@@ -107,7 +107,7 @@ func TestWithTenantReadOnly_RefusesWrites(t *testing.T) {
 		if ro != "on" || scoped != tenant.String() {
 			t.Fatalf("read_only=%s app.tenant_id=%s, want on/%s", ro, scoped, tenant)
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, 'ro-test', 'x')`, uuid.New(), tenant)
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, 'ro-test', 'x', 'active')`, uuid.New(), tenant)
 		return err
 	})
 	if err == nil || !strings.Contains(err.Error(), "25006") && !strings.Contains(err.Error(), "read-only") {

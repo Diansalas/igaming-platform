@@ -153,10 +153,42 @@ func RegisterPlayerPendingReview(ctx context.Context, tx pgx.Tx, brand Brand, em
 	return insertPlayerAccount(ctx, tx, brand, person.ID, email, passwordHash, PlayerStatusIdentityReviewRequired)
 }
 
+// RequireBrandAcceptingRegistrations refuses (ErrNotAcceptingRegistrations) unless the
+// brand AND its tenant are 'active' (ADR 0112 section 7.3; a brand and a tenant are
+// created pending_launch). It is a plain, NON-LOCKING read in the registering
+// transaction (S4): no FOR SHARE, no advisory lock. Registration moves no money and
+// must not contend with a suspension; the residual that a registration racing a
+// suspension may complete is recorded in ADR 0112 section 12.5. Fail closed: a row that
+// cannot be read refuses (the brand id and tenant id come from the already-resolved
+// brand, never from the client).
+func RequireBrandAcceptingRegistrations(ctx context.Context, tx pgx.Tx, brand Brand) error {
+	var brandStatus, tenantStatus string
+	err := tx.QueryRow(ctx,
+		`SELECT b.status, t.status FROM brands b JOIN tenants t ON t.id = b.tenant_id
+		  WHERE b.id = $1 AND b.tenant_id = $2`,
+		brand.ID, brand.TenantID,
+	).Scan(&brandStatus, &tenantStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotAcceptingRegistrations
+	}
+	if err != nil {
+		return fmt.Errorf("identity: read brand and tenant status for registration: %w", err)
+	}
+	if brandStatus != "active" || tenantStatus != "active" {
+		return ErrNotAcceptingRegistrations
+	}
+	return nil
+}
+
 // insertPlayerAccount is the shared insert behind all three registration
 // entry points above - identical row shape, differing only in personID
 // (existing vs. freshly-created) and initial status.
 func insertPlayerAccount(ctx context.Context, tx pgx.Tx, brand Brand, personID uuid.UUID, email, passwordHash string, status PlayerAccountStatus) (PlayerAccount, error) {
+	// Every registration path ends here, so this gate cannot be bypassed by calling a
+	// lower-level entry point (ADR 0112 section 7.3).
+	if err := RequireBrandAcceptingRegistrations(ctx, tx, brand); err != nil {
+		return PlayerAccount{}, err
+	}
 	email = strings.ToLower(strings.TrimSpace(email))
 
 	account := PlayerAccount{

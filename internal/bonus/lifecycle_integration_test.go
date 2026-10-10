@@ -2659,7 +2659,7 @@ func TestAdversarial_SamePlayerAcrossMultipleBrands_ConcurrentGrantsIsolated(t *
 		}
 
 		brand2ID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Test Brand')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Second Test Brand', 'active')`,
 			brand2ID, f.tenantID, "b2-"+brand2ID.String()[:8]); err != nil {
 			return err
 		}

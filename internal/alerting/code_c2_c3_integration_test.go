@@ -123,7 +123,7 @@ func TestFlush_PlatformAdminRunner_PersistsWithRaisedByScope(t *testing.T) {
 	// real. A correctly-reconstructed platform-admin retry runner will
 	// now succeed.
 	if err := pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'own_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, 'own_licence', 'active')`,
 			notYetTenantID, "alerting-c2-"+notYetTenantID.String()[:8], "alerting-c2-"+notYetTenantID.String()[:8])
 		return err
 	}); err != nil {

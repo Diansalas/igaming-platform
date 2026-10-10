@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -133,10 +134,7 @@ func (w *hrWorld) approvedWithdrawalOnSuspendedTenant(amount int64) uuid.UUID {
 	}); err != nil {
 		t.Fatalf("approved withdrawal: %v", err)
 	}
-	if err := w.a.pool.WithPlatformAdmin(ctx, w.pa, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, w.tenant)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatusOn(ctx, w.a.t, w.a.pool, w.tenant, "suspended"); err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}
 	return wrID

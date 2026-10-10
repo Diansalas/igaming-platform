@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func TestRequireBrandActive_BrandOnly_FailClosed(t *testing.T) {
@@ -26,12 +28,9 @@ func TestRequireBrandActive_BrandOnly_FailClosed(t *testing.T) {
 		})
 	}
 	setBrand := func(f brandPinFixture, status string) {
-		if err := owner.WithTenant(ctx, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE brands SET status = $2 WHERE id = $1`, f.brandID, status)
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
+		// ADR 0112: a brand status moves only through a governed decision; the fixture runs
+		// the real guards as owner-provisioned platform operators (launchfix, LF2).
+		launchfix.SetBrandStatus(t, f.tenantID, f.brandID, status)
 	}
 
 	if err := check(a.tenantID, a.brandID); err != nil {
@@ -39,12 +38,7 @@ func TestRequireBrandActive_BrandOnly_FailClosed(t *testing.T) {
 	}
 	// Tenant and brand are separate: a non-active TENANT with an active brand passes the
 	// brand-only check (the tenant policy is a different check), and the combined gate still refuses.
-	if err := owner.WithPlatformAdmin(ctx, uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, a.tenantID)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	launchfix.SetTenantStatus(t, a.tenantID, "suspended")
 	if err := check(a.tenantID, a.brandID); err != nil {
 		t.Fatalf("RequireBrandActive must not read the tenant status: %v", err)
 	}
@@ -55,13 +49,19 @@ func TestRequireBrandActive_BrandOnly_FailClosed(t *testing.T) {
 	}
 
 	for _, st := range []string{"suspended", "closed"} {
-		setBrand(b, st)
-		err := check(b.tenantID, b.brandID)
+		target := b
+		if st == "closed" {
+			// ADR 0112 section 3.1: closed is terminal, so the closed case uses its own brand
+			// (b is reactivated below, which the old raw-UPDATE fixture did from closed).
+			target = seedBrandPinTenant(t, owner)
+		}
+		setBrand(target, st)
+		err := check(target.tenantID, target.brandID)
 		if !errors.Is(err, ErrBrandNotActive) || !errors.Is(err, ErrNotActiveForPaymentInitiation) {
 			t.Fatalf("brand %s: want ErrBrandNotActive+ErrNotActiveForPaymentInitiation, got %v", st, err)
 		}
-		if err := rt.WithTenant(ctx, b.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			return RequireActiveForPaymentInitiation(ctx, tx, b.tenantID, b.brandID)
+		if err := rt.WithTenant(ctx, target.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return RequireActiveForPaymentInitiation(ctx, tx, target.tenantID, target.brandID)
 		}); !errors.Is(err, ErrNotActiveForPaymentInitiation) {
 			t.Fatalf("combined gate semantics changed for brand %s: %v", st, err)
 		}

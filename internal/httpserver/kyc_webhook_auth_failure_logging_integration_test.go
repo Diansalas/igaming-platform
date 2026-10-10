@@ -16,12 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -116,10 +115,7 @@ func TestKYCWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	activeTenant := mustCreateTenant(t, pool)
 	suspendedTenant := mustCreateTenant(t, pool)
-	if err := pool.WithPlatformAdmin(context.Background(), activeTenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, suspendedTenant.ID)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatus(context.Background(), suspendedTenant.ID, "suspended"); err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}
 

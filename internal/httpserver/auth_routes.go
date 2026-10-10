@@ -135,6 +135,10 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "an account with this email already exists for this brand")
 			return
 		}
+		if errors.Is(err, identity.ErrNotAcceptingRegistrations) {
+			apierror.Write(w, requestID, apierror.CodeBrandNotAcceptingRegistrations, "this brand is not accepting registrations")
+			return
+		}
 		if err != nil {
 			logger.Error("register_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "registration failed")
@@ -180,6 +184,13 @@ func newLoginHandler(deps Deps) http.HandlerFunc {
 		if err != nil {
 			logger.Error("login_brand_lookup_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "login failed")
+			return
+		}
+		// ADR 0112 section 7.3: a pending_launch brand has never been launched. It answers
+		// exactly like an unknown brand (404), so an unlaunched brand is not discoverable.
+		// Login on a suspended or closed brand stays allowed so players can see balances.
+		if brand.Status == identity.StatusPendingLaunch {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "unknown brand")
 			return
 		}
 

@@ -25,6 +25,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -51,7 +52,7 @@ func createTestTenant(t *testing.T, pool *db.Pool) identity.Tenant {
 	var tenant identity.Tenant
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		tenant, err = identity.CreateTenant(ctx, tx, "Test Tenant "+suffix, "tenant-"+suffix, "under_platform_licence")
+		tenant, err = launchfix.CreateTenant(ctx, tx, "Test Tenant "+suffix, "tenant-"+suffix, "under_platform_licence")
 		return err
 	})
 	if err != nil {
@@ -66,7 +67,7 @@ func createTestBrand(t *testing.T, pool *db.Pool, tenant identity.Tenant) identi
 	var brand identity.Brand
 	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		brand, err = identity.CreateBrand(ctx, tx, tenant.ID, "Test Brand", "brand-"+suffix)
+		brand, err = launchfix.CreateBrand(ctx, tx, tenant.ID, "Test Brand", "brand-"+suffix)
 		return err
 	})
 	if err != nil {

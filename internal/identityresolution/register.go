@@ -71,6 +71,12 @@ func RegisterPlayerWithResolution(ctx context.Context, tx pgx.Tx, resolver Perso
 	if resolver == nil {
 		return identity.PlayerAccount{}, "", fmt.Errorf("identityresolution: a PersonResolver is required")
 	}
+	// ADR 0112 section 7.3: refuse before any resolver call or audit write when the brand
+	// or its tenant is not active (plain non-locking read, S4). identity.insertPlayerAccount
+	// repeats the gate on every path, so this one only avoids needless side effects.
+	if err := identity.RequireBrandAcceptingRegistrations(ctx, tx, params.Brand); err != nil {
+		return identity.PlayerAccount{}, "", err
+	}
 
 	result, resolveErr := resolver.Resolve(ctx, ResolutionInput{
 		TenantID: params.Brand.TenantID,

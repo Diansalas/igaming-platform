@@ -164,7 +164,7 @@ func seedM0101Fixture(t *testing.T, pool *db.Pool) m0101Fixture {
 	// a genuinely platform-admin-scoped transaction (mirrors
 	// orchestrator_integration_test.go's seedOrchFixture exactly).
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'m0101 tenant','under_platform_licence')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1,$2,'m0101 tenant','under_platform_licence', 'active')`,
 			f.tenantID, "m0101-"+f.tenantID.String()[:8]); err != nil {
 			return err
 		}
@@ -175,7 +175,7 @@ func seedM0101Fixture(t *testing.T, pool *db.Pool) m0101Fixture {
 	}
 
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1,$2,$3,'M0101 Brand')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1,$2,$3,'M0101 Brand', 'active')`,
 			f.brandID, f.tenantID, "b-"+f.brandID.String()[:8]); err != nil {
 			return err
 		}

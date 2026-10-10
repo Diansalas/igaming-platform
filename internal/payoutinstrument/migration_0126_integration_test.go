@@ -23,7 +23,7 @@ func seed0126(t *testing.T, pool *db.Pool) (tenantID, brandID, playerID, walletI
 	t.Helper()
 	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'t','under_platform_licence')`, tenantID, "m126-"+tenantID.String()[:8]); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1,$2,'t','under_platform_licence', 'active')`, tenantID, "m126-"+tenantID.String()[:8]); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
@@ -32,7 +32,7 @@ func seed0126(t *testing.T, pool *db.Pool) (tenantID, brandID, playerID, walletI
 		t.Fatal(err)
 	}
 	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1,$2,'b','b')`, brandID, tenantID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1,$2,'b','b', 'active')`, brandID, tenantID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,'m@example.test','x','active')`,

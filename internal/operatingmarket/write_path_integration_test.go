@@ -62,7 +62,7 @@ func TestCreateOperatingCountryPolicyVersion_ForeignBrandRejectedByCompositeFK(t
 	var foreignBrandID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.otherTenantID, func(ctx context.Context, tx pgx.Tx) error {
 		foreignBrandID = uuid.New()
-		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Foreign Brand')`,
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Foreign Brand', 'pending_launch')`,
 			foreignBrandID, f.otherTenantID, "fb-"+foreignBrandID.String()[:8])
 		return err
 	})

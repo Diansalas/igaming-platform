@@ -33,7 +33,7 @@ func seedTenant(t *testing.T, pool *db.Pool, adminID uuid.UUID) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	err := pool.WithPlatformAdmin(context.Background(), adminID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'own_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, 'own_licence', 'active')`,
 			id, "alerting-test-"+id.String()[:8], "alerting-test-"+id.String()[:8])
 		return err
 	})

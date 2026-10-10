@@ -134,7 +134,7 @@ func migration0094SeedTenant(t *testing.T, pool *db.Pool) uuid.UUID {
 	tenantID := uuid.New()
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Migration 0094 Test Tenant', 'under_platform_licence')`,
+			`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'Migration 0094 Test Tenant', 'under_platform_licence', 'active')`,
 			tenantID, "t94-"+tenantID.String()[:8])
 		return err
 	})

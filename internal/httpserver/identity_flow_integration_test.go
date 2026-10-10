@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // --- test fixtures, created directly via internal/identity rather than
@@ -34,9 +35,11 @@ func mustCreateTenant(t *testing.T, pool *db.Pool) identity.Tenant {
 	t.Helper()
 	suffix := uuid.NewString()
 	var tenant identity.Tenant
-	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+	// ADR 0112 / LF2: callers may pass the RUNTIME-role pool (alertworld); the ACTIVE tenant is
+	// provisioned by the owner pool of the same database.
+	err := launchfix.OwnerFor(t, pool).WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		tenant, err = identity.CreateTenant(ctx, tx, "Test Tenant", "t-"+suffix, "under_platform_licence")
+		tenant, err = launchfix.CreateTenant(ctx, tx, "Test Tenant", "t-"+suffix, "under_platform_licence")
 		return err
 	})
 	if err != nil {
@@ -56,9 +59,9 @@ func mustCreateBrand(t *testing.T, pool *db.Pool, tenant identity.Tenant) identi
 	t.Helper()
 	suffix := uuid.NewString()
 	var brand identity.Brand
-	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+	err := launchfix.OwnerFor(t, pool).WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		brand, err = identity.CreateBrand(ctx, tx, tenant.ID, "Test Brand", "b-"+suffix)
+		brand, err = launchfix.CreateBrand(ctx, tx, tenant.ID, "Test Brand", "b-"+suffix)
 		return err
 	})
 	if err != nil {
@@ -605,8 +608,9 @@ func TestCreateTenantAPI_AuditRecordsReasonCodeAndAfterState(t *testing.T) {
 	if after["licensing_model"] != "own_licence" {
 		t.Errorf("expected after.licensing_model %q, got %v", "own_licence", after["licensing_model"])
 	}
-	if after["status"] != "active" {
-		t.Errorf("expected after.status %q, got %v", "active", after["status"])
+	// ADR 0112 section 7.4: creation is not launch; a new tenant is pending_launch.
+	if after["status"] != "pending_launch" {
+		t.Errorf("expected after.status %q, got %v", "pending_launch", after["status"])
 	}
 }
 

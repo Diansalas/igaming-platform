@@ -116,7 +116,7 @@ func (a *cgAPI) tenant() uuid.UUID {
 	a.t.Helper()
 	id := uuid.New()
 	if err := a.pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, 'CG API', $2, 'under_platform_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, 'CG API', $2, 'under_platform_licence', 'active')`,
 			id, "cgapi-"+strings.ReplaceAll(id.String(), "-", "")[:16])
 		return err
 	}); err != nil {

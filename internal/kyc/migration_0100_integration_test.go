@@ -191,7 +191,7 @@ func TestMigration0100_DownRefusesWhileDecisionsHoldRows(t *testing.T) {
 
 	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'T', 'under_platform_licence')`, tenantID, "t-"+tenantID.String()[:8]); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'T', 'under_platform_licence', 'active')`, tenantID, "t-"+tenantID.String()[:8]); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
@@ -201,7 +201,7 @@ func TestMigration0100_DownRefusesWhileDecisionsHoldRows(t *testing.T) {
 		t.Fatalf("seed tenant: %v", err)
 	}
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'B')`, brandID, tenantID, "b-"+brandID.String()[:8]); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'B', 'active')`, brandID, tenantID, "b-"+brandID.String()[:8]); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,

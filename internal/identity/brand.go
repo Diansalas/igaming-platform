@@ -28,6 +28,15 @@ func errSlugTaken(op string, err error) error {
 
 var ErrNotFound = errors.New("identity: not found")
 
+// StatusPendingLaunch is the status every new tenant and brand starts in (ADR 0112,
+// migration 0128). It is refused by every runtime gate that tests status = 'active'.
+const StatusPendingLaunch = "pending_launch"
+
+// ErrNotAcceptingRegistrations is returned by the player registration entry points when
+// the brand or its tenant is not active (ADR 0112 section 7.3). HTTP answers 409
+// BRAND_NOT_ACCEPTING_REGISTRATIONS.
+var ErrNotAcceptingRegistrations = errors.New("identity: the brand is not accepting registrations")
+
 // ErrSlugTaken is returned when a tenant or brand slug collides with an
 // existing row's UNIQUE constraint - a plain client input conflict, not
 // a server fault (see db.IsUniqueViolation).
@@ -130,8 +139,12 @@ func ListBrandsForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, lim
 // CreateBrand creates a brand under tenantID. Called from an already
 // tenant-scoped transaction (the caller - an admin endpoint gated by
 // PermBrandWrite - resolves and authorizes tenantID first).
+//
+// ADR 0112 (migration 0128): creation is not launch. The brand is created
+// StatusPendingLaunch and only a governed, audited launch decision can make it
+// active; the database refuses any other status from the runtime role (LA021).
 func CreateBrand(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name, slug string) (Brand, error) {
-	b := Brand{ID: uuid.New(), TenantID: tenantID, Name: name, Slug: slug, Status: "active"}
+	b := Brand{ID: uuid.New(), TenantID: tenantID, Name: name, Slug: slug, Status: StatusPendingLaunch}
 	_, err := tx.Exec(ctx,
 		`INSERT INTO brands (id, tenant_id, name, slug, status) VALUES ($1, $2, $3, $4, $5)`,
 		b.ID, b.TenantID, b.Name, b.Slug, b.Status,

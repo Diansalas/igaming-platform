@@ -598,3 +598,37 @@ no engineering session without a production credential can complete the
 one remaining step (creating the role for real, in production, with a
 real secret) — see `docs/governance/stage-4i-exit-register.md` §1 for the
 updated disposition.
+
+## 10. Launch authorisation status governance (ADR 0112 slice 1, migration 0128)
+
+Migration 0128 makes the **table-owner role** the only role that may provision a tenant or
+brand with a status other than `pending_launch`, and the only role that may write the two
+non-decision transition kinds. The runtime role is the opposite: it can create `pending_launch`
+rows and nothing else, and it can never change a status without a same-transaction governed
+decision record. This is why the role split is now also a launch-governance control, not only an
+RLS one.
+
+| Object | `igaming_runtime` | table owner (`igaming`) |
+|---|---|---|
+| `tenants` / `brands` INSERT | only `status = 'pending_launch'` (the default); any other value is refused, SQLSTATE `LA021` | any status; the database writes an `owner_provisioned` transition (LF2) |
+| `tenants.status` / `brands.status` UPDATE | refused unless a `governed` transition of an executing request exists in the same transaction (`LA020`, trigger `zz_launch_status_governed`); `closed` is never left | bound by the same trigger (owner bypass is only possible by disabling it, ADR 0110 9.4 residual) |
+| `launch_authorisation_requests` | `SELECT`, `INSERT`, column-level `UPDATE` on `status, decided_at, refusal_code, executing_txid` only; no `DELETE` / `TRUNCATE` | all (FORCE RLS and the guard triggers still apply) |
+| `launch_authorisation_approvals`, `launch_status_transitions` | `SELECT`, `INSERT` only (append-only: `UPDATE` / `DELETE` / `TRUNCATE` are refused by trigger, `LA099`) | all, same triggers |
+| `legacy_baseline` / `owner_provisioned` transitions | refused (`LA013`); also not admitted by any runtime RLS policy | allowed, `from_status` NULL only; one narrow `owner_provisioning_insert` policy that admits only the table-owner role by strict equality |
+
+- **S11.** `db.VerifyRuntimeRoleInProduction` (section 4, point 6) already refuses a production
+  start when the connecting role owns any table in `public`; the owner role owns `tenants` and
+  `brands`, so the owner-only provisioning paths above are unreachable from a production process.
+  `TestLaunchGov_S11_ProductionStartupRefusesTableOwner` pins this for the launch tables
+  (`internal/tenant/launch_governance_catalog_integration_test.go`). No new check was needed.
+- **Residual (ADR 0112 section 12.3).** A human holding the owner role can still bypass every
+  trigger; `owner_provisioned` / `legacy_baseline` rows make owner inserts visible, they do not
+  prevent them.
+- **Provisioning.** `deploy/init-app-role.sql` re-asserts the grants above on every run
+  (the blanket backfill `GRANT` would otherwise re-grant `DELETE`); migration 0128 carries the
+  same block for databases provisioned before it ran. No role, password or role attribute is
+  changed by any of this.
+- **Tests and CI.** Test fixtures that need ACTIVE tenants / brands provision them as the table
+  owner through `internal/testsupport/launchfix` (integration build tag, never compiled into an
+  application binary; pinned by `TestLaunchFixture_UnreachableFromNonTestBuilds`). Every
+  assertion about what the runtime role may do runs as `igaming_runtime`.

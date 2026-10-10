@@ -361,7 +361,7 @@ func TestSportsbookJurisdictionRestrictionsRLS_RequiresRealPlatformPrincipal(t *
 		tenantID := uuid.New()
 		err := pool.WithPlatformAdmin(context.Background(), seedPlatformAdminStaffPrincipal(t, pool), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx,
-				`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'SEC-S92-2 Tenant', 'under_platform_licence')`,
+				`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'SEC-S92-2 Tenant', 'under_platform_licence', 'active')`,
 				tenantID, "sec-s92-2-"+tenantID.String()[:8])
 			return err
 		})

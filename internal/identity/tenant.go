@@ -218,14 +218,19 @@ func ListTenants(ctx context.Context, tx pgx.Tx, q, status string, limit, offset
 // is checked FIRST, before anything else, and migration 0077's own
 // tenants_platform_admin_insert policy enforces the identical predicate
 // independently at the database.
+//
+// ADR 0112 (migration 0128): creation is not launch. The row is created
+// StatusPendingLaunch, explicitly (not through the column default), and only a
+// governed, audited launch decision can make it active. The database refuses any
+// other status from the runtime role (SQLSTATE LA021).
 func CreateTenant(ctx context.Context, tx pgx.Tx, name, slug, licensingModel string) (Tenant, error) {
 	if err := assertPlatformScope(ctx, tx); err != nil {
 		return Tenant{}, err
 	}
-	t := Tenant{ID: uuid.New(), Name: name, Slug: slug, LicensingModel: licensingModel, Status: "active"}
+	t := Tenant{ID: uuid.New(), Name: name, Slug: slug, LicensingModel: licensingModel, Status: StatusPendingLaunch}
 	_, err := tx.Exec(ctx,
-		`INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, $4)`,
-		t.ID, t.Name, t.Slug, t.LicensingModel,
+		`INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, $4, $5)`,
+		t.ID, t.Name, t.Slug, t.LicensingModel, t.Status,
 	)
 	if err != nil {
 		return Tenant{}, errSlugTaken("create tenant", err)

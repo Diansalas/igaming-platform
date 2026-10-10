@@ -454,7 +454,7 @@ func TestMigration0117_DownRefusesWithAnUnroutedReason(t *testing.T) {
 	var tenant, alert uuid.UUID
 	tenant = uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, 'm117', $2, 'own_licence')`, tenant, "m117-"+tenant.String()[:8])
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, 'm117', $2, 'own_licence', 'active')`, tenant, "m117-"+tenant.String()[:8])
 		return err
 	}); err != nil {
 		t.Fatal(err)

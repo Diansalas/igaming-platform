@@ -193,14 +193,14 @@ func newWorldOn(t *testing.T, pool *db.Pool, opts worldOpts) *world {
 	w.Tenant = uuid.New()
 	w.Brand = uuid.New()
 	if err := pool.WithPlatformAdmin(ctx, w.AdminA.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'under_platform_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, 'under_platform_licence', 'active')`,
 			w.Tenant, "K2 world", fmt.Sprintf("k2-%d-%s", n, strings.ReplaceAll(w.Tenant.String(), "-", "")[:12]))
 		return err
 	}); err != nil {
 		t.Fatalf("tenant: %v", err)
 	}
 	if err := pool.WithTenant(ctx, w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, name, slug) VALUES ($1, $2, 'K2 brand', $3)`,
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, name, slug, status) VALUES ($1, $2, 'K2 brand', $3, 'active')`,
 			w.Brand, w.Tenant, "k2b-"+strings.ReplaceAll(w.Brand.String(), "-", "")[:16])
 		return err
 	}); err != nil {

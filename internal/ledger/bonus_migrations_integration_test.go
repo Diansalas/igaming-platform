@@ -203,7 +203,7 @@ func insertRawAccount(pool *db.Pool, accountType string) error {
 	tenantID := uuid.New()
 	return pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Bonus Migration Test Tenant', 'under_platform_licence')`,
+			`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'Bonus Migration Test Tenant', 'under_platform_licence', 'active')`,
 			tenantID, "bmt-"+tenantID.String()[:8])
 		if err != nil {
 			return err

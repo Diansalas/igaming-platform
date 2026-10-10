@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func setVerification(t *testing.T, pool *db.Pool, f fixture, status VerificationStatus, expiresAt *time.Time) {
@@ -193,7 +194,7 @@ func TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies(t *test
 	var secondPlayerID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var secondBrandID uuid.UUID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Brand')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Second Brand', 'active')`,
 			secondBrandID, f.tenantID, "b2-"+secondBrandID.String()[:8]); err != nil {
 			return err
 		}
@@ -233,12 +234,16 @@ func TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies(t *test
 func seedSecondAccount(t *testing.T, pool *db.Pool, f fixture) fixture {
 	t.Helper()
 	second := fixture{tenantID: f.tenantID, personID: f.personID}
+	// ADR 0112 / LF2: pool may be the RUNTIME role; the ACTIVE second brand comes from the owner pool.
+	second.brandID = uuid.New()
+	if err := launchfix.OwnerFor(t, pool).WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Second Brand', 'active')`,
+			second.brandID, f.tenantID, "b2-"+second.brandID.String()[:8])
+		return err
+	}); err != nil {
+		t.Fatalf("seed second brand: %v", err)
+	}
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		second.brandID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Brand')`,
-			second.brandID, f.tenantID, "b2-"+second.brandID.String()[:8]); err != nil {
-			return err
-		}
 		second.playerID = uuid.New()
 		_, err := tx.Exec(ctx,
 			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
@@ -763,7 +768,7 @@ func TestEvaluateEnforcement_OrphanOnAnotherAccount_DoesNotMaskRejection(t *test
 	var secondBrandID, secondPlayerID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		secondBrandID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Brand')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Second Brand', 'active')`,
 			secondBrandID, f.tenantID, "b2-"+secondBrandID.String()[:8]); err != nil {
 			return err
 		}

@@ -31,6 +31,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -217,8 +218,10 @@ func (f *fx) tenantStaff(tenantID uuid.UUID, role string) uuid.UUID {
 func (f *fx) tenant() uuid.UUID {
 	f.t.Helper()
 	id := uuid.New()
-	if err := f.rt.WithPlatformAdmin(context.Background(), f.requester, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, 'PC Test', $2, 'under_platform_licence')`,
+	// ADR 0112 / LF2: the runtime role (f.rt) may only create pending_launch rows; the ACTIVE
+	// tenant this fixture needs is provisioned by the table-owner pool.
+	if err := launchfix.OwnerFor(f.t, f.rt).WithPlatformAdmin(context.Background(), f.requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, 'PC Test', $2, 'under_platform_licence', 'active')`,
 			id, "pc-"+strings.ReplaceAll(id.String(), "-", "")[:16])
 		return err
 	}); err != nil {

@@ -28,6 +28,15 @@ const CodeCloseBlockedOpenRounds = "TENANT_CLOSE_BLOCKED_OPEN_ROUNDS"
 // tenants.status, not just ChangeStatus.
 const sqlStateCloseBlocked = "GP020"
 
+// ErrGovernedStatusChangeRequired is returned by ChangeStatus (via
+// TranslateStatusChangeError) when the database refuses the status change with an LA
+// SQLSTATE (migration 0128, ADR 0112): a tenant status moves only through a governed,
+// same-transaction launch decision, which ChangeStatus does not write. ChangeStatus is
+// therefore FAIL-CLOSED for every real status change until the launchgov executor
+// (ADR 0112 slice 3) absorbs it; it is not a bypass and no caller may route around the
+// refusal.
+var ErrGovernedStatusChangeRequired = errors.New("tenant: status change requires a governed launch decision (ADR 0112)")
+
 // ErrCloseBlockedOpenRounds is the sentinel for a refused closure.
 var ErrCloseBlockedOpenRounds = errors.New("tenant: closure refused: open gaming rounds exist")
 
@@ -56,7 +65,14 @@ func (e *CloseBlockedError) Is(target error) bool { return target == ErrCloseBlo
 // the typed error (counts zero): the refusal itself is never lost.
 func TranslateStatusChangeError(err error) error {
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != sqlStateCloseBlocked {
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	// ADR 0112 SQLSTATE class LA (launch governance): the status guard refused.
+	if strings.HasPrefix(pgErr.Code, "LA") {
+		return fmt.Errorf("%w: %s", ErrGovernedStatusChangeRequired, pgErr.Code)
+	}
+	if pgErr.Code != sqlStateCloseBlocked {
 		return err
 	}
 	out := &CloseBlockedError{}
@@ -108,6 +124,15 @@ const (
 
 // ChangeStatus moves a tenant between active, suspended and closed, audited.
 //
+// ADR 0112 SLICE 1 (migration 0128): the database now refuses ANY change of
+// tenants.status that is not accompanied, in the same transaction, by a governed
+// launch transition of an executing launch request (trigger zz_launch_status_governed,
+// SQLSTATE LA020). ChangeStatus writes neither, so for every real status change it
+// returns ErrGovernedStatusChangeRequired and changes nothing: it is no longer a way to
+// change a status. Its GP020 closure translation and the separate-transaction refusal
+// audit are kept as they are, because the closure gate (tenants_status_change_gate)
+// fires BEFORE the launch guard. A request for the status the tenant already has is
+// still a no-op. ADR 0112 slice 3 turns the body into the unexported executor step.
 // AUTHORIZATION (follow-up TENANT-STATUS-AUTHZ-1): ChangeStatus performs NO
 // authorization check of its own. ActorID is trusted to be a server-resolved
 // platform-scoped staff principal. Before it is wired to ANY HTTP or console

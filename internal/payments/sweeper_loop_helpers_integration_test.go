@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // loopProvider wraps a MockProvider with call counters and per-call hooks. A hook
@@ -144,10 +145,7 @@ func newLoopSweeper(pool *db.Pool, orch *Orchestrator, hint bool, resolver Outbo
 
 func setTenantStatus(t *testing.T, pool *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
-	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = $2 WHERE id = $1`, tenantID, status)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatusOn(context.Background(), t, pool, tenantID, status); err != nil {
 		t.Fatalf("set tenant status %s: %v", status, err)
 	}
 }

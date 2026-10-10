@@ -232,7 +232,7 @@ func TestMigration0123_DownRefusesWithEvidence(t *testing.T) {
 	dir := migDir(t, migration0123Version)
 	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'t','under_platform_licence')`, tenantID, "d-"+tenantID.String()[:8]); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1,$2,'t','under_platform_licence', 'active')`, tenantID, "d-"+tenantID.String()[:8]); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
@@ -243,7 +243,7 @@ func TestMigration0123_DownRefusesWithEvidence(t *testing.T) {
 	keys := newTestKeys(t)
 	svc, _ := NewService(keys, DefaultKinds(), NewMockVerifier())
 	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1,$2,'b','b')`, brandID, tenantID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1,$2,'b','b', 'active')`, brandID, tenantID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,'d@example.test','x','active')`,
@@ -287,7 +287,7 @@ func TestMigration0123_UpRefusesLegacyNonMockWithdrawal(t *testing.T) {
 			pool := scratchThrough(t, "b13l6_", migration0123Version-1)
 			tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'t','under_platform_licence')`, tenantID, "l-"+tenantID.String()[:8]); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1,$2,'t','under_platform_licence', 'active')`, tenantID, "l-"+tenantID.String()[:8]); err != nil {
 					return err
 				}
 				_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
@@ -296,7 +296,7 @@ func TestMigration0123_UpRefusesLegacyNonMockWithdrawal(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1,$2,'b','b')`, brandID, tenantID); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1,$2,'b','b', 'active')`, brandID, tenantID); err != nil {
 					return err
 				}
 				if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,'l@example.test','x','active')`,
@@ -377,7 +377,7 @@ func TestMigration0123_PreflightLockSerialisesWithWriters(t *testing.T) {
 	pool := scratchThrough(t, "b13lock_", migration0123Version-1)
 	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'t','under_platform_licence')`, tenantID, "k-"+tenantID.String()[:8]); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1,$2,'t','under_platform_licence', 'active')`, tenantID, "k-"+tenantID.String()[:8]); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
@@ -387,7 +387,7 @@ func TestMigration0123_PreflightLockSerialisesWithWriters(t *testing.T) {
 	}
 	var wid uuid.UUID
 	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1,$2,'b','b')`, brandID, tenantID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1,$2,'b','b', 'active')`, brandID, tenantID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,'k@example.test','x','active')`, playerID, tenantID, brandID, personID); err != nil {

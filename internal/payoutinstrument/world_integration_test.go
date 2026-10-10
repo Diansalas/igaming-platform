@@ -68,7 +68,7 @@ func newWorld(t *testing.T, fpKids ...string) *world {
 	}
 	w.svc = svc
 	if err := owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'B13 tenant', 'under_platform_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'B13 tenant', 'under_platform_licence', 'active')`,
 			w.tenantID, "b13-"+w.tenantID.String()[:8])
 		return err
 	}); err != nil {
@@ -76,7 +76,7 @@ func newWorld(t *testing.T, fpKids ...string) *world {
 	}
 	if err := owner.WithTenant(context.Background(), w.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		for _, b := range []uuid.UUID{w.brandID, w.brand2ID} {
-			if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'B13 brand')`, b, w.tenantID, "b-"+b.String()[:8]); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'B13 brand', 'active')`, b, w.tenantID, "b-"+b.String()[:8]); err != nil {
 				return err
 			}
 		}

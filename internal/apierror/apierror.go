@@ -65,6 +65,10 @@ const (
 	// normal first request. A retry of an already-created intent/request is NOT
 	// refused (it returns the original, read-only).
 	CodeTenantOrBrandNotActive Code = "TENANT_OR_BRAND_NOT_ACTIVE"
+	// CodeBrandNotAcceptingRegistrations: player registration was refused because the
+	// brand or its tenant is not 'active' (ADR 0112 section 7.3; a brand is created
+	// pending_launch). 409; nothing was created.
+	CodeBrandNotAcceptingRegistrations Code = "BRAND_NOT_ACCEPTING_REGISTRATIONS"
 	// B13 (ADR 0111 2.4 / 2.9). 409 both. NOT_ACCEPTED is the ONE generic
 	// player-facing registration refusal (invalid detail, a card number, an
 	// unknown kind or rail, a fingerprint owned by another person): the same
@@ -109,7 +113,7 @@ func httpStatus(c Code) int {
 	case CodeConflict, CodeSettlementPayloadMismatch, CodeSettlementTombstoned, CodeSettlementBetVoided,
 		CodeSettlementBetAlreadySettled, CodeSettlementGenerationOutOfSequence, CodeSettlementIntegrity,
 		CodeCredentialRegistrationRejected, CodeApprovalRejected, CodeCredentialActivationRejected,
-		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds, CodeTenantOrBrandNotActive,
+		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds, CodeTenantOrBrandNotActive, CodeBrandNotAcceptingRegistrations,
 		CodePayoutInstrumentNotAccepted, CodePayoutInstrumentInUse,
 		CodePayoutInstrumentRequired, CodePayoutInstrumentNotUsable, CodePayoutDestinationNotUsable:
 		return http.StatusConflict

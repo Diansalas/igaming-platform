@@ -131,7 +131,7 @@ func seedBrandPinTenant(t *testing.T, owner *db.Pool) brandPinFixture {
 	f := brandPinFixture{tenantID: uuid.New(), brandID: uuid.New()}
 	f.name = "r14 grant pin brand " + f.brandID.String()[:8]
 	if err := owner.WithPlatformAdmin(ctx, uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'r14 grant pin tenant','under_platform_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1,$2,'r14 grant pin tenant','under_platform_licence', 'active')`,
 			f.tenantID, "r14pin-"+f.tenantID.String())
 		return err
 	}); err != nil {

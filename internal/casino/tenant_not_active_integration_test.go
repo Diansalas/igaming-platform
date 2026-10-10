@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func runtimePoolForGate(t *testing.T) *db.Pool {
@@ -50,16 +51,7 @@ func runtimePoolForGate(t *testing.T) *db.Pool {
 
 func setStatusForGate(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
-	err := owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("tenant row not updated")
-		}
-		return nil
-	})
+	err := launchfix.TrySetTenantStatus(context.Background(), tenantID, status)
 	if err != nil {
 		t.Fatalf("set tenant status %s: %v", status, err)
 	}
@@ -241,6 +233,18 @@ func TestTenantNotActive_CasinoNewPostingsRefused(t *testing.T) {
 				t.Fatalf("replays changed the ledger/wallet: tx %d->%d", txs0, txs2)
 			}
 
+			if status == "closed" {
+				// ADR 0112 section 3.1: closed is terminal (HD-CTF-9 stays open), so the
+				// reopening this test used to perform is now refused by the database
+				// (LA020); the tenant keeps refusing new postings.
+				if err := launchfix.TrySetTenantStatus(context.Background(), w.f.tenantID, "active"); err == nil {
+					t.Fatal("a closed tenant must not be reopenable")
+				}
+				if _, err := w.deliver(t, CallbackEventBet, "b-after", "", "round-after", 100); !errors.Is(err, ErrTenantNotActive) {
+					t.Fatalf("a closed tenant must keep refusing a new bet: %v", err)
+				}
+				return
+			}
 			// Reactivation: an active tenant is unchanged.
 			setStatusForGate(t, owner, w.f.tenantID, "active")
 			if _, err := w.deliver(t, CallbackEventBet, "b-after", "", "round-after", 100); err != nil {
@@ -320,13 +324,9 @@ func TestTenantNotActive_CasinoStatusChangeVsPostingRace(t *testing.T) {
 		releaseOnce := func() { releaseOnceGuard.Do(func() { close(release) }) }
 		t.Cleanup(releaseOnce) // never leave a held transaction behind on a failed assertion
 		go func() {
-			closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, w.f.tenantID); err != nil {
-					return err
-				}
+			closerDone <- launchfix.TrySetTenantStatusHolding(context.Background(), w.f.tenantID, "closed", func() {
 				close(updated)
 				<-release
-				return nil
 			})
 		}()
 		<-updated
@@ -374,10 +374,7 @@ func TestTenantNotActive_CasinoStatusChangeVsPostingRace(t *testing.T) {
 		<-inTx
 		closed := make(chan error, 1)
 		go func() {
-			closed <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, w.f.tenantID)
-				return err
-			})
+			closed <- launchfix.TrySetTenantStatus(context.Background(), w.f.tenantID, "closed")
 		}()
 		select {
 		case err := <-closed:
@@ -441,7 +438,12 @@ func casinoTombstonesAlwaysWritten(t *testing.T, status string) {
 		}
 		return n
 	}
-	for _, phase := range []string{"suspended", "reactivated"} {
+	phases := []string{"suspended", "reactivated"}
+	if status == "closed" {
+		// closed is terminal (ADR 0112 3.1): there is no reactivated phase for a closed tenant.
+		phases = []string{"suspended"}
+	}
+	for _, phase := range phases {
 		if phase == "reactivated" {
 			setStatusForGate(t, owner, w.f.tenantID, "active")
 		}

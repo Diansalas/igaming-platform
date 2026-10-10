@@ -42,8 +42,13 @@ func createTestTenant(t *testing.T, pool *db.Pool) Tenant {
 	suffix := uuid.New().String()
 	var tenant Tenant
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		tenant, err = CreateTenant(ctx, tx, "Test Tenant "+suffix, "tenant-"+suffix, "under_platform_licence")
+		// ADR 0112 / LF2: CreateTenant now creates pending_launch; this fixture needs an
+		// active tenant, which only the table-owner role may provision (the database writes
+		// the owner_provisioned transition). Package identity cannot import
+		// internal/testsupport/launchfix (that package imports identity), so it inserts directly.
+		tenant = Tenant{ID: uuid.New(), Name: "Test Tenant " + suffix, Slug: "tenant-" + suffix, LicensingModel: "under_platform_licence", Status: "active"}
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, $4, 'active')`,
+			tenant.ID, tenant.Name, tenant.Slug, tenant.LicensingModel)
 		return err
 	})
 	if err != nil {
@@ -69,8 +74,10 @@ func createTestBrand(t *testing.T, pool *db.Pool, tenant Tenant) Brand {
 	suffix := uuid.New().String()
 	var brand Brand
 	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		brand, err = CreateBrand(ctx, tx, tenant.ID, "Test Brand", "brand-"+suffix)
+		// ADR 0112 / LF2: see createTestTenant; owner-provisioned active brand.
+		brand = Brand{ID: uuid.New(), TenantID: tenant.ID, Name: "Test Brand", Slug: "brand-" + suffix, Status: "active"}
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, name, slug, status) VALUES ($1, $2, $3, $4, 'active')`,
+			brand.ID, brand.TenantID, brand.Name, brand.Slug)
 		return err
 	})
 	if err != nil {
@@ -106,7 +113,7 @@ func TestBrand_CrossTenantWriteDenied(t *testing.T) {
 	// Attempt to create a brand claiming tenant B while scoped to tenant A.
 	err := pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO brands (id, tenant_id, name, slug) VALUES ($1, $2, $3, $4)`,
+			`INSERT INTO brands (id, tenant_id, name, slug, status) VALUES ($1, $2, $3, $4, 'active')`,
 			uuid.New(), tenantB.ID, "Forged Brand", "forged-"+uuid.NewString(),
 		)
 		return err

@@ -19,16 +19,36 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
+// changeStatus drives tenant.ChangeStatus first, so every refusal that precedes the launch
+// guard (GP020 closure refusal and its audit, unknown tenant, validation) is the real
+// ChangeStatus behaviour. Since ADR 0112 / migration 0128 ChangeStatus cannot itself write
+// the governed decision a status change now needs (it fails closed with
+// ErrGovernedStatusChangeRequired AFTER the closure gate has admitted the change), so the
+// admitted change is then realised through the governed fixture (launchfix), which runs
+// the real guards. That is the sequence the slice-3 executor will perform.
 func changeStatus(rt *db.Pool, tenantID uuid.UUID, status string) error {
-	return tenant.ChangeStatus(context.Background(), rt, tenant.ChangeStatusParams{
+	err := tenant.ChangeStatus(context.Background(), rt, tenant.ChangeStatusParams{
 		TenantID: tenantID, NewStatus: status, ActorID: uuid.New(), ReasonCode: "r5_closure_test",
 		RequestID: "req-" + uuid.NewString(),
 	})
+	if !errors.Is(err, tenant.ErrGovernedStatusChangeRequired) {
+		return err
+	}
+	ferr := launchfix.TrySetTenantStatus(context.Background(), tenantID, status)
+	var pe *pgconn.PgError
+	if ferr != nil && !errors.As(ferr, &pe) {
+		// No governed action exists for the move (for example a reopening): the refusal ChangeStatus
+		// already reported stands.
+		return err
+	}
+	return tenant.TranslateStatusChangeError(ferr)
 }
 
 func tenantStatusOf(t *testing.T, owner *db.Pool, tenantID uuid.UUID) string {
@@ -114,12 +134,18 @@ func TestTenantClosure_RefusedWithOpenBetAllowedWhenResolved(t *testing.T) {
 	if got := tenantStatusOf(t, owner, f.tenantID); got != "closed" {
 		t.Fatalf("status %s", got)
 	}
-	if n := len(platformAudit(t, owner, f.tenantID, "tenant.status_changed")); n != 1 {
-		t.Fatalf("expected one success audit row, got %d", n)
+	// ADR 0112: the success audit row is the governed executor's (slice 3), not
+	// ChangeStatus's, which can no longer write a status change by itself.
+	if n := len(platformAudit(t, owner, f.tenantID, "tenant.status_changed")); n != 0 {
+		t.Fatalf("ChangeStatus must not write a success audit row any more, got %d", n)
 	}
-	// Reactivation of a closed tenant is unaffected by the guard.
-	if err := changeStatus(rt, f.tenantID, "active"); err != nil {
-		t.Fatalf("reactivation: %v", err)
+	// ADR 0112 section 3.1: closed is terminal (HD-CTF-9 stays open); the database refuses
+	// the reopening that ChangeStatus used to allow, with SQLSTATE LA020.
+	if err := changeStatus(rt, f.tenantID, "active"); !errors.Is(err, tenant.ErrGovernedStatusChangeRequired) {
+		t.Fatalf("reopening a closed tenant must be refused (LA020): %v", err)
+	}
+	if got := tenantStatusOf(t, owner, f.tenantID); got != "closed" {
+		t.Fatalf("a refused reopening changed the status: %s", got)
 	}
 }
 
@@ -220,25 +246,28 @@ func TestTenantClosure_RawSQLIsRefusedAndGUCsRestored(t *testing.T) {
 	// SAME transaction (needs app.tenant_id unset) must still be admitted.
 	empty := seedFixture(t, owner)
 	other := seedFixture(t, owner)
-	err = rt.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, empty.tenantID); err != nil {
-			return err
-		}
-		var tenantGUC, playerGUC, adminGUC string
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(current_setting('app.tenant_id', true), ''), COALESCE(current_setting('app.player_account_id', true), ''), COALESCE(current_setting('app.platform_admin_principal_id', true), '')`).Scan(&tenantGUC, &playerGUC, &adminGUC); err != nil {
-			return err
-		}
-		if tenantGUC != "" || playerGUC != "" || adminGUC == "" {
-			return errors.New("the trigger did not restore the transaction's scope settings")
-		}
-		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, other.tenantID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("the platform-scoped write after the closure was filtered out by RLS")
-		}
-		return nil
+	// ADR 0112: the closure itself is the governed fixture's (the raw runtime UPDATE above
+	// stays, to prove the GP020 refusal fires before the launch guard); right after the
+	// closure UPDATE, in the SAME transaction, the scope settings must be restored and a
+	// platform-only write must still be admitted.
+	err = launchfix.TrySetTenantStatusHooked(context.Background(), empty.tenantID, "closed", launchfix.Hooks{
+		AfterUpdate: func(ctx context.Context, tx pgx.Tx) error {
+			var tenantGUC, playerGUC, adminGUC string
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(current_setting('app.tenant_id', true), ''), COALESCE(current_setting('app.player_account_id', true), ''), COALESCE(current_setting('app.platform_admin_principal_id', true), '')`).Scan(&tenantGUC, &playerGUC, &adminGUC); err != nil {
+				return err
+			}
+			if tenantGUC != "" || playerGUC != "" || adminGUC == "" {
+				return errors.New("the trigger did not restore the transaction's scope settings")
+			}
+			tag, err := tx.Exec(ctx, `UPDATE tenants SET updated_at = now() WHERE id = $1`, other.tenantID)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return errors.New("the platform-scoped write after the closure was filtered out by RLS")
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("closure then platform write in one transaction: %v", err)
@@ -324,13 +353,9 @@ func TestTenantClosure_RaceWithBetPlacement(t *testing.T) {
 		releaseOnce := func() { once.Do(func() { close(release) }) }
 		t.Cleanup(releaseOnce)
 		go func() {
-			done <- rt.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, f.tenantID); err != nil {
-					return err
-				}
+			done <- launchfix.TrySetTenantStatusHolding(context.Background(), f.tenantID, "closed", func() {
 				close(updated)
 				<-release
-				return nil
 			})
 		}()
 		select {

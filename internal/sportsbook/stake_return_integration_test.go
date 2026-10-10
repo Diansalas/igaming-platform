@@ -22,6 +22,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func srAssertProjectionMatchesRebuild(t *testing.T, pool *db.Pool, tenantID uuid.UUID) {
@@ -520,14 +521,10 @@ func TestStakeReturn_SportsbookStatusChangeRace(t *testing.T) {
 		releaseOnce := func() { once.Do(func() { close(release) }) }
 		t.Cleanup(releaseOnce)
 		go func() {
-			closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				// Suspend (not close): the closure guard is exercised elsewhere.
-				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, f.tenantID); err != nil {
-					return err
-				}
+			// Suspend (not close): the closure guard is exercised elsewhere.
+			closerDone <- launchfix.TrySetTenantStatusHolding(context.Background(), f.tenantID, "suspended", func() {
 				close(updated)
 				<-release
-				return nil
 			})
 		}()
 		<-updated
@@ -581,10 +578,7 @@ func TestStakeReturn_SportsbookStatusChangeRace(t *testing.T) {
 		}
 		closed := make(chan error, 1)
 		go func() {
-			closed <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, f.tenantID)
-				return err
-			})
+			closed <- launchfix.TrySetTenantStatus(context.Background(), f.tenantID, "closed")
 		}()
 		select {
 		case err := <-closed:

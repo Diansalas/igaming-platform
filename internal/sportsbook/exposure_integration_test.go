@@ -310,7 +310,7 @@ func seedSecondBrandFixture(t *testing.T, pool *db.Pool, f sbFixture) sbFixture 
 	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Brand')`,
+			`INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Second Brand', 'active')`,
 			second.brandID, f.tenantID, "b2-"+second.brandID.String()[:8]); err != nil {
 			return err
 		}

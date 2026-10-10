@@ -24,7 +24,7 @@ func f4SeedTenant(t *testing.T, pool *db.Pool) uuid.UUID {
 	t.Helper()
 	tenantID := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'F-4 Test Tenant', 'under_platform_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'F-4 Test Tenant', 'under_platform_licence', 'active')`,
 			tenantID, "f4-"+tenantID.String()[:8])
 		return err
 	}); err != nil {
