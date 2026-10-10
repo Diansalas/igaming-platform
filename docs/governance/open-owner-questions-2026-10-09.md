@@ -92,3 +92,28 @@ Both pairs are reproduced below as O-1(A), O-2(A), O-1(B), O-2(B). Questions alr
 4. **Recommendation.** `ledger-finance` (L-7): stranded funds are launch-blocking before any non-MOCK payout. No option chosen. Note: the new decision 4 (`destination_integrity_failure`) concerns a parked attempt, NOT this state, and does not answer HD-R15-5.
 5. **Decision required (owner, with ledger-finance and security):** for an `approved` withdrawal whose instrument becomes permanently unusable, choose: remain parked, governed four-eyes release (hold returns to the player's own cash), or governed four-eyes rebind to another verified instrument of the same player.
 6. **Unblocks.** A governed disposition mechanism (likely reusing the HSEC `release_hold_to_player` machinery for the release option); removes a launch blocker.
+
+---
+
+## Blocking matrix (added 2026-10-10)
+
+Blocking classification is the orchestrator's reading of the existing records (ADR 0111 s10.3 launch flags, s15.5, s16, s23-s25;
+ADR 0095 s45-s47); "no" means no record makes it a prerequisite, not that it is irrelevant. The owner may reclassify.
+
+| Question | Blocks sandbox (synthetic tenant) | Blocks real providers / non-MOCK money | Blocks AWS | Blocks production |
+|---|---|---|---|---|
+| Q-HSEC-1 (kill switch vs hold release) | no (release is MOCK, no production policy row) | no | no | yes before a production HSEC policy row is added |
+| Q-HSEC-2 (scope of decisions 13-18) | no | no | no | yes before any production policy row; other states stay held until reactivation |
+| Q-HSEC-3 (tenant policy rows ignored while non-active) | no | no | no | yes before a production HSEC policy row |
+| O-1(A) (receipt-attribution race shape) | no | yes for real-provider acceptance (attribution gap) | no | yes |
+| O-2(A) (repair trigger governance) | no | no (function stays refusing) | no | no, unless O-1(A) chooses durable evidence |
+| O-1(B) (inactive brand/tenant callback decline: final vs deferred child) | no | no (money-neutral) | no | yes (player-visible outcome) |
+| O-2(B) (stale deferred child expiry; decision 22 adjacent) | no | yes before real PSP cascades (a stale child may charge unattended) | no | yes |
+| M-3 (fingerprint ownership claim) | no | yes (before any real customer destination) | no | yes |
+| HD-R15-5 (stranded approved withdrawal) | no | yes (ledger-finance L-7: before any non-MOCK payout) | no | yes |
+| Per-provider acceptability of `Unsupported` echo (decision 5 consequence) | no | yes for a provider that cannot echo | no | yes |
+| Governed completion route for a park from an unexpected echo | no | yes for such a provider | no | yes |
+| `evidence_ref_hash` binding (ledger-finance digest vs security blind entry) | no | yes before non-MOCK M4 | no | yes |
+| Resume of a `destination_integrity_failure` park (Q-R32-3) | no | no (interim route sufficient) | no | no |
+| D-REG-1 (are bank/e-wallet identifiers "raw credentials" for decision 8) | no | yes before accepting real instruments via the raw-detail route | no | yes |
+| ALERT-DELIVERY-1 / HD-PRH2-4-OPS | no (owner YES in principle) | no | yes (AWS-hosted channels) | yes |
