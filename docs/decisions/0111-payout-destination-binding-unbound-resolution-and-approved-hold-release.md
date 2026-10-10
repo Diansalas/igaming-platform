@@ -2791,7 +2791,7 @@ non-Synthetic adapters with an unset declaration, `VerifyStartup` (unset non-Syn
 7. **Security recommendation, awaiting an OWNER decision (NOT built):** refuse production startup for a non-Synthetic payout adapter that
    declares `Unsupported` unless an explicit per-provider acknowledgement is configured. The owner has not defined that acknowledgement
    (item 1), so no flag, allow-list or refusal was invented; the WARN marker (24.3) remains the only control.
-8. **Cross-branch HIGH (ledger-finance): r33 and r32 must NOT reach a non-MOCK provider before the r32 fix lands.** `destination_mismatch`
+8. **[STATUS 2026-10-10: SATISFIED. The r32 fix (durable success-reported record, migration 0127) is merged (766ee3d), and the echo contract is merged after it. The condition below is kept as history.]** **Cross-branch HIGH (ledger-finance): r33 and r32 must NOT reach a non-MOCK provider before the r32 fix lands.** `destination_mismatch`
    parks are created on success evidence, and this change makes them more frequent (every unexpected, malformed or drifted echo parks).
    `gov-r32-integrity` owns the fix: a durable "success reported" record that makes an M4 not-paid contradictory. It is not implemented
    here. Both branches stay MOCK-only until it is merged.
@@ -2907,8 +2907,8 @@ No part of this change lifts any launch condition. Non-MOCK M4, paid or not paid
 3. the T10 launch flag is cleared: the import seal passes `security` implementation review with mutation evidence (§10.3), plus the T10 residuals (T6 in-process key, authenticity/completeness, availability);
 4. for **M4 paid**, a positive destination clause (G-DEST): a destination-echo field on the statement line, a migration, and the comparison in `payout_m4_evidence`; until then `PaidAdmissible` is false by construction;
 5. LF C-3 (§20.4): the real provider's return/reversal/chargeback statuses reach `contradiction_after_m4_paid` or a dedicated reason, with a conformance test per adapter, and the governed WITHDRAWAL-REVERSAL-1 path exists; HD-R15-1 and HD-R15-5 (§10.3);
-6. **G-SUCCESS-PARK is fixed** (ledger-finance C-1, `gov-r32-integrity`, migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. This work does not introduce the exposure and does not fix it;
-7. **the SQL counterparts of G-REF, G-TIME and G-NONMOCK exist** (ledger-finance C-2): today they are enforced in Go only and are **not** in the database recount at `pending -> executing`. G-REF and G-TIME are being folded into 0127 (same first-send bound); G-NONMOCK's SQL form is decided with the real-source work. Until then a session able to drive `executing` directly bypasses them (T5).
+6. **[STATUS 2026-10-10: DONE for MOCK. Merged in migration 0127 (766ee3d): `payout_park_evidence`, all park writers, not-paid `contradictory` for every M4 not-paid reason.]** **G-SUCCESS-PARK is fixed** (ledger-finance C-1, `gov-r32-integrity`, migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. This work does not introduce the exposure and does not fix it;
+7. **[STATUS 2026-10-10: G-REF and G-TIME SQL are in the database recount (migration 0127, merged); G-NONMOCK stays Go-only, decided with the real-source work.]** **the SQL counterparts of G-REF, G-TIME and G-NONMOCK exist** (ledger-finance C-2): today they are enforced in Go only and are **not** in the database recount at `pending -> executing`. G-REF and G-TIME are being folded into 0127 (same first-send bound); G-NONMOCK's SQL form is decided with the real-source work. Until then a session able to drive `executing` directly bypasses them (T5).
 
 **Proposals for the owner and `security` (NOT decided, NOT implemented; launch-condition proposals).**
 

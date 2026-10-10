@@ -9,6 +9,9 @@ still missing. Scope of the authorisation being prepared: **one sandbox-only PSP
 payout and deposit capabilities as stated, no production credentials, no real customer data** (owner YES in principle on
 2026-10-06 per the decision register `SANDBOX-BEFORE-ALERT-DELIVERY-1`; ALERT-DELIVERY-1 stays a production blocker).
 
+The exact minimum request to the human (items A-Q) is `sandbox-psp-authorization-request-2026-10-10.md`; the questions are in `decision-ballot-2026-10-10.md`.
+Additional prerequisite for sandbox PAYOUTS: a non-Synthetic payout-instrument verifier (tiering refuses `synthetic` for real adapters; only the MOCK verifier exists). Not needed for a deposits-only sandbox.
+
 Legend: IN PLACE = implemented and tested against MOCK; GAP = missing; EXTERNAL = needs an input from outside the repository;
 DECISION = needs a human/security/ledger-finance ruling.
 
