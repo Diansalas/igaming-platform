@@ -1309,8 +1309,14 @@ func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
 	// a deposit says nothing about whether a payout left the platform. Any
 	// operation other than deposit goes through clearedRefFor (an unknown
 	// operation never clears: fail closed). Deposits are unchanged.
+	//
+	// Owner decision 1 of 2026-10-09 (ADR 0095 §48, Q-R21-1; ADR 0111 §21): a
+	// BOUND destination_mismatch park whose withdrawal an executed
+	// m4_evidence_not_paid failed also stops raising once the complete RR-1
+	// recovery predicate positively holds for THIS park
+	// (m4NotPaidRecoveredBound). Nothing else stops it.
 	if a.operation != paymentStatementKindDeposit {
-		return !m.clearedRefFor(a, a.providerRef, nil)
+		return !m.clearedRefFor(a, a.providerRef, nil) && !m.m4NotPaidRecoveredBound(a)
 	}
 	// PRH-2 K3 (S4, POLL-REF-CLEAR-1, LF B3): a poll_reference_mismatch park with
 	// typed Y evidence (the poll's returned reference, never audit JSON) also
