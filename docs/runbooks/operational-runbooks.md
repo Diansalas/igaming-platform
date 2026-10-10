@@ -704,7 +704,33 @@ overflow runbook entry (LOW-1 / RM-4) is still open.
 
 These are P1 `payment.webhook_integrity` alerts raised, with no state change, when the provider reports a payout after an
 executed M4 that contradicts it. **An operator may close a `success_after_m4_not_paid` alert only once reconciliation RR-1
-shows `recovered = amount` for exactly one payout** (the platform got the released money back, once). The alert and RR-1 are
+shows a NET `recovered` of at least the amount for exactly one payout** (the platform got the released money back, once;
+ADR 0111 §21: debits under the `withdrawal_failed` causation, none reversed, minus every credit under it). The alert and RR-1 are
 different channels and **neither clears the other**: closing the alert does not recover anything, and a recovery shown by RR-1
 does not close the alert. `contradiction_after_m4_paid` is closed only after a human has established with the provider which
 side is right; nothing in the platform moves money back on its own (governed WITHDRAWAL-REVERSAL-1 is required first).
+
+### Related: recovery findings with NO automatic stop path (ADR 0111 §21, r30; LF C-b)
+
+`pay_declared_not_paid_but_paid` (M2 (d) and M4 R-1), `pay_declared_paid_compensated_but_paid` (M2 (c2)) and the post-M4
+`pay_captured_unposted` (STANDING-1 and the bound `destination_mismatch` finding) stop raising only when the NET recovery
+positively holds (ADR 0111 §21.2). In the cases below **nothing in the platform will ever make them stop**: each run adds a new
+row, and the earlier rows stay as history.
+
+| Case | Why it never stops |
+|---|---|
+| a `reversed` payout line on any reference the M4 not-paid reads (RR30-3) | a recovery from the player after the PSP reported the payout reversed may be an over-recovery; the rule refuses to stop while such a line exists, whatever is posted later |
+| an executed credit (any reason code) whose causation is the `withdrawal_failed` transaction F (or, for (c2), the compensating credit C) | it is subtracted from the net, and the debits under F (or C) are capped by INV-ADJ-6 at the amount, so the net can never again reach the amount |
+| a reversed recovery: a credit caused by the recovery debit, or a ledger reversal of it | the reversed debit counts zero, and the INV-ADJ-6 cap counts it as spent, so the debit cannot be redone under F (or C) |
+
+**Exits (the only ones):** off-platform recovery with the PSP or the player, recorded by staff through the mismatch rows'
+`investigation_status` (staff-owned; reconciliation never changes it), or a future separately governed path (none exists today).
+**Never:** post a further compensating entry with another causation to "make the number right" (it is not counted, by design),
+edit or delete K2 requests, ledger rows or mismatch rows, or disable the reconciliation stream.
+
+**Monitoring gap (security LOW-1, r30; tracked follow-up, NOT built).** The net only sees K2 entries whose causation is F (or
+C). A four-eyes pair can return money to the same player through a credit with **no** causation (`goodwill_credit`, or
+`operational_error_correction` / `external_instruction` without one) or with an unrelated causation, after RR-1 has stopped
+the findings; the net figure cannot see it. Until a monitoring rule "flag any `credit_player` on the same wallet after an RR-1
+stop" exists, review K2 credits on wallets with a recovered M4/M2 not-paid as part of the four-eyes approval and in the
+periodic K2 audit review.

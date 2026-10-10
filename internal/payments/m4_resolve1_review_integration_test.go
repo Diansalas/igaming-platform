@@ -341,7 +341,8 @@ func TestM4Recon_Paid_LineOnRNamingAnotherMerchant_Raises(t *testing.T) {
 	m := newM4World(t)
 	p := m.park(800)
 	r := "m4-R-" + uuid.NewString()[:12]
-	l := m.line(r, p.fresh.MerchantReference, statement.PaymentStatusSucceeded, 800, time.Now().Add(-time.Minute).UTC().Truncate(time.Microsecond))
+	// D-7 (ADR 0111 s25): a paid line must not predate the attempt, so the fixture is dated now, not a minute ago.
+	l := m.line(r, p.fresh.MerchantReference, statement.PaymentStatusSucceeded, 800, time.Now().UTC().Truncate(time.Microsecond))
 	m.ingest(m4Imp{}, l)
 	m.execute(p, ResolutionM4EvidencePaid, m.mustEvidence(p.fresh.ID, M4VerdictPaid))
 	m.requireNone(m.stmtRun(m.source(false, l)), reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, p.fresh.ID, "control: the same line again")

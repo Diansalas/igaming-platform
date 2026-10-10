@@ -30,11 +30,14 @@ import (
 //     evidence line's own reference D (review amendment H-1) or any other
 //     matched reference (security LOW condition 1 / LF RR-4: notPaidLines),
 //     until the ledger-finance RR-1 rule holds (m4NotPaidRecovered: the M2 (d)
-//     recovery - executed compensating_entry debits with causation = the
-//     withdrawal_failed transaction, same wallet and asset, totalling at least
-//     the amount - over exactly one succeeded payout of the attempt's amount
-//     and asset). STANDING-1 for the same attempt uses the same rule
-//     (clearedRefFor -> m4NotPaidRecoveredLine).
+//     NET recovery - executed compensating_entry debits with causation = the
+//     withdrawal_failed transaction, same wallet and asset, none reversed,
+//     minus every executed credit with that causation, at least the amount
+//     (owner decision 2, ADR 0095 §48) - over exactly one succeeded payout of
+//     the attempt's amount and asset, with no reversed payout line).
+//     STANDING-1 for the same attempt uses the same rule (clearedRefFor ->
+//     m4NotPaidRecoveredLine), and so does the BOUND destination_mismatch
+//     site (capturedUnposted -> m4NotPaidRecoveredBound; owner decision 1).
 //
 // Raising only: nothing here clears, posts or changes state. ctx and tx are
 // kept for the stream's call shape; every input was read by loadK3Evidence.
@@ -143,7 +146,7 @@ func (e *k3Evidence) succeededGroups(r *m4Resolution) map[string]*persistedLine 
 		if l.status != paymentStatementStatusSucceeded {
 			continue
 		}
-		k := strings.Join([]string{l.ref, l.amount.String(), l.asset, l.occurredAt.UTC().Format(time.RFC3339Nano)}, "\x00")
+		k := succeededGroupKey(l)
 		if groups[k] == nil {
 			groups[k] = l
 		}
@@ -156,15 +159,21 @@ func (e *k3Evidence) succeededGroups(r *m4Resolution) map[string]*persistedLine 
 // m4_evidence_not_paid failed, the post-M4 findings may stop raising ONLY if
 // ALL of these hold; anything else keeps raising:
 //
-//	(a) the M2 (d) recovery rule: executed compensating_entry debit_player
+//	(a) the M2 (d) recovery rule, NET (owner decision 2 of 2026-10-09, ADR
+//	    0095 §48; ADR 0111 §21): executed compensating_entry debit_player
 //	    requests whose causation is THIS resolution's withdrawal_failed
 //	    transaction, on the withdrawal's wallet and the resolution's asset,
-//	    total at least the resolution's amount (r.recovered, loadK3Evidence);
+//	    none of them reversed, minus every executed credit_player request
+//	    with that causation, at least the resolution's amount (r.recovered,
+//	    netRecovery in loadK3Evidence). "A debit occurred" is not enough;
 //	(b) the late succeeded payout is ONE payout - exactly one distinct
 //	    succeeded line group across every reference R-1 reads, re-deliveries
 //	    collapsing into it - and its amount and asset equal the attempt's
 //	    (the recovery covers one payout of the attempt's amount: a second,
-//	    NEW succeeded line, or an unequal one, keeps raising);
+//	    NEW succeeded line, or an unequal one, keeps raising); and no
+//	    reversed payout line exists on those references (the PSP reporting
+//	    the payout reversed makes a recovery from the player a possible
+//	    over-recovery: never a silent stop; r30 reading RR30-3);
 //	(c) tenant and provider scoping: the resolution, the attempt and every
 //	    line come from this run's tenant- and provider-bound reads, the
 //	    resolution is this attempt's, and its amount and asset are the
@@ -189,7 +198,13 @@ func (m *payMatcher) m4NotPaidRecovered(a *payAttempt) (*persistedLine, bool) {
 	if r.recovered == nil || r.recovered.Cmp(r.amount) < 0 {
 		return nil, false
 	}
-	// (b) exactly one payout, of the attempt's amount and asset.
+	// (b) exactly one payout, of the attempt's amount and asset, never
+	// reported reversed.
+	for _, l := range m.k3.notPaidLines(r) {
+		if l.status == "reversed" {
+			return nil, false
+		}
+	}
 	groups := m.k3.succeededGroups(r)
 	if len(groups) != 1 {
 		return nil, false
@@ -208,7 +223,8 @@ func (m *payMatcher) m4NotPaidRecovered(a *payAttempt) (*persistedLine, bool) {
 // RR-1: a finding keyed on the evidencing line (ref, line) stops raising only
 // when m4NotPaidRecovered holds AND that line IS the single recovered payout
 // (same reference, amount and asset). The bound sites pass no line (nil) and
-// never stop here: BOUND-CLEAR-1 is outside the ruling.
+// never stop here; a bound destination_mismatch park has its own rule,
+// m4NotPaidRecoveredBound (owner decision 1, ADR 0095 §48).
 func (m *payMatcher) m4NotPaidRecoveredLine(a *payAttempt, ref string, line *evidencingLine) bool {
 	if line == nil || line.amount == nil || ref == "" {
 		return false
@@ -218,6 +234,63 @@ func (m *payMatcher) m4NotPaidRecoveredLine(a *payAttempt, ref string, line *evi
 		return false
 	}
 	return single.ref == ref && single.asset == line.asset && single.amount.Cmp(line.amount) == 0
+}
+
+// m4NotPaidRecoveredBound is RR-1 at the BOUND site of a recovered
+// destination_mismatch park (owner decision 1 of 2026-10-09, ADR 0095 §48:
+// Q-R21-1 DECIDED; ADR 0111 §21). The BOUND-CLEAR-1 finding is keyed on the
+// bound reference X with no line (matchPayment's bound case and
+// checkUnmatchedAttempts, both through capturedUnposted). A destination
+// mismatch is itself NOT recovery; the finding stops raising ONLY when ALL of
+// these hold, anything else keeps raising:
+//
+//   - the park is destination_mismatch (owner decision 1 names only this
+//     reason; destination_integrity_failure is M4 not-paid eligible since
+//     migration 0127 but is outside owner decision 1, so it never stops
+//     here - ADR 0111 §23 Q-R32-1) and still holds X, the reference pinned at submission
+//     (provider_reference_at_submission, R-6);
+//   - m4NotPaidRecovered holds: the NET recovery, exactly one distinct
+//     succeeded payout of the attempt's amount and asset, no reversed line;
+//   - that single payout is positively THIS park's: its reference is X, or a
+//     line of its group carries the attempt's merchant reference; and no line
+//     of the group names another merchant reference.
+//
+// Nothing else - a later callback, a destination that later looks valid, a
+// debit alone, an unrelated payout - is read here. It writes, posts,
+// releases and deletes nothing; earlier runs' rows stay as history.
+func (m *payMatcher) m4NotPaidRecoveredBound(a *payAttempt) bool {
+	if m.k3 == nil || a == nil || a.terminalReason != "destination_mismatch" || a.providerRef == "" {
+		return false
+	}
+	r := m.k3.m4NotPaid[a.id]
+	if r == nil || r.pinnedRef != a.providerRef {
+		return false
+	}
+	single, ok := m.m4NotPaidRecovered(a)
+	if !ok {
+		return false
+	}
+	key := succeededGroupKey(single)
+	byMerchant := false
+	for _, l := range m.k3.notPaidLines(r) {
+		if l.status != paymentStatementStatusSucceeded || succeededGroupKey(l) != key {
+			continue
+		}
+		if l.merchant == "" {
+			continue
+		}
+		if l.merchant != a.merchantRef {
+			return false
+		}
+		byMerchant = true
+	}
+	return single.ref == a.providerRef || byMerchant
+}
+
+// succeededGroupKey is the R19-5 dedupe key of a succeeded payout line
+// (provider_reference, amount, asset_code, occurred_at).
+func succeededGroupKey(l *persistedLine) string {
+	return strings.Join([]string{l.ref, l.amount.String(), l.asset, l.occurredAt.UTC().Format(time.RFC3339Nano)}, "\x00")
 }
 
 // payoutLinesOn returns the persisted PAYOUT lines named by any of refs (as

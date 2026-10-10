@@ -576,6 +576,7 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 	if err := scanResolution(row, &r); err != nil {
 		return ManualResolution{}, err
 	}
+	var reqAttempt PaymentAttempt
 	if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid || in.Kind.IsM4() {
 		// LF O-4 + PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds are refused at
 		// submission unless a statement source is registered for THIS attempt's
@@ -596,6 +597,7 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 		if !s.statementSourceRegistered(att.ProviderID) {
 			return ManualResolution{}, ErrResolutionNoStatementSource
 		}
+		reqAttempt = att
 	}
 	extra := map[string]any{"note": in.Note, "required_at_submission": r.RequiredAtSubmission}
 	if r.Kind.IsM4() {
@@ -606,6 +608,12 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 			return ManualResolution{}, err
 		}
 		extra["import_seals_verified"] = len(r.EvidenceImportIDs)
+		// D-7 (ADR 0111 section 25): the Go-side, refusal-only eligibility of the evidence.
+		if reason, err := m4EligibilityRefusal(ctx, tx, r, reqAttempt); err != nil {
+			return ManualResolution{}, err
+		} else if reason != "" {
+			return ManualResolution{}, fmt.Errorf("%w: %s", ErrResolutionEvidenceNotEligible, reason)
+		}
 	}
 	if err := recordResolutionAudit(ctx, tx, call, "payment.manual_resolution_requested", r, nil, extra); err != nil {
 		return ManualResolution{}, err
@@ -1326,6 +1334,8 @@ func ClassifyResolutionError(err error) ResolutionErrClass {
 		return ResolutionErrPrecondition
 	case errors.Is(err, ErrResolutionEvidenceUnsealed):
 		return ResolutionErrEvidenceUnsealed
+	case errors.Is(err, ErrResolutionEvidenceNotEligible):
+		return ResolutionErrEvidenceInsufficient
 	case errors.Is(err, withdrawal.ErrStateConflict), errors.Is(err, ErrAttemptStateConflict):
 		return ResolutionErrConflict
 	}
