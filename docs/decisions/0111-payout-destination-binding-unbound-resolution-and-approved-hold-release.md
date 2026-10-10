@@ -2675,7 +2675,7 @@ dated before `last_sent_at` but after the first send is NOT refused (an earlier 
 SQL gaps were flipped deliberately (`TestD7_P3_*`, the G-TIME subtests, the Go probe test, three `TestD7_Meta_*` cases now
 `dbNonPositive`); the Go gate is unchanged and still agrees (probed on the same lines).
 
-Down: unchanged contract (MR099 while any park-evidence row or integrity M4 row exists; both 0125 bodies restored byte for byte).
+Down: MR099 while any integrity M4 row exists or any park-evidence row records `succeeded` or `unknown_pre_0127` (the only rows that refuse a verdict; once every M4-scope park writes a row, refusing on any row would make 0125's own down refusals unreachable, which `TestM4_Migration0125DownRefusals` caught); both 0125 bodies restored byte for byte.
 Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt` (rounds 2 and 3).
 
 

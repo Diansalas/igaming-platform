@@ -527,3 +527,34 @@ func TestR32_GTIME_CoverageEndBoundary_InTheDB(t *testing.T) {
 		m.d7DBRefusesPaid(p, M4VerdictInsufficient)
 	})
 }
+
+// The destination flow binds the reported reference before a destination park; a reference already held
+// elsewhere turns it into a provider_reference_conflict park. That park must record the REPORTED success
+// (the routing class of the bind stays pending), and not-paid is refused.
+func TestR32_DestinationBindConflict_RecordsReportedSuccess(t *testing.T) {
+	m := newM4World(t)
+	wr, att := m.b11Claim(1198)
+	gr := m.b11Dispatch(att, func(WithdrawRequest) WithdrawResult { return WithdrawResult{Outcome: OutcomeAmbiguous} })
+	if err := ApplyPayoutResult(context.Background(), m.pool, m.f.tenantID, wr.ID, att, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
+		t.Fatalf("apply ambiguous: %v", err)
+	}
+	a := m.attempt(att.ID)
+	if a.State != AttemptAmbiguous || a.ProviderReference != nil {
+		t.Fatalf("setup: want ambiguous with no reference, got %s %v", a.State, a.ProviderReference)
+	}
+	ref := b11Ref()
+	m.b11PostDepositKey(ref) // the reported reference is already a deposit's ledger key
+	m.r32Tamper(`DELETE FROM payout_attempt_destination_snapshots WHERE attempt_id = $1`, att.ID)
+	if _, err := m.pm4Callback(a, OutcomeSucceeded, ref, 1198, nil); err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	fresh := m.attempt(att.ID)
+	if fresh.State != AttemptDisputed || fresh.TerminalReason == nil || *fresh.TerminalReason != TerminalReasonProviderReferenceConflict || fresh.ProviderReference != nil {
+		t.Fatalf("want disputed/provider_reference_conflict with no reference, got %s %v %v", fresh.State, fresh.TerminalReason, fresh.ProviderReference)
+	}
+	m.r32RequireEvidence(att.ID, "succeeded/callback")
+	if m.r32ParkEvidence(att.ID)["pending/callback"] {
+		t.Fatal("the routing class (pending) was recorded instead of the reported success")
+	}
+	m.r32RequireNotPaidRefused(&b11Parked{wr: wr, stale: att, fresh: fresh}, M4VerdictContradictory)
+}

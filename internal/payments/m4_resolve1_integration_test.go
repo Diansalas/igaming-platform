@@ -182,6 +182,9 @@ func TestM4_Verdict_PaidConditions(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m.t = t
 			p := m.park(int64(400 + i))
+			// GOV-R32 G-TIME (0127): a paid line must not predate the attempt's first send, so the
+			// lines are dated after the park (the closures read now).
+			now = time.Now()
 			c.setup(p)
 			ev := m.mustEvidence(p.fresh.ID, c.want)
 			if c.want != M4VerdictPaid && (ev.LineID != nil || ev.Reference != nil) {
