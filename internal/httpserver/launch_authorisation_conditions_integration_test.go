@@ -74,6 +74,23 @@ func TestLaunchHTTP_TenantView_HidesPlatformStaffIdentities_AndCoarsensReadiness
 			}
 		}
 	}
+	// A refused attempt by the platform on the now-active brand writes a *_denied row about this tenant.
+	if x := w.do("POST", lhBase(tenantID), w.tokReq(), lhActivationBody(&brand, jid, acks)); x.status != http.StatusConflict {
+		t.Fatalf("activating an active brand must be refused: %d %s", x.status, x.body)
+	}
+	// The tenant platform-actions audit endpoint shows the launch rows (incl. denied) WITHOUT any actor identity.
+	au := w.do("GET", "/v1/admin/audit-log/platform-actions", tt, nil)
+	if au.status != http.StatusOK || !strings.Contains(string(au.body), "launch_authorisation.executed") || !strings.Contains(string(au.body), "_denied") {
+		t.Fatalf("the projection must list the launch rows including a denied one: %d %s", au.status, au.body)
+	}
+	for _, id := range []string{w.ops.Requester.String(), w.ops.Approver1.String(), w.ops.Approver2.String()} {
+		if strings.Contains(string(au.body), id) {
+			t.Errorf("the tenant audit view must not contain platform staff id %s: %s", id, au.body)
+		}
+	}
+	if strings.Contains(string(au.body), `"display_name"`) && strings.Contains(string(au.body), `"display_name":"`) {
+		t.Errorf("the tenant audit view must not contain a platform display name: %s", au.body)
+	}
 	// The platform caller does see them.
 	pr := w.do("GET", lhBase(tenantID)+"/"+c.Request.ID, w.tokAp2(), nil)
 	if !strings.Contains(string(pr.body), w.ops.Requester.String()) || !strings.Contains(string(pr.body), w.ops.Approver1.String()) {

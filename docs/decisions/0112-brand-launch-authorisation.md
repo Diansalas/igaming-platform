@@ -805,6 +805,19 @@ authorisation).** HTTP routes, OpenAPI, error codes, process wiring, the slice-3
   the response envelopes are named types covered by the OpenAPI drift test; refusals are audited as denied rows, so replays "change no state"
   rather than "record nothing". **Console warning (slice 5):** the PII lint is an accident guard; names and identifiers can pass it, so the
   console must tell the user that `conditions_note`, `determination_reference` and operator fields are visible to the tenant and to platform staff.
+- **Last review round.** The tenant platform-actions audit endpoint no longer shows the actor (`staff_id`, `display_name`) of any
+  `launch_authorisation.*` row, denied rows included (scope only), so the statement that a tenant never sees platform staff ids now holds
+  for that endpoint too (test scans it; the other launch endpoints were already redacted). `DATABASE_URL` spellings of the guarded setting
+  are folded case-insensitively, differing duplicates and any `options` startup parameter naming it are refused. Free text also refuses
+  Zl/Zp (U+2028/2029) and the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0). The CI grant steps carry the same
+  `REVOKE DELETE, TRUNCATE ON withdrawal_requests` (pinned by a DB-free test). **Residuals recorded:** the table owner can `DISABLE TRIGGER`
+  `withdrawal_requests_deny_delete` and `withdrawal_requests_aa_subject_active_guard` ("binds every role including the owner" holds only while
+  they are enabled; the owner role is kept out of production by the startup check); the withdrawal STATE-transition guard (the runtime role can
+  UPDATE a request `requested` -> `cancelled` -> `requested` on a suspended brand) is `NOT IMPLEMENTED` and tracked as LAUNCH-BLOCKING (14(b2)).
+  **HD-RET-1 (OPEN, owner/legal, no policy invented):** withdrawal requests are now non-deletable by any role; does data-retention / erasure
+  law require deletion or pseudonymisation, or are they retained under AML record-keeping? Recommendation: retained; pseudonymise PII columns
+  only through a governed, audited path if counsel requires it. Not a technical-readiness blocker. Recorded in
+  `docs/governance/human-decision-register.md`.
 - **Not done / residual.** Shared with slice 3: S-1/S-3 trust model, ALERT-DELIVERY-1 (no recipient for `launch.suspension_exhausted`), the
   reason catalogues are a RECOMMENDATION. New: the admin routes have no per-route rate limit (only the auth routes are limited; residual); `security` has not
   yet reviewed the HTTP layer; the production run of the whole suite was done on a private scratch database, not CI.

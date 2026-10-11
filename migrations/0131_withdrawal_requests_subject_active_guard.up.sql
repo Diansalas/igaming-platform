@@ -41,6 +41,13 @@
 --    the "delete the row inside the closure transaction" bypass of residual 14(b2). The deploy grant
 --    script also revokes DELETE and TRUNCATE from igaming_runtime (defence in depth; deploy/init-app-role.sql).
 --
+-- RESIDUAL (security/ledger-finance re-check): "binds every role including the owner" holds only while the
+-- triggers are ENABLED. The table owner can ALTER TABLE withdrawal_requests DISABLE TRIGGER
+-- withdrawal_requests_deny_delete / withdrawal_requests_aa_subject_active_guard (ADR 0110 9.4 / ADR 0112
+-- residual 12.3: the owner role is kept out of production processes by db.VerifyRuntimeRoleInProduction).
+-- The withdrawal STATE-transition guard (the runtime role can UPDATE a request requested -> cancelled ->
+-- requested on a suspended brand) is NOT IMPLEMENTED and tracked as LAUNCH-BLOCKING (residual 14(b2)).
+--
 -- What this does NOT do: it does not touch an existing row, a state transition, the hold posting, any
 -- balance or projection. A withdrawal that exists keeps progressing on a suspended subject (approve,
 -- reject, cancel, hold release): the status guard fires on INSERT only. A database-level withdrawal

@@ -1,0 +1,7 @@
+E1 launch audit actor shown to tenants -> KILLED
+E2 URL key case not folded -> KILLED
+E3 options parameter not inspected -> KILLED
+E4 line/paragraph separators accepted -> KILLED
+E5 hangul fillers accepted -> KILLED
+E6 CI revoke missing -> KILLED
+DONE

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -338,7 +339,10 @@ func toPlatformActionEntry(row platformActionRawRow, names map[uuid.UUID]*string
 		entry.TargetID = *row.targetID
 	}
 	entry.Actor = platformActionAuditActor{Scope: "platform"}
-	if row.actorID != nil {
+	// ADR 0112 (review): the actor of a launch_authorisation.* row (requester, approver, executor,
+	// including the *_denied rows) is platform staff acting on the tenant's launch; a tenant sees the
+	// scope only, never a staff id or display name.
+	if row.actorID != nil && !strings.HasPrefix(row.action, "launch_authorisation.") {
 		entry.Actor.StaffID = row.actorID.String()
 		entry.Actor.DisplayName = names[*row.actorID]
 	}

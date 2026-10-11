@@ -46,6 +46,9 @@ func ConnectWithRuntimeParams(ctx context.Context, databaseURL string, maxConns 
 	if err != nil {
 		return nil, fmt.Errorf("db: parse database url: %w", err)
 	}
+	if err := normaliseGuardedURLParams(cfg.ConnConfig.RuntimeParams); err != nil {
+		return nil, err
+	}
 	for k, v := range params {
 		if !allowedRuntimeParams[k] {
 			return nil, fmt.Errorf("db: runtime parameter %q is not permitted", k)

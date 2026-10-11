@@ -10,6 +10,8 @@ import (
 // MaxIdleInTxTimeout is the loosest idle_in_transaction_session_timeout a database URL may set.
 const MaxIdleInTxTimeout = time.Hour
 
+const guardedIdleParam = "idle_in_transaction_session_timeout"
+
 // parsePGDuration parses a PostgreSQL time setting: a bare number is milliseconds, otherwise a
 // number with one of the units us, ms, s, min, h, d.
 func parsePGDuration(v string) (time.Duration, error) {
@@ -64,6 +66,40 @@ func checkIdleInTxBound(v string) error {
 	}
 	if d > MaxIdleInTxTimeout {
 		return fmt.Errorf("exceeds the %s bound", MaxIdleInTxTimeout)
+	}
+	return nil
+}
+
+// normaliseGuardedURLParams makes the URL bound on idle_in_transaction_session_timeout independent of
+// how the URL spells it: PostgreSQL setting names are case-insensitive, so a key such as
+// IDLE_IN_TRANSACTION_SESSION_TIMEOUT=0 must be the same setting (and, with two spellings, must not
+// depend on map iteration order). Every spelling is folded to the lower-case name (a second, differing
+// spelling is refused), and an `options` startup parameter naming the setting is refused outright
+// (`-c name=value` / `--name=value` would bypass the bound). A refusal is an error before any connection.
+func normaliseGuardedURLParams(rp map[string]string) error {
+	var found string
+	have := false
+	for k, v := range rp {
+		lk := strings.ToLower(k)
+		if lk == "options" {
+			if strings.Contains(strings.ToLower(strings.ReplaceAll(v, "-", "_")), guardedIdleParam) {
+				return fmt.Errorf("db: database url sets %s through the options parameter; set it through the application configuration only", guardedIdleParam)
+			}
+			continue
+		}
+		if lk != guardedIdleParam {
+			continue
+		}
+		if have && found != v {
+			return fmt.Errorf("db: database url sets %s more than once with different values", guardedIdleParam)
+		}
+		found, have = v, true
+		if k != guardedIdleParam {
+			delete(rp, k)
+		}
+	}
+	if have {
+		rp[guardedIdleParam] = found
 	}
 	return nil
 }

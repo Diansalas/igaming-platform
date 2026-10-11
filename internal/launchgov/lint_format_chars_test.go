@@ -15,7 +15,18 @@ func TestLintFreeText_RefusesFormatCharacters(t *testing.T) {
 		"word joiner":            "a⁠b",
 		"BOM":                    "x\ufeffnote",
 		"soft hyphen":            "co­nditions",
+		"line separator":         "one two",
+		"paragraph separator":    "one two",
+		"hangul filler U+3164":   "okㅤnote",
+		"hangul choseong filler": "okᅟnote",
+		"hangul jungseong fill":  "okᅠnote",
+		"halfwidth hangul fill":  "okﾠnote",
 	} {
+		for _, field := range []string{"conditions_note", "responsible_operator_name", "determination_reference"} {
+			if err := LintFreeText(field, s, 2000); !errors.Is(err, ErrInvalidInput) {
+				t.Errorf("%s in %s must be refused: %v", name, field, err)
+			}
+		}
 		if err := LintFreeText("conditions_note", s, 2000); !errors.Is(err, ErrInvalidInput) {
 			t.Errorf("%s must be refused: %v", name, err)
 		}

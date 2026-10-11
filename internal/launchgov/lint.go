@@ -89,6 +89,12 @@ func normalise(s string) string {
 	}, n)
 }
 
+// invisibleFiller reports the letter-category characters that render as blank: the Hangul fillers
+// U+115F, U+1160, U+3164 and U+FFA0 (they pass Cf/Zl/Zp checks and let a note look empty or hide text).
+func invisibleFiller(r rune) bool {
+	return r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0
+}
+
 func lint(field, s string, maxBytes int, registration bool) error {
 	if len(s) > maxBytes {
 		return fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidInput, field, maxBytes)
@@ -100,7 +106,7 @@ func lint(field, s string, maxBytes int, registration bool) error {
 		if r == '\n' {
 			continue
 		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) { // Cf: bidi overrides (U+202E), zero-width and joiner characters
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || invisibleFiller(r) { // Cf: bidi overrides, zero-width; Zl/Zp: U+2028/2029; fillers: Hangul fillers
 			return fmt.Errorf("%w: %s contains a control or format character", ErrInvalidInput, field)
 		}
 	}

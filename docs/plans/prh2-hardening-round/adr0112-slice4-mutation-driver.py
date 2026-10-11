@@ -78,6 +78,14 @@ mutants = {
   ("C10 deny-delete trigger not created", "migrations/0131_withdrawal_requests_subject_active_guard.up.sql", "CREATE TRIGGER withdrawal_requests_deny_delete\n    BEFORE DELETE ON withdrawal_requests\n    FOR EACH ROW EXECUTE FUNCTION withdrawal_requests_deny_delete();", "", C_CMD),
   ("C11 deny-truncate trigger not created", "migrations/0131_withdrawal_requests_subject_active_guard.up.sql", "CREATE TRIGGER withdrawal_requests_deny_truncate\n    BEFORE TRUNCATE ON withdrawal_requests\n    FOR EACH STATEMENT EXECUTE FUNCTION withdrawal_requests_deny_delete();", "", C_CMD),
  ],
+ "E": [
+  ("E1 launch audit actor shown to tenants", "internal/httpserver/audit_platform_actions_handlers.go", "if row.actorID != nil && !strings.HasPrefix(row.action, \"launch_authorisation.\") {", "if row.actorID != nil {", B_CMD),
+  ("E2 URL key case not folded", "internal/db/idle_bound.go", "lk := strings.ToLower(k)", "lk := k", "go test -count=1 ./internal/db -run 'TestConnectWithRuntimeParams_URLBound' 2>&1 | tail -15"),
+  ("E3 options parameter not inspected", "internal/db/idle_bound.go", "if lk == \"options\" {", "if lk == \"options-x\" {", "go test -count=1 ./internal/db -run 'TestConnectWithRuntimeParams_URLBound' 2>&1 | tail -15"),
+  ("E4 line/paragraph separators accepted", "internal/launchgov/lint.go", "|| unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)", "", "go test -count=1 ./internal/launchgov -run 'TestLintFreeText' 2>&1 | tail -15"),
+  ("E5 hangul fillers accepted", "internal/launchgov/lint.go", "return r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0", "return false", "go test -count=1 ./internal/launchgov -run 'TestLintFreeText' 2>&1 | tail -15"),
+  ("E6 CI revoke missing", ".github/workflows/ci.yml", "REVOKE DELETE, TRUNCATE ON withdrawal_requests FROM igaming_runtime;", "", "go test -count=1 ./internal/withdrawal -run 'TestDeleteTruncateRevokePinned' 2>&1 | tail -15"),
+ ],
  "D": [
   ("D1 tenantView always false", R, "func (c launchCall) tenantView() bool { return c.actor.Scope == launchgov.ScopeTenant }", "func (c launchCall) tenantView() bool { return false }", B_CMD),
   ("D2 request redaction dropped", R, "if c.tenantView() && r.RequestedByScope != launchgov.ScopeTenant {\n\t\td.RequestedBy = \"\"", "if false {\n\t\td.RequestedBy = \"\"", B_CMD),
