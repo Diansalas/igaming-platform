@@ -17,15 +17,29 @@ import (
 // A heuristic over source text, the same family as internal/tenant/status_readers_static_test.go:
 // it does not parse SQL, and a status write built by string concatenation would escape it.
 
+// Identifier forms: bare, or double-quoted, optionally schema-qualified ("public"."tenants").
+const (
+	tblIdent = `(?:"?public"?\.)?"?(?:tenants|brands)"?`
+	// a status assignment: `status =`, `"status" =`, or the column-list form `(a, status) =`.
+	statusAssign = `(?:\bstatus\b"?\s*=|\(\s*[^)]*\bstatus\b[^)]*\)\s*=)`
+)
+
 var (
 	rawStringRE = regexp.MustCompile("(?s)`[^`]*`")
-	// UPDATE <tenants|brands> ... SET ... status = : in a raw string, with the table named
-	// directly after UPDATE (public. optional) and a status assignment before the statement ends.
-	statusUpdateRE = regexp.MustCompile(`(?is)\bupdate\s+(?:only\s+)?(?:public\.)?(?:tenants|brands)\b[^;]*?\bset\b[^;]*?\bstatus\s*=`)
+	// UPDATE <tenants|brands> ... SET ... status = : the table named directly after UPDATE, with
+	// quoted identifiers, `SET (status, ...) =` and a status assignment before the statement ends.
+	statusUpdateRE = regexp.MustCompile(`(?is)\bupdate\s+(?:only\s+)?` + tblIdent + `\b[^;]*?\bset\b[^;]*?` + statusAssign)
 	// A dynamic table name: "UPDATE " + table / fmt.Sprintf("UPDATE %s ...") with a status SET.
-	dynamicUpdateRE = regexp.MustCompile(`(?is)\bupdate\s+(?:%s|%q|%v)\b[^;]*?\bset\b[^;]*?\bstatus\s*=`)
-	changeStatusRE  = regexp.MustCompile(`\bfunc\s+(?:\([^)]*\)\s*)?ChangeStatus\b`)
+	dynamicUpdateRE = regexp.MustCompile(`(?is)\bupdate\s+(?:%s|%q|%v)\b[^;]*?\bset\b[^;]*?` + statusAssign)
+	// An upsert that rewrites status: INSERT INTO tenants|brands ... ON CONFLICT ... DO UPDATE SET status,
+	// or MERGE INTO tenants|brands ... WHEN MATCHED THEN UPDATE SET status.
+	upsertRE       = regexp.MustCompile(`(?is)\b(?:insert\s+into|merge\s+into)\s+` + tblIdent + `\b[^;]*?\bupdate\b[^;]*?\bset\b[^;]*?` + statusAssign)
+	changeStatusRE = regexp.MustCompile(`\bfunc\s+(?:\([^)]*\)\s*)?ChangeStatus\b`)
 )
+
+func writesStatus(sql string) bool {
+	return statusUpdateRE.MatchString(sql) || dynamicUpdateRE.MatchString(sql) || upsertRE.MatchString(sql)
+}
 
 // statusWriters returns the repo-relative non-test Go files under root (outside the integration-
 // tag-only internal/testsupport tree, pinned unreachable by internal/tenant/launch_fixture_pin_test.go)
@@ -57,7 +71,7 @@ func statusWriters(t *testing.T, root string) map[string]int {
 			}
 			n := 0
 			for _, raw := range rawStringRE.FindAllString(string(b), -1) {
-				if statusUpdateRE.MatchString(raw) || dynamicUpdateRE.MatchString(raw) {
+				if writesStatus(raw) {
 					n++
 				}
 			}
@@ -66,7 +80,7 @@ func statusWriters(t *testing.T, root string) map[string]int {
 				if strings.HasPrefix(tl, "//") {
 					continue
 				}
-				if (statusUpdateRE.MatchString(tl) || dynamicUpdateRE.MatchString(tl)) && !strings.Contains(tl, "`") {
+				if writesStatus(tl) && !strings.Contains(tl, "`") {
 					n++ // a double-quoted one-line SQL string
 				}
 			}
@@ -145,14 +159,29 @@ func TestStatic_StatusWriterScan_IsNotVacuous(t *testing.T) {
 	write("internal/x/brands.go", "package x\nvar q = `\n\tUPDATE public.brands\n\t   SET name = $1, status = $2\n\t WHERE id = $3`\n")
 	write("internal/x/dyn.go", "package x\nvar q = fmt.Sprintf(`UPDATE %s SET status = $1 WHERE id = $2`, tbl)\n")
 	write("internal/x/oneline.go", "package x\nvar q = \"UPDATE brands SET status = $1 WHERE id = $2\"\n")
+	// The shapes the security review (L4) found the first regex missed:
+	write("internal/x/quoted.go", "package x\nvar q = `UPDATE \"tenants\" SET \"status\" = $1 WHERE id = $2`\n")
+	write("internal/x/quoted_schema.go", "package x\nvar q = `UPDATE \"public\".\"brands\" SET name = $1, \"status\"=$2 WHERE id = $3`\n")
+	write("internal/x/collist.go", "package x\nvar q = `UPDATE tenants SET (status, updated_at) = ($1, now()) WHERE id = $2`\n")
+	write("internal/x/collist2.go", "package x\nvar q = `UPDATE public.brands SET (name, status) = ($1, $2) WHERE id = $3`\n")
+	write("internal/x/collist_oneline.go", "package x\nvar q = \"UPDATE brands SET (status) = ($1) WHERE id = $2\"\n")
+	write("internal/x/upsert.go", "package x\nvar q = `INSERT INTO brands (id, tenant_id, name, slug, status) VALUES ($1, $2, $3, $4, $5)\n\tON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status`\n")
+	write("internal/x/upsert_quoted.go", "package x\nvar q = `INSERT INTO \"tenants\" (id, status) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET \"status\" = $2`\n")
+	write("internal/x/merge.go", "package x\nvar q = `MERGE INTO tenants t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET status = s.status`\n")
 	// Not status writes:
 	write("internal/y/ok1.go", "package y\nvar q = `UPDATE tenants SET name = $1 WHERE id = $2`\n")
 	write("internal/y/ok2.go", "package y\nvar q = `UPDATE player_accounts SET status = $1 WHERE id = $2`\n")
+	write("internal/y/ok4.go", "package y\nvar q = `UPDATE tenants SET (name, updated_at) = ($1, now()) WHERE id = $2`\n")
+	write("internal/y/ok5.go", "package y\nvar q = `INSERT INTO brands (id, tenant_id, name, slug, status) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING`\n")
+	write("internal/y/ok6.go", "package y\nvar q = `INSERT INTO tenants (id, name, status, updated_at) VALUES ($1, $2, $3, now()) ON CONFLICT (id) DO UPDATE SET name = $2`\n")
+	write("internal/y/ok7.go", "package y\nvar q = `UPDATE \"player_accounts\" SET \"status\" = $1 WHERE id = $2`\n")
 	write("internal/y/ok3.go", "package y\n// UPDATE tenants SET status = 'x' in a comment\nvar q = `SELECT status FROM tenants`\n")
 	write("internal/testsupport/z/fixture.go", "package z\nvar q = `UPDATE tenants SET status = $1 WHERE id = $2`\n")
 	write("internal/y/ok_test.go", "package y\nvar q = `UPDATE tenants SET status = $1 WHERE id = $2`\n")
 	got := statusWriters(t, root)
-	want := []string{"internal/x/tenants.go", "internal/x/brands.go", "internal/x/dyn.go", "internal/x/oneline.go"}
+	want := []string{"internal/x/tenants.go", "internal/x/brands.go", "internal/x/dyn.go", "internal/x/oneline.go",
+		"internal/x/quoted.go", "internal/x/quoted_schema.go", "internal/x/collist.go", "internal/x/collist2.go", "internal/x/collist_oneline.go",
+		"internal/x/upsert.go", "internal/x/upsert_quoted.go", "internal/x/merge.go"}
 	if len(got) != len(want) {
 		t.Fatalf("want exactly %v flagged, got %v", want, got)
 	}

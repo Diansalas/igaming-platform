@@ -85,6 +85,7 @@ constraint has a tenant / brand status vocabulary (checked against `pg_constrain
 | `migrations/0128_launch_authorisation_status_governance.up.sql` | `IF OLD.status = 'closed'` in `launch_subject_status_guard` | closed is terminal (ADR 0112 3.1) |
 | `migrations/0129_brand_gameplay_gate.up.sql` | the same `IF OLD.status = 'closed'` (0129 restates 0128's guard with the LF1 brand lock added) | closed is terminal, unchanged |
 | `migrations/0130_launch_authorisation_actor_proof.up.sql` | the same `IF OLD.status = 'closed'` (0130 restates the guard again with the C2 one-subject-per-transaction rule added) | closed is terminal, unchanged |
+| `migrations/0130_launch_authorisation_actor_proof.up.sql` | `IF NEW.status = 'closed'` (the closure backstop: LA023 hold-bearing withdrawals, LA024 brand open bets) | it reacts to a status being SET to closed (any prior status) and reads no subject status |
 
 ## 4. Writers
 
@@ -98,5 +99,14 @@ SQLSTATE LA020), and since migration 0130 every request and approval carries a s
 session that merely sets session settings can no longer fabricate the decision. A tenant status change after a brand status
 change of that tenant in one transaction is refused (security C2, LA020). `identity.CreateTenant` / `CreateBrand` insert
 `pending_launch` explicitly; every other role is refused any other initial status (LA021). The integration-tag-only
-`internal/testsupport` fixtures (`launchfix`, `launchdrive`) are exempt from the pin and pinned unreachable from non-test builds
-by `internal/tenant/launch_fixture_pin_test.go`.
+`internal/testsupport` fixtures (`launchfix`, `launchdrive`) are exempt from the writer pin; `internal/tenant/launch_fixture_pin_test.go`
+pins EACH of the two packages separately: every source file carries the `integration` build tag (removing the tag from either
+package fails a test) and no non-test file outside `internal/testsupport` imports it (a planted importer fails a test; both
+checks have a negative test over a temporary tree). Before the security review of slice 3 this document said both fixtures were
+pinned while the test covered `launchfix` only; that was incorrect and is corrected here and in the test.
+
+The writer scan (`status_writer_static_test.go`) is an aid, not the control: it recognises `UPDATE tenants|brands ... SET ... status =`
+including quoted identifiers (`"tenants"`, `"status"`, `public."brands"`), the column-list form `SET (status, ...) =`, and
+`INSERT ... ON CONFLICT ... DO UPDATE SET status` / `MERGE ... UPDATE SET status`, each with a planted-offender test. It does not
+parse SQL, and a status write assembled by string concatenation escapes it. The binding control is the database trigger
+(`zz_launch_status_governed`, LA020), which refuses every such write without a governed same-transaction decision.
