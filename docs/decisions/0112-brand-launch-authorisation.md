@@ -534,8 +534,21 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
     superseded by it, as section 8 says.)*
 14. **Slice-3 review residuals (recorded, not closed).** (a) No ledger-side closure arm: a non-zero `player_withdrawal_hold`
     balance without a hold-bearing request does not block a closure (ledger-finance invariant 12 `NOT IMPLEMENTED`); the
-    request-state arm and the brand open-bet arm are in the database (`LA023`, `LA024`). (b) Withdrawal creation does not take
-    the status gate lock, so a not-yet-committed withdrawal request is invisible to the closure guard. (c) Closing with
+    request-state arm and the brand open-bet arm are in the database (`LA023`, `LA024`). (b) CORRECTED after the live security re-review
+    and the ledger-finance re-review (2026-10-11): withdrawals created through the Go path DO serialise with closure (the only
+    inserting path, `withdrawal.go`, runs H-SEC-11 first: tenant gate key shared plus a fresh status read and brand row `FOR SHARE`;
+    a closure either waits and then refuses with `LA023`, or the request reads `closed` and is refused; the live race was run in
+    both orders). What remains open is enforcement only at the Go layer: a RAW INSERT into `withdrawal_requests` by the runtime
+    credential is not refused by the database on a non-active subject (MEDIUM, defence in depth). Tracked follow-up before launch:
+    a database-level withdrawal-insert status guard (BEFORE INSERT trigger taking the tenant key shared and checking status,
+    as 0118 does for ledger postings) and a reverse-order race test. (b2) A holder of BOTH the runtime credential and the signing
+    key can still close over a hold or an open bet by temporarily changing/deleting the row inside the closure transaction
+    (deploy grants give runtime DELETE on `withdrawal_requests` and `sportsbook_bets`; no database withdrawal state machine). Not a
+    new weakness (a key holder can already forge every approval); tracked follow-ups: revoke DELETE on those tables and add a
+    withdrawal state-transition trigger. (b3) `LA023` blocks closure indefinitely while a disputed payout that M2 cannot admit
+    (CT-BLOCKED, ADR 0107) holds funds, until PAYOUT-AMOUNT-DISPUTE-1 is decided; suspension remains the fail-closed lever.
+    (b4) `NoticeFundsStranded` is shown for closure; a suspension-specific notice (funds inaccessible, not stranded) is a slice-4
+    UI/readiness copy item. (c) Closing with
     non-zero balances strands them until HD-CTF-4 (OPEN); readiness also omits in-flight deposits and open casino rounds
     (Q-GP-6). (d) The prior-rejecter rule is Go-only. (e) The database does not recompute the readiness snapshot hash from the
     snapshot JSON. (f) Production pools are not yet wired to `db.ConnectWithRuntimeParams` for
