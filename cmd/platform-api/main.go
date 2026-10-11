@@ -28,6 +28,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
@@ -122,7 +123,14 @@ func run() error {
 		}
 	}()
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseConnTimeout)
+	// ADR 0112 security C4 / slice-3 residual 14(f): the application pool sends
+	// idle_in_transaction_session_timeout in the startup packet of EVERY connection
+	// (cfg.DatabaseRuntimeParams; per connection, not ALTER ROLE, no role change), so a
+	// transaction left idle while holding a status gate key or a subject row lock cannot starve a
+	// suspension indefinitely. This is the only pool this process opens for requests, background
+	// loops and the launch executor; the migrate and seed-admin tools are separate owner-role
+	// binaries and deliberately not wired (docs/runbooks/production-startup-database-config.md).
+	pool, err := db.ConnectWithRuntimeParams(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseConnTimeout, cfg.DatabaseRuntimeParams())
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
 	}
@@ -339,7 +347,23 @@ func run() error {
 	// not a notification to any person, so readiness stays NOT READY.
 	alertDispatcher := alerting.NewDispatcher(pool, alerting.DefaultDispatcherConfig(), alerting.LogSink{Logger: logger})
 
+	// ADR 0112 slice 4: the launch authorisation service (the only governed writer of
+	// tenants.status / brands.status). It signs with the process actor-proof issuer set above
+	// (nil in non-production leaves every governed write failing closed), records the guard
+	// environment in the readiness snapshot, and reads R-PROVIDER-TIER from the SAME component
+	// list the synthetic-component startup guard checked.
+	launchAuthorisation, err := launchgov.New(launchgov.Config{
+		Pool:        pool,
+		Proofs:      actorProofIssuer,
+		Environment: cfg.GuardEnvironment(),
+		Components:  buildRegistrations(cfg, providers),
+	})
+	if err != nil {
+		return fmt.Errorf("launch authorisation: %w", err)
+	}
+
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
+		LaunchAuthorisation:         launchAuthorisation,
 		AlertRouting:                alertDispatcher,
 		PayoutInstruments:           payoutInstruments,
 		AlertRoutingProduction:      cfg.GuardEnvironment() == "production",

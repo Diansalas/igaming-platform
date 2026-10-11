@@ -155,6 +155,14 @@ type Config struct {
 	DatabaseURL         string
 	DatabaseMaxConns    int32
 	DatabaseConnTimeout time.Duration
+	// DatabaseIdleInTxTimeout is sent as idle_in_transaction_session_timeout in the startup packet
+	// of EVERY connection the application pool opens (db.ConnectWithRuntimeParams; per connection,
+	// NOT ALTER ROLE, no role change). ADR 0112 security C4: a transaction left idle while holding
+	// a brand or tenant status gate key, or a subject row lock, would starve a suspension (the
+	// fail-closed lever) indefinitely; the server terminates such a session instead. Always
+	// positive (DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS, default 30s, max 1h): there is no
+	// way to switch it off. An engineering default, not a policy value.
+	DatabaseIdleInTxTimeout time.Duration
 
 	// JWTActiveKID/JWTSigningSecret are the current signing key and its
 	// id, used for every new token. JWTPreviousKID/JWTPreviousSecret are
@@ -457,6 +465,28 @@ const MinProviderCredentialFingerprintKeyBytes = 32
 // forces that ADR's resource-allocation rationale to be revisited.
 const DefaultDatabaseMaxConns int32 = 10
 
+// DefaultDatabaseIdleInTxTimeout is the per-connection idle_in_transaction_session_timeout
+// (ADR 0112 security C4). 30s: far above any legitimate gap between two statements of a request
+// transaction (no provider call runs inside one), well below the time an operator waits on a
+// stuck suspension. MaxDatabaseIdleInTxTimeoutSeconds bounds an override.
+const (
+	DefaultDatabaseIdleInTxTimeout           = 30 * time.Second
+	MaxDatabaseIdleInTxTimeoutSeconds        = 3600
+	runtimeParamIdleInTransactionSessionName = "idle_in_transaction_session_timeout"
+)
+
+// DatabaseRuntimeParams are the per-CONNECTION session settings the application pool sends in
+// every connection's startup packet (db.ConnectWithRuntimeParams). Values are milliseconds, the
+// unit PostgreSQL assumes for a bare number. A zero DatabaseIdleInTxTimeout (a Config not built by
+// Load) still yields the default: the setting cannot be left off by omission.
+func (c Config) DatabaseRuntimeParams() map[string]string {
+	d := c.DatabaseIdleInTxTimeout
+	if d <= 0 {
+		d = DefaultDatabaseIdleInTxTimeout
+	}
+	return map[string]string{runtimeParamIdleInTransactionSessionName: strconv.FormatInt(d.Milliseconds(), 10)}
+}
+
 // validateProviderCredentialFingerprintKey applies security review §3's
 // rules. An absent key is valid (the subsystem is then not constructed).
 func (c Config) validateProviderCredentialFingerprintKey() error {
@@ -562,6 +592,7 @@ func Load() (Config, error) {
 		DatabaseURL:                      os.Getenv("DATABASE_URL"),
 		DatabaseMaxConns:                 DefaultDatabaseMaxConns,
 		DatabaseConnTimeout:              5 * time.Second,
+		DatabaseIdleInTxTimeout:          DefaultDatabaseIdleInTxTimeout,
 		JWTActiveKID:                     getEnvDefault("JWT_ACTIVE_KID", "k1"),
 		JWTSigningSecret:                 os.Getenv("JWT_SIGNING_SECRET"),
 		JWTPreviousKID:                   getEnvDefault("JWT_PREVIOUS_KID", "k0"),
@@ -611,6 +642,18 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: invalid DATABASE_MAX_CONNS: %w", err)
 		}
 		cfg.DatabaseMaxConns = int32(n)
+	}
+	if v := os.Getenv("DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS: %w", err)
+		}
+		// Fail closed: zero or negative would disable the timeout (PostgreSQL treats 0 as off), and
+		// an unbounded value defeats its purpose.
+		if n < 1 || n > MaxDatabaseIdleInTxTimeoutSeconds {
+			return Config{}, fmt.Errorf("config: DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS must be between 1 and %d (it cannot be disabled)", MaxDatabaseIdleInTxTimeoutSeconds)
+		}
+		cfg.DatabaseIdleInTxTimeout = time.Duration(n) * time.Second
 	}
 	if v := os.Getenv("ACCESS_TOKEN_TTL_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
