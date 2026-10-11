@@ -752,7 +752,8 @@ authorisation).** HTTP routes, OpenAPI, error codes, process wiring, the slice-3
   `openapi_launch_authorisation_contract_test.go`): the section 9 list, plus ONE addition, a platform-only queue
   `GET /v1/admin/launch-authorisations` (the approval queue the slice-5 console needs; a tenant caller is 403). Readiness takes an
   `action` query value (the check set depends on it) and optional `jurisdiction_ids` / `licensing_*` / `licence_id` (never free text);
-  `POST .../launch-authorisations` also accepts `action = suspend` (the same governed suspension as the suspend routes). A
+  `POST .../launch-authorisations` REFUSES `action = suspend` with a 400 pointing at the suspend routes (review condition e: it would drop the
+  licensing fields and answer 201). A
   pending request returned by GET carries the CURRENT server-side readiness so an approver has the `seen_readiness_hash`.
 - **Tenant binding.** `tenant_id` only from the `{tenantID}` path value validated against the token (`canActOnTenant`); a foreign tenant
   is a 404, not a 403 (no existence oracle, section 8.3); a body `tenant_id` is accepted and IGNORED. The one body/query reference to a
@@ -763,14 +764,14 @@ authorisation).** HTTP routes, OpenAPI, error codes, process wiring, the slice-3
 - **Idempotency.** The admin four-eyes routes carry no `Idempotency-Key` (that is the player money-movement convention); these routes are
   idempotent by state: a replayed create is `LAUNCH_REQUEST_PENDING`, a replayed approve/reject by the same Person is
   `LAUNCH_ALREADY_DECIDED` (new in this slice: a Go pre-check so the answer is not an opaque `LA012`; the database still refuses it),
-  a replayed cancel is `LAUNCH_REQUEST_NOT_PENDING`, a replayed suspension is `LAUNCH_ILLEGAL_TRANSITION`; each records nothing.
+  a replayed cancel is `LAUNCH_REQUEST_NOT_PENDING`, a replayed suspension is `LAUNCH_ILLEGAL_TRANSITION`; each changes no state (the refusal itself is audited once as a denied row).
 - **Error codes.** Closed `LAUNCH_*` set in `internal/apierror` (messages are fixed sentences, never the underlying error text; a closed
   `check_codes` array carries H-/R-/refusal/SQLSTATE codes). `LA023` -> `LAUNCH_WITHDRAWALS_HOLDING_FUNDS`, `LA024` ->
   `LAUNCH_OPEN_BETS_BLOCK_CLOSURE`, `GP020` -> the existing `TENANT_CLOSE_BLOCKED_OPEN_ROUNDS`, a lock timeout ->
   `LAUNCH_RETRYABLE_LOCK_TIMEOUT`, an `AP*` proof refusal -> `LAUNCH_PROOF_REFUSED` (403), other `LA*` -> `LAUNCH_GUARD_REFUSED`; the final
   approval whose execution is refused is recorded and answered `LAUNCH_REFUSED_AT_EXECUTION`. Every 2xx carries `launchgov.Disclaimer`.
 - **Production pool (residual 14(f), closed).** `cmd/platform-api` opens its pool with `db.ConnectWithRuntimeParams` and
-  `cfg.DatabaseRuntimeParams()` (`DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, default 30 s, 1..3600, cannot be disabled): a per-connection
+  `cfg.DatabaseRuntimeParams()` (`DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, default 30 s, 1..3600; a URL value of 0 or above 1 h is refused): a per-connection
   startup parameter, no `ALTER ROLE`, no role change; tested live. Runbook: `docs/runbooks/production-startup-database-config.md`.
 - **Slice-3 LOW items (closed).** Two-asset R-PLAYER-FUNDS sums; the suspension-specific notice `NoticeFundsInaccessibleOnSuspension` (funds
   inaccessible, not stranded) distinct from `NoticeFundsStranded`; the reverse-order race (withdrawal request in flight -> closure waits ->
@@ -779,17 +780,33 @@ authorisation).** HTTP routes, OpenAPI, error codes, process wiring, the slice-3
 - **Migration 0131 (residual 14(b), the MEDIUM defence-in-depth gap; MONEY-PATH TRIGGER, `ledger-finance` review required).**
   `withdrawal_requests_aa_subject_active_guard` BEFORE INSERT: takes the tenant status gate key SHARED then the brand key SHARED, reads the
   tenant and the brand status in fresh statements and refuses `WD010` / `WD011` unless `active` (fail closed when a row is not visible; no owner
-  exemption; a replay of an existing key passes through to the unique constraint, like 0118). It fires before the 0126 binding guard. Tested
+  exemption). It fires before the 0126 binding guard. **No replay short-circuit** (security C1: the first draft let an INSERT through when a row with
+  the same key existed; `igaming_runtime` could DELETE that row in an open transaction and then a raw INSERT on a SUSPENDED brand was accepted
+  after the delete committed; the live exploit is a test now): the guard runs for every INSERT, the Go path answers replays before it inserts.
+  **Residual 14(b2) pulled forward:** `withdrawal_requests_deny_delete` (BEFORE DELETE row, BEFORE TRUNCATE statement, `WD012`, no role exempt) makes
+  a withdrawal request undeletable by every role, and `deploy/init-app-role.sql` plus `docs/security/runtime-role-separation.md` revoke DELETE and
+  TRUNCATE from `igaming_runtime` (defence in depth; the trigger is the binding control; CI workflow grant steps are not edited). The SQLSTATE
+  class `WD` (WD010 WD011 WD012) is used nowhere else (grep verified). Tested
   as `igaming_runtime` with raw INSERTs on pending_launch / suspended / closed brands and tenants, the control, the replay, a player-scoped
   (blind) session, the catalog order, and the race with a closure in BOTH orders (insert in flight -> closure waits -> `LA023`; closure in
   flight -> insert waits -> refused). `withdrawal.RequestWithdrawal` maps `WD010/WD011` to `tenant.ErrNotActiveForPaymentInitiation`.
-  Not done: it does not change any transition, hold, balance or projection; the ledger-side closure arm (14(a)) and the hold-state
-  trigger / DELETE revocation (14(b2)) remain `NOT IMPLEMENTED`.
+  `WD011` is wrapped like `tenant.RequireBrandActive` (both `ErrNotActiveForPaymentInitiation` and `ErrBrandNotActive`). The Go-path race tests run
+  through the owner pool; the runtime role is covered by the raw-insert races. Not done: it does not change any transition, hold, balance or
+  projection; the ledger-side closure arm (14(a)) and the withdrawal STATE-transition trigger (the rest of 14(b2)) remain `NOT IMPLEMENTED`.
 - **Audit presentation (section 15 item, partly closed).** `audit.TenantPresentation` entries for the ten `launch_authorisation.*` success
   events (closed reason code; before/after for executed / suspended / ratified); refusal rows have none (columns only). The approval chain
   of a launch decision in the tenant projection is NOT assembled (the chain key is the kill switch's): deferred.
+- **Review conditions applied (security / code-reviewer / ledger-finance).** Tenant-scoped callers never see platform staff ids (requester,
+  approvers, executor: scope only) and get a coarsened readiness (environment `redacted`; `R-PROVIDER-TIER` / `R-ALERTS` detail `see_platform`;
+  the hash is unchanged); the `approved` / `rejected` audit rows carry the DECIDER's reason under `reason_code` (the requester's stays in
+  `request_reason_code`); free text refuses format (Cf) characters such as U+202E; a `DATABASE_URL` value of `idle_in_transaction_session_timeout`
+  of 0 or above 1 h is refused at startup (a session can still SET it to 0: the runbook recommends a human-applied role-level default and a
+  lock-wait alert); `ErrNoPerson` is `LAUNCH_NO_PERSON` (403); the licensing vocabularies and 1..32 jurisdiction ids are enforced at the wire;
+  the response envelopes are named types covered by the OpenAPI drift test; refusals are audited as denied rows, so replays "change no state"
+  rather than "record nothing". **Console warning (slice 5):** the PII lint is an accident guard; names and identifiers can pass it, so the
+  console must tell the user that `conditions_note`, `determination_reference` and operator fields are visible to the tenant and to platform staff.
 - **Not done / residual.** Shared with slice 3: S-1/S-3 trust model, ALERT-DELIVERY-1 (no recipient for `launch.suspension_exhausted`), the
-  reason catalogues are a RECOMMENDATION. New: the admin routes have no per-route rate limit beyond the platform defaults; `security` has not
+  reason catalogues are a RECOMMENDATION. New: the admin routes have no per-route rate limit (only the auth routes are limited; residual); `security` has not
   yet reviewed the HTTP layer; the production run of the whole suite was done on a private scratch database, not CI.
 
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the

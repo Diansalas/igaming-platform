@@ -1,0 +1,11 @@
+B1 no canActOnTenant -> SURVIVED :: ok  	github.com/Diansalas/igaming-platform/internal/httpserver	3.272s | 
+B2 actor scope always platform -> KILLED
+B3 create uses body tenant -> KILLED
+B5 no disclaimer in results -> KILLED
+B6 get request no current readiness -> KILLED
+B7 list ignores status filter -> KILLED
+B8 decide drops AlreadyDecided check -> KILLED
+B9 queue allows tenant scope -> KILLED
+B11 funds notice swapped -> KILLED
+B12 history ignores brand filter -> KILLED
+DONE

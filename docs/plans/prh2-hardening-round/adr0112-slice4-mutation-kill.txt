@@ -48,3 +48,21 @@ GROUP C (migration 0131)  9 mutants, all KILLED
   C4 tenant key not taken            C5 brand key not taken          C6 only 'closed' refused
   C7 trigger name fires after the binding guard                      C8 owner role exempt
   C9 brand key derived from the tenant id
+
+REVIEW-CONDITION ROUND (security / code-reviewer / ledger-finance conditions applied on this branch)
+=====================================================================================================
+Driver and raw logs are committed next to this file (adr0112-slice4-mutation-driver.py; adr0112-slice4-mutation-log-*.txt).
+The driver's paths are the authoring sandbox's (scratchpad); it is evidence of method, not a CI job. Groups: A/B above were
+run in the first pass (log B first pass committed); C and C2 (migration 0131 after the fix) and D (the review fixes) were
+re-run after the fixes and every mutant is KILLED.
+
+GROUP C after the security C1 fix  9/9 KILLED
+  C3 now re-adds the replay short-circuit (the live exploit): killed by TestWithdrawalInsertGuard_ReplayOfExistingKey_IsStillGuarded
+  and TestWithdrawalDeleteGuard_ReviewExploitSequence_IsRefused. C1..C2, C4..C9 as before.
+GROUP C2 (delete / truncate guard)  2/2 KILLED
+  C10 deny-delete trigger not created, C11 deny-truncate trigger not created (TestWithdrawalDeleteGuard_NoRoleCanDeleteOrTruncate).
+GROUP D (review fixes)  13/13 KILLED
+  D1 tenantView always false, D2 request redaction dropped, D3 history redaction dropped, D4 readiness coarsening dropped,
+  D5 create accepts action=suspend again, D6 wire-shape validation dropped, D7 decision reason not stored under reason_code,
+  D8 format characters accepted, D9 DATABASE_URL may disable the idle timeout, D10 idle bound accepts 0, D11 WD011 not the
+  brand sentinel, D12 ErrNoPerson mapping dropped, D13 an asset that nets to zero is counted in R-PLAYER-FUNDS.

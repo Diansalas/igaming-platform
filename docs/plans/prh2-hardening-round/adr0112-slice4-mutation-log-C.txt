@@ -1,0 +1,10 @@
+C1 no brand check -> KILLED
+C2 no tenant check -> KILLED
+C3 replay short-circuit re-added (security C1 exploit) -> KILLED
+C4 tenant key not taken -> KILLED
+C5 brand key not taken -> KILLED
+C6 only closed refused -> KILLED
+C7 trigger fires after binding guard -> KILLED
+C8 owner exempt -> KILLED
+C9 shared lock -> exclusive-free (no lock for brand) via wrong key -> KILLED
+DONE
