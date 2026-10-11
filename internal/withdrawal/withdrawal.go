@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -388,6 +389,18 @@ type RequestParams struct {
 	Destinations DestinationGate
 }
 
+// translateInsertError classifies a failed withdrawal_requests INSERT. Migration 0131: the database
+// refuses the INSERT for a tenant (WD010) or brand (WD011) that is not active; that is the same
+// refusal as the H-SEC-11 gate (tenant.ErrNotActiveForPaymentInitiation), reported with the SQLSTATE
+// only. Anything else is an insert failure, unchanged.
+func translateInsertError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && (pgErr.Code == "WD010" || pgErr.Code == "WD011") {
+		return fmt.Errorf("withdrawal: request refused: %w: %s", tenant.ErrNotActiveForPaymentInitiation, pgErr.Code)
+	}
+	return fmt.Errorf("withdrawal: insert request: %w", err)
+}
+
 // RequestWithdrawal creates a WithdrawalRequest row AND posts Flow 3 Step
 // A (debit player_cash, credit player_withdrawal_hold) in the SAME
 // database transaction (tx), so there is never a row in `requested` state
@@ -532,7 +545,10 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		return err
 	})
 	if err != nil {
-		return WithdrawalRequest{}, fmt.Errorf("withdrawal: insert request: %w", err)
+		// Migration 0131: the database refuses the INSERT for a tenant (WD010) or brand (WD011)
+		// that is not active. The H-SEC-11 gate above runs first under the same locks, so this is
+		// defence in depth that cannot normally be reached; if it is, it is the same refusal.
+		return WithdrawalRequest{}, translateInsertError(err)
 	}
 
 	if conflict {
