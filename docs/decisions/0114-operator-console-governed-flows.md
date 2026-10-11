@@ -193,7 +193,7 @@ Owners: `backend` (routes), `backoffice` (screens), `payments`/`ledger-finance` 
 
 | Slice | Content | Owner / reviewers | Gate |
 |---|---|---|---|
-| S0 | H1 redaction test + fix; OpenAPI for K1, K2, financial-policy, platform-actions, enforcement-decisions, staff display-name/person-link | backend / security, code-reviewer | unblocked |
+| S0 | H1 redaction test + fix (DONE, section 9); OpenAPI for K1, K2, financial-policy, platform-actions, enforcement-decisions, staff display-name/person-link | backend / security, code-reviewer | unblocked |
 | S1 | Alerts console (PA): list with state/severity filters, ack, resolve, routing status read-only | backoffice / security, code-reviewer, PO-proxy | unblocked |
 | S2 | R1 + R1b | backend, payments / security, ledger-finance | unblocked (D-OPS-2 roles) |
 | S3 | Parked payments queue + attempt detail; withdrawal detail attempt panel; payout instruments view/suspend (UI-ready) | backoffice / security, ledger-finance (wording), code-reviewer | after S2 |
@@ -232,3 +232,117 @@ claims more than `IMPLEMENTED against MOCK`.
   the gap audit (section 2) records K3/M4/HSEC as IMPLEMENTED (MOCK); the orchestrator should reconcile the headers.
 - Deferred (recorded, not built): tenant-visible alerts, unified cross-domain approvals inbox (gap audit section 12),
   risk REVIEW queue, AML case management.
+
+## 9. Slice S0 record (security hardening + OpenAPI) - IMPLEMENTED against the local DB / MOCK, reviews pending
+
+Status of S0 only; the rest of this ADR stays PROPOSED. Labels: staff-id redaction IMPLEMENTED; evidence-reference
+removal IMPLEMENTED; OpenAPI for the six undocumented families IMPLEMENTED (documents the routes as mounted, no new
+behaviour). `security`, `ledger-finance` and `code-reviewer` reviews are pending.
+
+### 9.1 The defect (security-confirmed live)
+
+H1 in section 4 was a suspicion; it was real. A `platform_admin` engages a payment kill switch on tenant T; a
+`tenant_admin` of T calls `GET .../kill-switches/{id}` and received `changed_by` = the platform admin's staff id
+with `changed_by_scope = platform`. The same class existed on every tenant-readable governed DTO.
+
+### 9.2 The fix: one helper, no way around it
+
+`internal/httpserver/staff_identity_redaction.go`:
+
+- `staffViewerOf(tenant.Context)` derives the viewer from the server-side authenticated context only (nil tenant id
+  = platform principal, the `canActOnTenant` test).
+- `staffViewer.ref(actorScope, id)` / `optRef(...)` return a `staffRef`, the only type a staff-id response field may
+  have. A tenant viewer sees the id **only when the actor scope is exactly `tenant`**; any other value (including
+  empty, unknown, and the `platform_acting` value the K2/K3 tables actually store - the OpenAPI had `platform` for
+  the kill switch and `platform_acting` for K2/K3) is `null`. A zero `staffRef` marshals as `null`, so a DTO built
+  without the helper fails closed. A platform viewer sees everything (unchanged).
+- Rows with an actor id but no scope column (provider-credential `revoked_by`, the generic tenant
+  `GET /v1/admin/audit-log` `actor_id`) use `tenantStaffIDs`: visible only if the id is a `staff_users` row of the
+  caller's own tenant (explicit `tenant_id` filter, inside the tenant transaction; platform staff are RLS-hidden
+  there too). No migration was needed.
+- The wire change: the field stays present as `null` (it is `omitempty` only where it was before and the actor is
+  absent, e.g. `approved_by` before approval). The sibling `*_scope` field is the scope-only marker.
+- Static pin `staff_identity_static_test.go`: an AST walk over every non-test file of the package fails the build on
+  any response field whose JSON name looks like a staff/actor/approver/principal id and which is neither a
+  `staffRef` nor in a justified allowlist, on any hand-built visible `staffRef` outside the helper, and on a stale
+  allowlist entry. A planted-offender test proves the scanner flags `closed_by string`, `approver_ids []string`,
+  `grantee_staff_id *string` and a forged literal. `evidence_reference_static_test.go` pins the evidence-reference
+  removal (9.4).
+
+### 9.3 Inventory (every staff-id-shaped field in `internal/httpserver`)
+
+| Field(s) | DTO / route family | Reader | S0 treatment |
+|---|---|---|---|
+| `changed_by` | kill switch (`killSwitchDTO`; list, get, engage, release-approve responses) | tenant_admin | `staffRef`, scope `changed_by_scope` |
+| `requested_by`, `approved_by` | kill-switch release request | tenant_admin | `staffRef`; `*_scope` |
+| `grantee_staff_id`, `requested_by` | K1 request DTO | tenant_admin, compliance | `staffRef`; `grantee_scope`, `requested_by_scope` |
+| `grantee_staff_id` | K1 grant DTO | tenant_admin, compliance | `staffRef`; `grantee_scope` |
+| `initiated_by` | K2 `adjustmentDTO` (submit, list, get, decision, cancel) | compliance, finance | `staffRef`; `initiated_by_scope` (`tenant` / `platform_acting`) |
+| `requested_by` | K3 `resolutionDTO` (request, list, get, decision, cancel) | compliance, finance | `staffRef`; `requested_by_scope` |
+| `requested_by` (+ new `requested_by_scope`) | HSEC `holdResolutionDTO` | platform_admin only today | `staffRef`, applied for defence in depth |
+| `revoked_by` | provider-credential handle | tenant_admin | `staffRef` via tenant-staff membership (no scope column) |
+| `actor_id` | generic tenant `GET /v1/admin/audit-log` (platform staff who acted inside the tenant, e.g. brand/staff creation) | tenant_admin, compliance | `staffRef` via tenant-staff membership; non-staff actors unchanged |
+| `requested_by`, `decided_by`, `executed_by`, `approver_ids` | launch (ADR 0112) | tenant | already redacted inline by `launchCall`; allowlisted, existing tests unchanged |
+| `actor.staff_id`, `approval_chain[].actor_staff_id` | `GET /v1/admin/audit-log/platform-actions` (ADR 0104) | tenant_admin, compliance | **not changed - see 9.5** |
+| `requested_by_principal_id`, `approver_principal_id`, `applied_by_principal_id` | provider-credential requests | platform_admin only (`request`/`approve` permissions) | allowlisted: platform-only reader |
+| `created_by_actor_id` | sportsbook jurisdiction restrictions | platform_admin only | allowlisted |
+| `created_by_actor_id` | sportsbook exposure limits | risk_manager (tenant staff) | allowlisted: tenant-own actors |
+| `reviewed_by` | KYC case queue | compliance (tenant staff) | allowlisted: tenant-own actors |
+| `requested_by_principal_id`, `applied_by_principal_id` | bonus change requests (`RequireTenantScope`) | tenant staff | allowlisted: tenant-own actors |
+| `superseded_by` | alert routing | platform_admin only | allowlisted: id of a routing row, not a staff id |
+| `person_id` | staff create / person-link bodies and `staffResponse` | staff:manage | allowlisted: input, or the person link of the tenant staff just created |
+| financial-policy changes and policies | `policyChangeDTO`, `policyDTO` | tenant_admin, compliance | no actor field exists; nothing to redact |
+| KYC enforcement decisions | `enforcementDecisionResponse` | compliance | no actor field exists |
+
+Audit **metadata** is not returned by the tenant audit routes (they select no metadata); the platform-actions route
+projects only allowlisted keys.
+
+### 9.4 Second defect: the M4 evidence reference text (security BLOCKER 2)
+
+`resolutionDTO.evidence_reference` returned the PSP line reference R to every K3 reader, and R was written into the
+tenant-visible audit metadata (`evidence_reference`). That defeats the blind-entry design under which each approver
+types R independently. While `evidence_ref_hash` is OPEN:
+
+- the K3 DTO no longer has `evidence_reference`; it has `evidence_reference_present: true` (M4 rows only);
+- the audit metadata key is now `evidence_reference_present: true`; R is not written;
+- **unchanged:** the column `payment_manual_resolutions.evidence_reference`, `EvaluateM4Evidence`, the equality
+  checks in `m4EvidenceRefusal`, `postM4` (keys the completion `provider_id:R`), the reconciliation reader
+  (`payment_statement_k3.go`) and every DB trigger/guard - the server still reads and compares R from the database.
+  No M2/M4 verification was weakened.
+
+Changed assertions (all listed in the commit): `payment_force_resolution_m4_api_integration_test.go` (was
+`EvidenceReference == r`; now the key must be absent, R must not appear anywhere in the body, and
+`evidence_reference_present` must be true) and `m4_resolve1_integration_test.go` (was audit `evidence_reference == r`;
+now `evidence_reference_present == "true"` and R must not appear anywhere in that audit row's metadata).
+Type-adaptation only: `backoffice_admin_integration_test.go` and `identity_flow_integration_test.go` read
+`ActorID.String()` (own-tenant actor still visible, same expectation).
+
+Residuals recorded for `ledger-finance` / `security` (not changed in S0):
+
+1. After a **paid** M4 executes, R is, by design, the completion's provider transaction id (`provider_id:R`, LF F6) in
+   the ledger and the `withdrawal.completed` audit row. That is post-execution, after every blind entry, and is the
+   ledger key; it is not an approver-facing exposure.
+2. `provider_reference_at_submission` (the attempt's own provider reference X, pinned for the not-paid and M2 paths) is
+   still in audit metadata. For M4 not-paid the blind entry would be the portal's declined reference, which may equal
+   X. Decision needed: hash it like R or leave it.
+
+### 9.5 Tension recorded, not resolved here: ADR 0104 identifies the platform actor on purpose
+
+`GET /v1/admin/audit-log/platform-actions` (ADR 0104 section 5.2) returns `actor.staff_id` and `display_name` of the
+platform staff member for every platform action concerning the tenant, including kill-switch engage / release, with
+an approval chain. That was an owner-approved, product-owner-proxy-reviewed decision. ADR 0114 principle 7 says the
+opposite for every other surface. With S0 alone, a tenant that wants the platform actor's id can still read it from
+that route, so the kill-switch DTO redaction is only as strong as that route. S0 did **not** change ADR 0104 (a
+decision, not an implementation detail). Required decision (`architect` + owner + `security`): amend ADR 0104 to
+scope-only (consistent with ADR 0112's launch rows, which already withhold) or record the exception as final.
+
+### 9.6 OpenAPI (exactly as implemented)
+
+Documented in `docs/api/openapi/platform-api.yaml`: K1 (7 operations), K2 (6), financial-policy changes and policies
+(6), `GET /v1/admin/audit-log/platform-actions`, `GET /v1/admin/kyc/enforcement-decisions` (note: tenant-scope guard,
+so a platform caller gets 403 even though `platform_admin` holds the permission), both staff display-name routes and
+both person-link routes. Schemas changed: kill switch, release request, K3, HSEC, provider-credential handle and
+`AuditEntry` (nullable staff ids, `evidence_reference_present`). DB-free drift tests
+(`openapi_governed_routes_contract_test.go`): every mounted route is documented and every documented operation is
+mounted; each DTO's JSON field set equals its schema's property set (reflection); request bodies refuse unknown
+properties and carry no tenant field; the redaction contract and the absence of `evidence_reference` are pinned.
