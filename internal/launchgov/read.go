@@ -34,10 +34,16 @@ func (s *Service) ListRequests(ctx context.Context, a Actor, tenantID uuid.UUID,
 	if statuses == nil {
 		statuses = []string{}
 	}
+	// Expiry observed here is materialised (and audited once) before the read; the filter below
+	// still treats a pending row past its expires_at as expired on its own, so the result is right
+	// even when the materialising write could not run.
+	s.sweepBestEffort(ctx, a, tenantID, nil)
 	err := s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+requestColumns+` FROM launch_authorisation_requests
-			WHERE tenant_id = $1 AND ($2::uuid IS NULL OR brand_id = $2) AND (cardinality($3::text[]) = 0 OR status = ANY($3))
-			ORDER BY created_at DESC, id DESC LIMIT $4`, tenantID, f.BrandID, statuses, limit)
+			WHERE tenant_id = $1 AND ($2::uuid IS NULL OR brand_id = $2)
+			  AND (cardinality($3::text[]) = 0
+			       OR (CASE WHEN status = 'pending' AND expires_at <= $5 THEN 'expired' ELSE status END) = ANY($3))
+			ORDER BY created_at DESC, id DESC LIMIT $4`, tenantID, f.BrandID, statuses, limit, now)
 		if err != nil {
 			return err
 		}

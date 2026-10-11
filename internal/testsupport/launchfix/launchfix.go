@@ -342,7 +342,8 @@ func flip(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID
 		if err := setPlatform(ctx, tx, approverStaff[i]); err != nil {
 			return err
 		}
-		if err := prooftest.AttachForSession(ctx, tx, actorproof.OpLaunchApprove, reqID.String(), payloadHash); err != nil {
+		if err := prooftest.AttachForSession(ctx, tx, actorproof.OpLaunchApprove, reqID.String(),
+			actorproof.LaunchApprovalDigest(payloadHash, strings.Repeat("0", 64), "test_fixture")); err != nil {
 			return fmt.Errorf("launchfix: approval proof: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `

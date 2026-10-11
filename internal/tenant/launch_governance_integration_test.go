@@ -176,7 +176,8 @@ func lgSetPlatform(ctx context.Context, tx pgx.Tx, staff uuid.UUID) error {
 }
 
 func lgApprove(ctx context.Context, tx pgx.Tx, reqID uuid.UUID, hash, decision string) error {
-	if err := prooftest.AttachForSession(ctx, tx, "launch_authorisation:"+decision, reqID.String(), hash); err != nil {
+	if err := prooftest.AttachForSession(ctx, tx, "launch_authorisation:"+decision, reqID.String(),
+		actorproof.LaunchApprovalDigest(hash, strings.Repeat("0", 64), "lg_test")); err != nil {
 		return err
 	}
 	return lgApproveNoProof(ctx, tx, reqID, hash, decision)

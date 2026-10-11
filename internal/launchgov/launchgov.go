@@ -144,6 +144,12 @@ var (
 	ErrRetryableLockTimeout = errors.New("launchgov: LAUNCH_RETRYABLE_LOCK_TIMEOUT")
 	ErrIsolationLevel       = errors.New("launchgov: an approval-based execution requires a READ COMMITTED transaction")
 	ErrProofUnavailable     = errors.New("launchgov: no actor-proof issuer is configured (governed writes fail closed)")
+	// ErrPriorRejecter: the approver's own Person rejected a request of the same subject and action
+	// within the request TTL and this request carries no change note (security C2).
+	ErrPriorRejecter = errors.New("launchgov: LAUNCH_PRIOR_REJECTER")
+	// ErrNotLegacyBaseline: a ratification is only for a subject whose latest transition is the
+	// legacy baseline (mirrors the LA010 refusal of the request guard).
+	ErrNotLegacyBaseline = errors.New("launchgov: LAUNCH_NOT_LEGACY_BASELINE")
 )
 
 // PreconditionError carries the machine-readable codes of a refused hard precondition (H-1..H-3)

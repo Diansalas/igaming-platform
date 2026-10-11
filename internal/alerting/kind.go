@@ -106,6 +106,14 @@ const (
 // ALERT-DELIVERY-1 OPEN).
 const KindKYCSubmissionFailedTerminal Kind = "kyc.submission_failed_terminal"
 
+// KindLaunchSuspensionExhausted is the ADR 0112 slice 3 (security C4) P1 Kind: every bounded
+// attempt to execute a SUSPENSION (the fail-closed direction of a launch status change) ended in
+// a lock timeout, a deadlock or the C-3(b) commit check, so a subject that should have been
+// suspended was not. Raised by internal/launchgov through RaiseDetached AFTER the business
+// transaction rolled back (ADR 0102 7.4). Alert NOTIFICATION is NOT IMPLEMENTED (no route or
+// recipient; ALERT-DELIVERY-1 OPEN): the row exists, nobody is paged.
+const KindLaunchSuspensionExhausted Kind = "launch.suspension_exhausted"
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -193,6 +201,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindKYCSubmissionFailedTerminal, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("operation", "provider_id", "last_error_class", "outbox_id"),
+	},
+	KindLaunchSuspensionExhausted: {
+		Kind: KindLaunchSuspensionExhausted, Severity: SeverityP1, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeDetached,
+		AllowedKeys: keys("subject_kind", "attempts", "request_id"),
 	},
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,

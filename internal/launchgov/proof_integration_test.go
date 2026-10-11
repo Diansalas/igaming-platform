@@ -339,21 +339,37 @@ func TestProof_ApprovalAndCancelBinding(t *testing.T) {
 			return rawApproval(ctx, tx, reqID, hash, decision)
 		})
 	}
+	// An approval / rejection proof binds the digest of (payload_hash, the readiness hash the decider
+	// saw, the reason code) (security L1); rawApproval inserts the zero hash and 'reviewed_ok'.
+	ad := func(h string) string {
+		return actorproof.LaunchApprovalDigest(h, strings.Repeat("0", 64), "reviewed_ok")
+	}
 	tok := func(who uuid.UUID, op string, target uuid.UUID, hash string) string {
+		if op == actorproof.OpLaunchApprove || op == actorproof.OpLaunchReject {
+			hash = ad(hash)
+		}
 		return f.Valid(t, who, "platform", uuid.Nil, op, target.String(), hash)
 	}
+	w.wantCode("approval proof signed for another readiness hash (L1)", approve(ap1, r1.ID, r1.PayloadHash, "approve",
+		f.Valid(t, ap1, "platform", uuid.Nil, actorproof.OpLaunchApprove, r1.ID.String(),
+			actorproof.LaunchApprovalDigest(r1.PayloadHash, strings.Repeat("1", 64), "reviewed_ok"))), "AP004")
+	w.wantCode("approval proof signed for another reason code (L1)", approve(ap1, r1.ID, r1.PayloadHash, "approve",
+		f.Valid(t, ap1, "platform", uuid.Nil, actorproof.OpLaunchApprove, r1.ID.String(),
+			actorproof.LaunchApprovalDigest(r1.PayloadHash, strings.Repeat("0", 64), "policy_concern"))), "AP004")
+	w.wantCode("approval proof that binds the bare payload hash only (the old shape)", approve(ap1, r1.ID, r1.PayloadHash, "approve",
+		f.Valid(t, ap1, "platform", uuid.Nil, actorproof.OpLaunchApprove, r1.ID.String(), r1.PayloadHash)), "AP004")
 	w.wantCode("approval proof for request 1 used on request 2", approve(ap1, r2.ID, r2.PayloadHash, "approve", tok(ap1, actorproof.OpLaunchApprove, r1.ID, r2.PayloadHash)), "AP004")
 	w.wantCode("approval proof with another payload", approve(ap1, r1.ID, r1.PayloadHash, "approve", tok(ap1, actorproof.OpLaunchApprove, r1.ID, r2.PayloadHash)), "AP004")
 	w.wantCode("approve proof used for a reject", approve(ap1, r1.ID, r1.PayloadHash, "reject", tok(ap1, actorproof.OpLaunchApprove, r1.ID, r1.PayloadHash)), "AP004")
 	w.wantCode("reject proof used for an approve", approve(ap1, r1.ID, r1.PayloadHash, "approve", tok(ap1, actorproof.OpLaunchReject, r1.ID, r1.PayloadHash)), "AP004")
 	w.wantCode("another approver's proof", approve(ap1, r1.ID, r1.PayloadHash, "approve", tok(w.ops.Approver2, actorproof.OpLaunchApprove, r1.ID, r1.PayloadHash)), "AP004")
 	w.wantCode("tenant-scope approve proof", approve(ap1, r1.ID, r1.PayloadHash, "approve",
-		f.Valid(t, ap1, "tenant", tid, actorproof.OpLaunchApprove, r1.ID.String(), r1.PayloadHash)), "AP004")
+		f.Valid(t, ap1, "tenant", tid, actorproof.OpLaunchApprove, r1.ID.String(), ad(r1.PayloadHash))), "AP004")
 	w.wantCode("platform_acting approve proof", approve(ap1, r1.ID, r1.PayloadHash, "approve",
-		f.Valid(t, ap1, "platform_acting", tid, actorproof.OpLaunchApprove, r1.ID.String(), r1.PayloadHash)), "AP004")
+		f.Valid(t, ap1, "platform_acting", tid, actorproof.OpLaunchApprove, r1.ID.String(), ad(r1.PayloadHash))), "AP004")
 	w.wantCode("approval with a request proof", approve(ap1, r1.ID, r1.PayloadHash, "approve", tok(ap1, actorproof.OpLaunchRequest, r1.ID, r1.PayloadHash)), "AP004")
 	w.wantCode("expired approval proof", approve(ap1, r1.ID, r1.PayloadHash, "approve",
-		f.Token(t, ap1, "platform", uuid.Nil, actorproof.OpLaunchApprove, r1.ID.String(), r1.PayloadHash, time.Now().Unix()-120, time.Now().Unix()-60)), "AP003")
+		f.Token(t, ap1, "platform", uuid.Nil, actorproof.OpLaunchApprove, r1.ID.String(), ad(r1.PayloadHash), time.Now().Unix()-120, time.Now().Unix()-60)), "AP003")
 	good := tok(ap1, actorproof.OpLaunchApprove, r1.ID, r1.PayloadHash)
 	if err := approve(ap1, r1.ID, r1.PayloadHash, "approve", good); err != nil {
 		t.Fatalf("the correct approval proof must be accepted: %v", err)

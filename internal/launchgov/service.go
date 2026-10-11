@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -233,6 +234,11 @@ func classify(err error) error {
 	}
 	if pe.Code == "GP020" {
 		return tenant.TranslateStatusChangeError(err)
+	}
+	if pe.Code == "LA010" && strings.Contains(pe.Message, "legacy_baseline") {
+		// The request guard's ratify rule (only a subject whose latest transition is the legacy
+		// baseline can be ratified): its own error, not an illegal status move.
+		return fmt.Errorf("%w: %s", ErrNotLegacyBaseline, pe.Message)
 	}
 	if pe.Code == "LA010" {
 		// Content and vocabulary are validated in Go before any SQL, and the subject's status was

@@ -227,6 +227,13 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION launch_approval_proof_digest(p_payload_hash text, p_seen_hash text, p_reason text) RETURNS text
+    LANGUAGE sql IMMUTABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT public.k2_sha256_hex(public.k2_canonical(p_payload_hash, p_seen_hash, p_reason))
+$$;
+
 CREATE FUNCTION actor_proof_launch_approvals_guard() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
@@ -238,10 +245,13 @@ BEGIN
     IF NEW.decided_by IS DISTINCT FROM v_actor.actor OR v_actor.scope IS DISTINCT FROM 'platform' THEN
         RAISE EXCEPTION 'actor_proof: the decided_by column is not the proven platform actor' USING ERRCODE = 'AP004';
     END IF;
-    -- target = the request id; payload = the request's payload_hash (the 0128 guard already
-    -- forced NEW.payload_hash to equal it, LA012).
+    -- target = the request id; payload = the digest of the request's payload_hash (the 0128
+    -- guard already forced NEW.payload_hash to equal it, LA012), the readiness hash the decider
+    -- saw and the reason code (security L1: the two caller-supplied approval columns are bound
+    -- by the signed proof, so a proof cannot be replayed with other values for them).
     PERFORM public.actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
-        'launch_authorisation:' || NEW.decision, NEW.request_id::text, NEW.payload_hash);
+        'launch_authorisation:' || NEW.decision, NEW.request_id::text,
+        public.launch_approval_proof_digest(NEW.payload_hash, NEW.readiness_snapshot_hash_at_decision, NEW.reason_code));
     RETURN NEW;
 END
 $$;
@@ -264,14 +274,21 @@ CREATE FUNCTION launch_requests_reject_carryover() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
 AS $$
+DECLARE
+    v_prior public.launch_authorisation_requests%ROWTYPE;
 BEGIN
-    IF EXISTS (SELECT 1 FROM public.launch_authorisation_requests r
-                WHERE r.tenant_id = NEW.tenant_id AND r.subject_kind = NEW.subject_kind
-                  AND r.brand_id IS NOT DISTINCT FROM NEW.brand_id
-                  AND r.action = NEW.action AND r.payload_hash = NEW.payload_hash
-                  AND r.status = 'rejected' AND r.decided_at > now() - interval '72 hours') THEN
+    SELECT * INTO v_prior FROM public.launch_authorisation_requests r
+     WHERE r.tenant_id = NEW.tenant_id AND r.subject_kind = NEW.subject_kind
+       AND r.brand_id IS NOT DISTINCT FROM NEW.brand_id
+       AND r.action = NEW.action AND r.payload_hash = NEW.payload_hash
+       AND r.status = 'rejected' AND r.decided_at > now() - interval '72 hours'
+     ORDER BY r.decided_at DESC LIMIT 1;
+    IF FOUND THEN
+        -- DETAIL carries the matching prior request (an id and a timestamp only), so the service
+        -- names the request whose payload_hash matched rather than guessing the latest reject.
         RAISE EXCEPTION 'launch request: an identical request was rejected within the request TTL; it cannot be re-requested unchanged'
-            USING ERRCODE = 'LA014';
+            USING ERRCODE = 'LA014',
+                  DETAIL = format('prior_request_id=%s decided_at=%s', v_prior.id, to_char(v_prior.decided_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
     END IF;
     RETURN NEW;
 END
@@ -435,5 +452,25 @@ BEGIN
         END;
     END IF;
     RETURN NEW;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 6. The alert Kind launch.suspension_exhausted (security C4): a suspension whose every bounded
+--    attempt ended in lock contention. Seeded under alert_kinds' FORCE RLS exactly as migration
+--    0114 seeded its Kind (a temporary, literal, single-Kind, FOR INSERT TO CURRENT_USER policy
+--    created and dropped inside one DO block; FORCE ROW LEVEL SECURITY is never toggled).
+--    severity p1; alert NOTIFICATION is NOT IMPLEMENTED (no route or recipient is seeded).
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    CREATE POLICY alert_kinds_seed_0130 ON alert_kinds
+        FOR INSERT TO CURRENT_USER
+        WITH CHECK (kind = 'launch.suspension_exhausted');
+    INSERT INTO alert_kinds (kind, severity, scope, simulation, requires_subject,
+                             in_tx_raisable_by_tenant, allowed_keys, raise_mode)
+    VALUES ('launch.suspension_exhausted', 'p1', 'platform', false, true, true,
+            ARRAY['subject_kind', 'attempts', 'request_id'], 'detached');
+    DROP POLICY alert_kinds_seed_0130 ON alert_kinds;
 END
 $$;

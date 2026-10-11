@@ -30,6 +30,21 @@ END $$;
 
 ALTER TABLE launch_authorisation_requests FORCE ROW LEVEL SECURITY;
 
+-- Unseed the alert Kind (as 0114's down does); refused while alerts of the Kind exist.
+DO $$
+BEGIN
+    ALTER TABLE alert_kinds DISABLE TRIGGER alert_kinds_deny_update_delete;
+    CREATE POLICY alert_kinds_unseed_0130 ON alert_kinds
+        FOR DELETE TO CURRENT_USER USING (kind = 'launch.suspension_exhausted');
+    DELETE FROM alert_kinds WHERE kind = 'launch.suspension_exhausted';
+    DROP POLICY alert_kinds_unseed_0130 ON alert_kinds;
+    ALTER TABLE alert_kinds ENABLE TRIGGER alert_kinds_deny_update_delete;
+EXCEPTION WHEN foreign_key_violation THEN
+    RAISE EXCEPTION 'migration 0130 down: refusing - alerts of kind launch.suspension_exhausted exist; resolve and archive them under an authorized procedure first'
+        USING ERRCODE = 'LA099';
+END
+$$;
+
 DROP TRIGGER launch_suspension_no_stale_pending_at_commit ON launch_authorisation_requests;
 DROP FUNCTION launch_suspension_no_stale_pending_at_commit();
 DROP TRIGGER launch_requests_reject_carryover ON launch_authorisation_requests;
@@ -37,6 +52,7 @@ DROP FUNCTION launch_requests_reject_carryover();
 DROP TRIGGER zz_actor_proof_guard ON launch_authorisation_approvals;
 DROP TRIGGER zz_actor_proof_guard ON launch_authorisation_requests;
 DROP FUNCTION actor_proof_launch_approvals_guard();
+DROP FUNCTION launch_approval_proof_digest(text, text, text);
 DROP FUNCTION actor_proof_launch_requests_guard();
 DROP FUNCTION launch_request_content_digest(launch_authorisation_requests);
 

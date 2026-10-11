@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -83,6 +84,7 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 	}
 	sub := pre.Subject()
 	if pre.Status != ReqPending || !s.now().Before(pre.ExpiresAt) {
+		s.sweepBestEffort(ctx, a, tenantID, &requestID)
 		return nil, ErrNotPending
 	}
 	if pre.RequestedBy == a.StaffID {
@@ -112,16 +114,35 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 		if req.PayloadHash != pre.PayloadHash {
 			return ErrNotPending // content is immutable; a mismatch means a different row version: never decide it
 		}
-		if same, err := samePerson(ctx, tx, a.StaffID, req.RequestedBy); err != nil {
+		if same, err := samePersonAsRequester(ctx, tx, a.StaffID, req); err != nil {
 			return err
 		} else if same {
 			return ErrSelfApproval
+		}
+		// Security C2: every reject of the same subject and action within the TTL (any payload)
+		// is shown to the approver, and an approver whose own Person rejected one may not
+		// approve a request that carries no change note.
+		priors, err := loadPriorRejects(ctx, tx, s.now(), req)
+		if err != nil {
+			return err
+		}
+		res.PriorRejects = priors
+		if in.Decision == DecisionApprove && strings.TrimSpace(req.ConditionsNote) == "" {
+			me, err := personOf(ctx, tx, a.StaffID)
+			if err != nil {
+				return err
+			}
+			for _, p := range priors {
+				if p.DecidedByPersonID == me {
+					return ErrPriorRejecter
+				}
+			}
 		}
 		op := actorproof.OpLaunchApprove
 		if in.Decision == DecisionReject {
 			op = actorproof.OpLaunchReject
 		}
-		if err := s.attachProof(ctx, tx, a, op, req.ID.String(), req.PayloadHash); err != nil {
+		if err := s.attachProof(ctx, tx, a, op, req.ID.String(), actorproof.LaunchApprovalDigest(req.PayloadHash, hash, in.ReasonCode)); err != nil {
 			return err
 		}
 		var ap Approval
@@ -170,6 +191,10 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 	})
 	if err != nil {
 		err = classify(err)
+		if errors.Is(err, ErrNotPending) {
+			// The request may have expired by time: materialise (and audit once) the expiry.
+			s.sweepBestEffort(ctx, a, tenantID, &requestID)
+		}
 		if errors.Is(err, ErrRetryableLockTimeout) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotPending) || errors.Is(err, ErrIsolationLevel) || errors.Is(err, ErrProofUnavailable) {
 			return nil, err
 		}
@@ -188,15 +213,40 @@ func (s *Service) deniedExec(ctx context.Context, a Actor, op string, sub Subjec
 	return s.denied(ctx, a, op, sub, req.Action, err, withRequest(req.ID, req.ReasonCode))
 }
 
-// samePerson reports whether two staff rows are linked to the same Person (distinct staff AND
-// distinct Person). An unreadable row or a NULL person_id fails closed: the database refuses a
-// NULL person_id too (LA012 / LA001).
-func samePerson(ctx context.Context, tx pgx.Tx, a, b uuid.UUID) (bool, error) {
-	var pa, pb *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT (SELECT person_id FROM staff_users WHERE id = $1), (SELECT person_id FROM staff_users WHERE id = $2)`, a, b).Scan(&pa, &pb); err != nil {
+// ErrNoPerson: a staff row is unreadable or carries no Person, so "same Person" cannot be
+// decided. The check fails CLOSED with an error (the database refuses a NULL person_id too:
+// LA012 / LA001), never with "not the same Person".
+var ErrNoPerson = errors.New("launchgov: a staff account has no readable Person; the four-eyes check cannot be evaluated")
+
+// personOf returns the Person of a staff account, or ErrNoPerson when the row is unreadable or
+// has none.
+func personOf(ctx context.Context, tx pgx.Tx, staff uuid.UUID) (uuid.UUID, error) {
+	var p *uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, staff).Scan(&p)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && p == nil) {
+		return uuid.Nil, ErrNoPerson
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return *p, nil
+}
+
+// samePersonAsRequester reports whether the approver's staff account is linked to the SAME Person
+// as the request's requester. The requester's Person is the one the database recorded on the
+// request (requested_by_person_id; a tenant requester's own staff row is not readable from a
+// platform session), the approver's is read from its own row. An unreadable approver row, a
+// NULL person_id on either side, or a nil recorded Person fails CLOSED with ErrNoPerson: the
+// answer "not the same Person" is never inferred from missing data (security L3).
+func samePersonAsRequester(ctx context.Context, tx pgx.Tx, approver uuid.UUID, req Request) (bool, error) {
+	me, err := personOf(ctx, tx, approver)
+	if err != nil {
 		return false, err
 	}
-	return pa != nil && pb != nil && *pa == *pb, nil
+	if req.RequestedByPersonID == uuid.Nil {
+		return false, ErrNoPerson
+	}
+	return me == req.RequestedByPersonID, nil
 }
 
 func loadApprovals(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) ([]Approval, error) {

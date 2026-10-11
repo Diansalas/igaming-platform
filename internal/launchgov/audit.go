@@ -95,6 +95,10 @@ func denialCode(err error) string {
 		return "LAUNCH_RETRYABLE_LOCK_TIMEOUT"
 	case errors.Is(err, ErrPriorReject):
 		return "LAUNCH_PRIOR_REJECT"
+	case errors.Is(err, ErrPriorRejecter):
+		return "LAUNCH_PRIOR_REJECTER"
+	case errors.Is(err, ErrNotLegacyBaseline):
+		return "LAUNCH_NOT_LEGACY_BASELINE"
 	case errors.Is(err, ErrStaleReadiness):
 		return "LAUNCH_STALE_READINESS"
 	case errors.Is(err, ErrForbidden):

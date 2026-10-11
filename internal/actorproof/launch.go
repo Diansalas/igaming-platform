@@ -31,6 +31,13 @@ type LaunchRequest struct {
 	ReasonCode                      string
 }
 
+// LaunchApprovalDigest is the payload a launch approval / rejection proof binds: the request's
+// payload_hash, the readiness hash the decider saw and the reason code (migration 0130
+// launch_approval_proof_digest(); security L1).
+func LaunchApprovalDigest(payloadHash, seenReadinessHash, reasonCode string) string {
+	return Digest(S(payloadHash), S(seenReadinessHash), S(reasonCode))
+}
+
 // Digest is SHA-256(k2_canonical(...)) over the content columns, identical to the SQL
 // function. Arrays are comma-joined in byte order (uuid order is byte order; text uses
 // COLLATE "C" in SQL), an empty array is SQL NULL.

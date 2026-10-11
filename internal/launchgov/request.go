@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/auth"
@@ -27,6 +29,9 @@ func validateRequestContent(in RequestInput) error {
 		return fmt.Errorf("%w: reason code %q is not in the closed catalogue for %s", ErrInvalidInput, in.ReasonCode, in.Action)
 	}
 	if err := LintFreeText("conditions_note", in.ConditionsNote, maxConditionsNote); err != nil {
+		return err
+	}
+	if err := otherDocumentedNeedsNote(in.ReasonCode, in.ConditionsNote); err != nil {
 		return err
 	}
 	needsLicensing := in.Action == ActionActivate || in.Action == ActionReactivate || in.Action == ActionRatify
@@ -73,6 +78,35 @@ func validateRequestContent(in RequestInput) error {
 			return fmt.Errorf("%w: jurisdiction ids must be distinct and non-nil", ErrInvalidInput)
 		}
 		seen[j] = true
+	}
+	return nil
+}
+
+// latestIsLegacyBaseline returns ErrNotLegacyBaseline unless the subject's latest status
+// transition is the legacy baseline (the same ordering and subject match as migration 0128).
+func latestIsLegacyBaseline(ctx context.Context, tx pgx.Tx, sub Subject) error {
+	subjectID := sub.TenantID
+	if sub.BrandID != nil {
+		subjectID = *sub.BrandID
+	}
+	var kind string
+	err := tx.QueryRow(ctx, `SELECT kind FROM launch_status_transitions
+		WHERE subject_kind = $1 AND COALESCE(brand_id, tenant_id) = $2 ORDER BY created_at DESC, id DESC LIMIT 1`,
+		sub.Kind(), subjectID).Scan(&kind)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if kind != "legacy_baseline" {
+		return ErrNotLegacyBaseline
+	}
+	return nil
+}
+
+// otherDocumentedNeedsNote: the catch-all reason code "other_documented" is only meaningful with
+// the documentation it names, so it requires a non-empty conditions_note (security L5).
+func otherDocumentedNeedsNote(reason, note string) error {
+	if reason == ReasonOtherDocumented && strings.TrimSpace(note) == "" {
+		return fmt.Errorf("%w: reason code %s requires a non-empty conditions_note", ErrInvalidInput, ReasonOtherDocumented)
 	}
 	return nil
 }
@@ -196,6 +230,25 @@ func (s *Service) Request(ctx context.Context, a Actor, in RequestInput) (*Reque
 
 	var out Request
 	err = s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
+		// Serialise with a concurrent suspension of the same subject: the subject row is locked
+		// FOR SHARE (conflicts with the executor's FOR NO KEY UPDATE, not with gameplay's FK
+		// checks), so a suspension either completes before this request is inserted (the request
+		// guard then sees the new status) or waits for this request to commit and supersedes it.
+		if err := s.lockSubjectShared(ctx, tx, a, in.Subject); err != nil {
+			return err
+		}
+		// Go mirror of the request guard's ratify rule (migration 0128): only a subject whose LATEST
+		// transition is the legacy baseline can be ratified. The decision tables are readable only
+		// in the actor's principal session (not in the readiness evaluation's tenant read).
+		if in.Action == ActionRatify {
+			if err := latestIsLegacyBaseline(ctx, tx, in.Subject); err != nil {
+				return err
+			}
+		}
+		// Stale pending requests of the subject become 'expired' (audited once) before the insert.
+		if _, err := s.expireStale(ctx, tx, a, in.Subject.TenantID, &in.Subject, nil, "request"); err != nil {
+			return err
+		}
 		if err := s.attachProof(ctx, tx, a, actorproof.OpLaunchRequest, actorproof.TargetNew, digest); err != nil {
 			return err
 		}
@@ -237,7 +290,7 @@ func (s *Service) mapRequestErr(ctx context.Context, a Actor, in RequestInput, e
 		case pe.Code == "23505" && strings.Contains(pe.ConstraintName, "launch_requests_one_pending"):
 			return s.denied(ctx, a, "request", in.Subject, in.Action, ErrRequestPending)
 		case pe.Code == "LA014":
-			return s.denied(ctx, a, "request", in.Subject, in.Action, s.priorReject(ctx, a, in))
+			return s.denied(ctx, a, "request", in.Subject, in.Action, s.priorReject(pe))
 		}
 	}
 	err = classify(err)
@@ -247,15 +300,28 @@ func (s *Service) mapRequestErr(ctx context.Context, a Actor, in RequestInput, e
 	return s.denied(ctx, a, "request", in.Subject, in.Action, err)
 }
 
-// priorReject names the earlier rejected request an identical request collided with (best effort;
-// the refusal stands even if the lookup fails).
-func (s *Service) priorReject(ctx context.Context, a Actor, in RequestInput) error {
+// priorReject names the earlier rejected request an identical request collided with. The
+// database (migration 0130 LA014) names the request whose payload_hash MATCHED in the error
+// DETAIL ("prior_request_id=<uuid> decided_at=<RFC 3339>"), so nothing is guessed and no second
+// query runs. If the detail is unreadable the refusal stands with the worst-case retry time
+// (now + TTL), never the zero time.
+func (s *Service) priorReject(pe *pgconn.PgError) error {
 	e := &PriorRejectError{}
-	_ = s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT id, decided_at FROM launch_authorisation_requests
-			WHERE tenant_id = $1 AND subject_kind = $2 AND brand_id IS NOT DISTINCT FROM $3 AND action = $4 AND status = 'rejected'
-			ORDER BY decided_at DESC LIMIT 1`, in.Subject.TenantID, in.Subject.Kind(), in.Subject.BrandID, in.Action).Scan(&e.RequestID, &e.DecidedAt)
-	})
+	for _, part := range strings.Fields(pe.Detail) {
+		switch {
+		case strings.HasPrefix(part, "prior_request_id="):
+			if id, err := uuid.Parse(strings.TrimPrefix(part, "prior_request_id=")); err == nil {
+				e.RequestID = id
+			}
+		case strings.HasPrefix(part, "decided_at="):
+			if t, err := time.Parse(time.RFC3339Nano, strings.TrimPrefix(part, "decided_at=")); err == nil {
+				e.DecidedAt = t
+			}
+		}
+	}
+	if e.DecidedAt.IsZero() {
+		e.DecidedAt = s.now()
+	}
 	e.RetryAfter = e.DecidedAt.Add(RequestTTL)
 	return e
 }
@@ -291,6 +357,10 @@ func (s *Service) Cancel(ctx context.Context, a Actor, sub Subject, requestID uu
 	})
 	if err != nil {
 		err = classify(err)
+		if errors.Is(err, ErrNotPending) {
+			// The request may have expired by time: materialise (and audit once) the expiry.
+			s.sweepBestEffort(ctx, a, sub.TenantID, &requestID)
+		}
 		if errors.Is(err, ErrRetryableLockTimeout) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotPending) || errors.Is(err, ErrForbidden) {
 			return nil, err
 		}
@@ -317,12 +387,16 @@ func (s *Service) GetRequest(ctx context.Context, a Actor, tenantID, requestID u
 	}
 	var r Request
 	var apps []Approval
+	s.sweepBestEffort(ctx, a, tenantID, &requestID)
 	err := s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
 		err := scanRequest(tx.QueryRow(ctx, `SELECT `+requestColumns+` FROM launch_authorisation_requests WHERE id = $1 AND tenant_id = $2`, requestID, tenantID), &r)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
+			return err
+		}
+		if r.PriorRejects, err = loadPriorRejects(ctx, tx, s.now(), r); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT `+approvalColumns+` FROM launch_authorisation_approvals WHERE request_id = $1 ORDER BY decided_at, id`, requestID)

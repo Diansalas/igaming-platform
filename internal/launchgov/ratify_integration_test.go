@@ -179,7 +179,7 @@ func TestRatify_LegacyBaselineSubject_RecordsDecisionWithoutStatusChange(t *test
 			t.Fatalf("transition history: %v", kinds)
 		}
 		// Ratified once: the latest transition is no longer the legacy baseline.
-		if _, err := svc.Request(ctx, req, ratifyInput(b)); !errors.Is(err, launchgov.ErrIllegalTransition) {
+		if _, err := svc.Request(ctx, req, ratifyInput(b)); !errors.Is(err, launchgov.ErrNotLegacyBaseline) {
 			t.Fatalf("a second ratification must be refused: %v", err)
 		}
 	}
@@ -203,7 +203,20 @@ func TestRatify_NonLegacySubjectRefused(t *testing.T) {
 	in := w.activation(launchgov.Subject{TenantID: tid, BrandID: &brand}, jid)
 	in.Action, in.ReasonCode = launchgov.ActionRatify, "legacy_ratification"
 	in.AcknowledgedCheckCodes = w.nonPassing(in)
-	if _, err := w.svc.Request(ctx, w.req, in); !errors.Is(err, launchgov.ErrIllegalTransition) {
+	// Its own error (the Go mirror of the request guard's legacy_baseline rule), not an illegal move.
+	_, err := w.svc.Request(ctx, w.req, in)
+	if !errors.Is(err, launchgov.ErrNotLegacyBaseline) || errors.Is(err, launchgov.ErrIllegalTransition) {
 		t.Fatalf("ratifying an owner-provisioned subject: %v", err)
+	}
+	if rows := w.audit(tid, "launch_authorisation.request_denied"); len(rows) != 1 || rows[0]["code"] != "LAUNCH_NOT_LEGACY_BASELINE" {
+		t.Fatalf("one denied row with the distinct code: %+v", rows)
+	}
+	// The database says the same on its own (a raw INSERT bypassing Go): LA010 with the legacy_baseline message.
+	err = w.asPlatform(w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := newSpec(tid, &brand, "ratify").insert(ctx, tx)
+		return err
+	})
+	if pgCode(err) != "LA010" || !strings.Contains(err.Error(), "legacy_baseline") {
+		t.Fatalf("the database refuses a non-legacy ratification with LA010: %v", err)
 	}
 }

@@ -169,6 +169,25 @@ func (s *Service) lockSubject(ctx context.Context, tx pgx.Tx, a Actor, sub Subje
 	return status, err
 }
 
+// lockSubjectShared locks the subject row FOR SHARE (see Request): it conflicts with the
+// executor's FOR NO KEY UPDATE and with nothing the gameplay foreign-key checks take. The status
+// is read only to take the lock; it is not used.
+func (s *Service) lockSubjectShared(ctx context.Context, tx pgx.Tx, a Actor, sub Subject) error {
+	var status string
+	var err error
+	if sub.BrandID == nil {
+		err = tx.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1 FOR SHARE`, sub.TenantID).Scan(&status)
+	} else {
+		err = s.withSubjectTenant(ctx, tx, a, sub.TenantID, func() error {
+			return tx.QueryRow(ctx, `SELECT status FROM brands WHERE id = $1 AND tenant_id = $2 FOR SHARE`, *sub.BrandID, sub.TenantID).Scan(&status)
+		})
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
+}
+
 // updateSubjectStatus is THE status write: the only place in the non-test code base that updates
 // tenants.status or brands.status (pinned by a static test). The database refuses it unless the
 // same transaction holds a governed transition of an executing request (zz_launch_status_governed).
@@ -208,6 +227,9 @@ func (s *Service) Suspend(ctx context.Context, a Actor, in SuspendInput) (*Reque
 	if err := LintFreeText("conditions_note", in.ConditionsNote, maxConditionsNote); err != nil {
 		return nil, err
 	}
+	if err := otherDocumentedNeedsNote(in.ReasonCode, in.ConditionsNote); err != nil {
+		return nil, err
+	}
 	// Informational readiness (R-PLAYER-FUNDS). A failed evaluation must never delay a
 	// suspension: it degrades to a not_evaluable check.
 	as, err := s.assess(ctx, EvalInput{Subject: in.Subject, Action: ActionSuspend})
@@ -235,14 +257,19 @@ func (s *Service) Suspend(ctx context.Context, a Actor, in SuspendInput) (*Reque
 	digest := digestFor(in.Subject, ri, snapHash, nil, "").Digest()
 
 	var lastErr error
+	attempts := 0
 	for attempt := 1; attempt <= s.cfg.SuspendAttempts; attempt++ {
+		attempts = attempt
 		res, err := s.suspendOnce(ctx, a, in, ri, string(snap), snapHash, digest)
 		if err == nil {
 			res.Readiness = as.Readiness
 			return res, nil
 		}
 		lastErr = err
-		if !isRetryableLock(err) {
+		// A lock timeout / deadlock, or the C-3(b) commit check LA030 (a request committed by a
+		// concurrent transaction between this suspension's pending-request read and its commit: the
+		// next attempt reads it and supersedes it), is retried against a fresh transaction.
+		if !isRetryableLock(err) && !isStaleCommitCheck(err) {
 			break
 		}
 		if attempt < s.cfg.SuspendAttempts {
@@ -257,7 +284,18 @@ func (s *Service) Suspend(ctx context.Context, a Actor, in SuspendInput) (*Reque
 	if errors.Is(err, ErrProofUnavailable) || errors.Is(err, ErrIsolationLevel) || errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	return nil, s.denied(ctx, a, "suspend", in.Subject, ActionSuspend, err, withExtra(map[string]any{"attempts": s.cfg.SuspendAttempts}))
+	if isRetryableLock(lastErr) || isStaleCommitCheck(lastErr) {
+		// All attempts were consumed by lock contention: a suspension (the fail-closed direction)
+		// did not happen. This is a P1 condition (security C4), raised on its own detached path.
+		s.raiseSuspensionExhausted(ctx, a, in.Subject, attempts)
+	}
+	return nil, s.denied(ctx, a, "suspend", in.Subject, ActionSuspend, err, withExtra(map[string]any{"attempts": attempts}))
+}
+
+// isStaleCommitCheck reports the C-3(b) deferred commit check (LA030).
+func isStaleCommitCheck(err error) bool {
+	pe := pgErr(err)
+	return pe != nil && pe.Code == "LA030"
 }
 
 func (s *Service) suspendOnce(ctx context.Context, a Actor, in SuspendInput, ri RequestInput, snap, snapHash, digest string) (*RequestResult, error) {

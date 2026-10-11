@@ -79,6 +79,22 @@ type Request struct {
 	DecidedAt   *time.Time
 	RefusalCode *string
 	ExecutingTx *int64
+
+	// PriorRejects is filled by GetRequest only (never persisted): every reject decision of a
+	// request of the same subject and action within the request TTL, whatever its payload, so
+	// an approver sees that a variant of this request was already turned down (security C2).
+	PriorRejects []PriorReject
+}
+
+// PriorReject is a reject decision on an earlier request of the same subject and action within
+// the request TTL. Codes and ids only.
+type PriorReject struct {
+	RequestID         uuid.UUID
+	DecidedAt         time.Time
+	DecidedBy         uuid.UUID
+	DecidedByPersonID uuid.UUID
+	ReasonCode        string
+	SamePayload       bool // the rejected request had this request's payload_hash
 }
 
 // Subject returns the request's subject.
@@ -142,6 +158,8 @@ type DecisionResult struct {
 	// (refused_at_execution; the code names the failed precondition). The approval is recorded.
 	Refused   string
 	Readiness Readiness
+	// PriorRejects: see Request.PriorRejects (shown to the approver at decision time).
+	PriorRejects []PriorReject
 }
 
 // RefusedAtExecutionError is returned by Decide when the request reached execution and the

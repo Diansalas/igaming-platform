@@ -128,13 +128,18 @@ func TestConcurrency_SuspensionRacesFinalApproval_x50(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			time.Sleep(time.Duration(i%10) * 700 * time.Microsecond) // vary which side reaches the locks first
+			if i%2 == 0 { // vary which side reaches the locks first: even rounds delay the approval, odd rounds the suspension
+				time.Sleep(time.Duration(i%10) * 700 * time.Microsecond)
+			}
 			d, err := w.svc.Decide(context.Background(), w.ap2, tid, r.ID, launchgov.DecideInput{Decision: launchgov.DecisionApprove, ReasonCode: "reviewed_ok", SeenReadinessHash: seen})
 			dres = outcome{d, err}
 		}()
 		go func() {
 			defer wg.Done()
 			<-start
+			if i%2 == 1 {
+				time.Sleep(time.Duration(i%10) * 700 * time.Microsecond)
+			}
 			sres, serr = w.svc.Suspend(context.Background(), w.req, launchgov.SuspendInput{Subject: sub, ReasonCode: "compliance_hold"})
 		}()
 		close(start)
@@ -171,6 +176,10 @@ func TestConcurrency_SuspensionRacesFinalApproval_x50(t *testing.T) {
 		}
 	}
 	t.Logf("races: suspension first %d, closure first %d", suspendedWins, closedWins)
+	// Both orderings must have been exercised, or the test proves only one of the two paths.
+	if suspendedWins == 0 || closedWins == 0 {
+		t.Fatalf("the race must exercise both outcomes: suspended %d, closed %d", suspendedWins, closedWins)
+	}
 }
 
 // Two simultaneous suspensions of the same brand: exactly one executes.

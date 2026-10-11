@@ -69,7 +69,7 @@ func TestIsolation_ApprovalBasedExecution_RequiresReadCommitted(t *testing.T) {
 	// The database, independently: a raw approval-based execution under REPEATABLE READ (LA011), with
 	// real proofs so the proof guard is not what refuses it.
 	err = rr.WithPlatformAdmin(ctx, w.ops.Approver1, func(ctx context.Context, tx pgx.Tx) error {
-		if err := prooftest.AttachForSession(ctx, tx, actorproof.OpLaunchApprove, r.ID.String(), r.PayloadHash); err != nil {
+		if err := prooftest.AttachForSession(ctx, tx, actorproof.OpLaunchApprove, r.ID.String(), actorproof.LaunchApprovalDigest(r.PayloadHash, strings.Repeat("0", 64), "reviewed_ok")); err != nil {
 			return err
 		}
 		if err := rawApproval(ctx, tx, r.ID, r.PayloadHash, "approve"); err != nil {

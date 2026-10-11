@@ -76,6 +76,9 @@ var allowedLiteralCompares = map[string]string{
 	// 0130 (ADR 0112 slice 3): CREATE OR REPLACE of the same guard with the C2 one-subject-per-
 	// transaction rule added; the closed-is-terminal line is 0128's, unchanged.
 	"migrations/0130_launch_authorisation_actor_proof.up.sql:IF OLD.status = 'closed' THEN": "0130 restates 0128 closed is terminal",
+	// 0130 closure backstop (security C1): the same guard refuses a CLOSURE while hold-bearing
+	// withdrawals / (brand) open bets exist; it reads no status, it reacts to the status being set.
+	"migrations/0130_launch_authorisation_actor_proof.up.sql:IF NEW.status = 'closed' THEN": "0130 closure backstop: refuses closing over held funds / open bets",
 	// The 0130 DOWN is not scanned (only *.up.sql); it restores 0129's body verbatim.
 }
 
