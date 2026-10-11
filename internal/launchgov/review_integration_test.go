@@ -176,7 +176,10 @@ func TestExpiry_IsMaterialisedAndAuditedOnce(t *testing.T) {
 	w.age(r.ID)
 
 	// Observed by a decision attempt: refused as not pending; the expiry is now durable and audited.
-	if _, err := w.approve(w.ap1, r); !errors.Is(err, launchgov.ErrNotPending) {
+	// (Decide is called directly with a made-up readiness hash: the w.approve helper would read the
+	// request first, and a read also materialises the expiry.)
+	if _, err := w.svc.Decide(ctx, w.ap1, tid, r.ID, launchgov.DecideInput{
+		Decision: launchgov.DecisionApprove, ReasonCode: "reviewed_ok", SeenReadinessHash: strings.Repeat("0", 64)}); !errors.Is(err, launchgov.ErrNotPending) {
 		t.Fatalf("approving an expired request: %v", err)
 	}
 	// Durable and audited by the decision attempt itself, before anything else has read or listed.
