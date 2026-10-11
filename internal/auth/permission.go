@@ -934,6 +934,10 @@ var rolePermissions = map[Role]map[Permission]bool{
 	),
 	RoleCompliance: permSet(
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead,
+		// ADR 0112 slice 6 (b): read-only visibility of its OWN tenant record and brands, so a
+		// compliance operator can reach the launch panel (brand discovery). The tenant list stays
+		// platform-only (checked in the handler) and the routes enforce canActOnTenant. No write.
+		PermTenantRead, PermBrandRead,
 		// The sole tenant-scoped grantee of PermRGRestrictionWrite (Stage
 		// 4D-RG, ADR 0026 §12) - a tenant/brand-scoped restriction only
 		// (migration 0037's staff_insert RLS policy rejects a platform-wide

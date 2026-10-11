@@ -105,18 +105,12 @@ func beginLaunchCall(deps Deps, w http.ResponseWriter, r *http.Request, op strin
 		apierror.Write(w, c.requestID, apierror.CodeUnauthorized, "no authenticated context")
 		return c, false
 	}
-	staffID, err := uuid.Parse(tc.Subject)
-	if err != nil {
+	actor, ok := launchActorFrom(tc, r, c.requestID)
+	if !ok {
 		apierror.Write(w, c.requestID, apierror.CodeUnauthorized, "no authenticated context")
 		return c, false
 	}
-	c.actor = launchgov.Actor{
-		StaffID: staffID, Scope: launchgov.ScopePlatform, Role: auth.Role(tc.Role),
-		IPAddress: clientIP(r), RequestID: c.requestID,
-	}
-	if tc.TenantID != uuid.Nil {
-		c.actor.Scope, c.actor.TenantID = launchgov.ScopeTenant, tc.TenantID
-	}
+	c.actor = actor
 	if !withTenant {
 		return c, true
 	}
@@ -133,6 +127,23 @@ func beginLaunchCall(deps Deps, w http.ResponseWriter, r *http.Request, op strin
 		return c, false
 	}
 	return c, true
+}
+
+// launchActorFrom builds the launchgov.Actor from the verified token only (never a body or query
+// value). The scope is platform for a token without a tenant, tenant otherwise.
+func launchActorFrom(tc tenant.Context, r *http.Request, requestID string) (launchgov.Actor, bool) {
+	staffID, err := uuid.Parse(tc.Subject)
+	if err != nil {
+		return launchgov.Actor{}, false
+	}
+	a := launchgov.Actor{
+		StaffID: staffID, Scope: launchgov.ScopePlatform, Role: auth.Role(tc.Role),
+		IPAddress: clientIP(r), RequestID: requestID,
+	}
+	if tc.TenantID != uuid.Nil {
+		a.Scope, a.TenantID = launchgov.ScopeTenant, tc.TenantID
+	}
+	return a, true
 }
 
 // ---- error mapping -----------------------------------------------------------------------
@@ -313,6 +324,14 @@ type launchRequestDTO struct {
 
 	PriorRejects []launchPriorRejectDTO `json:"prior_rejects,omitempty"`
 	Approvals    []launchApprovalDTO    `json:"approvals,omitempty"`
+
+	// ADR 0112 slice 6. TenantName and BrandName are filled on the platform-wide queue only.
+	// CanApprove / CannotApproveReason are the server's answer for THE CALLER on the read paths
+	// (queue, list, detail); absent on write responses. The reason is a closed code, never a name.
+	TenantName          *string `json:"tenant_name,omitempty"`
+	BrandName           *string `json:"brand_name,omitempty"`
+	CanApprove          *bool   `json:"can_approve,omitempty"`
+	CannotApproveReason string  `json:"cannot_approve_reason,omitempty"`
 }
 
 func strp(u *uuid.UUID) *string {
@@ -335,6 +354,11 @@ func toLaunchRequestDTO(r launchgov.Request) launchRequestDTO {
 		RequestedBy: r.RequestedBy.String(), RequestedByScope: r.RequestedByScope, RequiredApprovals: r.RequiredApprovals,
 		PayloadHash: r.PayloadHash, CreatedAt: r.CreatedAt.UTC().Format(time.RFC3339), ExpiresAt: r.ExpiresAt.UTC().Format(time.RFC3339),
 		RefusalCode: r.RefusalCode,
+		TenantName:  r.TenantName, BrandName: r.BrandName,
+	}
+	if r.Approvability != nil {
+		ok := r.Approvability.CanApprove
+		d.CanApprove, d.CannotApproveReason = &ok, r.Approvability.Reason
 	}
 	if d.AcknowledgedCheckCodes == nil {
 		d.AcknowledgedCheckCodes = []string{}
@@ -419,6 +443,18 @@ func parseLaunchLimit(q string) (int, bool) {
 	}
 	n, err := strconv.Atoi(q)
 	if err != nil || n < 1 || n > 500 {
+		return 0, false
+	}
+	return n, true
+}
+
+// parseQueueLimit: 1..QueueMaxLimit, absent = 0 (the service default).
+func parseQueueLimit(q string) (int, bool) {
+	if q == "" {
+		return 0, true
+	}
+	n, err := strconv.Atoi(q)
+	if err != nil || n < 1 || n > launchgov.QueueMaxLimit {
 		return 0, false
 	}
 	return n, true
@@ -717,19 +753,39 @@ func newLaunchQueueHandler(deps Deps) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		statuses, sok := parseLaunchStatuses(r.URL.Query().Get("status"))
-		limit, lok := parseLaunchLimit(r.URL.Query().Get("limit"))
-		if !sok || !lok {
+		q := r.URL.Query()
+		statuses, sok := parseLaunchStatuses(q.Get("status"))
+		limit, lok := parseQueueLimit(q.Get("limit"))
+		var after *launchgov.QueueCursor
+		cok := true
+		if q.Has("cursor") {
+			cur, err := launchgov.DecodeCursor(q.Get("cursor"))
+			cok = err == nil
+			after = &cur
+		}
+		if !sok || !lok || !cok {
 			c.badRequest(w)
 			return
 		}
-		rs, err := deps.LaunchAuthorisation.ListRequestsAcrossTenants(r.Context(), c.actor, statuses, limit)
+		page, err := deps.LaunchAuthorisation.ListRequestsAcrossTenants(r.Context(), c.actor, statuses, limit, after)
 		if err != nil {
 			writeLaunchError(w, c, "queue", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, launchListResponse{launchEnvelope{launchgov.Disclaimer}, c.dtos(rs)})
+		out := launchQueueResponse{launchEnvelope: launchEnvelope{launchgov.Disclaimer}, Items: c.dtos(page.Items)}
+		if page.Next != nil {
+			tok := launchgov.EncodeCursor(*page.Next)
+			out.NextCursor = &tok
+		}
+		writeJSON(w, http.StatusOK, out)
 	}
+}
+
+// launchQueueResponse is the platform-wide queue page. NextCursor is null on the last page.
+type launchQueueResponse struct {
+	launchEnvelope
+	Items      []launchRequestDTO `json:"items"`
+	NextCursor *string            `json:"next_cursor"`
 }
 
 func newLaunchGetHandler(deps Deps) http.HandlerFunc {

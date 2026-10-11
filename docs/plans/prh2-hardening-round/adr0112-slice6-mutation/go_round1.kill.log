@@ -1,0 +1,43 @@
+A1 drop platform-scope check unit
+A2 drop approve perm check unit (BUILD)
+A3 expiry boundary unit
+A4 drop self check unit
+A5 drop same person unit
+A6 no_person fail-open unit
+A7 drop already decided unit
+A8 prior reject ignores note unit (BUILD)
+A9 prior reject always-with-note unit
+A10 not_pending missing unit
+A11 decided query uses staff id col http-int
+A12 prior reject window ignored SURVIVED
+A13 prior reject any decision SURVIVED
+A14 prior key ignores brand http-int
+A15 prior key ignores action http-int
+R1 keyset <= launchgov-int
+R2 keyset ts only launchgov-int
+R3 order asc launchgov-int
+R4 order id asc tiebreak SURVIVED
+R5 no limit+1 launchgov-int
+R6 default limit http-int
+R7 no cap launchgov-int
+R8 next cursor from first http-int
+R9 tenant name join dropped launchgov-int
+R10 brand join tenant check http-int
+R11 kinds oldest not newest SURVIVED
+R12 tenant kinds oldest SURVIVED
+R13 cursor micro->milli unit
+R14 queue forbids platform check launchgov-int
+H1 limit max 500 http-int
+H2 cursor error ignored http-int (BUILD)
+H3 limit min http-int
+H4 next cursor never http-int
+H5 can_approve not mapped http-int
+H6 reason on can http-int
+H7 tenant names dropped http-int
+P1 compliance approve unit
+P2 compliance no tenant read NOAPPLY
+P3 compliance tenant write unit
+D1 brand kinds not set http-int
+D2 brand kinds forbidden swallowed->500 removed SURVIVED
+
+[exited with code 0]

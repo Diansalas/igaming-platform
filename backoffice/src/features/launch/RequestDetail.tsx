@@ -9,6 +9,7 @@ import { Card } from '../../components/Card'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { SuccessAlert } from '../../components/Alert'
 import { ApproveDialog, CancelDialog, RejectDialog } from './DecisionDialogs'
+import { approvalControls } from './approvability'
 import { LaunchDisclaimer, LaunchErrorAlert, ReadinessChecklist, actorLabel } from './LaunchBits'
 import {
   actionLabel,
@@ -108,6 +109,7 @@ export function RequestDetail({ tenantId, requestId, onChanged }: RequestDetailP
   const readiness = data.readiness
   const isPending = r.status === 'pending'
   const isRequester = !!claims && !!r.requested_by && r.requested_by === claims.sub
+  const controls = approvalControls(r, perms.launchApprove)
   const approvals = r.approvals ?? []
   const approveCount = approvals.filter((a) => a.decision === 'approve').length
   const priorRejects = r.prior_rejects ?? []
@@ -180,17 +182,13 @@ export function RequestDetail({ tenantId, requestId, onChanged }: RequestDetailP
 
       {isPending && (
         <div className="flex flex-wrap items-center gap-2">
-          {perms.launchApprove && !isRequester && (
-            <>
-              <Button onClick={() => setDialog('approve')}>Approve</Button>
-              <Button variant="danger" onClick={() => setDialog('reject')}>
-                Reject
-              </Button>
-            </>
+          {controls.approve && <Button onClick={() => setDialog('approve')}>Approve</Button>}
+          {controls.reject && (
+            <Button variant="danger" onClick={() => setDialog('reject')}>
+              Reject
+            </Button>
           )}
-          {perms.launchApprove && isRequester && (
-            <p className="text-sm text-slate-600">You filed this request. A different platform approver must decide it.</p>
-          )}
+          {controls.note && <p className="text-sm text-slate-600">{controls.note}</p>}
           {perms.launchRequest && isRequester && (
             <Button variant="secondary" onClick={() => setDialog('cancel')}>
               Cancel request

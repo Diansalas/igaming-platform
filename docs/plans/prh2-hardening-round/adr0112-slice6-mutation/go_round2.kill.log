@@ -1,0 +1,11 @@
+B1 approve perm check neutered unit
+B2 prior reject ignores note unit
+B3 cursor error ignored http-int
+B4 window ignored launchgov-int
+B5 any decision counts as prior reject http-int
+B8 compliance no tenant read unit
+B9 compliance no brand read unit
+B10 expiry by status only unit
+B11 tenant kinds subject filter http-int
+B12 brand kinds subject filter SURVIVED (equivalent: brand_id = ANY already excludes tenant rows)
+B13 nonNilIDs guard SURVIVED (equivalent: callers never pass an empty list)

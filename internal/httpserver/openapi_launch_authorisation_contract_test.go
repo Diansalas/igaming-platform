@@ -162,7 +162,7 @@ func TestOpenAPI_LaunchAuthorisation_DisclaimerIsTheFixedText(t *testing.T) {
 		t.Fatalf("the LaunchDisclaimer enum must be exactly launchgov.Disclaimer:\n%s", block)
 	}
 	// Every launch envelope schema requires it.
-	for _, name := range []string{"LaunchReadinessResponse", "LaunchRequestEnvelope", "LaunchRequestDetail", "LaunchRequestList", "LaunchResult", "LaunchDecisionResult", "LaunchTransitionList"} {
+	for _, name := range []string{"LaunchReadinessResponse", "LaunchRequestEnvelope", "LaunchRequestDetail", "LaunchRequestList", "LaunchQueueList", "LaunchResult", "LaunchDecisionResult", "LaunchTransitionList"} {
 		b := schemaBlock(t, spec, name)
 		if !regexp.MustCompile(`required: \[disclaimer`).MatchString(b) {
 			t.Errorf("%s must require the disclaimer", name)
@@ -245,6 +245,7 @@ func TestOpenAPI_LaunchAuthorisation_DTOsMatchSchemas(t *testing.T) {
 		// Review condition (g): the envelopes too (they were inline structs before).
 		{launchReadinessResponse{}, "LaunchReadinessResponse"},
 		{launchListResponse{}, "LaunchRequestList"},
+		{launchQueueResponse{}, "LaunchQueueList"},
 		{launchRequestEnvelope{}, "LaunchRequestEnvelope"},
 		{launchDetailResponse{}, "LaunchRequestDetail"},
 		{launchHistoryResponse{}, "LaunchTransitionList"},

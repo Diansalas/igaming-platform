@@ -50,6 +50,20 @@ export interface LaunchApproval {
   decided_at: string
 }
 
+/**
+ * ADR 0112 slice 6 (d): the closed catalogue of server reasons why THE CALLER cannot approve a request
+ * now (internal/launchgov CannotApproveReasons). A code about the caller's own situation, never a name.
+ */
+export type CannotApproveReason =
+  | 'not_platform_approver'
+  | 'not_pending'
+  | 'expired'
+  | 'self_approval'
+  | 'same_person'
+  | 'no_person'
+  | 'already_decided'
+  | 'prior_reject_requires_change_note'
+
 export interface LaunchPriorReject {
   request_id: string
   decided_at: string
@@ -89,6 +103,12 @@ export interface LaunchRequest {
   refusal_code?: string
   prior_rejects?: LaunchPriorReject[]
   approvals?: LaunchApproval[]
+  /** Platform-wide queue rows only (display text). */
+  tenant_name?: string
+  brand_name?: string
+  /** Read responses (queue, list, detail): the server's advisory answer for the caller. Absent on write responses. */
+  can_approve?: boolean
+  cannot_approve_reason?: CannotApproveReason
 }
 
 export interface LaunchTransition {
@@ -115,6 +135,11 @@ export interface LaunchReadinessResponse extends WithDisclaimer {
 }
 export interface LaunchRequestList extends WithDisclaimer {
   items: LaunchRequest[]
+}
+export interface LaunchQueueList extends WithDisclaimer {
+  items: LaunchRequest[]
+  /** Pass back as `cursor`; null on the last page. */
+  next_cursor: string | null
 }
 export interface LaunchRequestEnvelope extends WithDisclaimer {
   request: LaunchRequest
@@ -218,7 +243,7 @@ export function listLaunchHistory(tenantId: string, params: { brand_id?: string;
 }
 
 /** Platform-wide approval queue (platform staff only; a tenant caller is 403). */
-export function listLaunchQueue(params: { status?: string; limit?: number } = {}): Promise<LaunchRequestList> {
+export function listLaunchQueue(params: { status?: string; limit?: number; cursor?: string } = {}): Promise<LaunchQueueList> {
   return apiFetch(`/v1/admin/launch-authorisations${buildQuery(params)}`)
 }
 

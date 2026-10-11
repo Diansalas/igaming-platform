@@ -472,9 +472,9 @@ paths:
     get:
       summary: Get a single tenant (Stage 5)
       description: >
-        tenant:read. platform_admin may read any tenant; a tenant-scoped
-        caller may only read its own tenant (403 otherwise, per ADR 0011's
-        canActOnTenant rule).
+        tenant:read (platform_admin, tenant_admin, compliance). platform_admin
+        may read any tenant; a tenant-scoped caller may only read its own
+        tenant (403 otherwise, per ADR 0011's canActOnTenant rule).
       security:
         - bearerAuth: []
       parameters:
@@ -501,8 +501,10 @@ paths:
     get:
       summary: List brands under a tenant (Stage 5)
       description: >
-        brand:read, canActOnTenant (platform_admin any tenant,
-        tenant-scoped caller only its own).
+        brand:read (platform_admin, tenant_admin, compliance), canActOnTenant
+        (platform_admin any tenant, tenant-scoped caller only its own; 403
+        otherwise). This is the brand discovery route for tenant staff: each
+        row carries id, name, slug, status and `launch_kind`.
       security:
         - bearerAuth: []
       parameters:
@@ -6653,8 +6655,14 @@ paths:
     get:
       summary: Platform-wide launch authorisation queue (platform staff only)
       description: >
-        launch_authorisation:read, platform-scoped staff principals only (a tenant-scoped caller is refused 403). Requests across every tenant, newest first, for the approval queue.
-        Same filters and limits as the per-tenant list (status, limit).
+        launch_authorisation:read, platform-scoped staff principals only (a tenant-scoped caller is refused 403). Requests across every tenant for the approval queue,
+        ordered by (created_at, id) DESCENDING with a keyset cursor: `next_cursor` of a page is passed back as `cursor` for the next page and is null on the last page.
+        A request inserted while a walk is in progress sorts before the first page, so it does not shift or duplicate a row of a later page. Residual: `created_at` is the database
+        transaction start time, so a transaction that stays open across a page boundary and commits later with an older `created_at` than the cursor can be missed by a walk
+        already past it; re-read the queue from the first page for a complete view. `limit` is 1..200, default 50 (before 2026-10-11 the queue accepted up to 500: 201..500 is now 400);
+        a malformed `cursor` or an out-of-range `limit` is 400. Each row carries `tenant_name` and `brand_name` (display only) and, for THE CALLER,
+        `can_approve` and a `cannot_approve_reason` from a closed catalogue; the reason is a code, never the name of another staff member. The answer is advisory: the
+        decision routes and the database (LA012) remain authoritative.
       security:
         - bearerAuth: []
       parameters:
@@ -6665,13 +6673,18 @@ paths:
         - name: limit
           in: query
           required: false
-          schema: { type: integer, minimum: 1, maximum: 500 }
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          required: false
+          description: The opaque `next_cursor` of the previous page.
+          schema: { type: string, maxLength: 128 }
       responses:
         "200":
-          description: The requests
+          description: One page of the requests
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/LaunchRequestList" }
+              schema: { $ref: "#/components/schemas/LaunchQueueList" }
         "400":
           $ref: "#/components/responses/LaunchBadRequest"
         "401":
@@ -7556,6 +7569,14 @@ components:
             `suspended` or `closed` (terminal). A status changes only
             through a governed, audited launch decision; creation is not launch.
           enum: [pending_launch, active, suspended, closed]
+        launch_kind:
+          type: string
+          nullable: true
+          description: >
+            List rows only (GET /v1/admin/tenants): the kind of the newest status transition,
+            `governed`, `legacy_baseline` or `owner_provisioned`; null when there is none.
+            `legacy_baseline` marks a subject that was active before launch governance and awaits ratification.
+            Null is also returned when the caller lacks launch read or the lookup failed.
       required: [id, name, slug, licensing_model, status]
     Brand:
       type: object
@@ -7571,6 +7592,13 @@ components:
             `suspended` or `closed` (terminal). Only an `active` brand of an
             `active` tenant accepts player registration.
           enum: [pending_launch, active, suspended, closed]
+        launch_kind:
+          type: string
+          nullable: true
+          description: >
+            List rows only (GET /v1/admin/tenants/{tenantID}/brands): the kind of the newest status
+            transition, `governed`, `legacy_baseline` or `owner_provisioned`; null when there is none,
+            the caller lacks launch read, or the lookup failed (logged server-side; the list never fails because of it).
       required: [id, tenant_id, name, slug, status]
     StaffUser:
       type: object
@@ -8814,6 +8842,13 @@ components:
         refusal_code: { type: string }
         prior_rejects: { type: array, items: { $ref: "#/components/schemas/LaunchPriorReject" } }
         approvals: { type: array, items: { $ref: "#/components/schemas/LaunchApproval" } }
+        tenant_name: { type: string, description: "Platform-wide queue only. Display text, never an identifier." }
+        brand_name: { type: string, description: "Platform-wide queue only (brand subjects). Display text." }
+        can_approve: { type: boolean, description: "Read paths only (queue, list, detail): whether THE CALLER may approve this request now. Advisory; the decision route and the database stay authoritative. Always false for a tenant-scoped caller." }
+        cannot_approve_reason:
+          type: string
+          description: "Present iff can_approve is false. A closed code about the caller's own situation; it never names another staff member."
+          enum: [not_platform_approver, not_pending, expired, self_approval, same_person, no_person, already_decided, prior_reject_requires_change_note]
       required: [id, tenant_id, subject_kind, action, from_status, to_status, status, jurisdiction_ids, readiness_snapshot_hash, acknowledged_check_codes, reason_code, requested_by_scope, required_approvals, payload_hash, created_at, expires_at]
     LaunchRequestEnvelope:
       type: object
@@ -8834,6 +8869,13 @@ components:
         disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
         items: { type: array, items: { $ref: "#/components/schemas/LaunchRequest" } }
       required: [disclaimer, items]
+    LaunchQueueList:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        items: { type: array, items: { $ref: "#/components/schemas/LaunchRequest" } }
+        next_cursor: { type: string, nullable: true, description: "Pass back as `cursor` for the next page; null on the last page." }
+      required: [disclaimer, items, next_cursor]
     LaunchResult:
       type: object
       properties:

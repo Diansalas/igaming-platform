@@ -12,7 +12,7 @@ import { useAuth } from '../../auth/AuthContext'
 import { isPlatformAdmin } from '../../auth/jwt'
 import { getNavPermissions } from '../../auth/permissions'
 import { LaunchPanel } from '../launch/LaunchPanel'
-import { LaunchStatusBadge } from '../launch/LaunchBits'
+import { LaunchStatusBadge, LegacyBaselineBadge } from '../launch/LaunchBits'
 import { CreateBrandForm } from './CreateBrandForm'
 import { CreateStaffForm } from './CreateStaffForm'
 import { LinkStaffPersonForm } from './LinkStaffPersonForm'
@@ -44,7 +44,16 @@ export function TenantDetailPage() {
   const columns: Column<Brand>[] = [
     { key: 'name', header: 'Name', render: (b) => <span className="font-medium text-slate-900">{b.name}</span> },
     { key: 'slug', header: 'Slug', render: (b) => b.slug },
-    { key: 'status', header: 'Status', render: (b) => <LaunchStatusBadge status={b.status} /> },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (b) => (
+        <span className="inline-flex items-center gap-1">
+          <LaunchStatusBadge status={b.status} />
+          {b.launch_kind === 'legacy_baseline' && <LegacyBaselineBadge />}
+        </span>
+      ),
+    },
   ]
 
   return (

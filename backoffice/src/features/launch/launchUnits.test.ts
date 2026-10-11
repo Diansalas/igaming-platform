@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ApiError, LAUNCH_ERROR_CODES } from '../../api/types'
 import { getNavPermissions } from '../../auth/permissions'
@@ -6,6 +8,7 @@ import { LAUNCH_ERROR_MESSAGES, describeLaunchError } from './errors'
 import { availableActions, isLegacyBaseline, subjectTransitions } from './actions'
 import { groupDecimalString, subjectStatusLabel, subjectStatusTone, LAUNCH_DISCLAIMER } from './labels'
 import { transition } from './launchFixtures'
+import { CANNOT_APPROVE_TEXT, approvalControls, cannotApproveText } from './approvability'
 
 describe('launch permissions mirror (UI hint only; the server decides)', () => {
   const launch = (role: string) => {
@@ -123,5 +126,42 @@ describe('legacy baseline detection', () => {
     expect(isLegacyBaseline(subjectTransitions([legacy], 'brand'))).toBe(true)
     expect(isLegacyBaseline(subjectTransitions([legacy, governed], 'brand'))).toBe(false)
     expect(isLegacyBaseline(subjectTransitions([legacy], 'tenant'))).toBe(false)
+  })
+})
+
+describe('compliance reaches its own tenant (ADR 0112 slice 6 (b))', () => {
+  it('gets the My Tenant nav item (brand discovery), but not the tenant list or the queue', () => {
+    const base = { sub: 's', principal_type: 'staff', exp: 0, iat: 0 }
+    const items = buildNavItems({ ...base, role: 'compliance', tenant_id: '11111111-1111-1111-1111-111111111111' }).map((i) => i.to)
+    expect(items).toContain('/my-tenant')
+    expect(items).not.toContain('/tenants')
+    expect(items).not.toContain('/launch-queue')
+  })
+})
+
+describe('approvability mirror (ADR 0112 slice 6 (d))', () => {
+  it('the closed reason catalogue is exactly the OpenAPI enum (drift guard against the server contract)', () => {
+    const spec = readFileSync(resolve(process.cwd(), '../docs/api/openapi/platform-api.yaml'), 'utf8')
+    const m = spec.match(/cannot_approve_reason:\n[\s\S]*?enum: \[([^\]]*)\]/)
+    expect(m).not.toBeNull()
+    const inSpec = m![1].split(',').map((x) => x.trim()).sort()
+    expect(Object.keys(CANNOT_APPROVE_TEXT).sort()).toEqual(inSpec)
+  })
+  it('no sentence names a person or an account id', () => {
+    for (const t of Object.values(CANNOT_APPROVE_TEXT)) expect(t).not.toMatch(/[0-9a-f]{8}-|Staff [0-9a-f]{8}/)
+  })
+  it('controls: role hint gates, absent answer defers to the server, false answers explain', () => {
+    expect(approvalControls({}, false)).toEqual({ approve: false, reject: false, note: null })
+    expect(approvalControls({ can_approve: false, cannot_approve_reason: 'self_approval' }, false)).toEqual({ approve: false, reject: false, note: null })
+    expect(approvalControls({}, true)).toEqual({ approve: true, reject: true, note: null })
+    expect(approvalControls({ can_approve: true }, true)).toEqual({ approve: true, reject: true, note: null })
+    const self = approvalControls({ can_approve: false, cannot_approve_reason: 'self_approval' }, true)
+    expect(self.approve || self.reject).toBe(false)
+    expect(self.note).toBe(CANNOT_APPROVE_TEXT.self_approval)
+    const prior = approvalControls({ can_approve: false, cannot_approve_reason: 'prior_reject_requires_change_note' }, true)
+    expect([prior.approve, prior.reject]).toEqual([false, true])
+    expect(cannotApproveText('nope')).toBe('You cannot approve this request now.')
+    expect(cannotApproveText('toString')).toBe('You cannot approve this request now.')
+    expect(cannotApproveText(undefined)).toBe('You cannot approve this request now.')
   })
 })

@@ -1,6 +1,7 @@
 package launchgov
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -84,6 +85,13 @@ type Request struct {
 	// request of the same subject and action within the request TTL, whatever its payload, so
 	// an approver sees that a variant of this request was already turned down (security C2).
 	PriorRejects []PriorReject
+
+	// Approvability is filled by the read paths (queue, list, get) for the CALLER; nil elsewhere.
+	// TenantName and BrandName are filled by the platform-wide queue only (display, never an
+	// identifier, never persisted).
+	Approvability *Approvability
+	TenantName    *string
+	BrandName     *string
 }
 
 // PriorReject is a reject decision on an earlier request of the same subject and action within
@@ -107,13 +115,29 @@ const requestColumns = `id, tenant_id, subject_kind, brand_id, action, from_stat
 	requested_by, requested_by_scope, requested_by_person_id, required_approvals, payload_hash,
 	status, created_at, expires_at, decided_at, refusal_code, executing_txid`
 
-func scanRequest(row pgx.Row, r *Request) error {
-	return row.Scan(&r.ID, &r.TenantID, &r.SubjectKind, &r.BrandID, &r.Action, &r.FromStatus, &r.ToStatus,
+func requestDests(r *Request) []any {
+	return []any{&r.ID, &r.TenantID, &r.SubjectKind, &r.BrandID, &r.Action, &r.FromStatus, &r.ToStatus,
 		&r.LicensingModel, &r.LicensingStatus, &r.LicenceID, &r.DeterminationReference, &r.DeterminationByRole,
 		&r.ResponsibleOperatorName, &r.ResponsibleOperatorRegistration, &r.JurisdictionIDs, &r.ConditionsNote,
 		&r.ReadinessSnapshotHash, &r.AcknowledgedCheckCodes, &r.ReasonCode,
 		&r.RequestedBy, &r.RequestedByScope, &r.RequestedByPersonID, &r.RequiredApprovals, &r.PayloadHash,
-		&r.Status, &r.CreatedAt, &r.ExpiresAt, &r.DecidedAt, &r.RefusalCode, &r.ExecutingTx)
+		&r.Status, &r.CreatedAt, &r.ExpiresAt, &r.DecidedAt, &r.RefusalCode, &r.ExecutingTx}
+}
+
+func scanRequest(row pgx.Row, r *Request) error { return row.Scan(requestDests(r)...) }
+
+// scanRequestWithNames scans requestColumns followed by the tenant name and the brand name.
+func scanRequestWithNames(row pgx.Row, r *Request) error {
+	return row.Scan(append(requestDests(r), &r.TenantName, &r.BrandName)...)
+}
+
+// prefixed qualifies every column of a comma-separated column list with a table alias.
+func prefixed(alias, cols string) string {
+	parts := strings.Split(cols, ",")
+	for i, p := range parts {
+		parts[i] = alias + "." + strings.TrimSpace(p)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Approval is one launch_authorisation_approvals row.

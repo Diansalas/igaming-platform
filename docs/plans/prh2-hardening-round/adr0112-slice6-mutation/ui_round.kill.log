@@ -1,0 +1,11 @@
+U1 absent answer hides KILLED
+U2 reject always KILLED
+U3 role hint ignored KILLED
+U4 next page never KILLED
+U5 page size KILLED
+U6 names ignored KILLED
+U7 legacy badge tenant list KILLED
+U8 legacy badge brand table SURVIVED -> test extended (owner_provisioned and null brands) -> KILLED on rerun
+U9 compliance ownTenant KILLED
+U10 cursor not sent KILLED
+U11 detail still guesses requester KILLED

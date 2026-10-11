@@ -9,7 +9,7 @@ import { PLATFORM_ADMIN_CLAIMS, signInAs } from '../../test/session'
 import { BrandDetailPage } from '../tenants/BrandDetailPage'
 import { TenantDetailPage } from '../tenants/TenantDetailPage'
 import { TenantListPage } from '../tenants/TenantListPage'
-import { LAUNCH_DISCLAIMER } from './labels'
+import { LAUNCH_DISCLAIMER, LEGACY_BASELINE_LABEL } from './labels'
 import {
   API_DISCLAIMER,
   BRAND_ID,
@@ -92,6 +92,53 @@ describe('status badges and filter', () => {
     renderBrand()
     await screen.findByRole('list', { name: 'Status history' })
     expect(within(screen.getByLabelText('Launch status')).queryByText(/Legacy baseline/)).not.toBeInTheDocument()
+  })
+})
+
+describe('legacy baseline badge on list rows (ADR 0112 slice 6 (e))', () => {
+  it('tenant list and brand table mark launch_kind legacy_baseline and only that', async () => {
+    signInAs(PLATFORM_ADMIN_CLAIMS)
+    server.use(
+      http.get('/v1/admin/tenants', () =>
+        HttpResponse.json({
+          items: [
+            { id: 'id-a', name: 'Legacy T', slug: 'a', licensing_model: 'own_licence', status: 'active', launch_kind: 'legacy_baseline' },
+            { id: 'id-b', name: 'Governed T', slug: 'b', licensing_model: 'own_licence', status: 'active', launch_kind: 'governed' },
+            { id: 'id-c', name: 'Bare T', slug: 'c', licensing_model: 'own_licence', status: 'pending_launch', launch_kind: null },
+          ],
+          limit: 20, offset: 0, total: 3,
+        }),
+      ),
+    )
+    renderWithProviders(<TenantListPage />, { route: '/tenants' })
+    const legacyRow = (await screen.findByText('Legacy T')).closest('tr') as HTMLElement
+    expect(within(legacyRow).getByText(LEGACY_BASELINE_LABEL)).toBeInTheDocument()
+    expect(within((await screen.findByText('Governed T')).closest('tr') as HTMLElement).queryByText(LEGACY_BASELINE_LABEL)).not.toBeInTheDocument()
+    expect(within((await screen.findByText('Bare T')).closest('tr') as HTMLElement).queryByText(LEGACY_BASELINE_LABEL)).not.toBeInTheDocument()
+  })
+
+  it('brand table on the tenant page', async () => {
+    signInAs(TENANT_ADMIN)
+    launchReadHandlers({})
+    server.use(
+      http.get('/v1/admin/tenants/:tid/brands', () =>
+        HttpResponse.json({
+          items: [
+            { id: 'b1', tenant_id: TENANT_ID, name: 'Old Brand', slug: 'ob', status: 'active', launch_kind: 'legacy_baseline' },
+            { id: 'b2', tenant_id: TENANT_ID, name: 'New Brand', slug: 'nb', status: 'active', launch_kind: 'governed' },
+            { id: 'b3', tenant_id: TENANT_ID, name: 'Owner Brand', slug: 'ob3', status: 'active', launch_kind: 'owner_provisioned' },
+            { id: 'b4', tenant_id: TENANT_ID, name: 'Bare Brand', slug: 'bb', status: 'pending_launch', launch_kind: null },
+          ],
+          limit: 20, offset: 0, total: 4,
+        }),
+      ),
+    )
+    renderTenant()
+    const row = (await screen.findByText('Old Brand')).closest('tr') as HTMLElement
+    expect(within(row).getByText(LEGACY_BASELINE_LABEL)).toBeInTheDocument()
+    for (const n of ['New Brand', 'Owner Brand', 'Bare Brand']) {
+      expect(within((await screen.findByText(n)).closest('tr') as HTMLElement).queryByText(LEGACY_BASELINE_LABEL)).not.toBeInTheDocument()
+    }
   })
 })
 
@@ -415,8 +462,9 @@ describe('request detail: approvals, rejects, approve / reject / cancel', () => 
 
   it('approve is not offered to the requester; the cancel is', async () => {
     signInAs({ ...PLATFORM_ADMIN_CLAIMS, sub: pendingByOther.requested_by })
-    launchReadHandlers({ brandStatus: 'pending_launch', requests: [pendingByOther] })
-    detailHandler()
+    const asRequester = { ...pendingByOther, can_approve: false, cannot_approve_reason: 'self_approval' as const }
+    launchReadHandlers({ brandStatus: 'pending_launch', requests: [asRequester] })
+    detailHandler(asRequester)
     let cancelBody: unknown
     server.use(
       http.post('/v1/admin/tenants/:tid/launch-authorisations/:rid/cancel', async ({ request }) => {
@@ -438,6 +486,70 @@ describe('request detail: approvals, rejects, approve / reject / cancel', () => 
     await user.click(confirm)
     await waitFor(() => expect(cancelBody).toEqual({ reason_code: 'requester_withdrew' }))
     expect(await screen.findByText('Request cancelled.')).toBeInTheDocument()
+  })
+
+  it('mirrors the server per-caller answer: no client-side same-person guess (ADR 0112 slice 6 (d))', async () => {
+    // The caller IS the requester by staff id, yet the server says it may approve: the UI shows the buttons.
+    signInAs({ ...PLATFORM_ADMIN_CLAIMS, sub: pendingByOther.requested_by })
+    const allowed = { ...pendingByOther, can_approve: true }
+    launchReadHandlers({ brandStatus: 'pending_launch', requests: [allowed] })
+    detailHandler(allowed)
+    renderBrand(`?request=${allowed.id}`)
+    await screen.findByLabelText('Launch request detail')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument()
+  })
+
+  it.each([
+    ['same_person', /another account of the same person/],
+    ['already_decided', /already recorded a decision/],
+    ['not_pending', /no longer pending/],
+    ['expired', /has expired/],
+    ['no_person', /not linked to a person/],
+    ['not_platform_approver', /Only platform approvers/],
+  ] as const)('server reason %s: no approve, no reject, the fixed sentence', async (reason, text) => {
+    signInAs({ ...PLATFORM_ADMIN_CLAIMS, sub: 'approver-1' })
+    const denied = { ...pendingByOther, can_approve: false, cannot_approve_reason: reason }
+    launchReadHandlers({ brandStatus: 'pending_launch', requests: [denied] })
+    detailHandler(denied)
+    renderBrand(`?request=${denied.id}`)
+    await screen.findByLabelText('Launch request detail')
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
+    expect(screen.getByText(text)).toBeInTheDocument()
+  })
+
+  it('prior-reject restriction removes approve only; reject stays (the server permits it)', async () => {
+    signInAs({ ...PLATFORM_ADMIN_CLAIMS, sub: 'approver-1' })
+    const denied = { ...pendingByOther, can_approve: false, cannot_approve_reason: 'prior_reject_requires_change_note' as const }
+    launchReadHandlers({ brandStatus: 'pending_launch', requests: [denied] })
+    detailHandler(denied)
+    renderBrand(`?request=${denied.id}`)
+    await screen.findByLabelText('Launch request detail')
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument()
+    expect(screen.getByText(/rejected an earlier variant/)).toBeInTheDocument()
+  })
+
+  it('an unknown future reason code degrades to a generic sentence and never prints the code as server text', async () => {
+    signInAs({ ...PLATFORM_ADMIN_CLAIMS, sub: 'approver-1' })
+    const denied = { ...pendingByOther, can_approve: false, cannot_approve_reason: 'RAW_FUTURE_REASON' as never }
+    launchReadHandlers({ brandStatus: 'pending_launch', requests: [denied] })
+    detailHandler(denied)
+    renderBrand(`?request=${denied.id}`)
+    await screen.findByLabelText('Launch request detail')
+    expect(screen.getByText('You cannot approve this request now.')).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('RAW_FUTURE_REASON')
+  })
+
+  it('a tenant role never sees decision buttons (static hint) even if the server answer were missing', async () => {
+    signInAs(TENANT_ADMIN)
+    launchReadHandlers({ brandStatus: 'pending_launch', requests: [pendingByOther] })
+    detailHandler()
+    renderBrand(`?request=${pendingByOther.id}`)
+    await screen.findByLabelText('Launch request detail')
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
   })
 
   it('a stale readiness refusal records nothing, shows the fixed message and re-reads the request', async () => {

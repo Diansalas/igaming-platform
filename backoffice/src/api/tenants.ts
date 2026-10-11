@@ -7,7 +7,11 @@ export interface Tenant {
   slug: string
   licensing_model: string
   status: string
+  /** List rows only: kind of the newest status transition; null when none. `legacy_baseline` marks a pre-governance subject. */
+  launch_kind?: LaunchKind | null
 }
+
+export type LaunchKind = 'governed' | 'legacy_baseline' | 'owner_provisioned'
 
 export interface Brand {
   id: string
@@ -15,6 +19,8 @@ export interface Brand {
   name: string
   slug: string
   status: string
+  /** List rows only: see Tenant.launch_kind. */
+  launch_kind?: LaunchKind | null
 }
 
 export interface ListTenantsParams {

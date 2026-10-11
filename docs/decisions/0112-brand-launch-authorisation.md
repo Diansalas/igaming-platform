@@ -853,6 +853,45 @@ carry `tenant_name` and `brand_name`, a `limit` and a `(created_at, id)` cursor,
 `can_approve` and `cannot_approve_reason` (the UI mirrors it; the database `LA012` stays authoritative); (e) `launch_kind` (kind of the
 latest transition) on tenant and brand list rows.
 
+**Slice 6 implementation note (launch API completions, 2026-10-11; status: `IMPLEMENTED against local DB/MOCK - security + code review conditions being closed` (not complete); Go and vitest tests, DB-backed
+HTTP tests run on a private scratch database; no migration).**
+(a) `GET /v1/admin/tenants/{tenantID}/brands` already existed (`brand:read` + `canActOnTenant`) and is usable by tenant staff; the tenant
+detail page already lists the brands with their ids, so the only gap was that `compliance` could not call it (b). No embedding in the tenant
+detail was added. (b) `compliance` gains `tenant:read` and `brand:read` (own tenant: the routes still enforce `canActOnTenant`; the tenant
+list stays platform-only in the handler); `launch_authorisation:read` was already assigned in slice 3. Pinned by permission-catalogue tests
+(exact holder sets of both read permissions) and a no-escalation test (compliance still holds no `:approve`, no tenant/brand write, no
+staff/licence management). The Back Office gives compliance the "My Tenant" entry. (c) `GET /v1/admin/launch-authorisations`: rows carry
+`tenant_name` and `brand_name` (display text from a LEFT JOIN inside the platform session), `limit` 1..200 (default 50; out of range or
+non-numeric is 400, never a clamp), and an opaque keyset `cursor` over `(created_at DESC, id DESC)` returned as `next_cursor` (null on the last
+page; `limit+1` rows are read to know). A malformed cursor is 400. New requests sort before the first page, so a walk in progress neither
+shifts nor duplicates a row. Residual: `created_at` is the database transaction start time, so a transaction that stays open across a page
+boundary and commits later with an older `created_at` than the cursor would be missed by a walk already past it (the same limit every
+timestamp keyset has); the queue is a work list that is re-read, not an audit export. (d) Every read of a request (queue, per-tenant list,
+detail) carries `can_approve` and, when false, `cannot_approve_reason` from the closed catalogue `not_platform_approver`, `not_pending`,
+`expired`, `self_approval`, `same_person`, `no_person`, `already_decided`, `prior_reject_requires_change_note`, evaluated in the order
+`Decide` refuses (`internal/launchgov/approvability.go`, a pure rule plus three bounded reads: the caller's Person, the caller's Person's
+decisions on the listed requests, the caller's Person's rejects within the TTL). It is advisory: `Decide`, the row lock and `LA012` are
+untouched and remain authoritative; the reasons describe the caller's own accounts and never name another staff member (tenant callers get
+`not_platform_approver` with no query). The Back Office removed its client-side same-person guess and mirrors the answer (an absent answer
+shows the buttons and the server decides; a prior-reject restriction removes Approve only). (e) `launch_kind` (kind of the newest transition by
+`(created_at DESC, id DESC)`, the history endpoint's order, or null) on the tenant list rows and brand list rows only; the Back Office marks
+`legacy_baseline` in both lists. A fresh scratch database cannot contain a `legacy_baseline` row (the table guard admits it only for a subject
+with no transition, and the migration backfill is the only producer), so the literal value is covered by the SQL passing the column through and
+by UI tests; `governed`, `owner_provisioned` and null are covered end to end.
+
+**Slice 6 review dispositions.** (1) *Breaking change, recorded:* the queue `limit` moved from a 500 cap to a 200 cap (201..500 is now 400, never a clamp).
+Evidence that no consumer is affected: the only callers of `GET /v1/admin/launch-authorisations` are the OpenAPI entry and `backoffice/src/api/launch.ts` (`listLaunchQueue`, which now
+sends 50); a grep of the repository for the path finds no other client, and no external consumer exists yet. (2) The OpenAPI paging text no longer claims a walk never drops a row: the
+late-commit residual above is stated in the spec. (3) A `launch_kind` lookup failure other than "forbidden" is logged and renders null for every row; it never fails the list (tested with an
+injected failing pool). (4) *Accepted, reviewed disclosure:* `cannot_approve_reason = no_person` does not say whose account is unlinked, so a platform approver who has a Person link learns that the
+requester has none. Splitting it into my-account / requester variants would disclose the same fact, so the code is kept and the audience is the point: platform approvers only (tenant callers
+always receive `not_platform_approver`). The reasons otherwise describe the caller's own accounts and never carry an id or a name. (5) Pinned: every non-`platform_admin` staff role is
+tenant-scoped by the `staff_users` CHECK (migration 0011), and the holder sets of `tenant:read` and `brand:read` are exactly platform_admin, tenant_admin and compliance
+(`TestTenantBrandRead_HoldersAreTenantScopedByTheDatabase`); a future platform-scoped compliance role must change both in one reviewed diff.
+**Tracked follow-ups (NOT built here):** (a) indexes on `launch_authorisation_requests (created_at, id)` for the queue keyset and on `launch_authorisation_approvals (decided_by_person_id)`
+for the prior-reject lookup, to be added under the DEVOPS-0107-INDEX-WINDOW-1 index-window practice before volume grows; (b) pre-existing, note only: a compliance `POST` with extra
+body fields returns 400 before 403 on routes that validate the body before authorisation.
+
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all
 `NOT IMPLEMENTED` until each slice lands; the licensing content recorded is human-dependent and never a statement of
