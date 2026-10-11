@@ -1598,8 +1598,12 @@ func TestB11_Recon_TenantIsolation(t *testing.T) {
 	// per (tenant, provider, provider_tx_id) - and never clears a payout even
 	// inside tenant A, TestB11_Recon_UnboundPayoutPark_TombstoneNeverClears.)
 	pid := a.provider
-	bwr, _ := b.payout(120)
-	b.tx(func(ctx context.Context, tx pgx.Tx) error { return withdrawal.Complete(ctx, tx, bwr.ID, pid, ref) })
+	// ADR 0113 (migration 0132): a completion must carry its OWN request's provider (B-i, WD041): B's
+	// withdrawal is therefore submitted to provider id pid (legal path, E7 with pid) and completed
+	// under it; it used to be B's dispatched payout (provider B) completed under A's provider id.
+	bwrID := uuid.New()
+	legacyWithdrawalAt(t, b.pool, b.f.orchFixture, bwrID, 120, "b11-iso-"+bwrID.String(), withdrawal.StateSubmitted, pid, "")
+	b.tx(func(ctx context.Context, tx pgx.Tx) error { return withdrawal.Complete(ctx, tx, bwrID, pid, ref) })
 	rev := b.b11DepositReversal(ref, "succeeded", p.wr.Amount)
 	rev.ProviderID = pid
 	bLine := a.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)

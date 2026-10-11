@@ -45,7 +45,10 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // seedWalletFor gives fixture f a wallet in assetCode and funds its
@@ -91,30 +94,24 @@ func seedWalletFor(t *testing.T, pool *db.Pool, f fixture, assetCode string, fun
 // Dr player_cash / Cr player_withdrawal_hold, BOTH of which are
 // wallet-scoped (so ledger_entries.player_account_id is non-NULL on both
 // legs - the exact condition that made the pre-fix query net to zero).
+//
+// ADR 0113 (migration 0132): a player_withdrawal_hold leg is admitted only as the pinned E0b leg of a
+// withdrawal request (B-i, WD040/WD041; B-ii at COMMIT). The leg is therefore posted through the
+// shared legal-path helper (wdpath.Seed, as igaming_runtime): the SAME two-leg shape, asset and
+// amount, keyed and correlated by a real `requested` withdrawal bound to a verified MOCK instrument.
 func postTwoPlayerOwnedLegTransaction(t *testing.T, pool *db.Pool, f fixture, walletID uuid.UUID, assetCode string, amount int64) {
 	t.Helper()
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		cash, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &walletID, ledger.AccountPlayerCash, assetCode)
-		if err != nil {
-			return err
-		}
-		hold, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &walletID, ledger.AccountPlayerWithdrawalHold, assetCode)
-		if err != nil {
-			return err
-		}
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: f.tenantID, TransactionType: ledger.TxWithdrawalRequested,
-			IdempotencyKey: "hold-" + uuid.New().String(), CorrelationID: uuid.New(),
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: cash, Direction: ledger.Debit, Amount: amount},
-				{LedgerAccountID: hold, Direction: ledger.Credit, Amount: amount},
-			},
-		})
-		return err
-	})
-	if err != nil {
-		t.Fatalf("post two-player-owned-leg transaction: %v", err)
+	inst := pitest.Bind(t, pool, f.tenantID, f.playerID, assetCode)
+	var fp string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT fingerprint FROM payout_instruments WHERE id = $1`, inst).Scan(&fp)
+	}); err != nil {
+		t.Fatalf("read instrument fingerprint: %v", err)
 	}
+	wdpath.Seed(context.Background(), t, pool, wdpath.Spec{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, WalletID: walletID,
+		AssetCode: assetCode, Amount: amount, InstrumentID: &inst, Fingerprint: &fp,
+	}, withdrawal.StateRequested)
 }
 
 // preFixBlindUsage reproduces the EXACT pre-fix query (no ledger_accounts

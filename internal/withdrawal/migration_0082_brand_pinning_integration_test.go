@@ -72,13 +72,11 @@ func TestMigration0082_WithdrawalRequestsBrandPinnedToPlayersOwnBrand(t *testing
 
 	// The same insert with the player's OWN brand must still succeed -
 	// the constraint must reject misattribution, not ordinary operation.
+	// ADR 0113 (migration 0132): a request commits only with its hold leg linked (check A), so the
+	// control row is planted through the legal E0 + E0b path (a13PlantE0), same columns as before.
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx,
-				`INSERT INTO withdrawal_requests
-					(tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
-				 VALUES ($1, $2, $3, $4, 'EUR', 1000, $5)`,
-				f.tenantID, f.brandID, f.playerAccountID, f.walletID, "mig0082-right-brand")
+			_, err := a13PlantE0(ctx, tx, f.tenantID, f.brandID, f.playerAccountID, f.walletID, 1000, "mig0082-right-brand", nil, nil)
 			return err
 		})
 	}); err != nil {

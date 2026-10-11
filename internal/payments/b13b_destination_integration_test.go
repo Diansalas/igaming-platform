@@ -452,15 +452,9 @@ func TestB13B_T1p_LegacyUnbound_SyntheticOnly(t *testing.T) {
 func (w *b13bW) legacyApproved(amount int64, key string) withdrawal.WithdrawalRequest {
 	w.t.Helper()
 	id := uuid.New()
-	if err := w.pool.WithTenant(w.ctx(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-				VALUES ($1,$2,$3,$4,$5,'EUR',$6,'approved',$7)`, id, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, key)
-			return err
-		})
-	}); err != nil {
-		w.t.Fatalf("plant legacy withdrawal: %v", err)
-	}
+	// ADR 0113 (migration 0132): planted as E0 + E0b and walked to the state through the Go writers
+	// (legacyWithdrawalAt); it used to be a direct INSERT in that state with no hold, now WD025.
+	legacyWithdrawalAt(w.t, w.pool, w.f.orchFixture, id, amount, key, withdrawal.StateApproved, "", "")
 	return w.wr(id)
 }
 

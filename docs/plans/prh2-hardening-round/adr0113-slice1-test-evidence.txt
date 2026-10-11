@@ -1,0 +1,39 @@
+ADR 0113 slice 1 (migration 0132) - test evidence on the final tree
+=====================================================================
+Private database adr0113s1_lf, rebuilt from the worktree migrations (head 0132) before the final runs, via the
+harness (priv_db.sh / priv_test.sh). -tags integration. Runtime-role assertions use TEST_RUNTIME_DATABASE_URL
+(igaming_runtime, asserted by the tests). A skip would not be evidence: SKIP counts are reported.
+
+Package results (final tree):
+  internal/withdrawal          ok   (incl. TestADR0113_* x11, TestMigration0132_* x2, DeeperGuards)      0 SKIP
+  internal/ledger              ok
+  internal/reconciliation      ok
+  internal/risk                ok
+  internal/wallet              ok
+  internal/launchgov           ok
+  internal/tenant              ok
+  internal/casino              ok   (incl. the latency gate under concurrent package load)
+  internal/payoutinstrument    FAIL x1 then PASS 5/5 alone: TestPlantedRows_NoOwnerRowAndUnsealedPending is a
+                               pre-existing 1-in-256 flake unrelated to 0132 (it plants fingerprint "11"+fp[2:],
+                               which equals the real fingerprint when fp starts with "11": 23505 instead of
+                               23503); the test touches no withdrawal or ledger row.
+  internal/payments            ok   1079 top-level PASS, 0 SKIP, 0 FAIL (3414.9 s, -timeout 6000s)
+  internal/httpserver          ok   696 top-level PASS, 0 SKIP (run alone on the quiet database, 372.7 s)
+
+Concurrency: TestADR0113_ConcurrentEdgeRaces -race -count=20 (4 pairs x 20 races per run = 1600 races):
+  ok, 20/20 PASS, no data race. Pairs: Cancel vs MoveToPendingReview; Approve vs Reject; Complete vs Fail;
+  DenyForCompliance vs MarkSubmittedPending. Exactly one winner, the loser ErrStateConflict, the hold nets to
+  the final state's amount, no deadlock.
+
+Casino bet/win latency gate (C4; budget stated before measuring: p95 regression <= 10% with the two 0132
+ledger_entries triggers enabled vs disabled; interleaved one-for-one, timed from the first callback statement
+to the end of COMMIT; run alone on the quiet database, 800 samples per mode):
+  run 1  bet p50 10.83 ms -> 10.83 ms (-0.0%)  p95 14.29 ms -> 14.14 ms (-1.0%)
+         win p50  9.49 ms ->  9.70 ms (+2.1%)  p95 14.58 ms -> 14.74 ms (+1.1%)
+  run 2  bet p50 10.33 ms -> 10.45 ms (+1.2%)  p95 13.60 ms -> 13.85 ms (+1.8%)
+         win p50 10.00 ms -> 10.06 ms (+0.6%)  p95 15.50 ms -> 15.03 ms (-3.0%)
+  PASS both runs (worst p95 +1.8%; the difference is inside run-to-run noise).
+
+Mutation-kill: adr0113-slice1-mutation-kill.txt (28 SQL mutants: 27 killed, 1 equivalent; 8 pre-flight mutants
+incl. the blind pre-flight: 8 killed; 7 deeper-guard mutants: 6 killed + 1 subsumed, whose block-level
+replacement is killed).

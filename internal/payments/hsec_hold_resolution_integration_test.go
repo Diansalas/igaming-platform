@@ -484,10 +484,7 @@ func TestHSEC_HoldRelease_AttemptExists_Refused(t *testing.T) {
 	if err != nil || claim.Attempt.ID == uuid.Nil {
 		t.Fatalf("setup dispatch: %v", err)
 	}
-	h.tx(func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`, wr.ID)
-		return err
-	})
+	h.forceStateOwnerTamper(wr.ID, "approved") // ADR 0113: submitted -> approved is not an edge (WD021)
 	h.suspendTenant()
 	out := h.mustDecide(h.apprB, r, ResolutionApprove)
 	if out.Executed || !out.Refused || out.Resolution.RefusalCode == nil || *out.Resolution.RefusalCode != holdRefusedAttemptExists {

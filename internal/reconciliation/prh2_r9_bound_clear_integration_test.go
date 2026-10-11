@@ -15,7 +15,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
-	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -78,30 +77,11 @@ type bcPark struct {
 func (w *bcWorld) bcPendingPayout(t *testing.T, x string, amount int64) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	wrID, attemptID := uuid.New(), uuid.New()
+	// ADR 0113 (migration 0132): the request is planted as E0 + E0b and walked to `submitted` through the
+	// Go writers as igaming_runtime (legacySubmittedWithdrawal); it used to be a free-standing hold leg
+	// plus a direct `submitted` INSERT, which the database now refuses (WD040 / WD025).
+	legacySubmittedWithdrawal(t, w.pool, w.f, wrID, amount, "bc-wd-"+wrID.String(), payProvA, x)
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		hold, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerWithdrawalHold, "EUR")
-		if err != nil {
-			return err
-		}
-		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalRequested, IdempotencyKey: "bc-wreq-" + wrID.String(), CorrelationID: wrID,
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Debit, Amount: amount},
-				{LedgerAccountID: hold, Direction: ledger.Credit, Amount: amount},
-			},
-		}); err != nil {
-			return fmt.Errorf("post hold: %w", err)
-		}
-		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
-		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx,
-				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
-			 VALUES ($1,$2,$3,$4,$5,'EUR',$6,'submitted',$7,$8,$9)`,
-				wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "bc-wd-"+wrID.String(), payProvA, x)
-			return err
-		}); err != nil {
-			return fmt.Errorf("insert withdrawal: %w", err)
-		}
 		if _, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{
 			ID: attemptID, TenantID: w.f.tenantID, Operation: payments.AttemptOperationPayout, WithdrawalRequestID: &wrID,
 			ProviderID: payProvA, PaymentMethod: "bank_transfer", AssetCode: "EUR", Amount: amount, Interactive: false,
@@ -282,32 +262,37 @@ func (w *bcWorld) bcUnlinkedCompletion(t *testing.T, ref string, amount int64) {
 	t.Helper()
 	pid := payProvA
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		hold, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerWithdrawalHold, "EUR")
-		if err != nil {
+		// ADR 0113 (migration 0132): a hold leg that NO withdrawal request names is refused to every session
+		// (WD040). This test's subject IS such an unattributed posting, so it is an owner tamper plant (ADR 0110
+		// 9.4: history the database now refuses), the same two postings as before.
+		return ownerTamperHoldLegs(ctx, tx, func() error {
+			hold, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerWithdrawalHold, "EUR")
+			if err != nil {
+				return err
+			}
+			clearing, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+			if err != nil {
+				return err
+			}
+			if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+				TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalRequested, IdempotencyKey: "bc-unl-req-" + uuid.NewString(), CorrelationID: uuid.New(),
+				Entries: []ledger.EntryInput{
+					{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Debit, Amount: amount},
+					{LedgerAccountID: hold, Direction: ledger.Credit, Amount: amount},
+				},
+			}); err != nil {
+				return err
+			}
+			_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+				TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalCompleted, IdempotencyKey: pid + ":" + ref,
+				ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
+				Entries: []ledger.EntryInput{
+					{LedgerAccountID: hold, Direction: ledger.Debit, Amount: amount},
+					{LedgerAccountID: clearing, Direction: ledger.Credit, Amount: amount},
+				},
+			})
 			return err
-		}
-		clearing, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
-		if err != nil {
-			return err
-		}
-		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalRequested, IdempotencyKey: "bc-unl-req-" + uuid.NewString(), CorrelationID: uuid.New(),
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Debit, Amount: amount},
-				{LedgerAccountID: hold, Direction: ledger.Credit, Amount: amount},
-			},
-		}); err != nil {
-			return err
-		}
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalCompleted, IdempotencyKey: pid + ":" + ref,
-			ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: hold, Direction: ledger.Debit, Amount: amount},
-				{LedgerAccountID: clearing, Direction: ledger.Credit, Amount: amount},
-			},
 		})
-		return err
 	}); err != nil {
 		t.Fatalf("unlinked withdrawal_completed: %v", err)
 	}
@@ -319,30 +304,11 @@ func (w *bcWorld) bcUnlinkedCompletion(t *testing.T, ref string, amount int64) {
 func (w *bcWorld) bcLegacyCompletion(t *testing.T, ref string, amount int64) {
 	t.Helper()
 	wrID := uuid.New()
+	// ADR 0113 (migration 0132): the request is planted as E0 + E0b and walked to `submitted` through the
+	// Go writers as igaming_runtime (legacySubmittedWithdrawal); it used to be a free-standing hold leg
+	// plus a direct `submitted` INSERT, which the database now refuses (WD040 / WD025).
+	legacySubmittedWithdrawal(t, w.pool, w.f, wrID, amount, "bc-leg-"+wrID.String(), payProvA, "bc-leg-instr-"+wrID.String()[:8])
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		hold, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerWithdrawalHold, "EUR")
-		if err != nil {
-			return err
-		}
-		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalRequested, IdempotencyKey: "bc-leg-req-" + wrID.String(), CorrelationID: wrID,
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Debit, Amount: amount},
-				{LedgerAccountID: hold, Direction: ledger.Credit, Amount: amount},
-			},
-		}); err != nil {
-			return err
-		}
-		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
-		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx,
-				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
-			 VALUES ($1,$2,$3,$4,$5,'EUR',$6,'submitted',$7,$8,$9)`,
-				wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "bc-leg-"+wrID.String(), payProvA, "bc-leg-instr-"+wrID.String()[:8])
-			return err
-		}); err != nil {
-			return err
-		}
 		return withdrawal.Complete(ctx, tx, wrID, payProvA, ref)
 	}); err != nil {
 		t.Fatalf("legacy completion: %v", err)

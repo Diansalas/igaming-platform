@@ -196,7 +196,8 @@ func TestHSEC_HoldRelease_ExecutingTransition_DatabaseRechecks(t *testing.T) {
 		// while the tenant is active, then suspend again.
 		h.activateTenant()
 		h.tx(func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted' WHERE id = $1`, wr.ID)
+			// ADR 0113 (migration 0132): the legal E7 shape (provider_id set; WD022 without it).
+			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`, wr.ID)
 			return err
 		})
 		h.suspendTenant()
@@ -213,10 +214,7 @@ func TestHSEC_HoldRelease_ExecutingTransition_DatabaseRechecks(t *testing.T) {
 		if _, err := h.orch.ClaimForDispatch(context.Background(), h.pool, KYCEnforcementPayoutGate{}, h.f.tenantID, wr.ID, "bank_transfer", testSubmitActor()); err != nil {
 			t.Fatal(err)
 		}
-		h.tx(func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`, wr.ID)
-			return err
-		})
+		h.forceStateOwnerTamper(wr.ID, "approved") // ADR 0113: submitted -> approved is not an edge (WD021)
 		h.suspendTenant()
 		if err := rawExecute(h, r, h.apprB); !hsrIs(err, "HR010") {
 			t.Fatalf("want HR010, got %v", err)

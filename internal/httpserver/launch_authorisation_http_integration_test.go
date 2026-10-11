@@ -19,6 +19,8 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 func lhRequireDisclaimer(t *testing.T, res cgResp) {
@@ -719,13 +721,16 @@ func TestLaunchHTTP_Close_WithdrawalsHolding_ThenClosed(t *testing.T) {
 	if w.requestCount(tenantID) != 0 || w.status(tenantID, &brand) != "active" {
 		t.Fatal("a refused closure writes nothing")
 	}
-	// Resolve the control withdrawal (a terminal state), then the closure runs.
+	// Resolve the control withdrawal (a terminal state), then the closure runs. ADR 0113 (migration
+	// 0132): through the legal edge E2 (withdrawal.Cancel, the genuine hold release) as igaming_runtime;
+	// it used to be a raw `UPDATE ... SET state = 'rejected'`, which the database now refuses (WD021).
+	var ctl uuid.UUID
 	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected' WHERE tenant_id = $1`, tenantID)
-		return err
+		return tx.QueryRow(ctx, `SELECT id FROM withdrawal_requests WHERE tenant_id = $1`, tenantID).Scan(&ctl)
 	}); err != nil {
-		t.Fatalf("resolve the control withdrawal: %v", err)
+		t.Fatalf("find the control withdrawal: %v", err)
 	}
+	wdpath.AdvanceAsRuntime(context.Background(), t, w.owner, tenantID, ctl, withdrawal.StateCancelled, wdpath.Spec{})
 	closeBody["acknowledged_check_codes"] = w.nonPassing(tenantID, &brand, "close", nil)
 	c := w.createRequest(w.tokReq(), tenantID, closeBody)
 	if c.Request.RequiredApprovals != 2 {

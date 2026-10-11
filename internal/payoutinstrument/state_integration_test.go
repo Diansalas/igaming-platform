@@ -473,8 +473,11 @@ func TestSupersession(t *testing.T) {
 	wl := w.seedWallet(p, "EUR")
 	var wid uuid.UUID
 	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key, payout_instrument_id, payout_instrument_fingerprint)
-			VALUES ($1,$2,$3,$4,'EUR',100,'k-supersede',$5,$6) RETURNING id`, w.tenantID, p.BrandID, p.ID, wl, old.ID, old.Fingerprint).Scan(&wid)
+		if err := tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key, payout_instrument_id, payout_instrument_fingerprint)
+			VALUES ($1,$2,$3,$4,'EUR',100,'k-supersede',$5,$6) RETURNING id`, w.tenantID, p.BrandID, p.ID, wl, old.ID, old.Fingerprint).Scan(&wid); err != nil {
+			return err
+		}
+		return plantHold(ctx, tx, w.tenantID, wl, wid, "EUR", 100) // ADR 0113: E0b in the same tx
 	}); err != nil {
 		t.Fatalf("bound withdrawal: %v", err)
 	}
@@ -496,7 +499,7 @@ func TestSupersession(t *testing.T) {
 		t.Fatalf("player revoke of an in-use instrument = %v, want ErrInUse", err)
 	}
 	// Release the withdrawal (terminal), then the sweep supersedes.
-	w.tamper("withdrawal_requests", `UPDATE withdrawal_requests SET state='cancelled' WHERE id = $1`, wid)
+	w.cancelLegally(wid) // ADR 0113: the legal E2 (was an owner tamper UPDATE state='cancelled')
 	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		sr, err = w.svc.Sweep(ctx, tx, w.tenantID, 100)

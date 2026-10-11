@@ -20,8 +20,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // refLessLive drives a real deposit to a LIVE attempt that holds no
@@ -68,7 +68,9 @@ func b3AssertParked(t *testing.T, e *depRefEnv, f orchFixture, id uuid.UUID, rea
 
 func b3NoMoney(t *testing.T, e *depRefEnv, f orchFixture) {
 	t.Helper()
-	if e.depositTxCount(t) != 0 || cashBalance(t, e.pool, f) != 0 {
+	// ADR 0113 (migration 0132): a payout fixture's withdrawal is born with its E0b hold, which moves its
+	// amount from player_cash to player_withdrawal_hold; a callback mismatch moves nothing beyond that.
+	if e.depositTxCount(t) != 0 || cashBalance(t, e.pool, f) != -depFixtureHolds(t, e, f) {
 		t.Fatalf("a callback mismatch must never post")
 	}
 	assertLedgerBalanced(t, e.pool, f.tenantID)
@@ -513,16 +515,11 @@ func TestB3_MultipleSuccess_ReferenceBoundElsewhere_QuietAnomaly(t *testing.T) {
 func seedPayoutAttemptLiveNoRef(t *testing.T, e *depRefEnv) PaymentAttempt {
 	t.Helper()
 	attemptID := uuid.New()
+	wr := uuid.New()
+	// ADR 0113 (migration 0132): planted as E0 + E0b and walked to the state through the Go writers
+	// (legacyWithdrawalAt); it used to be a direct INSERT in that state with no hold, now WD025.
+	legacyWithdrawalAt(t, e.pool, e.f, wr, 5000, "b3-payout-idem-"+wr.String(), withdrawal.StateSubmitted, e.id, "")
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		wr := uuid.New()
-		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
-		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, e.f.tenantID, e.f.brandID, e.f.playerAccountID, e.f.walletID, "b3-payout-idem-"+wr.String())
-			return err
-		}); err != nil {
-			return err
-		}
 		if _, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
 			ID: attemptID, TenantID: e.f.tenantID, Operation: AttemptOperationPayout,
 			WithdrawalRequestID: &wr, AttemptNo: 1, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
