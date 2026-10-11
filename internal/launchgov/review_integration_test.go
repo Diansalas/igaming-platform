@@ -315,6 +315,44 @@ func TestSuspend_ExhaustedAttempts_RaisesP1AndAuditsRealAttempts(t *testing.T) {
 	}
 }
 
+// The same exhaustion raised by a TENANT-scope suspender (its own brand): the alert is raised in
+// the tenant's own scope (the Kind is raisable by a tenant session, and the subject is its tenant).
+func TestSuspend_ExhaustedAttempts_TenantScope_RaisesP1InOwnScope(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	tid := w.activeTenant()
+	brand := w.activeBrand(tid)
+	sub := launchgov.Subject{TenantID: tid, BrandID: &brand}
+	ta := w.tenantStaff(tid, "tenant_admin")
+	svc := w.service(launchgov.Config{LockTimeout: "150ms", SuspendAttempts: 2})
+
+	holdDone, locked := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(holdDone)
+		_ = w.owner.WithTenant(ctx, tid, func(ctx context.Context, tx pgx.Tx) error {
+			var id uuid.UUID
+			if err := tx.QueryRow(ctx, `SELECT id FROM brands WHERE id = $1 FOR SHARE`, brand).Scan(&id); err != nil {
+				return err
+			}
+			close(locked)
+			time.Sleep(2500 * time.Millisecond)
+			return nil
+		})
+	}()
+	<-locked
+	_, err := svc.Suspend(ctx, ta, launchgov.SuspendInput{Subject: sub, ReasonCode: "operator_request"})
+	<-holdDone
+	if !errors.Is(err, launchgov.ErrRetryableLockTimeout) {
+		t.Fatalf("an exhausted tenant suspension: %v", err)
+	}
+	var n int
+	if err := w.owner.WithTenant(ctx, tid, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM alerts WHERE kind = 'launch.suspension_exhausted' AND subject_tenant_id = $1`, tid).Scan(&n)
+	}); err != nil || n != 1 {
+		t.Fatalf("one P1 alert visible in the tenant's own scope: n=%d err=%v", n, err)
+	}
+}
+
 // Security L3: an approver whose staff row carries no Person cannot decide; the check fails closed.
 func TestDecide_ApproverWithoutPerson_FailsClosed(t *testing.T) {
 	w := newWorld(t)
