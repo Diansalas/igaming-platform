@@ -121,6 +121,23 @@ BEGIN
 END
 $$;
 
+-- ADR 0112 slice 4 (migration 0131, residual 14(b2)): a withdrawal request is never deleted. The deny
+-- trigger of 0131 (WD012) is the BINDING control and binds the owner too; this REVOKE is defence in
+-- depth and re-asserts the narrowing every time this idempotent script re-runs (the blanket GRANT above
+-- would otherwise re-grant DELETE). Nothing in the application deletes withdrawal_requests. Guarded like
+-- the blocks below: the table does not exist yet on a fresh initdb run. This script is applied by a
+-- human/CI to a database; nothing here is applied to a live role by an agent.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'withdrawal_requests'
+    ) THEN
+        EXECUTE 'REVOKE DELETE, TRUNCATE ON withdrawal_requests FROM igaming_runtime';
+    END IF;
+END
+$$;
+
 -- ADR 0088 §3.5 (Stage 10 W1, sportsbook settlement): the deny triggers on
 -- sportsbook_bet_settlements (migration 0091) are the BINDING control -
 -- they bind the table owner too, so this REVOKE is defence in depth only,

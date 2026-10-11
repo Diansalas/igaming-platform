@@ -395,8 +395,12 @@ type RequestParams struct {
 // only. Anything else is an insert failure, unchanged.
 func translateInsertError(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && (pgErr.Code == "WD010" || pgErr.Code == "WD011") {
+	if errors.As(err, &pgErr) && pgErr.Code == "WD010" {
 		return fmt.Errorf("withdrawal: request refused: %w: %s", tenant.ErrNotActiveForPaymentInitiation, pgErr.Code)
+	}
+	if errors.As(err, &pgErr) && pgErr.Code == "WD011" {
+		// Same shape as tenant.RequireBrandActive: both the payment-initiation and the brand sentinel.
+		return fmt.Errorf("withdrawal: request refused: %w: %w: %s", tenant.ErrNotActiveForPaymentInitiation, tenant.ErrBrandNotActive, pgErr.Code)
 	}
 	return fmt.Errorf("withdrawal: insert request: %w", err)
 }

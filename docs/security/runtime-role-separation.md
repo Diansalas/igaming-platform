@@ -402,6 +402,14 @@ REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;
 --     this idempotent bootstrap.
 REVOKE UPDATE, DELETE, TRUNCATE ON sportsbook_bet_settlements FROM igaming_runtime;
 
+-- 3d. ADR 0112 slice 4 (migration 0131, residual 14(b2)): a withdrawal
+--     request is never deleted. The deny trigger of migration 0131
+--     (WD012, BEFORE DELETE / BEFORE TRUNCATE) is the binding control and
+--     binds the table owner too; this REVOKE is defence in depth, kept in
+--     force across re-runs of this bootstrap (only once the table exists).
+--     deploy/init-app-role.sql carries the guarded form of the same line.
+REVOKE DELETE, TRUNCATE ON withdrawal_requests FROM igaming_runtime;
+
 -- 4. Confirm no unwanted attribute or grant is present:
 --    (run as a check, expect the runtime role to show no attributes)
 \du+ igaming_runtime

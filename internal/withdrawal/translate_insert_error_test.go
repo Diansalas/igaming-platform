@@ -17,6 +17,12 @@ func TestTranslateInsertError(t *testing.T) {
 			t.Errorf("%s must be the not-active refusal: %v", code, err)
 		}
 	}
+	if err := translateInsertError(&pgconn.PgError{Code: "WD011"}); !errors.Is(err, tenant.ErrBrandNotActive) {
+		t.Errorf("WD011 must also be the brand refusal like RequireBrandActive: %v", err)
+	}
+	if err := translateInsertError(&pgconn.PgError{Code: "WD010"}); errors.Is(err, tenant.ErrBrandNotActive) {
+		t.Errorf("WD010 is the tenant refusal, not the brand one: %v", err)
+	}
 	for _, code := range []string{"23505", "PI046", "WD012", "42501"} {
 		err := translateInsertError(&pgconn.PgError{Code: code})
 		if errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {

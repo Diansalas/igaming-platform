@@ -19,6 +19,11 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
+// NOTE (ledger-finance review): the Go-path race tests below drive withdrawal.RequestWithdrawal through
+// the OWNER pool (the fixture needs ledger posting and instrument registration rights). The RUNTIME
+// role's behaviour in both race orders is covered by the raw-insert races in
+// withdrawal_insert_guard_integration_test.go, which run as igaming_runtime.
+
 // withdrawalFixture prepares a funded, KYC-approved player with a verified payout instrument and
 // returns a function that runs the REAL withdrawal.RequestWithdrawal (H-SEC-11 gate, hold posting,
 // insert) in the given transaction.

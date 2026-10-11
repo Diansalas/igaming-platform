@@ -157,9 +157,9 @@ func TestWithdrawalInsertGuard_InvisibleSubject_FailsClosed_OwnerNotExempt(t *te
 	}
 }
 
-// A replay of an existing request (same tenant, player, idempotency key) is let through to the unique
-// constraint, never refused as "not active": it writes nothing (23505), exactly like the Go replay.
-func TestWithdrawalInsertGuard_Replay_ReachesTheUniqueConstraint(t *testing.T) {
+// NO replay short-circuit (security C1): an INSERT whose key already exists on a non-active subject
+// is refused by the status guard like any other (the Go path answers replays before it inserts).
+func TestWithdrawalInsertGuard_ReplayOfExistingKey_IsStillGuarded(t *testing.T) {
 	w := newWorld(t)
 	f := w.wdFixture()
 	key := "replay-" + uuid.NewString()
@@ -169,8 +169,8 @@ func TestWithdrawalInsertGuard_Replay_ReachesTheUniqueConstraint(t *testing.T) {
 	if err := launchfix.TrySetTenantStatus(context.Background(), f.tid, "suspended"); err != nil {
 		t.Fatal(err)
 	}
-	if got := pgCode(w.rawInsertRT(f, key)); got != "23505" {
-		t.Fatalf("a replay on a suspended tenant must hit the unique constraint (23505), got %q", got)
+	if got := pgCode(w.rawInsertRT(f, key)); got != "WD010" {
+		t.Fatalf("an INSERT of an existing key on a suspended tenant must be refused WD010, got %q", got)
 	}
 	if got := pgCode(w.rawInsertRT(f, "new-"+uuid.NewString())); got != "WD010" {
 		t.Fatalf("a NEW key on the suspended tenant must be refused WD010, got %q", got)

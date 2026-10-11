@@ -36,14 +36,16 @@ func TestMigration0131_UpDownUp_WholeSchema(t *testing.T) {
 		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT
 				(SELECT count(*) FROM pg_trigger WHERE tgname = 'withdrawal_requests_aa_subject_active_guard' AND tgrelid = 'withdrawal_requests'::regclass AND NOT tgisinternal)
-				+ (SELECT count(*) FROM pg_proc WHERE proname = 'withdrawal_requests_subject_active_guard')`).Scan(&n)
+				+ (SELECT count(*) FROM pg_proc WHERE proname = 'withdrawal_requests_subject_active_guard')
+				+ (SELECT count(*) FROM pg_trigger WHERE tgname IN ('withdrawal_requests_deny_delete', 'withdrawal_requests_deny_truncate') AND tgrelid = 'withdrawal_requests'::regclass AND NOT tgisinternal)
+				+ (SELECT count(*) FROM pg_proc WHERE proname = 'withdrawal_requests_deny_delete')`).Scan(&n)
 		}); err != nil {
 			t.Fatal(err)
 		}
 		return n
 	}
-	if got := objects(); got != 2 {
-		t.Fatalf("0131 objects present: %d (want 2)", got)
+	if got := objects(); got != 5 {
+		t.Fatalf("0131 objects present: %d (want 5)", got)
 	}
 	if _, err := pool.MigrateDown(ctx, full, 1); err != nil {
 		t.Fatalf("down: %v", err)
