@@ -28,7 +28,7 @@
 // (that convention belongs to player money movement). These routes are idempotent by state:
 // a replayed create is LAUNCH_REQUEST_PENDING, a replayed approve/reject by the same Person is
 // LAUNCH_ALREADY_DECIDED, a replayed cancel is LAUNCH_REQUEST_NOT_PENDING, a replayed suspension
-// is LAUNCH_ILLEGAL_TRANSITION (already suspended); each is a 409 that records nothing.
+// is LAUNCH_ILLEGAL_TRANSITION (already suspended); each is a 409 that changes no state (the service audits a refused write once, in a separate transaction: codes only, no state change).
 //
 // Errors are the closed LAUNCH_* codes of internal/apierror (message = a fixed sentence, never
 // the underlying error text; check_codes = a closed H-/R- vocabulary). Every refusal that rolled
@@ -149,6 +149,8 @@ func launchErrorCode(err error) (apierror.Code, string, []string) {
 		return apierror.CodeTenantCloseBlockedOpenRounds, "closure refused: open sportsbook bets exist", nil
 	case errors.Is(err, launchgov.ErrNotFound):
 		return apierror.CodeNotFound, "not found", nil
+	case errors.Is(err, launchgov.ErrNoPerson):
+		return apierror.CodeLaunchNoPerson, "this account cannot take part in a four-eyes decision", nil
 	case errors.Is(err, launchgov.ErrActingSession), errors.Is(err, launchgov.ErrForbidden):
 		return apierror.CodeForbidden, "forbidden", nil
 	case errors.Is(err, launchgov.ErrInvalidInput):
@@ -270,7 +272,7 @@ type launchPriorRejectDTO struct {
 type launchApprovalDTO struct {
 	ID                      string `json:"id"`
 	Decision                string `json:"decision"`
-	DecidedBy               string `json:"decided_by"`
+	DecidedBy               string `json:"decided_by,omitempty"`
 	ReasonCode              string `json:"reason_code"`
 	ReadinessHashAtDecision string `json:"readiness_hash_at_decision"`
 	DecidedAt               string `json:"decided_at"`
@@ -300,7 +302,7 @@ type launchRequestDTO struct {
 	AcknowledgedCheckCodes []string `json:"acknowledged_check_codes"`
 	ReasonCode             string   `json:"reason_code"`
 
-	RequestedBy       string  `json:"requested_by"`
+	RequestedBy       string  `json:"requested_by,omitempty"`
 	RequestedByScope  string  `json:"requested_by_scope"`
 	RequiredApprovals int     `json:"required_approvals"`
 	PayloadHash       string  `json:"payload_hash"`
@@ -422,13 +424,69 @@ func parseLaunchLimit(q string) (int, bool) {
 	return n, true
 }
 
+var (
+	launchLicensingModels = map[string]bool{
+		launchgov.LicModelPlatform: true, launchgov.LicModelTenant: true, launchgov.LicModelOther: true, launchgov.LicModelNotApplic: true,
+	}
+	launchLicensingStatuses = map[string]bool{
+		launchgov.LicStatusInForce: true, launchgov.LicStatusAppliedPend: true, launchgov.LicStatusConditional: true,
+		launchgov.LicStatusSuspended: true, launchgov.LicStatusExpired: true, launchgov.LicStatusNotRequired: true,
+	}
+)
+
+// validLaunchCreateShape enforces at the wire what the OpenAPI schema promises: the closed licensing
+// vocabularies, and 1..32 jurisdiction ids for the actions that record them. (The service validates the
+// same content again; this makes the documented 400 independent of it.)
+func validLaunchCreateShape(b launchCreateBody) bool {
+	if b.Licensing != nil && (!launchLicensingModels[b.Licensing.Model] || !launchLicensingStatuses[b.Licensing.Status]) {
+		return false
+	}
+	if len(b.JurisdictionIDs) > 32 {
+		return false
+	}
+	switch b.Action {
+	case launchgov.ActionActivate, launchgov.ActionReactivate, launchgov.ActionRatify:
+		return len(b.JurisdictionIDs) >= 1
+	}
+	return true
+}
+
 func (c launchCall) badRequest(w http.ResponseWriter) {
 	apierror.Write(w, c.requestID, apierror.CodeInvalidRequest, "invalid request")
 }
 
-// withDisclaimer wraps a payload under the fixed envelope every 2xx launch response uses.
+// launchEnvelope is the fixed envelope every 2xx launch response uses.
 type launchEnvelope struct {
 	Disclaimer string `json:"disclaimer"`
+}
+
+// The named response bodies (so the OpenAPI drift test can reflect over every one of them).
+type launchReadinessResponse struct {
+	launchEnvelope
+	Readiness launchReadinessDTO `json:"readiness"`
+}
+
+type launchListResponse struct {
+	launchEnvelope
+	Items []launchRequestDTO `json:"items"`
+}
+
+type launchRequestEnvelope struct {
+	launchEnvelope
+	Request launchRequestDTO `json:"request"`
+}
+
+// launchDetailResponse: Readiness is the CURRENT server-side evaluation of a pending request's inputs
+// (never client-supplied): its readiness_hash is what an approver passes as seen_readiness_hash.
+type launchDetailResponse struct {
+	launchEnvelope
+	Request   launchRequestDTO    `json:"request"`
+	Readiness *launchReadinessDTO `json:"readiness,omitempty"`
+}
+
+type launchHistoryResponse struct {
+	launchEnvelope
+	Items []launchTransitionDTO `json:"items"`
 }
 
 // ---- handlers ----------------------------------------------------------------------------
@@ -468,10 +526,7 @@ func newLaunchReadinessHandler(deps Deps) http.HandlerFunc {
 			writeLaunchError(w, c, "readiness", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, struct {
-			launchEnvelope
-			Readiness launchReadinessDTO `json:"readiness"`
-		}{launchEnvelope{launchgov.Disclaimer}, toLaunchReadinessDTO(rd)})
+		writeJSON(w, http.StatusOK, launchReadinessResponse{launchEnvelope{launchgov.Disclaimer}, c.readiness(rd)})
 	}
 }
 
@@ -507,10 +562,10 @@ type launchResultResponse struct {
 	Superseded []string           `json:"superseded_request_ids,omitempty"`
 }
 
-func toLaunchResult(res *launchgov.RequestResult) launchResultResponse {
+func (c launchCall) result(res *launchgov.RequestResult) launchResultResponse {
 	out := launchResultResponse{
 		launchEnvelope: launchEnvelope{launchgov.Disclaimer},
-		Request:        toLaunchRequestDTO(res.Request), Readiness: toLaunchReadinessDTO(res.Readiness), Executed: res.Executed,
+		Request:        c.dto(res.Request), Readiness: c.readiness(res.Readiness), Executed: res.Executed,
 	}
 	for _, id := range res.Superseded {
 		out.Superseded = append(out.Superseded, id.String())
@@ -540,14 +595,13 @@ func newLaunchCreateHandler(deps Deps) http.HandlerFunc {
 		}
 		sub := launchgov.Subject{TenantID: c.target, BrandID: brandID}
 		if body.Action == launchgov.ActionSuspend {
-			// A suspension is requested AND executed in one transaction by one authorised person;
-			// the service checks launch_authorisation:suspend itself.
-			res, err := deps.LaunchAuthorisation.Suspend(r.Context(), c.actor, launchgov.SuspendInput{Subject: sub, ReasonCode: body.ReasonCode, ConditionsNote: body.ConditionsNote})
-			if err != nil {
-				writeLaunchError(w, c, "suspend", err)
-				return
-			}
-			writeJSON(w, http.StatusCreated, toLaunchResult(res))
+			// A suspension has its own routes (immediate, one authorised person, no licensing section).
+			// Accepting it here would silently drop the licensing fields and answer 201, so it is refused.
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "use the suspend routes to suspend")
+			return
+		}
+		if !validLaunchCreateShape(body) {
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request")
 			return
 		}
 		in := launchgov.RequestInput{
@@ -583,7 +637,7 @@ func newLaunchCreateHandler(deps Deps) http.HandlerFunc {
 			writeLaunchError(w, c, "request", err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, toLaunchResult(res))
+		writeJSON(w, http.StatusCreated, c.result(res))
 	}
 }
 
@@ -606,19 +660,54 @@ func newLaunchListHandler(deps Deps) http.HandlerFunc {
 			writeLaunchError(w, c, "list", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, struct {
-			launchEnvelope
-			Items []launchRequestDTO `json:"items"`
-		}{launchEnvelope{launchgov.Disclaimer}, toLaunchRequestDTOs(rs)})
+		writeJSON(w, http.StatusOK, launchListResponse{launchEnvelope{launchgov.Disclaimer}, c.dtos(rs)})
 	}
 }
 
-func toLaunchRequestDTOs(rs []launchgov.Request) []launchRequestDTO {
+func (c launchCall) dtos(rs []launchgov.Request) []launchRequestDTO {
 	out := make([]launchRequestDTO, 0, len(rs))
 	for _, x := range rs {
-		out = append(out, toLaunchRequestDTO(x))
+		out = append(out, c.dto(x))
 	}
 	return out
+}
+
+// tenantView is true for a tenant-scoped caller. A tenant sees its own decisions, but never the
+// identities of PLATFORM staff (security review condition): for a platform-scope actor it gets the
+// scope only ("platform"), never a staff id.
+func (c launchCall) tenantView() bool { return c.actor.Scope == launchgov.ScopeTenant }
+
+// dto is toLaunchRequestDTO with the tenant redaction applied.
+func (c launchCall) dto(r launchgov.Request) launchRequestDTO {
+	d := toLaunchRequestDTO(r)
+	if c.tenantView() && r.RequestedByScope != launchgov.ScopeTenant {
+		d.RequestedBy = ""
+	}
+	return d
+}
+
+// readiness is toLaunchReadinessDTO with the tenant coarsening applied (see coarsenForTenant).
+func (c launchCall) readiness(r launchgov.Readiness) launchReadinessDTO {
+	d := toLaunchReadinessDTO(r)
+	if c.tenantView() {
+		coarsenForTenant(&d)
+	}
+	return d
+}
+
+// coarsenForTenant removes platform-internal detail from a tenant-scoped caller's readiness (review
+// condition h): the environment name is blanked to a fixed word and the detail codes of the checks
+// that describe the PROCESS (R-PROVIDER-TIER, R-ALERTS) collapse to "see_platform". Results (pass /
+// fail / not_evaluable), the hash and the acknowledgement set are unchanged, so the tenant can still
+// request. The hash is computed over the full readiness server-side, so redaction cannot change it.
+func coarsenForTenant(d *launchReadinessDTO) {
+	d.Environment = "redacted"
+	for i := range d.Checks {
+		switch d.Checks[i].Code {
+		case launchgov.CheckProviderTier, launchgov.CheckAlerts:
+			d.Checks[i].DetailCode = "see_platform"
+		}
+	}
 }
 
 // newLaunchQueueHandler is the platform-wide approval queue (platform staff only).
@@ -639,10 +728,7 @@ func newLaunchQueueHandler(deps Deps) http.HandlerFunc {
 			writeLaunchError(w, c, "queue", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, struct {
-			launchEnvelope
-			Items []launchRequestDTO `json:"items"`
-		}{launchEnvelope{launchgov.Disclaimer}, toLaunchRequestDTOs(rs)})
+		writeJSON(w, http.StatusOK, launchListResponse{launchEnvelope{launchgov.Disclaimer}, c.dtos(rs)})
 	}
 }
 
@@ -662,27 +748,25 @@ func newLaunchGetHandler(deps Deps) http.HandlerFunc {
 			writeLaunchError(w, c, "get", err)
 			return
 		}
-		d := toLaunchRequestDTO(*req)
+		d := c.dto(*req)
 		for _, ap := range apps {
-			d.Approvals = append(d.Approvals, launchApprovalDTO{
+			a := launchApprovalDTO{
 				ID: ap.ID.String(), Decision: ap.Decision, DecidedBy: ap.DecidedBy.String(), ReasonCode: ap.ReasonCode,
 				ReadinessHashAtDecision: ap.ReadinessHashAtDec, DecidedAt: ap.DecidedAt.UTC().Format(time.RFC3339),
-			})
+			}
+			if c.tenantView() { // approvers are platform staff: a tenant never sees their ids
+				a.DecidedBy = ""
+			}
+			d.Approvals = append(d.Approvals, a)
 		}
-		out := struct {
-			launchEnvelope
-			Request launchRequestDTO `json:"request"`
-			// Readiness is the CURRENT server-side evaluation of a pending request's inputs (never
-			// client-supplied): its readiness_hash is what an approver passes as seen_readiness_hash.
-			Readiness *launchReadinessDTO `json:"readiness,omitempty"`
-		}{launchEnvelope: launchEnvelope{launchgov.Disclaimer}, Request: d}
+		out := launchDetailResponse{launchEnvelope: launchEnvelope{launchgov.Disclaimer}, Request: d}
 		if req.Status == launchgov.ReqPending {
 			rd, err := deps.LaunchAuthorisation.ReadReadiness(r.Context(), c.actor, launchgov.EvalInputOf(*req))
 			if err != nil {
 				writeLaunchError(w, c, "get", err)
 				return
 			}
-			dto := toLaunchReadinessDTO(rd)
+			dto := c.readiness(rd)
 			out.Readiness = &dto
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -730,8 +814,8 @@ func newLaunchDecideHandler(deps Deps, decision string) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, launchDecisionResponse{
 			launchEnvelope: launchEnvelope{launchgov.Disclaimer},
-			Request:        toLaunchRequestDTO(res.Request), Decision: res.Decision, Executed: res.Executed,
-			Readiness: toLaunchReadinessDTO(res.Readiness), PriorRejects: toLaunchPriorRejects(res.PriorRejects),
+			Request:        c.dto(res.Request), Decision: res.Decision, Executed: res.Executed,
+			Readiness: c.readiness(res.Readiness), PriorRejects: toLaunchPriorRejects(res.PriorRejects),
 		})
 	}
 }
@@ -765,10 +849,7 @@ func newLaunchCancelHandler(deps Deps) http.HandlerFunc {
 			writeLaunchError(w, c, "cancel", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, struct {
-			launchEnvelope
-			Request launchRequestDTO `json:"request"`
-		}{launchEnvelope{launchgov.Disclaimer}, toLaunchRequestDTO(*req)})
+		writeJSON(w, http.StatusOK, launchRequestEnvelope{launchEnvelope{launchgov.Disclaimer}, c.dto(*req)})
 	}
 }
 
@@ -804,7 +885,7 @@ func newLaunchSuspendHandler(deps Deps, brand bool) http.HandlerFunc {
 			writeLaunchError(w, c, "suspend", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, toLaunchResult(res))
+		writeJSON(w, http.StatusOK, c.result(res))
 	}
 }
 
@@ -849,11 +930,11 @@ func newLaunchHistoryHandler(deps Deps) http.HandlerFunc {
 			for _, a := range t.ApproverIDs {
 				d.ApproverIDs = append(d.ApproverIDs, a.String())
 			}
+			if c.tenantView() && t.ActorType != launchgov.ScopeTenant { // platform staff ids are never shown to a tenant
+				d.ExecutedBy, d.ApproverIDs = nil, []string{}
+			}
 			items = append(items, d)
 		}
-		writeJSON(w, http.StatusOK, struct {
-			launchEnvelope
-			Items []launchTransitionDTO `json:"items"`
-		}{launchEnvelope{launchgov.Disclaimer}, items})
+		writeJSON(w, http.StatusOK, launchHistoryResponse{launchEnvelope{launchgov.Disclaimer}, items})
 	}
 }

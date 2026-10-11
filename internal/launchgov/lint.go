@@ -100,8 +100,8 @@ func lint(field, s string, maxBytes int, registration bool) error {
 		if r == '\n' {
 			continue
 		}
-		if unicode.IsControl(r) {
-			return fmt.Errorf("%w: %s contains a control character", ErrInvalidInput, field)
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) { // Cf: bidi overrides (U+202E), zero-width and joiner characters
+			return fmt.Errorf("%w: %s contains a control or format character", ErrInvalidInput, field)
 		}
 	}
 	s = normalise(s)

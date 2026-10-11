@@ -6274,16 +6274,16 @@ paths:
           $ref: "#/components/responses/LaunchUnavailable"
   /v1/admin/tenants/{tenantID}/launch-authorisations:
     post:
-      summary: File a launch authorisation request (activate, reactivate, close, ratify; suspend executes at once)
+      summary: File a launch authorisation request (activate, reactivate, close, ratify)
       description: >
         launch_authorisation:request (platform_admin; tenant_admin and compliance for a BRAND of their own tenant only), staff principals only.
         ADR 0112 (MOCK stack; IMPLEMENTED against the local database). Files a request that changes no status by itself: it needs the distinct platform approvers
         named in required_approvals (1 for a brand activate / reactivate / ratify; 2 for a tenant activation, any closure, and a platform-licence brand
         launch requested by tenant staff), who approve through the approve route. The server computes and snapshots the readiness it binds and returns it; every check that is not pass must be listed in
         acknowledged_check_codes (exactly that set). The licensing section records the basis of the decision; it is never judged and no licence is required by this API.
-        action `suspend` here is the same governed suspension as the suspend routes (requested and executed in one transaction, 201 with executed=true).
+        action `suspend` is NOT accepted here (400): a suspension has its own routes (brand and tenant suspend), because it executes at once and records no licensing section.
         The tenant is the {tenantID} path value only; a body tenant_id is accepted and ignored. brand_id selects a brand OF THE ROUTE TENANT (a foreign or unknown brand is 404);
-        absent means the tenant itself (platform only). The signed actor proof (ADR 0110) is produced server-side. Replaying the call while a request is pending is 409 LAUNCH_REQUEST_PENDING and records nothing.
+        absent means the tenant itself (platform only). The signed actor proof (ADR 0110) is produced server-side. Replaying the call while a request is pending is 409 LAUNCH_REQUEST_PENDING and changes no state (a denied audit row is written).
         A recorded launch decision is evidence that named people took a decision on stated inputs; it is not a legal or regulatory authorisation.
       security:
         - bearerAuth: []
@@ -6402,8 +6402,8 @@ paths:
       summary: Approve a launch authorisation request
       description: >
         launch_authorisation:approve (platform_admin ONLY; every tenant role is refused 403 at the permission gate), staff principals only.
-        The approver passes the readiness_hash it was shown (seen_readiness_hash); a stale hash records nothing (409 LAUNCH_STALE_READINESS). The requester and any account of the requester's Person
-        are refused (409 LAUNCH_SELF_APPROVAL); a second decision by the same Person is 409 LAUNCH_ALREADY_DECIDED and records nothing. When this approval is the final one required, the same transaction
+        The approver passes the readiness_hash it was shown (seen_readiness_hash); a stale hash records no approval (a denied audit row is written) (409 LAUNCH_STALE_READINESS). The requester and any account of the requester's Person
+        are refused (409 LAUNCH_SELF_APPROVAL); a second decision by the same Person is 409 LAUNCH_ALREADY_DECIDED and changes no state (a denied audit row is written). When this approval is the final one required, the same transaction
         executes the request (executed=true); if execution is refused the approval is recorded and the response is 409 LAUNCH_REFUSED_AT_EXECUTION with the refusal code in check_codes
         (approvals_stale, readiness_changed_since_approval, readiness_changed_unacknowledged, or an H- code). Operator-fixable refusals (open sportsbook bets, hold-bearing withdrawals,
         a lock timeout) roll the execution back and leave the request pending. The signed actor proof is produced server-side. A body tenant_id is accepted and ignored.
@@ -8697,7 +8697,7 @@ components:
       properties:
         version: { type: integer }
         computed_at: { type: string, format: date-time }
-        environment: { type: string }
+        environment: { type: string, description: "The guard environment name; the fixed word `redacted` for a tenant-scoped caller. For a tenant-scoped caller the detail_code of R-PROVIDER-TIER and R-ALERTS is `see_platform`." }
         checks: { type: array, items: { $ref: "#/components/schemas/LaunchCheck" } }
         readiness_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Pass back as seen_readiness_hash to approve." }
         non_passing_check_codes: { type: array, items: { type: string }, description: "Exactly the set a request must acknowledge." }
@@ -8726,7 +8726,7 @@ components:
       properties:
         tenant_id: { type: string, description: "Accepted and IGNORED: the tenant is the {tenantID} path value." }
         brand_id: { type: string, format: uuid, description: "A brand of the route tenant; absent means the tenant itself (platform only). Unknown or foreign: 404." }
-        action: { type: string, enum: [activate, reactivate, suspend, close, ratify] }
+        action: { type: string, enum: [activate, reactivate, close, ratify] }
         reason_code:
           type: string
           description: >
@@ -8768,11 +8768,11 @@ components:
       properties:
         id: { type: string, format: uuid }
         decision: { type: string, enum: [approve, reject] }
-        decided_by: { type: string, format: uuid }
+        decided_by: { type: string, format: uuid, description: "Platform staff id. OMITTED for a tenant-scoped caller (a tenant never sees platform staff identities)." }
         reason_code: { type: string }
         readiness_hash_at_decision: { type: string }
         decided_at: { type: string, format: date-time }
-      required: [id, decision, decided_by, reason_code, readiness_hash_at_decision, decided_at]
+      required: [id, decision, reason_code, readiness_hash_at_decision, decided_at]
     LaunchPriorReject:
       type: object
       properties:
@@ -8804,7 +8804,7 @@ components:
         readiness_snapshot_hash: { type: string }
         acknowledged_check_codes: { type: array, items: { type: string } }
         reason_code: { type: string }
-        requested_by: { type: string, format: uuid }
+        requested_by: { type: string, format: uuid, description: "The requester staff id. OMITTED for a tenant-scoped caller when the requester is platform staff (scope only, see requested_by_scope)." }
         requested_by_scope: { type: string, enum: [platform, tenant] }
         required_approvals: { type: integer, minimum: 0, maximum: 2 }
         payload_hash: { type: string }
@@ -8814,7 +8814,7 @@ components:
         refusal_code: { type: string }
         prior_rejects: { type: array, items: { $ref: "#/components/schemas/LaunchPriorReject" } }
         approvals: { type: array, items: { $ref: "#/components/schemas/LaunchApproval" } }
-      required: [id, tenant_id, subject_kind, action, from_status, to_status, status, jurisdiction_ids, readiness_snapshot_hash, acknowledged_check_codes, reason_code, requested_by, requested_by_scope, required_approvals, payload_hash, created_at, expires_at]
+      required: [id, tenant_id, subject_kind, action, from_status, to_status, status, jurisdiction_ids, readiness_snapshot_hash, acknowledged_check_codes, reason_code, requested_by_scope, required_approvals, payload_hash, created_at, expires_at]
     LaunchRequestEnvelope:
       type: object
       properties:
@@ -8863,8 +8863,8 @@ components:
         from_status: { type: string }
         to_status: { type: string }
         request_id: { type: string, format: uuid }
-        executed_by: { type: string, format: uuid }
-        approver_ids: { type: array, items: { type: string, format: uuid } }
+        executed_by: { type: string, format: uuid, description: "OMITTED for a tenant-scoped caller when platform staff executed it." }
+        approver_ids: { type: array, items: { type: string, format: uuid }, description: "Platform approvers; always empty for a tenant-scoped caller." }
         actor_type: { type: string, enum: [system, platform, tenant] }
         created_at: { type: string, format: date-time }
       required: [id, subject_kind, kind, to_status, approver_ids, actor_type, created_at]
@@ -8922,6 +8922,7 @@ components:
             - LAUNCH_REFUSED_AT_EXECUTION
             - LAUNCH_GUARD_REFUSED
             - LAUNCH_PROOF_REFUSED
+            - LAUNCH_NO_PERSON
             - LAUNCH_AUTHORISATION_UNAVAILABLE
         message:
           type: string
@@ -9123,7 +9124,7 @@ components:
       description: >
         403. forbidden: not a staff principal, the static launch_authorisation:* permission is missing for the role (approve and reject are platform_admin only), a tenant-scoped
         caller on a tenant subject or on the platform-wide queue, a non-requester cancelling, or an acting session. LAUNCH_PROOF_REFUSED: the database refused the signed actor
-        proof (check_codes carries the AP code). No data is returned.
+        proof (check_codes carries the AP code). LAUNCH_NO_PERSON: the staff account has no readable Person, so the four-eyes check cannot be evaluated. No data is returned.
       content:
         application/json:
           schema:

@@ -175,7 +175,7 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 				return err
 			}
 			res.Request = req
-			return s.auditEvent(ctx, tx, a, "rejected", req, map[string]any{"decision_reason_code": in.ReasonCode, "decided_by": a.StaffID.String()})
+			return s.auditEvent(ctx, tx, a, "rejected", req, map[string]any{"decision_reason_code": in.ReasonCode, "reason_code": in.ReasonCode, "request_reason_code": req.ReasonCode, "decided_by": a.StaffID.String()})
 		}
 
 		apps, err := loadApprovals(ctx, tx, req.ID)
@@ -186,12 +186,12 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 		if len(counted) < req.RequiredApprovals {
 			res.Request = req
 			return s.auditEvent(ctx, tx, a, "approved", req, map[string]any{
-				"decision_reason_code": in.ReasonCode, "decided_by": a.StaffID.String(),
+				"decision_reason_code": in.ReasonCode, "reason_code": in.ReasonCode, "request_reason_code": req.ReasonCode, "decided_by": a.StaffID.String(),
 				"approvals": len(counted), "of_required": req.RequiredApprovals, "readiness_snapshot_hash_at_decision": hash,
 			})
 		}
 		if err := s.auditEvent(ctx, tx, a, "approved", req, map[string]any{
-			"decision_reason_code": in.ReasonCode, "decided_by": a.StaffID.String(),
+			"decision_reason_code": in.ReasonCode, "reason_code": in.ReasonCode, "request_reason_code": req.ReasonCode, "decided_by": a.StaffID.String(),
 			"approvals": len(counted), "of_required": req.RequiredApprovals, "readiness_snapshot_hash_at_decision": hash, "final": true,
 		}); err != nil {
 			return err

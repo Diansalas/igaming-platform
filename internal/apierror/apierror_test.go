@@ -73,6 +73,7 @@ func TestLaunchCodes_LiteralsAndStatuses(t *testing.T) {
 		{CodeLaunchRefusedAtExecution, "LAUNCH_REFUSED_AT_EXECUTION", 409},
 		{CodeLaunchGuardRefused, "LAUNCH_GUARD_REFUSED", 409},
 		{CodeLaunchProofRefused, "LAUNCH_PROOF_REFUSED", 403},
+		{CodeLaunchNoPerson, "LAUNCH_NO_PERSON", 403},
 		{CodeLaunchUnavailable, "LAUNCH_AUTHORISATION_UNAVAILABLE", 503},
 	}
 	for _, tc := range cases {

@@ -35,12 +35,17 @@ func (w *world) creditAsset(tenantID, walletID uuid.UUID, asset string, amount i
 		if err != nil {
 			return err
 		}
+		// A negative amount withdraws from the wallet (a fixture to net a wallet back to zero).
+		cashDir, adjDir := ledger.Credit, ledger.Debit
+		if amount < 0 {
+			amount, cashDir, adjDir = -amount, ledger.Debit, ledger.Credit
+		}
 		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "lgov-fund-" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{
-				{LedgerAccountID: adj, Direction: ledger.Debit, Amount: amount},
-				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: amount},
+				{LedgerAccountID: adj, Direction: adjDir, Amount: amount},
+				{LedgerAccountID: cash, Direction: cashDir, Amount: amount},
 			},
 		})
 		return err
@@ -124,10 +129,18 @@ func TestFundsCheck_TwoAssets_SummedSeparately_AndSuspensionNoticeIsDistinct(t *
 	w.creditAsset(tid, usd1, "USD", 5, ledger.AccountManualAdjustment)
 	w.creditAsset(tid, usd2, "USD", 11, ledger.AccountPSPClearing)
 	_ = usdZero // a wallet with no movement contributes nothing
+	// A THIRD asset that nets to zero (credit then withdraw): it must be absent from the sums, and its
+	// player must not be counted as holding a balance.
+	gbp := w.walletOf(tid, b, "GBP")
+	w.creditAsset(tid, gbp, "GBP", 7, ledger.AccountManualAdjustment)
+	w.creditAsset(tid, gbp, "GBP", -7, ledger.AccountManualAdjustment)
 
 	rd, err := w.svc.EvaluateReadiness(ctx, launchgov.EvalInput{Subject: sub, Action: launchgov.ActionClose})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, present := rd.Balances["GBP"]; present {
+		t.Fatalf("an asset that nets to zero must be absent from the sums: %v", rd.Balances)
 	}
 	if len(rd.Balances) != 2 || rd.Balances["EUR"] != "18000000000000000000" || rd.Balances["USD"] != "16" {
 		t.Fatalf("each asset must be summed on its own as an exact decimal string: %v", rd.Balances)

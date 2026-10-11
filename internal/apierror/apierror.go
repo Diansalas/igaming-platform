@@ -109,6 +109,7 @@ const (
 	CodeLaunchRefusedAtExecution   Code = "LAUNCH_REFUSED_AT_EXECUTION"      // the final approval was recorded; execution refused
 	CodeLaunchGuardRefused         Code = "LAUNCH_GUARD_REFUSED"             // another database guard (LA0xx)
 	CodeLaunchProofRefused         Code = "LAUNCH_PROOF_REFUSED"             // 403: the ADR 0110 actor proof guard (AP0xx)
+	CodeLaunchNoPerson             Code = "LAUNCH_NO_PERSON"                 // 403: the staff account has no readable Person (four-eyes cannot be evaluated)
 	CodeLaunchUnavailable          Code = "LAUNCH_AUTHORISATION_UNAVAILABLE" // 503: the service is not wired in this process
 )
 
@@ -133,7 +134,7 @@ func httpStatus(c Code) int {
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
-	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused:
+	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson:
 		return http.StatusForbidden
 	case CodeNotFound, CodeSettlementNotFound:
 		return http.StatusNotFound

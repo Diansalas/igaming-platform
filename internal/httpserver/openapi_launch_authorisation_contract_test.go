@@ -137,15 +137,18 @@ func TestOpenAPI_LaunchAuthorisation_ErrorCodesMatch(t *testing.T) {
 	conflict := spec[strings.Index(spec, "    LaunchConflict:\n"):]
 	for c := range inCode {
 		switch c {
-		case "LAUNCH_AUTHORISATION_UNAVAILABLE", "LAUNCH_PROOF_REFUSED":
+		case "LAUNCH_AUTHORISATION_UNAVAILABLE", "LAUNCH_PROOF_REFUSED", "LAUNCH_NO_PERSON":
 			continue
 		}
 		if !strings.Contains(conflict, c) {
 			t.Errorf("%s is not described in the LaunchConflict response", c)
 		}
 	}
-	if !strings.Contains(spec[strings.Index(spec, "    LaunchForbidden:\n"):], "LAUNCH_PROOF_REFUSED") {
-		t.Error("LAUNCH_PROOF_REFUSED must be described in LaunchForbidden")
+	forbidden := spec[strings.Index(spec, "    LaunchForbidden:\n"):]
+	for _, c := range []string{"LAUNCH_PROOF_REFUSED", "LAUNCH_NO_PERSON"} {
+		if !strings.Contains(forbidden, c) {
+			t.Errorf("%s must be described in LaunchForbidden", c)
+		}
 	}
 }
 
@@ -239,6 +242,12 @@ func TestOpenAPI_LaunchAuthorisation_DTOsMatchSchemas(t *testing.T) {
 		{launchSuspendBody{}, "LaunchSuspendRequest"},
 		{launchResultResponse{}, "LaunchResult"},
 		{launchDecisionResponse{}, "LaunchDecisionResult"},
+		// Review condition (g): the envelopes too (they were inline structs before).
+		{launchReadinessResponse{}, "LaunchReadinessResponse"},
+		{launchListResponse{}, "LaunchRequestList"},
+		{launchRequestEnvelope{}, "LaunchRequestEnvelope"},
+		{launchDetailResponse{}, "LaunchRequestDetail"},
+		{launchHistoryResponse{}, "LaunchTransitionList"},
 	}
 	for _, c := range cases {
 		props := launchSchemaProps(schemaBlock(t, spec, c.schema))

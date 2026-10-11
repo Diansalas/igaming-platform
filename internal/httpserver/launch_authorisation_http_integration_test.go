@@ -129,7 +129,7 @@ func TestLaunchHTTP_BrandActivation_TwoPersonFlow(t *testing.T) {
 	g := w.do("GET", lhBase(tenantID)+"/"+rid, tt, nil)
 	var got lhRequestResp
 	g.decode(t, &got)
-	if g.status != http.StatusOK || got.Request.Status != "executed" || len(got.Request.Approvals) != 1 || got.Request.Approvals[0].DecidedBy != w.ops.Approver1.String() {
+	if g.status != http.StatusOK || got.Request.Status != "executed" || len(got.Request.Approvals) != 1 || got.Request.Approvals[0].DecidedBy != "" {
 		t.Fatalf("get executed request: %d %s", g.status, g.body)
 	}
 	// A decided request is not pending: a further approval is a stable 409.
@@ -240,7 +240,7 @@ func TestLaunchHTTP_Cancel_RequesterOnly_AndReplay(t *testing.T) {
 	}
 }
 
-// Replays record nothing and answer a stable 409.
+// Replays change no state (a denied audit row may be written) and answer a stable 409.
 func TestLaunchHTTP_ReplaysAreStable409_NothingRecorded(t *testing.T) {
 	w := newLHWorld(t)
 	tenantID := w.activeTenant()
@@ -799,13 +799,14 @@ func TestLaunchHTTP_Suspend_Supersedes_ReactivationNeedsApproval(t *testing.T) {
 	if got := w.status(tenantID, &brand); got != "active" {
 		t.Fatalf("brand status after reactivation: %s", got)
 	}
-	// create with action=suspend is the same governed suspension (requested and executed).
+	// Review condition (e): create with action=suspend is refused (400, pointing at the suspend routes);
+	// it must not suspend anything.
 	again := w.do("POST", lhBase(tenantID), w.tokReq(), map[string]any{"action": "suspend", "brand_id": brand.String(), "reason_code": "compliance_hold"})
-	if again.status != http.StatusCreated {
-		t.Fatalf("create with action=suspend: %d %s", again.status, again.body)
+	if again.status != http.StatusBadRequest || again.code(t) != "validation_error" || !strings.Contains(string(again.body), "suspend routes") {
+		t.Fatalf("create with action=suspend must be a 400: %d %s", again.status, again.body)
 	}
-	if got := w.status(tenantID, &brand); got != "suspended" {
-		t.Fatalf("brand status: %s", got)
+	if got := w.status(tenantID, &brand); got != "active" {
+		t.Fatalf("brand status after the refused create: %s", got)
 	}
 }
 

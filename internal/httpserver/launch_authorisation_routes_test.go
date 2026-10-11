@@ -37,6 +37,7 @@ func TestLaunchErrorCode_MapsEveryRefusal(t *testing.T) {
 		checks []string
 	}{
 		{"not found", wrap(launchgov.ErrNotFound), apierror.CodeNotFound, 404, nil},
+		{"no person", wrap(launchgov.ErrNoPerson), apierror.CodeLaunchNoPerson, 403, nil},
 		{"forbidden", wrap(launchgov.ErrForbidden), apierror.CodeForbidden, 403, nil},
 		{"acting session refused", launchgov.ErrActingSession, apierror.CodeForbidden, 403, nil},
 		{"invalid input", wrap(launchgov.ErrInvalidInput), apierror.CodeValidation, 400, nil},
