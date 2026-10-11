@@ -272,7 +272,7 @@ Each yields `pass | fail | not_evaluable`; `not_evaluable` is not `pass`.
 | `R-CATALOGUE` | the brand has at least one enabled casino game or sportsbook product |
 | `R-PROVIDER-TIER` | the running process's components are production-eligible (`providerkind`); non-production is `fail` with `detail_code = synthetic_environment` (production start is hard-gated already) |
 | `R-ALERTS` | ALERT-DELIVERY-1 routing has a real recipient for P1 kinds (today always `fail`) |
-| `R-PLAYER-FUNDS` (LF3; `close`, and shown for `suspend`) | count of players with a non-zero balance and per-asset sums; count of open sportsbook bets. Requires acknowledgement; the funds fall under ADR 0107 / HD-CTF-4 (no new policy here) |
+| `R-PLAYER-FUNDS` (LF3; `close`, and shown for `suspend`) | count of players with a non-zero balance and **per-asset sums as DECIMAL STRINGS** (`SUM(credit_total - debit_total)::text` over the wallet-bound projection rows, `NUMERIC(38,0)`; never `int64` or float, safe for an 18-exponent asset); count of open sportsbook bets; count of hold-bearing withdrawals. Requires acknowledgement. **Closing with non-zero balances STRANDS them: closure is terminal and the unclaimed-funds / dormant-balance policy is OPEN (HD-CTF-4), so those funds stay in the ledger with no process to return them; the acknowledgement of this check says so (a fixed notice text, `launchgov.NoticeFundsStranded`).** The check also does not see in-flight deposits or open casino rounds (a round has no representable open state, Q-GP-6; fixed notice `NoticeFundsOmissions`). No new funds policy here |
 
 ### 5.2 Hard preconditions (refuse; the minimum)
 
@@ -285,11 +285,28 @@ Each yields `pass | fail | not_evaluable`; `not_evaluable` is not `pass`.
 | H-5 | every check not `pass` is listed in `acknowledged_check_codes`; at execution Go re-evaluates and refuses (`refused_at_execution`, `readiness_changed_unacknowledged`) if a check not acknowledged in the request now fails | explicit human acknowledgement; no silent regression |
 | H-6 | `close`: tenant: existing GP020 (open sportsbook bets; LF4: sportsbook only, casino rounds are the Q-GP-6 residual). Tenant **and brand**: no hold-bearing withdrawal request of the subject's players (LF3; states holding funds per ADR 0107), refused `LA023` | mirrors Q-GP-1 and keeps frozen-funds cases out of a terminal state; no new funds policy |
 
-**Brand-closure open-bet mirror: CUT (LF1/LF4).** Rev 1's `LA022` is removed. Once the brand gameplay gate exists,
-open bets of a closed brand can only be voided (terminal stake return), never settled with a payout or added to;
-tenant closure keeps GP020. The open-bet count is shown in `R-PLAYER-FUNDS` for acknowledgement. Nothing else refuses:
+**Brand-closure open-bet mirror: CUT in rev 2 (LF1/LF4), RESTORED as a database backstop by the slice-3 review
+(security C1 / ledger-finance condition 2) under a NEW code, `LA024`** (rev 1's `LA022` stays removed). Once the brand
+gameplay gate exists, open bets of a closed brand can only be voided (terminal stake return), never settled with a
+payout or added to; a key-holder bug must still not be able to close irreversibly over them. Tenant closure keeps GP020.
+The open-bet count is also shown in `R-PLAYER-FUNDS` for acknowledgement. Nothing else refuses:
 a non-production environment, missing alert recipients or an expired licence under a licence-backed model are
 acknowledged inputs, not blocks.
+
+**Closure backstop in the database (slice-3 review, security C1 / ledger-finance condition 2; migration 0130).**
+`launch_subject_status_guard`, when `NEW.status = 'closed'`, refuses under the gate lock it already holds (the brand key,
+or the tenant key taken by `tenants_status_change_gate` in the same statement): `LA023` while a withdrawal request in
+`requested`, `pending_review`, `approved` or `submitted` exists for the tenant (or the brand), and `LA024` for a brand
+while an open `sportsbook_bets` row of that brand exists. Both reads bind `app.tenant_id` to the subject's tenant for the
+read and restore it (the 0121 technique; blind RLS would fail open, so the tests assert a non-zero refusal). The Go
+`LA023` check (H-6) stays as the friendly pre-check with the typed error; the database refuses the same state on the
+key-holder path that bypasses Go (tested for all four states x brand and tenant, and for a bet). **Not done: a ledger-side
+arm** refusing when the subject's players' `player_withdrawal_hold` balance is non-zero (ledger-finance invariant 12). It
+needs a per-wallet aggregate over the ledger inside the gate lock, which is not cheap or obviously sound there, and a hold
+without a hold-bearing request (a failed release) is exactly the HD-CTF-4 population; recorded as a residual
+(`NOT IMPLEMENTED`). **Race residual:** a withdrawal request inserted by a concurrent transaction that has not committed
+is invisible to the guard, because withdrawal creation does not take the status gate lock; the window is the length of
+that transaction.
 
 ## 6. Authorization, four-eyes and actor proof
 
@@ -487,26 +504,44 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
 8. Brand-level jurisdiction scoping stays tenant-level (ADR 0012); jurisdictions on a brand decision are a record.
 9. **S-3 (hard prerequisite).** Until `zz_actor_proof_guard` (slice 3) exists, DB four-eyes trusts GUCs (see 7.2).
    No HTTP or console route may write the three launch tables, and no real launch may be authorised through them,
-   before that guard is in place and `security` has reviewed it.
+   before that guard is in place and `security` has reviewed it. *(Slice 3: the guard is in place (migration 0130); the
+   `security` review of it is still required before any route is added, section 13 slice 4.)*
 10. **C-3(b).** A committed suspension supersedes pending requests of the same subject in its own transaction, but
     nothing yet fails a COMMIT of a suspension that left a stale `pending` activation/closure behind (a deferred
     check over the subject at commit). Not done soundly in slice 1; the slice-3 executor performs the supersede and
-    its test asserts no stale `pending` request survives a suspension.
+    its test asserts no stale `pending` request survives a suspension. *(Slice 3: closed. Migration 0130 adds the deferred
+    commit check `launch_suspension_no_stale_pending_at_commit` (`LA030`) and the executor supersedes; tests in
+    `internal/launchgov`.)*
     *(Slice 2 adds two slice-3 obligations: the brand status-change path uses `SET LOCAL lock_timeout` with a bounded,
     audited retry, and the executor refuses a brand-then-tenant status change in one transaction; see section 13.)*
 11. **Snapshot isolation (security r2).** An approval-based `pending -> executing` is refused (`LA011`) unless the
     transaction is READ COMMITTED, because a reject committed after a REPEATABLE READ / SERIALIZABLE snapshot is
     invisible to the reject check and the approvals guard only row-locks the request (SSI does not abort). The slice-3
-    executor must run in READ COMMITTED.
+    executor must run in READ COMMITTED. *(Slice 3: the executor asserts READ COMMITTED per transaction.)*
 12. **Slice-3 notes.** (i) A recorded `reject` is bound to its request only: it does NOT carry over to a later
     identical request on the same subject, so an approver can be "shopped" by re-requesting. Slice 3 must decide and
     record the policy (for example a cool-down, or surfacing prior rejects of the same payload hash to the next
     approvers); nothing in slice 1 prevents it. (ii) A tenant's own-brand suspension supersedes and discards the
     platform's pending requests for that subject (S3). The audit trail and the console must show that explicitly
-    (request, superseding suspension, actor), not as a silent disappearance.
+    (request, superseding suspension, actor), not as a silent disappearance. *(Slice 3: both decided and implemented, see
+    section 13: exact-payload reject carry-over within the request TTL; one `superseded` audit row per request. The console
+    part is slice 5.)*
 13. **C-5.** The slice-1 closure tests realise an admitted closure through the owner-run governed fixture, and the
     `tenant.status_change` audit assertion of the pre-0128 tests is not made (ChangeStatus fails closed). Slice 3
     restores that assertion on the executor. Runtime-role raw-UPDATE refusal (GP020 / LA020) is covered separately.
+    *(Slice 3: restored in `internal/sportsbook/tenant_closure_integration_test.go` against the real executor: one
+    `launch_authorisation.executed` row with before/after, both approvers and the reason; `tenant.status_changed` is
+    superseded by it, as section 8 says.)*
+14. **Slice-3 review residuals (recorded, not closed).** (a) No ledger-side closure arm: a non-zero `player_withdrawal_hold`
+    balance without a hold-bearing request does not block a closure (ledger-finance invariant 12 `NOT IMPLEMENTED`); the
+    request-state arm and the brand open-bet arm are in the database (`LA023`, `LA024`). (b) Withdrawal creation does not take
+    the status gate lock, so a not-yet-committed withdrawal request is invisible to the closure guard. (c) Closing with
+    non-zero balances strands them until HD-CTF-4 (OPEN); readiness also omits in-flight deposits and open casino rounds
+    (Q-GP-6). (d) The prior-rejecter rule is Go-only. (e) The database does not recompute the readiness snapshot hash from the
+    snapshot JSON. (f) Production pools are not yet wired to `db.ConnectWithRuntimeParams` for
+    `idle_in_transaction_session_timeout` (slice 4 / deployment). (g) The `launch.suspension_exhausted` P1 alert has no route or
+    recipient (ALERT-DELIVERY-1). (h) The reason catalogues are a RECOMMENDATION. (i) The security review of slice 3 was
+    static; its runtime attack list is to be re-run as `igaming_runtime` on a private scratch database before slice 4.
 
 ## 13. Work breakdown (slices; none starts before LO-1 is put to the owner or explicitly defaulted)
 
@@ -576,6 +611,122 @@ player's BRAND is not `active`.
   placements by design). (2) The executor MUST refuse, in one transaction, a brand status change followed by a status
   change of that brand's tenant (brand key X then tenant key X inverts the tenant-then-brand order of placements); one
   subject per executing transaction.
+
+**Slice 3 implementation note (`backend`, 2026-10-11; status: `IMPLEMENTED against MOCK/local DB - security/LF/CR conditions
+being closed` (NOT complete): the `security`, `ledger-finance` and `code-reviewer` conditions listed under "Review conditions"
+below are applied on this branch and need re-review; `identity-compliance` and `qa` review still required; the security
+review was static only, so the runtime attack list must be re-run as `igaming_runtime` before slice 4; no HTTP route or console
+exists yet, so nothing here is reachable by an operator; every record produced is a recorded decision, not a legal
+authorisation).** Migration 0130, `internal/launchgov`, the ADR 0110 proof extension and the permissions.
+- **Proof guard (closes S-3 / 12.9, S-8, C-3(b)).** `zz_actor_proof_guard` (last BEFORE trigger) on `launch_authorisation_requests`
+  (INSERT, cancel) and `launch_authorisation_approvals` (INSERT). `actor_proof_require` admits `launch_authorisation:request|
+  suspend|cancel|approve|reject` for scope `platform` (NULL tenant) or `tenant`, `approve`/`reject` for `platform` only, never
+  `platform_acting`. The request digest (`launch_request_content_digest`, Go twin `actorproof.LaunchRequest.Digest`) binds
+  `tenant_id`, `subject_kind`, `brand_id`, `action`, `reason_code` and every other caller-supplied content column incl. the
+  readiness hash; `:suspend` iff `action = 'suspend'` (derived from the row). Transitions and the status UPDATE are bound through
+  the same-transaction executing request. `internal/launchgov` joined `TestStatic_OnlyFourEyesPackagesSign`'s allow-list (so did
+  the two integration-tag test-support packages that sign for fixtures). Deviation (hardening): a pending suspension is executed
+  only by its own requester (`AP004` otherwise).
+- **Approval-age and readiness bounds (S-1/S-8).** At execution Go refuses (`refused_at_execution`, durable) approvals older than
+  `ApprovalMaxAge` (default 24 h, an engineering default, not a policy value: `approvals_stale`), approvals whose recorded
+  readiness hash differs from the fresh one (`readiness_changed_since_approval`), a now-failing unacknowledged check
+  (`readiness_changed_unacknowledged`), and a failed H-1/H-2/H-3 re-check. An approver must pass the readiness hash they saw;
+  a stale hash records nothing (`ErrStaleReadiness`). The readiness hash covers version, environment and the checks, NOT
+  `computed_at` and NOT the live counts (`Readiness.Info`, display only).
+- **Executor.** `launchgov` is the only non-test writer of `tenants.status` / `brands.status` (`status_writer_static_test.go`);
+  `tenant.ChangeStatus` was removed (its GP020 translation and typed error stay in `internal/tenant/status.go`). READ COMMITTED
+  is asserted per transaction (the database also refuses otherwise, 12.11). `SET LOCAL lock_timeout` (default 5 s); a lock timeout
+  or deadlock rolls back (the final approval too) and is a retryable error; a suspension retries up to 3 times and audits one
+  denied row with the attempt count. One subject per executing transaction (security C2), enforced by the status guard as well
+  (a tenant change after a brand change of the same tenant in one transaction: `LA020`). Brand updates bind `app.tenant_id` to the
+  subject's own tenant transaction-locally and restore it (S6). The subject row is locked `FOR NO KEY UPDATE` (the UPDATE's own
+  lock): `FOR UPDATE` conflicts with the `FOR KEY SHARE` of every foreign-key check and deadlocked with placements and with
+  concurrent suspensions (found by the x50 races). Lock order: pending requests of the subject (id order), then the subject.
+- **Reject carry-over (12.12 (i), decided).** A request identical to one rejected within `RequestTTL` (72 h) in subject, action
+  and `payload_hash` is refused (`LA014` / `ErrPriorReject`, naming the prior request and the retry-after time). Exact, not
+  fuzzy: any change of content is a different request; a cancelled, expired or superseded request carries nothing. The 72 h upper
+  edge of the window is not exercised by a test (it needs a clock); the lower edge is.
+- **Supersede (12.12 (ii), C-3(b)).** A suspension supersedes every other pending request of the subject in its transaction; the
+  audit trail carries one `superseded` row per request (request id, superseding request, actor, scope) and the `suspended` row
+  lists the ids, whether the suspender is a platform admin or the tenant itself. A deferred commit check (`LA030`) fails the COMMIT
+  of a suspension that left a stale pending request.
+- **Hard preconditions and readiness.** H-1..H-3 and H-6 as in 5.2 (H-2 never judges: four recorded bases; a tenant-scope read sees
+  only its bound licence, so a foreign licence id is `licence_not_found`); H-6 withdrawal states `requested`, `pending_review`,
+  `approved`, `submitted` (the hold posts at `requested`), checked at the request and again under the subject locks at execution
+  (rollback, request stays pending, like GP020). Eight configuration checks + `R-PLAYER-FUNDS`; `R-CATALOGUE` covers casino
+  availability only (the sportsbook catalogue is not brand-scoped); `R-ALERTS` is derived from the alert channel vocabulary.
+- **Permissions.** `launch_authorisation:request|approve|suspend|read`, static (not in any grantable catalogue): `approve` is
+  `platform_admin` only; request/suspend/read also `tenant_admin` and `compliance`.
+- **PII lint** (8.8): the digit-run and phone rules do not apply to `responsible_operator_registration` (a registry number is its
+  purpose); e-mail, IBAN, wallet and Luhn-valid card shapes still do. Closed reason catalogues per action and per decision live in
+  `launchgov` (`lint.go`).
+
+**Review conditions applied after the slice-3 reviews (ledger-finance APPROVE WITH CONDITIONS, code-reviewer CONDITIONALLY
+READY, security APPROVE WITH CONDITIONS; `IMPLEMENTED` against the local database, re-review required).**
+- **Closure backstop (security C1, LF cond. 2).** `LA023` / `LA024` in `launch_subject_status_guard`, see 5.2. The ledger-side
+  arm (non-zero `player_withdrawal_hold` balance) is `NOT IMPLEMENTED` (residual, invariant 12).
+- **Consequence for existing suites (found by the full evidence run).** A closed subject that still holds hold-bearing
+  withdrawals (or, for a brand, open bets) can no longer be produced by any governed path. About a dozen payments tests
+  (ADR 0111 hold resolution, K3 closed-tenant actor scope, R3 closed-tenant observation, H-SEC-11) and the slice-2
+  sportsbook brand-gate matrix built exactly that state. They now use `launchfix.ForceClosed`, which reproduces a subject
+  closed BEFORE migration 0130 (the population hold resolution exists for; same sanctioned integration-only trigger
+  exception as `ForcePending`), and the two httpserver withdrawal tests and the sportsbook matrix assert the new
+  refusal (`LA023` / resolve the bets first) instead. The hold-resolution machinery itself is unchanged and still serves
+  suspended subjects and any subject closed before 0130.
+- **R-PLAYER-FUNDS (B).** Per-asset decimal-string sums, the stranded-until-HD-CTF-4 acknowledgement text and the omission
+  notice (in-flight deposits and open casino rounds, Q-GP-6), see 5.1.
+- **Suspension race (CR1).** A request inserted by a concurrent transaction between a suspension's pending-request read and its
+  commit made the C-3(b) check (`LA030`) fail the suspension. Fixed on both sides: the request transaction takes the subject row
+  `FOR SHARE` (it serialises with the executor's `FOR NO KEY UPDATE` and with nothing a gameplay foreign-key check takes), and the
+  suspension retries on `LA030` as on a lock timeout. Race tests in both orders assert both outcomes occur.
+- **Exhausted suspension (security C4).** After the bounded attempts a suspension ends as an audited denial (the audit row carries
+  the REAL attempt count) AND raises the P1 alert `launch.suspension_exhausted` through `alerting.RaiseDetached` (after the
+  business transaction rolled back, in the actor's scope; new Kind seeded in migration 0130). Notification for it is
+  `NOT IMPLEMENTED` (ALERT-DELIVERY-1 OPEN): a row exists, nobody is paged. `idle_in_transaction_session_timeout`: a per-CONNECTION
+  setting, `db.ConnectWithRuntimeParams` (startup parameters of the application's own pool, no `ALTER ROLE`); it is `PARTIALLY
+  IMPLEMENTED`: the capability and its test exist, but no production pool is wired to it yet (there is no launch route or
+  process wiring before slice 4), so the wiring in the process entry point is a slice-4 / deployment obligation.
+- **Expiry (CR4).** Expiry is materialised: a sweep (`SweepExpired`, also run best effort on `GetRequest`, `ListRequests`, a
+  refused `Decide`/`Cancel` and inside `Request` before its insert) moves stale pending requests to `expired` and writes one
+  `launch_authorisation.expired` audit row per request, exactly once. The `Statuses` filter treats a pending row past its
+  `expires_at` as `expired`.
+- **Reject carry-over is not defeated by editing the note (security C2).** `GetRequest` and `Decide` show every reject of the same
+  subject and action within the TTL, whatever its payload (`PriorRejects`, with `SamePayload`), and an approval is refused
+  (`ErrPriorRejecter`, `LAUNCH_PRIOR_REJECTER`) when the approver's own Person rejected one, unless the request carries a
+  non-empty `conditions_note` (the change note). Go-side rule, no database mirror (`NOT IMPLEMENTED` in the database).
+  `LA014` now carries the matching prior request id and decision time in its DETAIL; the refusal names the request whose
+  `payload_hash` matched and its retry time is `decided_at + TTL`, never the zero time.
+- **PII lint (security C3).** NFKC normalisation, format characters stripped, every character that is not a letter or number is a
+  separator in the digit-run and PAN rules, "at"/"dot" e-mail spellings, and the registration field is
+  `^[A-Za-z0-9][A-Za-z0-9 ./-]{0,63}$` with at most one alphabetic word (no `+`, no free names). Still an accident guard, not a
+  classification guarantee.
+- **Approval proof binding (security L1).** The approval / rejection proof binds the digest of (payload hash, the readiness hash
+  the decider saw, the reason code), `launch_approval_proof_digest` / `actorproof.LaunchApprovalDigest`. The stored
+  `readiness_snapshot` JSON is display data: the database does NOT recompute `readiness_snapshot_hash` from it (`NOT
+  IMPLEMENTED`; the hash, not the JSON, is what the request digest and the approvals bind).
+- **Fail-closed Person check (security L3).** The approver's Person is compared with the Person the database recorded on the
+  request; an unreadable row or a NULL Person is `ErrNoPerson`, never "not the same Person" (the former helper read both staff
+  rows and silently treated a tenant requester's invisible row as "different").
+- **Reason catalogues (security L5).** The closed catalogues in `lint.go` are a **RECOMMENDATION** authored for this slice, not a
+  Blueprint requirement. `other_documented` requires a non-empty `conditions_note` on a request and on a suspension (a cancel
+  or a reject carries no note field, so the rule cannot apply there).
+- **What is re-checked where (security L2, accurate).** Under the subject locks at execution: H-1 (status unchanged) and H-6
+  (hold-bearing withdrawals), and the database independently (LA020, LA023, LA024, LA011, AP*). Go-only and evaluated BEFORE the
+  executing transaction (so a TOCTOU window exists between that evaluation and the lock): the readiness hash match, the
+  acknowledged-checks re-evaluation, H-2 and H-3, and the 24 h approval age. The window is bounded by the request's own
+  transaction time and is the same for every readiness input (configuration is read, not locked). H-5 "re-check at execution"
+  in the table above means this Go evaluation, not a lock.
+- **Other fixes.** The `LA010` ratify rule (`only a subject whose latest transition is legacy_baseline`) has its own error
+  (`ErrNotLegacyBaseline`, `LAUNCH_NOT_LEGACY_BASELINE`) mirrored in Go in the request transaction; `R-ALERTS` iterates
+  `alerting.AllChannelKinds()` instead of naming kinds; the fixture pin now covers `launchdrive` and the status-writer scan
+  recognises quoted identifiers, `SET (status, ...) =` and upserts (see `docs/security/launch-status-readers.md`).
+- **Deviations from this ADR, listed.** (1) The acknowledgement rule is stricter than 5.2 H-5 reads: a request that
+  acknowledges a check that is NOT non-passing (an "extra" code) is refused (`extra:<code>`), so a blanket acknowledgement
+  cannot blind approvers. (2) A pending suspension is executed only by its own requester (`AP004` otherwise). (3) The subject
+  row lock is `FOR NO KEY UPDATE`, and the request transaction takes it `FOR SHARE` (above). (4) A brand-closure open-bet
+  refusal exists again in the database (`LA024`, above), against the rev-2 cut of the Go-side mirror.
+- **Mutation evidence** for these items is committed under `docs/plans/prh2-hardening-round/`
+  (`adr0112-slice3-mutation-*.txt`).
 
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all

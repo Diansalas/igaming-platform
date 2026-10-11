@@ -611,7 +611,7 @@ RLS one.
 | Object | `igaming_runtime` | table owner (`igaming`) |
 |---|---|---|
 | `tenants` / `brands` INSERT | only `status = 'pending_launch'` (the default); any other value is refused, SQLSTATE `LA021` | any status; the database writes an `owner_provisioned` transition (LF2) |
-| `tenants.status` / `brands.status` UPDATE | refused unless a `governed` transition of an executing request exists in the same transaction (`LA020`, trigger `zz_launch_status_governed`); `closed` is never left | bound by the same trigger (owner bypass is only possible by disabling it, ADR 0110 9.4 residual) |
+| `tenants.status` / `brands.status` UPDATE | refused unless a `governed` transition of an executing request exists in the same transaction (`LA020`, trigger `zz_launch_status_governed`); `closed` is never left; a closure is also refused while a hold-bearing withdrawal exists (`LA023`) or, for a brand, an open sportsbook bet (`LA024`) | bound by the same trigger (owner bypass is only possible by disabling it, ADR 0110 9.4 residual) |
 | `launch_authorisation_requests` | `SELECT`, `INSERT`, column-level `UPDATE` on `status, decided_at, refusal_code, executing_txid` only; no `DELETE` / `TRUNCATE` | all (FORCE RLS and the guard triggers still apply) |
 | `launch_authorisation_approvals`, `launch_status_transitions` | `SELECT`, `INSERT` only (append-only: `UPDATE` / `DELETE` / `TRUNCATE` are refused by trigger, `LA099`) | all, same triggers |
 | `legacy_baseline` / `owner_provisioned` transitions | refused (`LA013`); also not admitted by any runtime RLS policy | allowed, `from_status` NULL only; one narrow `owner_provisioning_insert` policy that admits only the table-owner role by strict equality |

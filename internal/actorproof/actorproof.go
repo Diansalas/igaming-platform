@@ -18,8 +18,8 @@
 //
 // The signing capability (Issuer.Sign / Issuer.Attach) must be reached ONLY
 // from the packages that own four-eyes and the K1 capability-grant flow
-// (internal/adjustment, internal/payments, internal/capability) and from process
-// wiring; a static test (TestStatic_OnlyFourEyesPackagesSign in
+// (internal/adjustment, internal/payments, internal/capability, and since ADR 0112
+// slice 3 internal/launchgov) and from process wiring; a static test (TestStatic_OnlyFourEyesPackagesSign in
 // actorproof_test.go) pins this. The key is
 // configuration (ACTOR_PROOF_KEYS / ACTOR_PROOF_ACTIVE_KID), never committed,
 // never stored where igaming_runtime SQL can read it.
@@ -83,6 +83,17 @@ const (
 	OpPolicyApprove = "financial_policy_change:approve"
 	OpPolicyReject  = "financial_policy_change:reject"
 	OpPolicyCancel  = "financial_policy_change:cancel"
+
+	// ADR 0112 slice 3 (migration 0130): brand and tenant launch authorisation. Provable
+	// for scope tenant or platform (NULL tenant on the wire) only; approve and reject for
+	// scope platform only; never platform_acting. OpLaunchSuspend signs a request whose
+	// action is 'suspend' and OpLaunchRequest every other action (the database derives the
+	// operation from the row, so a proof for the other operation is refused).
+	OpLaunchRequest = "launch_authorisation:request"
+	OpLaunchSuspend = "launch_authorisation:suspend"
+	OpLaunchCancel  = "launch_authorisation:cancel"
+	OpLaunchApprove = "launch_authorisation:approve"
+	OpLaunchReject  = "launch_authorisation:reject"
 )
 
 // Scopes the database admits.
@@ -138,6 +149,8 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: nil tenant", ErrInvalidClaims)
 	case strings.HasPrefix(c.Operation, "withdrawal_hold_resolution:") && c.Scope != ScopePlatformActing:
 		return fmt.Errorf("%w: withdrawal_hold_resolution operations are provable for the platform_acting scope only", ErrInvalidClaims)
+	case strings.HasPrefix(c.Operation, launchOperationPrefix) && !launchOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: launch_authorisation operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):
@@ -149,7 +162,22 @@ func (c Claims) validate() error {
 }
 
 func platformOperation(op string) bool {
-	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:")
+	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:") ||
+		strings.HasPrefix(op, launchOperationPrefix)
+}
+
+const launchOperationPrefix = "launch_authorisation:"
+
+// launchOperationAdmitted mirrors the verifier (migration 0130): the closed launch operation
+// set, scope tenant or platform, and approve / reject for scope platform only.
+func launchOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpLaunchRequest, OpLaunchSuspend, OpLaunchCancel:
+		return scope == ScopeTenant || scope == ScopePlatform
+	case OpLaunchApprove, OpLaunchReject:
+		return scope == ScopePlatform
+	}
+	return false
 }
 
 // Issuer signs proofs. It holds key material and must be treated as a secret

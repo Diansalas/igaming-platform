@@ -188,8 +188,7 @@ func TestLaunchGov_C3a_RecordedRejectBlocksExecution(t *testing.T) {
 	}
 	// pending -> rejected still needs the same-transaction reject (already covered); with it, it works.
 	if err := w.platformRT(w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE launch_authorisation_requests SET status = 'cancelled' WHERE id = $1`, reqID)
-		return err
+		return lgCancel(ctx, tx, reqID)
 	}); err != nil {
 		t.Fatalf("the requester can still cancel: %v", err)
 	}

@@ -28,6 +28,11 @@ const (
 	ChannelMock ChannelKind = "mock"
 )
 
+// AllChannelKinds is the closed channel vocabulary of the code: every kind that has a constant
+// above. A new kind is added here with its constant (internal/launchgov R-ALERTS derives its
+// result from this list and KnownHumanChannelKind instead of naming kinds itself).
+func AllChannelKinds() []ChannelKind { return []ChannelKind{ChannelLog, ChannelMock} }
+
 // Outcome is what Sink.Deliver reports.
 type Outcome string
 

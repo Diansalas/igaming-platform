@@ -10,11 +10,13 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -40,23 +42,44 @@ func hsecSetBrandStatus(t *testing.T, pool *db.Pool, tenantID, brandID uuid.UUID
 type hsecHTTPCase struct {
 	name       string
 	set, reset func(t *testing.T, pool *db.Pool, tenantID, brandID uuid.UUID)
+	// try (closed cases only) attempts the closure and returns the database's answer. Since the
+	// ADR 0112 slice-3 review (security C1) the database refuses to close a tenant / brand while a
+	// hold-bearing withdrawal exists (LA023), so the two withdrawal tests, which hold one, assert
+	// that refusal for the closed cases instead of exercising a closed subject with a live hold.
+	try func(pool *db.Pool, tenantID, brandID uuid.UUID) error
+}
+
+// requireClosureRefusedWithHold fails unless the closure is refused LA023 by the database.
+func requireClosureRefusedWithHold(t *testing.T, c hsecHTTPCase, pool *db.Pool, tenantID, brandID uuid.UUID) {
+	t.Helper()
+	err := c.try(pool, tenantID, brandID)
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "LA023" {
+		t.Fatalf("closing a subject that holds a hold-bearing withdrawal must be refused LA023 by the database, got %v", err)
+	}
 }
 
 var hsecHTTPCases = []hsecHTTPCase{
 	{"tenant_suspended",
 		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "suspended") },
-		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "active") }},
+		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "active") }, nil},
 	// closed is terminal (ADR 0112 section 3.1; HD-CTF-9 open): a closed subject has no reactivation
 	// step (reset == nil), the refusal and the no-rows-created assertions still run.
 	{"tenant_closed",
 		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "closed") },
-		nil},
+		nil,
+		func(_ *db.Pool, tn, _ uuid.UUID) error {
+			return launchfix.TrySetTenantStatus(context.Background(), tn, "closed")
+		}},
 	{"brand_suspended",
 		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "suspended") },
-		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "active") }},
+		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "active") }, nil},
 	{"brand_closed",
 		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "closed") },
-		nil},
+		nil,
+		func(_ *db.Pool, tn, b uuid.UUID) error {
+			return launchfix.TrySetBrandStatus(context.Background(), tn, b, "closed")
+		}},
 }
 
 func assertNotActiveRefusal(t *testing.T, resp *http.Response, what string) {
@@ -144,6 +167,10 @@ func TestHSEC11_HTTP_WithdrawalRequest_NonActiveRefused_RetryAfterReactivation(t
 			reqs := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID)
 			ledger := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
+			if c.try != nil {
+				requireClosureRefusedWithHold(t, c, pool, tenant.ID, brand.ID)
+				return
+			}
 			c.set(t, pool, tenant.ID, brand.ID)
 			key := "retry-" + uuid.NewString()
 			body := map[string]any{"asset_code": "EUR", "amount": 4000, "idempotency_key": key, "payout_instrument_id": instrument}
@@ -198,6 +225,10 @@ func TestHSEC11_HTTP_StaffSubmit_NonActiveRefused_StaysApproved_ThenSubmits(t *t
 			}
 			ledger := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
+			if c.try != nil {
+				requireClosureRefusedWithHold(t, c, pool, tenant.ID, brand.ID)
+				return
+			}
 			c.set(t, pool, tenant.ID, brand.ID)
 			assertNotActiveRefusal(t, postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "bank_transfer"}), "submit")
 			if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE id = $1 AND state = 'approved'`, wr.ID); n != 1 {

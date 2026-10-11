@@ -1,0 +1,487 @@
+ADR 0112 slice 3 mutation-kill evidence (internal/launchgov, migration 0130, review conditions)
+================================================================================================
+Method: a private sandbox copy of the worktree; each mutant edits one (or a coupled SQL+Go) site, rebuilds a private
+scratch database from the sandbox migrations when the mutant is SQL, runs the launchgov (integration, -p 1) suite or
+the named package subset as igaming_runtime, and is KILLED when that run fails. Files are always restored.
+Driver: scratchpad a3_mutate.py (S = SQL, G = Go gates of the original slice, R = review-condition mutants).
+Runs: against branch adr0112-slice3-launchgov. ERROR means the mutant did not compile or its pattern was not found
+and is NOT evidence; an ERROR row below is shown only when no later pass repaired it.
+
+FINAL STATUS PER MUTANT (the last pass that ran it wins)
+------------------------------------------------------------------------------------------------
+S01 | KILLED | requests INSERT not proof-guarded
+      killed by: --- FAIL: TestProof_GUCImpersonation_IsRefused_AsRuntimeRole (0.09s); --- FAIL: TestProof_RequestBinding_Matrix (0.06s); FAIL
+S02 | KILLED | approvals INSERT not proof-guarded
+      killed by: --- FAIL: TestProof_GUCImpersonation_IsRefused_AsRuntimeRole (0.08s); --- FAIL: TestProof_ApprovalAndCancelBinding (0.10s); FAIL
+S03 | KILLED | :suspend not derived from the action
+      killed by: --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (0.19s); --- FAIL: TestConcurrency_TwoSuspensions_OneWins_x20 (0.07s); --- FAIL: TestFlow_TenantActivation_NeedsTwoApprovers_ThenSuspendReactivateClose (0.16s)
+S04 | KILLED | approval operation not derived from the decision
+      killed by: --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.08s); --- FAIL: TestProof_ApprovalAndCancelBinding (0.10s); --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.09s)
+S05 | KILLED | cancel branch removed
+      killed by: --- FAIL: TestProof_ApprovalAndCancelBinding (0.12s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.338s
+S06 | KILLED | suspension executable by anyone
+      killed by: --- FAIL: TestProof_SuspensionExecutionBoundToRequester (0.06s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	21.707s
+S07 | SURVIVED | request guard does not assert the requester columns are the proven actor
+      survived: equivalent: the requester columns are also forced by the 0128 guard (LA001/LA012 paths); the proof guard check is a second line, and every forged-actor test is refused earlier or at the proof.
+S10 | KILLED | verifier: approve/reject admitted for tenant scope
+      killed by: --- FAIL: TestVerifier_LaunchFamily_ScopeOperationMatrix (0.06s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	21.386s
+S11 | KILLED | verifier: platform_acting admitted for the launch family
+      killed by: --- FAIL: TestVerifier_LaunchFamily_ScopeOperationMatrix (0.06s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	21.782s
+S12 | KILLED | verifier: launch operation set open
+      killed by: --- FAIL: TestVerifier_LaunchFamily_ScopeOperationMatrix (0.06s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	21.508s
+S13 | KILLED | verifier: launch family not admitted for platform scope
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.37s); --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.10s); --- FAIL: TestConcurrency_TwoFinalApprovals_OneExecution_x50 (0.10s)
+S14 | KILLED | digest binds no brand_id (SQL and Go twin)
+      killed by: --- FAIL: TestProof_RequestBinding_Matrix (0.12s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.381s
+S15 | KILLED | digest binds no action (SQL and Go twin)
+      killed by: --- FAIL: TestProof_RequestBinding_Matrix (0.13s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	21.851s
+S16 | KILLED | digest binds no tenant_id (SQL and Go twin)
+      killed by: --- FAIL: TestProof_RequestBinding_Matrix (0.16s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.772s
+S17 | KILLED | digest binds no reason_code (SQL and Go twin)
+      killed by: --- FAIL: TestProof_RequestBinding_Matrix (0.12s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.080s
+S20 | KILLED | carry-over also for cancelled requests
+      killed by: --- FAIL: TestRejectCarryOver_OnlyRejectedRequestsCarryOver (0.10s); --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.22s); FAIL
+S21 | KILLED | carry-over ignores the payload hash
+      killed by: --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.14s); --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.10s); --- FAIL: TestPriorRejecter_RejectOlderThanTTL_DoesNotCount (0.10s)
+S22 | KILLED | carry-over window is zero
+      killed by: --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.12s); --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.11s); --- FAIL: TestPriorReject_NamesTheMatchingRequest_AndRealRetryTime (0.
+S23 | KILLED | carry-over trigger removed
+      killed by: --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.11s); --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.10s); --- FAIL: TestPriorReject_NamesTheMatchingRequest_AndRealRetryTime (0.
+S24 | KILLED | C-3(b) counts the wrong status
+      killed by: --- FAIL: TestSuspension_StalePendingRequest_FailsTheCommit_LA030 (0.08s); --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (0.13s); FAIL
+S25 | KILLED | C-3(b) trigger never fires
+      killed by: --- FAIL: TestSuspension_StalePendingRequest_FailsTheCommit_LA030 (0.08s); --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (0.10s); FAIL
+S26 | KILLED | C2 mixed brand-then-tenant admitted
+      killed by: --- FAIL: TestExecutor_RefusesBrandThenTenantStatusChangeInOneTransaction (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.636s
+S27 | KILLED | C2 counts no brand transitions
+      killed by: --- FAIL: TestExecutor_RefusesBrandThenTenantStatusChangeInOneTransaction (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.406s
+G01 | KILLED | tenant session may act on a tenant subject
+      killed by: --- FAIL: TestAuthorize_ScopeAndPermissionRules (0.00s); --- FAIL: TestTenantStaff_RequestSuspendSupersede_NeverApprove_NoLoneReactivation (0.21s); --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused_CrossTenant404 
+G02 | KILLED | tenant actor may name a foreign tenant
+      killed by: --- FAIL: TestAuthorize_ScopeAndPermissionRules (0.00s); --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused_CrossTenant404 (0.14s); FAIL
+G03 | SURVIVED | no staff-id self-approval pre-check
+      survived: DB-backstopped: the staff-id self-approval pre-check is Go convenience; the database refuses a self-approval (LA012) and the same-Person check is exercised by G04.
+G04 | KILLED | no same-Person pre-check
+      killed by: --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused_CrossTenant404 (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.847s
+G05 | KILLED | acknowledgement: missing check accepted
+      killed by: --- FAIL: TestAckRule_ExactlyTheNonPassingSet (0.00s); --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.08s); FAIL
+G06 | KILLED | acknowledgement: extra check accepted
+      killed by: --- FAIL: TestAckRule_ExactlyTheNonPassingSet (0.00s); --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.07s); FAIL
+G07 | KILLED | stale readiness hash accepted
+      killed by: --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.669s
+G08 | KILLED | stale approvals accepted
+      killed by: --- FAIL: TestRules_ApprovalAge_StaleApprovalRefusedAtExecution (0.51s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.747s
+G09 | KILLED | readiness hash of earlier approvers ignored
+      killed by: --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.23s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	23.083s
+G10 | KILLED | regressed unacknowledged check ignored at execution
+      killed by: --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	23.045s
+G11 | KILLED | hold-bearing withdrawals ignored at execution (LA023)
+      killed by: --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.20s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	23.163s
+G12 | KILLED | hold-bearing withdrawals ignored at request (H-6)
+      killed by: --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.635s
+G13 | KILLED | READ COMMITTED not asserted
+      killed by: --- FAIL: TestIsolation_ApprovalBasedExecution_RequiresReadCommitted (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	23.085s
+G14 | KILLED | subject lock FOR UPDATE (deadlocks with FK checks / suspensions)
+      killed by: --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (4.66s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	42.282s
+G15 | KILLED | suspension does not supersede
+      killed by: --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (2.78s); --- FAIL: TestTenantStaff_RequestSuspendSupersede_NeverApprove_NoLoneReactivation (0.22s); --- FAIL: TestSuspension_StalePendingRequest_FailsTheCommit_LA030 (0.20
+G16 | KILLED | tenant GUC not restored after the brand UPDATE
+      killed by: --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.10s); --- FAIL: TestConcurrency_TwoFinalApprovals_OneExecution_x50 (0.16s); --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (0.07s)
+G17 | KILLED | H-2: licensee mismatch not detected
+      killed by: --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.18s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	24.835s
+G18 | KILLED | H-2: determination not required
+      killed by: --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.14s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	24.179s
+G19 | KILLED | H-2: status/model mismatch not detected
+      killed by: --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.22s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	25.665s
+G20 | KILLED | H-2: licence id not forbidden for not-applicable
+      killed by: --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.15s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	25.860s
+G21 | KILLED | H-3: configuration in effect not required
+      killed by: --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.28s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	26.370s
+G22 | KILLED | reject carry-over not mapped
+      killed by: --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.13s); --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (2.99s); --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.14s
+G23 | KILLED | cancel by a non-requester not refused in Go
+      killed by: --- FAIL: TestTenantStaff_RequestSuspendSupersede_NeverApprove_NoLoneReactivation (0.18s); --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (3.05s); --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused
+G24 | KILLED | closed subject not refused (H-1)
+      killed by: --- FAIL: TestFlow_TenantActivation_NeedsTwoApprovers_ThenSuspendReactivateClose (0.26s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	26.296s
+G25 | KILLED | illegal transition not refused (H-1)
+      killed by: --- FAIL: TestSuspend_ExhaustedAttempts_RaisesP1AndAuditsRealAttempts (3.11s); --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.10s); FAIL
+G26 | KILLED | request proof not attached
+      killed by: --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.12s); --- FAIL: TestConcurrency_TwoFinalApprovals_OneExecution_x50 (0.12s); --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (0.08s)
+G27 | KILLED | suspension never retries
+      killed by: --- FAIL: TestSuspend_LockTimeout_RetriesBounded_AndGameplayGateRace (0.50s); --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (0.12s); --- FAIL: TestSuspend_ExhaustedAttempts_RaisesP1AndAuditsRealAttempts (3.05s)
+G28 | KILLED | reason catalogue open for requests
+      killed by: --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (3.15s); --- FAIL: TestRequest_RecordsLicensingOperatorJurisdictionsAndNote_PIILinted (0.11s); FAIL
+G29 | KILLED | PII lint: e-mail not refused
+      killed by: --- FAIL: TestLintFreeText_RefusesPIIShapes (0.00s); --- FAIL: TestLintFreeText_RefusesTheReviewersEvasions (0.00s); FAIL
+G30 | KILLED | PII lint: long digit run not refused
+      killed by: --- FAIL: TestLintFreeText_RefusesPIIShapes (0.00s); --- FAIL: TestLintFreeText_RefusesTheReviewersEvasions (0.00s); FAIL
+G31 | KILLED | approve by tenant scope allowed in Go
+      killed by: --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (3.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	27.224s
+G32 | KILLED | readiness hash includes computed_at
+      killed by: --- FAIL: TestReadiness_HashIsDeterministic_IgnoresComputedAtAndOrder_BindsEveryResult (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.468s
+G33 | KILLED | not_evaluable counted as pass
+      killed by: --- FAIL: TestReadiness_HashIsDeterministic_IgnoresComputedAtAndOrder_BindsEveryResult (0.00s); --- FAIL: TestAckRule_ExactlyTheNonPassingSet (0.00s); FAIL
+G34 | SURVIVED | ratify changes status like any other
+      survived: equivalent for this test set: executing a ratification as a status write is refused by the status guard (ratify moves nothing: from = to is no change); the guard pins it.
+G35 | KILLED | final-approval audit/executed event name
+      killed by: --- FAIL: TestRatify_LegacyBaselineSubject_RecordsDecisionWithoutStatusChange (2.54s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	23.506s
+G36 | SURVIVED | executor does not verify subject status
+      survived: DB-backstopped: a status change under a stale from_status is refused by the status guard (LA020/LA010) and the unique pending index; no test can reach the Go check alone.
+R01 | KILLED | closure backstop: hold-bearing withdrawals not refused (LA023)
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.92s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.623s
+R02 | KILLED | closure backstop: withdrawal count ignores the brand
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.84s); --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.14s); FAIL
+R03 | KILLED | closure backstop: submitted is not a hold state
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.89s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.864s
+R04 | KILLED | closure backstop: requested is not a hold state
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.86s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.742s
+R05 | KILLED | closure backstop: RLS-blind read (tenant not bound)
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.90s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.408s
+R06 | KILLED | closure backstop: tenant GUC not restored
+      killed by: --- FAIL: TestFlow_TenantActivation_NeedsTwoApprovers_ThenSuspendReactivateClose (0.18s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	17.972s
+R07 | KILLED | closure backstop: only closure of a brand checked
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.88s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.688s
+R08 | KILLED | closure backstop: brand open bets not refused (LA024)
+      killed by: --- FAIL: TestBrandClosure_OpenBetRefusedByDatabase_LA024 (0.13s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/sportsbook	0.262s
+R09 | KILLED | closure backstop: settled bets also count
+      killed by: --- FAIL: TestBrandClosure_OpenBetRefusedByDatabase_LA024 (0.20s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/sportsbook	0.306s
+R10 | KILLED | closure backstop: other brands' bets count
+      killed by: --- FAIL: TestBrandClosure_OtherBrandsBetDoesNotBlock (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/sportsbook	0.408s
+R11 | KILLED | funds: sums through float
+      killed by: --- FAIL: TestFundsCheck_PerAssetSumsAreExactDecimalStrings_AndNoticesPresent (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	17.899s
+R12 | KILLED | funds: stranded-funds notice dropped
+      killed by: --- FAIL: TestFundsCheck_PerAssetSumsAreExactDecimalStrings_AndNoticesPresent (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	19.132s
+R13 | KILLED | funds: omissions notice dropped
+      killed by: --- FAIL: TestFundsCheck_PerAssetSumsAreExactDecimalStrings_AndNoticesPresent (0.06s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	17.853s
+R14 | KILLED | funds: balances not part of the pass condition
+      killed by: --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.16s); --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (0.06s); --- FAIL: TestConcurrency_ManyRequests_OnePending_x20 (0.07s)
+R15 | KILLED | suspend race: no retry on the commit check (LA030)
+      killed by: --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	5.462s
+R16 | KILLED | suspend race: request does not lock the subject FOR SHARE
+      killed by: --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	5.717s
+R17 | KILLED | suspend race: neither the retry nor the FOR SHARE lock
+      killed by: --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	5.047s
+R18 | KILLED | suspend race: the delayed side is always the same (one direction only)
+      killed by: --- FAIL: TestConcurrency_RequestRacesSuspension_BothOrders_x50 (2.04s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	7.221s
+R19 | KILLED | exhausted suspension raises no alert
+      killed by: --- FAIL: TestSuspend_ExhaustedAttempts_RaisesP1AndAuditsRealAttempts (3.05s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	19.697s
+R20 | KILLED | exhausted suspension audits the configured, not the real, attempt count
+      killed by: --- FAIL: TestSuspend_LockTimeout_RetriesBounded_AndGameplayGateRace (1.46s); --- FAIL: TestSuspend_ExhaustedAttempts_RaisesP1AndAuditsRealAttempts (3.05s); FAIL
+R21 | KILLED | alert raised for any refusal, not only exhaustion
+      killed by: --- FAIL: TestConcurrency_TwoSuspensions_OneWins_x20 (0.47s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	21.566s
+R22 | KILLED | alert Kind seeded with the wrong severity
+      killed by: --- FAIL: TestMigration0130_UpDownUp_WholeSchema_RestoresPriorBodiesVerbatim (2.26s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/tenant	3.976s
+R23 | KILLED | expiry: not audited
+      killed by: --- FAIL: TestExpiry_IsMaterialisedAndAuditedOnce (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	17.905s
+R24 | KILLED | expiry: not materialised
+      killed by: --- FAIL: TestExpiry_IsMaterialisedAndAuditedOnce (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.175s
+R25 | KILLED | expiry: Statuses filter ignores time-expired rows
+      killed by: --- FAIL: TestListRequests_StatusesFilter_TreatsTimeExpiredAsExpired (0.07s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.606s
+R26 | KILLED | expiry: not swept on a request
+      killed by: --- FAIL: TestExpiry_IsMaterialisedAndAuditedOnce (0.16s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	19.633s
+R27 | KILLED | expiry: not swept on a refused decision
+      killed by: --- FAIL: TestExpiry_IsMaterialisedAndAuditedOnce (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.468s
+R28 | KILLED | prior rejecter may approve
+      killed by: --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.13s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	20.744s
+R29 | KILLED | prior rejecter rule ignores the change note
+      killed by: --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.19s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	21.997s
+R30 | KILLED | prior rejects not shown by GetRequest
+      killed by: --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	20.297s
+R31 | KILLED | prior rejects ignore the TTL
+      killed by: --- FAIL: TestPriorRejecter_RejectOlderThanTTL_DoesNotCount (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	20.625s
+R32 | KILLED | prior rejects include approvals
+      killed by: --- FAIL: TestPriorRejecter_VariantAfterReject_ShownAndRefused (0.18s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.080s
+R33 | KILLED | missing Person treated as a different Person
+      killed by: --- FAIL: TestDecide_ApproverWithoutPerson_FailsClosed (0.08s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	20.905s
+R34 | SURVIVED | requester Person not checked for nil
+      survived: equivalent: requested_by_person_id is NOT NULL (forced by the request guard), so a nil recorded Person is unreachable; the check is defensive.
+R35 | KILLED | other_documented needs no note
+      killed by: --- FAIL: TestOtherDocumentedNeedsNote (0.00s); --- FAIL: TestOtherDocumented_RequiresNote (0.10s); FAIL
+R36 | KILLED | lint: no NFKC normalisation
+      killed by: --- FAIL: TestLintFreeText_RefusesTheReviewersEvasions (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.439s
+R37 | KILLED | lint: digit runs broken by punctuation
+      killed by: --- FAIL: TestLintFreeText_RefusesPIIShapes (0.00s); --- FAIL: TestLintFreeText_RefusesTheReviewersEvasions (0.00s); FAIL
+R38 | KILLED | lint: PAN broken by punctuation
+      killed by: --- FAIL: TestLintRegistration_RefusesPhonesNamesAndPunctuation (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.483s
+R39 | KILLED | lint: at/dot spellings accepted
+      killed by: --- FAIL: TestLintFreeText_RefusesTheReviewersEvasions (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.447s
+R40 | KILLED | lint: registration shape not enforced
+      killed by: --- FAIL: TestLintRegistration_RefusesPhonesNamesAndPunctuation (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.451s
+R41 | KILLED | lint: registration may be free text
+      killed by: --- FAIL: TestLintRegistration_RefusesPhonesNamesAndPunctuation (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.442s
+R42 | KILLED | approval proof: reason code not bound (SQL and Go twin)
+      killed by: --- FAIL: TestProof_ApprovalAndCancelBinding (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	19.081s
+R43 | KILLED | approval proof: seen readiness hash not bound (SQL and Go twin)
+      killed by: --- FAIL: TestProof_ApprovalAndCancelBinding (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	18.699s
+R44 | KILLED | approval proof: bare payload hash only (the old shape)
+      killed by: --- FAIL: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 (0.41s); --- FAIL: TestIsolation_ApprovalBasedExecution_RequiresReadCommitted (0.13s); --- FAIL: TestProof_ApprovalAndCancelBinding (0.11s)
+R45 | KILLED | LA014 names the latest reject, not the matching one
+      killed by: --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.13s); --- FAIL: TestPriorReject_NamesTheMatchingRequest_AndRealRetryTime (0.12s); FAIL
+R46 | KILLED | LA014 retry-after is the zero time
+      killed by: --- FAIL: TestPriorReject_FromDetail_AndFallbackIsNeverTheZeroTime (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.600s
+R47 | KILLED | LA014 DETAIL not carried by the database
+      killed by: --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.11s); --- FAIL: TestPriorReject_NamesTheMatchingRequest_AndRealRetryTime (0.11s); FAIL
+R48 | SURVIVED | not-legacy-baseline: Go mirror removed (DB classification remains)
+      survived: redundant pair with R49: either the Go mirror or the classification alone yields the same error; R50 removes both and is killed.
+R49 | SURVIVED | not-legacy-baseline: DB LA010 not classified separately (Go mirror remains)
+      survived: redundant pair with R48 (see above).
+R50 | KILLED | not-legacy-baseline: neither the Go mirror nor the classification
+      killed by: --- FAIL: TestRatify_LegacyBaselineSubject_RecordsDecisionWithoutStatusChange (2.44s); --- FAIL: TestRatify_NonLegacySubjectRefused (0.09s); FAIL
+R51 | KILLED | R-ALERTS hard-wired to pass
+      killed by: --- FAIL: TestAlertsCheck_IsDerivedFromTheChannelVocabulary (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	22.516s
+R52 | KILLED | launchdrive loses its build tag
+      killed by: --- FAIL: TestLaunchFixture_UnreachableFromNonTestBuilds (0.19s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.745s
+R53 | KILLED | launchfix loses its build tag
+      killed by: --- FAIL: TestLaunchFixture_UnreachableFromNonTestBuilds (0.24s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.749s
+R54 | KILLED | a non-test file imports launchdrive
+      killed by: --- FAIL: TestLaunchFixture_UnreachableFromNonTestBuilds (0.20s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.666s
+R55 | KILLED | writer scan: quoted identifiers no longer recognised
+      killed by: --- FAIL: TestStatic_StatusWriterScan_IsNotVacuous (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.440s
+R56 | KILLED | writer scan: column-list form no longer recognised
+      killed by: --- FAIL: TestStatic_StatusWriterScan_IsNotVacuous (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.420s
+R57 | KILLED | writer scan: upserts no longer recognised
+      killed by: --- FAIL: TestStatic_StatusWriterScan_IsNotVacuous (0.01s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.344s
+
+TOTAL: 116 mutants, 109 killed, 7 survived, 0 error
+
+PASS HISTORY
+------------------------------------------------------------------------------------------------
+[pass 1 (review-condition mutants R01-R57)] R01 closure backstop: hold-bearing withdrawals not refused (LA023) -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R02 closure backstop: withdrawal count ignores the brand -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R03 closure backstop: submitted is not a hold state -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R04 closure backstop: requested is not a hold state -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R05 closure backstop: RLS-blind read (tenant not bound) -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R06 closure backstop: tenant GUC not restored -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R07 closure backstop: only closure of a brand checked -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R08 closure backstop: brand open bets not refused (LA024) -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R09 closure backstop: settled bets also count -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R10 closure backstop: other brands' bets count -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R11 funds: sums through float -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R12 funds: stranded-funds notice dropped -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R13 funds: omissions notice dropped -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R14 funds: balances not part of the pass condition -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R15 suspend race: no retry on the commit check (LA030) -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R16 suspend race: request does not lock the subject FOR SHARE -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R17 suspend race: neither the retry nor the FOR SHARE lock -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R18 suspend race: SuspensionRacesFinalApproval always the same order -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R19 exhausted suspension raises no alert -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R20 exhausted suspension audits the configured, not the real, attempt count -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R21 alert raised for any refusal, not only exhaustion -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R22 alert Kind seeded with the wrong severity -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R23 expiry: not audited -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R24 expiry: not materialised -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R25 expiry: Statuses filter ignores time-expired rows -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R26 expiry: not swept on a request -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R27 expiry: not swept on a refused decision -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R28 prior rejecter may approve -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R29 prior rejecter rule ignores the change note -> ERROR
+[pass 1 (review-condition mutants R01-R57)] R30 prior rejects not shown by GetRequest -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R31 prior rejects ignore the TTL -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R32 prior rejects include approvals -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R33 missing Person treated as a different Person -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R34 requester Person not checked for nil -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R35 other_documented needs no note -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R36 lint: no NFKC normalisation -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R37 lint: digit runs broken by punctuation -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R38 lint: PAN broken by punctuation -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R39 lint: at/dot spellings accepted -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R40 lint: registration shape not enforced -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R41 lint: registration may be free text -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R42 approval proof: reason code not bound (SQL and Go twin) -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R43 approval proof: seen readiness hash not bound (SQL and Go twin) -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R44 approval proof: bare payload hash only (the old shape) -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R45 LA014 names the latest reject, not the matching one -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R46 LA014 retry-after is the zero time -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R47 LA014 DETAIL not carried by the database -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R48 not-legacy-baseline: no Go mirror and no classification -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R49 not-legacy-baseline: classified as illegal transition -> ERROR
+[pass 1 (review-condition mutants R01-R57)] R50 not-legacy-baseline: neither the Go mirror nor the classification -> ERROR
+[pass 1 (review-condition mutants R01-R57)] R51 R-ALERTS hard-wired to pass -> SURVIVED
+[pass 1 (review-condition mutants R01-R57)] R52 launchdrive loses its build tag -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R53 launchfix loses its build tag -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R54 a non-test file imports launchdrive -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R55 writer scan: quoted identifiers no longer recognised -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R56 writer scan: column-list form no longer recognised -> KILLED
+[pass 1 (review-condition mutants R01-R57)] R57 writer scan: upserts no longer recognised -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R10 closure backstop: other brands' bets count -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R18 suspend race: SuspensionRacesFinalApproval always the same order -> SURVIVED
+[pass 2 (R survivors after the tests were strengthened)] R21 alert raised for any refusal, not only exhaustion -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R27 expiry: not swept on a refused decision -> SURVIVED
+[pass 2 (R survivors after the tests were strengthened)] R29 prior rejecter rule ignores the change note -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R32 prior rejects include approvals -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R34 requester Person not checked for nil -> SURVIVED
+[pass 2 (R survivors after the tests were strengthened)] R38 lint: PAN broken by punctuation -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R46 LA014 retry-after is the zero time -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R48 not-legacy-baseline: Go mirror removed (DB classification remains) -> SURVIVED
+[pass 2 (R survivors after the tests were strengthened)] R49 not-legacy-baseline: DB LA010 not classified separately (Go mirror remains) -> SURVIVED
+[pass 2 (R survivors after the tests were strengthened)] R50 not-legacy-baseline: neither the Go mirror nor the classification -> KILLED
+[pass 2 (R survivors after the tests were strengthened)] R51 R-ALERTS hard-wired to pass -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] R27 expiry: not swept on a refused decision -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S01 requests INSERT not proof-guarded -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S02 approvals INSERT not proof-guarded -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S03 :suspend not derived from the action -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S04 approval operation not derived from the decision -> ERROR
+[pass 3 (original S/G sets re-run against the code under review)] S05 cancel branch removed -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S06 suspension executable by anyone -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S07 request guard does not assert the requester columns are the proven actor -> SURVIVED
+[pass 3 (original S/G sets re-run against the code under review)] S10 verifier: approve/reject admitted for tenant scope -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S11 verifier: platform_acting admitted for the launch family -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S12 verifier: launch operation set open -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S13 verifier: launch family not admitted for platform scope -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S14 digest binds no brand_id (SQL and Go twin) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S15 digest binds no action (SQL and Go twin) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S16 digest binds no tenant_id (SQL and Go twin) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S17 digest binds no reason_code (SQL and Go twin) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S20 carry-over also for cancelled requests -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S21 carry-over ignores the payload hash -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S22 carry-over window is zero -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S23 carry-over trigger removed -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S24 C-3(b) counts the wrong status -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S25 C-3(b) trigger never fires -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S26 C2 mixed brand-then-tenant admitted -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] S27 C2 counts no brand transitions -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G01 tenant session may act on a tenant subject -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G02 tenant actor may name a foreign tenant -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G03 no staff-id self-approval pre-check -> SURVIVED
+[pass 3 (original S/G sets re-run against the code under review)] G04 no same-Person pre-check -> ERROR
+[pass 3 (original S/G sets re-run against the code under review)] G05 acknowledgement: missing check accepted -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G06 acknowledgement: extra check accepted -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G07 stale readiness hash accepted -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G08 stale approvals accepted -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G09 readiness hash of earlier approvers ignored -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G10 regressed unacknowledged check ignored at execution -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G11 hold-bearing withdrawals ignored at execution (LA023) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G12 hold-bearing withdrawals ignored at request (H-6) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G13 READ COMMITTED not asserted -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G14 subject lock FOR UPDATE (deadlocks with FK checks / suspensions) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G15 suspension does not supersede -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G16 tenant GUC not restored after the brand UPDATE -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G17 H-2: licensee mismatch not detected -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G18 H-2: determination not required -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G19 H-2: status/model mismatch not detected -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G20 H-2: licence id not forbidden for not-applicable -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G21 H-3: configuration in effect not required -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G22 reject carry-over not mapped -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G23 cancel by a non-requester not refused in Go -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G24 closed subject not refused (H-1) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G25 illegal transition not refused (H-1) -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G26 request proof not attached -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G27 suspension retry unbounded-by-lock-error (never retries) -> ERROR
+[pass 3 (original S/G sets re-run against the code under review)] G28 reason catalogue open for requests -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G29 PII lint: e-mail not refused -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G30 PII lint: long digit run not refused -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G31 approve by tenant scope allowed in Go -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G32 readiness hash includes computed_at -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G33 not_evaluable counted as pass -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G34 ratify changes status like any other -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G35 final-approval audit/executed event name -> KILLED
+[pass 3 (original S/G sets re-run against the code under review)] G36 executor does not verify subject status -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] S04 approval operation not derived from the decision -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] R15 suspend race: no retry on the commit check (LA030) -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] R16 suspend race: request does not lock the subject FOR SHARE -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] R17 suspend race: neither the retry nor the FOR SHARE lock -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] R18 suspend race: the delayed side is always the same (one direction only) -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] R27 expiry: not swept on a refused decision -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] G34 ratify changes status like any other -> SURVIVED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] G35 final-approval audit/executed event name -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] G36 executor does not verify subject status -> SURVIVED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] G04 no same-Person pre-check -> KILLED
+[pass 4 (race / pattern repairs after the flaky race test was fixed)] G27 suspension never retries -> KILLED
+
+FINDING (found by this run): TestConcurrency_RequestRacesSuspension_BothOrders_x50 asserted both orderings with a
+0..6 ms delay schedule and failed once under load ("request first 50, suspension first 0"); G34, G35 and G36 were
+reported KILLED in pass 3 only because of that flake. The race tests now use a delay schedule from none to 48 ms in both
+directions (raceDelay); pass 4 shows the race mutants R15-R18 killed and G34/G36 honestly SURVIVED.
+
+RAW LOGS OF THE ORIGINAL (pre-review) ROUND
+------------------------------------------------------------------------------------------------
+
+## a3_mut_run_part1.log
+S01 requests INSERT not proof-guarded -> KILLED --- FAIL: TestProof_GUCImpersonation_IsRefused_AsRuntimeRole (0.08s); --- FAIL: TestProof_RequestBinding_Matrix (0.06s); FAIL
+S02 approvals INSERT not proof-guarded -> KILLED --- FAIL: TestProof_GUCImpersonation_IsRefused_AsRuntimeRole (0.12s); --- FAIL: TestProof_ApprovalAndCancelBinding (0.14s); FAIL
+S03 :suspend not derived from the action -> KILLED --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (0.37s); --- FAIL: TestConcurrency_TwoSuspensions_OneWins_x20 (0.14s); --- FAIL: TestFlow_TenantActiv
+S04 approval operation not derived from the decision -> KILLED --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.11s); --- FAIL: TestProof_ApprovalAndCancelBinding (0.12s); FAIL
+S05 cancel branch removed -> KILLED --- FAIL: TestProof_ApprovalAndCancelBinding (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.452s
+S06 suspension executable by anyone -> KILLED --- FAIL: TestProof_SuspensionExecutionBoundToRequester (0.06s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.022s
+S07 request guard does not assert the requester columns are the proven actor -> SURVIVED 
+S10 verifier: approve/reject admitted for tenant scope -> KILLED --- FAIL: TestVerifier_LaunchFamily_ScopeOperationMatrix (0.07s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.792s
+S11 verifier: platform_acting admitted for the launch family -> KILLED --- FAIL: TestVerifier_LaunchFamily_ScopeOperationMatrix (0.07s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.508s
+S12 verifier: launch operation set open -> KILLED --- FAIL: TestVerifier_LaunchFamily_ScopeOperationMatrix (0.06s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.671s
+S13 verifier: launch family not admitted for platform scope -> KILLED --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.12s); --- FAIL: TestConcurrency_TwoFinalApprovals_OneExecution_x50 (0.10s); --- FAIL: TestCo
+S14 digest binds no brand_id (SQL and Go twin) -> KILLED --- FAIL: TestProof_RequestBinding_Matrix (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.128s
+S15 digest binds no action (SQL and Go twin) -> KILLED --- FAIL: TestProof_RequestBinding_Matrix (0.14s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.984s
+S16 digest binds no tenant_id (SQL and Go twin) -> ERROR build failed: FAIL	github.com/Diansalas/igaming-platform/internal/launchgov [build failed]
+FAIL
+# github.com/Diansalas/igaming-platform/internal/actorproof
+inte
+S17 digest binds no reason_code (SQL and Go twin) -> KILLED --- FAIL: TestProof_RequestBinding_Matrix (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.777s
+S20 carry-over also for cancelled requests -> KILLED --- FAIL: TestRejectCarryOver_OnlyRejectedRequestsCarryOver (0.08s); --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.22s); FAIL
+S21 carry-over ignores the payload hash -> KILLED --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.12s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.2
+S22 carry-over window is zero -> KILLED --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.8
+S23 carry-over trigger removed -> KILLED --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.12s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.9
+S24 C-3(b) counts the wrong status -> KILLED --- FAIL: TestSuspension_StalePendingRequest_FailsTheCommit_LA030 (0.08s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.819s
+S25 C-3(b) trigger never fires -> KILLED --- FAIL: TestSuspension_StalePendingRequest_FailsTheCommit_LA030 (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.654s
+S26 C2 mixed brand-then-tenant admitted -> KILLED --- FAIL: TestExecutor_RefusesBrandThenTenantStatusChangeInOneTransaction (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.126s
+S27 C2 counts no brand transitions -> KILLED --- FAIL: TestExecutor_RefusesBrandThenTenantStatusChangeInOneTransaction (0.07s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.570s
+G01 tenant session may act on a tenant subject -> KILLED --- FAIL: TestAuthorize_ScopeAndPermissionRules (0.00s); --- FAIL: TestTenantStaff_RequestSuspendSupersede_NeverApprove_NoLoneReactivation (0.17s); --- FAIL: Te
+G02 tenant actor may name a foreign tenant -> KILLED --- FAIL: TestAuthorize_ScopeAndPermissionRules (0.00s); --- FAIL: TestExecutor_RefusesBrandThenTenantStatusChangeInOneTransaction (0.08s); --- FAIL: TestRules_
+G03 no staff-id self-approval pre-check -> KILLED --- FAIL: TestExecutor_RefusesBrandThenTenantStatusChangeInOneTransaction (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	11.798s
+G04 no same-Person pre-check -> KILLED --- FAIL: TestExecutor_RefusesBrandThenTenantStatusChangeInOneTransaction (0.07s); --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused_CrossTenan
+
+## a3_mut_run2.log
+S16 digest binds no tenant_id (SQL and Go twin) -> SURVIVED 
+G01 tenant session may act on a tenant subject -> KILLED --- FAIL: TestAuthorize_ScopeAndPermissionRules (0.00s); --- FAIL: TestTenantStaff_RequestSuspendSupersede_NeverApprove_NoLoneReactivation (0.23s); --- FAIL: Te
+G02 tenant actor may name a foreign tenant -> KILLED --- FAIL: TestAuthorize_ScopeAndPermissionRules (0.00s); --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused_CrossTenant404 (0.13s); FAIL
+G03 no staff-id self-approval pre-check -> SURVIVED 
+G04 no same-Person pre-check -> KILLED --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused_CrossTenant404 (0.09s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	1
+G05 acknowledgement: missing check accepted -> KILLED --- FAIL: TestAckRule_ExactlyTheNonPassingSet (0.00s); --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.07s); FAIL
+G06 acknowledgement: extra check accepted -> KILLED --- FAIL: TestAckRule_ExactlyTheNonPassingSet (0.00s); --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.07s); FAIL
+G07 stale readiness hash accepted -> KILLED --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.13s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.176s
+G08 stale approvals accepted -> ERROR build failed: FAIL	github.com/Diansalas/igaming-platform/internal/launchgov [build failed]
+FAIL
+# github.com/Diansalas/igaming-platform/internal/launchgov [gith
+G09 readiness hash of earlier approvers ignored -> SURVIVED 
+G10 regressed unacknowledged check ignored at execution -> ERROR build failed: FAIL	github.com/Diansalas/igaming-platform/internal/launchgov [build failed]
+FAIL
+# github.com/Diansalas/igaming-platform/internal/launchgov [gith
+G11 hold-bearing withdrawals ignored at execution (LA023) -> ERROR build failed: FAIL	github.com/Diansalas/igaming-platform/internal/launchgov [build failed]
+FAIL
+# github.com/Diansalas/igaming-platform/internal/launchgov [gith
+G12 hold-bearing withdrawals ignored at request (H-6) -> KILLED --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.510s
+G13 READ COMMITTED not asserted -> KILLED --- FAIL: TestIsolation_ApprovalBasedExecution_RequiresReadCommitted (0.13s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.469s
+G14 subject lock FOR UPDATE (deadlocks with FK checks / suspensions) -> KILLED --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (7.19s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	30.667s
+G15 suspension does not supersede -> KILLED --- FAIL: TestConcurrency_SuspensionRacesFinalApproval_x50 (0.42s); --- FAIL: TestTenantStaff_RequestSuspendSupersede_NeverApprove_NoLoneReactivation (0.11s); -
+G16 tenant GUC not restored after the brand UPDATE -> KILLED --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.21s); --- FAIL: TestConcurrency_TwoFinalApprovals_OneExecution_x50 (0.17s); --- FAIL: TestCo
+G17 H-2: licensee mismatch not detected -> KILLED --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.20s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.839s
+G18 H-2: determination not required -> KILLED --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.14s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.270s
+G19 H-2: status/model mismatch not detected -> KILLED --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.13s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.451s
+G20 H-2: licence id not forbidden for not-applicable -> KILLED --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.14s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.486s
+G21 H-3: configuration in effect not required -> KILLED --- FAIL: TestRules_HardPreconditions_H1_H2_H3_And_FourEyesCounts (0.27s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.687s
+G22 reject carry-over not mapped -> KILLED --- FAIL: TestRejectCarryOver_IdenticalRerequestRefused_ChangedContentAccepted (0.12s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.4
+G23 cancel by a non-requester not refused in Go -> KILLED --- FAIL: TestTenantStaff_RequestSuspendSupersede_NeverApprove_NoLoneReactivation (0.15s); --- FAIL: TestRules_SelfApproval_SamePerson_TenantAndActingRefused_Cr
+G24 closed subject not refused (H-1) -> KILLED --- FAIL: TestFlow_TenantActivation_NeedsTwoApprovers_ThenSuspendReactivateClose (0.24s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	14
+G25 illegal transition not refused (H-1) -> SURVIVED 
+G26 request proof not attached -> ERROR build failed: FAIL	github.com/Diansalas/igaming-platform/internal/launchgov [build failed]
+FAIL
+# github.com/Diansalas/igaming-platform/internal/launchgov [gith
+G27 suspension retry unbounded-by-lock-error (never retries) -> KILLED --- FAIL: TestSuspend_LockTimeout_RetriesBounded_AndGameplayGateRace (0.51s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	14.187s
+G28 reason catalogue open for requests -> KILLED --- FAIL: TestRequest_RecordsLicensingOperatorJurisdictionsAndNote_PIILinted (0.10s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.599
+G29 PII lint: e-mail not refused -> KILLED --- FAIL: TestLintFreeText_RefusesPIIShapes (0.00s); --- FAIL: TestLintRegistration_AllowsRegistryNumbers_RefusesCardsAndEmail (0.00s); FAIL
+G30 PII lint: long digit run not refused -> KILLED --- FAIL: TestLintFreeText_RefusesPIIShapes (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	0.326s
+G31 approve by tenant scope allowed in Go -> SURVIVED 
+G32 readiness hash includes computed_at -> KILLED --- FAIL: TestReadiness_HashIsDeterministic_IgnoresComputedAtAndOrder_BindsEveryResult (0.00s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launch
+G33 not_evaluable counted as pass -> KILLED --- FAIL: TestReadiness_HashIsDeterministic_IgnoresComputedAtAndOrder_BindsEveryResult (0.00s); --- FAIL: TestAckRule_ExactlyTheNonPassingSet (0.00s); FAIL
+G34 ratify changes status like any other -> SURVIVED 
+G35 final-approval audit/executed event name -> KILLED --- FAIL: TestRatify_LegacyBaselineSubject_RecordsDecisionWithoutStatusChange (2.59s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.82
+G36 executor does not verify subject status -> ERROR build failed: FAIL	github.com/Diansalas/igaming-platform/internal/launchgov [build failed]
+FAIL
+# github.com/Diansalas/igaming-platform/internal/launchgov [gith
+
+## a3_mut_run3.log
+S16 digest binds no tenant_id (SQL and Go twin) -> KILLED --- FAIL: TestProof_RequestBinding_Matrix (0.13s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.337s
+G08 stale approvals accepted -> KILLED --- FAIL: TestRules_ApprovalAge_StaleApprovalRefusedAtExecution (0.52s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.481s
+G09 readiness hash of earlier approvers ignored -> KILLED --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.26s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	12.475s
+G10 regressed unacknowledged check ignored at execution -> KILLED --- FAIL: TestRules_Acknowledgement_StaleReadiness_FlippingCheck (0.11s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.174s
+G11 hold-bearing withdrawals ignored at execution (LA023) -> KILLED --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.20s); FAIL; FAIL	github.com/Diansalas/igaming-platform/internal/launchgov	13.372s
+G26 request proof not attached -> KILLED --- FAIL: TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 (0.11s); --- FAIL: TestConcurrency_TwoFinalApprovals_OneExecution_x50 (0.08s); --- FAIL: TestCo
+G36 executor does not verify subject status -> SURVIVED 

@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -122,19 +123,52 @@ func Install(t testing.TB, ownerURL string) *actorproof.Issuer {
 
 func ensureProcessLocked(t testing.TB) {
 	t.Helper()
-	if process != nil {
-		return
+	if err := ensureProcessErrLocked(); err != nil {
+		t.Fatalf("prooftest: %v", err)
 	}
-	processKID = RandomKID(t)
-	processKey = NewKey(t)
+}
+
+// ensureProcessErrLocked is ensureProcessLocked without a testing.TB, for fixtures that run
+// outside a test function (the launch fixture opens its own owner connections).
+func ensureProcessErrLocked() error {
+	if process != nil {
+		return nil
+	}
+	var kb [6]byte
+	if _, err := rand.Read(kb[:]); err != nil {
+		return fmt.Errorf("random kid: %w", err)
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("random key: %w", err)
+	}
+	processKID, processKey = "t"+hex.EncodeToString(kb[:]), key
 	iss, err := actorproof.NewIssuer(processKID, map[string][]byte{processKID: processKey})
 	if err != nil {
-		t.Fatalf("prooftest: issuer: %v", err)
+		return fmt.Errorf("issuer: %w", err)
 	}
 	process = iss
 	// K1 fixtures open their own sessions and call internal/capability without an
 	// authenticated HTTP principal: sign for the session's own actor.
 	capability.TestSessionProofHook = AttachForSession
+	return nil
+}
+
+// EnsureKey makes sure this process has a signing key, provisions it (idempotently, as an
+// autocommit statement outside any caller transaction) into the database ex is connected to as
+// the OWNER role, and installs the issuer as the process default. It needs no testing.TB so a
+// fixture that opens its own connections (the launch fixture) can call it before each governed sequence.
+func EnsureKey(ctx context.Context, ex Execer) (*actorproof.Issuer, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	if err := ensureProcessErrLocked(); err != nil {
+		return nil, err
+	}
+	if _, err := ex.Exec(ctx, `INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
+		return nil, fmt.Errorf("provision process key: %w", err)
+	}
+	actorproof.SetDefault(process)
+	return process, nil
 }
 
 // Issuer installs the per-process issuer as the default WITHOUT touching any

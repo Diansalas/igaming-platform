@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +40,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
@@ -303,22 +306,45 @@ func flip(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID
 	var reqID uuid.UUID
 	var payloadHash string
 	var need int
+	// Since migration 0130 every request / approval carries the signed proof of the session's own
+	// actor (prooftest signs for whoever the session GUCs name, as the real issuer signs for the
+	// token subject). The digest is computed in Go from the very values inserted below.
+	lic := action == "activate" || action == "reactivate"
+	dr := actorproof.LaunchRequest{TenantID: tenantID, SubjectKind: kind, BrandID: brandID, Action: action,
+		ReadinessSnapshotHash: strings.Repeat("0", 64), ReasonCode: "test_fixture"}
+	var juris []uuid.UUID
+	var model, lstatus, operator *string
+	if lic {
+		m, st, op := "other_manually_approved", "conditional", "launchfix"
+		model, lstatus, operator = &m, &st, &op
+		juris = []uuid.UUID{uuid.New()}
+		dr.LicensingModel, dr.LicensingStatus, dr.ResponsibleOperatorName, dr.JurisdictionIDs = &m, &st, &op, juris
+	} else {
+		juris = []uuid.UUID{}
+	}
+	op := actorproof.OpLaunchRequest
+	if action == "suspend" {
+		op = actorproof.OpLaunchSuspend
+	}
+	if err := prooftest.AttachForSession(ctx, tx, op, actorproof.TargetNew, dr.Digest()); err != nil {
+		return fmt.Errorf("launchfix: request proof: %w", err)
+	}
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO launch_authorisation_requests
 		    (tenant_id, subject_kind, brand_id, action, reason_code, readiness_snapshot, readiness_snapshot_hash,
 		     licensing_model, licensing_status, responsible_operator_name, jurisdiction_ids)
-		VALUES ($1, $2, $3, $4, 'test_fixture', '{}'::jsonb, repeat('0', 64),
-		        CASE WHEN $4 IN ('activate','reactivate') THEN 'other_manually_approved' END,
-		        CASE WHEN $4 IN ('activate','reactivate') THEN 'conditional' END,
-		        CASE WHEN $4 IN ('activate','reactivate') THEN 'launchfix' END,
-		        CASE WHEN $4 IN ('activate','reactivate') THEN ARRAY[gen_random_uuid()] ELSE '{}'::uuid[] END)
+		VALUES ($1, $2, $3, $4, 'test_fixture', '{}'::jsonb, repeat('0', 64), $5, $6, $7, $8)
 		RETURNING id, payload_hash, required_approvals`,
-		tenantID, kind, brandID, action).Scan(&reqID, &payloadHash, &need); err != nil {
+		tenantID, kind, brandID, action, model, lstatus, operator, juris).Scan(&reqID, &payloadHash, &need); err != nil {
 		return fmt.Errorf("launchfix: insert request: %w", err)
 	}
 	for i := 0; i < need; i++ {
 		if err := setPlatform(ctx, tx, approverStaff[i]); err != nil {
 			return err
+		}
+		if err := prooftest.AttachForSession(ctx, tx, actorproof.OpLaunchApprove, reqID.String(),
+			actorproof.LaunchApprovalDigest(payloadHash, strings.Repeat("0", 64), "test_fixture")); err != nil {
+			return fmt.Errorf("launchfix: approval proof: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO launch_authorisation_approvals (request_id, decision, payload_hash, readiness_snapshot_hash_at_decision, reason_code)
@@ -389,6 +415,9 @@ func run(ctx context.Context, url string, fn func(pgx.Tx) error) error {
 		return fmt.Errorf("launchfix: connect owner: %w", err)
 	}
 	defer func() { _ = conn.Close(context.Background()) }()
+	if _, err := prooftest.EnsureKey(ctx, conn); err != nil {
+		return fmt.Errorf("launchfix: provision the process actor-proof key: %w", err)
+	}
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
@@ -428,6 +457,24 @@ func IsClosedTerminalRefusal(err error) bool {
 // internal/tenant/no_trigger_disable_test.go.
 func ForcePending(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.UUID, brandID *uuid.UUID) error {
 	tb.Helper()
+	return forceStatus(ctx, tb, p, tenantID, brandID, "pending_launch")
+}
+
+// ForceClosed puts an existing tenant (brandID nil) or brand into closed WITHOUT the governed
+// sequence and WITHOUT the closure backstop (LA023 hold-bearing withdrawals, LA024 brand open
+// bets, ADR 0112 slice-3 review). It reproduces a subject that was closed BEFORE migration 0130
+// and still holds funds: the very population the hold-resolution machinery (ADR 0111) and the
+// closed-tenant observation suites exist for, and which the backstop makes unreachable through
+// any governed path. Use TrySetTenantStatus / TrySetBrandStatus to test the governed closure and
+// its refusals. Same mechanism and the same sanctioned integration-tag-only exception as
+// ForcePending (internal/tenant/no_trigger_disable_test.go).
+func ForceClosed(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.UUID, brandID *uuid.UUID) error {
+	tb.Helper()
+	return forceStatus(ctx, tb, p, tenantID, brandID, "closed")
+}
+
+func forceStatus(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.UUID, brandID *uuid.UUID, to string) error {
+	tb.Helper()
 	return runOn(ctx, OwnerFor(tb, p), func(tx pgx.Tx) error {
 		if err := ensureOperators(ctx, tx); err != nil {
 			return err
@@ -443,14 +490,14 @@ func ForcePending(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.
 			return err
 		}
 		if brandID == nil {
-			if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'pending_launch' WHERE id = $1`, tenantID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE tenants SET status = $2 WHERE id = $1`, tenantID, to); err != nil {
 				return err
 			}
 		} else {
 			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `UPDATE brands SET status = 'pending_launch' WHERE id = $1`, *brandID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE brands SET status = $2 WHERE id = $1`, *brandID, to); err != nil {
 				return err
 			}
 		}
@@ -485,6 +532,15 @@ func TrySetBrandStatusHoldingOn(ctx context.Context, tb testing.TB, p *db.Pool, 
 }
 
 func runOn(ctx context.Context, owner *db.Pool, fn func(pgx.Tx) error) error {
+	// Provision the process signing key in its own committed transaction (idempotent), before the
+	// governed sequence opens its own: a key insert inside a long-lived sequence would block a
+	// concurrent sequence behind the uncommitted row.
+	if err := owner.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := prooftest.EnsureKey(ctx, tx)
+		return err
+	}); err != nil {
+		return fmt.Errorf("launchfix: provision the process actor-proof key: %w", err)
+	}
 	// WithoutTenant opens a plain transaction (no GUC); flip sets every setting it needs itself,
 	// transaction-locally. A returned error rolls the whole governed sequence back.
 	return owner.WithoutTenant(ctx, func(_ context.Context, tx pgx.Tx) error { return fn(tx) })

@@ -25,9 +25,34 @@ type Pool struct {
 // connectTimeout come from config, not hardcoded, so dev/staging/prod can
 // differ without a code change.
 func Connect(ctx context.Context, databaseURL string, maxConns int32, connectTimeout time.Duration) (*Pool, error) {
+	return ConnectWithRuntimeParams(ctx, databaseURL, maxConns, connectTimeout, nil)
+}
+
+// allowedRuntimeParams is the closed set of session settings a caller may request per connection.
+var allowedRuntimeParams = map[string]bool{
+	"idle_in_transaction_session_timeout": true,
+	"statement_timeout":                   true,
+	"lock_timeout":                        true,
+}
+
+// ConnectWithRuntimeParams is Connect plus per-CONNECTION session settings from the application's
+// pool configuration (sent in the startup packet of every connection the pool opens; no ALTER
+// ROLE, no role change). It exists for settings such as idle_in_transaction_session_timeout that
+// a service wants on every session (ADR 0112 security C4: a transaction left idle holding a
+// brand gate key or a subject row lock must not starve a suspension indefinitely). A value
+// already present in the database URL wins. Only a closed set of parameter names is accepted.
+func ConnectWithRuntimeParams(ctx context.Context, databaseURL string, maxConns int32, connectTimeout time.Duration, params map[string]string) (*Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("db: parse database url: %w", err)
+	}
+	for k, v := range params {
+		if !allowedRuntimeParams[k] {
+			return nil, fmt.Errorf("db: runtime parameter %q is not permitted", k)
+		}
+		if _, set := cfg.ConnConfig.RuntimeParams[k]; !set {
+			cfg.ConnConfig.RuntimeParams[k] = v
+		}
 	}
 	cfg.MaxConns = maxConns
 	cfg.ConnConfig.ConnectTimeout = connectTimeout

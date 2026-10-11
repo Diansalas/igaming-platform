@@ -73,6 +73,13 @@ var allowedLiteralCompares = map[string]string{
 	// 0129 (ADR 0112 slice 2, LF1): CREATE OR REPLACE of the same 0128 guard with the
 	// per-brand gameplay lock added; the closed-is-terminal line is 0128's, unchanged.
 	"migrations/0129_brand_gameplay_gate.up.sql:IF OLD.status = 'closed' THEN": "0129 restates 0128 closed is terminal",
+	// 0130 (ADR 0112 slice 3): CREATE OR REPLACE of the same guard with the C2 one-subject-per-
+	// transaction rule added; the closed-is-terminal line is 0128's, unchanged.
+	"migrations/0130_launch_authorisation_actor_proof.up.sql:IF OLD.status = 'closed' THEN": "0130 restates 0128 closed is terminal",
+	// 0130 closure backstop (security C1): the same guard refuses a CLOSURE while hold-bearing
+	// withdrawals / (brand) open bets exist; it reads no status, it reacts to the status being set.
+	"migrations/0130_launch_authorisation_actor_proof.up.sql:IF NEW.status = 'closed' THEN": "0130 closure backstop: refuses closing over held funds / open bets",
+	// The 0130 DOWN is not scanned (only *.up.sql); it restores 0129's body verbatim.
 }
 
 func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testing.T) {
@@ -175,7 +182,10 @@ var reviewedStatusReaderFiles = []string{
 	"internal/rg/enumeration_sweep.go",
 	"internal/tenant/gameplay_gate.go",
 	"internal/tenant/payment_initiation_gate.go",
-	"internal/tenant/status.go",
+	// ADR 0112 slice 3: the governed launch executor and its hard-precondition read are the Go
+	// readers (and the only writer) of the status columns that replaced tenant.ChangeStatus.
+	"internal/launchgov/execute.go",
+	"internal/launchgov/hard.go",
 }
 
 // A raw string is a status reader when it names tenants / brands as a table (FROM / JOIN / UPDATE /
@@ -218,7 +228,6 @@ func statusLiteralLines(src string) []string {
 // reviewedReaderLiteralAllow lists the only code lines in reviewed reader files that carry a
 // 'suspended' / 'closed' literal, with the reason each is not a status gate.
 var reviewedReaderLiteralAllow = map[string]string{
-	"internal/tenant/status.go:case \"active\", \"suspended\", \"closed\":":                                   "ChangeStatus input validation (not a gate)",
 	"internal/identity/player_account.go:PlayerStatusSuspended           PlayerAccountStatus = \"suspended\"": "player_accounts status constant, not tenants/brands",
 	"internal/identity/player_account.go:PlayerStatusClosed              PlayerAccountStatus = \"closed\"":    "player_accounts status constant, not tenants/brands",
 }

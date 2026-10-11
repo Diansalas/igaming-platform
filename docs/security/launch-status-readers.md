@@ -17,7 +17,7 @@
   now scans EVERY `migrations/*.up.sql` (not a hand-picked file list) and
   `TestStatusLiteralPin_ReviewedReaderFilesCarryNoSuspendedOrClosedLiteral` bans any quoted `suspended` / `closed` code
   literal in the reviewed reader files whatever the variable, operator (`==`, `!=`, `IN`, `NOT IN`, `case`) or quote
-  style (three non-gate lines are allow-listed: `ChangeStatus` input validation and two `player_accounts` constants).
+  style (two non-gate lines are allow-listed: the `player_accounts` constants; the former `ChangeStatus` input validation was removed with `ChangeStatus` in slice 3).
   The inventory pin recognises a reader whether the status column appears before or after the `FROM` / `JOIN` of
   `tenants` / `brands` (`SELECT t.status ... JOIN tenants`). `TestStatusPins_NegativeCases_ReviewerViolationsAreDetected`
   proves the reviewer's two violating changes and the missed shape now fail the pins. Still heuristics: they do not
@@ -29,7 +29,8 @@
 |---|---|---|---|---|
 | `internal/tenant/gameplay_gate.go` | `tenants.status` under the shared per-tenant lock (R3, 0118/0121); since ADR 0112 slice 2 also `brands.status` under the shared per-brand lock (`RequireBrandActiveForGameplay`, LF1, 0129; plain read bound to `tenant_id`, no row lock) | refuse new gameplay unless the tenant is `active`; refuse a NEW stake (casino bet, sportsbook placement) unless the brand is `active` | A | refused (tenant: GP010 / `tenant_not_active`; brand: `brand_not_active`, DB backstop GP011) |
 | `internal/tenant/payment_initiation_gate.go` | `brands.status` `FOR SHARE` (H-SEC-5/11, H(8)) | refuse initiation unless `active` | A | refused |
-| `internal/tenant/status.go` | `tenants.status FOR UPDATE` (`ChangeStatus`) | audited before-state of a change | W/D | a real change is refused by the database (LA020); same-status is a no-op |
+| `internal/launchgov/execute.go` | `tenants.status` / `brands.status` `FOR NO KEY UPDATE` (the executor's subject lock) and the status UPDATE | the current status the governed request must match (`status <> from_status` refuses at execution) | W/D | values compared against the request's own `from_status`, never a literal; a status change is refused by the database unless the governed transition of an executing request exists in the same transaction (LA020) |
+| `internal/launchgov/hard.go` | `tenants.status` / `brands.status` in the read-only readiness / hard-precondition transaction | H-1 (legal transition from the current status: `moveFor`) | D | the status is returned to `moveFor`, which names every status explicitly through constants (no literal in the file) |
 | `internal/identity/player_account.go` | brand and tenant status in the registering transaction, plain non-locking read (ADR 0112 7.3, S4) | refuse registration unless both `active` | A | refused (409 `BRAND_NOT_ACCEPTING_REGISTRATIONS`) |
 | `internal/identity/brand.go`, `tenant.go` | `status` of a brand / tenant row (slug / id lookups, list) | none (returned to the caller) | D | returned as `pending_launch` |
 | `internal/identity/tenant.go` (`ListActiveTenantSlugs`) | `WHERE status = 'active'` | public listing of live tenants | A | not listed |
@@ -67,6 +68,8 @@ Read from `pg_proc` on a fully migrated database (functions whose body reads eit
 | `operating_country_policies_enforce_ceiling` (0076) | licence ceiling; no status decision on the tenant | - | n/a |
 | `launch_subject_status_guard`, `launch_subject_insert_guard`, `launch_subject_owner_provisioned`, `launch_transitions_match_subject_at_commit`, `launch_requests_guard` (0128) | the new governance guards | W | by design |
 | `launch_subject_status_guard` (0129, CREATE OR REPLACE of 0128's) | on `brands`, a real status change first takes the per-brand gameplay key EXCLUSIVE (`brand_status_gate_key`, LF1); otherwise 0128's body unchanged, including the allow-listed `OLD.status = 'closed'` | W / L (restated 0128 literal) | a change into or out of any status serialises against in-flight new-stake placements of the brand |
+| `launch_subject_status_guard` (0130, CREATE OR REPLACE of 0129's) | adds C2: for a tenant change, counts governed brand transitions of that tenant in the same transaction (`from_status <> to_status`) and refuses | W | a tenant change after a brand change of the same tenant in one transaction is refused (LA020) |
+| `launch_suspension_no_stale_pending_at_commit`, `launch_requests_reject_carryover`, `actor_proof_launch_requests_guard`, `actor_proof_launch_approvals_guard` (0130) | the governance records only (request status / action / payload hash); no tenant or brand status | W | by design |
 | `ledger_wager_brand_active_guard` (0129, deferred constraint trigger on `ledger_transactions`, `casino_bet` / `sportsbook_bet` only) | `brands.status` of every player wallet the posting moves, under the shared per-brand key, `IS DISTINCT FROM 'active'` refuses | A | GP011 for a new stake; terminal stake returns, wins and settlements are not covered |
 
 Row-level-security policies: none reads `tenants.status` or `brands.status` (checked against `pg_policies`).
@@ -81,12 +84,29 @@ constraint has a tenant / brand status vocabulary (checked against `pg_constrain
 | `migrations/0121_gameplay_stake_return_and_closure_guard.up.sql` | `IF NEW.status = 'closed'` in `tenants_status_change_gate` | the closure gate fires for a transition INTO `closed`, from any status |
 | `migrations/0128_launch_authorisation_status_governance.up.sql` | `IF OLD.status = 'closed'` in `launch_subject_status_guard` | closed is terminal (ADR 0112 3.1) |
 | `migrations/0129_brand_gameplay_gate.up.sql` | the same `IF OLD.status = 'closed'` (0129 restates 0128's guard with the LF1 brand lock added) | closed is terminal, unchanged |
+| `migrations/0130_launch_authorisation_actor_proof.up.sql` | the same `IF OLD.status = 'closed'` (0130 restates the guard again with the C2 one-subject-per-transaction rule added) | closed is terminal, unchanged |
+| `migrations/0130_launch_authorisation_actor_proof.up.sql` | `IF NEW.status = 'closed'` (the closure backstop: LA023 hold-bearing withdrawals, LA024 brand open bets) | it reacts to a status being SET to closed (any prior status) and reads no subject status |
 
 ## 4. Writers
 
-The only non-test writer of either column is `tenant.ChangeStatus` (`internal/tenant/status.go`, tenants only). Since
-migration 0128 the database refuses any status change that is not accompanied, in the same transaction, by a governed
-launch transition of an executing request (`zz_launch_status_governed`, SQLSTATE LA020), so `ChangeStatus` fails closed for
-every real change (`ErrGovernedStatusChangeRequired`) until the slice-3 `launchgov` executor absorbs it. Brands have no Go
-status writer at all. `identity.CreateTenant` / `CreateBrand` insert `pending_launch` explicitly; every other role is
-refused any other initial status (LA021).
+Since ADR 0112 slice 3 the ONLY non-test writer of either column is the `launchgov` executor
+(`internal/launchgov/execute.go`, `updateSubjectStatus`: one `UPDATE tenants` and one `UPDATE brands`);
+`internal/launchgov/status_writer_static_test.go` pins that (a heuristic over source text, with a non-vacuity test), and that
+`ChangeStatus` no longer exists (`tenant.ChangeStatus`, the former unauthorised writer, TENANT-STATUS-AUTHZ-1, was removed; its
+GP020 typed error and translation stay in `internal/tenant/status.go`). The database refuses any status change that is not
+accompanied, in the same transaction, by a governed launch transition of an executing request (`zz_launch_status_governed`,
+SQLSTATE LA020), and since migration 0130 every request and approval carries a signed actor proof (ADR 0110), so a runtime
+session that merely sets session settings can no longer fabricate the decision. A tenant status change after a brand status
+change of that tenant in one transaction is refused (security C2, LA020). `identity.CreateTenant` / `CreateBrand` insert
+`pending_launch` explicitly; every other role is refused any other initial status (LA021). The integration-tag-only
+`internal/testsupport` fixtures (`launchfix`, `launchdrive`) are exempt from the writer pin; `internal/tenant/launch_fixture_pin_test.go`
+pins EACH of the two packages separately: every source file carries the `integration` build tag (removing the tag from either
+package fails a test) and no non-test file outside `internal/testsupport` imports it (a planted importer fails a test; both
+checks have a negative test over a temporary tree). Before the security review of slice 3 this document said both fixtures were
+pinned while the test covered `launchfix` only; that was incorrect and is corrected here and in the test.
+
+The writer scan (`status_writer_static_test.go`) is an aid, not the control: it recognises `UPDATE tenants|brands ... SET ... status =`
+including quoted identifiers (`"tenants"`, `"status"`, `public."brands"`), the column-list form `SET (status, ...) =`, and
+`INSERT ... ON CONFLICT ... DO UPDATE SET status` / `MERGE ... UPDATE SET status`, each with a planted-offender test. It does not
+parse SQL, and a status write assembled by string concatenation escapes it. The binding control is the database trigger
+(`zz_launch_status_governed`, LA020), which refuses every such write without a governed same-transaction decision.
