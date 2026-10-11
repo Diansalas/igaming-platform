@@ -87,6 +87,8 @@ func denialCode(err error) string {
 		return "LAUNCH_REQUEST_PENDING"
 	case errors.Is(err, ErrSelfApproval):
 		return "LAUNCH_SELF_APPROVAL"
+	case errors.Is(err, ErrAlreadyDecided):
+		return "LAUNCH_ALREADY_DECIDED"
 	case errors.Is(err, ErrIllegalTransition):
 		return "LAUNCH_ILLEGAL_TRANSITION"
 	case errors.Is(err, ErrSubjectClosed):

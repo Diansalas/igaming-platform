@@ -127,14 +127,17 @@ func (s Subject) Kind() string {
 // Sentinel errors. Callers branch with errors.Is / errors.As; the HTTP layer (slice 4) maps them
 // to the closed LAUNCH_* codes of ADR 0112 section 9.
 var (
-	ErrForbidden            = errors.New("launchgov: the actor's role or scope does not permit this operation")
-	ErrActingSession        = errors.New("launchgov: an acting session may not act here")
-	ErrInvalidInput         = errors.New("launchgov: invalid input")
-	ErrNotFound             = errors.New("launchgov: not found")
-	ErrIllegalTransition    = errors.New("launchgov: LAUNCH_ILLEGAL_TRANSITION")
-	ErrSubjectClosed        = errors.New("launchgov: LAUNCH_SUBJECT_CLOSED")
-	ErrRequestPending       = errors.New("launchgov: LAUNCH_REQUEST_PENDING")
-	ErrSelfApproval         = errors.New("launchgov: LAUNCH_SELF_APPROVAL")
+	ErrForbidden         = errors.New("launchgov: the actor's role or scope does not permit this operation")
+	ErrActingSession     = errors.New("launchgov: an acting session may not act here")
+	ErrInvalidInput      = errors.New("launchgov: invalid input")
+	ErrNotFound          = errors.New("launchgov: not found")
+	ErrIllegalTransition = errors.New("launchgov: LAUNCH_ILLEGAL_TRANSITION")
+	ErrSubjectClosed     = errors.New("launchgov: LAUNCH_SUBJECT_CLOSED")
+	ErrRequestPending    = errors.New("launchgov: LAUNCH_REQUEST_PENDING")
+	ErrSelfApproval      = errors.New("launchgov: LAUNCH_SELF_APPROVAL")
+	// ErrAlreadyDecided: the approver's Person already decided this request (a replayed approve or
+	// reject). Nothing is recorded.
+	ErrAlreadyDecided       = errors.New("launchgov: LAUNCH_ALREADY_DECIDED")
 	ErrNotPending           = errors.New("launchgov: the request is not pending (decided, executed, expired or superseded)")
 	ErrUnacknowledged       = errors.New("launchgov: LAUNCH_UNACKNOWLEDGED_CHECKS")
 	ErrPreconditionFailed   = errors.New("launchgov: LAUNCH_PRECONDITION_FAILED")

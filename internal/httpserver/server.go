@@ -23,6 +23,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
@@ -185,6 +186,12 @@ type Deps struct {
 	// sportsbook settlement provider is registered for any tenant, this
 	// route is removed or permanently disabled in the same change.
 	SportsbookSettlementSimulationEnabled bool
+
+	// LaunchAuthorisation is the ADR 0112 launch authorisation service (the only governed writer of
+	// tenants.status / brands.status). Nil means the launch routes answer 503
+	// LAUNCH_AUTHORISATION_UNAVAILABLE and write nothing (the repository's nil-means-disabled
+	// convention, fail closed); cmd/platform-api always sets it.
+	LaunchAuthorisation *launchgov.Service
 
 	// PersonResolver is Stage 4E's identity-resolution boundary, consulted
 	// by newRegisterHandler BEFORE a Person is ever created - unlike

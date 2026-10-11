@@ -86,6 +86,30 @@ const (
 	CodePayoutInstrumentNotUsable  Code = "PAYOUT_INSTRUMENT_NOT_USABLE"
 	CodePayoutDestinationNotUsable Code = "PAYOUT_DESTINATION_NOT_USABLE"
 	CodePaymentMethodMismatch      Code = "PAYMENT_METHOD_MISMATCH"
+
+	// ADR 0112 section 9 (slice 4): the closed LAUNCH_* codes of the launch authorisation
+	// routes. Every one is machine-readable and stable; the message is a fixed sentence, never
+	// the underlying error text. 409 unless noted. A launch decision is a recorded human
+	// decision, never a legal authorisation, and none of these codes states a legal conclusion.
+	CodeLaunchPreconditionFailed   Code = "LAUNCH_PRECONDITION_FAILED"       // hard precondition H-1..H-3 (check_codes)
+	CodeLaunchUnacknowledgedChecks Code = "LAUNCH_UNACKNOWLEDGED_CHECKS"     // H-5 (check_codes)
+	CodeLaunchRequestPending       Code = "LAUNCH_REQUEST_PENDING"           // one pending request per subject
+	CodeLaunchSelfApproval         Code = "LAUNCH_SELF_APPROVAL"             // requester / same Person
+	CodeLaunchIllegalTransition    Code = "LAUNCH_ILLEGAL_TRANSITION"        // section 3 state machine
+	CodeLaunchSubjectClosed        Code = "LAUNCH_SUBJECT_CLOSED"            // closed is terminal
+	CodeLaunchWithdrawalsHolding   Code = "LAUNCH_WITHDRAWALS_HOLDING_FUNDS" // H-6, LA023
+	CodeLaunchOpenBetsBlockClosure Code = "LAUNCH_OPEN_BETS_BLOCK_CLOSURE"   // LA024 (brand closure over open bets)
+	CodeLaunchRetryableLockTimeout Code = "LAUNCH_RETRYABLE_LOCK_TIMEOUT"    // lock timeout / deadlock: retry
+	CodeLaunchRequestNotPending    Code = "LAUNCH_REQUEST_NOT_PENDING"       // decided, executed, expired, superseded
+	CodeLaunchAlreadyDecided       Code = "LAUNCH_ALREADY_DECIDED"           // a replayed approve / reject by the same Person
+	CodeLaunchStaleReadiness       Code = "LAUNCH_STALE_READINESS"           // the decider's readiness hash is stale
+	CodeLaunchPriorReject          Code = "LAUNCH_PRIOR_REJECT"              // identical request rejected within the TTL (LA014)
+	CodeLaunchPriorRejecter        Code = "LAUNCH_PRIOR_REJECTER"            // approver's Person rejected a variant
+	CodeLaunchNotLegacyBaseline    Code = "LAUNCH_NOT_LEGACY_BASELINE"       // ratify only a legacy baseline subject
+	CodeLaunchRefusedAtExecution   Code = "LAUNCH_REFUSED_AT_EXECUTION"      // the final approval was recorded; execution refused
+	CodeLaunchGuardRefused         Code = "LAUNCH_GUARD_REFUSED"             // another database guard (LA0xx)
+	CodeLaunchProofRefused         Code = "LAUNCH_PROOF_REFUSED"             // 403: the ADR 0110 actor proof guard (AP0xx)
+	CodeLaunchUnavailable          Code = "LAUNCH_AUTHORISATION_UNAVAILABLE" // 503: the service is not wired in this process
 )
 
 // Error is the wire format for an API error response.
@@ -95,6 +119,8 @@ type Error struct {
 	// RequestID lets an operator correlate a returned error with server
 	// logs/traces without exposing internal details in Message.
 	RequestID string `json:"request_id,omitempty"`
+	// CheckCodes is set only by the launch authorisation routes (WriteWithCheckCodes).
+	CheckCodes []string `json:"check_codes,omitempty"`
 }
 
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
@@ -107,7 +133,7 @@ func httpStatus(c Code) int {
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
-	case CodeForbidden, CodeTenantMismatch:
+	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused:
 		return http.StatusForbidden
 	case CodeNotFound, CodeSettlementNotFound:
 		return http.StatusNotFound
@@ -116,11 +142,15 @@ func httpStatus(c Code) int {
 		CodeCredentialRegistrationRejected, CodeApprovalRejected, CodeCredentialActivationRejected,
 		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds, CodeTenantOrBrandNotActive, CodeBrandNotAcceptingRegistrations,
 		CodePayoutInstrumentNotAccepted, CodePayoutInstrumentInUse,
-		CodePayoutInstrumentRequired, CodePayoutInstrumentNotUsable, CodePayoutDestinationNotUsable:
+		CodePayoutInstrumentRequired, CodePayoutInstrumentNotUsable, CodePayoutDestinationNotUsable,
+		CodeLaunchPreconditionFailed, CodeLaunchUnacknowledgedChecks, CodeLaunchRequestPending, CodeLaunchSelfApproval,
+		CodeLaunchIllegalTransition, CodeLaunchSubjectClosed, CodeLaunchWithdrawalsHolding, CodeLaunchOpenBetsBlockClosure,
+		CodeLaunchRetryableLockTimeout, CodeLaunchRequestNotPending, CodeLaunchAlreadyDecided, CodeLaunchStaleReadiness, CodeLaunchPriorReject,
+		CodeLaunchPriorRejecter, CodeLaunchNotLegacyBaseline, CodeLaunchRefusedAtExecution, CodeLaunchGuardRefused:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
 		return http.StatusUnprocessableEntity
-	case CodeUnavailable:
+	case CodeUnavailable, CodeLaunchUnavailable:
 		return http.StatusServiceUnavailable
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
@@ -134,11 +164,22 @@ func httpStatus(c Code) int {
 // CodeInternal; log the detail server-side and return a generic message
 // here instead.
 func Write(w http.ResponseWriter, requestID string, code Code, message string) {
+	WriteWithCheckCodes(w, requestID, code, message, nil)
+}
+
+// WriteWithCheckCodes is Write plus the machine-readable check codes of a refused launch
+// precondition or readiness acknowledgement (ADR 0112 section 9: "LAUNCH_PRECONDITION_FAILED
+// (with check codes)"). The codes are a closed vocabulary (H-n:..., R-...), never free text.
+func WriteWithCheckCodes(w http.ResponseWriter, requestID string, code Code, message string, checkCodes []string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(httpStatus(code))
 	_ = json.NewEncoder(w).Encode(Error{
-		Code:      code,
-		Message:   message,
-		RequestID: requestID,
+		Code:       code,
+		Message:    message,
+		RequestID:  requestID,
+		CheckCodes: checkCodes,
 	})
 }
+
+// Status exposes the HTTP status an error code maps to (for contract tests).
+func Status(c Code) int { return httpStatus(c) }

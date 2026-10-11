@@ -180,4 +180,6 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerWithdrawalHoldResolutionRoutes(mux, deps) // HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 s6, migration 0124)
 	// B13 (ADR 0111 2.9): payout instruments.
 	registerPayoutInstrumentRoutes(mux, deps)
+	// ADR 0112 slice 4: launch authorisation (tenant and brand status governance).
+	registerLaunchAuthorisationRoutes(mux, deps)
 }
