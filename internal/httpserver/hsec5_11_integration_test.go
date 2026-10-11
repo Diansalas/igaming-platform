@@ -10,8 +10,10 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -163,12 +165,40 @@ func TestHSEC11_HTTP_WithdrawalRequest_NonActiveRefused_RetryAfterReactivation(t
 			if resp.StatusCode != http.StatusCreated {
 				t.Fatalf("control: want 201, got %d", resp.StatusCode)
 			}
+			var control struct {
+				ID string `json:"id"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&control); err != nil || control.ID == "" {
+				t.Fatalf("control response: %v %+v", err, control)
+			}
 			_ = resp.Body.Close()
 			reqs := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID)
 			ledger := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
 			if c.try != nil {
+				// While the control request holds the player's funds the closure is refused (LA023) ...
 				requireClosureRefusedWithHold(t, c, pool, tenant.ID, brand.ID)
+				// ... ADR 0112 slice-3 LOW item, closed-subject HTTP coverage restored where it is
+				// reachable legitimately: the player cancels the control request (its hold is released),
+				// the closure then commits through the governed path, and the HTTP route refuses a NEW
+				// request on the closed subject with the closed code, creating nothing.
+				cancel := postJSON(t, srv, "/v1/me/withdrawals/"+control.ID+"/cancel", player.Tokens.AccessToken, map[string]any{})
+				_ = cancel.Body.Close()
+				if cancel.StatusCode != http.StatusNoContent {
+					t.Fatalf("cancel the control request: want 204, got %d", cancel.StatusCode)
+				}
+				if err := c.try(pool, tenant.ID, brand.ID); err != nil {
+					t.Fatalf("with the control request cancelled the closure must commit: %v", err)
+				}
+				ledger = countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
+				closedBody := map[string]any{"asset_code": "EUR", "amount": 4000, "idempotency_key": "closed-" + uuid.NewString(), "payout_instrument_id": instrument}
+				assertNotActiveRefusal(t, postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, closedBody), "withdrawal request on a closed subject")
+				if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID); n != reqs {
+					t.Fatalf("withdrawal request created on a closed subject: %d -> %d", reqs, n)
+				}
+				if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID); n != ledger {
+					t.Fatalf("hold/ledger row created on a closed subject: %d -> %d", ledger, n)
+				}
 				return
 			}
 			c.set(t, pool, tenant.ID, brand.ID)
@@ -227,6 +257,27 @@ func TestHSEC11_HTTP_StaffSubmit_NonActiveRefused_StaysApproved_ThenSubmits(t *t
 
 			if c.try != nil {
 				requireClosureRefusedWithHold(t, c, pool, tenant.ID, brand.ID)
+				// An approved request on a subject closed BEFORE migration 0130 (the population hold
+				// resolution exists for; launchfix.ForceClosed, the sanctioned integration-only fixture):
+				// the staff submit is refused with the closed code, the request stays approved and nothing
+				// is created.
+				var brandPtr *uuid.UUID
+				if strings.HasPrefix(c.name, "brand_") {
+					brandPtr = &brand.ID
+				}
+				if err := launchfix.ForceClosed(context.Background(), t, pool, tenant.ID, brandPtr); err != nil {
+					t.Fatalf("force closed: %v", err)
+				}
+				assertNotActiveRefusal(t, postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "bank_transfer"}), "submit on a subject closed before 0130")
+				if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE id = $1 AND state = 'approved'`, wr.ID); n != 1 {
+					t.Fatal("the request must stay approved")
+				}
+				if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM payment_attempts WHERE withdrawal_request_id = $1`, wr.ID); n != 0 {
+					t.Fatalf("attempt created on a closed subject: %d", n)
+				}
+				if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID); n != ledger {
+					t.Fatalf("ledger row created on a closed subject: %d -> %d", ledger, n)
+				}
 				return
 			}
 			c.set(t, pool, tenant.ID, brand.ID)
