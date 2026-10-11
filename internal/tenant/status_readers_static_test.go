@@ -186,6 +186,7 @@ var reviewedStatusReaderFiles = []string{
 	// readers (and the only writer) of the status columns that replaced tenant.ChangeStatus.
 	"internal/launchgov/execute.go",
 	"internal/launchgov/hard.go",
+	"internal/launchgov/read.go",
 }
 
 // A raw string is a status reader when it names tenants / brands as a table (FROM / JOIN / UPDATE /
