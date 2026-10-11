@@ -14,7 +14,7 @@ import { getNavPermissions } from '../../auth/permissions'
 import { CreateTenantForm } from './CreateTenantForm'
 
 import { SUBJECT_STATUS_FILTER_OPTIONS } from '../launch/labels'
-import { LaunchStatusBadge } from '../launch/LaunchBits'
+import { LaunchStatusBadge, LegacyBaselineBadge } from '../launch/LaunchBits'
 
 const STATUS_OPTIONS = SUBJECT_STATUS_FILTER_OPTIONS
 
@@ -36,7 +36,13 @@ export function TenantListPage() {
     { key: 'name', header: 'Name', render: (t) => <span className="font-medium text-slate-900">{t.name}</span> },
     { key: 'slug', header: 'Slug', render: (t) => t.slug },
     { key: 'licensing_model', header: 'Licensing model', render: (t) => t.licensing_model },
-    { key: 'status', header: 'Status', render: (t) => <LaunchStatusBadge status={t.status} /> },
+    { key: 'status', header: 'Status', render: (t) => (
+        <span className="inline-flex items-center gap-1">
+          <LaunchStatusBadge status={t.status} />
+          {t.launch_kind === 'legacy_baseline' && <LegacyBaselineBadge />}
+        </span>
+      ),
+    },
   ]
 
   return (

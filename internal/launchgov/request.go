@@ -411,7 +411,16 @@ func (s *Service) GetRequest(ctx context.Context, a Actor, tenantID, requestID u
 			}
 			apps = append(apps, ap)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		rows.Close()
+		one := []Request{r}
+		if err := s.annotateApprovability(ctx, tx, a, s.now(), one); err != nil {
+			return err
+		}
+		r.Approvability = one[0].Approvability
+		return nil
 	})
 	if err != nil {
 		return nil, nil, err

@@ -854,7 +854,7 @@ func TestLaunchHTTP_ReadsListQueueHistory(t *testing.T) {
 		t.Fatalf("cancelled filter: %+v", l)
 	}
 	// The queue sees pending requests across tenants for platform staff.
-	q := get("/v1/admin/launch-authorisations?status=pending&limit=500", w.tokAp1())
+	q := get("/v1/admin/launch-authorisations?status=pending&limit=200", w.tokAp1())
 	seenA := false
 	for _, it := range q.Items {
 		if it.Status != "pending" {

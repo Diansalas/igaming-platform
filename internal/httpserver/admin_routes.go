@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -144,6 +145,20 @@ func newCreateTenantHandler(deps Deps) http.HandlerFunc {
 // its own), since reading one's own tenant record is an ordinary, everyday
 // tenant_admin action, unlike enumerating the whole platform.
 
+// tenantListRow and brandListRow are the list rows: the plain resource plus launch_kind, the kind
+// of the newest status transition (governed | legacy_baseline | owner_provisioned), or null when
+// there is none or the caller may not read launch history. ADR 0112 slice 6 (e): lets the Back
+// Office mark legacy-baseline subjects in a list without one history call per row.
+type tenantListRow struct {
+	tenantResponse
+	LaunchKind *string `json:"launch_kind"`
+}
+
+type brandListRow struct {
+	brandResponse
+	LaunchKind *string `json:"launch_kind"`
+}
+
 func newListTenantsHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -163,7 +178,7 @@ func newListTenantsHandler(deps Deps) http.HandlerFunc {
 		q := r.URL.Query().Get("q")
 		status := r.URL.Query().Get("status")
 
-		var resp []tenantResponse
+		var resp []tenantListRow
 		var total int
 		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 			tenants, t, err := identity.ListTenants(ctx, tx, q, status, p.Limit, p.Offset)
@@ -171,9 +186,9 @@ func newListTenantsHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			total = t
-			resp = make([]tenantResponse, 0, len(tenants))
+			resp = make([]tenantListRow, 0, len(tenants))
 			for _, ten := range tenants {
-				resp = append(resp, tenantResponse{ID: ten.ID.String(), Name: ten.Name, Slug: ten.Slug, LicensingModel: ten.LicensingModel, Status: ten.Status})
+				resp = append(resp, tenantListRow{tenantResponse: tenantResponse{ID: ten.ID.String(), Name: ten.Name, Slug: ten.Slug, LicensingModel: ten.LicensingModel, Status: ten.Status}})
 			}
 			return nil
 		})
@@ -181,6 +196,27 @@ func newListTenantsHandler(deps Deps) http.HandlerFunc {
 			logger.Error("list_tenants_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list tenants")
 			return
+		}
+		if actor, ok := launchActorFrom(tc, r, requestID); ok && deps.LaunchAuthorisation != nil && len(resp) > 0 {
+			ids := make([]uuid.UUID, 0, len(resp))
+			for _, row := range resp {
+				if id, perr := uuid.Parse(row.ID); perr == nil {
+					ids = append(ids, id)
+				}
+			}
+			kinds, kerr := deps.LaunchAuthorisation.LatestTenantKinds(r.Context(), actor, ids)
+			if kerr != nil && !errors.Is(kerr, launchgov.ErrForbidden) {
+				logger.Error("list_tenants_launch_kind_failed", "error", kerr)
+				apierror.Write(w, requestID, apierror.CodeInternal, "failed to list tenants")
+				return
+			}
+			for i := range resp {
+				if id, perr := uuid.Parse(resp[i].ID); perr == nil {
+					if k, found := kinds[id]; found {
+						resp[i].LaunchKind = &k
+					}
+				}
+			}
 		}
 		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
 	}
@@ -330,7 +366,7 @@ func newListBrandsHandler(deps Deps) http.HandlerFunc {
 
 		p := parsePageParams(r)
 
-		var resp []brandResponse
+		var resp []brandListRow
 		var total int
 		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
 			brands, t, err := identity.ListBrandsForTenant(ctx, tx, targetTenantID, p.Limit, p.Offset)
@@ -338,9 +374,9 @@ func newListBrandsHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			total = t
-			resp = make([]brandResponse, 0, len(brands))
+			resp = make([]brandListRow, 0, len(brands))
 			for _, b := range brands {
-				resp = append(resp, brandResponse{ID: b.ID.String(), TenantID: b.TenantID.String(), Name: b.Name, Slug: b.Slug, Status: b.Status})
+				resp = append(resp, brandListRow{brandResponse: brandResponse{ID: b.ID.String(), TenantID: b.TenantID.String(), Name: b.Name, Slug: b.Slug, Status: b.Status}})
 			}
 			return nil
 		})
@@ -348,6 +384,27 @@ func newListBrandsHandler(deps Deps) http.HandlerFunc {
 			logger.Error("list_brands_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list brands")
 			return
+		}
+		if actor, ok := launchActorFrom(tc, r, requestID); ok && deps.LaunchAuthorisation != nil && len(resp) > 0 {
+			ids := make([]uuid.UUID, 0, len(resp))
+			for _, row := range resp {
+				if id, perr := uuid.Parse(row.ID); perr == nil {
+					ids = append(ids, id)
+				}
+			}
+			kinds, kerr := deps.LaunchAuthorisation.LatestBrandKinds(r.Context(), actor, targetTenantID, ids)
+			if kerr != nil && !errors.Is(kerr, launchgov.ErrForbidden) {
+				logger.Error("list_brands_launch_kind_failed", "error", kerr)
+				apierror.Write(w, requestID, apierror.CodeInternal, "failed to list brands")
+				return
+			}
+			for i := range resp {
+				if id, perr := uuid.Parse(resp[i].ID); perr == nil {
+					if k, found := kinds[id]; found {
+						resp[i].LaunchKind = &k
+					}
+				}
+			}
 		}
 		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
 	}

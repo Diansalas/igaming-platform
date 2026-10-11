@@ -2,7 +2,11 @@ package launchgov
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,49 +91,128 @@ func (s *Service) ListTransitions(ctx context.Context, a Actor, tenantID uuid.UU
 	return out, err
 }
 
+// Queue paging bounds (ADR 0112 slice 6 (c)).
+const (
+	QueueDefaultLimit = 50
+	QueueMaxLimit     = 200
+)
+
+// QueueCursor is the keyset position of the last row of a page: the queue is ordered by
+// (created_at DESC, id DESC) and the next page is every row strictly after that pair. It is a
+// position, not a capability: the platform-only authorisation of the queue is applied on every call.
+type QueueCursor struct {
+	CreatedAt time.Time
+	ID        uuid.UUID
+}
+
+// ErrBadCursor is a cursor that is not exactly what EncodeCursor produces.
+var ErrBadCursor = errors.New("launchgov: malformed queue cursor")
+
+// EncodeCursor renders a cursor as an opaque URL-safe token: v1.<unix microseconds>.<uuid>, base64url.
+// Microseconds are the precision of timestamptz, so the round trip is exact.
+func EncodeCursor(c QueueCursor) string {
+	raw := "v1." + strconv.FormatInt(c.CreatedAt.UTC().UnixMicro(), 10) + "." + c.ID.String()
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// DecodeCursor is the strict inverse of EncodeCursor: any other input is ErrBadCursor.
+func DecodeCursor(tok string) (QueueCursor, error) {
+	if tok == "" || len(tok) > 128 {
+		return QueueCursor{}, ErrBadCursor
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil {
+		return QueueCursor{}, ErrBadCursor
+	}
+	parts := strings.Split(string(raw), ".")
+	if len(parts) != 3 || parts[0] != "v1" {
+		return QueueCursor{}, ErrBadCursor
+	}
+	us, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || us <= 0 || strconv.FormatInt(us, 10) != parts[1] {
+		return QueueCursor{}, ErrBadCursor
+	}
+	id, err := uuid.Parse(parts[2])
+	if err != nil || id == uuid.Nil || id.String() != parts[2] {
+		return QueueCursor{}, ErrBadCursor
+	}
+	return QueueCursor{CreatedAt: time.UnixMicro(us).UTC(), ID: id}, nil
+}
+
+// QueuePage is one page of the platform-wide queue. Next is nil on the last page.
+type QueuePage struct {
+	Items []Request
+	Next  *QueueCursor
+}
+
 // ListRequestsAcrossTenants is the platform-wide approval queue: a PLATFORM actor only, every
-// tenant, newest first. Same expiry-on-access rule as ListRequests (a pending row past expires_at
-// is reported as expired). A tenant actor is refused (ErrForbidden): its view is its own tenant.
-func (s *Service) ListRequestsAcrossTenants(ctx context.Context, a Actor, statuses []string, limit int) ([]Request, error) {
+// tenant, newest first by (created_at DESC, id DESC) with keyset paging (after = the last row of the
+// previous page; nil = first page). limit defaults to QueueDefaultLimit and is capped at
+// QueueMaxLimit. Same expiry-on-access rule as ListRequests (a pending row past expires_at is
+// reported as expired). Rows carry tenant and brand names (display only) and the caller's
+// approvability. A tenant actor is refused (ErrForbidden): its view is its own tenant.
+func (s *Service) ListRequestsAcrossTenants(ctx context.Context, a Actor, statuses []string, limit int, after *QueueCursor) (QueuePage, error) {
 	if a.Scope == actorproof.ScopePlatformActing {
-		return nil, ErrActingSession
+		return QueuePage{}, ErrActingSession
 	}
 	if a.Scope != ScopePlatform {
-		return nil, fmt.Errorf("%w: the platform-wide queue is for platform staff", ErrForbidden)
+		return QueuePage{}, fmt.Errorf("%w: the platform-wide queue is for platform staff", ErrForbidden)
 	}
 	if err := authorize(a, auth.PermLaunchAuthorisationRead, Subject{TenantID: uuid.New()}, false); err != nil {
-		return nil, err
+		return QueuePage{}, err
 	}
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	if limit <= 0 {
+		limit = QueueDefaultLimit
+	}
+	if limit > QueueMaxLimit {
+		limit = QueueMaxLimit
 	}
 	if statuses == nil {
 		statuses = []string{}
 	}
+	var afterTS *time.Time
+	var afterID *uuid.UUID
+	if after != nil {
+		afterTS, afterID = &after.CreatedAt, &after.ID
+	}
 	now := s.now()
-	var out []Request
+	var page QueuePage
 	err := s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+requestColumns+` FROM launch_authorisation_requests
+		page = QueuePage{}
+		rows, err := tx.Query(ctx, `SELECT `+prefixed("r", requestColumns)+`, t.name, b.name
+			FROM launch_authorisation_requests r
+			LEFT JOIN tenants t ON t.id = r.tenant_id
+			LEFT JOIN brands b ON b.id = r.brand_id AND b.tenant_id = r.tenant_id
 			WHERE (cardinality($1::text[]) = 0
-			       OR (CASE WHEN status = 'pending' AND expires_at <= $3 THEN 'expired' ELSE status END) = ANY($1))
-			ORDER BY created_at DESC, id DESC LIMIT $2`, statuses, limit, now)
+			       OR (CASE WHEN r.status = 'pending' AND r.expires_at <= $3 THEN 'expired' ELSE r.status END) = ANY($1))
+			  AND ($4::timestamptz IS NULL OR (r.created_at, r.id) < ($4::timestamptz, $5::uuid))
+			ORDER BY r.created_at DESC, r.id DESC LIMIT $2`, statuses, limit+1, now, afterTS, afterID)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var r Request
-			if err := scanRequest(rows, &r); err != nil {
+			if err := scanRequestWithNames(rows, &r); err != nil {
 				return err
 			}
 			if r.Status == ReqPending && !now.Before(r.ExpiresAt) {
 				r.Status = ReqExpired
 			}
-			out = append(out, r)
+			page.Items = append(page.Items, r)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		rows.Close()
+		if len(page.Items) > limit {
+			page.Items = page.Items[:limit]
+			last := page.Items[limit-1]
+			page.Next = &QueueCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+		}
+		return s.annotateApprovability(ctx, tx, a, now, page.Items)
 	})
-	return out, err
+	return page, err
 }
 
 // ListFilter narrows ListRequests. All fields are optional; the tenant is the route-validated one.
@@ -180,6 +263,68 @@ func (s *Service) ListRequests(ctx context.Context, a Actor, tenantID uuid.UUID,
 				r.Status = ReqExpired
 			}
 			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		rows.Close()
+		return s.annotateApprovability(ctx, tx, a, now, out)
+	})
+	return out, err
+}
+
+// LatestBrandKinds returns, for each given brand of the tenant, the kind of its newest status
+// transition (governed | legacy_baseline | owner_provisioned). A brand with no transition is
+// absent from the map (the API renders null). ADR 0112 slice 6 (e): a display flag for lists, read
+// with the same ordering the history endpoint uses ((created_at, id) newest first). A tenant actor
+// reads only its own tenant (authorize + RLS); a role without launch_authorisation:read gets
+// ErrForbidden and the caller renders null.
+func (s *Service) LatestBrandKinds(ctx context.Context, a Actor, tenantID uuid.UUID, brandIDs []uuid.UUID) (map[uuid.UUID]string, error) {
+	if err := authorize(a, auth.PermLaunchAuthorisationRead, Subject{TenantID: tenantID}, false); err != nil {
+		return nil, err
+	}
+	return s.latestKinds(ctx, a, `SELECT DISTINCT ON (brand_id) brand_id, kind FROM launch_status_transitions
+		WHERE subject_kind = 'brand' AND tenant_id = $1 AND brand_id = ANY($2)
+		ORDER BY brand_id, created_at DESC, id DESC`, tenantID, nonNilIDs(brandIDs))
+}
+
+// LatestTenantKinds is LatestBrandKinds for tenant subjects. Platform actors only (the tenant list
+// is platform-only).
+func (s *Service) LatestTenantKinds(ctx context.Context, a Actor, tenantIDs []uuid.UUID) (map[uuid.UUID]string, error) {
+	if a.Scope != ScopePlatform {
+		return nil, fmt.Errorf("%w: tenant launch kinds are for platform staff", ErrForbidden)
+	}
+	if err := authorize(a, auth.PermLaunchAuthorisationRead, Subject{TenantID: uuid.New()}, false); err != nil {
+		return nil, err
+	}
+	return s.latestKinds(ctx, a, `SELECT DISTINCT ON (tenant_id) tenant_id, kind FROM launch_status_transitions
+		WHERE subject_kind = 'tenant' AND tenant_id = ANY($1)
+		ORDER BY tenant_id, created_at DESC, id DESC`, nonNilIDs(tenantIDs))
+}
+
+// nonNilIDs: a nil slice would bind as SQL NULL and ANY(NULL) matches nothing silently.
+func nonNilIDs(ids []uuid.UUID) []uuid.UUID {
+	if ids == nil {
+		return []uuid.UUID{}
+	}
+	return ids
+}
+
+func (s *Service) latestKinds(ctx context.Context, a Actor, q string, args ...any) (map[uuid.UUID]string, error) {
+	out := map[uuid.UUID]string{}
+	err := s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id uuid.UUID
+			var kind string
+			if err := rows.Scan(&id, &kind); err != nil {
+				return err
+			}
+			out[id] = kind
 		}
 		return rows.Err()
 	})

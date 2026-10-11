@@ -165,3 +165,18 @@ describe('getNavPermissions payout instrument flags (B13)', () => {
     }
   })
 })
+
+describe('getNavPermissions own-tenant read (ADR 0112 slice 6 (b))', () => {
+  it('tenant_admin and compliance may open their own tenant; compliance stays read only', () => {
+    expect(getNavPermissions('tenant_admin').ownTenant).toBe(true)
+    const c = getNavPermissions('compliance')
+    expect(c.ownTenant).toBe(true)
+    expect([c.tenantWrite, c.brandWrite, c.staffAdmin, c.launchApprove, c.launchQueue, c.tenants]).toEqual([false, false, false, false, false, false])
+    expect([c.launchRead, c.launchRequest, c.launchSuspend]).toEqual([true, true, true])
+  })
+  it('no other role gets own-tenant access', () => {
+    for (const role of ['platform_admin', 'support', 'finance', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]) {
+      expect(getNavPermissions(role as string).ownTenant).toBe(false)
+    }
+  })
+})

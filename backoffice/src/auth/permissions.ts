@@ -14,7 +14,10 @@
 export interface NavPermissions {
   /** GET /v1/admin/tenants - the platform-wide tenant list (platform_admin only). */
   tenants: boolean
-  /** This tenant's own detail + brand list (tenant_admin only). */
+  /**
+   * This tenant's own detail + brand list (PermTenantRead + PermBrandRead on the own tenant):
+   * tenant_admin, and since ADR 0112 slice 6 compliance (read only; brandWrite/staffAdmin stay false).
+   */
   ownTenant: boolean
   players: boolean
   kyc: boolean
@@ -204,7 +207,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     launchSuspend: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
+  compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
   finance: {
     ...NONE,
     withdrawals: true,

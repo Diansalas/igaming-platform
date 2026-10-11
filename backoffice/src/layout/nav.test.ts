@@ -62,7 +62,8 @@ describe('buildNavItems', () => {
 
   it('gives compliance its review sections but no configuration, catalogue, or withdrawals', () => {
     const items = buildNavItems({ ...baseClaims, role: 'compliance' }).map((i) => i.label)
-    expect(items).toEqual(['Players', 'KYC', 'Responsible Gaming', 'Bonus', 'Sportsbook', 'Casino', 'Audit Log'])
+    // 'My Tenant': own-tenant read since ADR 0112 slice 6 (b) (brand discovery for the launch panel).
+    expect(items).toEqual(['My Tenant', 'Players', 'KYC', 'Responsible Gaming', 'Bonus', 'Sportsbook', 'Casino', 'Audit Log'])
   })
 
   it('never gives finance configuration or catalogue pages', () => {

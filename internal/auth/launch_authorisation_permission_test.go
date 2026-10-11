@@ -29,3 +29,34 @@ func TestLaunchAuthorisationPermissions_RoleMatrix(t *testing.T) {
 		t.Fatal("permission strings drifted from ADR 0112 6.1")
 	}
 }
+
+// ADR 0112 slice 6 (b): compliance gains own-tenant tenant and brand READ (brand discovery for the
+// launch panel) and nothing else. This pins the exact holder sets of the two read permissions and
+// proves the grant is not an escalation: compliance still cannot approve, cannot write a tenant or
+// a brand, cannot bind a licence or manage staff, and the launch matrix is otherwise unchanged.
+func TestCompliance_TenantBrandReadGrant_NoEscalation(t *testing.T) {
+	for _, perm := range []Permission{PermTenantRead, PermBrandRead} {
+		want := map[Role]bool{RolePlatformAdmin: true, RoleTenantAdmin: true, RoleCompliance: true}
+		for _, role := range append(append([]Role(nil), allRoles...), "", "unknown", "COMPLIANCE") {
+			if got := RoleHasPermission(role, perm); got != want[role] {
+				t.Errorf("role %q %s = %v, want %v", role, perm, got, want[role])
+			}
+		}
+	}
+	for _, perm := range []Permission{
+		PermLaunchAuthorisationApprove, PermTenantWrite, PermBrandWrite, PermStaffManage, PermTenantLicenceAssign,
+		PermJurisdictionRegistryManage, PermProviderConfigWrite, PermWithdrawalApprove,
+	} {
+		if RoleHasPermission(RoleCompliance, perm) {
+			t.Errorf("compliance must not hold %s", perm)
+		}
+	}
+	for perm, want := range map[Permission]bool{
+		PermLaunchAuthorisationRead: true, PermLaunchAuthorisationRequest: true, PermLaunchAuthorisationSuspend: true,
+		PermLaunchAuthorisationApprove: false,
+	} {
+		if RoleHasPermission(RoleCompliance, perm) != want {
+			t.Errorf("compliance %s want %v", perm, want)
+		}
+	}
+}
