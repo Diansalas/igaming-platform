@@ -73,6 +73,9 @@ var allowedLiteralCompares = map[string]string{
 	// 0129 (ADR 0112 slice 2, LF1): CREATE OR REPLACE of the same 0128 guard with the
 	// per-brand gameplay lock added; the closed-is-terminal line is 0128's, unchanged.
 	"migrations/0129_brand_gameplay_gate.up.sql:IF OLD.status = 'closed' THEN": "0129 restates 0128 closed is terminal",
+	// 0130 (ADR 0112 slice 3): CREATE OR REPLACE of the same guard with the C2 one-subject-per-
+	// transaction rule added; the closed-is-terminal line is 0128's, unchanged.
+	"migrations/0130_launch_authorisation_actor_proof.up.sql:IF OLD.status = 'closed' THEN": "0130 restates 0128 closed is terminal",
 }
 
 func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testing.T) {

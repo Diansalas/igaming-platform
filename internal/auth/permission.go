@@ -701,6 +701,28 @@ const (
 	PermWithdrawalHoldResolutionRead    Permission = "withdrawal_hold_resolution:read"
 )
 
+// Launch authorisation permissions (ADR 0112 slice 3, section 6.1; ADR 0099 3.2 style:
+// STATIC route-level authority, deliberately not grantable through any capability catalogue
+// and never usable in an acting session). They answer only "may this role attempt this
+// call at all"; the controls that matter (distinct staff AND Person, no self-approval, signed
+// actor proof, the status guard) are the database's and internal/launchgov's, whatever the
+// role. A record produced through them is a recorded decision, not a legal authorisation.
+//
+//   - PermLaunchAuthorisationRequest: file / cancel a launch request. platform_admin (any
+//     tenant); tenant_admin and compliance for brand subjects of their OWN tenant only
+//     (launchgov and the database refuse a tenant subject from a tenant session).
+//   - PermLaunchAuthorisationApprove: approve or reject. platform_admin ONLY; a tenant role
+//     never approves (the approvals table admits platform sessions only).
+//   - PermLaunchAuthorisationSuspend: immediate suspension (fail-closed direction).
+//     platform_admin (any); tenant_admin and compliance for their own tenant's brands.
+//   - PermLaunchAuthorisationRead: read requests, approvals, readiness and history.
+const (
+	PermLaunchAuthorisationRequest Permission = "launch_authorisation:request"
+	PermLaunchAuthorisationApprove Permission = "launch_authorisation:approve"
+	PermLaunchAuthorisationSuspend Permission = "launch_authorisation:suspend"
+	PermLaunchAuthorisationRead    Permission = "launch_authorisation:read"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -789,6 +811,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermPaymentForceResolveRequest, PermPaymentForceResolveApprove, PermPaymentForceResolveRead,
 		// HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3): platform_admin ONLY.
 		PermWithdrawalHoldResolutionRequest, PermWithdrawalHoldResolutionApprove, PermWithdrawalHoldResolutionRead,
+		// ADR 0112 slice 3 (6.1): platform_admin is the ONLY holder of :approve.
+		PermLaunchAuthorisationRequest, PermLaunchAuthorisationApprove, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -895,6 +919,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// static half of that same decision.
 		PermCapabilityGrantRequest, PermCapabilityGrantRevoke, PermCapabilityGrantRead,
 		PermFinancialPolicyTighten, PermFinancialPolicyRead,
+		// ADR 0112 slice 3 (6.1): request and suspend for the tenant's OWN brands, plus read.
+		// Never :approve.
+		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -961,6 +988,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PRH-2 K3 (ADR 0101 24.9): read-only visibility of payment
 		// force-resolutions.
 		PermPaymentForceResolveRead,
+		// ADR 0112 slice 3 (6.1): compliance may request and suspend for its tenant's own
+		// brands and read; never :approve.
+		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing

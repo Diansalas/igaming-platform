@@ -243,7 +243,7 @@ func staticOffenders(t *testing.T, root string, allowed map[string]bool) []strin
 		src := string(b)
 		dir := filepath.Dir(rel)
 		inProoftest := dir == filepath.Join("internal", "actorproof", "prooftest")
-		if strings.Contains(src, impTest) && !inProoftest {
+		if strings.Contains(src, impTest) && !inProoftest && !prooftestImporters[dir] {
 			offenders = append(offenders, rel+" (imports prooftest)")
 		}
 		// Pinned to exact code-line counts (comments excluded), not to whole directories:
@@ -295,13 +295,27 @@ func codeLines(src, needle string) int {
 	return n
 }
 
+// prooftestImporters are the integration-tag-only test-support packages that sign proofs for
+// raw-SQL fixtures (ADR 0112 slice 3: every launch fixture write now needs a proof). They are
+// behind the `integration` build tag and a separate static test pins that no non-test code
+// imports them (internal/tenant/launch_fixture_pin_test.go).
+var prooftestImporters = map[string]bool{
+	filepath.Join("internal", "testsupport", "launchfix"):   true,
+	filepath.Join("internal", "testsupport", "launchdrive"): true,
+}
+
 var staticAllowed = map[string]bool{
-	filepath.Join("internal", "adjustment"): true,
-	filepath.Join("internal", "payments"):   true,
-	filepath.Join("internal", "capability"): true,
-	filepath.Join("internal", "actorproof"): true,
-	filepath.Join("cmd", "platform-api"):    true, // SetDefault wiring only
-	filepath.Join("internal", "config"):     true, // ParseKeySet validation only
+	// ADR 0112 slice 3: the launch authorisation service signs request / cancel / approve /
+	// reject / suspend proofs for the authenticated principal (security review mandatory).
+	filepath.Join("internal", "launchgov"):                  true,
+	filepath.Join("internal", "testsupport", "launchfix"):   true,
+	filepath.Join("internal", "testsupport", "launchdrive"): true,
+	filepath.Join("internal", "adjustment"):                 true,
+	filepath.Join("internal", "payments"):                   true,
+	filepath.Join("internal", "capability"):                 true,
+	filepath.Join("internal", "actorproof"):                 true,
+	filepath.Join("cmd", "platform-api"):                    true, // SetDefault wiring only
+	filepath.Join("internal", "config"):                     true, // ParseKeySet validation only
 	// canon.go uses only actorproof.TS (timestamp text encoding) for the
 	// payout-instrument seal input; it never signs (B13-A, ADR 0111 s15).
 	filepath.Join("internal", "payoutinstrument"): true,

@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
@@ -31,6 +35,9 @@ type lgWorld struct {
 func newLG(t *testing.T) *lgWorld {
 	t.Helper()
 	w := &lgWorld{owner: brandPinOwnerPool(t), rt: brandPinRuntimePool(t)}
+	// Since migration 0130 every request / approval needs the signed proof of the session's own
+	// actor: install the per-process issuer and provision its key into this database.
+	prooftest.Install(t, os.Getenv("TEST_DATABASE_URL"))
 	launchfix.SeedOperators(t)
 	w.ops = launchfix.Operators()
 	return w
@@ -113,8 +120,17 @@ func (w *lgWorld) tenantStatus(t *testing.T, tenantID uuid.UUID) string {
 }
 
 // lgRequest inserts a request in the CURRENT transaction (whatever session shape it holds) and
-// returns its id and payload hash.
+// returns its id and payload hash. It attaches the session actor's signed proof (migration 0130).
 func lgRequest(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID, action string) (uuid.UUID, string, error) {
+	return lgRequestWith(ctx, tx, tenantID, brandID, action, true)
+}
+
+// lgRequestNoProof is lgRequest without a proof (the proof guard must refuse it).
+func lgRequestNoProof(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID, action string) (uuid.UUID, string, error) {
+	return lgRequestWith(ctx, tx, tenantID, brandID, action, false)
+}
+
+func lgRequestWith(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID, action string, proof bool) (uuid.UUID, string, error) {
 	kind := "tenant"
 	if brandID != nil {
 		kind = "brand"
@@ -122,10 +138,22 @@ func lgRequest(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid
 	needsLicensing := action == "activate" || action == "reactivate" || action == "ratify"
 	var model, lstatus, operator *string
 	var juris []uuid.UUID
+	d := actorproof.LaunchRequest{TenantID: tenantID, SubjectKind: kind, BrandID: brandID, Action: action,
+		ReadinessSnapshotHash: strings.Repeat("0", 64), ReasonCode: "lg_test"}
 	if needsLicensing {
 		m, s, o := "other_manually_approved", "conditional", "lg operator"
 		model, lstatus, operator = &m, &s, &o
 		juris = []uuid.UUID{uuid.New()}
+		d.LicensingModel, d.LicensingStatus, d.ResponsibleOperatorName, d.JurisdictionIDs = &m, &s, &o, juris
+	}
+	if proof {
+		op := actorproof.OpLaunchRequest
+		if action == "suspend" {
+			op = actorproof.OpLaunchSuspend
+		}
+		if err := prooftest.AttachForSession(ctx, tx, op, actorproof.TargetNew, d.Digest()); err != nil {
+			return uuid.Nil, "", err
+		}
 	}
 	id := uuid.New()
 	var hash string
@@ -148,9 +176,31 @@ func lgSetPlatform(ctx context.Context, tx pgx.Tx, staff uuid.UUID) error {
 }
 
 func lgApprove(ctx context.Context, tx pgx.Tx, reqID uuid.UUID, hash, decision string) error {
+	if err := prooftest.AttachForSession(ctx, tx, "launch_authorisation:"+decision, reqID.String(), hash); err != nil {
+		return err
+	}
+	return lgApproveNoProof(ctx, tx, reqID, hash, decision)
+}
+
+// lgApproveNoProof inserts an approval WITHOUT a proof (the proof guard must refuse it) - also the
+// shape for a session whose actor does not resolve (the earlier guards must refuse it first).
+func lgApproveNoProof(ctx context.Context, tx pgx.Tx, reqID uuid.UUID, hash, decision string) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO launch_authorisation_approvals (request_id, decision, payload_hash, readiness_snapshot_hash_at_decision, reason_code)
 		VALUES ($1, $2, $3, repeat('0', 64), 'lg_test')`, reqID, decision, hash)
+	return err
+}
+
+// lgCancel is the requester's proof-bound cancel of a pending request (migration 0130).
+func lgCancel(ctx context.Context, tx pgx.Tx, reqID uuid.UUID) error {
+	var hash string
+	if err := tx.QueryRow(ctx, `SELECT payload_hash FROM launch_authorisation_requests WHERE id = $1`, reqID).Scan(&hash); err != nil {
+		return err
+	}
+	if err := prooftest.AttachForSession(ctx, tx, actorproof.OpLaunchCancel, reqID.String(), hash); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE launch_authorisation_requests SET status = 'cancelled' WHERE id = $1`, reqID)
 	return err
 }
 
@@ -673,8 +723,7 @@ func TestLaunchGov_Requests_S1_ExecutionConditions(t *testing.T) {
 	wantCode(t, "runtime content tampering (no column privilege)", err, "42501")
 	// The requester can cancel; a second cancel is refused (terminal).
 	if err := w.platformRT(w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE launch_authorisation_requests SET status = 'cancelled' WHERE id = $1`, r3)
-		return err
+		return lgCancel(ctx, tx, r3)
 	}); err != nil {
 		t.Fatalf("requester cancel: %v", err)
 	}
@@ -725,7 +774,7 @@ func TestLaunchGov_Approvals_LA012_And_LA001(t *testing.T) {
 	wantCode(t, "approval with a different payload_hash", err, "LA012")
 
 	// A platform session whose principal is not an active platform staff row.
-	err = w.platformRT(uuid.New(), func(ctx context.Context, tx pgx.Tx) error { return lgApprove(ctx, tx, reqID, hash, "approve") })
+	err = w.platformRT(uuid.New(), func(ctx context.Context, tx pgx.Tx) error { return lgApproveNoProof(ctx, tx, reqID, hash, "approve") })
 	wantCode(t, "approval by an unknown platform principal", err, "LA001")
 
 	// An acting-session GUC shape is refused outright by the actor resolver (LA001) and sees
@@ -737,7 +786,8 @@ func TestLaunchGov_Approvals_LA012_And_LA001(t *testing.T) {
 			f.tenantID.String(), w.ops.Approver1.String()); err != nil {
 			return err
 		}
-		return lgApprove(ctx, tx, reqID, hash, "approve")
+		// No proof: an acting shape cannot even be proven (the earlier actor resolver refuses first).
+		return lgApproveNoProof(ctx, tx, reqID, hash, "approve")
 	})
 	wantCode(t, "acting-session approval", err, "LA001")
 	var visible int
@@ -760,8 +810,7 @@ func TestLaunchGov_Approvals_LA012_And_LA001(t *testing.T) {
 
 	// A decided (cancelled) request takes no further approval.
 	if err := w.platformRT(w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE launch_authorisation_requests SET status = 'cancelled' WHERE id = $1`, reqID)
-		return err
+		return lgCancel(ctx, tx, reqID)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -855,12 +904,19 @@ func TestLaunchGov_TenantSession_S8_S14(t *testing.T) {
 		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'lg s14')`, pb2, f.tenantID, "lg-"+pb2.String()); err != nil {
 			return err
 		}
+		m, st, op := "platform_licence", "in_force", "op"
+		j := uuid.New()
+		d := actorproof.LaunchRequest{TenantID: f.tenantID, SubjectKind: "brand", BrandID: &pb2, Action: "activate", LicensingModel: &m, LicensingStatus: &st,
+			ResponsibleOperatorName: &op, JurisdictionIDs: []uuid.UUID{j}, ReadinessSnapshotHash: strings.Repeat("0", 64), ReasonCode: "lg"}
+		if err := prooftest.AttachForSession(ctx, tx, actorproof.OpLaunchRequest, actorproof.TargetNew, d.Digest()); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, `
 			INSERT INTO launch_authorisation_requests
 			    (tenant_id, subject_kind, brand_id, action, reason_code, readiness_snapshot, readiness_snapshot_hash,
 			     licensing_model, licensing_status, responsible_operator_name, jurisdiction_ids, required_approvals)
-			VALUES ($1, 'brand', $2, 'activate', 'lg', '{}'::jsonb, repeat('0', 64), 'platform_licence', 'in_force', 'op', ARRAY[gen_random_uuid()], 0)
-			RETURNING required_approvals`, f.tenantID, pb2).Scan(&n)
+			VALUES ($1, 'brand', $2, 'activate', 'lg', '{}'::jsonb, repeat('0', 64), 'platform_licence', 'in_force', 'op', ARRAY[$3::uuid], 0)
+			RETURNING required_approvals`, f.tenantID, pb2, j).Scan(&n)
 	}); err != nil {
 		t.Fatalf("S14 request: %v", err)
 	}
