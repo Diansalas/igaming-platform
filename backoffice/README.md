@@ -41,4 +41,13 @@ hits a real backend).
 - `src/features/` - one folder per domain (tenants, players, kyc, rg,
   bonus, withdrawals, audit); domain display logic lives here, not in
   `components/`.
+- `src/features/launch/` - ADR 0112 launch authorisation: the launch panel on
+  tenant and brand detail (status, legacy-baseline badge, readiness checklist
+  with acknowledgements, licensing record, request / approve / reject / cancel /
+  suspend / close dialogs, status history) and the platform-only launch queue
+  (`/launch-queue`). Every screen carries the fixed disclaimer "A recorded
+  decision is not a legal authorisation". Error text is UI-owned (`errors.ts`
+  maps every `LAUNCH_*` code; the server message is never rendered). Money-like
+  values (R-PLAYER-FUNDS balances) are decimal strings and are never parsed
+  into a JS number.
 - `src/layout/` - app shell (sidebar, top bar, role-aware nav).

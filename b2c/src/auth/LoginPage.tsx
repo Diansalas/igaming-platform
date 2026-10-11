@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation } from 'react-router-dom'
 import { Button } from '../components/Button'
 import { TextInput } from '../components/TextInput'
 import { ApiError } from '../api/types'
+import { SiteUnavailable, isSiteUnavailableError } from '../components/SiteUnavailable'
 import { useAuth } from './AuthContext'
 
 function errorMessageFor(err: unknown): string {
@@ -14,8 +15,6 @@ function errorMessageFor(err: unknown): string {
         return 'Invalid email or password.'
       case 'forbidden':
         return 'This account cannot currently log in.'
-      case 'not_found':
-        return 'Unknown brand configuration.'
       case 'validation_error':
         return err.message || 'Please check the form and try again.'
       case 'network_error':
@@ -34,11 +33,14 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [unavailable, setUnavailable] = useState(false)
 
   if (isAuthenticated) {
     const from = (location.state as { from?: Location })?.from
     return <Navigate to={from?.pathname ?? '/'} replace />
   }
+
+  if (unavailable) return <SiteUnavailable />
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
@@ -47,6 +49,10 @@ export function LoginPage() {
     try {
       await login({ email: email.trim(), password })
     } catch (err) {
+      if (isSiteUnavailableError(err)) {
+        setUnavailable(true)
+        return
+      }
       setError(errorMessageFor(err))
     } finally {
       setIsSubmitting(false)

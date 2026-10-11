@@ -822,6 +822,37 @@ authorisation).** HTTP routes, OpenAPI, error codes, process wiring, the slice-3
   reason catalogues are a RECOMMENDATION. New: the admin routes have no per-route rate limit (only the auth routes are limited; residual); `security` has not
   yet reviewed the HTTP layer; the production run of the whole suite was done on a private scratch database, not CI.
 
+**Slice 5 implementation note (`backoffice` frontend, 2026-10-11; status: `IMPLEMENTED` against the OpenAPI contract and MSW-mocked
+responses only, NOT exercised against a live server; `product-owner-proxy` and `security` review required; no backend change).**
+`backoffice/src/features/launch/` plus `backoffice/src/api/launch.ts`: status badge for all four statuses and a `pending_launch` list
+filter; the "legacy baseline" badge (newest own transition of `launch-status-history` is `legacy_baseline`); the launch panel on tenant and
+brand detail (readiness checklist with pass/fail/info and per-code acknowledgement, licensing record with the four models, bounded note with
+the PII WARNING, request dialogs for activate / reactivate / close / ratify, request detail with approvals and prior rejects, approve /
+reject / cancel, single-actor suspend with the "inaccessible, not stranded" notice, closure with decimal-string per-asset sums and the
+"stranded until HD-CTF-4" notice, history timeline); the platform queue page (`/launch-queue`, platform roles only); the fixed disclaimer
+on every such screen; static permission mirror `launchRead|Request|Approve|Suspend|Queue` in `permissions.ts` (UI hint only; every server
+refusal is shown); an error map for every `LAUNCH_*` code that never prints the server message. B2C shows a neutral "This site is not
+available at the moment" on the not-launched 404 and the 409 `BRAND_NOT_ACCEPTING_REGISTRATIONS`. **API gaps found (UI does not fake
+them):** (1) the jurisdiction and licence registries are `platform_admin` only, so tenant staff must type UUIDs; (2) `compliance` holds no
+`tenant:read`/`brand:read`, so it cannot open the brand page that hosts the panel; (3) tenant and brand LIST endpoints carry no
+legacy-baseline flag (the badge is detail-only, one history call per subject); (4) the queue returns tenant ids only (no tenant or brand
+names) and has no pagination or total; (5) a request does not carry its readiness check results (only the hash), so a decided request
+shows no historical check detail; (6) "same Person" self-approval cannot be known to the UI (only the requester staff id is compared;
+the server answers `LAUNCH_SELF_APPROVAL`).
+
+**Slice 5 review follow-up (security APPROVE WITH CONDITIONS; product-owner wording checklist).** Applied in the UI: ids are
+`encodeURIComponent`-encoded when the queue builds a destination; the approve dialog freezes the readiness (hash and checks) at open;
+the disclaimer is visible on the request form, the approval dialog and the history view; licensing fields read "recorded basis"; the
+note reads "record only, not enforced"; no auto-selected reason, no pre-ticked acknowledgement. **Accepted residuals:** (1) HTTP
+responses distinguish 404 (unknown or `pending_launch`) from 409 (`suspended`/`closed`) for direct API callers (section 7.3); the B2C
+page maps both to the same neutral text. (2) `Modal` has no focus trap or focus restore: a tracked accessibility item.
+**Product-owner MUST-fix set for a real launch (SLICE 6, API completions; NOT implemented here, smallest API change each):**
+(a) brand discovery for tenant staff (`GET /v1/admin/tenants/{id}/brands`, or brands embedded in tenant detail, with id, name, slug,
+status); (b) `compliance` gets own-tenant brand and tenant read plus `launch_authorisation:read` (role mapping change); (c) queue rows
+carry `tenant_name` and `brand_name`, a `limit` and a `(created_at, id)` cursor, default 50; (d) a per-request server-computed
+`can_approve` and `cannot_approve_reason` (the UI mirrors it; the database `LA012` stays authoritative); (e) `launch_kind` (kind of the
+latest transition) on tenant and brand list rows.
+
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all
 `NOT IMPLEMENTED` until each slice lands; the licensing content recorded is human-dependent and never a statement of
