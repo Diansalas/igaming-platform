@@ -30,9 +30,29 @@ func TestK3_X01_EntriesFenceIsNullSafe_HouseLevelHoldAccount(t *testing.T) {
 			w := newK3World(t, k3Opts{base: 1})
 			wr, a := w.ambiguousPayout(250)
 			house := uuid.New()
-			w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			// ADR 0113 (migration 0132, security C1): a wallet-less player-type account is now refused by
+			// ledger_accounts_player_types_have_wallet (23514) ...
+			plant := func(ctx context.Context, tx pgx.Tx) error {
 				_, err := tx.Exec(ctx, `INSERT INTO ledger_accounts (id, tenant_id, account_type, asset_code, status) VALUES ($1, $2, 'player_withdrawal_hold', 'EUR', 'active')`,
 					house, w.f.tenantID)
+				return err
+			}
+			if err := w.pool.WithTenant(context.Background(), w.f.tenantID, plant); k3Code(err) != "23514" {
+				t.Fatalf("a wallet-less player_withdrawal_hold account: want 23514, got %v", err)
+			}
+			// ... so the fence's NULL-safety (the subject of this test) is exercised on an OWNER TAMPER plant
+			// on this throwaway scratch database: the CHECK is dropped for the plant and re-added NOT VALID
+			// (the planted row is exactly the history the check exists for).
+			w.tx(func(ctx context.Context, tx pgx.Tx) error {
+				if _, err := tx.Exec(ctx, `ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_player_types_have_wallet`); err != nil {
+					return err
+				}
+				if err := plant(ctx, tx); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, `ALTER TABLE ledger_accounts ADD CONSTRAINT ledger_accounts_player_types_have_wallet
+					CHECK (account_type NOT IN ('player_cash', 'player_bonus', 'player_locked_cash', 'player_locked_bonus',
+					                            'player_withdrawal_hold', 'player_bonus_held') OR wallet_id IS NOT NULL) NOT VALID`)
 				return err
 			})
 			r := w.mustRequest(w.acting, w.m2In(a.ID, kind))

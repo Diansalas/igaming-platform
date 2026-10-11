@@ -734,3 +734,29 @@ C). A four-eyes pair can return money to the same player through a credit with *
 the findings; the net figure cannot see it. Until a monitoring rule "flag any `credit_player` on the same wallet after an RR-1
 stop" exists, review K2 credits on wallets with a recovered M4/M2 not-paid as part of the four-eyes approval and in the
 periodic K2 audit review.
+
+## 17. Migration 0132 refused with `WD098` (ADR 0113 slice 1: withdrawal state machine and hold invariant)
+
+**What it means.** Before it creates any guard, migration 0132 scans every tenant (per-tenant `set_config` loop:
+the tables are FORCE RLS, a plain `SELECT` would be blind) and refuses with `WD098` if an EXISTING row already
+violates the new rules. The message carries one count per class: `reversed`, `columns`, `hold_link`,
+`release_link`, `hold_sum`, `hold_entry`, `hold_balance`, `walletless_player_account`,
+`withdrawal_tx_without_hold_leg`. Nothing is changed; the transaction rolls back. The migration takes
+`SHARE ROW EXCLUSIVE` on `withdrawal_requests`, `ledger_transactions`, `ledger_entries`, `ledger_accounts` for the
+scan, so writers wait (they do not fail) until it commits or refuses; run it in a deploy window.
+
+**Never patch rows to make it pass.** Rows are never edited or deleted to satisfy the pre-flight (append-only
+ledger, ADR 0113 section 6). The remedy depends on the database:
+
+| Database (this repository's tooling) | Persistent? | Expected outcome | Remedy |
+|---|---|---|---|
+| CI service database `igaming_platform_test` (`.github/workflows/ci.yml`, a fresh `services:` container per job) | no | migrates clean | none |
+| Self-hosted runner cluster on `127.0.0.1:54329` (`ci-selfhosted.yml`; created per run in `$RUNNER_TEMP`, deleted in an `always()` step, see `self-hosted-runner.md`) | no, while that teardown runs | migrates clean | if a run aborted before teardown and the data directory survived: delete it (teardown section of `self-hosted-runner.md`) and let the next run create a fresh cluster |
+| Throwaway `scratchdb` databases (integration tests) | no | migrate clean | none |
+| Local dev database `igaming_platform_dev` (`Makefile`, `deploy/docker-compose.dev.yml`, volume `igaming_postgres_data`) | **yes** | `WD098` if it ever held raw-inserted test rows (direct `approved` / `submitted` requests, hold legs without a request) | **rebuild from migrations**: recreate the database (or the volume) and run `make migrate-up`; it is synthetic data |
+| Local shared CI database `igaming_platform_ci_local` (agent / orchestrator harness) and agents' private databases | **yes** | `WD098` (years of fixture rows written before 0132) | **rebuild from migrations** (drop, create, `migrate up`), never patch |
+| Staging / any production-like database (`igaming_platform_staging`, RDS) | **yes** | should migrate clean (only the Go writers ever wrote there) | if `WD098`: STOP, escalate (ledger-finance + human). Every remedy (a compensating leg through a governed path: a hold-resolution release, an M2/M4 resolution, a governed manual adjustment) must be committed **BEFORE** 0132 is applied, because after 0132 only the table owner with the triggers disabled can post to a `player_withdrawal_hold` account. Then re-run the migration. |
+
+**Why the counts can include history that "worked" before.** Before 0132 nothing tied a request's state to its
+ledger legs: a request inserted directly as `approved`, a `withdrawal_*` posting with no hold leg, or a wallet-less
+`player_*` account were all accepted. 0132 refuses them from now on and refuses to start on top of them.

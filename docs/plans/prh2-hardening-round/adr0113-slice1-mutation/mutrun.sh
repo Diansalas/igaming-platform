@@ -20,5 +20,7 @@ for f in $M/mutants/${MUT_ONLY:-*}.sql; do
   rc=$?
   killers=$(grep -E "^--- FAIL" $M/$id.log | awk '{print $3}' | tr '\n' ' ')
   if [ $rc -ne 0 ]; then echo "$id KILLED by: $killers" | tee -a $OUT; else echo "$id SURVIVED" | tee -a $OUT; fi
-  psql "$OWNER" -q -v ON_ERROR_STOP=1 -f $M/restore.sql >/dev/null || { echo "restore failed after $id"; exit 1; }
+  # A C1 mutant lets the test commit wall-less player accounts; the restored CHECK then cannot validate:
+  # rebuild the private mutation database from the migrations instead.
+  psql "$OWNER" -q -v ON_ERROR_STOP=1 -f $M/restore.sql >/dev/null 2>&1 || { echo "($id: data left by the mutant, rebuilding $PRIV_DB)"; bash $S/priv_db.sh >/dev/null 2>&1 || { echo "rebuild failed"; exit 1; }; }
 done

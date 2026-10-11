@@ -14,11 +14,18 @@
 // B-ii run; the disabled state never outlives its own transaction (transactional DDL), so nothing
 // else on the database ever sees the triggers off. The table owner runs it (as every casino test does).
 //
+// OPT-IN (ledger-finance review C3): the gate toggles a trigger on ledger_entries ~1600 times (each an
+// ACCESS EXCLUSIVE lock for the toggling transaction), so it runs only when ADR0113_LATENCY_GATE=1 AND
+// ADR0113_LATENCY_DB names the connected database (an explicit "this is my private database"); it
+// skips otherwise and is never run on a shared database. The always-on evidence is
+// TestADR0113_HoldGuardTriggerCost_ExplainAnalyze (per-trigger cost from EXPLAIN ANALYZE, no DDL).
+//
 // ADR0113_LATENCY_SAMPLES overrides the per-mode sample count (default 400).
 package casino
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -27,12 +34,26 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 func TestADR0113_CasinoBetWinLatencyGate(t *testing.T) {
+	if os.Getenv("ADR0113_LATENCY_GATE") != "1" {
+		t.Skip("opt-in: toggles a trigger on ledger_entries ~1600 times (exclusive table lock); set ADR0113_LATENCY_GATE=1 and ADR0113_LATENCY_DB=<private database> to run it. Always-on evidence: TestADR0113_HoldGuardTriggerCost_ExplainAnalyze")
+	}
 	pool := testPool(t)
+	var dbName string
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT current_database()::text`).Scan(&dbName)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := os.Getenv("ADR0113_LATENCY_DB"); want == "" || want != dbName {
+		t.Fatalf("the latency gate runs only on the private database named by ADR0113_LATENCY_DB (connected to %q)", dbName)
+	}
 	f := seedCasinoFixture(t, pool)
 	fundWallet(t, pool, f, 1_000_000_000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
@@ -130,5 +151,81 @@ func TestADR0113_CasinoBetWinLatencyGate(t *testing.T) {
 	}
 	if failed {
 		t.Fatalf("casino bet/win p95 regression above the %.0f%% budget with the 0132 hold-account guards enabled", budget*100)
+	}
+}
+
+// TestADR0113_HoldGuardTriggerCost_ExplainAnalyze is the always-on cost evidence for C4 (no DDL, no
+// lock beyond an ordinary insert, rolled back): EXPLAIN ANALYZE of a two-entry player posting reports
+// the time and call count of every trigger, B-ii fired at statement end (SET CONSTRAINTS ... IMMEDIATE
+// for that trigger only). The bound is generous (1 ms per call; reviewers measured 0.01-0.04 ms) so
+// the test pins an order of magnitude, not a benchmark.
+func TestADR0113_HoldGuardTriggerCost_ExplainAnalyze(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	ctx := context.Background()
+	type trig struct {
+		Name  string  `json:"Trigger Name"`
+		Time  float64 `json:"Time"`
+		Calls int     `json:"Calls"`
+	}
+	per := map[string][]float64{}
+	for i := 0; i < 30; i++ {
+		tx, err := pool.Raw().Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		func() {
+			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, f.tenantID.String()); err != nil {
+				t.Fatal(err)
+			}
+			cash, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &f.walletID, ledger.AccountPlayerCash, "EUR")
+			if err != nil {
+				t.Fatal(err)
+			}
+			clearing, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+			if err != nil {
+				t.Fatal(err)
+			}
+			txID, ref := uuid.New(), "a13-cost-"+uuid.NewString()
+			if _, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (id, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, correlation_id)
+				VALUES ($1, $2, 'deposit', $3, 'a13-cost', $3, gen_random_uuid())`, txID, f.tenantID, ref); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(ctx, `SET CONSTRAINTS ledger_entries_withdrawal_hold_link_at_commit IMMEDIATE`); err != nil {
+				t.Fatal(err)
+			}
+			var plan []byte
+			if err := tx.QueryRow(ctx, `EXPLAIN (ANALYZE, FORMAT JSON) INSERT INTO ledger_entries (ledger_transaction_id, ledger_account_id, tenant_id, asset_code, direction, amount)
+				VALUES ($1, $2, $4, 'EUR', 'debit', 5), ($1, $3, $4, 'EUR', 'credit', 5)`, txID, clearing, cash, f.tenantID).Scan(&plan); err != nil {
+				t.Fatal(err)
+			}
+			var out []struct {
+				Triggers []trig `json:"Triggers"`
+			}
+			if err := json.Unmarshal(plan, &out); err != nil || len(out) != 1 {
+				t.Fatalf("plan: %v %s", err, plan)
+			}
+			for _, tr := range out[0].Triggers {
+				if tr.Calls > 0 {
+					per[tr.Name] = append(per[tr.Name], tr.Time/float64(tr.Calls))
+				}
+			}
+		}()
+	}
+	med := func(v []float64) float64 {
+		s := append([]float64(nil), v...)
+		sort.Float64s(s)
+		return s[len(s)/2]
+	}
+	for _, name := range []string{"ledger_entries_populate_from_account_trigger", "ledger_entries_withdrawal_hold_guard", "ledger_entries_withdrawal_hold_link_at_commit"} {
+		v := per[name]
+		if len(v) == 0 {
+			t.Fatalf("EXPLAIN ANALYZE reported no calls of %s: %v", name, per)
+		}
+		t.Logf("ADR0113-TRIGGER-COST %s median %.4f ms/entry over %d runs", name, med(v), len(v))
+		if name != "ledger_entries_populate_from_account_trigger" && med(v) > 1.0 {
+			t.Fatalf("%s costs %.4f ms per entry (bound 1 ms)", name, med(v))
+		}
 	}
 }

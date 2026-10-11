@@ -46,6 +46,8 @@ func legacySubmittedWithdrawal(t *testing.T, pool *db.Pool, f fixture, wrID uuid
 // (WD040). Used only by the reconciliation tests whose subject IS such an unattributed posting. The
 // deferred balance check of fn's entries is fired first: ALTER TABLE refuses to run while the table has
 // pending trigger events (55006).
+//
+// Callers first call wdpath.SkipOnPersistentDatabase: the planted legs are permanent (append-only).
 func ownerTamperHoldLegs(ctx context.Context, tx pgx.Tx, fn func() error) error {
 	for _, q := range []string{
 		`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_withdrawal_hold_guard`,

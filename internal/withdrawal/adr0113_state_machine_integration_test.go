@@ -1121,3 +1121,67 @@ func TestADR0113_ConcurrentEdgeRaces(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------------------------
+// Review round (security C1 / C2): the hold-account bypasses found live, as the runtime role.
+// ---------------------------------------------------------------------------------------------
+
+// C1: a wallet-less ledger account of a player type would skip B-i / B-ii (both fast-exit on a NULL
+// wallet_id); the reviewer's exploit created one as igaming_runtime and posted manual_adjustment
+// Dr house_gaming / Cr it. The account itself is now refused (23514), for every player_* type.
+func TestADR0113_WalletlessPlayerAccountRefused_C1(t *testing.T) {
+	w := newA13(t)
+	for _, typ := range []string{"player_withdrawal_hold", "player_cash", "player_bonus", "player_locked_cash", "player_locked_bonus", "player_bonus_held"} {
+		err := w.rtExec(`INSERT INTO ledger_accounts (id, tenant_id, account_type, asset_code, status) VALUES ($1, $2, $3, 'EUR', 'active')`,
+			uuid.New(), w.f.tenantID, typ)
+		wantCode(t, "wallet-less "+typ+" account", err, "23514")
+		wantMsg(t, "wallet-less "+typ+" account", err, "ledger_accounts_player_types_have_wallet")
+	}
+	// House-level accounts (no wallet) are unaffected.
+	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, nil, ledger.AccountHouseGaming, "EUR")
+		return err
+	}); err != nil {
+		t.Fatalf("a house account must stay creatable: %v", err)
+	}
+}
+
+// C2: a withdrawal_* posting that never touches a hold account (so B-i / B-ii never see it) is refused
+// at COMMIT (WD043): the double-pay shape Dr psp_clearing / Cr player_cash under withdrawal_rejected with
+// a fresh key against a COMPLETED request, and a withdrawal_completed Dr player_cash / Cr psp_clearing.
+// withdrawal_reversed (no writer) is refused at its hold leg (B-i, WD040).
+func TestADR0113_WithdrawalTypesRequireAHoldLeg_C2(t *testing.T) {
+	w := newA13(t)
+	cash, _, clearing := w.accounts()
+	done := w.at(t, StateCompleted)
+	sub := w.at(t, StateSubmitted)
+	post := func(typ ledger.TransactionType, key string, corr uuid.UUID, dr, cr uuid.UUID, amt int64, prov *string) error {
+		return w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+			in := ledger.TransactionInput{TenantID: w.f.tenantID, TransactionType: typ, IdempotencyKey: key, CorrelationID: corr,
+				Entries: []ledger.EntryInput{{LedgerAccountID: dr, Direction: ledger.Debit, Amount: amt}, {LedgerAccountID: cr, Direction: ledger.Credit, Amount: amt}}}
+			if prov != nil {
+				ptx := strings.TrimPrefix(key, *prov+":")
+				in.ProviderID, in.ProviderTxID = prov, &ptx
+			}
+			_, err := ledger.Post(ctx, tx, in)
+			return err
+		})
+	}
+	psp := a13PSP
+	wantCode(t, "withdrawal_rejected Dr psp_clearing / Cr cash vs completed, fresh key",
+		post(ledger.TxWithdrawalRejected, done.ID.String()+":again", done.ID, clearing, cash, done.Amount, nil), "WD043")
+	wantCode(t, "withdrawal_completed Dr cash / Cr psp_clearing (no hold leg)",
+		post(ledger.TxWithdrawalCompleted, psp+":nohold-"+sub.ID.String(), sub.ID, cash, clearing, sub.Amount, &psp), "WD043")
+	wantCode(t, "withdrawal_failed Dr psp_clearing / Cr cash vs submitted",
+		post(ledger.TxWithdrawalFailed, sub.ID.String()+":failed", sub.ID, clearing, cash, sub.Amount, nil), "WD043")
+	wantCode(t, "withdrawal_reversed through the hold",
+		post(ledger.TxWithdrawalReversed, done.ID.String()+":reversed", done.ID, clearing, w.f.holdAccountID, done.Amount, nil), "WD040")
+	if got := w.get(t, sub.ID); got.State != StateSubmitted || got.ReleaseLedgerTransactionID != nil {
+		t.Fatalf("the submitted request moved: %+v", got)
+	}
+	// Control: other types are unaffected (a deposit to player_cash commits).
+	k := "a13-c2-dep-" + uuid.NewString()
+	if err := post(ledger.TxDeposit, "a13-dep:"+k, uuid.New(), clearing, cash, 3, ptr("a13-dep")); err != nil {
+		t.Fatalf("a deposit must be unaffected: %v", err)
+	}
+}

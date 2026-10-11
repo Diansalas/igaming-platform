@@ -99,14 +99,14 @@ func m132Snapshot(t *testing.T, pool *db.Pool) string {
 			SELECT 'constraint:' || conrelid::regclass::text || ':' || conname || ':' || pg_get_constraintdef(oid)
 			  FROM pg_constraint WHERE connamespace = 'public'::regnamespace
 			UNION ALL
-			SELECT 'table:' || tablename || ':rls=' || c.relrowsecurity || ':force=' || c.relforcerowsecurity
+			SELECT 'table:' || tablename || ':rls=' || c.relrowsecurity || ':force=' || c.relforcerowsecurity || ':acl=' || coalesce(c.relacl::text, '')
 			  FROM pg_tables pt JOIN pg_class c ON c.relname = pt.tablename AND c.relnamespace = 'public'::regnamespace
 			 WHERE pt.schemaname = 'public'
 			UNION ALL
 			SELECT 'column:' || table_name || ':' || column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, '')
 			  FROM information_schema.columns WHERE table_schema = 'public'
 			UNION ALL
-			SELECT 'function:' || p.oid::regprocedure::text || ':' || md5(p.prosrc) || ':' || coalesce(array_to_string(p.proconfig, ','), '') || ':' || p.prosecdef
+			SELECT 'function:' || p.oid::regprocedure::text || ':' || md5(p.prosrc) || ':' || coalesce(array_to_string(p.proconfig, ','), '') || ':' || p.prosecdef || ':acl=' || coalesce(p.proacl::text, '')
 			  FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace
 			UNION ALL
 			SELECT 'index:' || tablename || ':' || indexname || ':' || indexdef FROM pg_indexes WHERE schemaname = 'public') s`).Scan(&snap)
@@ -196,6 +196,17 @@ func TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp(t *testing.T
 			_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: k,
 				ProviderID: &p, ProviderTxID: &k, CorrelationID: uuid.New(),
 				Entries: []ledger.EntryInput{{LedgerAccountID: w.clearing(), Direction: ledger.Debit, Amount: 3}, {LedgerAccountID: w.f.holdAccountID, Direction: ledger.Credit, Amount: 3}}})
+			return err
+		}},
+		{"walletless_player_account", func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO ledger_accounts (tenant_id, account_type, asset_code, status) VALUES ($1, 'player_withdrawal_hold', 'EUR', 'active')`, w.f.tenantID)
+			return err
+		}},
+		{"withdrawal_tx_without_hold_leg", func(ctx context.Context, tx pgx.Tx) error {
+			k := "dirty-" + uuid.NewString()
+			_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalFailed, IdempotencyKey: k,
+				CorrelationID: uuid.New(),
+				Entries:       []ledger.EntryInput{{LedgerAccountID: w.clearing(), Direction: ledger.Debit, Amount: 6}, {LedgerAccountID: w.f.cashAccountID, Direction: ledger.Credit, Amount: 6}}})
 			return err
 		}},
 		{"hold_balance", func(ctx context.Context, tx pgx.Tx) error {
@@ -319,7 +330,7 @@ func TestMigration0132_Catalog(t *testing.T) {
 	// No WHEN clause on any of the four (HN-4); the two at-commit triggers are deferred constraint triggers.
 	for _, row := range q(`SELECT tgname || '|' || (tgqual IS NULL)::text || '|' || tgdeferrable::text || '|' || tginitdeferred::text || '|' || (tgconstraint <> 0)::text
 		FROM pg_trigger WHERE tgname IN ('withdrawal_requests_aa_state_transition_guard', 'withdrawal_requests_ledger_link_at_commit',
-		  'ledger_entries_withdrawal_hold_guard', 'ledger_entries_withdrawal_hold_link_at_commit') ORDER BY tgname`) {
+		  'ledger_entries_withdrawal_hold_guard', 'ledger_entries_withdrawal_hold_link_at_commit', 'ledger_transactions_withdrawal_hold_leg_at_commit') ORDER BY tgname`) {
 		parts := strings.Split(row, "|")
 		atCommit := strings.HasSuffix(parts[0], "_at_commit")
 		if parts[1] != "true" {
@@ -333,15 +344,27 @@ func TestMigration0132_Catalog(t *testing.T) {
 		}
 	}
 	if n := len(q(`SELECT tgname::text FROM pg_trigger WHERE tgname IN ('withdrawal_requests_aa_state_transition_guard', 'withdrawal_requests_ledger_link_at_commit',
-		'ledger_entries_withdrawal_hold_guard', 'ledger_entries_withdrawal_hold_link_at_commit') AND tgenabled = 'O'`)); n != 4 {
-		t.Fatalf("expected the four 0132 triggers enabled, got %d", n)
+		'ledger_entries_withdrawal_hold_guard', 'ledger_entries_withdrawal_hold_link_at_commit', 'ledger_transactions_withdrawal_hold_leg_at_commit') AND tgenabled = 'O'`)); n != 5 {
+		t.Fatalf("expected the five 0132 triggers enabled, got %d", n)
 	}
 	for _, fn := range []string{"withdrawal_requests_state_transition_guard", "withdrawal_request_ledger_link_violation",
-		"withdrawal_requests_ledger_link_at_commit", "ledger_entries_withdrawal_hold_guard", "ledger_entries_withdrawal_hold_link_at_commit"} {
+		"withdrawal_requests_ledger_link_at_commit", "ledger_entries_withdrawal_hold_guard", "ledger_entries_withdrawal_hold_link_at_commit",
+		"ledger_transactions_withdrawal_hold_leg_at_commit"} {
 		got := q(`SELECT prosecdef::text || '|' || coalesce(array_to_string(proconfig, ','), '') FROM pg_proc WHERE proname = $1`, fn)
 		if len(got) != 1 || got[0] != "false|search_path=pg_catalog, public, pg_temp" {
 			t.Fatalf("%s: want not SECURITY DEFINER with a pinned search_path, got %v", fn, got)
 		}
+	}
+	// Security L3: the shared check function is not executable by PUBLIC.
+	if got := q(`SELECT has_function_privilege('public', 'withdrawal_request_ledger_link_violation(uuid, uuid)', 'EXECUTE')::text`); got[0] != "false" {
+		t.Fatal("withdrawal_request_ledger_link_violation must not be executable by PUBLIC")
+	}
+	if got := q(`SELECT coalesce(has_function_privilege('igaming_runtime', 'withdrawal_request_ledger_link_violation(uuid, uuid)', 'EXECUTE'), false)::text`); got[0] != "true" {
+		t.Fatal("igaming_runtime needs EXECUTE on withdrawal_request_ledger_link_violation (its sessions fire A / B-ii)")
+	}
+	// Security C1: the player-types-have-a-wallet CHECK exists and is validated.
+	if got := q(`SELECT convalidated::text FROM pg_constraint WHERE conname = 'ledger_accounts_player_types_have_wallet' AND conrelid = 'ledger_accounts'::regclass`); len(got) != 1 || got[0] != "true" {
+		t.Fatalf("ledger_accounts_player_types_have_wallet: %v", got)
 	}
 	// B-i mechanics (C4): no lock, exactly one ledger_accounts read, the NULL fast exit first.
 	src := q(`SELECT prosrc FROM pg_proc WHERE proname = 'ledger_entries_withdrawal_hold_guard'`)[0]

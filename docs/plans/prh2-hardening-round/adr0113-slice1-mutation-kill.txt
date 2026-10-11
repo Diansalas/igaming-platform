@@ -73,3 +73,16 @@ D4_0125_MR041_M4_outcome_off SURVIVED - subsumed: the next MR041 raise in the sa
 D4b_0125_MR041_executed_payout_block_off KILLED by: TestM4_MR041_ForgedLinkAndPlantedPosting (all three sub-tests)
 D5_0026_immutable_fields_trigger_dropped KILLED by: TestADR0113_DeeperGuardsStillArmedBehindTheStateGuard
 D6_0124_approved_hold_freeze_trigger_dropped KILLED by: TestADR0113_DeeperGuardsStillArmedBehindTheStateGuard
+
+D. Review round (security C1/C2/L3; mutation DB rebuilt from the migrations whenever a C1 mutant let the
+   test commit wall-less player accounts, which the restored CHECK then refuses to validate).
+
+Round-2 rerun of A on the review-round tree: M01-M28 unchanged (27 killed, M24 equivalent).
+M29_C1_player_wallet_check_dropped KILLED by: TestADR0113_WalletlessPlayerAccountRefused_C1 TestMigration0132_Catalog
+M30_C1_check_hold_type_only KILLED by: TestADR0113_WalletlessPlayerAccountRefused_C1
+M31_C2_hold_leg_trigger_dropped KILLED by: TestADR0113_WithdrawalTypesRequireAHoldLeg_C2 TestMigration0132_Catalog
+M32_C2_rejected_type_not_pinned KILLED by: TestADR0113_WithdrawalTypesRequireAHoldLeg_C2
+M33_L3_check_fn_public_execute KILLED by: TestMigration0132_Catalog
+PRE_walletless_not_counted KILLED: walletless_player_account: want SQLSTATE WD098, got "23514" (the CHECK validation is the RLS-independent backstop)
+PRE_no_hold_leg_not_counted KILLED: withdrawal_tx_without_hold_leg: want SQLSTATE WD098, got "" (only the pre-flight sees this history)
+(the seven earlier PRE_* mutants re-run on this tree: all killed)

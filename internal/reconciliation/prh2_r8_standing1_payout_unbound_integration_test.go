@@ -12,6 +12,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 )
 
 // PAY-PAYOUT-UNBOUND-STANDING-1 (ADR 0095 §35.2 PO-1 / §35.6): the per-operation
@@ -65,6 +66,7 @@ func TestStanding1_DepositUnboundPark_UnattributedWithdrawalCompletedNeverClears
 
 	ref := pk.pspRef
 	pid := payProvA
+	wdpath.SkipOnPersistentDatabase(t, w.pool) // permanent owner-tamper rows (ADR 0113 review)
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		// ADR 0113 (migration 0132): a hold leg that NO withdrawal request names is refused to every session
 		// (WD040). This test's subject IS such an unattributed posting, so it is an owner tamper plant (ADR 0110

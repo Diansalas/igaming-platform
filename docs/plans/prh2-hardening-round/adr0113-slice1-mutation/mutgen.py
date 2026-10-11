@@ -21,6 +21,8 @@ DROP TRIGGER IF EXISTS withdrawal_requests_state_transition_guard ON withdrawal_
 DROP TRIGGER IF EXISTS withdrawal_requests_ledger_link_at_commit ON withdrawal_requests;
 DROP TRIGGER IF EXISTS ledger_entries_withdrawal_hold_guard ON ledger_entries;
 DROP TRIGGER IF EXISTS ledger_entries_withdrawal_hold_link_at_commit ON ledger_entries;
+DROP TRIGGER IF EXISTS ledger_transactions_withdrawal_hold_leg_at_commit ON ledger_transactions;
+ALTER TABLE ledger_accounts DROP CONSTRAINT IF EXISTS ledger_accounts_player_types_have_wallet;
 '''
 base = drops + body
 os.makedirs(os.path.join(outdir, 'mutants'), exist_ok=True)
@@ -89,6 +91,21 @@ M['M26_Bii_dropped'] = m('''CREATE CONSTRAINT TRIGGER ledger_entries_withdrawal_
     FOR EACH ROW EXECUTE FUNCTION ledger_entries_withdrawal_hold_link_at_commit();''', '')
 M['M27_Bii_link_check_off'] = m('''    IF (NEW.direction = 'credit' AND w.hold_ledger_transaction_id IS DISTINCT FROM NEW.ledger_transaction_id)
        OR (NEW.direction = 'debit' AND w.release_ledger_transaction_id IS DISTINCT FROM NEW.ledger_transaction_id) THEN''', '''    IF false THEN''')
+
+# Review round (security C1 / C2)
+M['M29_C1_player_wallet_check_dropped'] = m('''ALTER TABLE ledger_accounts ADD CONSTRAINT ledger_accounts_player_types_have_wallet
+    CHECK (account_type NOT IN ('player_cash', 'player_bonus', 'player_locked_cash', 'player_locked_bonus',
+                                'player_withdrawal_hold', 'player_bonus_held') OR wallet_id IS NOT NULL);''', '')
+M['M30_C1_check_hold_type_only'] = m("    CHECK (account_type NOT IN ('player_cash', 'player_bonus', 'player_locked_cash', 'player_locked_bonus',\n                                'player_withdrawal_hold', 'player_bonus_held') OR wallet_id IS NOT NULL);",
+    "    CHECK (account_type <> 'player_withdrawal_hold' OR wallet_id IS NOT NULL);")
+M['M31_C2_hold_leg_trigger_dropped'] = m('''CREATE CONSTRAINT TRIGGER ledger_transactions_withdrawal_hold_leg_at_commit
+    AFTER INSERT ON ledger_transactions
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION ledger_transactions_withdrawal_hold_leg_at_commit();''', '')
+M['M32_C2_rejected_type_not_pinned'] = m("    IF NEW.transaction_type NOT IN ('withdrawal_requested', 'withdrawal_rejected', 'withdrawal_failed',\n                                    'withdrawal_completed', 'withdrawal_reversed') THEN",
+    "    IF NEW.transaction_type NOT IN ('withdrawal_requested', 'withdrawal_failed',\n                                    'withdrawal_completed', 'withdrawal_reversed') THEN")
+M['M33_L3_check_fn_public_execute'] = m("REVOKE ALL ON FUNCTION withdrawal_request_ledger_link_violation(uuid, uuid) FROM PUBLIC;",
+    "GRANT EXECUTE ON FUNCTION withdrawal_request_ledger_link_violation(uuid, uuid) TO PUBLIC;")
 
 for k, v in M.items():
     assert v != base, k

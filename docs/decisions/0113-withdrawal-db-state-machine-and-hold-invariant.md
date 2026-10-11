@@ -207,7 +207,12 @@ drops the deeper guard. The shared legal-path helper (E0 -> E1 -> E3 -> E7 throu
 `prh2_r16_res1_tighten:58`, `prh2_r8_standing1_payout_unbound:69`: old success, new `WD040`/`WD041` (no request, wrong
 key or pre-state) -> helper. `ledger/lockorder:126,229,739`, `ledger/replay:152`: the hold account is used as a
 generic second account; new `WD040` -> switch to a non-hold account of the same lock class (`ledger-finance` confirms
-lock-order coverage is kept). `casino/stage9_concurrency:479` is a read: unaffected.
+lock-order coverage is kept). `casino/stage9_concurrency:479` is a read: unaffected. **Slice 1 record (code review LOW):** the ledger lock-order
+test no longer posts to a hold account (a hand-built hold leg is `WD040`); hold-account projection locks under
+concurrency are covered through the real writers instead: `withdrawal`
+`TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds` (concurrent E0b on one wallet) and
+`TestADR0113_ConcurrentEdgeRaces` (`-race`, x20: Cancel/MoveToPendingReview, Approve/Reject, Complete/Fail,
+DenyForCompliance/MarkSubmittedPending, each with a hold leg), and `casino` stage-9 bet-vs-withdrawal race.
 
 **Raw `UPDATE` fixtures (38 sites, 14 files**: `payments/hsec_hold_resolution_*`, `k3_*`, `m4_resolve1_*`, `r31_*`;
 `payoutinstrument/{binding,state,migration_0123}_*`; `httpserver/{hsec_hold_resolution_api,launch_authorisation_http}_*`;
@@ -282,7 +287,20 @@ Numbers are allocated by the orchestrator (next free `0132`).
    detection in payout-statement reconciliation. It is recorded for human acceptance **on condition that statement
    reconciliation is scheduled for every live payout provider**. Moving the check to `payment_attempts` only relocates
    the forgery unless the terminal state is bound in the database to provider evidence.
-3. `WD023` is not a four-eyes control (§3 item 4); proof binding is a follow-up.
+   **Slice 1 review (security C2, ledger-finance L2), recorded:** the double-pay fix (B-i/B-ii) covers legs on the
+   HOLD account. Migration 0132 additionally pins every `withdrawal_*` transaction to a REQUIRED hold leg at COMMIT
+   (`WD043`, its hold leg then subject to B-i/B-ii/A), which closes the two non-hold shapes found live: a
+   `withdrawal_rejected` Dr `psp_clearing` / Cr `player_cash` with a fresh key against a COMPLETED request, and a
+   `withdrawal_completed` Dr `player_cash` / Cr `psp_clearing`; `withdrawal_reversed` (no writer) is refused end to
+   end. It also requires every `player_*` ledger account to have a wallet (security C1: a wallet-less
+   `player_withdrawal_hold` skipped both hold triggers). What REMAINS, for human acceptance under this residual:
+   value can still leave `player_cash` through postings of OTHER types (e.g. a `manual_adjustment` Dr
+   `manual_adjustment` / Cr `player_cash` is admitted at the database level with no approval: residual 9.5 /
+   ADR 0113 governed adjustments are a Go-level control), and a well-shaped forged E9 leg as above. Detection: payout
+   statement reconciliation (scheduled for every live payout provider) and reconciliation D (slice 3).
+3. `WD023` is not a four-eyes control (§3 item 4): the runtime credential can write an AUTOMATED approval record
+   and satisfy it (security C3, confirmed live; accepted residual). Binding approve/reject records to the `0120`
+   signed actor proof stays on the launch list (`security`).
 4. E5 carries no decision evidence (§3 item 5).
 5. The four-eyes count and threshold remain Go-only (state doc §3).
 

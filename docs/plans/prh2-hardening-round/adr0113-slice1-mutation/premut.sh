@@ -9,7 +9,7 @@ OUT=$S/s1/mut/preflight_results.txt
 : > $OUT
 # M28 (run the same way): the per-tenant `PERFORM set_config('app.tenant_id', tenant_rec.id::text, true);`
 # line replaced by a comment (a BLIND pre-flight); TestMigration0132_Preflight... must fail ("want WD098").
-for c in reversed columns hold_link release hold_sum entry balance; do
+for c in reversed columns hold_link release hold_sum entry balance walletless no_hold_leg; do
   python3 - "$F" "$c" <<'EOF'
 import sys
 p, c = sys.argv[1], sys.argv[2]

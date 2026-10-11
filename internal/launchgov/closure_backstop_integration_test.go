@@ -11,6 +11,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 )
 
 // DB BACKSTOP (security C1 / ledger-finance condition 2): the trigger itself refuses a closure
@@ -54,6 +55,10 @@ func TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023(t *testin
 	}
 	w.t = t
 	for _, state := range []string{"rejected", "completed", "failed", "cancelled", "reversed"} {
+		if state == "reversed" && wdpath.OnPersistentDatabase(t, w.owner) {
+			t.Log("reversed: owner tamper plant (permanent row) not run on a persistent database (ADR 0113 review)")
+			continue
+		}
 		tid := w.activeTenant()
 		b := w.activeBrand(tid)
 		p, wl := w.playerWithWallet(tid, b)

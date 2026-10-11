@@ -19,6 +19,8 @@
 --         account, transaction or request is not visible to the session (fail closed)
 --   WD041 B-i: a withdrawal hold leg that is not the pinned leg of the named request in its pre-state
 --   WD042 B-ii: at COMMIT the named request does not link this hold leg's transaction, or A fails for it
+--   WD043 a withdrawal_* transaction without a player_withdrawal_hold leg at COMMIT (security C2)
+--   23514 ledger_accounts_player_types_have_wallet: a player_* account with no wallet (security C1)
 --   WD098 up-migration refused: the pre-flight found existing rows that violate the new rules
 --
 -- What it adds (ADR 0113 s3, s4.2, s6 M-A):
@@ -67,8 +69,14 @@ DECLARE
     c_hold_sum  BIGINT := 0;
     c_entry     BIGINT := 0;
     c_balance   BIGINT := 0;
+    c_walletless BIGINT := 0;
+    c_no_hold_leg BIGINT := 0;
     n BIGINT;
 BEGIN
+    -- Writers wait while the assertion runs and until this migration commits, so no row can slip in
+    -- between the scan and the creation of the guards below (code review LOW). Lock order matches the
+    -- writers' (the request, then the ledger: ADR 0082 L1 before L3); SHARE ROW EXCLUSIVE admits reads.
+    LOCK TABLE withdrawal_requests, ledger_transactions, ledger_entries, ledger_accounts IN SHARE ROW EXCLUSIVE MODE;
     PERFORM set_config('app.player_account_id', '', true);
     PERFORM set_config('app.platform_admin_principal_id', '', true);
     PERFORM set_config('app.acting_tenant_id', '', true);
@@ -202,12 +210,27 @@ BEGIN
         ) o ON o.wallet_id = h.wallet_id AND o.asset_code = h.asset_code
          WHERE COALESCE(h.bal, 0) <> COALESCE(o.open_sum, 0);
         c_balance := c_balance + n;
+
+        -- (8) security C1: a player_* account with no wallet (a wallet-less "player_withdrawal_hold" would
+        --     bypass both hold-entry triggers, which fast-exit on a NULL wallet_id).
+        SELECT count(*) INTO n FROM ledger_accounts la
+         WHERE la.tenant_id = tenant_rec.id AND la.wallet_id IS NULL
+           AND la.account_type IN ('player_cash', 'player_bonus', 'player_locked_cash', 'player_locked_bonus', 'player_withdrawal_hold', 'player_bonus_held');
+        c_walletless := c_walletless + n;
+
+        -- (9) security C2: a withdrawal_* transaction with no leg on a player_withdrawal_hold account.
+        SELECT count(*) INTO n FROM ledger_transactions t
+         WHERE t.tenant_id = tenant_rec.id
+           AND t.transaction_type IN ('withdrawal_requested', 'withdrawal_rejected', 'withdrawal_failed', 'withdrawal_completed', 'withdrawal_reversed')
+           AND NOT EXISTS (SELECT 1 FROM ledger_entries e JOIN ledger_accounts la ON la.id = e.ledger_account_id
+                            WHERE e.ledger_transaction_id = t.id AND la.account_type = 'player_withdrawal_hold');
+        c_no_hold_leg := c_no_hold_leg + n;
     END LOOP;
     PERFORM set_config('app.tenant_id', '', true);
 
-    IF c_reversed + c_columns + c_hold_link + c_release + c_hold_sum + c_entry + c_balance > 0 THEN
-        RAISE EXCEPTION 'migration 0132 pre-flight: existing rows violate the withdrawal state machine / hold invariant: reversed=% columns=% hold_link=% release_link=% hold_sum=% hold_entry=% hold_balance=%. Nothing was changed. Rows are never deleted or edited to make this pass; escalate to the human (ADR 0113 s6).',
-            c_reversed, c_columns, c_hold_link, c_release, c_hold_sum, c_entry, c_balance
+    IF c_reversed + c_columns + c_hold_link + c_release + c_hold_sum + c_entry + c_balance + c_walletless + c_no_hold_leg > 0 THEN
+        RAISE EXCEPTION 'migration 0132 pre-flight: existing rows violate the withdrawal state machine / hold invariant: reversed=% columns=% hold_link=% release_link=% hold_sum=% hold_entry=% hold_balance=% walletless_player_account=% withdrawal_tx_without_hold_leg=%. Nothing was changed. Rows are never deleted or edited to make this pass; escalate to the human (ADR 0113 s6; operator note: docs/runbooks).',
+            c_reversed, c_columns, c_hold_link, c_release, c_hold_sum, c_entry, c_balance, c_walletless, c_no_hold_leg
             USING ERRCODE = 'WD098';
     END IF;
 END $$;
@@ -450,6 +473,17 @@ BEGIN
 END
 $$;
 
+-- Security L3: the check reads ledger rows of any request id it is handed (RLS-bound); only the
+-- roles whose sessions fire A / B-ii need it.
+REVOKE ALL ON FUNCTION withdrawal_request_ledger_link_violation(uuid, uuid) FROM PUBLIC;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+        GRANT EXECUTE ON FUNCTION withdrawal_request_ledger_link_violation(uuid, uuid) TO igaming_runtime;
+    END IF;
+END
+$$;
+
 -- A: at COMMIT, for every request inserted or updated in the transaction (re-read by id: the
 -- event's own tuple may be superseded by a later UPDATE in the same transaction).
 CREATE FUNCTION withdrawal_requests_ledger_link_at_commit() RETURNS trigger
@@ -572,6 +606,13 @@ BEGIN
     END IF;
     SELECT la.account_type INTO v_type FROM ledger_accounts la WHERE la.id = NEW.ledger_account_id;
     IF NOT FOUND THEN
+        -- Fail closed either way; an account the session cannot see at commit is, in practice, a session
+        -- whose scope GUCs changed after the insert (security L1): report that as WD030.
+        IF NULLIF(current_setting('app.player_account_id', true), '') IS NOT NULL
+           OR COALESCE(NULLIF(current_setting('app.tenant_id', true), ''),
+                       NULLIF(current_setting('app.acting_tenant_id', true), '')) IS DISTINCT FROM NEW.tenant_id::text THEN
+            RAISE EXCEPTION 'ledger_entries: the session is not the tenant (or acting) scope of the wallet entry at commit' USING ERRCODE = 'WD030';
+        END IF;
         RAISE EXCEPTION 'ledger_entries: the account of a wallet entry is not visible at commit' USING ERRCODE = 'WD042';
     END IF;
     IF v_type IS DISTINCT FROM 'player_withdrawal_hold' THEN
@@ -609,6 +650,51 @@ CREATE CONSTRAINT TRIGGER ledger_entries_withdrawal_hold_link_at_commit
     AFTER INSERT ON ledger_entries
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION ledger_entries_withdrawal_hold_link_at_commit();
+
+-- =========================================================================
+-- 6. Security C1: every player_* ledger account belongs to a wallet. A wallet-less account of a player
+--    type (house-level) would skip B-i / B-ii, which fast-exit on a NULL wallet_id. Validated in place
+--    (the pre-flight above counted class 8 first, with a readable message; the validation itself is
+--    RLS-independent and is the backstop for rows the tenant loop cannot see). NOT VALID + VALIDATE is
+--    not used: the migration already holds the table lock and must not commit with the check unvalidated.
+-- =========================================================================
+
+ALTER TABLE ledger_accounts ADD CONSTRAINT ledger_accounts_player_types_have_wallet
+    CHECK (account_type NOT IN ('player_cash', 'player_bonus', 'player_locked_cash', 'player_locked_bonus',
+                                'player_withdrawal_hold', 'player_bonus_held') OR wallet_id IS NOT NULL);
+
+-- =========================================================================
+-- 7. Security C2: a withdrawal_* transaction must carry a leg on a player_withdrawal_hold account (at
+--    COMMIT, WD043). Its hold leg is then subject to B-i / B-ii / A, so a withdrawal-typed posting that
+--    bypasses the hold (e.g. withdrawal_rejected Dr psp_clearing / Cr player_cash, or a
+--    withdrawal_completed Dr player_cash / Cr psp_clearing) cannot commit. withdrawal_reversed has no
+--    writer (ADR 0113 s2) and its hold leg is refused by B-i: the type is refused end to end.
+--    Fast exit on every other type; no lock; an invisible entry counts as missing (fail closed).
+-- =========================================================================
+
+CREATE FUNCTION ledger_transactions_withdrawal_hold_leg_at_commit() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF NEW.transaction_type NOT IN ('withdrawal_requested', 'withdrawal_rejected', 'withdrawal_failed',
+                                    'withdrawal_completed', 'withdrawal_reversed') THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM ledger_entries e JOIN ledger_accounts la ON la.id = e.ledger_account_id
+                    WHERE e.ledger_transaction_id = NEW.id AND e.tenant_id = NEW.tenant_id
+                      AND la.account_type = 'player_withdrawal_hold') THEN
+        RAISE EXCEPTION 'ledger_transactions: a % transaction must carry a player_withdrawal_hold leg', NEW.transaction_type
+            USING ERRCODE = 'WD043';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER ledger_transactions_withdrawal_hold_leg_at_commit
+    AFTER INSERT ON ledger_transactions
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION ledger_transactions_withdrawal_hold_leg_at_commit();
 
 -- =========================================================================
 -- 5. The open-request index (ADR 0113 s4.4 / s6 M-A; used by reconciliation D in slice 3).

@@ -323,11 +323,26 @@ func TestMigration0050_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 // not re-tested here).
 func TestMigration0050_PreExistingAccountTypesStillInsert(t *testing.T) {
 	pool := testPool(t) // the shared, already-fully-migrated test database
+	// ADR 0113 (migration 0132, security C1): a player_* account must belong to a wallet
+	// (ledger_accounts_player_types_have_wallet), so the player types are inserted on a fresh wallet;
+	// the account_type CHECK under test is the same constraint either way.
+	f := seedFixture(t, pool)
+	wallet := loNewWallet(t, pool, f, "EUR")
 	for _, accountType := range []string{
 		"player_cash", "player_bonus", "player_locked_cash", "player_locked_bonus",
 		"player_withdrawal_hold", "house_gaming", "provider_payable", "psp_clearing",
 		"psp_reserve", "jackpot_contribution", "promo_liability", "manual_adjustment",
 	} {
+		if strings.HasPrefix(accountType, "player_") {
+			if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `INSERT INTO ledger_accounts (id, tenant_id, wallet_id, account_type, asset_code) VALUES ($1, $2, $3, $4, 'EUR')`,
+					uuid.New(), f.tenantID, wallet, accountType)
+				return err
+			}); err != nil {
+				t.Fatalf("pre-existing account type %q must still insert after migration 0050: %v", accountType, err)
+			}
+			continue
+		}
 		if err := insertRawAccount(pool, accountType); err != nil {
 			t.Fatalf("pre-existing account type %q must still insert after migration 0050: %v", accountType, err)
 		}

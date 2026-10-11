@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -260,6 +261,7 @@ func (w *bcWorld) bcComplete(t *testing.T, wrID uuid.UUID, provider, ref string)
 // that no withdrawal request releases (no attribution at all), of amount.
 func (w *bcWorld) bcUnlinkedCompletion(t *testing.T, ref string, amount int64) {
 	t.Helper()
+	wdpath.SkipOnPersistentDatabase(t, w.pool) // permanent owner-tamper rows (ADR 0113 review)
 	pid := payProvA
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		// ADR 0113 (migration 0132): a hold leg that NO withdrawal request names is refused to every session

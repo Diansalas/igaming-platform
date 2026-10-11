@@ -30,7 +30,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"sync"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,20 +268,53 @@ func AdvanceAsRuntime(ctx context.Context, tb testing.TB, p *db.Pool, tenantID, 
 	}
 }
 
+// poolIdentity is (server address, server port, database, current user) as the SERVER reports them for a
+// connection of p; (*db.Pool).Raw is reserved to internal/db (raw_guard_test), so it is read by query.
+func poolIdentity(tb testing.TB, p *db.Pool) (addr string, port int, dbName, user string) {
+	tb.Helper()
+	if err := p.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT coalesce(host(inet_server_addr()), 'local'), coalesce(inet_server_port(), 0), current_database()::text, current_user::text`).
+			Scan(&addr, &port, &dbName, &user)
+	}); err != nil {
+		tb.Fatalf("wdpath: inspect pool: %v", err)
+	}
+	return addr, port, dbName, user
+}
+
+// sharedTestDB reports whether p is connected to the SHARED test database: the same server address,
+// port and database name as a connection opened from TEST_DATABASE_URL (both reported by the server, so
+// "localhost" and "127.0.0.1" compare correctly). It FAILS the test (closed) when TEST_DATABASE_URL is
+// unset or unreachable: without it no pool can be classified, and a guess could run fixtures on the
+// wrong role.
+func sharedTestDB(tb testing.TB, p *db.Pool) bool {
+	tb.Helper()
+	raw := os.Getenv("TEST_DATABASE_URL")
+	if raw == "" {
+		tb.Fatal("wdpath: TEST_DATABASE_URL is required to classify the pool (shared test database or scratch)")
+	}
+	ctx := context.Background()
+	c, err := pgx.Connect(ctx, raw)
+	if err != nil {
+		tb.Fatalf("wdpath: connect TEST_DATABASE_URL: %v", err)
+	}
+	defer func() { _ = c.Close(ctx) }()
+	var sAddr, sDB string
+	var sPort int
+	if err := c.QueryRow(ctx, `SELECT coalesce(host(inet_server_addr()), 'local'), coalesce(inet_server_port(), 0), current_database()::text`).
+		Scan(&sAddr, &sPort, &sDB); err != nil {
+		tb.Fatalf("wdpath: inspect TEST_DATABASE_URL: %v", err)
+	}
+	addr, port, dbName, _ := poolIdentity(tb, p)
+	return addr == sAddr && port == sPort && dbName == sDB
+}
+
 // AdvanceOnScratch walks an existing request to target on p's OWN role. Only for a throwaway
 // scratchdb database, where the runtime role is granted nothing (scratchdb creates the database with
 // no default privileges for it): the database rules exercised are role-independent (no role is exempt
-// from the 0132 guards), but the caller must say so explicitly; it refuses to run when p connects to
-// the shared test database (TEST_DATABASE_URL's database).
+// from the 0132 guards), but the caller must say so explicitly. It refuses the shared test database.
 func AdvanceOnScratch(ctx context.Context, tb testing.TB, p *db.Pool, tenantID, id uuid.UUID, target withdrawal.State, spec Spec) {
 	tb.Helper()
-	var dbName string
-	if err := p.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT current_database()::text`).Scan(&dbName)
-	}); err != nil {
-		tb.Fatal(err)
-	}
-	if shared, err := url.Parse(os.Getenv("TEST_DATABASE_URL")); err == nil && "/"+dbName == shared.Path {
+	if sharedTestDB(tb, p) {
 		tb.Fatal("wdpath.AdvanceOnScratch on the shared test database: use AdvanceAsRuntime")
 	}
 	if err := p.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -296,27 +329,17 @@ func AdvanceOnScratch(ctx context.Context, tb testing.TB, p *db.Pool, tenantID, 
 // may hold either kind of pool.
 func AdvanceForFixture(ctx context.Context, tb testing.TB, p *db.Pool, tenantID, id uuid.UUID, target withdrawal.State, spec Spec) {
 	tb.Helper()
-	var dbName string
-	if err := p.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT current_database()::text`).Scan(&dbName)
-	}); err != nil {
-		tb.Fatal(err)
-	}
-	if shared, err := url.Parse(os.Getenv("TEST_DATABASE_URL")); err == nil && "/"+dbName == shared.Path {
+	if sharedTestDB(tb, p) {
 		AdvanceAsRuntime(ctx, tb, p, tenantID, id, target, spec)
 		return
 	}
 	AdvanceOnScratch(ctx, tb, p, tenantID, id, target, spec)
 }
 
-var (
-	runtimeMu    sync.Mutex
-	runtimePools = map[string]*db.Pool{}
-)
-
 // RuntimeFor returns a pool on the RUNTIME role (TEST_RUNTIME_DATABASE_URL's credentials) for the
-// database p is connected to; p itself if it already is the runtime role. Fails the test if the runtime
-// URL is not configured (a skip would not be evidence).
+// SHARED test database p is connected to; p itself if it already is the runtime role. A runtime pool
+// on a scratch database is refused (no grants there, and its connections would block the scratch
+// cleanup). The pool is opened for the calling test and closed by its cleanup.
 func RuntimeFor(tb testing.TB, p *db.Pool) *db.Pool {
 	tb.Helper()
 	base := os.Getenv("TEST_RUNTIME_DATABASE_URL")
@@ -327,30 +350,52 @@ func RuntimeFor(tb testing.TB, p *db.Pool) *db.Pool {
 	if err != nil {
 		tb.Fatalf("wdpath: parse TEST_RUNTIME_DATABASE_URL: %v", err)
 	}
-	var user, dbName string
-	if err := p.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT current_user::text, current_database()::text`).Scan(&user, &dbName)
-	}); err != nil {
-		tb.Fatalf("wdpath: inspect pool role: %v", err)
-	}
+	_, _, dbName, user := poolIdentity(tb, p)
 	if user == u.User.Username() {
 		return p
 	}
-	// Only the shared test database grants the runtime role anything; a runtime pool opened on a
-	// throwaway scratchdb database would also keep connections the scratch cleanup cannot terminate.
-	if shared, err := url.Parse(os.Getenv("TEST_DATABASE_URL")); err != nil || "/"+dbName != shared.Path {
+	if !sharedTestDB(tb, p) {
 		tb.Fatalf("wdpath.RuntimeFor on %q, which is not the shared test database: use AdvanceForFixture / AdvanceOnScratch", dbName)
 	}
 	u.Path = "/" + dbName
-	runtimeMu.Lock()
-	defer runtimeMu.Unlock()
-	if rp, ok := runtimePools[dbName]; ok {
-		return rp
-	}
 	rp, err := db.Connect(context.Background(), u.String(), 4, 5*time.Second)
 	if err != nil {
-		tb.Fatalf("wdpath: connect runtime pool for %s: %v", dbName, err)
+		tb.Fatalf("wdpath: connect runtime pool: %v", err)
 	}
-	runtimePools[dbName] = rp
+	tb.Cleanup(rp.Close)
 	return rp
+}
+
+// PersistentDatabases are the long-lived databases of this repository's tooling (Makefile /
+// docker-compose dev database; the local shared CI database of the agent harness). Fixtures that leave
+// PERMANENT invariant-violating rows (owner tamper plants of history the database now refuses: the
+// ledger is append-only, so such rows can never be cleaned up) must not run there.
+// ADR0113_PERSISTENT_DBS (comma-separated) extends the list.
+var PersistentDatabases = []string{"igaming_platform_dev", "igaming_platform_ci_local"}
+
+// OnPersistentDatabase reports whether p is connected to one of PersistentDatabases.
+func OnPersistentDatabase(tb testing.TB, p *db.Pool) bool {
+	tb.Helper()
+	_, _, name, _ := poolIdentity(tb, p)
+	list := append([]string(nil), PersistentDatabases...)
+	for _, n := range strings.Split(os.Getenv("ADR0113_PERSISTENT_DBS"), ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			list = append(list, n)
+		}
+	}
+	for _, n := range list {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// SkipOnPersistentDatabase skips a test whose fixture leaves permanent tamper rows when p is a
+// persistent shared database (run it on a private or CI service database).
+func SkipOnPersistentDatabase(tb testing.TB, p *db.Pool) {
+	tb.Helper()
+	if OnPersistentDatabase(tb, p) {
+		tb.Skip("owner tamper plant leaves permanent append-only rows: not run on a persistent database (ADR 0113 slice 1 review)")
+	}
 }

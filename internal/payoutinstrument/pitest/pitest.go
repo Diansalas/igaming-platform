@@ -119,7 +119,7 @@ func WithoutBindingGuard(ctx context.Context, tx pgx.Tx, fn func() error) error 
 	// Migration 0132 (ADR 0113 check A) queues a DEFERRED constraint-trigger event for every row
 	// inserted or updated, and ALTER TABLE refuses to run while the table has pending trigger events
 	// (55006). fire runs A NOW for every pending withdrawal_requests event: the rows must already be
-	// legally shaped (born `requested` with the hold leg linked, internal/testsupport/wdpath.Plant),
+	// legally shaped (born `requested` with the hold leg linked, the shared legal-path helper wdpath.Plant),
 	// exactly as they must be at COMMIT. Nothing is skipped; A only runs earlier, then is deferred
 	// again. On a schema before 0132 there is nothing to fire.
 	fire := func() error {

@@ -8,6 +8,9 @@
 -- for byte (whole-schema snapshot test).
 
 DROP INDEX idx_withdrawal_requests_open_wallet_asset;
+DROP TRIGGER ledger_transactions_withdrawal_hold_leg_at_commit ON ledger_transactions;
+DROP FUNCTION ledger_transactions_withdrawal_hold_leg_at_commit();
+ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_player_types_have_wallet;
 DROP TRIGGER ledger_entries_withdrawal_hold_link_at_commit ON ledger_entries;
 DROP FUNCTION ledger_entries_withdrawal_hold_link_at_commit();
 DROP TRIGGER ledger_entries_withdrawal_hold_guard ON ledger_entries;
