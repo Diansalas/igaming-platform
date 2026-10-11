@@ -46,7 +46,7 @@ func TestWithdrawalDeleteGuard_NoRoleCanDeleteOrTruncate(t *testing.T) {
 		err := run()
 		code := pgCode(err)
 		// The runtime role has no TRUNCATE privilege on a default grant set; either refusal is a refusal.
-		if code != "WD012" && !(name == "runtime TRUNCATE" && code == "42501") {
+		if code != "WD012" && (name != "runtime TRUNCATE" || code != "42501") {
 			t.Errorf("%s must be refused WD012 (or lack the privilege), got %v", name, err)
 		}
 	}

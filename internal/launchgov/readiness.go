@@ -119,15 +119,6 @@ func (r Readiness) NonPassing() []string {
 	return out
 }
 
-func (r Readiness) result(code string) (string, bool) {
-	for _, c := range r.Checks {
-		if c.Code == code {
-			return c.Result, true
-		}
-	}
-	return "", false
-}
-
 // EvalInput is what a readiness evaluation depends on besides the subject: the action (which
 // decides the check set) and, for activate / reactivate / ratify, the recorded licensing basis
 // and the referenced jurisdictions. All server-side values or validated request content.

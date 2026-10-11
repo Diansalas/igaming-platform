@@ -63,7 +63,7 @@ func TestLintFreeText_RefusesTheReviewersEvasions(t *testing.T) {
 		"at / dot spelled":             "x at example dot com",
 		"(at) / (dot)":                 "x (at) example (dot) com",
 		"[at] / [dot]":                 "x [at] example [dot] com",
-		"zero-width inside the number": "4111​1111​1111​1111",
+		"zero-width inside the number": "4111\u200b1111\u200b1111\u200b1111",
 		"arabic-indic digits":          "٤١١١١١١١١١١١١١١١",
 		"digits in brackets":           "(123)(456)(789)",
 	}

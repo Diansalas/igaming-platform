@@ -9,14 +9,14 @@ import (
 // text, not stored (a stored U+202E would reorder what a console renders).
 func TestLintFreeText_RefusesFormatCharacters(t *testing.T) {
 	for name, s := range map[string]string{
-		"right-to-left override": "approved‮ by counsel",
-		"left-to-right isolate":  "see ⁦note⁩",
-		"zero width space":       "re​view",
-		"word joiner":            "a⁠b",
+		"right-to-left override": "approved\u202e by counsel",
+		"left-to-right isolate":  "see \u2066note\u2069",
+		"zero width space":       "re\u200bview",
+		"word joiner":            "a\u2060b",
 		"BOM":                    "x\ufeffnote",
-		"soft hyphen":            "co­nditions",
-		"line separator":         "one two",
-		"paragraph separator":    "one two",
+		"soft hyphen":            "co\u00adnditions",
+		"line separator":         "one\u2028two",
+		"paragraph separator":    "one\u2029two",
 		"hangul filler U+3164":   "okㅤnote",
 		"hangul choseong filler": "okᅟnote",
 		"hangul jungseong fill":  "okᅠnote",

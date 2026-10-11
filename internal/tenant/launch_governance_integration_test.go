@@ -125,11 +125,6 @@ func lgRequest(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid
 	return lgRequestWith(ctx, tx, tenantID, brandID, action, true)
 }
 
-// lgRequestNoProof is lgRequest without a proof (the proof guard must refuse it).
-func lgRequestNoProof(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID, action string) (uuid.UUID, string, error) {
-	return lgRequestWith(ctx, tx, tenantID, brandID, action, false)
-}
-
 func lgRequestWith(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID, action string, proof bool) (uuid.UUID, string, error) {
 	kind := "tenant"
 	if brandID != nil {

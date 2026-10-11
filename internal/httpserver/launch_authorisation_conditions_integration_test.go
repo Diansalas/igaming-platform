@@ -32,7 +32,7 @@ func TestLaunchHTTP_CreateShape_LicensingEnumsAndJurisdictionBounds(t *testing.T
 			}
 			b["jurisdiction_ids"] = ids
 		},
-		"bidi override in the note": func(b map[string]any) { b["conditions_note"] = "approved‮ by counsel" },
+		"bidi override in the note": func(b map[string]any) { b["conditions_note"] = "approved\u202e by counsel" },
 	}
 	for name, mutate := range cases {
 		body := lhActivationBody(&brand, jid, nil)
