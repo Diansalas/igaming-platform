@@ -43,9 +43,11 @@ func TestMigration0130_UpDownUp_WholeSchema_RestoresPriorBodiesVerbatim(t *testi
 			(SELECT count(*) FROM pg_trigger WHERE tgname = 'zz_actor_proof_guard' AND tgrelid IN ('launch_authorisation_requests'::regclass, 'launch_authorisation_approvals'::regclass))
 			+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'launch_requests_reject_carryover' AND tgrelid = 'launch_authorisation_requests'::regclass)
 			+ (SELECT count(*) FROM pg_trigger WHERE tgname = 'launch_suspension_no_stale_pending_at_commit' AND tgrelid = 'launch_authorisation_requests'::regclass)
-			+ (SELECT count(*) FROM pg_proc WHERE proname = 'launch_request_content_digest')`).Scan(&n)
-	}); err != nil || n != 5 {
-		t.Fatalf("0130 objects present: %d (want 5) err=%v", n, err)
+			+ (SELECT count(*) FROM pg_proc WHERE proname = 'launch_request_content_digest')
+			+ (SELECT count(*) FROM pg_proc WHERE proname = 'launch_approval_proof_digest')
+			+ (SELECT count(*) FROM alert_kinds WHERE kind = 'launch.suspension_exhausted' AND severity = 'p1' AND raise_mode = 'detached')`).Scan(&n)
+	}); err != nil || n != 7 {
+		t.Fatalf("0130 objects present: %d (want 7) err=%v", n, err)
 	}
 	// The verifier admits the launch family (and only through the platform / tenant scopes).
 	var src string
@@ -60,6 +62,11 @@ func TestMigration0130_UpDownUp_WholeSchema_RestoresPriorBodiesVerbatim(t *testi
 	}
 	if got := lgSnapshot(t, pool); got != snap129 {
 		t.Fatalf("down did not restore the 0129 schema byte for byte:\n%s", lgSnapDiff(snap129, got))
+	}
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM alert_kinds WHERE kind = 'launch.suspension_exhausted'`).Scan(&n)
+	}); err != nil || n != 0 {
+		t.Fatalf("down must unseed the alert Kind: n=%d err=%v", n, err)
 	}
 	if _, err := pool.MigrateUp(ctx, full); err != nil {
 		t.Fatal(err)

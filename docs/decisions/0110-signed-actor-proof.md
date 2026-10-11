@@ -81,7 +81,7 @@ extension of the SAME mechanism) the five K1 capability-grant / financial-policy
 | `withdrawal_hold_resolution_approvals` | INSERT | `withdrawal_hold_resolution:approve` / `:reject` | resolution id | the approval's `payload_hash`; scope `platform_acting` with a tenant only |
 | `launch_authorisation_requests` | INSERT | `launch_authorisation:request` (`:suspend` iff `action = 'suspend'`) | the literal `new` | digest of tenant, subject kind, brand, action, licensing record, operator, jurisdictions, note, readiness hash, acknowledged checks, reason (ADR 0112 6.4; migration 0130); scope `platform` (NULL tenant) or `tenant` |
 | `launch_authorisation_requests` | UPDATE pending -> cancelled | `launch_authorisation:cancel` | request id | the request's `payload_hash`; requester only (also executing a pending suspension: requester only) |
-| `launch_authorisation_approvals` | INSERT | `launch_authorisation:approve` / `:reject` | request id | the request's `payload_hash`; scope `platform` only |
+| `launch_authorisation_approvals` | INSERT | `launch_authorisation:approve` / `:reject` | request id | digest of the request's `payload_hash`, the readiness hash the decider saw and the reason code (`launch_approval_proof_digest`, ADR 0112 security L1); scope `platform` only |
 
 In every row the trigger also asserts that the actor column the earlier guard FORCED (`initiated_by`, `decided_by`,
 `requested_by`, `revoked_by`) equals the PROVEN actor (`AP004` otherwise), and a catalog test pins that
