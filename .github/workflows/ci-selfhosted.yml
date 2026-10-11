@@ -243,6 +243,9 @@ jobs:
         run: |
           psql -h 127.0.0.1 -p "${PGPORT}" -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
           REVOKE UPDATE, DELETE, TRUNCATE ON sportsbook_bet_settlements FROM igaming_runtime;
+          -- ADR 0112 slice 4 (migration 0131): a withdrawal request is never deleted; the WD012 trigger is
+          -- the binding control, this mirrors deploy/init-app-role.sql.
+          REVOKE DELETE, TRUNCATE ON withdrawal_requests FROM igaming_runtime;
           SQL
 
       - name: Unit tests (race detector)

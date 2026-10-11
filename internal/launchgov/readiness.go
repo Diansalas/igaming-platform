@@ -69,6 +69,12 @@ const (
 	// NoticeFundsStranded is shown with every funds position and is the substance of the
 	// acknowledgement of R-PLAYER-FUNDS: closure is terminal and no unclaimed-funds process exists.
 	NoticeFundsStranded = "Closing with non-zero player balances strands those balances: closure is terminal and the unclaimed-funds / dormant-balance policy is OPEN (HD-CTF-4), so the funds stay in the ledger with no process to return them. Acknowledging R-PLAYER-FUNDS acknowledges this."
+	// NoticeFundsInaccessibleOnSuspension is shown with the funds position of a SUSPENSION (slice-3
+	// review b4): a suspension is reversible, so the balances are not stranded. They stay in the
+	// ledger, untouched, but players cannot start new wagers, deposits or withdrawals on a
+	// non-active subject until it is reactivated (four-eyes), and the unclaimed-funds policy
+	// (HD-CTF-4) is not engaged. Distinct from NoticeFundsStranded, which belongs to closure only.
+	NoticeFundsInaccessibleOnSuspension = "Suspending makes player balances inaccessible for new wagers, deposits and withdrawals until the subject is reactivated through a new four-eyes decision. The funds are not stranded: they stay in the ledger unchanged, and a suspension is reversible. Hold-bearing withdrawals continue to hold their funds and need the separate hold-resolution process."
 	// NoticeFundsOmissions states what the check cannot see.
 	NoticeFundsOmissions = "R-PLAYER-FUNDS does not cover in-flight deposits or open casino rounds (Q-GP-6: a casino round has no representable open state); only wallet balances, open sportsbook bets and hold-bearing withdrawals are counted."
 )
@@ -385,7 +391,7 @@ func alertsCheck() Check {
 // bets and hold-bearing withdrawals of the subject's players. The counts go to r.Info (live
 // display data, not hashed); the persisted check carries a closed detail code only. This check
 // requires acknowledgement; the funds fall under ADR 0107 / HD-CTF-4 (no new policy here).
-func fundsCheck(ctx context.Context, tx pgx.Tx, sub Subject, r *Readiness) Check {
+func fundsCheck(ctx context.Context, tx pgx.Tx, sub Subject, action string, r *Readiness) Check {
 	brand := sub.BrandID
 	var players, bets, holds int64
 	if err := tx.QueryRow(ctx, `
@@ -436,7 +442,13 @@ func fundsCheck(ctx context.Context, tx pgx.Tx, sub Subject, r *Readiness) Check
 	if players == 0 && bets == 0 && holds == 0 && len(balances) == 0 {
 		return ck(CheckPlayerFunds, ResultPass, "ok")
 	}
-	r.Notices = append(r.Notices, NoticeFundsStranded)
+	// The notice follows the action: only a closure strands funds. A suspension makes them
+	// inaccessible until reactivation (reversible); it must never be shown the stranded text.
+	if action == ActionClose {
+		r.Notices = append(r.Notices, NoticeFundsStranded)
+	} else {
+		r.Notices = append(r.Notices, NoticeFundsInaccessibleOnSuspension)
+	}
 	return ck(CheckPlayerFunds, ResultFail, "funds_or_open_positions_present")
 }
 

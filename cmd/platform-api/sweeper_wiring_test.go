@@ -124,7 +124,7 @@ func TestRun_StartsSweeperThroughValidatedConstructor(t *testing.T) {
 		}
 		return true
 	})
-	for _, want := range []string{"buildPaymentsSweeper", "paymentsSweeper.ValidateForLoop", "payments.RunSweeperLoop", "db.Connect", "refuseSyntheticInProduction", "paymentsSweeperWG.Wait"} {
+	for _, want := range []string{"buildPaymentsSweeper", "paymentsSweeper.ValidateForLoop", "payments.RunSweeperLoop", "db.ConnectWithRuntimeParams", "refuseSyntheticInProduction", "paymentsSweeperWG.Wait"} {
 		if _, ok := first[want]; !ok {
 			t.Fatalf("run() does not call %s", want)
 		}
@@ -230,7 +230,7 @@ func TestRun_StartsSweeperThroughValidatedConstructor(t *testing.T) {
 	if !insideGo["payments.RunSweeperLoop"] {
 		t.Fatal("payments.RunSweeperLoop must run in its own goroutine")
 	}
-	if first["payments.RunSweeperLoop"] < first["db.Connect"] || first["buildPaymentsSweeper"] < first["refuseSyntheticInProduction"] {
+	if first["payments.RunSweeperLoop"] < first["db.ConnectWithRuntimeParams"] || first["buildPaymentsSweeper"] < first["refuseSyntheticInProduction"] {
 		t.Fatal("the sweeper must start after the synthetic guard and the database connection")
 	}
 }

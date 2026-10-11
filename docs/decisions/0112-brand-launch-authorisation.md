@@ -541,18 +541,21 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
     both orders). What remains open is enforcement only at the Go layer: a RAW INSERT into `withdrawal_requests` by the runtime
     credential is not refused by the database on a non-active subject (MEDIUM, defence in depth). Tracked follow-up before launch:
     a database-level withdrawal-insert status guard (BEFORE INSERT trigger taking the tenant key shared and checking status,
-    as 0118 does for ledger postings) and a reverse-order race test. (b2) A holder of BOTH the runtime credential and the signing
+    as 0118 does for ledger postings) and a reverse-order race test. *(Slice 4: both done, migration 0131 and the race tests in both
+    orders; `ledger-finance` review of 0131 required before merge.)* (b2) A holder of BOTH the runtime credential and the signing
     key can still close over a hold or an open bet by temporarily changing/deleting the row inside the closure transaction
     (deploy grants give runtime DELETE on `withdrawal_requests` and `sportsbook_bets`; no database withdrawal state machine). Not a
     new weakness (a key holder can already forge every approval); tracked follow-ups: revoke DELETE on those tables and add a
     withdrawal state-transition trigger. (b3) `LA023` blocks closure indefinitely while a disputed payout that M2 cannot admit
     (CT-BLOCKED, ADR 0107) holds funds, until PAYOUT-AMOUNT-DISPUTE-1 is decided; suspension remains the fail-closed lever.
     (b4) `NoticeFundsStranded` is shown for closure; a suspension-specific notice (funds inaccessible, not stranded) is a slice-4
-    UI/readiness copy item. (c) Closing with
+    UI/readiness copy item. *(Slice 4: `launchgov.NoticeFundsInaccessibleOnSuspension` is returned with a suspension's readiness; the
+    console copy is slice 5.)* (c) Closing with
     non-zero balances strands them until HD-CTF-4 (OPEN); readiness also omits in-flight deposits and open casino rounds
     (Q-GP-6). (d) The prior-rejecter rule is Go-only. (e) The database does not recompute the readiness snapshot hash from the
     snapshot JSON. (f) Production pools are not yet wired to `db.ConnectWithRuntimeParams` for
-    `idle_in_transaction_session_timeout` (slice 4 / deployment). (g) The `launch.suspension_exhausted` P1 alert has no route or
+    `idle_in_transaction_session_timeout` (slice 4 / deployment). *(Slice 4: the `platform-api` pool is wired and tested; the deployment
+    still has to keep the default or set the variable, see `docs/runbooks/production-startup-database-config.md`.)* (g) The `launch.suspension_exhausted` P1 alert has no route or
     recipient (ALERT-DELIVERY-1). (h) The reason catalogues are a RECOMMENDATION. (i) The security review of slice 3 was
     static; its runtime attack list is to be re-run as `igaming_runtime` on a private scratch database before slice 4.
 
@@ -741,6 +744,84 @@ READY, security APPROVE WITH CONDITIONS; `IMPLEMENTED` against the local databas
 - **Mutation evidence** for these items is committed under `docs/plans/prh2-hardening-round/`
   (`adr0112-slice3-mutation-*.txt`).
 
+**Slice 4 implementation note (`backend`, 2026-10-11; status: `IMPLEMENTED` against the local database and the MOCK stack,
+NOT complete: `security` and `code-reviewer` review is required, and `ledger-finance` MUST review migration 0131 (money-path
+trigger) before merge; no console exists yet, slice 5; every record produced is a recorded decision, not a legal
+authorisation).** HTTP routes, OpenAPI, error codes, process wiring, the slice-3 LOW items and the withdrawal-creation guard.
+- **Routes** (`internal/httpserver/launch_authorisation_routes.go`; spec under `docs/api/openapi/platform-api.yaml`; contract tests
+  `openapi_launch_authorisation_contract_test.go`): the section 9 list, plus ONE addition, a platform-only queue
+  `GET /v1/admin/launch-authorisations` (the approval queue the slice-5 console needs; a tenant caller is 403). Readiness takes an
+  `action` query value (the check set depends on it) and optional `jurisdiction_ids` / `licensing_*` / `licence_id` (never free text);
+  `POST .../launch-authorisations` REFUSES `action = suspend` with a 400 pointing at the suspend routes (review condition e: it would drop the
+  licensing fields and answer 201). A
+  pending request returned by GET carries the CURRENT server-side readiness so an approver has the `seen_readiness_hash`.
+- **Tenant binding.** `tenant_id` only from the `{tenantID}` path value validated against the token (`canActOnTenant`); a foreign tenant
+  is a 404, not a 403 (no existence oracle, section 8.3); a body `tenant_id` is accepted and IGNORED. The one body/query reference to a
+  second id, `brand_id`, is resolved tenant-bound by the service (a foreign brand is a 404). The actor (staff id, role, scope) is built
+  from the verified token; `platform_acting` cannot be asked for over HTTP and the service refuses it anyway.
+- **Proof carriage.** As every four-eyes route of this repository: the service signs the ADR 0110 proof for the authenticated principal
+  right before each governed write; no proof header or field exists. No issuer: 500 and nothing written (tested).
+- **Idempotency.** The admin four-eyes routes carry no `Idempotency-Key` (that is the player money-movement convention); these routes are
+  idempotent by state: a replayed create is `LAUNCH_REQUEST_PENDING`, a replayed approve/reject by the same Person is
+  `LAUNCH_ALREADY_DECIDED` (new in this slice: a Go pre-check so the answer is not an opaque `LA012`; the database still refuses it),
+  a replayed cancel is `LAUNCH_REQUEST_NOT_PENDING`, a replayed suspension is `LAUNCH_ILLEGAL_TRANSITION`; each changes no state (the refusal itself is audited once as a denied row).
+- **Error codes.** Closed `LAUNCH_*` set in `internal/apierror` (messages are fixed sentences, never the underlying error text; a closed
+  `check_codes` array carries H-/R-/refusal/SQLSTATE codes). `LA023` -> `LAUNCH_WITHDRAWALS_HOLDING_FUNDS`, `LA024` ->
+  `LAUNCH_OPEN_BETS_BLOCK_CLOSURE`, `GP020` -> the existing `TENANT_CLOSE_BLOCKED_OPEN_ROUNDS`, a lock timeout ->
+  `LAUNCH_RETRYABLE_LOCK_TIMEOUT`, an `AP*` proof refusal -> `LAUNCH_PROOF_REFUSED` (403), other `LA*` -> `LAUNCH_GUARD_REFUSED`; the final
+  approval whose execution is refused is recorded and answered `LAUNCH_REFUSED_AT_EXECUTION`. Every 2xx carries `launchgov.Disclaimer`.
+- **Production pool (residual 14(f), closed).** `cmd/platform-api` opens its pool with `db.ConnectWithRuntimeParams` and
+  `cfg.DatabaseRuntimeParams()` (`DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, default 30 s, 1..3600; a URL value of 0 or above 1 h is refused): a per-connection
+  startup parameter, no `ALTER ROLE`, no role change; tested live. Runbook: `docs/runbooks/production-startup-database-config.md`.
+- **Slice-3 LOW items (closed).** Two-asset R-PLAYER-FUNDS sums; the suspension-specific notice `NoticeFundsInaccessibleOnSuspension` (funds
+  inaccessible, not stranded) distinct from `NoticeFundsStranded`; the reverse-order race (withdrawal request in flight -> closure waits ->
+  `LA023`) and the forward order; the sportsbook matrix variant for a brand closed before 0130 (`launchfix.ForceClosed`); HTTP
+  closed-subject withdrawal coverage restored where reachable legitimately (cancel the control request, close, assert the HTTP refusal).
+- **Migration 0131 (residual 14(b), the MEDIUM defence-in-depth gap; MONEY-PATH TRIGGER, `ledger-finance` review required).**
+  `withdrawal_requests_aa_subject_active_guard` BEFORE INSERT: takes the tenant status gate key SHARED then the brand key SHARED, reads the
+  tenant and the brand status in fresh statements and refuses `WD010` / `WD011` unless `active` (fail closed when a row is not visible; no owner
+  exemption). It fires before the 0126 binding guard. **No replay short-circuit** (security C1: the first draft let an INSERT through when a row with
+  the same key existed; `igaming_runtime` could DELETE that row in an open transaction and then a raw INSERT on a SUSPENDED brand was accepted
+  after the delete committed; the live exploit is a test now): the guard runs for every INSERT, the Go path answers replays before it inserts.
+  **Residual 14(b2) pulled forward:** `withdrawal_requests_deny_delete` (BEFORE DELETE row, BEFORE TRUNCATE statement, `WD012`, no role exempt) makes
+  a withdrawal request undeletable by every role, and `deploy/init-app-role.sql` plus `docs/security/runtime-role-separation.md` revoke DELETE and
+  TRUNCATE from `igaming_runtime` (defence in depth; the trigger is the binding control; CI workflow grant steps are not edited). The SQLSTATE
+  class `WD` (WD010 WD011 WD012) is used nowhere else (grep verified). Tested
+  as `igaming_runtime` with raw INSERTs on pending_launch / suspended / closed brands and tenants, the control, the replay, a player-scoped
+  (blind) session, the catalog order, and the race with a closure in BOTH orders (insert in flight -> closure waits -> `LA023`; closure in
+  flight -> insert waits -> refused). `withdrawal.RequestWithdrawal` maps `WD010/WD011` to `tenant.ErrNotActiveForPaymentInitiation`.
+  `WD011` is wrapped like `tenant.RequireBrandActive` (both `ErrNotActiveForPaymentInitiation` and `ErrBrandNotActive`). The Go-path race tests run
+  through the owner pool; the runtime role is covered by the raw-insert races. Not done: it does not change any transition, hold, balance or
+  projection; the ledger-side closure arm (14(a)) and the withdrawal STATE-transition trigger (the rest of 14(b2)) remain `NOT IMPLEMENTED`.
+- **Audit presentation (section 15 item, partly closed).** `audit.TenantPresentation` entries for the ten `launch_authorisation.*` success
+  events (closed reason code; before/after for executed / suspended / ratified); refusal rows have none (columns only). The approval chain
+  of a launch decision in the tenant projection is NOT assembled (the chain key is the kill switch's): deferred.
+- **Review conditions applied (security / code-reviewer / ledger-finance).** Tenant-scoped callers never see platform staff ids (requester,
+  approvers, executor: scope only) and get a coarsened readiness (environment `redacted`; `R-PROVIDER-TIER` / `R-ALERTS` detail `see_platform`;
+  the hash is unchanged); the `approved` / `rejected` audit rows carry the DECIDER's reason under `reason_code` (the requester's stays in
+  `request_reason_code`); free text refuses format (Cf) characters such as U+202E; a `DATABASE_URL` value of `idle_in_transaction_session_timeout`
+  of 0 or above 1 h is refused at startup (a session can still SET it to 0: the runbook recommends a human-applied role-level default and a
+  lock-wait alert); `ErrNoPerson` is `LAUNCH_NO_PERSON` (403); the licensing vocabularies and 1..32 jurisdiction ids are enforced at the wire;
+  the response envelopes are named types covered by the OpenAPI drift test; refusals are audited as denied rows, so replays "change no state"
+  rather than "record nothing". **Console warning (slice 5):** the PII lint is an accident guard; names and identifiers can pass it, so the
+  console must tell the user that `conditions_note`, `determination_reference` and operator fields are visible to the tenant and to platform staff.
+- **Last review round.** The tenant platform-actions audit endpoint no longer shows the actor (`staff_id`, `display_name`) of any
+  `launch_authorisation.*` row, denied rows included (scope only), so the statement that a tenant never sees platform staff ids now holds
+  for that endpoint too (test scans it; the other launch endpoints were already redacted). `DATABASE_URL` spellings of the guarded setting
+  are folded case-insensitively, differing duplicates and any `options` startup parameter naming it are refused. Free text also refuses
+  Zl/Zp (U+2028/2029) and the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0). The CI grant steps carry the same
+  `REVOKE DELETE, TRUNCATE ON withdrawal_requests` (pinned by a DB-free test). **Residuals recorded:** the table owner can `DISABLE TRIGGER`
+  `withdrawal_requests_deny_delete` and `withdrawal_requests_aa_subject_active_guard` ("binds every role including the owner" holds only while
+  they are enabled; the owner role is kept out of production by the startup check); the withdrawal STATE-transition guard (the runtime role can
+  UPDATE a request `requested` -> `cancelled` -> `requested` on a suspended brand) is `NOT IMPLEMENTED` and tracked as LAUNCH-BLOCKING (14(b2)).
+  **HD-RET-1 (OPEN, owner/legal, no policy invented):** withdrawal requests are now non-deletable by any role; does data-retention / erasure
+  law require deletion or pseudonymisation, or are they retained under AML record-keeping? Recommendation: retained; pseudonymise PII columns
+  only through a governed, audited path if counsel requires it. Not a technical-readiness blocker. Recorded in
+  `docs/governance/human-decision-register.md`.
+- **Not done / residual.** Shared with slice 3: S-1/S-3 trust model, ALERT-DELIVERY-1 (no recipient for `launch.suspension_exhausted`), the
+  reason catalogues are a RECOMMENDATION. New: the admin routes have no per-route rate limit (only the auth routes are limited; residual); `security` has not
+  yet reviewed the HTTP layer; the production run of the whole suite was done on a private scratch database, not CI.
+
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all
 `NOT IMPLEMENTED` until each slice lands; the licensing content recorded is human-dependent and never a statement of
@@ -783,7 +864,7 @@ legal authorisation.
 - Further derived checks: operating-market policy resolution (ADR 0045), actor-proof key provisioned, tenant-active
   for a brand subject, legacy-baseline ratification status, brand RG defaults.
 - Mandatory ratification of legacy rows or any ratification deadline.
-- Partner-console launch screens and ADR 0104 `TenantPresentation` entries for the new actions (the rows are already
-  tenant-visible through `subject_tenant_id`).
+- Partner-console launch screens. *(ADR 0104 `TenantPresentation` entries for the launch actions: done in slice 4; only the approval
+  chain of a launch decision in the tenant projection is still deferred.)*
 - Scheduled effective time (`not_before`) for an approved activation; per-tenant provider tiering; brand-level
   jurisdiction configuration.

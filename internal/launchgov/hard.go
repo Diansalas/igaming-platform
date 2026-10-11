@@ -105,7 +105,7 @@ func (s *Service) assess(ctx context.Context, in EvalInput) (assessment, error) 
 			a.Readiness.Checks = append(a.Readiness.Checks, s.configChecks(ctx, tx, in)...)
 		}
 		if doFunds {
-			a.Readiness.Checks = append(a.Readiness.Checks, fundsCheck(ctx, tx, in.Subject, &a.Readiness))
+			a.Readiness.Checks = append(a.Readiness.Checks, fundsCheck(ctx, tx, in.Subject, in.Action, &a.Readiness))
 		}
 		if in.Action == ActionClose {
 			n, err := holdBearingWithdrawals(ctx, tx, in.Subject)

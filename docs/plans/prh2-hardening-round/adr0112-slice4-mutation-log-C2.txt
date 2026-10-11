@@ -1,0 +1,3 @@
+C10 deny-delete trigger not created -> KILLED
+C11 deny-truncate trigger not created -> KILLED
+DONE

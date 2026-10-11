@@ -119,6 +119,22 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 		} else if same {
 			return ErrSelfApproval
 		}
+		// A replayed decision (the same Person already decided this request) is a stable,
+		// side-effect-free refusal: the database would refuse it too (UNIQUE request + Person, LA012),
+		// but with an opaque code.
+		meNow, err := personOf(ctx, tx, a.StaffID)
+		if err != nil {
+			return err
+		}
+		prior, err := loadApprovals(ctx, tx, req.ID)
+		if err != nil {
+			return err
+		}
+		for _, ap := range prior {
+			if ap.DecidedByPersonID == meNow {
+				return ErrAlreadyDecided
+			}
+		}
 		// Security C2: every reject of the same subject and action within the TTL (any payload)
 		// is shown to the approver, and an approver whose own Person rejected one may not
 		// approve a request that carries no change note.
@@ -159,7 +175,7 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 				return err
 			}
 			res.Request = req
-			return s.auditEvent(ctx, tx, a, "rejected", req, map[string]any{"decision_reason_code": in.ReasonCode, "decided_by": a.StaffID.String()})
+			return s.auditEvent(ctx, tx, a, "rejected", req, map[string]any{"decision_reason_code": in.ReasonCode, "reason_code": in.ReasonCode, "request_reason_code": req.ReasonCode, "decided_by": a.StaffID.String()})
 		}
 
 		apps, err := loadApprovals(ctx, tx, req.ID)
@@ -170,12 +186,12 @@ func (s *Service) Decide(ctx context.Context, a Actor, tenantID, requestID uuid.
 		if len(counted) < req.RequiredApprovals {
 			res.Request = req
 			return s.auditEvent(ctx, tx, a, "approved", req, map[string]any{
-				"decision_reason_code": in.ReasonCode, "decided_by": a.StaffID.String(),
+				"decision_reason_code": in.ReasonCode, "reason_code": in.ReasonCode, "request_reason_code": req.ReasonCode, "decided_by": a.StaffID.String(),
 				"approvals": len(counted), "of_required": req.RequiredApprovals, "readiness_snapshot_hash_at_decision": hash,
 			})
 		}
 		if err := s.auditEvent(ctx, tx, a, "approved", req, map[string]any{
-			"decision_reason_code": in.ReasonCode, "decided_by": a.StaffID.String(),
+			"decision_reason_code": in.ReasonCode, "reason_code": in.ReasonCode, "request_reason_code": req.ReasonCode, "decided_by": a.StaffID.String(),
 			"approvals": len(counted), "of_required": req.RequiredApprovals, "readiness_snapshot_hash_at_decision": hash, "final": true,
 		}); err != nil {
 			return err

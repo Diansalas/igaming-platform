@@ -10,29 +10,42 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
 
 // credit posts a manual-adjustment credit to the wallet's player_cash account (fixture).
 func (w *world) credit(tenantID, walletID uuid.UUID, amount int64, contra ledger.AccountType) {
 	w.t.Helper()
+	w.creditAsset(tenantID, walletID, "EUR", amount, contra)
+}
+
+// creditAsset is credit for an explicit asset (the wallet must be a wallet of that asset).
+func (w *world) creditAsset(tenantID, walletID uuid.UUID, asset string, amount int64, contra ledger.AccountType) {
+	w.t.Helper()
 	reason := "launchgov test funding"
 	err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		cash, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerCash, "EUR")
+		cash, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerCash, asset)
 		if err != nil {
 			return err
 		}
-		adj, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, contra, "EUR")
+		adj, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, contra, asset)
 		if err != nil {
 			return err
+		}
+		// A negative amount withdraws from the wallet (a fixture to net a wallet back to zero).
+		cashDir, adjDir := ledger.Credit, ledger.Debit
+		if amount < 0 {
+			amount, cashDir, adjDir = -amount, ledger.Debit, ledger.Credit
 		}
 		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "lgov-fund-" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{
-				{LedgerAccountID: adj, Direction: ledger.Debit, Amount: amount},
-				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: amount},
+				{LedgerAccountID: adj, Direction: adjDir, Amount: amount},
+				{LedgerAccountID: cash, Direction: cashDir, Amount: amount},
 			},
 		})
 		return err
@@ -93,6 +106,90 @@ func TestFundsCheck_PerAssetSumsAreExactDecimalStrings_AndNoticesPresent(t *test
 	if rd.Hash() == "" {
 		t.Fatal("hash")
 	}
+}
+
+// Slice-3 LOW item: TWO assets in one brand. Each asset is summed on its own (never added across
+// assets), exactly, as decimal strings; a zero-sum asset is absent; an 18-exponent-sized amount
+// does not overflow. The notice follows the action: closure shows the stranded text, a suspension
+// shows the distinct "inaccessible, not stranded" text and never the stranded one.
+func TestFundsCheck_TwoAssets_SummedSeparately_AndSuspensionNoticeIsDistinct(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	tid := w.activeTenant()
+	b := w.activeBrand(tid)
+	sub := launchgov.Subject{TenantID: tid, BrandID: &b}
+	_, eur1 := w.playerWithWallet(tid, b)
+	_, eur2 := w.playerWithWallet(tid, b)
+	usd1 := w.walletOf(tid, b, "USD")
+	usd2 := w.walletOf(tid, b, "USD")
+	usdZero := w.walletOf(tid, b, "USD")
+	const big = int64(9_000_000_000_000_000_000)
+	w.credit(tid, eur1, big, ledger.AccountHouseGaming)
+	w.credit(tid, eur2, big, ledger.AccountPSPClearing)
+	w.creditAsset(tid, usd1, "USD", 5, ledger.AccountManualAdjustment)
+	w.creditAsset(tid, usd2, "USD", 11, ledger.AccountPSPClearing)
+	_ = usdZero // a wallet with no movement contributes nothing
+	// A THIRD asset that nets to zero (credit then withdraw): it must be absent from the sums, and its
+	// player must not be counted as holding a balance.
+	gbp := w.walletOf(tid, b, "GBP")
+	w.creditAsset(tid, gbp, "GBP", 7, ledger.AccountManualAdjustment)
+	w.creditAsset(tid, gbp, "GBP", -7, ledger.AccountManualAdjustment)
+
+	rd, err := w.svc.EvaluateReadiness(ctx, launchgov.EvalInput{Subject: sub, Action: launchgov.ActionClose})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := rd.Balances["GBP"]; present {
+		t.Fatalf("an asset that nets to zero must be absent from the sums: %v", rd.Balances)
+	}
+	if len(rd.Balances) != 2 || rd.Balances["EUR"] != "18000000000000000000" || rd.Balances["USD"] != "16" {
+		t.Fatalf("each asset must be summed on its own as an exact decimal string: %v", rd.Balances)
+	}
+	if rd.Info["players_with_non_zero_balance"] != 4 {
+		t.Fatalf("players with a non-zero balance across both assets: %v", rd.Info)
+	}
+	if !containsStr(rd.Notices, launchgov.NoticeFundsStranded) || containsStr(rd.Notices, launchgov.NoticeFundsInaccessibleOnSuspension) {
+		t.Fatalf("closure shows the stranded notice only: %v", rd.Notices)
+	}
+
+	rs, err := w.svc.EvaluateReadiness(ctx, launchgov.EvalInput{Subject: sub, Action: launchgov.ActionSuspend})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(rs.Notices, launchgov.NoticeFundsInaccessibleOnSuspension) || containsStr(rs.Notices, launchgov.NoticeFundsStranded) {
+		t.Fatalf("suspension shows the inaccessible-not-stranded notice and NEVER the stranded one: %v", rs.Notices)
+	}
+	if !containsStr(rs.Notices, launchgov.NoticeFundsOmissions) {
+		t.Fatalf("the omissions notice is shown for a suspension too: %v", rs.Notices)
+	}
+	if strings.Contains(launchgov.NoticeFundsInaccessibleOnSuspension, "HD-CTF-4") || !strings.Contains(launchgov.NoticeFundsInaccessibleOnSuspension, "not stranded") {
+		t.Fatal("the suspension notice must say not stranded and must not engage the unclaimed-funds policy")
+	}
+	if launchgov.NoticeFundsInaccessibleOnSuspension == launchgov.NoticeFundsStranded {
+		t.Fatal("the two notices must be distinct")
+	}
+}
+
+// walletOf registers one more player in the brand and opens a wallet of the asset for it.
+func (w *world) walletOf(tenantID, brandID uuid.UUID, asset string) uuid.UUID {
+	w.t.Helper()
+	var id uuid.UUID
+	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		br, err := identity.GetBrandByID(ctx, tx, brandID)
+		if err != nil {
+			return err
+		}
+		p, err := identity.RegisterPlayer(ctx, tx, br, "lgov-"+uuid.NewString()+"@fixture.invalid", "!x")
+		if err != nil {
+			return err
+		}
+		wl, err := wallet.GetOrCreate(ctx, tx, tenantID, brandID, p.ID, asset)
+		id = wl.ID
+		return err
+	}); err != nil {
+		w.t.Fatalf("seed %s wallet: %v", asset, err)
+	}
+	return id
 }
 
 func containsStr(l []string, s string) bool {

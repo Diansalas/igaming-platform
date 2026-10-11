@@ -1,0 +1,68 @@
+ADR 0112 slice 4 mutation-kill evidence (HTTP routes, error mapping, migration 0131)
+=====================================================================================
+Method: each mutant edits ONE site of the worktree (branch adr0112-slice4-http), runs the named test command and is KILLED
+when that run fails (compile failure counts as killed only when it is the test build failing; none did). The file is always
+restored afterwards. Group A is DB-free (go test ./internal/httpserver ... TestLaunchErrorCode|TestWriteLaunchError|
+TestLaunchRoutes|TestOpenAPI_Launch). Group B runs the HTTP integration suite (-tags integration -p 1, TestLaunchHTTP) or the
+launchgov funds tests as igaming_runtime on a private scratch database. Group C rebuilds the private database from the mutated
+migration and runs TestWithdrawalInsertGuard (as igaming_runtime). Driver: scratchpad s4_mut.py.
+
+GROUP A (route authz, mapping, envelope)  17 + 1 mutants, all KILLED
+  A1  approve route permission -> request                               KILLED  (route pin)
+  A2  reject route permission -> read                                    KILLED  (route pin)
+  A3  brand suspend permission -> request                                KILLED  (route pin)
+  A4  platform queue permission -> request                               KILLED  (route pin)
+  A5  wrapper drops RequireStaffPrincipal                                KILLED  (wrapper pin)
+  A6  foreign tenant answers 403 instead of 404                          KILLED  (source pin)
+  A7  H-6 (ErrWithdrawalsHolding) mapped to PRECONDITION_FAILED          KILLED  (mapping table)
+  A8  LA024 branch removed                                               KILLED  (mapping table)
+  A9  AP* proof refusal mapped to GUARD_REFUSED                          KILLED  (mapping table)
+  A10 ErrAlreadyDecided mapped to SELF_APPROVAL                          KILLED  (mapping table)
+  A11 ErrNotFound mapped to forbidden                                    KILLED  (mapping table)
+  A12 ErrActingSession no longer a 403                                   KILLED  (mapping table)
+  A13 GP020 CloseBlockedError mapping dropped                            KILLED  (mapping table)
+  A14 lock timeout mapped to GUARD_REFUSED                               KILLED  (mapping table)
+  A15 internal error text leaks into the 500 body                        first run SURVIVED -> test added
+        (TestWriteLaunchError_EnvelopeShape, internal-error case) -> KILLED
+  A16 refused-at-execution check code dropped                            KILLED  (mapping table)
+  A17 apierror: GUARD_REFUSED no longer 409                              KILLED  (apierror status table)
+  A18 route-level canActOnTenant dropped                                 KILLED by the source pin only. Over HTTP it is
+        behaviourally EQUIVALENT (B1 below survives): the service re-checks the tenant (ErrNotFound) and RLS binds the
+        session, which is the intended defence in depth.
+
+GROUP B (HTTP integration, launchgov funds)  10 run, 9 KILLED, 1 SURVIVED (equivalent, see A18)
+  B1  no canActOnTenant at the route                                     SURVIVED over HTTP (equivalent; killed by A18's pin)
+  B2  actor scope always platform (token tenant ignored)                 KILLED
+  B3  create takes the tenant from the body                              KILLED
+  B5  disclaimer removed from create / suspend results                   KILLED
+  B6  GET request shows no current readiness for a pending request       KILLED
+  B7  list ignores the status filter                                     KILLED
+  B8  Decide drops the already-decided pre-check                         KILLED
+  B9  platform queue allows a tenant scope                               KILLED
+  B11 suspension shows the stranded notice (condition swapped)           KILLED
+  B12 status history ignores the brand filter                            KILLED
+  (B4 and B10 were drafted without a command and are not evidence.)
+
+GROUP C (migration 0131)  9 mutants, all KILLED
+  C1 no brand check                  C2 no tenant check              C3 no replay pass-through
+  C4 tenant key not taken            C5 brand key not taken          C6 only 'closed' refused
+  C7 trigger name fires after the binding guard                      C8 owner role exempt
+  C9 brand key derived from the tenant id
+
+REVIEW-CONDITION ROUND (security / code-reviewer / ledger-finance conditions applied on this branch)
+=====================================================================================================
+Driver and raw logs are committed next to this file (adr0112-slice4-mutation-driver.py; adr0112-slice4-mutation-log-*.txt).
+The driver's paths are the authoring sandbox's (scratchpad); it is evidence of method, not a CI job. Groups: A/B above were
+run in the first pass (log B first pass committed); C and C2 (migration 0131 after the fix) and D (the review fixes) were
+re-run after the fixes and every mutant is KILLED.
+
+GROUP C after the security C1 fix  9/9 KILLED
+  C3 now re-adds the replay short-circuit (the live exploit): killed by TestWithdrawalInsertGuard_ReplayOfExistingKey_IsStillGuarded
+  and TestWithdrawalDeleteGuard_ReviewExploitSequence_IsRefused. C1..C2, C4..C9 as before.
+GROUP C2 (delete / truncate guard)  2/2 KILLED
+  C10 deny-delete trigger not created, C11 deny-truncate trigger not created (TestWithdrawalDeleteGuard_NoRoleCanDeleteOrTruncate).
+GROUP D (review fixes)  13/13 KILLED
+  D1 tenantView always false, D2 request redaction dropped, D3 history redaction dropped, D4 readiness coarsening dropped,
+  D5 create accepts action=suspend again, D6 wire-shape validation dropped, D7 decision reason not stored under reason_code,
+  D8 format characters accepted, D9 DATABASE_URL may disable the idle timeout, D10 idle bound accepts 0, D11 WD011 not the
+  brand sentinel, D12 ErrNoPerson mapping dropped, D13 an asset that nets to zero is counted in R-PLAYER-FUNDS.

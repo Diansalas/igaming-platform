@@ -169,7 +169,7 @@ func TestWiring_CoverageGate(t *testing.T) {
 // Static pin: in run(), ONE variable (paySources, assigned from
 // providers.paymentStatementSources()) is (1) passed to the coverage gate,
 // (2) registered, and (3) spread as the scheduler's trailing argument - and all
-// of it happens before db.Connect and before the HTTP server is built, and
+// of it happens before db.ConnectWithRuntimeParams and before the HTTP server is built, and
 // Deps.StatementSources receives the registry that was filled.
 func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	fset := token.NewFileSet()
@@ -257,7 +257,7 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 				if id, ok := x.Args[len(x.Args)-1].(*ast.Ident); ok {
 					schedulerLast = id.Name
 				}
-			case "db.Connect":
+			case "db.ConnectWithRuntimeParams":
 				if connectPos == 0 {
 					connectPos = x.Pos()
 				}
@@ -287,7 +287,7 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	}
 	ordered := assignPos < coveragePos && coveragePos < registerPos && registerPos < connectPos && registerPos < newServerPos
 	if !ordered {
-		t.Fatalf("order must be: assign < coverage gate < register < db.Connect and < HTTP server construction (%v %v %v %v %v)",
+		t.Fatalf("order must be: assign < coverage gate < register < db.ConnectWithRuntimeParams and < HTTP server construction (%v %v %v %v %v)",
 			assignPos, coveragePos, registerPos, connectPos, newServerPos)
 	}
 }

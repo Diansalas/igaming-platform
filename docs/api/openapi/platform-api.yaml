@@ -6210,6 +6210,479 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/admin/tenants/{tenantID}/launch-readiness:
+    get:
+      summary: Read the launch readiness of a tenant or brand (read-only, informational)
+      description: >
+        launch_authorisation:read (platform_admin; tenant_admin and compliance for their own tenant), staff principals only.
+        ADR 0112. Computes, server-side and without writing anything, the informational readiness checks for the action in the query,
+        and returns the readiness_hash an approver must pass back as seen_readiness_hash plus the exact set of non-passing check codes a request
+        must acknowledge. Readiness proves configuration presence only; it is not a legal or regulatory assessment, and a non-passing check never
+        blocks by itself. The tenant is the {tenantID} path value only: a tenant-scoped caller naming another tenant, or a brand_id that is not a brand of
+        the tenant, is 404 (no existence oracle). The query carries no free text. Every 2xx response carries the fixed disclaimer.
+        Status per ADR 0112 slice 4: IMPLEMENTED against the local database; MOCK provider stack.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: action
+          in: query
+          required: true
+          schema: { type: string, enum: [activate, reactivate, suspend, close, ratify] }
+        - name: brand_id
+          in: query
+          required: false
+          description: A brand of the tenant; absent means the tenant itself.
+          schema: { type: string, format: uuid }
+        - name: jurisdiction_ids
+          in: query
+          required: false
+          description: Comma-separated jurisdiction ids (activate, reactivate, ratify).
+          schema: { type: string }
+        - name: licensing_model
+          in: query
+          required: false
+          schema: { type: string, enum: [platform_licence, tenant_licence, other_manually_approved, not_applicable_recorded_determination] }
+        - name: licensing_status
+          in: query
+          required: false
+          schema: { type: string, enum: [in_force, applied_pending, conditional, suspended, expired, not_required_per_determination] }
+        - name: licence_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The readiness evaluation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchReadinessResponse" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/launch-authorisations:
+    post:
+      summary: File a launch authorisation request (activate, reactivate, close, ratify)
+      description: >
+        launch_authorisation:request (platform_admin; tenant_admin and compliance for a BRAND of their own tenant only), staff principals only.
+        ADR 0112 (MOCK stack; IMPLEMENTED against the local database). Files a request that changes no status by itself: it needs the distinct platform approvers
+        named in required_approvals (1 for a brand activate / reactivate / ratify; 2 for a tenant activation, any closure, and a platform-licence brand
+        launch requested by tenant staff), who approve through the approve route. The server computes and snapshots the readiness it binds and returns it; every check that is not pass must be listed in
+        acknowledged_check_codes (exactly that set). The licensing section records the basis of the decision; it is never judged and no licence is required by this API.
+        action `suspend` is NOT accepted here (400): a suspension has its own routes (brand and tenant suspend), because it executes at once and records no licensing section.
+        The tenant is the {tenantID} path value only; a body tenant_id is accepted and ignored. brand_id selects a brand OF THE ROUTE TENANT (a foreign or unknown brand is 404);
+        absent means the tenant itself (platform only). The signed actor proof (ADR 0110) is produced server-side. Replaying the call while a request is pending is 409 LAUNCH_REQUEST_PENDING and changes no state (a denied audit row is written).
+        A recorded launch decision is evidence that named people took a decision on stated inputs; it is not a legal or regulatory authorisation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchCreateRequest" }
+      responses:
+        "201":
+          description: The filed request (or the executed suspension), with the readiness the server bound
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchResult" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "409":
+          $ref: "#/components/responses/LaunchConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+    get:
+      summary: List the tenant's launch authorisation requests
+      description: >
+        launch_authorisation:read (platform_admin; tenant_admin and compliance for their own tenant), staff principals only.
+        Newest first, at most `limit` (default 100, max 500). A pending request past its expiry is reported as `expired`.
+        A tenant-scoped caller naming another tenant is 404. Every 2xx response carries the fixed disclaimer.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: brand_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          required: false
+          description: Comma-separated request statuses.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchRequestList" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}:
+    get:
+      summary: Get one launch authorisation request with its approvals
+      description: >
+        launch_authorisation:read (platform_admin; tenant_admin and compliance for their own tenant), staff principals only.
+        A request that does not exist for the {tenantID} (including another tenant's request) is 404. For a pending request the response also carries the CURRENT server-side
+        readiness (never client-supplied): its readiness_hash is what an approver passes as seen_readiness_hash. prior_rejects lists the rejects of the same subject and action within the request window.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchRequestDetail" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/approve:
+    post:
+      summary: Approve a launch authorisation request
+      description: >
+        launch_authorisation:approve (platform_admin ONLY; every tenant role is refused 403 at the permission gate), staff principals only.
+        The approver passes the readiness_hash it was shown (seen_readiness_hash); a stale hash records no approval (a denied audit row is written) (409 LAUNCH_STALE_READINESS). The requester and any account of the requester's Person
+        are refused (409 LAUNCH_SELF_APPROVAL); a second decision by the same Person is 409 LAUNCH_ALREADY_DECIDED and changes no state (a denied audit row is written). When this approval is the final one required, the same transaction
+        executes the request (executed=true); if execution is refused the approval is recorded and the response is 409 LAUNCH_REFUSED_AT_EXECUTION with the refusal code in check_codes
+        (approvals_stale, readiness_changed_since_approval, readiness_changed_unacknowledged, or an H- code). Operator-fixable refusals (open sportsbook bets, hold-bearing withdrawals,
+        a lock timeout) roll the execution back and leave the request pending. The signed actor proof is produced server-side. A body tenant_id is accepted and ignored.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchDecideRequest" }
+      responses:
+        "200":
+          description: The decision outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchDecisionResult" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "409":
+          $ref: "#/components/responses/LaunchConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/reject:
+    post:
+      summary: Reject a launch authorisation request
+      description: >
+        launch_authorisation:approve (platform_admin ONLY), staff principals only. A recorded reject ends the request (`rejected`); an identical new request within the request window is refused
+        (409 LAUNCH_PRIOR_REJECT). seen_readiness_hash is not required to reject. Same tenant, proof and replay rules as approve.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchDecideRequest" }
+      responses:
+        "200":
+          description: The decision outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchDecisionResult" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "409":
+          $ref: "#/components/responses/LaunchConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/cancel:
+    post:
+      summary: Cancel a pending launch authorisation request
+      description: >
+        launch_authorisation:request, staff principals only. Only the requester (same staff member and scope) can cancel, only while the request is `pending` (otherwise 409
+        LAUNCH_REQUEST_NOT_PENDING; a non-requester is 403). A reason code from the cancel catalogue is required. The response is the cancelled request.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchCancelRequest" }
+      responses:
+        "200":
+          description: The cancelled request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchRequestEnvelope" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "409":
+          $ref: "#/components/responses/LaunchConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/brands/{brandID}/suspend:
+    post:
+      summary: Suspend a brand immediately (one authorised person, fail-closed direction)
+      description: >
+        launch_authorisation:suspend (platform_admin for any brand; tenant_admin and compliance for a brand of their own tenant), staff principals only.
+        A mandatory reason code and a server-side signed actor proof; the suspension is requested and executed in one transaction, supersedes every other pending request of the brand
+        (listed in superseded_request_ids, one audit row each) and retries a bounded number of times on a lock timeout (then 409 LAUNCH_RETRYABLE_LOCK_TIMEOUT). Reactivation is always four-eyes:
+        a suspender can never reactivate alone. The brand is the {brandID} path value (a brand_id or tenant_id in the body is accepted and ignored); a brand of another tenant is 404.
+        A replayed suspension is 409 LAUNCH_ILLEGAL_TRANSITION. The readiness in the response carries the suspension funds notice (player funds become inaccessible until reactivation; they are not stranded).
+        The signed actor proof is produced server-side. A recorded suspension is a recorded decision, not a legal or regulatory authorisation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: brandID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchSuspendRequest" }
+      responses:
+        "200":
+          description: The executed suspension
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchResult" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "409":
+          $ref: "#/components/responses/LaunchConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/suspend:
+    post:
+      summary: Suspend a tenant immediately (platform staff only)
+      description: >
+        launch_authorisation:suspend, staff principals only. A tenant subject is platform-only: a tenant-scoped caller is refused 403 (and a foreign tenant is 404). Otherwise as the brand suspension: the signed actor proof is produced server-side, a body tenant_id is accepted and ignored, and the result is a recorded decision, not a legal or regulatory authorisation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LaunchSuspendRequest" }
+      responses:
+        "200":
+          description: The executed suspension
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchResult" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "409":
+          $ref: "#/components/responses/LaunchConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/launch-status-history:
+    get:
+      summary: Read the launch status history of a tenant or brand
+      description: >
+        launch_authorisation:read, staff principals only. The append-only status transitions (governed, legacy_baseline, owner_provisioned), newest first, at most `limit` (default 100, max 500).
+        A tenant-scoped caller naming another tenant is 404. Ids and codes only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: brand_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        "200":
+          description: The transitions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchTransitionList" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "404":
+          $ref: "#/components/responses/LaunchNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/launch-authorisations:
+    get:
+      summary: Platform-wide launch authorisation queue (platform staff only)
+      description: >
+        launch_authorisation:read, platform-scoped staff principals only (a tenant-scoped caller is refused 403). Requests across every tenant, newest first, for the approval queue.
+        Same filters and limits as the per-tenant list (status, limit).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LaunchRequestList" }
+        "400":
+          $ref: "#/components/responses/LaunchBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LaunchForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LaunchUnavailable"
+
   /v1/admin/tenants/{tenantID}/payments/kill-switches:
     get:
       summary: List the tenant's payment kill switches (PRH-I1, ADR 0095 §10.5)
@@ -8201,6 +8674,206 @@ components:
             rotation_complete, suspected_compromise, confirmed_compromise,
             vendor_offboarded, misregistration, tenant_request.
       required: [action, reason_code]
+    LaunchDisclaimer:
+      type: string
+      description: >
+        The fixed text every 2xx launch response carries (launchgov.Disclaimer). A recorded launch decision is evidence that named people took a decision on stated inputs.
+        It is not a legal or regulatory authorisation, and it does not determine whether a licence is required or whether any jurisdiction permits operation.
+      enum:
+        - "A recorded launch decision is evidence that named people took a decision on stated inputs. It is not a legal or regulatory authorisation, and it does not determine whether a licence is required or whether any jurisdiction permits operation."
+    LaunchCheck:
+      type: object
+      properties:
+        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-PROVIDER-TIER, R-ALERTS or R-PLAYER-FUNDS" }
+        result: { type: string, enum: [pass, fail, not_evaluable], description: "not_evaluable is not pass" }
+        detail_code: { type: string, description: "A closed detail code, never free text." }
+      required: [code, result, detail_code]
+    LaunchReadiness:
+      type: object
+      description: >
+        The server-side informational readiness of a subject for an action. It proves configuration presence only. counts and balances are live display data of
+        R-PLAYER-FUNDS (not hashed); balances are DECIMAL STRINGS per asset. notices are fixed texts: closure shows the stranded-funds notice, a suspension shows the
+        inaccessible-not-stranded notice.
+      properties:
+        version: { type: integer }
+        computed_at: { type: string, format: date-time }
+        environment: { type: string, description: "The guard environment name; the fixed word `redacted` for a tenant-scoped caller. For a tenant-scoped caller the detail_code of R-PROVIDER-TIER and R-ALERTS is `see_platform`." }
+        checks: { type: array, items: { $ref: "#/components/schemas/LaunchCheck" } }
+        readiness_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Pass back as seen_readiness_hash to approve." }
+        non_passing_check_codes: { type: array, items: { type: string }, description: "Exactly the set a request must acknowledge." }
+        counts: { type: object, additionalProperties: { type: integer, format: int64 } }
+        balances: { type: object, additionalProperties: { type: string, pattern: "^-?[0-9]+$" } }
+        notices: { type: array, items: { type: string } }
+      required: [version, computed_at, environment, checks, readiness_hash, non_passing_check_codes]
+    LaunchReadinessResponse:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        readiness: { $ref: "#/components/schemas/LaunchReadiness" }
+      required: [disclaimer, readiness]
+    LaunchLicensing:
+      type: object
+      description: The RECORDED basis of the decision. Recording a basis is never judging it; every model is always available.
+      properties:
+        model: { type: string, enum: [platform_licence, tenant_licence, other_manually_approved, not_applicable_recorded_determination] }
+        status: { type: string, enum: [in_force, applied_pending, conditional, suspended, expired, not_required_per_determination] }
+        licence_id: { type: string, format: uuid, description: "Required for the two licence-backed models; absent for not_applicable_recorded_determination." }
+        determination_reference: { type: string, maxLength: 200, description: "An external document reference, never the document." }
+        determination_by_role: { type: string, maxLength: 100, description: "The responsible function (for example external counsel), never a person's name." }
+      required: [model, status]
+    LaunchCreateRequest:
+      type: object
+      properties:
+        tenant_id: { type: string, description: "Accepted and IGNORED: the tenant is the {tenantID} path value." }
+        brand_id: { type: string, format: uuid, description: "A brand of the route tenant; absent means the tenant itself (platform only). Unknown or foreign: 404." }
+        action: { type: string, enum: [activate, reactivate, close, ratify] }
+        reason_code:
+          type: string
+          description: >
+            Closed catalogue per action (a RECOMMENDATION authored for this slice, not a Blueprint requirement). activate: initial_launch. reactivate: issue_resolved,
+            relaunch_after_review. suspend: compliance_hold, security_incident, operational_incident, licence_issue, operator_request, other_documented.
+            close: offboarding, licence_issue, operator_request, compliance_decision. ratify: legacy_ratification. other_documented requires a conditions_note.
+        licensing: { $ref: "#/components/schemas/LaunchLicensing" }
+        responsible_operator_name: { type: string, maxLength: 200 }
+        responsible_operator_registration: { type: string, maxLength: 100 }
+        jurisdiction_ids: { type: array, minItems: 1, maxItems: 32, items: { type: string, format: uuid } }
+        conditions_note: { type: string, maxLength: 2000, description: "A recorded note. Nothing in it is machine-enforced. PII-linted (e-mail, phone, IBAN, card, wallet shapes are refused)." }
+        acknowledged_check_codes: { type: array, items: { type: string }, description: "Exactly the checks whose result is not pass." }
+      required: [action, reason_code]
+    LaunchDecideRequest:
+      type: object
+      properties:
+        tenant_id: { type: string, description: "Accepted and IGNORED." }
+        reason_code:
+          type: string
+          description: "approve: reviewed_ok. reject: insufficient_information, readiness_concerns, policy_concern, other_documented."
+        seen_readiness_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Required to approve: the readiness_hash the approver was shown." }
+      required: [reason_code]
+    LaunchCancelRequest:
+      type: object
+      properties:
+        tenant_id: { type: string, description: "Accepted and IGNORED." }
+        reason_code: { type: string, enum: [requester_withdrew, superseded_by_new_request, other_documented] }
+      required: [reason_code]
+    LaunchSuspendRequest:
+      type: object
+      properties:
+        tenant_id: { type: string, description: "Accepted and IGNORED." }
+        brand_id: { type: string, description: "Accepted and IGNORED: the brand is the path value." }
+        reason_code: { type: string, enum: [compliance_hold, security_incident, operational_incident, licence_issue, operator_request, other_documented] }
+        conditions_note: { type: string, maxLength: 2000 }
+      required: [reason_code]
+    LaunchApproval:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        decision: { type: string, enum: [approve, reject] }
+        decided_by: { type: string, format: uuid, description: "Platform staff id. OMITTED for a tenant-scoped caller (a tenant never sees platform staff identities)." }
+        reason_code: { type: string }
+        readiness_hash_at_decision: { type: string }
+        decided_at: { type: string, format: date-time }
+      required: [id, decision, reason_code, readiness_hash_at_decision, decided_at]
+    LaunchPriorReject:
+      type: object
+      properties:
+        request_id: { type: string, format: uuid }
+        decided_at: { type: string, format: date-time }
+        reason_code: { type: string }
+        same_payload: { type: boolean }
+      required: [request_id, decided_at, reason_code, same_payload]
+    LaunchRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        subject_kind: { type: string, enum: [tenant, brand] }
+        brand_id: { type: string, format: uuid }
+        action: { type: string, enum: [activate, reactivate, suspend, close, ratify] }
+        from_status: { type: string, enum: [pending_launch, active, suspended, closed] }
+        to_status: { type: string, enum: [pending_launch, active, suspended, closed] }
+        status: { type: string, enum: [pending, executing, executed, refused_at_execution, rejected, cancelled, expired, superseded] }
+        licensing_model: { type: string }
+        licensing_status: { type: string }
+        licence_id: { type: string, format: uuid }
+        determination_reference: { type: string }
+        determination_by_role: { type: string }
+        responsible_operator_name: { type: string }
+        responsible_operator_registration: { type: string }
+        jurisdiction_ids: { type: array, items: { type: string, format: uuid } }
+        conditions_note: { type: string }
+        readiness_snapshot_hash: { type: string }
+        acknowledged_check_codes: { type: array, items: { type: string } }
+        reason_code: { type: string }
+        requested_by: { type: string, format: uuid, description: "The requester staff id. OMITTED for a tenant-scoped caller when the requester is platform staff (scope only, see requested_by_scope)." }
+        requested_by_scope: { type: string, enum: [platform, tenant] }
+        required_approvals: { type: integer, minimum: 0, maximum: 2 }
+        payload_hash: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time }
+        refusal_code: { type: string }
+        prior_rejects: { type: array, items: { $ref: "#/components/schemas/LaunchPriorReject" } }
+        approvals: { type: array, items: { $ref: "#/components/schemas/LaunchApproval" } }
+      required: [id, tenant_id, subject_kind, action, from_status, to_status, status, jurisdiction_ids, readiness_snapshot_hash, acknowledged_check_codes, reason_code, requested_by_scope, required_approvals, payload_hash, created_at, expires_at]
+    LaunchRequestEnvelope:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        request: { $ref: "#/components/schemas/LaunchRequest" }
+      required: [disclaimer, request]
+    LaunchRequestDetail:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        request: { $ref: "#/components/schemas/LaunchRequest" }
+        readiness: { $ref: "#/components/schemas/LaunchReadiness" }
+      required: [disclaimer, request]
+    LaunchRequestList:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        items: { type: array, items: { $ref: "#/components/schemas/LaunchRequest" } }
+      required: [disclaimer, items]
+    LaunchResult:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        request: { $ref: "#/components/schemas/LaunchRequest" }
+        readiness: { $ref: "#/components/schemas/LaunchReadiness" }
+        executed: { type: boolean, description: "True for a suspension (requested and executed in one transaction)." }
+        superseded_request_ids: { type: array, items: { type: string, format: uuid } }
+      required: [disclaimer, request, readiness, executed]
+    LaunchDecisionResult:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        request: { $ref: "#/components/schemas/LaunchRequest" }
+        decision: { type: string, enum: [approve, reject] }
+        executed: { type: boolean, description: "True when this approval was the final one and the status change committed." }
+        readiness: { $ref: "#/components/schemas/LaunchReadiness" }
+        prior_rejects: { type: array, items: { $ref: "#/components/schemas/LaunchPriorReject" } }
+      required: [disclaimer, request, decision, executed, readiness, prior_rejects]
+    LaunchTransition:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        subject_kind: { type: string, enum: [tenant, brand] }
+        brand_id: { type: string, format: uuid }
+        kind: { type: string, enum: [governed, legacy_baseline, owner_provisioned] }
+        from_status: { type: string }
+        to_status: { type: string }
+        request_id: { type: string, format: uuid }
+        executed_by: { type: string, format: uuid, description: "OMITTED for a tenant-scoped caller when platform staff executed it." }
+        approver_ids: { type: array, items: { type: string, format: uuid }, description: "Platform approvers; always empty for a tenant-scoped caller." }
+        actor_type: { type: string, enum: [system, platform, tenant] }
+        created_at: { type: string, format: date-time }
+      required: [id, subject_kind, kind, to_status, approver_ids, actor_type, created_at]
+    LaunchTransitionList:
+      type: object
+      properties:
+        disclaimer: { $ref: "#/components/schemas/LaunchDisclaimer" }
+        items: { type: array, items: { $ref: "#/components/schemas/LaunchTransition" } }
+      required: [disclaimer, items]
     Error:
       type: object
       description: Platform-wide error envelope (internal/apierror.Error).
@@ -8230,10 +8903,38 @@ components:
             - PAYMENT_METHOD_MISMATCH
             - TENANT_OR_BRAND_NOT_ACTIVE
             - BRAND_NOT_ACCEPTING_REGISTRATIONS
+            - TENANT_CLOSE_BLOCKED_OPEN_ROUNDS
+            - LAUNCH_PRECONDITION_FAILED
+            - LAUNCH_UNACKNOWLEDGED_CHECKS
+            - LAUNCH_REQUEST_PENDING
+            - LAUNCH_SELF_APPROVAL
+            - LAUNCH_ALREADY_DECIDED
+            - LAUNCH_ILLEGAL_TRANSITION
+            - LAUNCH_SUBJECT_CLOSED
+            - LAUNCH_WITHDRAWALS_HOLDING_FUNDS
+            - LAUNCH_OPEN_BETS_BLOCK_CLOSURE
+            - LAUNCH_RETRYABLE_LOCK_TIMEOUT
+            - LAUNCH_REQUEST_NOT_PENDING
+            - LAUNCH_STALE_READINESS
+            - LAUNCH_PRIOR_REJECT
+            - LAUNCH_PRIOR_REJECTER
+            - LAUNCH_NOT_LEGACY_BASELINE
+            - LAUNCH_REFUSED_AT_EXECUTION
+            - LAUNCH_GUARD_REFUSED
+            - LAUNCH_PROOF_REFUSED
+            - LAUNCH_NO_PERSON
+            - LAUNCH_AUTHORISATION_UNAVAILABLE
         message:
           type: string
         request_id:
           type: string
+        check_codes:
+          type: array
+          description: >
+            Set only by the launch authorisation routes: the closed H-n / R- / refusal / SQLSTATE codes of a refused precondition,
+            acknowledgement, execution or database guard. Never free text.
+          items:
+            type: string
       required: [code, message]
   responses:
     ResolutionInvalidRequest:
@@ -8406,6 +9107,50 @@ components:
         Retry-After:
           description: Seconds to wait before retrying (1 for a capacity rejection, 2 for the domain-transaction bulkhead).
           schema: { type: integer, minimum: 1, maximum: 60 }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LaunchBadRequest:
+      description: >
+        400. invalid_request for a malformed JSON body, an unknown body field or a malformed path id; validation_error (message "invalid request", never an echo of the
+        offending content) for a value that fails validation: a malformed id or query value, an action or reason code outside its closed set, a free-text note that the PII lint
+        refuses, a missing required field.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LaunchForbidden:
+      description: >
+        403. forbidden: not a staff principal, the static launch_authorisation:* permission is missing for the role (approve and reject are platform_admin only), a tenant-scoped
+        caller on a tenant subject or on the platform-wide queue, a non-requester cancelling, or an acting session. LAUNCH_PROOF_REFUSED: the database refused the signed actor
+        proof (check_codes carries the AP code). LAUNCH_NO_PERSON: the staff account has no readable Person, so the four-eyes check cannot be evaluated. No data is returned.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LaunchNotFound:
+      description: >
+        404 not_found. An unknown id, another tenant's request or brand, and a tenant-scoped caller naming another tenant's path are indistinguishable (no existence oracle).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LaunchConflict:
+      description: >
+        409. A closed LAUNCH_* code (see the Error.code enum): LAUNCH_PRECONDITION_FAILED and LAUNCH_UNACKNOWLEDGED_CHECKS carry check_codes (H-n:... / R-...);
+        LAUNCH_REQUEST_PENDING, LAUNCH_SELF_APPROVAL, LAUNCH_ALREADY_DECIDED, LAUNCH_ILLEGAL_TRANSITION, LAUNCH_SUBJECT_CLOSED (closed is terminal), LAUNCH_REQUEST_NOT_PENDING
+        (decided, executed, expired or superseded), LAUNCH_STALE_READINESS, LAUNCH_PRIOR_REJECT, LAUNCH_PRIOR_REJECTER, LAUNCH_NOT_LEGACY_BASELINE,
+        LAUNCH_WITHDRAWALS_HOLDING_FUNDS (H-6 / LA023: hold-bearing withdrawal requests exist), LAUNCH_OPEN_BETS_BLOCK_CLOSURE (LA024) and TENANT_CLOSE_BLOCKED_OPEN_ROUNDS (GP020: open
+        sportsbook bets) refuse a closure and leave the request pending; LAUNCH_RETRYABLE_LOCK_TIMEOUT is retryable (nothing was recorded); LAUNCH_REFUSED_AT_EXECUTION (the approval is recorded,
+        execution was refused; check_codes carries the refusal code); LAUNCH_GUARD_REFUSED (another database guard; check_codes carries the LA code). The message is a fixed sentence; no
+        message states a legal conclusion.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LaunchUnavailable:
+      description: 503 LAUNCH_AUTHORISATION_UNAVAILABLE. The launch authorisation service is not wired in this process; nothing was read or written.
       content:
         application/json:
           schema:

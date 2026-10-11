@@ -1,0 +1,14 @@
+D1 tenantView always false -> KILLED
+D2 request redaction dropped -> KILLED
+D3 history redaction dropped -> KILLED
+D4 readiness coarsening dropped -> KILLED
+D5 create accepts suspend again -> KILLED
+D6 wire-shape validation dropped -> KILLED
+D7 decision reason not stored under reason_code -> KILLED
+D8 format characters accepted -> KILLED
+D9 URL may disable the idle timeout -> KILLED
+D10 idle bound accepts zero -> KILLED
+D11 WD011 not the brand sentinel -> KILLED
+D12 ErrNoPerson mapping dropped -> KILLED
+D13 two-asset: zero-netting asset counted -> KILLED
+DONE

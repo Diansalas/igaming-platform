@@ -10,7 +10,7 @@ import (
 // TestRun_GuardAndSchemeValidationPrecedeDBConnect pins the placement of
 // the two pre-DB startup checks in run(): refuseSyntheticInProduction and
 // validateWebhookSchemes (security S-1/I-1) are both called, and both
-// before db.Connect. The synthetic guard's ordering is also proven end to
+// before db.ConnectWithRuntimeParams. The synthetic guard's ordering is also proven end to
 // end by the integration subprocess test.
 func TestRun_GuardAndSchemeValidationPrecedeDBConnect(t *testing.T) {
 	fset := token.NewFileSet()
@@ -47,9 +47,9 @@ func TestRun_GuardAndSchemeValidationPrecedeDBConnect(t *testing.T) {
 		}
 		return true
 	})
-	connect, ok := first["db.Connect"]
+	connect, ok := first["db.ConnectWithRuntimeParams"]
 	if !ok {
-		t.Fatal("run() does not call db.Connect")
+		t.Fatal("run() does not call db.ConnectWithRuntimeParams")
 	}
 	for _, check := range []string{"refuseSyntheticInProduction", "validateWebhookSchemes"} {
 		pos, ok := first[check]
@@ -57,7 +57,7 @@ func TestRun_GuardAndSchemeValidationPrecedeDBConnect(t *testing.T) {
 			t.Fatalf("run() does not call %s", check)
 		}
 		if pos >= connect {
-			t.Fatalf("run() calls %s after db.Connect; it must run before any database side effect", check)
+			t.Fatalf("run() calls %s after db.ConnectWithRuntimeParams; it must run before any database side effect", check)
 		}
 	}
 }
