@@ -100,6 +100,13 @@ func TestWriteLaunchError_EnvelopeShape(t *testing.T) {
 		!strings.Contains(rec.Body.String(), `"check_codes":["H-3:config_missing_or_not_in_effect"]`) || !strings.Contains(rec.Body.String(), `"request_id":"req-1"`) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
+	// An unclassified (internal) error: a fixed 500 body, the underlying text only in the log.
+	rec = httptest.NewRecorder()
+	writeLaunchError(rec, c, "request", fmt.Errorf("pq: password authentication failed for user igaming (secret-detail): %w", launchgov.ErrProofUnavailable))
+	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "secret-detail") || strings.Contains(rec.Body.String(), "pq:") ||
+		!strings.Contains(rec.Body.String(), `"message":"internal error"`) {
+		t.Fatalf("an internal error must be a fixed body: %d %s", rec.Code, rec.Body)
+	}
 	rec = httptest.NewRecorder()
 	writeLaunchError(rec, c, "get", launchgov.ErrNotFound)
 	if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "check_codes") {
@@ -150,7 +157,9 @@ func TestLaunchRoutes_PermissionPerRoute_Pinned(t *testing.T) {
 		t.Error("tenant_id must never be read from a body or query")
 	}
 	// canActOnTenant answers 404 (no existence oracle), never 403, for a foreign tenant.
-	if !regexp.MustCompile(`canActOnTenant\(tc, target\) \{[^}]*CodeNotFound`).MatchString(string(src)) {
+	// (The service re-checks the tenant and RLS binds the session, so a mutant that drops the route
+	// check is behaviourally equivalent over HTTP; this source pin is what keeps the route check.)
+	if !regexp.MustCompile(`if !canActOnTenant\(tc, target\) \{[^}]*CodeNotFound`).MatchString(string(src)) {
 		t.Error("a foreign tenant must answer 404 not_found")
 	}
 }
