@@ -1,6 +1,10 @@
 # ADR 0110 — Signed actor proof for governed four-eyes writes (PRH-2 R5, SIGNED-ACTOR-PROOF)
 
 - **Implemented (2026-10-08, migration 0124, HSEC-APPROVED-HOLD-RELEASE-1):** the two `withdrawal_hold_resolution*` tables are proof-bound (eleven governed tables); the verifier refuses every scope but `platform_acting` (with a tenant) for the four `withdrawal_hold_resolution:*` operations (`AP004`), and the Go signer refuses the same claims; see the rows appended to the table in section 3 and ADR 0111 section 16. The other pointer items below (K3 digest, T9-T11) remain NOT implemented.
+- **Implemented (2026-10-11, migration 0130, ADR 0112 slice 3):** two more governed tables (`launch_authorisation_requests`,
+  `launch_authorisation_approvals`; thirteen in all), the operation family `launch_authorisation:*` admitted for scope `platform`
+  (NULL tenant, like the K1 flows) or `tenant`, `approve` / `reject` for `platform` only, never `platform_acting`; `internal/launchgov`
+  is a signing package. See the rows appended to the table in section 3 and ADR 0112 section 13.
 - **Pointer (2026-10-08, ADR 0111, PROPOSED):** ADR 0111 §6.3 extends the protected-table list from nine to eleven (`withdrawal_hold_resolutions`, `withdrawal_hold_resolution_approvals`, platform_acting with a tenant only), §4.5 appends `evidence_line_id` to the K3 INSERT digest (all K3 INSERT digests gain the trailing field, `~` for M1/M2; SQL and Go change in lockstep; a test pins the new digests), and records new §10a threats: **T9** payout-instrument writes are not actor-proof bound (mitigated by Go-side seals and the gate rule, ADR 0111 §2.2); **T10** forgeable statement lines used as M4 evidence (mitigated by system-shape-only import INSERT plus a Go import seal written in the INSERT, ADR 0111 §4.3; the source declaration comes only from the in-process registry/config; residuals T6, source authenticity/completeness and availability (forged lines can overflow the I-2 cap: loud, never clears); launch-blocking for non-MOCK M4 until the seal passes security implementation review and S-3 is met per real source; no human acceptance of T10 is needed); **T11** SQL-planted `pending_verification` instrument rows (mitigated by the instrument seal checked by the verifier). Revision 2 also restricts the four `withdrawal_hold_resolution:*` operations to `platform_acting` scope with a tenant. Not implemented.
 
 - **Status:** IMPLEMENTED on branch `prh2-r5-signed-actor-proof` (migration `0120_signed_actor_proof`, amended in
@@ -75,6 +79,9 @@ extension of the SAME mechanism) the five K1 capability-grant / financial-policy
 | `withdrawal_hold_resolutions` | UPDATE pending -> cancelled | `withdrawal_hold_resolution:cancel` | resolution id | the resolution's `payload_hash`; requester only |
 | `withdrawal_hold_resolutions` | UPDATE pending -> expired | none | | refused (HR030) unless `now() >= expires_at` (checked by the resolution guard and again by the proof trigger) |
 | `withdrawal_hold_resolution_approvals` | INSERT | `withdrawal_hold_resolution:approve` / `:reject` | resolution id | the approval's `payload_hash`; scope `platform_acting` with a tenant only |
+| `launch_authorisation_requests` | INSERT | `launch_authorisation:request` (`:suspend` iff `action = 'suspend'`) | the literal `new` | digest of tenant, subject kind, brand, action, licensing record, operator, jurisdictions, note, readiness hash, acknowledged checks, reason (ADR 0112 6.4; migration 0130); scope `platform` (NULL tenant) or `tenant` |
+| `launch_authorisation_requests` | UPDATE pending -> cancelled | `launch_authorisation:cancel` | request id | the request's `payload_hash`; requester only (also executing a pending suspension: requester only) |
+| `launch_authorisation_approvals` | INSERT | `launch_authorisation:approve` / `:reject` | request id | the request's `payload_hash`; scope `platform` only |
 
 In every row the trigger also asserts that the actor column the earlier guard FORCED (`initiated_by`, `decided_by`,
 `requested_by`, `revoked_by`) equals the PROVEN actor (`AP004` otherwise), and a catalog test pins that

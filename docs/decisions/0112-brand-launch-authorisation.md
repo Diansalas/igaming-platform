@@ -487,26 +487,34 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
 8. Brand-level jurisdiction scoping stays tenant-level (ADR 0012); jurisdictions on a brand decision are a record.
 9. **S-3 (hard prerequisite).** Until `zz_actor_proof_guard` (slice 3) exists, DB four-eyes trusts GUCs (see 7.2).
    No HTTP or console route may write the three launch tables, and no real launch may be authorised through them,
-   before that guard is in place and `security` has reviewed it.
+   before that guard is in place and `security` has reviewed it. *(Slice 3: the guard is in place (migration 0130); the
+   `security` review of it is still required before any route is added, section 13 slice 4.)*
 10. **C-3(b).** A committed suspension supersedes pending requests of the same subject in its own transaction, but
     nothing yet fails a COMMIT of a suspension that left a stale `pending` activation/closure behind (a deferred
     check over the subject at commit). Not done soundly in slice 1; the slice-3 executor performs the supersede and
-    its test asserts no stale `pending` request survives a suspension.
+    its test asserts no stale `pending` request survives a suspension. *(Slice 3: closed. Migration 0130 adds the deferred
+    commit check `launch_suspension_no_stale_pending_at_commit` (`LA030`) and the executor supersedes; tests in
+    `internal/launchgov`.)*
     *(Slice 2 adds two slice-3 obligations: the brand status-change path uses `SET LOCAL lock_timeout` with a bounded,
     audited retry, and the executor refuses a brand-then-tenant status change in one transaction; see section 13.)*
 11. **Snapshot isolation (security r2).** An approval-based `pending -> executing` is refused (`LA011`) unless the
     transaction is READ COMMITTED, because a reject committed after a REPEATABLE READ / SERIALIZABLE snapshot is
     invisible to the reject check and the approvals guard only row-locks the request (SSI does not abort). The slice-3
-    executor must run in READ COMMITTED.
+    executor must run in READ COMMITTED. *(Slice 3: the executor asserts READ COMMITTED per transaction.)*
 12. **Slice-3 notes.** (i) A recorded `reject` is bound to its request only: it does NOT carry over to a later
     identical request on the same subject, so an approver can be "shopped" by re-requesting. Slice 3 must decide and
     record the policy (for example a cool-down, or surfacing prior rejects of the same payload hash to the next
     approvers); nothing in slice 1 prevents it. (ii) A tenant's own-brand suspension supersedes and discards the
     platform's pending requests for that subject (S3). The audit trail and the console must show that explicitly
-    (request, superseding suspension, actor), not as a silent disappearance.
+    (request, superseding suspension, actor), not as a silent disappearance. *(Slice 3: both decided and implemented, see
+    section 13: exact-payload reject carry-over within the request TTL; one `superseded` audit row per request. The console
+    part is slice 5.)*
 13. **C-5.** The slice-1 closure tests realise an admitted closure through the owner-run governed fixture, and the
     `tenant.status_change` audit assertion of the pre-0128 tests is not made (ChangeStatus fails closed). Slice 3
     restores that assertion on the executor. Runtime-role raw-UPDATE refusal (GP020 / LA020) is covered separately.
+    *(Slice 3: restored in `internal/sportsbook/tenant_closure_integration_test.go` against the real executor: one
+    `launch_authorisation.executed` row with before/after, both approvers and the reason; `tenant.status_changed` is
+    superseded by it, as section 8 says.)*
 
 ## 13. Work breakdown (slices; none starts before LO-1 is put to the owner or explicitly defaulted)
 
@@ -576,6 +584,53 @@ player's BRAND is not `active`.
   placements by design). (2) The executor MUST refuse, in one transaction, a brand status change followed by a status
   change of that brand's tenant (brand key X then tenant key X inverts the tenant-then-brand order of placements); one
   subject per executing transaction.
+
+**Slice 3 implementation note (`backend`, 2026-10-11; `IMPLEMENTED` against the local database, MOCK providers; reviews by
+`security`, `ledger-finance` (LF3 closure preconditions), `identity-compliance`, `code-reviewer` and `qa` still required; no
+HTTP route or console exists yet, so nothing here is reachable by an operator; every record produced is a recorded decision,
+not a legal authorisation).** Migration 0130, `internal/launchgov`, the ADR 0110 proof extension and the permissions.
+- **Proof guard (closes S-3 / 12.9, S-8, C-3(b)).** `zz_actor_proof_guard` (last BEFORE trigger) on `launch_authorisation_requests`
+  (INSERT, cancel) and `launch_authorisation_approvals` (INSERT). `actor_proof_require` admits `launch_authorisation:request|
+  suspend|cancel|approve|reject` for scope `platform` (NULL tenant) or `tenant`, `approve`/`reject` for `platform` only, never
+  `platform_acting`. The request digest (`launch_request_content_digest`, Go twin `actorproof.LaunchRequest.Digest`) binds
+  `tenant_id`, `subject_kind`, `brand_id`, `action`, `reason_code` and every other caller-supplied content column incl. the
+  readiness hash; `:suspend` iff `action = 'suspend'` (derived from the row). Transitions and the status UPDATE are bound through
+  the same-transaction executing request. `internal/launchgov` joined `TestStatic_OnlyFourEyesPackagesSign`'s allow-list (so did
+  the two integration-tag test-support packages that sign for fixtures). Deviation (hardening): a pending suspension is executed
+  only by its own requester (`AP004` otherwise).
+- **Approval-age and readiness bounds (S-1/S-8).** At execution Go refuses (`refused_at_execution`, durable) approvals older than
+  `ApprovalMaxAge` (default 24 h, an engineering default, not a policy value: `approvals_stale`), approvals whose recorded
+  readiness hash differs from the fresh one (`readiness_changed_since_approval`), a now-failing unacknowledged check
+  (`readiness_changed_unacknowledged`), and a failed H-1/H-2/H-3 re-check. An approver must pass the readiness hash they saw;
+  a stale hash records nothing (`ErrStaleReadiness`). The readiness hash covers version, environment and the checks, NOT
+  `computed_at` and NOT the live counts (`Readiness.Info`, display only).
+- **Executor.** `launchgov` is the only non-test writer of `tenants.status` / `brands.status` (`status_writer_static_test.go`);
+  `tenant.ChangeStatus` was removed (its GP020 translation and typed error stay in `internal/tenant/status.go`). READ COMMITTED
+  is asserted per transaction (the database also refuses otherwise, 12.11). `SET LOCAL lock_timeout` (default 5 s); a lock timeout
+  or deadlock rolls back (the final approval too) and is a retryable error; a suspension retries up to 3 times and audits one
+  denied row with the attempt count. One subject per executing transaction (security C2), enforced by the status guard as well
+  (a tenant change after a brand change of the same tenant in one transaction: `LA020`). Brand updates bind `app.tenant_id` to the
+  subject's own tenant transaction-locally and restore it (S6). The subject row is locked `FOR NO KEY UPDATE` (the UPDATE's own
+  lock): `FOR UPDATE` conflicts with the `FOR KEY SHARE` of every foreign-key check and deadlocked with placements and with
+  concurrent suspensions (found by the x50 races). Lock order: pending requests of the subject (id order), then the subject.
+- **Reject carry-over (12.12 (i), decided).** A request identical to one rejected within `RequestTTL` (72 h) in subject, action
+  and `payload_hash` is refused (`LA014` / `ErrPriorReject`, naming the prior request and the retry-after time). Exact, not
+  fuzzy: any change of content is a different request; a cancelled, expired or superseded request carries nothing. The 72 h upper
+  edge of the window is not exercised by a test (it needs a clock); the lower edge is.
+- **Supersede (12.12 (ii), C-3(b)).** A suspension supersedes every other pending request of the subject in its transaction; the
+  audit trail carries one `superseded` row per request (request id, superseding request, actor, scope) and the `suspended` row
+  lists the ids, whether the suspender is a platform admin or the tenant itself. A deferred commit check (`LA030`) fails the COMMIT
+  of a suspension that left a stale pending request.
+- **Hard preconditions and readiness.** H-1..H-3 and H-6 as in 5.2 (H-2 never judges: four recorded bases; a tenant-scope read sees
+  only its bound licence, so a foreign licence id is `licence_not_found`); H-6 withdrawal states `requested`, `pending_review`,
+  `approved`, `submitted` (the hold posts at `requested`), checked at the request and again under the subject locks at execution
+  (rollback, request stays pending, like GP020). Eight configuration checks + `R-PLAYER-FUNDS`; `R-CATALOGUE` covers casino
+  availability only (the sportsbook catalogue is not brand-scoped); `R-ALERTS` is derived from the alert channel vocabulary.
+- **Permissions.** `launch_authorisation:request|approve|suspend|read`, static (not in any grantable catalogue): `approve` is
+  `platform_admin` only; request/suspend/read also `tenant_admin` and `compliance`.
+- **PII lint** (8.8): the digit-run and phone rules do not apply to `responsible_operator_registration` (a registry number is its
+  purpose); e-mail, IBAN, wallet and Luhn-valid card shapes still do. Closed reason catalogues per action and per decision live in
+  `launchgov` (`lint.go`).
 
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all

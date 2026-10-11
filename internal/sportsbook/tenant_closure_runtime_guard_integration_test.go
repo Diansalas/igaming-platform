@@ -16,11 +16,9 @@ import (
 // no open rounds passes the GP020 closure gate and is then refused by the governed-status guard
 // (LA020) and stays active.
 //
-// RESIDUAL (restore in slice 3): the pre-0128 closure tests asserted the `tenant.status_change`
-// audit row written by ChangeStatus itself. ChangeStatus now fails closed
-// (ErrGovernedStatusChangeRequired) and the owner-run fixture writes no audit row, so that
-// assertion is not made here; the slice-3 launchgov executor owns the audit row and its test must
-// assert it.
+// The `tenant.status_change` / `launch_authorisation.executed` audit assertion that slice 1
+// weakened is restored on the launchgov executor in tenant_closure_integration_test.go
+// (TestTenantClosure_RefusedWithOpenBetAllowedWhenResolved, C-5).
 func TestTenantClosure_RuntimeRoleRawClosureOfEmptyTenant_RefusedByTheLaunchGuard(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)

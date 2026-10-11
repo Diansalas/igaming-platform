@@ -36,14 +36,3 @@ func TestTranslateStatusChangeError(t *testing.T) {
 		t.Fatalf("unexpected message %q", msg)
 	}
 }
-
-func TestChangeStatusValidation(t *testing.T) {
-	for _, p := range []ChangeStatusParams{
-		{NewStatus: "gone"},
-		{NewStatus: "closed"},
-	} {
-		if err := ChangeStatus(nil, nil, p); !errors.Is(err, ErrInvalidStatusChange) { //nolint:staticcheck // validation fails before the runner or context is used
-			t.Fatalf("%+v: expected ErrInvalidStatusChange, got %v", p, err)
-		}
-	}
-}

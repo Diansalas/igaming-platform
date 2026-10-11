@@ -1,0 +1,408 @@
+package launchgov
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/providerkind"
+)
+
+// Check codes (ADR 0112 5.1). Each yields pass | fail | not_evaluable; not_evaluable is NOT pass.
+const (
+	CheckJurisdictionConfig = "R-JUR-CONFIG"
+	CheckLicenceValid       = "R-LIC-VALID"
+	CheckRulesets           = "R-RULESETS"
+	CheckCurrencies         = "R-CURRENCIES"
+	CheckPaymentMethods     = "R-PAY-METHODS"
+	CheckCatalogue          = "R-CATALOGUE"
+	CheckProviderTier       = "R-PROVIDER-TIER"
+	CheckAlerts             = "R-ALERTS"
+	CheckPlayerFunds        = "R-PLAYER-FUNDS"
+
+	ResultPass         = "pass"
+	ResultFail         = "fail"
+	ResultNotEvaluable = "not_evaluable"
+
+	// SnapshotVersion is bumped when the check set or the canonical form changes.
+	SnapshotVersion = 1
+)
+
+// Check is one readiness check: a code, a result and a closed detail code. Never free text.
+type Check struct {
+	Code       string `json:"code"`
+	Result     string `json:"result"`
+	DetailCode string `json:"detail_code"`
+}
+
+// Readiness is the computed, informational readiness of a subject for an action. Checks are the
+// ONLY part that is snapshotted and hashed; Info is live display data (counts for R-PLAYER-FUNDS)
+// that is neither persisted nor hashed, because it changes with every wallet movement.
+type Readiness struct {
+	Version     int       `json:"version"`
+	ComputedAt  time.Time `json:"computed_at"`
+	Environment string    `json:"environment"`
+	Checks      []Check   `json:"checks"`
+
+	Info map[string]int64 `json:"-"`
+}
+
+// Hash is the SHA-256 of the canonical snapshot over version, environment and the checks sorted
+// by code. computed_at is NOT hashed: two evaluations of the same state hash identically, so the
+// hash an approver saw is comparable with the hash at execution.
+func (r Readiness) Hash() string {
+	cs := append([]Check(nil), r.Checks...)
+	sort.Slice(cs, func(i, j int) bool { return cs[i].Code < cs[j].Code })
+	canon := struct {
+		Version     int     `json:"version"`
+		Environment string  `json:"environment"`
+		Checks      []Check `json:"checks"`
+	}{r.Version, r.Environment, cs}
+	b, _ := json.Marshal(canon) // fixed struct field order: deterministic
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// SnapshotJSON is the persisted snapshot ({version, computed_at, environment, checks}); codes only.
+func (r Readiness) SnapshotJSON() ([]byte, error) {
+	cs := append([]Check(nil), r.Checks...)
+	sort.Slice(cs, func(i, j int) bool { return cs[i].Code < cs[j].Code })
+	return json.Marshal(struct {
+		Version     int       `json:"version"`
+		ComputedAt  time.Time `json:"computed_at"`
+		Environment string    `json:"environment"`
+		Checks      []Check   `json:"checks"`
+	}{r.Version, r.ComputedAt.UTC(), r.Environment, cs})
+}
+
+// NonPassing returns the codes of every check whose result is not pass, sorted.
+func (r Readiness) NonPassing() []string {
+	var out []string
+	for _, c := range r.Checks {
+		if c.Result != ResultPass {
+			out = append(out, c.Code)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (r Readiness) result(code string) (string, bool) {
+	for _, c := range r.Checks {
+		if c.Code == code {
+			return c.Result, true
+		}
+	}
+	return "", false
+}
+
+// EvalInput is what a readiness evaluation depends on besides the subject: the action (which
+// decides the check set) and, for activate / reactivate / ratify, the recorded licensing basis
+// and the referenced jurisdictions. All server-side values or validated request content.
+type EvalInput struct {
+	Subject         Subject
+	Action          string
+	Licensing       *LicensingRecord
+	JurisdictionIDs []uuid.UUID
+}
+
+// checkSetFor returns whether an action evaluates the configuration checks and whether it
+// evaluates the funds check.
+func checkSetFor(action string) (config, funds bool) {
+	switch action {
+	case ActionActivate, ActionReactivate, ActionRatify:
+		return true, false
+	case ActionClose, ActionSuspend:
+		return false, true
+	}
+	return false, false
+}
+
+// EvaluateReadiness computes the readiness of a subject for an action. It is READ-ONLY: it runs
+// in one read-only tenant-scoped transaction (the route-validated tenant, never a caller value)
+// and writes nothing. A read failure is fail closed: the affected check is not_evaluable (never
+// pass); the only error returned is an unusable subject or context.
+func (s *Service) EvaluateReadiness(ctx context.Context, in EvalInput) (Readiness, error) {
+	a, err := s.assess(ctx, in)
+	if err != nil {
+		return Readiness{}, fmt.Errorf("launchgov: evaluate readiness: %w", err)
+	}
+	return a.Readiness, nil
+}
+
+func sortChecks(cs []Check) {
+	sort.Slice(cs, func(i, j int) bool { return cs[i].Code < cs[j].Code })
+}
+
+func ck(code, result, detail string) Check {
+	return Check{Code: code, Result: result, DetailCode: detail}
+}
+
+// configChecks evaluates the tenant-data checks inside the caller's read-only transaction. Every
+// query failure degrades its own check to not_evaluable.
+func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []Check {
+	var out []Check
+	now := s.now()
+	type cfg struct {
+		jurisdiction            uuid.UUID
+		kyc, aml, rg            *string
+		currencies, paymentMeth []byte
+	}
+	var cfgs []cfg
+	cfgErr := func() error {
+		if len(in.JurisdictionIDs) == 0 {
+			return nil
+		}
+		rows, err := tx.Query(ctx, `
+			SELECT jurisdiction_id, kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, allowed_currencies, allowed_payment_methods
+			  FROM tenant_jurisdiction_configs
+			 WHERE tenant_id = $1 AND jurisdiction_id = ANY($2)
+			   AND effective_from <= $3 AND (effective_to IS NULL OR effective_to > $3)`,
+			in.Subject.TenantID, in.JurisdictionIDs, now)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var c cfg
+			if err := rows.Scan(&c.jurisdiction, &c.kyc, &c.aml, &c.rg, &c.currencies, &c.paymentMeth); err != nil {
+				return err
+			}
+			cfgs = append(cfgs, c)
+		}
+		return rows.Err()
+	}()
+
+	// R-JUR-CONFIG
+	switch {
+	case cfgErr != nil:
+		out = append(out, ck(CheckJurisdictionConfig, ResultNotEvaluable, "read_error"))
+	case len(in.JurisdictionIDs) == 0:
+		out = append(out, ck(CheckJurisdictionConfig, ResultFail, "no_jurisdiction_referenced"))
+	default:
+		have := map[uuid.UUID]bool{}
+		for _, c := range cfgs {
+			have[c.jurisdiction] = true
+		}
+		missing := false
+		for _, j := range in.JurisdictionIDs {
+			if !have[j] {
+				missing = true
+			}
+		}
+		if missing {
+			out = append(out, ck(CheckJurisdictionConfig, ResultFail, "config_missing_or_not_in_effect"))
+		} else {
+			out = append(out, ck(CheckJurisdictionConfig, ResultPass, "ok"))
+		}
+	}
+
+	// R-LIC-VALID: only a licence-backed basis is evaluable.
+	out = append(out, s.licenceCheck(ctx, tx, in, now))
+
+	// R-RULESETS
+	switch {
+	case cfgErr != nil:
+		out = append(out, ck(CheckRulesets, ResultNotEvaluable, "read_error"))
+	case len(cfgs) == 0:
+		out = append(out, ck(CheckRulesets, ResultFail, "no_jurisdiction_config"))
+	default:
+		okAll := true
+		for _, c := range cfgs {
+			if c.kyc == nil || *c.kyc == "" || c.aml == nil || *c.aml == "" || c.rg == nil || *c.rg == "" {
+				okAll = false
+			}
+		}
+		if okAll {
+			out = append(out, ck(CheckRulesets, ResultPass, "ok"))
+		} else {
+			out = append(out, ck(CheckRulesets, ResultFail, "ruleset_unset"))
+		}
+	}
+
+	// R-CURRENCIES: every allowed currency is an ACTIVE asset in the registry.
+	switch {
+	case cfgErr != nil:
+		out = append(out, ck(CheckCurrencies, ResultNotEvaluable, "read_error"))
+	case len(cfgs) == 0:
+		out = append(out, ck(CheckCurrencies, ResultFail, "no_jurisdiction_config"))
+	default:
+		codes := map[string]bool{}
+		bad := false
+		for _, c := range cfgs {
+			var l []string
+			if err := json.Unmarshal(c.currencies, &l); err != nil {
+				bad = true
+				continue
+			}
+			for _, code := range l {
+				codes[code] = true
+			}
+		}
+		if len(codes) == 0 {
+			bad = true
+		}
+		if !bad {
+			var list []string
+			for k := range codes {
+				list = append(list, k)
+			}
+			var active int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM assets WHERE code = ANY($1) AND active`, list).Scan(&active); err != nil {
+				out = append(out, ck(CheckCurrencies, ResultNotEvaluable, "read_error"))
+				break
+			}
+			bad = active != len(list)
+		}
+		if bad {
+			out = append(out, ck(CheckCurrencies, ResultFail, "currency_missing_or_inactive"))
+		} else {
+			out = append(out, ck(CheckCurrencies, ResultPass, "ok"))
+		}
+	}
+
+	// R-PAY-METHODS: non-empty allowed methods and an approved (active) provider credential handle.
+	switch {
+	case cfgErr != nil:
+		out = append(out, ck(CheckPaymentMethods, ResultNotEvaluable, "read_error"))
+	case len(cfgs) == 0:
+		out = append(out, ck(CheckPaymentMethods, ResultFail, "no_jurisdiction_config"))
+	default:
+		methods := 0
+		for _, c := range cfgs {
+			var l []any
+			if err := json.Unmarshal(c.paymentMeth, &l); err == nil {
+				methods += len(l)
+			}
+		}
+		var handles int
+		err := tx.QueryRow(ctx, `SELECT count(*) FROM provider_credential_handles
+			WHERE tenant_id = $1 AND status = 'active' AND domain = 'payments' AND not_before <= $2 AND (not_after IS NULL OR not_after > $2)`,
+			in.Subject.TenantID, now).Scan(&handles)
+		switch {
+		case err != nil:
+			out = append(out, ck(CheckPaymentMethods, ResultNotEvaluable, "read_error"))
+		case methods == 0:
+			out = append(out, ck(CheckPaymentMethods, ResultFail, "no_payment_method"))
+		case handles == 0:
+			out = append(out, ck(CheckPaymentMethods, ResultFail, "no_approved_credential_handle"))
+		default:
+			out = append(out, ck(CheckPaymentMethods, ResultPass, "ok"))
+		}
+	}
+
+	// R-CATALOGUE: at least one enabled casino game for the brand (or tenant-wide). The
+	// sportsbook catalogue is platform-wide, not brand-scoped, so it is not a brand derivation.
+	var games int
+	var err error
+	if in.Subject.BrandID != nil {
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM casino_game_availability a JOIN casino_games g ON g.id = a.game_id
+			WHERE a.tenant_id = $1 AND a.enabled AND g.status = 'active' AND (a.brand_id = $2 OR a.brand_id IS NULL)`,
+			in.Subject.TenantID, *in.Subject.BrandID).Scan(&games)
+	} else {
+		err = tx.QueryRow(ctx, `SELECT count(*) FROM casino_game_availability a JOIN casino_games g ON g.id = a.game_id
+			WHERE a.tenant_id = $1 AND a.enabled AND g.status = 'active'`, in.Subject.TenantID).Scan(&games)
+	}
+	switch {
+	case err != nil:
+		out = append(out, ck(CheckCatalogue, ResultNotEvaluable, "read_error"))
+	case games == 0:
+		out = append(out, ck(CheckCatalogue, ResultFail, "no_enabled_casino_game"))
+	default:
+		out = append(out, ck(CheckCatalogue, ResultPass, "ok"))
+	}
+	return out
+}
+
+// licenceCheck is R-LIC-VALID: licence-backed basis => EvaluateLicenceValidity at the evaluation time.
+func (s *Service) licenceCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) Check {
+	if in.Licensing == nil || in.Licensing.LicenceID == nil {
+		return ck(CheckLicenceValid, ResultNotEvaluable, "not_licence_backed")
+	}
+	v, err := jurisdiction.EvaluateLicenceValidity(ctx, tx, *in.Licensing.LicenceID, now)
+	if err != nil {
+		return ck(CheckLicenceValid, ResultNotEvaluable, "read_error")
+	}
+	if v == jurisdiction.LicenceValid {
+		return ck(CheckLicenceValid, ResultPass, "ok")
+	}
+	return ck(CheckLicenceValid, ResultFail, "licence_"+string(v))
+}
+
+// providerTierCheck is R-PROVIDER-TIER: the running process's registered components are
+// production-eligible. It describes the PROCESS, not a per-tenant provider binding (none exists).
+func (s *Service) providerTierCheck() Check {
+	if len(s.cfg.Components) == 0 {
+		return ck(CheckProviderTier, ResultNotEvaluable, "no_component_registry")
+	}
+	// The guard only inspects the environment string "production"; evaluating it for
+	// "production" asks "would these components be refused in production".
+	if err := providerkind.RefuseSyntheticInProduction("production", s.cfg.Components); err != nil {
+		return ck(CheckProviderTier, ResultFail, "synthetic_environment")
+	}
+	return ck(CheckProviderTier, ResultPass, "ok")
+}
+
+// alertsCheck is R-ALERTS: P1 alert routing has a real (human-notifying) channel. Derived from the
+// alert channel vocabulary of the code (ALERT-DELIVERY-1): today no channel kind is known to
+// notify a person, so this is always fail.
+func alertsCheck() Check {
+	for _, k := range []alerting.ChannelKind{alerting.ChannelLog, alerting.ChannelMock} {
+		if alerting.KnownHumanChannelKind(k) {
+			return ck(CheckAlerts, ResultPass, "ok")
+		}
+	}
+	return ck(CheckAlerts, ResultFail, "no_human_notification_channel")
+}
+
+// fundsCheck is R-PLAYER-FUNDS (LF3): players with a non-zero wallet balance, open sportsbook
+// bets and hold-bearing withdrawals of the subject's players. The counts go to r.Info (live
+// display data, not hashed); the persisted check carries a closed detail code only. This check
+// requires acknowledgement; the funds fall under ADR 0107 / HD-CTF-4 (no new policy here).
+func fundsCheck(ctx context.Context, tx pgx.Tx, sub Subject, r *Readiness) Check {
+	brand := sub.BrandID
+	var players, bets, holds int64
+	if err := tx.QueryRow(ctx, `
+		SELECT count(DISTINCT p.player_account_id)
+		  FROM wallet_balance_projection p
+		  JOIN player_accounts pa ON pa.id = p.player_account_id AND pa.tenant_id = p.tenant_id
+		 WHERE p.tenant_id = $1 AND p.wallet_id IS NOT NULL AND ($2::uuid IS NULL OR pa.brand_id = $2)
+		   AND p.credit_total <> p.debit_total`, sub.TenantID, brand).Scan(&players); err != nil {
+		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
+	}
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM sportsbook_bets WHERE tenant_id = $1 AND status = 'open' AND ($2::uuid IS NULL OR brand_id = $2)`,
+		sub.TenantID, brand).Scan(&bets); err != nil {
+		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
+	}
+	holds, err := holdBearingWithdrawals(ctx, tx, sub)
+	if err != nil {
+		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
+	}
+	r.Info["players_with_non_zero_balance"] = players
+	r.Info["open_sportsbook_bets"] = bets
+	r.Info["hold_bearing_withdrawals"] = holds
+	if players == 0 && bets == 0 && holds == 0 {
+		return ck(CheckPlayerFunds, ResultPass, "ok")
+	}
+	return ck(CheckPlayerFunds, ResultFail, "funds_or_open_positions_present")
+}
+
+// holdBearingWithdrawals counts withdrawal requests of the subject's players whose state still
+// holds the player's funds in player_withdrawal_hold (the hold posts at 'requested' and is
+// released only on a terminal state; docs/architecture/withdrawal-state-machine.md).
+func holdBearingWithdrawals(ctx context.Context, tx pgx.Tx, sub Subject) (int64, error) {
+	var n int64
+	err := tx.QueryRow(ctx, `SELECT count(*) FROM withdrawal_requests
+		WHERE tenant_id = $1 AND ($2::uuid IS NULL OR brand_id = $2)
+		  AND state IN ('requested', 'pending_review', 'approved', 'submitted')`, sub.TenantID, sub.BrandID).Scan(&n)
+	return n, err
+}

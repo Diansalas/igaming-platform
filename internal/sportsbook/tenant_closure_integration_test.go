@@ -19,36 +19,26 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchdrive"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
-// changeStatus drives tenant.ChangeStatus first, so every refusal that precedes the launch
-// guard (GP020 closure refusal and its audit, unknown tenant, validation) is the real
-// ChangeStatus behaviour. Since ADR 0112 / migration 0128 ChangeStatus cannot itself write
-// the governed decision a status change now needs (it fails closed with
-// ErrGovernedStatusChangeRequired AFTER the closure gate has admitted the change), so the
-// admitted change is then realised through the governed fixture (launchfix), which runs
-// the real guards. That is the sequence the slice-3 executor will perform.
-func changeStatus(rt *db.Pool, tenantID uuid.UUID, status string) error {
-	err := tenant.ChangeStatus(context.Background(), rt, tenant.ChangeStatusParams{
-		TenantID: tenantID, NewStatus: status, ActorID: uuid.New(), ReasonCode: "r5_closure_test",
-		RequestID: "req-" + uuid.NewString(),
-	})
-	if !errors.Is(err, tenant.ErrGovernedStatusChangeRequired) {
-		return err
+// changeStatus moves a tenant to a status through the governed launch authorisation service
+// (ADR 0112 slice 3; tenant.ChangeStatus no longer exists). A CLOSURE is driven through the REAL
+// launchgov executor (request, two fixture approvers, execution), so the GP020 refusal, its
+// separate-transaction audit row and the success audit row are the executor's own. Suspension and
+// reactivation are not the subject of these tests (they are not subject to the closure check) and
+// run through the governed owner fixture (internal/testsupport/launchfix).
+func changeStatus(t *testing.T, rt *db.Pool, tenantID uuid.UUID, status string) error {
+	t.Helper()
+	if status == "closed" {
+		return launchdrive.Close(context.Background(), t, rt, launchgov.Subject{TenantID: tenantID})
 	}
-	ferr := launchfix.TrySetTenantStatus(context.Background(), tenantID, status)
-	var pe *pgconn.PgError
-	if ferr != nil && !errors.As(ferr, &pe) {
-		// No governed action exists for the move (for example a reopening): the refusal ChangeStatus
-		// already reported stands.
-		return err
-	}
-	return tenant.TranslateStatusChangeError(ferr)
+	return launchfix.TrySetTenantStatus(context.Background(), tenantID, status)
 }
 
 func tenantStatusOf(t *testing.T, owner *db.Pool, tenantID uuid.UUID) string {
@@ -89,6 +79,33 @@ func platformAudit(t *testing.T, owner *db.Pool, tenantID uuid.UUID, action stri
 	return out
 }
 
+// platformAuditBySubject returns the platform-scope audit rows (tenant_id IS NULL) whose
+// subject_tenant_id is the tenant (ADR 0104; launch_authorisation.* rows), for an action.
+func platformAuditBySubject(t *testing.T, owner *db.Pool, tenantID uuid.UUID, action string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	if err := owner.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT outcome, metadata FROM audit_log WHERE tenant_id IS NULL AND subject_tenant_id = $1 AND action = $2 ORDER BY created_at`, tenantID, action)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var outcome string
+			var md map[string]any
+			if err := rows.Scan(&outcome, &md); err != nil {
+				return err
+			}
+			md["_outcome"] = outcome
+			out = append(out, md)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 func TestTenantClosure_RefusedWithOpenBetAllowedWhenResolved(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)
@@ -100,7 +117,7 @@ func TestTenantClosure_RefusedWithOpenBetAllowedWhenResolved(t *testing.T) {
 	}
 
 	// Closure with two open bets is refused, typed, counts only, audited.
-	err = changeStatus(rt, f.tenantID, "closed")
+	err = changeStatus(t, rt, f.tenantID, "closed")
 	var blocked *tenant.CloseBlockedError
 	if !errors.Is(err, tenant.ErrCloseBlockedOpenRounds) || !errors.As(err, &blocked) || blocked.SportsbookOpenBets != 2 {
 		t.Fatalf("expected a CloseBlockedError with 2 open bets, got %v", err)
@@ -123,25 +140,34 @@ func TestTenantClosure_RefusedWithOpenBetAllowedWhenResolved(t *testing.T) {
 
 	// Resolve via the approved path while still ACTIVE: void one bet, settle the other.
 	mustSimulate(t, rt, f.tenantID, voidEvent(betID, actor, "market_cancelled"))
-	err = changeStatus(rt, f.tenantID, "closed")
+	err = changeStatus(t, rt, f.tenantID, "closed")
 	if !errors.As(err, &blocked) || blocked.SportsbookOpenBets != 1 {
 		t.Fatalf("one open bet must still block: %v", err)
 	}
 	mustSimulate(t, rt, f.tenantID, settleEvent(second.Bet.ID, actor, 1, SettlementOutcomeLost, 0))
-	if err := changeStatus(rt, f.tenantID, "closed"); err != nil {
+	if err := changeStatus(t, rt, f.tenantID, "closed"); err != nil {
 		t.Fatalf("closure after every round is resolved must succeed: %v", err)
 	}
 	if got := tenantStatusOf(t, owner, f.tenantID); got != "closed" {
 		t.Fatalf("status %s", got)
 	}
-	// ADR 0112: the success audit row is the governed executor's (slice 3), not
-	// ChangeStatus's, which can no longer write a status change by itself.
+	// ADR 0112 / C-5 (restored in slice 3): the success audit row is the governed executor's
+	// (launch_authorisation.executed supersedes tenant.status_changed): exactly one, naming the
+	// before / after statuses, the request, both approvers and the reason.
 	if n := len(platformAudit(t, owner, f.tenantID, "tenant.status_changed")); n != 0 {
-		t.Fatalf("ChangeStatus must not write a success audit row any more, got %d", n)
+		t.Fatalf("tenant.status_changed is superseded by launch_authorisation.executed, got %d legacy rows", n)
+	}
+	exec := platformAuditBySubject(t, owner, f.tenantID, "launch_authorisation.executed")
+	if len(exec) != 1 || exec[0]["_outcome"] != "success" || exec[0]["before"] != "active" || exec[0]["after"] != "closed" ||
+		exec[0]["action"] != "close" || exec[0]["reason_code"] != "offboarding" {
+		t.Fatalf("expected exactly one launch_authorisation.executed row (active -> closed), got %+v", exec)
+	}
+	if ids, _ := exec[0]["approver_ids"].([]any); len(ids) != 2 {
+		t.Fatalf("the executed row must name both approvers: %+v", exec[0])
 	}
 	// ADR 0112 section 3.1: closed is terminal (HD-CTF-9 stays open); the database refuses
-	// the reopening that ChangeStatus used to allow, with SQLSTATE LA020.
-	if err := changeStatus(rt, f.tenantID, "active"); !errors.Is(err, tenant.ErrGovernedStatusChangeRequired) {
+	// the reopening that ChangeStatus used to allow, with SQLSTATE LA020, for any writer.
+	if err := launchfix.TrySetTenantStatus(context.Background(), f.tenantID, "active"); !launchfix.IsClosedTerminalRefusal(err) {
 		t.Fatalf("reopening a closed tenant must be refused (LA020): %v", err)
 	}
 	if got := tenantStatusOf(t, owner, f.tenantID); got != "closed" {
@@ -153,23 +179,23 @@ func TestTenantClosure_AllowedWhenNoRoundsAndSuspendUnaffected(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)
 	empty := seedFixture(t, owner)
-	if err := changeStatus(rt, empty.tenantID, "closed"); err != nil {
+	if err := changeStatus(t, rt, empty.tenantID, "closed"); err != nil {
 		t.Fatalf("a tenant with no rounds must close: %v", err)
 	}
 
 	f, actor, betID := newStdBet(t, owner)
 	// Suspension (not closure) is allowed with an open bet, and so is reactivation.
-	if err := changeStatus(rt, f.tenantID, "suspended"); err != nil {
+	if err := changeStatus(t, rt, f.tenantID, "suspended"); err != nil {
 		t.Fatalf("suspend with an open bet must be allowed: %v", err)
 	}
-	if err := changeStatus(rt, f.tenantID, "active"); err != nil {
+	if err := changeStatus(t, rt, f.tenantID, "active"); err != nil {
 		t.Fatalf("reactivation with an open bet must be allowed: %v", err)
 	}
-	if err := changeStatus(rt, f.tenantID, "suspended"); err != nil {
+	if err := changeStatus(t, rt, f.tenantID, "suspended"); err != nil {
 		t.Fatal(err)
 	}
 	// Closing a SUSPENDED tenant with an open bet is refused too.
-	if err := changeStatus(rt, f.tenantID, "closed"); !errors.Is(err, tenant.ErrCloseBlockedOpenRounds) {
+	if err := changeStatus(t, rt, f.tenantID, "closed"); !errors.Is(err, tenant.ErrCloseBlockedOpenRounds) {
 		t.Fatalf("closing a suspended tenant with an open bet must be refused, got %v", err)
 	}
 	// The approved sequence: while suspended, the stake return (void) is allowed
@@ -177,7 +203,7 @@ func TestTenantClosure_AllowedWhenNoRoundsAndSuspendUnaffected(t *testing.T) {
 	// possible for a suspended tenant (still refused), so a bet that must pay
 	// out has to be settled BEFORE suspending (remaining owner question).
 	mustSimulate(t, rt, f.tenantID, voidEvent(betID, actor, "market_cancelled"))
-	if err := changeStatus(rt, f.tenantID, "closed"); err != nil {
+	if err := changeStatus(t, rt, f.tenantID, "closed"); err != nil {
 		t.Fatalf("closure after the void must succeed: %v", err)
 	}
 }
@@ -189,11 +215,11 @@ func TestTenantClosure_ReopenedBetBlocksAndSettledDoesNot(t *testing.T) {
 	mustSimulate(t, rt, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
 	// A settled bet does not block; a settlement rolled back (bet reopened) does.
 	mustSimulate(t, rt, f.tenantID, rollbackEvent(betID, actor, 1))
-	if err := changeStatus(rt, f.tenantID, "closed"); !errors.Is(err, tenant.ErrCloseBlockedOpenRounds) {
+	if err := changeStatus(t, rt, f.tenantID, "closed"); !errors.Is(err, tenant.ErrCloseBlockedOpenRounds) {
 		t.Fatalf("a reopened bet must block the closure, got %v", err)
 	}
 	mustSimulate(t, rt, f.tenantID, settleEvent(betID, actor, 2, SettlementOutcomeWon, stdPayout))
-	if err := changeStatus(rt, f.tenantID, "closed"); err != nil {
+	if err := changeStatus(t, rt, f.tenantID, "closed"); err != nil {
 		t.Fatalf("settled: %v", err)
 	}
 }
@@ -203,12 +229,12 @@ func TestTenantClosure_TenantIsolation(t *testing.T) {
 	rt := runtimePool(t)
 	fa := seedFixture(t, owner)
 	fb, _, _ := newStdBet(t, owner) // tenant B has an open bet
-	if err := changeStatus(rt, fa.tenantID, "closed"); err != nil {
+	if err := changeStatus(t, rt, fa.tenantID, "closed"); err != nil {
 		t.Fatalf("another tenant's open bet must not block this closure: %v", err)
 	}
 	// And tenant B's refusal reports only B's own count.
 	var blocked *tenant.CloseBlockedError
-	if err := changeStatus(rt, fb.tenantID, "closed"); !errors.As(err, &blocked) || blocked.SportsbookOpenBets != 1 {
+	if err := changeStatus(t, rt, fb.tenantID, "closed"); !errors.As(err, &blocked) || blocked.SportsbookOpenBets != 1 {
 		t.Fatalf("tenant B: %v", err)
 	}
 	if got := tenantStatusOf(t, owner, fb.tenantID); got != "active" {
@@ -274,15 +300,9 @@ func TestTenantClosure_RawSQLIsRefusedAndGUCsRestored(t *testing.T) {
 	}
 }
 
-func TestTenantClosure_ValidationAndTranslation(t *testing.T) {
+func TestTenantClosure_UnknownTenantAndTranslation(t *testing.T) {
 	rt := runtimePool(t)
-	if err := tenant.ChangeStatus(context.Background(), rt, tenant.ChangeStatusParams{TenantID: uuid.New(), NewStatus: "gone", ActorID: uuid.New(), ReasonCode: "x"}); !errors.Is(err, tenant.ErrInvalidStatusChange) {
-		t.Fatalf("invalid status: %v", err)
-	}
-	if err := tenant.ChangeStatus(context.Background(), rt, tenant.ChangeStatusParams{TenantID: uuid.New(), NewStatus: "closed", ActorID: uuid.New()}); !errors.Is(err, tenant.ErrInvalidStatusChange) {
-		t.Fatalf("missing reason: %v", err)
-	}
-	if err := changeStatus(rt, uuid.New(), "closed"); !errors.Is(err, tenant.ErrUnknownTenant) {
+	if err := changeStatus(t, rt, uuid.New(), "closed"); !errors.Is(err, launchgov.ErrNotFound) {
 		t.Fatalf("unknown tenant: %v", err)
 	}
 }
@@ -326,7 +346,7 @@ func TestTenantClosure_RaceWithBetPlacement(t *testing.T) {
 			t.Fatalf("placement ended early: %v", err)
 		}
 		closed := make(chan error, 1)
-		go func() { closed <- changeStatus(rt, f.tenantID, "closed") }()
+		go func() { closed <- changeStatus(t, rt, f.tenantID, "closed") }()
 		select {
 		case err := <-closed:
 			t.Fatalf("the closure must wait for the in-flight bet placement: %v", err)
@@ -427,7 +447,7 @@ func TestTenantClosure_RaceWithResolution(t *testing.T) {
 				t.Fatalf("resolution ended before the hook: %v", err)
 			}
 			closed := make(chan error, 1)
-			go func() { closed <- changeStatus(rt, f.tenantID, "closed") }()
+			go func() { closed <- changeStatus(t, rt, f.tenantID, "closed") }()
 			select {
 			case err := <-closed:
 				t.Fatalf("the closure must wait for the in-flight %s: %v", kind, err)
