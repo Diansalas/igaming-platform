@@ -21,6 +21,17 @@ import (
 // whose from_status differs from the subject's status). Two outcomes are legal and BOTH must occur:
 //   - the request committed first: it recorded from_status 'active' and was superseded;
 //   - the suspension committed first: the request was filed against 'suspended' and stays pending.
+//
+// raceDelay returns, for round i, how long the delayed side waits and whether the FIRST side is the
+// delayed one. The delays run from none (a true race) to well beyond one operation (a strict order),
+// and each delay is used in both directions across 50 rounds, so both orderings always occur and the
+// near-simultaneous window is exercised as well.
+func raceDelay(i int) (d time.Duration, delayFirst bool) {
+	pats := []time.Duration{0, time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond, 8 * time.Millisecond,
+		16 * time.Millisecond, 32 * time.Millisecond, 48 * time.Millisecond, 0, 3 * time.Millisecond}
+	return pats[i%10], (i/2)%2 == 0
+}
+
 func TestConcurrency_RequestRacesSuspension_BothOrders_x50(t *testing.T) {
 	w := newWorld(t)
 	tid := w.activeTenant()
@@ -39,16 +50,16 @@ func TestConcurrency_RequestRacesSuspension_BothOrders_x50(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if i%2 == 1 { // odd rounds: the suspension gets a head start
-				time.Sleep(time.Duration(i%10) * 700 * time.Microsecond)
+			if d, first := raceDelay(i); !first { // the suspension gets the head start
+				time.Sleep(d)
 			}
 			rres, rerr = w.svc.Request(context.Background(), w.ap1, in)
 		}()
 		go func() {
 			defer wg.Done()
 			<-start
-			if i%2 == 0 { // even rounds: the request gets a head start
-				time.Sleep(time.Duration(i%10) * 700 * time.Microsecond)
+			if d, first := raceDelay(i); first { // the request gets the head start
+				time.Sleep(d)
 			}
 			_, serr = w.svc.Suspend(context.Background(), w.req, launchgov.SuspendInput{Subject: sub, ReasonCode: "compliance_hold"})
 		}()
