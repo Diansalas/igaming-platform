@@ -50,8 +50,14 @@ func ConnectWithRuntimeParams(ctx context.Context, databaseURL string, maxConns 
 		if !allowedRuntimeParams[k] {
 			return nil, fmt.Errorf("db: runtime parameter %q is not permitted", k)
 		}
-		if _, set := cfg.ConnConfig.RuntimeParams[k]; !set {
+		if cur, set := cfg.ConnConfig.RuntimeParams[k]; !set {
 			cfg.ConnConfig.RuntimeParams[k] = v
+		} else if k == "idle_in_transaction_session_timeout" {
+			// A DATABASE_URL value may tighten the timeout but must never disable or loosen it past the
+			// bound (PostgreSQL treats 0 as "off"): refuse at startup (ADR 0112 security C4 condition).
+			if err := checkIdleInTxBound(cur); err != nil {
+				return nil, fmt.Errorf("db: database url sets idle_in_transaction_session_timeout=%q: %w", cur, err)
+			}
 		}
 	}
 	cfg.MaxConns = maxConns

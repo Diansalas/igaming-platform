@@ -12,7 +12,7 @@ connection the pool opens:
 
 | Session setting | Source | Default | Bounds | Why |
 |---|---|---|---|---|
-| `idle_in_transaction_session_timeout` | `DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS` (`Config.DatabaseIdleInTxTimeout`) | `30` seconds | 1..3600; `0`, negative, non-integer and over-large values are refused at startup (the timeout cannot be switched off) | ADR 0112 security C4. A transaction left idle while it holds a tenant or brand status gate key or a subject row lock must not starve a suspension (the fail-closed lever) indefinitely; the server terminates such a session. |
+| `idle_in_transaction_session_timeout` | `DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS` (`Config.DatabaseIdleInTxTimeout`) | `30` seconds | 1..3600; `0`, negative, non-integer and over-large values are refused at startup (the application never sets it off). A `DATABASE_URL` value of 0 or above 1 h is refused too (`db.ConnectWithRuntimeParams`); a value inside 1 ms..1 h is honoured | ADR 0112 security C4. A transaction left idle while it holds a tenant or brand status gate key or a subject row lock must not starve a suspension (the fail-closed lever) indefinitely; the server terminates such a session. |
 
 It is a per-connection setting of the application's own pool. Nothing here uses `ALTER ROLE`, `ALTER DATABASE`, a
 role change, a password change or any privileged session; the database role is exactly the one in `DATABASE_URL`.
@@ -42,6 +42,16 @@ launch executor (`SET LOCAL`, default 5 s), not per connection.
    recipient exists.
 
 ## What this does NOT cover
+
+- **A session can still disable it.** `idle_in_transaction_session_timeout` is a user-settable GUC: any code or
+  person holding a session of the runtime role can `SET idle_in_transaction_session_timeout = 0` for that session.
+  The startup parameter is a default for honest code, not a control against a hostile session. Recommended,
+  HUMAN-applied only (no agent or script of this repository applies it): (1) a role-level default so a pooler that
+  drops startup parameters is still covered, for example `ALTER ROLE igaming_runtime SET
+  idle_in_transaction_session_timeout = '30s'` run by the database administrator through the normal change process;
+  (2) an alert on lock waits longer than the suspension's `lock_timeout` (pg_stat_activity `wait_event_type = 'Lock'`,
+  or the `launch_authorisation.suspend_denied` audit rows with `code = LAUNCH_RETRYABLE_LOCK_TIMEOUT`), so a stuck
+  holder is seen by a person.
 
 - The `cmd/migrate` and `cmd/seed-admin` binaries are separate owner-role tools with their own short-lived pools; they
   deliberately do not use the setting.

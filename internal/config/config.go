@@ -160,8 +160,8 @@ type Config struct {
 	// NOT ALTER ROLE, no role change). ADR 0112 security C4: a transaction left idle while holding
 	// a brand or tenant status gate key, or a subject row lock, would starve a suspension (the
 	// fail-closed lever) indefinitely; the server terminates such a session instead. Always
-	// positive (DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS, default 30s, max 1h): there is no
-	// way to switch it off. An engineering default, not a policy value.
+	// positive (DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS, default 30s, max 1h): the application never
+	// sets it off, and a DATABASE_URL value of 0 or above 1h is refused. A session can still SET it itself (see the runbook). An engineering default.
 	DatabaseIdleInTxTimeout time.Duration
 
 	// JWTActiveKID/JWTSigningSecret are the current signing key and its
@@ -651,7 +651,7 @@ func Load() (Config, error) {
 		// Fail closed: zero or negative would disable the timeout (PostgreSQL treats 0 as off), and
 		// an unbounded value defeats its purpose.
 		if n < 1 || n > MaxDatabaseIdleInTxTimeoutSeconds {
-			return Config{}, fmt.Errorf("config: DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS must be between 1 and %d (it cannot be disabled)", MaxDatabaseIdleInTxTimeoutSeconds)
+			return Config{}, fmt.Errorf("config: DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS must be between 1 and %d (the application never sets it off)", MaxDatabaseIdleInTxTimeoutSeconds)
 		}
 		cfg.DatabaseIdleInTxTimeout = time.Duration(n) * time.Second
 	}
