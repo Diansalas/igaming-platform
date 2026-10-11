@@ -214,43 +214,46 @@ type requestResolutionBody struct {
 }
 
 type resolutionDTO struct {
-	ID                  string  `json:"id"`
-	TenantID            string  `json:"tenant_id"`
-	AttemptID           string  `json:"attempt_id"`
-	Operation           string  `json:"operation"`
-	Kind                string  `json:"kind"`
-	TargetState         *string `json:"target_state,omitempty"`
-	FindingCode         *string `json:"finding_code,omitempty"`
-	BasisCode           *string `json:"basis_code,omitempty"`
-	ContextCode         *string `json:"context_code,omitempty"`
-	EvidenceRefHash     *string `json:"evidence_ref_hash,omitempty"`
-	AmountMinorUnits    string  `json:"amount_minor_units"`
-	AssetCode           string  `json:"asset_code"`
-	ReasonCode          string  `json:"reason_code"`
-	PayloadHash         string  `json:"payload_hash"`
-	RequestedBy         string  `json:"requested_by"`
-	RequestedByScope    string  `json:"requested_by_scope"`
-	RequiredAtSubmit    int     `json:"required_at_submission"`
-	TenantStatus        string  `json:"tenant_status_at_submission"`
-	State               string  `json:"state"`
-	RefusalCode         *string `json:"refusal_code,omitempty"`
-	LedgerTransactionID *string `json:"ledger_transaction_id,omitempty"`
-	CreatedAt           string  `json:"created_at"`
-	ExpiresAt           string  `json:"expires_at"`
-	// M4 evidence (ADR 0111 4.2); omitted on every other kind. The reference R is
-	// the PSP's own line reference the approvers confirm on the provider portal.
-	EvidenceLineID    *string  `json:"evidence_line_id,omitempty"`
-	EvidenceReference *string  `json:"evidence_reference,omitempty"`
-	EvidenceVerdict   *string  `json:"evidence_verdict,omitempty"`
-	EvidenceImportIDs []string `json:"evidence_import_ids,omitempty"`
+	ID                  string   `json:"id"`
+	TenantID            string   `json:"tenant_id"`
+	AttemptID           string   `json:"attempt_id"`
+	Operation           string   `json:"operation"`
+	Kind                string   `json:"kind"`
+	TargetState         *string  `json:"target_state,omitempty"`
+	FindingCode         *string  `json:"finding_code,omitempty"`
+	BasisCode           *string  `json:"basis_code,omitempty"`
+	ContextCode         *string  `json:"context_code,omitempty"`
+	EvidenceRefHash     *string  `json:"evidence_ref_hash,omitempty"`
+	AmountMinorUnits    string   `json:"amount_minor_units"`
+	AssetCode           string   `json:"asset_code"`
+	ReasonCode          string   `json:"reason_code"`
+	PayloadHash         string   `json:"payload_hash"`
+	RequestedBy         staffRef `json:"requested_by"` // null for a tenant caller when the requester is platform staff (ADR 0114 H1)
+	RequestedByScope    string   `json:"requested_by_scope"`
+	RequiredAtSubmit    int      `json:"required_at_submission"`
+	TenantStatus        string   `json:"tenant_status_at_submission"`
+	State               string   `json:"state"`
+	RefusalCode         *string  `json:"refusal_code,omitempty"`
+	LedgerTransactionID *string  `json:"ledger_transaction_id,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	ExpiresAt           string   `json:"expires_at"`
+	// M4 evidence (ADR 0111 4.2); omitted on every other kind. The reference text R is
+	// deliberately NEVER returned (ADR 0114 S0, security BLOCKER 2): each approver must type R
+	// independently (blind entry), so no API reader - requester, approver, compliance - may be
+	// handed it while evidence_ref_hash is OPEN. The server still holds and compares R from the
+	// database (M2/M4 verification is unchanged); the API only says that one is pinned.
+	EvidenceLineID           *string  `json:"evidence_line_id,omitempty"`
+	EvidenceReferencePresent *bool    `json:"evidence_reference_present,omitempty"`
+	EvidenceVerdict          *string  `json:"evidence_verdict,omitempty"`
+	EvidenceImportIDs        []string `json:"evidence_import_ids,omitempty"`
 }
 
-func toResolutionDTO(r payments.ManualResolution) resolutionDTO {
+func toResolutionDTO(v staffViewer, r payments.ManualResolution) resolutionDTO {
 	dto := resolutionDTO{
 		ID: r.ID.String(), TenantID: r.TenantID.String(), AttemptID: r.AttemptID.String(), Operation: r.Operation,
 		Kind: string(r.Kind), TargetState: r.TargetState, FindingCode: r.FindingCode, BasisCode: r.BasisCode,
 		ContextCode: r.ContextCode, EvidenceRefHash: r.EvidenceRefHash, AmountMinorUnits: strconv.FormatInt(r.Amount, 10),
-		AssetCode: r.AssetCode, ReasonCode: r.ReasonCode, PayloadHash: r.PayloadHash, RequestedBy: r.RequestedBy.String(),
+		AssetCode: r.AssetCode, ReasonCode: r.ReasonCode, PayloadHash: r.PayloadHash, RequestedBy: v.ref(r.RequestedByScope, r.RequestedBy),
 		RequestedByScope: r.RequestedByScope, RequiredAtSubmit: r.RequiredAtSubmission, TenantStatus: r.TenantStatusAtSubmission,
 		State: string(r.State), RefusalCode: r.RefusalCode,
 		CreatedAt: r.CreatedAt.Format(time.RFC3339), ExpiresAt: r.ExpiresAt.Format(time.RFC3339),
@@ -263,7 +266,11 @@ func toResolutionDTO(r payments.ManualResolution) resolutionDTO {
 		s := r.EvidenceLineID.String()
 		dto.EvidenceLineID = &s
 	}
-	dto.EvidenceReference, dto.EvidenceVerdict = r.EvidenceReference, r.EvidenceVerdict
+	if r.EvidenceReference != nil {
+		present := true
+		dto.EvidenceReferencePresent = &present
+	}
+	dto.EvidenceVerdict = r.EvidenceVerdict
 	for _, id := range r.EvidenceImportIDs {
 		dto.EvidenceImportIDs = append(dto.EvidenceImportIDs, id.String())
 	}
@@ -308,7 +315,7 @@ func newRequestResolutionHandler(deps Deps, svc *payments.ManualResolutionServic
 			writeResolutionError(r.Context(), deps, w, c, "request", err, "", attemptID.String())
 			return
 		}
-		writeJSON(w, http.StatusCreated, toResolutionDTO(res))
+		writeJSON(w, http.StatusCreated, toResolutionDTO(staffViewerOf(c.tc), res))
 	}
 }
 
@@ -329,7 +336,7 @@ func newListResolutionsHandler(deps Deps, svc *payments.ManualResolutionService)
 		}
 		out := make([]resolutionDTO, 0, len(rs))
 		for _, x := range rs {
-			out = append(out, toResolutionDTO(x))
+			out = append(out, toResolutionDTO(staffViewerOf(c.tc), x))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
@@ -355,7 +362,7 @@ func newGetResolutionHandler(deps Deps, svc *payments.ManualResolutionService) h
 			writeResolutionError(r.Context(), deps, w, c, "get", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toResolutionDTO(res))
+		writeJSON(w, http.StatusOK, toResolutionDTO(staffViewerOf(c.tc), res))
 	}
 }
 
@@ -399,7 +406,7 @@ func newDecideResolutionHandler(deps Deps, svc *payments.ManualResolutionService
 			writeResolutionError(r.Context(), deps, w, c, op, err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, resolutionDecisionResponse{Resolution: toResolutionDTO(out.Resolution), Executed: out.Executed,
+		writeJSON(w, http.StatusOK, resolutionDecisionResponse{Resolution: toResolutionDTO(staffViewerOf(c.tc), out.Resolution), Executed: out.Executed,
 			Refused: out.Refused, Counted: out.Counted, Required: out.Required})
 	}
 }
@@ -424,6 +431,6 @@ func newCancelResolutionHandler(deps Deps, svc *payments.ManualResolutionService
 			writeResolutionError(r.Context(), deps, w, c, "cancel", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toResolutionDTO(res))
+		writeJSON(w, http.StatusOK, toResolutionDTO(staffViewerOf(c.tc), res))
 	}
 }

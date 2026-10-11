@@ -4,7 +4,7 @@ import type { PagedResponse } from './types'
 export interface AuditEntry {
   id: string
   actor_type: string
-  actor_id?: string
+  actor_id?: string | null // null: platform staff who acted in this tenant (ADR 0114 S0)
   action: string
   target_type?: string
   target_id?: string

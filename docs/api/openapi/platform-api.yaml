@@ -6696,6 +6696,568 @@ paths:
         "503":
           $ref: "#/components/responses/LaunchUnavailable"
 
+  /v1/admin/tenants/{tenantID}/capability-grants/requests:
+    post:
+      summary: Request a scoped financial capability grant (K1)
+      description: >
+        capability_grant:request (tenant_admin, platform_admin), staff principals only. ADR 0099. Files a request that a platform administrator must approve; nothing is granted on request.
+        The target tenant is the {tenantID} path value only; a tenant-scoped caller may name only its own tenant (403, no data). A platform-scoped session may not request a grant for a tenant-scoped grantee: that is refused 409 with a fixed message (ADR 0099 I-1); the tenant administrator requests instead.
+        The signed actor proof (ADR 0110) is produced server-side. Guard refusals, double submissions and a refused database check are 409 or 400 with a generic body; a refusal writes a denied audit row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapabilityGrantRequestBody" }
+      responses:
+        "201":
+          description: The pending request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityGrantRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    get:
+      summary: List the tenant's capability grant requests (K1)
+      description: >
+        capability_grant:read (tenant_admin, compliance, platform_admin), staff principals only. A bare JSON array (no envelope, no pagination) of the target tenant's requests.
+        ADR 0114 S0: requested_by and grantee_staff_id are null for a tenant-scoped caller when the actor's scope is not tenant; the scope fields say which scope acted.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/CapabilityGrantRequest" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/cancel:
+    post:
+      summary: Cancel an open capability grant request (K1)
+      description: >
+        capability_grant:request (tenant_admin, platform_admin). Only the requester may cancel (migration 0120); any other caller gets 409. 404 when the request does not exist for the target tenant.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Cancelled }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/approve:
+    post:
+      summary: Approve a capability grant request (K1)
+      description: >
+        capability_grant:approve (platform_admin only). No tenant role holds this permission, and a tenant-scoped approval is also refused by the database (migration 0112 R-7). Approving creates the grant in the same transaction and returns it; a database refusal is 409.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapabilityGrantDecisionBody" }
+      responses:
+        "200":
+          description: The grant created by the approval
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityGrant" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/reject:
+    post:
+      summary: Reject a capability grant request (K1)
+      description: capability_grant:approve (platform_admin only). Same body and error rules as approve; no grant is created.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapabilityGrantDecisionBody" }
+      responses:
+        "204": { description: Rejected }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/capability-grants:
+    get:
+      summary: List the tenant's capability grants (K1)
+      description: >
+        capability_grant:read (tenant_admin, compliance, platform_admin), staff principals only. A bare JSON array (no envelope, no pagination).
+        ADR 0114 S0: grantee_staff_id is null for a tenant-scoped caller when grantee_scope is not tenant.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The grants
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/CapabilityGrant" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/capability-grants/{grantID}/revoke:
+    post:
+      summary: Revoke a capability grant (K1)
+      description: >
+        capability_grant:revoke (tenant_admin, platform_admin). The emergency stop (ADR 0099 section 8.1): a single actor, no second approver. A grant already revoked is 409; an unknown grant is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: grantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CapabilityGrantRevokeBody" }
+      responses:
+        "204": { description: Revoked }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/manual-adjustments:
+    post:
+      summary: Submit a governed manual balance adjustment (K2)
+      description: >
+        ledger_adjustment:initiate (finance, platform_admin), staff principals only. ADR 0100. Software capability only, MOCK stack: no regulatory approval is implied. Records a pending request; nothing posts to the ledger until the final required approval is recorded, in that approval's own transaction. Amount is an integer in minor units sent as a decimal string.
+        The target tenant is the {tenantID} path value only. The submitter must hold an in-force capability grant (K1) for ledger_adjustment:initiate; a platform caller acts only through a platform acting session for exactly that tenant. A missing grant is 403. Refusals write a denied audit row.
+        Error bodies: 400 validation (including closed refusal tokens), 403 not permitted, 409 when adjustments are disabled for the tenant, on open payment exposure, on expiry or on a transient conflict.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManualAdjustmentSubmitBody" }
+      responses:
+        "201":
+          description: The pending request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualAdjustment" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    get:
+      summary: List the tenant's manual adjustments (K2)
+      description: >
+        ledger_adjustment:read (finance, compliance, platform_admin), staff principals only. Up to 100 most recent requests of the target tenant as { items }. A platform caller needs an in-force grant for the tenant.
+        ADR 0114 S0: initiated_by is null for a tenant-scoped caller when initiated_by_scope is not tenant.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/ManualAdjustment" } } }, required: [items] }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}:
+    get:
+      summary: Get one manual adjustment (K2)
+      description: ledger_adjustment:read (finance, compliance, platform_admin). 404 when the request does not exist for the target tenant. Same initiated_by redaction as the list.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualAdjustment" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/approve:
+    post:
+      summary: Approve a manual adjustment (K2)
+      description: >
+        ledger_adjustment:approve (finance, platform_admin). The approver pins the payload_hash of the request reviewed. When this approval is the final required one the adjustment executes in the same transaction (executed=true); otherwise counted_approvals is below required_approvals. Self-approval is refused 409 (four-eyes, database-enforced). Insufficient funds ends the request `refused_insufficient_funds`; a failed precondition ends it `refused_at_execution`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManualAdjustmentDecisionBody" }
+      responses:
+        "200":
+          description: The decision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualAdjustmentDecision" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/reject:
+    post:
+      summary: Reject a manual adjustment (K2)
+      description: ledger_adjustment:approve (finance, platform_admin). Same body, response and error rules as approve; the request ends `rejected` and nothing posts.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ManualAdjustmentDecisionBody" }
+      responses:
+        "200":
+          description: The decision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualAdjustmentDecision" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/cancel:
+    post:
+      summary: Cancel a pending manual adjustment (K2)
+      description: ledger_adjustment:initiate (finance, platform_admin). Returns the cancelled request. A database refusal (for example the request is no longer pending) is 409.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The cancelled request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManualAdjustment" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/financial-policy-changes:
+    post:
+      summary: Propose a platform-level financial approval policy change
+      description: >
+        financial_policy:author (platform_admin only). ADR 0100 / migration 0113. Four-eyes: the proposal takes effect only when a different principal approves it with the content_hash returned here. This route takes platform, jurisdiction and profile level changes; a tenant, brand or profile-assignment change is refused 400 and uses the tenant route. A policy change affects approval counts only; it moves no money. The response carries no actor identity.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FinancialPolicyChangeProposal" }
+      responses:
+        "201":
+          description: The pending change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FinancialPolicyChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/financial-policy-changes:
+    post:
+      summary: Propose a tenant-level financial approval policy change
+      description: >
+        financial_policy:author (platform_admin) or financial_policy:tighten (tenant_admin). Tenant, brand and profile-assignment changes for the {tenantID} path tenant, which is the only tenant source (the body has none). A tenant caller may only tighten, and may name only its own tenant; the tighten-only rule is enforced by the database, not here. Same response and errors as the platform route.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FinancialPolicyChangeProposal" }
+      responses:
+        "201":
+          description: The pending change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FinancialPolicyChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/financial-policy-changes/{changeID}/approve:
+    post:
+      summary: Approve a financial approval policy change
+      description: financial_policy:author or financial_policy:tighten. The approver pins the content_hash of the change reviewed; self-approval is refused 409. 404 for an unknown change.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: changeID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FinancialPolicyChangeDecisionBody" }
+      responses:
+        "200":
+          description: The decided change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FinancialPolicyChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/financial-policy-changes/{changeID}/reject:
+    post:
+      summary: Reject a financial approval policy change
+      description: financial_policy:author or financial_policy:tighten. Same body, response and errors as approve; the change ends `rejected`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: changeID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FinancialPolicyChangeDecisionBody" }
+      responses:
+        "200":
+          description: The decided change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FinancialPolicyChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/financial-policy-changes/{changeID}/cancel:
+    post:
+      summary: Cancel a pending financial approval policy change
+      description: financial_policy:author or financial_policy:tighten. No request body. Returns the change. 404 for an unknown change; a database refusal is 409.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: changeID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The cancelled change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FinancialPolicyChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/financial-policies:
+    get:
+      summary: List the effective financial approval policies
+      description: >
+        financial_policy:read (tenant_admin, compliance, platform_admin). The in-force policy rows visible to the caller for one operation_kind (default `ledger_adjustment`), as { items }. A read; it moves no money and carries no actor identity.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: operation_kind, in: query, required: false, schema: { type: string, default: ledger_adjustment } }
+      responses:
+        "200":
+          description: The policies
+          content:
+            application/json:
+              schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/FinancialPolicy" } } }, required: [items] }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/audit-log/platform-actions:
+    get:
+      summary: The tenant's read-only view of platform actions that concern it
+      description: >
+        audit:read (tenant_admin, compliance), tenant-scoped sessions only: a platform-scoped caller is refused 403. ADR 0104. Returns platform-scope audit rows whose subject tenant is the caller's tenant (today: payment kill-switch actions), newest first, in the shared paged envelope. The row set is decided by row-level security on subject_tenant_id, not by the handler.
+        The platform actor is identified (actor.staff_id, actor.display_name when set) ONLY for payments_kill_switch.* actions (ADR 0104 section 5.2, explicit allow-list). For every other action - capability grants, manual adjustments, force-resolutions, launch authorisation - actor.scope is platform, actor.staff_id is the empty string and display_name is null; the same rule applies to approval_chain entries (actor_staff_id omitted). IP address, user agent, request id and non-allowlisted metadata are never returned. before/after/reason_code appear only for actions with an entry in the compiled-in presentation allowlist. approval_chain links the other kill-switch audit rows for the same switch (ADR 0104 section 5.5).
+        Whether kill-switch actors should stay identified is the open owner decision D-0104-1 (ADR 0114 section 9.5); security recommends scope-only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200, default: 50 }, description: Out-of-range values are clamped; non-numeric values fall back to the default. }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: One page of platform actions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformActionAuditPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-decisions:
+    get:
+      summary: A player's KYC enforcement decisions (read-only)
+      description: >
+        kyc_enforcement_decision:read (compliance), tenant-scoped sessions only: the route sits behind the tenant-scope guard, so a platform-scoped caller is refused 403 even though platform_admin holds the permission. ADR 0096 section 6. The tenant comes only from the authenticated context. A player_account_id of another tenant and one that does not exist return the same 404. The response is the closed field set below: never the verification reason, person or document data, or an amount. Keyset pagination, most recent first.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: player_account_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 0, maximum: 100, default: 25 }, description: 0 or absent selects 25; values above 100 are clamped to 100; negative or non-numeric is 400. }
+        - { name: next_before, in: query, required: false, schema: { type: string, example: "2026-01-01T00:00:00.123456789Z,00000000-0000-0000-0000-000000000000" }, description: The exact next_before value of the previous response ("<RFC3339Nano>,<uuid>"). A malformed value is 400. }
+      responses:
+        "200":
+          description: One page of decisions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementDecisionPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/display-name:
+    patch:
+      summary: Set a tenant staff member's display name
+      description: >
+        staff:manage (tenant_admin, platform_admin). ADR 0104 section 4. A column-allowlisted update of display_name only. A tenant-scoped caller may name only its own tenant (403). The name is 1-100 characters with no control characters (also bidi and zero-width characters, ADR 0104 N-3); otherwise 400. Every change, a self-rename included, is audited as staff.display_name_changed with before and after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffDisplayNameRequest" }
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/staff/me/display-name:
+    patch:
+      summary: Set the caller's own display name
+      description: >
+        Any authenticated staff principal; there is no staff-management permission and no "which user" input: only the verified token subject is renamed. Same hygiene rules and audit as the tenant route. Works for tenant-scoped and platform-scoped staff.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffDisplayNameRequest" }
+      responses:
+        "204": { description: Updated }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/person-link:
+    post:
+      summary: Link a tenant staff account to a Person
+      description: >
+        staff:manage (tenant_admin, platform_admin). Stage 3D remediation (ADR 0024): sets person_id only where none is set; an existing link can never be changed (database append-only trigger). A tenant-scoped caller may name only its own tenant (403). 400 when person_id is not a UUID or names no existing Person; 404 when the staff user is not in the tenant; 409 when it is already linked.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffPersonLinkRequest" }
+      responses:
+        "204": { description: Linked }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/platform-staff/{staffID}/person-link:
+    post:
+      summary: Link a platform staff account to a Person
+      description: >
+        staff:manage, and the caller must be platform-scoped (a tenant-scoped caller is refused 403 even though tenant_admin holds the permission). Same contract as the tenant route for a platform-wide staff account (tenant_id null).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffPersonLinkRequest" }
+      responses:
+        "204": { description: Linked }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
   /v1/admin/tenants/{tenantID}/payments/kill-switches:
     get:
       summary: List the tenant's payment kill switches (PRH-I1, ADR 0095 §10.5)
@@ -7229,6 +7791,240 @@ components:
         decline_reason: { type: string }
         cascadable: { type: boolean }
       required: [event_type, provider_reference, outcome, amount, asset_code]
+    CapabilityGrantRequestBody:
+      type: object
+      additionalProperties: false
+      description: The target tenant is the path value only; there is no tenant field. valid_from defaults to now when absent.
+      properties:
+        grantee_staff_id: { type: string, format: uuid }
+        capability:
+          type: string
+          enum: [ledger_adjustment:initiate, ledger_adjustment:approve, payment_force_resolve:request, payment_force_resolve:approve, withdrawal_hold_resolution:request, withdrawal_hold_resolution:approve]
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        reason_code: { type: string, minLength: 1 }
+      required: [grantee_staff_id, capability, reason_code]
+    CapabilityGrantDecisionBody:
+      type: object
+      additionalProperties: false
+      properties:
+        reason_code: { type: string, minLength: 1 }
+      required: [reason_code]
+    CapabilityGrantRevokeBody:
+      type: object
+      additionalProperties: false
+      properties:
+        reason_code: { type: string, minLength: 1 }
+      required: [reason_code]
+    CapabilityGrantRequest:
+      type: object
+      description: >
+        A K1 grant request row. ADR 0114 S0: grantee_staff_id and requested_by are null for a tenant-scoped caller when the grantee or requester scope is not tenant; the scope fields always name the scope.
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        grantee_staff_id: { type: string, format: uuid, nullable: true }
+        grantee_scope: { type: string, enum: [tenant, platform] }
+        capability: { type: string }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        reason_code: { type: string }
+        requested_by: { type: string, format: uuid, nullable: true }
+        requested_by_scope: { type: string, enum: [tenant, platform] }
+        status: { type: string, enum: [pending, approved, rejected, cancelled, expired] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+      required: [id, tenant_id, grantee_staff_id, grantee_scope, capability, valid_from, reason_code, requested_by, requested_by_scope, status, created_at, expires_at]
+    CapabilityGrant:
+      type: object
+      description: A K1 grant row. ADR 0114 S0 - grantee_staff_id is null for a tenant-scoped caller when grantee_scope is not tenant.
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        grantee_staff_id: { type: string, format: uuid, nullable: true }
+        grantee_scope: { type: string, enum: [tenant, platform] }
+        capability: { type: string }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        granted_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        revoke_reason_code: { type: string }
+      required: [id, tenant_id, grantee_staff_id, grantee_scope, capability, valid_from, granted_at]
+    ManualAdjustmentSubmitBody:
+      type: object
+      additionalProperties: false
+      description: The target tenant is the path value only. Amount is a positive int64 in minor units as a decimal string.
+      properties:
+        wallet_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        direction: { type: string, enum: [credit_player, debit_player] }
+        amount_minor_units: { type: string }
+        reason_code: { type: string, enum: [operational_error_correction, compensating_entry, goodwill_credit, external_instruction] }
+        causation_transaction_id: { type: string, format: uuid }
+        evidence_ref_hash: { type: string }
+        note: { type: string, description: Visible to tenant and platform staff. }
+      required: [wallet_id, asset_code, direction, amount_minor_units, reason_code]
+    ManualAdjustmentDecisionBody:
+      type: object
+      additionalProperties: false
+      properties:
+        payload_hash: { type: string, description: The payload_hash of the request the decider reviewed. }
+        reason_code: { type: string }
+      required: [payload_hash, reason_code]
+    ManualAdjustment:
+      type: object
+      description: >
+        A K2 manual adjustment request. ADR 0114 S0 - initiated_by is null for a tenant-scoped caller when initiated_by_scope is not tenant (platform_acting sessions). Approver identities are not part of this response.
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        direction: { type: string, enum: [credit_player, debit_player] }
+        amount_minor_units: { type: string, description: Integer minor units as a decimal string. }
+        reason_code: { type: string }
+        causation_transaction_id: { type: string, format: uuid }
+        evidence_ref_hash: { type: string }
+        payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
+        initiated_by: { type: string, format: uuid, nullable: true }
+        initiated_by_scope: { type: string, enum: [tenant, platform_acting] }
+        required_at_submission: { type: integer }
+        contributing_policy_ids: { type: array, nullable: true, items: { type: string, format: uuid } }
+        tenant_status_at_submission: { type: string }
+        state: { type: string, enum: [pending, executing, executed, refused_insufficient_funds, refused_at_execution, rejected, cancelled, expired] }
+        refusal_code: { type: string }
+        ledger_transaction_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+      required: [id, tenant_id, wallet_id, player_account_id, asset_code, direction, amount_minor_units, reason_code, payload_hash, initiated_by, initiated_by_scope, required_at_submission, contributing_policy_ids, tenant_status_at_submission, state, created_at, expires_at]
+    ManualAdjustmentDecision:
+      type: object
+      properties:
+        request: { $ref: "#/components/schemas/ManualAdjustment" }
+        executed: { type: boolean, description: True when this was the final approval and the adjustment executed. }
+        counted_approvals: { type: integer }
+        required_approvals: { type: integer }
+      required: [request, executed, counted_approvals, required_approvals]
+    FinancialPolicyChangeProposal:
+      type: object
+      additionalProperties: false
+      description: >
+        There is no tenant field: the tenant comes from the path on the tenant route and is absent on the platform route. The database validates the combination of change_kind, level and the optional fields (and, for a tenant caller, the tighten-only rule).
+      properties:
+        change_kind: { type: string, enum: [policy, profile_assignment] }
+        operation_kind: { type: string }
+        level: { type: string, enum: [platform, jurisdiction, profile, tenant, brand] }
+        brand_id: { type: string, format: uuid }
+        jurisdiction_id: { type: string, format: uuid }
+        profile_code: { type: string }
+        asset_code: { type: string }
+        base_required_approvals: { type: integer }
+        threshold_minor_units: { type: string }
+        required_approvals_above_threshold: { type: integer }
+        effective_from: { type: string, format: date-time }
+        legal_review_reference: { type: string }
+    FinancialPolicyChangeDecisionBody:
+      type: object
+      additionalProperties: false
+      properties:
+        content_hash: { type: string, description: The content_hash of the change the decider reviewed. }
+        reason_code: { type: string }
+      required: [content_hash, reason_code]
+    FinancialPolicyChange:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        change_kind: { type: string, enum: [policy, profile_assignment] }
+        content_hash: { type: string }
+        status: { type: string, enum: [pending, approved, rejected, cancelled, expired] }
+        expires_at: { type: string, format: date-time }
+      required: [id, change_kind, content_hash, status, expires_at]
+    FinancialPolicy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        operation_kind: { type: string }
+        level: { type: string, enum: [platform, jurisdiction, profile, tenant, brand] }
+        tenant_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        base_required_approvals: { type: integer }
+        threshold_minor_units: { type: string, description: Integer minor units as a decimal string. }
+        required_approvals_above_threshold: { type: integer }
+        effective_from: { type: string, format: date-time }
+      required: [id, operation_kind, level, base_required_approvals, effective_from]
+    PlatformActionAuditActor:
+      type: object
+      description: >
+        Always scope platform. staff_id and display_name are filled only for payments_kill_switch.* actions (ADR 0104 section 5.2); for every other action staff_id is the empty string and display_name is null.
+      properties:
+        scope: { type: string, enum: [platform] }
+        staff_id: { type: string }
+        display_name: { type: string, nullable: true }
+      required: [scope, staff_id, display_name]
+    PlatformActionAuditChainEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string }
+        outcome: { type: string }
+        created_at: { type: string, format: date-time }
+        actor_staff_id: { type: string, description: Omitted when the row has no actor. }
+        actor_display_name: { type: string, nullable: true }
+      required: [id, action, outcome, created_at, actor_display_name]
+    PlatformActionAuditEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        action: { type: string, example: payments_kill_switch.engage }
+        target_type: { type: string }
+        target_id: { type: string }
+        outcome: { type: string }
+        actor: { $ref: "#/components/schemas/PlatformActionAuditActor" }
+        reason_code: { type: string, description: Only for actions on the presentation allowlist. }
+        before: { description: Only for actions on the presentation allowlist. }
+        after: { description: Only for actions on the presentation allowlist. }
+        extra_metadata: { type: object, additionalProperties: true, description: Never present with the compiled-in presentation defaults. }
+        approval_chain: { type: array, items: { $ref: "#/components/schemas/PlatformActionAuditChainEntry" } }
+      required: [id, created_at, action, outcome, actor]
+    PlatformActionAuditPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/PlatformActionAuditEntry" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
+    KYCEnforcementDecision:
+      type: object
+      description: The closed field set of ADR 0096 section 6.
+      properties:
+        id: { type: string, format: uuid }
+        operation: { type: string }
+        outcome: { type: string }
+        matched_trigger: { type: string, description: Omitted when empty. }
+        policy_version: { type: string }
+        decided_at: { type: string, format: date-time }
+      required: [id, operation, outcome, policy_version, decided_at]
+    KYCEnforcementDecisionPage:
+      type: object
+      properties:
+        decisions: { type: array, items: { $ref: "#/components/schemas/KYCEnforcementDecision" } }
+        next_before: { type: string, description: "Omitted on an empty page. Pass it back unchanged as next_before." }
+      required: [decisions]
+    StaffDisplayNameRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 100, description: No control, bidi or zero-width characters. }
+      required: [display_name]
+    StaffPersonLinkRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        person_id: { type: string, format: uuid }
+      required: [person_id]
     PaymentsKillSwitch:
       type: object
       description: >
@@ -7244,7 +8040,7 @@ components:
         engaged_by_scope: { type: string, enum: [tenant, platform], nullable: true }
         release_request_id: { type: string, format: uuid, nullable: true }
         reason_code: { type: string }
-        changed_by: { type: string, format: uuid }
+        changed_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant-scoped caller when the actor is platform staff (ADR 0114 S0 H1); see changed_by_scope." }
         changed_by_scope: { type: string, enum: [tenant, platform] }
         changed_at: { type: string, format: date-time }
         version: { type: integer, format: int64 }
@@ -7278,12 +8074,12 @@ components:
         kill_switch_id: { type: string, format: uuid }
         expected_version: { type: integer, format: int64 }
         reason_code: { type: string }
-        requested_by: { type: string, format: uuid }
+        requested_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant-scoped caller when the requester is platform staff (ADR 0114 S0 H1); see requested_by_scope." }
         requested_by_scope: { type: string, enum: [tenant, platform] }
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
         status: { type: string, enum: [open, approved, cancelled, expired] }
-        approved_by: { type: string, format: uuid, nullable: true }
+        approved_by: { type: string, format: uuid, nullable: true, description: "Omitted until approved. Null for a tenant-scoped caller when the approver is platform staff (ADR 0114 S0 H1); see approved_by_scope." }
         approved_by_scope: { type: string, enum: [tenant, platform], nullable: true }
         decided_at: { type: string, format: date-time, nullable: true }
       required: [id, tenant_id, kill_switch_id, expected_version, reason_code, requested_by, requested_by_scope, created_at, expires_at, status]
@@ -7622,7 +8418,7 @@ components:
         actor_type:
           type: string
           enum: [player, staff, system]
-        actor_id: { type: string, format: uuid }
+        actor_id: { type: string, format: uuid, nullable: true, description: "Null on the tenant audit log when the staff actor is not staff of the caller's own tenant, i.e. platform staff who acted inside the tenant (ADR 0114 S0 H1). Omitted when the row has no actor." }
         action: { type: string, example: player.suspended }
         target_type: { type: string, example: player_account }
         target_id: { type: string }
@@ -7920,7 +8716,7 @@ components:
         asset_code: { type: string }
         reason_code: { type: string }
         payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
-        requested_by: { type: string, format: uuid }
+        requested_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant-scoped caller when the requester is platform staff, i.e. requested_by_scope is platform_acting (ADR 0114 S0 H1)." }
         requested_by_scope: { type: string, enum: [tenant, platform_acting] }
         required_at_submission: { type: integer, description: Number of approvals required, fixed at submission. }
         tenant_status_at_submission: { type: string }
@@ -7933,7 +8729,7 @@ components:
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
         evidence_line_id: { type: string, format: uuid, description: M4 only. }
-        evidence_reference: { type: string, description: M4 only. The provider's own line reference. }
+        evidence_reference_present: { type: boolean, description: "M4 only. True when a provider line reference is pinned on the resolution. The reference text itself is never returned to any caller (ADR 0114 S0, blind entry: each approver types it independently) and is not written to audit metadata; the server compares it from the database." }
         evidence_verdict: { type: string, description: M4 only. }
         evidence_import_ids: { type: array, items: { type: string, format: uuid }, description: M4 only. }
       required: [id, tenant_id, attempt_id, operation, kind, amount_minor_units, asset_code, reason_code, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, state, created_at, expires_at]
@@ -7985,7 +8781,8 @@ components:
         reason_code: { type: string }
         evidence_ref_hash: { type: string }
         payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
-        requested_by: { type: string, format: uuid }
+        requested_by: { type: string, format: uuid, nullable: true, description: "Null for a non-platform caller when the requester is not tenant staff (ADR 0114 S0 H1). Every HSEC route is platform_admin-only today." }
+        requested_by_scope: { type: string, description: "Scope of the requester (tenant or platform_acting)." }
         required_at_submission: { type: integer, description: Number of approvals required, fixed at submission. }
         tenant_status_at_submission: { type: string }
         brand_status_at_submission: { type: string }
@@ -7999,7 +8796,7 @@ components:
         ledger_transaction_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
-      required: [id, tenant_id, withdrawal_request_id, kind, amount_minor_units, asset_code, reason_code, evidence_ref_hash, payload_hash, requested_by, required_at_submission, tenant_status_at_submission, brand_status_at_submission, state, created_at, expires_at]
+      required: [id, tenant_id, withdrawal_request_id, kind, amount_minor_units, asset_code, reason_code, evidence_ref_hash, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, brand_status_at_submission, state, created_at, expires_at]
     WithdrawalHoldResolutionDecision:
       type: object
       properties:
@@ -8606,7 +9403,7 @@ components:
         vendor_account_id: { type: string, nullable: true }
         activation_request_id: { type: string, format: uuid }
         revoked_at: { type: string, format: date-time }
-        revoked_by: { type: string, format: uuid }
+        revoked_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant-scoped caller unless the revoker is staff of the caller's own tenant (ADR 0114 S0 H1; the row carries no scope column, so membership of the caller's tenant decides)." }
         revoke_reason:
           type: string
           enum: [rotation_complete, suspected_compromise, confirmed_compromise, vendor_offboarded, misregistration, tenant_request]

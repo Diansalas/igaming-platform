@@ -159,17 +159,21 @@ func TestForceResolutionAPI_M4_Paid_OverHTTP(t *testing.T) {
 		t.Fatalf("M4 request: %d %s", res.status, res.body)
 	}
 	var d struct {
-		ID, PayloadHash, EvidenceReference, EvidenceVerdict, EvidenceLineID string
-		EvidenceImportIDs                                                   []string
+		ID, PayloadHash, EvidenceVerdict, EvidenceLineID string
+		EvidenceImportIDs                                []string
 	}
 	var raw map[string]any
 	res.decode(t, &raw)
 	d.ID, _ = raw["id"].(string)
 	d.PayloadHash, _ = raw["payload_hash"].(string)
-	d.EvidenceReference, _ = raw["evidence_reference"].(string)
 	d.EvidenceVerdict, _ = raw["evidence_verdict"].(string)
 	d.EvidenceLineID, _ = raw["evidence_line_id"].(string)
-	if d.EvidenceReference != r || d.EvidenceVerdict != "paid" || d.EvidenceLineID != line.String() {
+	// CHANGED (ADR 0114 S0, security BLOCKER 2): was `EvidenceReference == r`. The reference text R
+	// must NOT be returned to any reader (blind entry); only its presence is.
+	if _, leaked := raw["evidence_reference"]; leaked || strings.Contains(string(res.body), r) {
+		t.Fatalf("M4 DTO leaks the evidence reference text: %s", res.body)
+	}
+	if present, _ := raw["evidence_reference_present"].(bool); !present || d.EvidenceVerdict != "paid" || d.EvidenceLineID != line.String() {
 		t.Fatalf("M4 DTO: %v", raw)
 	}
 	dec := w.a.do("POST", w.base()+"/"+d.ID+"/approve", w.a.token(approver, uuid.Nil, "platform_admin"),

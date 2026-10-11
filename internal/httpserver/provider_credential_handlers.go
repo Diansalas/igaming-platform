@@ -161,22 +161,22 @@ func writeProviderCredentialError(w http.ResponseWriter, c providerCredentialCal
 // --- DTOs (allow-listed fields only; no store result ever flows here) ---
 
 type providerCredentialHandleDTO struct {
-	ID                  string  `json:"id"`
-	Domain              string  `json:"domain"`
-	ProviderID          string  `json:"provider_id"`
-	Purpose             string  `json:"purpose"`
-	KeyID               string  `json:"key_id"`
-	Status              string  `json:"status"`
-	NotBefore           string  `json:"not_before"`
-	NotAfter            *string `json:"not_after"`
-	StatusChangedAt     string  `json:"status_changed_at"`
-	Fingerprint         string  `json:"fingerprint"`
-	SecretRef           string  `json:"secret_ref"`
-	VendorAccountID     *string `json:"vendor_account_id"`
-	ActivationRequestID string  `json:"activation_request_id"`
-	RevokedAt           *string `json:"revoked_at,omitempty"`
-	RevokedBy           *string `json:"revoked_by,omitempty"`
-	RevokeReason        *string `json:"revoke_reason,omitempty"`
+	ID                  string    `json:"id"`
+	Domain              string    `json:"domain"`
+	ProviderID          string    `json:"provider_id"`
+	Purpose             string    `json:"purpose"`
+	KeyID               string    `json:"key_id"`
+	Status              string    `json:"status"`
+	NotBefore           string    `json:"not_before"`
+	NotAfter            *string   `json:"not_after"`
+	StatusChangedAt     string    `json:"status_changed_at"`
+	Fingerprint         string    `json:"fingerprint"`
+	SecretRef           string    `json:"secret_ref"`
+	VendorAccountID     *string   `json:"vendor_account_id"`
+	ActivationRequestID string    `json:"activation_request_id"`
+	RevokedAt           *string   `json:"revoked_at,omitempty"`
+	RevokedBy           *staffRef `json:"revoked_by,omitempty"` // null for a tenant caller unless the revoker is staff of its own tenant (ADR 0114 H1)
+	RevokeReason        *string   `json:"revoke_reason,omitempty"`
 }
 
 func rfc3339Ptr(t *time.Time) *string {
@@ -195,13 +195,22 @@ func uuidPtr(u *uuid.UUID) *string {
 	return &s
 }
 
-func toHandleDTO(h providercred.Handle) providerCredentialHandleDTO {
+// toHandleDTO renders a handle for viewer v. A handle row carries revoked_by but no scope column,
+// so a tenant viewer sees the revoker only when ownStaff (staff of the viewer's tenant, resolved in
+// the same tenant transaction, or the caller itself) contains it; any other revoker is a platform
+// principal and is shown as null (ADR 0114 H1, fail closed).
+func toHandleDTO(v staffViewer, h providercred.Handle, ownStaff map[uuid.UUID]bool) providerCredentialHandleDTO {
+	var revokedBy *staffRef
+	if h.RevokedBy != nil {
+		scope := scopeFromMembership(ownStaff[*h.RevokedBy])
+		revokedBy = v.optRef(&scope, h.RevokedBy)
+	}
 	return providerCredentialHandleDTO{
 		ID: h.ID.String(), Domain: h.Domain, ProviderID: h.ProviderID, Purpose: h.Purpose, KeyID: h.KeyID,
 		Status: h.Status, NotBefore: h.NotBefore.UTC().Format(time.RFC3339Nano), NotAfter: rfc3339Ptr(h.NotAfter),
 		StatusChangedAt: h.StatusChangedAt.UTC().Format(time.RFC3339Nano), Fingerprint: h.Fingerprint,
 		SecretRef: h.SecretRef, VendorAccountID: h.VendorAccountID, ActivationRequestID: h.ActivationRequestID.String(),
-		RevokedAt: rfc3339Ptr(h.RevokedAt), RevokedBy: uuidPtr(h.RevokedBy), RevokeReason: h.RevokeReason,
+		RevokedAt: rfc3339Ptr(h.RevokedAt), RevokedBy: revokedBy, RevokeReason: h.RevokeReason,
 	}
 }
 
@@ -315,9 +324,21 @@ func newListProviderCredentialsHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		var handles []providercred.Handle
+		ownStaff := map[uuid.UUID]bool{}
+		viewer := staffViewerOf(c.tc)
 		err := deps.DB.WithTenant(r.Context(), c.target, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			handles, err = providercred.ListHandles(ctx, tx, c.target)
+			if err != nil || viewer.platform {
+				return err
+			}
+			var revokers []uuid.UUID
+			for _, h := range handles {
+				if h.RevokedBy != nil {
+					revokers = append(revokers, *h.RevokedBy)
+				}
+			}
+			ownStaff, err = tenantStaffIDs(ctx, tx, c.target, revokers)
 			return err
 		})
 		if err != nil {
@@ -326,7 +347,7 @@ func newListProviderCredentialsHandler(deps Deps) http.HandlerFunc {
 		}
 		out := make([]providerCredentialHandleDTO, 0, len(handles))
 		for _, h := range handles {
-			out = append(out, toHandleDTO(h))
+			out = append(out, toHandleDTO(viewer, h, ownStaff))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"handles": out})
 	}
@@ -480,7 +501,7 @@ func newApplyProviderCredentialRequestHandler(deps Deps) http.HandlerFunc {
 			writeProviderCredentialError(w, c, "activated", err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, toHandleDTO(h))
+		writeJSON(w, http.StatusCreated, toHandleDTO(staffViewerOf(c.tc), h, nil))
 	}
 }
 
@@ -518,6 +539,6 @@ func newTransitionProviderCredentialHandler(deps Deps) http.HandlerFunc {
 			writeProviderCredentialError(w, c, "transitioned", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, toHandleDTO(h))
+		writeJSON(w, http.StatusOK, toHandleDTO(staffViewerOf(c.tc), h, map[uuid.UUID]bool{c.subject: true})) // the revoker is the caller itself
 	}
 }
