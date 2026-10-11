@@ -650,7 +650,7 @@ func TestReconciliationSweep_UnchangedOverLockedSplitAccounts(t *testing.T) {
 	}
 }
 
-// TestReconciliationSweep_EntrylessAccountIsAFalsePositive_KNOWNDEFECT
+// TestReconciliationSweep_EntrylessAccountIsClean_LF0048_1_Fixed
 // is a CHARACTERIZATION test, not an approval: it pins behavior this
 // dispatch found and is NOT authorized to fix, so the defect cannot be
 // lost and cannot be silently "fixed" without a deliberate test update.
@@ -683,9 +683,9 @@ func TestReconciliationSweep_UnchangedOverLockedSplitAccounts(t *testing.T) {
 // projected.Found, i.e. treat "no projection row AND zero rebuilt totals"
 // as ordinary), which this dispatch is explicitly scoped out of touching.
 //
-// WHEN THAT FIX LANDS THIS TEST MUST FAIL, and its expectation must be
-// inverted to "clean" rather than deleted.
-func TestReconciliationSweep_EntrylessAccountIsAFalsePositive_KNOWNDEFECT(t *testing.T) {
+// STATUS: FIXED (ADR 0112 slice 2 reconciliation commit). This test now
+// asserts the clean behaviour (inverted, not deleted).
+func TestReconciliationSweep_EntrylessAccountIsClean_LF0048_1_Fixed(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
 
@@ -708,23 +708,14 @@ func TestReconciliationSweep_EntrylessAccountIsAFalsePositive_KNOWNDEFECT(t *tes
 		if err != nil {
 			return err
 		}
-		if run.Status == reconciliation.StatusClean {
-			t.Fatalf("finding LF-0048-1 appears to be FIXED (sweep is clean over an entry-less account). " +
-				"That is the desired behavior: update this test to assert StatusClean and zero mismatches, " +
-				"and remove the characterization note above")
+		// LF-0048-1 is FIXED (reconciliation treats an account with no entries and
+		// no projection row as ordinary): the sweep must be clean and report
+		// nothing for the entry-less account.
+		if run.Status != reconciliation.StatusClean {
+			t.Fatalf("expected a clean sweep over an entry-less account, got status %q", run.Status)
 		}
-		if len(mismatches) != 1 || mismatches[0].ReconciliationKey != lockedBonusID.String() {
-			t.Fatalf("expected exactly the entry-less account to be (spuriously) flagged, got %+v", mismatches)
-		}
-		if mismatches[0].MismatchKind != reconciliation.MismatchKindBalanceMismatch {
-			t.Fatalf("expected kind %q, got %q", reconciliation.MismatchKindBalanceMismatch, mismatches[0].MismatchKind)
-		}
-		// The shape of the false positive: zero totals on both sides,
-		// differing only in the absent row's empty asset/type strings.
-		if !strings.Contains(mismatches[0].ActualValue, "asset= type=") {
-			t.Fatalf("finding LF-0048-1's signature is an ABSENT projection row (empty asset/type); got actual=%q - "+
-				"this may be a different, real mismatch and must be investigated, not assumed benign",
-				mismatches[0].ActualValue)
+		if len(mismatches) != 0 {
+			t.Fatalf("expected zero mismatches for the entry-less account %s, got %+v", lockedBonusID, mismatches)
 		}
 		return nil
 	})
