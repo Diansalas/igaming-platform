@@ -1,8 +1,9 @@
 # ADR 0114 - Operator console for the governed financial/operational flows
 
-- **Status:** PROPOSED - DESIGN ONLY (`architect`, 2026-10-11, repository at `6bda8ac`). Nothing in this ADR is
-  implemented. Every UI and route below is `NOT IMPLEMENTED` until its slice lands; every governed flow it fronts is
-  `MOCK` (no real provider).
+- **Status:** ACCEPTED - PENDING IMPLEMENTATION (2026-10-11; drafted by `architect` at `6bda8ac`; `security` design
+  review APPROVE WITH CONDITIONS, conditions written into this text, section 9). Nothing in this ADR is implemented.
+  Every UI and route below is `NOT IMPLEMENTED` until its slice lands; every governed flow it fronts is `MOCK` (no real
+  provider). D-OPS-1 and D-OPS-2 are recorded as **orchestrator defaults, reversible by the owner** (section 5).
 - **Trigger:** owner directive 2026-10-11: important governed financial/operational functionality must not stay
   API-only where a production operator would reasonably need an interface; UI is provider-independent and
   architecturally defined; **no workflow that has not been approved may be invented**.
@@ -149,86 +150,140 @@ for PA on the `/tenants/{tenantID}/` family), return named envelope types covere
 return raw provider payloads, destination detail/ciphertext/fingerprints/seals, emails, or a platform staff id to a
 tenant caller. Unknown enum values are mapped to a closed `other` bucket rather than passed through.
 
+Unknown filter input is refused with 400; only the output side uses the `other` bucket.
+
 | # | Route | Permission (existing unless noted) | Shape (fields) | Reviews |
 |---|---|---|---|---|
-| R1 | `GET /v1/admin/tenants/{tenantID}/payment-attempts?operation=payout|deposit&state=&terminal_reason=&withdrawal_request_id=&limit&offset` and `GET .../payment-attempts/{attemptID}` | `RequireAnyPermission(payment_force_resolve:read, withdrawal:review)` + `canActOnTenant` | `id, operation, state, terminal_reason, subject_ref {withdrawal_request_id or deposit_id}, amount_minor_units (string), asset_code, exponent, provider_id, has_provider_reference (bool), created_at, state_changed_at, open_resolution_id, admissible_kinds[]` | security (exposure), ledger-finance (`admissible_kinds`), payments |
-| R1b | add `payout_attempt` (latest attempt summary, R1 field subset) to `GET /v1/admin/withdrawals/{id}` | unchanged (`withdrawal:review`) | `attempt_id, state, terminal_reason, open_resolution_id` or `null` | security, code-reviewer |
-| R2 | `GET /v1/admin/tenants/{tenantID}/reconciliation/runs?stream=` and `.../reconciliation/mismatches?stream=&status=&kind=&subject_id=` | per stream: `payment_statement` -> `payment_force_resolve:read`; `ledger_vs_projection` -> `ledger_adjustment:read`; `sportsbook_settlement` -> **new** `sportsbook_reconciliation:read`; casino streams stay on the existing casino route | run: `id, stream, period_start, period_end, run_at, status`; mismatch: `id, run_id, stream, kind, status, subject_ref, expected/actual minor units (string), asset_code, detected_at` | security, ledger-finance |
-| R2b | `GET .../payment-attempts/{attemptID}/statement-evidence` (M4 line picker; MOCK only) | `payment_force_resolve:request` | `evidence_line_id, import_id, seal_verified (bool), verdict, line_date` - never the reference text while `evidence_ref_hash` is OPEN | security (T10), ledger-finance |
-| R3 | `GET /v1/admin/tenants/{tenantID}/withdrawal-hold-candidates?limit&offset` (approved withdrawals on a non-active tenant or brand) | `withdrawal_hold_resolution:read` (PA only) | `withdrawal_request_id, brand_id, amount_minor_units, asset_code, approved_at, tenant_status, brand_status, open_resolution_id` | security, ledger-finance |
-| R4 | `GET /v1/admin/tenants/{tenantID}/staff?role=&limit&offset` | `RequireAnyPermission(staff:manage, capability_grant:request)` + `canActOnTenant` | `id, role, display_name, person_linked (bool), status, created_at` - no email, no person_id; platform staff never listed | security |
-| R5 | `GET /v1/admin/players/{playerID}/wallets` | `ledger_adjustment:read` + `RequireTenantScope` (PA via `/tenants/{tenantID}/players/{playerID}/wallets` platform_acting) | `wallet_id, asset_code, exponent, projected_balance_minor_units (string), projection_as_of` labelled "projection, not authoritative" | ledger-finance, security |
-| R6 | `GET /v1/admin/financial-policy-changes?status=&limit&offset` (PA: platform + all tenants; TA: own tenant) | `financial_policy:read` | `id, scope, tenant_id, profile_code, proposed values, status, proposer_scope, created_at` (proposer id only within the same scope) | security, ledger-finance |
-| H1 | **Hardening, not a route:** verify and, where missing, redact to scope-only the platform actor id on tenant-readable governed DTOs: K3 `requested_by` (`payment_force_resolution_routes.go:231,253`), K1 `requested_by` (`capability_routes.go:263,274`), kill-switch `requested_by` / `approved_by` (`payments_kill_switch_handlers.go:502-523`) | n/a | `requested_by: null` + `requested_by_scope` when caller scope differs from actor scope | security |
+| R1 | `GET /v1/admin/tenants/{tenantID}/payment-attempts?operation=payout|deposit&state=&terminal_reason=&withdrawal_request_id=&limit&offset` and `GET .../payment-attempts/{attemptID}` | `payment_force_resolve:read` **alone** (FI, CO, PA; `withdrawal:review` is not accepted) + `canActOnTenant` | `id, operation, state, terminal_reason, subject_ref {withdrawal_request_id or deposit_id}, amount_minor_units (string), asset_code, exponent, provider_id, has_provider_reference (bool), created_at, state_changed_at, open_resolution_id, admissible_kinds[]`. Never `provider_reference` text, player id or destination. A platform_acting read writes a tenant-visible platform-action audit row (ADR 0104) | security (exposure), ledger-finance (`admissible_kinds`), payments |
+| R1b | add `payout_attempt` (latest attempt summary) to `GET /v1/admin/withdrawals/{id}` | unchanged (`withdrawal:review`, FI only) | `attempt_id, state, terminal_reason, open_resolution_id` or `null`; same exclusions as R1 | security, code-reviewer |
+| R2 | `GET /v1/admin/tenants/{tenantID}/reconciliation/runs?stream=` and `.../reconciliation/mismatches?stream=&status=&kind=&subject_id=` | per stream, **checked before any query**: `payment_statement` -> `payment_force_resolve:read`; `ledger_vs_projection` -> `ledger_adjustment:read`; `sportsbook_settlement` -> **new** `sportsbook_reconciliation:read`; casino streams stay on the existing casino route. `stream` is required | run: `id, stream, period_start, period_end, run_at, status`; mismatch: `id, run_id, stream, kind, status, subject_ref, expected/actual minor units (string), asset_code, detected_at`. Unknown `stream`/`status`/`kind` input -> 400; `subject_ref` names an attempt, withdrawal, wallet or bet id, never a player identity | security, ledger-finance |
+| R2b | `GET .../payment-attempts/{attemptID}/statement-evidence` (M4 line picker; MOCK only) | `payment_force_resolve:request` | `evidence_line_id, import_id, seal_verified (bool), verdict, line_date`; never the reference text while `evidence_ref_hash` is OPEN | security (T10), ledger-finance |
+| R3 | `GET /v1/admin/tenants/{tenantID}/withdrawal-hold-candidates?limit&offset` | `withdrawal_hold_resolution:read` (PA only) | read through ONE narrow `SECURITY DEFINER` function that returns only `approved` withdrawals of the path tenant whose tenant or brand is non-active; **no platform-wide RLS policy** on `withdrawal_requests`. Fields `withdrawal_request_id, brand_id, amount_minor_units, asset_code, approved_at, tenant_status, brand_status, open_resolution_id`; no player id | security, ledger-finance |
+| R4 | `GET /v1/admin/tenants/{tenantID}/staff?role=&limit&offset` | `RequireAnyPermission(staff:manage, capability_grant:request)` + `canActOnTenant` | tenant staff of the path tenant only; platform staff excluded **in SQL** (not by a Go filter); paginated; `role` filter is a closed vocabulary (400 otherwise). Fields `id, role, display_name, person_linked (bool), status, created_at`; no email, no person_id | security |
+| R5 | `GET /v1/admin/players/{playerID}/wallets`; PA form `GET /v1/admin/tenants/{tenantID}/players/{playerID}/wallets` | `ledger_adjustment:read` + `RequireTenantScope` (tenant form). PA form additionally requires an **active K2 (ledger_adjustment) grant on that tenant** (ADR 0099), checked in-tx, and every PA read is recorded as a tenant-visible platform action (ADR 0104) | wallet fields only: `wallet_id, asset_code, exponent, projected_balance_minor_units (string), projection_as_of`, labelled "projection, not authoritative"; no player identity; foreign or unknown player -> 404; every read writes a read audit row. **No broad platform SELECT policy** on wallets or balance projections is added: the PA form runs platform_acting inside the tenant's RLS | ledger-finance, security |
+| R6 | `GET /v1/admin/financial-policy-changes?status=&limit&offset` | `financial_policy:read` | cross-tenant rows only on an explicit platform-scope branch (`WithPlatformAdmin`); tenant callers via `db.WithTenant`, own tenant (+ platform baseline) only. Fields `id, scope, tenant_id, profile_code, proposed values, status, proposer_scope, proposer_id, created_at`; `proposer_id` blanked when proposer scope differs from caller scope | security, ledger-finance |
+| H1 | **BLOCKER hardening (security live-confirmed):** platform actor ids are returned to tenant callers today | n/a | see section 4.1 | security |
+| H2 | **BLOCKER hardening:** the M4 reference text leaks | n/a | see section 4.2 | security, ledger-finance |
 
 `admissible_kinds` (R1) must be computed by calling the same database predicates the request path uses
 (`payment_m2_admits`, `payment_m4_in_scope`, migrations 0115/0125/0127), not a Go re-implementation; it is a hint and
-the request path re-checks. H1 is a suspected gap: a grep of those handlers found no redaction code; a test must
-decide it before any tenant-facing governed screen ships.
+the request path re-checks.
 
-## 5. Owner questions (only these two)
+### 4.1 H1 - actor-id redaction on every tenant-readable DTO (confirmed live by `security`)
 
-**D-OPS-1 - build the console before a real provider?** Recommended answer: **YES, build now** (the 2026-10-11
-directive). Read-only views first, then action screens, every governed-money screen labelled MOCK (principle 6).
-Building UI does not change any non-MOCK gate: M4 non-MOCK stays blocked by D-7/T10/S-3 and the `evidence_ref_hash`
-binding; HSEC production stays blocked by Q-HSEC-1/2/3; GAP-AAM stays read-only; alert human delivery stays
-ALERT-DELIVERY-1. Nothing here genuinely blocks the build.
+Every `*_by` and `grantee_staff_id` field on every tenant-readable response is blanked (`null`, scope kept) when the
+actor's scope differs from the caller's scope, through **one shared helper** modelled on `launchCall.dto`
+(`internal/httpserver/launch_authorisation_routes.go:717`). Known fields (grep at `6bda8ac`, `json:"*_by"` /
+`grantee_staff_id` in `internal/httpserver`):
 
-**D-OPS-2 - who sees park reasons / attempt state / findings?** Recommended answer, using existing permissions only
-except one addition:
-- attempt state and park reason: FI (`withdrawal:review`, `payment_force_resolve:read`), CO and PA
-  (`payment_force_resolve:read`). Not TA, SU, RM (Stage 3D: TA holds no withdrawal governance).
-- `payment_statement` findings: same holders as above; `ledger_vs_projection`: `ledger_adjustment:read` (FI, CO, PA),
-  since its correction path is K2; casino unchanged (TA, CO, FI).
-- `sportsbook_settlement`: **new** `sportsbook_reconciliation:read` for TA, CO, FI - the exact Stage 10.3 W2b casino
-  precedent. This is the only role-matrix change and needs `security` sign-off.
+| DTO | Fields |
+|---|---|
+| Kill switch / history (`payments_kill_switch_handlers.go:473`) | `changed_by` |
+| Kill-switch release request (`payments_kill_switch_handlers.go:502,507`) | `requested_by`, `approved_by` |
+| K1 grant request / grant (`capability_routes.go:247,257,263,287`) | `requested_by`, `grantee_staff_id` |
+| K2 adjustment (`manual_adjustment_routes.go:247`) | `initiated_by` |
+| K3 resolution (`payment_force_resolution_routes.go:231`) | `requested_by` |
+| Provider credential handle (`provider_credential_handlers.go:178`) | `revoked_by` |
+| KYC review (`kyc_admin_handlers.go:42`) | `reviewed_by` (same-scope today; routed through the helper anyway) |
+| Already redacted / platform-only | launch DTOs (`launch_authorisation_routes.go:286,316,956`); HSEC `requested_by` and alert-route `superseded_by` (PA-only routes; still routed through the helper) |
+
+A static test fails the build on any response struct field whose JSON name ends in `_by` or equals
+`grantee_staff_id` that is not populated through the helper. The same rule applies to R6 `proposer_id`.
+
+### 4.2 H2 - M4 evidence reference (blind entry while `evidence_ref_hash` is OPEN)
+
+`resolutionDTO.evidence_reference` (`payment_force_resolution_routes.go:243`) returns the M4 reference R to every K3
+reader, and R is written into tenant audit metadata (`internal/payments/manual_resolution.go:1253-1254`,
+`md["evidence_reference"]`). That defeats blind entry. While `evidence_ref_hash` is OPEN: remove the reference text
+from the K3 DTO and from the audit metadata **for every caller** (replace with the hash or `evidence_reference_present:
+bool`). Invariant 7.2 applies to existing DTOs, not only to new routes.
+
+## 5. Recorded decisions (orchestrator defaults, reversible by the owner)
+
+**D-OPS-1 - build the console before a real provider: YES (default recorded 2026-10-11).** Build now, read-only
+views first, then action screens; every governed-money screen labelled MOCK (principle 6). Building UI does not
+change any non-MOCK gate: M4 non-MOCK stays blocked by D-7/T10/S-3 and the `evidence_ref_hash` binding; HSEC
+production stays blocked by Q-HSEC-1/2/3; GAP-AAM stays read-only; alert human delivery stays ALERT-DELIVERY-1.
+Nothing genuinely blocks the build.
+
+**D-OPS-2 - who sees park reasons / attempt state / findings (default recorded 2026-10-11):**
+- attempt state and park reason (R1): holders of `payment_force_resolve:read` only = FI, CO, PA. FI additionally sees
+  the R1b summary on the withdrawal detail (`withdrawal:review`). Not TA, SU, RM (Stage 3D).
+- `payment_statement` findings: `payment_force_resolve:read` (FI, CO, PA); `ledger_vs_projection`:
+  `ledger_adjustment:read` (FI, CO, PA), since its correction path is K2; casino unchanged (TA, CO, FI).
+- `sportsbook_settlement`: **new** `sportsbook_reconciliation:read` granted to **exactly** TA, CO, FI (Stage 10.3 W2b
+  casino precedent). A role-matrix test asserts it is absent from PA, SU, RM, PM, BX. The only role-matrix change.
 - HSEC: PA only; alerts: PA only (both unchanged).
-If the owner prefers zero new permissions, sportsbook findings stay API-only and slice S5 drops that stream.
+If the owner reverses the new permission, sportsbook findings stay API-only and S5 drops that stream.
 
 ## 6. Build order (small slices)
 
 Owners: `backend` (routes), `backoffice` (screens), `payments`/`ledger-finance` (domain review), `security`
 (mandatory on every governed-money slice), `code-reviewer`, `qa` (gate), `product-owner-proxy` (wording/scope).
-"Unblocked" = provider-independent and needs no further human decision beyond D-OPS-1/2.
+"Unblocked" = provider-independent and needs no further human decision beyond D-OPS-1/2. **No action screen is
+enabled before the S0 H1/H2 tests pass; S1, S3 and S6-S9 do not ship before S0.**
 
 | Slice | Content | Owner / reviewers | Gate |
 |---|---|---|---|
-| S0 | H1 redaction test + fix; OpenAPI for K1, K2, financial-policy, platform-actions, enforcement-decisions, staff display-name/person-link | backend / security, code-reviewer | unblocked |
-| S1 | Alerts console (PA): list with state/severity filters, ack, resolve, routing status read-only | backoffice / security, code-reviewer, PO-proxy | unblocked |
-| S2 | R1 + R1b | backend, payments / security, ledger-finance | unblocked (D-OPS-2 roles) |
-| S3 | Parked payments queue + attempt detail; withdrawal detail attempt panel; payout instruments view/suspend (UI-ready) | backoffice / security, ledger-finance (wording), code-reviewer | after S2 |
-| S4 | R2 (payment_statement, ledger_vs_projection; sportsbook if D-OPS-2 adds the permission) | backend / security, ledger-finance | unblocked |
-| S5 | Reconciliation views: runs + mismatches for all streams incl. existing casino routes; findings link to the K3/K2 screens | backoffice / ledger-finance, code-reviewer | after S4 |
-| S6 | Payment kill switch console (engage, release request/approve/cancel) | backoffice / security, payments | unblocked |
+| S0 | H1 shared helper + static test + fixes; H2 removal; section 3 generated matrix test; OpenAPI for K1, K2, financial-policy, platform-actions, enforcement-decisions, staff display-name/person-link | backend / security, ledger-finance (H2), code-reviewer | unblocked; first |
+| S1 | Alerts console (PA): list with state/severity filters, ack, resolve, routing status read-only | backoffice / security, code-reviewer, PO-proxy | after S0 |
+| S2 | R1 + R1b | backend, payments / security, ledger-finance | after S0 |
+| S3 | Parked payments queue + attempt detail; withdrawal detail attempt panel; payout instruments view/suspend | backoffice / security, ledger-finance (wording), code-reviewer | after S0, S2 |
+| S4 | R2 (payment_statement, ledger_vs_projection, sportsbook_settlement + new permission) | backend / security, ledger-finance | after S0 |
+| S5 | Reconciliation views: runs + mismatches for all streams incl. existing casino routes; findings link to K3/K2 screens | backoffice / ledger-finance, code-reviewer | after S4 |
+| S6 | Payment kill switch console (engage, release request/approve/cancel) | backoffice / security, payments | after S0 |
 | S7 | R4 + K1 grants console (request, approve, reject, cancel, revoke, list) - prerequisite for FI to act in K2/K3 | backend + backoffice / security | after S0 |
-| S8 | K3 M1/M2 console: request from an R1 attempt or R2 finding, closed reason/basis/context catalogues, approve/reject/cancel with frozen `payload_hash`, refusal map | backoffice / security, ledger-finance, payments, code-reviewer | after S3, S5, S7; MOCK |
-| S9 | R5 + R6 + K2 manual adjustments console + financial policy view and change approvals | backend + backoffice / ledger-finance, security | after S7; MOCK |
-| S10 | R3 + HSEC console (PA) | backend + backoffice / security, ledger-finance | MOCK only; production policy row gated by Q-HSEC-1/2/3 |
-| S11 | R2b + M4 screens: blind entry of the reference (never pre-filled), evidence line picker with seal status | backend + backoffice / security, ledger-finance | MOCK only; non-MOCK gated by D-7, T10, S-3, `evidence_ref_hash` |
-| Later | risk rules UI, provider credentials UI, registries UI, platform-actions audit view, KYC enforcement view, bonus remainder (needs list routes), staff list screen, asset change-request list | domain owners | unblocked, not day one |
+| S8 | K3 M1/M2 console: request from an R1 attempt or R2 finding, closed reason/basis/context catalogues, approve/reject/cancel with frozen `payload_hash`, refusal map | backoffice / security, ledger-finance, payments, code-reviewer | after S0, S3, S5, S7; MOCK |
+| S9 | R5 + R6 + K2 manual adjustments console + financial policy view and change approvals | backend + backoffice / ledger-finance, security | after S0, S7; MOCK |
+| S10 | R3 + HSEC console (PA) | backend + backoffice / security, ledger-finance | after S0; MOCK only; production policy row gated by Q-HSEC-1/2/3 |
+| S11 | R2b + M4 screens: blind entry of the reference (never pre-filled), evidence line picker with seal status | backend + backoffice / security, ledger-finance | after S0, S8; MOCK only; non-MOCK gated by D-7, T10, S-3, `evidence_ref_hash` |
+| Later | risk rules UI, provider credentials UI, registries UI, platform-actions audit view, KYC enforcement view, bonus remainder (needs list routes), staff list screen, asset change-request list | domain owners | after S0; not day one |
 | Not built | GAP-AAM exit, risk REVIEW queue, RG limits, AML cases, tenant alert view, instrument verify/reinstate | architect + owner | needs-design / owner |
 
-Day-one operator set = S0-S8 (withdrawal queue already exists; parked payments, force-resolution approvals,
-reconciliation, alerts, kill switch). S9-S11 follow. Each slice ends with qa evidence and a registry row; no slice
-claims more than `IMPLEMENTED against MOCK`.
+Day-one operator set = S0-S8. S9-S11 follow. Each slice ends with qa evidence and a registry row; no slice claims more
+than `IMPLEMENTED against MOCK`.
 
 ## 7. Architectural invariants (for `qa` and `code-reviewer`)
 
-1. Every new route is GET-only, writes nothing except its own read audit if the domain already audits reads, and
+1. Every new route is GET-only, writes nothing except the read/platform-action audit rows required in section 4, and
    is refused (403) for every role not in section 3; a tenant caller with another tenant's `tenantID` gets 404/403
-   and RLS returns zero foreign rows even if the handler check is removed (test both).
-2. No new response field contains a platform staff id for a tenant caller, an email, destination detail, ciphertext,
-   fingerprint, seal value, raw provider payload, or (while `evidence_ref_hash` is OPEN) a provider reference text.
+   and RLS returns zero foreign rows even if the handler check is removed (test both). The permission check runs
+   before any query (R2 per stream).
+2. No response field - new **or existing** - contains a platform staff id for a tenant caller (H1), an email,
+   destination detail, ciphertext, fingerprint, seal value, raw provider payload, a player identity on R1/R2/R3/R5, or
+   (while `evidence_ref_hash` is OPEN) a provider/evidence reference text (H2, any caller, DTO and audit metadata).
 3. `admissible_kinds` agrees with the database predicates on a fixture of every terminal reason (one table test).
 4. The console sends no client-chosen tenant id for tenant-scoped callers; it never computes approval counts or
    self-approval authoritatively; it formats money without floating point.
 5. No console button exists for a transition no route performs (static test over the action maps).
+6. A static test fails the build on any `*_by` / `grantee_staff_id` response field not populated through the H1 helper.
+7. A generated test checks the section 3 matrix against `rolePermissions`; a role-matrix test pins
+   `sportsbook_reconciliation:read` to exactly TA, CO, FI.
+8. R6: a test proves tenant B's policy changes never appear for tenant A; cross-tenant rows only via `WithPlatformAdmin`.
+9. The client never hides a refusal: every 403/409 is rendered through the code map, and no screen gates on
+   `permissions.ts` alone (the server answer decides what is shown as done).
 
 ## 8. Consequences
 
 - Operators get a provider-independent console for every approved governed flow; the API remains the only contract.
-- Eight small read routes (R1-R6, R1b, R2b) and one redaction hardening (H1) are added; one permission is proposed.
-- Inconsistency recorded, not fixed here: ADR 0101/0111 header status lines still read PROPOSED / NOT IMPLEMENTED while
-  the gap audit (section 2) records K3/M4/HSEC as IMPLEMENTED (MOCK); the orchestrator should reconcile the headers.
+- Eight small read routes (R1-R6, R1b, R2b), two blocker hardenings (H1, H2) and one permission are added.
+- ADR 0101/0111 header status lines are reconciled by a one-line STATUS note each (2026-10-11); bodies unchanged.
 - Deferred (recorded, not built): tenant-visible alerts, unified cross-domain approvals inbox (gap audit section 12),
   risk REVIEW queue, AML case management.
+
+## 9. Security design review (2026-10-11): APPROVE WITH CONDITIONS - applied
+
+| # | Condition | Where applied |
+|---|---|---|
+| 1 | BLOCKER H1 wider than first listed (live-confirmed); one shared helper; static test; S1/S3/S6-S9 not before S0 | 4.1, 6, 7.6 |
+| 2 | BLOCKER H2: `evidence_reference` in K3 DTO and tenant audit metadata; remove for every caller while `evidence_ref_hash` is OPEN | 4.2, 7.2 |
+| 3 | R5: wallet fields only, 404 foreign/unknown, read audit; PA needs active K2 grant + ADR 0104 platform action; no broad platform SELECT policy | 4 (R5) |
+| 4 | R3: narrow SECURITY DEFINER function, no platform-wide RLS policy, no player id | 4 (R3) |
+| 5 | R1: `payment_force_resolve:read` alone; no reference text, player id or destination; platform_acting reads audited | 4 (R1), 5 |
+| 6 | R6: `WithPlatformAdmin` branch only; tenant isolation test; `proposer_id` blank across scopes | 4 (R6), 7.8 |
+| 7 | R4: staff:manage OR capability_grant:request; path tenant only; platform staff excluded in SQL; paginated; closed role filter | 4 (R4) |
+| 8 | `sportsbook_reconciliation:read` exactly TA, CO, FI; absence test for PA, SU, RM, PM, BX | 5, 7.7 |
+| 9 | R2: 400 on unknown input, `other` output only, no player identity in `subject_ref`, permission before query | 4 (R2), 7.1 |
+| 10 | Sequencing: S6-S9 depend on S0; no action screen before H1 tests pass | 6 |
+| 11 | Generated section 3 vs `rolePermissions` test | 7.7 |
+| 12 | Client never hides a refusal; code map for every 403/409; no gating on `permissions.ts` alone | 1.1, 7.9 |
