@@ -142,6 +142,21 @@ func TestBrandGate_Sportsbook_Matrix(t *testing.T) {
 			sib := seedSiblingBrandSB(t, owner, f)
 			fundWallet(t, owner, sib, funded)
 
+			// ADR 0112 slice-3 review (security C1): the database refuses to CLOSE a brand while one of
+			// its bets is open (LA024; brand_closure_backstop_integration_test.go). A closed brand
+			// therefore has no open bets: bets A (void) and B (settlement) are resolved BEFORE the
+			// closure, and the steps below that act on a still-open bet apply to the non-closed
+			// statuses only. Replay (2) and the void after settlement (3, bet C) apply to all.
+			closing := status == "closed"
+			if closing {
+				if r, err := simulateSettlement(t, owner, f.tenantID, voidEvent(openBet, actor, "market_cancelled")); err != nil || r.Rejected() {
+					t.Fatalf("resolve bet A before the closure: %+v err=%v", r, err)
+				}
+				if r, err := simulateSettlement(t, owner, f.tenantID, settleEvent(b.Bet.ID, actor, 1, SettlementOutcomeWon, stdPayout)); err != nil || r.Rejected() {
+					t.Fatalf("resolve bet B before the closure: %+v err=%v", r, err)
+				}
+			}
+
 			setBrandStatusSB(t, owner, f, status)
 			txs0, entries0 := ledgerCounts(t, owner, f.tenantID)
 			cash0 := cashBalance(t, owner, f)
@@ -171,9 +186,11 @@ func TestBrandGate_Sportsbook_Matrix(t *testing.T) {
 			}
 
 			// 3. Terminal stake returns stay allowed (Q-GP-5 analogue).
-			vres, err := simulateSettlement(t, rt, f.tenantID, voidEvent(openBet, actor, "market_cancelled"))
-			if err != nil || vres.Rejected() || vres.Result != SettlementResultApplied || vres.BetStatus != BetStatusVoid {
-				t.Fatalf("a void of an open bet must apply on a %s brand: %+v err=%v", status, vres, err)
+			if !closing {
+				vres, err := simulateSettlement(t, rt, f.tenantID, voidEvent(openBet, actor, "market_cancelled"))
+				if err != nil || vres.Rejected() || vres.Result != SettlementResultApplied || vres.BetStatus != BetStatusVoid {
+					t.Fatalf("a void of an open bet must apply on a %s brand: %+v err=%v", status, vres, err)
+				}
 			}
 			vas, err := simulateSettlement(t, rt, f.tenantID, voidEvent(c.Bet.ID, actor, "data_error"))
 			if err != nil || vas.Rejected() || vas.Result != SettlementResultApplied || len(vas.LedgerTransactionIDs) != 2 {
@@ -182,9 +199,11 @@ func TestBrandGate_Sportsbook_Matrix(t *testing.T) {
 
 			// 4. Settlement (with payout) of a bet the brand already accepted is not
 			//    brand-gated (the tenant is active).
-			sres, err := simulateSettlement(t, rt, f.tenantID, settleEvent(b.Bet.ID, actor, 1, SettlementOutcomeWon, stdPayout))
-			if err != nil || sres.Rejected() || sres.Result != SettlementResultApplied {
-				t.Fatalf("settlement of an accepted bet must apply on a %s brand: %+v err=%v", status, sres, err)
+			if !closing {
+				sres, err := simulateSettlement(t, rt, f.tenantID, settleEvent(b.Bet.ID, actor, 1, SettlementOutcomeWon, stdPayout))
+				if err != nil || sres.Rejected() || sres.Result != SettlementResultApplied {
+					t.Fatalf("settlement of an accepted bet must apply on a %s brand: %+v err=%v", status, sres, err)
+				}
 			}
 
 			// 5. A sibling brand of the same tenant is unaffected.

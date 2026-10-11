@@ -457,6 +457,24 @@ func IsClosedTerminalRefusal(err error) bool {
 // internal/tenant/no_trigger_disable_test.go.
 func ForcePending(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.UUID, brandID *uuid.UUID) error {
 	tb.Helper()
+	return forceStatus(ctx, tb, p, tenantID, brandID, "pending_launch")
+}
+
+// ForceClosed puts an existing tenant (brandID nil) or brand into closed WITHOUT the governed
+// sequence and WITHOUT the closure backstop (LA023 hold-bearing withdrawals, LA024 brand open
+// bets, ADR 0112 slice-3 review). It reproduces a subject that was closed BEFORE migration 0130
+// and still holds funds: the very population the hold-resolution machinery (ADR 0111) and the
+// closed-tenant observation suites exist for, and which the backstop makes unreachable through
+// any governed path. Use TrySetTenantStatus / TrySetBrandStatus to test the governed closure and
+// its refusals. Same mechanism and the same sanctioned integration-tag-only exception as
+// ForcePending (internal/tenant/no_trigger_disable_test.go).
+func ForceClosed(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.UUID, brandID *uuid.UUID) error {
+	tb.Helper()
+	return forceStatus(ctx, tb, p, tenantID, brandID, "closed")
+}
+
+func forceStatus(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.UUID, brandID *uuid.UUID, to string) error {
+	tb.Helper()
 	return runOn(ctx, OwnerFor(tb, p), func(tx pgx.Tx) error {
 		if err := ensureOperators(ctx, tx); err != nil {
 			return err
@@ -472,14 +490,14 @@ func ForcePending(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.
 			return err
 		}
 		if brandID == nil {
-			if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'pending_launch' WHERE id = $1`, tenantID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE tenants SET status = $2 WHERE id = $1`, tenantID, to); err != nil {
 				return err
 			}
 		} else {
 			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `UPDATE brands SET status = 'pending_launch' WHERE id = $1`, *brandID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE brands SET status = $2 WHERE id = $1`, *brandID, to); err != nil {
 				return err
 			}
 		}

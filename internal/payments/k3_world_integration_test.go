@@ -342,6 +342,14 @@ func (w *k3World) approvePolicy(in adjustment.PolicyChangeInput, requester, appr
 
 func (w *k3World) setTenantStatus(status string) {
 	w.t.Helper()
+	if status == "closed" {
+		// See setTenantStatus (sweeper_loop_helpers_integration_test.go): a tenant closed before the
+		// LA023 backstop that still holds funds is the subject of these suites.
+		if err := launchfix.ForceClosed(context.Background(), w.t, w.pool, w.f.tenantID, nil); err != nil {
+			w.t.Fatalf("force tenant closed: %v", err)
+		}
+		return
+	}
 	if err := launchfix.TrySetTenantStatusOn(context.Background(), w.t, w.pool, w.f.tenantID, status); err != nil {
 		w.t.Fatalf("set tenant status %s: %v", status, err)
 	}

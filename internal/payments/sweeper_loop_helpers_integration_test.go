@@ -151,6 +151,16 @@ func setTenantStatus(t *testing.T, pool *db.Pool, tenantID uuid.UUID, status str
 		}
 		return
 	}
+	if status == "closed" {
+		// ADR 0112 slice-3 review (security C1): the database refuses to CLOSE a tenant that has a
+		// hold-bearing withdrawal (LA023). These suites exercise the subject that was closed BEFORE
+		// that backstop (migration 0130) and still holds funds, which no governed path reaches any
+		// more: ForceClosed reproduces it (sanctioned integration-only exception).
+		if err := launchfix.ForceClosed(context.Background(), t, pool, tenantID, nil); err != nil {
+			t.Fatalf("force tenant closed: %v", err)
+		}
+		return
+	}
 	if err := launchfix.TrySetTenantStatusOn(context.Background(), t, pool, tenantID, status); err != nil {
 		t.Fatalf("set tenant status %s: %v", status, err)
 	}

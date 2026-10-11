@@ -53,6 +53,13 @@ func setBrandStatus(t *testing.T, pool *db.Pool, tenantID, brandID uuid.UUID, st
 		}
 		return
 	}
+	if status == "closed" {
+		// See setTenantStatus: a brand closed before the LA023 / LA024 backstop that still holds funds.
+		if err := launchfix.ForceClosed(context.Background(), t, pool, tenantID, &brandID); err != nil {
+			t.Fatalf("force brand closed: %v", err)
+		}
+		return
+	}
 	if err := launchfix.TrySetBrandStatusOn(context.Background(), t, pool, tenantID, brandID, status); err != nil {
 		t.Fatalf("set brand status %s: %v", status, err)
 	}
