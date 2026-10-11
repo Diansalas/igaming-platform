@@ -95,6 +95,12 @@ export interface NavPermissions {
    */
   alertRouting: boolean
   /**
+   * ADR 0114 S1: PermAlertManage - list, acknowledge and resolve platform alerts and read routing
+   * status. platform_admin ONLY (internal/auth/permission.go). UI convenience only; the server
+   * re-checks every call and requires a platform-scope token.
+   */
+  alertManage: boolean
+  /**
    * ADR 0112 (section 6.1): the static launch_authorisation:* governance permissions. UI
    * convenience only - the server re-checks every call (and enforces tenant scope: tenant
    * subjects are platform-only, a tenant role may act on its own tenant's BRANDS only).
@@ -136,6 +142,7 @@ const NONE: NavPermissions = {
   payoutInstruments: false,
   payoutInstrumentSuspend: false,
   alertRouting: false,
+  alertManage: false,
   launchRead: false,
   launchRequest: false,
   launchApprove: false,
@@ -182,6 +189,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     withdrawalHoldResolutionAct: true,
     payoutInstruments: true,
     alertRouting: true,
+    alertManage: true,
     launchRead: true,
     launchRequest: true,
     launchApprove: true,
