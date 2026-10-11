@@ -283,17 +283,6 @@ func readInternalSources(t *testing.T) map[string]string {
 	return out
 }
 
-func readPackageSources(t *testing.T) map[string]string {
-	t.Helper()
-	out := map[string]string{}
-	for p, s := range readInternalSources(t) {
-		if filepath.Dir(p) == filepath.Join("..", "httpserver") {
-			out[filepath.Base(p)] = s
-		}
-	}
-	return out
-}
-
 func TestStaffIdentity_StaticPin_EveryStaffIDFieldGoesThroughTheHelper(t *testing.T) {
 	res := scanStaffIDSources(t, readInternalSources(t))
 	for _, f := range res.Findings {
