@@ -1440,7 +1440,10 @@ func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testi
 		line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
 		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
 		pid := w.provider
-		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+		// ADR 0113 slice 1 (WD043): a withdrawal_completed with no player_withdrawal_hold leg is
+		// now refused at commit, so this unlinked shape can no longer be posted (and migration 0132's
+		// pre-flight refuses it in history). The finding must still stand after the refusal.
+		err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			cash, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerCash, "EUR")
 			if err != nil {
 				return err
@@ -1459,6 +1462,9 @@ func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testi
 			})
 			return err
 		})
+		if k3Code(err) != "WD043" {
+			t.Fatalf("an unlinked withdrawal_completed (no hold leg): want WD043, got %v", err)
+		}
 		w.assertInvariants()
 		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "unlinked completion, standing")
 		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "unlinked completion, in-run")
