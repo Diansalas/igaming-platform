@@ -665,6 +665,14 @@ authorisation).** Migration 0130, `internal/launchgov`, the ADR 0110 proof exten
 READY, security APPROVE WITH CONDITIONS; `IMPLEMENTED` against the local database, re-review required).**
 - **Closure backstop (security C1, LF cond. 2).** `LA023` / `LA024` in `launch_subject_status_guard`, see 5.2. The ledger-side
   arm (non-zero `player_withdrawal_hold` balance) is `NOT IMPLEMENTED` (residual, invariant 12).
+- **Consequence for existing suites (found by the full evidence run).** A closed subject that still holds hold-bearing
+  withdrawals (or, for a brand, open bets) can no longer be produced by any governed path. About a dozen payments tests
+  (ADR 0111 hold resolution, K3 closed-tenant actor scope, R3 closed-tenant observation, H-SEC-11) and the slice-2
+  sportsbook brand-gate matrix built exactly that state. They now use `launchfix.ForceClosed`, which reproduces a subject
+  closed BEFORE migration 0130 (the population hold resolution exists for; same sanctioned integration-only trigger
+  exception as `ForcePending`), and the two httpserver withdrawal tests and the sportsbook matrix assert the new
+  refusal (`LA023` / resolve the bets first) instead. The hold-resolution machinery itself is unchanged and still serves
+  suspended subjects and any subject closed before 0130.
 - **R-PLAYER-FUNDS (B).** Per-asset decimal-string sums, the stranded-until-HD-CTF-4 acknowledgement text and the omission
   notice (in-flight deposits and open casino rounds, Q-GP-6), see 5.1.
 - **Suspension race (CR1).** A request inserted by a concurrent transaction between a suspension's pending-request read and its
