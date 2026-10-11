@@ -476,3 +476,20 @@ func forceClosed(t *testing.T, w *lhWorld, tenantID uuid.UUID, brandID *uuid.UUI
 		t.Fatalf("force closed: %v", err)
 	}
 }
+
+// extraPlatformStaff seeds one more platform admin with its own Person.
+func (w *lhWorld) extraPlatformStaff() uuid.UUID {
+	w.t.Helper()
+	id, person := uuid.New(), uuid.New()
+	if err := w.owner.WithPlatformAdmin(context.Background(), w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id)
+			VALUES ($1, NULL, $2, '!lh-not-a-login', 'platform_admin', $3)`, id, "lh-extra-"+id.String()+"@fixture.invalid", person)
+		return err
+	}); err != nil {
+		w.t.Fatalf("seed platform staff: %v", err)
+	}
+	return id
+}
