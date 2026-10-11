@@ -313,14 +313,16 @@ func TestHSEC_HoldRelease_VerifierOperationTable_ScopeRestricted(t *testing.T) {
 }
 
 // The catalog pin: zz_actor_proof_guard is the LAST BEFORE ROW trigger on every one of
-// the ELEVEN governed tables (nine + the two hold-resolution tables).
-func TestHSEC_HoldRelease_ActorProofTriggerOnElevenTables_Last(t *testing.T) {
+// the THIRTEEN governed tables (nine + the two hold-resolution tables + the two launch
+// authorisation tables of ADR 0112 slice 3, migration 0130).
+func TestHSEC_HoldRelease_ActorProofTriggerOnGovernedTables_Last(t *testing.T) {
 	h := newHSR(t, 1)
 	tables := []string{
 		"ledger_adjustment_requests", "ledger_adjustment_approvals", "payment_manual_resolutions", "payment_manual_resolution_approvals",
 		"staff_capability_grant_requests", "staff_capability_grant_approvals", "staff_capability_grants",
 		"financial_approval_policy_changes", "financial_approval_policy_change_approvals",
 		"withdrawal_hold_resolutions", "withdrawal_hold_resolution_approvals",
+		"launch_authorisation_requests", "launch_authorisation_approvals",
 	}
 	var total int
 	if err := h.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
@@ -351,8 +353,8 @@ func TestHSEC_HoldRelease_ActorProofTriggerOnElevenTables_Last(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if total != 11 {
-		t.Fatalf("zz_actor_proof_guard is on %d tables, want 11", total)
+	if total != 13 {
+		t.Fatalf("zz_actor_proof_guard is on %d tables, want 13", total)
 	}
 }
 
