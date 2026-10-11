@@ -147,7 +147,7 @@ func newCreateTenantHandler(deps Deps) http.HandlerFunc {
 
 // tenantListRow and brandListRow are the list rows: the plain resource plus launch_kind, the kind
 // of the newest status transition (governed | legacy_baseline | owner_provisioned), or null when
-// there is none or the caller may not read launch history. ADR 0112 slice 6 (e): lets the Back
+// there is none, the caller lacks launch read, or the lookup failed (logged; the list is never failed by it). ADR 0112 slice 6 (e): lets the Back
 // Office mark legacy-baseline subjects in a list without one history call per row.
 type tenantListRow struct {
 	tenantResponse
@@ -207,8 +207,7 @@ func newListTenantsHandler(deps Deps) http.HandlerFunc {
 			kinds, kerr := deps.LaunchAuthorisation.LatestTenantKinds(r.Context(), actor, ids)
 			if kerr != nil && !errors.Is(kerr, launchgov.ErrForbidden) {
 				logger.Error("list_tenants_launch_kind_failed", "error", kerr)
-				apierror.Write(w, requestID, apierror.CodeInternal, "failed to list tenants")
-				return
+				kinds = nil // decorative column: log and render null, never fail the list
 			}
 			for i := range resp {
 				if id, perr := uuid.Parse(resp[i].ID); perr == nil {
@@ -395,8 +394,7 @@ func newListBrandsHandler(deps Deps) http.HandlerFunc {
 			kinds, kerr := deps.LaunchAuthorisation.LatestBrandKinds(r.Context(), actor, targetTenantID, ids)
 			if kerr != nil && !errors.Is(kerr, launchgov.ErrForbidden) {
 				logger.Error("list_brands_launch_kind_failed", "error", kerr)
-				apierror.Write(w, requestID, apierror.CodeInternal, "failed to list brands")
-				return
+				kinds = nil // decorative column: log and render null, never fail the list
 			}
 			for i := range resp {
 				if id, perr := uuid.Parse(resp[i].ID); perr == nil {

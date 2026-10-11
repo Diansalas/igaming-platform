@@ -18,9 +18,12 @@ import (
 // (LA012 and friends) stays authoritative, so a stale or wrong answer here can only mis-label a
 // button, never permit a decision.
 //
-// A reason is a code only. It never names or hints at another staff member: "self_approval" and
-// "same_person" describe the CALLER's own accounts, "already_decided" the caller's own Person, and
-// "prior_reject_requires_change_note" the caller's own earlier reject.
+// A reason is a code only. It never names another staff member or carries an id. Four of them
+// describe the CALLER's own accounts ("self_approval", "same_person", "already_decided",
+// "prior_reject_requires_change_note"). "no_person" is the one accepted disclosure: it does not say
+// WHOSE account is unlinked, so a platform approver who has a Person link learns that the
+// requester has none (ADR 0112 slice 6, reviewed; audience = platform approvers only, since tenant
+// callers always get "not_platform_approver").
 const (
 	CannotNotPlatformApprover = "not_platform_approver"
 	CannotNotPending          = "not_pending"

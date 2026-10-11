@@ -77,7 +77,17 @@ func TestQueuePage_KeysetTupleSemantics_AndAuthorization(t *testing.T) {
 	if has(after, full.Items[0].ID) && full.Items[0].CreatedAt.After(k.CreatedAt) {
 		t.Error("a newer row must not reappear after the cursor")
 	}
-	// limit: default 50, cap 200, next cursor iff more rows exist.
+	// limit: default 50 (limit 0), cap 200, next cursor iff more rows exist.
+	def, err := w.svc.ListRequestsAcrossTenants(ctx, w.ap1, nil, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := min(len(full.Items), launchgov.QueueDefaultLimit); len(def.Items) != want {
+		t.Fatalf("default limit: %d rows, want %d", len(def.Items), want)
+	}
+	if (len(full.Items) > launchgov.QueueDefaultLimit) != (def.Next != nil) {
+		t.Fatalf("default limit next cursor mismatch")
+	}
 	one, err := w.svc.ListRequestsAcrossTenants(ctx, w.ap1, nil, 1, nil)
 	if err != nil || len(one.Items) != 1 || one.Next == nil || one.Next.ID != one.Items[0].ID {
 		t.Fatalf("limit 1: %+v %v", one, err)

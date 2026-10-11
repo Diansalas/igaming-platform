@@ -7,6 +7,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 )
@@ -278,10 +280,20 @@ func TestLaunchHTTP6_CanApprove_PerCaller_MirrorsDecide(t *testing.T) {
 			t.Fatalf("a read must carry can_approve: %s", r.body)
 		}
 		// The queue row says the same as the detail.
-		_, q := w.s6Queue(tok, "?limit=200")
-		for _, row := range q.Items {
-			if row.ID == id && (row.CanApprove == nil || *row.CanApprove != *it.Request.CanApprove || row.Reason != it.Request.Reason) {
-				t.Fatalf("queue row %+v disagrees with detail %+v", row, it.Request)
+		qr, q := w.s6Queue(tok, "?limit=200")
+		if qr.status != http.StatusForbidden { // tenant callers have no queue
+			found := false
+			for _, row := range q.Items {
+				if row.ID != id {
+					continue
+				}
+				found = true
+				if row.CanApprove == nil || *row.CanApprove != *it.Request.CanApprove || row.Reason != it.Request.Reason {
+					t.Fatalf("queue row %+v disagrees with detail %+v", row, it.Request)
+				}
+			}
+			if !found {
+				t.Fatalf("request %s missing from the newest 200 queue rows (status %d): the agreement check must not be skipped", id, qr.status)
 			}
 		}
 		return *it.Request.CanApprove, it.Request.Reason
@@ -632,5 +644,45 @@ func TestLaunchHTTP6_ListRows_LaunchKind(t *testing.T) {
 	// Detail responses are unchanged in shape (no launch_kind).
 	if d := w.do("GET", "/v1/admin/tenants/"+a.String(), w.tokAp1(), nil); strings.Contains(string(d.body), "launch_kind") {
 		t.Errorf("tenant detail must not carry launch_kind: %s", d.body)
+	}
+}
+
+type s6FailPool struct{}
+
+func (s6FailPool) WithPlatformAdmin(context.Context, uuid.UUID, db.TxFunc) error {
+	return errors.New("injected lookup failure")
+}
+func (s6FailPool) WithPrincipalScope(context.Context, uuid.UUID, uuid.UUID, db.TxFunc) error {
+	return errors.New("injected lookup failure")
+}
+func (s6FailPool) WithTenantReadOnly(context.Context, uuid.UUID, db.TxFunc) error {
+	return errors.New("injected lookup failure")
+}
+
+// A launch_kind lookup failure must not fail the list: the rows come back with launch_kind null.
+func TestLaunchHTTP6_ListRows_LaunchKindLookupFailure_RendersNull(t *testing.T) {
+	w := newLHWorld(t)
+	a := w.activeTenant()
+	b := w.activeBrand(a) // would be owner_provisioned if the lookup worked
+	failing, err := launchgov.New(launchgov.Config{Pool: s6FailPool{}, Environment: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.serve(failing)
+	ta := w.staff(a, identity.StaffRoleTenantAdmin)
+	for name, tc := range map[string]struct{ path, tok string }{
+		"brands":  {"/v1/admin/tenants/" + a.String() + "/brands", w.tenantTok(a, ta, auth.RoleTenantAdmin)},
+		"tenants": {"/v1/admin/tenants?limit=200", w.tokAp1()},
+	} {
+		r := w.do("GET", tc.path, tc.tok, nil)
+		if r.status != http.StatusOK {
+			t.Fatalf("%s list must survive a launch_kind failure: %d %s", name, r.status, r.body)
+		}
+		if strings.Contains(string(r.body), `"launch_kind":"`) {
+			t.Errorf("%s: launch_kind must be null on a failed lookup: %s", name, r.body)
+		}
+	}
+	if r := w.do("GET", "/v1/admin/tenants/"+a.String()+"/brands", w.tenantTok(a, ta, auth.RoleTenantAdmin), nil); !strings.Contains(string(r.body), b.String()) {
+		t.Errorf("the brand must still be listed: %s", r.body)
 	}
 }

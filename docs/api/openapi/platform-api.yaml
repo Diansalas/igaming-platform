@@ -6657,8 +6657,10 @@ paths:
       description: >
         launch_authorisation:read, platform-scoped staff principals only (a tenant-scoped caller is refused 403). Requests across every tenant for the approval queue,
         ordered by (created_at, id) DESCENDING with a keyset cursor: `next_cursor` of a page is passed back as `cursor` for the next page and is null on the last page.
-        Paging is stable under concurrent inserts (a new request sorts before the first page, so it never shifts, duplicates or drops a row of a later page). `limit` is 1..200,
-        default 50; a malformed `cursor` or an out-of-range `limit` is 400. Each row carries `tenant_name` and `brand_name` (display only) and, for THE CALLER,
+        A request inserted while a walk is in progress sorts before the first page, so it does not shift or duplicate a row of a later page. Residual: `created_at` is the database
+        transaction start time, so a transaction that stays open across a page boundary and commits later with an older `created_at` than the cursor can be missed by a walk
+        already past it; re-read the queue from the first page for a complete view. `limit` is 1..200, default 50 (before 2026-10-11 the queue accepted up to 500: 201..500 is now 400);
+        a malformed `cursor` or an out-of-range `limit` is 400. Each row carries `tenant_name` and `brand_name` (display only) and, for THE CALLER,
         `can_approve` and a `cannot_approve_reason` from a closed catalogue; the reason is a code, never the name of another staff member. The answer is advisory: the
         decision routes and the database (LA012) remain authoritative.
       security:
@@ -7574,6 +7576,7 @@ components:
             List rows only (GET /v1/admin/tenants): the kind of the newest status transition,
             `governed`, `legacy_baseline` or `owner_provisioned`; null when there is none.
             `legacy_baseline` marks a subject that was active before launch governance and awaits ratification.
+            Null is also returned when the caller lacks launch read or the lookup failed.
       required: [id, name, slug, licensing_model, status]
     Brand:
       type: object
@@ -7594,8 +7597,8 @@ components:
           nullable: true
           description: >
             List rows only (GET /v1/admin/tenants/{tenantID}/brands): the kind of the newest status
-            transition, `governed`, `legacy_baseline` or `owner_provisioned`; null when there is none
-            or the caller may not read launch history.
+            transition, `governed`, `legacy_baseline` or `owner_provisioned`; null when there is none,
+            the caller lacks launch read, or the lookup failed (logged server-side; the list never fails because of it).
       required: [id, tenant_id, name, slug, status]
     StaffUser:
       type: object
