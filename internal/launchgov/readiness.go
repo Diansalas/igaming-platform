@@ -54,7 +54,24 @@ type Readiness struct {
 	Checks      []Check   `json:"checks"`
 
 	Info map[string]int64 `json:"-"`
+	// Balances is the per-asset sum of the subject's players' wallet-account balances
+	// (credit_total - debit_total over the wallet-bound projection rows), as DECIMAL STRINGS:
+	// NUMERIC(38,0) sums never pass through int64 or float (an 18-exponent asset overflows
+	// both). Live display data like Info: not hashed, not persisted.
+	Balances map[string]string `json:"-"`
+	// Notices are the fixed texts an approver must read for this evaluation (closed set below).
+	Notices []string `json:"-"`
 }
+
+// Notice texts of the funds check (ADR 0112 R-PLAYER-FUNDS; ledger-finance condition). They are
+// constants, never built from data.
+const (
+	// NoticeFundsStranded is shown with every funds position and is the substance of the
+	// acknowledgement of R-PLAYER-FUNDS: closure is terminal and no unclaimed-funds process exists.
+	NoticeFundsStranded = "Closing with non-zero player balances strands those balances: closure is terminal and the unclaimed-funds / dormant-balance policy is OPEN (HD-CTF-4), so the funds stay in the ledger with no process to return them. Acknowledging R-PLAYER-FUNDS acknowledges this."
+	// NoticeFundsOmissions states what the check cannot see.
+	NoticeFundsOmissions = "R-PLAYER-FUNDS does not cover in-flight deposits or open casino rounds (Q-GP-6: a casino round has no representable open state); only wallet balances, open sportsbook bets and hold-bearing withdrawals are counted."
+)
 
 // Hash is the SHA-256 of the canonical snapshot over version, environment and the checks sorted
 // by code. computed_at is NOT hashed: two evaluations of the same state hash identically, so the
@@ -356,7 +373,7 @@ func (s *Service) providerTierCheck() Check {
 // alert channel vocabulary of the code (ALERT-DELIVERY-1): today no channel kind is known to
 // notify a person, so this is always fail.
 func alertsCheck() Check {
-	for _, k := range []alerting.ChannelKind{alerting.ChannelLog, alerting.ChannelMock} {
+	for _, k := range alerting.AllChannelKinds() {
 		if alerting.KnownHumanChannelKind(k) {
 			return ck(CheckAlerts, ResultPass, "ok")
 		}
@@ -387,12 +404,39 @@ func fundsCheck(ctx context.Context, tx pgx.Tx, sub Subject, r *Readiness) Check
 	if err != nil {
 		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
 	}
+	rows, err := tx.Query(ctx, `
+		SELECT p.asset_code, SUM(p.credit_total - p.debit_total)::text
+		  FROM wallet_balance_projection p
+		  JOIN player_accounts pa ON pa.id = p.player_account_id AND pa.tenant_id = p.tenant_id
+		 WHERE p.tenant_id = $1 AND p.wallet_id IS NOT NULL AND ($2::uuid IS NULL OR pa.brand_id = $2)
+		 GROUP BY p.asset_code
+		HAVING SUM(p.credit_total - p.debit_total) <> 0
+		 ORDER BY p.asset_code`, sub.TenantID, brand)
+	if err != nil {
+		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
+	}
+	balances := map[string]string{}
+	for rows.Next() {
+		var asset, sum string
+		if err := rows.Scan(&asset, &sum); err != nil {
+			rows.Close()
+			return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
+		}
+		balances[asset] = sum
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
+	}
 	r.Info["players_with_non_zero_balance"] = players
 	r.Info["open_sportsbook_bets"] = bets
 	r.Info["hold_bearing_withdrawals"] = holds
-	if players == 0 && bets == 0 && holds == 0 {
+	r.Balances = balances
+	r.Notices = append(r.Notices, NoticeFundsOmissions)
+	if players == 0 && bets == 0 && holds == 0 && len(balances) == 0 {
 		return ck(CheckPlayerFunds, ResultPass, "ok")
 	}
+	r.Notices = append(r.Notices, NoticeFundsStranded)
 	return ck(CheckPlayerFunds, ResultFail, "funds_or_open_positions_present")
 }
 
