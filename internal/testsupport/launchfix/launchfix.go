@@ -513,7 +513,13 @@ func TrySetBrandStatusHoldingOn(ctx context.Context, tb testing.TB, p *db.Pool, 
 }
 
 func runOn(ctx context.Context, owner *db.Pool, fn func(pgx.Tx) error) error {
-	if _, err := prooftest.EnsureKey(ctx, owner.Raw()); err != nil {
+	// Provision the process signing key in its own committed transaction (idempotent), before the
+	// governed sequence opens its own: a key insert inside a long-lived sequence would block a
+	// concurrent sequence behind the uncommitted row.
+	if err := owner.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := prooftest.EnsureKey(ctx, tx)
+		return err
+	}); err != nil {
 		return fmt.Errorf("launchfix: provision the process actor-proof key: %w", err)
 	}
 	// WithoutTenant opens a plain transaction (no GUC); flip sets every setting it needs itself,

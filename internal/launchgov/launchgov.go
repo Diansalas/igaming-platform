@@ -17,6 +17,15 @@
 // gives no legal advice: readiness checks prove configuration presence only; licensing is
 // recorded, never judged ("no licence" never blocks by itself; four recorded bases exist).
 //
+// Policies decided in slice 3 (ADR 0112 section 13): a recorded reject carries over to a later
+// request with the identical subject, action and payload hash within RequestTTL (migration 0130,
+// LA014 / ErrPriorReject; any change of content is a different request); a tenant's own-brand
+// suspension supersedes the pending requests of that brand and records each superseded request
+// id in the audit trail; approvals older than Config.ApprovalMaxAge, or decided on a readiness
+// whose hash is no longer current, are refused at execution (refused_at_execution, durable);
+// operator-fixable refusals (GP020 open bets, LA023 hold-bearing withdrawals, a lock timeout)
+// roll the execution back as a unit and leave the request pending.
+//
 // Status of the implementation (CLAUDE.md labels): the service, readiness evaluator, executor
 // and audit are IMPLEMENTED against the local database; no HTTP route or console exists yet
 // (ADR 0112 slices 4-5), so nothing here is reachable by an operator. The readiness checks
