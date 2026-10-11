@@ -438,8 +438,8 @@ func TestReinstatePlayerAPI_HappyPathAndAuditRow(t *testing.T) {
 	if !found {
 		t.Fatalf("expected a player.reinstated audit_log entry for %s", playerID)
 	}
-	if entry.ActorID != admin.ID.String() {
-		t.Errorf("expected actor %s, got %s", admin.ID, entry.ActorID)
+	if entry.ActorID.String() != admin.ID.String() {
+		t.Errorf("expected actor %s, got %s", admin.ID, entry.ActorID.String())
 	}
 	if entry.Outcome != "success" {
 		t.Errorf("expected outcome success, got %q", entry.Outcome)

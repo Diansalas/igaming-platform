@@ -198,31 +198,32 @@ type requestHoldResolutionBody struct {
 }
 
 type holdResolutionDTO struct {
-	ID                  string  `json:"id"`
-	TenantID            string  `json:"tenant_id"`
-	WithdrawalRequestID string  `json:"withdrawal_request_id"`
-	Kind                string  `json:"kind"`
-	AmountMinorUnits    string  `json:"amount_minor_units"`
-	AssetCode           string  `json:"asset_code"`
-	ReasonCode          string  `json:"reason_code"`
-	EvidenceRefHash     string  `json:"evidence_ref_hash"`
-	PayloadHash         string  `json:"payload_hash"`
-	RequestedBy         string  `json:"requested_by"`
-	RequiredAtSubmit    int     `json:"required_at_submission"`
-	TenantStatusSubmit  string  `json:"tenant_status_at_submission"`
-	BrandStatusSubmit   string  `json:"brand_status_at_submission"`
-	State               string  `json:"state"`
-	RefusalCode         *string `json:"refusal_code,omitempty"`
-	LedgerTransactionID *string `json:"ledger_transaction_id,omitempty"`
-	CreatedAt           string  `json:"created_at"`
-	ExpiresAt           string  `json:"expires_at"`
+	ID                  string   `json:"id"`
+	TenantID            string   `json:"tenant_id"`
+	WithdrawalRequestID string   `json:"withdrawal_request_id"`
+	Kind                string   `json:"kind"`
+	AmountMinorUnits    string   `json:"amount_minor_units"`
+	AssetCode           string   `json:"asset_code"`
+	ReasonCode          string   `json:"reason_code"`
+	EvidenceRefHash     string   `json:"evidence_ref_hash"`
+	PayloadHash         string   `json:"payload_hash"`
+	RequestedBy         staffRef `json:"requested_by"` // null for a non-platform caller when the requester is platform staff (ADR 0114 H1)
+	RequestedByScope    string   `json:"requested_by_scope"`
+	RequiredAtSubmit    int      `json:"required_at_submission"`
+	TenantStatusSubmit  string   `json:"tenant_status_at_submission"`
+	BrandStatusSubmit   string   `json:"brand_status_at_submission"`
+	State               string   `json:"state"`
+	RefusalCode         *string  `json:"refusal_code,omitempty"`
+	LedgerTransactionID *string  `json:"ledger_transaction_id,omitempty"`
+	CreatedAt           string   `json:"created_at"`
+	ExpiresAt           string   `json:"expires_at"`
 }
 
-func toHoldResolutionDTO(r payments.HoldResolution) holdResolutionDTO {
+func toHoldResolutionDTO(v staffViewer, r payments.HoldResolution) holdResolutionDTO {
 	dto := holdResolutionDTO{
 		ID: r.ID.String(), TenantID: r.TenantID.String(), WithdrawalRequestID: r.WithdrawalRequestID.String(), Kind: string(r.Kind),
 		AmountMinorUnits: strconv.FormatInt(r.Amount, 10), AssetCode: r.AssetCode, ReasonCode: r.ReasonCode,
-		EvidenceRefHash: r.EvidenceRefHash, PayloadHash: r.PayloadHash, RequestedBy: r.RequestedBy.String(),
+		EvidenceRefHash: r.EvidenceRefHash, PayloadHash: r.PayloadHash, RequestedBy: v.ref(r.RequestedByScope, r.RequestedBy), RequestedByScope: r.RequestedByScope,
 		RequiredAtSubmit: r.RequiredAtSubmission, TenantStatusSubmit: r.TenantStatusAtSubmission, BrandStatusSubmit: r.BrandStatusAtSubmission,
 		State: string(r.State), RefusalCode: r.RefusalCode,
 		CreatedAt: r.CreatedAt.Format(time.RFC3339), ExpiresAt: r.ExpiresAt.Format(time.RFC3339),
@@ -264,7 +265,7 @@ func newRequestHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldReso
 			writeHoldResolutionError(r.Context(), deps, w, c, "request", err, "", wrID.String())
 			return
 		}
-		writeJSON(w, http.StatusCreated, toHoldResolutionDTO(res))
+		writeJSON(w, http.StatusCreated, toHoldResolutionDTO(staffViewerOf(c.tc), res))
 	}
 }
 
@@ -285,7 +286,7 @@ func newListHoldResolutionsHandler(deps Deps, svc *payments.WithdrawalHoldResolu
 		}
 		out := make([]holdResolutionDTO, 0, len(rs))
 		for _, x := range rs {
-			out = append(out, toHoldResolutionDTO(x))
+			out = append(out, toHoldResolutionDTO(staffViewerOf(c.tc), x))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
@@ -311,7 +312,7 @@ func newGetHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldResoluti
 			writeHoldResolutionError(r.Context(), deps, w, c, "get", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toHoldResolutionDTO(res))
+		writeJSON(w, http.StatusOK, toHoldResolutionDTO(staffViewerOf(c.tc), res))
 	}
 }
 
@@ -355,7 +356,7 @@ func newDecideHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldResol
 			writeHoldResolutionError(r.Context(), deps, w, c, op, err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, holdResolutionDecisionResponse{Resolution: toHoldResolutionDTO(out.Resolution), Executed: out.Executed,
+		writeJSON(w, http.StatusOK, holdResolutionDecisionResponse{Resolution: toHoldResolutionDTO(staffViewerOf(c.tc), out.Resolution), Executed: out.Executed,
 			Refused: out.Refused, Counted: out.Counted, Required: out.Required})
 	}
 }
@@ -380,6 +381,6 @@ func newCancelHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldResol
 			writeHoldResolutionError(r.Context(), deps, w, c, "cancel", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toHoldResolutionDTO(res))
+		writeJSON(w, http.StatusOK, toHoldResolutionDTO(staffViewerOf(c.tc), res))
 	}
 }

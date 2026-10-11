@@ -1187,14 +1187,14 @@ func newClearIdentityReviewHandler(deps Deps) http.HandlerFunc {
 // --- Audit trail (read-only) ---
 
 type auditEntryResponse struct {
-	ID         string `json:"id"`
-	ActorType  string `json:"actor_type"`
-	ActorID    string `json:"actor_id,omitempty"`
-	Action     string `json:"action"`
-	TargetType string `json:"target_type,omitempty"`
-	TargetID   string `json:"target_id,omitempty"`
-	Outcome    string `json:"outcome"`
-	CreatedAt  string `json:"created_at"`
+	ID         string    `json:"id"`
+	ActorType  string    `json:"actor_type"`
+	ActorID    *staffRef `json:"actor_id,omitempty"` // null for a tenant caller when the actor is not staff of its own tenant (ADR 0114 H1)
+	Action     string    `json:"action"`
+	TargetType string    `json:"target_type,omitempty"`
+	TargetID   string    `json:"target_id,omitempty"`
+	Outcome    string    `json:"outcome"`
+	CreatedAt  string    `json:"created_at"`
 }
 
 // queryAuditLog is the shared read behind both audit endpoints in this
@@ -1217,7 +1217,12 @@ type auditEntryResponse struct {
 // read (the same policy's OTHER arm: tenant_id IS NULL rows are visible
 // only when app.tenant_id itself is unset) - this function does not open
 // or scope the transaction itself.
-func queryAuditLog(ctx context.Context, tx pgx.Tx, tenantID *uuid.UUID, actorType, action, outcome string, p pageParams) ([]auditEntryResponse, int, error) {
+//
+// v is the viewer (ADR 0114 H1): a tenant viewer sees an actor_id of type "staff" only when that
+// staff user belongs to the viewer's own tenant; platform staff who acted inside the tenant (for
+// example admin_routes.go tenant provisioning writes) are shown as a null actor_id. Non-staff actor
+// ids (players, system) are the tenant's own and are unchanged.
+func queryAuditLog(ctx context.Context, tx pgx.Tx, v staffViewer, tenantID *uuid.UUID, actorType, action, outcome string, p pageParams) ([]auditEntryResponse, int, error) {
 	query := `SELECT id, actor_type, actor_id, action, target_type, target_id, outcome, created_at, count(*) OVER()
 	          FROM audit_log WHERE `
 	args := []any{}
@@ -1251,6 +1256,7 @@ func queryAuditLog(ctx context.Context, tx pgx.Tx, tenantID *uuid.UUID, actorTyp
 	defer rows.Close()
 
 	var entries []auditEntryResponse
+	var rawActors []*uuid.UUID
 	var total int
 	for rows.Next() {
 		var (
@@ -1264,9 +1270,7 @@ func queryAuditLog(ctx context.Context, tx pgx.Tx, tenantID *uuid.UUID, actorTyp
 			return nil, 0, err
 		}
 		entry := auditEntryResponse{ID: id.String(), ActorType: actorTypeVal, Action: actionVal, Outcome: outcomeVal, CreatedAt: createdAt.Format(time.RFC3339)}
-		if actorID != nil {
-			entry.ActorID = actorID.String()
-		}
+		rawActors = append(rawActors, actorID)
 		if targetType != nil {
 			entry.TargetType = *targetType
 		}
@@ -1275,7 +1279,37 @@ func queryAuditLog(ctx context.Context, tx pgx.Tx, tenantID *uuid.UUID, actorTyp
 		}
 		entries = append(entries, entry)
 	}
-	return entries, total, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	// Only a tenant-scoped read by a non-platform viewer needs the membership lookup.
+	var own map[uuid.UUID]bool
+	if !v.platform && tenantID != nil {
+		var staffIDs []uuid.UUID
+		for i, e := range entries {
+			if e.ActorType == string(audit.ActorStaff) && rawActors[i] != nil {
+				staffIDs = append(staffIDs, *rawActors[i])
+			}
+		}
+		var err error
+		if own, err = tenantStaffIDs(ctx, tx, *tenantID, staffIDs); err != nil {
+			return nil, 0, err
+		}
+	}
+	for i := range entries {
+		id := rawActors[i]
+		if id == nil {
+			continue
+		}
+		scope := staffScopeTenant // players and system actors are the tenant's own
+		if !v.platform && entries[i].ActorType == string(audit.ActorStaff) {
+			scope = scopeFromMembership(own[*id]) // fail closed: not provably this tenant's staff => hidden
+		}
+		r := v.ref(scope, *id)
+		entries[i].ActorID = &r
+	}
+	return entries, total, nil
 }
 
 // newListAuditLogHandler is the tenant-scoped audit read. Stage 5 gave it
@@ -1303,7 +1337,7 @@ func newListAuditLogHandler(deps Deps) http.HandlerFunc {
 		var total int
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			resp, total, err = queryAuditLog(ctx, tx, &tc.TenantID, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
+			resp, total, err = queryAuditLog(ctx, tx, staffViewerOf(tc), &tc.TenantID, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
 			return err
 		})
 		if err != nil {
@@ -1353,7 +1387,7 @@ func newListPlatformAuditLogHandler(deps Deps) http.HandlerFunc {
 		var total int
 		err = deps.DB.WithPlatformAdmin(r.Context(), subjectID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			resp, total, err = queryAuditLog(ctx, tx, nil, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
+			resp, total, err = queryAuditLog(ctx, tx, staffViewer{platform: true}, nil, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
 			return err
 		})
 		if err != nil {

@@ -1251,7 +1251,9 @@ func recordResolutionAudit(ctx context.Context, tx pgx.Tx, call ResolutionCall, 
 		md["evidence_line_id"] = r.EvidenceLineID.String()
 	}
 	if r.EvidenceReference != nil {
-		md["evidence_reference"] = *r.EvidenceReference
+		// ADR 0114 S0 (security BLOCKER 2): the reference text R is never written to tenant-visible
+		// audit metadata (blind-entry design). The row itself keeps R; only its presence is recorded.
+		md["evidence_reference_present"] = true
 	}
 	if r.EvidenceVerdict != nil {
 		md["evidence_verdict"] = *r.EvidenceVerdict

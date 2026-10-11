@@ -252,26 +252,26 @@ type createCapabilityGrantRequestBody struct {
 }
 
 type capabilityGrantRequestDTO struct {
-	ID               string  `json:"id"`
-	TenantID         string  `json:"tenant_id"`
-	GranteeStaffID   string  `json:"grantee_staff_id"`
-	GranteeScope     string  `json:"grantee_scope"`
-	Capability       string  `json:"capability"`
-	ValidFrom        string  `json:"valid_from"`
-	ValidUntil       *string `json:"valid_until,omitempty"`
-	ReasonCode       string  `json:"reason_code"`
-	RequestedBy      string  `json:"requested_by"`
-	RequestedByScope string  `json:"requested_by_scope"`
-	Status           string  `json:"status"`
-	CreatedAt        string  `json:"created_at"`
-	ExpiresAt        string  `json:"expires_at"`
+	ID               string   `json:"id"`
+	TenantID         string   `json:"tenant_id"`
+	GranteeStaffID   staffRef `json:"grantee_staff_id"` // null for a tenant caller when the grantee is platform staff (ADR 0114 H1)
+	GranteeScope     string   `json:"grantee_scope"`
+	Capability       string   `json:"capability"`
+	ValidFrom        string   `json:"valid_from"`
+	ValidUntil       *string  `json:"valid_until,omitempty"`
+	ReasonCode       string   `json:"reason_code"`
+	RequestedBy      staffRef `json:"requested_by"` // null for a tenant caller when the requester is platform staff
+	RequestedByScope string   `json:"requested_by_scope"`
+	Status           string   `json:"status"`
+	CreatedAt        string   `json:"created_at"`
+	ExpiresAt        string   `json:"expires_at"`
 }
 
-func toCapabilityRequestDTO(r capability.Request) capabilityGrantRequestDTO {
+func toCapabilityRequestDTO(v staffViewer, r capability.Request) capabilityGrantRequestDTO {
 	dto := capabilityGrantRequestDTO{
-		ID: r.ID.String(), TenantID: r.TenantID.String(), GranteeStaffID: r.GranteeStaffID.String(),
+		ID: r.ID.String(), TenantID: r.TenantID.String(), GranteeStaffID: v.ref(r.GranteeScope, r.GranteeStaffID),
 		GranteeScope: r.GranteeScope, Capability: string(r.Capability), ValidFrom: r.ValidFrom.Format(time.RFC3339),
-		ReasonCode: r.ReasonCode, RequestedBy: r.RequestedBy.String(), RequestedByScope: r.RequestedByScope,
+		ReasonCode: r.ReasonCode, RequestedBy: v.ref(r.RequestedByScope, r.RequestedBy), RequestedByScope: r.RequestedByScope,
 		Status: string(r.Status), CreatedAt: r.CreatedAt.Format(time.RFC3339), ExpiresAt: r.ExpiresAt.Format(time.RFC3339),
 	}
 	if r.ValidUntil != nil {
@@ -282,21 +282,21 @@ func toCapabilityRequestDTO(r capability.Request) capabilityGrantRequestDTO {
 }
 
 type capabilityGrantDTO struct {
-	ID               string  `json:"id"`
-	TenantID         string  `json:"tenant_id"`
-	GranteeStaffID   string  `json:"grantee_staff_id"`
-	GranteeScope     string  `json:"grantee_scope"`
-	Capability       string  `json:"capability"`
-	ValidFrom        string  `json:"valid_from"`
-	ValidUntil       *string `json:"valid_until,omitempty"`
-	GrantedAt        string  `json:"granted_at"`
-	RevokedAt        *string `json:"revoked_at,omitempty"`
-	RevokeReasonCode *string `json:"revoke_reason_code,omitempty"`
+	ID               string   `json:"id"`
+	TenantID         string   `json:"tenant_id"`
+	GranteeStaffID   staffRef `json:"grantee_staff_id"` // null for a tenant caller when the grantee is platform staff (ADR 0114 H1)
+	GranteeScope     string   `json:"grantee_scope"`
+	Capability       string   `json:"capability"`
+	ValidFrom        string   `json:"valid_from"`
+	ValidUntil       *string  `json:"valid_until,omitempty"`
+	GrantedAt        string   `json:"granted_at"`
+	RevokedAt        *string  `json:"revoked_at,omitempty"`
+	RevokeReasonCode *string  `json:"revoke_reason_code,omitempty"`
 }
 
-func toCapabilityGrantDTO(g capability.Grant) capabilityGrantDTO {
+func toCapabilityGrantDTO(v staffViewer, g capability.Grant) capabilityGrantDTO {
 	dto := capabilityGrantDTO{
-		ID: g.ID.String(), TenantID: g.TenantID.String(), GranteeStaffID: g.GranteeStaffID.String(),
+		ID: g.ID.String(), TenantID: g.TenantID.String(), GranteeStaffID: v.ref(g.GranteeScope, g.GranteeStaffID),
 		GranteeScope: g.GranteeScope, Capability: string(g.Capability), ValidFrom: g.ValidFrom.Format(time.RFC3339),
 		GrantedAt: g.GrantedAt.Format(time.RFC3339),
 	}
@@ -366,7 +366,7 @@ func newCreateCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 			writeCapabilityError(r.Context(), deps, w, c, "request", "capability_grant_request", "", err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, toCapabilityRequestDTO(req))
+		writeJSON(w, http.StatusCreated, toCapabilityRequestDTO(staffViewerOf(c.tc), req))
 	}
 }
 
@@ -481,7 +481,7 @@ func newDecideCapabilityGrantRequestHandler(deps Deps, decision string) http.Han
 			return
 		}
 		if grant != nil {
-			writeJSON(w, http.StatusOK, toCapabilityGrantDTO(*grant))
+			writeJSON(w, http.StatusOK, toCapabilityGrantDTO(staffViewerOf(c.tc), *grant))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -561,7 +561,7 @@ func newListCapabilityGrantRequestsHandler(deps Deps) http.HandlerFunc {
 		}
 		dtos := make([]capabilityGrantRequestDTO, 0, len(reqs))
 		for _, req := range reqs {
-			dtos = append(dtos, toCapabilityRequestDTO(req))
+			dtos = append(dtos, toCapabilityRequestDTO(staffViewerOf(c.tc), req))
 		}
 		writeJSON(w, http.StatusOK, dtos)
 	}
@@ -585,7 +585,7 @@ func newListCapabilityGrantsHandler(deps Deps) http.HandlerFunc {
 		}
 		dtos := make([]capabilityGrantDTO, 0, len(grants))
 		for _, g := range grants {
-			dtos = append(dtos, toCapabilityGrantDTO(g))
+			dtos = append(dtos, toCapabilityGrantDTO(staffViewerOf(c.tc), g))
 		}
 		writeJSON(w, http.StatusOK, dtos)
 	}
