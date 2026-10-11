@@ -12,6 +12,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -64,12 +65,31 @@ func TestBrandClosure_OpenBetRefusedByDatabase_LA024(t *testing.T) {
 	}
 }
 
-// Another brand's open bet does not block this brand's closure.
+// Another brand's open bet does not block this brand's closure: a SECOND brand of the SAME tenant
+// (and a brand of another tenant) closes while the first brand has an open bet.
 func TestBrandClosure_OtherBrandsBetDoesNotBlock(t *testing.T) {
 	owner := testPool(t)
-	newStdBet(t, owner)
+	ctx := context.Background()
+	f, _, _ := newStdBet(t, owner)
+	var second uuid.UUID
+	if err := owner.WithTenant(ctx, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		b, err := launchfix.CreateBrand(ctx, tx, f.tenantID, "second brand", "second-"+uuid.NewString())
+		second = b.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := launchfix.TrySetBrandStatusOn(ctx, t, owner, f.tenantID, second, "closed"); err != nil {
+		t.Fatalf("a sibling brand with no open bet closes while this tenant's other brand has one: %v", err)
+	}
 	other := seedFixture(t, owner)
-	if err := launchfix.TrySetBrandStatusOn(context.Background(), t, owner, other.tenantID, other.brandID, "closed"); err != nil {
-		t.Fatalf("a brand with no open bet closes while another brand has one: %v", err)
+	if err := launchfix.TrySetBrandStatusOn(ctx, t, owner, other.tenantID, other.brandID, "closed"); err != nil {
+		t.Fatalf("a brand of another tenant closes: %v", err)
+	}
+	// ... and the brand that DOES have the open bet is still refused.
+	err := launchfix.TrySetBrandStatusOn(ctx, t, owner, f.tenantID, f.brandID, "closed")
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "LA024" {
+		t.Fatalf("the brand with the bet: %v", err)
 	}
 }

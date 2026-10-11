@@ -218,6 +218,13 @@ func TestConcurrency_TwoSuspensions_OneWins_x20(t *testing.T) {
 			t.Fatalf("round %d: ok=%d illegal=%d status=%s", i, ok, illegal, w.status(sub))
 		}
 	}
+	// The losers were refused as illegal (a decision), never as lock exhaustion: no P1 alert.
+	var alerts int
+	if err := w.owner.WithPlatformAdmin(context.Background(), w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM alerts WHERE kind = 'launch.suspension_exhausted' AND subject_tenant_id = $1`, tid).Scan(&alerts)
+	}); err != nil || alerts != 0 {
+		t.Fatalf("a refused-as-illegal suspension must not raise the exhaustion alert: n=%d err=%v", alerts, err)
+	}
 }
 
 // Many requests for one subject at once: the one-pending-per-subject UNIQUE admits exactly one.

@@ -4,8 +4,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
 )
@@ -97,6 +101,8 @@ func TestLintRegistration_RefusesPhonesNamesAndPunctuation(t *testing.T) {
 		"-REG-4711",
 		" REG-4711",
 		"４１１１ １１１１ １１１１ １１１１",
+		"4111/1111/1111/1111", // allowed characters, Luhn-valid card number
+		"4111.1111.1111.1111",
 	} {
 		if err := LintRegistration(bad); !errors.Is(err, ErrInvalidInput) {
 			t.Errorf("%q must be refused, got %v", bad, err)
@@ -294,5 +300,49 @@ func TestAuthorize_ScopeAndPermissionRules(t *testing.T) {
 		if (c.want == nil) != (err == nil) || (c.want != nil && !errors.Is(err, c.want)) {
 			t.Errorf("%s: want %v, got %v", c.name, c.want, err)
 		}
+	}
+}
+
+// The LA014 detail is parsed into the matching prior request; an unreadable detail still yields a
+// real retry time (never the zero time, year 0001).
+func TestPriorReject_FromDetail_AndFallbackIsNeverTheZeroTime(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	svc := &Service{cfg: Config{Clock: func() time.Time { return now }}}
+	id := uuid.New()
+	e := svc.priorReject(&pgconn.PgError{Code: "LA014", Detail: "prior_request_id=" + id.String() + " decided_at=2026-10-10T08:30:00.123456Z"}).(*PriorRejectError)
+	if e.RequestID != id || !e.DecidedAt.Equal(time.Date(2026, 10, 10, 8, 30, 0, 123456000, time.UTC)) || !e.RetryAfter.Equal(e.DecidedAt.Add(RequestTTL)) {
+		t.Fatalf("parsed: %+v", e)
+	}
+	for _, detail := range []string{"", "garbage", "prior_request_id=not-a-uuid decided_at=nope"} {
+		e := svc.priorReject(&pgconn.PgError{Code: "LA014", Detail: detail}).(*PriorRejectError)
+		if e.RetryAfter.Year() < 2026 || e.DecidedAt.IsZero() || !e.RetryAfter.Equal(now.Add(RequestTTL)) {
+			t.Fatalf("fallback for %q must be a real time (now + TTL): %+v", detail, e)
+		}
+	}
+}
+
+// R-ALERTS is derived from the alert channel vocabulary: it passes exactly when some known channel
+// kind notifies a person. Today none does (ALERT-DELIVERY-1 OPEN), so it fails; the expectation is
+// computed from the vocabulary, not restated.
+func TestAlertsCheck_IsDerivedFromTheChannelVocabulary(t *testing.T) {
+	human := false
+	for _, k := range alerting.AllChannelKinds() {
+		if alerting.KnownHumanChannelKind(k) {
+			human = true
+		}
+	}
+	got := alertsCheck()
+	want := ResultFail
+	if human {
+		want = ResultPass
+	}
+	if got.Code != CheckAlerts || got.Result != want {
+		t.Fatalf("R-ALERTS = %+v, want result %s", got, want)
+	}
+	if len(alerting.AllChannelKinds()) < 2 {
+		t.Fatal("the vocabulary must list the known channel kinds")
+	}
+	if !human && got.DetailCode != "no_human_notification_channel" {
+		t.Fatalf("a failing R-ALERTS names its reason: %+v", got)
 	}
 }

@@ -100,6 +100,10 @@ func TestPriorRejecter_VariantAfterReject_ShownAndRefused(t *testing.T) {
 
 	// With a change note the same approver may approve (the note is the recorded change).
 	r3 := w.mustRequest(w.req, w.closeInput(sub, "compliance_decision", "scope narrowed after the 12 Oct review"))
+	g3, _, err := w.svc.GetRequest(ctx, w.ap2, tid, r3.ID)
+	if err != nil || len(g3.PriorRejects) != 2 || g3.PriorRejects[0].RequestID != r2.ID || g3.PriorRejects[1].RequestID != r1.ID {
+		t.Fatalf("only reject decisions are listed (newest first), never approvals: %+v err=%v", g3.PriorRejects, err)
+	}
 	if _, err := w.approve(w.ap1, r3); err != nil {
 		t.Fatalf("a prior rejecter approving a request that carries a change note: %v", err)
 	}
@@ -174,6 +178,10 @@ func TestExpiry_IsMaterialisedAndAuditedOnce(t *testing.T) {
 	// Observed by a decision attempt: refused as not pending; the expiry is now durable and audited.
 	if _, err := w.approve(w.ap1, r); !errors.Is(err, launchgov.ErrNotPending) {
 		t.Fatalf("approving an expired request: %v", err)
+	}
+	// Durable and audited by the decision attempt itself, before anything else has read or listed.
+	if rows := w.audit(tid, "launch_authorisation.expired"); len(rows) != 1 {
+		t.Fatalf("a refused decision on an expired request must materialise and audit the expiry: %+v", rows)
 	}
 	for i := 0; i < 3; i++ { // list, get and sweep afterwards add nothing
 		if _, err := w.svc.ListRequests(ctx, w.ap1, tid, launchgov.ListFilter{}); err != nil {
