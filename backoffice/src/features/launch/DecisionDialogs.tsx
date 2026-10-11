@@ -54,8 +54,10 @@ export interface ApproveDialogProps {
   onStale: () => void
 }
 
-export function ApproveDialog({ tenantId, request, readiness, onClose, onDone, onStale }: ApproveDialogProps) {
-  const [reason, setReason] = useState(APPROVE_REASON_CODES.length === 1 ? APPROVE_REASON_CODES[0].value : '')
+export function ApproveDialog({ tenantId, request, readiness: liveReadiness, onClose, onDone, onStale }: ApproveDialogProps) {
+  // Frozen at open: a background refetch must never swap the checks/hash the approver is looking at.
+  const [readiness] = useState(() => liveReadiness)
+  const [reason, setReason] = useState('')
   const once = useOnceSubmit()
   const m = useMutation({
     mutationFn: () => approveLaunchRequest(tenantId, request.id, { reason_code: reason, seen_readiness_hash: readiness?.readiness_hash ?? '' }),
@@ -213,7 +215,7 @@ export function SuspendDialog({ tenantId, brandId, subjectLabel, onClose, onDone
         {readiness && <FundsView readiness={readiness} mode="suspend" hideModeNotice />}
         <SelectField label="Reason code" value={reason} onChange={(e) => setReason(e.target.value)} options={[{ value: '', label: 'Select a reason' }, ...REQUEST_REASON_CODES.suspend]} />
         <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-slate-700">Conditions / notes{reason === 'other_documented' ? ' (required)' : ' (optional)'}</span>
+          <span className="font-medium text-slate-700">Conditions / notes{reason === 'other_documented' ? ' (required)' : ' (optional)'} - record only, not enforced - record only, not enforced</span>
           <WarningBox>{CONDITIONS_NOTE_WARNING}</WarningBox>
           <textarea
             aria-label="Conditions note"

@@ -840,6 +840,19 @@ names) and has no pagination or total; (5) a request does not carry its readines
 shows no historical check detail; (6) "same Person" self-approval cannot be known to the UI (only the requester staff id is compared;
 the server answers `LAUNCH_SELF_APPROVAL`).
 
+**Slice 5 review follow-up (security APPROVE WITH CONDITIONS; product-owner wording checklist).** Applied in the UI: ids are
+`encodeURIComponent`-encoded when the queue builds a destination; the approve dialog freezes the readiness (hash and checks) at open;
+the disclaimer is visible on the request form, the approval dialog and the history view; licensing fields read "recorded basis"; the
+note reads "record only, not enforced"; no auto-selected reason, no pre-ticked acknowledgement. **Accepted residuals:** (1) HTTP
+responses distinguish 404 (unknown or `pending_launch`) from 409 (`suspended`/`closed`) for direct API callers (section 7.3); the B2C
+page maps both to the same neutral text. (2) `Modal` has no focus trap or focus restore: a tracked accessibility item.
+**Product-owner MUST-fix set for a real launch (SLICE 6, API completions; NOT implemented here, smallest API change each):**
+(a) brand discovery for tenant staff (`GET /v1/admin/tenants/{id}/brands`, or brands embedded in tenant detail, with id, name, slug,
+status); (b) `compliance` gets own-tenant brand and tenant read plus `launch_authorisation:read` (role mapping change); (c) queue rows
+carry `tenant_name` and `brand_name`, a `limit` and a `(created_at, id)` cursor, default 50; (d) a per-request server-computed
+`can_approve` and `cannot_approve_reason` (the UI mirrors it; the database `LA012` stays authoritative); (e) `launch_kind` (kind of the
+latest transition) on tenant and brand list rows.
+
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all
 `NOT IMPLEMENTED` until each slice lands; the licensing content recorded is human-dependent and never a statement of

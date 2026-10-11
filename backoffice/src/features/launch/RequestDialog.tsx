@@ -59,7 +59,7 @@ export function RequestDialog({ tenantId, brandId, action, canReadRegistries, on
   const reasons = REQUEST_REASON_CODES[action]
   const recordsLicensing = action === 'activate' || action === 'reactivate' || action === 'ratify'
 
-  const [reason, setReason] = useState(reasons.length === 1 ? reasons[0].value : '')
+  const [reason, setReason] = useState('')
   const [model, setModel] = useState<LicensingModel | ''>('')
   const [licStatus, setLicStatus] = useState<LicensingStatus | ''>('')
   const [licenceId, setLicenceId] = useState('')
@@ -182,13 +182,13 @@ export function RequestDialog({ tenantId, brandId, action, canReadRegistries, on
               The model records the basis of this decision. Every model is always available; no licence is required by the system.
             </p>
             <SelectField
-              label="Licensing model"
+              label="Licensing model (recorded basis)"
               value={model}
               onChange={(e) => setModel(e.target.value as LicensingModel | '')}
               options={[{ value: '', label: 'Select a model' }, ...LICENSING_MODEL_OPTIONS]}
             />
             <SelectField
-              label="Licensing status"
+              label="Licensing status (recorded basis)"
               value={licStatus}
               onChange={(e) => setLicStatus(e.target.value as LicensingStatus | '')}
               options={[{ value: '', label: 'Select a status' }, ...LICENSING_STATUS_OPTIONS]}
@@ -276,7 +276,7 @@ export function RequestDialog({ tenantId, brandId, action, canReadRegistries, on
         )}
 
         <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-slate-700">Conditions / notes (optional)</span>
+          <span className="font-medium text-slate-700">Conditions / notes (optional) - record only, not enforced</span>
           <WarningBox>{CONDITIONS_NOTE_WARNING}</WarningBox>
           <textarea
             aria-label="Conditions note"

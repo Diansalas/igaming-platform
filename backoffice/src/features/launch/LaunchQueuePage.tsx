@@ -25,8 +25,9 @@ export function LaunchQueuePage() {
   const items = query.data?.items ?? []
 
   function open(r: LaunchRequest) {
-    const base = r.brand_id ? `/tenants/${r.tenant_id}/brands/${r.brand_id}` : `/tenants/${r.tenant_id}`
-    navigate(`${base}?request=${r.id}`)
+    const t = encodeURIComponent(r.tenant_id)
+    const base = r.brand_id ? `/tenants/${t}/brands/${encodeURIComponent(r.brand_id)}` : `/tenants/${t}`
+    navigate(`${base}?request=${encodeURIComponent(r.id)}`)
   }
 
   return (

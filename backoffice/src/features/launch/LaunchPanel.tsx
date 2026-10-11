@@ -159,6 +159,7 @@ export function LaunchPanel({ tenantId, brandId, status, subjectName, onSubjectC
 
         <section aria-label="Status history" className="flex flex-col gap-2">
           <h4 className="text-sm font-semibold text-slate-800">Status history</h4>
+          <LaunchDisclaimer />
           {historyQuery.isLoading && <LoadingSpinner label="Loading history..." />}
           {historyQuery.error && <LaunchErrorAlert error={historyQuery.error} />}
           {historyQuery.data && <HistoryTimeline items={history} />}

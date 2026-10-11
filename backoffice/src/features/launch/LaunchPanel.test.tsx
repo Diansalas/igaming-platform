@@ -75,7 +75,7 @@ describe('status badges and filter', () => {
     renderBrand()
     const statusTitle = await screen.findByLabelText('Launch status')
     await waitFor(() => expect(within(statusTitle).getByText('Legacy baseline - no launch decision recorded through ADR 0112')).toBeInTheDocument())
-    const note = await screen.findByRole('note', { name: 'Disclaimer' })
+    const note = (await screen.findAllByRole('note', { name: 'Disclaimer' }))[0]
     expect(note).toHaveTextContent(LAUNCH_DISCLAIMER)
     expect(note).toHaveTextContent(API_DISCLAIMER)
   })
@@ -197,7 +197,7 @@ describe('request dialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Activate request' })
 
     // the four licensing models are all selectable
-    const model = within(dialog).getByLabelText('Licensing model') as HTMLSelectElement
+    const model = within(dialog).getByLabelText('Licensing model (recorded basis)') as HTMLSelectElement
     expect(Array.from(model.options).map((o) => o.value)).toEqual([
       '',
       'platform_licence',
@@ -211,7 +211,7 @@ describe('request dialog', () => {
 
     await user.selectOptions(within(dialog).getByLabelText('Reason code'), 'initial_launch')
     await user.selectOptions(model, 'other_manually_approved')
-    await user.selectOptions(within(dialog).getByLabelText('Licensing status'), 'conditional')
+    await user.selectOptions(within(dialog).getByLabelText('Licensing status (recorded basis)'), 'conditional')
     await user.type(within(dialog).getByLabelText('Determination reference'), 'DOC-77')
     await user.type(within(dialog).getByLabelText('Determination by (responsible function)'), 'external counsel')
     await user.type(within(dialog).getByLabelText('Responsible operator (legal entity)'), 'Operator Ltd')
@@ -256,7 +256,7 @@ describe('request dialog', () => {
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: 'Request activate' }))
     const dialog = await screen.findByRole('dialog')
-    const model = within(dialog).getByLabelText('Licensing model')
+    const model = within(dialog).getByLabelText('Licensing model (recorded basis)')
     await user.selectOptions(model, 'platform_licence')
     expect(await within(dialog).findByLabelText('Licence')).toBeInTheDocument()
     expect(within(dialog).getByRole('option', { name: /LIC-1/ })).toBeInTheDocument()
@@ -407,6 +407,7 @@ describe('request detail: approvals, rejects, approve / reject / cancel', () => 
     await user.click(await screen.findByRole('button', { name: 'Approve' }))
     const dialog = await screen.findByRole('dialog', { name: 'Approve launch request' })
     expect(within(dialog).getByLabelText('Readiness checklist')).toBeInTheDocument()
+    await user.selectOptions(within(dialog).getByLabelText('Reason code'), 'reviewed_ok')
     await user.click(within(dialog).getByRole('button', { name: 'Approve request' }))
     await waitFor(() => expect(body).toEqual({ reason_code: 'reviewed_ok', seen_readiness_hash: 'f'.repeat(64) }))
     expect(await screen.findByText(/the request executed: the status is now Active/)).toBeInTheDocument()
@@ -456,6 +457,7 @@ describe('request detail: approvals, rejects, approve / reject / cancel', () => 
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: 'Approve' }))
     const dialog = await screen.findByRole('dialog')
+    await user.selectOptions(within(dialog).getByLabelText('Reason code'), 'reviewed_ok')
     await user.click(within(dialog).getByRole('button', { name: 'Approve request' }))
     expect(await within(dialog).findByText(/The readiness changed since you opened this request/)).toBeInTheDocument()
     await waitFor(() => expect(gets).toBeGreaterThan(1))
