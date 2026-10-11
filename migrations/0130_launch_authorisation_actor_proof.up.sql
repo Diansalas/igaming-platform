@@ -31,6 +31,12 @@
 --      TENANT status change in a transaction that already executed a governed status
 --      change of one of that tenant's BRANDS (brand key X then tenant key X inverts the
 --      tenant-then-brand order of gameplay placements; ADR 0082 / 0129 lock order).
+--   5. CLOSURE BACKSTOP (security C1 / ledger-finance condition 2): the same function
+--      refuses a closure (LA023) while a hold-bearing withdrawal request (requested,
+--      pending_review, approved, submitted) exists for the tenant / brand, and (LA024) a
+--      BRAND closure while an open sportsbook bet of that brand exists. A ledger-side arm
+--      (non-zero player_withdrawal_hold balances) is NOT implemented: it needs a full
+--      per-wallet ledger aggregate under the gate lock (ADR 0112 residual; invariant 12).
 --
 -- NUMBERING: 0130 (next free after 0129; confirmed against migrations/ and every local
 -- branch at branch time). Numbers are allocated by the orchestrator.
@@ -389,6 +395,44 @@ BEGIN
     IF v_mixed > 0 THEN
         RAISE EXCEPTION 'tenants status change refused: a brand status change of this tenant was already executed in this transaction (one subject per executing transaction)'
             USING ERRCODE = 'LA020';
+    END IF;
+    -- CLOSURE BACKSTOP (security C1 / ledger-finance condition 2; ADR 0112 invariant 11): a
+    -- closure is refused while withdrawal requests that still hold the players' funds exist
+    -- (LA023) and, for a brand, while open sportsbook bets of that brand exist (LA024; a
+    -- tenant's own open bets are refused by tenants_status_change_gate, GP020). Both reads
+    -- are RLS-bound, so app.tenant_id is bound to the subject's tenant for the read and
+    -- restored (the 0121 technique; TestClosureBackstop_* fail if the read goes blind). The
+    -- reads run under the gate lock this trigger already holds (brand key above; the tenant
+    -- key is taken by tenants_status_change_gate in the same statement). A request inserted
+    -- by a concurrent transaction that has not yet committed is not visible: the residual is
+    -- recorded in ADR 0112 (withdrawal creation does not take the gate lock).
+    IF NEW.status = 'closed' THEN
+        DECLARE
+            v_prev_t text := current_setting('app.tenant_id', true);
+            v_prev_p text := current_setting('app.player_account_id', true);
+            v_wd     bigint;
+            v_bets   bigint := 0;
+        BEGIN
+            PERFORM set_config('app.tenant_id', v_tenant::text, true);
+            PERFORM set_config('app.player_account_id', '', true);
+            SELECT count(*) INTO v_wd FROM public.withdrawal_requests w
+             WHERE w.tenant_id = v_tenant AND (v_brand IS NULL OR w.brand_id = v_brand)
+               AND w.state IN ('requested', 'pending_review', 'approved', 'submitted');
+            IF v_kind = 'brand' THEN
+                SELECT count(*) INTO v_bets FROM public.sportsbook_bets b
+                 WHERE b.tenant_id = v_tenant AND b.brand_id = v_brand AND b.status = 'open';
+            END IF;
+            PERFORM set_config('app.tenant_id', COALESCE(v_prev_t, ''), true);
+            PERFORM set_config('app.player_account_id', COALESCE(v_prev_p, ''), true);
+            IF v_wd > 0 THEN
+                RAISE EXCEPTION '% closure refused: withdrawal requests still hold player funds', TG_TABLE_NAME
+                    USING ERRCODE = 'LA023', DETAIL = format('hold_bearing_withdrawals=%s', v_wd);
+            END IF;
+            IF v_bets > 0 THEN
+                RAISE EXCEPTION 'brand closure refused: open sportsbook bets exist'
+                    USING ERRCODE = 'LA024', DETAIL = format('open_sportsbook_bets=%s', v_bets);
+            END IF;
+        END;
     END IF;
     RETURN NEW;
 END
