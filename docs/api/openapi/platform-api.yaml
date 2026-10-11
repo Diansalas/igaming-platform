@@ -7134,8 +7134,8 @@ paths:
       summary: The tenant's read-only view of platform actions that concern it
       description: >
         audit:read (tenant_admin, compliance), tenant-scoped sessions only: a platform-scoped caller is refused 403. ADR 0104. Returns platform-scope audit rows whose subject tenant is the caller's tenant (today: payment kill-switch actions), newest first, in the shared paged envelope. The row set is decided by row-level security on subject_tenant_id, not by the handler.
-        By ADR 0104 section 5.2 the platform actor IS identified here (actor.scope = platform, actor.staff_id, actor.display_name when set). Exception (ADR 0112): for launch_authorisation.* rows actor.staff_id is the empty string and no display name is given. IP address, user agent, request id and non-allowlisted metadata are never returned. before/after/reason_code appear only for actions with an entry in the compiled-in presentation allowlist. approval_chain links the other kill-switch audit rows for the same switch (ADR 0104 section 5.5).
-        Tension recorded in ADR 0114 section 9: ADR 0114 principle 7 says a tenant caller never sees a platform staff id; this route is the one documented exception and is NOT changed by slice S0.
+        The platform actor is identified (actor.staff_id, actor.display_name when set) ONLY for payments_kill_switch.* actions (ADR 0104 section 5.2, explicit allow-list). For every other action - capability grants, manual adjustments, force-resolutions, launch authorisation - actor.scope is platform, actor.staff_id is the empty string and display_name is null; the same rule applies to approval_chain entries (actor_staff_id omitted). IP address, user agent, request id and non-allowlisted metadata are never returned. before/after/reason_code appear only for actions with an entry in the compiled-in presentation allowlist. approval_chain links the other kill-switch audit rows for the same switch (ADR 0104 section 5.5).
+        Whether kill-switch actors should stay identified is the open owner decision D-0104-1 (ADR 0114 section 9.5); security recommends scope-only.
       security:
         - bearerAuth: []
       parameters:
@@ -7956,7 +7956,7 @@ components:
     PlatformActionAuditActor:
       type: object
       description: >
-        Always scope platform. staff_id is the platform actor's id (ADR 0104 section 5.2); it is the empty string for launch_authorisation.* rows (ADR 0112), where display_name is also null.
+        Always scope platform. staff_id and display_name are filled only for payments_kill_switch.* actions (ADR 0104 section 5.2); for every other action staff_id is the empty string and display_name is null.
       properties:
         scope: { type: string, enum: [platform] }
         staff_id: { type: string }

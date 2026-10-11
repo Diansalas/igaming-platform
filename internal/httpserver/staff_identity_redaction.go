@@ -50,6 +50,10 @@ func staffViewerOf(tc tenant.Context) staffViewer {
 	return staffViewer{platform: tc.TenantID == uuid.Nil}
 }
 
+// platformStaffViewer is the viewer of a route only a platform principal can reach (for example the
+// platform audit log). Using it on a route a tenant caller can reach would defeat the redaction.
+func platformStaffViewer() staffViewer { return staffViewer{platform: true} }
+
 // sees reports whether this viewer may see the identity of an actor of the given scope. Fail
 // closed: for a tenant viewer only the exact scope "tenant" is visible; an empty or unknown scope
 // is hidden.

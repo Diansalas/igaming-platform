@@ -95,7 +95,7 @@ OAS = documented in `docs/api/openapi/platform-api.yaml`. BO = Back Office scree
 | Tenant audit log; platform audit log | `GET /v1/admin/audit-log`, `/platform/audit-log` (`routes.go:140,151`) | yes | yes `features/audit/*` | TA, CO (tenant); PA (platform) | IMPLEMENTED |
 | Tenant view of platform actions (ADR 0104) | `GET /v1/admin/audit-log/platform-actions` (`routes.go:161`) | **no** | no | TA, CO | UI-ready |
 | KYC case queue, verification/document review | `/v1/admin/kyc/*` | yes | yes `features/kyc/*` | CO act; TA read | IMPLEMENTED |
-| KYC enforcement decisions | `GET /v1/admin/kyc/enforcement-decisions` | **no** | no | CO, PA | UI-ready |
+| KYC enforcement decisions | `GET /v1/admin/kyc/enforcement-decisions` | **no** | no | CO only: the route is `RequireTenantScope`, so a platform_admin token gets 403 although it holds the permission (S0 verified) | UI-ready (CO) |
 | AML monitoring / sanctions / SAR cases | none | n/a | no | - | needs-design (not built; gap audit section 6) |
 | RG self-exclusion restrictions | `GET|POST /v1/admin/rg/restrictions` | yes | yes `features/rg/*` | CO act; TA read | IMPLEMENTED |
 | RG limits (deposit/loss/session, cooling-off) | none (`rg.go:38-41` single type) | n/a | no | - | needs-design (backend NOT IMPLEMENTED; parameters LEGAL) |
@@ -131,7 +131,7 @@ A = act, R = read, - = hidden (the server refuses anyway). Derived from `rolePer
 | Reconciliation: sportsbook_settlement (R2, new permission) | - | R | R | R | - | - | - |
 | Alerts list / ack / resolve; routing status | A | - | - | - | - | - | - |
 | Audit: tenant / platform-actions; platform | R (platform log) | R | R | - | - | - | - |
-| KYC queue / enforcement decisions | R (enforcement) | R (verification) | A | - | - | - | - |
+| KYC queue / enforcement decisions | - (403: tenant-scope guard; the permission alone does not reach the route) | R (verification) | A | - | - | - | - |
 | RG restrictions | - | R | A | - | - | - | - |
 | Risk rules | - | R | - | - | A | - | - |
 | Bonus | - | R | R + suspend | - | suspend | R | per role |
@@ -193,7 +193,7 @@ Owners: `backend` (routes), `backoffice` (screens), `payments`/`ledger-finance` 
 
 | Slice | Content | Owner / reviewers | Gate |
 |---|---|---|---|
-| S0 | H1 redaction test + fix (DONE, section 9); OpenAPI for K1, K2, financial-policy, platform-actions, enforcement-decisions, staff display-name/person-link | backend / security, code-reviewer | unblocked |
+| S0 | H1 redaction test + fix (section 9; H1 stays OPEN until D-0104-1 is ruled and the platform-actions fix is reviewed); OpenAPI for K1, K2, financial-policy, platform-actions, enforcement-decisions, staff display-name/person-link | backend / security, code-reviewer | unblocked |
 | S1 | Alerts console (PA): list with state/severity filters, ack, resolve, routing status read-only | backoffice / security, code-reviewer, PO-proxy | unblocked |
 | S2 | R1 + R1b | backend, payments / security, ledger-finance | unblocked (D-OPS-2 roles) |
 | S3 | Parked payments queue + attempt detail; withdrawal detail attempt panel; payout instruments view/suspend (UI-ready) | backoffice / security, ledger-finance (wording), code-reviewer | after S2 |
@@ -262,11 +262,17 @@ with `changed_by_scope = platform`. The same class existed on every tenant-reada
   there too). No migration was needed.
 - The wire change: the field stays present as `null` (it is `omitempty` only where it was before and the actor is
   absent, e.g. `approved_by` before approval). The sibling `*_scope` field is the scope-only marker.
-- Static pin `staff_identity_static_test.go`: an AST walk over every non-test file of the package fails the build on
-  any response field whose JSON name looks like a staff/actor/approver/principal id and which is neither a
-  `staffRef` nor in a justified allowlist, on any hand-built visible `staffRef` outside the helper, and on a stale
-  allowlist entry. A planted-offender test proves the scanner flags `closed_by string`, `approver_ids []string`,
-  `grantee_staff_id *string` and a forged literal. `evidence_reference_static_test.go` pins the evidence-reference
+- Static pin `staff_identity_static_test.go` (hardened after the security review executed evasions): an AST walk over
+  every non-test file under `internal/` covers every `ast.StructType` (named, anonymous, nested, in functions), uses
+  the Go field name in snake case when the tag has no name or there is no tag, treats `*_name` as an id unless it is
+  a known display name, flags string-keyed map literals passed to `writeJSON` (nested too), assignments to `.id`
+  and `staffViewer{}` literals outside the helper file, hand-built visible `staffRef` literals, and stale allowlist
+  entries. Negative tests plant each evasion (no tag, nameless tag, `approver_name`, `operator_id`/`admin_id`/
+  `user_id`/`staff`/`actor_staff`, anonymous and nested structs, maps, `.id` assignment, viewer literal, forged
+  literal). Known limit: a map built in a variable and passed to `writeJSON` later is not seen. The allowlist
+  justifications were re-checked against `permission.go` (provider-credential request/approve, jurisdiction
+  restrictions and alert routing: `RolePlatformAdmin` only; exposure limits: `RequireTenantScope`, manage held by
+  `risk_manager` only; KYC and bonus routes: `RequireTenantScope`). `evidence_reference_static_test.go` pins the evidence-reference
   removal (9.4).
 
 ### 9.3 Inventory (every staff-id-shaped field in `internal/httpserver`)
@@ -283,7 +289,7 @@ with `changed_by_scope = platform`. The same class existed on every tenant-reada
 | `revoked_by` | provider-credential handle | tenant_admin | `staffRef` via tenant-staff membership (no scope column) |
 | `actor_id` | generic tenant `GET /v1/admin/audit-log` (platform staff who acted inside the tenant, e.g. brand/staff creation) | tenant_admin, compliance | `staffRef` via tenant-staff membership; non-staff actors unchanged |
 | `requested_by`, `decided_by`, `executed_by`, `approver_ids` | launch (ADR 0112) | tenant | already redacted inline by `launchCall`; allowlisted, existing tests unchanged |
-| `actor.staff_id`, `approval_chain[].actor_staff_id` | `GET /v1/admin/audit-log/platform-actions` (ADR 0104) | tenant_admin, compliance | **not changed - see 9.5** |
+| `actor.staff_id`, `approval_chain[].actor_staff_id`, `actor.display_name` | `GET /v1/admin/audit-log/platform-actions` (ADR 0104) | tenant_admin, compliance | **fixed in the review round: identified ONLY for `payments_kill_switch.*` (explicit allow-list `identifiedActionPrefixes`); scope-only for K1, K2, K3, launch and any future action - see 9.5** |
 | `requested_by_principal_id`, `approver_principal_id`, `applied_by_principal_id` | provider-credential requests | platform_admin only (`request`/`approve` permissions) | allowlisted: platform-only reader |
 | `created_by_actor_id` | sportsbook jurisdiction restrictions | platform_admin only | allowlisted |
 | `created_by_actor_id` | sportsbook exposure limits | risk_manager (tenant staff) | allowlisted: tenant-own actors |
@@ -317,6 +323,26 @@ now `evidence_reference_present == "true"` and R must not appear anywhere in tha
 Type-adaptation only: `backoffice_admin_integration_test.go` and `identity_flow_integration_test.go` read
 `ActorID.String()` (own-tenant actor still visible, same expectation).
 
+**Blind entry is NOT IMPLEMENTED.** `decideResolutionBody` (approve/reject) takes only `payload_hash` and
+`reason_code`: no approver types R and the server compares nothing against an approver entry. S0 only stops the API
+and the tenant audit from handing R out. Whether `evidence_ref_hash` is a platform digest over
+`(provider_id, R, amount, asset, merchant_reference)` shown to approvers (ledger-finance) or the hash of the portal
+confirmation with blind entry (security) remains the OPEN owner question of ADR 0111 25.7. The removal is therefore
+a safe default that makes an approver who needs R go to the provider portal, not a finished control.
+
+**GATING items for S11 and any non-MOCK M4** (next to D-7, T10, S-3, `evidence_ref_hash`):
+
+- G-S11-1: `provider_reference_at_submission` must be redacted or hashed in audit metadata before the blind-entry
+  screens, or any non-MOCK M4 not-paid flow, ship (residual 2 below stays OPEN).
+- G-S11-2: any hash of R (or of X) exposed to a reader must be KEYED (HMAC with a per-tenant or platform secret).
+  A bare SHA-256 of a short or sequential PSP reference is brute-forceable. The same weakness exists in
+  `payload_hash` (an unkeyed digest of low-entropy fields); noted, not changed here.
+- G-S11-3: any future statement-line read route (R2b and the M4 evidence line picker) must withhold the reference
+  text from K3 readers.
+- Guard quality: `evidence_reference_static_test.go` is a heuristic AST check (literal in any spelling, JSON tag,
+  dereference outside the verification file). The real guard is the integration `position()` / body-contains
+  checks, which must stay in the required suite.
+
 Residuals recorded for `ledger-finance` / `security` (not changed in S0):
 
 1. After a **paid** M4 executes, R is, by design, the completion's provider transaction id (`provider_id:R`, LF F6) in
@@ -326,20 +352,32 @@ Residuals recorded for `ledger-finance` / `security` (not changed in S0):
    still in audit metadata. For M4 not-paid the blind entry would be the portal's declined reference, which may equal
    X. Decision needed: hash it like R or leave it.
 
-### 9.5 Tension recorded, not resolved here: ADR 0104 identifies the platform actor on purpose
+### 9.5 OPEN owner decision D-0104-1: who may a tenant see as the platform actor?
 
-`GET /v1/admin/audit-log/platform-actions` (ADR 0104 section 5.2) returns `actor.staff_id` and `display_name` of the
-platform staff member for every platform action concerning the tenant, including kill-switch engage / release, with
-an approval chain. That was an owner-approved, product-owner-proxy-reviewed decision. ADR 0114 principle 7 says the
-opposite for every other surface. With S0 alone, a tenant that wants the platform actor's id can still read it from
-that route, so the kill-switch DTO redaction is only as strong as that route. S0 did **not** change ADR 0104 (a
-decision, not an implementation detail). Required decision (`architect` + owner + `security`): amend ADR 0104 to
-scope-only (consistent with ADR 0112's launch rows, which already withhold) or record the exception as final.
+ADR 0104 sections 5.2 and 5.5 had the tenant-visible `GET /v1/admin/audit-log/platform-actions` identify the platform
+actor (`staff_id` plus display name), approved for **kill-switch actions**. Findings and treatment:
+
+- The security review executed it live: K1 (`capability_grant.requested/approved`) and K2
+  (`ledger_adjustment.submit` denied) platform rows now also carry `subject_tenant_id`, so the route showed the
+  requester, the grant approver and the acting grantee to tenant_admin and compliance. The comment in
+  `audit/allowlist.go` ("only kill-switch actions carry subject_tenant_id") was stale and is corrected.
+- **Applied now (security BLOCKER 1, independent of the owner ruling):** the actor is identified only for actions
+  matching an explicit allow-list (`identifiedActionPrefixes = ["payments_kill_switch."]`) in both the entry and the
+  approval-chain entries, and the display-name lookup is not run for any other action. Everything else shows
+  `actor.scope = platform`, `staff_id = ""`, `display_name = null`. A live test (K1, K2, K3-denied and kill switch,
+  as tenant_admin and compliance, whole-body search for the platform staff ids) pins it. The kill-switch
+  behaviour is otherwise unchanged.
+- **OPEN, owner decision D-0104-1 (`architect` + owner + `security`):** whether the kill-switch actor stays
+  identified at all. Security's ruling and recommendation: amend ADR 0104 sections 5.2/5.5 to scope-only, following
+  the ADR 0112 precedent. A stable, global staff UUID plus display name shown to every tenant is a
+  social-engineering target list and enables cross-tenant correlation of the same platform operator. If tenants need
+  proof that two approvals came from distinct people, give them a per-tenant HMAC pseudonym instead. Until the owner
+  rules, the allow-list above is the rule, and H1 must not be recorded closed.
 
 ### 9.6 OpenAPI (exactly as implemented)
 
 Documented in `docs/api/openapi/platform-api.yaml`: K1 (7 operations), K2 (6), financial-policy changes and policies
-(6), `GET /v1/admin/audit-log/platform-actions`, `GET /v1/admin/kyc/enforcement-decisions` (note: tenant-scope guard,
+(6), `GET /v1/admin/audit-log/platform-actions`, `GET /v1/admin/kyc/enforcement-decisions` (note: tenant-scope guard (S0 re-verified: a platform_admin token gets 403; ADR 0114 sections 2.4 and 3 now say so and the console plan must not offer this screen to PA),
 so a platform caller gets 403 even though `platform_admin` holds the permission), both staff display-name routes and
 both person-link routes. Schemas changed: kill switch, release request, K3, HSEC, provider-credential handle and
 `AuditEntry` (nullable staff ids, `evidence_reference_present`). DB-free drift tests

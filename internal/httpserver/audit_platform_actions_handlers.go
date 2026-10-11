@@ -109,11 +109,11 @@ type platformActionAuditEntry struct {
 // query (AT-9), except names, which are attached afterwards from a
 // separate id-restricted lookup (§5.4).
 type platformActionRawRow struct {
-	id, actorType, action, outcome string
-	actorID                        *uuid.UUID
-	targetType, targetID           *string
-	createdAt                      time.Time
-	metadata                       map[string]any
+	rowID, actorType, action, outcome string
+	actorID                           *uuid.UUID
+	targetType, targetID              *string
+	createdAt                         time.Time
+	metadata                          map[string]any
 }
 
 // newListPlatformActionsAuditLogHandler implements ADR 0104 §5.1.
@@ -152,7 +152,7 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 					qr.Close()
 					return err
 				}
-				row.id = id.String()
+				row.rowID = id.String()
 				if len(metadataJSON) > 0 {
 					if err := json.Unmarshal(metadataJSON, &row.metadata); err != nil {
 						qr.Close()
@@ -200,7 +200,7 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 				if err := cr.Scan(&id, &row.actorType, &row.actorID, &row.action, &row.targetType, &row.targetID, &row.outcome, &row.createdAt, &metadataJSON); err != nil {
 					return err
 				}
-				row.id = id.String()
+				row.rowID = id.String()
 				if len(metadataJSON) > 0 {
 					if err := json.Unmarshal(metadataJSON, &row.metadata); err != nil {
 						return err
@@ -241,10 +241,27 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// identifiedActionPrefixes is the explicit allow-list of platform-action families whose ACTOR the
+// tenant sees by staff id and display name (ADR 0104 section 5.2, approved for kill-switch actions
+// only). Every other action - K1 capability grants, K2 manual adjustments, K3, launch
+// authorisation, anything added later - shows the scope only (staff_id "", display name null).
+// ADR 0114 S0 (security BLOCKER): fail closed by default. Whether kill-switch actors should stay
+// identified is the open owner decision D-0104-1 (ADR 0114 section 9.5).
+var identifiedActionPrefixes = []string{"payments_kill_switch."}
+
+func actorIdentifiedToTenant(action string) bool {
+	for _, p := range identifiedActionPrefixes {
+		if strings.HasPrefix(action, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func lookupStaffDisplayNames(ctx context.Context, deps Deps, rows []platformActionRawRow) (map[uuid.UUID]*string, error) {
 	idSet := map[uuid.UUID]struct{}{}
 	for _, row := range rows {
-		if row.actorID != nil {
+		if row.actorID != nil && actorIdentifiedToTenant(row.action) {
 			idSet[*row.actorID] = struct{}{}
 		}
 	}
@@ -329,7 +346,7 @@ func buildPlatformActionEntries(pageRows, chainRows []platformActionRawRow, name
 
 func toPlatformActionEntry(row platformActionRawRow, names map[uuid.UUID]*string, presentation audit.Presentation, byKey map[string][]platformActionRawRow) platformActionAuditEntry {
 	entry := platformActionAuditEntry{
-		ID: row.id, CreatedAt: row.createdAt.UTC().Format(time.RFC3339Nano),
+		ID: row.rowID, CreatedAt: row.createdAt.UTC().Format(time.RFC3339Nano),
 		Action: row.action, Outcome: row.outcome,
 	}
 	if row.targetType != nil {
@@ -342,7 +359,7 @@ func toPlatformActionEntry(row platformActionRawRow, names map[uuid.UUID]*string
 	// ADR 0112 (review): the actor of a launch_authorisation.* row (requester, approver, executor,
 	// including the *_denied rows) is platform staff acting on the tenant's launch; a tenant sees the
 	// scope only, never a staff id or display name.
-	if row.actorID != nil && !strings.HasPrefix(row.action, "launch_authorisation.") {
+	if row.actorID != nil && actorIdentifiedToTenant(row.action) {
 		entry.Actor.StaffID = row.actorID.String()
 		entry.Actor.DisplayName = names[*row.actorID]
 	}
@@ -382,14 +399,14 @@ func toPlatformActionEntry(row platformActionRawRow, names map[uuid.UUID]*string
 
 	if key := killSwitchChainKey(row); key != "" {
 		for _, sib := range byKey[key] {
-			if sib.id == row.id {
+			if sib.rowID == row.rowID {
 				continue
 			}
 			chainEntry := platformActionAuditChainEntry{
-				ID: sib.id, Action: sib.action, Outcome: sib.outcome,
+				ID: sib.rowID, Action: sib.action, Outcome: sib.outcome,
 				CreatedAt: sib.createdAt.UTC().Format(time.RFC3339Nano),
 			}
-			if sib.actorID != nil {
+			if sib.actorID != nil && actorIdentifiedToTenant(sib.action) {
 				chainEntry.ActorStaffID = sib.actorID.String()
 				chainEntry.ActorDisplayName = names[*sib.actorID]
 			}

@@ -23,9 +23,13 @@ type TenantPresentationEntry struct {
 // "the projection including ip_address" must never happen regardless of
 // this map - ip_address/user_agent/request_id are never read from this
 // map at all, by construction, in the read path). Keyed by audit_log
-// action. PRH-2 populates it for every platform-scope kill-switch action
-// G1 puts in tenant scope (ADR 0104 §4's "in scope" list) - the only
-// actions that can ever carry a subject_tenant_id today.
+// action. PRH-2 populated it for every platform-scope kill-switch action
+// G1 puts in tenant scope (ADR 0104 §4's "in scope" list). That is NO LONGER
+// the only family carrying a subject_tenant_id: K1 capability grants, K2
+// manual adjustments and launch authorisation platform rows carry one too.
+// An entry here controls only reason_code/before/after; WHO the actor is
+// shown as is decided separately by identifiedActionPrefixes in
+// internal/httpserver/audit_platform_actions_handlers.go (kill-switch only).
 var TenantPresentation = map[string]TenantPresentationEntry{
 	"payments_kill_switch.engage":          {ReasonCode: true, BeforeAfter: true},
 	"payments_kill_switch.request_release": {ReasonCode: true, BeforeAfter: true},

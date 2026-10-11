@@ -1387,7 +1387,7 @@ func newListPlatformAuditLogHandler(deps Deps) http.HandlerFunc {
 		var total int
 		err = deps.DB.WithPlatformAdmin(r.Context(), subjectID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			resp, total, err = queryAuditLog(ctx, tx, staffViewer{platform: true}, nil, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
+			resp, total, err = queryAuditLog(ctx, tx, platformStaffViewer(), nil, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
 			return err
 		})
 		if err != nil {
