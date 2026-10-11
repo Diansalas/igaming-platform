@@ -20,6 +20,7 @@ export function buildNavItems(claims: StaffClaims | null): NavItem[] {
   if (isPlatformAdmin(claims)) {
     if (perms.tenants) items.push({ label: 'Tenants', to: '/tenants' })
     if (perms.launchQueue) items.push({ label: 'Launch Queue', to: '/launch-queue' })
+    if (perms.alertManage) items.push({ label: 'Alerts', to: '/alerts' })
     if (perms.catalogue) items.push({ label: 'Casino Catalogue', to: '/casino-catalogue' })
     if (perms.platformAudit) items.push({ label: 'Platform Audit Log', to: '/platform-audit-log' })
     return items

@@ -244,7 +244,7 @@ type adjustmentDTO struct {
 	CausationTransactionID *string  `json:"causation_transaction_id,omitempty"`
 	EvidenceRefHash        *string  `json:"evidence_ref_hash,omitempty"`
 	PayloadHash            string   `json:"payload_hash"`
-	InitiatedBy            string   `json:"initiated_by"`
+	InitiatedBy            staffRef `json:"initiated_by"` // null for a tenant caller when the initiator is platform staff (ADR 0114 H1)
 	InitiatedByScope       string   `json:"initiated_by_scope"`
 	RequiredAtSubmission   int      `json:"required_at_submission"`
 	ContributingPolicyIDs  []string `json:"contributing_policy_ids"`
@@ -256,12 +256,12 @@ type adjustmentDTO struct {
 	ExpiresAt              string   `json:"expires_at"`
 }
 
-func toAdjustmentDTO(r adjustment.Request) adjustmentDTO {
+func toAdjustmentDTO(v staffViewer, r adjustment.Request) adjustmentDTO {
 	dto := adjustmentDTO{
 		ID: r.ID.String(), TenantID: r.TenantID.String(), WalletID: r.WalletID.String(), PlayerAccountID: r.PlayerAccountID.String(),
 		AssetCode: r.AssetCode, Direction: string(r.Direction), AmountMinorUnits: strconv.FormatInt(r.Amount, 10),
 		ReasonCode: string(r.ReasonCode), EvidenceRefHash: r.EvidenceRefHash, PayloadHash: r.PayloadHash,
-		InitiatedBy: r.InitiatedBy.String(), InitiatedByScope: r.InitiatedByScope, RequiredAtSubmission: r.RequiredAtSubmission,
+		InitiatedBy: v.ref(r.InitiatedByScope, r.InitiatedBy), InitiatedByScope: r.InitiatedByScope, RequiredAtSubmission: r.RequiredAtSubmission,
 		TenantStatus: r.TenantStatusAtSubmit, State: string(r.State), RefusalCode: r.RefusalCode,
 		CreatedAt: r.CreatedAt.Format(time.RFC3339), ExpiresAt: r.ExpiresAt.Format(time.RFC3339),
 	}
@@ -324,7 +324,7 @@ func newSubmitAdjustmentHandler(deps Deps, svc *adjustment.Service) http.Handler
 			writeAdjustmentError(r.Context(), deps, w, c, "submit", err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, toAdjustmentDTO(req))
+		writeJSON(w, http.StatusCreated, toAdjustmentDTO(staffViewerOf(c.tc), req))
 	}
 }
 
@@ -345,7 +345,7 @@ func newListAdjustmentsHandler(deps Deps, svc *adjustment.Service) http.HandlerF
 		}
 		out := make([]adjustmentDTO, 0, len(reqs))
 		for _, x := range reqs {
-			out = append(out, toAdjustmentDTO(x))
+			out = append(out, toAdjustmentDTO(staffViewerOf(c.tc), x))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
@@ -371,7 +371,7 @@ func newGetAdjustmentHandler(deps Deps, svc *adjustment.Service) http.HandlerFun
 			writeAdjustmentError(r.Context(), deps, w, c, "get", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, toAdjustmentDTO(req))
+		writeJSON(w, http.StatusOK, toAdjustmentDTO(staffViewerOf(c.tc), req))
 	}
 }
 
@@ -413,7 +413,7 @@ func newDecideAdjustmentHandler(deps Deps, svc *adjustment.Service, decision adj
 			writeAdjustmentError(r.Context(), deps, w, c, op, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, decisionResponse{Request: toAdjustmentDTO(out.Request), Executed: out.Executed, Counted: out.Counted, Required: out.Required})
+		writeJSON(w, http.StatusOK, decisionResponse{Request: toAdjustmentDTO(staffViewerOf(c.tc), out.Request), Executed: out.Executed, Counted: out.Counted, Required: out.Required})
 	}
 }
 
@@ -437,7 +437,7 @@ func newCancelAdjustmentHandler(deps Deps, svc *adjustment.Service) http.Handler
 			writeAdjustmentError(r.Context(), deps, w, c, "cancel", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, toAdjustmentDTO(req))
+		writeJSON(w, http.StatusOK, toAdjustmentDTO(staffViewerOf(c.tc), req))
 	}
 }
 

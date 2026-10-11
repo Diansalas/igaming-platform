@@ -50,7 +50,8 @@ describe('buildNavItems', () => {
     }).map((i) => i.label)
     // Launch Queue mirrors launch_authorisation:read for platform scope (ADR 0112).
     // Casino Catalogue mirrors PermCasinoCatalogueManage (platform_admin only).
-    expect(items).toEqual(['Tenants', 'Launch Queue', 'Casino Catalogue', 'Platform Audit Log'])
+    // Alerts mirrors alert:manage (platform_admin only; ADR 0114 S1).
+    expect(items).toEqual(['Tenants', 'Launch Queue', 'Alerts', 'Casino Catalogue', 'Platform Audit Log'])
   })
 
   it('gives tenant_admin the Providers & Games configuration page but never the platform catalogue', () => {

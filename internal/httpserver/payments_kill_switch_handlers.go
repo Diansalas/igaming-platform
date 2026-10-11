@@ -462,22 +462,22 @@ func engageAuditBeforeState(before payments.KillSwitch, found bool) map[string]a
 // --- DTOs -------------------------------------------------------------
 
 type killSwitchDTO struct {
-	ID               string  `json:"id"`
-	TenantID         string  `json:"tenant_id"`
-	ProviderScope    string  `json:"provider_scope"`
-	OperationScope   string  `json:"operation_scope"`
-	Engaged          bool    `json:"engaged"`
-	EngagedByScope   *string `json:"engaged_by_scope,omitempty"`
-	ReleaseRequestID *string `json:"release_request_id,omitempty"`
-	ReasonCode       string  `json:"reason_code"`
-	ChangedBy        string  `json:"changed_by"`
-	ChangedByScope   string  `json:"changed_by_scope"`
-	ChangedAt        string  `json:"changed_at"`
-	Version          int64   `json:"version"`
-	CreatedAt        string  `json:"created_at"`
+	ID               string   `json:"id"`
+	TenantID         string   `json:"tenant_id"`
+	ProviderScope    string   `json:"provider_scope"`
+	OperationScope   string   `json:"operation_scope"`
+	Engaged          bool     `json:"engaged"`
+	EngagedByScope   *string  `json:"engaged_by_scope,omitempty"`
+	ReleaseRequestID *string  `json:"release_request_id,omitempty"`
+	ReasonCode       string   `json:"reason_code"`
+	ChangedBy        staffRef `json:"changed_by"` // null for a tenant caller when the actor is platform staff (ADR 0114 H1)
+	ChangedByScope   string   `json:"changed_by_scope"`
+	ChangedAt        string   `json:"changed_at"`
+	Version          int64    `json:"version"`
+	CreatedAt        string   `json:"created_at"`
 }
 
-func toKillSwitchDTO(ks payments.KillSwitch) killSwitchDTO {
+func toKillSwitchDTO(v staffViewer, ks payments.KillSwitch) killSwitchDTO {
 	var engagedByScope *string
 	if ks.EngagedByScope != nil {
 		s := string(*ks.EngagedByScope)
@@ -487,29 +487,29 @@ func toKillSwitchDTO(ks payments.KillSwitch) killSwitchDTO {
 		ID: ks.ID.String(), TenantID: ks.TenantID.String(), ProviderScope: ks.ProviderScope,
 		OperationScope: string(ks.OperationScope), Engaged: ks.Engaged, EngagedByScope: engagedByScope,
 		ReleaseRequestID: uuidPtr(ks.ReleaseRequestID), ReasonCode: ks.ReasonCode,
-		ChangedBy: ks.ChangedBy.String(), ChangedByScope: string(ks.ChangedByScope),
+		ChangedBy: v.ref(string(ks.ChangedByScope), ks.ChangedBy), ChangedByScope: string(ks.ChangedByScope),
 		ChangedAt: ks.ChangedAt.UTC().Format(time.RFC3339Nano), Version: ks.Version,
 		CreatedAt: ks.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 
 type killSwitchReleaseRequestDTO struct {
-	ID               string  `json:"id"`
-	TenantID         string  `json:"tenant_id"`
-	KillSwitchID     string  `json:"kill_switch_id"`
-	ExpectedVersion  int64   `json:"expected_version"`
-	ReasonCode       string  `json:"reason_code"`
-	RequestedBy      string  `json:"requested_by"`
-	RequestedByScope string  `json:"requested_by_scope"`
-	CreatedAt        string  `json:"created_at"`
-	ExpiresAt        string  `json:"expires_at"`
-	Status           string  `json:"status"`
-	ApprovedBy       *string `json:"approved_by,omitempty"`
-	ApprovedByScope  *string `json:"approved_by_scope,omitempty"`
-	DecidedAt        *string `json:"decided_at,omitempty"`
+	ID               string    `json:"id"`
+	TenantID         string    `json:"tenant_id"`
+	KillSwitchID     string    `json:"kill_switch_id"`
+	ExpectedVersion  int64     `json:"expected_version"`
+	ReasonCode       string    `json:"reason_code"`
+	RequestedBy      staffRef  `json:"requested_by"` // null for a tenant caller when the actor is platform staff (ADR 0114 H1)
+	RequestedByScope string    `json:"requested_by_scope"`
+	CreatedAt        string    `json:"created_at"`
+	ExpiresAt        string    `json:"expires_at"`
+	Status           string    `json:"status"`
+	ApprovedBy       *staffRef `json:"approved_by,omitempty"` // null for a tenant caller when the approver is platform staff
+	ApprovedByScope  *string   `json:"approved_by_scope,omitempty"`
+	DecidedAt        *string   `json:"decided_at,omitempty"`
 }
 
-func toKillSwitchReleaseRequestDTO(req payments.KillSwitchReleaseRequest) killSwitchReleaseRequestDTO {
+func toKillSwitchReleaseRequestDTO(v staffViewer, req payments.KillSwitchReleaseRequest) killSwitchReleaseRequestDTO {
 	var approvedByScope *string
 	if req.ApprovedByScope != nil {
 		s := string(*req.ApprovedByScope)
@@ -518,9 +518,9 @@ func toKillSwitchReleaseRequestDTO(req payments.KillSwitchReleaseRequest) killSw
 	return killSwitchReleaseRequestDTO{
 		ID: req.ID.String(), TenantID: req.TenantID.String(), KillSwitchID: req.KillSwitchID.String(),
 		ExpectedVersion: req.ExpectedVersion, ReasonCode: req.ReasonCode,
-		RequestedBy: req.RequestedBy.String(), RequestedByScope: string(req.RequestedByScope),
+		RequestedBy: v.ref(string(req.RequestedByScope), req.RequestedBy), RequestedByScope: string(req.RequestedByScope),
 		CreatedAt: req.CreatedAt.UTC().Format(time.RFC3339Nano), ExpiresAt: req.ExpiresAt.UTC().Format(time.RFC3339Nano),
-		Status: req.Status, ApprovedBy: uuidPtr(req.ApprovedBy), ApprovedByScope: approvedByScope,
+		Status: req.Status, ApprovedBy: v.optRef(approvedByScope, req.ApprovedBy), ApprovedByScope: approvedByScope,
 		DecidedAt: rfc3339Ptr(req.DecidedAt),
 	}
 }
@@ -555,7 +555,7 @@ func newListKillSwitchesHandler(deps Deps) http.HandlerFunc {
 		}
 		dtos := make([]killSwitchDTO, 0, len(out))
 		for _, ks := range out {
-			dtos = append(dtos, toKillSwitchDTO(ks))
+			dtos = append(dtos, toKillSwitchDTO(staffViewerOf(c.tc), ks))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"kill_switches": dtos})
 	}
@@ -586,7 +586,7 @@ func newGetKillSwitchHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
+		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks))
 	}
 }
 
@@ -615,7 +615,7 @@ func newGetKillSwitchReleaseRequestHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, toKillSwitchReleaseRequestDTO(req))
+		writeJSON(w, http.StatusOK, toKillSwitchReleaseRequestDTO(staffViewerOf(c.tc), req))
 	}
 }
 
@@ -724,7 +724,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 		// POST-COMMIT ONLY, detached, in the engage's own scope. The engage
 		// row and its audit row are already committed; no failure of any
 		// class in the alert path can roll back or change this response.
-		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
+		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks))
 		flushResponse(w)
 		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover) // after status, headers and body bytes are flushed (ADR 0102 7.3)
 	}
@@ -797,7 +797,7 @@ func newRequestKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 			writeKillSwitchError(r.Context(), deps, w, c, "request_release", "payment_kill_switch", killSwitchID.String(), err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, toKillSwitchReleaseRequestDTO(req))
+		writeJSON(w, http.StatusCreated, toKillSwitchReleaseRequestDTO(staffViewerOf(c.tc), req))
 	}
 }
 
@@ -856,7 +856,7 @@ func newApproveKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 			writeKillSwitchError(r.Context(), deps, w, c, "approve_release", "payment_kill_switch_release_request", requestID.String(), err)
 			return
 		}
-		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
+		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks))
 	}
 }
 

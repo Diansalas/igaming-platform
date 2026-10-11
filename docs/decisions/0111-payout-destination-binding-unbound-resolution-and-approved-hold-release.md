@@ -1,5 +1,6 @@
 # ADR 0111 — Payout destination binding (B13), governed resolution of unbound payouts (PAY-PAYOUT-UNBOUND-RESOLVE-1) and four-eyes release of frozen `approved` holds (HSEC-APPROVED-HOLD-RELEASE-1)
 
+- **STATUS NOTE (2026-10-11, reconciliation per ADR 0114 section 8; body unchanged):** B13 binding (migrations 0123, 0126), M4 (0125, 0127) and HSEC approved-hold release (0124) are IMPLEMENTED against MOCK providers only (gap audit 2026-10-10 section 2, task registry); the PROPOSED / NOT IMPLEMENTED status line below is historical. Non-MOCK M4 stays BLOCKED (D-7, T10, S-3, `evidence_ref_hash`); a production HSEC policy row waits on Q-HSEC-1/2/3.
 - **Status: PROPOSED — DESIGN ONLY, revision 4 (`architect`, 2026-10-08).** Revision 4 applies the `security`
   co-ruling on §4 (S-1..S-8; 0125 MAY START; BC-2 co-signed; HD-R15-8 resolved by sealed imports; §14). Revision 3 applies the `ledger-finance`
   pre-0125 wording conditions (BC-1, R-1..R-5) and records BC-2, LOW-1, P-2 and notes (§13); LF: 0125 may start once

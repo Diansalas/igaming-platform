@@ -796,8 +796,8 @@ func TestAuditLog_RecordsSecurityEvents(t *testing.T) {
 	if suspended.Outcome != "success" {
 		t.Errorf("expected player.suspended outcome success, got %q", suspended.Outcome)
 	}
-	if suspended.ActorID != tenantAdmin.ID.String() {
-		t.Errorf("expected player.suspended actor to be the tenant_admin who performed it, got %q", suspended.ActorID)
+	if suspended.ActorID.String() != tenantAdmin.ID.String() {
+		t.Errorf("expected player.suspended actor to be the tenant_admin who performed it, got %q", suspended.ActorID.String())
 	}
 
 	found := false

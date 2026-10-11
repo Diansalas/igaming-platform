@@ -69,10 +69,12 @@ func TestM4_Paid_EndToEnd_MOCK(t *testing.T) {
 	if strings.Join(acts, ",") != "payment.manual_resolution_requested,payment.manual_resolution_executed" {
 		t.Fatalf("audit trail: %v", acts)
 	}
-	ar := m.sysQuery(`SELECT metadata->>'evidence_reference' AS r, metadata->>'evidence_verdict' AS v, metadata->>'evidence_line_id' AS l,
+	// CHANGED (ADR 0114 S0, security BLOCKER 2): the audit row carries evidence_reference_present, never the
+	// reference text R (blind entry). Was: ar[0]["r"] == r. The row in payment_manual_resolutions still holds R.
+	ar := m.sysQuery(`SELECT metadata->>'evidence_reference_present' AS r, position($3::text in metadata::text) > 0 AS leaked, metadata->>'evidence_verdict' AS v, metadata->>'evidence_line_id' AS l,
 		metadata->>'import_seals_verified' AS s, metadata->>'evidence_ref_hash' AS h
-		FROM audit_log WHERE tenant_id = $1 AND target_id = $2 AND action = 'payment.manual_resolution_requested'`, m.f.tenantID, res.ID.String())
-	if len(ar) != 1 || ar[0]["r"] != r || ar[0]["v"] != "paid" || ar[0]["l"] != ev.LineID.String() || ar[0]["s"] != "1" || ar[0]["h"] != k3EvidenceHash() {
+		FROM audit_log WHERE tenant_id = $1 AND target_id = $2 AND action = 'payment.manual_resolution_requested'`, m.f.tenantID, res.ID.String(), r)
+	if len(ar) != 1 || ar[0]["r"] != "true" || ar[0]["leaked"] != false || ar[0]["v"] != "paid" || ar[0]["l"] != ev.LineID.String() || ar[0]["s"] != "1" || ar[0]["h"] != k3EvidenceHash() {
 		t.Fatalf("request audit row lacks the evidence: %v", ar)
 	}
 	if n := m.countRows(`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.completed' AND target_id = $2`, m.f.tenantID, p.wr.ID.String()); n != 1 {
