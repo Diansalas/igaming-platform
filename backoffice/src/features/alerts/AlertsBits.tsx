@@ -7,7 +7,12 @@ import { Modal } from '../../components/Modal'
 import { describeAlertError, type AlertOp } from './errors'
 import { DELIVERY_BANNER_BODY, DELIVERY_BANNER_TITLE, REASON_HELP, describeKind } from './labels'
 
-/** Fixed, always-present banner: ALERT-DELIVERY-1 is OPEN. Not dismissible. */
+/**
+ * Fixed, always-present banner: ALERT-DELIVERY-1 is OPEN. Not dismissible.
+ * HARDCODED on purpose. When ALERT-DELIVERY-1 closes this MUST be derived from GET /v1/admin/alerting/status
+ * (human_notification_routes > 0 per severity), not left static; likewise the "Nobody was notified" wording
+ * must follow each row's notified_a_person. Deriving it is NOT authorised yet (pinned by a test).
+ */
 export function DeliveryBanner() {
   return (
     <div role="note" aria-label="Delivery status" className="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">

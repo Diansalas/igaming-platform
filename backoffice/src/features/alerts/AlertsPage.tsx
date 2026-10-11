@@ -1,8 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { listAlerts, type AlertSeverity, type AlertState, type PlatformAlert } from '../../api/alerts'
-import { useAuth } from '../../auth/AuthContext'
-import { getNavPermissions } from '../../auth/permissions'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
@@ -32,8 +30,6 @@ const SEVERITIES = new Set(['p1', 'p2', 'p3'])
  * The list API supports state, severity and limit only: no kind filter, no offset/cursor, no detail GET.
  */
 export function AlertsPage() {
-  const { claims } = useAuth()
-  const canAct = getNavPermissions(claims?.role).alertManage
   const qc = useQueryClient()
   const [state, setState] = useState('open')
   const [severity, setSeverity] = useState('')
@@ -56,20 +52,30 @@ export function AlertsPage() {
   const selected = alerts.find((a) => a.id === selectedId) ?? null
   const mayHaveMore = query.data !== undefined && alerts.length >= Number(limit)
 
+  function pickFilter(set: (v: string) => void) {
+    return (e: { target: { value: string } }) => {
+      setNotice(null)
+      set(e.target.value)
+    }
+  }
+
   function refresh() {
     void qc.invalidateQueries({ queryKey: ['alerts'] })
   }
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title="Alerts" description="Platform alerts across all tenants, newest first." />
+      <PageHeader title="Alerts" description="Platform alerts, newest first by first-seen time." />
       <DeliveryBanner />
       <RoutingStatusPanel />
       <div className="flex flex-wrap items-end gap-2">
-        <Select aria-label="Alert state" placeholder="All states" options={STATE_OPTIONS} value={state} onChange={(e) => setState(e.target.value)} />
-        <Select aria-label="Alert severity" placeholder="All severities" options={SEVERITY_OPTIONS} value={severity} onChange={(e) => setSeverity(e.target.value)} />
-        <Select aria-label="Rows to load" options={LIMIT_OPTIONS} value={limit} onChange={(e) => setLimit(e.target.value)} />
-        <Button variant="secondary" onClick={refresh} isLoading={query.isFetching}>
+        <Select aria-label="Alert state" placeholder="All states" options={STATE_OPTIONS} value={state} onChange={pickFilter(setState)} />
+        <Select aria-label="Alert severity" placeholder="All severities" options={SEVERITY_OPTIONS} value={severity} onChange={pickFilter(setSeverity)} />
+        <Select aria-label="Rows to load" options={LIMIT_OPTIONS} value={limit} onChange={pickFilter(setLimit)} />
+        <Button variant="secondary" onClick={() => { setNotice(null); setSeverity('p1') }}>
+          Show P1 only
+        </Button>
+        <Button variant="secondary" onClick={() => { setNotice(null); refresh() }} isLoading={query.isFetching}>
           Refresh
         </Button>
       </div>
@@ -87,6 +93,7 @@ export function AlertsPage() {
       {alerts.length > 0 && (
         <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
           <table className="w-full text-left text-sm">
+            <caption className="sr-only">Platform alerts</caption>
             <thead className="bg-surface-alt text-xs text-slate-500">
               <tr>
                 <th className="px-3 py-2 font-medium">Alert</th>
@@ -120,18 +127,19 @@ export function AlertsPage() {
       )}
       {mayHaveMore && (
         <p className="text-xs text-slate-500">
-          Showing the newest {limit}. There may be older alerts that match; raise the row count (maximum 200) or narrow the filters.
+          Showing the newest {limit}. There may be more alerts that match. The list is sorted by first-seen time only, so up to 200 newer P3 alerts can push an open P1 out of view. Use &quot;Show P1 only&quot; or filter by severity, or raise the row count (maximum 200).
         </p>
       )}
-      {selected && <AlertDetail alert={selected} canAct={canAct} onAct={(op) => setDialog({ op, alert: selected })} onClose={() => setSelectedId(null)} />}
+      {selected && <AlertDetail alert={selected} onAct={(op) => { setNotice(null); setDialog({ op, alert: selected }) }} onClose={() => setSelectedId(null)} />}
       {dialog && (
         <TransitionDialog
           op={dialog.op}
           alert={dialog.alert}
           onClose={() => setDialog(null)}
-          onRefused={refresh}
+          onRefused={() => { setNotice(null); refresh() }}
           onDone={(r) => {
             setDialog(null)
+            // HARDCODED while ALERT-DELIVERY-1 is OPEN: derive from /alerting/status human_notification_routes when it closes.
             setNotice(`Alert ${r.state === 'resolved' ? 'resolved' : 'acknowledged'}. Nobody was notified: delivery is not configured.`)
             refresh()
           }}
@@ -141,11 +149,15 @@ export function AlertsPage() {
   )
 }
 
-function AlertDetail({ alert, canAct, onAct, onClose }: { alert: PlatformAlert; canAct: boolean; onAct: (op: 'ack' | 'resolve') => void; onClose: () => void }) {
+function AlertDetail({ alert, onAct, onClose }: { alert: PlatformAlert; onAct: (op: 'ack' | 'resolve') => void; onClose: () => void }) {
   const k = describeKind(alert.kind)
   const unrouted = unroutedLabel(alert.unrouted_reason)
+  const ref = useRef<HTMLElement>(null)
+  useEffect(() => {
+    ref.current?.focus()
+  }, [alert.id])
   return (
-    <section aria-label="Alert detail" className="rounded-lg border border-border bg-surface p-4 shadow-sm">
+    <section ref={ref} tabIndex={-1} aria-label="Alert detail" className="rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 border border-border bg-surface p-4 shadow-sm">
       <div className="flex items-start justify-between gap-2">
         <h2 className="text-sm font-semibold text-slate-900">{k.title}</h2>
         <button type="button" className="text-xs text-slate-500 hover:underline" onClick={onClose}>
@@ -172,7 +184,9 @@ function AlertDetail({ alert, canAct, onAct, onClose }: { alert: PlatformAlert; 
           {unrouted ? `: ${unrouted}` : ''}. {alert.notified_a_person ? 'A person was notified.' : 'Nobody was notified.'}
         </dd>
       </dl>
-      {canAct && (alert.state === 'open' || alert.state === 'acked') && (
+      {/* Actions are shown for every open/acked alert. The page itself is already gated by alertManage (the same
+          permission ack/resolve need), so there is no separate hide-actions case; the server decides. */}
+      {(alert.state === 'open' || alert.state === 'acked') && (
         <div className="mt-3 flex gap-2">
           {alert.state === 'open' && (
             <Button variant="secondary" onClick={() => onAct('ack')}>

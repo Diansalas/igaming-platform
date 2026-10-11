@@ -441,6 +441,31 @@ mounted; each DTO's JSON field set equals its schema's property set (reflection)
 properties and carry no tenant field; the redaction contract and the absence of `evidence_reference` are pinned.
 
 
+## 9B. S1b backend API completions (MUST before production console) - NOT IMPLEMENTED
+
+Recorded from the S1 reviews (security and code-reviewer, APPROVE WITH CONDITIONS). The S1 console (frontend only)
+works around these gaps and says so on screen; none is built here.
+
+MUST before the alerts console is relied on in production:
+
+- Keyset cursor `(first_seen_at, id)` on `GET /v1/admin/alerts` so alerts beyond the newest 200 are reachable (today
+  `limit` only, max 200, sorted by `first_seen_at`; newer P3 alerts can push an open P1 out of view).
+- The list returns `acked_at`, `resolved_at`, `acked_by`, `resolved_by` (platform-only route, so tenant redaction is
+  not applicable).
+- Document `escalation_step`, `delivery_channel_kind` and `attempt_no` (already returned by the handler) in OpenAPI.
+
+SHOULD:
+
+- Single-alert `GET /v1/admin/alerts/{alertID}`; a `kind` filter on the list.
+- Closed codes for the `reason` and `missing_operator_input` strings of `/alerting/status` (the console does not render
+  them today because they are open text).
+- Ensure `recipient_ref` never holds a credential or a tokened URL once real channels exist.
+
+Also pinned for the console: the "MOCK / no delivery channel" banner and "Nobody was notified" wording are hardcoded
+while ALERT-DELIVERY-1 is OPEN and must be derived from `/alerting/status` `human_notification_routes` and each row's
+`notified_a_person` when it closes.
+
+
 ## 10. S0 security re-check disposition (orchestrator, 2026-10-11)
 
 Live security re-check of `68f2152`: APPROVE WITH CONDITIONS, the platform-actions blocker is fixed (no platform staff id outside

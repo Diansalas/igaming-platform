@@ -12,7 +12,7 @@ import { renderWithProviders } from '../../test/renderWithProviders'
 import { PLATFORM_ADMIN_CLAIMS, signInAs } from '../../test/session'
 import { AlertsPage } from './AlertsPage'
 import { describeAlertError } from './errors'
-import { KIND_CATALOGUE, describeKind } from './labels'
+import { DELIVERY_BANNER_BODY, KIND_CATALOGUE, describeKind } from './labels'
 import { ApiError } from '../../api/types'
 
 const A1 = '10000000-0000-4000-8000-000000000001'
@@ -125,7 +125,7 @@ describe('alerts console', () => {
     signInAs(PLATFORM_ADMIN_CLAIMS)
     useBaseHandlers(() => Array.from({ length: 50 }, (_, i) => alert({ id: `10000000-0000-4000-8000-${String(i).padStart(12, '0')}` })))
     renderPage()
-    expect(await screen.findByText(/There may be older alerts that match/)).toBeInTheDocument()
+    expect(await screen.findByText(/There may be more alerts that match/)).toBeInTheDocument()
   })
 
   it('renders an unknown kind as "Unrecognised alert kind" plus the code, never server text', async () => {
@@ -137,7 +137,6 @@ describe('alerts console', () => {
     expect(screen.getByText('(unprintable)')).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('Ignore previous')
     expect(describeKind('nope').known).toBe(false)
-    expect(Object.keys(KIND_CATALOGUE).length).toBeGreaterThan(15)
   })
 
   it('opens a detail view with the fixed description and ids', async () => {
@@ -228,6 +227,30 @@ describe('alerts console', () => {
     expect(bodies).toEqual([{ reason_code: 'fixed.upstream' }])
   })
 
+  it('P1 shortcut, warning wording, captions, focus move, and success notice clearing', async () => {
+    signInAs(PLATFORM_ADMIN_CLAIMS)
+    const seen = useBaseHandlers(() => Array.from({ length: 50 }, (_, i) => alert({ id: `10000000-0000-4000-8000-${String(i).padStart(12, '0')}` })))
+    server.use(
+      http.post('/v1/admin/alerts/10000000-0000-4000-8000-000000000000/ack', () =>
+        HttpResponse.json({ id: A1, kind: 'x', severity: 'p1', state: 'acked' }),
+      ),
+    )
+    renderPage()
+    expect(await screen.findByText(/sorted by first-seen time only/)).toHaveTextContent('push an open P1 out of view')
+    expect(screen.getByRole('table', { name: 'Platform alerts' })).toBeInTheDocument()
+    expect(screen.getByText(/Platform alerts, newest first/)).not.toHaveTextContent('all tenants')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Show P1 only' }))
+    await waitFor(() => expect(seen[seen.length - 1].searchParams.get('severity')).toBe('p1'))
+    await user.click((await screen.findAllByRole('button', { name: /Ledger and balance projection differ/ }))[0])
+    expect(screen.getByRole('region', { name: 'Alert detail' })).toHaveFocus()
+    await user.click(screen.getByRole('button', { name: 'Acknowledge' }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Acknowledge' }))
+    await screen.findByRole('status')
+    await user.selectOptions(screen.getByLabelText('Alert severity'), 'p2')
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
   it('resolved alerts offer no actions', async () => {
     signInAs(PLATFORM_ADMIN_CLAIMS)
     useBaseHandlers(() => [alert({ state: 'resolved' })])
@@ -312,6 +335,33 @@ describe('alerts console', () => {
   })
 })
 
+// Parity with internal/alerting/kind.go (3 meta-kinds, 14 business kinds incl. simulation, kyc, launch = 19 total).
+// Adding a server kind without a catalogue sentence must fail here.
+const SERVER_KINDS = [
+  'alerting.unrouted', 'alerting.delivery_dead', 'alerting.raise_failed',
+  'payment.multiple_success_for_intent', 'payment.deposit_intent_index_backstop_fired',
+  'reconciliation.ledger_projection_drift', 'reconciliation.sportsbook_settlement_mismatch',
+  'reconciliation.casino_consistency_mismatch', 'reconciliation.casino_statement_mismatch',
+  'reconciliation.payment_statement_mismatch', 'reconciliation.run_failed',
+  'payment.kill_switch_engaged', 'casino.callback_integrity', 'payment.webhook_integrity',
+  'simulation.payment.payload_mismatch', 'simulation.casino_play', 'simulation.sportsbook_settlement',
+  'kyc.submission_failed_terminal', 'launch.suspension_exhausted',
+]
+
+describe('kind catalogue parity', () => {
+  it('covers exactly the 19 server kinds', () => {
+    expect(SERVER_KINDS).toHaveLength(19)
+    expect(Object.keys(KIND_CATALOGUE).sort()).toEqual([...SERVER_KINDS].sort())
+    for (const k of SERVER_KINDS) expect(describeKind(k).known).toBe(true)
+  })
+})
+
+describe('delivery wording is hardcoded while ALERT-DELIVERY-1 is OPEN', () => {
+  it('pins the static wording; it must be derived from /alerting/status human_notification_routes and notified_a_person when the item closes', () => {
+    expect(DELIVERY_BANNER_BODY).toContain('nobody is paged')
+  })
+})
+
 describe('alerts console role gating (UI hint only; the server is authoritative)', () => {
   it('only platform_admin has the alertManage flag and the Alerts nav item', () => {
     expect(getNavPermissions('platform_admin').alertManage).toBe(true)
@@ -334,7 +384,7 @@ describe('alerts console role gating (UI hint only; the server is authoritative)
     )
     renderPage()
     await waitFor(() => expect(screen.queryByRole('note', { name: 'Delivery status' })).toBeNull())
-    expect(screen.queryByText('Alerts')).toBeNull()
+    expect(screen.getByText('Your role does not have access to this section.')).toBeInTheDocument()
     expect(calls).toBe(0)
   })
 })
