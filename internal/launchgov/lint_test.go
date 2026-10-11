@@ -45,6 +45,82 @@ func TestLintFreeText_RefusesPIIShapes(t *testing.T) {
 	}
 }
 
+// Security C3: the reviewer's exact evasion strings (and their relatives) are refused.
+func TestLintFreeText_RefusesTheReviewersEvasions(t *testing.T) {
+	bad := map[string]string{
+		"pan with slashes":             "4111/1111/1111/1111",
+		"pan with underscores":         "4111_1111_1111_1111",
+		"pan with dots":                "4111.1111.1111.1111",
+		"pan with mixed separators":    "4111 / 1111 _ 1111 . 1111",
+		"full-width digits":            "４１１１１１１１１１１１１１１１",
+		"full-width digits, long run":  "ref １２３４５６７８９０",
+		"full-width at sign":           "jane＠example.com",
+		"full-width everything":        "ｊａｎｅ＠ｅｘａｍｐｌｅ．ｃｏｍ",
+		"at / dot spelled":             "x at example dot com",
+		"(at) / (dot)":                 "x (at) example (dot) com",
+		"[at] / [dot]":                 "x [at] example [dot] com",
+		"zero-width inside the number": "4111​1111​1111​1111",
+		"arabic-indic digits":          "٤١١١١١١١١١١١١١١١",
+		"digits in brackets":           "(123)(456)(789)",
+	}
+	for name, s := range bad {
+		if err := LintFreeText("conditions_note", s, 2000); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%s: %q must be refused, got %v", name, s, err)
+		}
+	}
+	// Not refused: ordinary prose that merely contains "at" or numbers below the run threshold.
+	for _, ok := range []string{
+		"meet at the office to review",
+		"look at the second quarter figures",
+		"clause 12 and 14, page 3",
+		"phase 1/2/3 of the plan",
+		"the 2026-10-10 memo",
+		"version 1.2.3",
+	} {
+		if err := LintFreeText("conditions_note", ok, 2000); err != nil {
+			t.Errorf("%q must be accepted, got %v", ok, err)
+		}
+	}
+}
+
+// Security C3: the registration field is a registry number, not free text.
+func TestLintRegistration_RefusesPhonesNamesAndPunctuation(t *testing.T) {
+	for _, bad := range []string{
+		"+34 600 123 456",
+		"12345678Z Jane Doe born 1980",
+		"Jane Doe",
+		"(555) 123-4567",
+		"ceo at example dot com",
+		"REG#4711",
+		"REG_4711",
+		"REG,4711",
+		"-REG-4711",
+		" REG-4711",
+		"４１１１ １１１１ １１１１ １１１１",
+	} {
+		if err := LintRegistration(bad); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%q must be refused, got %v", bad, err)
+		}
+	}
+	for _, ok := range []string{"", "REG-4711", "HRB 123456", "C 12345-2020", "CHE-123.456.789", "12345678901", "B/12345/2020"} {
+		if err := LintRegistration(ok); err != nil {
+			t.Errorf("registry number %q must be accepted: %v", ok, err)
+		}
+	}
+}
+
+func TestOtherDocumentedNeedsNote(t *testing.T) {
+	if err := otherDocumentedNeedsNote(ReasonOtherDocumented, "  "); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("other_documented with a blank note must be refused: %v", err)
+	}
+	if err := otherDocumentedNeedsNote(ReasonOtherDocumented, "see the counsel memo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := otherDocumentedNeedsNote("compliance_hold", ""); err != nil {
+		t.Fatalf("every other reason needs no note: %v", err)
+	}
+}
+
 func TestLintFreeText_SizeBounds(t *testing.T) {
 	if err := LintFreeText("conditions_note", strings.Repeat("a", 2000), 2000); err != nil {
 		t.Fatalf("2000 bytes is the bound: %v", err)

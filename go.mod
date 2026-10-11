@@ -22,6 +22,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/crypto v0.42.0
+	golang.org/x/text v0.42.0
 )
 
 require (
@@ -44,5 +45,4 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
 )
