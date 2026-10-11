@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation } from 'react-router-dom'
 import { Button } from '../components/Button'
 import { TextInput } from '../components/TextInput'
 import { ApiError } from '../api/types'
+import { SiteUnavailable, isSiteUnavailableError } from '../components/SiteUnavailable'
 import { useAuth } from './AuthContext'
 
 function errorMessageFor(err: unknown): string {
@@ -10,8 +11,6 @@ function errorMessageFor(err: unknown): string {
     switch (err.code) {
       case 'conflict':
         return 'An account with this email already exists.'
-      case 'not_found':
-        return 'Unknown brand configuration.'
       case 'validation_error':
         return err.message || 'Please check the form and try again.'
       case 'network_error':
@@ -30,6 +29,7 @@ export function RegisterPage() {
   const [password, setPassword] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [unavailable, setUnavailable] = useState(false)
 
   if (isAuthenticated) {
     const from = (location.state as { from?: Location })?.from
@@ -38,6 +38,8 @@ export function RegisterPage() {
     return <Navigate to={from?.pathname ?? '/account'} replace />
   }
 
+  if (unavailable) return <SiteUnavailable />
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
@@ -45,6 +47,10 @@ export function RegisterPage() {
     try {
       await register({ email: email.trim(), password })
     } catch (err) {
+      if (isSiteUnavailableError(err)) {
+        setUnavailable(true)
+        return
+      }
       setError(errorMessageFor(err))
     } finally {
       setIsSubmitting(false)

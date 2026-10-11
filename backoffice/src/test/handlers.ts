@@ -29,6 +29,10 @@ export const handlers = [
     })
   }),
 
+  // ADR 0112 launch panel reads (tenant/brand detail pages): empty by default, overridden per test.
+  http.get('/v1/admin/tenants/:tid/launch-authorisations', () => HttpResponse.json({ items: [] })),
+  http.get('/v1/admin/tenants/:tid/launch-status-history', () => HttpResponse.json({ items: [] })),
+
   http.get('/v1/admin/withdrawals/history', () => {
     return HttpResponse.json({
       items: [

@@ -5,10 +5,13 @@ export function Modal({
   title,
   onClose,
   children,
+  size = 'md',
 }: {
   title: string
   onClose: () => void
   children: ReactNode
+  /** 'lg' for forms with a checklist (launch request); scrolls inside the viewport. */
+  size?: 'md' | 'lg'
 }) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -24,7 +27,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="w-full max-w-md rounded-lg bg-white shadow-xl"
+        className={`flex max-h-[90vh] w-full flex-col rounded-lg bg-white shadow-xl ${size === 'lg' ? 'max-w-2xl' : 'max-w-md'}`}
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
@@ -37,7 +40,7 @@ export function Modal({
             &#10005;
           </button>
         </div>
-        <div className="p-4">{children}</div>
+        <div className="overflow-y-auto p-4">{children}</div>
       </div>
     </div>
   )

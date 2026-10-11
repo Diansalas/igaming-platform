@@ -2,7 +2,6 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { getTenant, listBrands } from '../../api/tenants'
 import type { Brand } from '../../api/tenants'
-import { Badge } from '../../components/Badge'
 import { Card } from '../../components/Card'
 import { ErrorState } from '../../components/ErrorState'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
@@ -12,6 +11,8 @@ import { usePagination } from '../../components/usePagination'
 import { useAuth } from '../../auth/AuthContext'
 import { isPlatformAdmin } from '../../auth/jwt'
 import { getNavPermissions } from '../../auth/permissions'
+import { LaunchPanel } from '../launch/LaunchPanel'
+import { LaunchStatusBadge } from '../launch/LaunchBits'
 import { CreateBrandForm } from './CreateBrandForm'
 import { CreateStaffForm } from './CreateStaffForm'
 import { LinkStaffPersonForm } from './LinkStaffPersonForm'
@@ -43,7 +44,7 @@ export function TenantDetailPage() {
   const columns: Column<Brand>[] = [
     { key: 'name', header: 'Name', render: (b) => <span className="font-medium text-slate-900">{b.name}</span> },
     { key: 'slug', header: 'Slug', render: (b) => b.slug },
-    { key: 'status', header: 'Status', render: (b) => <Badge tone={b.status === 'active' ? 'success' : 'warning'}>{b.status}</Badge> },
+    { key: 'status', header: 'Status', render: (b) => <LaunchStatusBadge status={b.status} /> },
   ]
 
   return (
@@ -58,7 +59,7 @@ export function TenantDetailPage() {
           <div>
             <dt className="text-slate-500">Status</dt>
             <dd className="mt-1">
-              <Badge tone={tenant.status === 'active' ? 'success' : 'warning'}>{tenant.status}</Badge>
+              <LaunchStatusBadge status={tenant.status} />
             </dd>
           </div>
           <div>
@@ -67,6 +68,16 @@ export function TenantDetailPage() {
           </div>
         </dl>
       </Card>
+
+      <LaunchPanel
+        tenantId={tenantId}
+        status={tenant.status}
+        subjectName={tenant.name}
+        onSubjectChanged={() => {
+          void tenantQuery.refetch()
+          void brandsQuery.refetch()
+        }}
+      />
 
       <Card title="Brands">
         <Table

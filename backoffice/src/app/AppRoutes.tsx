@@ -22,6 +22,7 @@ import { PlatformAuditLogPage } from '../features/audit/PlatformAuditLogPage'
 import { TenantAuditLogPage } from '../features/audit/TenantAuditLogPage'
 import { ConfigurationPage } from '../features/configuration/ConfigurationPage'
 import { CasinoCataloguePage } from '../features/catalogue/CasinoCataloguePage'
+import { LaunchQueuePage } from '../features/launch/LaunchQueuePage'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
 
@@ -60,6 +61,14 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission={['tenants', 'ownTenant']}>
               <BrandDetailPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="launch-queue"
+          element={
+            <RequireNavPermission permission="launchQueue">
+              <LaunchQueuePage />
             </RequireNavPermission>
           }
         />

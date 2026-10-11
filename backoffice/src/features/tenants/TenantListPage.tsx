@@ -1,7 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { listTenants } from '../../api/tenants'
-import { Badge, type BadgeTone } from '../../components/Badge'
 import { PageHeader } from '../../components/PageHeader'
 import { SearchInput } from '../../components/SearchInput'
 import { Select } from '../../components/Select'
@@ -14,17 +13,10 @@ import { useAuth } from '../../auth/AuthContext'
 import { getNavPermissions } from '../../auth/permissions'
 import { CreateTenantForm } from './CreateTenantForm'
 
-const STATUS_OPTIONS = [
-  { value: 'active', label: 'Active' },
-  { value: 'suspended', label: 'Suspended' },
-  { value: 'closed', label: 'Closed' },
-]
+import { SUBJECT_STATUS_FILTER_OPTIONS } from '../launch/labels'
+import { LaunchStatusBadge } from '../launch/LaunchBits'
 
-function statusTone(status: string): BadgeTone {
-  if (status === 'active') return 'success'
-  if (status === 'suspended') return 'warning'
-  return 'neutral'
-}
+const STATUS_OPTIONS = SUBJECT_STATUS_FILTER_OPTIONS
 
 export function TenantListPage() {
   const navigate = useNavigate()
@@ -44,7 +36,7 @@ export function TenantListPage() {
     { key: 'name', header: 'Name', render: (t) => <span className="font-medium text-slate-900">{t.name}</span> },
     { key: 'slug', header: 'Slug', render: (t) => t.slug },
     { key: 'licensing_model', header: 'Licensing model', render: (t) => t.licensing_model },
-    { key: 'status', header: 'Status', render: (t) => <Badge tone={statusTone(t.status)}>{t.status}</Badge> },
+    { key: 'status', header: 'Status', render: (t) => <LaunchStatusBadge status={t.status} /> },
   ]
 
   return (

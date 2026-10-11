@@ -21,7 +21,8 @@ async function toApiError(res: Response): Promise<ApiError> {
   }
   const code = (body.code as ApiErrorBody['code']) ?? 'internal_error'
   const message = body.message ?? res.statusText ?? 'Request failed'
-  return new ApiError(code as ApiError['code'], message, res.status, body.request_id)
+  const checkCodes = Array.isArray(body.check_codes) ? body.check_codes.filter((c): c is string => typeof c === 'string') : []
+  return new ApiError(code as ApiError['code'], message, res.status, body.request_id, checkCodes)
 }
 
 // Refresh calls are made with a bare fetch, never apiFetch - apiFetch's

@@ -34,6 +34,8 @@ export type ApiErrorCode =
   | 'PAYOUT_INSTRUMENT_REQUIRED'
   | 'PAYOUT_INSTRUMENT_NOT_USABLE'
   | 'TENANT_OR_BRAND_NOT_ACTIVE'
+  // ADR 0112 7.3: a suspended or closed brand/tenant accepts no new registration (409).
+  | 'BRAND_NOT_ACCEPTING_REGISTRATIONS'
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode

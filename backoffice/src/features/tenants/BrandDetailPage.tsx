@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { getBrand } from '../../api/tenants'
-import { Badge } from '../../components/Badge'
+import { LaunchPanel } from '../launch/LaunchPanel'
+import { LaunchStatusBadge } from '../launch/LaunchBits'
 import { Card } from '../../components/Card'
 import { ErrorState } from '../../components/ErrorState'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
@@ -28,7 +29,7 @@ export function BrandDetailPage() {
           <div>
             <dt className="text-slate-500">Status</dt>
             <dd className="mt-1">
-              <Badge tone={brand.status === 'active' ? 'success' : 'warning'}>{brand.status}</Badge>
+              <LaunchStatusBadge status={brand.status} />
             </dd>
           </div>
           <div>
@@ -41,6 +42,13 @@ export function BrandDetailPage() {
           </div>
         </dl>
       </Card>
+      <LaunchPanel
+        tenantId={tenantId}
+        brandId={brandId}
+        status={brand.status}
+        subjectName={brand.name}
+        onSubjectChanged={() => void refetch()}
+      />
       <Link to={`/tenants/${tenantId}`} className="text-sm text-brand-700 hover:underline">
         &larr; Back to tenant
       </Link>

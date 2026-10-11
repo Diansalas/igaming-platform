@@ -91,6 +91,19 @@ export interface NavPermissions {
    * ack/resolve permission. UI convenience only; the server re-checks.
    */
   alertRouting: boolean
+  /**
+   * ADR 0112 (section 6.1): the static launch_authorisation:* governance permissions. UI
+   * convenience only - the server re-checks every call (and enforces tenant scope: tenant
+   * subjects are platform-only, a tenant role may act on its own tenant's BRANDS only).
+   * read: platform_admin, tenant_admin, compliance. request and suspend: the same three.
+   * approve: platform_admin ONLY (also the only role that sees the platform queue).
+   */
+  launchRead: boolean
+  launchRequest: boolean
+  launchApprove: boolean
+  launchSuspend: boolean
+  /** GET /v1/admin/launch-authorisations - platform staff only. */
+  launchQueue: boolean
 }
 
 const NONE: NavPermissions = {
@@ -120,6 +133,11 @@ const NONE: NavPermissions = {
   payoutInstruments: false,
   payoutInstrumentSuspend: false,
   alertRouting: false,
+  launchRead: false,
+  launchRequest: false,
+  launchApprove: false,
+  launchSuspend: false,
+  launchQueue: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -161,6 +179,11 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     withdrawalHoldResolutionAct: true,
     payoutInstruments: true,
     alertRouting: true,
+    launchRead: true,
+    launchRequest: true,
+    launchApprove: true,
+    launchSuspend: true,
+    launchQueue: true,
   },
   tenant_admin: {
     ...NONE,
@@ -176,9 +199,12 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     staffAdmin: true,
     providerConfig: true,
     casinoConfig: true,
+    launchRead: true,
+    launchRequest: true,
+    launchSuspend: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true },
+  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
   finance: {
     ...NONE,
     withdrawals: true,
