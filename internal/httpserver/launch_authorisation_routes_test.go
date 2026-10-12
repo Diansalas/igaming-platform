@@ -58,6 +58,8 @@ func TestLaunchErrorCode_MapsEveryRefusal(t *testing.T) {
 		{"refused at execution", &launchgov.RefusedAtExecutionError{RequestID: uuid.New(), Code: "approvals_stale"}, apierror.CodeLaunchRefusedAtExecution, 409, []string{"approvals_stale"}},
 		{"GP020 open bets", wrap(&tenant.CloseBlockedError{SportsbookOpenBets: 3}), apierror.CodeTenantCloseBlockedOpenRounds, 409, nil},
 		{"LA023 database backstop", guard("LA023"), apierror.CodeLaunchWithdrawalsHolding, 409, []string{"LA023"}},
+		{"LA025 database backstop (ADR 0113 s4.3: non-zero withdrawal hold balance)", guard("LA025"), apierror.CodeLaunchWithdrawalsHolding, 409, []string{"LA025"}},
+		{"H-6 hold balance precondition", &launchgov.PreconditionError{Base: launchgov.ErrWithdrawalsHolding, Codes: []string{launchgov.H6HoldBalanceNonZero}}, apierror.CodeLaunchWithdrawalsHolding, 409, []string{launchgov.H6HoldBalanceNonZero}},
 		{"LA024 database backstop", guard("LA024"), apierror.CodeLaunchOpenBetsBlockClosure, 409, []string{"LA024"}},
 		{"LA001 session", guard("LA001"), apierror.CodeForbidden, 403, nil},
 		{"LA011", guard("LA011"), apierror.CodeLaunchGuardRefused, 409, []string{"LA011"}},

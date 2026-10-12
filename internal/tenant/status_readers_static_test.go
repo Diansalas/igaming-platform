@@ -80,6 +80,11 @@ var allowedLiteralCompares = map[string]string{
 	// withdrawals / (brand) open bets exist; it reads no status, it reacts to the status being set.
 	"migrations/0130_launch_authorisation_actor_proof.up.sql:IF NEW.status = 'closed' THEN": "0130 closure backstop: refuses closing over held funds / open bets",
 	// The 0130 DOWN is not scanned (only *.up.sql); it restores 0129's body verbatim.
+	// 0133 (ADR 0113 slice 2): CREATE OR REPLACE of 0130's guard body byte for byte plus the LA025
+	// ledger closure arm inside the same closure branch; both lines are 0130's, unchanged. The 0133
+	// DOWN restores 0130's body verbatim.
+	"migrations/0133_launch_closure_withdrawal_hold_balance_arm.up.sql:IF OLD.status = 'closed' THEN": "0133 restates 0128 closed is terminal",
+	"migrations/0133_launch_closure_withdrawal_hold_balance_arm.up.sql:IF NEW.status = 'closed' THEN": "0133 closure backstop: LA023 / LA024 (0130) plus LA025 non-zero withdrawal hold balances",
 }
 
 func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testing.T) {

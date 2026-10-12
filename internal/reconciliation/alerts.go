@@ -39,19 +39,27 @@ const (
 	// a governance breach (a manual adjustment posted outside the governed
 	// request path), see the runbook.
 	discLedgerUnlinkedManualAdjustment = "stream:ledger_unlinked_manual_adjustment"
+	// discLedgerWithdrawalHold is check D (ADR 0113 s4.4, invariant #12): both of its kinds
+	// (withdrawal_hold_open_mismatch, withdrawal_request_ledger_link_invalid) under ONE stable
+	// discriminator of the drift Kind, distinct from projection drift and from K2 (see the runbook).
+	discLedgerWithdrawalHold = "stream:ledger_withdrawal_hold"
 )
 
 // splitLedgerMismatches separates the K2 unlinked-manual-adjustment findings
-// from true projection drift within one ledger_vs_projection run.
-func splitLedgerMismatches(ms []Mismatch) (drift, unlinked int) {
+// and the check-D withdrawal hold findings (ADR 0113 s4.4) from true projection
+// drift within one ledger_vs_projection run.
+func splitLedgerMismatches(ms []Mismatch) (drift, unlinked, holds int) {
 	for _, m := range ms {
-		if m.MismatchKind == MismatchKindLedgerUnlinkedManualAdjustment {
+		switch m.MismatchKind {
+		case MismatchKindLedgerUnlinkedManualAdjustment:
 			unlinked++
-		} else {
+		case MismatchKindWithdrawalHoldOpenMismatch, MismatchKindWithdrawalRequestLedgerLinkInvalid:
+			holds++
+		default:
 			drift++
 		}
 	}
-	return drift, unlinked
+	return drift, unlinked, holds
 }
 
 func mismatchAlert(kind alerting.Kind, tenantID uuid.UUID, discriminator string, runID uuid.UUID, count int, extra map[string]alerting.AttrValue) alerting.Alert {
@@ -63,14 +71,15 @@ func mismatchAlert(kind alerting.Kind, tenantID uuid.UUID, discriminator string,
 }
 
 // raiseLedgerRunAlerts raises the in-tx P1s for one ledger_vs_projection run:
-// drift under discLedgerVsProjection and K2 unlinked adjustments under
-// discLedgerUnlinkedManualAdjustment. Must be called inside the InTx closure,
+// drift under discLedgerVsProjection, K2 unlinked adjustments under
+// discLedgerUnlinkedManualAdjustment and check D (ADR 0113 s4.4) under
+// discLedgerWithdrawalHold. Must be called inside the InTx closure,
 // as the last statement group before the closure returns.
 func raiseLedgerRunAlerts(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, run Run, acquired bool, ms []Mismatch) error {
 	if !acquired || run.Status != StatusMismatchesFound {
 		return nil
 	}
-	drift, unlinked := splitLedgerMismatches(ms)
+	drift, unlinked, holds := splitLedgerMismatches(ms)
 	if drift > 0 {
 		if err := alerting.RaiseGuarded(ctx, tx, mismatchAlert(alerting.KindReconciliationLedgerProjectionDrift, tenantID, discLedgerVsProjection, run.ID, drift, nil)); err != nil {
 			return err
@@ -78,6 +87,11 @@ func raiseLedgerRunAlerts(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, ru
 	}
 	if unlinked > 0 {
 		if err := alerting.RaiseGuarded(ctx, tx, mismatchAlert(alerting.KindReconciliationLedgerProjectionDrift, tenantID, discLedgerUnlinkedManualAdjustment, run.ID, unlinked, nil)); err != nil {
+			return err
+		}
+	}
+	if holds > 0 {
+		if err := alerting.RaiseGuarded(ctx, tx, mismatchAlert(alerting.KindReconciliationLedgerProjectionDrift, tenantID, discLedgerWithdrawalHold, run.ID, holds, nil)); err != nil {
 			return err
 		}
 	}

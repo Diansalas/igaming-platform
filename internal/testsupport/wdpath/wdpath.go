@@ -373,22 +373,51 @@ func RuntimeFor(tb testing.TB, p *db.Pool) *db.Pool {
 // ADR0113_PERSISTENT_DBS (comma-separated) extends the list.
 var PersistentDatabases = []string{"igaming_platform_dev", "igaming_platform_ci_local"}
 
-// OnPersistentDatabase reports whether p is connected to one of PersistentDatabases.
-func OnPersistentDatabase(tb testing.TB, p *db.Pool) bool {
-	tb.Helper()
-	_, _, name, _ := poolIdentity(tb, p)
+// CIDatabases are the CI service databases (.github/workflows/ci.yml, ci-selfhosted.yml). The
+// tamper-plant tests are the only evidence for several money-path controls (ADR 0113 slices 1-3: LA025
+// stranded holds, check D orphan legs and relabels), so they must never be skipped there: a skip
+// decision on a CI database (by name, or any database while CI=true) FAILS the test instead
+// (ledger-finance review C2), so a CI run cannot go green with that evidence silently missing.
+var CIDatabases = []string{"igaming_platform_test"}
+
+// persistentDecision is OnPersistentDatabase's pure decision: skip on a persistent database, with a
+// non-empty failure reason when that database is (or the run is) CI.
+func persistentDecision(name, extra string, ci bool) (skip bool, fail string) {
 	list := append([]string(nil), PersistentDatabases...)
-	for _, n := range strings.Split(os.Getenv("ADR0113_PERSISTENT_DBS"), ",") {
+	for _, n := range strings.Split(extra, ",") {
 		if n = strings.TrimSpace(n); n != "" {
 			list = append(list, n)
 		}
 	}
 	for _, n := range list {
 		if n == name {
-			return true
+			skip = true
 		}
 	}
-	return false
+	if !skip {
+		return false, ""
+	}
+	for _, n := range CIDatabases {
+		if n == name {
+			return true, "database " + name + " is a CI database but is listed as persistent: the ADR 0113 tamper-plant evidence would be skipped"
+		}
+	}
+	if ci {
+		return true, "CI=true but database " + name + " is listed as persistent: the ADR 0113 tamper-plant evidence would be skipped in CI"
+	}
+	return true, ""
+}
+
+// OnPersistentDatabase reports whether p is connected to one of PersistentDatabases (or
+// ADR0113_PERSISTENT_DBS). It FAILS the test when the answer would skip tamper-plant evidence in CI.
+func OnPersistentDatabase(tb testing.TB, p *db.Pool) bool {
+	tb.Helper()
+	_, _, name, _ := poolIdentity(tb, p)
+	skip, fail := persistentDecision(name, os.Getenv("ADR0113_PERSISTENT_DBS"), os.Getenv("CI") == "true")
+	if fail != "" {
+		tb.Fatalf("wdpath: %s", fail)
+	}
+	return skip
 }
 
 // SkipOnPersistentDatabase skips a test whose fixture leaves permanent tamper rows when p is a

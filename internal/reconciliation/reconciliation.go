@@ -26,8 +26,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
 // Stream identifies which reconciliation stream a Run belongs to.
@@ -96,10 +94,11 @@ type Mismatch struct {
 }
 
 // RunLedgerVsProjection recomputes every ledger_account's balance
-// directly from ledger_entries (the authoritative source,
-// ledger.RebuildBalance) and compares it against the materialized
-// wallet_balance_projection row for the same account
-// (ledger.GetProjectedBalance), for every ledger_account belonging to
+// directly from ledger_entries (the authoritative source, the
+// ledger.RebuildBalance read) and compares it against the materialized
+// wallet_balance_projection row for the same account (the
+// ledger.GetProjectedBalance read), both in ONE statement per account
+// (rebuildAndProject), for every ledger_account belonging to
 // tenantID. It records exactly one ReconciliationRun and zero or more
 // ReconciliationMismatch rows, atomically, inside tx - the caller opens
 // tx via db.Pool.WithTenant(ctx, tenantID, ...), matching every other
@@ -131,13 +130,9 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 
 	var mismatches []Mismatch
 	for _, accountID := range accountIDs {
-		rebuilt, err := ledger.RebuildBalance(ctx, tx, accountID)
+		rebuilt, projected, err := rebuildAndProject(ctx, tx, accountID)
 		if err != nil {
-			return Run{}, nil, fmt.Errorf("reconciliation: rebuild balance for account %s: %w", accountID, err)
-		}
-		projected, err := ledger.GetProjectedBalance(ctx, tx, accountID)
-		if err != nil {
-			return Run{}, nil, fmt.Errorf("reconciliation: get projected balance for account %s: %w", accountID, err)
+			return Run{}, nil, fmt.Errorf("reconciliation: rebuild / projected balance for account %s: %w", accountID, err)
 		}
 
 		switch {
@@ -201,6 +196,14 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		return Run{}, nil, err
 	}
 	mismatches = append(mismatches, unlinked...)
+
+	// ADR 0113 s4.4 check D (invariant #12): standing, unwindowed, ONE statement rebuilt from
+	// ledger_entries; fails closed on a blind read (withdrawal_hold.go).
+	holds, err := withdrawalHoldFindings(ctx, tx, tenantID)
+	if err != nil {
+		return Run{}, nil, err
+	}
+	mismatches = append(mismatches, holds...)
 
 	if len(mismatches) > 0 {
 		run.Status = StatusMismatchesFound
@@ -283,6 +286,51 @@ func persistRun(ctx context.Context, tx pgx.Tx, run Run, mismatches []Mismatch) 
 		}
 	}
 	return nil
+}
+
+// accountBalance is one account's totals as the ledger_vs_projection compare reads them (the
+// fields of ledger.Balance; a local type so this package keeps using only the reviewed ledger
+// symbols, TestR3_Static_LedgerUsedReadOnly). Found is meaningful on the projection side only.
+type accountBalance struct {
+	LedgerAccountID uuid.UUID
+	AssetCode       string
+	AccountType     string
+	DebitTotal      int64
+	CreditTotal     int64
+	Found           bool
+}
+
+// rebuildAndProject reads, in ONE statement (one READ COMMITTED snapshot), what
+// ledger.RebuildBalance rebuilds from ledger_entries and what ledger.GetProjectedBalance
+// reads from wallet_balance_projection for one account. ADR 0113 slice 3 (C7, found by
+// TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1): the two reads used to be two
+// statements, so a posting that committed between them (any live bet, deposit or
+// withdrawal on the account) produced a FALSE balance_mismatch P1. The SQL is the union of
+// the two ledger functions' reads; the projection side is Found=false when no row exists.
+func rebuildAndProject(ctx context.Context, tx pgx.Tx, accountID uuid.UUID) (rebuilt, projected accountBalance, err error) {
+	rebuilt.LedgerAccountID, projected.LedgerAccountID = accountID, accountID
+	var pAsset, pType *string
+	var pDebit, pCredit *int64
+	err = tx.QueryRow(ctx, `
+		SELECT la.asset_code, la.account_type, s.debit_total, s.credit_total,
+		       p.asset_code, p.account_type, p.debit_total, p.credit_total
+		  FROM ledger_accounts la
+		  CROSS JOIN LATERAL (
+		      SELECT COALESCE(SUM(le.amount) FILTER (WHERE le.direction = 'debit'), 0) AS debit_total,
+		             COALESCE(SUM(le.amount) FILTER (WHERE le.direction = 'credit'), 0) AS credit_total
+		        FROM ledger_entries le WHERE le.ledger_account_id = la.id) s
+		  LEFT JOIN wallet_balance_projection p ON p.ledger_account_id = la.id
+		 WHERE la.id = $1`, accountID).Scan(&rebuilt.AssetCode, &rebuilt.AccountType, &rebuilt.DebitTotal, &rebuilt.CreditTotal,
+		&pAsset, &pType, &pDebit, &pCredit)
+	if err != nil {
+		return accountBalance{}, accountBalance{}, err
+	}
+	if pAsset != nil {
+		projected.Found = true
+		projected.AssetCode, projected.AccountType = *pAsset, *pType
+		projected.DebitTotal, projected.CreditTotal = *pDebit, *pCredit
+	}
+	return rebuilt, projected, nil
 }
 
 func ledgerAccountIDsForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]uuid.UUID, error) {

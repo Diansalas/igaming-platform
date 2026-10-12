@@ -65,11 +65,18 @@ func (s *Service) execute(ctx context.Context, tx pgx.Tx, a Actor, req Request, 
 	// H-SEC-5/11 FOR SHARE initiation read waits on). It is checked BEFORE the readiness-integrity
 	// refusals so the operator sees the fixable cause; it rolls back and the request stays pending
 	// (like GP020: resolve the withdrawals, then approve again).
+	// ---- LA025 / H6HoldBalanceNonZero (ADR 0113 s4.3): no non-zero player_withdrawal_hold balance
+	// of the subject's player wallets, whether or not a request still holds it (a stranded hold is
+	// refused too: suspension is the lever, ADR 0113 s8 Q1). Same locks, same rollback-and-stay-
+	// pending treatment; the database arm (migration 0133) refuses the status UPDATE anyway.
 	if out.Action == ActionClose {
-		var holds int64
+		var holds, holdAccounts int64
 		if err := s.withSubjectTenant(ctx, tx, a, out.TenantID, func() error {
 			var err error
-			holds, err = holdBearingWithdrawals(ctx, tx, sub)
+			if holds, err = holdBearingWithdrawals(ctx, tx, sub); err != nil {
+				return err
+			}
+			holdAccounts, err = nonZeroWithdrawalHolds(ctx, tx, sub)
 			return err
 		}); err != nil {
 			return Request{}, "", err
@@ -77,10 +84,13 @@ func (s *Service) execute(ctx context.Context, tx pgx.Tx, a Actor, req Request, 
 		if holds > 0 {
 			return Request{}, "", &PreconditionError{Base: ErrWithdrawalsHolding, Codes: []string{H6WithdrawalsHolding}}
 		}
+		if holdAccounts > 0 {
+			return Request{}, "", &PreconditionError{Base: ErrWithdrawalsHolding, Codes: []string{H6HoldBalanceNonZero}}
+		}
 	}
 	for _, f := range as.Failures {
-		if f == H6WithdrawalsHolding {
-			continue // the authoritative count is the one above, under the locks
+		if f == H6WithdrawalsHolding || f == H6HoldBalanceNonZero {
+			continue // the authoritative counts are the ones above, under the locks
 		}
 		return refuse(f)
 	}
