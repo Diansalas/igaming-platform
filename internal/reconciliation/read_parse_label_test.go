@@ -24,7 +24,7 @@ func (labelSource) Fetch(context.Context, statement.PaymentFetchRequest) (statem
 }
 
 func TestValidateSourceIdentity_LabelCharset(t *testing.T) {
-	for _, ok := range []string{"real-fixed test statement", "MOCK m4 http test statement", "PSP A (sandbox) v1.2: daily/utc_feed; test, only", "MOCK in-process payment provider statement - renders the MockProvider own records, not the platform DB; single-process; non-production"} {
+	for _, ok := range []string{"real-fixed test statement", "MOCK m4 http test statement", "PSP A (sandbox) v1.2: daily/utc_feed; test, only", "MOCK in-process payment provider statement - renders the MockProvider's own records, not the platform DB; single-process; non-production"} {
 		if err := validateSourceIdentity(labelSource{ok}); err != nil && !isMockLabelRefusal(err) {
 			t.Errorf("label %q refused: %v", ok, err)
 		}

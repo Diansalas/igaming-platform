@@ -576,7 +576,7 @@ Facts and choices, each of which `security`/`ledger-finance` may overturn:
    null"): every other kind's actual segment is a platform, ledger or other-attempt value (verified against the real emitters:
    merchant-attribution `pay_reference_mismatch` embeds the other attempt's render, `pay_captured_unposted` embeds the parked attempt's
    amount, the K3/M4 `pay_declared_*` texts are free diagnostics). **Source label (security F1):** `source_label` is stored data rendered as
-   `[label] ` ahead of every statement-line segment. Go `validateSourceIdentity` now restricts it to `[A-Za-z0-9 ._:/(),;-]{1,256}` (no `=`,
+   `[label] ` ahead of every statement-line segment. Go `validateSourceIdentity` now restricts it to `[A-Za-z0-9 ._:/(),;'-]{1,256}` (no `=`,
    brackets or control characters), AND the parser is immune regardless of stored data: a bracketed segment is parsed only after the last
    `] line=` and is refused (all fields null) when the label part contains `=`. Tests: hostile labels through the real `matchLines`, plus an
    HTTP test over a stored hostile label. **Deferred follow-up (not done, no migration):** a database CHECK on `source_label` (the same
