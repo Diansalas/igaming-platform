@@ -232,7 +232,7 @@ func otelhttpSeries(t *testing.T) (series map[string]bool, labels map[string]boo
 					k := strings.ReplaceAll(string(kv.Key), ".", "_")
 					labels[k] = true
 					if k == "http_route" {
-						routeValues[kv.Value.Emit()] = true
+						routeValues[kv.Value.AsString()] = true
 					}
 				}
 			}
@@ -249,7 +249,6 @@ func otelhttpSeries(t *testing.T) (series map[string]bool, labels map[string]boo
 type rule struct {
 	name string
 	expr string
-	line string
 }
 
 // parseRules extracts `- alert: Name` and its `expr:` (single line or `|` block) from a Prometheus
