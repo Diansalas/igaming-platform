@@ -672,7 +672,7 @@ func TestStaffReadR1_UnknownTerminalReasonIsOther(t *testing.T) {
 		if _, err := tx.Exec(ctx, `ALTER TABLE payment_attempts DISABLE TRIGGER USER`); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE payment_attempts SET terminal_reason = $2 WHERE id = $1`, w.depA[2], odd); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE payment_attempts SET terminal_reason = $2 WHERE id = ANY($1)`, []uuid.UUID{w.depA[2], w.destAtt}, odd); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `ALTER TABLE payment_attempts ENABLE TRIGGER USER`)
@@ -684,6 +684,15 @@ func TestStaffReadR1_UnknownTerminalReasonIsOther(t *testing.T) {
 	d := decodeAttempt(t, res)
 	if d.TerminalReason == nil || *d.TerminalReason != "other" || strings.Contains(string(res.body), "SECRET123") {
 		t.Errorf("unknown reason rendered as %v: %s", d.TerminalReason, res.body)
+	}
+	// R1b maps through the same catalogue.
+	det := w.a.do("GET", "/v1/admin/withdrawals/"+w.destWD.String(), w.tok(w.f1), nil)
+	var wd struct {
+		PayoutAttempt *payoutAttemptSummaryDTO `json:"payout_attempt"`
+	}
+	det.decode(t, &wd)
+	if wd.PayoutAttempt == nil || wd.PayoutAttempt.TerminalReason == nil || *wd.PayoutAttempt.TerminalReason != "other" || strings.Contains(string(det.body), "SECRET123") {
+		t.Errorf("R1b rendered an unknown reason as %+v: %s", wd.PayoutAttempt, det.body)
 	}
 }
 
@@ -785,6 +794,19 @@ func TestStaffReadR2_PermissionMatrixPerStream(t *testing.T) {
 					t.Errorf("%s %s as %s: got %d, want %d: %s", kind, stream, c.name, res.status, exp, res.body)
 				}
 				w.noLeak(t, c.name+" "+stream, res.body)
+			}
+		}
+	}
+	// The route gate runs before the stream is even parsed: a role holding none of the three
+	// permissions is 403 whatever the stream parameter says.
+	for _, c := range []struct{ name, tok string }{
+		{"support", w.tok(w.supp)}, {"risk_manager", w.rmTok}, {"promotions_manager", w.pmTok}, {"bonus_operations", w.bxTok},
+	} {
+		for _, q := range []string{"", "stream=bogus", "stream=casino_statement", "stream=payment_statement&limit=0"} {
+			for _, kind := range []string{"runs", "mismatches"} {
+				if res := w.a.do("GET", w.reconURL(w.tenant, kind, q), c.tok, nil); res.status != http.StatusForbidden {
+					t.Errorf("%s %s %q: got %d, want 403", c.name, kind, q, res.status)
+				}
 			}
 		}
 	}

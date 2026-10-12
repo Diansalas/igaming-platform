@@ -520,3 +520,52 @@ Problem: nothing moves a request `open -> expired`, so a stale or expired reques
 - Optional sweeper for expired requests (same audit row).
 - Tests: expired platform-filed request then tenant re-file succeeds; stale-version request is superseded; a live request still
   409; a tenant cannot expire a live platform request; the audit row exists; mutants for each predicate.
+
+## 12. S2 and S4 record (read routes R1, R1b, R2 and `sportsbook_reconciliation:read`) - IMPLEMENTED against the local DB / MOCK, reviews pending
+
+Status of S2 and S4 only. `security`, `ledger-finance`, `payments` and `code-reviewer` reviews are pending. No migration, no write
+path, no index. Routes (all GET, all under the existing `auth.Middleware` + `RequireStaffPrincipal`):
+
+| Route | Gate | Notes |
+|---|---|---|
+| `GET /v1/admin/tenants/{tenantID}/payment-attempts` and `.../{attemptID}` (R1) | `payment_force_resolve:read` alone (FI, CO, PA) | keyset `(created_at, id)` desc, opaque cursor `next_cursor`, `limit` 1..200 default 50, filters `operation`, `state`, `terminal_reason`, `withdrawal_request_id` (closed vocabularies, 400 otherwise); unknown query parameters (a client `tenant_id` included) are 400 |
+| `payout_attempt` on `GET /v1/admin/withdrawals/{id}` (R1b) | unchanged (`withdrawal:review`, FI) | latest payout attempt: `attempt_id, state, terminal_reason, open_resolution_id, attempt_count`, or `null` |
+| `GET /v1/admin/tenants/{tenantID}/reconciliation/runs` and `.../mismatches` (R2) | per stream, checked after the stream is parsed and before any query: `payment_statement` -> `payment_force_resolve:read`, `ledger_vs_projection` -> `ledger_adjustment:read`, `sportsbook_settlement` -> new `sportsbook_reconciliation:read` (TA, CO, FI exactly) | `stream` required; unknown stream/status/kind/subject_id is 400; offset paging with `total`, `limit` 1..200 |
+
+Facts and choices, each of which `security`/`ledger-finance` may overturn:
+
+1. **Exclusions.** No response carries `provider_reference`, `merchant_reference`, the idempotency key, a player or wallet id, a
+   destination, or a staff id. `has_provider_reference` is a boolean. `terminal_reason` is mapped through a closed catalogue (every payout
+   and deposit dispute reason, the invalid-reference reasons over the closed `providerref` set, four platform refusal codes); anything else is
+   reported as `other` (the `rg_ineligible:*` and KYC decline codes of rejected attempts therefore read `other`). The OpenAPI enum, the code
+   catalogue and the dispute-reason tables are pinned equal by DB-free tests.
+2. **Tenant rule.** A tenant caller naming another tenant gets **404** (the existing K3 routes answer 403; the ADR allows either). The
+   handler check is not the only barrier: a test issues the handler statements in tenant B's scope without any tenant predicate and gets zero
+   of tenant A's rows (`TestStaffReadRoutes_RLSBackstopWithoutHandlerChecks`).
+3. **Platform reads.** A platform caller may name any existing tenant (unknown tenant: 404, no audit row). The read is first committed as a
+   platform-scope audit row (`payment_attempts.platform_read`, `reconciliation.platform_read`; `subject_tenant_id` = the path tenant, ADR 0104,
+   no actor identity shown to the tenant) and the tenant data is read only if that write succeeded: an injected audit failure yields 500 and no data.
+   The platform read runs in the tenant's RLS scope; it opens **no acting session** (that needs a K1 grant and is for writes).
+4. **`open_resolution_id` is read through `WithPrincipalScope(tenant, caller)` for tenant and platform callers alike**, because K3 resolutions
+   are invisible to a plain tenant session (migration 0115). Consequence for `security` to rule on: a platform_admin without a K1 grant can
+   learn that an open resolution exists and its id (not its content) for any tenant. The alternative (an acting session) would refuse the read
+   without a grant. If security rejects this, `open_resolution_id` is null for platform callers.
+5. **`admissible_kinds` is a hint.** M4 is the database predicate `payment_m4_in_scope` itself, evaluated in the read query. M1 and M2
+   cannot be taken from the database: `payment_m2_admits` answers only inside an executing resolution, and M1/M2 preconditions live in the
+   request trigger body. They are restated through `payments.M2ResolvableDispute` (parity-pinned to the database by C-47) plus the
+   trigger's other preconditions (provider present, withdrawal `submitted`, "paid" needs a held reference); a table test covers every
+   terminal reason. An attempt with an open resolution admits nothing. **Deviation from section 4 text** ("not a Go re-implementation"):
+   M1/M2 are a Go restatement; ledger-finance to rule.
+6. **R2 free text is never returned.** `reconciliation_key`, `expected_value` and `actual_value` embed provider and merchant references.
+   `subject_ref` (`payment_attempt`, `deposit_intent`, `payment_receipt`, `bet`, `wallet`, `ledger_account`, `ledger_transaction`), the
+   minor-unit amounts and `asset_code` are strict parses of them: a canonical lower-case UUID after a known token, a whole-value integer or
+   exactly one `amount=` token, a short asset token, else `null`. Ledger and sportsbook multi-value texts therefore yield null amounts.
+   The stream of a mismatch is the stream of its run (join), not inferred from the kind. **Parsers are pinned against format strings copied
+   from the emitters, not against live runs of the payment_statement and sportsbook streams** (residual).
+7. **Field names.** `updated_at`/`resolved_at` replace the ADR's `state_changed_at` (no such column exists); `subject_ref` uses
+   `deposit_intent_id` for deposits; R2 mismatches use `kind`/`status`/`detected_at` as the ADR lists them.
+8. **Pagination of R2** is offset based like the casino route (no cursor was specified), with strict 400s instead of clamping.
+9. **Scale residual.** R1's keyset sorts a tenant's attempts without a `(tenant_id, created_at, id)` index (only `(tenant_id)` exists).
+   Acceptable at current volume; a migration (next free number 0134; 0133 is reserved by the ADR 0113 slice 2 agent) is NOT created.
+10. **R2b, R3-R6, H1/H2 are untouched.** The generated section 3 matrix test (`TestADR0114_RoleMatrix_AgainstRolePermissions`) covers the
+    permissions these routes use; `TestRoleHasPermission_SportsbookReconciliationRead_ExactGrantees` pins invariant 7.7.
