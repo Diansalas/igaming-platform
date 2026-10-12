@@ -56,6 +56,7 @@ func TestStaffReadR2_InjectedTokensNeverMatchOrSurface(t *testing.T) {
 	s := w.seedRecon(t, w.tenant)
 	inj, injBet := uuid.NewString(), uuid.NewString()
 	ref := "my ref"
+	dupA, dupB := uuid.NewString(), uuid.NewString()
 	if err := w.a.pool.WithTenant(context.Background(), w.tenant, func(ctx context.Context, tx pgx.Tx) error {
 		ins := func(run uuid.UUID, key, exp, act, kind string) error {
 			_, err := tx.Exec(ctx, `INSERT INTO reconciliation_mismatches (id, tenant_id, reconciliation_run_id, reconciliation_key, expected_value, actual_value, mismatch_kind, investigation_status)
@@ -72,6 +73,10 @@ func TestStaffReadR2_InjectedTokensNeverMatchOrSurface(t *testing.T) {
 		if err := ins(s.runPay, "provider=mock provider_reference=x kind=deposit attempt="+inj+" check=amount",
 			"platform: attempt="+s.attemptKeyed+" op=deposit amount=10 asset=USD provider_reference=r amount=999 asset=EUR",
 			"line=1 kind=deposit status=ok amount=11 asset=USD merchant_reference=m", "pay_amount_mismatch"); err != nil {
+			return err
+		}
+		// two attempt tokens in the trusted prefix: ambiguous, so neither id is a subject.
+		if err := ins(s.runPay, "provider=mock attempt="+dupA+" attempt="+dupB+" check=unresolved", "x", "y", "pay_unresolved"); err != nil {
 			return err
 		}
 		// sportsbook statement diff: free text in the key.
@@ -91,7 +96,7 @@ func TestStaffReadR2_InjectedTokensNeverMatchOrSurface(t *testing.T) {
 	}
 	// An injected id matches nothing, in any stream.
 	for _, stream := range []string{"payment_statement", "sportsbook_settlement", "ledger_vs_projection"} {
-		for _, id := range []string{inj, injBet} {
+		for _, id := range []string{inj, injBet, dupA, dupB} {
 			if n, _ := count(stream, "&subject_id="+id); n != 0 {
 				t.Errorf("%s: injected id %s matched %d rows through the subject_id filter", stream, id, n)
 			}

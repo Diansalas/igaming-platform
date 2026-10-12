@@ -54,4 +54,11 @@ func TestPaymentAttemptKeyset_TiesAndOrderingPinned(t *testing.T) {
 	if strings.Contains(s, "WithPrincipalScope") {
 		t.Error("the R1 reads must never open a principal-scope transaction")
 	}
+	// C1: the principal is set for tenant callers only.
+	if !strings.Contains(s, "if !c.platform() {\n\t\t\t// Tenant callers only") {
+		t.Error("readScope must set the principal for tenant callers only (security C1)")
+	}
+	if strings.Count(s, "attemptReadSelect(!c.platform())") != 2 {
+		t.Error("both R1 reads must ask for the open resolution only for tenant callers")
+	}
 }
