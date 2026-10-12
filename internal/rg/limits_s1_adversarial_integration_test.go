@@ -197,6 +197,29 @@ func TestRGLimitsS1(t *testing.T) {
 			})
 			wantCode(t, name, err, "RL007")
 		}
+		// Filing and deciding without a signed proof are refused by the verifier (AP001).
+		err = do(w.rt, platformSess(st.Requester), func(ctx context.Context, tx pgx.Tx) error {
+			b, _ := json.Marshal(spec.Clone(rgfix.Spec{"effective_from": now(tx)}))
+			_, err := tx.Exec(ctx, `INSERT INTO rg_limit_config_change_requests (jurisdiction_code, control_kind, asset_code, proposed_config, reason_code)
+				VALUES ($1, 'wager', 'EUR', $2::jsonb, $3)`, f.jur, b, spec["reason_code"])
+			return err
+		})
+		wantCode(t, "request without a proof", err, "AP001")
+		err = do(w.rt, sess{}, func(ctx context.Context, tx pgx.Tx) error {
+			reqID, _, err := rgfix.RequestFloor(ctx, tx, spec.Clone(rgfix.Spec{"effective_from": now(tx)}), st)
+			if err != nil {
+				return err
+			}
+			if err := rgfix.SetPlatform(ctx, tx, st.Approver); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.actor_proof', '', true)`); err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `UPDATE rg_limit_config_change_requests SET status = 'approved' WHERE id = $1`, reqID)
+			return err
+		})
+		wantCode(t, "approval without a proof", err, "AP001")
 		// The approver deciding their own request by staff id is refused too.
 		err = do(w.rt, sess{}, func(ctx context.Context, tx pgx.Tx) error {
 			reqID, hash, err := rgfix.RequestFloor(ctx, tx, spec.Clone(rgfix.Spec{"effective_from": now(tx)}), st)
@@ -401,6 +424,16 @@ func TestRGLimitsS1(t *testing.T) {
 		if got := c["increase_cooldown"]; durOf(got) != 5*time.Hour {
 			t.Fatalf("cooldown must be MAX: %v", got)
 		}
+		// A brand row binds only its own brand.
+		wantOK(t, "brand A2 row", w.operator(f.tenantA, f.staffA, opRow.Clone(rgfix.Spec{"brand_id": f.brandA2.String(), "ceiling": "100",
+			"enabled": true, "mandatory": true, "allowed_periods": []string{"rolling_24h", "rolling_7d", "calendar_day"},
+			"increase_requires_reconfirmation": true, "scope": "tenant_person"})))
+		if c := w.compose(t, staffSess(f.tenantA, f.staffA), f.jur, &f.tenantA, &f.brandA1, "deposit", strp("EUR")); num(c["ceiling"]) != "300" {
+			t.Fatalf("brand A1 must not be bound by brand A2's row: %v", c)
+		}
+		if c := w.compose(t, staffSess(f.tenantA, f.staffA), f.jur, &f.tenantA, &f.brandA2, "deposit", strp("EUR")); num(c["ceiling"]) != "100" {
+			t.Fatalf("brand A2 must be bound by its own row: %v", c)
+		}
 		// Tenant B sees only the floor (the operator row never leaves tenant A).
 		cb := w.compose(t, staffSess(f.tenantB, f.staffB), f.jur, &f.tenantB, &f.brandB, "deposit", strp("EUR"))
 		if num(cb["ceiling"]) != "300" || durOf(cb["increase_cooldown"]) != time.Hour {
@@ -433,6 +466,26 @@ func TestRGLimitsS1(t *testing.T) {
 		if time.Since(r.requestedAt) > time.Minute || time.Since(r.requestedAt) < -time.Minute {
 			t.Fatalf("requested_at must be the database clock: %v", r.requestedAt)
 		}
+		// Boundary of the realization rule: realized AT its effective_at (<=), not before.
+		at := r.effAt
+		before := r.effAt.Add(-time.Microsecond)
+		wantOK(t, "realized at the boundary", do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
+			got, err := RealizedLimit(ctx, tx, key, &at)
+			if err != nil {
+				return err
+			}
+			if !got.HasRow || got.Value == nil || *got.Value != "1000" {
+				t.Errorf("a row is realized at exactly its effective_at: %+v", got)
+			}
+			got, err = RealizedLimit(ctx, tx, key, &before)
+			if err != nil {
+				return err
+			}
+			if got.HasRow {
+				t.Errorf("nothing is realized before the first effective_at: %+v", got)
+			}
+			return nil
+		}))
 		r, err = w.change(pa, dep(strp("500")))
 		wantOK(t, "decrease", err)
 		if r.kind != "decrease" || !r.effAt.Equal(r.requestedAt) {
@@ -854,6 +907,20 @@ func TestRGLimitsS1(t *testing.T) {
 			}
 		}
 		rgfix.SeedPermissiveFloorsAt(t, w.ownerURL) // idempotent
+		// An operator row over a synthetic floor: where the floor counts as absent, the operator row
+		// alone never makes the configuration "found" (a floor must be in force).
+		opTest := sess{tenant: f.tenantA.String(), principal: f.staffA.String(), env: "test"}
+		wantOK(t, "operator row over the synthetic floor", do(w.rt, opTest, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := rgfix.InsertRow(ctx, tx, rgfix.PermissiveFloor(f.jur, "deposit").Clone(rgfix.Spec{"tenant_id": f.tenantA.String(),
+				"attestation_ref": testAttestation, "enabled": true}), nil)
+			return err
+		}))
+		if c := w.compose(t, staffSess(f.tenantA, f.staffA), f.jur, &f.tenantA, &f.brandA1, "deposit", eur); c["found"] != false {
+			t.Fatalf("an operator row without a floor in force must not compose as found: %v", c)
+		}
+		if c := w.compose(t, opTest, f.jur, &f.tenantA, &f.brandA1, "deposit", eur); c["found"] != true || c["enabled"] != true {
+			t.Fatalf("in a test session the floor and the operator row compose: %v", c)
+		}
 		var n int
 		wantOK(t, "count", do(w.rt, sess{env: "test"}, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT count(*) FROM rg_limit_configs WHERE jurisdiction_code = $1 AND attestation_ref = 'synthetic'`, f.jur).Scan(&n)
