@@ -1028,6 +1028,9 @@ func TestRGLimitsS1(t *testing.T) {
 				[]any{f.tenantA, f.acctA1, f.personA}},
 			{"classify", `SELECT (rg_limit_change_classify($1, $2, $3, NULL, $4, 'account', 'deposit', 'EUR', 'rolling_24h', 1, NULL, NULL, 'player_self_service', clock_timestamp())).change_kind IS NOT NULL`,
 				[]any{f.tenantA, f.acctA1, f.personA, f.jur}},
+			// The cancel / confirm path reads the history directly (no realized / compose call first).
+			{"classify-supersede", `SELECT (rg_limit_change_classify($1, $2, $3, NULL, $4, 'account', 'deposit', 'EUR', 'rolling_24h', NULL, $5, 'cancel_pending', 'player_self_service', clock_timestamp())).change_kind IS NOT NULL`,
+				[]any{f.tenantA, f.acctA1, f.personA, f.jur, a.id}},
 		}
 		for _, p := range probes {
 			for sname, s := range map[string]sess{"tenant B staff": staffSess(f.tenantB, f.staffB), "platform": platformSess(w.ops.Requester), "tenant-less": {}} {
