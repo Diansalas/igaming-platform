@@ -94,6 +94,15 @@ const (
 	OpLaunchCancel  = "launch_authorisation:cancel"
 	OpLaunchApprove = "launch_authorisation:approve"
 	OpLaunchReject  = "launch_authorisation:reject"
+
+	// ADR 0115 S1 (migration 0135): the jurisdiction RG floor four-eyes flow. Provable for scope
+	// platform (NULL tenant on the wire) ONLY. OpRGConfigApply binds the floor INSERT to the
+	// approved request id and the payload hash the database recomputes from the inserted row.
+	OpRGConfigRequest = "rg_limit_config:request"
+	OpRGConfigApprove = "rg_limit_config:approve"
+	OpRGConfigReject  = "rg_limit_config:reject"
+	OpRGConfigCancel  = "rg_limit_config:cancel"
+	OpRGConfigApply   = "rg_limit_config:apply"
 )
 
 // Scopes the database admits.
@@ -151,6 +160,8 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: withdrawal_hold_resolution operations are provable for the platform_acting scope only", ErrInvalidClaims)
 	case strings.HasPrefix(c.Operation, launchOperationPrefix) && !launchOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: launch_authorisation operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, rgConfigOperationPrefix) && !rgConfigOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: rg_limit_config operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):
@@ -163,7 +174,19 @@ func (c Claims) validate() error {
 
 func platformOperation(op string) bool {
 	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:") ||
-		strings.HasPrefix(op, launchOperationPrefix)
+		strings.HasPrefix(op, launchOperationPrefix) || strings.HasPrefix(op, rgConfigOperationPrefix)
+}
+
+const rgConfigOperationPrefix = "rg_limit_config:"
+
+// rgConfigOperationAdmitted mirrors the verifier (migration 0135): the closed rg_limit_config
+// operation set, scope platform only.
+func rgConfigOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpRGConfigRequest, OpRGConfigApprove, OpRGConfigReject, OpRGConfigCancel, OpRGConfigApply:
+		return scope == ScopePlatform
+	}
+	return false
 }
 
 const launchOperationPrefix = "launch_authorisation:"

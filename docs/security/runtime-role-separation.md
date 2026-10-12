@@ -640,3 +640,57 @@ RLS one.
   owner through `internal/testsupport/launchfix` (integration build tag, never compiled into an
   application binary; pinned by `TestLaunchFixture_UnreachableFromNonTestBuilds`). Every
   assertion about what the runtime role may do runs as `igaming_runtime`.
+
+## 11. RG limits and the database environment anchor (ADR 0115 S1, migration 0135)
+
+Migration 0135 adds the RG limit schema. Nothing in it enforces a limit yet (slice S4); the
+role split matters here because one control, the SYNTHETIC-NOT-LEGAL configuration guard, must
+not be satisfiable by the runtime role.
+
+| Object | `igaming_runtime` | table owner (`igaming`) |
+|---|---|---|
+| `database_environment` (one row, the environment anchor; no row = production) | `SELECT` only. Every write is refused three times: no grant, RLS enabled with no write policy, and an insert guard that refuses any role that is not a member of the owner role (`RL009`) | may INSERT the row once (write-once: `UPDATE` / `DELETE` / `TRUNCATE` refused by trigger, owner included while enabled) |
+| `rg_limit_config_change_requests` (floor four-eyes) | `SELECT`, `INSERT`, column-level `UPDATE (status)`; no `DELETE` / `TRUNCATE` | same triggers (FORCE RLS, platform sessions only) |
+| `rg_limit_configs`, `player_rg_limit_changes` | `SELECT`, `INSERT` only (append-only; deny triggers `RL009`), plus `USAGE` on `player_rg_limit_changes_seq_seq` | FORCE RLS; same deny triggers |
+
+- **Why an anchor and not only a GUC.** ADR 0115 section 2.1 names a new per-connection setting,
+  `app.environment`, set from `cfg.GuardEnvironment()` (it is: `config.DatabaseRuntimeParams`,
+  startup packet, no `ALTER ROLE`). A custom GUC is settable by ANY session with `set_config()`,
+  so a runtime credential with arbitrary SQL could claim `test`. The database therefore admits a
+  synthetic row only when `rg_synthetic_config_allowed()` is true: the owner-written anchor says
+  `development` / `test` AND the session's `app.environment` says `development` / `test`. The
+  GUC can only narrow; the anchor is the binding control. A missing anchor and a missing GUC both
+  mean production. Rejected alternative: `ALTER DATABASE ... SET app.environment` is also
+  overridable by a session `SET`, and reading `pg_db_role_setting` would leave per-role settings
+  (`ALTER ROLE igaming_runtime SET ...`, which a role may do for itself) as a trap.
+- **Who writes the anchor.** Development / CI test databases: the owner role, through the
+  integration-tagged `internal/testsupport/rgfix.EnsureTestEnvironment` (refuses any database
+  already anchored as `staging` / `production`). Production: the provisioning operator, once,
+  `production` - a REQUIRED provisioning step (`production-configuration-checklist.md`); a
+  production `platform-api` refuses to start on a `development` / `test` anchor
+  (`db.VerifyEnvironmentAnchor`). Never an agent; never the runtime role.
+- **Read primitives are tenant-bound (security C2).** `rg_limit_config_compose`,
+  `rg_limit_realized` and `rg_limit_change_classify` raise `RL026` unless their `p_tenant` equals
+  the session's `app.tenant_id` (both NULL = floor-only read), instead of returning a
+  silently RLS-filtered answer.
+- **Platform time-outs (security C4).** A RESTRICTIVE SELECT policy on `player_restrictions`
+  (`time_out_tenant_narrowing`) hides a platform-scope (`tenant_id` NULL) `time_out` from a
+  tenant-bound session unless the Person has an account in that tenant. Platform-scope
+  `self_exclusion` rows keep their existing visibility (ADR 0026; redacting readers).
+- **Caller-chosen keys (security C1).** The BEFORE INSERT triggers force `id` (and
+  `player_rg_limit_changes.seq`), so a caller value can never probe another tenant's rows
+  through a unique-violation.
+- **Application-enforced, not database-enforced.** The operator-config permission
+  (`PermRGConfigWrite`, S2) and the staff limit permissions are enforced by the HTTP layer only;
+  the database binds operator rows to a tenant principal of the same tenant (RL001) and to
+  tighten-only (RL004), not to a specific staff permission.
+- **Residual (unchanged class, ADR 0110 9.4).** A holder of the OWNER credential can insert a
+  `test` anchor (on an un-anchored database) or disable the triggers; the anchor makes that a
+  visible, write-once, owner-only act, it does not prevent it. `db.VerifyRuntimeRoleInProduction`
+  keeps the owner role out of a production `platform-api`.
+- **Tests.** `TestRGLimitsS1/EnvironmentAnchor_RuntimeCannotForgeDevOrTest` (runtime role: every
+  write to the anchor `42501`; synthetic floor refused `RL008` with `app.environment` forged to
+  `test` / `development`; anchors `staging` / `production`, and `test` with the GUC unset or
+  `staging`, all refuse), `.../RGFix_PermissiveSyntheticFloorsResolveOnlyInTest` (a pool built
+  from a production `Config` resolves synthetic floors as absent even on a test-anchored
+  database), `TestInitAppRoleSQLMatchesMigration0135Grants` (deploy script = migration grants).

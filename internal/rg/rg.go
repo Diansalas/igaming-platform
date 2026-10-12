@@ -151,14 +151,17 @@ func insertRestriction(ctx context.Context, tx pgx.Tx, r Restriction) (Restricti
 		r.StartsAt = time.Now().UTC()
 	}
 	r.CreatedAt = time.Now().UTC()
-	_, err := tx.Exec(ctx,
+	// RETURNING id: since migration 0135 (security L2) the database replaces the id of a
+	// player-session insert, so the stored id is read back rather than assumed.
+	err := tx.QueryRow(ctx,
 		`INSERT INTO player_restrictions
 			(id, person_id, tenant_id, brand_id, player_account_id, restriction_type,
 			 starts_at, ends_at, source, reason_code, created_by_actor_type, created_by_actor_id, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), $11, $12, $13)`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), $11, $12, $13)
+		 RETURNING id`,
 		r.ID, r.PersonID, r.TenantID, r.BrandID, r.PlayerAccountID, r.RestrictionType,
 		r.StartsAt, r.EndsAt, r.Source, r.ReasonCode, string(r.CreatedByActorType), r.CreatedByActorID, r.CreatedAt,
-	)
+	).Scan(&r.ID)
 	if err != nil {
 		return Restriction{}, fmt.Errorf("rg: insert restriction: %w", err)
 	}

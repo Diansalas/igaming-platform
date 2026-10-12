@@ -116,6 +116,12 @@ var a18SelectAllowlist = map[string]bool{
 	// per-jurisdiction verification max age (owner-written, runtime SELECT-only).
 	"payout_instrument_kinds":                true,
 	"payout_instrument_verification_max_age": true,
+	// ADR 0115 S1 (0135): the jurisdiction RG floors (the tenant_id NULL rows of rg_limit_configs;
+	// "floors are readable by all", ADR 0115 2.1 - operator rows stay tenant-bound) and the
+	// one-row database_environment anchor (an environment label). Reference data: no PII, no
+	// credentials, no player data; both are SELECT-only for the runtime role (grant pin).
+	"rg_limit_configs":     true,
+	"database_environment": true,
 }
 
 // a18Policy is one effective (CREATE'd, not yet DROP'd) policy.

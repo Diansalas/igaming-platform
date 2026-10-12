@@ -1,0 +1,32 @@
+ADR 0115 S1 (migration 0135) - mutation-kill evidence (local, private scratch databases; no CI evidence)
+
+Driver: docs/plans/prh2-hardening-round/adr0115-s1-mutation-driver.py. It refuses to start on a dirty
+mutation target: an earlier container restart killed run 1 mid-mutant and left mutant C3 in the working
+copy (restored from git before anything else ran).
+Suite per DB mutant: go test -tags integration -p 1 -count=1 -run 'TestRGLimitsS1|TestMigration0135'
+./internal/rg/ (every run migrates throwaway scratch databases from the mutated file; runtime role
+igaming_runtime for every assertion). Go mutants: unit tests of internal/config and internal/db.
+
+Run 2 (initial S1, 76 mutants; log adr0115-s1-mutation-log-run2.txt): 71 killed, 5 survived.
+  P5 / R5 / R7 were test gaps: tests added, each re-run KILLED.
+Run 3 (after review round 1, 90 mutants incl. 14 new S-C1..S-C4, S-LOW, I1..I4; log
+adr0115-s1-mutation-log-run3.txt): 86 killed, 4 survived:
+  S-C2d classify guard dropped: test gap (the cancel/confirm path). Probe added; re-run KILLED.
+  S-C4b narrowing ignores the tenant: LAYERED. The EXISTS reads player_accounts under the session's own
+     tenant_isolation RLS, which already restricts it to the session tenant; the explicit predicate is
+     defence in depth.
+  E4 anchor insert guard: owner-membership check off: LAYERED. The runtime role has no INSERT grant and
+     RLS has no write policy; isolating the third layer would need a new role (not permitted). E8 shows
+     the trigger layer is exercised when the grant is widened.
+  F7 caller payload_hash trusted: EQUIVALENT. The preceding mismatch check already forces equality.
+Final: 87 of 90 killed; 3 survive: E4 and S-C4b (LAYERED), F7 (EQUIVALENT).
+
+Coverage map:
+  tighten-only / widen-only ....... T1-T17      composition (strictest / UNION / OR) .. C1-C8
+  backdating ...................... B1          forged change_kind / time ............ P6, P7
+  realization incl. <= boundary ... P3-P5       classification / confirm / cooldown .. P1, P2, P10-P12, P16
+  L0.4 / isolation guard .......... P8, P9, P13 synthetic / environment anchor ....... E1-E10, S-LOW1, S-LOW2
+  floor four-eyes / proofs ........ F1-F9       RLS-blind / RLS-broad / cross-tenant . R1-R7, P14, P15, S-C2a-d
+  caller seq / id (C1) ............ S-C1a/b     platform time_out narrowing (C4) ..... S-C4a/b
+  time_out RLS / CHECK ............ O1-O3       index step (C3, LF 1/2/5) ............ I1-I4, X1
+  down refusal / restore .......... X2-X5

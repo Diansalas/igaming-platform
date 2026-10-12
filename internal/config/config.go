@@ -479,13 +479,25 @@ const (
 // every connection's startup packet (db.ConnectWithRuntimeParams). Values are milliseconds, the
 // unit PostgreSQL assumes for a bare number. A zero DatabaseIdleInTxTimeout (a Config not built by
 // Load) still yields the default: the setting cannot be left off by omission.
+//
+// ADR 0115 S1: app.environment carries GuardEnvironment() (a missing or non-explicit APP_ENV is
+// "production") to every connection. The database treats this setting as a NARROWING input only:
+// any session can set_config() it, so the synthetic-configuration guard additionally requires the
+// owner-written database_environment anchor (migration 0135; docs/security/runtime-role-separation.md
+// section 11). A Config not built by Load still yields "production".
 func (c Config) DatabaseRuntimeParams() map[string]string {
 	d := c.DatabaseIdleInTxTimeout
 	if d <= 0 {
 		d = DefaultDatabaseIdleInTxTimeout
 	}
-	return map[string]string{runtimeParamIdleInTransactionSessionName: strconv.FormatInt(d.Milliseconds(), 10)}
+	return map[string]string{
+		runtimeParamIdleInTransactionSessionName: strconv.FormatInt(d.Milliseconds(), 10),
+		RuntimeParamAppEnvironment:               c.GuardEnvironment(),
+	}
 }
+
+// RuntimeParamAppEnvironment is the per-connection setting carrying GuardEnvironment() (ADR 0115 S1).
+const RuntimeParamAppEnvironment = "app.environment"
 
 // validateProviderCredentialFingerprintKey applies security review §3's
 // rules. An absent key is valid (the subsystem is then not constructed).

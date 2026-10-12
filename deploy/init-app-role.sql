@@ -579,3 +579,40 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ADR 0115 S1 (migration 0135, RG limits schema): least-privilege, re-asserted on every run,
+-- mirroring migration 0135's own in-migration grant block. RLS (FORCE on the three RG tables) and
+-- the guard / deny triggers are the binding controls; these grants are defence in depth, narrower
+-- than the blanket backfill GRANT above (which would otherwise re-grant UPDATE / DELETE):
+--   database_environment            - the owner-written environment anchor: SELECT only. The runtime
+--                                     role must NEVER write it (a dev/test anchor would admit
+--                                     SYNTHETIC-NOT-LEGAL RG configuration); its insert guard also
+--                                     refuses any role that is not a member of the owner role.
+--   rg_limit_config_change_requests - SELECT/INSERT, and UPDATE on status only (decided_* are forced
+--                                     by the guard trigger). Never DELETE or TRUNCATE.
+--   rg_limit_configs,
+--   player_rg_limit_changes         - append-only: SELECT/INSERT only (+ the seq sequence).
+-- No role, password or attribute change.
+DO $$
+DECLARE
+    t RECORD;
+BEGIN
+    FOR t IN SELECT * FROM (VALUES
+        ('database_environment', 'SELECT'),
+        ('rg_limit_config_change_requests', 'SELECT, INSERT'),
+        ('rg_limit_configs', 'SELECT, INSERT'),
+        ('player_rg_limit_changes', 'SELECT, INSERT')) AS v(name, privs)
+    LOOP
+        IF to_regclass('public.' || t.name) IS NOT NULL THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t.name);
+            EXECUTE format('GRANT %s ON %I TO igaming_runtime', t.privs, t.name);
+        END IF;
+    END LOOP;
+    IF to_regclass('public.rg_limit_config_change_requests') IS NOT NULL THEN
+        EXECUTE 'GRANT UPDATE (status) ON rg_limit_config_change_requests TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.player_rg_limit_changes_seq_seq') IS NOT NULL THEN
+        EXECUTE 'GRANT USAGE ON SEQUENCE player_rg_limit_changes_seq_seq TO igaming_runtime';
+    END IF;
+END
+$$;

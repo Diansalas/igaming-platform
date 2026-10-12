@@ -81,8 +81,10 @@ func TestRun_ProductionPoolUsesRuntimeParams(t *testing.T) {
 
 func TestDatabaseRuntimeParams_DefaultAndOverride(t *testing.T) {
 	p := config.Config{}.DatabaseRuntimeParams()
-	if len(p) != 1 || p["idle_in_transaction_session_timeout"] != "30000" {
-		t.Fatalf("the zero Config must still yield the 30s default (the setting cannot be omitted): %v", p)
+	// ADR 0115 S1: exactly two per-connection settings - the idle bound and app.environment
+	// (GuardEnvironment: "production" for a zero Config).
+	if len(p) != 2 || p["idle_in_transaction_session_timeout"] != "30000" || p["app.environment"] != "production" {
+		t.Fatalf("the zero Config must still yield the 30s default (the setting cannot be omitted) and app.environment=production: %v", p)
 	}
 	p = config.Config{DatabaseIdleInTxTimeout: 700 * time.Millisecond}.DatabaseRuntimeParams()
 	if p["idle_in_transaction_session_timeout"] != "700" {
