@@ -48,7 +48,10 @@
 --      identically defined, and the step below then EXECUTEs nothing for them (no statement on the
 --      table, so no SHARE lock). A missing index is built here only on a small table (dev / CI); on a
 --      table above the threshold (reltuples > 100000 or > 64 MB) the migration refuses with RL098 and
---      points at the runbook. The step runs under SET LOCAL-style lock_timeout 5 s (restored after).
+--      points at the runbook. The step sets a transaction-local lock_timeout of 5 s that stays in force
+--      for the WHOLE file (security L1): a later ACCESS EXCLUSIVE step (player_restrictions,
+--      casino_launch_sessions) that cannot get its lock fails 55P03 within seconds and the transaction
+--      rolls back (releasing any SHARE lock the index build took), instead of queueing indefinitely.
 --
 -- SQLSTATE class RL (new): RL001 actor session, RL003 backdated, RL004 operator row loosens / narrows,
 -- RL005 operator row with no floor in force, RL006 floor without a usable approved request, RL007
@@ -88,6 +91,9 @@ BEGIN
      WHERE conrelid = 'public.player_restrictions'::regclass AND conname = 'player_restrictions_restriction_type_check';
     IF v_def IS DISTINCT FROM 'CHECK ((restriction_type = ''self_exclusion''::text))' THEN
         RAISE EXCEPTION 'migration 0135 pre-flight: player_restrictions_restriction_type_check is not the 0037 definition (%)', v_def USING ERRCODE = 'RL098';
+    END IF;
+    IF to_regprocedure('public.player_restrictions_player_id_forced()') IS NOT NULL THEN
+        RAISE EXCEPTION 'migration 0135 pre-flight: player_restrictions_player_id_forced already exists' USING ERRCODE = 'RL098';
     END IF;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_policies WHERE schemaname = 'public' AND tablename = 'player_restrictions'
                 AND policyname = 'time_out_tenant_narrowing') THEN
@@ -131,7 +137,6 @@ $$;
 -- =========================================================================
 DO $$
 DECLARE
-    v_prev_lt text := pg_catalog.current_setting('lock_timeout');
     r         record;
     v_rows    double precision;
     v_bytes   bigint;
@@ -152,7 +157,7 @@ BEGIN
             EXECUTE format('CREATE INDEX %I ON public.%I (tenant_id, player_account_id, asset_code, created_at)', r.name, r.tbl);
         END IF;
     END LOOP;
-    PERFORM pg_catalog.set_config('lock_timeout', v_prev_lt, true);
+    -- lock_timeout is deliberately NOT restored: it bounds every later lock of this file (security L1).
 END
 $$;
 
@@ -1317,6 +1322,24 @@ CREATE POLICY player_self_insert ON player_restrictions
             WHERE id = NULLIF(current_setting('app.player_account_id', true), '')::uuid
         )
     );
+
+-- Security L2: a player-session insert never chooses its own id (a caller id that collides with
+-- another tenant's row would turn the primary key into a cross-tenant existence oracle; 0135 widens
+-- player self-insert to time_out). Staff / system inserts are unchanged. rg.insertRestriction reads
+-- the stored id back with RETURNING.
+CREATE FUNCTION player_restrictions_player_id_forced() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF NULLIF(pg_catalog.current_setting('app.player_account_id', true), '') IS NOT NULL THEN
+        NEW.id := pg_catalog.gen_random_uuid();
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER player_restrictions_player_id_forced BEFORE INSERT ON player_restrictions
+    FOR EACH ROW EXECUTE FUNCTION player_restrictions_player_id_forced();
 
 -- Security C4 (ADR 0115 security condition 10, database layer): a platform-scope (tenant_id NULL)
 -- time_out is visible to a tenant-bound session only when the Person has an account in THAT

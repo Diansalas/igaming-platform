@@ -1075,6 +1075,20 @@ func TestRGLimitsS1(t *testing.T) {
 		if n := seen(platformSess(w.ops.Requester)); n != 1 {
 			t.Fatalf("a platform session is not narrowed, saw %d", n)
 		}
+		// L2: a player-session insert naming an existing restriction id (here person X's, tenant A)
+		// gets a database id: no primary-key collision, so no cross-tenant existence oracle.
+		var xID uuid.UUID
+		wantOK(t, "x restriction id", do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT id FROM player_restrictions WHERE person_id = $1 AND restriction_type = 'time_out'`, f.personX).Scan(&xID)
+		}))
+		var gotID uuid.UUID
+		wantOK(t, "tenant B player supplying person X's restriction id", do(w.rt, playerSess(f.tenantB, f.acctB), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `INSERT INTO player_restrictions (id, person_id, player_account_id, restriction_type, ends_at, source, created_by_actor_type, created_by_actor_id)
+				VALUES ($1, $2, $3, 'time_out', $4, 'player_self_service', 'player', $3) RETURNING id`, xID, f.personA, f.acctB, end).Scan(&gotID)
+		}))
+		if gotID == xID || gotID == uuid.Nil {
+			t.Fatalf("a player-chosen restriction id must be replaced: got %v (probe %v)", gotID, xID)
+		}
 		// ASCII attestation (security LOW): a Cyrillic homoglyph of 'synthetic' is refused by the CHECK.
 		cyr := midFloor(f.jur, "loss").Clone(rgfix.Spec{"attestation_ref": "ѕynthetic"})
 		err = do(w.rt, sess{}, func(ctx context.Context, tx pgx.Tx) error {

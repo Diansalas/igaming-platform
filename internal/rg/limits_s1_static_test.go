@@ -144,7 +144,8 @@ func TestMigration0135_NoEnforcementNoSeededValues(t *testing.T) {
 	// The only triggers it creates are on its own tables (no hook on a money path).
 	for _, m := range regexp.MustCompile(`CREATE TRIGGER \w+\s+BEFORE [A-Z ]+ ON (\w+)`).FindAllStringSubmatch(mig, -1) {
 		switch m[1] {
-		case "database_environment", "rg_limit_config_change_requests", "rg_limit_configs", "player_rg_limit_changes":
+		case "database_environment", "rg_limit_config_change_requests", "rg_limit_configs", "player_rg_limit_changes",
+			"player_restrictions": // security L2: the player-insert id is forced (not a money path)
 		default:
 			t.Errorf("migration 0135 creates a trigger on %s", m[1])
 		}

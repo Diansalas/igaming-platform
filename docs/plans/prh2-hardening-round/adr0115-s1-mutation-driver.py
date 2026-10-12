@@ -180,6 +180,11 @@ M = [
      "CREATE INDEX IF NOT EXISTS idx_ledger_entries_tenant_player_asset_created ON ledger_entries (tenant_id, player_account_id, asset_code, created_at);\n--", DB_TEST),
     ('I2 large-table threshold off', UP, "            IF v_rows > 100000 OR v_bytes > 64 * 1024 * 1024 THEN", "            IF false THEN", DB_TEST),
     ('I3 no lock_timeout on the index step', UP, "    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);\n", "", DB_TEST),
+    ('L1 lock_timeout restored to the session default after the index step', UP,
+     "    -- lock_timeout is deliberately NOT restored: it bounds every later lock of this file (security L1).\n",
+     "    PERFORM pg_catalog.set_config('lock_timeout', '0', true);\n", DB_TEST),
+    ('L2 player-session restriction id not forced', UP,
+     "        NEW.id := pg_catalog.gen_random_uuid();\n    END IF;\n    RETURN NEW;", "        NULL;\n    END IF;\n    RETURN NEW;", DB_TEST),
     ('I4 pre-flight accepts an INVALID index', UP, "WHERE i.indexrelid = ('public.' || r.name)::regclass AND i.indisvalid AND i.indisready",
      "WHERE i.indexrelid = ('public.' || r.name)::regclass", DB_TEST),
 ]

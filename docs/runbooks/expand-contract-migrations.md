@@ -109,7 +109,11 @@ migration that adds an index on a production-size table (first case: 0135, ADR 0
    `CREATE INDEX` only when the index is absent (`to_regclass(...) IS NULL`): with a pre-built index NO statement runs
    against `ledger_entries` / `deposit_intents`, so no `SHARE` lock is taken and writers are not blocked (an earlier
    wording here called a `CREATE INDEX IF NOT EXISTS` a "no-op": that was wrong, `IF NOT EXISTS` still takes the
-   table's `SHARE` lock before noticing the index exists). The step runs with `lock_timeout = 5s`.
+   table's `SHARE` lock before noticing the index exists). The step sets a transaction-local `lock_timeout = 5s` that
+   stays in force for the REST of 0135: every later lock (the `ACCESS EXCLUSIVE` steps on `player_restrictions` and
+   `casino_launch_sessions`) also waits at most 5 s, then the migration fails `55P03` and rolls back completely, releasing
+   any `SHARE` lock the in-migration index build took. Re-run it when the blocking session has finished
+   (`pg_stat_activity`, section 5 step 2). Pinned by `TestMigration0135_BlockedAccessExclusiveStepFailsFast`.
    Without a pre-build: on a small table (dev / CI) the index is built in the migration transaction; on a table above
    the threshold (`reltuples > 100000` or more than 64 MB) the migration refuses with `RL098` naming this section.
 4. Pinned by `TestMigration0135_PrebuiltConcurrentIndex` (accepted while writers hold `ROW EXCLUSIVE` on both tables,

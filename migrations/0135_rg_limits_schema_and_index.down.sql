@@ -36,6 +36,8 @@ DROP INDEX IF EXISTS idx_ledger_entries_tenant_player_asset_created;
 ALTER TABLE casino_launch_sessions DROP COLUMN auth_session_root_started_at;
 
 DROP POLICY time_out_tenant_narrowing ON player_restrictions;
+DROP TRIGGER player_restrictions_player_id_forced ON player_restrictions;
+DROP FUNCTION player_restrictions_player_id_forced();
 DROP POLICY player_self_insert ON player_restrictions;
 CREATE POLICY player_self_insert ON player_restrictions
     FOR INSERT

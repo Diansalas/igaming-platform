@@ -716,6 +716,17 @@ until S1-S6 merge.
   jurisdiction that `internal/testsupport/rgfix` has NOT seeded. rgfix seeds a permissive
   synthetic floor for every jurisdiction present when it runs, so a fail-closed test in a
   seeded jurisdiction would pass vacuously.
+- **Launch-gate items (security re-review; they do not block S1):**
+  - `platform-api` must REFUSE to start in production while no environment anchor is recorded.
+    Today it only warns; it already refuses a `development` / `test` anchor.
+  - Re-run the `attestation_ref` sweep (ASCII and "synthetic" detection) under the production
+    database collation before launch.
+  - `RETURNING seq` on `player_rg_limit_changes` exposes a global sequence value. This is
+    accepted as low risk: it reveals ordering and volume, not content.
+- **Security L2 decision:** a player-session insert into `player_restrictions` gets a
+  database-chosen `id` (trigger `player_restrictions_player_id_forced`, migration 0135).
+  `rg.insertRestriction` reads the stored id back with `RETURNING`. Staff and system inserts
+  are unchanged.
 - **Application-enforced:** `PermRGConfigWrite` and the staff limit permissions are HTTP-layer
   checks. The database binds operator rows to a same-tenant principal and to tighten-only, not
   to a permission.

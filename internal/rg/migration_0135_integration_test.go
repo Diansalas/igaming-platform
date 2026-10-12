@@ -313,6 +313,51 @@ func mustUUID() uuid.UUID { return uuid.New() }
 
 func mustParse(s string) uuid.UUID { return uuid.MustParse(s) }
 
+// Security L1: the 5 s lock_timeout stays in force for the whole file. With the indexes built in the
+// transaction (SHARE on ledger_entries / deposit_intents), a later ACCESS EXCLUSIVE step that is
+// blocked fails 55P03 within seconds and the rollback applies nothing - it never queues indefinitely
+// while holding the ledger SHARE lock.
+func TestMigration0135_BlockedAccessExclusiveStepFailsFast(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := m135Scratch(t, "m0135x_")
+	if _, err := pool.MigrateUp(ctx, m135Dir(t, migration0135Version-1)); err != nil {
+		t.Fatal(err)
+	}
+	for _, tbl := range []string{"player_restrictions", "casino_launch_sessions"} {
+		holder, err := pool.Raw().Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		htx, err := holder.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := htx.Exec(ctx, `LOCK TABLE `+tbl+` IN ACCESS SHARE MODE`); err != nil {
+			t.Fatal(err)
+		}
+		bounded, cancel := context.WithTimeout(ctx, 60*time.Second)
+		start := time.Now()
+		_, err = pool.MigrateUp(bounded, m135Dir(t, migration0135Version))
+		elapsed := time.Since(start)
+		cancel()
+		_ = htx.Rollback(ctx)
+		holder.Release()
+		if codeOf(err) != "55P03" || elapsed > 20*time.Second {
+			t.Fatalf("%s held: the blocked ACCESS EXCLUSIVE step must fail 55P03 within seconds, got %v after %s", tbl, err, elapsed)
+		}
+		var n int
+		var head int64
+		if err := pool.Raw().QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_class WHERE relname IN ('rg_limit_configs', 'database_environment',
+				'idx_ledger_entries_tenant_player_asset_created', 'idx_deposit_intents_tenant_player_asset_created')),
+				(SELECT max(version) FROM schema_migrations)`).Scan(&n, &head); err != nil || n != 0 || head >= migration0135Version {
+			t.Fatalf("%s held: a refused up must apply nothing (objects=%d head=%d err=%v)", tbl, n, head, err)
+		}
+	}
+	if _, err := pool.MigrateUp(ctx, m135Dir(t, migration0135Version)); err != nil {
+		t.Fatalf("with nothing held the migration applies: %v", err)
+	}
+}
+
 // Ledger-finance 5: an INVALID index under the expected name (a failed / cancelled CONCURRENTLY
 // build) is refused with RL098 even though its definition matches.
 func TestMigration0135_InvalidPrebuiltIndexRefused(t *testing.T) {
