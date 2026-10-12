@@ -434,6 +434,17 @@ func TestRGLimitsS1(t *testing.T) {
 		if c := w.compose(t, staffSess(f.tenantA, f.staffA), f.jur, &f.tenantA, &f.brandA2, "deposit", strp("EUR")); num(c["ceiling"]) != "100" {
 			t.Fatalf("brand A2 must be bound by its own row: %v", c)
 		}
+		// Direct reads: operator rows never leave their tenant; floor change requests are platform-only.
+		var foreignRows, reqRows int
+		wantOK(t, "tenant B direct read", do(w.rt, staffSess(f.tenantB, f.staffB), func(ctx context.Context, tx pgx.Tx) error {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM rg_limit_configs WHERE tenant_id = $1`, f.tenantA).Scan(&foreignRows); err != nil {
+				return err
+			}
+			return tx.QueryRow(ctx, `SELECT count(*) FROM rg_limit_config_change_requests`).Scan(&reqRows)
+		}))
+		if foreignRows != 0 || reqRows != 0 {
+			t.Fatalf("tenant B read %d of tenant A's operator rows and %d floor change requests", foreignRows, reqRows)
+		}
 		// Tenant B sees only the floor (the operator row never leaves tenant A).
 		cb := w.compose(t, staffSess(f.tenantB, f.staffB), f.jur, &f.tenantB, &f.brandB, "deposit", strp("EUR"))
 		if num(cb["ceiling"]) != "300" || durOf(cb["increase_cooldown"]) != time.Hour {
@@ -539,6 +550,17 @@ func TestRGLimitsS1(t *testing.T) {
 		time.Sleep(2200 * time.Millisecond)
 		if got := w.realized(t, f, key); got.Value == nil || *got.Value != "450" {
 			t.Fatalf("a cancelled increase is never realized: %+v", got)
+		}
+		// Two pending increases: the first is superseded by the second BEFORE its own effective_at,
+		// so it is never realized even after its cooldown elapses (the next-request bound).
+		_, err = w.change(pa, dep(strp("650")))
+		wantOK(t, "pending increase A", err)
+		time.Sleep(1000 * time.Millisecond)
+		_, err = w.change(pa, dep(strp("680")))
+		wantOK(t, "pending increase B", err)
+		time.Sleep(1300 * time.Millisecond)
+		if got := w.realized(t, f, key); got.Value == nil || *got.Value != "450" {
+			t.Fatalf("an increase superseded before its effective_at is never realized: %+v", got)
 		}
 		// Removal after the cooldown, realized as "no limit".
 		rm, err := w.change(pa, dep(nil))
