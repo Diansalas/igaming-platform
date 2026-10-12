@@ -13,6 +13,7 @@ Status: policy and procedure document (no code). It consolidates rules that alre
 - `down` **refuses** unless `APP_ENV` is explicitly `development` or `staging` (unset or `production` is refused, checked
   before any connection). Some downs refuse data-bearing states. CI proves reversibility only for the last 4 steps.
 - Rolling deploys run two application versions against one schema (section 3 of the deployment architecture).
+- `up` and `down` take a session advisory lock, so two migrators cannot run concurrently.
 - A restore or `CREATE DATABASE` does not carry the database ACL (TEMPORARY revoke, migration 0116); `migrate up` will not
   re-apply it (`restore-from-backup.md`).
 
@@ -80,8 +81,13 @@ Some migrations take strong table locks for their scan or for lifting FORCE RLS 
 2. Check for long-running transactions first: `SELECT pid, now()-xact_start, state, left(query,80) FROM pg_stat_activity WHERE xact_start IS NOT NULL ORDER BY 2 DESC`.
    A writer holding a row lock can deadlock with the migration; PostgreSQL aborts one side. If the migration loses it
    rolls back cleanly and can be re-run.
-3. Set a statement-level guard for the migration session where the migration does not set its own (`lock_timeout`), so a
-   blocked migration fails fast instead of queueing behind traffic and then blocking all new traffic behind itself.
+3. Set `lock_timeout` for the migration session where the migration does not set its own, so a blocked migration fails fast
+   instead of queueing behind traffic and then blocking all new traffic behind itself. `cmd/migrate` reads only
+   `DATABASE_URL`, and a libpq/pgx `options` parameter reaches the session (verified against this repository's `db.Connect`:
+   `SHOW lock_timeout` returned `5s`):
+   `DATABASE_URL='postgres://<owner>@<host>/<db>?sslmode=require&options=-c%20lock_timeout%3D5s' go run ./cmd/migrate up`
+   (credentials via `PGPASSFILE` or the secret store, not in the URL). Migrations that set their own `lock_timeout` override
+   it. The drill's own URLs must not carry `options` (its guard refuses it); this is for real migration runs.
 4. Run `cmd/migrate up` as the **migration-owner** role, separately from the application rollout, never implicitly at app
    startup (`operational-runbooks.md` section 1).
 5. Verify (section 6) before restarting writers.

@@ -16,8 +16,8 @@
 #      scratch database, then re-applies the database-level privileges a dump cannot carry
 #      (deploy/drill/post-restore.sql) and verifies structure and `migrate verify`;
 #      it also records that a FULL-DATA pg_dump by the migration-owner role is REFUSED by FORCE RLS
-#      (finding BACKUP-ROLE-1: a data-bearing logical dump needs a BYPASSRLS backup role, which this
-#      drill is forbidden to create);
+#      (finding BACKUP-ROLE-1: a data-bearing logical dump needs a dedicated RLS-bypassing backup role,
+#      which this drill is forbidden to create);
 #   4. SNAPSHOT path: CREATE DATABASE ... TEMPLATE (same cluster, same failure domain: NOT a backup,
 #      only a data-bearing restore exercise) and verifies every check against the baseline, including
 #      `migrate verify`; then shows the RPO of a snapshot by writing one more row to the source;
@@ -75,28 +75,14 @@ case "$DEPOSITS" in ''|*[!0-9]*) die "--deposits must be a positive integer" ;; 
 for tool in psql pg_dump pg_restore go sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
-for f in seed.sql verify.sql post-restore.sql post-backup-write.sql tamper.sql; do
-  [ -f "${SCRIPT_DIR}/${f}" ] || die "missing ${SCRIPT_DIR}/${f}"
+for f in seed verify post-restore post-backup-write tamper; do
+  [ -f "${SCRIPT_DIR}/${f}.sql" ] || die "missing ${SCRIPT_DIR}/${f}.sql"
 done
 [ -d "${REPO_ROOT}/migrations" ] || die "migrations directory not found at ${REPO_ROOT}/migrations"
 
-# ---- URL helpers (credentials are never echoed) -------------------------------------------------
-url_host() { # postgres://user:pass@host:port/db?x -> host
-  local rest="${1#*://}"; rest="${rest#*@}"; rest="${rest%%/*}"; rest="${rest%%:*}"; printf '%s' "$rest"
-}
-url_with_db() { # base-url new-db -> same authority/query, different database name
-  local base="$1" db="$2" scheme_auth query="" rest
-  rest="${base#*://}"
-  scheme_auth="${base%%://*}://${rest%%/*}"
-  case "$base" in *\?*) query="?${base#*\?}" ;; esac
-  printf '%s/%s%s' "$scheme_auth" "$db" "$query"
-}
-for u in "$TEST_ADMIN_DATABASE_URL" "$TEST_DATABASE_URL"; do
-  case "$(url_host "$u")" in
-    127.0.0.1|localhost|"[::1]"|::1) ;;
-    *) die "refusing a non-local database host (this drill is local-only; AWS is not authorised)" ;;
-  esac
-done
+# shellcheck source=deploy/drill/lib-localdb.sh
+WORK_PREFIX=drill-bk
+. "${SCRIPT_DIR}/lib-localdb.sh"
 
 SUFFIX="$(date +%s)_$$"
 SRC_DB="${DB_PREFIX}src_${SUFFIX}"
@@ -105,21 +91,24 @@ RST_DB="${DB_PREFIX}rst_${SUFFIX}"
 for n in "$SRC_DB" "$LGC_DB" "$RST_DB"; do
   [[ "$n" =~ ^drill_bk_[a-z0-9_]+$ ]] || die "internal: unsafe scratch database name $n"
 done
-
-ADMIN_URL="$TEST_ADMIN_DATABASE_URL"
 SRC_URL="$(url_with_db "$TEST_DATABASE_URL" "$SRC_DB")"
 LGC_URL="$(url_with_db "$TEST_DATABASE_URL" "$LGC_DB")"
 RST_URL="$(url_with_db "$TEST_DATABASE_URL" "$RST_DB")"
 
-adm() { psql -X -q -At -v ON_ERROR_STOP=1 "$ADMIN_URL" "$@"; }
-
 if [ "$CLEAN_STALE" -eq 1 ]; then
-  # only databases this drill created (name prefix), never anything else
-  while IFS= read -r d; do
+  # only databases this drill created (name prefix), old enough (the epoch is in the name), and with no
+  # active connection; never anything else. DRILL_STALE_MIN_AGE_SECONDS (default 3600) tunes the age.
+  MIN_AGE="${DRILL_STALE_MIN_AGE_SECONDS:-3600}"
+  case "$MIN_AGE" in ''|*[!0-9]*) die "DRILL_STALE_MIN_AGE_SECONDS must be an integer" ;; esac
+  NOW_EPOCH="$(date +%s)"
+  while IFS='|' read -r d conns; do
     [[ "$d" =~ ^drill_bk_[a-z0-9_]+$ ]] || continue
+    if [[ "$d" =~ _([0-9]{9,})_[0-9]+$ ]]; then ep="${BASH_REMATCH[1]}"; else echo "drill: skipping $d (no timestamp in name)"; continue; fi
+    if [ $((NOW_EPOCH - ep)) -lt "$MIN_AGE" ]; then echo "drill: skipping $d (younger than ${MIN_AGE}s)"; continue; fi
+    if [ "$conns" -gt 0 ]; then echo "drill: skipping $d (${conns} active connection(s))"; continue; fi
     echo "drill: dropping stale scratch database $d"
-    adm -c "DROP DATABASE IF EXISTS \"$d\" WITH (FORCE)"
-  done < <(adm -c "SELECT datname FROM pg_database WHERE datname LIKE 'drill\\_bk\\_%'")
+    adm -c "DROP DATABASE IF EXISTS \"$d\""
+  done < <(adm -c "SELECT d.datname || '|' || (SELECT count(*) FROM pg_stat_activity a WHERE a.datname = d.datname) FROM pg_database d WHERE d.datname LIKE 'drill\\_bk\\_%'")
   [ "$DRY_RUN" -eq 1 ] || exit 0
 fi
 
@@ -136,7 +125,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # ---- working state, cleanup ---------------------------------------------------------------------
-WORK="$(mktemp -d "${DRILL_WORKDIR:-${TMPDIR:-/tmp}}/drill-bk.XXXXXX")"
 CREATED=()
 cleanup() {
   local rc=$?
@@ -256,7 +244,7 @@ echo "drill: [3/6] LOGICAL: full-data pg_dump as the migration owner (expected: 
 FULL_RC=0
 pg_dump -Fc -f /dev/null "$SRC_URL" 2>"${WORK}/full-dump.err" || FULL_RC=$?
 if [ "$FULL_RC" -ne 0 ] && grep -q 'row-level security' "${WORK}/full-dump.err"; then
-  record "logical:full_data_dump_as_owner" "REFUSED" "pg_dump exit=${FULL_RC}: FORCE RLS blocks the non-BYPASSRLS owner (BACKUP-ROLE-1); not worked around"
+  record "logical:full_data_dump_as_owner" "REFUSED" "pg_dump exit=${FULL_RC}: FORCE RLS blocks the owner role, which has no RLS-bypass attribute (BACKUP-ROLE-1); not worked around"
 elif [ "$FULL_RC" -eq 0 ]; then
   record "logical:full_data_dump_as_owner" "UNEXPECTED" "pg_dump succeeded as the owner; revisit docs/runbooks/restore-from-backup.md (this drill still uses the schema-only path)"
 else
@@ -277,8 +265,11 @@ pg_restore --exit-on-error --no-owner --dbname "$LGC_URL" "${WORK}/migrations-da
 T[lgc_restored]="$(now)"
 run_verify "$LGC_URL" "${WORK}/lgc-raw.out"
 RAW_TEMP="$(grep '^CHK|runtime_role_cannot_create_temp_0116|' "${WORK}/lgc-raw.out" | cut -d'|' -f3)"
-RAW_CONN="$(grep '^CHK|runtime_role_has_connect|' "${WORK}/lgc-raw.out" | cut -d'|' -f3)"
-record "logical:raw_restore_db_level_privileges" "INFO" "before post-restore step: runtime_role_has_connect=${RAW_CONN:-?} runtime_role_cannot_create_temp_0116=${RAW_TEMP:-?} (FAIL here is the documented loss of database-level ACLs; fixed by deploy/drill/post-restore.sql)"
+if [ "$RAW_TEMP" = FAIL ]; then
+  record "logical:raw_restore_shows_database_acl_loss" PASS "raw restore left TEMPORARY on PUBLIC (runtime_role_cannot_create_temp_0116=FAIL) as documented; the verifier detects the loss"
+else
+  record "logical:raw_restore_shows_database_acl_loss" FAIL "raw restore did NOT show the expected TEMP loss (got '${RAW_TEMP:-missing}'): the dump carried the ACL, or the verifier is vacuous"
+fi
 psql -X -q -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/post-restore.sql" "$LGC_URL" >/dev/null
 run_verify "$LGC_URL" "${WORK}/lgc.out"
 gate_checks "logical-schema" "${WORK}/lgc.out" struct
@@ -294,8 +285,11 @@ adm -c "CREATE DATABASE \"${RST_DB}\" OWNER igaming TEMPLATE \"${SRC_DB}\""
 T[rst_cloned]="$(now)"
 run_verify "$RST_URL" "${WORK}/rst-raw.out"
 RAW2_TEMP="$(grep '^CHK|runtime_role_cannot_create_temp_0116|' "${WORK}/rst-raw.out" | cut -d'|' -f3)"
-RAW2_CONN="$(grep '^CHK|runtime_role_has_connect|' "${WORK}/rst-raw.out" | cut -d'|' -f3)"
-record "snapshot:raw_clone_db_level_privileges" "INFO" "before post-restore step: runtime_role_has_connect=${RAW2_CONN:-?} runtime_role_cannot_create_temp_0116=${RAW2_TEMP:-?}"
+if [ "$RAW2_TEMP" = FAIL ]; then
+  record "snapshot:raw_clone_shows_database_acl_loss" PASS "raw clone left TEMPORARY on PUBLIC (runtime_role_cannot_create_temp_0116=FAIL) as documented; the verifier detects the loss"
+else
+  record "snapshot:raw_clone_shows_database_acl_loss" FAIL "raw clone did NOT show the expected TEMP loss (got '${RAW2_TEMP:-missing}'): the verifier is vacuous or the template carried the ACL"
+fi
 psql -X -q -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/post-restore.sql" "$RST_URL" >/dev/null
 run_verify "$RST_URL" "${WORK}/rst.out"
 gate_checks "snapshot" "${WORK}/rst.out" all
@@ -320,15 +314,21 @@ fi
 echo "drill: [6/6] NEGATIVE CONTROL: damaging the restored scratch copy; the verifiers must now FAIL"
 psql -X -q -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/tamper.sql" "$RST_URL" >/dev/null
 run_verify "$RST_URL" "${WORK}/tampered.out"
-EXPECT_FAIL="rls_enabled_and_forced_on_all_tenant_tables runtime_role_cannot_create_temp_0116 runtime_role_no_truncate_trigger_references_ddl"
+EXPECT_FAIL="rls_enabled_and_forced_on_all_tenant_tables runtime_role_cannot_create_temp_0116 runtime_role_no_truncate_trigger_references_ddl ledger_debits_eq_credits_per_tenant_asset balance_projection_equals_ledger_recompute"
 for c in $EXPECT_FAIL; do
   s="$(grep "^CHK|${c}|" "${WORK}/tampered.out" | cut -d'|' -f3)"
   if [ "$s" = FAIL ]; then record "negative-control:verify_detects:${c}" PASS "verifier reported FAIL on the damaged copy"
   else record "negative-control:verify_detects:${c}" FAIL "verifier reported '${s:-missing}' on a damaged copy (check is vacuous)"; fi
 done
+if ! diff -q <(grep '^ROW|' "${WORK}/src.out") <(grep '^ROW|' "${WORK}/tampered.out") >/dev/null \
+   && [ "$(grep '^FP|rowcounts_md5|' "${WORK}/src.out")" != "$(grep '^FP|rowcounts_md5|' "${WORK}/tampered.out")" ]; then
+  record "negative-control:row_count_diff_detects_deleted_row" PASS "non-zero (table,scope) counts and rowcounts_md5 differ from the source"
+else
+  record "negative-control:row_count_diff_detects_deleted_row" FAIL "row-count comparison did not notice a deleted projection row"
+fi
 t_fp="$(grep '^FP|triggers_md5|' "${WORK}/tampered.out" | head -1)"; b_fp="$(grep '^FP|triggers_md5|' "${WORK}/src.out" | head -1)"
 if [ -n "$t_fp" ] && [ "$t_fp" != "$b_fp" ]; then record "negative-control:fingerprint_detects_dropped_trigger" PASS "triggers_md5 differs from source"
-else record "negative-control:fingerprint_detects_dropped_trigger" FAIL "triggers_md5 unchanged after DROP TRIGGER"; fi
+else record "negative-control:fingerprint_detects_dropped_trigger" FAIL "triggers_md5 unchanged after a trigger was dropped"; fi
 nc_rc=0; DATABASE_URL="$RST_URL" "$MIGRATE_BIN" -dir "${REPO_ROOT}/migrations" verify >/dev/null 2>&1 || nc_rc=$?
 if [ "$nc_rc" -ne 0 ]; then record "negative-control:migrate_verify_detects_checksum_tamper" PASS "migrate verify exit=${nc_rc}"
 else record "negative-control:migrate_verify_detects_checksum_tamper" FAIL "migrate verify passed on a tampered checksum"; fi
@@ -353,12 +353,18 @@ echo "logical schema dump:                 $(elapsed "${T[lgc0]}" "${T[lgc_dumpe
 echo "logical restore (schema):            $(elapsed "${T[lgc_dumped]}" "${T[lgc_restored]}") s"
 echo "logical restore -> verified:         $(elapsed "${T[lgc0]}" "${T[lgc_done]}") s  (dump + restore + post-restore + verify + migrate verify)"
 echo "snapshot restore (CREATE..TEMPLATE): $(elapsed "${T[rst0]}" "${T[rst_cloned]}") s"
-echo "snapshot restore -> verified:        $(elapsed "${T[rst0]}" "${T[rst_done]}") s  (restore + post-restore + all checks + migrate verify) = measured RTO analogue for this dataset"
+echo "snapshot restore -> verified:        $(elapsed "${T[rst0]}" "${T[rst_done]}") s  (restore + post-restore + all checks + migrate verify) (wall time of this local mechanics sequence on this small synthetic dataset; NOT an RTO)"
 echo "snapshot RPO on this run:            ${LOST} committed ledger entries written after the snapshot were absent from the restore"
+N_PASS=0; N_SNAPCMP=0
+for r in "${RESULTS[@]}"; do
+  case "$r" in *"|PASS|"*) N_PASS=$((N_PASS + 1)) ;; esac
+  case "$r" in snapshot:fingerprint:*"|PASS|"*|snapshot:row_counts_all_tables_all_scopes*"|PASS|"*) N_SNAPCMP=$((N_SNAPCMP + 1)) ;; esac
+done
+echo "gating checks passed: ${N_PASS} (failed: ${FAILS}); ${N_SNAPCMP} of them compare the file-level clone with its own source and pass by construction"
 echo "total drill wall time:               $(elapsed "${T[start]}" "${T[end]}") s"
 echo
 if [ "$FAILS" -eq 0 ]; then
-  echo "DRILL RESULT: PASS (all gating checks passed; INFO/REFUSED rows are findings, see the runbook)"
+  echo "DRILL RESULT: PASS (all gating checks passed; the REFUSED row is a finding, see the runbook)"
   exit 0
 fi
 echo "DRILL RESULT: FAIL (${FAILS} gating check(s) failed)"

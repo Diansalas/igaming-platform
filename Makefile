@@ -106,10 +106,10 @@ ci: fmt-check vet lint build test
 # (CREATEDB) and owner harness credentials via TEST_ADMIN_DATABASE_URL / TEST_DATABASE_URL and never
 # alter a role or password. Runbooks: docs/runbooks/restore-from-backup.md, load-and-soak-test-plan.md.
 drill-backup-restore:
-	TEST_ADMIN_DATABASE_URL=$(TEST_ADMIN_DATABASE_URL) TEST_DATABASE_URL=$(DATABASE_URL) deploy/drill/backup-restore-drill.sh --deposits 200
+	@TEST_ADMIN_DATABASE_URL='$(TEST_ADMIN_DATABASE_URL)' TEST_DATABASE_URL='$(DATABASE_URL)' deploy/drill/backup-restore-drill.sh --deposits 200
 
 drill-backup-restore-dry-run:
-	TEST_ADMIN_DATABASE_URL=$(TEST_ADMIN_DATABASE_URL) TEST_DATABASE_URL=$(DATABASE_URL) deploy/drill/backup-restore-drill.sh --dry-run
+	@TEST_ADMIN_DATABASE_URL='$(TEST_ADMIN_DATABASE_URL)' TEST_DATABASE_URL='$(DATABASE_URL)' deploy/drill/backup-restore-drill.sh --dry-run
 
 smoke-local:
-	TEST_ADMIN_DATABASE_URL=$(TEST_ADMIN_DATABASE_URL) TEST_DATABASE_URL=$(DATABASE_URL) deploy/loadtest/local-smoke.sh
+	@TEST_ADMIN_DATABASE_URL='$(TEST_ADMIN_DATABASE_URL)' TEST_DATABASE_URL='$(DATABASE_URL)' deploy/loadtest/local-smoke.sh

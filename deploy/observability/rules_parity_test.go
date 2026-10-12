@@ -30,9 +30,11 @@ import (
 	"strings"
 	"testing"
 
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"net/http"
 	"net/http/httptest"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.yaml.in/yaml/v3"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -82,6 +84,89 @@ func goSources(t *testing.T) string {
 		}
 	}
 	return sb.String()
+}
+
+// goFiles returns every non-test .go file under internal/ and cmd/ (path -> text).
+func goFiles(t *testing.T) map[string]string {
+	t.Helper()
+	root := repoRoot(t)
+	out := map[string]string{}
+	for _, top := range []string{"internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, top), func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+				return nil
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			out[p] = string(b)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", top, err)
+		}
+	}
+	return out
+}
+
+var instrumentVarRe = regexp.MustCompile(`(\w+)\s*,\s*_\s*:?=\s*\w+\.(?:Int64|Float64)\w+\(\s*"([a-z][a-z0-9_.]*)"`)
+var spanEndRe = regexp.MustCompile(`\n}\n`)
+
+// metricAttrKeys maps each custom metric (Prometheus name) to the attribute keys recorded ON THAT
+// INSTRUMENT: for a synchronous instrument held in a variable, the keys inside the functions that call
+// <var>.Add/Record; for observable gauges (no variable), the keys used anywhere in the instrument's own package
+// directory. A label that is recorded only on some OTHER instrument does not count.
+func metricAttrKeys(files map[string]string) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	dirKeys := map[string]map[string]bool{}
+	for path, text := range files {
+		d := filepath.Dir(path)
+		if dirKeys[d] == nil {
+			dirKeys[d] = map[string]bool{}
+		}
+		for k := range emittedAttrKeys(text) {
+			dirKeys[d][k] = true
+		}
+	}
+	for path, text := range files {
+		fileKeys := dirKeys[filepath.Dir(path)] // same package: helpers such as severityAttr live in sibling files
+		for _, m := range instrumentRe.FindAllStringSubmatch(text, -1) {
+			out[strings.ReplaceAll(m[1], ".", "_")] = fileKeys
+		}
+		for _, m := range instrumentVarRe.FindAllStringSubmatch(text, -1) {
+			name := strings.ReplaceAll(m[2], ".", "_")
+			keys := map[string]bool{}
+			for _, call := range regexp.MustCompile(regexp.QuoteMeta(m[1])+`\.(?:Add|Record)\(`).FindAllStringIndex(text, -1) {
+				span := text[call[0]:]
+				if end := spanEndRe.FindStringIndex(span); end != nil {
+					span = span[:end[0]]
+				}
+				for k := range emittedAttrKeys(span) {
+					keys[k] = true
+				}
+				// one level of same-file helpers (e.g. severityAttr) used to build the attributes
+				for _, h := range regexp.MustCompile(`\b([a-zA-Z_]\w*)\(`).FindAllStringSubmatch(span, -1) {
+					if loc := regexp.MustCompile(`(?m)^func ` + regexp.QuoteMeta(h[1]) + `\(`).FindStringIndex(text); loc != nil {
+						body := text[loc[0]:]
+						if end := spanEndRe.FindStringIndex(body); end != nil {
+							body = body[:end[0]]
+						}
+						for k := range emittedAttrKeys(body) {
+							keys[k] = true
+						}
+					}
+				}
+			}
+			if len(keys) > 0 {
+				out[name] = keys
+			}
+		}
+	}
+	return out
 }
 
 var instrumentRe = regexp.MustCompile(`\.(?:Int64|Float64)(?:Counter|UpDownCounter|Histogram|Gauge|ObservableCounter|ObservableUpDownCounter|ObservableGauge)\(\s*"([a-z][a-z0-9_.]*)"`)
@@ -268,10 +353,7 @@ func TestPrometheusRulesReferenceOnlyEmittedSeries(t *testing.T) {
 		t.Fatalf("found only %d custom instruments in source; the scanner is broken", len(custom))
 	}
 	httpSeries, httpLabels, routes := otelhttpSeries(t)
-	attrKeys := emittedAttrKeys(src)
-	for k := range httpLabels {
-		attrKeys[k] = true
-	}
+	perMetric := metricAttrKeys(goFiles(t))
 
 	rules := parseRules(readFile(t, filepath.Join(root, "deploy/observability/prometheus-alert-rules.yml")))
 	if len(rules) < 15 {
@@ -288,6 +370,17 @@ func TestPrometheusRulesReferenceOnlyEmittedSeries(t *testing.T) {
 			continue
 		}
 		ms, ls := analyse(r.expr)
+		allowed := map[string]bool{}
+		for _, m := range ms {
+			if httpSeries[m] {
+				for k := range httpLabels {
+					allowed[k] = true
+				}
+			}
+			for k := range perMetric[m] {
+				allowed[k] = true
+			}
+		}
 		if len(ms) == 0 {
 			t.Errorf("%s: expression references no metric: %q", r.name, r.expr)
 		}
@@ -297,8 +390,8 @@ func TestPrometheusRulesReferenceOnlyEmittedSeries(t *testing.T) {
 			}
 		}
 		for _, l := range ls {
-			if !attrKeys[l] {
-				t.Errorf("%s: label %q is not an attribute key recorded anywhere in the code", r.name, l)
+			if !allowed[l] {
+				t.Errorf("%s: label %q is not an attribute key recorded on the metric(s) this expression uses (%v)", r.name, l, ms)
 			}
 		}
 	}
@@ -414,3 +507,84 @@ func TestEveryPrometheusRuleHasSeverityAndRunbook(t *testing.T) {
 		}
 	}
 }
+
+// ---- structural YAML checks (go.yaml.in/yaml/v3, already in the module graph) -------------------------
+
+type promFile struct {
+	Groups []struct {
+		Name  string `yaml:"name"`
+		Rules []struct {
+			Alert       string            `yaml:"alert"`
+			Expr        string            `yaml:"expr"`
+			For         string            `yaml:"for"`
+			Labels      map[string]string `yaml:"labels"`
+			Annotations map[string]string `yaml:"annotations"`
+		} `yaml:"rules"`
+	} `yaml:"groups"`
+}
+
+func TestPrometheusRulesAreStructurallyValidYAML(t *testing.T) {
+	text := readFile(t, filepath.Join(repoRoot(t), "deploy/observability/prometheus-alert-rules.yml"))
+	var f promFile
+	if err := yaml.Unmarshal([]byte(text), &f); err != nil {
+		t.Fatalf("prometheus-alert-rules.yml is not valid YAML: %v", err)
+	}
+	n := 0
+	durRe := regexp.MustCompile(`^[0-9]+(ms|s|m|h|d|w|y)$`)
+	for _, g := range f.Groups {
+		if g.Name == "" || len(g.Rules) == 0 {
+			t.Errorf("group %q is empty or unnamed", g.Name)
+		}
+		for _, r := range g.Rules {
+			n++
+			if r.Alert == "" || strings.TrimSpace(r.Expr) == "" {
+				t.Errorf("rule %q: alert and expr are required", r.Alert)
+			}
+			if r.For != "" && !durRe.MatchString(r.For) {
+				t.Errorf("%s: bad for: %q", r.Alert, r.For)
+			}
+			if sev := r.Labels["severity"]; sev != "page" && sev != "ticket" && sev != "info" {
+				t.Errorf("%s: severity %q is not page|ticket|info", r.Alert, sev)
+			}
+			if r.Annotations["summary"] == "" || r.Annotations["runbook"] == "" {
+				t.Errorf("%s: summary and runbook annotations are required", r.Alert)
+			}
+			if strings.Count(r.Expr, "(") != strings.Count(r.Expr, ")") || strings.Count(r.Expr, "{") != strings.Count(r.Expr, "}") || strings.Count(r.Expr, "[") != strings.Count(r.Expr, "]") {
+				t.Errorf("%s: unbalanced brackets in expr (PromQL syntax is otherwise NOT validated here)", r.Alert)
+			}
+		}
+	}
+	if n != strings.Count(text, "- alert:") {
+		t.Errorf("YAML parse found %d rules but the text has a different number of '- alert:' entries", n)
+	}
+}
+
+func TestOtherRuleFilesAreValidYAML(t *testing.T) {
+	root := repoRoot(t)
+	var logf struct {
+		Rules []map[string]string `yaml:"rules"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, filepath.Join(root, "deploy/observability/log-event-alert-rules.yml"))), &logf); err != nil {
+		t.Fatalf("log-event-alert-rules.yml: %v", err)
+	}
+	for _, r := range logf.Rules {
+		for _, k := range []string{"id", "severity", "event", "match", "threshold", "source", "runbook"} {
+			if r[k] == "" {
+				t.Errorf("log rule %q missing %s", r["id"], k)
+			}
+		}
+	}
+	var pend struct {
+		Pending []map[string]any `yaml:"pending"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, filepath.Join(root, "deploy/observability/pending-signals.yml"))), &pend); err != nil {
+		t.Fatalf("pending-signals.yml: %v", err)
+	}
+	if len(pend.Pending) < 3 {
+		t.Errorf("expected at least 3 pending signals, got %d", len(pend.Pending))
+	}
+}
+
+// PromQL syntax is NOT validated by this suite: that needs promtool or the Prometheus PromQL parser,
+// a new dependency this repository has not adopted. Recommended once a backend exists: run
+// `promtool check rules deploy/observability/prometheus-alert-rules.yml` in CI.

@@ -10,7 +10,7 @@ mock providers on a shared sandbox VM. Nothing here targets or authorises any no
 (`drill_bk_smoke_*`, dropped on exit), migrates it, seeds synthetic data (`deploy/drill/seed.sql`), starts `platform-api` with
 `APP_ENV=development` on `127.0.0.1:18080` and drives it with `deploy/loadtest/smoke` (standard library only, loopback targets
 only, no new dependency). Scenarios: `GET /healthz` (no DB), `GET /readyz` (DB ping), `GET /v1/me` (JWT verification plus a
-tenant-scoped RLS read) after a one-time player registration per worker. Server stopped with `kill <pid>`.
+tenant-scoped RLS read) after a one-time player registration per worker. Server stopped with `kill <pid>`. **The server runs as the migration-owner role, not `igaming_runtime`** (dev mode allows it; production startup refuses an owner-privileged connection), so the smoke does not exercise the runtime role's grants. The JWT signing secret is a fresh random value per run; `internal/config` only requires 32+ characters and has no dev-literal denylist for JWT, which is why no literal secret is kept in the repository. Production additionally refuses the mock adapters at startup (MOCK-ADAPTER-PROD-1; an unset `APP_ENV` counts as production), so a dev-mode process cannot be mistaken for a production one.
 
 ```sh
 export TEST_ADMIN_DATABASE_URL=... TEST_DATABASE_URL=...

@@ -11,7 +11,9 @@ labeled done unless it has actually been built and exercised.
   restored, serving primary.
 
 **Status (updated 2026-10-12, OPS-READINESS-LOCAL): production RPO/RTO remain NOT MET. A LOCAL restore drill now
-exists and has been exercised (IMPLEMENTED for the local dev dataset only).** There is still no scheduled backup job, no
+exists and has been exercised (IMPLEMENTED for the local dev dataset only). No data-bearing backup artefact has been
+restored: the logical path is schema-only, and the data restore is `CREATE DATABASE ... TEMPLATE`, a same-cluster file copy
+that is NOT a backup.** There is still no scheduled backup job, no
 managed automated backup, no point-in-time recovery, no replica and no cross-region copy anywhere; those are
 `PROVIDER DEPENDENT` and AWS-gated (AWS is OFF and unauthorised). This is expected at this point in the project: per
 ADR 0009 no hyperscale cloud account has been provisioned, and managed automated backups (RDS/Cloud SQL/Azure Database
@@ -21,10 +23,10 @@ point-in-time-recovery) are the intended production mechanism, not something thi
 
 | Item | Status | Evidence / reason |
 |---|---|---|
-| Scripted local backup + restore drill on private scratch databases with synthetic data | **DONE (local, dev dataset only)** | `deploy/drill/backup-restore-drill.sh`, runbook `restore-from-backup.md`; 2026-10-12 run: all gating checks PASS (row counts per RLS scope, `SUM(debits)=SUM(credits)` per tenant/asset, projection == ledger recompute, RLS enabled+FORCED on all 98 tenant tables, runtime-role pins, `schema_migrations` head 132 and checksums, trigger/function/policy/constraint/index/ACL fingerprints equal, `cmd/migrate verify` clean) |
-| Verifiers proven able to fail (negative control) | DONE | the drill damages the restored copy and requires 5 detections |
-| Measured restore wall time / RPO | DONE for **this dataset only** | 31.7 MB, 16,000 ledger entries: snapshot restore to fully verified 1.72 s; logical schema dump+restore+verify 4.69 s; snapshot RPO = writes after the snapshot are lost (2 ledger entries in the run). **Not production RPO/RTO** |
-| Full-data **logical** backup (`pg_dump`) as the migration owner | **BLOCKED (finding BACKUP-ROLE-1)** | refused by FORCE RLS (the owner is not BYPASSRLS, correctly). Needs a dedicated BYPASSRLS backup role or a physical mechanism: a human/infra decision; the drill may not create roles and does not weaken RLS to work around it |
+| Scripted local backup + restore drill on private scratch databases with synthetic data | **DONE (local, dev dataset only); no data-bearing backup artefact restored** | `deploy/drill/backup-restore-drill.sh`, runbook `restore-from-backup.md`. Logical path = schema-only dump + `schema_migrations` data (real dump and restore, no financial data). Data path = `CREATE DATABASE ... TEMPLATE` (same-cluster file copy, NOT a backup). 2026-10-12 run: 78 gating checks PASS, 0 FAIL (16 compare the clone with its own source and pass by construction); invariants: ledger balance per tenant/asset, projection == recompute, RLS enabled+FORCED on 98 tenant tables, runtime-role pins, `schema_migrations` head 132, catalog fingerprints, `cmd/migrate verify` |
+| Verifiers proven able to fail (negative control) | DONE | the drill damages the restored copy (RLS, TEMP, TRUNCATE grant, dropped trigger, checksum, unbalanced ledger entry, projection mismatch, deleted row) and requires 8 detections |
+| Measured copy/verify wall time / RPO | DONE for **this dataset only** | 22 MB, 3,200 ledger entries: clone to fully verified 1.18 s; logical schema dump+restore+verify 3.82 s; snapshot RPO = writes after the snapshot are lost (2 ledger entries in the run). **Not an RTO; not production RPO/RTO** |
+| Full-data **logical** backup (`pg_dump`) as the migration owner | **BLOCKED (finding BACKUP-ROLE-1, OPEN: human/ADR decision, AWS-gated)** | refused by FORCE RLS (the owner has no RLS-bypass attribute, correctly). Security recommendation: managed physical snapshots + PITR as the primary path; a dedicated minimal `igaming_backup` role only if logical dumps are required (details in `restore-from-backup.md`). The drill may not create roles and does not weaken RLS to work around it |
 | Base backup / WAL archiving / local PITR | **NOT ATTEMPTED** (AWS/managed-PITR-gated) | the local test-admin role has no `REPLICATION` attribute, `archive_mode` is off, `wal_level=replica`; enabling either needs role or server-configuration changes this work must not make |
 | Scheduled / automated backups | NOT MET | none exists locally or elsewhere |
 | Managed backups with PITR, retention policy | NOT MET, AWS-gated | no cloud account |
@@ -32,7 +34,7 @@ point-in-time-recovery) are the intended production mechanism, not something thi
 | Cross-region / off-site copy | NOT MET, AWS-gated | none |
 | Restore of a database ACL (TEMPORARY revoke, CONNECT) | DONE in the drill | dump/clone do not carry it; `deploy/drill/post-restore.sql` repairs it; the drill shows the check FAIL before and PASS after |
 | Directive **RPO 0** (ledger) | NOT MET | snapshots lose post-snapshot writes by construction; needs WAL archiving / sync replication |
-| Directive **RTO < 15 min** | NOT DEMONSTRATED | seconds for a 30 MB local dataset says nothing about a production-sized restore, transfer, detection and decision time |
+| Directive **RTO < 15 min** | NOT DEMONSTRATED | seconds for a ~20 MB local dataset says nothing about a production-sized restore, transfer, detection and decision time |
 
 **Production classification is unchanged: this remains a production blocker.** CLAUDE.md does not permit launching a
 real-money ledger without a tested restore path *on the real topology*; the local drill proves the platform's schema,

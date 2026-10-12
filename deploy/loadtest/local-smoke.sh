@@ -12,7 +12,16 @@
 #   TEST_DATABASE_URL        the migration-owner role; only user/password/host are used
 # Optional: SMOKE_PORT (default 18080), DRILL_WORKDIR.
 #
-# Safety: local hosts only; the scratch database name is drill_bk_smoke_*; the server is stopped with
+# This runs platform-api as the MIGRATION OWNER role (DATABASE_URL = TEST_DATABASE_URL's user), NOT as
+# igaming_runtime: dev mode allows it, production startup refuses an owner-privileged connection
+# (VerifyRuntimeRoleInProduction). So the smoke does not exercise the runtime role's grants or the
+# FORCE RLS owner restrictions the way production would. The JWT signing secret is a fresh random value
+# per run (never a literal in the repo; internal/config only requires >= 32 characters, it has no
+# dev-literal denylist for JWT, so the protection against a leaked literal is not having one).
+# The workdir holds the only copy of the credentials in a 0600 PGPASSFILE and is removed on exit.
+#
+# Safety: local hosts only (URL query redirection keys refused, redirecting PG* variables unset, server
+# address asserted loopback after connecting); the scratch database name is drill_bk_smoke_*; the server is stopped with
 # `kill <its pid>` (never pkill/killall); no role or password is changed; nothing is sent anywhere.
 
 set -euo pipefail
@@ -43,20 +52,14 @@ case "$PORT" in ''|*[!0-9]*) die "SMOKE_PORT must be an integer" ;; esac
 : "${TEST_DATABASE_URL:?TEST_DATABASE_URL is required}"
 for tool in psql go curl; do command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"; done
 
-url_host() { local rest="${1#*://}"; rest="${rest#*@}"; rest="${rest%%/*}"; printf '%s' "${rest%%:*}"; }
-url_with_db() {
-  local base="$1" db="$2" rest="${1#*://}" query=""
-  case "$base" in *\?*) query="?${base#*\?}" ;; esac
-  printf '%s/%s%s' "${base%%://*}://${rest%%/*}" "$db" "$query"
-}
-for u in "$TEST_ADMIN_DATABASE_URL" "$TEST_DATABASE_URL"; do
-  case "$(url_host "$u")" in 127.0.0.1|localhost) ;; *) die "refusing a non-local database host" ;; esac
-done
+# shared local-only guard + credential handling (0600 PGPASSFILE, no password in argv, server-side loopback proof)
+WORK_PREFIX=smoke
+# shellcheck source=deploy/drill/lib-localdb.sh
+. "${REPO_ROOT}/deploy/drill/lib-localdb.sh"
 
 DB="drill_bk_smoke_$(date +%s)_$$"
 [[ "$DB" =~ ^drill_bk_smoke_[0-9_]+$ ]] || die "internal: unsafe database name"
 DB_URL="$(url_with_db "$TEST_DATABASE_URL" "$DB")"
-adm() { psql -X -q -At -v ON_ERROR_STOP=1 "$TEST_ADMIN_DATABASE_URL" "$@"; }
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "smoke: DRY RUN - would create ${DB}, migrate, seed, start platform-api on 127.0.0.1:${PORT} (APP_ENV=development), run ${WORKERS} workers for ${DURATION}, then stop and drop"
@@ -64,7 +67,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-WORK="$(mktemp -d "${DRILL_WORKDIR:-${TMPDIR:-/tmp}}/smoke.XXXXXX")"
 API_PID=""
 cleanup() {
   local rc=$?
@@ -85,7 +87,7 @@ psql -X -q -v ON_ERROR_STOP=1 -v seed_deposits=2 -f "${REPO_ROOT}/deploy/drill/s
 # AUTH_RATE_LIMIT_PER_MINUTE is raised so the per-IP limiter does not throttle the setup registrations;
 # the limiter itself is therefore NOT exercised by this smoke.
 APP_ENV=development HTTP_ADDR="127.0.0.1:${PORT}" OTEL_EXPORTER=none AUTH_RATE_LIMIT_PER_MINUTE=100000 \
-  JWT_SIGNING_SECRET="smoke-local-not-a-secret-0123456789abcdef" DATABASE_URL="$DB_URL" \
+  JWT_SIGNING_SECRET="$(head -c 48 /dev/urandom | base64 | tr -d '\n=+/')" DATABASE_URL="$DB_URL" \
   "${WORK}/platform-api" >"${WORK}/api.log" 2>&1 &
 API_PID=$!
 

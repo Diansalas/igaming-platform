@@ -16,7 +16,7 @@ pending:
     also_needed: [db_pool_max_connections, db_pool_acquire_wait_seconds_total]
     proposed_expr: "db_pool_acquired_connections / db_pool_max_connections > 0.9 for 5m"
     why_missing: "internal/db wraps pgxpool but exports no pool statistics (pgxpool.Stat) to OpenTelemetry."
-    interim: "No automated signal. Operators can only infer saturation from rising http_request duration_ms and 5xx. See docs/runbooks/load-and-soak-test-plan.md for the local measurement."
+    interim: "No automated signal. Operators can only infer saturation from a rising http_server_request_duration_seconds and a rising 5xx ratio (Http5xxRatioHigh). See docs/runbooks/load-and-soak-test-plan.md for the local measurement."
 
   - id: ReconciliationStale
     severity: page

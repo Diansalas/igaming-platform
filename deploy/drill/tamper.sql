@@ -13,3 +13,14 @@ DROP TRIGGER ledger_entries_immutable ON ledger_entries;
 UPDATE schema_migrations SET checksum = 'tampered-by-drill-negative-control' WHERE version = (SELECT min(version) FROM schema_migrations);
 -- 5. over-grant the runtime role
 GRANT TRUNCATE ON ledger_entries TO igaming_runtime;
+-- 6. money damage (the immutability trigger was dropped in step 3, which is what makes these writes possible):
+--    one credit entry grows by 7 (SUM(debits) != SUM(credits), and the projection no longer equals the
+--    recompute), and one projection row disappears (a row-count difference against the source).
+BEGIN;
+SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-0000000000a1', true);
+UPDATE ledger_entries SET amount = amount + 7
+ WHERE id = (SELECT id FROM ledger_entries WHERE direction = 'credit' ORDER BY created_at, id LIMIT 1);
+DELETE FROM wallet_balance_projection
+ WHERE ledger_account_id = (SELECT ledger_account_id FROM wallet_balance_projection
+                             WHERE account_type = 'player_cash' ORDER BY ledger_account_id DESC LIMIT 1);
+COMMIT;
