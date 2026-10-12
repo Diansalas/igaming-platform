@@ -108,6 +108,15 @@ const (
 	// platform-admin token carries no tenant).
 	PermCasinoReconciliationRead Permission = "casino_reconciliation:read"
 
+	// PermSportsbookReconciliationRead gates STAFF, tenant-scoped, READ-ONLY visibility into the
+	// sportsbook_settlement reconciliation evidence (runs, mismatches) through ADR 0114 R2 (slice
+	// S4, D-OPS-2). Same shape and grantees as PermCasinoReconciliationRead: RoleTenantAdmin,
+	// RoleCompliance and RoleFinance, EXACTLY (a role-matrix test pins the absence for
+	// platform_admin, support, risk_manager, promotions_manager and bonus_operations). It is the
+	// only role-matrix change ADR 0114 makes. Detection only: nothing gated by it resolves or
+	// compensates a finding.
+	PermSportsbookReconciliationRead Permission = "sportsbook_reconciliation:read"
+
 	// PermWithdrawalPolicyWrite gates the Stage 3D withdrawal_policies
 	// admin API (docs/decisions/0024 §5). Deliberately its own
 	// permission, never bundled with PermWithdrawalApprove: the role
@@ -903,6 +912,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermProviderCredentialRead, PermProviderCredentialRevoke,
 		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
 		PermCasinoReconciliationRead,
+		// ADR 0114 S4: see PermSportsbookReconciliationRead's own doc comment.
+		PermSportsbookReconciliationRead,
 		// PRH-I1 (ADR 0095 §10.4/§10.5): a tenant admin may engage/release
 		// its OWN tenant's kill switches. Unlike PermProviderCredentialRequest/
 		// Approve (platform-admin only), release here is deliberately also
@@ -974,6 +985,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermCasinoTransactionRead,
 		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
 		PermCasinoReconciliationRead,
+		// ADR 0114 S4: see PermSportsbookReconciliationRead's own doc comment.
+		PermSportsbookReconciliationRead,
 		// PRH-I3 (ADR 0096 §6/§13 condition 7): see
 		// PermKYCEnforcementDecisionRead's own doc comment.
 		PermKYCEnforcementDecisionRead,
@@ -1012,6 +1025,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermCasinoTransactionRead,
 		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
 		PermCasinoReconciliationRead,
+		// ADR 0114 S4: see PermSportsbookReconciliationRead's own doc comment.
+		PermSportsbookReconciliationRead,
 		// PRH-2 K1 (ADR 0099 §3.2): finance is an eligible capability
 		// GRANTEE (§3.3), not a grant requester/approver/revoker - it holds
 		// no capability_grant:* permission, only the financial-policy read

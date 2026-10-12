@@ -125,3 +125,93 @@ func ListMismatchesOfKinds(ctx context.Context, tx pgx.Tx, kinds []MismatchKind,
 	}
 	return out, total, rows.Err()
 }
+
+// StaffViewStreams are the streams the ADR 0114 R2 staff views serve (slice S4): the streams
+// that had no staff read route. The casino streams keep their own route.
+var StaffViewStreams = []Stream{StreamPaymentStatement, StreamLedgerVsProjection, StreamSportsbookSettlement}
+
+// LedgerVsProjectionMismatchKinds are the kinds the ledger_vs_projection stream records.
+var LedgerVsProjectionMismatchKinds = []MismatchKind{
+	MismatchKindMissingProjection, MismatchKindBalanceMismatch, MismatchKindLedgerUnlinkedManualAdjustment,
+}
+
+// PaymentStatementMismatchKinds are the kinds the payment_statement stream records.
+var PaymentStatementMismatchKinds = []MismatchKind{
+	MismatchKindPayMissingPlatformRecord, MismatchKindPayMissingProviderRecord, MismatchKindPayAmountMismatch,
+	MismatchKindPayAssetMismatch, MismatchKindPayReferenceMismatch, MismatchKindPayStatusMismatch,
+	MismatchKindPayDuplicate, MismatchKindPayUnresolved, MismatchKindPayCapturedUnposted,
+	MismatchKindPayDeclaredPaidUnconfirmed, MismatchKindPayDeclaredNotPaidButPaid,
+	MismatchKindPayDeclaredPaidCompensatedButPaid,
+}
+
+// SportsbookSettlementMismatchKinds are the kinds the sportsbook_settlement stream records.
+var SportsbookSettlementMismatchKinds = []MismatchKind{
+	MismatchKindSBLocked, MismatchKindSBBetNet, MismatchKindSBOrphanLedger, MismatchKindSBOrphanHistory,
+	MismatchKindSBStatus, MismatchKindSBMockStatement,
+}
+
+// StaffViewMismatchKinds returns the closed kind vocabulary of one staff-view stream. ok is
+// false for any other stream.
+func StaffViewMismatchKinds(stream Stream) (kinds []MismatchKind, ok bool) {
+	switch stream {
+	case StreamPaymentStatement:
+		return PaymentStatementMismatchKinds, true
+	case StreamLedgerVsProjection:
+		return LedgerVsProjectionMismatchKinds, true
+	case StreamSportsbookSettlement:
+		return SportsbookSettlementMismatchKinds, true
+	}
+	return nil, false
+}
+
+// StaffMismatchFilter narrows ListMismatchesForStream. Every field is optional except Stream.
+type StaffMismatchFilter struct {
+	Stream Stream
+	// Kind and Status are matched exactly when non-empty (validated by the caller against the
+	// closed vocabularies).
+	Kind   MismatchKind
+	Status string
+	// SubjectID, when non-empty, must be a canonical lower-case UUID (the caller validates it):
+	// it matches a mismatch whose reconciliation_key names that id as the whole key or as one of
+	// the subject tokens (attempt=, deposit_intent=, receipt=, bet=, wallet=, ledger_transaction=).
+	SubjectID string
+}
+
+// ListMismatchesForStream reads one page of the tenant's mismatches of ONE stream (taken from
+// the owning run's stream, not from the mismatch kind), newest first, with the total count. A
+// plain SELECT under the caller's tenant-scoped transaction.
+func ListMismatchesForStream(ctx context.Context, tx pgx.Tx, f StaffMismatchFilter, limit, offset int) ([]StoredMismatch, int, error) {
+	const where = `
+		 FROM reconciliation_mismatches m
+		 JOIN reconciliation_runs r ON r.id = m.reconciliation_run_id AND r.tenant_id = m.tenant_id
+		WHERE r.stream = $1
+		  AND ($2 = '' OR m.mismatch_kind = $2)
+		  AND ($3 = '' OR m.investigation_status = $3)
+		  AND ($4 = '' OR m.reconciliation_key = $4
+		       OR m.reconciliation_key ~ ('(^| )(attempt|deposit_intent|receipt|bet|wallet|ledger_transaction)=' || $4 || '( |$)'))`
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT count(*)`+where, string(f.Stream), string(f.Kind), f.Status, f.SubjectID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("reconciliation: count staff-view mismatches: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT m.id, m.tenant_id, m.reconciliation_run_id, m.reconciliation_key, m.expected_value, m.actual_value,
+		       m.mismatch_kind, m.investigation_status, m.created_at, m.resolved_at`+where+`
+		 ORDER BY m.created_at DESC, m.id
+		 LIMIT $5 OFFSET $6`, string(f.Stream), string(f.Kind), f.Status, f.SubjectID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("reconciliation: list staff-view mismatches: %w", err)
+	}
+	defer rows.Close()
+	var out []StoredMismatch
+	for rows.Next() {
+		var m StoredMismatch
+		var kind string
+		if err := rows.Scan(&m.ID, &m.TenantID, &m.RunID, &m.ReconciliationKey, &m.ExpectedValue, &m.ActualValue,
+			&kind, &m.InvestigationStatus, &m.CreatedAt, &m.ResolvedAt); err != nil {
+			return nil, 0, fmt.Errorf("reconciliation: scan staff-view mismatch: %w", err)
+		}
+		m.MismatchKind = MismatchKind(kind)
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
+}

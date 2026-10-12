@@ -177,6 +177,9 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerCapabilityRoutes(mux, deps)
 	registerManualAdjustmentRoutes(mux, deps)
 	registerPaymentForceResolutionRoutes(mux, deps)
+	// ADR 0114 S2/S4: read-only payment attempt and reconciliation views (R1, R2).
+	registerPaymentAttemptReadRoutes(mux, deps)
+	registerStaffReconciliationRoutes(mux, deps)
 	registerWithdrawalHoldResolutionRoutes(mux, deps) // HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 s6, migration 0124)
 	// B13 (ADR 0111 2.9): payout instruments.
 	registerPayoutInstrumentRoutes(mux, deps)
