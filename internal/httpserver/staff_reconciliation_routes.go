@@ -3,7 +3,6 @@ package httpserver
 import (
 	"context"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -78,6 +77,7 @@ type staffReconciliationMismatchDTO struct {
 	ExpectedMinorUOM *string                   `json:"expected_minor_units"`
 	ActualMinorUOM   *string                   `json:"actual_minor_units"`
 	AssetCode        *string                   `json:"asset_code"`
+	Exponent         *int16                    `json:"exponent"`
 	DetectedAt       string                    `json:"detected_at"`
 }
 
@@ -235,8 +235,9 @@ func newStaffReconciliationMismatchesHandler(deps Deps) http.HandlerFunc {
 			}
 			total = count
 			items = make([]staffReconciliationMismatchDTO, 0, len(ms))
+			res := &assetResolver{ctx: ctx, tx: tx, cache: map[string]*resolvedAsset{}}
 			for _, m := range ms {
-				items = append(items, toStaffReconciliationMismatchDTO(stream, vocab, m))
+				items = append(items, toStaffReconciliationMismatchDTO(res, stream, vocab, m))
 			}
 			return nil
 		})
@@ -249,7 +250,39 @@ func newStaffReconciliationMismatchesHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
-func toStaffReconciliationMismatchDTO(stream reconciliation.Stream, vocab []reconciliation.MismatchKind, m reconciliation.StoredMismatch) staffReconciliationMismatchDTO {
+// --- mapping (the strict parsers live in internal/reconciliation/read_parse.go) ---
+
+// assetResolver resolves an asset code candidate against the asset registry (case-insensitive
+// match, canonical registry code returned), caching per request.
+type assetResolver struct {
+	ctx   context.Context
+	tx    pgx.Tx
+	cache map[string]*resolvedAsset
+}
+
+type resolvedAsset struct {
+	code     string
+	exponent int16
+}
+
+func (r *assetResolver) resolve(candidate *string) *resolvedAsset {
+	if candidate == nil {
+		return nil
+	}
+	key := strings.ToUpper(*candidate)
+	if v, ok := r.cache[key]; ok {
+		return v
+	}
+	var a resolvedAsset
+	var out *resolvedAsset
+	if err := r.tx.QueryRow(r.ctx, `SELECT code, decimal_exponent FROM assets WHERE upper(code) = $1`, key).Scan(&a.code, &a.exponent); err == nil {
+		out = &a
+	}
+	r.cache[key] = out
+	return out
+}
+
+func toStaffReconciliationMismatchDTO(res *assetResolver, stream reconciliation.Stream, vocab []reconciliation.MismatchKind, m reconciliation.StoredMismatch) staffReconciliationMismatchDTO {
 	kind := terminalReasonOther
 	for _, k := range vocab {
 		if k == m.MismatchKind {
@@ -260,98 +293,19 @@ func toStaffReconciliationMismatchDTO(stream reconciliation.Stream, vocab []reco
 	if status != "open" && status != "investigating" && status != "resolved" {
 		status = terminalReasonOther
 	}
-	return staffReconciliationMismatchDTO{
+	d := staffReconciliationMismatchDTO{
 		ID: m.ID.String(), RunID: m.RunID.String(), Stream: string(stream), Kind: kind, Status: status,
-		SubjectRef:       reconciliationSubject(stream, m.MismatchKind, m.ReconciliationKey),
-		ExpectedMinorUOM: reconciliationMinorUnits(m.ExpectedValue),
-		ActualMinorUOM:   reconciliationMinorUnits(m.ActualValue),
-		AssetCode:        reconciliationAsset(m.ReconciliationKey, m.ExpectedValue, m.ActualValue),
-		DetectedAt:       m.CreatedAt.UTC().Format(rfc3339),
+		DetectedAt: m.CreatedAt.UTC().Format(rfc3339),
 	}
-}
-
-// --- strict parsers over the free-form reconciliation texts (DB-free, unit-tested) ---
-
-const canonicalUUID = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
-
-var (
-	wholeUUIDRe = regexp.MustCompile(`^` + canonicalUUID + `$`)
-	// subjectTokens: the key tokens that name a subject, in preference order, with the closed
-	// subject type each yields. "history=" and every other token are deliberately absent.
-	subjectTokens = []struct {
-		token, typ string
-		re         *regexp.Regexp
-	}{
-		{"attempt", "payment_attempt", regexp.MustCompile(`(?:^| )attempt=(` + canonicalUUID + `)(?: |$)`)},
-		{"deposit_intent", "deposit_intent", regexp.MustCompile(`(?:^| )deposit_intent=(` + canonicalUUID + `)(?: |$)`)},
-		{"receipt", "payment_receipt", regexp.MustCompile(`(?:^| )receipt=(` + canonicalUUID + `)(?: |$)`)},
-		{"bet", "bet", regexp.MustCompile(`(?:^| )bet=(` + canonicalUUID + `)(?: |$)`)},
-		{"wallet", "wallet", regexp.MustCompile(`(?:^| )wallet=(` + canonicalUUID + `)(?: |$)`)},
-		{"ledger_transaction", "ledger_transaction", regexp.MustCompile(`(?:^| )ledger_transaction=(` + canonicalUUID + `)(?: |$)`)},
+	if s := reconciliation.MismatchSubject(stream, m.MismatchKind, m.ReconciliationKey, m.ExpectedValue); s != nil {
+		d.SubjectRef = &reconciliationSubjectRef{Type: s.Type, ID: s.ID}
 	}
-	wholeIntRe   = regexp.MustCompile(`^[a-z_]+=(-?[0-9]{1,40})$`)
-	intValueRe   = regexp.MustCompile(`^-?[0-9]{1,40}$`)
-	assetValueRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,16}$`)
-)
-
-// reconciliationSubject derives the subject_ref of a mismatch from its stored key, or nil.
-func reconciliationSubject(stream reconciliation.Stream, kind reconciliation.MismatchKind, key string) *reconciliationSubjectRef {
-	if stream == reconciliation.StreamLedgerVsProjection && wholeUUIDRe.MatchString(key) {
-		switch kind {
-		case reconciliation.MismatchKindMissingProjection, reconciliation.MismatchKindBalanceMismatch:
-			return &reconciliationSubjectRef{Type: "ledger_account", ID: key}
-		case reconciliation.MismatchKindLedgerUnlinkedManualAdjustment:
-			return &reconciliationSubjectRef{Type: "ledger_transaction", ID: key}
-		}
-		return nil
+	// The asset must exist in the registry; without one both amounts are null (ledger-finance F3).
+	if a := res.resolve(reconciliation.MismatchAssetCandidate(m.ExpectedValue, m.ActualValue)); a != nil {
+		code, exp := a.code, a.exponent
+		d.AssetCode, d.Exponent = &code, &exp
+		d.ExpectedMinorUOM = reconciliation.MismatchAmount(m.ExpectedValue)
+		d.ActualMinorUOM = reconciliation.MismatchAmount(m.ActualValue)
 	}
-	for _, t := range subjectTokens {
-		if m := t.re.FindStringSubmatch(key); m != nil {
-			return &reconciliationSubjectRef{Type: t.typ, ID: m[1]}
-		}
-	}
-	return nil
-}
-
-// reconciliationMinorUnits returns a minor-unit amount (a decimal integer string) when the
-// diagnostic text carries exactly one unambiguous amount: the whole text is `name=<integer>`, or
-// it holds exactly one space-separated `amount=<integer>` token. Anything else (multi-value
-// texts, prose) is nil.
-func reconciliationMinorUnits(text string) *string {
-	if m := wholeIntRe.FindStringSubmatch(text); m != nil {
-		return &m[1]
-	}
-	var found []string
-	for _, f := range strings.Split(text, " ") {
-		if v, ok := strings.CutPrefix(f, "amount="); ok {
-			found = append(found, v)
-		}
-	}
-	if len(found) == 1 && intValueRe.MatchString(found[0]) {
-		return &found[0]
-	}
-	return nil
-}
-
-// reconciliationAsset returns the asset code when every space-separated `asset=` token in the
-// key and both texts names the same short token; nil when there is none, a token is malformed,
-// or they disagree.
-func reconciliationAsset(texts ...string) *string {
-	asset := ""
-	for _, t := range texts {
-		for _, f := range strings.Split(t, " ") {
-			v, ok := strings.CutPrefix(f, "asset=")
-			if !ok {
-				continue
-			}
-			if !assetValueRe.MatchString(v) || (asset != "" && !strings.EqualFold(asset, v)) {
-				return nil
-			}
-			asset = v
-		}
-	}
-	if asset == "" {
-		return nil
-	}
-	return &asset
+	return d
 }

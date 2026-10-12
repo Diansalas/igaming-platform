@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 )
@@ -181,19 +182,33 @@ func decodePaymentAttemptCursor(tok string) (paymentAttemptCursor, error) {
 // or executing) K3 resolution of the attempt; the two m4 booleans are the DATABASE predicate
 // payment_m4_in_scope (migrations 0125/0127) evaluated for each M4 kind. The withdrawal state is
 // read for the M2 precondition. provider_reference is only tested for presence.
-const attemptReadSelect = `
+const attemptReadSelectTmpl = `
 SELECT a.id, a.operation, a.attempt_no, a.state, a.terminal_reason, a.deposit_intent_id, a.withdrawal_request_id,
        a.amount::text, a.asset_code, a.provider_id, (a.provider_reference IS NOT NULL),
        a.created_at, a.updated_at, a.resolved_at,
-       (SELECT m.id FROM payment_manual_resolutions m
-         WHERE m.tenant_id = a.tenant_id AND m.attempt_id = a.id AND m.state IN ('pending', 'executing')
-         ORDER BY m.created_at DESC, m.id DESC LIMIT 1),
+       %OPENRES%,
        w.state,
+       COALESCE(w.amount = a.amount AND w.asset_code = a.asset_code, false),
        payment_m4_in_scope('m4_evidence_paid', a.state, a.terminal_reason, a.provider_reference),
        payment_m4_in_scope('m4_evidence_not_paid', a.state, a.terminal_reason, a.provider_reference)
   FROM payment_attempts a
   LEFT JOIN withdrawal_requests w ON w.id = a.withdrawal_request_id AND w.tenant_id = a.tenant_id
  WHERE a.tenant_id = $1`
+
+// openResolutionSQL is the open (pending or executing) K3 resolution of the attempt. Resolutions are
+// visible only to a principal-scoped session (migration 0115 tenant_scope_select), which only a
+// TENANT caller's read carries. A platform caller's read never sets app.principal_id (ADR 0114
+// section 12.4, security C1): its open_resolution_id is NULL by construction, not by RLS accident.
+const openResolutionSQL = `(SELECT m.id FROM payment_manual_resolutions m
+         WHERE m.tenant_id = a.tenant_id AND m.attempt_id = a.id AND m.state IN ('pending', 'executing')
+         ORDER BY m.created_at DESC, m.id DESC LIMIT 1)`
+
+func attemptReadSelect(withResolutions bool) string {
+	if withResolutions {
+		return strings.Replace(attemptReadSelectTmpl, "%OPENRES%", openResolutionSQL, 1)
+	}
+	return strings.Replace(attemptReadSelectTmpl, "%OPENRES%", "NULL::uuid", 1)
+}
 
 type attemptRow struct {
 	id                      uuid.UUID
@@ -211,6 +226,7 @@ type attemptRow struct {
 	resolvedAt              *time.Time
 	openResolutionID        *uuid.UUID
 	withdrawalState         *string
+	withdrawalMatches       bool // the withdrawal's amount and asset equal the attempt's
 	m4PaidScope, m4NotScope bool
 }
 
@@ -218,7 +234,7 @@ func scanAttemptRow(row pgx.Row) (attemptRow, error) {
 	var a attemptRow
 	err := row.Scan(&a.id, &a.operation, &a.attemptNo, &a.state, &a.terminalReason, &a.depositIntentID, &a.withdrawalRequestID,
 		&a.amount, &a.asset, &a.providerID, &a.hasRef, &a.createdAt, &a.updatedAt, &a.resolvedAt, &a.openResolutionID,
-		&a.withdrawalState, &a.m4PaidScope, &a.m4NotScope)
+		&a.withdrawalState, &a.withdrawalMatches, &a.m4PaidScope, &a.m4NotScope)
 	return a, err
 }
 
@@ -252,10 +268,15 @@ func admissibleKinds(a attemptRow) []string {
 	if m2 {
 		out = append(out, string(payments.ResolutionM2DeclareNotPaid))
 	}
-	if a.m4PaidScope {
+	// M4: payment_m4_in_scope is ONE of several preconditions. The hint also requires a provider, a
+	// submitted withdrawal and the withdrawal's amount and asset equal to the attempt's. The
+	// statement-evidence verdict (paid / not paid / insufficient) is NOT evaluated here: an M4 kind
+	// means "in scope; the evidence verdict decides" and the request path re-checks everything.
+	m4Pre := a.providerID != nil && a.withdrawalState != nil && *a.withdrawalState == "submitted" && a.withdrawalMatches
+	if m4Pre && a.m4PaidScope {
 		out = append(out, string(payments.ResolutionM4EvidencePaid))
 	}
-	if a.m4NotScope {
+	if m4Pre && a.m4NotScope {
 		out = append(out, string(payments.ResolutionM4EvidenceNotPaid))
 	}
 	return out
@@ -304,12 +325,22 @@ func attemptExponents(ctx context.Context, tx pgx.Tx, rows []attemptRow) (map[st
 	return out, nil
 }
 
-// readScope runs fn in the tenant-scoped read transaction of the call. K3 resolutions are
-// visible only to a principal-scoped session (migration 0115 tenant_scope_select), so the
-// transaction carries the caller's own subject; the tenant GUC is always the path tenant (the
-// caller's own for a tenant caller). It opens no acting session and writes nothing.
+// readScope runs fn in a READ ONLY tenant-scoped transaction (the tenant GUC is always the path
+// tenant, the caller's own for a tenant caller). K3 resolutions are visible only to a
+// principal-scoped session (migration 0115 tenant_scope_select): a TENANT caller's transaction
+// carries its own subject; a PLATFORM caller's never does (ADR 0114 12.4, security C1), so a
+// platform principal is never placed in app.principal_id under a tenant app.tenant_id. It opens no
+// acting session and writes nothing.
 func (c staffReadCall) readScope(ctx context.Context, deps Deps, fn func(ctx context.Context, tx pgx.Tx) error) error {
-	return deps.DB.WithPrincipalScope(ctx, c.target, c.subject, fn)
+	return deps.DB.WithTenantReadOnly(ctx, c.target, func(ctx context.Context, tx pgx.Tx) error {
+		if !c.platform() {
+			// Tenant callers only: K3 resolutions are visible to a principal-scoped session.
+			if err := db.SetPrincipalIDForCurrentTx(ctx, tx, c.subject); err != nil {
+				return err
+			}
+		}
+		return fn(ctx, tx)
+	})
 }
 
 func newListPaymentAttemptsHandler(deps Deps) http.HandlerFunc {
@@ -351,14 +382,10 @@ func newListPaymentAttemptsHandler(deps Deps) http.HandlerFunc {
 			}
 			wdID = id
 		}
-		limit := defaultPageLimit
-		if q.Has("limit") {
-			n, err := strconv.Atoi(q.Get("limit"))
-			if err != nil || n < 1 || n > maxPageLimit || len(q["limit"]) != 1 {
-				bad()
-				return
-			}
-			limit = n
+		limit, _, pok := strictPage(q)
+		if !pok || len(q["limit"]) > 1 {
+			bad()
+			return
 		}
 		var after *paymentAttemptCursor
 		if q.Has("cursor") {
@@ -382,7 +409,7 @@ func newListPaymentAttemptsHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		sql := attemptReadSelect
+		sql := attemptReadSelect(!c.platform())
 		args := []any{c.target}
 		add := func(clause string, v any) {
 			args = append(args, v)
@@ -483,7 +510,7 @@ func newGetPaymentAttemptHandler(deps Deps) http.HandlerFunc {
 		var dto paymentAttemptDTO
 		found := false
 		err = c.readScope(r.Context(), deps, func(ctx context.Context, tx pgx.Tx) error {
-			a, err := scanAttemptRow(tx.QueryRow(ctx, attemptReadSelect+" AND a.id = $2", c.target, id))
+			a, err := scanAttemptRow(tx.QueryRow(ctx, attemptReadSelect(!c.platform())+" AND a.id = $2", c.target, id))
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}

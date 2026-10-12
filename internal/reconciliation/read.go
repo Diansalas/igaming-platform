@@ -2,6 +2,7 @@ package reconciliation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -177,18 +178,35 @@ type StaffMismatchFilter struct {
 	SubjectID string
 }
 
+// ErrBadSubjectID is a StaffMismatchFilter.SubjectID that is not a canonical lower-case UUID.
+var ErrBadSubjectID = errors.New("reconciliation: subject id must be a canonical lower-case UUID")
+
 // ListMismatchesForStream reads one page of the tenant's mismatches of ONE stream (taken from
 // the owning run's stream, not from the mismatch kind), newest first, with the total count. A
 // plain SELECT under the caller's tenant-scoped transaction.
 func ListMismatchesForStream(ctx context.Context, tx pgx.Tx, f StaffMismatchFilter, limit, offset int) ([]StoredMismatch, int, error) {
-	const where = `
+	where := `
 		 FROM reconciliation_mismatches m
 		 JOIN reconciliation_runs r ON r.id = m.reconciliation_run_id AND r.tenant_id = m.tenant_id
 		WHERE r.stream = $1
 		  AND ($2 = '' OR m.mismatch_kind = $2)
 		  AND ($3 = '' OR m.investigation_status = $3)
-		  AND ($4 = '' OR m.reconciliation_key = $4
-		       OR m.reconciliation_key ~ ('(^| )(attempt|deposit_intent|receipt|bet|wallet|ledger_transaction)=' || $4 || '( |$)'))`
+		  AND ($4 = '' OR m.reconciliation_key = $4 OR (
+		       m.reconciliation_key !~ '^(statement|ledger):'
+		       AND EXISTS (
+		           SELECT 1
+		             FROM (SELECT regexp_replace(m.reconciliation_key, '` + FreeTextTokenSQL + `', '') AS p) x,
+		                  unnest(ARRAY['attempt', 'deposit_intent', 'receipt', 'bet', 'wallet', 'ledger_transaction']) AS tok
+		            WHERE x.p ~ ('(^| )' || tok || '=' || $4 || '( |$)')
+		              AND (SELECT count(*) FROM regexp_matches(x.p, '(^| )' || tok || '=', 'g')) = 1))
+		       OR (r.stream = 'payment_statement' AND EXISTS (
+		           SELECT 1
+		             FROM (SELECT regexp_replace(m.expected_value, '` + FreeTextTokenSQL + `', '') AS p) x
+		            WHERE x.p ~ ('(^| )attempt=' || $4 || '( |$)')
+		              AND (SELECT count(*) FROM regexp_matches(x.p, '(^| )attempt=', 'g')) = 1)))`
+	if f.SubjectID != "" && !IsCanonicalUUID(f.SubjectID) {
+		return nil, 0, ErrBadSubjectID
+	}
 	var total int
 	if err := tx.QueryRow(ctx, `SELECT count(*)`+where, string(f.Stream), string(f.Kind), f.Status, f.SubjectID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("reconciliation: count staff-view mismatches: %w", err)

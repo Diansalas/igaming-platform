@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
@@ -638,7 +639,10 @@ func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
 		var attemptSummary *payoutAttemptSummaryDTO
 		subject, perr := uuid.Parse(tc.Subject)
 		if perr == nil {
-			perr = deps.DB.WithPrincipalScope(r.Context(), tc.TenantID, subject, func(ctx context.Context, tx pgx.Tx) error {
+			perr = deps.DB.WithTenantReadOnly(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+				if err := db.SetPrincipalIDForCurrentTx(ctx, tx, subject); err != nil {
+					return err
+				}
 				var err error
 				attemptSummary, err = loadPayoutAttemptSummary(ctx, tx, tc.TenantID, wr.ID)
 				return err

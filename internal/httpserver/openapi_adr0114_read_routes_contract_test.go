@@ -206,6 +206,7 @@ func TestAdmissibleKinds_Table(t *testing.T) {
 		return payments.M4ResolvableDispute(kind, payments.AttemptState(a.state), a.terminalReason, refPtr(a.hasRef))
 	}
 	withM4 := func(a attemptRow) attemptRow {
+		a.withdrawalMatches = true
 		a.m4PaidScope = m4(payments.ResolutionM4EvidencePaid, a)
 		a.m4NotScope = m4(payments.ResolutionM4EvidenceNotPaid, a)
 		return a
@@ -268,75 +269,6 @@ func TestPaymentAttemptCursor_RoundTripAndStrictness(t *testing.T) {
 	}
 }
 
-func TestReconciliationSubject_Parser(t *testing.T) {
-	a, b := uuid.NewString(), uuid.NewString()
-	cases := []struct {
-		stream reconciliation.Stream
-		kind   reconciliation.MismatchKind
-		key    string
-		want   string // type:id or ""
-	}{
-		{reconciliation.StreamLedgerVsProjection, reconciliation.MismatchKindBalanceMismatch, a, "ledger_account:" + a},
-		{reconciliation.StreamLedgerVsProjection, reconciliation.MismatchKindMissingProjection, a, "ledger_account:" + a},
-		{reconciliation.StreamLedgerVsProjection, reconciliation.MismatchKindLedgerUnlinkedManualAdjustment, a, "ledger_transaction:" + a},
-		{reconciliation.StreamLedgerVsProjection, reconciliation.MismatchKindBalanceMismatch, "not-a-uuid", ""},
-		{reconciliation.StreamPaymentStatement, reconciliation.MismatchKindPayAmountMismatch, "provider=mock provider_reference=SECRET-REF kind=deposit attempt=" + a + " check=amount", "payment_attempt:" + a},
-		{reconciliation.StreamPaymentStatement, reconciliation.MismatchKindPayMissingPlatformRecord, "provider=mock provider_reference=SECRET-REF kind=deposit", ""},
-		{reconciliation.StreamPaymentStatement, reconciliation.MismatchKindPayDuplicate, "provider=mock deposit_intent=" + a + " check=duplicate_success", "deposit_intent:" + a},
-		{reconciliation.StreamPaymentStatement, reconciliation.MismatchKindPayUnresolved, "provider=mock receipt=" + a + " provider_reference=R check=deferred_receipt", "payment_receipt:" + a},
-		{reconciliation.StreamPaymentStatement, reconciliation.MismatchKindPayAmountMismatch, "provider=mock attempt=" + strings.ToUpper(a) + " check=amount", ""},
-		{reconciliation.StreamPaymentStatement, reconciliation.MismatchKindPayAmountMismatch, "provider=mock xattempt=" + a, ""},
-		{reconciliation.StreamSportsbookSettlement, reconciliation.MismatchKindSBBetNet, "bet=" + a + " check=end_state status=won", "bet:" + a},
-		{reconciliation.StreamSportsbookSettlement, reconciliation.MismatchKindSBLocked, "wallet=" + a + " asset=USD account_type=player_locked_cash", "wallet:" + a},
-		{reconciliation.StreamSportsbookSettlement, reconciliation.MismatchKindSBOrphanHistory, "history=" + a + " bet=" + b + " check=reverses", "bet:" + b},
-		{reconciliation.StreamSportsbookSettlement, reconciliation.MismatchKindSBOrphanLedger, "ledger_transaction=" + a, "ledger_transaction:" + a},
-		{reconciliation.StreamSportsbookSettlement, reconciliation.MismatchKindSBMockStatement, "statement: some-key", ""},
-	}
-	for _, c := range cases {
-		got := ""
-		if s := reconciliationSubject(c.stream, c.kind, c.key); s != nil {
-			got = s.Type + ":" + s.ID
-		}
-		if got != c.want {
-			t.Errorf("key %q -> %q, want %q", c.key, got, c.want)
-		}
-	}
-}
-
-func TestReconciliationMinorUnitsAndAsset_Parsers(t *testing.T) {
-	nums := map[string]string{
-		"open_bet_stakes=500":                                     "500",
-		"ledger_locked_net=-30":                                   "-30",
-		"sportsbook_locked_bonus_net=0":                           "0",
-		"attempt=x op=payout state=pending amount=1250 asset=USD": "1250",
-		"line=1 kind=deposit status=ok amount=77 asset=USD":       "77",
-		"ledger: amount=9":                                        "9",
-	}
-	for in, want := range nums {
-		if got := reconciliationMinorUnits(in); got == nil || *got != want {
-			t.Errorf("minor units of %q = %v, want %s", in, got, want)
-		}
-	}
-	for _, in := range []string{
-		"", "asset=USD type=player_cash debit=5 credit=7", "cash=1 locked=2 house=3", "amount=1 amount=2",
-		"amount=1.5", "amount=abc", "x=1 y=2", "amount=" + strings.Repeat("9", 41), "provider_reference=abc123", "ledger: amount=1 amount=1",
-	} {
-		if got := reconciliationMinorUnits(in); got != nil {
-			t.Errorf("minor units of %q = %q, want nil", in, *got)
-		}
-	}
-	if got := reconciliationAsset("wallet=x asset=USD account_type=a", "asset=usd debit=1", "none"); got == nil || !strings.EqualFold(*got, "USD") {
-		t.Errorf("asset = %v", got)
-	}
-	for _, in := range [][]string{
-		{"asset=USD", "asset=EUR"}, {"no asset"}, {"asset="}, {"asset=bad!"}, {"asset=" + strings.Repeat("A", 17)}, {"xasset=USD"},
-	} {
-		if got := reconciliationAsset(in...); got != nil {
-			t.Errorf("asset of %v = %q, want nil", in, *got)
-		}
-	}
-}
-
 // Section 3 / invariant 7.1 at the unit level: the stream -> permission table is exactly the ADR's.
 func TestStaffStreamPermission_IsTheADRTable(t *testing.T) {
 	want := map[reconciliation.Stream]auth.Permission{
@@ -346,5 +278,29 @@ func TestStaffStreamPermission_IsTheADRTable(t *testing.T) {
 	}
 	if !reflect.DeepEqual(staffStreamPermission, want) {
 		t.Fatalf("staffStreamPermission = %v, want %v", staffStreamPermission, want)
+	}
+}
+
+// M4 kinds are "in scope; the verdict decides": payment_m4_in_scope is one of several preconditions.
+// With the database predicate true, a missing provider, a withdrawal that is not submitted, or a
+// withdrawal whose amount or asset differs from the attempt's each withdraw the M4 kinds.
+func TestAdmissibleKinds_M4PreconditionsBeyondThePredicate(t *testing.T) {
+	base := attemptRow{operation: "payout", state: "disputed", terminalReason: str("invalid_provider_reference"), providerID: str("mock"),
+		withdrawalState: str("submitted"), withdrawalMatches: true, m4PaidScope: true, m4NotScope: true}
+	if got := admissibleKinds(base); !reflect.DeepEqual(got, []string{"m4_evidence_paid", "m4_evidence_not_paid"}) {
+		t.Fatalf("all preconditions met: %v", got)
+	}
+	for name, mut := range map[string]func(*attemptRow){
+		"no provider":           func(a *attemptRow) { a.providerID = nil },
+		"withdrawal completed":  func(a *attemptRow) { a.withdrawalState = str("completed") },
+		"no withdrawal":         func(a *attemptRow) { a.withdrawalState = nil },
+		"amount/asset differ":   func(a *attemptRow) { a.withdrawalMatches = false },
+		"predicate false (not)": func(a *attemptRow) { a.m4PaidScope, a.m4NotScope = false, false },
+	} {
+		a := base
+		mut(&a)
+		if got := admissibleKinds(a); len(got) != 0 {
+			t.Errorf("%s: kinds = %v, want none", name, got)
+		}
 	}
 }

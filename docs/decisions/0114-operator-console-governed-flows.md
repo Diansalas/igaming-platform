@@ -546,24 +546,37 @@ Facts and choices, each of which `security`/`ledger-finance` may overturn:
    platform-scope audit row (`payment_attempts.platform_read`, `reconciliation.platform_read`; `subject_tenant_id` = the path tenant, ADR 0104,
    no actor identity shown to the tenant) and the tenant data is read only if that write succeeded: an injected audit failure yields 500 and no data.
    The platform read runs in the tenant's RLS scope; it opens **no acting session** (that needs a K1 grant and is for writes).
-4. **`open_resolution_id` is read through `WithPrincipalScope(tenant, caller)` for tenant and platform callers alike**, because K3 resolutions
-   are invisible to a plain tenant session (migration 0115). Consequence for `security` to rule on: a platform_admin without a K1 grant can
-   learn that an open resolution exists and its id (not its content) for any tenant. The alternative (an acting session) would refuse the read
-   without a grant. If security rejects this, `open_resolution_id` is null for platform callers.
-5. **`admissible_kinds` is a hint.** M4 is the database predicate `payment_m4_in_scope` itself, evaluated in the read query. M1 and M2
-   cannot be taken from the database: `payment_m2_admits` answers only inside an executing resolution, and M1/M2 preconditions live in the
-   request trigger body. They are restated through `payments.M2ResolvableDispute` (parity-pinned to the database by C-47) plus the
-   trigger's other preconditions (provider present, withdrawal `submitted`, "paid" needs a held reference); a table test covers every
-   terminal reason. An attempt with an open resolution admits nothing. **Deviation from section 4 text** ("not a Go re-implementation"):
-   M1/M2 are a Go restatement; ledger-finance to rule.
-6. **R2 free text is never returned.** `reconciliation_key`, `expected_value` and `actual_value` embed provider and merchant references.
-   `subject_ref` (`payment_attempt`, `deposit_intent`, `payment_receipt`, `bet`, `wallet`, `ledger_account`, `ledger_transaction`), the
-   minor-unit amounts and `asset_code` are strict parses of them: a canonical lower-case UUID after a known token, a whole-value integer or
-   exactly one `amount=` token, a short asset token, else `null`. Ledger and sportsbook multi-value texts therefore yield null amounts.
-   The stream of a mismatch is the stream of its run (join), not inferred from the kind. **Parsers are pinned against format strings copied
-   from the emitters, not against live runs of the payment_statement and sportsbook streams** (residual).
+4. **`open_resolution_id` (security C1, review fix).** K3 resolutions are visible only to a principal-scoped session (migration 0115). A
+   TENANT caller's read sets its own subject as `app.principal_id` (inside a READ ONLY transaction, `SetPrincipalIDForCurrentTx`) and sees the
+   open resolution id. A PLATFORM caller's read never sets `app.principal_id` under a tenant `app.tenant_id` (an earlier draft did; REJECTED by
+   security): its `open_resolution_id` is always `null`, and the select is built with `NULL::uuid` rather than relying on RLS. Consequence: a
+   platform caller's `admissible_kinds` cannot account for an open resolution. Test:
+   `TestStaffReadR1_PlatformCallerNeverSeesOpenResolution` (platform_admin without a K1 grant, with a grant, and a tenant control).
+5. **`admissible_kinds` is a hint (ledger-finance F4, review fix).** `payment_m4_in_scope` is the database predicate, evaluated in the
+   read query, but it is **one of several preconditions**: the hint also requires a provider, a `submitted` withdrawal and the withdrawal's
+   amount and asset equal to the attempt's. The statement-evidence verdict is NOT evaluated: an M4 kind means "in scope; the evidence verdict
+   decides" (stated in the OpenAPI). M1 and M2 cannot be taken from the database (`payment_m2_admits` answers only inside an executing
+   resolution; the M1/M2 preconditions live in the request trigger body): they are restated through `payments.M2ResolvableDispute`
+   (parity-pinned to the database by C-47) plus the trigger's other preconditions (provider present, withdrawal `submitted`, "paid" needs a
+   held reference). A table test covers every terminal reason and a second test the M4 preconditions. An attempt with an open resolution
+   admits nothing (tenant callers). **Deviation from section 4 text** ("not a Go re-implementation"): M1/M2 are a Go restatement.
+6. **R2 free text is never returned, and only platform-written text is parsed (security C2, ledger-finance F1-F3, review fix).**
+   `reconciliation_key`, `expected_value` and `actual_value` embed provider, merchant and statement values that may contain spaces and injected
+   `name=value` tokens. The parsers (`internal/reconciliation/read_parse.go`) trust only the text BEFORE the first free-text token
+   (`provider_reference=`, `provider_tx_id=`, `merchant_reference=`, `settlement_reference=`, `original=`, `reference=`) and accept a token only
+   if it appears exactly once there. `subject_ref` comes from the key's trusted prefix and, for payment_statement, the expected segment's trusted
+   prefix (rendered `platform: attempt=<id> ...`), never the actual segment; a `statement:`/`ledger:` key yields none. A payment key whose
+   `attempt=` follows the provider reference therefore yields no subject from the key (the expected segment usually supplies it). The asset comes
+   only from the rendered expected/actual segments (never the key), must agree across them and must exist in the asset registry (canonical
+   registry code and `exponent` returned); otherwise `asset_code`, `exponent` and BOTH amounts are null. Amount names are an allow-list
+   (`amount=`, `open_bet_stakes`, `ledger_locked_net`, `sportsbook_locked_bonus_net`). The `subject_id` filter is the same rule in SQL (trusted
+   prefix, exactly once, expected segment for payment_statement) and re-validates the id as a canonical lower-case UUID inside
+   `ListMismatchesForStream`. Sportsbook locked-balance kinds carry the asset only in the key, so their amounts are now null. Tests: parser
+   unit tests with spaces and injected `attempt=`/`bet=`/`asset=`/`amount=` tokens; the REAL `payMatcher.matchLines` emitter fed hostile
+   references; the REAL sportsbook emitter (`RunSportsbookSettlement` over injected drift) through the parsers; HTTP tests for the filter and an
+   unknown asset. The stream of a mismatch is the stream of its run (join), not inferred from the kind.
 7. **Field names.** `updated_at`/`resolved_at` replace the ADR's `state_changed_at` (no such column exists); `subject_ref` uses
-   `deposit_intent_id` for deposits; R2 mismatches use `kind`/`status`/`detected_at` as the ADR lists them.
+   `deposit_intent_id` for deposits; R1 and R1b read in READ ONLY transactions and the R1 limit uses `strictPage`; R2 mismatches use `kind`/`status`/`detected_at` as the ADR lists them.
 8. **Pagination of R2** is offset based like the casino route (no cursor was specified), with strict 400s instead of clamping.
 9. **Scale residual.** R1's keyset sorts a tenant's attempts without a `(tenant_id, created_at, id)` index (only `(tenant_id)` exists).
    Acceptable at current volume; a migration (next free number 0134; 0133 is reserved by the ADR 0113 slice 2 agent) is NOT created.

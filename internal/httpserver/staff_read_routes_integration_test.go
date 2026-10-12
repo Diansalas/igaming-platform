@@ -935,7 +935,7 @@ func TestStaffReadR2_ShapeSubjectsAndExclusions(t *testing.T) {
 	for _, it := range led.Items {
 		switch it.Kind {
 		case "balance_mismatch":
-			if it.SubjectRef == nil || it.SubjectRef.Type != "ledger_account" || it.ExpectedMinorUOM != nil || it.AssetCode == nil || *it.AssetCode != "USD" {
+			if it.SubjectRef == nil || it.SubjectRef.Type != "ledger_account" || it.ExpectedMinorUOM != nil || it.AssetCode == nil || *it.AssetCode != "USD" || it.Exponent == nil || *it.Exponent != 2 {
 				t.Errorf("balance_mismatch = %+v", it)
 			}
 		case "ledger_unlinked_manual_adjustment":
@@ -948,7 +948,7 @@ func TestStaffReadR2_ShapeSubjectsAndExclusions(t *testing.T) {
 	for _, it := range sb.Items {
 		switch it.Kind {
 		case "sb_locked_mismatch":
-			if it.SubjectRef == nil || it.SubjectRef.Type != "wallet" || it.ExpectedMinorUOM == nil || *it.ExpectedMinorUOM != "500" || *it.ActualMinorUOM != "300" {
+			if it.SubjectRef == nil || it.SubjectRef.Type != "wallet" || it.ExpectedMinorUOM != nil || it.ActualMinorUOM != nil || it.AssetCode != nil {
 				t.Errorf("sb_locked_mismatch = %+v", it)
 			}
 		case "sb_bet_net_mismatch":

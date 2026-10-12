@@ -6364,8 +6364,9 @@ paths:
         Same stream permissions, tenant rule and audit as the runs route. `status` and `kind` are closed vocabularies (kind per stream) and
         `subject_id` a canonical UUID; any other input is 400 (the `other` bucket applies to output only). The stored reconciliation key and the
         expected/actual diagnostic texts are never returned: `subject_ref` (an attempt, deposit intent, receipt, bet, wallet, ledger account or
-        ledger transaction, never a player identity), the minor-unit amounts and the asset code are derived from them by strict parsers and are
-        null when not unambiguous. `subject_id` matches a mismatch whose key names that id.
+        ledger transaction, never a player identity), the minor-unit amounts, the asset code and its exponent are derived from them by strict
+        parsers over the platform-written part only (see StaffReconciliationMismatch) and are null when not unambiguous. `subject_id` (canonical
+        lower-case UUID) matches exactly the mismatches whose subject_ref would name that id.
       security:
         - bearerAuth: []
       parameters:
@@ -8765,8 +8766,11 @@ components:
       description: >
         ADR 0114 R1. Amounts are decimal strings of minor units; `exponent` is the asset registry's decimal exponent. `updated_at` is the last change
         of the row (there is no separate state-change timestamp); `resolved_at` is set once the attempt left the in-flight states (a dispute included). `admissible_kinds`
-        is a hint of the K3 kinds the request path would admit now (empty when a resolution is already open); `open_resolution_id` is the pending
-        K3 resolution, if any.
+        is a hint of the K3 kinds the request path would admit now (empty when a resolution is already open for a tenant caller). M4 kinds mean
+        "in scope; the statement-evidence verdict decides": they require the database predicate payment_m4_in_scope AND a provider AND a submitted
+        withdrawal whose amount and asset equal the attempt's, but the verdict is not evaluated. `open_resolution_id` is the pending K3 resolution
+        for TENANT callers; it is always null for platform callers (a platform principal is never placed in the resolution-visible session), and
+        a platform caller's `admissible_kinds` therefore does not account for an open resolution.
       properties:
         id: { type: string, format: uuid }
         operation: { type: string, enum: [payout, deposit] }
@@ -8842,8 +8846,12 @@ components:
     StaffReconciliationMismatch:
       type: object
       description: >
-        ADR 0114 R2. The amounts are decimal strings of minor units and the asset code is a registry code; each is null unless the stored diagnostic
-        text carries exactly one unambiguous value. `subject_ref` is null when the stored key names no recognised subject.
+        ADR 0114 R2. The amounts are decimal strings of minor units. Everything here is derived from the stored diagnostic texts only from the
+        platform-written part: the text before the first free-text token (provider_reference=, provider_tx_id=, merchant_reference=,
+        settlement_reference=, original=, reference=), each token required exactly once. The asset comes only from the rendered expected/actual
+        segments (never the key) and must exist in the asset registry; when it is null both amounts are null. The amount names are an allow-list
+        (amount=, open_bet_stakes, ledger_locked_net, sportsbook_locked_bonus_net). `subject_ref` is null when no trusted token names a subject
+        (for example a payment key whose attempt token follows the provider reference).
       properties:
         id: { type: string, format: uuid }
         run_id: { type: string, format: uuid }
@@ -8863,9 +8871,10 @@ components:
           required: [type, id]
         expected_minor_units: { type: string, nullable: true }
         actual_minor_units: { type: string, nullable: true }
-        asset_code: { type: string, nullable: true }
+        asset_code: { type: string, nullable: true, description: "The registry's canonical code; null unless the rendered expected/actual segments agree on one asset that exists in the asset registry." }
+        exponent: { type: integer, nullable: true, description: "The asset registry's decimal exponent; null exactly when asset_code is null." }
         detected_at: { type: string, format: date-time }
-      required: [id, run_id, stream, kind, status, subject_ref, expected_minor_units, actual_minor_units, asset_code, detected_at]
+      required: [id, run_id, stream, kind, status, subject_ref, expected_minor_units, actual_minor_units, asset_code, exponent, detected_at]
     PageMeta:
       type: object
       description: >
