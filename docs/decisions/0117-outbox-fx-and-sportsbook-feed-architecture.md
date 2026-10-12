@@ -108,38 +108,31 @@ and the claim-token CAS, following the ADR 0102 §4.1 narrow-exception pattern.
 
 ### A.4 Emit contract (`internal/outbox`)
 
-- `Emit` refuses outside a tenant-scoped or allowed-platform-service transaction (`txscope`).
-  It refuses an `event_type`/`schema_version` not in the Go registry (closed set, each with a
-  typed payload struct and a JSON-schema test). It also refuses money serialised as anything but
-  decimal-string integer minor units plus an `asset_code`.
-- Emission is idempotent: `INSERT ... ON CONFLICT DO NOTHING` on the dedupe index. A replayed
-  business operation (for example `ledger.Post` returning `AlreadyPosted`) must not emit, and if
-  it does, the event deduplicates.
-- **A failed `Emit` aborts the business transaction.** It is not swallowed the way
-  `RaiseGuarded` is (ADR 0102 §7.2). A swallowed emit is a silently lost event for the AML feed,
-  and the AML feed is the reason this outbox exists. That rule makes `Emit` a liveness dependency
-  of every producer. Mitigations: one plain INSERT, a trigger that only inserts, no locks beyond
-  the dedupe index, and a fault-injection test per producer (A.8).
-- Lock order: `Emit` is a new class **L5** (after L4, last statement before commit). This needs an
-  ADR 0082 amendment. The orchestrator owns amendment sections.
+- `Emit` refuses outside a tenant-scoped or allowed-platform-service transaction (`txscope`), and
+  refuses an `event_type`/`schema_version` not in the Go registry (closed set, typed payload struct
+  and JSON-schema test each). Money is decimal-string integer minor units plus `asset_code` only.
+- Idempotent: `INSERT ... ON CONFLICT DO NOTHING` on the dedupe index. A replayed operation (e.g.
+  `ledger.Post` returning `AlreadyPosted`) must not emit; if it does, it deduplicates.
+- **A failed `Emit` aborts the business transaction.** It is not swallowed like `RaiseGuarded`
+  (ADR 0102 §7.2): a swallowed emit silently loses an AML-feed event. This makes `Emit` a liveness
+  dependency of every producer. Mitigations: one plain INSERT, an insert-only trigger, no locks
+  beyond the dedupe index, and a fault-injection test per producer.
+- Lock order: `Emit` is a new class **L5**, after L4 and last before commit (ADR 0082 amendment;
+  the orchestrator owns amendment sections).
 
 ### A.5 Delivery, poison, retention
 
-- Backoff is exponential with jitter, and `attempts >= max_attempts` → `dead`. `dead` raises
-  `outbox.delivery_dead` (a new alert kind, ADR 0102 registry). For an **ordered** subscription it
-  blocks only that `(subscription, partition_key)`. Lag over a threshold raises
-  `outbox.consumer_lag`.
-- Error classes form a closed set: `transient | permanent | lease_expired | tenant_inactive`.
-  `permanent` (schema-invalid payload, unknown aggregate) goes straight to `dead`.
-- Operator recovery is an audited platform-staff action with a reason code: **requeue** (`dead→pending`)
-  or **skip** (`dead→skipped`). Skip requires four-eyes for subscriptions flagged `financial`
-  (AML feed). Owner question **OQ-A2**.
-- Retention: a platform retention function (the only DELETE path, SECURITY DEFINER, audited run
-  record) removes `done`/`skipped` deliveries and the events whose deliveries are all terminal,
-  once they are older than a configured window. `dead`/`pending` rows are never removed. The
-  window aligns with the open KYC-outbox retention decision HQ-E1-4 (**OQ-A1**).
-- Backfill for a newly added subscription is an explicit, audited replay over a `seq` range. It
-  never happens implicitly.
+- Exponential backoff with jitter; `attempts >= max_attempts` → `dead`, raising
+  `outbox.delivery_dead` (new ADR 0102 alert kind). In an **ordered** subscription a dead delivery
+  blocks only its `(subscription, partition_key)`. Lag over threshold raises `outbox.consumer_lag`.
+  Error classes are closed: `transient | permanent | lease_expired | tenant_inactive`; `permanent`
+  (schema-invalid payload, unknown aggregate) goes straight to `dead`.
+- Recovery is an audited platform-staff action with a reason code: **requeue** (`dead→pending`) or
+  **skip** (`dead→skipped`); skip needs four-eyes on subscriptions flagged `financial` (**OQ-A2**).
+- Retention: a SECURITY DEFINER retention function (the only DELETE path, audited run record)
+  removes `done`/`skipped` deliveries and fully terminal events older than a configured window;
+  `dead`/`pending` rows are never removed. Window aligns with HQ-E1-4 (**OQ-A1**). Backfill for a
+  new subscription is an explicit, audited replay over a `seq` range, never implicit.
 
 ### A.6 Planned first event types and consumers (all consumers MOCK or log sinks initially)
 
@@ -148,7 +141,7 @@ and the claim-token CAS, following the ADR 0102 §4.1 narrow-exception pattern.
 | `wallet.ledger_posted` | `ledger.Post` callers that post (not `AlreadyPosted`): deposit credit, withdrawal transitions, casino/sportsbook postings, manual adjustment, conversion | `player_account_id` or `tenant_id` for house-only | `aml_feed` (ordered), `bi_export` |
 | `conversion.executed` | B.5 execute | `player_account_id` | `aml_feed`, `bi_export`, `alerts_rules` |
 | `sportsbook.bet.placed` / `.settled` | `PlaceBet`, settlement functions | `bet_id` | `bi_export`, `aml_feed` |
-| `sportsbook.market.resulted` / `.state_changed` (tenant NULL) | C.4 ingestion | `market_id` | `sb_settlement_dispatch` (ordered), `bi_export` |
+| `sportsbook.market.resulted` / `.state_changed` (tenant NULL) | C.2 ingestion | `market_id` | `sb_settlement_dispatch` (ordered), `bi_export` |
 | `audit.recorded` (ids only) | `audit.Record` | `tenant_id` | `audit_export` (BI copy, **not** the system of record) |
 | `kyc.submission.terminal` | KYC worker terminal transition | `player_account_id` | `aml_feed` |
 
