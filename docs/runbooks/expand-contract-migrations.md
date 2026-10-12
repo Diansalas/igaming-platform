@@ -92,6 +92,23 @@ Some migrations take strong table locks for their scan or for lifting FORCE RLS 
    startup (`operational-runbooks.md` section 1).
 5. Verify (section 6) before restarting writers.
 
+### 5.1 Pre-building a large index CONCURRENTLY (DEVOPS-0107-INDEX-WINDOW-1 practice; first used by 0135)
+
+`cmd/migrate` applies every file in one transaction, so `CREATE INDEX CONCURRENTLY` cannot run inside a migration. A
+migration that adds an index on a production-size table (first case: 0135, ADR 0115 section 2.6, on `ledger_entries` and
+`deposit_intents`) is written so the index can be built **out of band, without blocking writes**, before the migration runs:
+
+1. As the migration-owner role, OUTSIDE any transaction (`psql` autocommit), build the exact index the migration names:
+   `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ledger_entries_tenant_player_asset_created ON ledger_entries (tenant_id, player_account_id, asset_code, created_at);`
+   `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_deposit_intents_tenant_player_asset_created ON deposit_intents (tenant_id, player_account_id, asset_code, created_at);`
+2. Check each is valid: `SELECT indexrelid::regclass, indisvalid, indisready FROM pg_index WHERE indexrelid::regclass::text LIKE 'idx_%_tenant_player_asset_created';`
+   A failed concurrent build leaves an INVALID index: `DROP INDEX CONCURRENTLY <name>;` and repeat step 1.
+3. Run `cmd/migrate up`. The migration's pre-flight accepts a pre-built index only if it is VALID, READY and its
+   `pg_get_indexdef` equals the migration's definition exactly; otherwise it refuses with `RL098` before creating anything.
+   Its `CREATE INDEX IF NOT EXISTS` is then a no-op. Without a pre-build the migration builds the index itself,
+   non-concurrently (a `SHARE` lock on the table for the build: acceptable only at synthetic scale or in a write-quiet window).
+4. `TestMigration0135_PrebuiltConcurrentIndex` (internal/rg) pins both the acceptance and the refusal.
+
 ## 6. Procedure for a production-like migration
 
 1. Take and **verify** a backup first. Today none exists for any deployed environment (`NOT MET`): this is a launch

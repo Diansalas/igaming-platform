@@ -174,7 +174,7 @@ jobs:
           offenders="$(grep -rl --include='*.go' 'TEST_ADMIN_DATABASE_URL' . | grep -v '_test\.go$' | grep -v '^\./internal/testsupport/scratchdb/' || true)"
           if [ -n "$offenders" ]; then echo "TEST_ADMIN_DATABASE_URL referenced outside test support code:"; echo "$offenders"; exit 1; fi
           if grep -rn 'TEST_ADMIN' internal/config/; then echo "internal/config must never read a TEST_ADMIN setting"; exit 1; fi
-          for f in internal/testsupport/scratchdb/*.go internal/testsupport/wdpath/*.go; do
+          for f in internal/testsupport/scratchdb/*.go internal/testsupport/wdpath/*.go internal/testsupport/rgfix/*.go; do
             head -1 "$f" | grep -qx '//go:build integration' || { echo "$f lacks //go:build integration"; exit 1; }
           done
 

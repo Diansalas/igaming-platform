@@ -21,7 +21,8 @@ import (
 
 // fixturePackages are the test-support packages that can write governed launch state.
 // wdpath (ADR 0113 slice 1) plants and walks withdrawal requests (money-path fixtures).
-var fixturePackages = []string{"launchfix", "launchdrive", "wdpath"}
+// rgfix (ADR 0115 S1) seeds SYNTHETIC-NOT-LEGAL RG floors and writes the test environment anchor.
+var fixturePackages = []string{"launchfix", "launchdrive", "wdpath", "rgfix"}
 
 // untaggedFixtureFiles returns the .go files of the package directory that do not start with the
 // integration build constraint, and the number of Go files inspected.

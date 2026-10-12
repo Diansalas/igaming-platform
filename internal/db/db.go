@@ -33,7 +33,14 @@ var allowedRuntimeParams = map[string]bool{
 	"idle_in_transaction_session_timeout": true,
 	"statement_timeout":                   true,
 	"lock_timeout":                        true,
+	// ADR 0115 S1: the guarded environment (config.GuardEnvironment), a NARROWING input to the
+	// synthetic-configuration guard only (the binding control is the database_environment anchor).
+	appEnvironmentParam: true,
 }
+
+// appEnvironmentParam is always taken from the application configuration: a DATABASE_URL value (in
+// any spelling, or through `options`) is discarded, so a URL cannot claim development / test.
+const appEnvironmentParam = "app.environment"
 
 // ConnectWithRuntimeParams is Connect plus per-CONNECTION session settings from the application's
 // pool configuration (sent in the startup packet of every connection the pool opens; no ALTER
@@ -49,9 +56,16 @@ func ConnectWithRuntimeParams(ctx context.Context, databaseURL string, maxConns 
 	if err := normaliseGuardedURLParams(cfg.ConnConfig.RuntimeParams); err != nil {
 		return nil, err
 	}
+	if err := dropURLAppEnvironment(cfg.ConnConfig.RuntimeParams); err != nil {
+		return nil, err
+	}
 	for k, v := range params {
 		if !allowedRuntimeParams[k] {
 			return nil, fmt.Errorf("db: runtime parameter %q is not permitted", k)
+		}
+		if k == appEnvironmentParam {
+			cfg.ConnConfig.RuntimeParams[k] = v
+			continue
 		}
 		if cur, set := cfg.ConnConfig.RuntimeParams[k]; !set {
 			cfg.ConnConfig.RuntimeParams[k] = v
