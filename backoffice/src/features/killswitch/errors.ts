@@ -45,7 +45,7 @@ export function describeKillSwitchError(err: unknown, op: KillSwitchOp): KillSwi
       if (op === 'engage')
         return { ...base, stale: true, message: 'The server refused because of a conflict, for example a switch engaged by platform staff can be changed only by platform staff. Nothing was changed. The list is being refreshed.' }
       if (op === 'request' && err.code === ALREADY_OPEN)
-        return { ...base, stale: true, message: 'A release request is already open for this switch, so a second one was refused. Nothing was changed. The list is being refreshed; the open request will appear on this switch, where it can be approved by a different person or cancelled.' }
+        return { ...base, stale: true, message: 'A release request is already open for this switch, so a second one was refused. Nothing was changed. The list is being refreshed; the open request will appear on this switch. Who may approve or cancel it depends on who filed it, and the server decides.' }
       if (op === 'request')
         return { ...base, stale: true, message: 'The server refused: the switch is not engaged any more, or it was engaged by platform staff and only platform staff may release it. Nothing was changed. The list is being refreshed.' }
       if (op === 'approve')

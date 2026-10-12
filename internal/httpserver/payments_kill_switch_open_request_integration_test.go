@@ -8,11 +8,14 @@
 package httpserver
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
 )
@@ -429,5 +432,99 @@ func TestKillSwitchOpenRequest_TenantIsolation(t *testing.T) {
 	pl := k.a.do("GET", otherBase+"/kill-switches", k.ptok1, nil)
 	if strings.Contains(string(pl.body), req.ID) {
 		t.Fatalf("platform list of tenant B shows tenant A's request: %s", pl.body)
+	}
+}
+
+// Security C1 (S6b review): NUL, other control characters, whitespace-only and invalid UTF-8 / lone surrogates
+// are refused 400 before any transaction, never a 500 from Postgres and never silently stored as U+FFFD.
+func TestKillSwitchOpenRequest_ReasonCodeContentRefused400(t *testing.T) {
+	k := newKSActors(t)
+	ks := k.engage(k.tok1, "deposit", "seed")
+	raw := map[string]json.RawMessage{
+		"nul":            json.RawMessage(`"a\u0000b"`),
+		"tab":            json.RawMessage(`"a\tb"`),
+		"newline":        json.RawMessage(`"a\nb"`),
+		"c1 control":     json.RawMessage(`"a\u0085b"`),
+		"space only":     json.RawMessage(`" "`),
+		"tabs only":      json.RawMessage(`"\t\t"`),
+		"lone surrogate": json.RawMessage(`"a\ud800b"`),
+		"replacement":    json.RawMessage(`"a�b"`),
+	}
+	for name, v := range raw {
+		eb := map[string]any{"provider_scope": "*", "operation_scope": "deposit", "reason_code": v}
+		if r := k.a.do("POST", k.base+"/kill-switches", k.tok1, eb); r.status != http.StatusBadRequest {
+			t.Errorf("engage %s: %d (want 400) %s", name, r.status, r.body)
+		}
+		if r := k.a.do("POST", k.base+"/kill-switches/"+ks.ID+"/release-requests", k.tok2, map[string]any{"reason_code": v}); r.status != http.StatusBadRequest {
+			t.Errorf("file %s: %d (want 400) %s", name, r.status, r.body)
+		}
+	}
+	if got := k.get(k.tok1, ks.ID); got.OpenReleaseRequestID != nil || got.ReasonCode != "seed" || got.Version != ks.Version {
+		t.Fatalf("a refused reason must change nothing: %+v", got)
+	}
+	if r := k.file(k.tok2, ks.ID, "provider ok é"); r.status != http.StatusCreated {
+		t.Fatalf("printable reason: %d %s", r.status, r.body)
+	}
+}
+
+// What a tenant viewer may do with a PLATFORM-filed request (pins what the console hint may claim).
+func TestKillSwitchOpenRequest_TenantActsOnPlatformFiledRequest(t *testing.T) {
+	k := newKSActors(t)
+	// platform-engaged switch, platform-filed request: tenant approve and cancel
+	ks := k.engage(k.ptok1, "deposit", "plat")
+	var req killSwitchReleaseRequestDTO
+	k.file(k.ptok1, ks.ID, "r").decode(t, &req)
+	ap := k.a.do("POST", k.base+"/kill-switch-release-requests/"+req.ID+"/approve", k.tok2, nil)
+	cn := k.a.do("POST", k.base+"/kill-switch-release-requests/"+req.ID+"/cancel", k.tok2, nil)
+	// tenant-engaged switch, platform-filed request
+	ks2 := k.engage(k.tok1, "payout", "ten")
+	var req2 killSwitchReleaseRequestDTO
+	k.file(k.ptok1, ks2.ID, "r").decode(t, &req2)
+	ap2 := k.a.do("POST", k.base+"/kill-switch-release-requests/"+req2.ID+"/approve", k.tok2, nil)
+	cn2 := k.a.do("POST", k.base+"/kill-switch-release-requests/"+req2.ID+"/cancel", k.tok2, nil)
+	if ap.status != 409 || cn.status != 409 || ap2.status != 409 || cn2.status != 409 {
+		t.Fatalf("a tenant must be refused approve and cancel of a platform-filed request: %d %d %d %d", ap.status, cn.status, ap2.status, cn2.status)
+	}
+	if openID(k.get(k.ptok1, ks.ID)) != req.ID || openID(k.get(k.ptok1, ks2.ID)) != req2.ID {
+		t.Fatal("the refused tenant actions must leave both requests open")
+	}
+}
+
+// The database refuses to release on an expired request. The guard trigger freezes expires_at, so the
+// scratch-DB owner ages the row with the trigger disabled inside one transaction (scratch DB only).
+func TestKillSwitchOpenRequest_ApprovalOfExpiredRequestRefused(t *testing.T) {
+	k := newKSActors(t)
+	ks := k.engage(k.tok1, "payout", "expiry")
+	var req killSwitchReleaseRequestDTO
+	k.file(k.tok2, ks.ID, "r").decode(t, &req)
+	err := k.a.pool.WithPlatformAdmin(context.Background(), k.p1, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `ALTER TABLE payment_kill_switch_release_requests DISABLE TRIGGER payment_kill_switch_release_requests_guard`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_kill_switch_release_requests SET expires_at = now() - interval '1 hour' WHERE id = $1`, req.ID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `ALTER TABLE payment_kill_switch_release_requests ENABLE TRIGGER payment_kill_switch_release_requests_guard`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("age the request on the scratch DB: %v", err)
+	}
+	if r := k.a.do("POST", k.base+"/kill-switch-release-requests/"+req.ID+"/approve", k.tok3, nil); r.status != http.StatusConflict {
+		t.Fatalf("approving an expired request must be 409, got %d %s", r.status, r.body)
+	}
+	got := k.get(k.tok1, ks.ID)
+	if !got.Engaged || openID(got) != req.ID {
+		t.Fatalf("a refused approval leaves the switch engaged and the (expired) request open: %+v", got)
+	}
+	if k.a.auditCountByOutcome(k.tenant, "payments_kill_switch.approve_release", "denied") != 1 {
+		t.Error("expired approval must write a denied audit row")
+	}
+	// it still holds the slot (no expiry transition exists: ticket S6c); cancelling frees it
+	if r := k.file(k.tok3, ks.ID, "again"); r.status != http.StatusConflict {
+		t.Fatalf("expired-open request still holds the slot: %d %s", r.status, r.body)
+	}
+	if c := k.a.do("POST", k.base+"/kill-switch-release-requests/"+req.ID+"/cancel", k.tok3, nil); c.status != http.StatusNoContent {
+		t.Fatalf("cancel expired: %d %s", c.status, c.body)
 	}
 }

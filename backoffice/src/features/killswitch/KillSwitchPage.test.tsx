@@ -46,7 +46,13 @@ function ks(over: Partial<KillSwitch> = {}): KillSwitch {
     created_at: '2026-10-01T10:00:00Z',
     ...over,
   }
+  // Rules the database really produces (migrations 0105/0106 payment_kill_switches_guard):
+  //  engaged  => engaged_by_scope set, release_request_id null (forced NULL on insert and on every engage)
+  //  released => engaged_by_scope null, release_request_id = the approved request, no open request
   if (row.engaged && row.release_request_id) throw new Error('fixture: an engaged switch never has release_request_id set')
+  if (row.engaged && !row.engaged_by_scope) throw new Error('fixture: an engaged switch always has engaged_by_scope')
+  if (!row.engaged && !row.release_request_id) throw new Error('fixture: a released switch always has the approved release_request_id')
+  if (!row.engaged && row.engaged_by_scope) throw new Error('fixture: a released switch has engaged_by_scope null')
   if (!row.engaged && row.open_release_request_id) throw new Error('fixture: a released switch has no open request')
   return row
 }
@@ -141,7 +147,7 @@ describe('role gating (UI hint only; the server decides)', () => {
 describe('state display', () => {
   it('shows the MOCK banner, engaged and released sections, and the no-history note', async () => {
     signInAs(TA)
-    useList([ks(), ks({ id: S2, provider_scope: 'mockpay', operation_scope: 'deposit', engaged: false, engaged_by_scope: null })])
+    useList([ks(), ks({ id: S2, provider_scope: 'mockpay', operation_scope: 'deposit', engaged: false, engaged_by_scope: null, release_request_id: R1 })])
     renderPage()
     const banner = await screen.findByRole('note', { name: 'Stack status' })
     expect(banner).toHaveTextContent('MOCK payment stack')
@@ -284,7 +290,7 @@ describe('release (four-eyes)', () => {
     let approved = 0
     server.use(
       http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq())),
-      http.post(`${BASE}/kill-switch-release-requests/${R1}/approve`, () => { approved++; return HttpResponse.json(ks({ engaged: false })) }),
+      http.post(`${BASE}/kill-switch-release-requests/${R1}/approve`, () => { approved++; return HttpResponse.json(ks({ engaged: false, engaged_by_scope: null, release_request_id: R1 })) }),
     )
     renderPage()
     const { user, detail } = await selectFirst()
@@ -370,6 +376,12 @@ describe('release (four-eyes)', () => {
 describe('release flow against server-shaped state (S6b)', () => {
   const ALREADY_OPEN = 'KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN'
 
+  /** The viewer as the server sees it: the `sub` of the bearer token on THIS request. */
+  function subOf(request: Request): string {
+    const tok = (request.headers.get('Authorization') ?? '').replace('Bearer ', '')
+    return JSON.parse(atob(tok.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub as string
+  }
+
   function statefulServer(opts: { reportOpen?: boolean } = {}) {
     const reportOpen = opts.reportOpen ?? true
     const st = { sw: ks(), req: null as KillSwitchReleaseRequest | null, lists: 0, approves: 0, cancels: 0 }
@@ -381,16 +393,17 @@ describe('release flow against server-shaped state (S6b)', () => {
       http.post(`${BASE}/kill-switches/${S1}/release-requests`, async ({ request }) => {
         if (st.req?.status === 'open') return ERR(409, ALREADY_OPEN)
         const body = (await request.json()) as { reason_code: string }
-        st.req = rq({ reason_code: body.reason_code, expected_version: st.sw.version, requested_by: 'someone-else' })
+        st.req = rq({ reason_code: body.reason_code, expected_version: st.sw.version, requested_by: subOf(request) })
         st.sw = ks({ ...st.sw, open_release_request_id: st.req.id }) // release_request_id stays null: the DB fills it at release only
         return HttpResponse.json(st.req, { status: 201 })
       }),
       http.get(`${BASE}/kill-switch-release-requests/:rid`, ({ params }) =>
         st.req && st.req.id === params.rid ? HttpResponse.json(st.req) : ERR(404, 'not_found'),
       ),
-      http.post(`${BASE}/kill-switch-release-requests/:rid/approve`, () => {
+      http.post(`${BASE}/kill-switch-release-requests/:rid/approve`, ({ request }) => {
+        if ((st.req as KillSwitchReleaseRequest).requested_by === subOf(request)) return ERR(409, 'conflict') // four-eyes, decided by the server
         st.approves++
-        st.req = { ...(st.req as KillSwitchReleaseRequest), status: 'approved', approved_by: 'ta-1', approved_by_scope: 'tenant' }
+        st.req = { ...(st.req as KillSwitchReleaseRequest), status: 'approved', approved_by: subOf(request), approved_by_scope: 'tenant' }
         st.sw = ks({ ...st.sw, engaged: false, engaged_by_scope: null, open_release_request_id: null, release_request_id: st.req.id, version: st.sw.version + 1 })
         return HttpResponse.json(st.sw)
       }),
@@ -458,10 +471,21 @@ describe('release flow against server-shaped state (S6b)', () => {
     await waitFor(() => expect(st.cancels).toBe(1))
     await waitFor(() => expect(detail).toHaveTextContent('No release request is open'))
     await file(user, detail, 'second_try')
+    // the filer approving their own request is refused by the (fake) server, which decides from the token
+    await user.click(await within(detail).findByRole('button', { name: 'Approve and release' }))
+    dialog = await screen.findByRole('dialog', { name: 'Approve and release' })
+    await user.click(within(dialog).getByRole('button', { name: 'Approve and release' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('you filed this request yourself')
+    expect(st.approves).toBe(0)
+    await user.click(within(dialog).getByRole('button', { name: 'Back' }))
+    // a SECOND user approves
+    signInAs({ ...TA, sub: 'ta-2' })
     await user.click(await within(detail).findByRole('button', { name: 'Approve and release' }))
     dialog = await screen.findByRole('dialog', { name: 'Approve and release' })
     await user.click(within(dialog).getByRole('button', { name: 'Approve and release' }))
     await waitFor(() => expect(st.approves).toBe(1))
+    expect(st.req?.approved_by).toBe('ta-2')
+    expect(st.req?.requested_by).toBe('ta-1')
     expect(await within(detail).findByText(/This switch is released/)).toBeInTheDocument()
   })
 
@@ -480,6 +504,34 @@ describe('release flow against server-shaped state (S6b)', () => {
     expect(alert).toHaveTextContent(ALREADY_OPEN)
     expect(document.body).not.toHaveTextContent('RAW SERVER MESSAGE')
     await waitFor(() => expect(st.lists).toBeGreaterThan(1)) // stale refusal refreshes
+  })
+
+  it('returns to "Request release" when the request id kept from the 201 is cancelled elsewhere (colleague or platform takeover)', async () => {
+    signInAs(TA)
+    const st = statefulServer()
+    renderPage()
+    const { user, detail } = await open()
+    await file(user, detail)
+    await within(detail).findByRole('region', { name: 'Release request' })
+    // elsewhere: a platform takeover cancelled the request; the list now reports no open request
+    st.req = { ...(st.req as KillSwitchReleaseRequest), status: 'cancelled' }
+    st.sw = ks({ ...st.sw, open_release_request_id: null, engaged_by_scope: 'platform', version: st.sw.version + 1 })
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(detail).toHaveTextContent('No release request is open'))
+    expect(within(detail).queryByRole('region', { name: 'Release request' })).toBeNull()
+    expect(within(detail).getByRole('button', { name: 'Request release' })).toBeInTheDocument()
+  })
+
+  it('does not offer a tenant viewer enabled Approve/Cancel on a platform-filed request (hint; the server also refuses)', async () => {
+    signInAs(TA)
+    useList([ks({ open_release_request_id: R1 })])
+    server.use(http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq({ requested_by: null, requested_by_scope: 'platform' }))))
+    renderPage()
+    const { detail } = await open()
+    const panel = await within(detail).findByRole('region', { name: 'Release request' })
+    expect(panel).toHaveTextContent('Platform staff filed this request')
+    expect(within(panel).getByRole('button', { name: 'Approve and release' })).toBeDisabled()
+    expect(within(panel).getByRole('button', { name: 'Cancel request' })).toBeDisabled()
   })
 
   it('shows an expired-but-open request as blocking, with cancel as the way out', async () => {
@@ -507,8 +559,9 @@ describe('release flow against server-shaped state (S6b)', () => {
       const { dialog } = await openEngage()
       const note = within(dialog).getByRole('note', { name: 'Re-engage and takeover' })
       expect(note).toHaveTextContent('overwrites the stored reason code and raises the switch version')
-      expect(note).toHaveTextContent('open release request is not cancelled')
+      expect(note).toHaveTextContent('does not cancel an open release request')
       expect(note).toHaveTextContent('refuse to approve it')
+      expect(note).toHaveTextContent('platform engage over a tenant-engaged switch, which is a takeover and does cancel it')
       expect(note).toHaveTextContent('If platform staff engage a switch that you engaged')
       expect(note).toHaveTextContent('any open release request is cancelled')
     })

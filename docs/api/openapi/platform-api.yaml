@@ -7303,7 +7303,8 @@ paths:
         tenant caller re-engaging a platform-engaged switch is refused 409.
         A platform-scoped caller's engage is forced to engaged_by_scope=platform
         by the database, never asserted by this request. reason_code is 1 to
-        64 BYTES (not characters); a longer or empty value is 400.
+        64 BYTES (not characters), non-blank, with no control characters (NUL included)
+        and valid UTF-8; anything else is 400 before any transaction.
       security:
         - bearerAuth: []
       parameters:

@@ -41,6 +41,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -385,7 +387,19 @@ func isKillSwitchOpenRequestDuplicate(err error) bool {
 
 // killSwitchReasonCodeValid mirrors the database CHECK octet_length(reason_code) BETWEEN 1 AND 64. Go's len
 // on a string is its BYTE length, which is what the CHECK counts (a multi-byte character costs more than 1).
-func killSwitchReasonCodeValid(reason string) bool { return len(reason) >= 1 && len(reason) <= 64 }
+func killSwitchReasonCodeValid(reason string) bool {
+	if len(reason) < 1 || len(reason) > 64 || !utf8.ValidString(reason) || strings.TrimSpace(reason) == "" {
+		return false
+	}
+	for _, r := range reason {
+		// Control characters (NUL makes Postgres reject the row as a 500) and U+FFFD (what encoding/json turns
+		// invalid UTF-8 or a lone surrogate into) are refused before any transaction opens.
+		if unicode.IsControl(r) || r == utf8.RuneError {
+			return false
+		}
+	}
+	return true
+}
 
 // logKillSwitchEngagedAlert is S95-C7's "alert on every engage": a
 // structured, allow-listed Error-level log line (this codebase has no
@@ -679,7 +693,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if !killSwitchReasonCodeValid(body.ReasonCode) {
-			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code must be 1 to 64 bytes")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code must be 1 to 64 bytes of printable text")
 			return
 		}
 		switch body.OperationScope {
@@ -804,7 +818,7 @@ func newRequestKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if !killSwitchReasonCodeValid(body.ReasonCode) {
-			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code must be 1 to 64 bytes")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code must be 1 to 64 bytes of printable text")
 			return
 		}
 		var req payments.KillSwitchReleaseRequest

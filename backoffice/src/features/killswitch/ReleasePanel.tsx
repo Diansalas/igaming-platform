@@ -46,6 +46,9 @@ export function ReleasePanel({
     retry: false,
   })
   const req = rq.data
+  // A request id kept from the 201 is only a fallback: once the server stops reporting it as open (cancelled by a
+  // colleague, a platform takeover) the fetched status is not open and the panel returns to "Request release".
+  const noReq = reqId === null || (ks.open_release_request_id == null && req !== undefined && req.status !== 'open')
 
   if (!ks.engaged) {
     return <p className="text-sm text-slate-600">This switch is released. Dispatch to the provider in scope is no longer blocked by it.</p>
@@ -60,7 +63,7 @@ export function ReleasePanel({
           This switch was engaged by platform staff. The server lets only platform staff release it, and will refuse a release request from tenant staff.
         </p>
       )}
-      {reqId === null && (
+      {noReq && (
         <>
           <p className="text-sm text-slate-600">No release request is open. {CONSEQUENCE_RELEASE_REQUEST}</p>
           <div>
@@ -70,9 +73,9 @@ export function ReleasePanel({
           </div>
         </>
       )}
-      {reqId !== null && rq.isLoading && <LoadingSpinner label="Loading release request..." />}
-      {reqId !== null && rq.error && <KillSwitchErrorAlert error={rq.error} op="get_request" />}
-      {req && (
+      {!noReq && rq.isLoading && <LoadingSpinner label="Loading release request..." />}
+      {!noReq && rq.error && <KillSwitchErrorAlert error={rq.error} op="get_request" />}
+      {req && !noReq && (
         <section aria-label="Release request" className="rounded-md border border-border bg-surface-alt p-3">
           <p className="mb-2 text-xs text-slate-500">This is the request exactly as it was filed. Approval acts on this frozen content only.</p>
           <dl className="grid grid-cols-[11rem_1fr] gap-y-1 text-sm">
@@ -114,9 +117,16 @@ export function ReleasePanel({
             <p className="mt-2 text-sm text-amber-900">You filed this request. A different person must approve it; the server refuses self-approval.</p>
           )}
           {req.status === 'open' && (
-            <div className="mt-3 flex gap-2">
-              <Button onClick={() => { onNotice(''); setDialog('approve') }}>Approve and release</Button>
-              <Button variant="secondary" onClick={() => { onNotice(''); setDialog('cancel') }}>Cancel request</Button>
+            <div className="mt-3 flex flex-col gap-2">
+              {!viewerIsPlatform && req.requested_by_scope === 'platform' && (
+                <p className="text-sm text-amber-900">
+                  Platform staff filed this request. The server refuses approval and cancellation of it from tenant staff (verified), so the buttons are off. Platform staff can decide it.
+                </p>
+              )}
+              <div className="flex gap-2">
+                <Button disabled={!viewerIsPlatform && req.requested_by_scope === 'platform'} onClick={() => { onNotice(''); setDialog('approve') }}>Approve and release</Button>
+                <Button variant="secondary" disabled={!viewerIsPlatform && req.requested_by_scope === 'platform'} onClick={() => { onNotice(''); setDialog('cancel') }}>Cancel request</Button>
+              </div>
             </div>
           )}
           {req.status !== 'open' && <p className="mt-2 text-sm text-slate-600">This request is no longer open, so it cannot be approved or cancelled.</p>}
@@ -136,7 +146,7 @@ export function ReleasePanel({
           }}
         />
       )}
-      {(dialog === 'approve' || dialog === 'cancel') && req && (
+      {(dialog === 'approve' || dialog === 'cancel') && req && !noReq && (
         <DecideDialog
           op={dialog}
           tenantId={tenantId}

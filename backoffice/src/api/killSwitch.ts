@@ -57,7 +57,8 @@ export function reasonByteLength(s: string): number {
 
 export function reasonCodeValid(s: string): boolean {
   const n = reasonByteLength(s)
-  return s.trim() !== '' && n >= 1 && n <= KILL_SWITCH_REASON_MAX
+  // Same content rules as the server: non-blank, no control characters (a NUL would otherwise be a server error).
+  return s.trim() !== '' && n >= 1 && n <= KILL_SWITCH_REASON_MAX && !/[\u0000-\u001f\u007f-\u009f\ufffd]/.test(s)
 }
 
 export interface EngageRequest {

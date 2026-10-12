@@ -37,7 +37,8 @@ export const REASON_HELP =
  */
 export const NOTICE_REENGAGE =
   'If this provider and operation are already engaged, engaging again does not fail: it overwrites the stored reason code and raises the switch version. ' +
-  'An open release request is not cancelled by that, but it stays tied to the old version, so the server will refuse to approve it. Cancel it and file a new one.'
+  'A re-engage by the same kind of staff (tenant over tenant, platform over platform) does not cancel an open release request, but it stays tied to the old version, so the server will refuse to approve it. Cancel it and file a new one. ' +
+  'The exception is a platform engage over a tenant-engaged switch, which is a takeover and does cancel it (next paragraph).'
 
 export const NOTICE_TAKEOVER_PLATFORM =
   'As platform staff, engaging a switch that tenant staff engaged takes it over: it becomes platform-engaged, any open tenant release request is cancelled, and tenant staff can no longer change or release it.'

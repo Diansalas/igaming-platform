@@ -1,0 +1,23 @@
+KILLED: B1 open ids always empty
+SURVIVED: B2 drop status=open (list)
+KILLED: B2b drop status=open (single)
+KILLED: B3 23505 not mapped
+KILLED: B4 no denied audit on duplicate
+KILLED: B4b duplicate answers generic conflict code
+KILLED: B5 rune count instead of bytes
+KILLED: B5b release handler skips byte check
+KILLED: B5c engage handler skips byte check
+KILLED(build?): B6 engage response never reports open request
+KILLED(build?): B7 GET switch never reports open request
+KILLED: B7b list never reports open request
+KILLED: B8 request DTO leaks platform requester to tenant
+KILLED: B9 switch DTO leaks platform changer to tenant
+SURVIVED: B10 open id from another tenant (no tenant predicate, single)
+KILLED: U1 gate removed from AppRoutes
+KILLED: U2 panel uses release_request_id
+KILLED: U3 201 id not kept
+KILLED: U4 characters not bytes
+KILLED: U5 table badge uses release_request_id
+KILLED: U6 no stale refresh on refusal
+KILLED: U7 notices removed
+KILLED: U8 platform notice shown to tenant
