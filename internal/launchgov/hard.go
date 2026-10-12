@@ -30,6 +30,10 @@ const (
 	H3NoJurisdiction      = "H-3:no_jurisdiction"
 	H3ConfigMissing       = "H-3:config_missing_or_not_in_effect"
 	H6WithdrawalsHolding  = "H-6:withdrawals_holding_funds"
+	// H6HoldBalanceNonZero (ADR 0113 s4.3, LA025): a player_withdrawal_hold balance of the subject's
+	// player wallets is not zero, whether or not a hold-bearing request still exists (a stranded hold,
+	// the HD-CTF-4 population). Closure is refused; suspension is the lever (ADR 0113 s8 Q1).
+	H6HoldBalanceNonZero = "H-6:withdrawal_hold_balance_non_zero"
 )
 
 // moveFor returns the status the action moves a subject in `from` to, and whether the move is
@@ -57,6 +61,9 @@ type assessment struct {
 	From      string
 	Failures  []string
 	Holds     int64
+	// HoldAccounts is the number of the subject's player_withdrawal_hold accounts with a non-zero
+	// balance (H6HoldBalanceNonZero, LA025).
+	HoldAccounts int64
 }
 
 // assess reads, in ONE read-only tenant-scoped transaction (the route-validated tenant), the
@@ -115,6 +122,14 @@ func (s *Service) assess(ctx context.Context, in EvalInput) (assessment, error) 
 			a.Holds = n
 			if n > 0 {
 				a.Failures = append(a.Failures, H6WithdrawalsHolding)
+			}
+			h, err := nonZeroWithdrawalHolds(ctx, tx, in.Subject)
+			if err != nil {
+				return err
+			}
+			a.HoldAccounts = h
+			if h > 0 {
+				a.Failures = append(a.Failures, H6HoldBalanceNonZero)
 			}
 		}
 		return nil

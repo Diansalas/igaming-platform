@@ -76,7 +76,12 @@ const (
 	// (HD-CTF-4) is not engaged. Distinct from NoticeFundsStranded, which belongs to closure only.
 	NoticeFundsInaccessibleOnSuspension = "Suspending makes player balances inaccessible for new wagers, deposits and withdrawals until the subject is reactivated through a new four-eyes decision. The funds are not stranded: they stay in the ledger unchanged, and a suspension is reversible. Hold-bearing withdrawals continue to hold their funds and need the separate hold-resolution process."
 	// NoticeFundsOmissions states what the check cannot see.
-	NoticeFundsOmissions = "R-PLAYER-FUNDS does not cover in-flight deposits or open casino rounds (Q-GP-6: a casino round has no representable open state); only wallet balances, open sportsbook bets and hold-bearing withdrawals are counted."
+	NoticeFundsOmissions = "R-PLAYER-FUNDS does not cover in-flight deposits or open casino rounds (Q-GP-6: a casino round has no representable open state); only wallet balances, open sportsbook bets, hold-bearing withdrawals and non-zero withdrawal hold balances are counted."
+	// NoticeFundsHoldBlocksClosure (ADR 0113 s4.3 / s8 Q1, LA025) is shown with the funds position of
+	// a CLOSURE while any player withdrawal hold balance of the subject is not zero: acknowledging
+	// R-PLAYER-FUNDS does not unblock it. A stranded hold (no withdrawal request still holds it, the
+	// HD-CTF-4 population) refuses the closure too; suspension is the lever.
+	NoticeFundsHoldBlocksClosure = "Closure is refused while any player withdrawal hold balance of this subject is not zero, even when no withdrawal request still holds it (LA025); acknowledging R-PLAYER-FUNDS does not change that. Resolve the hold, or suspend the subject instead: a stranded hold has no resolution process yet (HD-CTF-4)."
 )
 
 // Hash is the SHA-256 of the canonical snapshot over version, environment and the checks sorted
@@ -401,6 +406,10 @@ func fundsCheck(ctx context.Context, tx pgx.Tx, sub Subject, action string, r *R
 	if err != nil {
 		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
 	}
+	holdAccounts, err := nonZeroWithdrawalHolds(ctx, tx, sub)
+	if err != nil {
+		return ck(CheckPlayerFunds, ResultNotEvaluable, "read_error")
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT p.asset_code, SUM(p.credit_total - p.debit_total)::text
 		  FROM wallet_balance_projection p
@@ -428,15 +437,19 @@ func fundsCheck(ctx context.Context, tx pgx.Tx, sub Subject, action string, r *R
 	r.Info["players_with_non_zero_balance"] = players
 	r.Info["open_sportsbook_bets"] = bets
 	r.Info["hold_bearing_withdrawals"] = holds
+	r.Info["withdrawal_hold_accounts_non_zero"] = holdAccounts
 	r.Balances = balances
 	r.Notices = append(r.Notices, NoticeFundsOmissions)
-	if players == 0 && bets == 0 && holds == 0 && len(balances) == 0 {
+	if players == 0 && bets == 0 && holds == 0 && holdAccounts == 0 && len(balances) == 0 {
 		return ck(CheckPlayerFunds, ResultPass, "ok")
 	}
 	// The notice follows the action: only a closure strands funds. A suspension makes them
 	// inaccessible until reactivation (reversible); it must never be shown the stranded text.
 	if action == ActionClose {
 		r.Notices = append(r.Notices, NoticeFundsStranded)
+		if holdAccounts > 0 {
+			r.Notices = append(r.Notices, NoticeFundsHoldBlocksClosure)
+		}
 	} else {
 		r.Notices = append(r.Notices, NoticeFundsInaccessibleOnSuspension)
 	}
@@ -451,5 +464,20 @@ func holdBearingWithdrawals(ctx context.Context, tx pgx.Tx, sub Subject) (int64,
 	err := tx.QueryRow(ctx, `SELECT count(*) FROM withdrawal_requests
 		WHERE tenant_id = $1 AND ($2::uuid IS NULL OR brand_id = $2)
 		  AND state IN ('requested', 'pending_review', 'approved', 'submitted')`, sub.TenantID, sub.BrandID).Scan(&n)
+	return n, err
+}
+
+// nonZeroWithdrawalHolds counts the subject's player_withdrawal_hold accounts whose balance is not
+// zero (ADR 0113 s4.3, the Go arm of LA025, migration 0133): the tenant's every brand for a tenant
+// subject, only wallets of the brand (wallets.brand_id) for a brand subject. It reads the projection
+// through idx_wallet_balance_projection_withdrawal_hold, the same read as the database arm. The
+// caller's transaction is the subject tenant's scope (RLS-bound).
+func nonZeroWithdrawalHolds(ctx context.Context, tx pgx.Tx, sub Subject) (int64, error) {
+	var n int64
+	err := tx.QueryRow(ctx, `SELECT count(*) FROM wallet_balance_projection p
+		WHERE p.tenant_id = $1 AND p.account_type = 'player_withdrawal_hold' AND p.credit_total <> p.debit_total
+		  AND ($2::uuid IS NULL OR EXISTS (
+		      SELECT 1 FROM wallets wl WHERE wl.id = p.wallet_id AND wl.tenant_id = p.tenant_id AND wl.brand_id = $2))`,
+		sub.TenantID, sub.BrandID).Scan(&n)
 	return n, err
 }

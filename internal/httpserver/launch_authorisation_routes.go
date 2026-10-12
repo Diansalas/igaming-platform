@@ -201,6 +201,10 @@ func launchErrorCode(err error) (apierror.Code, string, []string) {
 		switch {
 		case code == "LA023":
 			return apierror.CodeLaunchWithdrawalsHolding, "closure refused: withdrawal requests still hold player funds", []string{code}
+		case code == "LA025":
+			// ADR 0113 s4.3: a non-zero player withdrawal hold balance (also with no hold-bearing
+			// request). Same closed API code as LA023; check_codes carry the distinction.
+			return apierror.CodeLaunchWithdrawalsHolding, "closure refused: player withdrawal hold balances are not zero", []string{code}
 		case code == "LA024":
 			return apierror.CodeLaunchOpenBetsBlockClosure, "brand closure refused: open sportsbook bets exist", []string{code}
 		case code == "LA001":

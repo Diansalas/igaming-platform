@@ -191,7 +191,7 @@ func hardErr(fails []string) error {
 			return ErrSubjectClosed
 		case H1IllegalTransition:
 			return ErrIllegalTransition
-		case H6WithdrawalsHolding:
+		case H6WithdrawalsHolding, H6HoldBalanceNonZero:
 			return &PreconditionError{Base: ErrWithdrawalsHolding, Codes: fails}
 		}
 	}
