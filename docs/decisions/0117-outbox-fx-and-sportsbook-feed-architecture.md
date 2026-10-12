@@ -1,21 +1,15 @@
 # ADR 0117: Transactional Outbox / Event Bus, FX ConversionOperation, Sportsbook Feed Abstraction
 
-**Status: PROPOSED** (architect, 2026-10-12, at HEAD `489995e`). Design only: nothing here is
-implemented. Each part needs the reviews listed in its "Reviews" subsection before it can be
-ACCEPTED, and ledger-finance owns every money invariant in Parts A and B. This ADR does not
-authorise a stage. It sequences the three provider-independent items 12, 13 and 14 from
-`docs/governance/platform-completion-gap-audit-2026-10-10.md` (§1 rows "FX" and "Event bus", §4
-rows "Sports-data provider abstraction" and "Settlement"). Wherever this ADR says MOCK, it means
-MOCK. No real FX provider or sports-data vendor is designed, named or assumed.
+**Status: PROPOSED** (architect, 2026-10-12, HEAD `489995e`). Design only; nothing is implemented,
+and no stage is authorised. Each part needs its listed reviews before ACCEPTED; ledger-finance owns
+every money invariant. Covers gap-audit items 12-14 (`docs/governance/platform-completion-gap-audit-2026-10-10.md`
+§1 "FX"/"Event bus", §4 "Sports-data provider abstraction"/"Settlement"). MOCK means MOCK: no real
+FX provider or sports-data vendor is designed, named or assumed.
 
-Builds on and does not reopen: ADR 0021 (`ConversionOperation`, rounding DS-1/DS-2/DS-3), ADR
-0037 Part B (FX Rate Provider, Conversion record, fail-closed conditions 1-9, plausibility B.7),
-ADR 0082 (lock ordering), ADR 0083 (sportsbook jurisdiction/exposure), ADR 0087/0088 (sportsbook
-settlement contract), ADR 0095 (no provider I/O while a DB transaction is held), ADR 0097 (webhook
-admission), ADR 0102 (durable alerting), ADR 0106 (KYC submit outbox), and
-`docs/architecture/09-sportsbook-architecture.md` §1.4, §3.5 and §4.
-
----
+Builds on, without reopening: ADR 0021 (`ConversionOperation`, DS-1/2/3), ADR 0037 Part B (FX Rate
+Provider, Conversion record, fail-closed 1-9, plausibility B.7), 0082 (lock order), 0083, 0087/0088
+(settlement contract), 0095 (no provider I/O inside a transaction), 0097 (webhook admission), 0102
+(alerting), 0106 (KYC outbox), doc 09 §1.4/§3.5/§4.
 
 ## Part A: Transactional outbox and event bus
 
@@ -145,21 +139,19 @@ and the claim-token CAS, following the ADR 0102 §4.1 narrow-exception pattern.
 | `audit.recorded` (ids only) | `audit.Record` | `tenant_id` | `audit_export` (BI copy, **not** the system of record) |
 | `kyc.submission.terminal` | KYC worker terminal transition | `player_account_id` | `aml_feed` |
 
-`alerts_rules` evaluates configured thresholds (for example a large conversion) and calls
-`alerting.Raise`. The rules themselves are configuration and out of scope beyond the hook.
+`alerts_rules` evaluates configured thresholds and calls `alerting.Raise` (rules out of scope).
 
 ### A.7 Invariants
 
-- **INV-OB-1:** each event row commits iff its business transaction commits, because it is in the same `tx`.
-- **INV-OB-2:** every event has exactly one delivery per matching enabled subscription at commit time.
-- **INV-OB-3:** `platform_events` is immutable, and the only DELETE path is the retention function.
-- **INV-OB-4:** `tenant_id` on events and deliveries is forced from the authenticated GUC and is
-  never taken from the payload. A consumer always runs under `WithTenant(delivery.tenant_id)`.
-- **INV-OB-5:** a DB-local consumer's effect and its `done` transition are atomic.
-- **INV-OB-6:** an ordered subscription never runs N+1 while N (same partition) is non-terminal or dead.
-- **INV-OB-7:** `Emit` is the last statement before commit, and partition producers share an L1/L3 lock.
-- **INV-OB-8:** payloads contain no PII or secrets (static test over registry structs: allow-listed field kinds).
-- **INV-OB-9:** no consumer is on the bet or settlement critical path. No authoritative balance is ever derived from events.
+**OB-1** an event commits iff its business transaction commits. **OB-2** one delivery per matching
+enabled subscription at commit. **OB-3** `platform_events` is immutable; the only DELETE is the
+retention function. **OB-4** `tenant_id` is forced from the authenticated GUC, never the payload;
+consumers run under `WithTenant(delivery.tenant_id)`. **OB-5** a DB-local consumer's effect and its
+`done` transition are atomic. **OB-6** an ordered subscription never runs N+1 while N (same
+partition) is non-terminal or dead. **OB-7** `Emit` is last before commit and a partition's
+producers share an L1/L3 lock. **OB-8** no PII or secrets in payloads (static test over registry
+structs). **OB-9** no consumer is on the bet/settlement critical path, and no authoritative balance
+is derived from events.
 
 ### A.8 Failure modes and tests (qa owns the gate)
 
@@ -175,82 +167,61 @@ Load test: a p99 emit overhead budget agreed with qa.
 
 ### A.9 Slices (owners)
 
-- **A1 (architect design → backend; reviews: security, ledger-finance, qa):** the migration, `internal/outbox`
-  Emit plus registry, the `event_relay` identity, the consumer runtime, metrics, and the two alert kinds. No
-  producers yet.
-- **A2 (ledger-finance-owned):** `wallet.ledger_posted` emission at the posting call sites and the
-  `conversion.executed` emit point. Proves INV-OB-1/7 against ADR 0082 L5.
-- **A3 (backend; review: compliance/security):** `aml_feed` and `bi_export` MOCK sinks, plus `audit_export`.
-- **A4 (sportsbook):** the `sb_settlement_dispatch` consumer (Part C).
-- **A5 (later, bonus owner):** evaluate migrating the migration 0068 watermark sweep onto the runtime.
+**A1** (architect → backend): migration, `internal/outbox` Emit + registry, `event_relay`
+identity, consumer runtime, metrics, two alert kinds; no producers. **A2** (ledger-finance):
+`wallet.ledger_posted` at posting call sites; proves OB-1/OB-7 under L5. **A3** (backend):
+`aml_feed`, `bi_export`, `audit_export` MOCK sinks. **A4** (sportsbook): `sb_settlement_dispatch`
+(= C3). **A5** (later, bonus owner): evaluate moving the migration 0068 sweep onto the runtime.
 
-**Reviews:** security (RLS, relay identity, guard transitions, PII rule), ledger-finance (INV-OB-1/7,
+**Reviews:** security (RLS, relay identity, guard transitions, PII rule), ledger-finance (OB-1/OB-7,
 emit-abort rule, L5 amendment), qa, code-reviewer.
-
----
 
 ## Part B: FX / `ConversionOperation` (MOCK rate source only)
 
 ### B.1 Verified context
 
-- **Not implemented:** there is no rate source, no rate table, and no wallet-to-wallet conversion path. The only
-  conversion-like path is the bonus conversion, which is explicitly *never* a `ConversionOperation`
-  (`internal/ledger/ledger.go:136`, financial-transaction-flows.md row 14).
-- `assets` is an open registry with `decimal_exponent` 0..18 (migration 0003). Eligibility comes
-  through `assetregistry.CheckEligibility` with `OperationConversion`
-  (`internal/assetregistry/types.go:103`). Registry layer 8 (rate availability) is deliberately
-  left to the Conversion Service (ADR 0037 §A.7).
-- The ledger balances **per asset per transaction**: the deferred constraint trigger
-  `ledger_entries_check_balance` (migration 0022) groups by `asset_code`. `ledger_entries.amount` is
-  `NUMERIC(38,0)`, but `ledger.EntryInput.Amount` is still `int64` (finding LF-16b,
-  `internal/money/money.go:70-78`).
-- House accounts are unique on `(tenant_id, account_type, asset_code)` (migration 0020). No
-  conversion clearing account type exists. That is an `OPEN DECISION` in ADR 0021 and
-  ledger-accounting-model.md §2.
-- Rounding is resolved as DS-1 half-up away from zero, rounded once at the final boundary, one platform rule (ADR
-  0021). It is implemented by `money.RoundToMinorUnits(exact *big.Rat, exp, ruleID)`.
+- No rate source, rate table or wallet-to-wallet conversion exists. Bonus conversion is *never* a
+  `ConversionOperation` (`internal/ledger/ledger.go:136`, financial-transaction-flows.md row 14).
+- `assets` is open, `decimal_exponent` 0..18 (migration 0003). Eligibility is
+  `assetregistry.CheckEligibility(OperationConversion)` (`internal/assetregistry/types.go:103`);
+  layer 8 (rate availability) belongs to the Conversion Service (ADR 0037 §A.7).
+- The ledger balances **per asset per transaction** (`ledger_entries_check_balance`, migration
+  0022). `ledger_entries.amount` is `NUMERIC(38,0)` but `ledger.EntryInput.Amount` is `int64`
+  (LF-16b, `internal/money/money.go:70-78`).
+- House accounts are unique on `(tenant_id, account_type, asset_code)` (migration 0020). No clearing
+  account type exists (`OPEN DECISION`, ADR 0021, ledger-accounting-model.md §2).
+- Rounding is resolved (ADR 0021): DS-1 half-up away from zero, once, one platform rule, via
+  `money.RoundToMinorUnits(exact *big.Rat, exp, ruleID)`.
 
 ### B.2 Decision
 
-1. **There are four separate components, per ADR 0037 B.1.** The Registry (existing), the
-   `FXRateProvider` (B.2 shape, **MOCK implementation only**, `providerkind.Synthetic` so
-   production refuses it), the Conversion Service (`internal/fx`), and the Ledger posting
-   (`ConversionOperation`, owned by ledger-finance).
-2. **Rates are snapshotted and the snapshot is persisted.** A platform-service ingest
-   (`fx_rate_ingest`) polls the rate source *outside any transaction* (ADR 0095) and writes
-   immutable `fx_rate_snapshots`. Quotes and executions reference a snapshot id. A live provider
-   response is never the historical record (ADR 0037 B.6, last paragraph).
-3. **The flow is quote then execute, and the quote expires.** A quote locks the snapshot, the
-   amounts, the fee and the policy version for `quote_ttl`. Execution re-validates and posts
-   **exactly one** `LedgerTransaction` of a new type `conversion`.
-4. **Clearing: one `fx_conversion_clearing` house account per (tenant, asset).** This keeps the
-   ADR 0021 shape and leaves the migration 0020 uniqueness untouched. Pair attribution lives on
-   `conversion_operations`, and pair-level reconciliation is computed from those rows (B.7).
-   **The deviation from the requested "per asset pair" is deliberate:** per-pair accounts need a
-   `counter_asset_code` column and a changed unique index on the core `ledger_accounts` table, and
-   they add no invariant that B.7 R3 does not already check. The per-pair alternative remains
-   ledger-finance's call (**OQ-B1**).
+1. **Four separate components (ADR 0037 B.1):** Registry (existing); `FXRateProvider` (ADR 0037
+   B.2 shape, **MOCK only**, `providerkind.Synthetic` so production refuses it); Conversion Service
+   (`internal/fx`); Ledger posting (`ConversionOperation`, ledger-finance-owned).
+2. **Persisted rate snapshots.** Platform service `fx_rate_ingest` polls *outside any transaction*
+   (ADR 0095) and writes immutable `fx_rate_snapshots`; quotes and executions reference a snapshot
+   id. A live response is never the historical record (ADR 0037 B.6).
+3. **Quote then execute.** A quote fixes snapshot, amounts, fee and policy version for `quote_ttl`.
+   Execute re-validates and posts **exactly one** `LedgerTransaction` of new type `conversion`.
+4. **Clearing: one `fx_conversion_clearing` house account per (tenant, asset)**, keeping ADR 0021's
+   shape and migration 0020's uniqueness; pair attribution lives on `conversion_operations` and
+   pair reconciliation is computed from it (B.7). **Deliberate deviation from "per asset pair"**:
+   per-pair accounts need a `counter_asset_code` column and a changed unique index on core
+   `ledger_accounts`, and add no invariant R3 does not already check (**OQ-B1**, ledger-finance).
 5. **Rounding.** `destination_amount = RoundToMinorUnits(net_source × rate_applied, exp_dest,
-   rounding_rule_id)` with DS-1. It is computed once, from the snapshot's exact NUMERIC rate parsed into
-   `big.Rat` (never float). **The residual (|r| ≤ ½ destination minor unit) is borne by the
-   operator through the clearing position.** This follows ADR 0021 ("absorbed as part of the
-   platform's spread"). It is recorded per operation as the exact rational `residual`. Because ties
-   round away from zero, ties favour the player on the destination credit. Confirming or overriding
-   this is a ledger-finance decision (**OQ-B2**). DS-3 forbids an FX-only rule without an
-   ADR 0021 amendment.
-6. **Width guard.** Until LF-16b widens `EntryInput.Amount`, any amount that does not fit `int64`
-   fails closed with `ErrAmountOutOfRange`. It is never truncated. At exponent 18 that caps
-   conversions at about 9.2 whole units. This is disclosed, not hidden.
-7. **Same player only.** Both wallets belong to one `player_account_id`, and therefore one brand.
-   The assets differ. A same-asset transfer is **not** a `ConversionOperation` and is not built
-   (ADR 0021).
-8. **Only `player_cash` is convertible.** Bonus, locked, held and withdrawal-hold balances are never
-   converted.
-9. **Fail closed** on every ADR 0037 B.6 condition 1-9 plus B.7 plausibility. A stale rate means
-   `now() - snapshot.as_of > max_rate_age`, and **no configured policy means stale**. Further
-   conditions: asset ineligible for `conversion` at any layer; tenant or brand not active (the
-   same gate as money initiation); either wallet not `active`; conversions kill-switched for the
-   pair; insufficient balance read under the L3 lock.
+   rounding_rule_id)`, once, from the exact NUMERIC rate as `big.Rat` (never float). **The residual
+   (|r| ≤ ½ destination minor unit) is borne by the operator via clearing** (ADR 0021: "absorbed as
+   part of the platform's spread") and stored per operation as an exact rational. Ties favour the
+   player on the credit. Confirm or override: **OQ-B2**; an FX-only rule needs an ADR 0021
+   amendment (DS-3).
+6. **Width guard.** Until LF-16b widens `EntryInput.Amount`, any amount not fitting `int64` fails
+   closed (`ErrAmountOutOfRange`), never truncated: at exponent 18 that is about 9.2 whole units.
+7. **Same player, different assets, `player_cash` only.** Bonus, locked, held and withdrawal-hold
+   balances are never converted. Same-asset transfer is not a `ConversionOperation` and is not built.
+8. **Fail closed** on ADR 0037 B.6 conditions 1-9 and B.7 plausibility (stale = `now() - as_of >
+   max_rate_age`; **no configured policy means stale**), plus: asset ineligible for `conversion` at
+   any layer; tenant/brand not active (money-initiation gate); either wallet not `active`; pair
+   kill-switched; insufficient balance under the L3 lock.
 
 ### B.3 Data model
 
@@ -335,28 +306,25 @@ movement during the TTL (**OQ-B4**).
 
 ### B.7 Reconciliation (`internal/reconciliation`, stream `fx_conversion`, hourly with ledger drift)
 
-- **R1:** for each operation, recomputing `destination_amount` from the stored `net_source_amount`,
-  `rate_applied` and `rounding_rule_id` gives exactly the stored value. The stored residual is recomputed too.
-- **R2:** the ledger entries of `ledger_transaction_id` equal the B.4 shape and amounts exactly.
+- **R1/R2:** recomputing `destination_amount` and the residual from stored `net_source_amount`,
+  `rate_applied`, `rounding_rule_id` gives the stored values; ledger entries equal B.4 exactly.
 - **R3 (the "nets to zero" check, stated precisely):** per-asset clearing balances cannot net to zero in
   their own asset. They are the operator's open FX position. What must net to zero, **per snapshot**,
   is the valuation identity over every operation priced on that snapshot:
-  `Σ(credit_clearing_A × rate_applied) − Σ(debit_clearing_B) − Σ residual = 0` (exact rational).
-  Any non-zero result is a P1 mismatch.
-- **R4:** there is no orphan `conversion` ledger transaction without an operation, and no operation without its transaction.
-- **R5:** the `fx_conversion_clearing` projection matches the entries. Existing ledger-vs-projection drift covers it.
-
-How clearing positions are later swept or hedged (treasury) is out of scope and is a finance decision.
+  `Σ(ledger Cr clearing_A × rate_applied × 10^(exp_B − exp_A)) − Σ(ledger Dr clearing_B) − Σ residual = 0`
+  (exact rational, B minor units, amounts read from the ledger not the operation rows). Any
+  non-zero result is a P1 mismatch.
+- **R4/R5:** no orphan `conversion` transaction or operation; clearing projection vs entries is
+  covered by existing drift. Sweeping or hedging clearing positions (treasury) is out of scope.
 
 ### B.8 Invariants
 
-- **INV-FX-1:** a cross-asset value movement exists only as a `conversion` transaction with exactly one `conversion_operations` row.
-- **INV-FX-2:** one quote can be executed at most once, enforced by `UNIQUE quote_id` and the ledger key.
-- **INV-FX-3:** both wallets belong to the same player, and their assets differ.
-- **INV-FX-4:** no float appears anywhere. The rate is NUMERIC, Go uses `big.Rat`, and rounding happens once through `money.RoundToMinorUnits`.
-- **INV-FX-5:** every executed conversion is reproducible from persisted rows alone (R1).
-- **INV-FX-6:** a stale, absent, implausible or unconfigured rate means a refusal. Absent configuration always denies.
-- **INV-FX-7:** `MockRateSource` is refused in production (`RefuseSyntheticInProduction`).
+**FX-1** cross-asset value moves only as a `conversion` transaction with exactly one
+`conversion_operations` row. **FX-2** a quote executes at most once (`UNIQUE quote_id` + ledger
+key). **FX-3** same player, different assets. **FX-4** no float anywhere: NUMERIC rate, `big.Rat`,
+one rounding via `money.RoundToMinorUnits`. **FX-5** every conversion is reproducible from persisted
+rows (R1). **FX-6** stale, absent, implausible or unconfigured rate means refusal. **FX-7**
+`MockRateSource` is refused in production (`RefuseSyntheticInProduction`).
 
 ### B.9 Failure modes and tests (ledger-finance's 12-category rule applies)
 
@@ -373,39 +341,33 @@ execution. **Lock order:** a `lockorder_*` deadlock harness case.
 
 ### B.10 Slices (owners)
 
-- **B0 (ledger-finance decision record):** answer OQ-B1..B4 and add the account and transaction types (migration).
-- **B1 (backend; review: security):** `internal/fx` with `FXRateProvider`, `MockRateSource`, rate ingest
-  worker, snapshots, bindings with dual control, and the B.6 + B.7 checks. There is no ledger
-  dependency.
-- **B2 (ledger-finance-owned):** quote/execute, posting, guard triggers, and the L1/L3 amendment.
-- **B3 (backend + frontend):** player API, B2C dialog, and BO screens.
-- **B4 (ledger-finance + backend):** `fx_conversion` reconciliation and BO read routes.
-- **Prerequisite for any exponent > ~12 asset:** LF-16b (`EntryInput.Amount` widened to `*big.Int`).
+**B0** (ledger-finance): answer OQ-B1..B4; migration for account and transaction types. **B1**
+(backend): `internal/fx`, `FXRateProvider`, `MockRateSource`, ingest worker, snapshots,
+dual-control bindings, ADR 0037 B.6/B.7 checks; no ledger dependency. **B2** (ledger-finance):
+quote/execute, posting, guard triggers, L1 amendment. **B3** (backend + frontend): player API, B2C
+dialog, BO screens. **B4** (ledger-finance + backend): `fx_conversion` reconciliation and BO reads.
+Prerequisite for assets with exponent above about 12: LF-16b (`EntryInput.Amount` as `*big.Int`).
 
 **Reviews:** ledger-finance (owner), security (player authz, RLS, dual control on bindings and
 policies, rate-manipulation surface), architect, qa, and product-owner-proxy (screen scope).
 Compliance flag: conversions can be a layering vector. `conversion.executed` feeds the AML feed,
 and whether converted funds carry special withdrawal conditions is **OQ-B5**.
 
----
-
 ## Part C: Sportsbook feed abstraction (provider-neutral, MOCK feed)
 
 ### C.1 Verified context
 
-- `sportsbook.Provider` has only `Catalogue(ctx)` (`internal/sportsbook/types.go:370-372`). The
-  catalogue tables `sb_*` are platform-wide (migration 0078). `sb_selections` holds only the
-  *current* `odds_numerator/denominator` and has no version or price history.
-- Placement rejects an odds mismatch by **exact** numerator and denominator equality
-  (`orchestrator.go:232`). It reads selection, market and event status without a row lock
-  (`orchestrator.go:216-230`).
-- Settlement (`settlement.go:327 SimulateSettlementEvent`) is driven only by the non-production
-  staff route `POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event`. That route is
-  registration-gated (`internal/httpserver/sportsbook_settlement_handlers.go:20-27`). Settlement
-  re-derives every amount server-side, supports generations, rollback, tombstones and composed void,
-  and records `actor_staff_account_id` (nullable, migration 0091).
-- doc 09 §4.1 already specifies a `DataFeedProvider` shape and §1.4 PriceHistory/acceptance freezing.
-  This part makes those concrete. It does not redesign them.
+- `sportsbook.Provider` has only `Catalogue(ctx)` (`internal/sportsbook/types.go:370-372`); `sb_*`
+  tables are platform-wide (migration 0078); `sb_selections` has current odds only, no version or
+  history. Placement checks odds by **exact** equality (`orchestrator.go:232`) and reads
+  event/market/selection status without a row lock (`orchestrator.go:216-230`).
+- Settlement (`settlement.go:327`) is driven only by the registration-gated, non-production route
+  `POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event`
+  (`internal/httpserver/sportsbook_settlement_handlers.go:20-27`). It re-derives amounts
+  server-side, supports generations, rollback, tombstones and composed void, and
+  `actor_staff_account_id` is nullable (migration 0091).
+- doc 09 §4.1 (`DataFeedProvider`) and §1.4 (PriceHistory, acceptance freezing) are made concrete
+  here, not redesigned.
 
 ### C.2 Decision
 
@@ -429,9 +391,8 @@ and whether converted funds carry special withdrawal conditions is **OQ-B5**.
        Body      FeedBody              // canonical: EventState | MarketState | Price{Num,Den} | Result{per-selection outcome} | Fixture
    }
    ```
-   `VersioningMode` is adapter-declared: `entity_sequence` or `timestamp_sequence`. An adapter that
-   can supply neither is **not admissible**. **No real provider's semantics are assumed.** An adapter
-   maps the vendor's behaviour onto this contract, or it declares itself incapable.
+   `VersioningMode` (`entity_sequence | timestamp_sequence`) is adapter-declared; an adapter offering
+   neither is **not admissible**. **No real provider semantics are assumed.**
 2. **Ingestion is idempotent, versioned and append-only.** `ingest.Apply` runs per message in a
    transaction under the new platform service `sportsbook_feed_ingest`: deduplicate on
    `(feed_id, message_id)`; map external refs (unmapped refs are recorded `unmapped`, never
@@ -448,10 +409,9 @@ and whether converted funds carry special withdrawal conditions is **OQ-B5**.
    `computePotentialReturn`); void/cancelled result → void (`market_cancelled`/`push`/`data_error`);
    correction (higher `result_version`, different outcome) → rollback g, settle g+1 (ADR 0088
    machinery); same outcome → recorded no-op. The simulate route stays as non-production test support. It is no longer the only driver.
-4. **Event-state and market-state messages** apply suspend, resume, close, cancel and void. Cancel or
-   void of an event cascades to its markets' results as void, through the same results path. Staff
-   trading operations (suspend market, void event, manual result) are a second, audited *source*
-   (`source = 'staff'`) of the same messages. Manual results require four-eyes (doc 09 §3.5).
+4. **State messages** apply suspend/resume/close/cancel/void; an event cancel or void cascades to
+   void results via the same path. Staff trading operations are a second audited *source*
+   (`source = 'staff'`) of the same messages; manual results need four-eyes (doc 09 §3.5).
 5. **Bet acceptance staleness rules.** These are added to `PlaceBet` before RG, without changing the
    existing order of the other checks. (a) `ExpectedOddsVersion` must equal `sel.odds_version`
    (optional during migration, falling back to today's exact-price check). (b) Price-change policy
@@ -464,13 +424,11 @@ and whether converted funds carry special withdrawal conditions is **OQ-B5**.
    (ADR 0082 amendment) that makes a committed suspension linearizable against placement.
    Ingestion takes only C0 `FOR UPDATE` and never a financial lock, so no cycle exists. Rejections reuse `RejectionOddsChanged` and `RejectionEventNotOpen` and add
    `RejectionFeedStale`.
-6. **Feed watchdog.** When `last_heartbeat_at` exceeds `suspend_after`, a platform job auto-suspends the
-   feed's live markets (fail closed). Resume happens only on fresh state messages. Every
-   suspension is audited with source `watchdog`.
-7. **Cashout is a hook only, NOT IMPLEMENTED.** `type CashoutPricer interface{ Quote(ctx, betID)
-   (CashoutQuote, error) }` is reserved. It will require the bet's L1 lock, the current
-   `odds_version`, the same staleness rules as (5), and `settlement_type = cashout` (doc 09 §3.5,
-   ADR 0033 §2). That needs its own ADR, and no code or schema is added here.
+6. **Watchdog.** Heartbeat older than `suspend_after` → a platform job suspends the feed's live
+   markets (fail closed, audited `watchdog`); resume only on fresh state messages.
+7. **Cashout: hook only, NOT IMPLEMENTED.** Reserved `CashoutPricer.Quote(ctx, betID)`; it will need
+   the bet's L1 lock, current `odds_version`, rule (5) staleness and `settlement_type = cashout`
+   (doc 09 §3.5, ADR 0033 §2), under its own ADR. No code or schema now.
 
 ### C.3 Data model (platform-wide unless stated)
 
@@ -497,28 +455,21 @@ Dead-heat and partial (fractional) outcomes are **NOT IMPLEMENTED**. A result ca
 
 ### C.4 Invariants
 
-- **INV-SBF-1:** an entity's applied state is monotone in `feed_version`. An older message never
-  overwrites a newer one.
-- **INV-SBF-2:** a `(feed_id, message_id)` pair is applied at most once.
-- **INV-SBF-3:** a feed message never posts money. Only `settleBet`, `voidBet` and `rollbackBet` post,
-  under the bet's L1 lock. INV-LOCK-E4 and the sole-writer test
-  (`sportsbook_settlement_sole_writer_test.go`) are unchanged.
-- **INV-SBF-4:** payout is always re-derived from the bet's frozen odds. A feed value is a claim at most.
-- **INV-SBF-5:** a result correction produces a rollback plus a re-settlement, never an edit.
-- **INV-SBF-6:** with a stale feed or unconfigured staleness, no new bet is accepted on a feed-sourced market.
-- **INV-SBF-7:** odds history is append-only, and `accepted_odds_version` resolves to a history row.
-- **INV-SBF-8:** tenant scope for settlement comes from the bet row under `WithTenant`, never from the feed.
+**SBF-1** applied state is monotone in `feed_version`. **SBF-2** a `(feed_id, message_id)` applies
+at most once. **SBF-3** a feed message never posts money; only `settleBet`/`voidBet`/`rollbackBet`
+post, under the bet's L1 lock (INV-LOCK-E4 and `sportsbook_settlement_sole_writer_test.go`
+unchanged). **SBF-4** payout is re-derived from the bet's frozen odds; a feed value is at most a
+claim. **SBF-5** a correction is rollback + re-settlement, never an edit. **SBF-6** stale feed or
+unconfigured staleness means no new bet on a feed-sourced market. **SBF-7** odds history is
+append-only and `accepted_odds_version` resolves to a history row. **SBF-8** settlement tenant scope
+comes from the bet row under `WithTenant`, never from the feed.
 
 ### C.5 Reconciliation
 
-`internal/reconciliation/sportsbook_settlement.go` gains these mismatch kinds:
-
-- `sb_unsettled_after_result`: an open bet on a resulted market older than a threshold.
-- `sb_outcome_vs_result`: the latest effective settlement outcome differs from the latest
-  `result_version`.
-- `sb_settlement_stale_result`: the settlement `result_id` is not the latest version.
-
-The existing MOCK-statement check is kept. A BO read route is part of gap-audit item 9.
+`internal/reconciliation/sportsbook_settlement.go` gains: `sb_unsettled_after_result` (open bet on
+a resulted market past a threshold), `sb_outcome_vs_result` (latest effective outcome differs from
+the latest `result_version`), `sb_settlement_stale_result` (settlement `result_id` not the latest).
+The MOCK-statement check stays; the BO read route is gap-audit item 9.
 
 ### C.6 Failure modes and tests
 
@@ -537,29 +488,24 @@ for the three new kinds. A scripted **mock feed scenario** drives a full lifecyc
 
 ### C.7 Slices (owners)
 
-- **C1 (sportsbook + architect):** `datafeed` interfaces, `MockFeedProvider` (scripted, deterministic,
-  `providerkind.Synthetic`), ingest tables, the `sportsbook_feed_ingest` identity, versioned apply,
-  price history and state changes. There is no settlement change in this slice. Reviews: security, qa.
-- **C2 (sportsbook; review: ledger-finance, security):** placement rules (5a-e), C0 lock-class amendment,
-  `accepted_odds_version`, and the price-change policy config.
-- **C3 (sportsbook + ledger-finance; requires A1):** `sb_market_results`, `SettleFromResult`, the
-  `sb_settlement_dispatch` consumer, the `driver`/`result_id` columns, and the C.5 reconciliation kinds.
-- **C4 (sportsbook + frontend; review: security):** BO trading operations (suspend/resume market, void event,
-  manual result with four-eyes), feed health page, and the catalogue fetch timeout (gap audit item 13).
-- **C5 (later, separate ADR):** cashout, multiples, and a real feed adapter (PROVIDER DEPENDENT).
+**C1** (sportsbook + architect): `datafeed` interfaces, scripted deterministic `MockFeedProvider`
+(`providerkind.Synthetic`), ingest tables, `sportsbook_feed_ingest` identity, versioned apply, price
+history, state changes; no settlement change. **C2** (sportsbook): placement rules 5a-e, C0
+amendment, `accepted_odds_version`, price-change policy. **C3** (sportsbook + ledger-finance; needs
+A1): results, `SettleFromResult`, `sb_settlement_dispatch`, `driver`/`result_id`, C.5 kinds.
+**C4** (sportsbook + frontend): BO trading operations (suspend/resume, void event, four-eyes manual
+result), feed health page, catalogue fetch timeout (gap-audit item 13). **C5** (separate ADR):
+cashout, multiples, real feed adapter (PROVIDER DEPENDENT).
 
-**Reviews:** architect, sportsbook, ledger-finance (C2/C3), security (feed trust boundary: a forged result
-is a direct payout vector; watchdog; four-eyes), qa, code-reviewer.
-
----
+**Reviews:** architect, sportsbook, ledger-finance (C2/C3), security (feed trust boundary: a forged
+result is a direct payout vector; watchdog; four-eyes), qa, code-reviewer.
 
 ## D. Sequencing and cross-part dependencies
 
-A1 → (A2, C1 in parallel) → B0/B1 → C2 → C3 (needs A1) → B2 → B3/B4, C4. Part A has no money
-change except emit points. B2 and C3 are the only slices that post money, and both are
-ledger-finance-owned. Two ADR 0082 amendments are needed: L5 (Emit) and C0 (catalogue rows), plus
-the `conversion_quotes` L1 entry. All of this is provider-independent. Live FX rates and real feeds
-stay PROVIDER DEPENDENT.
+Track A: A1 → A2 → A3. Track C: C1 (parallel with A1) → C2 → C3 (needs A1) → C4. Track B: B0
+(parallel) → B1 → B2 (needs A1 for the emit point) → B3/B4. Only B2 and C3 post money; both are
+ledger-finance-owned. ADR 0082 amendments: L5 (Emit), C0 (catalogue rows), `conversion_quotes` in
+L1. All of this is provider-independent; live rates and real feeds stay PROVIDER DEPENDENT.
 
 ## E. Owner questions (minimal; recommendation first)
 
