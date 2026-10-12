@@ -113,6 +113,12 @@ export interface NavPermissions {
   launchSuspend: boolean
   /** GET /v1/admin/launch-authorisations - platform staff only. */
   launchQueue: boolean
+  /**
+   * ADR 0114 S6: payments_kill_switch:read / :engage / :release - platform_admin and tenant_admin hold all
+   * three (internal/auth/permission.go). One flag: the roles are identical. UI convenience only; the server
+   * re-checks every call and a tenant caller may name only its own tenant.
+   */
+  killSwitch: boolean
 }
 
 const NONE: NavPermissions = {
@@ -148,6 +154,7 @@ const NONE: NavPermissions = {
   launchApprove: false,
   launchSuspend: false,
   launchQueue: false,
+  killSwitch: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -195,6 +202,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     launchApprove: true,
     launchSuspend: true,
     launchQueue: true,
+    killSwitch: true,
   },
   tenant_admin: {
     ...NONE,
@@ -213,6 +221,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     launchRead: true,
     launchRequest: true,
     launchSuspend: true,
+    killSwitch: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
   compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
