@@ -37,42 +37,31 @@ admission), ADR 0102 (durable alerting), ADR 0106 (KYC submit outbox), and
 
 ### A.2 Decision
 
-1. **Events are written in the same DB transaction as the business change.** They go into an
-   append-only `platform_events` table. They are never published after commit and never
-   published to memory. A new `internal/outbox` package exposes:
+1. **Same-transaction write.** Events go into an append-only `platform_events` table in the
+   business transaction, never published after commit or to memory. New `internal/outbox`:
    `Emit(ctx, tx pgx.Tx, e outbox.Event) (EmitResult, error)`. `eventbus.Publisher` (no tx) is
-   **deprecated for domain events**. `InMemoryBus` stays a test double.
-2. **Fan-out happens at insert, and delivery is state-based.** An `AFTER INSERT` trigger on
-   `platform_events` inserts one `event_deliveries` row for each enabled `event_subscriptions`
-   row whose `event_type` matches. It runs in the same transaction, so the event and its pending
-   deliveries commit or roll back together. **No high-water-mark cursor exists.** A cursor over a
-   sequence skips rows when commit order differs from sequence order. That is the defect migration
-   0068's caveat describes, and an `xmin`-filtered cursor still misses it when a later-xid
-   transaction holds a lower sequence value. State-based claiming cannot skip a row.
-3. **The relay is a consumer runtime, not a publisher.** Workers run under one new platform-service
-   identity, `event_relay` (`internal/db/platform_service.go` closed vocabulary). They claim due
-   deliveries with `FOR UPDATE SKIP LOCKED`, a lease and a claim token, the same mechanics as
-   `internal/kyc/outbox_worker.go:241-259`. Each worker invokes the consumer's handler and records
-   the outcome. **Pluggable relay:** an external broker (Kafka/NATS) is added later as one more
-   consumer, `broker_sink`, behind a `Sink` interface. Producers and the schema do not change. No
-   broker is required or built now.
-4. **Delivery is at-least-once, and consumers are idempotent.** A DB-local consumer runs its effect
-   and the CAS `claimed→done` of its delivery row **in one transaction** under
-   `WithTenant(event.tenant_id)`. That makes the effect exactly-once. An external sink is
-   at-least-once and keyed by `event_id`.
-5. **Ordering is per partition key, never global.** Each event carries a `partition_key` (default:
-   the aggregate id, such as `player_account_id`, `bet_id` or `conversion_id`). An *ordered*
-   subscription never dispatches delivery N for `(subscription, partition_key)` while a lower-`seq`
-   delivery for the same pair is non-terminal or `dead`. **The guarantee holds only when producers
-   of one partition are serialised by an existing L1/L3 lock and `Emit` is the last statement
-   before commit** (INV-OB-7). Under those conditions sequence order equals commit order within
-   the partition. A tenant-wide total order is **not offered**: it would need a tenant-wide
-   serialisation point (an L0 advisory on every financial write). If a future consumer truly needs
-   it, that needs its own ADR. No consumer planned in A.6 needs it.
-6. **Tenant isolation is enforced by RLS and a guard trigger, not by discipline.**
-7. **Payloads carry identifiers and money facts only.** They hold no PII, no secrets and no raw
-   provider payloads. Consumers re-read details under their own RLS scope. This keeps erasure (doc
-   16) and retention simple.
+   **deprecated for domain events**; `InMemoryBus` stays a test double.
+2. **Fan-out at insert, state-based delivery.** An `AFTER INSERT` trigger inserts one
+   `event_deliveries` row per enabled matching `event_subscriptions` row, in the same transaction.
+   **There is no high-water-mark cursor**: a sequence cursor skips rows when commit order differs
+   from sequence order (migration 0068's caveat), and an `xmin`-filtered cursor still misses a
+   later-xid transaction holding a lower sequence value. State-based claiming cannot skip a row.
+3. **The relay is a consumer runtime.** Workers run as a new platform service `event_relay`
+   (`internal/db/platform_service.go`) and claim due deliveries with `FOR UPDATE SKIP LOCKED`, lease
+   and claim token, as `internal/kyc/outbox_worker.go:241-259` does. **Pluggable:** an external
+   broker is added later as one more consumer, `broker_sink`, behind a `Sink` interface; producers
+   and schema do not change. No broker is built now.
+4. **At-least-once with idempotent consumers.** A DB-local consumer applies its effect and the CAS
+   `claimed→done` **in one transaction** under `WithTenant(delivery.tenant_id)`, so the effect is
+   exactly-once. External sinks are at-least-once, keyed by `event_id`.
+5. **Ordering per partition key, never global.** `partition_key` defaults to the aggregate id
+   (`player_account_id`, `bet_id`, `conversion_id`). An *ordered* subscription never dispatches N for
+   `(subscription, partition_key)` while a lower-`seq` delivery there is non-terminal or `dead`. This
+   equals commit order **only when a partition's producers are serialised by an existing L1/L3 lock
+   and `Emit` is the last statement before commit** (INV-OB-7). A tenant-wide total order is **not
+   offered** (it would need an L0 advisory on every financial write); no A.6 consumer needs it.
+6. **Tenant isolation by RLS plus a guard trigger.** **Payloads carry ids and money facts only**: no
+   PII, secrets or raw provider payloads; consumers re-read under their own RLS scope.
 
 ### A.3 Data model (one migration)
 
@@ -581,27 +570,15 @@ stay PROVIDER DEPENDENT.
 
 ## E. Owner questions (minimal; recommendation first)
 
-- **OQ-A1 (human/compliance):** event retention window. *Recommend* 90 days for terminal
-  deliveries and their events, aligned with HQ-E1-4. Ledger and audit remain the record.
-- **OQ-A2 (security):** should skipping a dead delivery of a financial subscription need four-eyes?
-  *Recommend yes.*
-- **OQ-B1 (ledger-finance):** clearing granularity. *Recommend* per (tenant, asset) as in ADR 0021,
-  with pair attribution on `conversion_operations`. Per-pair only if finance needs pair P&L inside
-  the ledger.
-- **OQ-B2 (ledger-finance):** FX rounding. *Recommend* keeping DS-1 half-up, with the residual borne
-  by the operator through clearing. An FX-specific rule (for example round-down) needs an ADR 0021
-  amendment under DS-3.
-- **OQ-B3 (ledger-finance):** fee revenue account. *Recommend* a new `conversion_fee_revenue` type,
-  not `house_gaming`.
-- **OQ-B4 (human/commercial):** the operator bears rate movement during the quote TTL, and fee and
-  spread defaults are commercial. *Recommend* TTL ≤ 15 s, and fee/spread as tenant config with
-  default 0 and the pair disabled until a tenant enables it.
-- **OQ-B5 (compliance):** do converted funds carry extra withdrawal or AML conditions?
-  *Recommend:* no special rule now, with every conversion fed to the AML feed.
-- **OQ-C1 (product/human):** price-change acceptance policy. *Recommend* `exact` by default, with
-  `accept_better` as tenant opt-in.
-- **OQ-C2 (security/ledger-finance):** should high-payout feed settlements be held for manual
-  confirmation? *Recommend* a configurable payout threshold hold, designed in C3 review, with no
-  provider behaviour assumed.
-- **OQ-C3 (architect, self-decided unless objected):** tenant enumeration versus a cross-tenant
-  open-bet index for fan-out. *Recommend* enumeration now and revisiting it at more than 50 tenants.
+| # | Owner | Question | Recommendation |
+|---|---|---|---|
+| OQ-A1 | human/compliance | Event retention window | 90 days for terminal deliveries and their events, aligned with HQ-E1-4; ledger and audit stay the record |
+| OQ-A2 | security | Four-eyes to skip a dead delivery of a financial subscription? | Yes |
+| OQ-B1 | ledger-finance | Clearing granularity | Per (tenant, asset) as ADR 0021, pair attribution on `conversion_operations`; per-pair only if finance needs pair P&L in-ledger |
+| OQ-B2 | ledger-finance | FX rounding and residual bearer | Keep DS-1 half-up; operator bears residual via clearing; an FX-only rule needs an ADR 0021 amendment (DS-3) |
+| OQ-B3 | ledger-finance | Fee revenue account | New `conversion_fee_revenue`, not `house_gaming` |
+| OQ-B4 | human/commercial | Operator bears rate movement in quote TTL; fee/spread defaults | TTL ≤ 15 s; fee/spread tenant config, default 0; pair disabled until a tenant enables it |
+| OQ-B5 | compliance | Extra withdrawal/AML conditions on converted funds? | None now; every conversion goes to the AML feed |
+| OQ-C1 | product/human | Price-change acceptance policy | `exact` default; `accept_better` tenant opt-in |
+| OQ-C2 | security/ledger-finance | Hold high-payout feed settlements for manual confirmation? | Configurable payout-threshold hold, designed in C3 review; no provider behaviour assumed |
+| OQ-C3 | architect (self-decided unless objected) | Tenant enumeration vs cross-tenant open-bet index for fan-out | Enumerate now; revisit above 50 tenants |
