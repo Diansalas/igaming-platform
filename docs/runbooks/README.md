@@ -11,9 +11,15 @@ Operational incident runbooks now exist (Stage 9) — see:
   and `stage-9-4-staging-lifecycle-runbook.md` — staging (AWS is currently OFF;
   see `../governance/staging-teardown-2026-09-26.md`).
 - `backup-and-disaster-recovery.md` — honest RPO/RTO evidence status
-  (currently NOT MET/NOT IMPLEMENTED — see that file for why and what's
-  needed).
-- `observability-and-alerting.md` — minimum alert-rule inventory.
+  (production NOT MET; a local restore drill is DONE for the dev dataset only).
+- `restore-from-backup.md` — restore procedure matching the local drill
+  (`deploy/drill/backup-restore-drill.sh`), findings and measured dev-dataset numbers.
+- `launch-and-suspension.md` — ADR 0112 brand/tenant launch, suspension, reactivation, closure.
+- `incident-response-and-oncall.md` — TEMPLATE: no rota or recipient exists (ALERT-DELIVERY-1 open).
+- `expand-contract-migrations.md` — forward-fix versus restore policy, pre-flight refusals, write-quiet window.
+- `load-and-soak-test-plan.md` — load/soak/chaos plan plus one small local smoke (`deploy/loadtest/`).
+- `observability-and-alerting.md` — minimum alert-rule inventory; rule files (NOT wired) in
+  `deploy/observability/`.
 - `production-configuration-checklist.md` — field-by-field production
   config audit.
 - `self-hosted-runner.md` — PREPARED, NOT ACTIVE: Mac self-hosted CI runner

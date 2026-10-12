@@ -1,0 +1,33 @@
+# Alert rules that CANNOT be written yet because the platform emits no signal for them (OPS-READINESS-LOCAL).
+#
+# STATUS: NOT WIRED, NOT IMPLEMENTED. These are gaps, recorded so they are not mistaken for coverage.
+# ALERT-DELIVERY-1 is OPEN regardless: nobody is paged by anything in deploy/observability/.
+#
+# Each entry names the metric a future instrumentation change would have to add. The parity test
+# requires that the proposed name is STILL ABSENT from the code: when someone adds the metric, the test
+# fails and tells them to promote the entry into prometheus-alert-rules.yml (so this file cannot rot
+# into a list of things that already exist). Adding the instrumentation is a code change in
+# internal/ (owned by the domain specialists), deliberately not done by the ops-readiness task.
+
+pending:
+  - id: DbPoolSaturation
+    severity: page
+    proposed_metric: db_pool_acquired_connections
+    also_needed: [db_pool_max_connections, db_pool_acquire_wait_seconds_total]
+    proposed_expr: "db_pool_acquired_connections / db_pool_max_connections > 0.9 for 5m"
+    why_missing: "internal/db wraps pgxpool but exports no pool statistics (pgxpool.Stat) to OpenTelemetry."
+    interim: "No automated signal. Operators can only infer saturation from rising http_request duration_ms and 5xx. See docs/runbooks/load-and-soak-test-plan.md for the local measurement."
+
+  - id: ReconciliationStale
+    severity: page
+    proposed_metric: reconciliation_last_success_unix_seconds
+    proposed_expr: "time() - reconciliation_last_success_unix_seconds > 2 * 3600 (default interval is 1h)"
+    why_missing: "The reconciliation scheduler logs and persists run rows (reconciliation_runs) but exports no last-success heartbeat; absence of a log line is not alertable."
+    interim: "SQL check an operator can run by hand: SELECT stream, max(run_at) FROM reconciliation_runs GROUP BY stream, per tenant, under that tenant's scope (FORCE RLS: set app.tenant_id) (docs/runbooks/incident-response-and-oncall.md)."
+
+  - id: LedgerDriftAsMetric
+    severity: page
+    proposed_metric: reconciliation_mismatches_open
+    proposed_expr: "reconciliation_mismatches_open > 0"
+    why_missing: "Drift is visible as the log event in log-event-alert-rules.yml (LedgerDriftP1) and as a durable alert row, not as a metric."
+    interim: "Log-event rule LedgerDriftP1."

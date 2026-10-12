@@ -1,0 +1,232 @@
+# Prometheus-format alert rules for the metrics platform-api ALREADY EMITS (OPS-READINESS-LOCAL).
+#
+# STATUS: NOT WIRED. No Prometheus (or any metrics backend) exists in any environment. platform-api's
+# OTEL_EXPORTER supports only "stdout" and "none" today (internal/observability/metrics.go), so none of
+# the series below is scrapeable anywhere, and no Alertmanager / receiver / recipient exists.
+# ALERT-DELIVERY-1 is OPEN: even a firing rule pages nobody. Writing these rules is not alerting.
+# Wiring them needs (a) a Prometheus-compatible OTel exporter or collector [PROVIDER DEPENDENT / AWS],
+# (b) an Alertmanager route to a named human on-call [HD-PRH2-4-OPS, HUMAN decision]. Nothing here
+# invents a recipient; every rule carries only a `severity` label, never a receiver.
+#
+# Metric names assume the standard OpenTelemetry -> Prometheus translation: instrument names pass
+# through unchanged (all counters already end in _total, no units are set on the custom instruments);
+# the otelhttp histogram `http.server.request.duration` (unit s) becomes
+# `http_server_request_duration_seconds_{bucket,count,sum}` with dotted attribute names underscored.
+#
+# Drift guard: deploy/observability/rules_parity_test.go fails the build if any metric or label used
+# here is not emitted by the code (custom instruments are found in the source, the otelhttp series
+# is proven by running the real handler). Signals the platform does NOT emit as metrics (ledger drift,
+# kill switch, DB pool saturation, reconciliation staleness) are in log-event-alert-rules.yml and
+# pending-signals.yml, never invented here.
+#
+# Thresholds are starting points, not tuned SLOs (docs/runbooks/observability-and-alerting.md section 2).
+# severity: page = would page an on-call if one existed; ticket = work-hours ticket; info = dashboard.
+
+groups:
+  - name: platform-api-payments
+    rules:
+      - alert: PaymentsSweeperStalled
+        # Sweeper tick default is 15s (PAYMENTS_SWEEP_INTERVAL_SECONDS); 8 missed ticks = stalled.
+        # absent() covers "never ran" once the series is scraped at all.
+        expr: time() - payments_sweeper_last_pass_unix_seconds > 120
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Payments sweeper has not completed a pass for over 2 minutes"
+          description: "Deposit polling and payout dispatch/resend/resolve run in this loop. Stalled = payments stop progressing."
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: PaymentsSweeperItemFailures
+        # payment dispatch failures: any errored or panicked sweeper item.
+        expr: increase(payments_sweeper_items_total{result=~"error|panic"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Payments sweeper items are failing (error or panic)"
+          description: "A deposit poll or payout dispatch step failed. result=panic is always a bug. Look for 'payments sweeper:' log lines (tenant and attempt ids, no provider payloads)."
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: PaymentsSweeperTenantFailures
+        expr: increase(payments_sweeper_tenant_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Payments sweeper could not list or claim work for a tenant"
+          description: "phase=list|claim|panic. A whole tenant's payment work may be silently skipped."
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: PaymentsSweeperResolutionOnlyBlocksGrowing
+        # New money-moving dispatches withheld for a non-active tenant: normal right after a suspension,
+        # a problem if it keeps growing (a suspended tenant with work queued).
+        expr: increase(payments_sweeper_resolution_only_blocks_total[1h]) > 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "Dispatches are being withheld for a non-active tenant"
+          description: "Expected while a tenant is suspended or closed; investigate if it persists after reactivation."
+          runbook: docs/runbooks/launch-and-suspension.md
+
+  - name: platform-api-webhook-admission
+    rules:
+      - alert: WebhookAdmissionDirectoryUnloaded
+        # The admission layer is failing closed on every webhook route. Not expected outside a fresh deploy.
+        expr: sum by (provider_kind) (increase(webhook_admission_decisions_total{decision="rejected",reason="directory_unloaded"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Webhook admission is rejecting everything: tenant directory not loaded"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: WebhookAdmissionVerifiedRefusals
+        # Ratio stays WITHIN stage="verified" (never mix stages: one request is admitted once per stage).
+        expr: |
+          sum by (provider_kind) (rate(webhook_admission_decisions_total{decision="rejected",stage="verified"}[10m]))
+            /
+          sum by (provider_kind) (rate(webhook_admission_decisions_total{stage="verified"}[10m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "More than 5% of verified-stage webhook decisions are refusals"
+          description: "A vendor's retry window may be at risk. reason label: verified, db_gate, domain_bulkhead, inflight, panic."
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: WebhookAdmissionCapacityRefusals
+        expr: sum by (provider_kind, reason) (increase(webhook_admission_decisions_total{decision="rejected",reason=~"db_gate|domain_bulkhead|inflight"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Webhook pool-protection bulkheads are refusing traffic"
+          description: "Sustained refusals suggest the bulkheads are undersized for real traffic, not necessarily an attack."
+          runbook: docs/runbooks/load-and-soak-test-plan.md
+
+      - alert: WebhookAdmissionInflightSaturated
+        # A4a in-flight bulkhead occupancy. Rest value is 0. Threshold must be set from the configured
+        # per-domain bulkhead size once real traffic exists; 0 disables nothing, this is a placeholder floor.
+        expr: max by (provider_kind) (webhook_admission_inflight) > 0
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Webhook in-flight slots have been continuously occupied for 30 minutes"
+          description: "At rest this gauge is 0. A permanently non-zero value suggests a leaked slot or a stuck handler. Tune against the configured bulkhead size."
+          runbook: docs/runbooks/load-and-soak-test-plan.md
+
+  - name: platform-api-durable-alerting
+    rules:
+      - alert: AlertRoutingNotReady
+        # ALERT-DELIVERY-1. EXPECTED TO BE FIRING TODAY: no route, no human channel, no recipient exists.
+        # It must keep firing until the owner closes ALERT-DELIVERY-1; a silenced or deleted copy hides the gap.
+        expr: alert_routing_ready{severity="p1"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "No configured path would notify a person for P1 alerts (ALERT-DELIVERY-1 OPEN)"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: AlertDeliveryDead
+        expr: increase(alert_dead_total[15m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "A durable alert exhausted its delivery attempts"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: AlertUnrouted
+        expr: increase(alert_unrouted_total{severity="p1"}[15m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "A P1 durable alert was raised with no route (nobody notified)"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: AlertRaiseFailures
+        expr: increase(alert_raise_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Raising a durable alert failed (the alert itself may be lost)"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: AlertDispatcherStale
+        # No pass of any result in 10 minutes: the dispatcher loop is not running.
+        expr: sum(increase(alert_dispatcher_passes_total[10m])) == 0
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Alert dispatcher loop has completed no passes in 10 minutes"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+  - name: platform-api-background-workers
+    rules:
+      - alert: KycOutboxStalled
+        # KYC outbox tick default is 5s (KYC_OUTBOX_INTERVAL_SECONDS).
+        expr: time() - kyc_outbox_last_pass_unix_seconds > 120
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "KYC submission outbox worker has not completed a pass for over 2 minutes"
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: KycOutboxLagging
+        # stuck outbox / sweeper lag: rows claimed far past their due time.
+        expr: kyc_outbox_oldest_due_age_seconds > 300
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "KYC outbox rows are being claimed more than 5 minutes after they were due"
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: KycOutboxDeferredTooLong
+        # Rows deferred because the tenant is not active; expected during a suspension, not for days.
+        expr: kyc_outbox_oldest_deferred_age_seconds > 86400
+        labels:
+          severity: info
+        annotations:
+          summary: "KYC outbox rows have been deferred for an inactive tenant for over a day"
+          runbook: docs/runbooks/launch-and-suspension.md
+
+      - alert: KycOutboxItemFailures
+        expr: increase(kyc_outbox_items_total{result=~"failed_terminal|phase_c_failed|apply_conflict"}[30m]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "KYC outbox items ended in a terminal or conflicting state"
+          runbook: docs/runbooks/operational-runbooks.md
+
+  - name: platform-api-http
+    rules:
+      - alert: Http5xxRatioHigh
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+            /
+          sum(rate(http_server_request_duration_seconds_count[5m]))
+            > 0.01
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "More than 1% of HTTP requests answered 5xx over 5 minutes"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: ReadinessFailing
+        # /readyz answers 503 when the DB health probe fails (internal/httpserver/health.go).
+        expr: sum(increase(http_server_request_duration_seconds_count{http_route="/readyz",http_response_status_code="503"}[5m])) > 3
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "/readyz has answered 503 repeatedly: database health probe failing"
+          runbook: docs/runbooks/incident-response-and-oncall.md

@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration test-integration-runtime-role lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down dev-db-init-roles dev-db-init-test-admin ci
+.PHONY: drill-backup-restore drill-backup-restore-dry-run smoke-local build run test test-integration test-integration-runtime-role lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down dev-db-init-roles dev-db-init-test-admin ci
 
 GO ?= go
 DATABASE_URL ?= postgres://igaming:igaming_dev_password@127.0.0.1:5432/igaming_platform_dev?sslmode=disable
@@ -100,3 +100,16 @@ dev-db-init-test-admin:
 # ci runs the same checks CI runs, so failures are caught locally first.
 ci: fmt-check vet lint build test
 	@echo "Run 'make test-integration' separately against a running dev database."
+
+# OPS-READINESS-LOCAL: scripted local backup/restore drill and a small local smoke, both on PRIVATE
+# scratch databases (drill_bk_*), local hosts only, synthetic data. They use the existing test-admin
+# (CREATEDB) and owner harness credentials via TEST_ADMIN_DATABASE_URL / TEST_DATABASE_URL and never
+# alter a role or password. Runbooks: docs/runbooks/restore-from-backup.md, load-and-soak-test-plan.md.
+drill-backup-restore:
+	TEST_ADMIN_DATABASE_URL=$(TEST_ADMIN_DATABASE_URL) TEST_DATABASE_URL=$(DATABASE_URL) deploy/drill/backup-restore-drill.sh --deposits 200
+
+drill-backup-restore-dry-run:
+	TEST_ADMIN_DATABASE_URL=$(TEST_ADMIN_DATABASE_URL) TEST_DATABASE_URL=$(DATABASE_URL) deploy/drill/backup-restore-drill.sh --dry-run
+
+smoke-local:
+	TEST_ADMIN_DATABASE_URL=$(TEST_ADMIN_DATABASE_URL) TEST_DATABASE_URL=$(DATABASE_URL) deploy/loadtest/local-smoke.sh
