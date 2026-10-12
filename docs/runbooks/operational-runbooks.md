@@ -774,3 +774,38 @@ ledger, ADR 0113 section 6). The remedy depends on the database:
 **Why the counts can include history that "worked" before.** Before 0132 nothing tied a request's state to its
 ledger legs: a request inserted directly as `approved`, a `withdrawal_*` posting with no hold leg, or a wallet-less
 `player_*` account were all accepted. 0132 refuses them from now on and refuses to start on top of them.
+
+## 18. Closure refused `LA025` and reconciliation check D (ADR 0113 slices 2-3, migrations 0133 / 0134)
+
+**`LA025` (closure refused: player withdrawal hold balances are not zero).** A tenant or brand closure is refused
+while any `player_withdrawal_hold` account of the subject's player wallets has a non-zero balance (tenant: every
+brand; brand: the wallets of that brand). It fires after `LA023` (hold-bearing requests) and `LA024` (brand open
+bets), so on its own it means a hold balance that NO non-terminal request explains: a stranded hold (the HD-CTF-4
+population). The API answers `409 LAUNCH_WITHDRAWALS_HOLDING_FUNDS` with check code `LA025` (database) or
+`H-6:withdrawal_hold_balance_non_zero` (Go readiness / executor). **Orchestrator default (ADR 0113 s8 Q1,
+reversible by the owner): the closure stays refused even when nothing can resolve the hold yet; suspension is the
+lever** (suspend the subject; do not close it). Do not post anything to "zero" the hold: every compensating leg on
+a hold account must go through a governed path (hold resolution, M2/M4) and is subject to the 0132 triggers. A
+stranded hold is also a check-D finding (below): investigate it there.
+
+**Deploy note (0133).** `CREATE INDEX idx_wallet_balance_projection_withdrawal_hold` takes a `SHARE` lock on
+`wallet_balance_projection` for the build (writers wait; the index covers only hold rows). Apply in a write-quiet
+window on a large database.
+
+**Check D findings (`stream:ledger_withdrawal_hold`, P1).** Hourly, inside the `ledger_vs_projection` run, for
+every tenant (active or observed), ONE SQL statement rebuilds each wallet's hold balance from `ledger_entries` and
+compares it with the sum of the wallet's non-terminal requests, and re-checks every request against check A's
+link rules. Read the open rows of the latest `ledger_vs_projection` run:
+`withdrawal_hold_open_mismatch` (key = hold `ledger_account_id`, or `wallet:<id>:<asset>` with no hold account;
+expected = non-terminal sum, actual = rebuilt balance) and `withdrawal_request_ledger_link_invalid` (key = request
+id; actual = `violation=WD03x state=<state>`). Findings are standing (every run re-reports until the cause is
+resolved, one open alert with growing occurrences) and append-only. Treat as a financial incident (section 3):
+find the writer (`pg_trigger` history, owner sessions, DB audit), never edit or delete a ledger row or a request;
+correct only through governed compensating paths with ledger-finance sign-off.
+
+**Run failure `reconciliation.run_failed` with `ErrWithdrawalHoldCheckBlind`.** Check D fails CLOSED (the run is
+not recorded, never `clean`) when its read is blind: the session is not exactly the tenant scope, or one table
+shows none of the tenant's rows while another shows them (no request visible while E0b hold transactions are; no
+hold transaction while requests are; no hold entry while the hold projection shows postings). Causes: an RLS
+policy change, a session-setup defect, or a request / ledger row tampered away. Escalate to security +
+ledger-finance; do not disable the check.

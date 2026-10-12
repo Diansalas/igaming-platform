@@ -427,6 +427,7 @@ remain the day-one signal for everything not listed here.
 | Casino callback integrity | `casino.callback_integrity` (p1) | `provider:<provider_id>:reason:<reason>` | detached |
 | Ledger projection drift | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_vs_projection` | in the run tx |
 | **Unlinked manual adjustment (governance breach, NOT drift)** | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_unlinked_manual_adjustment` | in the run tx |
+| **Withdrawal hold invariant #12 / check A link rules (ADR 0113 check D, NOT projection drift)** | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_withdrawal_hold` | in the run tx |
 | Sportsbook / casino-consistency mismatch | `reconciliation.sportsbook_settlement_mismatch` / `reconciliation.casino_consistency_mismatch` (p1) | `stream:sportsbook_settlement` / `stream:casino_consistency` | in the run tx |
 | Casino statement / payment statement mismatch (REPEATABLE READ) | `reconciliation.casino_statement_mismatch` / `reconciliation.payment_statement_mismatch` (p1) | `stream:casino_statement` / `stream:payment_statement:provider:<id>` | after the snapshot commits, detached |
 | A reconciliation run transaction failed | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
@@ -710,6 +711,14 @@ Two different findings share this Kind; the discriminator tells them apart.
   Balances reconcile; the control (four-eyes, closed reason code) was bypassed. Do not "rebuild the
   projection". Treat it as a compliance incident (security + ledger-finance) and find who posted it from
   the audit log.
+- `stream:ledger_withdrawal_hold` (ADR 0113 check D): **a withdrawal hold invariant breach, not projection
+  drift.** Mismatch kinds `withdrawal_hold_open_mismatch` (a wallet's `player_withdrawal_hold` balance rebuilt
+  from `ledger_entries` differs from the sum of its non-terminal withdrawal requests) and
+  `withdrawal_request_ledger_link_invalid` (a request fails check A's link rules; `actual_value` carries the
+  WD03x code). The 0132 triggers make both unreachable for every session while they are enabled, so a finding
+  means history, an owner `DISABLE TRIGGER`, or a defect: a P1 financial incident (ledger-finance + security);
+  see operational runbook section 18. A run that could not read the tenant's rows (blind read) is NOT
+  reported here: it fails and raises `reconciliation.run_failed` (`stream:ledger_vs_projection`).
 
 **How to investigate (both streams).** Do NOT rely on the alert's `run_id` attribute: it is the run that
 first raised the alert, and a repeat raise only adds an occurrence (which carries no attributes). Query

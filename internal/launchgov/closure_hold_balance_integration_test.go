@@ -250,6 +250,20 @@ func TestLA025_GoArm_ReadinessRequestAndExecutor(t *testing.T) {
 	if st := w.status(s2); st != "active" {
 		t.Fatalf("brand 2 status %s", st)
 	}
+
+	// A zero-net hold account (a cancelled request: hold and release) is not a hold balance for the Go
+	// arm either: readiness counts 0 and the closure request is admitted.
+	b3 := w.activeBrand(tid)
+	s3 := launchgov.Subject{TenantID: tid, BrandID: &b3}
+	p3, w3 := w.playerWithWallet(tid, b3)
+	w.withdrawal(tid, b3, p3, w3, "cancelled")
+	rd3, err := w.svc.EvaluateReadiness(ctx, launchgov.EvalInput{Subject: s3, Action: launchgov.ActionClose})
+	if err != nil || rd3.Info["withdrawal_hold_accounts_non_zero"] != 0 || containsStr(rd3.Notices, launchgov.NoticeFundsHoldBlocksClosure) {
+		t.Fatalf("a zero-net hold account is not a hold balance: %+v err=%v", rd3.Info, err)
+	}
+	in3 := launchgov.RequestInput{Subject: s3, Action: launchgov.ActionClose, ReasonCode: "offboarding"}
+	in3.AcknowledgedCheckCodes = w.nonPassing(in3)
+	w.mustRequest(w.req, in3)
 }
 
 // Concurrency with a NEW hold (ADR 0113 s4.3 race), both orders, brand and tenant. The only
