@@ -287,6 +287,16 @@ deliberately left untouched - see "Known gaps" below):
 
 ## 2. Minimum alert-rule list (to configure once a real backend exists)
 
+> **Rule files (OPS-READINESS-LOCAL, 2026-10-12): `deploy/observability/`.** `prometheus-alert-rules.yml` (rules over the
+> metrics the platform emits), `log-event-alert-rules.yml` (signals that exist only as log lines) and
+> `pending-signals.yml` (alerts that cannot be written because no signal exists: DB pool saturation, reconciliation
+> staleness, drift as a metric). **NOT WIRED to any backend; ALERT-DELIVERY-1 is OPEN; nobody is paged.**
+> `deploy/observability/rules_parity_test.go` fails the build if a rule references a metric, label or log event the code
+> does not emit. The test found that the log events `payment_webhook_signature_invalid` and
+> `casino_webhook_signature_invalid` named in item 4 below do not exist in code any more (signature rejections are visible
+> as `webhook_admission_decisions_total{decision="rejected"}` and in the audit log); item 4 is stale on that point.
+> The otelhttp request-duration histogram labels the route as the mux pattern path (`/readyz`), without the method.
+
 Ordered roughly by how directly each maps to real player-money or
 compliance risk on a financial platform, per `CLAUDE.md`'s financial
 rules. Every rule below names the log event/table it reads and a

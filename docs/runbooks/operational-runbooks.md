@@ -138,8 +138,8 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 
 1. `platform-api` fails closed on DB loss (`/readyz` goes unready); this is
    correct behavior, not a bug to route around.
-2. If this is a full primary loss: there is currently **no tested restore
-   path** (see `docs/runbooks/backup-and-disaster-recovery.md` — this is a
+2. If this is a full primary loss: there is currently **no production restore
+   path** (the procedure is rehearsed locally only: `restore-from-backup.md`; see `docs/runbooks/backup-and-disaster-recovery.md` — this is a
    known, documented production blocker, not an oversight).
 3. If this is connection exhaustion / pool starvation rather than data
    loss: check `internal/db`'s pool configuration and the reconciliation
@@ -187,9 +187,10 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 
 ## 8. Restore verification (once a backup mechanism exists)
 
-See `docs/runbooks/backup-and-disaster-recovery.md`'s "Minimum action
-plan" — this step does not exist yet because no backup mechanism has been
-built. Do not attempt an improvised restore against production without
+A local restore drill and a restore procedure now exist: `docs/runbooks/restore-from-backup.md` (script
+`deploy/drill/backup-restore-drill.sh`, verifiers `deploy/drill/verify.sql`). They are rehearsed on scratch databases only.
+No managed backup mechanism exists, so there is still no production restore path; see
+`docs/runbooks/backup-and-disaster-recovery.md`'s "Minimum action plan". Do not attempt an improvised restore against production without
 that groundwork; an untested restore procedure executed for the first time
 during a real incident is itself a major risk.
 
