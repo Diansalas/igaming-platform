@@ -302,9 +302,13 @@ func codeLines(src, needle string) int {
 var prooftestImporters = map[string]bool{
 	filepath.Join("internal", "testsupport", "launchfix"):   true,
 	filepath.Join("internal", "testsupport", "launchdrive"): true,
+	// ADR 0115 S1: rgfix files the floor four-eyes flow (request / approve / apply proofs) for
+	// SYNTHETIC-NOT-LEGAL fixture floors; integration-tagged, pinned by the same fixture pin.
+	filepath.Join("internal", "testsupport", "rgfix"): true,
 }
 
 var staticAllowed = map[string]bool{
+	filepath.Join("internal", "testsupport", "rgfix"): true, // ADR 0115 S1 fixture (see prooftestImporters)
 	// ADR 0112 slice 3: the launch authorisation service signs request / cancel / approve /
 	// reject / suspend proofs for the authenticated principal (security review mandatory).
 	filepath.Join("internal", "launchgov"):                  true,
