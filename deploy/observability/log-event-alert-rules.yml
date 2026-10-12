@@ -1,0 +1,120 @@
+# Log-event alert rules (OPS-READINESS-LOCAL). NOT Prometheus rules: these signals exist today ONLY as
+# structured JSON log lines (slog), not as metrics, so a Prometheus rule cannot see them. A log backend
+# (Loki, CloudWatch Logs metric filters, Datadog, ...) would turn each entry into an alert. None exists.
+#
+# STATUS: NOT WIRED. No log backend, no alert routing, no recipient. ALERT-DELIVERY-1 is OPEN: nobody
+# is paged by anything in this file. Some of these events ALSO raise a durable alert row (ADR 0102,
+# docs/runbooks/observability-and-alerting.md section 3); a stored alert is not a delivery either.
+#
+# Format (custom, one entry per event):
+#   id        stable rule id
+#   severity  page | ticket | info   (what it would be if delivery existed)
+#   event     the exact slog message string; the parity test requires it as a string literal in non-test Go code
+#   match     how a backend would select it ("msg" == event, optional field filters)
+#   threshold when it fires
+#   source    file that emits it (informational; the parity test only checks the literal exists)
+#   runbook   repo path that must exist
+#
+# Drift guard: deploy/observability/rules_parity_test.go.
+
+rules:
+  - id: LedgerDriftP1
+    severity: page
+    event: "reconciliation sweep: MISMATCH FOUND"
+    match: 'msg = "reconciliation sweep: MISMATCH FOUND" (level=ERROR; fields tenant_id, run_id | stream)'
+    threshold: ">0 occurrences, ever. CLAUDE.md: any non-zero drift is a P1 incident."
+    source: internal/reconciliation/scheduler.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: ReconciliationTenantRunFailed
+    severity: ticket
+    event: "reconciliation sweep: tenant run failed"
+    match: 'msg = "reconciliation sweep: tenant run failed"'
+    threshold: ">0 per hour. A tenant's scheduled sweep did not run (distinct from a drift FINDING)."
+    source: internal/reconciliation/scheduler.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: PaymentKillSwitchEngaged
+    severity: page
+    event: "payments_kill_switch_engaged_alert"
+    match: 'msg = "payments_kill_switch_engaged_alert" (fields tenant_id, provider_scope, operation_scope, reason_code, changed_by, request_id)'
+    threshold: ">0. An operator-initiated containment action; route to the owner of provider_scope."
+    source: internal/httpserver/payments_kill_switch_handlers.go
+    runbook: docs/runbooks/payment-kill-switch-release-recovery.md
+
+  - id: PanicRecovered
+    severity: page
+    event: "panic_recovered"
+    match: 'msg = "panic_recovered"'
+    threshold: ">0. A panic reaching recoverMiddleware is always a bug."
+    source: internal/httpserver/middleware.go
+    runbook: docs/runbooks/incident-response-and-oncall.md
+
+  - id: PaymentWebhookFailed
+    severity: ticket
+    event: "payment_webhook_failed"
+    match: 'msg = "payment_webhook_failed"'
+    threshold: ">5 per minute, or >5% of payment callbacks."
+    source: internal/httpserver/deposit_handlers.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: PaymentWebhookIntegrityAlertPayloadMismatch
+    severity: page
+    event: "payment_webhook_integrity_alert_payload_mismatch"
+    match: 'msg = "payment_webhook_integrity_alert_payload_mismatch"'
+    threshold: ">0. A provider callback disagrees with the platform's own record of the payment."
+    source: internal/httpserver/deposit_handlers.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: PaymentWebhookDepositAlreadyReversed
+    severity: page
+    event: "payment_webhook_integrity_alert_deposit_already_reversed"
+    match: 'msg = "payment_webhook_integrity_alert_deposit_already_reversed"'
+    threshold: ">0."
+    source: internal/httpserver/deposit_handlers.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: WebhookAdmissionPanicRecovered
+    severity: page
+    event: "webhook_admission_panic_recovered"
+    match: 'msg = "webhook_admission_panic_recovered"'
+    threshold: ">0. The admission layer failed closed after a panic."
+    source: internal/httpserver/webhook_admission.go
+    runbook: docs/runbooks/incident-response-and-oncall.md
+
+  # NOTE: signature failures no longer have a dedicated log event name in code (the older names
+  # payment_webhook_signature_invalid / casino_webhook_signature_invalid listed in
+  # observability-and-alerting.md section 2 do not exist). Rejections are visible as
+  # webhook_admission_decisions_total{decision="rejected"} (prometheus-alert-rules.yml) and in the audit log.
+
+  - id: CasinoIntegrityAlertBetNotFound
+    severity: page
+    event: "casino_webhook_integrity_alert_bet_not_found"
+    match: 'msg = "casino_webhook_integrity_alert_bet_not_found"'
+    threshold: ">0. A provider named a bet the ledger does not know. Never expected in normal operation."
+    source: internal/httpserver/casino_handlers.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: CasinoIntegrityAlertRoundOwnershipConflict
+    severity: page
+    event: "casino_webhook_integrity_alert_provider_round_ownership_conflict"
+    match: 'msg = "casino_webhook_integrity_alert_provider_round_ownership_conflict"'
+    threshold: ">0."
+    source: internal/httpserver/casino_handlers.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: WithdrawalApprovalFailed
+    severity: ticket
+    event: "approve_withdrawal_failed"
+    match: 'msg = "approve_withdrawal_failed"'
+    threshold: ">5 per minute."
+    source: internal/httpserver/withdrawal_handlers.go
+    runbook: docs/runbooks/operational-runbooks.md
+
+  - id: HttpRequestLog5xx
+    severity: info
+    event: "http_request"
+    match: 'msg = "http_request" AND status >= 500'
+    threshold: "Log-derived twin of Http5xxRatioHigh in prometheus-alert-rules.yml, for a backend that has logs but not metrics."
+    source: internal/httpserver/middleware.go
+    runbook: docs/runbooks/incident-response-and-oncall.md
