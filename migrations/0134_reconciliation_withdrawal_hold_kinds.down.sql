@@ -4,6 +4,10 @@
 -- make a down pass. reconciliation_mismatches is FORCE RLS and this session carries no tenant, so the
 -- check lifts FORCE for the owner inside this migration transaction and restores it (the 0115 down
 -- pattern). Otherwise the 0115 CHECK is restored byte for byte (whole-schema snapshot test).
+--
+-- Hand-applied with psql: run it as ONE transaction (`psql -1 -v ON_ERROR_STOP=1 -f ...`). Statement by
+-- statement in autocommit, a refusal after the NO FORCE step would leave reconciliation_mismatches
+-- without FORCE ROW LEVEL SECURITY. The migrate runner already applies each file in one transaction.
 
 ALTER TABLE reconciliation_mismatches NO FORCE ROW LEVEL SECURITY;
 DO $$

@@ -312,11 +312,13 @@ func rebuildAndProject(ctx context.Context, tx pgx.Tx, accountID uuid.UUID) (reb
 	var pAsset, pType *string
 	var pDebit, pCredit *int64
 	err = tx.QueryRow(ctx, `
-		SELECT la.asset_code, la.account_type,
-		       COALESCE((SELECT SUM(le.amount) FROM ledger_entries le WHERE le.ledger_account_id = la.id AND le.direction = 'debit'), 0),
-		       COALESCE((SELECT SUM(le.amount) FROM ledger_entries le WHERE le.ledger_account_id = la.id AND le.direction = 'credit'), 0),
+		SELECT la.asset_code, la.account_type, s.debit_total, s.credit_total,
 		       p.asset_code, p.account_type, p.debit_total, p.credit_total
 		  FROM ledger_accounts la
+		  CROSS JOIN LATERAL (
+		      SELECT COALESCE(SUM(le.amount) FILTER (WHERE le.direction = 'debit'), 0) AS debit_total,
+		             COALESCE(SUM(le.amount) FILTER (WHERE le.direction = 'credit'), 0) AS credit_total
+		        FROM ledger_entries le WHERE le.ledger_account_id = la.id) s
 		  LEFT JOIN wallet_balance_projection p ON p.ledger_account_id = la.id
 		 WHERE la.id = $1`, accountID).Scan(&rebuilt.AssetCode, &rebuilt.AccountType, &rebuilt.DebitTotal, &rebuilt.CreditTotal,
 		&pAsset, &pType, &pDebit, &pCredit)

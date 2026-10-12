@@ -8,25 +8,26 @@
 -- player wallets is non-zero.
 --
 -- What it does, and only this:
---   1. idx_wallet_balance_projection_withdrawal_hold: wallet_balance_projection (tenant_id) WHERE
---      account_type = 'player_withdrawal_hold' (ledger-finance condition C3). The predicate names ONLY
---      account_type, a column the projection trigger (0023) never changes, and the key is tenant_id,
---      also never changed, so an ON CONFLICT DO UPDATE of credit_total / debit_total / updated_at stays a
---      HOT update (no indexed column changes). A predicate on credit_total / debit_total would make
---      every posting to a hold account a non-HOT update on the hottest table. The totals are filtered
---      on the heap.
+--   1. idx_ledger_accounts_withdrawal_hold: ledger_accounts (tenant_id) WHERE account_type =
+--      'player_withdrawal_hold'. tenant_id and account_type of a ledger_accounts row never change (ledger_accounts_immutable_fields
+--      trigger), so the partial index costs one insert per hold account and nothing on the posting path.
+--      The per-account balance is then summed from ledger_entries through the existing
+--      idx_ledger_entries_account (ledger_account_id, created_at). No index is added to
+--      wallet_balance_projection or ledger_entries (no overlap with 0135's
+--      idx_ledger_entries_tenant_player_asset_created). Built under SET LOCAL lock_timeout = '5s': the
+--      SHARE lock on ledger_accounts fails fast instead of queueing writers behind a long wait.
 --   2. launch_subject_status_guard: CREATE OR REPLACE of 0130's body, byte for byte, plus ONE marked
 --      block (LA025) inside the closure branch, under the same RLS-bound read window (app.tenant_id
 --      bound to the subject's tenant, app.player_account_id cleared, both restored) and under the gate
 --      locks the closure already holds (brand: brand_status_gate_key EXCLUSIVE taken by this trigger;
 --      tenant: tenant_status_gate_key EXCLUSIVE taken by tenants_status_change_gate in the same
---      statement). The read is the projection (accepted by both ADR 0113 reviewers for this
---      refusal-only check: written by trigger in the same transaction as each entry, already the
---      readiness source; a zero-showing drift is caught by ledger_vs_projection and reconciliation D).
---      A tenant closure counts the hold accounts of EVERY brand of the tenant; a brand closure counts
---      only the hold accounts whose wallet belongs to that brand (wallets.brand_id, FK-pinned to the
---      player's brand by 0019). LA023 (hold-bearing requests) stays and is checked first; then LA024
---      (brand open bets); then LA025.
+--      statement). The balance is REBUILT FROM ledger_entries (append-only), NOT read from
+--      wallet_balance_projection: security review C1 executed, as the runtime role, an UPDATE of a hold
+--      projection row (debit_total = credit_total) followed by a committed brand closure; the projection
+--      is runtime-writable outside the acting fence, the ledger is not. A tenant closure counts the hold
+--      accounts of EVERY brand of the tenant; a brand closure counts only the hold accounts whose wallet
+--      belongs to that brand (wallets.brand_id). LA023 (hold-bearing requests) stays and is checked
+--      first; then LA024 (brand open bets); then LA025.
 --
 -- Race (ADR 0113 s4.3): the only hold-INCREASING leg is E0b (B-i, 0132), posted in the transaction of
 -- E0, whose insert takes the tenant and brand gate keys SHARED (0131). A closure holds the key of its
@@ -42,10 +43,11 @@
 -- `NEW.status = 'closed'` and adds no other status literal or status reader.
 
 -- ---------------------------------------------------------------------------
--- 1. The partial projection index (C3).
+-- 1. The partial hold-account index.
 -- ---------------------------------------------------------------------------
-CREATE INDEX idx_wallet_balance_projection_withdrawal_hold
-    ON wallet_balance_projection (tenant_id)
+SET LOCAL lock_timeout = '5s';
+CREATE INDEX idx_ledger_accounts_withdrawal_hold
+    ON ledger_accounts (tenant_id)
     WHERE account_type = 'player_withdrawal_hold';
 
 -- ---------------------------------------------------------------------------
@@ -151,15 +153,17 @@ BEGIN
                  WHERE b.tenant_id = v_tenant AND b.brand_id = v_brand AND b.status = 'open';
             END IF;
             -- LA025 (ADR 0113 s4.3, migration 0133): the ledger closure arm. Non-zero
-            -- player_withdrawal_hold balances of the subject's player wallets, read from the
-            -- projection through idx_wallet_balance_projection_withdrawal_hold inside this RLS-bound
-            -- window; a brand closure joins wallets.brand_id (RLS-bound too).
-            SELECT count(*) INTO v_holds FROM public.wallet_balance_projection p
-             WHERE p.tenant_id = v_tenant AND p.account_type = 'player_withdrawal_hold'
-               AND p.credit_total <> p.debit_total
+            -- player_withdrawal_hold balances of the subject's player wallets, REBUILT FROM
+            -- ledger_entries (never the runtime-writable projection) inside this RLS-bound window; a
+            -- brand closure joins wallets.brand_id (RLS-bound too).
+            SELECT count(*) INTO v_holds FROM public.ledger_accounts la
+             WHERE la.tenant_id = v_tenant AND la.account_type = 'player_withdrawal_hold'
                AND (v_brand IS NULL OR EXISTS (
                     SELECT 1 FROM public.wallets wl
-                     WHERE wl.id = p.wallet_id AND wl.tenant_id = v_tenant AND wl.brand_id = v_brand));
+                     WHERE wl.id = la.wallet_id AND wl.tenant_id = v_tenant AND wl.brand_id = v_brand))
+               AND (SELECT COALESCE(sum(CASE e.direction WHEN 'credit' THEN e.amount ELSE -e.amount END), 0)
+                      FROM public.ledger_entries e
+                     WHERE e.ledger_account_id = la.id AND e.tenant_id = v_tenant) <> 0;
             PERFORM set_config('app.tenant_id', COALESCE(v_prev_t, ''), true);
             PERFORM set_config('app.player_account_id', COALESCE(v_prev_p, ''), true);
             IF v_wd > 0 THEN

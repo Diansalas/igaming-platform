@@ -12,6 +12,8 @@ package reconciliation
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -49,6 +51,13 @@ func legacySubmittedWithdrawal(t *testing.T, pool *db.Pool, f fixture, wrID uuid
 //
 // Callers first call wdpath.SkipOnPersistentDatabase: the planted legs are permanent (append-only).
 func ownerTamperHoldLegs(ctx context.Context, tx pgx.Tx, fn func() error) error {
+	var tenant string
+	if err := tx.QueryRow(ctx, `SELECT current_setting('app.tenant_id', true)`).Scan(&tenant); err != nil {
+		return err
+	}
+	if id, err := uuid.Parse(tenant); err == nil {
+		plantedTenants.Store(id, true)
+	}
 	for _, q := range []string{
 		`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_withdrawal_hold_guard`,
 		`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_withdrawal_hold_link_at_commit`,
@@ -71,4 +80,25 @@ func ownerTamperHoldLegs(ctx context.Context, tx pgx.Tx, fn func() error) error 
 		}
 	}
 	return nil
+}
+
+// plantedTenants are the tenants that received an ownerTamperHoldLegs plant in this test binary.
+var plantedTenants sync.Map
+
+// withoutPlantedUnlinkedHoldLegs drops check D's WD042 findings (an unattributed hold leg, ADR 0113
+// slices 2-3 review LF C1) for tenants whose unattributed legs were planted on purpose by
+// ownerTamperHoldLegs: the payout reconciliation suites using it assert "no OTHER finding", and WD042
+// for their own plant is expected (it is asserted by TestADR0113D_UnlinkedZeroNetPair_IsNotClean). A
+// WD042 for any other tenant, and every other kind, is kept.
+func withoutPlantedUnlinkedHoldLegs(ms []Mismatch) []Mismatch {
+	var out []Mismatch
+	for _, m := range ms {
+		_, planted := plantedTenants.Load(m.TenantID)
+		if planted && m.MismatchKind == MismatchKindWithdrawalRequestLedgerLinkInvalid &&
+			strings.HasPrefix(m.ReconciliationKey, "ledger_transaction:") && strings.HasPrefix(m.ActualValue, "violation=WD042 ") {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }

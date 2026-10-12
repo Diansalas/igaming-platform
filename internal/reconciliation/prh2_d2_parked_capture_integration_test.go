@@ -357,6 +357,7 @@ func (w *d2World) d2AssertNoMoney(t *testing.T, pk d2Parked) {
 		}
 		var err error
 		_, drift, err = RunLedgerVsProjection(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
+		drift = withoutPlantedUnlinkedHoldLegs(drift)
 		return err
 	}); err != nil {
 		t.Fatal(err)

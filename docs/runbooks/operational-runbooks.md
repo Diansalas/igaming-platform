@@ -789,9 +789,12 @@ lever** (suspend the subject; do not close it). Do not post anything to "zero" t
 a hold account must go through a governed path (hold resolution, M2/M4) and is subject to the 0132 triggers. A
 stranded hold is also a check-D finding (below): investigate it there.
 
-**Deploy note (0133).** `CREATE INDEX idx_wallet_balance_projection_withdrawal_hold` takes a `SHARE` lock on
-`wallet_balance_projection` for the build (writers wait; the index covers only hold rows). Apply in a write-quiet
-window on a large database.
+The balance is rebuilt from `ledger_entries`, never read from `wallet_balance_projection` (which the runtime role
+can write), so "fixing" a projection row does not unblock a closure.
+
+**Deploy note (0133).** `CREATE INDEX idx_ledger_accounts_withdrawal_hold` takes a `SHARE` lock on
+`ledger_accounts` for the build (new-account inserts wait) under `lock_timeout = 5s`: if the lock is not granted
+within 5 s the migration fails cleanly (nothing applied) and can be re-run in a quieter moment.
 
 **Check D findings (`stream:ledger_withdrawal_hold`, P1).** Hourly, inside the `ledger_vs_projection` run, for
 every tenant (active or observed), ONE SQL statement rebuilds each wallet's hold balance from `ledger_entries` and
@@ -799,7 +802,8 @@ compares it with the sum of the wallet's non-terminal requests, and re-checks ev
 link rules. Read the open rows of the latest `ledger_vs_projection` run:
 `withdrawal_hold_open_mismatch` (key = hold `ledger_account_id`, or `wallet:<id>:<asset>` with no hold account;
 expected = non-terminal sum, actual = rebuilt balance) and `withdrawal_request_ledger_link_invalid` (key = request
-id; actual = `violation=WD03x state=<state>`). Findings are standing (every run re-reports until the cause is
+id; actual = `violation=WD03x state=<state>`; or key = `ledger_transaction:<id>`, actual = `violation=WD042 ...`:
+a hold leg whose transaction no request links, including a pair that nets to zero). Findings are standing (every run re-reports until the cause is
 resolved, one open alert with growing occurrences) and append-only. Treat as a financial incident (section 3):
 find the writer (`pg_trigger` history, owner sessions, DB audit), never edit or delete a ledger row or a request;
 correct only through governed compensating paths with ledger-finance sign-off.

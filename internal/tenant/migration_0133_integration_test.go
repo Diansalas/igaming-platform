@@ -2,9 +2,9 @@
 
 // ADR 0113 slice 2, migration 0133 (the LA025 ledger closure arm) on THROWAWAY scratch databases: a
 // whole-schema up/down/up snapshot (the down restores 0130's launch_subject_status_guard body byte for
-// byte and drops the index), the C3 index shape (HOT safety: no index of wallet_balance_projection
-// names a column the projection trigger updates), the LA025 read placed inside the RLS-bound window,
-// and the index read plan. The behaviour (stranded hold refused, brand scoping, races, Go arm) is in
+// byte and drops the index), the index shape (a partial index on ledger_accounts only; no index of
+// wallet_balance_projection is added), the LA025 read placed inside the RLS-bound window and rebuilt
+// from ledger_entries (never the projection), and the read plan. The behaviour (stranded hold refused, brand scoping, races, Go arm) is in
 // internal/launchgov/closure_hold_balance_integration_test.go. Requires TEST_DATABASE_URL and
 // TEST_ADMIN_DATABASE_URL (scratchdb); a skip is NOT evidence.
 package tenant
@@ -38,7 +38,7 @@ func TestMigration0133_UpDownUp_WholeSchema_RestoresThe0130GuardVerbatim(t *test
 	present := func() (idx int, la025 bool) {
 		var src string
 		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE indexname = 'idx_wallet_balance_projection_withdrawal_hold'`).Scan(&idx); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE indexname = 'idx_ledger_accounts_withdrawal_hold'`).Scan(&idx); err != nil {
 				return err
 			}
 			return tx.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = 'launch_subject_status_guard'`).Scan(&src)
@@ -72,134 +72,145 @@ func TestMigration0133_UpDownUp_WholeSchema_RestoresThe0130GuardVerbatim(t *test
 // debit_total or updated_at - the three columns the projection trigger's ON CONFLICT DO UPDATE
 // changes - so every projection update stays HOT-eligible. The LA025 read sits inside the guard's
 // RLS-bound window (between the set_config of the subject tenant and the restore).
-func TestMigration0133_IndexShape_HOTSafe_ReadInsideTheRLSWindow(t *testing.T) {
+
+// Index shape and read source (security C1): the only index 0133 adds is the partial
+// idx_ledger_accounts_withdrawal_hold (tenant_id) WHERE account_type = 'player_withdrawal_hold';
+// wallet_balance_projection gains no index and the guard never reads it; the LA025 read sums
+// ledger_entries and sits inside the guard's RLS-bound window (between the set_config of the subject
+// tenant and the restore).
+func TestMigration0133_IndexShape_LedgerSource_ReadInsideTheRLSWindow(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := lgScratch(t, "m0133i_")
+	if _, err := pool.MigrateUp(ctx, lgMigDir(t, migration0133Version-1)); err != nil {
+		t.Fatal(err)
+	}
+	indexes := func() map[string]string {
+		out := map[string]string{}
+		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'`)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var n, d string
+				if err := rows.Scan(&n, &d); err != nil {
+					return err
+				}
+				out[n] = d
+			}
+			return rows.Err()
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := indexes()
 	if _, err := pool.MigrateUp(ctx, lgMigDir(t, migration0133Version)); err != nil {
 		t.Fatal(err)
 	}
-	var def, src string
-	var offenders []string
+	after := indexes()
+	var added []string
+	for n := range after {
+		if _, ok := before[n]; !ok {
+			added = append(added, n)
+		}
+	}
+	want := "CREATE INDEX idx_ledger_accounts_withdrawal_hold ON public.ledger_accounts USING btree (tenant_id) WHERE (account_type = 'player_withdrawal_hold'::text)"
+	if len(added) != 1 || after["idx_ledger_accounts_withdrawal_hold"] != want {
+		t.Fatalf("0133 must add exactly the partial ledger_accounts index:\n added %v\n got %s\nwant %s", added, after["idx_ledger_accounts_withdrawal_hold"], want)
+	}
+	var src string
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_wallet_balance_projection_withdrawal_hold'`).Scan(&def); err != nil {
-			return err
-		}
-		rows, err := tx.Query(ctx, `
-			SELECT c.relname
-			  FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-			 WHERE i.indrelid = 'wallet_balance_projection'::regclass
-			   AND (EXISTS (SELECT 1 FROM unnest(i.indkey) k JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k
-			                 WHERE a.attname IN ('credit_total', 'debit_total', 'updated_at'))
-			        OR coalesce(pg_get_expr(i.indpred, i.indrelid), '') ~ '(credit_total|debit_total|updated_at)'
-			        OR coalesce(pg_get_expr(i.indexprs, i.indrelid), '') ~ '(credit_total|debit_total|updated_at)')`)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var n string
-			if err := rows.Scan(&n); err != nil {
-				rows.Close()
-				return err
-			}
-			offenders = append(offenders, n)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
 		return tx.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = 'launch_subject_status_guard'`).Scan(&src)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	want := "CREATE INDEX idx_wallet_balance_projection_withdrawal_hold ON public.wallet_balance_projection USING btree (tenant_id) WHERE (account_type = 'player_withdrawal_hold'::text)"
-	if def != want {
-		t.Fatalf("index shape:\n got %s\nwant %s", def, want)
-	}
-	if len(offenders) != 0 {
-		t.Fatalf("an index of wallet_balance_projection names a column the projection trigger updates (defeats HOT): %v", offenders)
+	if strings.Contains(src, "wallet_balance_projection") {
+		t.Fatal("the guard must never read wallet_balance_projection (runtime-writable, security C1)")
 	}
 	bind := strings.Index(src, "PERFORM set_config('app.tenant_id', v_tenant::text, true);")
-	read := strings.Index(src, "FROM public.wallet_balance_projection p")
+	read := strings.Index(src, "FROM public.ledger_accounts la")
 	join := strings.Index(src, "FROM public.wallets wl")
+	sum := strings.Index(src, "FROM public.ledger_entries e")
 	restore := strings.Index(src, "PERFORM set_config('app.tenant_id', COALESCE(v_prev_t, ''), true);")
-	if bind < 0 || read < 0 || join < 0 || restore < 0 || !(bind < read && read < join && join < restore) {
-		t.Fatalf("the LA025 projection read and wallets join must sit inside the RLS-bound window (bind=%d read=%d join=%d restore=%d)", bind, read, join, restore)
+	if bind < 0 || read < 0 || join < 0 || sum < 0 || restore < 0 || !(bind < read && read < join && join < sum && sum < restore) {
+		t.Fatalf("the LA025 read must sit inside the RLS-bound window (bind=%d read=%d join=%d sum=%d restore=%d)", bind, read, join, sum, restore)
 	}
-	if !strings.Contains(src, "p.account_type = 'player_withdrawal_hold'") || !strings.Contains(src, "wl.brand_id = v_brand") {
+	if !strings.Contains(src, "la.account_type = 'player_withdrawal_hold'") || !strings.Contains(src, "wl.brand_id = v_brand") {
 		t.Fatal("the LA025 read must filter the hold account type literally (partial index match) and join wallets.brand_id")
 	}
 }
 
-// Performance of the index read: the LA025 read (the trigger's exact predicate, the tenant bound as a
-// parameter like the plpgsql generic plan) can be answered from the partial index; on a populated
-// tenant set the planner chooses it without hints. The populated case seeds 2000 house
-// accounts (one tenant each) plus 400 hold rows (three of them in the probed tenant) directly into the projection on
-// the throwaway database (owner, FORCE RLS / triggers / two FKs lifted, no ledger rows: this database
-// is dropped after the test and the transaction rolls back anyway).
-func TestMigration0133_LA025ReadUsesThePartialIndex(t *testing.T) {
+// Read plan: the LA025 read (the guard's exact shape, the tenant bound as a parameter like the
+// plpgsql generic plan) finds the tenant's hold accounts through idx_ledger_accounts_withdrawal_hold
+// and sums each through idx_ledger_entries_account. Population on the throwaway database: 2000
+// house accounts of 2000 tenants plus 400 hold accounts (three in the probed tenant) with two entries
+// each (owner; FORCE RLS, triggers and the account/asset FKs lifted inside a rolled-back transaction).
+func TestMigration0133_LA025ReadUsesTheIndexes(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := lgScratch(t, "m0133p_")
 	if _, err := pool.MigrateUp(ctx, lgMigDir(t, migration0133Version)); err != nil {
 		t.Fatal(err)
 	}
 	probe := uuid.New()
-	q := `EXPLAIN (FORMAT TEXT) SELECT count(*) FROM public.wallet_balance_projection p
-		WHERE p.tenant_id = $1 AND p.account_type = 'player_withdrawal_hold' AND p.credit_total <> p.debit_total`
-	plan := func(tx pgx.Tx) string {
-		rows, err := tx.Query(ctx, q, probe)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer rows.Close()
-		var b strings.Builder
-		for rows.Next() {
-			var l string
-			if err := rows.Scan(&l); err != nil {
-				t.Fatal(err)
-			}
-			b.WriteString(l + "\n")
-		}
-		return b.String()
-	}
+	q := `EXPLAIN (FORMAT TEXT) SELECT count(*) FROM public.ledger_accounts la
+		WHERE la.tenant_id = $1 AND la.account_type = 'player_withdrawal_hold'
+		  AND (SELECT COALESCE(sum(CASE e.direction WHEN 'credit' THEN e.amount ELSE -e.amount END), 0)
+		         FROM public.ledger_entries e WHERE e.ledger_account_id = la.id AND e.tenant_id = $1) <> 0`
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		// FORCE RLS binds the owner: lift it for the synthetic population on this throwaway database.
 		for _, s := range []string{
-			`ALTER TABLE wallet_balance_projection NO FORCE ROW LEVEL SECURITY`,
 			`ALTER TABLE ledger_accounts NO FORCE ROW LEVEL SECURITY`,
-			`ALTER TABLE wallet_balance_projection DISABLE TRIGGER USER`,
+			`ALTER TABLE ledger_entries NO FORCE ROW LEVEL SECURITY`,
 			`ALTER TABLE ledger_accounts DISABLE TRIGGER USER`,
+			`ALTER TABLE ledger_entries DISABLE TRIGGER USER`,
 			`ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_asset_code_fkey`,
-			`ALTER TABLE wallet_balance_projection DROP CONSTRAINT wallet_balance_projection_ledger_account_id_fkey`,
+			`ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_wallet_id_fkey`,
+			`ALTER TABLE ledger_entries DROP CONSTRAINT ledger_entries_ledger_transaction_id_tenant_id_fkey`,
 		} {
 			if _, err := tx.Exec(ctx, s); err != nil {
 				return err
 			}
 		}
 		if _, err := tx.Exec(ctx, `
-			WITH a AS (
-			  INSERT INTO ledger_accounts (id, tenant_id, account_type, asset_code, status)
-			  SELECT gen_random_uuid(), gen_random_uuid(), t, 'EUR', 'active'
-			    FROM generate_series(1, 400) g, unnest(ARRAY['house_gaming', 'psp_clearing', 'provider_payable', 'promo_liability', 'bonus_expense']) t
-			  RETURNING id, tenant_id, account_type, asset_code)
-			INSERT INTO wallet_balance_projection (ledger_account_id, tenant_id, asset_code, account_type, debit_total, credit_total)
-			SELECT id, tenant_id, asset_code, account_type, 5, 7 FROM a`); err != nil {
+			INSERT INTO ledger_accounts (id, tenant_id, account_type, asset_code, status)
+			SELECT gen_random_uuid(), gen_random_uuid(), t, 'EUR', 'active'
+			  FROM generate_series(1, 400) g, unnest(ARRAY['house_gaming', 'psp_clearing', 'provider_payable', 'promo_liability', 'bonus_expense']) t`); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO wallet_balance_projection (ledger_account_id, tenant_id, wallet_id, player_account_id, asset_code, account_type, debit_total, credit_total)
-			SELECT gen_random_uuid(), CASE WHEN g <= 3 THEN $1 ELSE gen_random_uuid() END, gen_random_uuid(), gen_random_uuid(), 'EUR',
-			       'player_withdrawal_hold', 0, CASE WHEN g % 2 = 0 THEN 10 ELSE 0 END
-			  FROM generate_series(1, 400) g`, probe); err != nil {
+			WITH a AS (
+			  INSERT INTO ledger_accounts (id, tenant_id, wallet_id, player_account_id, account_type, asset_code)
+			  SELECT gen_random_uuid(), CASE WHEN g <= 3 THEN $1 ELSE gen_random_uuid() END, gen_random_uuid(), gen_random_uuid(),
+			         'player_withdrawal_hold', 'EUR'
+			    FROM generate_series(1, 400) g
+			  RETURNING id, tenant_id)
+			INSERT INTO ledger_entries (ledger_transaction_id, ledger_account_id, tenant_id, asset_code, direction, amount)
+			SELECT gen_random_uuid(), a.id, a.tenant_id, 'EUR', d, 10 FROM a, unnest(ARRAY['credit', 'debit']) d`, probe); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `ANALYZE wallet_balance_projection`); err != nil {
+		if _, err := tx.Exec(ctx, `ANALYZE ledger_accounts; ANALYZE ledger_entries`); err != nil {
 			return err
 		}
-		p := plan(tx)
-		if !strings.Contains(p, "idx_wallet_balance_projection_withdrawal_hold") {
-			t.Fatalf("on a populated projection the LA025 read must use the partial index:\n%s", p)
+		rows, err := tx.Query(ctx, q, probe)
+		if err != nil {
+			return err
 		}
-		t.Logf("LA025 read plan (2400 projection rows, about 2400 tenants):\n%s", p)
+		var b strings.Builder
+		for rows.Next() {
+			var l string
+			if err := rows.Scan(&l); err != nil {
+				rows.Close()
+				return err
+			}
+			b.WriteString(l + "\n")
+		}
+		rows.Close()
+		p := b.String()
+		if !strings.Contains(p, "idx_ledger_accounts_withdrawal_hold") || !strings.Contains(p, "idx_ledger_entries_account") {
+			t.Fatalf("the LA025 read must use the partial account index and the per-account entry index:\n%s", p)
+		}
+		t.Logf("LA025 read plan (2400 accounts, 800 hold entries):\n%s", p)
 		return errRollback
 	}); err != nil && err != errRollback {
 		t.Fatal(err)

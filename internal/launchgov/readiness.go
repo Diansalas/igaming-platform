@@ -469,15 +469,18 @@ func holdBearingWithdrawals(ctx context.Context, tx pgx.Tx, sub Subject) (int64,
 
 // nonZeroWithdrawalHolds counts the subject's player_withdrawal_hold accounts whose balance is not
 // zero (ADR 0113 s4.3, the Go arm of LA025, migration 0133): the tenant's every brand for a tenant
-// subject, only wallets of the brand (wallets.brand_id) for a brand subject. It reads the projection
-// through idx_wallet_balance_projection_withdrawal_hold, the same read as the database arm. The
-// caller's transaction is the subject tenant's scope (RLS-bound).
+// subject, only wallets of the brand (wallets.brand_id) for a brand subject. The balance is REBUILT
+// FROM ledger_entries, the same read as the database arm, never from wallet_balance_projection (which
+// the runtime role can write: security review C1). The caller's transaction is the subject tenant's
+// scope (RLS-bound).
 func nonZeroWithdrawalHolds(ctx context.Context, tx pgx.Tx, sub Subject) (int64, error) {
 	var n int64
-	err := tx.QueryRow(ctx, `SELECT count(*) FROM wallet_balance_projection p
-		WHERE p.tenant_id = $1 AND p.account_type = 'player_withdrawal_hold' AND p.credit_total <> p.debit_total
+	err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_accounts la
+		WHERE la.tenant_id = $1 AND la.account_type = 'player_withdrawal_hold'
 		  AND ($2::uuid IS NULL OR EXISTS (
-		      SELECT 1 FROM wallets wl WHERE wl.id = p.wallet_id AND wl.tenant_id = p.tenant_id AND wl.brand_id = $2))`,
+		      SELECT 1 FROM wallets wl WHERE wl.id = la.wallet_id AND wl.tenant_id = la.tenant_id AND wl.brand_id = $2))
+		  AND (SELECT COALESCE(sum(CASE e.direction WHEN 'credit' THEN e.amount ELSE -e.amount END), 0)
+		         FROM ledger_entries e WHERE e.ledger_account_id = la.id AND e.tenant_id = la.tenant_id) <> 0`,
 		sub.TenantID, sub.BrandID).Scan(&n)
 	return n, err
 }

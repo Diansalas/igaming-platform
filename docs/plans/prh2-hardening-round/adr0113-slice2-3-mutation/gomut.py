@@ -15,6 +15,7 @@ ENV = dict(os.environ, PRIV_DB='priv_lf_adr0113s23_mut', PRIV_SRC=W)
 LG = ('launchgov', 'TestLA025|TestClosure_HoldBearingWithdrawals')
 RD = ('reconciliation', 'TestADR0113D')
 MIG = ('tenant', 'TestMigration0133')
+RD = ('reconciliation', 'TestADR0113D|TestRebuildAndProject')
 
 MUTANTS = [
     # --- slice 2, Go arm
@@ -23,20 +24,25 @@ MUTANTS = [
     ('G2M02_request_hold_balance_check_off', 'internal/launchgov/hard.go',
      '			if h > 0 {\n', '			if false && h > 0 {\n', LG),
     ('G2M03_go_read_brand_filter_dropped', 'internal/launchgov/readiness.go',
-     "AND ($2::uuid IS NULL OR EXISTS (", "AND ($2::uuid IS NULL OR true OR EXISTS (", LG),
-    ('G2M04_go_read_totals_filter_dropped', 'internal/launchgov/readiness.go',
-     "AND p.credit_total <> p.debit_total\n		  AND ($2::uuid", "\n		  AND ($2::uuid", LG),
+     "		  AND ($2::uuid IS NULL OR EXISTS (\n		      SELECT 1 FROM wallets wl WHERE wl.id = la.wallet_id",
+     "		  AND ($2::uuid IS NULL OR true OR EXISTS (\n		      SELECT 1 FROM wallets wl WHERE wl.id = la.wallet_id", LG),
+    ('G2M04_go_read_balance_filter_dropped', 'internal/launchgov/readiness.go',
+     "ledger_entries e WHERE e.ledger_account_id = la.id AND e.tenant_id = la.tenant_id) <> 0`",
+     "ledger_entries e WHERE e.ledger_account_id = la.id AND e.tenant_id = la.tenant_id) <> 0 OR true`", LG),
+    ('G2M06_go_reads_the_projection', 'internal/launchgov/readiness.go',
+     "		  AND (SELECT COALESCE(sum(CASE e.direction WHEN 'credit' THEN e.amount ELSE -e.amount END), 0)\n		         FROM ledger_entries e WHERE e.ledger_account_id = la.id AND e.tenant_id = la.tenant_id) <> 0`",
+     "		  AND (SELECT COALESCE(max(pp.credit_total - pp.debit_total), 0) FROM wallet_balance_projection pp WHERE pp.ledger_account_id = la.id) <> 0`", LG),
     ('G2M05_closure_notice_dropped', 'internal/launchgov/readiness.go',
      '			r.Notices = append(r.Notices, NoticeFundsHoldBlocksClosure)\n', '', LG),
     # --- slice 2, migration file (scratch databases)
-    ('F2M01_index_with_totals_predicate', 'migrations/0133_launch_closure_withdrawal_hold_balance_arm.up.sql',
-     "    WHERE account_type = 'player_withdrawal_hold';",
-     "    WHERE account_type = 'player_withdrawal_hold' AND credit_total <> debit_total;", MIG),
+    ('F2M01_index_on_the_projection_again', 'migrations/0133_launch_closure_withdrawal_hold_balance_arm.up.sql',
+     "CREATE INDEX idx_ledger_accounts_withdrawal_hold\n    ON ledger_accounts (tenant_id)",
+     "CREATE INDEX idx_ledger_accounts_withdrawal_hold\n    ON ledger_accounts (tenant_id)\n    WHERE account_type = 'player_withdrawal_hold';\nCREATE INDEX idx_wallet_balance_projection_withdrawal_hold\n    ON wallet_balance_projection (tenant_id)", MIG),
     ('F2M02_down_body_not_verbatim', 'migrations/0133_launch_closure_withdrawal_hold_balance_arm.down.sql',
      "        RAISE EXCEPTION '% status: closed is terminal', TG_TABLE_NAME USING ERRCODE = 'LA020';",
      "        RAISE EXCEPTION '% status: closed is terminal.', TG_TABLE_NAME USING ERRCODE = 'LA020';", MIG),
     ('F2M03_down_keeps_index', 'migrations/0133_launch_closure_withdrawal_hold_balance_arm.down.sql',
-     'DROP INDEX idx_wallet_balance_projection_withdrawal_hold;\n', '', MIG),
+     'DROP INDEX idx_ledger_accounts_withdrawal_hold;\n', '', MIG),
     # --- slice 3, check D
     ('D3M01_check_d_not_called', 'internal/reconciliation/reconciliation.go',
      '	holds, err := withdrawalHoldFindings(ctx, tx, tenantID)\n', '	holds, err := []Mismatch(nil), error(nil)\n', RD),
@@ -58,6 +64,11 @@ MUTANTS = [
      "          WHEN cs.s <> CASE WHEN r.term THEN 0 ELSE r.amount END THEN 'WD034'\n", '', RD),
     ('D3M10_wd033_release_shape_off', 'internal/reconciliation/withdrawal_hold.go',
      "          WHEN r.term AND NOT COALESCE(rt.correlation_id = r.id AND CASE r.state\n", "          WHEN false AND r.term AND NOT COALESCE(rt.correlation_id = r.id AND CASE r.state\n", RD),
+    ('D3M16_unlinked_hold_leg_rule_off', 'internal/reconciliation/withdrawal_hold.go',
+     '     WHERE l.tx IS NULL\n', '     WHERE false\n', RD),
+    ('D3M17_unlinked_rule_hold_links_only', 'internal/reconciliation/withdrawal_hold.go',
+     '    UNION\n    SELECT r.release_ledger_transaction_id FROM req r WHERE r.release_ledger_transaction_id IS NOT NULL\n',
+     '    UNION\n    SELECT r.release_ledger_transaction_id FROM req r WHERE false\n', RD),
     ('D3M11_rebuilt_from_projection', 'internal/reconciliation/withdrawal_hold.go',
      "    SELECT la.id, la.wallet_id, la.asset_code, count(e.id) AS n_entries,\n"
      "           COALESCE(sum(CASE e.direction WHEN 'credit' THEN e.amount ELSE -e.amount END), 0) AS open_amount\n"

@@ -1,5 +1,65 @@
 ADR 0113 slices 2-3 (migrations 0133 / 0134, check D) - mutation-kill evidence
 ==============================================================================
+ROUND 2 (after the security + ledger-finance review fixes: LA025 rebuilt from ledger_entries, check D
+WD042 unlinked-hold-leg rule, one-pass rebuildAndProject). Private database priv_lf_adr0113s23_mut
+(rebuilt from the edited migrations, head 134); scratchdb databases for the migration-file mutants.
+Drivers: adr0113-slice2-3-mutation/ (mutgen_s2.py + mutrun_s2.sh: SQL mutants of the 0133 guard;
+gomut.py: Go-source and migration-file mutants, each file restored byte for byte). Commands:
+  bash docs/plans/prh2-hardening-round/adr0113-slice2-3-mutation/mutrun_s2.sh
+  python3 -I docs/plans/prh2-hardening-round/adr0113-slice2-3-mutation/gomut.py <worktree> <results>
+New in round 2: S2M10 (LA025 reads the projection again) and G2M06 (Go arm reads the projection) are
+killed only by the projection-tamper test (security C1); D3M16 / D3M17 (WD042 rule off / release links
+ignored) are killed by the planted zero-net pair and the healthy-tenant tests (ledger-finance C1);
+F2M01 (projection index re-added) by the index-shape test.
+
+BASELINE ok  	github.com/Diansalas/igaming-platform/internal/launchgov	8.764s
+S2M01_la025_off KILLED by: TestLA025_StrandedHold_NoHoldBearingRequest_RefusesClosure_KeyHolderPath TestLA025_TenantCountsEveryBrand_BrandCountsItsOwn TestLA025_ProjectionTamper_StillRefused 
+S2M02_ledger_read_blind KILLED by: TestLA025_StrandedHold_NoHoldBearingRequest_RefusesClosure_KeyHolderPath TestLA025_TenantCountsEveryBrand_BrandCountsItsOwn TestLA025_ProjectionTamper_StillRefused 
+S2M02b_account_read_blind KILLED by: TestLA025_StrandedHold_NoHoldBearingRequest_RefusesClosure_KeyHolderPath TestLA025_TenantCountsEveryBrand_BrandCountsItsOwn TestLA025_ProjectionTamper_StillRefused 
+S2M03_wallets_join_blind KILLED by: TestLA025_StrandedHold_NoHoldBearingRequest_RefusesClosure_KeyHolderPath TestLA025_TenantCountsEveryBrand_BrandCountsItsOwn TestLA025_ProjectionTamper_StillRefused 
+S2M04_read_outside_rls_window KILLED by: TestLA025_StrandedHold_NoHoldBearingRequest_RefusesClosure_KeyHolderPath TestLA025_TenantCountsEveryBrand_BrandCountsItsOwn TestLA025_ProjectionTamper_StillRefused 
+S2M05_brand_filter_dropped KILLED by: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 TestLA025_StrandedHold_NoHoldBearingRequest_RefusesClosure_KeyHolderPath TestLA025_TenantCountsEveryBrand_BrandCountsItsOwn TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023 
+S2M06_balance_filter_dropped KILLED by: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 TestLA025_ZeroNetHoldDoesNotBlock_LA023StaysFirst 
+S2M07_wrong_account_type KILLED by: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 TestLA025_RaceWithANewHold_BothOrders 
+S2M08_la023_off_la025_alone KILLED by: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 TestLA025_ZeroNetHoldDoesNotBlock_LA023StaysFirst 
+S2M09_player_scope_not_cleared KILLED by: TestClosureBackstop_HoldBearingWithdrawal_RefusedByDatabase_LA023 TestLA025_StrandedHold_NoHoldBearingRequest_RefusesClosure_KeyHolderPath TestLA025_TenantCountsEveryBrand_BrandCountsItsOwn TestLA025_ZeroNetHoldDoesNotBlock_LA023StaysFirst TestLA025_RaceWithANewHold_BothOrders TestLA025_ProjectionTamper_StillRefused 
+S2M10_reads_the_projection KILLED by: TestLA025_ProjectionTamper_StillRefused 
+G2M01_executor_hold_balance_check_off KILLED by: TestLA025_GoArm_ReadinessRequestAndExecutor
+G2M02_request_hold_balance_check_off KILLED by: TestLA025_GoArm_ReadinessRequestAndExecutor TestLA025_ProjectionTamper_StillRefused
+G2M03_go_read_brand_filter_dropped KILLED by: TestLA025_GoArm_ReadinessRequestAndExecutor TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023
+G2M04_go_read_balance_filter_dropped KILLED by: TestLA025_GoArm_ReadinessRequestAndExecutor TestLA025_ProjectionTamper_StillRefused TestClosure_HoldBearingWithdrawals_RefuseClosure_LA023
+G2M06_go_reads_the_projection KILLED by: TestLA025_ProjectionTamper_StillRefused
+G2M05_closure_notice_dropped KILLED by: TestLA025_GoArm_ReadinessRequestAndExecutor
+F2M01_index_on_the_projection_again KILLED by: TestMigration0133_UpDownUp_WholeSchema_RestoresThe0130GuardVerbatim TestMigration0133_IndexShape_LedgerSource_ReadInsideTheRLSWindow
+F2M02_down_body_not_verbatim KILLED by: TestMigration0133_UpDownUp_WholeSchema_RestoresThe0130GuardVerbatim
+F2M03_down_keeps_index KILLED by: TestMigration0133_UpDownUp_WholeSchema_RestoresThe0130GuardVerbatim
+D3M01_check_d_not_called KILLED by: TestADR0113D_SeededDriftDetected_Standing_AppendOnly TestADR0113D_LinkRules_ParityWithCheckA TestADR0113D_BlindRead_FailsClosed TestADR0113D_BlindRead_ThroughTheSweep_RunFailedP1 TestADR0113D_NonActiveTenantObserved TestADR0113D_UnlinkedZeroNetPair_IsNotClean TestADR0113D_MultiAssetWallets_AndTheWalletKeyPath TestADR0113D_Static_WiredIntoTheHourlyLedgerStream
+D3M02_blind_check_off KILLED by: TestADR0113D_BlindRead_FailsClosed TestADR0113D_BlindRead_ThroughTheSweep_RunFailedP1
+D3M03_session_probe_off KILLED by: TestADR0113D_BlindRead_FailsClosed
+D3M04_blind_requests_rule_off KILLED by: TestADR0113D_BlindRead_FailsClosed TestADR0113D_BlindRead_ThroughTheSweep_RunFailedP1
+D3M05_blind_hold_tx_rule_off KILLED by: TestADR0113D_BlindRead_FailsClosed
+D3M06_blind_entries_rule_off KILLED by: TestADR0113D_BlindRead_FailsClosed
+D3M07_open_mismatch_off KILLED by: TestADR0113D_SeededDriftDetected_Standing_AppendOnly TestADR0113D_LinkRules_ParityWithCheckA TestADR0113D_NonActiveTenantObserved TestADR0113D_MultiAssetWallets_AndTheWalletKeyPath
+D3M08_link_rules_off KILLED by: TestADR0113D_LinkRules_ParityWithCheckA
+D3M09_wd034_off KILLED by: TestADR0113D_LinkRules_ParityWithCheckA
+D3M10_wd033_release_shape_off KILLED by: TestADR0113D_LinkRules_ParityWithCheckA
+D3M16_unlinked_hold_leg_rule_off KILLED by: TestADR0113D_SeededDriftDetected_Standing_AppendOnly TestADR0113D_UnlinkedZeroNetPair_IsNotClean
+D3M17_unlinked_rule_hold_links_only KILLED by: TestADR0113D_HealthyTenantIsClean TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1 TestADR0113D_MultiAssetWallets_AndTheWalletKeyPath
+D3M11_rebuilt_from_projection KILLED by: TestADR0113D_RebuiltFromLedger_NotFromTheProjection
+D3M12_submitted_treated_terminal KILLED by: TestADR0113D_HealthyTenantIsClean
+D3M13_alert_not_raised KILLED by: TestADR0113D_SeededDriftDetected_Standing_AppendOnly TestADR0113D_NonActiveTenantObserved
+D3M14_hold_findings_counted_as_drift KILLED by: TestADR0113D_SeededDriftDetected_Standing_AppendOnly TestADR0113D_NonActiveTenantObserved
+D3M15_compare_two_statements_again KILLED by: TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1
+
+Totals round 2: 12 SQL mutants (incl. BASELINE line above: 11 mutants), 26 Go/file mutants; all killed,
+no survivor, no equivalent mutant. S2M08 (LA023 disabled) is killed by the LA023-code tests while
+TestLA025_RaceWithANewHold_BothOrders still PASSES under it: in the hold-first race LA025 alone refuses.
+
+=============================================================================================
+ROUND 1 (superseded code: projection-based LA025; kept for the record)
+=============================================================================================
+ADR 0113 slices 2-3 (migrations 0133 / 0134, check D) - mutation-kill evidence
+==============================================================================
 Branch claude/adr0113-slice2-3 (base 489995e). Private databases only: priv_lf_adr0113s23_mut for every
 mutant (rebuilt from the migrations, head 134), throwaway scratchdb databases for the migration-file
 mutants. Drivers: adr0113-slice2-3-mutation/ (mutgen_s2.py + mutrun_s2.sh: SQL mutants of the 0133 guard,

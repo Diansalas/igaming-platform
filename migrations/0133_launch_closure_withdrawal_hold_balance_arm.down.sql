@@ -5,7 +5,7 @@
 -- touched; the schema returns to 0132 byte for byte (whole-schema snapshot test,
 -- internal/tenant/migration_0133_integration_test.go).
 
-DROP INDEX idx_wallet_balance_projection_withdrawal_hold;
+DROP INDEX idx_ledger_accounts_withdrawal_hold;
 
 -- 0130's launch_subject_status_guard body, verbatim (CREATE OR REPLACE).
 CREATE OR REPLACE FUNCTION launch_subject_status_guard() RETURNS trigger

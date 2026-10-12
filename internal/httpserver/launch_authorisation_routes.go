@@ -171,7 +171,14 @@ func launchErrorCode(err error) (apierror.Code, string, []string) {
 	case errors.Is(err, launchgov.ErrUnacknowledged):
 		return apierror.CodeLaunchUnacknowledgedChecks, "every check that is not pass must be acknowledged", preCodes(err, &pre)
 	case errors.Is(err, launchgov.ErrWithdrawalsHolding):
-		return apierror.CodeLaunchWithdrawalsHolding, "closure refused: withdrawal requests still hold player funds", preCodes(err, &pre)
+		codes := preCodes(err, &pre)
+		for _, c := range codes {
+			if c == launchgov.H6WithdrawalsHolding {
+				return apierror.CodeLaunchWithdrawalsHolding, "closure refused: withdrawal requests still hold player funds", codes
+			}
+		}
+		// ADR 0113 s4.3 (H6HoldBalanceNonZero alone): a hold balance that no request explains.
+		return apierror.CodeLaunchWithdrawalsHolding, "closure refused: player withdrawal hold balances are not zero", codes
 	case errors.Is(err, launchgov.ErrPreconditionFailed):
 		return apierror.CodeLaunchPreconditionFailed, "a hard precondition is not met", preCodes(err, &pre)
 	case errors.Is(err, launchgov.ErrRequestPending):

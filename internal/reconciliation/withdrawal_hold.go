@@ -24,8 +24,8 @@ package reconciliation
 //     never recorded `clean`, and reconciliation.run_failed is raised) when the read is blind: the
 //     session is not exactly the tenant scope (app.tenant_id = the run tenant, no player scope), or a
 //     count read under the tenant's set_config is zero while an independently policied count is not:
-//       (a) no withdrawal request visible while E0b-shaped withdrawal_requested transactions
-//           (idempotency_key = correlation_id, the shape B-i pins) are;
+//       (a) no withdrawal request visible while an E0b-shaped withdrawal_requested transaction
+//           (idempotency_key = correlation_id, the shape B-i pins) is (an EXISTS probe);
 //       (b) no E0b-shaped transaction visible while withdrawal requests are (every request carries one:
 //           check A, WD031/WD032);
 //       (c) no hold-account ledger entry visible while the hold projection rows show postings.
@@ -42,10 +42,11 @@ package reconciliation
 //   - withdrawal_request_ledger_link_invalid: the request fails check A's link rules (ADR 0113 s4.2,
 //     the same rules as withdrawal_request_ledger_link_violation in migration 0132, set-wise and
 //     read-only: WD030 not visible, WD031 no hold link, WD032 hold shape, WD033 release shape, WD034
-//     correlated hold legs do not net to amount / 0). Keyed by the request id.
-// An unattributed hold leg pair that nets to zero on its wallet (no request named, no balance left) is
-// not invariant #12 drift and is not reported here (B-ii is preventive; residual ADR 0113 s9.2 is
-// covered by payout statement reconciliation).
+//     correlated hold legs do not net to amount / 0), keyed by the request id; and (ledger-finance
+//     review C1, the read-only B-ii) WD042: a player_withdrawal_hold leg whose transaction NO request
+//     links as its hold or release (an anti-join of the tenant's hold-leg transactions against the
+//     requests' two link columns), keyed "ledger_transaction:<id>". This also reports an unattributed
+//     hold-leg pair that nets to zero on its wallet (no balance left), which the aggregate cannot see.
 
 import (
 	"context"
@@ -94,9 +95,9 @@ vis AS (
     SELECT (NULLIF(current_setting('app.tenant_id', true), '') IS NOT DISTINCT FROM $1::text
             AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL) AS sess_ok,
            (SELECT count(*) FROM req) AS n_req,
-           (SELECT count(*) FROM ledger_transactions t
-             WHERE t.tenant_id = $1 AND t.transaction_type = 'withdrawal_requested'
-               AND t.idempotency_key = t.correlation_id::text) AS n_e0b,
+           (EXISTS (SELECT 1 FROM ledger_transactions t
+                     WHERE t.tenant_id = $1 AND t.transaction_type = 'withdrawal_requested'
+                       AND t.idempotency_key = t.correlation_id::text))::int::bigint AS n_e0b,
            (SELECT COALESCE(sum(n_entries), 0) FROM hold_bal) AS n_hold_entries,
            (SELECT count(*) FROM wallet_balance_projection p
              WHERE p.tenant_id = $1 AND p.account_type = 'player_withdrawal_hold'
@@ -112,6 +113,22 @@ open_mm AS (
       FROM hold_bal b
       FULL JOIN open_req o ON o.wallet_id = b.wallet_id AND o.asset_code = b.asset_code
      WHERE COALESCE(b.open_amount, 0) <> COALESCE(o.open_sum, 0)
+),
+linked AS (
+    SELECT r.hold_ledger_transaction_id AS tx FROM req r WHERE r.hold_ledger_transaction_id IS NOT NULL
+    UNION
+    SELECT r.release_ledger_transaction_id FROM req r WHERE r.release_ledger_transaction_id IS NOT NULL
+),
+unlinked_mm AS (
+    SELECT 'withdrawal_request_ledger_link_invalid'::text AS kind, 'ledger_transaction:' || u.tx::text AS key,
+           'every player_withdrawal_hold leg belongs to a transaction a request links as its hold or release'::text AS expected,
+           format('violation=WD042 unlinked hold leg transaction=%s', u.tx) AS actual
+      FROM (SELECT DISTINCT e.ledger_transaction_id AS tx
+              FROM ledger_entries e
+              JOIN ledger_accounts la ON la.id = e.ledger_account_id
+             WHERE la.tenant_id = $1 AND la.account_type = 'player_withdrawal_hold' AND e.tenant_id = $1) u
+      LEFT JOIN linked l ON l.tx = u.tx
+     WHERE l.tx IS NULL
 ),
 link_mm AS (
     SELECT 'withdrawal_request_ledger_link_invalid'::text AS kind, r.id::text AS key,
@@ -175,7 +192,7 @@ link_mm AS (
 )
 SELECT v.sess_ok, v.n_req, v.n_e0b, v.n_hold_entries, v.n_proj_active, f.kind, f.key, f.expected, f.actual
   FROM vis v
-  LEFT JOIN (SELECT * FROM open_mm UNION ALL SELECT * FROM link_mm) f ON true
+  LEFT JOIN (SELECT * FROM open_mm UNION ALL SELECT * FROM link_mm UNION ALL SELECT * FROM unlinked_mm) f ON true
  ORDER BY f.kind, f.key`
 
 // withdrawalHoldVisibility is check D's visibility probe, read in the same statement as the findings.
@@ -191,7 +208,7 @@ func (v withdrawalHoldVisibility) blind() string {
 	case !v.SessionOK:
 		return "the session is not exactly the tenant scope of the run (app.tenant_id / app.player_account_id)"
 	case v.Requests == 0 && v.E0bTxs > 0:
-		return fmt.Sprintf("no withdrawal request is visible while %d withdrawal_requested hold transactions are", v.E0bTxs)
+		return "no withdrawal request is visible while withdrawal_requested hold transactions are"
 	case v.Requests > 0 && v.E0bTxs == 0:
 		return fmt.Sprintf("no withdrawal_requested hold transaction is visible while %d withdrawal requests are", v.Requests)
 	case v.HoldEntries == 0 && v.HoldProjectionRowsWithPostings > 0:

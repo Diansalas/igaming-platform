@@ -98,6 +98,16 @@ func dMismatches(t *testing.T, pool *db.Pool, f fixture) []dRow {
 	return out
 }
 
+func dKind(rows []dRow, k MismatchKind) []dRow {
+	var out []dRow
+	for _, r := range rows {
+		if r.kind == string(k) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func holdAccount(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
@@ -196,7 +206,7 @@ func TestADR0113D_HealthyTenantIsClean(t *testing.T) {
 			&v.HoldProjectionRowsWithPostings, &k, &key, &e, &a); err != nil {
 			return err
 		}
-		if !v.SessionOK || v.Requests != 8 || v.E0bTxs != 8 || v.HoldEntries != 12 || k != nil {
+		if !v.SessionOK || v.Requests != 8 || v.E0bTxs != 1 || v.HoldEntries != 12 || k != nil {
 			return fmt.Errorf("probe %+v kind=%v", v, k)
 		}
 		return nil
@@ -221,16 +231,22 @@ func TestADR0113D_SeededDriftDetected_Standing_AppendOnly(t *testing.T) {
 	if o1.Err != nil || o1.Run.Status != StatusMismatchesFound {
 		t.Fatalf("seeded drift must be found: status=%s err=%v", o1.Run.Status, o1.Err)
 	}
-	rows := dMismatches(t, pool, f)
-	if len(rows) != 1 || rows[0].kind != string(MismatchKindWithdrawalHoldOpenMismatch) || rows[0].key != hold.String() ||
+	all := dMismatches(t, pool, f)
+	rows := dKind(all, MismatchKindWithdrawalHoldOpenMismatch)
+	if len(rows) != 1 || rows[0].key != hold.String() ||
 		!strings.Contains(rows[0].expected, "= 40 (requests=1)") || !strings.Contains(rows[0].actual, "= 740 ") || rows[0].status != "open" {
-		t.Fatalf("one open-hold mismatch on the hold account (expected 40, rebuilt 740): %+v", rows)
+		t.Fatalf("one open-hold mismatch on the hold account (expected 40, rebuilt 740): %+v", all)
+	}
+	// The stranded leg is also an unlinked hold leg (ledger-finance C1, WD042).
+	if ul := dKind(all, MismatchKindWithdrawalRequestLedgerLinkInvalid); len(ul) != 1 || !strings.HasPrefix(ul[0].key, "ledger_transaction:") ||
+		!strings.HasPrefix(ul[0].actual, "violation=WD042 ") {
+		t.Fatalf("the stranded leg's transaction must be reported WD042: %+v", all)
 	}
 	o2 := dSweep(t, rt, f)
 	if o2.Run.Status != StatusMismatchesFound {
 		t.Fatalf("the finding is standing: %s", o2.Run.Status)
 	}
-	rows2 := dMismatches(t, pool, f)
+	rows2 := dKind(dMismatches(t, pool, f), MismatchKindWithdrawalHoldOpenMismatch)
 	if len(rows2) != 2 || rows2[0] != rows[0] || rows2[1].run != o2.Run.ID || rows2[0].run != o1.Run.ID {
 		t.Fatalf("each run appends its own finding row; the first is unchanged: %+v", rows2)
 	}
@@ -497,14 +513,14 @@ func TestADR0113D_NonActiveTenantObserved(t *testing.T) {
 	if !o.ObservationOnly || o.TenantStatus != "closed" || o.Err != nil || o.Run.Status != StatusMismatchesFound {
 		t.Fatalf("a closed tenant is observed and D finds the stranded hold: %+v", o)
 	}
-	if rows := dMismatches(t, pool, f); len(rows) != 1 || rows[0].kind != string(MismatchKindWithdrawalHoldOpenMismatch) {
+	if rows := dMismatches(t, pool, f); len(dKind(rows, MismatchKindWithdrawalHoldOpenMismatch)) != 1 {
 		t.Fatalf("one open-hold finding: %+v", rows)
 	}
 	mustOne(t, alertinject.ForSubject(t, pool, f.tenantID), alerting.KindReconciliationLedgerProjectionDrift, discLedgerWithdrawalHold)
 }
 
 // Concurrency with live withdrawals (C7): requests are created (E0 + E0b) and released (cancel, reject,
-// submit + fail) continuously while the ledger stream runs repeatedly on the runtime role. Every run
+// submit + fail, submit + complete) continuously while the ledger stream runs repeatedly on the runtime role. Every run
 // must be clean: the single-statement snapshot never sees a request without its leg or a leg without
 // its request state, so no false P1.
 func TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1(t *testing.T) {
@@ -516,7 +532,7 @@ func TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1(t *testing.T) {
 	var wg sync.WaitGroup
 	var made atomic.Int64
 	errs := make(chan error, 8)
-	targets := []withdrawal.State{withdrawal.StateCancelled, withdrawal.StateRejected, withdrawal.StateFailed, withdrawal.StateRequested}
+	targets := []withdrawal.State{withdrawal.StateCancelled, withdrawal.StateRejected, withdrawal.StateFailed, withdrawal.StateCompleted, withdrawal.StateRequested}
 	// A real verified binding, so every writer runs as igaming_runtime with no owner DDL (the legacy
 	// binding-guard plant takes an ACCESS EXCLUSIVE table lock and would deadlock the writers).
 	inst := pitest.Bind(t, pool, f.tenantID, f.playerAccountID, "EUR")

@@ -157,16 +157,21 @@ one PK read; slice 1 adds a casino bet/win latency benchmark gate (regression bu
 ### 4.3 The ledger closure arm (`LA025`)
 
 `launch_subject_status_guard` (`0130` text + one marked block), when `NEW.status = 'closed'`, inside the RLS-bound
-read window it already opens (`0130:433-443`): refuse `LA025` if any `wallet_balance_projection` row of the subject
-(tenant; for a brand joined through `wallets.brand_id`) has `account_type = 'player_withdrawal_hold'` and
-`credit_total <> debit_total`. `LA023` stays alongside it. The Go readiness pre-check (`launchgov/readiness.go:455-464`)
-gains the same arm with a typed error.
-- **Projection read** is accepted by both reviewers for this refusal-only check: the projection is written by trigger
-  in the same transaction as each entry (`0023`) and is already the readiness source (`readiness.go:399,415`); a
-  zero-showing drift is caught by `ledger_vs_projection` and D.
-- **Index (C3):** `wallet_balance_projection (tenant_id) WHERE account_type = 'player_withdrawal_hold'` only; the
-  totals are filtered on the heap. A predicate on `credit_total`/`debit_total` would defeat HOT updates on the
-  hottest table.
+read window it already opens (`0130:433-443`): refuse `LA025` if any `player_withdrawal_hold` account of the subject
+(tenant; for a brand joined through `wallets.brand_id`) has a non-zero balance **rebuilt from `ledger_entries`**
+(credits minus debits). `LA023` stays alongside it. The Go readiness pre-check gains the same arm with a typed error
+and the same ledger read.
+- **Ledger read, not the projection (slices 2-3 review, security C1; supersedes rev 2's "projection read accepted"):**
+  `wallet_balance_projection` is writable by the runtime role outside the acting fence. The reviewer executed, as
+  `igaming_runtime`, `UPDATE wallet_balance_projection SET debit_total = credit_total` on a stranded hold's row and
+  then committed a brand closure against the projection-based draft. `ledger_entries` is append-only, so the arm now
+  sums it per hold account (`idx_ledger_entries_account`); closure is rare, so the cost is acceptable (one indexed
+  sum per hold account of the subject).
+- **Index:** `ledger_accounts (tenant_id) WHERE account_type = 'player_withdrawal_hold'`
+  (`idx_ledger_accounts_withdrawal_hold`, built under `SET LOCAL lock_timeout = '5s'`). `ledger_accounts` never
+  changes `tenant_id` / `account_type`, so the index costs nothing on the posting path. No index is added to the
+  projection or to `ledger_entries` (no overlap with ADR 0115 S1's `idx_ledger_entries_tenant_player_asset_created`,
+  migration 0135).
 - **Race:** hold-increasing legs are only E0b (B-i), and E0 takes the tenant and brand gate keys SHARED (`0131:76,84`),
   so a closure (keys EXCLUSIVE) sees the committed hold or the insert sees `closed`. Releases only lower balances.
 
@@ -276,12 +281,15 @@ Numbers are allocated by the orchestrator (next free `0132`).
   pseudonymisation exemption from `WD020` is allowed only for a DB-proven governed actor (`0120` signed proof) with an
   audit row, never through a GUC or role flag, and never for state, amount or ledger-link columns.
 - **Residual 9.2 is a HIGH launch-risk item for human acceptance** (below).
-- **Engineering (decided here):** edge set, SQLSTATEs, A + B-i + B-ii + D, projection closure arm, fixture policy,
+- **Engineering (decided here):** edge set, SQLSTATEs, A + B-i + B-ii + D, ledger closure arm, fixture policy,
   migration split. **Not decided:** `completed -> reversed`, ADR 0107 CT-PRE, PAYOUT-AMOUNT-DISPUTE-1 / HD-CTF-4.
 
 ## 9. Residuals (stated honestly)
 
-1. The table owner can `DISABLE TRIGGER` (ADR 0110 §9.4); D detects the result, nothing prevents it.
+1. The table owner can `DISABLE TRIGGER` (ADR 0110 §9.4); nothing prevents it, D detects the result: a hold
+   balance no non-terminal request explains (`withdrawal_hold_open_mismatch`), a request whose links break A's
+   rules, and (slices 2-3 review, ledger-finance C1) any hold leg whose transaction no request links (`WD042`,
+   including a pair that nets to zero on its wallet).
 2. **HIGH, not launch-blocking by itself:** a holder of a compromised runtime credential can still drive a legal edge
    with a forged but well-shaped leg, e.g. E9 to `psp_clearing` (a forged payout completion). It is bounded by the
    detection in payout-statement reconciliation. It is recorded for human acceptance **on condition that statement
@@ -324,6 +332,15 @@ Numbers are allocated by the orchestrator (next free `0132`).
    a different name (the Terraform variable `db_runtime_username` is configurable), A and B-ii fail closed
    (permission denied) for every withdrawal write. Before release, verify the role name against
    `deploy/init-app-role.sql` and `db_runtime_username` (runbook section 17).
+10. **Tracked finding BRAND-REHOME-HOLD-1 (security C2, slices 2-3 review; PRE-EXISTING, NOT fixed here; owner:
+   identity + architect).** The runtime role can re-home a player into another brand of the same tenant with one
+   statement (a CTE that UPDATEs `player_accounts.brand_id` and `wallets.brand_id` together; the composite FK
+   `(player_account_id, tenant_id, brand_id)` is satisfied after the statement). Moving a wallet that carries a
+   withdrawal hold into a brand that is already `closed` puts a hold balance into a closed brand after `LA025` let
+   that closure through, and moves it out of an active brand's `LA025` count. Likely fixes (decision for the owner
+   of identity, via an ADR): make `brand_id` immutable on `player_accounts` / `wallets`, or refuse a move into a
+   non-`active` brand under the brand gate key. Detection today: reconciliation D still sees the hold (D is
+   per tenant, not per brand). Registered in `docs/governance/task-registry.md`.
 
 ## 10. Work slices (ordered; none starts without orchestrator authorisation)
 
@@ -353,37 +370,43 @@ Slice 1 alone closes the LAUNCH-BLOCKING part of 14(b2); slices 2-3 close 14(a) 
 | LOWs: completed provider equality; E7 `provider_id` NOT NULL; HD-RET-1 exemption rule; residual 9.2 HIGH | both | §4.2, §3, §8, §9 |
 | Owner questions Q1/Q2 | orchestrator defaults | §8 |
 
-## 12. Implementation record: slices 2 and 3 (`ledger-finance`; IMPLEMENTED against a private local database, pending reviews)
+## 12. Implementation record: slices 2 and 3 (`ledger-finance`; IMPLEMENTED against a private local database, reviews applied, re-review pending)
 
-**Slice 2 (M-B = migration `0133`).** `idx_wallet_balance_projection_withdrawal_hold` (`tenant_id`) WHERE
-`account_type = 'player_withdrawal_hold'` (C3: no totals predicate; a catalog test pins that no index of the
-projection names `credit_total` / `debit_total` / `updated_at`, so the trigger's update stays HOT-eligible).
-`launch_subject_status_guard` = 0130's body byte for byte plus one `LA025` block in the closure branch, inside the
-existing RLS-bound window, after `LA023` and `LA024` (so existing codes are unchanged where several apply). Down
-restores 0130's body verbatim (whole-schema snapshot test). Go arm: hard precondition
-`H-6:withdrawal_hold_balance_non_zero` at request and under the executor's subject locks, typed as
-`PreconditionError{Base: ErrWithdrawalsHolding}` (same closed API code `LAUNCH_WITHDRAWALS_HOLDING_FUNDS`; the check
-code carries the distinction, no new API code); readiness `Info["withdrawal_hold_accounts_non_zero"]` and the
-closure-only notice `NoticeFundsHoldBlocksClosure`. **Q1 default applied:** a stranded hold (no hold-bearing
-request) refuses the closure; suspension is the lever (tested). Race: a hold-increasing leg is E0b only, whose
-insert takes the gate keys SHARED, so in the hold-first order the closure waits and is refused (`LA023` fires first;
-with `LA023` disabled by a mutant, `LA025` alone refuses: mutation evidence `S2M08`).
+**Slice 2 (M-B = migration `0133`).** `idx_ledger_accounts_withdrawal_hold` (`tenant_id`) WHERE `account_type =
+'player_withdrawal_hold'`, built under `SET LOCAL lock_timeout = '5s'`. `launch_subject_status_guard` = 0130's
+body byte for byte plus one `LA025` block in the closure branch, inside the existing RLS-bound window, after `LA023`
+and `LA024` (so existing codes are unchanged where several apply); the hold balance is rebuilt from
+`ledger_entries` (s4.3, security C1: the first draft read the runtime-writable projection; a test now zeroes the
+projection row as `igaming_runtime` and asserts `LA025` still refuses). Down restores 0130's body verbatim
+(whole-schema snapshot test). Go arm: hard precondition `H-6:withdrawal_hold_balance_non_zero` at request and
+under the executor's subject locks, typed as `PreconditionError{Base: ErrWithdrawalsHolding}` (same closed API code
+`LAUNCH_WITHDRAWALS_HOLDING_FUNDS`; the check code carries the distinction and the message says "player withdrawal
+hold balances are not zero" when no request holds funds); readiness `Info["withdrawal_hold_accounts_non_zero"]`
+(ledger read) and the closure-only notice `NoticeFundsHoldBlocksClosure`. **Q1 default applied:** a stranded hold
+(no hold-bearing request) refuses the closure; suspension is the lever (tested). Race: a hold-increasing leg is E0b
+only, whose insert takes the gate keys SHARED, so in the hold-first order the closure waits and is refused (`LA023`
+fires first; with `LA023` disabled by a mutant, `LA025` alone refuses: mutation evidence `S2M08`).
 
 **Slice 3 (M-C = migration `0134` + check D).** Kinds `withdrawal_hold_open_mismatch` and
 `withdrawal_request_ledger_link_invalid` (CHECK = 0115 list + 2; down fails loud `WD099` while findings exist).
 D is appended to `RunLedgerVsProjection` as specified in s4.4 (so the hourly scheduler, the non-active observation
 sweep and the in-tx P1 raise come with it; discriminator `stream:ledger_withdrawal_hold` under the drift Kind,
 like K2). ONE SQL statement (C7): per wallet, the hold balance rebuilt from `ledger_entries` vs the non-terminal
-sum, plus check A's link rules set-wise (parity-tested against `withdrawal_request_ledger_link_violation`).
-**Deviation (fail-closed definition):** a TRUE owner-side count is not available to the runtime credential (no
-BYPASSRLS; FORCE RLS binds the owner too; no SECURITY DEFINER per repo policy). D fails closed instead on (i) a
-session that is not exactly the tenant scope and (ii) a zero count under the tenant's `set_config` while an
-independently policied count is not (requests vs E0b transactions, both directions; hold entries vs hold
-projection rows). A policy change blinding all of these tables at once is not detectable at run time (residual;
-the whole-schema snapshot tests pin the policies). **Defect fixed on the way (C7):** the pre-existing
-ledger_vs_projection compare read the rebuild and the projection in two statements, so a posting committing
-between them raised a FALSE `balance_mismatch` P1 under live traffic (reproduced by
-`TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1`); both are now one statement per account (`rebuildAndProject`).
-**Not covered by D (residual 9.2):** an unattributed hold-leg pair that nets to zero on its wallet (no balance
-left) is not invariant #12 drift; B-ii prevents it while enabled, payout statement reconciliation detects a forged
-completion.
+sum; check A's link rules set-wise (parity-tested against `withdrawal_request_ledger_link_violation`); and
+(ledger-finance review C1) the read-only B-ii: every hold leg's transaction must be some request's hold or release
+link, else `violation=WD042` under the link-invalid kind, keyed `ledger_transaction:<id>` (this catches an
+unattributed pair that nets to zero, which the aggregate cannot see; residual 9.1). **Deviation (fail-closed
+definition):** a TRUE owner-side count is not available to the runtime credential (no BYPASSRLS; FORCE RLS binds
+the owner too; no SECURITY DEFINER per repo policy). D fails closed instead on (i) a session that is not exactly the
+tenant scope and (ii) a zero count under the tenant's `set_config` while an independently policied count is not
+(requests vs an E0b-shaped hold transaction, both directions; hold entries vs hold projection rows). A policy change
+blinding all of these tables at once is not detectable at run time (residual; the whole-schema snapshot tests pin
+the policies). **Defect fixed on the way (C7):** the pre-existing ledger_vs_projection compare read the rebuild and
+the projection in two statements, so a posting committing between them raised a FALSE `balance_mismatch` P1 under
+live traffic (reproduced by `TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1`); both are now one statement per
+account (`rebuildAndProject`, one pass with `SUM ... FILTER`, parity-tested against `ledger.RebuildBalance` /
+`ledger.GetProjectedBalance`). What D does NOT prove is residual 9.2: a well-shaped forged leg that IS linked by a
+request on a legal edge (e.g. a forged E9 completion) passes both A and D; detection is payout statement
+reconciliation. **CI guard (ledger-finance C2):** the owner tamper-plant tests skip only on the persistent shared
+databases; on the CI service database (`igaming_platform_test`) or with `CI=true`, a skip decision FAILS the test
+(`wdpath.OnPersistentDatabase`).
