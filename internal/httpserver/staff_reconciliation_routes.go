@@ -304,8 +304,10 @@ func toStaffReconciliationMismatchDTO(res *assetResolver, stream reconciliation.
 	if a := res.resolve(reconciliation.MismatchAssetCandidate(m.ExpectedValue, m.ActualValue)); a != nil {
 		code, exp := a.code, a.exponent
 		d.AssetCode, d.Exponent = &code, &exp
-		d.ExpectedMinorUOM = reconciliation.MismatchAmount(m.ExpectedValue)
-		d.ActualMinorUOM = reconciliation.MismatchAmount(m.ActualValue)
+		if reconciliation.AmountKindExposed(m.MismatchKind) {
+			d.ExpectedMinorUOM = reconciliation.MismatchAmount(m.ExpectedValue)
+			d.ActualMinorUOM = reconciliation.MismatchAmount(m.ActualValue)
+		}
 	}
 	return d
 }

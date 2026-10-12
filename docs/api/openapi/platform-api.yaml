@@ -8850,7 +8850,10 @@ components:
         platform-written part: the text before the first free-text token (provider_reference=, provider_tx_id=, merchant_reference=,
         settlement_reference=, original=, reference=), each token required exactly once. The asset comes only from the rendered expected/actual
         segments (never the key) and must exist in the asset registry; when it is null both amounts are null. The amount names are an allow-list
-        (amount=, open_bet_stakes, ledger_locked_net, sportsbook_locked_bonus_net). `subject_ref` is null when no trusted token names a subject
+        (amount=, open_bet_stakes, ledger_locked_net, sportsbook_locked_bonus_net). Amounts are exposed ONLY for the kinds pay_amount_mismatch and
+        pay_asset_mismatch (expected = the platform render, actual = the statement line render); every other kind returns null amounts, because
+        its actual text is a platform, ledger or other-attempt value (ledger-finance ruling: when in doubt, null). A statement line segment
+        rendered behind a source label that contains any token is not parsed at all (the label is stored data). `subject_ref` is null when no trusted token names a subject
         (for example a payment key whose attempt token follows the provider reference).
       properties:
         id: { type: string, format: uuid }

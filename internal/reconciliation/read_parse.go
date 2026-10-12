@@ -105,10 +105,37 @@ var (
 // the sportsbook locked-balance diff and the `amount=` token the payment renders use.
 var amountNames = []string{"amount", "open_bet_stakes", "ledger_locked_net", "sportsbook_locked_bonus_net"}
 
+// AmountKindExposed reports whether a mismatch kind may expose minor-unit amounts at all (ledger-
+// finance ruling, security F2: when in doubt, null). Only the two kinds whose expected side is the
+// platform render and whose actual side is the statement line render qualify; every other kind's
+// actual segment is a platform, ledger or other-attempt value.
+func AmountKindExposed(kind MismatchKind) bool {
+	return kind == MismatchKindPayAmountMismatch || kind == MismatchKindPayAssetMismatch
+}
+
+// segmentBody returns the part of a rendered segment that the platform wrote, or false. A statement
+// source label is rendered as a leading "[label] " (security F1); the label is stored data, so the body
+// is taken after the LAST "] line=" and the segment is refused when the label contains '=' (a label
+// that could carry a token). A bracketed segment with no "] line=" structure is refused.
+func segmentBody(seg string) (string, bool) {
+	if !strings.HasPrefix(seg, "[") {
+		return seg, true
+	}
+	i := strings.LastIndex(seg, "] line=")
+	if i < 0 || strings.Contains(seg[:i], "=") {
+		return "", false
+	}
+	return seg[i+2:], true
+}
+
 // MismatchAmount returns the minor-unit amount carried by one rendered segment (expected or
 // actual): exactly one allow-listed name, exactly once, in the trusted prefix, with an integer
 // value. Anything else is nil.
 func MismatchAmount(text string) *string {
+	text, ok := segmentBody(text)
+	if !ok {
+		return nil
+	}
 	var found *string
 	for _, name := range amountNames {
 		if v, ok := tokenOnce(text, name); ok && integerRe.MatchString(v) {
@@ -139,6 +166,10 @@ func hasToken(text, name string) bool {
 func MismatchAssetCandidate(expected, actual string) *string {
 	var asset string
 	for _, seg := range []string{expected, actual} {
+		seg, ok := segmentBody(seg)
+		if !ok {
+			return nil
+		}
 		if !hasToken(seg, "asset") {
 			continue
 		}
