@@ -42,9 +42,14 @@ is either a secret or noise).
   `app.environment` is discarded, an `options` value naming it is refused). No `ALTER ROLE`, no role change.
 - The setting is NOT a security control on its own: any session can `set_config()` it. SYNTHETIC-NOT-LEGAL RG configuration
   is admitted only when the owner-written `database_environment` anchor ALSO says `development` / `test`. **No anchor row =
-  production.** Production action: never insert a `development` / `test` row; optionally, as the migration-owner role,
-  `INSERT INTO database_environment (environment) VALUES ('production');` once, which makes the anchor permanent (the row is
-  write-once; the runtime role can never write it). Verify: `SELECT rg_database_environment();` returns `production`.
+  production.** **REQUIRED provisioning step (security review of ADR 0115 S1):** immediately after `migrate up` reaches
+  0135 on a production database, as the migration-owner role, run once
+  `INSERT INTO database_environment (environment) VALUES ('production');` - the row is write-once (the runtime role can
+  never write it; the owner cannot change it while the guard trigger is enabled), so no later mistake can turn the
+  database into a "test" one. Verify: `SELECT environment, recorded_at, recorded_by FROM database_environment;`.
+- Startup check: `platform-api` with `GuardEnvironment() = production` refuses to start when the anchor says
+  `development` / `test` (`db.VerifyEnvironmentAnchor`, `ErrEnvironmentAnchorMismatch`), fails closed if the anchor cannot be
+  read, and logs a warning while no anchor is recorded (the provisioning step above was skipped).
 - A database restored from a test / development backup carries that backup's anchor row: never restore one into production
   (`restore-from-backup.md`).
 

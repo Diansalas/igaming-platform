@@ -326,6 +326,17 @@ launch. Bets recompute the deadline from the *current* limit.
   built without blocking writes (the `CONCURRENTLY` practice from
   DEVOPS-0107-INDEX-WINDOW-1, in its own non-transactional migration step).
 - S1 also adds `deposit_intents (tenant_id, player_account_id, asset_code, created_at)`.
+- **Amendment (S1 implementation, ledger-finance review LF 3).** This repository's migration
+  runner applies every file in one transaction, so there is no "own non-transactional migration
+  step". Instead the operator pre-builds both indexes `CONCURRENTLY` out of band before
+  migration 0135 (runbook `expand-contract-migrations.md` section 5.1). 0135's first step accepts
+  a pre-built index only if VALID and identically defined and then executes nothing against the
+  table. A missing index is built in the migration only on a small table; above the threshold
+  (`reltuples > 100000` or more than 64 MB) the migration refuses with `RL098`. Two §2.2 shapes
+  also changed in S1:
+  - the singular `config_version_id` is `config_version_ids uuid[]`, because a composed
+    configuration spans several rows;
+  - a `requires_confirmation` column records that a row awaits the player's `confirm`.
 
 ### 3. Enforcement
 
@@ -670,3 +681,41 @@ required, with 409 on a body mismatch; rate-limited):
 | SEC LOW: ceiling raise delayed by player cooldown | Accepted | §2.2 |
 | SEC LOW: idempotency key reuse with different body = 409 | Accepted | §2.2, §5 |
 | OQ-1/2/3 | Recorded as orchestrator defaults, reversible by owner/legal | §9 |
+
+## S1 implementation record (migration 0135; not a status change)
+
+Recorded from the S1 security and ledger-finance reviews. Labels stay as in the Status section
+until S1-S6 merge.
+
+- **Implemented differently from the text above, deliberately:**
+  - Index build: see the §2.6 amendment.
+  - Environment control: `app.environment` is a narrowing input only. The binding control is
+    the owner-written, write-once `database_environment` anchor (no row = production). A
+    production `platform-api` refuses a `development` / `test` anchor. Recording `production`
+    is a required provisioning step.
+  - Config key: `rg_limit_configs` carries `asset_code` in its key. NULL means all assets, and
+    a numeric ceiling needs an asset.
+  - Change requests: the floor change request stores `proposed_config`, and its
+    `payload_hash` is derived by the database.
+  - `attestation_ref` is restricted to printable ASCII.
+  - Read primitives (`compose` / `realized` / `classify`) raise `RL026` for a tenant other
+    than the session's.
+  - A restrictive policy narrows platform-scope `time_out` visibility to tenants where the
+    Person holds an account.
+  - Account-scope `time_out` is not yet encoded (S2).
+- **S2 must (ledger-finance LF 7):**
+  - reject a player value above the composed `ceiling`;
+  - reject a `period_kind` outside the composed `allowed_periods` and an `asset_code` /
+    `scope` the configuration does not offer;
+  - enforce the pending-change cap and map an idempotency-key reuse with a different body to
+    409.
+
+  The database does none of these in S1. The S1 trigger classifies and times the change; the
+  ceiling clamp is read-time (§2.2).
+- **S4 must (ledger-finance LF 8):** run its fail-closed (`rg_config_missing`) tests in a
+  jurisdiction that `internal/testsupport/rgfix` has NOT seeded. rgfix seeds a permissive
+  synthetic floor for every jurisdiction present when it runs, so a fail-closed test in a
+  seeded jurisdiction would pass vacuously.
+- **Application-enforced:** `PermRGConfigWrite` and the staff limit permissions are HTTP-layer
+  checks. The database binds operator rows to a same-tenant principal and to tighten-only, not
+  to a permission.

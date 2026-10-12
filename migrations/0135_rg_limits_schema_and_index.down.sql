@@ -8,27 +8,34 @@ ALTER TABLE rg_limit_configs NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE rg_limit_config_change_requests NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE player_rg_limit_changes NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE player_restrictions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE casino_launch_sessions NO FORCE ROW LEVEL SECURITY;
 DO $$
 DECLARE
-    v_cfg bigint; v_req bigint; v_chg bigint; v_to bigint;
+    v_cfg bigint; v_req bigint; v_chg bigint; v_to bigint; v_root bigint;
 BEGIN
     SELECT count(*) INTO v_cfg FROM rg_limit_configs;
     SELECT count(*) INTO v_req FROM rg_limit_config_change_requests;
     SELECT count(*) INTO v_chg FROM player_rg_limit_changes;
     SELECT count(*) INTO v_to FROM player_restrictions WHERE restriction_type = 'time_out';
-    IF v_cfg + v_req + v_chg + v_to > 0 THEN
-        RAISE EXCEPTION 'migration 0135 down refused: RG limit data exists (configs=%, change_requests=%, player_changes=%, time_outs=%)',
-            v_cfg, v_req, v_chg, v_to USING ERRCODE = 'RL099';
+    -- Ledger-finance 6: a recorded session-root instant (written by S4) is data, not schema.
+    SELECT count(*) INTO v_root FROM casino_launch_sessions WHERE auth_session_root_started_at IS NOT NULL;
+    IF v_cfg + v_req + v_chg + v_to + v_root > 0 THEN
+        RAISE EXCEPTION 'migration 0135 down refused: RG limit data exists (configs=%, change_requests=%, player_changes=%, time_outs=%, launch_session_roots=%)',
+            v_cfg, v_req, v_chg, v_to, v_root USING ERRCODE = 'RL099';
     END IF;
 END
 $$;
 ALTER TABLE player_restrictions FORCE ROW LEVEL SECURITY;
+ALTER TABLE casino_launch_sessions FORCE ROW LEVEL SECURITY;
 
+-- On a production-size ledger, DROP INDEX CONCURRENTLY both indexes out of band BEFORE running this
+-- down (runbook expand-contract-migrations section 5.1); IF EXISTS then makes these no-ops.
 DROP INDEX IF EXISTS idx_deposit_intents_tenant_player_asset_created;
 DROP INDEX IF EXISTS idx_ledger_entries_tenant_player_asset_created;
 
 ALTER TABLE casino_launch_sessions DROP COLUMN auth_session_root_started_at;
 
+DROP POLICY time_out_tenant_narrowing ON player_restrictions;
 DROP POLICY player_self_insert ON player_restrictions;
 CREATE POLICY player_self_insert ON player_restrictions
     FOR INSERT
@@ -68,6 +75,7 @@ DROP TABLE rg_limit_config_change_requests;
 DROP FUNCTION rg_limit_config_change_requests_guard();
 DROP FUNCTION rg_deny_mutation();
 DROP FUNCTION rg_scope_rank(text);
+DROP FUNCTION rg_assert_session_tenant(uuid);
 DROP FUNCTION rg_valid_interval_set(interval[]);
 DROP FUNCTION rg_valid_text_set(text[], text[]);
 DROP FUNCTION rg_fixed_interval(interval);

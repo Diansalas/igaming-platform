@@ -1,8 +1,9 @@
 -- ADR 0115 SLICE S1 (Responsible Gaming limits: schema + index + database environment anchor).
 -- RG / MONEY-ADJACENT SCHEMA: FOR `architect`, `security`, `ledger-finance`, `qa` REVIEW BEFORE MERGE.
 --
--- NUMBERING: 0135, allocated by the orchestrator (0133 is the ADR 0113 slice-2 migration, 0134 is
--- reserved). Until those merge, `migrate verify` reports the 0133/0134 gap; nothing else depends on it.
+-- NUMBERING: 0135, allocated by the orchestrator. 0133 and 0134 are the ADR 0113 slice 2 / slice 3
+-- migrations on claude/adr0113-slice2-3; until that branch merges, `migrate verify` on this branch
+-- reports the 0133/0134 gap. 0135 depends on neither (up/down/up verified with 0133 applied first).
 --
 -- NO ENFORCEMENT. Nothing in this file refuses a deposit, a wager, a launch or a login: the
 -- enforcement boundary rg.EvaluateAction and its hook points are slice S4. NO LEGAL VALUE: this file
@@ -32,23 +33,30 @@
 --      is refused.
 --   6. player_restrictions: restriction_type gains 'time_out' (bounded: ends_at required) and the
 --      player_self_insert policy is extended for it (platform_person, or tenant_person pinned to
---      app.tenant_id). Locks, RLS for everything else and immutability are unchanged.
+--      app.tenant_id), and a RESTRICTIVE SELECT policy hides a platform-scope time_out from a tenant
+--      session unless the Person has an account in that tenant (security C4). Locks, every other
+--      policy and immutability are unchanged.
+--   Security C1/C2: the BEFORE INSERT triggers force id (and seq); rg_limit_config_compose,
+--   rg_limit_realized and rg_limit_change_classify raise RL026 unless p_tenant = app.tenant_id.
 --   7. casino_launch_sessions.auth_session_root_started_at (nullable; written by S4).
 --   8. Grants to igaming_runtime (mirrored by deploy/init-app-role.sql).
---   9. ledger_entries (tenant_id, player_account_id, asset_code, created_at) and deposit_intents
+--   0b. (FIRST, before any ALTER / ACCESS EXCLUSIVE step) ledger_entries and deposit_intents
 --      (tenant_id, player_account_id, asset_code, created_at) indexes. This runner applies every file
 --      in ONE transaction, so CREATE INDEX CONCURRENTLY cannot run here. Production practice
---      (docs/runbooks/expand-contract-migrations.md section 5): the migration operator pre-builds both
---      indexes CONCURRENTLY out of band; the pre-flight then accepts them only if VALID and identically
---      defined and the CREATE INDEX IF NOT EXISTS below is a no-op. Without a pre-build the index is
---      built here, non-concurrently (a SHARE lock on the table for the build, as 0092 / 0107 / 0121).
+--      (docs/runbooks/expand-contract-migrations.md section 5.1): the migration operator pre-builds both
+--      indexes CONCURRENTLY out of band; the pre-flight accepts them only if VALID, READY and
+--      identically defined, and the step below then EXECUTEs nothing for them (no statement on the
+--      table, so no SHARE lock). A missing index is built here only on a small table (dev / CI); on a
+--      table above the threshold (reltuples > 100000 or > 64 MB) the migration refuses with RL098 and
+--      points at the runbook. The step runs under SET LOCAL-style lock_timeout 5 s (restored after).
 --
 -- SQLSTATE class RL (new): RL001 actor session, RL003 backdated, RL004 operator row loosens / narrows,
 -- RL005 operator row with no floor in force, RL006 floor without a usable approved request, RL007
 -- four-eyes person / payload binding, RL008 synthetic row refused, RL009 append-only, RL010 request
 -- state machine, RL011 calendar_tz, RL020 client-asserted time / change_kind, RL021 no change, RL022
 -- cancel / confirm invalid, RL023 increase / removal with no configuration in force, RL024 isolation
--- level, RL025 tenant / actor / self-target, RL098 pre-flight, RL099 down refused. AP0xx from the verifier.
+-- level, RL025 tenant / actor / self-target, RL026 read primitive for a tenant other than the session's,
+-- RL098 pre-flight / large table without a pre-built index, RL099 down refused. AP0xx from the verifier.
 --
 -- No function is SECURITY DEFINER except the existing verifier; every function pins search_path.
 
@@ -81,6 +89,10 @@ BEGIN
     IF v_def IS DISTINCT FROM 'CHECK ((restriction_type = ''self_exclusion''::text))' THEN
         RAISE EXCEPTION 'migration 0135 pre-flight: player_restrictions_restriction_type_check is not the 0037 definition (%)', v_def USING ERRCODE = 'RL098';
     END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_policies WHERE schemaname = 'public' AND tablename = 'player_restrictions'
+                AND policyname = 'time_out_tenant_narrowing') THEN
+        RAISE EXCEPTION 'migration 0135 pre-flight: time_out_tenant_narrowing already exists' USING ERRCODE = 'RL098';
+    END IF;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = 'public.player_restrictions'::regclass
                 AND conname = 'player_restrictions_time_out_bounded') THEN
         RAISE EXCEPTION 'migration 0135 pre-flight: player_restrictions_time_out_bounded already exists' USING ERRCODE = 'RL098';
@@ -104,11 +116,43 @@ BEGIN
              WHERE i.indexrelid = ('public.' || r.name)::regclass AND i.indisvalid AND i.indisready
                AND pg_catalog.pg_get_indexdef(i.indexrelid) = r.def;
             IF v_n <> 1 THEN
-                RAISE EXCEPTION 'migration 0135 pre-flight: index % exists but is INVALID or not defined as expected; DROP INDEX CONCURRENTLY it and rebuild (runbook expand-contract-migrations section 5)', r.name
+                RAISE EXCEPTION 'migration 0135 pre-flight: index % exists but is INVALID or not defined as expected; DROP INDEX CONCURRENTLY it and rebuild (runbook expand-contract-migrations section 5.1)', r.name
                     USING ERRCODE = 'RL098';
             END IF;
         END IF;
     END LOOP;
+END
+$$;
+
+-- =========================================================================
+-- 0b. The indexes (ADR 0115 2.6, ledger-finance BLOCKER-1), BEFORE any lock-taking DDL of this file.
+--     A pre-built index (accepted by the pre-flight) is left untouched: nothing is executed against
+--     its table. A missing index is built only on a small table; otherwise RL098 (runbook 5.1).
+-- =========================================================================
+DO $$
+DECLARE
+    v_prev_lt text := pg_catalog.current_setting('lock_timeout');
+    r         record;
+    v_rows    double precision;
+    v_bytes   bigint;
+BEGIN
+    PERFORM pg_catalog.set_config('lock_timeout', '5s', true);
+    FOR r IN SELECT * FROM (VALUES
+        ('idx_ledger_entries_tenant_player_asset_created', 'ledger_entries'),
+        ('idx_deposit_intents_tenant_player_asset_created', 'deposit_intents')
+    ) AS v(name, tbl)
+    LOOP
+        IF to_regclass('public.' || r.name) IS NULL THEN
+            SELECT GREATEST(c.reltuples, 0), pg_catalog.pg_relation_size(c.oid) INTO v_rows, v_bytes
+              FROM pg_catalog.pg_class c WHERE c.oid = ('public.' || r.tbl)::regclass;
+            IF v_rows > 100000 OR v_bytes > 64 * 1024 * 1024 THEN
+                RAISE EXCEPTION 'migration 0135: % is not small (reltuples=%, % bytes); pre-build % CONCURRENTLY first (runbook expand-contract-migrations section 5.1)',
+                    r.tbl, v_rows, v_bytes, r.name USING ERRCODE = 'RL098';
+            END IF;
+            EXECUTE format('CREATE INDEX %I ON public.%I (tenant_id, player_account_id, asset_code, created_at)', r.name, r.tbl);
+        END IF;
+    END LOOP;
+    PERFORM pg_catalog.set_config('lock_timeout', v_prev_lt, true);
 END
 $$;
 
@@ -375,6 +419,20 @@ AS $$
        AND cardinality(p) = (SELECT count(DISTINCT x) FROM unnest(p) AS x)
 $$;
 
+-- Security C2: a read primitive is evaluated only for the session's OWN tenant. p_tenant must equal
+-- app.tenant_id (both NULL = a floor-only read from a tenant-less session). A mismatch raises RL026
+-- instead of returning a silently RLS-filtered answer (a bare floor, or has_row = false).
+CREATE FUNCTION rg_assert_session_tenant(p_tenant uuid) RETURNS void
+    LANGUAGE plpgsql STABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF p_tenant IS DISTINCT FROM NULLIF(pg_catalog.current_setting('app.tenant_id', true), '')::uuid THEN
+        RAISE EXCEPTION 'rg limits: tenant % is not the session tenant', p_tenant USING ERRCODE = 'RL026';
+    END IF;
+END
+$$;
+
 -- Scope strictness (broader reach = more protective).
 CREATE FUNCTION rg_scope_rank(p text) RETURNS int
     LANGUAGE sql IMMUTABLE
@@ -483,7 +541,8 @@ CREATE TABLE rg_limit_configs (
     allowed_durations_any             BOOLEAN NULL,
     allowed_intervals                 INTERVAL[] NULL,
     reason_code                       TEXT NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 64),
-    attestation_ref                   TEXT NOT NULL CHECK (octet_length(attestation_ref) BETWEEN 1 AND 200),
+    -- Printable ASCII only (security LOW): no homoglyph can dodge the synthetic guard's 'synthetic' match.
+    attestation_ref                   TEXT NOT NULL CHECK (octet_length(attestation_ref) BETWEEN 1 AND 200 AND attestation_ref ~ '^[ -~]+$'),
     change_request_id                 UUID NULL UNIQUE REFERENCES rg_limit_config_change_requests (id) ON DELETE RESTRICT,
     created_by_actor_type             TEXT NOT NULL CHECK (created_by_actor_type = 'staff'),
     created_by_actor_id               UUID NOT NULL,
@@ -687,6 +746,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names z WHERE z.name = NEW.calendar_tz) AND NEW.calendar_tz IS NOT NULL THEN
         RAISE EXCEPTION 'rg_limit_configs: calendar_tz % is not a known time zone', NEW.calendar_tz USING ERRCODE = 'RL011';
     END IF;
+    NEW.id := pg_catalog.gen_random_uuid(); -- never a caller value (security C1)
     NEW.created_by_actor_type := 'staff';
     NEW.created_by_actor_id := v_actor.actor;
     NEW.created_by_person_id := v_actor.person_id;
@@ -867,6 +927,7 @@ CREATE FUNCTION rg_limit_config_compose(
 ) LANGUAGE sql STABLE
     SET search_path = pg_catalog, public, pg_temp
 AS $$
+    SELECT public.rg_assert_session_tenant(p_tenant);
     WITH inforce AS (
         SELECT DISTINCT ON (c.tenant_id, c.brand_id, c.asset_code) c.*
           FROM public.rg_limit_configs c
@@ -965,6 +1026,7 @@ CREATE FUNCTION rg_limit_realized(
 ) LANGUAGE sql STABLE
     SET search_path = pg_catalog, public, pg_temp
 AS $$
+    SELECT public.rg_assert_session_tenant(p_tenant);
     WITH k AS (
         SELECT c.id, c.value, c.requested_at, c.seq, c.effective_at, c.requires_confirmation,
                lead(c.requested_at) OVER (ORDER BY c.requested_at, c.seq) AS next_requested_at
@@ -1003,6 +1065,7 @@ DECLARE
     v_latest RECORD;
     v_cfg    RECORD;
 BEGIN
+    PERFORM public.rg_assert_session_tenant(p_tenant);
     IF p_supersedes IS NOT NULL THEN
         IF p_intent IS NULL OR p_intent NOT IN ('cancel_pending', 'confirm') THEN
             RAISE EXCEPTION 'rg limit change: a superseding request is cancel_pending or confirm' USING ERRCODE = 'RL022';
@@ -1094,6 +1157,10 @@ DECLARE
     v_res       RECORD;
     v_intent    text := NEW.change_kind;
 BEGIN
+    -- Security C1: the ordering tiebreaker and the key are never caller values (a caller-chosen seq
+    -- or id would turn the UNIQUE / PK constraints into a cross-tenant existence oracle).
+    NEW.seq := pg_catalog.nextval('public.player_rg_limit_changes_seq_seq'::regclass);
+    NEW.id := pg_catalog.gen_random_uuid();
     IF current_setting('transaction_isolation') <> 'read committed' THEN
         RAISE EXCEPTION 'rg limit change: refused under % isolation (READ COMMITTED only)', current_setting('transaction_isolation')
             USING ERRCODE = 'RL024';
@@ -1251,6 +1318,25 @@ CREATE POLICY player_self_insert ON player_restrictions
         )
     );
 
+-- Security C4 (ADR 0115 security condition 10, database layer): a platform-scope (tenant_id NULL)
+-- time_out is visible to a tenant-bound session only when the Person has an account in THAT
+-- tenant. Without this, staff_and_system_read's tenant_id NULL arm would disclose every Person's
+-- platform time-outs to every tenant. RESTRICTIVE: it narrows every permissive SELECT policy and
+-- widens nothing. Tenant-less (platform / system) sessions and every non-time_out row are
+-- unaffected; self_exclusion visibility is unchanged (ADR 0026, redacting readers).
+CREATE POLICY time_out_tenant_narrowing ON player_restrictions AS RESTRICTIVE
+    FOR SELECT
+    USING (
+        restriction_type <> 'time_out'
+        OR tenant_id IS NOT NULL
+        OR NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        OR EXISTS (
+            SELECT 1 FROM player_accounts pa
+             WHERE pa.person_id = player_restrictions.person_id
+               AND pa.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        )
+    );
+
 -- =========================================================================
 -- 8. casino_launch_sessions.auth_session_root_started_at (ADR 0115 2.4; written by S4)
 -- =========================================================================
@@ -1277,10 +1363,5 @@ BEGIN
 END $$;
 
 -- =========================================================================
--- 10. Indexes (ADR 0115 2.6, ledger-finance BLOCKER-1). See the header: pre-build CONCURRENTLY in
---     production; accepted here only if valid and identical (pre-flight), otherwise built now.
+-- 10. (The indexes are section 0b, at the top of this file.)
 -- =========================================================================
-CREATE INDEX IF NOT EXISTS idx_ledger_entries_tenant_player_asset_created
-    ON ledger_entries (tenant_id, player_account_id, asset_code, created_at);
-CREATE INDEX IF NOT EXISTS idx_deposit_intents_tenant_player_asset_created
-    ON deposit_intents (tenant_id, player_account_id, asset_code, created_at);

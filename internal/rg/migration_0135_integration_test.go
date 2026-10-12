@@ -23,6 +23,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
+	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
 
 const migration0135Version = 135
@@ -228,6 +229,30 @@ func TestMigration0135_PrebuiltConcurrentIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	full := m135Dir(t, migration0135Version)
+	// No pre-build, a writer holding ROW EXCLUSIVE: the small-table build waits at most the step's
+	// lock_timeout (5 s) and fails 55P03 - it never queues indefinitely behind live traffic.
+	{
+		w, err := pool.Raw().Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wt, err := w.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wt.Exec(ctx, `LOCK TABLE ledger_entries IN ROW EXCLUSIVE MODE`); err != nil {
+			t.Fatal(err)
+		}
+		bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+		start := time.Now()
+		_, err = pool.MigrateUp(bounded, full)
+		cancel()
+		_ = wt.Rollback(ctx)
+		w.Release()
+		if codeOf(err) != "55P03" || time.Since(start) > 20*time.Second {
+			t.Fatalf("a blocked index build must fail on lock_timeout (55P03) within seconds, got %v after %s", err, time.Since(start))
+		}
+	}
 	// Wrong definition under the expected name.
 	if _, err := pool.Raw().Exec(ctx, `CREATE INDEX CONCURRENTLY idx_ledger_entries_tenant_player_asset_created ON ledger_entries (tenant_id, created_at)`); err != nil {
 		t.Fatal(err)
@@ -256,8 +281,26 @@ func TestMigration0135_PrebuiltConcurrentIndex(t *testing.T) {
 	}
 	var oid1 uint32
 	_ = pool.Raw().QueryRow(ctx, `SELECT 'idx_ledger_entries_tenant_player_asset_created'::regclass::oid`).Scan(&oid1)
-	if applied, err := pool.MigrateUp(ctx, full); err != nil || len(applied) != 1 {
-		t.Fatalf("up over valid pre-built indexes: %v %v", applied, err)
+	// Security C3 / ledger-finance 1-2: with the indexes pre-built the migration takes no SHARE lock
+	// on either table - it succeeds while another session holds ROW EXCLUSIVE (live writers) on both.
+	writer, err := pool.Raw().Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Release()
+	wtx, err := writer.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wtx.Exec(ctx, `LOCK TABLE ledger_entries, deposit_intents IN ROW EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+	applied, err := pool.MigrateUp(bounded, full)
+	cancel()
+	_ = wtx.Rollback(ctx)
+	if err != nil || len(applied) != 1 {
+		t.Fatalf("up over valid pre-built indexes, with writers holding ROW EXCLUSIVE: %v %v", applied, err)
 	}
 	var oid2 uint32
 	_ = pool.Raw().QueryRow(ctx, `SELECT 'idx_ledger_entries_tenant_player_asset_created'::regclass::oid`).Scan(&oid2)
@@ -269,3 +312,111 @@ func TestMigration0135_PrebuiltConcurrentIndex(t *testing.T) {
 func mustUUID() uuid.UUID { return uuid.New() }
 
 func mustParse(s string) uuid.UUID { return uuid.MustParse(s) }
+
+// Ledger-finance 5: an INVALID index under the expected name (a failed / cancelled CONCURRENTLY
+// build) is refused with RL098 even though its definition matches.
+func TestMigration0135_InvalidPrebuiltIndexRefused(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := m135Scratch(t, "m0135v_")
+	if _, err := pool.MigrateUp(ctx, m135Dir(t, migration0135Version-1)); err != nil {
+		t.Fatal(err)
+	}
+	// A session holding ROW EXCLUSIVE makes the CONCURRENTLY build wait after it has created its
+	// (invalid) catalog entry; a statement timeout then cancels it and leaves the index INVALID.
+	holder, err := pool.Raw().Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	htx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := htx.Exec(ctx, `LOCK TABLE deposit_intents IN ROW EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	builder, err := pool.Raw().Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := builder.Exec(ctx, `SET statement_timeout = '1s'`); err != nil {
+		t.Fatal(err)
+	}
+	_, buildErr := builder.Exec(ctx, `CREATE INDEX CONCURRENTLY idx_deposit_intents_tenant_player_asset_created ON deposit_intents (tenant_id, player_account_id, asset_code, created_at)`)
+	_, _ = builder.Exec(ctx, `RESET statement_timeout`)
+	builder.Release()
+	_ = htx.Rollback(ctx)
+	holder.Release()
+	if buildErr == nil {
+		t.Fatal("the concurrent build was expected to be cancelled")
+	}
+	var valid bool
+	if err := pool.Raw().QueryRow(ctx, `SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_deposit_intents_tenant_player_asset_created'::regclass`).Scan(&valid); err != nil || valid {
+		t.Fatalf("precondition: an INVALID index must exist (valid=%v err=%v)", valid, err)
+	}
+	_, err = pool.MigrateUp(ctx, m135Dir(t, migration0135Version))
+	if codeOf(err) != "RL098" || !strings.Contains(err.Error(), "INVALID") {
+		t.Fatalf("an INVALID pre-built index must be refused with RL098, got %v", err)
+	}
+	if _, err := pool.Raw().Exec(ctx, `DROP INDEX CONCURRENTLY idx_deposit_intents_tenant_player_asset_created`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.MigrateUp(ctx, m135Dir(t, migration0135Version)); err != nil {
+		t.Fatalf("after DROP INDEX CONCURRENTLY the small-table path builds the index: %v", err)
+	}
+}
+
+// Security C3 / ledger-finance 1-2: without a pre-built index, a table above the threshold
+// (reltuples > 100000) is refused with RL098 pointing at runbook 5.1; nothing is created.
+func TestMigration0135_LargeTableWithoutPrebuiltIndexRefused(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := m135Scratch(t, "m0135l_")
+	if _, err := pool.MigrateUp(ctx, m135Dir(t, migration0135Version-1)); err != nil {
+		t.Fatal(err)
+	}
+	tenantID, brandID, acct, person := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	if err := pool.WithPlatformAdmin(ctx, uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, 'm0135l', $2, 'under_platform_licence', 'active')`,
+			tenantID, "m0135l-"+tenantID.String()[:8]); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'b', 'active')`, brandID, tenantID, "m0135l-b-"+brandID.String()[:8]); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
+			acct, tenantID, brandID, person, acct.String()+"@m0135l.invalid"); err != nil {
+			return err
+		}
+		w, err := wallet.GetOrCreate(ctx, tx, tenantID, brandID, acct, "EUR")
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO deposit_intents (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, idempotency_key)
+			SELECT $1, $2, $3, $4, 'EUR', 100, 'card', 'm0135l-' || g FROM generate_series(1, 120000) AS g`, tenantID, brandID, acct, w.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed 120k deposit intents: %v", err)
+	}
+	if _, err := pool.Raw().Exec(ctx, `ANALYZE deposit_intents`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pool.MigrateUp(ctx, m135Dir(t, migration0135Version))
+	if codeOf(err) != "RL098" || !strings.Contains(err.Error(), "section 5.1") || !strings.Contains(err.Error(), "deposit_intents") {
+		t.Fatalf("a large table without a pre-built index must be refused with RL098 (runbook 5.1), got %v", err)
+	}
+	var n int
+	if err := pool.Raw().QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relname IN ('rg_limit_configs', 'idx_ledger_entries_tenant_player_asset_created', 'idx_deposit_intents_tenant_player_asset_created')`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("a refused up must create nothing: %d %v", n, err)
+	}
+	if _, err := pool.Raw().Exec(ctx, `CREATE INDEX CONCURRENTLY idx_deposit_intents_tenant_player_asset_created ON deposit_intents (tenant_id, player_account_id, asset_code, created_at)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.MigrateUp(ctx, m135Dir(t, migration0135Version)); err != nil {
+		t.Fatalf("after the runbook pre-build the migration applies: %v", err)
+	}
+}

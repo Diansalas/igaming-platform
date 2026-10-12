@@ -665,8 +665,25 @@ not be satisfiable by the runtime role.
   (`ALTER ROLE igaming_runtime SET ...`, which a role may do for itself) as a trap.
 - **Who writes the anchor.** Development / CI test databases: the owner role, through the
   integration-tagged `internal/testsupport/rgfix.EnsureTestEnvironment` (refuses any database
-  already anchored as `staging` / `production`). Production: nobody (no row = production), or the
-  provisioning operator once, `production`. Never an agent; never the runtime role.
+  already anchored as `staging` / `production`). Production: the provisioning operator, once,
+  `production` - a REQUIRED provisioning step (`production-configuration-checklist.md`); a
+  production `platform-api` refuses to start on a `development` / `test` anchor
+  (`db.VerifyEnvironmentAnchor`). Never an agent; never the runtime role.
+- **Read primitives are tenant-bound (security C2).** `rg_limit_config_compose`,
+  `rg_limit_realized` and `rg_limit_change_classify` raise `RL026` unless their `p_tenant` equals
+  the session's `app.tenant_id` (both NULL = floor-only read), instead of returning a
+  silently RLS-filtered answer.
+- **Platform time-outs (security C4).** A RESTRICTIVE SELECT policy on `player_restrictions`
+  (`time_out_tenant_narrowing`) hides a platform-scope (`tenant_id` NULL) `time_out` from a
+  tenant-bound session unless the Person has an account in that tenant. Platform-scope
+  `self_exclusion` rows keep their existing visibility (ADR 0026; redacting readers).
+- **Caller-chosen keys (security C1).** The BEFORE INSERT triggers force `id` (and
+  `player_rg_limit_changes.seq`), so a caller value can never probe another tenant's rows
+  through a unique-violation.
+- **Application-enforced, not database-enforced.** The operator-config permission
+  (`PermRGConfigWrite`, S2) and the staff limit permissions are enforced by the HTTP layer only;
+  the database binds operator rows to a tenant principal of the same tenant (RL001) and to
+  tighten-only (RL004), not to a specific staff permission.
 - **Residual (unchanged class, ADR 0110 9.4).** A holder of the OWNER credential can insert a
   `test` anchor (on an un-anchored database) or disable the triggers; the anchor makes that a
   visible, write-once, owner-only act, it does not prevent it. `db.VerifyRuntimeRoleInProduction`

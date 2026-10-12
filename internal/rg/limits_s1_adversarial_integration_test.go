@@ -12,6 +12,7 @@ package rg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -927,14 +928,17 @@ func TestRGLimitsS1(t *testing.T) {
 	t.Run("RGFix_PermissiveSyntheticFloorsResolveOnlyInTest", func(t *testing.T) {
 		f := w.newFix(t)
 		rgfix.SeedPermissiveFloorsAt(t, w.ownerURL)
+		inEnv := func(env string) sess {
+			return sess{tenant: f.tenantA.String(), principal: f.staffA.String(), env: env}
+		}
 		for _, k := range rgfix.ControlKinds {
-			if c := w.compose(t, sess{env: "test"}, f.jur, &f.tenantA, &f.brandA1, k, eur); c["found"] != true || c["enabled"] != false {
+			if c := w.compose(t, inEnv("test"), f.jur, &f.tenantA, &f.brandA1, k, eur); c["found"] != true || c["enabled"] != false {
 				t.Fatalf("%s: the permissive fixture floor must resolve in a test session: %v", k, c)
 			}
-			if c := w.compose(t, sess{env: ""}, f.jur, &f.tenantA, &f.brandA1, k, eur); c["found"] != false {
+			if c := w.compose(t, inEnv(""), f.jur, &f.tenantA, &f.brandA1, k, eur); c["found"] != false {
 				t.Fatalf("%s: a synthetic floor must resolve as ABSENT without app.environment: %v", k, c)
 			}
-			if c := w.compose(t, sess{env: "staging"}, f.jur, &f.tenantA, &f.brandA1, k, eur); c["found"] != false {
+			if c := w.compose(t, inEnv("staging"), f.jur, &f.tenantA, &f.brandA1, k, eur); c["found"] != false {
 				t.Fatalf("%s: a synthetic floor must resolve as ABSENT in staging: %v", k, c)
 			}
 		}
@@ -985,5 +989,95 @@ func TestRGLimitsS1(t *testing.T) {
 		if env != "production" || found {
 			t.Fatalf("a production-configured connection must carry app.environment=production and see no synthetic floor: env=%q found=%v", env, found)
 		}
+		// Startup check (security LOW): a production process refuses this test-anchored database
+		// (read through the runtime role, as platform-api does).
+		if _, err := db.VerifyEnvironmentAnchor(ctx, "production", prodPool); !errors.Is(err, db.ErrEnvironmentAnchorMismatch) {
+			t.Fatalf("a production start on a test-anchored database must be refused, got %v", err)
+		}
+	})
+
+	t.Run("SecurityConditions_C1SeqId_C2SessionTenant_C4TimeOutNarrowing_ASCII", func(t *testing.T) {
+		f := w.newFix(t)
+		w.floor(t, midFloor(f.jur, "deposit").Clone(rgfix.Spec{"increase_cooldown": "01:00:00", "increase_requires_reconfirmation": false, "scope": "account", "mandatory": false}))
+		// C1: a player-supplied seq / id is replaced (no 23505 existence oracle across tenants).
+		a, err := w.change(playerSess(f.tenantA, f.acctA1), chg{tenant: f.tenantA, acct: f.acctA1, kind: "deposit", asset: eur, period: rolling, value: strp("100")})
+		wantOK(t, "tenant A row", err)
+		var aSeq int64
+		wantOK(t, "seq", do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT seq FROM player_rg_limit_changes WHERE id = $1`, a.id).Scan(&aSeq)
+		}))
+		var bID uuid.UUID
+		var bSeq int64
+		err = do(w.rt, playerSess(f.tenantB, f.acctB), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `INSERT INTO player_rg_limit_changes
+				(seq, id, tenant_id, player_account_id, scope, control_kind, asset_code, period_kind, value, source, reason_code, idempotency_key, request_hash)
+				VALUES ($1, $2, $3, $4, 'account', 'deposit', 'EUR', 'rolling_24h', 5, 'player_self_service', 'c1', 'c1-probe', $5)
+				RETURNING id, seq`, aSeq, a.id, f.tenantB, f.acctB, hex64()).Scan(&bID, &bSeq)
+		})
+		wantOK(t, "a player supplying another tenant's seq / id", err)
+		if bID == a.id || bSeq == aSeq {
+			t.Fatalf("seq / id must be database values: got id=%v seq=%d (probe id=%v seq=%d)", bID, bSeq, a.id, aSeq)
+		}
+		// C2: the read primitives refuse a tenant other than the session's (RL026), never a silent answer.
+		probes := []struct {
+			name, q string
+			args    []any
+		}{
+			{"compose", `SELECT (rg_limit_config_compose($1, $2, NULL, 'deposit', 'EUR', clock_timestamp())).found`, []any{f.jur, f.tenantA}},
+			{"realized", `SELECT (rg_limit_realized($1, $2, $3, 'account', 'deposit', 'EUR', 'rolling_24h', clock_timestamp())).has_row`,
+				[]any{f.tenantA, f.acctA1, f.personA}},
+			{"classify", `SELECT (rg_limit_change_classify($1, $2, $3, NULL, $4, 'account', 'deposit', 'EUR', 'rolling_24h', 1, NULL, NULL, 'player_self_service', clock_timestamp())).change_kind IS NOT NULL`,
+				[]any{f.tenantA, f.acctA1, f.personA, f.jur}},
+		}
+		for _, p := range probes {
+			for sname, s := range map[string]sess{"tenant B staff": staffSess(f.tenantB, f.staffB), "platform": platformSess(w.ops.Requester), "tenant-less": {}} {
+				err := do(w.rt, s, func(ctx context.Context, tx pgx.Tx) error {
+					var b bool
+					return tx.QueryRow(ctx, p.q, p.args...).Scan(&b)
+				})
+				wantCode(t, p.name+" for tenant A from a "+sname+" session", err, "RL026")
+			}
+		}
+		var stillHasRow bool
+		wantOK(t, "own-tenant realized", do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT (rg_limit_realized($1, $2, $3, 'account', 'deposit', 'EUR', 'rolling_24h', clock_timestamp())).has_row`, f.tenantA, f.acctA1, f.personA).Scan(&stillHasRow)
+		}))
+		if !stillHasRow {
+			t.Fatal("the own-tenant read must still see the realized row")
+		}
+		// C4: a platform-scope time_out of person X (accounts in tenant A only) is invisible to tenant
+		// B staff, visible to tenant A staff and to X; tenant-scoped rows are unchanged.
+		end := time.Now().Add(24 * time.Hour)
+		wantOK(t, "player X platform time_out", do(w.rt, playerSess(f.tenantA, f.acctX), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO player_restrictions (person_id, player_account_id, restriction_type, ends_at, source, created_by_actor_type, created_by_actor_id)
+				VALUES ($1, $2, 'time_out', $3, 'player_self_service', 'player', $2)`, f.personX, f.acctX, end)
+			return err
+		}))
+		seen := func(s sess) int {
+			var n int
+			wantOK(t, "time_out count", do(w.rt, s, func(ctx context.Context, tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT count(*) FROM player_restrictions WHERE person_id = $1 AND restriction_type = 'time_out'`, f.personX).Scan(&n)
+			}))
+			return n
+		}
+		if n := seen(staffSess(f.tenantB, f.staffB)); n != 0 {
+			t.Fatalf("tenant B staff saw %d of person X's platform time_out rows", n)
+		}
+		if n := seen(staffSess(f.tenantA, f.staffA)); n != 1 {
+			t.Fatalf("tenant A staff must see person X's platform time_out, saw %d", n)
+		}
+		if n := seen(playerSess(f.tenantA, f.acctX)); n != 1 {
+			t.Fatalf("player X must see their own time_out, saw %d", n)
+		}
+		if n := seen(platformSess(w.ops.Requester)); n != 1 {
+			t.Fatalf("a platform session is not narrowed, saw %d", n)
+		}
+		// ASCII attestation (security LOW): a Cyrillic homoglyph of 'synthetic' is refused by the CHECK.
+		cyr := midFloor(f.jur, "loss").Clone(rgfix.Spec{"attestation_ref": "ѕynthetic"})
+		err = do(w.rt, sess{}, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := rgfix.InsertFloor(ctx, tx, cyr, rgfix.DefaultSteps())
+			return err
+		})
+		wantCode(t, "a non-ASCII attestation_ref", err, "23514")
 	})
 }
