@@ -1,0 +1,36 @@
+ADR 0115 S1 (migration 0135) - mutation-kill evidence (local, private scratch databases; no CI evidence)
+
+Driver: docs/plans/prh2-hardening-round/adr0115-s1-mutation-driver.py (76 mutants; it refuses to start
+on a dirty mutation target, after an earlier container restart killed run 1 mid-mutant and left
+mutant C3 in the working copy - that file was restored from git before anything else ran).
+Suite per DB mutant: go test -tags integration -p 1 -count=1 -run 'TestRGLimitsS1|TestMigration0135'
+./internal/rg/ (every run migrates throwaway scratch databases from the mutated file, runtime role
+igaming_runtime for every assertion). Go mutants: unit tests of internal/config and internal/db.
+
+Run 2 (full, at commit 5e23932 + the rgfix allowlist commit; raw log adr0115-s1-mutation-log-run2.txt): 71 KILLED, 5 SURVIVED.
+Survivors and disposition:
+  P5 superseded request realized (next-request bound dropped)  -> test gap; test added
+     (two pending increases); re-run: KILLED.
+  R5 operator rows readable by every tenant                     -> test gap; direct cross-tenant read added; KILLED.
+  R7 change requests: platform-principal conjunct dropped       -> test gap; principal-less read added; KILLED.
+  E4 anchor insert guard: owner-membership check off            -> SURVIVES BY LAYERING: the runtime role has
+     no INSERT grant and RLS has no write policy, so the third layer cannot be isolated without
+     creating a role (not permitted). Mutant E8 proves the trigger layer is exercised when the
+     grant is widened (RL009 instead of 42501).
+  F7 caller payload_hash trusted (COALESCE)                     -> EQUIVALENT: the preceding mismatch check
+     guarantees a supplied payload_hash already equals the derived one.
+Final: 74 of 76 KILLED; 2 survivors dispositioned above (1 layered, 1 equivalent).
+
+Coverage map (ADR 0115 section 7 adversarial list -> mutants):
+  tighten-only / widen-only bypass ........ T1-T17
+  UNION / OR / strictest composition ...... C1-C8
+  backdating ................................ B1
+  forged change_kind / effective_at ........ P6, P7
+  realization rule incl. <= boundary ....... P3, P4, P5
+  classification / cooldown / confirm ...... P1, P2, P10, P11, P12, P16
+  L0.4 serialisation / isolation guard ..... P8, P9, P13
+  synthetic rows in 'production' ........... E1-E8 (runtime cannot forge the anchor), E9, E10
+  floor four-eyes + hash binding + proofs .. F1-F9
+  cross-tenant / RLS-blind / RLS-broad ..... R1-R7, P14, P15
+  time_out RLS / CHECK ..................... O1-O3
+  migration pre-flight / down refusal ...... X1-X5

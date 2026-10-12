@@ -205,6 +205,9 @@ var workerReferenceAllowlist = map[string]bool{
 	"payment_manual_resolution_codes": true, // K3 (0115) family-R reference table: closed code vocabulary
 	// B13 (0123) family-R reference tables (no tenant data; SELECT-only for the runtime role).
 	"payout_instrument_kinds": true, "payout_instrument_verification_max_age": true,
+	// ADR 0115 S1 (0135): jurisdiction RG floors (tenant_id NULL rows only; operator rows stay
+	// tenant-bound) and the one-row environment anchor - same decision as a18SelectAllowlist.
+	"rg_limit_configs": true, "database_environment": true,
 }
 
 // T-ID-1: the worker sees every tenant's outbox rows, claims a due row, and the
