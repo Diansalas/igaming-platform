@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
@@ -188,6 +189,33 @@ func TestADR0113D_HealthyTenantIsClean(t *testing.T) {
 		withdrawal.StateSubmitted, withdrawal.StateCancelled, withdrawal.StateRejected, withdrawal.StateCompleted, withdrawal.StateFailed} {
 		dWithdrawal(t, pool, f, 10, st)
 	}
+	// The :kyc_denied release path (E5, withdrawal.DenyForCompliance as igaming_runtime): a healthy
+	// release leg that WD042 / A must accept (re-review recommendation).
+	denied := dWithdrawal(t, pool, f, 10, withdrawal.StateApproved)
+	var person uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, f.playerAccountID).Scan(&person)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := withdrawal.LockApprovedForSubmission(ctx, tx, denied); err != nil {
+			return err
+		}
+		_, err := withdrawal.DenyForCompliance(ctx, tx, denied,
+			kyc.EnforcementDecision{Outcome: kyc.OutcomeFailed, Allowed: false, Code: "kyc_withdrawal_payout:failed", PolicyVersion: kyc.PolicyVersion},
+			kyc.EnforcementParams{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: person,
+				Operation: kyc.EnforcementWithdrawalPayout, AssetCode: "EUR", Amount: 10, CorrelationID: uuid.New()})
+		return err
+	}); err != nil {
+		t.Fatalf("E5 kyc denial: %v", err)
+	}
+	var key string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT t.idempotency_key FROM withdrawal_requests w JOIN ledger_transactions t ON t.id = w.release_ledger_transaction_id WHERE w.id = $1`, denied).Scan(&key)
+	}); err != nil || key != denied.String()+":kyc_denied" {
+		t.Fatalf("precondition: the :kyc_denied release leg: %q err=%v", key, err)
+	}
 	o := dSweep(t, rt, f)
 	if o.Err != nil || o.Run.Status != StatusClean {
 		t.Fatalf("a healthy tenant must reconcile clean: status=%s err=%v", o.Run.Status, o.Err)
@@ -206,7 +234,7 @@ func TestADR0113D_HealthyTenantIsClean(t *testing.T) {
 			&v.HoldProjectionRowsWithPostings, &k, &key, &e, &a); err != nil {
 			return err
 		}
-		if !v.SessionOK || v.Requests != 8 || v.E0bTxs != 1 || v.HoldEntries != 12 || k != nil {
+		if !v.SessionOK || v.Requests != 9 || v.E0bTxs != 1 || v.HoldEntries != 14 || k != nil {
 			return fmt.Errorf("probe %+v kind=%v", v, k)
 		}
 		return nil
@@ -513,10 +541,34 @@ func TestADR0113D_NonActiveTenantObserved(t *testing.T) {
 	if !o.ObservationOnly || o.TenantStatus != "closed" || o.Err != nil || o.Run.Status != StatusMismatchesFound {
 		t.Fatalf("a closed tenant is observed and D finds the stranded hold: %+v", o)
 	}
-	if rows := dMismatches(t, pool, f); len(dKind(rows, MismatchKindWithdrawalHoldOpenMismatch)) != 1 {
-		t.Fatalf("one open-hold finding: %+v", rows)
+	// The COMPLETE finding set (re-review C1): exactly the open-hold row on the hold account and the
+	// WD042 row of the stranded leg's transaction, nothing else.
+	hold := holdAccount(t, pool, f)
+	rows := dMismatches(t, pool, f)
+	if len(rows) != 2 {
+		t.Fatalf("exactly two findings (open-hold + WD042): %+v", rows)
 	}
-	mustOne(t, alertinject.ForSubject(t, pool, f.tenantID), alerting.KindReconciliationLedgerProjectionDrift, discLedgerWithdrawalHold)
+	var open, unlinked int
+	for _, r := range rows {
+		switch {
+		case r.kind == string(MismatchKindWithdrawalHoldOpenMismatch) && r.key == hold.String() &&
+			strings.Contains(r.expected, "= 0 (requests=0)") && strings.Contains(r.actual, "= 300 "):
+			open++
+		case r.kind == string(MismatchKindWithdrawalRequestLedgerLinkInvalid) && strings.HasPrefix(r.key, "ledger_transaction:") &&
+			strings.HasPrefix(r.actual, "violation=WD042 "):
+			unlinked++
+		}
+	}
+	if open != 1 || unlinked != 1 {
+		t.Fatalf("want exactly 1 open-hold (expected 0, rebuilt 300) and 1 WD042 row: %+v", rows)
+	}
+	var stream []string
+	for _, a := range alertinject.ForSubject(t, pool, f.tenantID) {
+		stream = append(stream, a.Kind+"|"+a.Discriminator)
+	}
+	if len(stream) != 1 || stream[0] != string(alerting.KindReconciliationLedgerProjectionDrift)+"|"+discLedgerWithdrawalHold {
+		t.Fatalf("exactly one alert, the D discriminator: %v", stream)
+	}
 }
 
 // Concurrency with live withdrawals (C7): requests are created (E0 + E0b) and released (cancel, reject,

@@ -792,6 +792,14 @@ stranded hold is also a check-D finding (below): investigate it there.
 The balance is rebuilt from `ledger_entries`, never read from `wallet_balance_projection` (which the runtime role
 can write), so "fixing" a projection row does not unblock a closure.
 
+**Closure duration (capacity note).** A closure re-sums EVERY `ledger_entries` row of the subject's hold accounts
+(two per withdrawal ever made, including terminal ones) while it holds the subject's status gate key EXCLUSIVE, so
+new withdrawal requests, deposits and stakes of that tenant (tenant closure) or brand (brand closure) wait for it.
+The time grows with withdrawal history: in the order of 1-4 s at about 200k hold entries for a tenant closure
+(re-review estimate; brand closures sum only that brand's wallets). Schedule large tenant closures in a quiet
+window; if this becomes a problem, a closure-time hold-balance cache is a design change for `ledger-finance`, not
+a configuration change.
+
 **Deploy note (0133).** `CREATE INDEX idx_ledger_accounts_withdrawal_hold` takes a `SHARE` lock on
 `ledger_accounts` for the build (new-account inserts wait) under `lock_timeout = 5s`: if the lock is not granted
 within 5 s the migration fails cleanly (nothing applied) and can be re-run in a quieter moment.

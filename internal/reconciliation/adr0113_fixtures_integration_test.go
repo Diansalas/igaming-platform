@@ -51,12 +51,9 @@ func legacySubmittedWithdrawal(t *testing.T, pool *db.Pool, f fixture, wrID uuid
 //
 // Callers first call wdpath.SkipOnPersistentDatabase: the planted legs are permanent (append-only).
 func ownerTamperHoldLegs(ctx context.Context, tx pgx.Tx, fn func() error) error {
-	var tenant string
-	if err := tx.QueryRow(ctx, `SELECT current_setting('app.tenant_id', true)`).Scan(&tenant); err != nil {
+	before, err := holdLegTransactions(ctx, tx)
+	if err != nil {
 		return err
-	}
-	if id, err := uuid.Parse(tenant); err == nil {
-		plantedTenants.Store(id, true)
 	}
 	for _, q := range []string{
 		`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_withdrawal_hold_guard`,
@@ -68,6 +65,15 @@ func ownerTamperHoldLegs(ctx context.Context, tx pgx.Tx, fn func() error) error 
 	}
 	if err := fn(); err != nil {
 		return err
+	}
+	after, err := holdLegTransactions(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for id := range after {
+		if !before[id] {
+			plantedTxs.Store(id, true) // a transaction this plant posted a hold leg in
+		}
 	}
 	for _, q := range []string{
 		`SET CONSTRAINTS ledger_entries_balanced IMMEDIATE`,
@@ -82,21 +88,44 @@ func ownerTamperHoldLegs(ctx context.Context, tx pgx.Tx, fn func() error) error 
 	return nil
 }
 
-// plantedTenants are the tenants that received an ownerTamperHoldLegs plant in this test binary.
-var plantedTenants sync.Map
+// plantedTxs are the ledger transactions that ownerTamperHoldLegs plants posted a hold leg in (this
+// test binary): the exact unattributed legs those suites create on purpose.
+var plantedTxs sync.Map
+
+// holdLegTransactions is the set of transactions with a player_withdrawal_hold leg visible to tx.
+func holdLegTransactions(ctx context.Context, tx pgx.Tx) (map[uuid.UUID]bool, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT e.ledger_transaction_id FROM ledger_entries e
+		JOIN ledger_accounts la ON la.id = e.ledger_account_id WHERE la.account_type = 'player_withdrawal_hold'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
 
 // withoutPlantedUnlinkedHoldLegs drops check D's WD042 findings (an unattributed hold leg, ADR 0113
-// slices 2-3 review LF C1) for tenants whose unattributed legs were planted on purpose by
-// ownerTamperHoldLegs: the payout reconciliation suites using it assert "no OTHER finding", and WD042
-// for their own plant is expected (it is asserted by TestADR0113D_UnlinkedZeroNetPair_IsNotClean). A
-// WD042 for any other tenant, and every other kind, is kept.
+// slices 2-3 review LF C1) ONLY for the exact transactions ownerTamperHoldLegs planted (re-review C2:
+// per transaction, not per tenant). The payout suites using it assert "no OTHER finding"; WD042 for
+// their own plant is expected (asserted by TestADR0113D_UnlinkedZeroNetPair_IsNotClean). A WD042 of
+// any other transaction, and every other kind, is kept, so the callers' len(drift) == 0 assertion
+// proves every dropped finding was a planted one.
 func withoutPlantedUnlinkedHoldLegs(ms []Mismatch) []Mismatch {
 	var out []Mismatch
 	for _, m := range ms {
-		_, planted := plantedTenants.Load(m.TenantID)
-		if planted && m.MismatchKind == MismatchKindWithdrawalRequestLedgerLinkInvalid &&
-			strings.HasPrefix(m.ReconciliationKey, "ledger_transaction:") && strings.HasPrefix(m.ActualValue, "violation=WD042 ") {
-			continue
+		if m.MismatchKind == MismatchKindWithdrawalRequestLedgerLinkInvalid && strings.HasPrefix(m.ActualValue, "violation=WD042 ") {
+			if id, err := uuid.Parse(strings.TrimPrefix(m.ReconciliationKey, "ledger_transaction:")); err == nil {
+				if _, planted := plantedTxs.Load(id); planted {
+					continue
+				}
+			}
 		}
 		out = append(out, m)
 	}
