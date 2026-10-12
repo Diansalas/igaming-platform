@@ -2,447 +2,671 @@
 
 ## Status
 
-**PROPOSED** (architect, 2026-10-12). Design only; nothing here is implemented.
+**ACCEPTED, pending implementation** (architect, 2026-10-12). Revision 2 adds the
+ledger-finance and security design reviews (both APPROVE WITH CONDITIONS, ledger-finance
+with 2 blockers). Every condition is applied below as ADR text. The review
+disposition table is at the end. Design only: **nothing here is implemented.**
+The labels are `NOT IMPLEMENTED` until slices S1–S6 (§8) merge.
+
 Owner directive 2026-10-11: finish provider-independent RG. No legal value is
 chosen here. Every numeric limit, cool-down, period, duration and cadence is
 **configuration per jurisdiction**, and the configuration has **no default that
-implies legal compliance**. Compliance/legal supplies the content later (§9).
-Migration numbers are allocated by the orchestrator only.
+implies legal compliance**. Compliance/legal supplies the content. The OQ-1..OQ-3
+answers in §9 are **orchestrator defaults, reversible by owner/legal**. They are not
+owner or legal approvals. Migration numbers are allocated by the orchestrator only.
 
 ## Context
 
-- Blueprint requirement (as extracted in `docs/architecture/01-requirements-inventory.md` §6,
-  `docs/architecture/11-kyc-aml-rg-architecture.md` "Responsible gaming"): deposit, loss,
-  wager and session limits. A decrease takes effect immediately and an increase only
-  after a cooling-off period. Reality checks, time-outs, and self-exclusion at brand and
-  platform level. A permanent self-exclusion survives account closure and
-  re-registration (person cluster).
-- Implemented today (`internal/rg/rg.go`, ADR 0026, migrations 0037/0038): one
-  restriction type, `self_exclusion` (CHECK in `migrations/0037_create_player_restrictions.up.sql:49`).
-  It is append-only, and immutability triggers enforce that. Player self-service
-  exclusions apply platform-wide. Staff exclusions are tenant- or brand-scoped.
-  `EvaluateEligibility` (`rg.go:584`) takes the L0.4 person advisory lock (`rg.go:138`)
-  and checks the player account status, active self-exclusions (with `clock_timestamp()`),
-  and the wallet status. Other parts already in place: the open-bet policy
-  (`self_exclusion_policy.go`, ADR 0034 §14, which shows the effective-dated,
-  tighten-only, no-backdating config pattern), the enumeration sweep
-  (`enumeration_sweep.go`) and cross-brand person resolution (`internal/identityresolution`,
-  ADR 0027, **MOCK** resolver only).
-- Current callers of `EvaluateEligibility`: casino launch
-  (`internal/casino/orchestrator.go:399`); casino bet (`orchestrator.go:1647`, after
-  L0.1 `:1408` and L0.2 `:1630`, before risk `:1688` and L3 `:1805`); sportsbook place
-  (`internal/sportsbook/orchestrator.go:279`, before L3 `:483`); deposit T1
-  (`internal/payments/deposit_v2.go:207`); deposit T2 (`internal/payments/drive.go:88`);
-  bonus eligibility (`internal/bonus/eligibility.go:95`). Rollback, win, void and settlement paths deliberately do **not** call it
+- **Blueprint requirement.** As extracted in `docs/architecture/01-requirements-inventory.md` §6
+  and `docs/architecture/11-kyc-aml-rg-architecture.md` "Responsible gaming", the
+  platform needs deposit, loss, wager and session limits. A decrease takes effect
+  immediately; an increase only after a cooling-off period. It also needs reality
+  checks, time-outs, and self-exclusion at brand and platform level. A permanent
+  self-exclusion survives account closure and re-registration (person cluster).
+- **Implemented today** (`internal/rg/rg.go`, ADR 0026, migrations 0037/0038):
+  - Only one restriction type exists, `self_exclusion` (CHECK in
+    `migrations/0037_create_player_restrictions.up.sql:49`). Rows are append-only,
+    enforced by immutability triggers.
+  - Player self-service exclusions apply platform-wide. Staff exclusions are tenant- or
+    brand-scoped.
+  - `EvaluateEligibility` (`rg.go:584`) takes the L0.4 person advisory lock
+    (`rg.go:138`). It then checks account status, self-exclusion (using
+    `clock_timestamp()`) and wallet status.
+  - Supporting pieces: the open-bet policy (`self_exclusion_policy.go`, ADR 0034 §14,
+    the effective-dated, tighten-only, no-backdating config pattern), the enumeration
+    sweep (`enumeration_sweep.go`) and Person resolution (`internal/identityresolution`,
+    ADR 0027, **MOCK** resolver only).
+- **Current `EvaluateEligibility` callers:**
+
+  | Call site | Location | Ordering notes |
+  |---|---|---|
+  | Casino launch | `internal/casino/orchestrator.go:399` | |
+  | Casino bet | `orchestrator.go:1647` | after L0.1 `:1408` and L0.2 `:1630`; before risk `:1688` and L3 `:1805` |
+  | Sportsbook place | `internal/sportsbook/orchestrator.go:279` | before L3 `:483` |
+  | Deposit T1 | `internal/payments/deposit_v2.go:207` | |
+  | Deposit T2 | `internal/payments/drive.go:88` | |
+  | Bonus eligibility | `internal/bonus/eligibility.go:95` | |
+
+  Rollback, win, void and settlement paths deliberately do not call it
   (`casino/orchestrator.go:1954,2096`).
-- Gap audit `docs/governance/platform-completion-gap-audit-2026-10-10.md` §7 found no
-  deposit, loss, wager or session limits, no time-out, and no cool-down on limit
-  increases. Risk rules (`internal/risk`, ADR 0031) are **operator** limits. They are
-  not player-set and have no cool-down semantics, so they are not reused as RG limits.
-  Only the risk engine's ledger-usage measurement is reused (§3.4).
-- Constraints: ADR 0082 lock order (status keys, then L0.1..L0.6, then L1..L4, rule
-  R8); Q-GP-5, terminal stake returns are allowed (task-registry
-  `DECISIONS-PRH2-FINAL-GAMEPLAY-SECURITY-2026-10-06`); WD-RG-1 still open
-  (`docs/HANDOVER.md:481`). `tenant_jurisdiction_configs` exists but has no reader (gap audit §0.1). It is not
-    reused because it holds opaque ruleset ids, not versioned, tighten-only values.
+- **Gap audit** (`docs/governance/platform-completion-gap-audit-2026-10-10.md` §7):
+  there are no deposit, loss, wager or session limits, no time-out, and no cool-down on
+  limit increases.
+  - Risk rules (ADR 0031) are **operator** limits and are not reused as RG limits.
+  - Risk's *specs* also cannot be reused for RG usage. ledger-finance BLOCKER-2 explains
+    why (§3.4).
+- **Constraints:**
+  - ADR 0082 lock order.
+  - Q-GP-5: terminal stake returns are allowed (task-registry
+    `DECISIONS-PRH2-FINAL-GAMEPLAY-SECURITY-2026-10-06`).
+  - WD-RG-1 is open (`docs/HANDOVER.md:481`).
+  - ADR 0017 step-up is NOT IMPLEMENTED. The withdrawal path fails closed on it
+    (`internal/httpserver/withdrawal_handlers.go:788`).
+  - `tenant_jurisdiction_configs` has no reader and holds opaque ruleset ids, so it is
+    not reused.
 
 ## Decision
 
-### 1. Controls, scopes and periods
+### 1. Controls, scopes, periods, usage
 
 | Control | Kind key | Unit | Scope options (config) | Period |
 |---|---|---|---|---|
 | Deposit limit | `deposit` | asset minor units, `NUMERIC(38,0)` | `account` \| `tenant_person` | yes |
 | Loss limit | `loss` | asset minor units | `account` \| `tenant_person` | yes |
 | Wager limit | `wager` | asset minor units | `account` \| `tenant_person` | yes |
-| Session duration limit | `session_duration` | seconds | `account` \| `tenant_person` | no (per login session) |
-| Reality-check cadence | `reality_check_interval` | seconds | `account` | no. **Notification config only**; never blocks a bet |
+| Session duration limit | `session_duration` | seconds | `account` \| `tenant_person` | no (per login chain, §1.5) |
+| Reality-check cadence | `reality_check_interval` | seconds | `account` | no. **Notification only**; never blocks |
 | Time-out / cooling-off break | restriction `time_out` | duration | `platform_person` \| `tenant_person` \| `account` | n/a |
 | Self-exclusion (exists) | restriction `self_exclusion` | duration or indefinite | `platform_person` (player); tenant/brand (staff) | n/a |
 
-**Scope rules**
+**1.1 Scope.**
+- Self-exclusion stays person-level and platform-wide for self-service (ADR 0026 §3).
+- An unconfigured time-out scope defaults to **`platform_person`**. That is the
+  protective choice; it is not a legal value.
+- Amount and session limits reach at most **`tenant_person`**: one Person's accounts
+  across the brands of one tenant. They never cross tenants (OQ-3).
+- `tenant_person` aggregation depends on Person linking, which is **PROVIDER
+  DEPENDENT** (MOCK, ADR 0027). §2.5 restricts what a linked account may do.
 
-- Self-exclusion stays **person-level and platform-wide** for player self-service
-  (ADR 0026 §3, unchanged). The same applies to `time_out` when the config says
-  `platform_person`.
-- Amount and session limits can be at most **`tenant_person`**, meaning all of one
-  Person's accounts across the brands of one tenant. They are never cross-tenant,
-  because usage comes from tenant-RLS-scoped ledger rows and B2B tenants are separate
-  operators with separate licences (ADR 0006). Cross-tenant amount limits are owner question OQ-3.
-- `tenant_person` aggregation depends on Person linking. Person linking is
-  **PROVIDER DEPENDENT** (MOCK resolver, ADR 0027), and the same caveat already
-  disclosed for self-exclusion applies here.
+**1.2 Periods.**
+- Allowed values: `rolling_24h`, `rolling_7d`, `rolling_30d`, `calendar_day`,
+  `calendar_week`, `calendar_month`.
+- Window starts are computed **in SQL from `clock_timestamp()`**:
+  - Rolling windows subtract `interval '24 hours' / '168 hours' / '720 hours'`. They
+    never use `'1 day'`, which is DST-sensitive.
+  - Calendar windows are
+    `date_trunc(unit, clock_timestamp() AT TIME ZONE calendar_tz) AT TIME ZONE calendar_tz`.
+    Week start comes from config.
+  - Go local time is never used.
+- A player may hold several limits of one kind, and all of them apply.
 
-**Periods**
+**1.3 Assets.**
+- Amount limits are per asset code (Asset-registry exponent, ADR 0007/0021), with no
+  FX conversion.
+- If a kind is `mandatory`, every asset the player transacts in needs a limit.
 
-- Allowed periods are `rolling_24h`, `rolling_7d`, `rolling_30d`, `calendar_day`,
-  `calendar_week` and `calendar_month`. Calendar periods use the config row's IANA
-  timezone and week start. Jurisdiction config lists which periods a player may
-  choose. A player may hold several limits of one kind (for example daily and
-  monthly), and all of them apply.
+**1.4 Usage definitions.**
+- **Source.** Usage is always derived from the ledger or from `deposit_intents` at
+  read time. There are **no counters, so usage cannot drift**. A future rollup would
+  be a ledger-derived projection covered by the hourly drift job (CLAUDE.md), never
+  authoritative.
+- **wager.** The sum of stake legs (`casino_bet`, `sportsbook_bet`), minus reversals
+  **whose `reverses_transaction_id` is a stake** (a rollback of a `casino_win` never
+  counts). Bonus-funded legs count only if `count_bonus_funded=true`.
+- **loss.** The net debit to `player_cash` (plus `player_bonus` when
+  `count_bonus_funded=true`) over the transaction types `casino_bet`, `casino_win`,
+  `casino_rollback`, `sportsbook_bet`, `sportsbook_settlement`, `sportsbook_void` and
+  `sportsbook_rollback`. `player_locked_cash` and `player_locked_bonus` are **declared
+  ignored**.
+  - When `count_bonus_funded=false`, wins and returns on bonus-funded legs are
+    excluded too.
+  - Bonus conversion (bonus to cash) **never reduces** loss usage.
+  - `loss_computation` supports only `net_of_wins`. A config row naming anything else
+    is rejected at write time.
+  - Whether net loss may go negative (a net win giving extra headroom) is the attested
+    field `loss_may_go_negative`. When the config row is present but this field is
+    `none`, the engineering floor of 0 applies.
+- **Reversal window rule.** A reversal counts toward wager or loss **only if its
+  original transaction is inside the same window**.
+- **deposit.** Intents with status in {`pending`, `ambiguous`} count at the amount
+  requested. `succeeded` intents count at the amount credited by their ledger deposit
+  posting. Inbound deposits with no intent are counted from ledger deposit postings.
+  - `deposit_intents.status` has no `expired` value (migration 0025 CHECK:
+    `pending|succeeded|declined|ambiguous|failed`). A pending intent older than a
+    configured TTL is moved to `failed` by the **existing payments sweeper**, which
+    releases its usage.
+  - Reversals and withdrawals do not restore capacity.
+  - For `tenant_person`, deposit usage is **joined by `person_id`** through the
+    tenant's `player_accounts`, never by `player_account_id` alone.
 
-**Assets**
+**1.5 Session.**
+- `session_duration` is measured from the `created_at` of the root of the
+  refresh-token rotation chain (`migrations/0012_create_sessions.up.sql`,
+  `replaced_by_session_id`).
+- Re-login and parallel chains can bypass it. Two **required, attestable** config
+  fields cover this, each taking a value or `none`:
+  - `post_session_break`: minimum interval after a chain hits its limit before a new
+    chain may wager or deposit.
+  - `concurrent_chain_aggregation`: whether all of the Person's open chains in the
+    scope count from the earliest root.
 
-- Amount limits are **per asset code**, keyed to the `Asset` registry exponent
-  (ADR 0007/0021). There is **no FX conversion**.
-- A jurisdiction marking a kind `mandatory` means every asset the player transacts in
-  needs a limit, otherwise the action is refused (§3.2).
-
-**Usage definitions (v1)**
-
-- **wager** = sum of stake legs (cash, plus bonus-funded legs if
-  `count_bonus_funded=true`) minus stake returns (rollback/void) in the window.
-- **loss** = (stakes) − (wins + stake returns) in the window. Only the
-  `net_of_wins` computation is supported. A config naming any other computation is
-  rejected at write time, so an unsupported regime fails closed.
-- **deposit** = gross sum of deposit intents in the window with status not in
-  {declined, failed, expired}, including in-flight ones, using the credited amount
-  once known. Reversals and withdrawals do not restore capacity.
-- **session_duration** = now − the `created_at` of the root of the refresh-token
-  rotation chain (`migrations/0012_create_sessions.up.sql`, `replaced_by_session_id`).
-
-**Deferred (recorded, not built)**
-
-- Cumulative play time per period: there is no reliable activity signal. It needs its
-  own design.
-- Operator-imposed (affordability) limits.
+**1.6 Deferred (recorded, not built).** Cumulative play time per period, operator-imposed
+affordability limits, cross-tenant amount limits, a per-player-jurisdiction overlay,
+and WD-RG-1.
 
 ### 2. Data model
 
-**2.1 `rg_limit_configs` (versioned config; pattern from migration 0043/0049 and `self_exclusion_policy.go`)**
+**2.1 `rg_limit_configs` (versioned; pattern of migrations 0043/0049)**
 
-- **Key:** `(jurisdiction_code, tenant_id NULL, brand_id NULL, control_kind, effective_from)`.
-  - A row with `tenant_id NULL` is the **jurisdiction floor**. It is written by a
-    platform principal only.
-  - Tenant and brand rows are **operator bounds** and may only tighten the floor.
-- **Fields.** Every field is **tri-state and explicit**: a value, the literal `none`
-  (an attested "no bound"), or not allowed. A row cannot be stored with a field
-  missing (DB `CHECK`). Fields: `enabled` (bool, whether players may set this kind);
-  `mandatory` (bool); `ceiling` (value or `none`: the hard cap and the maximum a
-  player may set); `allowed_periods[]`; `calendar_tz`; `week_start`;
-  `increase_cooldown` (interval; no `none`, zero rejected; absence makes increases
-  impossible); `increase_requires_reconfirmation` (bool); `scope`
-  (`account` | `tenant_person`); `count_bonus_funded` (bool); `loss_computation`
-  (`net_of_wins`). Time-out rows: `allowed_durations[]` or `any`, and `scope`.
-  Reality-check rows: `allowed_intervals[]`, `mandatory`. Every row also carries
-  `reason_code`, `attestation_ref` (the compliance/legal reference that supplied the
-  value), `created_by_*` and `created_at`.
-- **Append-only.** No UPDATE or DELETE, enforced by trigger like
-  `player_restrictions_immutable`. The value in force is the latest
-  `effective_from <= asOf` per exact scope.
-- **Floor writes** may not be backdated (the ErrJurisdictionFloorBackdated rule and
-  its 5 s tolerance).
-- **Tighten-only** is checked twice for operator rows: in Go, with an audited denial,
-  and by a DB trigger. Tighter means: lower ceiling; longer cool-down; `mandatory`,
-  reconfirmation or `count_bonus_funded` false→true; wider scope
-  (account→tenant_person); a subset of allowed periods and durations.
-- **Read-time resolution** composes floor, tenant and brand rows by taking the
-  strictest value per field, so it is safe even if a trigger is bypassed.
-- **RLS:** floor rows are readable by all and tenant/brand rows by
-  `tenant_id = app.tenant_id`. Floors are written by a platform principal and
-  overrides by the same tenant (as with `sb_jurisdiction_restrictions`, migration
-  0090).
-- **Jurisdiction key** is derived server-side from the tenant licence. This is the
-  same derivation as `jurisdiction.EvaluationPolicyLookup`
-  (`internal/jurisdiction/evaluation_policy.go`), and no request body can name it. A
-  future per-player-jurisdiction overlay composes by taking the strictest value.
+- **Key.** `(jurisdiction_code, tenant_id NULL, brand_id NULL, control_kind, effective_from)`.
+  - `tenant_id NULL` marks the **jurisdiction floor**.
+  - Tenant and brand rows are **operator bounds**.
+- **Fields.** Every field is explicit. Each holds either a value or the literal `none`
+  (an attested "no bound"). A missing field is rejected by a DB `CHECK`, so partial
+  configuration cannot exist. The fields:
+  - `enabled`, `mandatory`
+  - `ceiling` (value | `none`): the hard cap and the maximum a player may set
+  - `allowed_periods[]`, `calendar_tz`, `week_start`
+  - `increase_cooldown` (interval; no `none`; zero rejected)
+  - `increase_requires_reconfirmation`
+  - `scope`
+  - `count_bonus_funded`
+  - `loss_computation` (`net_of_wins`), `loss_may_go_negative`
+  - `post_session_break`, `concurrent_chain_aggregation` (for `session_duration`)
+  - `pending_intent_ttl` (for `deposit`)
+  - Time-out rows: `allowed_durations[]` | `any`, plus `scope`
+  - Reality-check rows: `allowed_intervals[]`, `mandatory`
+  - On every row: `reason_code`, `attestation_ref`, `created_by_*`, `created_at`
+- **Append-only.** An immutability trigger enforces this. The row in force is the
+  latest `effective_from <= asOf` for the exact scope.
+- **No backdating, for floor or operator rows.** This reuses the
+  `ErrJurisdictionFloorBackdated` rule and its 5 s DB-trigger tolerance (security
+  condition 9).
+- **Operator rows are tighten-only for restrictive fields and widen-only for
+  protective options** (security condition 1). Both the Go layer (with an audited
+  denial) and a DB trigger check this.
+  - **Restrictive fields may only tighten:**
+    - lower `ceiling`
+    - longer `increase_cooldown`
+    - `mandatory` false→true
+    - reconfirmation false→true
+    - `count_bonus_funded` false→true
+    - `loss_may_go_negative` true→false
+    - scope `account`→`tenant_person`
+    - longer `post_session_break`
+    - `concurrent_chain_aggregation` false→true
+  - **Protective options may only widen:**
+    - `enabled` false→true (an operator may let players set a limit the floor does
+      not offer, but may never take one away)
+    - `allowed_periods`, `allowed_durations` and `allowed_intervals` may only be
+      **supersets** of the floor
+- **Read-time composition** works even if a trigger is bypassed:
+  - strictest value for restrictive fields
+  - **UNION** for option sets
+  - **OR** for `enabled` and `mandatory`
+- **Floor four-eyes is enforced in the DB** (security condition 9, ADR 0113 pattern).
+  - A floor row can only be inserted with `change_request_id` referencing an
+    `approved` row in `rg_limit_config_change_requests`.
+  - The trigger checks that the approver's `person_id` differs from the requester's
+    `person_id`.
+  - The signed actor proof (ADR 0110) is bound to the request id **and** a hash of the
+    payload; the trigger recomputes the hash from the inserted row.
+- **Synthetic-config guard** (security condition 8). Rows with
+  `attestation_ref='synthetic'` are labelled `SYNTHETIC-NOT-LEGAL`.
+  - Resolution treats such rows as **absent**, which yields `rg_config_missing` plus an
+    alert, unless `cfg.GuardEnvironment()` (`internal/config/config.go:924`) is
+    `development` or `test`. A missing `APP_ENV` counts as production, and staging
+    counts as non-dev.
+  - A DB trigger refuses synthetic rows unless the GUC `app.environment` is
+    `development` or `test`. This GUC is **new**: S1 sets it per connection from the
+    guarded config, and when it is absent the trigger treats the environment as
+    production.
+  - This replaces the earlier "startup refusal", which was an availability hazard.
+- **RLS.**
+  - Floors are readable by all; tenant and brand rows only by
+    `tenant_id = app.tenant_id`.
+  - Floor writes need a platform principal plus an approved change request. Overrides
+    are written by the same tenant (as in migration 0090).
+- **Jurisdiction key.** Derived server-side from the tenant licence, as in
+  `jurisdiction.EvaluationPolicyLookup` (`internal/jurisdiction/evaluation_policy.go`).
+  It is never taken from a request body.
 
-**2.2 `player_rg_limit_changes` (append-only history; the authoritative player-set state)**
+**2.2 `player_rg_limit_changes` (append-only; the authoritative player-set state)**
 
-- **Columns:** `id`, `tenant_id NOT NULL`, `person_id`, `player_account_id` (anchor),
-  `brand_id`; `scope`, `control_kind`, `asset_code NULL`, `period_kind NULL`;
-  `value NUMERIC(38,0) NULL` (NULL means removal); `change_kind`
-  (`initial|decrease|increase|removal|cancel_pending|confirm`); `requested_at` (DB
-  `clock_timestamp()`), `effective_at`; `supersedes_change_id NULL` (for
-  `confirm`/`cancel_pending`); `source` (`player_self_service|staff_on_player_request`);
-  `reason_code`, `evidence_ref` (required for staff); `created_by_actor_type/id`;
-  `config_version_id` (provenance); `idempotency_key` with
-  `UNIQUE (tenant_id, player_account_id, idempotency_key)`.
-- `change_kind` is **classified server-side** by comparing with the currently
-  effective value. The client never asserts direction.
-- **Timing rules:**
-  - `initial`, `decrease` and `cancel_pending` take effect at `requested_at`
-    (immediate).
-  - `increase` and `removal` take effect at `requested_at + increase_cooldown`, read
-    from the config **in force at request time**. If the cool-down is unconfigured,
-    the request is refused (`rg_cooldown_unconfigured`), which leaves only the safe
-    direction open.
-- **Realization rule (deterministic, no UPDATE).** Order requests per key
-  `(person or account, kind, asset, period)` by `requested_at`.
-  - A row is *realized* iff `effective_at <= min(t, requested_at of the next request
-    for the key)`. In other words, any newer request made before an increase matures
-    supersedes that increase.
-  - The effective player value at `t` is the latest realized row.
-  - If `increase_requires_reconfirmation`, an `increase` row is never realized itself.
-    A later `confirm` row (allowed only once `t >= increase.effective_at`, with no
-    newer request) carries the value and is effective immediately.
+- **Columns:**
+  - `seq BIGSERIAL` (ordering tiebreaker) and `id`
+  - `tenant_id NOT NULL`, `person_id`, `player_account_id` (anchor), `brand_id`
+  - `scope`, `control_kind`, `asset_code NULL`, `period_kind NULL`
+  - `value NUMERIC(38,0) NULL` (NULL means removal)
+  - `change_kind` (`initial|decrease|increase|removal|cancel_pending|confirm`)
+  - `requested_at`, `effective_at`
+  - `supersedes_change_id NULL`
+  - `source` (`player_self_service|staff_on_player_request`)
+  - `reason_code`, `evidence_ref`
+  - `created_by_actor_type/id`
+  - `config_version_id`
+  - `idempotency_key`, `request_hash`, with
+    `UNIQUE (tenant_id, player_account_id, idempotency_key)`
+- **The server sets the time and the classification** (security condition 3).
+  - A `BEFORE INSERT` trigger sets `requested_at` from `clock_timestamp()`.
+  - It sets `effective_at` from the config **in force at that instant**: decreases,
+    initial values and `cancel_pending` apply now; increases and removals apply at
+    now + `increase_cooldown`.
+  - **One SQL function** implements both the `change_kind` classification and the
+    realization rule. The trigger calls it and rejects any asserted `change_kind` or
+    `effective_at` that differs. Go calls the same function and never re-implements
+    it.
+  - Ordering is `(requested_at, seq)`.
+- **Idempotency.** Reusing an `Idempotency-Key` with a different body (different
+  `request_hash`) returns **409**.
+- **Realization rule.** Requests for one key are ordered by `(requested_at, seq)`.
+  - A row is *realized* iff `effective_at <= min(t, requested_at of the next request)`.
+  - The effective player value is the latest realized row.
+  - An `increase` row that needs reconfirmation is never realized itself. A later
+    `confirm` row, allowed only once `t >= effective_at` and with no newer request,
+    carries the value.
+  - **A staff-originated increase or removal always needs a `confirm` from the
+    player's own authenticated session**, whatever `increase_requires_reconfirmation`
+    says (security condition 4).
+- **Effective limit across scopes** (security condition 5). The effective limit is the
+  **MIN** of:
+  - every realized account-level row for the anchor account
+  - every realized `tenant_person` row for that Person within the tenant
+  - the composed `ceiling`
 
-  This is computed with one indexed query (`LEAD(requested_at)` window) on
-  `(tenant_id, person_id, control_kind, asset_code, period_kind, requested_at DESC)`.
-- **Effective limit** = min(player value or +∞, composed `ceiling`). Lowering a
-  ceiling therefore clamps existing player limits immediately.
-- If the kind is `mandatory`, there is no player value, and the ceiling is `none`, the
-  action is refused with `rg_limit_required`. The platform never invents a value.
-- **RLS:** tenant isolation on `tenant_id` (`WithTenant`); player self-read and
-  self-insert via `app.player_account_id` (as in 0037's `player_self_*`), re-deriving
-  `person_id`; no platform-wide read.
-- Every writer takes `rg.lockPerson` (L0.4) first.
+  It is never +∞ where any limit existed. Changing scope from account to
+  `tenant_person` therefore cannot drop a limit.
+- **Ceiling changes.**
+  - Lowering a ceiling clamps the effective limit immediately.
+  - **Raising a ceiling** that lifts a clamped player's effective limit takes effect
+    for that player only after the player's `increase_cooldown`, measured from the
+    ceiling row's `effective_from`.
+- **Mandatory kinds.** If a kind is `mandatory`, the player has no value, and the
+  ceiling is `none`, the action is refused with `rg_limit_required`.
+- **Pending cap.** Each player may have at most a configured number of open pending
+  changes (security condition 6). The cap is an engineering anti-abuse bound, not a
+  legal value.
+- **RLS.**
+  - Tenant isolation applies (`WithTenant`).
+  - Players can self-read and self-insert via `app.player_account_id`. `person_id` and
+    `tenant_id` are re-derived server-side.
+  - There is no platform-wide read. **Limit history never leaves its tenant.**
+- **Indexes:**
+  - `(tenant_id, person_id, control_kind, asset_code, period_kind, requested_at DESC, seq DESC)`
+  - `(tenant_id, player_account_id, control_kind, …)`
 
-**2.3 `player_restrictions`.** Extend the CHECK to
-`('self_exclusion','time_out')` and keep the same table, locks, RLS and immutability.
-`EvaluateEligibility`'s EXISTS query reads both types and returns distinct codes,
-`self_excluded` and `timed_out`. A time-out cannot be ended early (append-only, as in
-ADR 0026 §2). The same applies to the open-bet policy question, which stays scoped to
-self-exclusion only.
+**2.3 `player_restrictions`.**
+- The CHECK is extended to `('self_exclusion','time_out')`. Locks, RLS and
+  immutability are unchanged.
+- `EvaluateEligibility` returns `self_excluded` or `timed_out`.
+- A time-out cannot be ended early, and it **never changes wallet status**, so
+  withdrawals keep working.
+- Player self-insert of a `time_out` **explicitly extends the `player_self_insert`
+  RLS policy** (security condition 10). For `tenant_person` scope, `tenant_id` is
+  pinned server-side from `app.tenant_id`, never from the body.
 
-**2.4 `casino_launch_sessions`.** Add `auth_session_root_started_at` (NOT NULL for new
-rows), recorded at launch from the authenticated session chain. Bets recompute the
-session deadline from the *current* limit, so a decrease applies mid-round.
+**2.4 `casino_launch_sessions`.** Add `auth_session_root_started_at`, recorded at
+launch. Bets recompute the deadline from the *current* limit.
+
+**2.5 Linked accounts** (security condition 7).
+- Only an account linked to the Person by a resolver **Match** may request an increase
+  or removal of a `tenant_person` limit. Every linked account is notified.
+- An **Uncertain** registration follows ADR 0027 §5/§6: it gets a new Person in
+  `identity_review_required`. It gets **no** person-level privileges and no
+  inheritance until review links it. This corrects revision 1's "Match/Uncertain
+  inherits" wording, which conflicted with ADR 0027.
+- After a confirmed link, restrictions and limits apply through the Person.
+
+**2.6 Indexes** (ledger-finance BLOCKER-1).
+- The revision 1 claim was false. `risk/cumulative.go:317` filters on
+  `(tenant_id, player_account_id, asset_code, created_at)`, and no index serves that
+  shape. The only one is the partial `idx_ledger_entries_player_account`, so the query
+  scans the player's whole history on every bet.
+- S1 adds `ledger_entries (tenant_id, player_account_id, asset_code, created_at)`,
+  built without blocking writes (the `CONCURRENTLY` practice from
+  DEVOPS-0107-INDEX-WINDOW-1, in its own non-transactional migration step).
+- S1 also adds `deposit_intents (tenant_id, player_account_id, asset_code, created_at)`.
 
 ### 3. Enforcement
 
-**3.1 One boundary.** Add `rg.EvaluateAction(ctx, tx, ActionParams{TenantID, BrandID,
-PlayerAccountID, WalletID, Action, AssetCode, Amount, CandidateRef, AuthSessionRootStartedAt})`.
-- `Action` is one of `deposit|casino_launch|casino_wager|sportsbook_wager|session_refresh`.
-- It calls `EvaluateEligibility` first, which keeps the L0.4 lock, the status checks,
-  self-exclusion and time-out, and then:
-  1. Config resolution. With no floor row in force, the result is
-     `rg_config_missing` (§6).
-  2. Session deadline.
-  3. Amount limits: for each effective limit of the action's kinds,
-     allowed iff `usage + amount <= limit`. Equality is allowed.
-- It returns the existing `Decision` type with new codes: `timed_out`,
-  `rg_config_missing`, `rg_limit_required`, `deposit_limit_reached`,
-  `loss_limit_reached`, `wager_limit_reached` and `session_limit_reached`.
-- ADR 0026 §5 "single boundary" is preserved. Callers swap `EvaluateEligibility` for
-  `EvaluateAction` and keep their existing denial-audit helpers. Bonus eligibility
-  keeps calling `EvaluateEligibility`, which now also covers time-out.
+**3.1 One boundary: `rg.EvaluateAction(ctx, tx, ActionParams{...})`.**
 
-**3.2 Hook points (all already at the RG position; no call is moved)**
+- **Parameters:** `TenantID`, `BrandID`, `PlayerAccountID`, `WalletID`, `Action`,
+  `AssetCode`, `Amount`, `CandidateRef`, `AuthSessionRootStartedAt`.
+- **`Action` values:** `deposit|casino_launch|casino_wager|sportsbook_wager|session_refresh`.
+- **Isolation guard.** `EvaluateAction` **refuses a `REPEATABLE READ` or
+  `SERIALIZABLE` transaction** with an error, so it fails closed. The usage `SELECT`
+  runs as a new statement after the L0.4 lock is acquired, under `READ COMMITTED`, so
+  it sees every commit that preceded the lock. A concurrency test pins this.
+- **Evaluation order for all actions except `session_refresh`:**
+  1. `EvaluateEligibility` (L0.4, status, self-exclusion, time-out).
+  2. Config resolution. No floor in force gives `rg_config_missing`.
+  3. Session deadline, including `post_session_break` and
+     `concurrent_chain_aggregation`.
+  4. Amount limits: allowed iff `usage + amount <= limit`.
+- **`session_refresh`** (security condition 2) evaluates **only the session
+  deadline**.
+  - It never returns `self_excluded`, `timed_out`, `rg_config_missing` or
+    `rg_limit_required`.
+  - It **never refuses login**: a new chain always starts, so excluded or timed-out
+    players can still withdraw.
+  - Past the deadline, the *existing* chain's refresh is refused and the player must
+    log in again. Wagering or depositing in the new chain is still subject to
+    `post_session_break`.
+- **Protective writes never call `EvaluateAction`.** These are decrease,
+  `cancel_pending`, time-out and self-exclusion. They succeed whatever the
+  `enabled`/config/restriction state, and a time-out with unconfigured durations
+  accepts any positive duration.
+- **New decision codes:** `timed_out`, `rg_config_missing`, `rg_limit_required`,
+  `deposit_limit_reached`, `loss_limit_reached`, `wager_limit_reached`,
+  `session_limit_reached`.
+- **Single boundary preserved.** ADR 0026 §5's single-boundary rule still holds. Bonus
+  eligibility keeps `EvaluateEligibility`.
 
-| Path | File:line | Kinds checked | Note |
+**3.2 Hook points.** No call is moved.
+
+| Path | File:line | Checks | Note |
 |---|---|---|---|
-| Deposit T1 `InitiateDepositAttempt` | `payments/deposit_v2.go:207` | deposit, mandatory-limit, config | `CandidateRef` = the just-inserted intent id, excluded from usage and added once as `Amount` |
-| Deposit T2 `driveCreatedAttempt` | `payments/drive.go:88` | the same, re-checked | A decrease made between T1 and T2 declines an unsubmitted intent |
-| Deposit receipt/success (`receipt.go`) | — | **none** | Money already taken is never refused. If the credited amount is above the limit, raise the alert `rg_deposit_limit_exceeded_post_facto` |
-| Casino launch | `casino/orchestrator.go:399` | config, session, mandatory | The launch-token `expires_at` is capped at the session deadline (ADR 0103 contract unchanged otherwise) |
-| Casino bet `postBet` | `casino/orchestrator.go:1647` | wager, loss, session | Covers bonus-funded legs per `count_bonus_funded`. Runs after the idempotency short-circuit, so replays are never re-evaluated |
-| Sportsbook place | `sportsbook/orchestrator.go:279` | wager, loss (stake counts as potential loss), session | Bonus-funded sportsbook stakes remain blocked platform-wide (`sportsbook/orchestrator.go:120`) |
-| Player refresh/login | `internal/auth` session rotate | session_duration | Past the deadline: refresh is refused and the player is logged out. Withdrawal still works after re-login (a new chain). The **session limit is per login chain**, by definition |
-| Wins, casino rollback, sportsbook void/settlement/rollback, Q-GP-5 stake returns | `casino/orchestrator.go:1954,2096`, `sportsbook/settlement.go` | **none** | Never RG-gated. Returns reduce wager/loss usage automatically (ledger-derived) |
-| Withdrawal request/approval/payout | `internal/withdrawal`, `payments/payout.go` | **none** | Withdrawals are never blocked by deposit/loss/wager limits, time-out or `rg_config_missing`. WD-RG-1 stays a separate owner item |
-| Bonus claim/grant | `bonus/eligibility.go:95` | eligibility (self-exclusion + time-out) | A bonus grant is not a deposit. Bonus conversion is not counted as deposit |
+| Deposit T1 | `payments/deposit_v2.go:207` | deposit, mandatory, config | `CandidateRef` = own intent: excluded from usage, added once as `Amount` |
+| Deposit T2 | `payments/drive.go:88` | same, re-checked | An RG denial sets the intent to `declined` **in the same transaction** |
+| Deposit receipt (`receipt.go`) | — | none | A late provider success on an RG-declined or failed intent is **credited** through `receipt.go`. It is never auto-refunded. It raises `rg_deposit_limit_exceeded_post_facto`, and the funds stay withdrawable |
+| Casino launch | `casino/orchestrator.go:399` | config, session, mandatory | Launch-token `expires_at` capped at the session deadline (ADR 0103) |
+| Casino bet | `casino/orchestrator.go:1647` | wager, loss, session | Runs after the idempotency short-circuit. Bonus-funded legs per §1.4 |
+| Sportsbook place | `sportsbook/orchestrator.go:279` | wager, loss (stake = potential loss), session | Bonus-funded sportsbook stakes remain blocked (`:120`) |
+| Auth refresh | `internal/auth` rotate | `session_refresh` only (§3.1) | Never blocks login |
+| Wins, rollbacks, voids, settlements, Q-GP-5 stake returns | `casino/orchestrator.go:1954,2096`, `sportsbook/settlement.go` | none | Never gated |
+| Withdrawals | `internal/withdrawal`, `payments/payout.go` | none | Never blocked by limits, time-out or `rg_config_missing`. WD-RG-1 separate |
+| Bonus claim | `bonus/eligibility.go:95` | eligibility | A grant or conversion is not a deposit |
 
-**3.3 Locks and ordering (ADR 0082).** **No new hot-path lock class.**
-- Every check above runs **inside the L0.4 person lock** that `EvaluateEligibility`
-  already takes, at its existing position (after the status keys, L0.1 and L0.2, and
-  before L0.5 risk, L1, L2 and L3, per R8).
-- Usage, limit and config reads are plain MVCC reads using `clock_timestamp()`, not
-  `now()` (the `rg.go:618` lesson).
-- Because the limit writers and every gated action for a Person serialize on the same
-  L0.4 key, two concurrent wagers on two brands for one person cannot both pass a
-  `tenant_person` wager limit. The decrease-versus-bet race is decided by whoever
-  takes the lock first.
-- Config writers take a writer-only scope advisory (as in
-  `lockOpenBetSelfExclusionPolicyScope`). It is never co-held with any L0.x, L1 or
-  later lock, so it is outside the gameplay order. Record it as an ADR 0082 amendment
-  note, not as a new class.
-- Deposit T1 inserts its intent before the RG gate. That is a new row, not a lock on
-  an existing row, so R8 holds as today.
+**3.3 Locks and ordering (ADR 0082).** No new hot-path lock class.
+- All checks run inside the existing L0.4 lock at its current position: after the
+  status keys, L0.1 and L0.2; before L0.5 and L1–L3 (R8).
+- **Limit-change and time-out writers take only L0.4.** They never then take a tenant
+  or brand status gate key, or any L1–L4 lock. These writers are added to the ADR 0082
+  **static lock-order suite**.
+- Config writers take a writer-only scope advisory that is never co-held with L0.x or
+  L1+. This is recorded as an ADR 0082 amendment note.
+- **Timeouts** (security condition 6):
+  - `lockPerson` runs `SET LOCAL lock_timeout` first.
+  - Usage scans run under `SET LOCAL statement_timeout`.
+  - Either timeout fails closed and raises `rg_evaluation_unavailable`.
+  - The values are engineering operational settings, set by devops and measured in S3.
 
-**3.4 Usage source and cost.**
-- **Wager and loss** come from `ledger_entries`, through a **read-only measurement
-  function exported from `internal/risk`** that reuses `cumulativeSpec` and its
-  undeclared-leg fail-closed check (`internal/risk/cumulative.go`, ADR 0031 §33). It
-  is not a second, independent implementation. It uses index
-  `idx_ledger_entries_account (ledger_account_id, created_at)` per account, with one
-  range scan per (account, asset, window).
-- **Deposit** comes from `deposit_intents` (payments-owned read helper). A new index
-  on `(tenant_id, player_account_id, asset_code, created_at)` is needed.
-- **Cost per gated action:** one config read (indexed, in-tx, **not cached**, so a
-  tightening is never served stale), one limit-history read, and 0..N usage scans
-  (N = active limits for the action).
-- Slice S3 must deliver EXPLAIN plans and a measured p95 delta on the casino bet path.
-  No SLA is claimed. If 30-day rolling scans prove costly, daily rollups derived from
-  the ledger can be added later, with drift-checking (no authoritative counters).
-  Redis/cache is never consulted (CLAUDE.md).
+**3.4 Usage measurement** (ledger-finance BLOCKER-2).
+- Risk's `casino_bet` spec cannot be reused, for three reasons:
+  - It nets every `casino_rollback`, so rolling back a `casino_win` would count as
+    wager.
+  - Bonus-funded casino bets touch `player_bonus`/`player_locked_bonus`
+    (`casino/orchestrator.go:2281`), which `casino_bet` does not declare, so the
+    measurement would hit `ErrUnrecognizedCumulativeLeg`.
+  - No spec covers wins.
+- **ledger-finance supplies new RG-only specs** (wager and loss as defined in §1.4),
+  using risk's declared-leg / undeclared-leg-fails-closed mechanism. **Risk's own specs
+  are unchanged.**
+- **One scan per action.** It uses `player_account_id = ANY(<Person's accounts in this
+  tenant>)` (or the anchor account alone for account scope) and computes every
+  window's total with `SUM(...) FILTER (WHERE created_at >= window_start_i)`.
+- Deposit usage uses one scan of `deposit_intents` plus ledger deposit postings for
+  intent-less deposits.
+- **Before S4 merges, S3 must provide:**
+  - `EXPLAIN (ANALYZE, BUFFERS)` showing the §2.6 indexes in use
+  - the p95 latency delta on casino bet, sportsbook place and deposit T1
+  - **L0.4 lock hold time**
+
+  No SLA is claimed. Redis or any cache is never consulted.
 
 **3.5 Fail-closed.**
-- Any error while reading restrictions, config, limit history or usage returns an
-  error. The caller's transaction aborts, so nothing is posted, no deposit intent
-  proceeds and no session is minted (launch uses the existing `launchFailed` path).
-- An undeclared ledger leg is an error, never "zero usage".
-- Because the error path rolls back in-tx audit, the caller logs it out of the
-  transaction and emits the durable alert `rg_evaluation_unavailable` (ADR 0102),
-  as `launchFailed` does today.
-- Protective player actions are **never** blocked by missing config: decrease, cancel
-  of a pending increase, self-exclusion, and time-out (any positive duration when the
-  allowed durations are unconfigured).
+- Any read error aborts the transaction: nothing posts, no intent proceeds, no session
+  is minted.
+- An undeclared ledger leg, an isolation-guard failure, or a lock or statement timeout
+  all count as errors.
+- The caller logs out-of-transaction and emits `rg_evaluation_unavailable` (ADR 0102),
+  as `launchFailed` does.
+- **Abuse bounds.** Per-player rate limits apply on every `/v1/me/rg/*` write and on
+  deposit T1 (security condition 6).
 
-### 4. Audit and alerts
+### 4. Audit, alerts, disclosure
 
-- **Audit records.** Every limit request is audited via `audit.Record` in the same
-  transaction, whether accepted or refused: action
-  `rg.limit.change_requested|…_denied|confirmed|cancelled`; actor, tenant, person,
-  account, kind, asset, period; before and after effective value, pending value and
-  `effective_at`; config version, reason code, IP, UA and request id.
-- Time-out uses `rg.time_out.created`.
-- Every enforcement denial is audited with `{code, kind, period, limit, usage,
-  attempted_amount, config_version}`, under the existing action names
-  (`casino_bet.denied_by_rg_policy`, etc.).
-- Config writes audit before and after values plus `attestation_ref`. Platform floor
-  changes become **tenant-visible** through the ADR 0104 platform-actions feed. Player
-  history is tenant-scoped and visible to that tenant's compliance staff, plus the
-  player's own history.
-- **Alerts** (`internal/alerting`, ADR 0102; delivery still **NOT IMPLEMENTED**,
-  ALERT-DELIVERY-1): `rg_evaluation_unavailable`, `rg_config_missing` (deduplicated
-  per tenant/brand/jurisdiction), `rg_deposit_limit_exceeded_post_facto`,
-  `rg_staff_increase_on_player_request` (info).
+- **Change audit.** Every limit request is audited in the transaction, whether
+  accepted or refused (`rg.limit.change_requested|…_denied|confirmed|cancelled`). Each
+  entry records:
+  - actor, tenant, person, account, kind, asset, period
+  - effective value before and after, pending value, `effective_at`
+  - config version, reason, IP, UA, request id
+- Time-outs are audited as `rg.time_out.created`.
+- **Denial audit** captures enough to replay the decision (ledger-finance):
+  - `{code, kind, period, limit, usage, attempted_amount, config_version}`
+  - `window_start`
+  - the usage SQL inputs: account set, asset, transaction-type set, `clock_timestamp`
+- **Staff requests** appear in the player's own RG history and trigger a player
+  notification (security condition 4).
+- **Config audit.** Config writes record before/after and `attestation_ref`. Floor
+  changes are tenant-visible through the ADR 0104 feed.
+- **Cross-tenant disclosure** (security condition 10). Disclosure of `time_out` or
+  `self_exclusion` across tenants is limited to **type, platform scope, start and
+  end**. Every new reader (BO tab, exports, ADR 0104 feed) must either use a redacting
+  DTO or follow the `ListRestrictionsForTenant` INNER-JOIN pattern (`rg.go:455`).
+- **Daily check.** Compares credited amounts on `succeeded` intents against ledger
+  deposit postings. A mismatch raises an alert.
+- **Alerts** (ADR 0102; delivery is still **NOT IMPLEMENTED**, ALERT-DELIVERY-1):
+  - `rg_evaluation_unavailable`
+  - `rg_config_missing` (deduplicated)
+  - `rg_deposit_limit_exceeded_post_facto`
+  - `rg_staff_increase_on_player_request`
+  - `rg_synthetic_config_in_non_dev`
+  - `rg_deposit_credit_mismatch`
 
 ### 5. API and screens (OpenAPI in `docs/api/openapi/platform-api.yaml`)
 
-**Player** (`RequirePlayerPrincipal`; tenant, account and person from the session
-only; `Idempotency-Key` required on writes):
-- `GET /v1/me/rg/limits` returns effective limits, pending changes with
-  `effective_at`, remaining usage per period, and the allowed periods/ceilings from
-  config.
-- `POST /v1/me/rg/limits` with `{kind, asset_code?, period?, value|null}` sets,
-  decreases, increases or removes a limit. The server classifies the request and
-  returns 202 with `effective_at` for a pending increase.
-- `POST /v1/me/rg/limits/changes/{id}/confirm` and `…/cancel`.
-- `POST /v1/me/rg/time-out` with `{duration}`.
-- `POST /v1/me/rg/self-exclusion` and `GET /v1/me/rg/status` exist already
-  (`internal/httpserver/rg_routes.go:21-22`). The status response gains `timed_out`.
-- `GET|PUT /v1/me/rg/reality-check` sets the interval preference. The client shows the
-  notification. In-game reality checks via provider launch params are
-  **PROVIDER DEPENDENT**.
+**Player** (`RequirePlayerPrincipal`; identity from the session only; `Idempotency-Key`
+required, with 409 on a body mismatch; rate-limited):
+- `GET /v1/me/rg/limits`
+- `POST /v1/me/rg/limits` with `{kind, asset_code?, period?, value|null}`. Returns 202
+  with `effective_at` when the change is pending.
+- `POST /v1/me/rg/limits/changes/{id}/confirm|cancel`
+- `POST /v1/me/rg/time-out`
+- Existing routes: `POST /v1/me/rg/self-exclusion` and `GET /v1/me/rg/status`
+  (`internal/httpserver/rg_routes.go:21-22`). Status gains `timed_out`.
+- `GET|PUT /v1/me/rg/reality-check`. In-game delivery is **PROVIDER DEPENDENT**.
 
 **Staff** (`RequireTenantScope`):
-- `GET /v1/admin/players/{id}/rg/limits` (+ `/history`), using the new
-  `PermRGLimitRead`.
-- `POST /v1/admin/players/{id}/rg/limits` uses `PermRGLimitWriteOnPlayerRequest`,
-  which requires step-up (ADR 0017), `reason_code` and `evidence_ref`. It applies the
-  **same** classification and cool-down as player requests. Staff cannot shorten a
-  cool-down, backdate, or create an immediate increase, so there is no silent raise.
-  `GET /v1/admin/rg/restrictions` gains a `time_out` filter.
-- `GET|POST /v1/admin/rg/limit-configs` takes tenant/brand overrides, tighten-only,
-  with `PermRGConfigWrite`.
-- `POST /v1/admin/platform/rg/limit-config-change-requests` (+ approve/reject) handles
-  jurisdiction floors. It is platform principal only, with **four-eyes** and signed
-  actor proof (ADR 0099/0110 pattern) and a mandatory `attestation_ref`.
+- `GET /v1/admin/players/{id}/rg/limits` and `/history` (`PermRGLimitRead`)
+- `POST /v1/admin/players/{id}/rg/limits` (`PermRGLimitWriteOnPlayerRequest`). Requires
+  `reason_code` and `evidence_ref`.
+  - **Decreases** need no step-up.
+  - **Increases and removals return 403** until ADR 0017 step-up ships. Even after
+    that, they are never realized without the player's own `confirm`.
+  - Staff whose `person_id` equals the target's are refused.
+- `GET|POST /v1/admin/rg/limit-configs` (operator rows; `PermRGConfigWrite`)
+- `POST /v1/admin/platform/rg/limit-config-change-requests` plus approve/reject. Floor
+  changes go through this DB-enforced four-eyes flow (§2.1).
+- `GET /v1/admin/rg/restrictions` gains a `time_out` filter and redacted
+  cross-tenant rows.
 
-**Screens**
-- **B2C** (`b2c/src`): RG hub (limits list with remaining usage); set/change limit
-  form with a "takes effect at" preview; pending-increase confirm/cancel; time-out
-  picker; self-exclusion (exists); reality-check preference and timed notification;
-  session-limit expiry screen (withdraw link stays available).
-- **Back Office** (`backoffice/src/features/rg`): player RG tab (limits, history,
-  pending changes, restrictions); "apply on player request" form; tenant RG config
-  (overrides with floor shown); platform floor change-request queue with
-  approve/reject; the RG queue gains time-out.
-- **Partner console:** read the tenant config and floors.
+**Screens:**
+- **B2C** (`b2c/src`):
+  - RG hub with remaining usage
+  - limit form with a "takes effect at" preview
+  - confirm/cancel for pending changes, including staff-originated ones
+  - time-out picker
+  - reality-check preference and notification
+  - session-expiry screen (the withdraw link stays)
+- **Back Office** (`backoffice/src/features/rg`):
+  - player RG tab (limits, history, pending changes, redacted restrictions)
+  - "apply on player request" form
+  - tenant config (overrides alongside the floor)
+  - floor change-request queue
+- **Partner console:** read-only config.
 
-### 6. Unconfigured configuration ⇒ behaviour
+### 6. Unconfigured configuration ⇒ behaviour (orchestrator default OQ-1)
 
-- **No floor row in force** for the brand's licence jurisdiction and kind means that
-  **deposits, casino launches and wagers, and sportsbook wagers are refused** with
-  `rg_config_missing`. Unaffected: withdrawals; wins, settlements and stake returns;
-  login; balance and history reads; every protective action.
-- **Partial configuration cannot exist**: every field is explicit, and `none` is a
-  recorded, attested choice by a named actor.
-- **Unconfigured cool-down** cannot happen, since it is a required field. If it ever
-  did, increases would be refused.
-- A **brand launch-readiness item** "RG config present for every enabled kind" is
-  added to the ADR 0112 / gap-audit §0.2 checklist.
-- Dev and test fixtures seed configs labelled `SYNTHETIC-NOT-LEGAL` with
-  `attestation_ref='synthetic'`. A startup check refuses such rows outside dev/test.
-- Whether missing config fails closed (as proposed) or runs permissive-with-alert is a
-  **legal/compliance decision** (OQ-1). Consequence of the recommendation: once S4
-  merges, the existing Anjouan B2C brand cannot take deposits or wagers until
-  compliance supplies or attests a floor (OQ-2).
+- **No floor in force** for the brand's licence jurisdiction and kind (including a
+  synthetic row outside dev/test): **deposits and new wagers are refused, and so are
+  casino launches** (`rg_config_missing`).
+- **Still allowed:** withdrawals, wins, settlements, stake returns, login, balance and
+  history reads, and every protective action.
+- **Partial configuration cannot exist** (§2.1).
+- **Launch readiness.** A new readiness item, "RG config present for every enabled
+  kind", joins the ADR 0112 / gap-audit §0.2 checklist.
+- **Test fixture** (ledger-finance condition): `internal/testsupport/rgfix`. It uses
+  the integration build tag and is import-pinned like `internal/testsupport/launchfix`.
+  - It seeds a permissive `SYNTHETIC-NOT-LEGAL` floor for every jurisdiction that
+    `launchfix` provisions: `enabled=false`, `mandatory=false`, `ceiling=none`, a
+    non-zero cooldown, and every other field explicit.
+  - This keeps the existing money-path integration test files' semantics unchanged.
+  - Fail-closed behaviour is proven in dedicated tests that omit the floor.
+- **Consequence:** once S4 merges, the Anjouan B2C brand cannot take deposits or new
+  wagers until compliance supplies or attests a floor (OQ-2).
 
-### 7. Test plan (owner: `qa`; integration tests against real Postgres, `-race`)
+### 7. Test plan (owner `qa`; real Postgres, `-race`)
 
-- **Invariants:** an increase is never effective before `requested_at + cooldown`; a
-  decrease is always effective immediately; the effective limit is ≤ the composed
-  ceiling; `usage + amount > limit` ⇒ zero ledger rows and zero intent progression;
-  gating never reaches L3 before L0.4; `player_rg_limit_changes` and
-  `rg_limit_configs` reject UPDATE, DELETE and TRUNCATE.
-- **Adversarial:** client-supplied tenant, person, `effective_at` or direction is
-  ignored or rejected; backdated floor rejected; tenant loosening (each field)
-  rejected by Go and DB with an audited denial; staff without step-up or
-  `evidence_ref` gets 403/400; a staff increase is still delayed; tenant B staff
-  cannot read tenant A person's limits/history (RLS, including the INNER-JOIN lesson
-  of `rg.go:455`); a player cannot read another account's rows;
-  `SYNTHETIC-NOT-LEGAL` rows are refused in a non-dev env; mutation-kill evidence for
-  each comparator (`<` vs `<=`, realization rule, min-compose).
-- **Concurrency:** N parallel casino bets across two brands of one person against a
-  `tenant_person` wager limit (at most the allowed total posts); limit decrease vs.
-  bet; time-out vs. launch; parallel deposit T1s against a deposit limit (in-flight
-  counted); increase confirm vs. new decrease; config tighten vs. bet; no deadlock
-  under mixed bet/rollback/bonus-convert/limit-write load (extend the ADR 0082
-  lock-order suite).
-- **Lifecycle:** rolling-window boundary; calendar boundary in a non-UTC timezone
-  including a DST transition; week-start; multi-asset isolation; `NUMERIC(38,0)`
-  exponent-18 asset; rollback/void restores wager and loss capacity; a win after the
-  loss limit is reached still settles; Q-GP-5 stake return during time-out;
-  withdrawal while the deposit limit is exhausted, while timed out, and while
-  `rg_config_missing`; pending increase superseded; reconfirmation required; session
-  deadline mid-round (next bet declined, win posts); refresh refused past the
-  deadline.
-- **Fail-closed:** inject errors in the config, history, usage and restriction reads
-  at each hook point. Expect no posting, no session and an alert row. Also test an
-  undeclared ledger leg.
-- **Cross-brand:** self-exclusion or a `platform_person` time-out on brand A blocks
-  brands B and C and another tenant; a `tenant_person` limit aggregates across brands
-  but not tenants; MOCK resolver Match/Uncertain registration inherits the person's
-  limits and restrictions.
+- **Invariants:**
+  - an increase is never effective before `requested_at + cooldown`
+  - a decrease is effective immediately
+  - the effective limit equals the MIN across scopes and ceiling (§2.2)
+  - `usage + amount > limit` produces zero ledger rows and no intent progression
+  - L0.4 is always taken before L3
+  - append-only tables reject UPDATE, DELETE and TRUNCATE
+  - a time-out leaves wallet status unchanged (withdraw pre-existing funds while
+    `timed_out`)
+- **Adversarial:**
+  - client-supplied tenant, person, `effective_at`, `change_kind` or timestamps are
+    rejected by the trigger
+  - an idempotency key reused with a different body returns 409
+  - backdated floor or operator rows are rejected
+  - an operator loosening any restrictive field, narrowing any option set, or turning
+    `enabled` true→false is rejected by both Go and the DB
+  - a floor inserted without an approved request, or with the same person approving,
+    or with a payload-hash mismatch is rejected
+  - synthetic rows are refused by the trigger and resolve as absent when
+    `app.environment`/`APP_ENV` is missing or set to staging
+  - staff increases return 403 while step-up is not implemented, and are never
+    realized without the player's `confirm`
+  - staff acting on their own Person are refused
+  - an Uncertain-registered account cannot raise a `tenant_person` limit
+  - tenant B cannot read tenant A's limit history, and cross-tenant restriction fields
+    are redacted
+  - rate limits and the pending-change cap are enforced
+  - mutation-kill evidence for `<=`, the realization rule, MIN-compose, UNION/OR
+    composition and reversal-in-window
+- **Concurrency:**
+  - N parallel bets across two brands of one Person against a `tenant_person` limit
+  - decrease vs. bet
+  - time-out vs. launch
+  - parallel deposit T1s, with in-flight intents counted
+  - confirm vs. a new decrease
+  - config tighten vs. bet
+  - a `REPEATABLE READ` caller is refused, and the `READ COMMITTED` post-lock read sees
+    a concurrent commit
+  - lock and statement timeouts fail closed
+  - no deadlock under a mixed load, using the ADR 0082 static plus dynamic suites
+- **Lifecycle:**
+  - rolling and calendar boundaries in a non-UTC timezone across DST, and week start
+  - multi-asset; an exponent-18 `NUMERIC(38,0)` asset
+  - a rollback of a win does not change wager usage
+  - a reversal whose original is outside the window does not count
+  - `loss_may_go_negative` both ways
+  - bonus-funded legs both ways, and conversion never reduces loss
+  - TTL sweep to `failed` releases deposit usage
+  - a T2 decline in the same transaction
+  - a late success on a declined intent is credited, raises an alert and stays
+    withdrawable
+  - an intent-less deposit is counted
+  - withdrawals while a limit is exhausted, while `timed_out`, while `self_excluded`
+    and while `rg_config_missing`
+  - `session_refresh` never blocks login
+  - `post_session_break` and `concurrent_chain_aggregation`
+  - a ceiling raise delayed by cooldown
+  - scope change cannot drop a limit
+- **Fail-closed:** inject an error into each read at each hook point, an undeclared
+  leg, and the isolation guard.
+- **Cross-brand:** a platform-wide exclusion or time-out blocks other brands and
+  tenants; `tenant_person` aggregates across brands but never across tenants.
 
-### 8. Ordered slices (each: security + code-reviewer + qa review; the stage gate applies)
+### 8. Ordered slices (each also gets code-reviewer + qa; the stage gate applies)
 
 | # | Slice | Owner | Required reviewers |
 |---|---|---|---|
-| S1 | Migrations: `rg_limit_configs`, `player_rg_limit_changes` (+ immutability, RLS, tighten-only/no-backdate triggers), `time_out` CHECK, `casino_launch_sessions.auth_session_root_started_at`, deposit-intent index. Pure Go resolution (realization rule, strictest-compose) + unit/integration tests. No enforcement | identity-compliance | architect, security, qa |
-| S2 | Write paths + APIs + audit: player/staff limit changes, time-out, config admin (tenant tighten-only; platform four-eyes + actor proof), OpenAPI, permissions | identity-compliance | security, qa, code-reviewer |
-| S3 | Usage measurement: exported read-only `risk` measurement (wager/loss), payments deposit-usage helper, EXPLAIN + p95 evidence | identity-compliance with risk/payments owners | **ledger-finance**, qa |
-| S4 | `rg.EvaluateAction` + wiring at the §3.2 hooks, auth refresh session check, launch-token cap, alerts, fail-closed, ADR 0082 amendment note | identity-compliance with casino/sportsbook/payments owners | **ledger-finance** (money-path hooks), security, architect, qa |
-| S5 | B2C + Back Office + partner console screens (§5) | frontend specialists | security (authz/UI-not-trusted), qa |
-| S6 | Adversarial/concurrency/cross-brand suite (§7) + launch-readiness item + runbook "RG config onboarding" | qa | identity-compliance, code-reviewer |
+| S1 | **Schema + index**: `rg_limit_configs` + change-request table (four-eyes trigger, hash binding, no-backdate, tighten/widen triggers, synthetic trigger, `app.environment` GUC); `player_rg_limit_changes` (BEFORE INSERT trigger + single classification/realization SQL function, `seq`, `request_hash`); `time_out` CHECK + `player_self_insert` extension; `casino_launch_sessions.auth_session_root_started_at`; **non-blocking `ledger_entries` index** and `deposit_intents` index; `internal/testsupport/rgfix` | identity-compliance (index: ledger-finance + devops) | architect, security, **ledger-finance**, qa |
+| S2 | **Write APIs**: player/staff limit changes (step-up 403, player confirm, self-target refusal, notifications), time-out, operator config, floor change requests, rate limits, pending cap, 409 idempotency, redacting DTOs, OpenAPI, permissions | identity-compliance | security, qa |
+| S3 | **Usage measurement**: RG-only wager/loss specs (ledger-finance-authored), single-scan `FILTER` query, SQL window starts, deposit usage (intents + ledger, person join), TTL sweep to `failed`, daily credit check; EXPLAIN + p95 + L0.4 hold time | ledger-finance with identity-compliance, payments | **ledger-finance**, architect, qa |
+| S4 | **Enforcement**: `rg.EvaluateAction` (isolation guard, timeouts, `session_refresh` rules), §3.2 wiring, T2 same-transaction decline, launch-token cap, alerts, ADR 0082 amendment note and static-suite entries | identity-compliance with casino/sportsbook/payments | **ledger-finance**, security, architect, qa |
+| S5 | **UI**: B2C, Back Office, partner console (§5) | frontend specialists | security, qa |
+| S6 | **QA**: §7 suite, launch-readiness item, "RG config onboarding" runbook | qa | identity-compliance, security, code-reviewer |
 
-S4 must not merge before S1–S3, and its rollout requires the OQ-1 answer.
-Labels after S6: the mechanism is `IMPLEMENTED`; per-jurisdiction content is
-`BLOCKED` on legal; cross-brand person matching is `PROVIDER DEPENDENT`; in-game
-reality checks are `PROVIDER DEPENDENT`.
+**Merge gates:**
+- S4 must not merge before S1–S3 **and** before S3's EXPLAIN evidence shows index use.
+- S4's rollout makes every brand non-transactable until OQ-2 content exists. The
+  orchestrator sequences that rollout with the owner.
+- Staff increases stay 403 until ADR 0017 ships.
 
-### 9. Owner / legal questions (minimum set)
+**Labels after S6:**
+- `IMPLEMENTED`: the mechanism
+- `BLOCKED` (legal content, OQ-2): jurisdiction values
+- `PROVIDER DEPENDENT`: Person matching and in-game reality checks
+- `NOT IMPLEMENTED`: staff increases/removals (blocked on ADR 0017)
 
-- **OQ-1 (owner + compliance):** When no RG floor configuration is in force for a
-  brand's jurisdiction, do we **refuse** deposits and new wagers (fail closed), or
-  allow them and raise an alert?
-  **Recommendation:** fail closed. Withdrawals, settlements and protective actions
-  remain allowed in both options.
-- **OQ-2 (legal/compliance, content):** For Anjouan (the only fixed jurisdiction),
-  supply, or explicitly attest as `none`, each §2.1 field per kind: enabled/mandatory;
-  ceiling; allowed periods and timezone; increase cool-down and reconfirmation; scope;
-  bonus-funded counting; time-out durations and scope; reality-check
-  intervals/mandatory. Also name the compliance signatory for `attestation_ref`.
-  **Recommendation:** route this through the existing licence counsel. Engineering
-  will not propose values.
-- **OQ-3 (owner):** Confirm that monetary and session limits are scoped at most to
-  "one Person within one operator (tenant)", and that only self-exclusion and time-out
-  apply across operators.
-  **Recommendation:** confirm. Cross-operator amount aggregation would require
-  cross-tenant ledger reads and cross-operator data sharing that the hybrid licensing
-  model (ADR 0006) does not authorize.
+### 9. Owner / legal questions — orchestrator defaults (reversible by owner/legal)
+
+- **OQ-1 (owner + compliance). DEFAULT: fail closed.**
+  - With no RG config in force, deposits and new wagers (and launches) are refused.
+  - Withdrawals, settlements and protective actions stay allowed.
+  - Reversal path: owner/legal may choose permissive-with-alert. That change is
+    confined to one branch in §3.1 step 2.
+- **OQ-2 (legal/compliance). DEFAULT: compliance supplies the Anjouan values.**
+  - For each §2.1 field, compliance supplies a value or an attested `none`, through
+    the floor change-request flow with a named signatory in `attestation_ref`.
+  - Engineering supplies **no** values.
+  - Until then, Anjouan is `rg_config_missing`.
+- **OQ-3 (owner). DEFAULT: limits stop at the operator boundary.**
+  - Money and session limits stop at one Person within one operator (tenant).
+  - Only self-exclusion and time-out cross operators.
+  - Reversal would need cross-tenant ledger reads and data-sharing authority that
+    ADR 0006 does not grant, and would require a new ADR.
 
 ## Consequences
 
-- The Blueprint RG controls get a single enforcement boundary with no new hot-path
-  lock and ledger-derived (non-drifting) usage. There is a measurable per-bet read
-  cost, to be evidenced in S3.
-- With OQ-1 as recommended, every brand is non-transactable until compliance supplies
-  configuration. This is deliberate, because the alternative would be an implied
-  legal default.
-- `player_restrictions` grows a second type. ADR 0026 §15 anticipated this.
-- Deferred: cumulative play-time limits, operator-imposed affordability limits,
-  cross-tenant amount limits, a per-player-jurisdiction overlay and WD-RG-1.
+- One enforcement boundary, no new hot-path lock, and counter-free ledger-derived
+  usage (cannot drift). This depends on the new `ledger_entries` index; without it
+  every bet scans the player's whole history.
+- Under the OQ-1 default, every brand is non-transactable until compliance supplies
+  configuration. This is deliberate: the alternative is an implied legal default.
+- `player_restrictions` grows a second type (anticipated by ADR 0026 §15).
+- ADR 0082 gains an amendment note for the RG writers and the config advisory. ADR
+  0027's Uncertain semantics are unchanged; this ADR conforms to them.
+
+## Review disposition (revision 2)
+
+| Review item | Disposition | Where |
+|---|---|---|
+| LF BLOCKER-1: no index serves `cumulative.go:317` shape; whole-history scan | Accepted. Non-blocking `ledger_entries (tenant_id, player_account_id, asset_code, created_at)` in S1; single ANY+FILTER scan; EXPLAIN gate before S4 | §2.6, §3.4, §8 |
+| LF BLOCKER-2: risk specs not reusable (win rollback, bonus legs, no win spec) | Accepted. New RG-only specs by ledger-finance; risk specs unchanged | §1.4, §3.4 |
+| LF: reversal only within same window | Accepted | §1.4 |
+| LF: negative net loss is an attested field, floor 0 | Accepted (`loss_may_go_negative`) | §1.4, §2.1 |
+| LF: SQL window starts, hour intervals, `date_trunc … AT TIME ZONE` | Accepted | §1.2 |
+| LF: refuse RR/SERIALIZABLE; post-lock READ COMMITTED read | Accepted | §3.1, §7 |
+| LF: deposit usage statuses; no `expired`; TTL sweep; T2 same-tx decline; intent-less deposits; late success credited + alert | Accepted | §1.4, §3.2 |
+| LF: `rgfix` permissive synthetic floor; fail-closed in dedicated tests | Accepted | §6 |
+| LF: RG writers L0.4 only; static lock-order suite | Accepted | §3.3 |
+| LF: no counters; rollups under hourly drift job | Accepted | §1.4 |
+| LF: denial audit replay inputs; daily credited-vs-ledger check | Accepted | §4 |
+| LF: time-out never changes wallet status (test) | Accepted | §2.3, §7 |
+| LF: S3 reports L0.4 hold time | Accepted | §3.4 |
+| SEC 1: widen-only for protective options; UNION/OR composition | Accepted | §2.1 |
+| SEC 2: `session_refresh` evaluates deadline only, never refuses login | Accepted | §3.1 |
+| SEC 3: trigger-set timestamps; one SQL function; `seq` tiebreaker | Accepted | §2.2 |
+| SEC 4: step-up 403; player confirm for staff increases; self-target refused; history + notification; decreases no step-up | Accepted | §2.2, §4, §5 |
+| SEC 5: MIN across account and person scopes | Accepted | §2.2 |
+| SEC 6: lock/statement timeouts fail closed; rate limits; pending cap | Accepted | §2.2, §3.3, §3.5 |
+| SEC 7: Match-only person-level increases; notify linked; Uncertain no privileges (ADR 0027 conflict fixed) | Accepted | §2.5 |
+| SEC 8: synthetic rows absent outside dev/test; DB trigger on `app.environment` | Accepted (GUC is new in S1) | §2.1 |
+| SEC 9: DB-enforced floor four-eyes; distinct persons; hash-bound proof; operator rows not backdatable | Accepted | §2.1 |
+| SEC 10: redacted cross-tenant disclosure; RLS extension for time-out; history never leaves tenant | Accepted | §2.2, §2.3, §4 |
+| SEC LOW: `post_session_break`, `concurrent_chain_aggregation` | Accepted | §1.5, §2.1 |
+| SEC LOW: protective writes bypass `EvaluateAction` | Accepted | §3.1 |
+| SEC LOW: unconfigured time-out scope = `platform_person` | Accepted | §1.1 |
+| SEC LOW: `count_bonus_funded=false` excludes bonus wins/returns; conversion never reduces loss | Accepted | §1.4 |
+| SEC LOW: tenant_person deposit usage joined by person | Accepted | §1.4 |
+| SEC LOW: ceiling raise delayed by player cooldown | Accepted | §2.2 |
+| SEC LOW: idempotency key reuse with different body = 409 | Accepted | §2.2, §5 |
+| OQ-1/2/3 | Recorded as orchestrator defaults, reversible by owner/legal | §9 |
