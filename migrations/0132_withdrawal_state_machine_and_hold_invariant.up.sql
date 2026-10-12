@@ -56,7 +56,7 @@
 --    tenants with set_config (the 0115:69-108 pattern). Scope: every row whose tenant_id names a row
 --    of tenants (withdrawal_requests reach tenants through the brands FK; a ledger row of a tenant id
 --    with no tenants row is invisible to this loop and to every tenant session alike - residual,
---    covered by reconciliation D in slice 3).
+--    covered by reconciliation D in slice 3; class 9 alone also has an RLS-independent owner count, 9b).
 -- =========================================================================
 
 DO $$
@@ -71,6 +71,7 @@ DECLARE
     c_balance   BIGINT := 0;
     c_walletless BIGINT := 0;
     c_no_hold_leg BIGINT := 0;
+    c_no_hold_leg_all BIGINT := 0;
     n BIGINT;
 BEGIN
     -- Writers wait while the assertion runs and until this migration commits, so no row can slip in
@@ -228,9 +229,25 @@ BEGIN
     END LOOP;
     PERFORM set_config('app.tenant_id', '', true);
 
-    IF c_reversed + c_columns + c_hold_link + c_release + c_hold_sum + c_entry + c_balance + c_walletless + c_no_hold_leg > 0 THEN
-        RAISE EXCEPTION 'migration 0132 pre-flight: existing rows violate the withdrawal state machine / hold invariant: reversed=% columns=% hold_link=% release_link=% hold_sum=% hold_entry=% hold_balance=% walletless_player_account=% withdrawal_tx_without_hold_leg=%. Nothing was changed. Rows are never deleted or edited to make this pass; escalate to the human (ADR 0113 s6; operator note: docs/runbooks).',
-            c_reversed, c_columns, c_hold_link, c_release, c_hold_sum, c_entry, c_balance, c_walletless, c_no_hold_leg
+    -- (9b) ledger-finance: an RLS-INDEPENDENT backstop for class 9. The tenant loop cannot see a ledger
+    --      row whose tenant_id names no tenants row (ledger_transactions.tenant_id has no FK to tenants),
+    --      so unseen history must not pass silently. FORCE is lifted for the owner's count only and
+    --      restored inside this transaction (the 0124 pattern); a non-owner migration role cannot lift it
+    --      and fails closed. The count is over ALL rows, so it also includes the loop's class 9 rows.
+    ALTER TABLE ledger_transactions NO FORCE ROW LEVEL SECURITY;
+    ALTER TABLE ledger_entries NO FORCE ROW LEVEL SECURITY;
+    ALTER TABLE ledger_accounts NO FORCE ROW LEVEL SECURITY;
+    SELECT count(*) INTO c_no_hold_leg_all FROM ledger_transactions t
+     WHERE t.transaction_type IN ('withdrawal_requested', 'withdrawal_rejected', 'withdrawal_failed', 'withdrawal_completed', 'withdrawal_reversed')
+       AND NOT EXISTS (SELECT 1 FROM ledger_entries e JOIN ledger_accounts la ON la.id = e.ledger_account_id
+                        WHERE e.ledger_transaction_id = t.id AND la.account_type = 'player_withdrawal_hold');
+    ALTER TABLE ledger_transactions FORCE ROW LEVEL SECURITY;
+    ALTER TABLE ledger_entries FORCE ROW LEVEL SECURITY;
+    ALTER TABLE ledger_accounts FORCE ROW LEVEL SECURITY;
+
+    IF c_reversed + c_columns + c_hold_link + c_release + c_hold_sum + c_entry + c_balance + c_walletless + c_no_hold_leg + c_no_hold_leg_all > 0 THEN
+        RAISE EXCEPTION 'migration 0132 pre-flight: existing rows violate the withdrawal state machine / hold invariant: reversed=% columns=% hold_link=% release_link=% hold_sum=% hold_entry=% hold_balance=% walletless_player_account=% withdrawal_tx_without_hold_leg=% withdrawal_tx_without_hold_leg_unscoped=%. Nothing was changed. Rows are never deleted or edited to make this pass; escalate to the human (ADR 0113 s6; operator note: docs/runbooks).',
+            c_reversed, c_columns, c_hold_link, c_release, c_hold_sum, c_entry, c_balance, c_walletless, c_no_hold_leg, c_no_hold_leg_all
             USING ERRCODE = 'WD098';
     END IF;
 END $$;

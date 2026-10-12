@@ -209,6 +209,27 @@ func TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp(t *testing.T
 				Entries:       []ledger.EntryInput{{LedgerAccountID: w.clearing(), Direction: ledger.Debit, Amount: 6}, {LedgerAccountID: w.f.cashAccountID, Direction: ledger.Credit, Amount: 6}}})
 			return err
 		}},
+		// Class 9b (ledger-finance): the same shape under a tenant id with NO tenants row - invisible to
+		// the per-tenant RLS loop (its count stays 0, asserted below), caught only by the owner count.
+		{"withdrawal_tx_without_hold_leg_unscoped", func(ctx context.Context, tx pgx.Tx) error {
+			orphan := uuid.New()
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, orphan.String()); err != nil {
+				return err
+			}
+			a, err := ledger.GetOrCreateAccount(ctx, tx, orphan, nil, ledger.AccountPSPClearing, "EUR")
+			if err != nil {
+				return err
+			}
+			b, err := ledger.GetOrCreateAccount(ctx, tx, orphan, nil, ledger.AccountManualAdjustment, "EUR")
+			if err != nil {
+				return err
+			}
+			k := "dirty-" + uuid.NewString()
+			_, err = ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: orphan, TransactionType: ledger.TxWithdrawalFailed, IdempotencyKey: k,
+				CorrelationID: uuid.New(),
+				Entries:       []ledger.EntryInput{{LedgerAccountID: a, Direction: ledger.Debit, Amount: 7}, {LedgerAccountID: b, Direction: ledger.Credit, Amount: 7}}})
+			return err
+		}},
 		{"hold_balance", func(ctx context.Context, tx pgx.Tx) error {
 			p, k := "dirty-psp", "dirty-"+uuid.NewString()
 			_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: k,
@@ -234,11 +255,23 @@ func TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp(t *testing.T
 			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', '', true)`); err != nil {
 				t.Fatal(err)
 			}
+			// Flush the plant's deferred ledger checks: the pre-flight's 9b lifts FORCE RLS with ALTER
+			// TABLE, which PostgreSQL refuses on a table with pending trigger events (a real migration
+			// transaction has none).
+			if _, err := tx.Exec(ctx, `SET CONSTRAINTS ALL IMMEDIATE`); err != nil {
+				t.Fatalf("%s: flush: %v", c.class, err)
+			}
 			_, err = tx.Exec(ctx, string(upSQL))
 			return err
 		}()
 		wantCode(t, c.class, err, "WD098")
 		wantMsg(t, c.class, err, " "+c.class+"=1")
+		switch c.class {
+		case "withdrawal_tx_without_hold_leg":
+			wantMsg(t, c.class, err, " withdrawal_tx_without_hold_leg_unscoped=1") // the backstop counts every row
+		case "withdrawal_tx_without_hold_leg_unscoped":
+			wantMsg(t, c.class, err, " withdrawal_tx_without_hold_leg=0") // the RLS loop is blind to it
+		}
 	}
 
 	// Clean: the migration applies.
@@ -365,6 +398,11 @@ func TestMigration0132_Catalog(t *testing.T) {
 	// Security C1: the player-types-have-a-wallet CHECK exists and is validated.
 	if got := q(`SELECT convalidated::text FROM pg_constraint WHERE conname = 'ledger_accounts_player_types_have_wallet' AND conrelid = 'ledger_accounts'::regclass`); len(got) != 1 || got[0] != "true" {
 		t.Fatalf("ledger_accounts_player_types_have_wallet: %v", got)
+	}
+	// Pre-flight 9b lifts FORCE RLS on three ledger tables for its owner count: it must be restored.
+	if got := q(`SELECT relname::text || '=' || relforcerowsecurity::text FROM pg_class
+		WHERE oid IN ('ledger_transactions'::regclass, 'ledger_entries'::regclass, 'ledger_accounts'::regclass) ORDER BY relname`); strings.Join(got, ",") != "ledger_accounts=true,ledger_entries=true,ledger_transactions=true" {
+		t.Fatalf("FORCE ROW LEVEL SECURITY must be restored by the 0132 pre-flight: %v", got)
 	}
 	// B-i mechanics (C4): no lock, exactly one ledger_accounts read, the NULL fast exit first.
 	src := q(`SELECT prosrc FROM pg_proc WHERE proname = 'ledger_entries_withdrawal_hold_guard'`)[0]

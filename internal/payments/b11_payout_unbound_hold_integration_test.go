@@ -1442,8 +1442,8 @@ func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testi
 		pid := w.provider
 		// ADR 0113 slice 1 (WD043): a withdrawal_completed with no player_withdrawal_hold leg is
 		// now refused at commit, so this unlinked shape can no longer be posted (and migration 0132's
-		// pre-flight refuses it in history). The finding must still stand after the refusal.
-		err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// pre-flight refuses it in history).
+		post := func(ctx context.Context, tx pgx.Tx) error {
 			cash, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerCash, "EUR")
 			if err != nil {
 				return err
@@ -1461,9 +1461,37 @@ func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testi
 				},
 			})
 			return err
-		})
-		if k3Code(err) != "WD043" {
+		}
+		if err := w.pool.WithTenant(context.Background(), w.f.tenantID, post); k3Code(err) != "WD043" {
 			t.Fatalf("an unlinked withdrawal_completed (no hold leg): want WD043, got %v", err)
+		}
+		// The reconciler's positive attribution must not depend on WD043: plant the shape as an OWNER
+		// TAMPER on this throwaway scratch database (the hold-leg trigger is disabled for the plant
+		// only, pending deferred events are flushed, and the trigger is re-enabled before commit), then
+		// require that the finding STILL stands.
+		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `ALTER TABLE ledger_transactions DISABLE TRIGGER ledger_transactions_withdrawal_hold_leg_at_commit`); err != nil {
+				return err
+			}
+			if err := post(ctx, tx); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SET CONSTRAINTS ALL IMMEDIATE`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `ALTER TABLE ledger_transactions ENABLE TRIGGER ledger_transactions_withdrawal_hold_leg_at_commit`)
+			return err
+		})
+		if n := w.countRows(`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'withdrawal_completed' AND provider_id = $2 AND provider_tx_id = $3`,
+			w.f.tenantID, pid, ref); n != 1 {
+			t.Fatalf("setup: the unlinked completion must be planted, got %d", n)
+		}
+		var enabled string
+		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT tgenabled::text FROM pg_trigger WHERE tgname = 'ledger_transactions_withdrawal_hold_leg_at_commit'`).Scan(&enabled)
+		})
+		if enabled != "O" {
+			t.Fatalf("the WD043 trigger must be re-enabled after the plant, tgenabled=%q", enabled)
 		}
 		w.assertInvariants()
 		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "unlinked completion, standing")

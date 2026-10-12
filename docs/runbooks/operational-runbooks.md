@@ -741,9 +741,23 @@ periodic K2 audit review.
 the tables are FORCE RLS, a plain `SELECT` would be blind) and refuses with `WD098` if an EXISTING row already
 violates the new rules. The message carries one count per class: `reversed`, `columns`, `hold_link`,
 `release_link`, `hold_sum`, `hold_entry`, `hold_balance`, `walletless_player_account`,
-`withdrawal_tx_without_hold_leg`. Nothing is changed; the transaction rolls back. The migration takes
-`SHARE ROW EXCLUSIVE` on `withdrawal_requests`, `ledger_transactions`, `ledger_entries`, `ledger_accounts` for the
-scan, so writers wait (they do not fail) until it commits or refuses; run it in a deploy window.
+`withdrawal_tx_without_hold_leg`, `withdrawal_tx_without_hold_leg_unscoped` (an RLS-independent owner count of
+the same class, which also sees ledger rows of a tenant id with no `tenants` row). Nothing is changed; the
+transaction rolls back.
+
+**Run it in a write-quiet window.** The migration takes `SHARE ROW EXCLUSIVE` on `withdrawal_requests`,
+`ledger_transactions`, `ledger_entries`, `ledger_accounts` for the scan, and briefly `ACCESS EXCLUSIVE` on the three
+ledger tables (it lifts and restores FORCE RLS for the owner count), so writers - and, for that moment, readers -
+wait until it commits or refuses. A writer already holding a lock on one of these tables (e.g. a `ledger_accounts`
+row lock) can deadlock with the migration; PostgreSQL then aborts one side. If the migration is the victim it rolls
+back cleanly (nothing was created, FORCE RLS is untouched) and can simply be re-run once writes are quiet.
+
+**Deploy check before release: the runtime role name.** 0132 revokes EXECUTE on
+`withdrawal_request_ledger_link_violation(uuid, uuid)` from PUBLIC and grants it only to a role named exactly
+`igaming_runtime`. If the environment's runtime role has another name (`deploy/init-app-role.sql`; Terraform
+`db_runtime_username` in `deploy/aws/modules/ecs`), every withdrawal write fails closed with `permission denied`.
+Verify after migrating: `SELECT has_function_privilege('<runtime role>', 'withdrawal_request_ledger_link_violation(uuid, uuid)', 'EXECUTE');`
+must be `true`; if not, STOP and escalate (a grant to a differently named role needs its own reviewed migration).
 
 **Never patch rows to make it pass.** Rows are never edited or deleted to satisfy the pre-flight (append-only
 ledger, ADR 0113 section 6). The remedy depends on the database:

@@ -303,6 +303,27 @@ Numbers are allocated by the orchestrator (next free `0132`).
    signed actor proof stays on the launch list (`security`).
 4. E5 carries no decision evidence (§3 item 5).
 5. The four-eyes count and threshold remain Go-only (state doc §3).
+6. **WD043 lists its types explicitly (ledger-finance, slice 1 focused check).** The `withdrawal_*` transaction
+   types are exactly the five `ledger.go` constants (`withdrawal_requested`, `_rejected`, `_failed`, `_completed`,
+   `_reversed`), and the WD043 trigger function and pre-flight class 9 name those five. A FUTURE `withdrawal_*`
+   type is not caught automatically by the database; the static test
+   `internal/ledger/withdrawal_types_wd043_static_test.go` fails when a new `withdrawal_` `TransactionType`
+   constant appears without a recorded WD043 decision, or when the latest migration defining the WD043
+   function does not list it.
+7. **Known constraint on WITHDRAWAL-REVERSAL-1** (provider return after completion): WD043 requires a hold leg on
+   `withdrawal_reversed` and B-i refuses every hold leg of that type, so the type is refused end to end. Building
+   the reversal flow needs a NEW migration that relaxes or reshapes WD043 (and B-i) for that type, with
+   `ledger-finance` sign-off. 0132 is not edited.
+8. **Pre-flight class 9 backstop.** The per-tenant RLS loop cannot see a ledger row whose `tenant_id` names no
+   `tenants` row (`ledger_transactions.tenant_id` has no FK to `tenants`). Class 9 therefore also has an
+   RLS-independent owner count (`withdrawal_tx_without_hold_leg_unscoped`, FORCE RLS lifted and restored inside
+   the migration transaction, the 0124 pattern). Classes 1-7 keep the loop-only scope stated in §6 (covered by D);
+   class 8 is backstopped by the validated CHECK itself.
+9. **Deploy check (role naming).** 0132 revokes EXECUTE on `withdrawal_request_ledger_link_violation` from PUBLIC
+   and grants it only to a role named exactly `igaming_runtime`, if one exists. If the production runtime role has
+   a different name (the Terraform variable `db_runtime_username` is configurable), A and B-ii fail closed
+   (permission denied) for every withdrawal write. Before release, verify the role name against
+   `deploy/init-app-role.sql` and `db_runtime_username` (runbook section 17).
 
 ## 10. Work slices (ordered; none starts without orchestrator authorisation)
 

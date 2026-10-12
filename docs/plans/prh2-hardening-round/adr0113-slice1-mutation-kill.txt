@@ -86,3 +86,15 @@ M33_L3_check_fn_public_execute KILLED by: TestMigration0132_Catalog
 PRE_walletless_not_counted KILLED: walletless_player_account: want SQLSTATE WD098, got "23514" (the CHECK validation is the RLS-independent backstop)
 PRE_no_hold_leg_not_counted KILLED: withdrawal_tx_without_hold_leg: want SQLSTATE WD098, got "" (only the pre-flight sees this history)
 (the seven earlier PRE_* mutants re-run on this tree: all killed)
+
+E. Ledger-finance focused round (pre-flight 9b owner backstop; manual mutants, private DB adr0113s1_lf,
+   migration file restored byte-for-byte after each, cmp-verified).
+
+M34_9b_owner_count_zeroed KILLED by: TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp
+  (withdrawal_tx_without_hold_leg: want " withdrawal_tx_without_hold_leg_unscoped=1", got ...unscoped=0)
+M35_9b_force_rls_not_restored_on_ledger_entries KILLED by: TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp
+  (down did not restore the 0131 schema: table:ledger_entries force=false; TestMigration0132_Catalog also pins force=true at head)
+The orphan-tenant plant (class withdrawal_tx_without_hold_leg_unscoped) shows the per-tenant loop is blind to it:
+  the message carries withdrawal_tx_without_hold_leg=0 and ..._unscoped=1.
+STATIC_new_withdrawal_type: adding `const TxZZMut TransactionType = "withdrawal_clawback"` to internal/ledger makes
+  TestWD043_EveryWithdrawalTxTypeHasAHoldLegDecision FAIL (no WD043 decision; the 0132 function does not list it).
