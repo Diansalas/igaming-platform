@@ -445,6 +445,16 @@ func TestRGLimitsS1(t *testing.T) {
 		if foreignRows != 0 || reqRows != 0 {
 			t.Fatalf("tenant B read %d of tenant A's operator rows and %d floor change requests", foreignRows, reqRows)
 		}
+		var anon, plat int
+		wantOK(t, "principal-less read", do(w.rt, sess{}, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM rg_limit_config_change_requests`).Scan(&anon)
+		}))
+		wantOK(t, "platform read", do(w.rt, platformSess(w.ops.Requester), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM rg_limit_config_change_requests`).Scan(&plat)
+		}))
+		if anon != 0 || plat == 0 {
+			t.Fatalf("floor change requests need a platform principal: principal-less=%d platform=%d", anon, plat)
+		}
 		// Tenant B sees only the floor (the operator row never leaves tenant A).
 		cb := w.compose(t, staffSess(f.tenantB, f.staffB), f.jur, &f.tenantB, &f.brandB, "deposit", strp("EUR"))
 		if num(cb["ceiling"]) != "300" || durOf(cb["increase_cooldown"]) != time.Hour {
