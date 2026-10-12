@@ -148,9 +148,9 @@ M = [
     # --- migration mechanics ---
     ('X1 pre-flight accepts a differently defined index', UP,
      "               AND pg_catalog.pg_get_indexdef(i.indexrelid) = r.def;", "               ;", DB_TEST),
-    ('X2 down: data refusal off', DOWN, "    IF v_cfg + v_req + v_chg + v_to > 0 THEN", "    IF false THEN", DB_TEST),
+    ('X2 down: data refusal off', DOWN, "    IF v_cfg + v_req + v_chg + v_to + v_root > 0 THEN", "    IF false THEN", DB_TEST),
     ('X3 down: counts are RLS-blind (FORCE kept)', DOWN,
-     "ALTER TABLE player_restrictions NO FORCE ROW LEVEL SECURITY;\nDO $$", "DO $$", DB_TEST),
+     "ALTER TABLE player_restrictions NO FORCE ROW LEVEL SECURITY;\nALTER TABLE casino_launch_sessions", "ALTER TABLE casino_launch_sessions", DB_TEST),
     ('X4 down does not restore 0037 player_self_insert', DOWN,
      "        tenant_id IS NULL\n        AND brand_id IS NULL\n        AND restriction_type = 'self_exclusion'",
      "        brand_id IS NULL\n        AND restriction_type = 'self_exclusion'", DB_TEST),
