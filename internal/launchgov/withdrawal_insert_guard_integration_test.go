@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 )
 
 type wdFx struct {
@@ -51,12 +52,22 @@ const rawWithdrawalInsert = `INSERT INTO withdrawal_requests
 	(id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key, payout_instrument_id, payout_instrument_fingerprint)
 	VALUES ($1, $2, $3, $4, $5, 'EUR', 1000, $6, $7, $8)`
 
-// rawInsertRT is a RAW insert as the runtime role in the tenant's own scope (no Go gate).
+// rawInsertRT is a RAW insert as the runtime role in the tenant's own scope (no Go gate). Since ADR
+// 0113 (migration 0132) a request commits only with its hold leg linked (check A, WD031 otherwise), so
+// the raw insert is the legal E0 + E0b path of the shared helper (wdpath.Plant: the same INSERT, then
+// the withdrawal_requested hold leg and its link), still with no Go gate. A refused INSERT (WD010 /
+// WD011) is refused at its first statement exactly as before.
 func (w *world) rawInsertRT(f wdFx, key string) error {
 	return w.rt.WithTenant(context.Background(), f.tid, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, rawWithdrawalInsert, uuid.New(), f.tid, f.brand, f.player, f.wallet, key, f.instrument, f.fingerprint)
-		return err
+		return w.rawPlant(ctx, tx, f, key)
 	})
+}
+
+func (w *world) rawPlant(ctx context.Context, tx pgx.Tx, f wdFx, key string) error {
+	inst, fp := f.instrument, f.fingerprint
+	_, err := wdpath.Plant(ctx, tx, wdpath.Spec{TenantID: f.tid, BrandID: f.brand, PlayerAccountID: f.player, WalletID: f.wallet,
+		AssetCode: "EUR", Amount: 1000, IdempotencyKey: key, InstrumentID: &inst, Fingerprint: &fp})
+	return err
 }
 
 // A raw runtime INSERT is refused for every non-active tenant / brand status (WD010 tenant, WD011
@@ -198,7 +209,7 @@ func TestWithdrawalInsertGuard_Race_InsertHoldsKeys_ClosureWaits_ThenLA023(t *te
 			insDone := make(chan error, 1)
 			go func() {
 				insDone <- w.rt.WithTenant(ctx, f.tid, func(ctx context.Context, tx pgx.Tx) error {
-					if _, err := tx.Exec(ctx, rawWithdrawalInsert, uuid.New(), f.tid, f.brand, f.player, f.wallet, "race1-"+uuid.NewString(), f.instrument, f.fingerprint); err != nil {
+					if err := w.rawPlant(ctx, tx, f, "race1-"+uuid.NewString()); err != nil {
 						return err
 					}
 					close(started)
@@ -319,8 +330,11 @@ func TestWithdrawalInsertGuard_Catalog(t *testing.T) {
 			}
 			names = append(names, n)
 		}
-		if len(names) == 0 || names[0] != "withdrawal_requests_aa_subject_active_guard" {
-			t.Fatalf("the status guard must be the FIRST enabled BEFORE INSERT row trigger, got %v", names)
+		// ADR 0113 (migration 0132): the state-transition guard (WD025, a pure shape check that takes no
+		// lock) sorts FIRST, then this status guard, then the binding guard; the status guard is still
+		// before every trigger that takes a lock or a row (stricter pin than before: the full prefix).
+		if len(names) < 2 || names[0] != "withdrawal_requests_aa_state_transition_guard" || names[1] != "withdrawal_requests_aa_subject_active_guard" {
+			t.Fatalf("BEFORE INSERT order must start [aa_state_transition_guard, aa_subject_active_guard], got %v", names)
 		}
 		foundBinding := false
 		for _, n := range names {

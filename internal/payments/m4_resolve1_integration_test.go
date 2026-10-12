@@ -1138,8 +1138,22 @@ func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
 			}
 			return *after.ReleaseLedgerTransactionID, nil
 		})
-		k3RequireCode(t, err, "MR041")
+		// ADR 0113 (migration 0132): a completed withdrawal is terminal, so rewriting its release link
+		// is refused at the statement by the state-transition guard (WD020, was MR041 at commit; S-8 is
+		// now closed in the database) ...
+		k3RequireCode(t, err, "WD020")
 		m.b11Held(p, "forged release link")
+		// ... and the deeper fault MR041 exists for (the resolution's link differs from the
+		// withdrawal's release) re-driven through the LEGAL edge: a genuine Complete, the resolution
+		// linking another transaction (the hold): MR041 at commit, unchanged.
+		err = execForge(res, func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error) {
+			if err := withdrawal.Complete(ctx, tx, wr.ID, m.provider, r); err != nil {
+				return uuid.Nil, err
+			}
+			return *wr.HoldLedgerTransactionID, nil
+		})
+		k3RequireCode(t, err, "MR041")
+		m.b11Held(p, "resolution linking a transaction other than the release")
 	})
 	t.Run("planted wrong-key completion", func(t *testing.T) {
 		m.t = t
@@ -1150,7 +1164,7 @@ func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
 		// completion in every respect but its key.
 		var planted uuid.UUID
 		plantedRef := "m4-planted-" + uuid.NewString()[:8]
-		m.tx(func(ctx context.Context, tx pgx.Tx) error {
+		plant := func(ctx context.Context, tx pgx.Tx) error {
 			accts, err := ledger.GetOrCreateAccounts(ctx, tx, m.f.tenantID,
 				ledger.AccountSpec{WalletID: &m.f.walletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
 				ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: "EUR"})
@@ -1164,6 +1178,15 @@ func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
 					{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 568}}})
 			planted = out.TransactionID
 			return err
+		}
+		// ADR 0113 (migration 0132): an ordinary posting of a completion leg that its withdrawal never
+		// links cannot commit any more (B-ii, WD042) ...
+		k3RequireCode(t, m.pool.WithTenant(context.Background(), m.f.tenantID, plant), "WD042")
+		// ... so the planted completion (history, or an owner with the 0132 ledger checks off: ADR 0110
+		// 9.4) is an OWNER TAMPER plant here, B-i / B-ii disabled for that posting only; the executing
+		// transaction then meets MR041 exactly as before (check A admits the completion's shape).
+		m.tx(func(ctx context.Context, tx pgx.Tx) error {
+			return m4OwnerTamperHoldLegs(ctx, tx, func() error { return plant(ctx, tx) })
 		})
 		err = execForge(res, func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error) {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'completed', release_ledger_transaction_id = $2, updated_at = now() WHERE id = $1`, wr.ID, planted)
@@ -1182,7 +1205,7 @@ func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
 		// An ordinary hold -> cash posting correlated to the withdrawal but NOT
 		// under the governed wr.id:failed key.
 		var planted uuid.UUID
-		m.tx(func(ctx context.Context, tx pgx.Tx) error {
+		plant := func(ctx context.Context, tx pgx.Tx) error {
 			accts, err := ledger.GetOrCreateAccounts(ctx, tx, m.f.tenantID,
 				ledger.AccountSpec{WalletID: &m.f.walletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
 				ledger.AccountSpec{WalletID: &m.f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"})
@@ -1195,12 +1218,22 @@ func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
 					{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 569}}})
 			planted = out.TransactionID
 			return err
+		}
+		// ADR 0113 (migration 0132): the wrong-key failure leg is refused at the posting (B-i, WD041) ...
+		k3RequireCode(t, m.pool.WithTenant(context.Background(), m.f.tenantID, plant), "WD041")
+		// ... so it is an OWNER TAMPER plant here (B-i / B-ii off for that posting only).
+		m.tx(func(ctx context.Context, tx pgx.Tx) error {
+			return m4OwnerTamperHoldLegs(ctx, tx, func() error { return plant(ctx, tx) })
 		})
-		err = execForge(res, func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error) {
-			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'failed', release_ledger_transaction_id = $2, updated_at = now() WHERE id = $1`, wr.ID, planted)
-			return planted, err
-		})
-		k3RequireCode(t, err, "MR041")
+		forgeFailed := func() error {
+			return execForge(res, func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error) {
+				_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'failed', release_ledger_transaction_id = $2, updated_at = now() WHERE id = $1`, wr.ID, planted)
+				return planted, err
+			})
+		}
+		// Linking it: MR041 at commit, unchanged (its event is queued at `executing`, before check A's;
+		// A would refuse the same release shape, WD033, behind it).
+		k3RequireCode(t, forgeFailed(), "MR041")
 		if wr := m.wd(p.wr.ID); wr.State != withdrawal.StateSubmitted {
 			t.Fatalf("withdrawal moved: %s", wr.State)
 		}

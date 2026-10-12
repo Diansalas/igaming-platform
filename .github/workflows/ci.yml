@@ -125,7 +125,7 @@ jobs:
           if grep -rn 'TEST_ADMIN' internal/config/; then echo "internal/config must never read a TEST_ADMIN setting"; exit 1; fi
           # Every scratchdb file must carry the integration build tag so it
           # is never compiled into an application binary.
-          for f in internal/testsupport/scratchdb/*.go; do
+          for f in internal/testsupport/scratchdb/*.go internal/testsupport/wdpath/*.go; do
             head -1 "$f" | grep -qx '//go:build integration' || { echo "$f lacks //go:build integration"; exit 1; }
           done
 

@@ -14,9 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
-	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
@@ -54,30 +52,11 @@ const rsAmount = int64(900)
 func (w *bcWorld) rsPayout(t *testing.T, x string, wrAmount, attAmount int64, attAsset string) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	wrID, attemptID := uuid.New(), uuid.New()
+	// ADR 0113 (migration 0132): the request is planted as E0 + E0b and walked to `submitted` through the
+	// Go writers as igaming_runtime (legacySubmittedWithdrawal); it used to be a free-standing hold leg
+	// plus a direct `submitted` INSERT, which the database now refuses (WD040 / WD025).
+	legacySubmittedWithdrawal(t, w.pool, w.f, wrID, wrAmount, "rs-wd-"+wrID.String(), payProvA, "rs-instr-"+wrID.String()[:8])
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		hold, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerWithdrawalHold, "EUR")
-		if err != nil {
-			return err
-		}
-		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalRequested, IdempotencyKey: "rs-wreq-" + wrID.String(), CorrelationID: wrID,
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Debit, Amount: wrAmount},
-				{LedgerAccountID: hold, Direction: ledger.Credit, Amount: wrAmount},
-			},
-		}); err != nil {
-			return fmt.Errorf("post hold: %w", err)
-		}
-		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
-		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx,
-				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
-			 VALUES ($1,$2,$3,$4,$5,'EUR',$6,'submitted',$7,$8,$9)`,
-				wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, wrAmount, "rs-wd-"+wrID.String(), payProvA, "rs-instr-"+wrID.String()[:8])
-			return err
-		}); err != nil {
-			return fmt.Errorf("insert withdrawal: %w", err)
-		}
 		if _, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{
 			ID: attemptID, TenantID: w.f.tenantID, Operation: payments.AttemptOperationPayout, WithdrawalRequestID: &wrID,
 			ProviderID: payProvA, PaymentMethod: "bank_transfer", AssetCode: attAsset, Amount: attAmount, Interactive: false,

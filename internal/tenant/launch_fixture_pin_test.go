@@ -20,7 +20,8 @@ import (
 //     active subject.
 
 // fixturePackages are the test-support packages that can write governed launch state.
-var fixturePackages = []string{"launchfix", "launchdrive"}
+// wdpath (ADR 0113 slice 1) plants and walks withdrawal requests (money-path fixtures).
+var fixturePackages = []string{"launchfix", "launchdrive", "wdpath"}
 
 // untaggedFixtureFiles returns the .go files of the package directory that do not start with the
 // integration build constraint, and the number of Go files inspected.

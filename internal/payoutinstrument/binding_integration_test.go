@@ -34,7 +34,11 @@ func (b *bindWorld) insertWithdrawal(tx pgx.Tx, ctx context.Context, instID *uui
 	var id uuid.UUID
 	err := tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key, payout_instrument_id, payout_instrument_fingerprint)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, b.tenantID, b.p.BrandID, b.p.ID, b.wallet, asset, amount, "k-"+uuid.NewString(), instID, fp).Scan(&id)
-	return id, err
+	if err != nil {
+		return id, err
+	}
+	// ADR 0113 (migration 0132): the request commits only with its E0b hold leg linked (check A).
+	return id, plantHold(ctx, tx, b.tenantID, b.wallet, id, asset, amount)
 }
 
 func (b *bindWorld) wd(instID *uuid.UUID, fp *string) (uuid.UUID, error) {
@@ -53,7 +57,9 @@ func (b *bindWorld) wd(instID *uuid.UUID, fp *string) (uuid.UUID, error) {
 // tamper, the same technique as world.tamper). Legacy rows are UNAFFECTED by 0126.
 func (b *bindWorld) legacyWd() (uuid.UUID, error) { return b.plantLegacy(b.p, b.wallet) }
 
-// plantLegacy inserts a NULL/NULL withdrawal row as a pre-0126 row exists (owner, triggers off).
+// plantLegacy inserts a NULL/NULL withdrawal row as a pre-0126 row exists (owner, triggers off). ADR 0113
+// (migration 0132): the plant also writes the row's E0b hold leg and link (with the withdrawal_requests
+// triggers still off, the ledger triggers ON), so the plant is a well-formed pre-0126 request.
 func (w *world) plantLegacy(p player, wallet uuid.UUID) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
@@ -64,6 +70,9 @@ func (w *world) plantLegacy(p player, wallet uuid.UUID) (uuid.UUID, error) {
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
 			VALUES ($1,$2,$3,$4,'EUR',100,$5) RETURNING id`, w.tenantID, p.BrandID, p.ID, wallet, "legacy-"+uuid.NewString()).Scan(&id); err != nil {
+			return err
+		}
+		if err := plantHold(ctx, tx, w.tenantID, wallet, id, "EUR", 100); err != nil {
 			return err
 		}
 		for _, q := range []string{`ALTER TABLE withdrawal_requests FORCE ROW LEVEL SECURITY`, `ALTER TABLE withdrawal_requests ENABLE TRIGGER USER`} {
@@ -164,8 +173,11 @@ func TestBinding_ExpiredVerificationAndImmutability(t *testing.T) {
 	ins := func(instID *uuid.UUID, fp *string) (uuid.UUID, error) {
 		var id uuid.UUID
 		err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key, payout_instrument_id, payout_instrument_fingerprint)
-				VALUES ($1,$2,$3,$4,'EUR',100,$5,$6,$7) RETURNING id`, w.tenantID, p.BrandID, p.ID, wl, "k-"+uuid.NewString(), instID, fp).Scan(&id)
+			if err := tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key, payout_instrument_id, payout_instrument_fingerprint)
+				VALUES ($1,$2,$3,$4,'EUR',100,$5,$6,$7) RETURNING id`, w.tenantID, p.BrandID, p.ID, wl, "k-"+uuid.NewString(), instID, fp).Scan(&id); err != nil {
+				return err
+			}
+			return plantHold(ctx, tx, w.tenantID, wl, id, "EUR", 100) // ADR 0113: E0b in the same tx
 		})
 		return id, err
 	}
@@ -354,7 +366,7 @@ func TestBinding_InstrumentIDImmutableEvenForSameFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The request ends (terminal), the player revokes A and registers the same destination again.
-	b.tamper("withdrawal_requests", `UPDATE withdrawal_requests SET state='cancelled' WHERE id = $1`, wid)
+	b.cancelLegally(wid) // ADR 0113: the legal E2 (was an owner tamper UPDATE state='cancelled')
 	if err := b.rtTx(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := b.svc.Revoke(ctx, tx, BlockParams{TenantID: b.tenantID, InstrumentID: id, Actor: Actor{Type: ActorPlayer, ID: b.p.ID.String()}, ReasonCode: "player_revoked"})
 		return err

@@ -561,11 +561,15 @@ func TestK3_C9_ReservedPrefixAtEveryIngress(t *testing.T) {
 		w := newK3World(t, k3Opts{base: 1})
 		wr, a := w.ambiguousPayout(100)
 		rvInit(t, w.pool, w.orch, w.f.orchFixture, 5000, "k3-bk-"+uuid.NewString()) // a deposit_intents row to update
+		// ADR 0113 (migration 0132): provider_reference may be written only on a submitted request that
+		// has none (E8, set-once; WD022 otherwise), so the CHECK backstop is probed on such a request.
+		nullRef := uuid.New()
+		legacyWithdrawalAt(t, w.pool, w.f.orchFixture, nullRef, 100, "k3-bk-wr-"+nullRef.String(), withdrawal.StateSubmitted, w.provider, "")
 		// CHECKs.
 		w.tx(func(ctx context.Context, tx pgx.Tx) error {
 			for name, sql := range map[string]string{
 				"deposit_intents":     `UPDATE deposit_intents SET provider_reference = $1 WHERE id = (SELECT id FROM deposit_intents WHERE tenant_id = $2 LIMIT 1)`,
-				"withdrawal_requests": `UPDATE withdrawal_requests SET provider_reference = $1 WHERE id = (SELECT id FROM withdrawal_requests WHERE tenant_id = $2 LIMIT 1)`,
+				"withdrawal_requests": `UPDATE withdrawal_requests SET provider_reference = $1 WHERE id = (SELECT id FROM withdrawal_requests WHERE tenant_id = $2 AND state = 'submitted' AND provider_reference IS NULL LIMIT 1)`,
 			} {
 				sql := sql
 				err := k3Try(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/capability"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // C-47 (LF D-9): Go <-> SQL allow-list parity. payment_m2_admits takes the OLD
@@ -106,8 +107,10 @@ func TestK3_C5c_AdmitsRechecksTheWithdrawalStateAtWriteTime(t *testing.T) {
 		}); err != nil && err != errK3Rollback {
 			return err
 		}
-		// Move the withdrawal out of `submitted` inside the executing transaction.
-		if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected' WHERE id = $1`, wr.ID); err != nil {
+		// Move the withdrawal out of `submitted` inside the executing transaction. ADR 0113 (migration
+		// 0132): through the legal edge E10 (withdrawal.Fail, the governed `:failed` leg this M2
+		// declare-not-paid admits); the raw `submitted -> rejected` is no longer an edge (WD021).
+		if err := withdrawal.Fail(ctx, tx, wr.ID, "k3_c5c"); err != nil {
 			t.Fatalf("setup: cannot move the withdrawal: %v", err)
 		}
 		if err := k3Try(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {

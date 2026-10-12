@@ -30,7 +30,9 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 type lhWorld struct {
@@ -301,18 +303,24 @@ func (w *lhWorld) playerWithWallet(tenantID, brandID uuid.UUID) (player, walletI
 	return player, walletID
 }
 
-// withdrawal inserts a withdrawal request in the given state (owner fixture, legacy binding).
+// withdrawal creates a withdrawal request in the given state (owner fixture, legacy binding). ADR 0113
+// (migration 0132): planted as E0 + E0b (WD025 / check A) by the owner inside the sanctioned
+// binding-guard plant, then walked to `state` through the Go writers as igaming_runtime (wdpath).
 func (w *lhWorld) withdrawal(tenantID, brandID, player, walletID uuid.UUID, state string) {
 	w.t.Helper()
+	spec := wdpath.Spec{TenantID: tenantID, BrandID: brandID, PlayerAccountID: player, WalletID: walletID,
+		AssetCode: "EUR", Amount: 1000, IdempotencyKey: "lh-" + uuid.NewString()}
+	var res wdpath.Result
 	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-				VALUES ($1, $2, $3, $4, 'EUR', 1000, $5, $6)`, tenantID, brandID, player, walletID, state, "lh-"+uuid.NewString())
+			var err error
+			res, err = wdpath.Plant(ctx, tx, spec)
 			return err
 		})
 	}); err != nil {
 		w.t.Fatalf("seed withdrawal: %v", err)
 	}
+	wdpath.AdvanceAsRuntime(context.Background(), w.t, w.owner, tenantID, res.ID, withdrawal.State(state), spec)
 }
 
 // ---- request bodies / paths -------------------------------------------------------------

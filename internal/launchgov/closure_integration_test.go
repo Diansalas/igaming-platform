@@ -13,7 +13,9 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // playerWithWallet registers a player on the (active) brand and returns its account and wallet ids.
@@ -41,19 +43,49 @@ func (w *world) playerWithWallet(tenantID, brandID uuid.UUID) (player, walletID 
 	return player, walletID
 }
 
-// withdrawal inserts a withdrawal request in the given state (owner, tenant scope: a fixture).
+// withdrawal creates a withdrawal request in the given state (a fixture). Since ADR 0113 (migration
+// 0132) a request is born `requested` with its hold leg (WD025 / check A) and reaches a later state
+// only along the legal edges, so the LEGACY (NULL-binding) row is planted by the owner as E0 + E0b
+// (the repo's sanctioned binding-guard plant; the fixture is about the state, not the binding) and
+// then walked to `state` through the Go writers as igaming_runtime (wdpath).
 func (w *world) withdrawal(tenantID, brandID, player, walletID uuid.UUID, state string) {
 	w.t.Helper()
+	spec := wdpath.Spec{TenantID: tenantID, BrandID: brandID, PlayerAccountID: player, WalletID: walletID,
+		AssetCode: "EUR", Amount: 1000, IdempotencyKey: "lgov-" + uuid.NewString()}
+	var res wdpath.Result
 	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		// A LEGACY (NULL-binding) row: the fixture is about the state, not the payout binding (the
-		// repo's sanctioned integration-only helper; owner role).
 		return pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-				VALUES ($1, $2, $3, $4, 'EUR', 1000, $5, $6)`, tenantID, brandID, player, walletID, state, "lgov-"+uuid.NewString())
+			var err error
+			res, err = wdpath.Plant(ctx, tx, spec)
 			return err
 		})
 	}); err != nil {
 		w.t.Fatalf("seed withdrawal (%s): %v", state, err)
+	}
+	if state != "reversed" {
+		wdpath.AdvanceAsRuntime(context.Background(), w.t, w.owner, tenantID, res.ID, withdrawal.State(state), spec)
+		return
+	}
+	// `reversed` has no writer and no legal edge (ADR 0113 s2): the closure guard's treatment of it
+	// (holds nothing) is kept as an OWNER TAMPER plant (ADR 0110 9.4): the request is walked to
+	// `completed` legally, then the owner relabels it with the state guard and check A disabled for
+	// that one statement only (both re-enabled in the same transaction).
+	wdpath.AdvanceAsRuntime(context.Background(), w.t, w.owner, tenantID, res.ID, withdrawal.StateCompleted, spec)
+	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		for _, q := range []string{
+			`ALTER TABLE withdrawal_requests DISABLE TRIGGER withdrawal_requests_aa_state_transition_guard`,
+			`ALTER TABLE withdrawal_requests DISABLE TRIGGER withdrawal_requests_ledger_link_at_commit`,
+			`UPDATE withdrawal_requests SET state = 'reversed' WHERE id = '` + res.ID.String() + `'`,
+			`ALTER TABLE withdrawal_requests ENABLE TRIGGER withdrawal_requests_aa_state_transition_guard`,
+			`ALTER TABLE withdrawal_requests ENABLE TRIGGER withdrawal_requests_ledger_link_at_commit`,
+		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		w.t.Fatalf("owner tamper plant (reversed): %v", err)
 	}
 }
 

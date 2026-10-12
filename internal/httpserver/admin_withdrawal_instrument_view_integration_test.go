@@ -15,6 +15,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 )
 
 // B13-B usability: the staff withdrawal DETAIL exposes the bound instrument's id, rail and display_mask (and
@@ -156,11 +157,11 @@ func TestAdminGetWithdrawal_LegacyNullBindingIsNull(t *testing.T) {
 
 	legacyID := uuid.New()
 	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		// ADR 0113 (migration 0132): the legacy row is planted as E0 + E0b (same columns, plus its hold
+		// leg and link: a request commits only with its hold, check A).
 		return pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests
-				(id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
-				VALUES ($1, $2, $3, $4, $5, 'EUR', 700, 'legacy-null-binding')`,
-				legacyID, tenant.ID, brand.ID, player.ID, walletID)
+			_, err := wdpath.Plant(ctx, tx, wdpath.Spec{ID: legacyID, TenantID: tenant.ID, BrandID: brand.ID, PlayerAccountID: player.ID,
+				WalletID: walletID, AssetCode: "EUR", Amount: 700, IdempotencyKey: "legacy-null-binding"})
 			return err
 		})
 	}); err != nil {

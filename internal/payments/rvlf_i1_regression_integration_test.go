@@ -481,16 +481,11 @@ func TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned(t *testing.T) {
 
 	payoutRef := "payout-ref-m4"
 	payoutAttemptID := uuid.New()
+	wr := uuid.New()
+	// ADR 0113 (migration 0132): planted as E0 + E0b and walked to the state through the Go writers
+	// (legacyWithdrawalAt); it used to be a direct INSERT in that state with no hold, now WD025.
+	legacyWithdrawalAt(t, pool, f, wr, 5000, "rv-m4-idem-"+wr.String(), withdrawal.StateSubmitted, "mock-m4", "")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		wr := uuid.New()
-		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
-		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, f.tenantID, f.brandID, f.playerAccountID, f.walletID, "rv-m4-idem-"+wr.String())
-			return err
-		}); err != nil {
-			return err
-		}
 		_, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
 			ID: payoutAttemptID, TenantID: f.tenantID, Operation: AttemptOperationPayout,
 			WithdrawalRequestID: &wr, AttemptNo: 1, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,

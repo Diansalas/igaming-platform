@@ -107,18 +107,41 @@ func Bind(t testing.TB, pool *db.Pool, tenantID, playerAccountID uuid.UUID, asse
 // On a scratch database migrated to a version BEFORE 0123 the trigger does not exist (a few migration
 // tests pin an old schema): fn then runs as is.
 func WithoutBindingGuard(ctx context.Context, tx pgx.Tx, fn func() error) error {
-	var present bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'withdrawal_requests_payout_binding_guard'
-		AND tgrelid = 'withdrawal_requests'::regclass)`).Scan(&present); err != nil {
+	var present, hasA bool
+	if err := tx.QueryRow(ctx, `SELECT
+		EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'withdrawal_requests_payout_binding_guard' AND tgrelid = 'withdrawal_requests'::regclass),
+		EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'withdrawal_requests_ledger_link_at_commit' AND tgrelid = 'withdrawal_requests'::regclass)`).Scan(&present, &hasA); err != nil {
 		return err
 	}
 	if !present {
 		return fn()
 	}
+	// Migration 0132 (ADR 0113 check A) queues a DEFERRED constraint-trigger event for every row
+	// inserted or updated, and ALTER TABLE refuses to run while the table has pending trigger events
+	// (55006). fire runs A NOW for every pending withdrawal_requests event: the rows must already be
+	// legally shaped (born `requested` with the hold leg linked, the shared legal-path helper wdpath.Plant),
+	// exactly as they must be at COMMIT. Nothing is skipped; A only runs earlier, then is deferred
+	// again. On a schema before 0132 there is nothing to fire.
+	fire := func() error {
+		if !hasA {
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `SET CONSTRAINTS withdrawal_requests_ledger_link_at_commit IMMEDIATE`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `SET CONSTRAINTS withdrawal_requests_ledger_link_at_commit DEFERRED`)
+		return err
+	}
+	if err := fire(); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `ALTER TABLE withdrawal_requests DISABLE TRIGGER withdrawal_requests_payout_binding_guard`); err != nil {
 		return err
 	}
 	if err := fn(); err != nil {
+		return err
+	}
+	if err := fire(); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `ALTER TABLE withdrawal_requests ENABLE TRIGGER withdrawal_requests_payout_binding_guard`)

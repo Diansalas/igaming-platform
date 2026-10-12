@@ -34,6 +34,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 const migration0101Filename = "0101_payment_attempts"
@@ -225,6 +226,28 @@ func insertDepositIntent(t *testing.T, pool *db.Pool, f m0101Fixture, status str
 func insertWithdrawalRequest(t *testing.T, pool *db.Pool, f m0101Fixture, state string, providerID, providerReference *string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
+	// ADR 0113 (migration 0132): on a scratch database migrated THROUGH 0132 a request is born
+	// `requested` with its hold and reaches `state` only along the legal edges (WD025 otherwise), so the
+	// row is planted as E0 + E0b and walked there (legacyWithdrawalAt); on a database pinned below 0132
+	// (the 0101 migration-boundary tests) the raw legacy INSERT below is unchanged.
+	var guarded bool
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'withdrawal_requests_aa_state_transition_guard')`).Scan(&guarded)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if guarded {
+		pid, ref := "", ""
+		if providerID != nil {
+			pid = *providerID
+		}
+		if providerReference != nil {
+			ref = *providerReference
+		}
+		legacyWithdrawalAt(t, pool, orchFixture{tenantID: f.tenantID, brandID: f.brandID, playerAccountID: f.playerID, walletID: f.walletID},
+			id, 500, "widem-"+id.String(), withdrawal.State(state), pid, ref)
+		return id
+	}
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return pitest.WithoutBindingGuard(ctx, tx, func() error {
 			_, err := tx.Exec(ctx,

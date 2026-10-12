@@ -154,6 +154,12 @@ func TestWithdrawalRequests_AmountImmutableAfterInsert(t *testing.T) {
 	if pgErr.Message == "" {
 		t.Fatalf("expected a non-empty trigger error message, got: %+v", pgErr)
 	}
+	// ADR 0113 (migration 0132): the state-transition guard sorts first and freezes every column a
+	// legal edge does not write (WD022); the 0026 immutable-fields trigger behind it is pinned by
+	// TestADR0113_DeeperGuardsStillArmedBehindTheStateGuard.
+	if pgErr.Code != "WD022" {
+		t.Fatalf("expected the 0132 column-discipline refusal WD022 first, got %s: %s", pgErr.Code, pgErr.Message)
+	}
 
 	// The rejected UPDATE must not have partially applied - re-read in a
 	// fresh transaction (the failed one above was rolled back) and

@@ -1,0 +1,100 @@
+ADR 0113 slice 1 (migration 0132) - mutation-kill evidence
+============================================================
+Branch claude/adr0113-slice1 (base 6bda8ac). Private databases only (adr0113s1_mut for the SQL mutants,
+throwaway scratchdb databases for the file mutants). Drivers: adr0113-slice1-mutation/.
+
+Kill = the named tests FAIL with the mutant applied (and PASS on the restored objects: BASELINE line).
+
+A. SQL mutants of the 0132 objects (mutgen.py -> mutrun.sh; each mutant re-creates the four triggers and
+   the functions with ONE change, the slice's withdrawal-package tests run, then restore.sql re-applies the
+   migration's exact objects). Test set: TestADR0113_* and TestMigration0132_Catalog.
+
+BASELINE ok  	github.com/Diansalas/igaming-platform/internal/withdrawal	6.409s
+M01_drop_aa_prefix (guard trigger renamed: sorts after the 0124/0126/0131 triggers) KILLED by: TestADR0113_InsertMatrix_OnlyE0IsAdmitted TestADR0113_ReversedIsTerminal TestADR0113_RevivalExploit_14b2 TestADR0113_ColumnDiscipline TestMigration0132_Catalog TestADR0113_DeeperGuardsStillArmedBehindTheStateGuard
+M02_insert_guard_off (WD025) KILLED by: TestADR0113_InsertMatrix_OnlyE0IsAdmitted
+M03_terminal_mutable (WD020) KILLED by: TestADR0113_GraphMatrix_TenantSession TestADR0113_ReversedIsTerminal TestADR0113_RevivalExploit_14b2 TestADR0113_ColumnDiscipline
+M04_edge_allowlist_open (WD021) KILLED by: TestADR0113_HeaderFirstAttacks TestADR0113_GraphMatrix_TenantSession TestADR0113_ReversedIsTerminal TestADR0113_RevivalExploit_14b2 TestADR0113_ColumnDiscipline TestADR0113_WorkflowRecord TestADR0113_DoublePayAndStrandAttacks TestADR0113_CheckA TestADR0113_ConcurrentEdgeRaces
+M05_frozen_columns_off (to_jsonb discipline) KILLED by: TestADR0113_ColumnDiscipline
+M06_release_rule_off (terminal edge must set release) KILLED by: TestADR0113_GraphMatrix_TenantSession TestADR0113_ReversedIsTerminal TestADR0113_RevivalExploit_14b2 TestADR0113_ColumnDiscipline TestADR0113_WorkflowRecord TestADR0113_DoublePayAndStrandAttacks TestADR0113_CheckA TestADR0113_ConcurrentEdgeRaces TestADR0113_DeeperGuardsStillArmedBehindTheStateGuard
+M06b_release_nonterminal_off KILLED by: TestADR0113_ColumnDiscipline
+M07_e7_provider_not_null_off KILLED by: TestADR0113_ColumnDiscipline
+M08_provider_ref_setonce_off KILLED by: TestADR0113_ColumnDiscipline
+M09_hold_setonce_off KILLED by: TestADR0113_ColumnDiscipline
+M10_wd023_off KILLED by: TestADR0113_HeaderFirstAttacks TestADR0113_WorkflowRecord
+M11_A_session_shape_off (C-A, player-scoped blind count) KILLED by: TestADR0113_CheckA
+M12_A_wd031_off KILLED by: TestADR0113_InsertMatrix_OnlyE0IsAdmitted TestADR0113_HeaderFirstAttacks TestADR0113_CheckA
+M13_A_hold_shape_off KILLED by: TestADR0113_CheckA
+M14_A_release_shape_off KILLED by: TestADR0113_CheckA
+M15_A_wd034_off KILLED by: TestADR0113_CheckA
+M16_A_invisible_passes (RLS-blind: a non-visible request passes A) KILLED by: TestADR0113_CheckA
+M17_A_trigger_dropped KILLED by: TestADR0113_InsertMatrix_OnlyE0IsAdmitted TestADR0113_HeaderFirstAttacks TestADR0113_ReversedIsTerminal TestADR0113_CheckA TestMigration0132_Catalog
+M18_Bi_with_when_clause (C4 / HN-4) KILLED by: TestMigration0132_Catalog
+M19_Bi_invisible_request_passes (RLS-blind, skip the WD040 visibility raise) KILLED by: TestADR0113_DoublePayAndStrandAttacks
+M20_Bi_type_check_off KILLED by: TestADR0113_DoublePayAndStrandAttacks
+M21_Bi_key_pinning_off KILLED by: TestADR0113_DoublePayAndStrandAttacks
+M22_Bi_prestate_nonterminal_only (rev-1 "non-terminal" pre-state) KILLED by: TestADR0113_DoublePayAndStrandAttacks
+M23_Bi_provider_equality_off KILLED by: TestADR0113_DoublePayAndStrandAttacks
+M24_Bi_release_not_null_check_off SURVIVED - EQUIVALENT: with the guard enabled a request carries a release link
+    iff it is terminal (WD022 refuses a release on any non-terminal state; WD020 freezes terminal rows), and the
+    pinned pre-states of B-i are all non-terminal, so the removed disjunct can never be the only one true. Kept
+    as defence in depth for the trigger-disabled (owner) case, where D (slice 3) is the control.
+M25_Bi_type_blind_all_wallet_accounts KILLED by: (every TestADR0113_* test that posts a player entry)
+M26_Bii_dropped (remove the B-ii companion) KILLED by: TestADR0113_DoublePayAndStrandAttacks TestADR0113_CheckA TestMigration0132_Catalog
+M27_Bii_link_check_off KILLED by: TestADR0113_DoublePayAndStrandAttacks
+
+Totals A: 28 mutants, 27 killed, 1 equivalent survivor (M24, argued above). First pass (before the tests were
+strengthened) had 5 survivors: M14, M16, M20, M27 were then killed by added cases (owner-planted release
+shapes for A; an acting-shaped session with no grant; non-withdrawal types correlated to a live request; the
+B-ii "does not link" message), M24 is equivalent.
+
+B. Pre-flight mutants (premut.sh: the 0132 up file on disk loses ONE class counter; the scratch test seeds one
+   dirty row per class under FORCE RLS and runs the up script; file restored byte for byte), plus M28 (the
+   per-tenant set_config removed: the BLIND pre-flight of the 0048/0092/0107 lesson).
+
+M28_preflight_blind (no tenant GUC) KILLED: reversed: want SQLSTATE WD098, got "" (<nil>)
+PRE_reversed_not_counted KILLED: want an error containing " reversed=1"
+PRE_columns_not_counted KILLED: columns: want SQLSTATE WD098, got "" (<nil>)
+PRE_hold_link_not_counted KILLED: want an error containing " hold_link=1"
+PRE_release_not_counted KILLED: want an error containing " release_link=1"
+PRE_hold_sum_not_counted KILLED: want an error containing " hold_sum=1"
+PRE_entry_not_counted KILLED: want an error containing " hold_entry=1"
+PRE_balance_not_counted KILLED: want an error containing " hold_balance=1"
+
+C. Deeper-guard mutants (ADR 0113 s5 / C6: a converted test that proved HR0xx / MR041 / the 0026 trigger must
+   still raise it; drop the deeper guard, the test must fail). D1-D4b edit the guard's migration file on disk
+   (the payments worlds are scratchdb databases built from migrations/; file restored byte for byte); D5-D6
+   drop the trigger on the private mutation database and re-create it exactly.
+
+D1_0124_freeze_HR050_off KILLED by: TestHSEC_HoldRelease_FreezeTrigger TestHSEC_HoldRelease_FreezeTrigger_UnreadableStatusFailsClosed
+D2_0124_HR041_two_leg_shape_off KILLED by: TestHSEC_HoldRelease_DeferredShapeCheck_CatchesFenceBypass
+D3_0124_HR030_governed_guard_off KILLED by: TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries
+D4_0125_MR041_M4_outcome_off SURVIVED - subsumed: the next MR041 raise in the same block (link key / shape)
+    refuses the same forgeries; D4b disables the whole block:
+D4b_0125_MR041_executed_payout_block_off KILLED by: TestM4_MR041_ForgedLinkAndPlantedPosting (all three sub-tests)
+D5_0026_immutable_fields_trigger_dropped KILLED by: TestADR0113_DeeperGuardsStillArmedBehindTheStateGuard
+D6_0124_approved_hold_freeze_trigger_dropped KILLED by: TestADR0113_DeeperGuardsStillArmedBehindTheStateGuard
+
+D. Review round (security C1/C2/L3; mutation DB rebuilt from the migrations whenever a C1 mutant let the
+   test commit wall-less player accounts, which the restored CHECK then refuses to validate).
+
+Round-2 rerun of A on the review-round tree: M01-M28 unchanged (27 killed, M24 equivalent).
+M29_C1_player_wallet_check_dropped KILLED by: TestADR0113_WalletlessPlayerAccountRefused_C1 TestMigration0132_Catalog
+M30_C1_check_hold_type_only KILLED by: TestADR0113_WalletlessPlayerAccountRefused_C1
+M31_C2_hold_leg_trigger_dropped KILLED by: TestADR0113_WithdrawalTypesRequireAHoldLeg_C2 TestMigration0132_Catalog
+M32_C2_rejected_type_not_pinned KILLED by: TestADR0113_WithdrawalTypesRequireAHoldLeg_C2
+M33_L3_check_fn_public_execute KILLED by: TestMigration0132_Catalog
+PRE_walletless_not_counted KILLED: walletless_player_account: want SQLSTATE WD098, got "23514" (the CHECK validation is the RLS-independent backstop)
+PRE_no_hold_leg_not_counted KILLED: withdrawal_tx_without_hold_leg: want SQLSTATE WD098, got "" (only the pre-flight sees this history)
+(the seven earlier PRE_* mutants re-run on this tree: all killed)
+
+E. Ledger-finance focused round (pre-flight 9b owner backstop; manual mutants, private DB adr0113s1_lf,
+   migration file restored byte-for-byte after each, cmp-verified).
+
+M34_9b_owner_count_zeroed KILLED by: TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp
+  (withdrawal_tx_without_hold_leg: want " withdrawal_tx_without_hold_leg_unscoped=1", got ...unscoped=0)
+M35_9b_force_rls_not_restored_on_ledger_entries KILLED by: TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp
+  (down did not restore the 0131 schema: table:ledger_entries force=false; TestMigration0132_Catalog also pins force=true at head)
+The orphan-tenant plant (class withdrawal_tx_without_hold_leg_unscoped) shows the per-tenant loop is blind to it:
+  the message carries withdrawal_tx_without_hold_leg=0 and ..._unscoped=1.
+STATIC_new_withdrawal_type: adding `const TxZZMut TransactionType = "withdrawal_clawback"` to internal/ledger makes
+  TestWD043_EveryWithdrawalTxTypeHasAHoldLegDecision FAIL (no WD043 decision; the 0132 function does not list it).

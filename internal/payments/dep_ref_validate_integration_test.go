@@ -24,6 +24,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // depRefProvider wraps the MOCK and lets a test rewrite what Deposit returns.
@@ -154,8 +155,23 @@ func depScan[T any](t *testing.T, pool *db.Pool, tenantID uuid.UUID, sql string,
 	return v
 }
 
+// depLedgerTxCount counts the tenant's ledger transactions. ADR 0113 (migration 0132): a payout fixture's
+// withdrawal request is born with its E0b hold (withdrawal_requested, correlated to the request), which a
+// deposit park can never produce; exactly those fixture holds are excluded, every other transaction counts.
 func depLedgerTxCount(t *testing.T, e *depRefEnv, f orchFixture) int64 {
-	return depScan[int64](t, e.pool, f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID)
+	return depScan[int64](t, e.pool, f.tenantID, depLedgerTxCountSQL, f.tenantID)
+}
+
+const depLedgerTxCountSQL = `SELECT count(*) FROM ledger_transactions lt WHERE lt.tenant_id = $1
+	AND NOT (lt.transaction_type = 'withdrawal_requested'
+	         AND EXISTS (SELECT 1 FROM withdrawal_requests w WHERE w.tenant_id = lt.tenant_id AND w.id = lt.correlation_id
+	                     AND w.hold_ledger_transaction_id = lt.id))`
+
+// depFixtureHolds is the amount the payout fixtures' open withdrawal requests hold on f's wallet (their
+// E0b moved it from player_cash to player_withdrawal_hold); a deposit park moves nothing.
+func depFixtureHolds(t *testing.T, e *depRefEnv, f orchFixture) int64 {
+	return depScan[int64](t, e.pool, f.tenantID, `SELECT COALESCE(sum(amount), 0)::bigint FROM withdrawal_requests
+		WHERE tenant_id = $1 AND wallet_id = $2 AND state IN ('requested', 'pending_review', 'approved', 'submitted')`, f.tenantID, f.walletID)
 }
 
 func depDisputeAudits(t *testing.T, e *depRefEnv, f orchFixture, attemptID uuid.UUID) int64 {
@@ -205,8 +221,8 @@ func assertParkedNoMoney(t *testing.T, e *depRefEnv, f orchFixture, res Initiate
 	if n := depLedgerTxCount(t, e, f); n != 0 {
 		t.Errorf("a park must never produce a ledger transaction, found %d", n)
 	}
-	if b := cashBalance(t, e.pool, f); b != 0 {
-		t.Errorf("player balance = %d, want 0", b)
+	if b, held := cashBalance(t, e.pool, f), depFixtureHolds(t, e, f); b != -held {
+		t.Errorf("player balance = %d, want %d (0 minus the payout fixtures' own holds, ADR 0113)", b, -held)
 	}
 	assertLedgerBalanced(t, e.pool, f.tenantID)
 	if s := depIntentStatus(t, e, f, res.Intent.ID); s != string(DepositIntentAmbiguous) {
@@ -444,16 +460,11 @@ func TestDepSyncAmount_MismatchDisputesNoPosting(t *testing.T) {
 func seedPayoutAttemptBoundTo(t *testing.T, pool *db.Pool, f orchFixture, providerID, ref string) uuid.UUID {
 	t.Helper()
 	attemptID := uuid.New()
+	wr := uuid.New()
+	// ADR 0113 (migration 0132): planted as E0 + E0b and walked to the state through the Go writers
+	// (legacyWithdrawalAt); it used to be a direct INSERT in that state with no hold, now WD025.
+	legacyWithdrawalAt(t, pool, f, wr, 5000, "dr-payout-idem-"+wr.String(), withdrawal.StateSubmitted, providerID, "")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		wr := uuid.New()
-		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
-		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, f.tenantID, f.brandID, f.playerAccountID, f.walletID, "dr-payout-idem-"+wr.String())
-			return err
-		}); err != nil {
-			return err
-		}
 		if _, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
 			ID: attemptID, TenantID: f.tenantID, Operation: AttemptOperationPayout,
 			WithdrawalRequestID: &wr, AttemptNo: 1, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
@@ -550,7 +561,7 @@ func TestDepRefConflict_ReferenceBoundToAPayoutAttempt_Parks(t *testing.T) {
 				e.f.tenantID, a.ID.String()); got != "payout" {
 				t.Errorf("audit bound_to_operation = %q, want payout", got)
 			}
-			if depLedgerTxCount(t, e, e.f) != 0 || cashBalance(t, pool, e.f) != 0 {
+			if depLedgerTxCount(t, e, e.f) != 0 || cashBalance(t, pool, e.f) != -depFixtureHolds(t, e, e.f) {
 				t.Errorf("a binding conflict must never post")
 			}
 			after := mustGetAttempt(t, pool, e.f.tenantID, payoutID)
@@ -830,8 +841,8 @@ func TestDepRefConflict_CascadeDrivenParkReturnsNoRedirect(t *testing.T) {
 	if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
 		t.Fatalf("child state=%s reason=%s, want disputed/provider_reference_conflict", a.State, depTerminalReason(a))
 	}
-	if n := depScan[int64](t, pool, f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID); n != 0 {
-		t.Errorf("no ledger transaction may exist, found %d", n)
+	if n := depScan[int64](t, pool, f.tenantID, depLedgerTxCountSQL, f.tenantID); n != 0 {
+		t.Errorf("no ledger transaction may exist (beyond the payout fixture's own E0b hold, ADR 0113), found %d", n)
 	}
 }
 

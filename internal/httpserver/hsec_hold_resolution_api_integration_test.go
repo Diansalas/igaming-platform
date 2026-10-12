@@ -23,6 +23,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -129,11 +130,14 @@ func (w *hrWorld) approvedWithdrawalOnSuspendedTenant(amount int64) uuid.UUID {
 			return err
 		}
 		wrID = wr.ID
-		_, err = tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`, wr.ID)
-		return err
+		return nil
 	}); err != nil {
 		t.Fatalf("approved withdrawal: %v", err)
 	}
+	// ADR 0113 (migration 0132): requested -> approved is not an edge (WD021); the request walks E1 + E3
+	// through the legal-path helper (the approval workflow is not under test). This world is a throwaway
+	// scratch database with no runtime grants, so the scratch owner drives (AdvanceForFixture).
+	wdpath.AdvanceForFixture(ctx, t, w.a.pool, w.tenant, wrID, withdrawal.StateApproved, wdpath.Spec{})
 	if err := launchfix.TrySetTenantStatusOn(ctx, w.a.t, w.a.pool, w.tenant, "suspended"); err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}

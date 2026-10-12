@@ -478,8 +478,15 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 		{"a wrong amount (entry shape)", func(ctx context.Context, tx pgx.Tx) error {
 			return hsrPost(ctx, tx, h, wr, ledger.TxWithdrawalRejected, key, wr.ID, 399, 399)
 		}, []string{"CG030"}},
+		// ADR 0113 (migration 0132): approved -> submitted without provider_id is refused first by the
+		// state-transition guard's column rule (WD022, was HR050/HR030/42501); the same edge in its legal
+		// E7 shape (provider_id set) still reaches the 0124 freeze / governed guard / acting policy.
 		{"the state edge to submitted", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted' WHERE id = $1`, wr.ID)
+			return err
+		}, []string{"WD022"}},
+		{"the state edge to submitted, legal E7 shape", func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`, wr.ID)
 			return err
 		}, []string{"HR050", "HR030", "42501"}},
 		// state 'rejected' passes the acting policy WITH CHECK, so only the trigger can stop it.
@@ -487,14 +494,16 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected', release_ledger_transaction_id = hold_ledger_transaction_id WHERE id = $1`, wr.ID)
 			return err
 		}, []string{"HR030"}},
+		// ADR 0113: approved -> cancelled / failed are not edges (WD021 first, was HR050); the freeze
+		// itself is still proven on the legal E7 shape above and in TestHSEC_HoldRelease_FreezeTrigger.
 		{"cancelled", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'cancelled' WHERE id = $1`, wr.ID)
 			return err
-		}, []string{"HR050"}},
+		}, []string{"WD021"}},
 		{"failed", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'failed' WHERE id = $1`, wr.ID)
 			return err
-		}, []string{"HR050"}},
+		}, []string{"WD021"}},
 	}
 	for _, a := range attacks {
 		t.Run(a.name, func(t *testing.T) {
@@ -676,61 +685,85 @@ func TestHSEC_HoldRelease_DeferredShapeCheck_CatchesFenceBypass(t *testing.T) {
 			ddl(`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_governed_fence`)
 			defer ddl(`ALTER TABLE ledger_entries ENABLE TRIGGER ledger_entries_governed_fence`)
 
-			err := h.acting(h.apprB, func(ctx context.Context, tx pgx.Tx) error {
-				if err := h.proof(ctx, tx, "withdrawal_hold_resolution:approve", r.ID.String(), r.PayloadHash); err != nil {
+			forge := func() error {
+				return h.acting(h.apprB, func(ctx context.Context, tx pgx.Tx) error {
+					if err := h.proof(ctx, tx, "withdrawal_hold_resolution:approve", r.ID.String(), r.PayloadHash); err != nil {
+						return err
+					}
+					if err := hsrRawApprove(ctx, tx, h, r, "approve"); err != nil {
+						return err
+					}
+					if _, err := tx.Exec(ctx, `UPDATE withdrawal_hold_resolutions SET state = 'executing' WHERE id = $1`, r.ID); err != nil {
+						return err
+					}
+					accts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+						ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
+						ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"})
+					if err != nil {
+						return err
+					}
+					entries := []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 400}}
+					reverses, pid, ptx := wr.HoldLedgerTransactionID, (*string)(nil), (*string)(nil)
+					switch variant {
+					case "three_entries":
+						entries = append(entries,
+							ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 399},
+							ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 1})
+					case "credit_to_house_not_cash":
+						entries = append(entries, ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 400})
+					case "four_entries_extra_pair":
+						entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400},
+							ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Debit, Amount: 5},
+							ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 5})
+					case "no_reversal_link":
+						entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
+						reverses = nil
+					case "credit_to_other_wallet_cash":
+						entries = append(entries, ledger.EntryInput{LedgerAccountID: otherCash, Direction: ledger.Credit, Amount: 400})
+					case "wrong_amount_both_legs":
+						entries = []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 399},
+							{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 399}}
+					case "provider_ids_set":
+						entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
+						a, b := "hsr-forged-provider", "hsr-forged-"+uuid.NewString()
+						pid, ptx = &a, &b
+					}
+					res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: wr.TenantID, TransactionType: ledger.TxWithdrawalRejected,
+						IdempotencyKey: wr.ID.String() + ":governed_hold_released", CorrelationID: wr.ID, ReversesTransactionID: reverses,
+						ProviderID: pid, ProviderTxID: ptx, Entries: entries})
+					if err != nil {
+						return err
+					}
+					if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected', release_ledger_transaction_id = $2, updated_at = now() WHERE id = $1`, wr.ID, res.TransactionID); err != nil {
+						return err
+					}
+					_, err = tx.Exec(ctx, `UPDATE withdrawal_hold_resolutions SET state = 'executed', ledger_transaction_id = $2 WHERE id = $1`, r.ID, res.TransactionID)
 					return err
-				}
-				if err := hsrRawApprove(ctx, tx, h, r, "approve"); err != nil {
-					return err
-				}
-				if _, err := tx.Exec(ctx, `UPDATE withdrawal_hold_resolutions SET state = 'executing' WHERE id = $1`, r.ID); err != nil {
-					return err
-				}
-				accts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
-					ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
-					ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"})
-				if err != nil {
-					return err
-				}
-				entries := []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 400}}
-				reverses, pid, ptx := wr.HoldLedgerTransactionID, (*string)(nil), (*string)(nil)
-				switch variant {
-				case "three_entries":
-					entries = append(entries,
-						ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 399},
-						ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 1})
-				case "credit_to_house_not_cash":
-					entries = append(entries, ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 400})
-				case "four_entries_extra_pair":
-					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400},
-						ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Debit, Amount: 5},
-						ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 5})
-				case "no_reversal_link":
-					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
-					reverses = nil
-				case "credit_to_other_wallet_cash":
-					entries = append(entries, ledger.EntryInput{LedgerAccountID: otherCash, Direction: ledger.Credit, Amount: 400})
-				case "wrong_amount_both_legs":
-					entries = []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 399},
-						{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 399}}
-				case "provider_ids_set":
-					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
-					a, b := "hsr-forged-provider", "hsr-forged-"+uuid.NewString()
-					pid, ptx = &a, &b
-				}
-				res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: wr.TenantID, TransactionType: ledger.TxWithdrawalRejected,
-					IdempotencyKey: wr.ID.String() + ":governed_hold_released", CorrelationID: wr.ID, ReversesTransactionID: reverses,
-					ProviderID: pid, ProviderTxID: ptx, Entries: entries})
-				if err != nil {
-					return err
-				}
-				if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected', release_ledger_transaction_id = $2, updated_at = now() WHERE id = $1`, wr.ID, res.TransactionID); err != nil {
-					return err
-				}
-				_, err = tx.Exec(ctx, `UPDATE withdrawal_hold_resolutions SET state = 'executed', ledger_transaction_id = $2 WHERE id = $1`, r.ID, res.TransactionID)
-				return err
-			})
-			if !hsrIs(err, "HR041") {
+				})
+			}
+			// ADR 0113 (migration 0132): with 0132 enabled the 0124 deferred check still answers first
+			// (its event is queued at `executing`, before the posting's B-ii event), except for a hold leg
+			// of the wrong amount, which the hold-entry guard refuses at the posting (B-i, WD041) ...
+			want := "HR041"
+			if variant == "wrong_amount_both_legs" {
+				want = "WD041"
+			}
+			if err := forge(); !hsrIs(err, want) {
+				t.Fatalf("a malformed release must not commit: want %s with 0132 enabled, got %v", want, err)
+			}
+			// ... and with those checks lifted as well (throwaway scratch database, re-enabled on exit),
+			// the 0124 deferred two-leg check still refuses on its own (HR041), as before 0132.
+			for _, q := range []string{
+				`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_withdrawal_hold_guard`,
+				`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_withdrawal_hold_link_at_commit`,
+				`ALTER TABLE withdrawal_requests DISABLE TRIGGER withdrawal_requests_ledger_link_at_commit`,
+			} {
+				ddl(q)
+			}
+			defer ddl(`ALTER TABLE ledger_entries ENABLE TRIGGER ledger_entries_withdrawal_hold_guard`)
+			defer ddl(`ALTER TABLE ledger_entries ENABLE TRIGGER ledger_entries_withdrawal_hold_link_at_commit`)
+			defer ddl(`ALTER TABLE withdrawal_requests ENABLE TRIGGER withdrawal_requests_ledger_link_at_commit`)
+			if err := forge(); !hsrIs(err, "HR041") {
 				t.Fatalf("a malformed release must not commit: want HR041, got %v", err)
 			}
 			if h.wr(wr.ID).State != withdrawal.StateApproved || h.governedTxCount(wr.ID) != 0 {
@@ -748,15 +781,17 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 		t.Run(variant, func(t *testing.T) {
 			h := newHSR(t, 1)
 			wr := h.hold(100)
-			// Active tenant and brand: the same edges are NOT frozen (control, rolled back).
+			// Active tenant and brand: the same edges are NOT frozen (control, rolled back). ADR 0113
+			// (migration 0132): the probe is a LEGAL edge out of approved (E7 shape, provider_id set);
+			// approved -> cancelled is no longer an edge at all (WD021).
 			err := h.rt.WithTenant(context.Background(), h.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				if _, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'cancelled' WHERE id = $1`, wr.ID); e != nil {
+				if _, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`, wr.ID); e != nil {
 					return e
 				}
 				return errK3Rollback
 			})
 			if !errors.Is(err, errK3Rollback) {
-				t.Fatalf("control: an active tenant must not freeze approved -> cancelled: %v", err)
+				t.Fatalf("control: an active tenant must not freeze approved -> submitted: %v", err)
 			}
 			switch variant {
 			case "tenant_suspended":
@@ -766,6 +801,18 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 			default:
 				h.suspendBrand()
 			}
+			// ADR 0113 (migration 0132): the two LEGAL edges out of approved, in their legal column shape
+			// (E5/E6 with a release link, E7 with provider_id), pass the state-transition guard and are
+			// frozen by 0124 (HR050, unchanged); the three non-edges are refused first by the guard
+			// (WD021, was HR050).
+			probe := map[string]string{
+				"rejected":  `UPDATE withdrawal_requests SET state = 'rejected', release_ledger_transaction_id = hold_ledger_transaction_id WHERE id = $1`,
+				"submitted": `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`,
+				"cancelled": `UPDATE withdrawal_requests SET state = 'cancelled' WHERE id = $1`,
+				"failed":    `UPDATE withdrawal_requests SET state = 'failed' WHERE id = $1`,
+				"requested": `UPDATE withdrawal_requests SET state = 'requested' WHERE id = $1`,
+			}
+			wantFor := map[string]string{"rejected": "HR050", "submitted": "HR050", "cancelled": "WD021", "failed": "WD021", "requested": "WD021"}
 			for _, to := range []string{"rejected", "cancelled", "failed", "submitted", "requested"} {
 				sessions := map[string]func(fn func(ctx context.Context, tx pgx.Tx) error) error{
 					"tenant": func(fn func(ctx context.Context, tx pgx.Tx) error) error {
@@ -781,7 +828,7 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 				}
 				for name, run := range sessions {
 					err := run(func(ctx context.Context, tx pgx.Tx) error {
-						tag, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = $2 WHERE id = $1`, wr.ID, to)
+						tag, e := tx.Exec(ctx, probe[to], wr.ID)
 						if e == nil && tag.RowsAffected() == 0 {
 							return errors.New("no row matched")
 						}
@@ -789,8 +836,8 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 					})
 					// An acting session without an executing resolution may also be stopped by RLS; the
 					// freeze trigger fires BEFORE the WITH CHECK, so HR050 is the answer everywhere.
-					if !hsrIs(err, "HR050") {
-						t.Errorf("%s session approved -> %s: want HR050, got %v", name, to, err)
+					if !hsrIs(err, wantFor[to]) {
+						t.Errorf("%s session approved -> %s: want %s, got %v", name, to, wantFor[to], err)
 					}
 				}
 			}
@@ -1165,8 +1212,11 @@ func TestHSEC_HoldRelease_ExecutingWindow_SecondUpdateAndRefusalRefused(t *testi
 				return e
 			})
 		})
-		if !hsrIs(err, "HR030") {
-			t.Errorf("%s after the release in the executing txn: want HR030, got %v", name, err)
+		// ADR 0113 (migration 0132): the released row is terminal, so the state-transition guard refuses
+		// every further UPDATE first (WD020, was HR030); HR030 itself stays proven by the "rejected with
+		// an unrelated link" attack in TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries.
+		if !hsrIs(err, "WD020") {
+			t.Errorf("%s after the release in the executing txn: want WD020, got %v", name, err)
 		}
 	}
 	// HR042.
@@ -1217,7 +1267,8 @@ func TestHSEC_HoldRelease_FreezeTrigger_UnreadableStatusFailsClosed(t *testing.T
 	}
 	try := func() error {
 		return h.rt.WithTenant(ctx, h.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			if _, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'cancelled' WHERE id = $1`, wr.ID); e != nil {
+			// ADR 0113: the probe is the legal E7 shape (approved -> cancelled is no longer an edge, WD021).
+			if _, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`, wr.ID); e != nil {
 				return e
 			}
 			return errK3Rollback

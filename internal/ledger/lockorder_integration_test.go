@@ -123,7 +123,12 @@ func TestLockOrder_ConcurrentFirstPostingsCreateSameAccounts_NoDeadlock(t *testi
 	f := seedFixture(t, pool)
 
 	accSeeded := loAccount(t, pool, f, &f.walletID, AccountPlayerLockedCash, "EUR")
-	accNew := loAccount(t, pool, f, &f.walletID, AccountPlayerWithdrawalHold, "EUR")
+	// ADR 0113 (migration 0132, B-i): a player_withdrawal_hold entry must be the pinned leg of a
+	// withdrawal request (WD040 otherwise), so the brand-new account under test is another
+	// wallet-scoped player account of the same projection lock class (ADR 0082 L3), never used before:
+	// player_cash of a second wallet (player_bonus would need a BonusCost, a different posting shape).
+	walletNew := loNewWallet(t, pool, f, "EUR")
+	accNew := loAccount(t, pool, f, &walletNew, AccountPlayerCash, "EUR")
 
 	// Give accSeeded a projection row (and only accSeeded).
 	mustPost(t, pool, f, TransactionInput{
@@ -736,7 +741,12 @@ func TestLedger_BalancedUnderConcurrentLoad(t *testing.T) {
 	walletTwo := loNewWallet(t, pool, f, "EUR")
 
 	house := loAccount(t, pool, f, nil, AccountHouseGaming, "EUR")
-	hold := loAccount(t, pool, f, &f.walletID, AccountPlayerWithdrawalHold, "EUR")
+	// ADR 0113 (migration 0132, B-i): a hand-built player_withdrawal_hold leg with no withdrawal
+	// request is WD040, so the fourth leg class is another wallet-scoped player account of the same
+	// projection lock class (ADR 0082 L3); a genuine concurrent hold is covered through the real
+	// writer by internal/withdrawal (TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds and
+	// TestADR0113_ConcurrentEdgeRaces).
+	hold := loAccount(t, pool, f, &f.walletID, AccountPlayerLockedCash, "EUR")
 	bonus := loAccount(t, pool, f, &f.walletID, AccountPlayerBonus, "EUR")
 	cashTwo := loAccount(t, pool, f, &walletTwo, AccountPlayerCash, "EUR")
 
@@ -771,8 +781,8 @@ func TestLedger_BalancedUnderConcurrentLoad(t *testing.T) {
 					{LedgerAccountID: house, Direction: Debit, Amount: 50},
 					{LedgerAccountID: f.cashAccountID, Direction: Credit, Amount: 50},
 				}
-			case 3: // withdrawal hold: Dr player_cash / Cr player_withdrawal_hold
-				in.TransactionType = TxWithdrawalRequested
+			case 3: // stake lock: Dr player_cash / Cr player_locked_cash (was the withdrawal hold, see above)
+				in.TransactionType = TxCasinoBet
 				in.Entries = []EntryInput{
 					{LedgerAccountID: f.cashAccountID, Direction: Debit, Amount: 20},
 					{LedgerAccountID: hold, Direction: Credit, Amount: 20},
