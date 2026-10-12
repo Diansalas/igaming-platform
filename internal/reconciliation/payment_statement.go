@@ -361,6 +361,8 @@ func isSyntheticSource(src statement.PaymentStatementSource) bool {
 	return ok
 }
 
+var sourceLabelRe = regexp.MustCompile(`^[A-Za-z0-9 ._:/(),;'-]{1,256}$`)
+
 func validateSourceIdentity(src statement.PaymentStatementSource) error {
 	if src == nil {
 		return ErrPaymentStatementSourceNone
@@ -368,6 +370,11 @@ func validateSourceIdentity(src statement.PaymentStatementSource) error {
 	label := src.Label()
 	if label == "" || len(label) > 256 || !utf8.ValidString(label) {
 		return fmt.Errorf("%w: source label must be 1..256 bytes of UTF-8", ErrPaymentStatementInvalid)
+	}
+	if !sourceLabelRe.MatchString(label) {
+		// ADR 0114 R2 (security F1): the label is rendered into every mismatch text; a conservative
+		// charset (no '=', brackets or control characters) keeps it from carrying tokens.
+		return fmt.Errorf("%w: source label may use only letters, digits, space and . _ : / ( ) , ; ' -", ErrPaymentStatementInvalid)
 	}
 	if isSyntheticSource(src) && !strings.Contains(label, "MOCK") {
 		return fmt.Errorf("%w: a synthetic source's label must contain MOCK", ErrPaymentStatementInvalid)

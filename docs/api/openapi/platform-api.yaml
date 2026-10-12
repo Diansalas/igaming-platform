@@ -930,6 +930,8 @@ paths:
         the response also carries `payout_instrument`: the bound
         instrument's id, rail and masked display value (null for a legacy
         withdrawal with no binding). The list endpoint does not carry it.
+        ADR 0114 R1b: it also carries `payout_attempt`, the latest payout
+        attempt summary (null when none); see PayoutAttemptSummary.
       security:
         - bearerAuth: []
       parameters:
@@ -6212,6 +6214,210 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/admin/tenants/{tenantID}/payment-attempts:
+    get:
+      summary: List the tenant's payment attempts (ADR 0114 R1, read-only)
+      description: >
+        payment_force_resolve:read ALONE (finance, compliance, platform_admin); withdrawal:review is not accepted. Staff principals only.
+        Read-only view of deposit and payout attempts (the parked and disputed queue is `state=disputed`) with the closed park-reason catalogue, the
+        open K3 force-resolution id and the resolution kinds the request path would currently admit (`admissible_kinds`, a hint: the request path
+        re-checks in the database). Never returned: the provider reference text (only `has_provider_reference`), the merchant reference, the
+        idempotency key, a player or wallet id, any destination or instrument detail, a staff id.
+        Tenant: the {tenantID} path value only. A tenant-scoped caller may name only its own tenant (otherwise 404, no data); a platform caller may
+        name any existing tenant, and that read is first recorded as a tenant-visible platform-action audit row (`payment_attempts.platform_read`);
+        if the audit row cannot be written nothing is returned (500). No client-supplied tenant id is read from the query string: an unknown query
+        parameter is 400.
+        Pagination is a keyset on (created_at, id) descending: pass the previous page's `next_cursor` as `cursor`; `next_cursor` is null on the last page.
+        A cursor is a position only; tenant scope is applied on every call. `limit` is 1..200 (default 50); anything else is 400. Unknown `operation`,
+        `state` or `terminal_reason` values are 400 (the `other` bucket applies to output only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: operation
+          in: query
+          schema: { type: string, enum: [payout, deposit] }
+        - name: state
+          in: query
+          schema: { $ref: "#/components/schemas/PaymentAttemptState" }
+        - name: terminal_reason
+          in: query
+          description: Exact match on a catalogue value (the `other` bucket is output-only and is refused as input).
+          schema: { $ref: "#/components/schemas/PaymentAttemptTerminalReason" }
+        - name: withdrawal_request_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          description: Opaque keyset cursor from a previous page's next_cursor.
+          schema: { type: string, maxLength: 128 }
+      responses:
+        "200":
+          description: One page of payment attempts, newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentAttemptPage" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}:
+    get:
+      summary: Get one payment attempt (ADR 0114 R1, read-only)
+      description: >
+        Same gate, tenant rule, exclusions and platform-action audit as the list route. An attempt that does not exist in the target tenant is 404
+        (a foreign tenant's attempt id is indistinguishable from an unknown one). No query parameters are accepted.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: attemptID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The attempt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentAttempt" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/reconciliation/runs:
+    get:
+      summary: Reconciliation runs of one stream (ADR 0114 R2, read-only)
+      description: >
+        `stream` is required: payment_statement (payment_force_resolve:read: finance, compliance, platform_admin), ledger_vs_projection
+        (ledger_adjustment:read: finance, compliance, platform_admin) or sportsbook_settlement (sportsbook_reconciliation:read: tenant_admin,
+        compliance, finance). The permission of the requested stream is checked before any query; the casino streams keep
+        GET /v1/admin/casino/reconciliation/runs. An unknown or missing stream is 400. Same tenant rule and platform-action audit
+        (`reconciliation.platform_read`) as the payment-attempts routes. Detection only: nothing here resolves or compensates a finding
+        (corrections go through K2/K3).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: stream
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/StaffReconciliationStream" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Paginated reconciliation runs, newest first
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/StaffReconciliationRun" }
+                    required: [items]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/reconciliation/mismatches:
+    get:
+      summary: Reconciliation mismatches of one stream (ADR 0114 R2, read-only)
+      description: >
+        Same stream permissions, tenant rule and audit as the runs route. `status` and `kind` are closed vocabularies (kind per stream) and
+        `subject_id` a canonical UUID; any other input is 400 (the `other` bucket applies to output only). The stored reconciliation key and the
+        expected/actual diagnostic texts are never returned: `subject_ref` (an attempt, deposit intent, receipt, bet, wallet, ledger account or
+        ledger transaction, never a player identity), the minor-unit amounts, the asset code and its exponent are derived from them by strict
+        parsers over the platform-written part only (see StaffReconciliationMismatch) and are null when not unambiguous. `subject_id` (canonical
+        lower-case UUID) matches exactly the mismatches whose subject_ref would name that id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: stream
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/StaffReconciliationStream" }
+        - name: status
+          in: query
+          schema: { type: string, enum: [open, investigating, resolved] }
+        - name: kind
+          in: query
+          schema: { $ref: "#/components/schemas/StaffReconciliationKind" }
+        - name: subject_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Paginated reconciliation mismatches, newest first
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/StaffReconciliationMismatch" }
+                    required: [items]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /v1/admin/tenants/{tenantID}/launch-readiness:
     get:
       summary: Read the launch readiness of a tenant or brand (read-only, informational)
@@ -8513,6 +8719,165 @@ components:
         reviewed_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
       required: [id, player_account_id, status, provider_id, created_at]
+    PaymentAttemptState:
+      type: string
+      enum: [created, submitting, pending, ambiguous, succeeded, declined, rejected, disputed]
+    PaymentAttemptTerminalReason:
+      type: string
+      description: >
+        The closed catalogue of attempt terminal reasons (ADR 0114 R1): every payout and deposit dispute reason, the invalid-reference reasons
+        expanded over the closed providerref reasons, and the platform refusal codes of the rejected state. As OUTPUT, any stored value outside
+        the catalogue is reported as `other`; `other` is not accepted as input.
+      enum:
+        - amount_asset_mismatch
+        - callback_amount_asset_mismatch
+        - destination_integrity_failure
+        - destination_mismatch
+        - expired_before_submission
+        - intent_succeeded
+        - invalid_provider_reference
+        - "invalid_provider_reference:control_char"
+        - "invalid_provider_reference:empty"
+        - "invalid_provider_reference:invalid_utf8"
+        - "invalid_provider_reference:reserved_namespace"
+        - "invalid_provider_reference:too_long"
+        - kill_switch
+        - late_contradicting_evidence
+        - late_decline_after_terminal
+        - late_success_after_terminal
+        - multiple_success_for_intent
+        - no_routable_provider
+        - poll_amount_mismatch
+        - poll_reference_mismatch
+        - provider_reference_conflict
+        - provider_reference_mismatch
+        - reversal_tombstone_precedes_success
+        - success_after_payout_declined
+        - success_for_never_sent_attempt
+        - sync_amount_mismatch
+    PaymentAttemptSubjectRef:
+      type: object
+      description: What the attempt is for; exactly one property is present. Never a player or wallet identity.
+      properties:
+        withdrawal_request_id: { type: string, format: uuid }
+        deposit_intent_id: { type: string, format: uuid }
+    PaymentAttempt:
+      type: object
+      description: >
+        ADR 0114 R1. Amounts are decimal strings of minor units; `exponent` is the asset registry's decimal exponent. `updated_at` is the last change
+        of the row (there is no separate state-change timestamp); `resolved_at` is set once the attempt left the in-flight states (a dispute included). `admissible_kinds`
+        is a hint of the K3 kinds the request path would admit now (empty when a resolution is already open for a tenant caller). M4 kinds mean
+        "in scope; the statement-evidence verdict decides": they require the database predicate payment_m4_in_scope AND a provider AND a submitted
+        withdrawal whose amount and asset equal the attempt's, but the verdict is not evaluated. `open_resolution_id` is the pending K3 resolution
+        for TENANT callers; it is always null for platform callers (a platform principal is never placed in the resolution-visible session), and
+        a platform caller's `admissible_kinds` therefore does not account for an open resolution.
+      properties:
+        id: { type: string, format: uuid }
+        operation: { type: string, enum: [payout, deposit] }
+        attempt_no: { type: integer }
+        state: { $ref: "#/components/schemas/PaymentAttemptState" }
+        terminal_reason:
+          type: string
+          nullable: true
+          description: A PaymentAttemptTerminalReason value, or `other`.
+        subject_ref: { $ref: "#/components/schemas/PaymentAttemptSubjectRef" }
+        amount_minor_units: { type: string }
+        asset_code: { type: string }
+        exponent: { type: integer }
+        provider_id: { type: string, nullable: true }
+        has_provider_reference: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        open_resolution_id: { type: string, format: uuid, nullable: true }
+        admissible_kinds:
+          type: array
+          items:
+            type: string
+            enum: [m1_deposit_evidence, m2_declare_paid, m2_declare_not_paid, m4_evidence_paid, m4_evidence_not_paid]
+      required: [id, operation, attempt_no, state, terminal_reason, subject_ref, amount_minor_units, asset_code, exponent, provider_id,
+        has_provider_reference, created_at, updated_at, resolved_at, open_resolution_id, admissible_kinds]
+    PaymentAttemptPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PaymentAttempt" }
+        next_cursor: { type: string, nullable: true, description: Null on the last page. }
+      required: [items, next_cursor]
+    StaffReconciliationStream:
+      type: string
+      enum: [payment_statement, ledger_vs_projection, sportsbook_settlement]
+    StaffReconciliationKind:
+      type: string
+      description: Closed per stream; a kind of another stream is 400. As OUTPUT a stored kind outside the stream's vocabulary is reported as `other`.
+      enum:
+        - missing_projection
+        - balance_mismatch
+        - ledger_unlinked_manual_adjustment
+        - pay_missing_platform_record
+        - pay_missing_provider_record
+        - pay_amount_mismatch
+        - pay_asset_mismatch
+        - pay_reference_mismatch
+        - pay_status_mismatch
+        - pay_duplicate
+        - pay_unresolved
+        - pay_captured_unposted
+        - pay_declared_paid_unconfirmed
+        - pay_declared_not_paid_but_paid
+        - pay_declared_paid_compensated_but_paid
+        - sb_locked_mismatch
+        - sb_bet_net_mismatch
+        - sb_orphan_ledger
+        - sb_orphan_history
+        - sb_status_mismatch
+        - sb_mock_statement_mismatch
+    StaffReconciliationRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        stream: { $ref: "#/components/schemas/StaffReconciliationStream" }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        run_at: { type: string, format: date-time }
+        status: { type: string, enum: [clean, mismatches_found, other] }
+      required: [id, stream, period_start, period_end, run_at, status]
+    StaffReconciliationMismatch:
+      type: object
+      description: >
+        ADR 0114 R2. The amounts are decimal strings of minor units. Everything here is derived from the stored diagnostic texts only from the
+        platform-written part: the text before the first free-text token (provider_reference=, provider_tx_id=, merchant_reference=,
+        settlement_reference=, original=, reference=), each token required exactly once. The asset comes only from the rendered expected/actual
+        segments (never the key) and must exist in the asset registry; when it is null both amounts are null. The amount names are an allow-list
+        (amount=, open_bet_stakes, ledger_locked_net, sportsbook_locked_bonus_net). Amounts are exposed ONLY for the kinds pay_amount_mismatch and
+        pay_asset_mismatch (expected = the platform render, actual = the statement line render); every other kind returns null amounts, because
+        its actual text is a platform, ledger or other-attempt value (ledger-finance ruling: when in doubt, null). A statement line segment
+        rendered behind a source label that contains any token is not parsed at all (the label is stored data). `subject_ref` is null when no trusted token names a subject
+        (for example a payment key whose attempt token follows the provider reference).
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        stream: { $ref: "#/components/schemas/StaffReconciliationStream" }
+        kind:
+          type: string
+          description: A StaffReconciliationKind value of the stream, or `other`.
+        status: { type: string, enum: [open, investigating, resolved, other] }
+        subject_ref:
+          type: object
+          nullable: true
+          properties:
+            type:
+              type: string
+              enum: [payment_attempt, deposit_intent, payment_receipt, bet, wallet, ledger_account, ledger_transaction]
+            id: { type: string, format: uuid }
+          required: [type, id]
+        expected_minor_units: { type: string, nullable: true }
+        actual_minor_units: { type: string, nullable: true }
+        asset_code: { type: string, nullable: true, description: "The registry's canonical code; null unless the rendered expected/actual segments agree on one asset that exists in the asset registry." }
+        exponent: { type: integer, nullable: true, description: "The asset registry's decimal exponent; null exactly when asset_code is null." }
+        detected_at: { type: string, format: date-time }
+      required: [id, run_id, stream, kind, status, subject_ref, expected_minor_units, actual_minor_units, asset_code, exponent, detected_at]
     PageMeta:
       type: object
       description: >
@@ -8622,7 +8987,30 @@ components:
                 method the staff submit is compared with.
               allOf:
                 - $ref: "#/components/schemas/WithdrawalBoundInstrument"
-          required: [payout_instrument]
+            payout_attempt:
+              nullable: true
+              description: >
+                ADR 0114 R1b: the latest payout attempt of this withdrawal, or
+                null when it has none yet. State, the park reason from the
+                closed catalogue (unknown values are reported as `other`), the
+                id of the open K3 force-resolution when one is pending, and the
+                number of payout attempts. Never the provider reference, the
+                merchant reference, a player id or any destination detail.
+              allOf:
+                - $ref: "#/components/schemas/PayoutAttemptSummary"
+          required: [payout_instrument, payout_attempt]
+    PayoutAttemptSummary:
+      type: object
+      properties:
+        attempt_id: { type: string, format: uuid }
+        state: { $ref: "#/components/schemas/PaymentAttemptState" }
+        terminal_reason:
+          type: string
+          nullable: true
+          description: The park or terminal reason from the closed catalogue, or `other`.
+        open_resolution_id: { type: string, format: uuid, nullable: true }
+        attempt_count: { type: integer }
+      required: [attempt_id, state, terminal_reason, open_resolution_id, attempt_count]
     WithdrawalBoundInstrument:
       type: object
       properties:

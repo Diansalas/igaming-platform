@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
@@ -546,6 +547,11 @@ var errBoundInstrumentUnreadable = errors.New("withdrawal admin detail: bound pa
 type staffWithdrawalDetailResponse struct {
 	staffWithdrawalResponse
 	PayoutInstrument *staffPayoutInstrumentRef `json:"payout_instrument"`
+	// PayoutAttempt (ADR 0114 R1b) is the latest payout attempt of the withdrawal (state, park
+	// reason from the closed catalogue, open K3 resolution id, attempt count), or null when the
+	// withdrawal has no attempt yet. Same exclusions as the R1 attempt list: never the provider
+	// reference, the merchant reference, a player id or any destination detail.
+	PayoutAttempt *payoutAttemptSummaryDTO `json:"payout_attempt"`
 }
 
 // newGetAdminWithdrawalHandler is the Stage 5 Back Office withdrawal
@@ -628,6 +634,25 @@ func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
 			return
 		}
+		// R1b: a second, principal-scoped read-only transaction (K3 resolutions are invisible to a
+		// plain tenant session). The tenant is the caller's own (RequireTenantScope on this route).
+		var attemptSummary *payoutAttemptSummaryDTO
+		subject, perr := uuid.Parse(tc.Subject)
+		if perr == nil {
+			perr = deps.DB.WithTenantReadOnly(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+				if err := db.SetPrincipalIDForCurrentTx(ctx, tx, subject); err != nil {
+					return err
+				}
+				var err error
+				attemptSummary, err = loadPayoutAttemptSummary(ctx, tx, tc.TenantID, wr.ID)
+				return err
+			})
+		}
+		if perr != nil {
+			logger.Error("get_admin_withdrawal_attempt_summary_failed", "error", perr)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load withdrawal")
+			return
+		}
 		writeJSON(w, http.StatusOK, staffWithdrawalDetailResponse{
 			staffWithdrawalResponse: staffWithdrawalResponse{
 				withdrawalRequestResponse: toWithdrawalRequestResponse(wr),
@@ -635,6 +660,7 @@ func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
 				DecimalExponent:           decimalExponent,
 			},
 			PayoutInstrument: instrument,
+			PayoutAttempt:    attemptSummary,
 		})
 	}
 }

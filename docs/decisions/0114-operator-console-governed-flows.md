@@ -520,3 +520,74 @@ Problem: nothing moves a request `open -> expired`, so a stale or expired reques
 - Optional sweeper for expired requests (same audit row).
 - Tests: expired platform-filed request then tenant re-file succeeds; stale-version request is superseded; a live request still
   409; a tenant cannot expire a live platform request; the audit row exists; mutants for each predicate.
+
+## 12. S2 and S4 record (read routes R1, R1b, R2 and `sportsbook_reconciliation:read`) - IMPLEMENTED against the local DB / MOCK, reviews pending
+
+Status of S2 and S4 only. `security`, `ledger-finance`, `payments` and `code-reviewer` reviews are pending. No migration, no write
+path, no index. Routes (all GET, all under the existing `auth.Middleware` + `RequireStaffPrincipal`):
+
+| Route | Gate | Notes |
+|---|---|---|
+| `GET /v1/admin/tenants/{tenantID}/payment-attempts` and `.../{attemptID}` (R1) | `payment_force_resolve:read` alone (FI, CO, PA) | keyset `(created_at, id)` desc, opaque cursor `next_cursor`, `limit` 1..200 default 50, filters `operation`, `state`, `terminal_reason`, `withdrawal_request_id` (closed vocabularies, 400 otherwise); unknown query parameters (a client `tenant_id` included) are 400 |
+| `payout_attempt` on `GET /v1/admin/withdrawals/{id}` (R1b) | unchanged (`withdrawal:review`, FI) | latest payout attempt: `attempt_id, state, terminal_reason, open_resolution_id, attempt_count`, or `null` |
+| `GET /v1/admin/tenants/{tenantID}/reconciliation/runs` and `.../mismatches` (R2) | per stream, checked after the stream is parsed and before any query: `payment_statement` -> `payment_force_resolve:read`, `ledger_vs_projection` -> `ledger_adjustment:read`, `sportsbook_settlement` -> new `sportsbook_reconciliation:read` (TA, CO, FI exactly) | `stream` required; unknown stream/status/kind/subject_id is 400; offset paging with `total`, `limit` 1..200 |
+
+Facts and choices, each of which `security`/`ledger-finance` may overturn:
+
+1. **Exclusions.** No response carries `provider_reference`, `merchant_reference`, the idempotency key, a player or wallet id, a
+   destination, or a staff id. `has_provider_reference` is a boolean. `terminal_reason` is mapped through a closed catalogue (every payout
+   and deposit dispute reason, the invalid-reference reasons over the closed `providerref` set, four platform refusal codes); anything else is
+   reported as `other` (the `rg_ineligible:*` and KYC decline codes of rejected attempts therefore read `other`). The OpenAPI enum, the code
+   catalogue and the dispute-reason tables are pinned equal by DB-free tests.
+2. **Tenant rule.** A tenant caller naming another tenant gets **404** (the existing K3 routes answer 403; the ADR allows either). The
+   handler check is not the only barrier: a test issues the handler statements in tenant B's scope without any tenant predicate and gets zero
+   of tenant A's rows (`TestStaffReadRoutes_RLSBackstopWithoutHandlerChecks`).
+3. **Platform reads.** A platform caller may name any existing tenant (unknown tenant: 404, no audit row). The read is first committed as a
+   platform-scope audit row (`payment_attempts.platform_read`, `reconciliation.platform_read`; `subject_tenant_id` = the path tenant, ADR 0104,
+   no actor identity shown to the tenant) and the tenant data is read only if that write succeeded: an injected audit failure yields 500 and no data.
+   The platform read runs in the tenant's RLS scope; it opens **no acting session** (that needs a K1 grant and is for writes).
+4. **`open_resolution_id` (security C1, review fix).** K3 resolutions are visible only to a principal-scoped session (migration 0115). A
+   TENANT caller's read sets its own subject as `app.principal_id` (inside a READ ONLY transaction, `SetPrincipalIDForCurrentTx`) and sees the
+   open resolution id. A PLATFORM caller's read never sets `app.principal_id` under a tenant `app.tenant_id` (an earlier draft did; REJECTED by
+   security): its `open_resolution_id` is always `null`, and the select is built with `NULL::uuid` rather than relying on RLS. Consequence: a
+   platform caller's `admissible_kinds` cannot account for an open resolution. Test:
+   `TestStaffReadR1_PlatformCallerNeverSeesOpenResolution` (platform_admin without a K1 grant, with a grant, and a tenant control).
+5. **`admissible_kinds` is a hint (ledger-finance F4, review fix).** `payment_m4_in_scope` is the database predicate, evaluated in the
+   read query, but it is **one of several preconditions**: the hint also requires a provider, a `submitted` withdrawal and the withdrawal's
+   amount and asset equal to the attempt's. The statement-evidence verdict is NOT evaluated: an M4 kind means "in scope; the evidence verdict
+   decides" (stated in the OpenAPI). M1 and M2 cannot be taken from the database (`payment_m2_admits` answers only inside an executing
+   resolution; the M1/M2 preconditions live in the request trigger body): they are restated through `payments.M2ResolvableDispute`
+   (parity-pinned to the database by C-47) plus the trigger's other preconditions (provider present, withdrawal `submitted`, "paid" needs a
+   held reference). A table test covers every terminal reason and a second test the M4 preconditions. An attempt with an open resolution
+   admits nothing (tenant callers). **Deviation from section 4 text** ("not a Go re-implementation"): M1/M2 are a Go restatement.
+6. **R2 free text is never returned, and only platform-written text is parsed (security C2, ledger-finance F1-F3, review fix).**
+   `reconciliation_key`, `expected_value` and `actual_value` embed provider, merchant and statement values that may contain spaces and injected
+   `name=value` tokens. The parsers (`internal/reconciliation/read_parse.go`) trust only the text BEFORE the first free-text token
+   (`provider_reference=`, `provider_tx_id=`, `merchant_reference=`, `settlement_reference=`, `original=`, `reference=`) and accept a token only
+   if it appears exactly once there. `subject_ref` comes from the key's trusted prefix and, for payment_statement, the expected segment's trusted
+   prefix (rendered `platform: attempt=<id> ...`), never the actual segment; a `statement:`/`ledger:` key yields none. A payment key whose
+   `attempt=` follows the provider reference therefore yields no subject from the key (the expected segment usually supplies it). The asset comes
+   only from the rendered expected/actual segments (never the key), must agree across them and must exist in the asset registry (canonical
+   registry code and `exponent` returned); otherwise `asset_code`, `exponent` and BOTH amounts are null. Amount names are an allow-list
+   (`amount=`, `open_bet_stakes`, `ledger_locked_net`, `sportsbook_locked_bonus_net`). The `subject_id` filter is the same rule in SQL (trusted
+   prefix, exactly once, expected segment for payment_statement) and re-validates the id as a canonical lower-case UUID inside
+   `ListMismatchesForStream`. Sportsbook locked-balance kinds carry the asset only in the key, so their amounts are null.
+   **Amounts are exposed only for `pay_amount_mismatch` and `pay_asset_mismatch`** (security F2, ledger-finance ruling "when in doubt,
+   null"): every other kind's actual segment is a platform, ledger or other-attempt value (verified against the real emitters:
+   merchant-attribution `pay_reference_mismatch` embeds the other attempt's render, `pay_captured_unposted` embeds the parked attempt's
+   amount, the K3/M4 `pay_declared_*` texts are free diagnostics). **Source label (security F1):** `source_label` is stored data rendered as
+   `[label] ` ahead of every statement-line segment. Go `validateSourceIdentity` now restricts it to `[A-Za-z0-9 ._:/(),;'-]{1,256}` (no `=`,
+   brackets or control characters), AND the parser is immune regardless of stored data: a bracketed segment is parsed only after the last
+   `] line=` and is refused (all fields null) when the label part contains `=`. Tests: hostile labels through the real `matchLines`, plus an
+   HTTP test over a stored hostile label. **Deferred follow-up (not done, no migration):** a database CHECK on `source_label` (the same
+   charset) in `payment_statement_imports`; migration numbers 0136+ are reserved, so it is recorded here rather than created. Tests: parser
+   unit tests with spaces and injected `attempt=`/`bet=`/`asset=`/`amount=` tokens; the REAL `payMatcher.matchLines` emitter fed hostile
+   references; the REAL sportsbook emitter (`RunSportsbookSettlement` over injected drift) through the parsers; HTTP tests for the filter and an
+   unknown asset. The stream of a mismatch is the stream of its run (join), not inferred from the kind.
+7. **Field names.** `updated_at`/`resolved_at` replace the ADR's `state_changed_at` (no such column exists); `subject_ref` uses
+   `deposit_intent_id` for deposits; R1 and R1b read in READ ONLY transactions and the R1 limit uses `strictPage`; R2 mismatches use `kind`/`status`/`detected_at` as the ADR lists them.
+8. **Pagination of R2** is offset based like the casino route (no cursor was specified), with strict 400s instead of clamping.
+9. **Scale residual.** R1's keyset sorts a tenant's attempts without a `(tenant_id, created_at, id)` index (only `(tenant_id)` exists).
+   Acceptable at current volume; a migration (next free number 0134; 0133 is reserved by the ADR 0113 slice 2 agent) is NOT created.
+10. **R2b, R3-R6, H1/H2 are untouched.** The generated section 3 matrix test (`TestADR0114_RoleMatrix_AgainstRolePermissions`) covers the
+    permissions these routes use; `TestRoleHasPermission_SportsbookReconciliationRead_ExactGrantees` pins invariant 7.7.
