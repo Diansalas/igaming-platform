@@ -2,7 +2,8 @@
 // (/v1/admin/tenants/{tenantID}/payments/kill-switches*, kill-switch-release-requests*); no route or field is
 // invented. API facts the UI relies on: there is NO platform-wide or provider-wide route (everything is under a
 // tenant path), NO list of release requests (a pending request is found through the switch's
-// `release_request_id`), NO per-change history route (the list returns one current row per scope pair, released
+// `open_release_request_id`, ADR 0114 S6b; `release_request_id` is the APPROVED request and is filled only when
+// the switch is released, so it is never how a pending request is found), NO per-change history route (the list returns one current row per scope pair, released
 // rows included) and NO provider registry route.
 import { apiFetch } from './client'
 
@@ -18,7 +19,10 @@ export interface KillSwitch {
   operation_scope: string
   engaged: boolean
   engaged_by_scope?: string | null
+  /** The approved request that released the switch. Database-filled at release time only; null while engaged. */
   release_request_id?: string | null
+  /** Id of the switch's OPEN release request (status open, which may be expired or stale), or null. Always present. */
+  open_release_request_id: string | null
   reason_code: string
   changed_by: string | null
   changed_by_scope: string
@@ -43,7 +47,18 @@ export interface KillSwitchReleaseRequest {
   decided_at?: string | null
 }
 
+/** The server (and the database CHECK) bound reason_code at 64 BYTES, not characters. */
 export const KILL_SWITCH_REASON_MAX = 64
+
+/** UTF-8 byte length, the unit the server counts. */
+export function reasonByteLength(s: string): number {
+  return new TextEncoder().encode(s).length
+}
+
+export function reasonCodeValid(s: string): boolean {
+  const n = reasonByteLength(s)
+  return s.trim() !== '' && n >= 1 && n <= KILL_SWITCH_REASON_MAX
+}
 
 export interface EngageRequest {
   provider_scope: string

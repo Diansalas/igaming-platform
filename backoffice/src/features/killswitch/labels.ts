@@ -1,5 +1,9 @@
-// Fixed UI-owned vocabulary for the payment kill switch console (ADR 0114 S6). No server text is rendered:
-// every enum falls back to 'Unrecognised' plus a safe code. No legal or regulatory claim is made anywhere.
+// Fixed UI-owned vocabulary for the payment kill switch console (ADR 0114 S6). No server MESSAGE is rendered and
+// every enum falls back to 'Unrecognised' plus a safe code. The one deliberate exception is `reason_code`: it is a
+// staff-entered string (up to 64 bytes) that the console shows verbatim, as escaped React text in a monospace
+// element (never as HTML, never interpreted). It is not passed through safeCode(), because a legitimate reason
+// may contain characters outside the token set; the audit log holds the same value. No legal or regulatory claim
+// is made anywhere.
 import type { BadgeTone } from '../../components/Badge'
 
 /**
@@ -23,7 +27,23 @@ export const CONSEQUENCE_RELEASE_REQUEST =
   'Filing a release request does not release the switch. It stays engaged until a different person approves the request. Approving also does not move funds or restart anything by itself.'
 
 export const REASON_HELP =
-  'Up to 64 characters, for example "provider_incident". It is recorded in the audit log. Do not enter names or personal data.'
+  'Up to 64 bytes (a plain ASCII letter, digit or underscore is one byte; accented and other non-ASCII characters take two or more), for example "provider_incident". It is recorded in the audit log. Do not enter names or personal data.'
+
+/**
+ * What engaging an ALREADY ENGAGED provider/operation pair really does (migrations 0105/0106, EngageKillSwitch): it
+ * is not an error and not a no-op. The reason is overwritten and the version is bumped. An open release request is
+ * NOT cancelled by a same-scope re-engage: it stays open but frozen at the old version, so the server refuses to
+ * approve it; cancel it and file a new one.
+ */
+export const NOTICE_REENGAGE =
+  'If this provider and operation are already engaged, engaging again does not fail: it overwrites the stored reason code and raises the switch version. ' +
+  'An open release request is not cancelled by that, but it stays tied to the old version, so the server will refuse to approve it. Cancel it and file a new one.'
+
+export const NOTICE_TAKEOVER_PLATFORM =
+  'As platform staff, engaging a switch that tenant staff engaged takes it over: it becomes platform-engaged, any open tenant release request is cancelled, and tenant staff can no longer change or release it.'
+
+export const NOTICE_TAKEOVER_TENANT =
+  'If platform staff engage a switch that you engaged, it becomes platform-engaged and any open release request is cancelled. After that only platform staff can change or release it, and the server refuses a tenant engage or release request for it.'
 
 export const PLATFORM_STAFF = 'Platform staff'
 

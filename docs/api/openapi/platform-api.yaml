@@ -7294,9 +7294,16 @@ paths:
       description: >
         Requires payments_kill_switch:engage (platform_admin, tenant_admin).
         Idempotent on (tenant, provider_scope, operation_scope): engaging an
-        already-engaged switch re-engages it with the new reason_code. A
-        platform-scoped caller's engage is forced to engaged_by_scope=platform
-        by the database, never asserted by this request.
+        already-engaged switch re-engages it: the reason_code is overwritten,
+        version is bumped, engaged_by_scope becomes the caller's scope, and
+        an open release request is NOT cancelled by a same-scope re-engage (it
+        stays open but its expected_version is now stale, so approval is
+        refused). Only a PLATFORM engage of a switch that is not already
+        platform-engaged cancels the open request (KS-L6, migration 0106). A
+        tenant caller re-engaging a platform-engaged switch is refused 409.
+        A platform-scoped caller's engage is forced to engaged_by_scope=platform
+        by the database, never asserted by this request. reason_code is 1 to
+        64 BYTES (not characters); a longer or empty value is 400.
       security:
         - bearerAuth: []
       parameters:
@@ -7357,7 +7364,10 @@ paths:
         server-side, never accepted from the client. Refused (409) when the
         switch is not currently engaged, and when a tenant-scoped caller
         targets a platform-engaged switch (L5(a) - the database refuses the
-        insert).
+        insert). Also 409 with code KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN
+        when the switch already has an open request (one-open unique index;
+        a denied audit row is written; read open_release_request_id on the
+        switch to find it). reason_code is 1 to 64 BYTES; otherwise 400.
       security:
         - bearerAuth: []
       parameters:
@@ -8038,14 +8048,15 @@ components:
         operation_scope: { type: string, enum: [deposit, payout, "*"] }
         engaged: { type: boolean }
         engaged_by_scope: { type: string, enum: [tenant, platform], nullable: true }
-        release_request_id: { type: string, format: uuid, nullable: true }
+        release_request_id: { type: string, format: uuid, nullable: true, description: "The APPROVED request that released this switch. The database fills it only at release time (migration 0106 forces it NULL on insert and engage), so it is never the way to find a pending request; use open_release_request_id." }
+        open_release_request_id: { type: string, format: uuid, nullable: true, description: "ADR 0114 S6b. Id of this switch's OPEN release request, or null. Computed from the release-request table (status open, same tenant, same RLS) in the read transaction; no staff identity is carried here - read the request resource for that (redacted per ADR 0114 S0). Open means status open, not live: an open request past expires_at, or made stale by a later version of the switch, is still reported because it still holds the one-open slot and can still be cancelled. Approval refuses it." }
         reason_code: { type: string }
         changed_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant-scoped caller when the actor is platform staff (ADR 0114 S0 H1); see changed_by_scope." }
         changed_by_scope: { type: string, enum: [tenant, platform] }
         changed_at: { type: string, format: date-time }
         version: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
-      required: [id, tenant_id, provider_scope, operation_scope, engaged, reason_code, changed_by, changed_by_scope, changed_at, version, created_at]
+      required: [id, tenant_id, provider_scope, operation_scope, engaged, open_release_request_id, reason_code, changed_by, changed_by_scope, changed_at, version, created_at]
     PaymentsKillSwitchEngageRequest:
       type: object
       additionalProperties: false
@@ -9758,6 +9769,7 @@ components:
             - LAUNCH_PRIOR_REJECT
             - LAUNCH_PRIOR_REJECTER
             - LAUNCH_NOT_LEGACY_BASELINE
+            - KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN
             - LAUNCH_REFUSED_AT_EXECUTION
             - LAUNCH_GUARD_REFUSED
             - LAUNCH_PROOF_REFUSED

@@ -66,7 +66,7 @@ OAS = documented in `docs/api/openapi/platform-api.yaml`. BO = Back Office scree
 | Payout instruments view (state, verification source/expiry, mask) | `GET /v1/admin/players/{playerID}/payout-instruments` (`payout_instrument_routes.go:74`; `payoutinstrument.View`, `ops.go:252-264`) | yes | no | FI (masks), CO, PA read | n/a | UI-ready |
 | Payout instrument suspend | `POST /v1/admin/payout-instruments/{id}/suspend` (`payout_instrument_routes.go:76`) | yes | no | CO act | single actor + reason | UI-ready |
 | Payout instrument verify / reinstate | none | n/a | no | - | - | needs-design (not approved; do not build) |
-| Payment kill switch engage, list, detail, release request/approve/cancel | `/v1/admin/tenants/{tenantID}/payments/kill-switch*` (`payments_kill_switch_handlers.go:65-78`) | yes | no | TA, PA act | release four-eyes + platform lock (migration 0105) | UI-ready (pending release found via `release_request_id` on the switch) |
+| Payment kill switch engage, list, detail, release request/approve/cancel | `/v1/admin/tenants/{tenantID}/payments/kill-switch*` (`payments_kill_switch_handlers.go:65-78`) | yes | no | TA, PA act | release four-eyes + platform lock (migration 0105) | UI-ready after S6b (pending release found via `open_release_request_id` on the switch; `release_request_id` is the approved request, filled only at release time) |
 
 ### 2.2 Ledger governance
 

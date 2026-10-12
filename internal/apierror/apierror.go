@@ -106,11 +106,13 @@ const (
 	CodeLaunchPriorReject          Code = "LAUNCH_PRIOR_REJECT"              // identical request rejected within the TTL (LA014)
 	CodeLaunchPriorRejecter        Code = "LAUNCH_PRIOR_REJECTER"            // approver's Person rejected a variant
 	CodeLaunchNotLegacyBaseline    Code = "LAUNCH_NOT_LEGACY_BASELINE"       // ratify only a legacy baseline subject
-	CodeLaunchRefusedAtExecution   Code = "LAUNCH_REFUSED_AT_EXECUTION"      // the final approval was recorded; execution refused
-	CodeLaunchGuardRefused         Code = "LAUNCH_GUARD_REFUSED"             // another database guard (LA0xx)
-	CodeLaunchProofRefused         Code = "LAUNCH_PROOF_REFUSED"             // 403: the ADR 0110 actor proof guard (AP0xx)
-	CodeLaunchNoPerson             Code = "LAUNCH_NO_PERSON"                 // 403: the staff account has no readable Person (four-eyes cannot be evaluated)
-	CodeLaunchUnavailable          Code = "LAUNCH_AUTHORISATION_UNAVAILABLE" // 503: the service is not wired in this process
+	// ADR 0114 S6b: a release request is already open for this kill switch (the one-open unique index). 409.
+	CodeKillSwitchReleaseRequestAlreadyOpen Code = "KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN"
+	CodeLaunchRefusedAtExecution            Code = "LAUNCH_REFUSED_AT_EXECUTION"      // the final approval was recorded; execution refused
+	CodeLaunchGuardRefused                  Code = "LAUNCH_GUARD_REFUSED"             // another database guard (LA0xx)
+	CodeLaunchProofRefused                  Code = "LAUNCH_PROOF_REFUSED"             // 403: the ADR 0110 actor proof guard (AP0xx)
+	CodeLaunchNoPerson                      Code = "LAUNCH_NO_PERSON"                 // 403: the staff account has no readable Person (four-eyes cannot be evaluated)
+	CodeLaunchUnavailable                   Code = "LAUNCH_AUTHORISATION_UNAVAILABLE" // 503: the service is not wired in this process
 )
 
 // Error is the wire format for an API error response.
@@ -147,7 +149,8 @@ func httpStatus(c Code) int {
 		CodeLaunchPreconditionFailed, CodeLaunchUnacknowledgedChecks, CodeLaunchRequestPending, CodeLaunchSelfApproval,
 		CodeLaunchIllegalTransition, CodeLaunchSubjectClosed, CodeLaunchWithdrawalsHolding, CodeLaunchOpenBetsBlockClosure,
 		CodeLaunchRetryableLockTimeout, CodeLaunchRequestNotPending, CodeLaunchAlreadyDecided, CodeLaunchStaleReadiness, CodeLaunchPriorReject,
-		CodeLaunchPriorRejecter, CodeLaunchNotLegacyBaseline, CodeLaunchRefusedAtExecution, CodeLaunchGuardRefused:
+		CodeLaunchPriorRejecter, CodeLaunchNotLegacyBaseline, CodeLaunchRefusedAtExecution, CodeLaunchGuardRefused,
+		CodeKillSwitchReleaseRequestAlreadyOpen:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
 		return http.StatusUnprocessableEntity

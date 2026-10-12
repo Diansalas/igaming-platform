@@ -1,12 +1,13 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
-import { KILL_SWITCH_REASON_MAX, approveRelease, cancelRelease, getReleaseRequest, requestRelease, type KillSwitch } from '../../api/killSwitch'
+import { KILL_SWITCH_REASON_MAX, approveRelease, cancelRelease, getReleaseRequest, reasonByteLength, reasonCodeValid, requestRelease, type KillSwitch, type KillSwitchReleaseRequest } from '../../api/killSwitch'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Modal } from '../../components/Modal'
 import { ActorText, EnumText, KillSwitchErrorAlert } from './KillSwitchBits'
+import { refusalIsStale } from './errors'
 import { CONSEQUENCE_RELEASE_REQUEST, REASON_HELP, describeRequestStatus, requestStatusTone } from './labels'
 
 /**
@@ -32,7 +33,12 @@ export function ReleasePanel({
   onNotice: (msg: string) => void
 }) {
   const [dialog, setDialog] = useState<'request' | 'approve' | 'cancel' | null>(null)
-  const reqId = ks.release_request_id ?? null
+  // The id the 201 returned for a request filed in this panel, kept so the panel shows it at once instead of
+  // waiting for the next list read. The server's open_release_request_id wins whenever it is set.
+  const [filed, setFiled] = useState<{ ksId: string; requestId: string } | null>(null)
+  // The pending request is the switch's OPEN request. `release_request_id` is the approved request that released
+  // the switch and is filled only at release time, so it is never used to find a pending one.
+  const reqId = ks.open_release_request_id ?? (filed && filed.ksId === ks.id ? filed.requestId : null)
   const rq = useQuery({
     queryKey: ['killswitch', 'release-request', tenantId, reqId],
     queryFn: () => getReleaseRequest(tenantId, reqId as string),
@@ -101,6 +107,9 @@ export function ReleasePanel({
           {req.status === 'open' && req.expected_version !== ks.version && (
             <p className="mt-2 text-sm text-amber-900">The switch is now at version {ks.version}, not {req.expected_version}. The server is expected to refuse approval; cancel this request and file a new one.</p>
           )}
+          {req.status === 'open' && Date.parse(req.expires_at) <= Date.now() && (
+            <p className="mt-2 text-sm text-amber-900">This request has expired but is still open, which blocks filing a new one. The server refuses to approve it; cancel it, then file a new request.</p>
+          )}
           {req.status === 'open' && viewerId && req.requested_by === viewerId && (
             <p className="mt-2 text-sm text-amber-900">You filed this request. A different person must approve it; the server refuses self-approval.</p>
           )}
@@ -119,7 +128,12 @@ export function ReleasePanel({
           ks={ks}
           onClose={() => setDialog(null)}
           onRefused={onRefused}
-          onDone={() => { setDialog(null); onNotice('Release requested. The switch is still engaged until a different person approves.'); onChanged() }}
+          onDone={(created) => {
+            setFiled({ ksId: ks.id, requestId: created.id })
+            setDialog(null)
+            onNotice('Release requested. The switch is still engaged until a different person approves.')
+            onChanged()
+          }}
         />
       )}
       {(dialog === 'approve' || dialog === 'cancel') && req && (
@@ -132,6 +146,7 @@ export function ReleasePanel({
           onRefused={onRefused}
           onDone={() => {
             const was = dialog
+            setFiled(null)
             setDialog(null)
             onNotice(was === 'approve' ? 'Approved. The server released the switch. No funds were moved and no withdrawal was changed.' : 'Release request cancelled. The switch stays engaged.')
             onChanged()
@@ -142,24 +157,54 @@ export function ReleasePanel({
   )
 }
 
-function RequestDialog({ tenantId, ks, onClose, onDone, onRefused }: { tenantId: string; ks: KillSwitch; onClose: () => void; onDone: () => void; onRefused: () => void }) {
+function RequestDialog({
+  tenantId,
+  ks,
+  onClose,
+  onDone,
+  onRefused,
+}: {
+  tenantId: string
+  ks: KillSwitch
+  onClose: () => void
+  onDone: (created: KillSwitchReleaseRequest) => void
+  onRefused: () => void
+}) {
+  const qc = useQueryClient()
   const [reason, setReason] = useState('')
   const busy = useRef(false)
   const m = useMutation({
     mutationFn: () => requestRelease(tenantId, ks.id, reason),
-    onSuccess: onDone,
-    onError: () => onRefused(),
+    onSuccess: (created) => {
+      qc.setQueryData(['killswitch', 'release-request', tenantId, created.id], created)
+      onDone(created)
+    },
+    onError: (e) => {
+      if (refusalIsStale(e, 'request')) onRefused()
+    },
     onSettled: () => {
       busy.current = false
     },
   })
-  const valid = reason.trim() !== '' && reason.length <= KILL_SWITCH_REASON_MAX
+  const bytes = reasonByteLength(reason)
+  const valid = reasonCodeValid(reason)
   return (
     <Modal title="Request kill switch release" onClose={onClose}>
       <div className="flex flex-col gap-4">
         <p className="text-sm text-slate-600">{CONSEQUENCE_RELEASE_REQUEST}</p>
         <p className="text-sm text-slate-600">It will apply to switch version {ks.version}. If the switch changes before approval, the server refuses the approval.</p>
-        <TextInput label="Reason code (required)" value={reason} onChange={(e) => setReason(e.target.value)} help={REASON_HELP} maxLength={KILL_SWITCH_REASON_MAX} autoComplete="off" />
+        <TextInput label="Reason code (required)" value={reason} onChange={(e) => setReason(e.target.value)} help={
+            <>
+              {REASON_HELP}
+              {bytes > KILL_SWITCH_REASON_MAX && (
+                <span role="alert" className="mt-1 block text-red-700">
+                  This reason code is {bytes} bytes; the limit is {KILL_SWITCH_REASON_MAX} bytes. Shorten it.
+                </span>
+              )}
+            </>
+          }
+          autoComplete="off"
+        />
         <KillSwitchErrorAlert error={m.error} op="request" />
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={m.isPending}>Cancel</Button>
@@ -196,7 +241,9 @@ function DecideDialog({
       else await cancelRelease(tenantId, requestId)
     },
     onSuccess: onDone,
-    onError: () => onRefused(),
+    onError: (e) => {
+      if (refusalIsStale(e, op)) onRefused()
+    },
     onSettled: () => {
       busy.current = false
     },

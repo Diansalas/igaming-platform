@@ -5,6 +5,7 @@ import { Route, Routes } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import type { KillSwitch, KillSwitchReleaseRequest } from '../../api/killSwitch'
 import { ApiError } from '../../api/types'
+import { AppRoutes } from '../../app/AppRoutes'
 import { RequireNavPermission } from '../../auth/RequireNavPermission'
 import { getNavPermissions } from '../../auth/permissions'
 import { buildNavItems } from '../../layout/nav'
@@ -22,8 +23,13 @@ const R1 = '30000000-0000-4000-8000-000000000001'
 const TA = { role: 'tenant_admin', tenant_id: TENANT, sub: 'ta-1' }
 const BASE = `/v1/admin/tenants/${TENANT}/payments`
 
+/**
+ * Server-reachable switch rows ONLY (ADR 0114 S6b). The database fills `release_request_id` at RELEASE time only
+ * (migration 0106 forces NULL on insert and engage), so an ENGAGED switch always has release_request_id null; a
+ * pending request is `open_release_request_id`. The fixture refuses to build the shape the server can never produce.
+ */
 function ks(over: Partial<KillSwitch> = {}): KillSwitch {
-  return {
+  const row: KillSwitch = {
     id: S1,
     tenant_id: TENANT,
     provider_scope: '*',
@@ -31,6 +37,7 @@ function ks(over: Partial<KillSwitch> = {}): KillSwitch {
     engaged: true,
     engaged_by_scope: 'tenant',
     release_request_id: null,
+    open_release_request_id: null,
     reason_code: 'provider_incident',
     changed_by: 'staff-aaaa',
     changed_by_scope: 'tenant',
@@ -39,6 +46,9 @@ function ks(over: Partial<KillSwitch> = {}): KillSwitch {
     created_at: '2026-10-01T10:00:00Z',
     ...over,
   }
+  if (row.engaged && row.release_request_id) throw new Error('fixture: an engaged switch never has release_request_id set')
+  if (!row.engaged && row.open_release_request_id) throw new Error('fixture: a released switch has no open request')
+  return row
 }
 
 function rq(over: Partial<KillSwitchReleaseRequest> = {}): KillSwitchReleaseRequest {
@@ -96,10 +106,24 @@ describe('role gating (UI hint only; the server decides)', () => {
     expect(buildNavItems({ ...base, role: 'finance' }).map((i) => i.label)).not.toContain('Payment Kill Switch')
   })
 
-  it('does not render the page for a compliance user who typed the URL', async () => {
+  // Rendered through the real AppRoutes, so removing the RequireNavPermission gate from AppRoutes.tsx fails these.
+  it('shows NotAuthorized, and makes no kill-switch request, to a compliance user who typed the URL', async () => {
     signInAs({ ...TA, role: 'compliance' })
-    renderPage()
-    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Payment kill switch' })).toBeNull())
+    let calls = 0
+    server.use(http.get(`${BASE}/kill-switches`, () => { calls++; return HttpResponse.json({ kill_switches: [] }) }))
+    renderWithProviders(<AppRoutes />, { route: '/payment-kill-switch' })
+    expect(await screen.findByText('Your role does not have access to this section.')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Payment kill switch' })).toBeNull()
+    expect(screen.queryByRole('note', { name: 'Stack status' })).toBeNull()
+    expect(calls).toBe(0)
+  })
+
+  it('renders the page through AppRoutes for a tenant_admin', async () => {
+    signInAs(TA)
+    useList([])
+    renderWithProviders(<AppRoutes />, { route: '/payment-kill-switch' })
+    expect(await screen.findByRole('heading', { name: 'Payment kill switch' })).toBeInTheDocument()
+    expect(screen.queryByText('Your role does not have access to this section.')).toBeNull()
   })
 
   it('degrades correctly when the server refuses a permitted-looking list (403 shown, not hidden)', async () => {
@@ -225,7 +249,10 @@ describe('release (four-eyes)', () => {
     signInAs(TA)
     useList([ks()])
     let body: unknown
-    server.use(http.post(`${BASE}/kill-switches/${S1}/release-requests`, async ({ request }) => { body = await request.json(); return HttpResponse.json(rq(), { status: 201 }) }))
+    server.use(
+      http.post(`${BASE}/kill-switches/${S1}/release-requests`, async ({ request }) => { body = await request.json(); return HttpResponse.json(rq(), { status: 201 }) }),
+      http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq())),
+    )
     renderPage()
     const { user, detail } = await selectFirst()
     await user.click(within(detail).getByRole('button', { name: 'Request release' }))
@@ -239,7 +266,7 @@ describe('release (four-eyes)', () => {
 
   it('shows the frozen request payload, with Platform staff for a redacted requester', async () => {
     signInAs(TA)
-    useList([ks({ release_request_id: R1 })])
+    useList([ks({ open_release_request_id: R1 })])
     server.use(http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq({ requested_by: null, requested_by_scope: 'platform' }))))
     renderPage()
     const { detail } = await selectFirst()
@@ -253,7 +280,7 @@ describe('release (four-eyes)', () => {
 
   it('approves and releases, then reports that no funds moved', async () => {
     signInAs(TA)
-    useList([ks({ release_request_id: R1 })])
+    useList([ks({ open_release_request_id: R1 })])
     let approved = 0
     server.use(
       http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq())),
@@ -271,7 +298,7 @@ describe('release (four-eyes)', () => {
 
   it('still lets the server decide on self-approval: hint only, and the 409 is shown with a closed message', async () => {
     signInAs({ ...TA, sub: 'staff-bbbb' })
-    useList([ks({ release_request_id: R1 })])
+    useList([ks({ open_release_request_id: R1 })])
     server.use(
       http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq())),
       http.post(`${BASE}/kill-switch-release-requests/${R1}/approve`, () => ERR(409, 'conflict')),
@@ -292,7 +319,7 @@ describe('release (four-eyes)', () => {
 
   it('cancels an open request (204)', async () => {
     signInAs(TA)
-    useList([ks({ release_request_id: R1 })])
+    useList([ks({ open_release_request_id: R1 })])
     let cancelled = 0
     server.use(
       http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq())),
@@ -309,7 +336,7 @@ describe('release (four-eyes)', () => {
 
   it('shows a 404 on the request lookup through the closed map', async () => {
     signInAs(TA)
-    useList([ks({ release_request_id: R1 })])
+    useList([ks({ open_release_request_id: R1 })])
     server.use(http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => ERR(404, 'not_found')))
     renderPage()
     const { detail } = await selectFirst()
@@ -328,13 +355,217 @@ describe('release (four-eyes)', () => {
 
   it('shows a finished request as not actionable', async () => {
     signInAs(TA)
-    useList([ks({ release_request_id: R1 })])
+    useList([ks({ open_release_request_id: R1 })])
     server.use(http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq({ status: 'quantum' }))))
     renderPage()
     const { detail } = await selectFirst()
     const panel = await within(detail).findByRole('region', { name: 'Release request' })
     expect(panel).toHaveTextContent('Unrecognised (quantum)')
     expect(within(panel).queryByRole('button', { name: 'Approve and release' })).toBeNull()
+  })
+})
+
+// The REAL server behaviour (ADR 0114 S6b): filing a request does not touch release_request_id; the pending
+// request is reported as open_release_request_id; the DB allows one open request per switch.
+describe('release flow against server-shaped state (S6b)', () => {
+  const ALREADY_OPEN = 'KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN'
+
+  function statefulServer(opts: { reportOpen?: boolean } = {}) {
+    const reportOpen = opts.reportOpen ?? true
+    const st = { sw: ks(), req: null as KillSwitchReleaseRequest | null, lists: 0, approves: 0, cancels: 0 }
+    server.use(
+      http.get(`${BASE}/kill-switches`, () => {
+        st.lists++
+        return HttpResponse.json({ kill_switches: [reportOpen ? st.sw : { ...st.sw, open_release_request_id: null }] })
+      }),
+      http.post(`${BASE}/kill-switches/${S1}/release-requests`, async ({ request }) => {
+        if (st.req?.status === 'open') return ERR(409, ALREADY_OPEN)
+        const body = (await request.json()) as { reason_code: string }
+        st.req = rq({ reason_code: body.reason_code, expected_version: st.sw.version, requested_by: 'someone-else' })
+        st.sw = ks({ ...st.sw, open_release_request_id: st.req.id }) // release_request_id stays null: the DB fills it at release only
+        return HttpResponse.json(st.req, { status: 201 })
+      }),
+      http.get(`${BASE}/kill-switch-release-requests/:rid`, ({ params }) =>
+        st.req && st.req.id === params.rid ? HttpResponse.json(st.req) : ERR(404, 'not_found'),
+      ),
+      http.post(`${BASE}/kill-switch-release-requests/:rid/approve`, () => {
+        st.approves++
+        st.req = { ...(st.req as KillSwitchReleaseRequest), status: 'approved', approved_by: 'ta-1', approved_by_scope: 'tenant' }
+        st.sw = ks({ ...st.sw, engaged: false, engaged_by_scope: null, open_release_request_id: null, release_request_id: st.req.id, version: st.sw.version + 1 })
+        return HttpResponse.json(st.sw)
+      }),
+      http.post(`${BASE}/kill-switch-release-requests/:rid/cancel`, () => {
+        st.cancels++
+        st.req = { ...(st.req as KillSwitchReleaseRequest), status: 'cancelled' }
+        st.sw = ks({ ...st.sw, open_release_request_id: null })
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    return st
+  }
+
+  async function open() {
+    const user = userEvent.setup()
+    const region = await screen.findByRole('region', { name: 'Engaged now' })
+    await user.click(within(region).getAllByRole('button')[0])
+    return { user, detail: await screen.findByRole('region', { name: 'Switch detail' }) }
+  }
+
+  async function file(user: ReturnType<typeof userEvent.setup>, detail: HTMLElement, reason = 'provider_recovered') {
+    await user.click(within(detail).getByRole('button', { name: 'Request release' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Request kill switch release' })
+    await user.type(within(dialog).getByLabelText('Reason code (required)'), reason)
+    await user.click(within(dialog).getByRole('button', { name: 'File release request' }))
+  }
+
+  it('engaged switch with no request offers Request release; after filing, the open request, Approve and Cancel appear', async () => {
+    signInAs(TA)
+    const st = statefulServer()
+    renderPage()
+    const { user, detail } = await open()
+    expect(detail).toHaveTextContent('No release request is open')
+    await file(user, detail)
+    const panel = await within(detail).findByRole('region', { name: 'Release request' })
+    expect(panel).toHaveTextContent('provider_recovered')
+    expect(within(panel).getByRole('button', { name: 'Approve and release' })).toBeEnabled()
+    expect(within(panel).getByRole('button', { name: 'Cancel request' })).toBeEnabled()
+    expect(detail).not.toHaveTextContent('No release request is open')
+    expect(st.sw.release_request_id).toBeNull() // the premise: the server never fills it while engaged
+    // the table marks the switch as release-requested from open_release_request_id
+    expect(within(screen.getByRole('region', { name: 'Engaged now' })).getByText('release requested')).toBeInTheDocument()
+  })
+
+  it('keeps the id from the 201: the panel shows the request even if the next list read does not report it yet', async () => {
+    signInAs(TA)
+    statefulServer({ reportOpen: false })
+    renderPage()
+    const { user, detail } = await open()
+    await file(user, detail)
+    const panel = await within(detail).findByRole('region', { name: 'Release request' })
+    expect(within(panel).getByRole('button', { name: 'Approve and release' })).toBeEnabled()
+    expect(detail).not.toHaveTextContent('No release request is open')
+  })
+
+  it('approve releases the switch and the panel reports it; cancel closes the request and offers a new one', async () => {
+    signInAs(TA)
+    const st = statefulServer()
+    renderPage()
+    const { user, detail } = await open()
+    await file(user, detail)
+    await user.click(await within(detail).findByRole('button', { name: 'Cancel request' }))
+    let dialog = await screen.findByRole('dialog', { name: 'Cancel release request' })
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel request' }))
+    await waitFor(() => expect(st.cancels).toBe(1))
+    await waitFor(() => expect(detail).toHaveTextContent('No release request is open'))
+    await file(user, detail, 'second_try')
+    await user.click(await within(detail).findByRole('button', { name: 'Approve and release' }))
+    dialog = await screen.findByRole('dialog', { name: 'Approve and release' })
+    await user.click(within(dialog).getByRole('button', { name: 'Approve and release' }))
+    await waitFor(() => expect(st.approves).toBe(1))
+    expect(await within(detail).findByText(/This switch is released/)).toBeInTheDocument()
+  })
+
+  it('a duplicate filing is the stable 409: closed message, the list is refreshed, the open request becomes visible', async () => {
+    signInAs(TA)
+    const st = statefulServer()
+    renderPage()
+    const { user, detail } = await open()
+    // someone else filed meanwhile: the server has an open request this tab has not read yet
+    st.req = rq({ requested_by: 'someone-else' })
+    await file(user, detail, 'mine')
+    const dialog = await screen.findByRole('dialog', { name: 'Request kill switch release' })
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('A release request is already open for this switch')
+    expect(alert).toHaveTextContent('HTTP 409')
+    expect(alert).toHaveTextContent(ALREADY_OPEN)
+    expect(document.body).not.toHaveTextContent('RAW SERVER MESSAGE')
+    await waitFor(() => expect(st.lists).toBeGreaterThan(1)) // stale refusal refreshes
+  })
+
+  it('shows an expired-but-open request as blocking, with cancel as the way out', async () => {
+    signInAs(TA)
+    useList([ks({ open_release_request_id: R1 })])
+    server.use(http.get(`${BASE}/kill-switch-release-requests/${R1}`, () => HttpResponse.json(rq({ expires_at: '2020-01-01T00:00:00Z' }))))
+    renderPage()
+    const { detail } = await open()
+    expect(await within(detail).findByText(/has expired but is still open/)).toBeInTheDocument()
+    expect(within(detail).getByRole('button', { name: 'Cancel request' })).toBeEnabled()
+  })
+
+  describe('engage dialog notices and the byte limit', () => {
+    async function openEngage() {
+      const user = userEvent.setup()
+      await screen.findByRole('region', { name: 'Engaged now' })
+      await user.click(screen.getByRole('button', { name: 'Engage kill switch' }))
+      return { user, dialog: await screen.findByRole('dialog', { name: 'Engage payment kill switch' }) }
+    }
+
+    it('tells a tenant viewer that re-engaging overwrites the reason, bumps the version and leaves an open request stale, and about a platform takeover', async () => {
+      signInAs(TA)
+      useList([])
+      renderPage()
+      const { dialog } = await openEngage()
+      const note = within(dialog).getByRole('note', { name: 'Re-engage and takeover' })
+      expect(note).toHaveTextContent('overwrites the stored reason code and raises the switch version')
+      expect(note).toHaveTextContent('open release request is not cancelled')
+      expect(note).toHaveTextContent('refuse to approve it')
+      expect(note).toHaveTextContent('If platform staff engage a switch that you engaged')
+      expect(note).toHaveTextContent('any open release request is cancelled')
+    })
+
+    it('tells platform staff that engaging a tenant-engaged switch takes it over and cancels the open tenant request', async () => {
+      signInAs(PLATFORM_ADMIN_CLAIMS)
+      server.use(
+        http.get('/v1/admin/tenants', () => HttpResponse.json({ items: [{ id: TENANT, name: 'Acme', slug: 'acme', licensing_model: 'own_licence', status: 'active' }], limit: 50, offset: 0, total: 1 })),
+      )
+      useList([])
+      renderPage()
+      const user = userEvent.setup()
+      await waitFor(() => expect(screen.getByRole('option', { name: 'Acme' })).toBeInTheDocument())
+      await user.selectOptions(screen.getByLabelText('Tenant'), TENANT)
+      await screen.findByRole('region', { name: 'Engaged now' })
+      await user.click(screen.getByRole('button', { name: 'Engage kill switch' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Engage payment kill switch' })
+      const note = within(dialog).getByRole('note', { name: 'Re-engage and takeover' })
+      expect(note).toHaveTextContent('takes it over')
+      expect(note).toHaveTextContent('any open tenant release request is cancelled')
+      expect(note).not.toHaveTextContent('If platform staff engage a switch that you engaged')
+    })
+
+    it('measures the reason code in BYTES (TextEncoder), not characters', async () => {
+      signInAs(TA)
+      useList([])
+      renderPage()
+      const { user, dialog } = await openEngage()
+      const reason = within(dialog).getByLabelText('Reason code (required)')
+      const submit = within(dialog).getByRole('button', { name: 'Engage kill switch' })
+      await user.click(within(dialog).getByRole('checkbox'))
+      await user.type(reason, 'é'.repeat(33)) // 33 characters, 66 bytes
+      expect(submit).toBeDisabled()
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('66 bytes')
+      await user.clear(reason)
+      await user.type(reason, 'é'.repeat(32)) // 32 characters, 64 bytes
+      expect(within(dialog).queryByRole('alert')).toBeNull()
+      expect(submit).toBeEnabled()
+      await user.clear(reason)
+      await user.type(reason, 'a'.repeat(65))
+      expect(submit).toBeDisabled()
+    })
+
+    it('the release-request dialog applies the same byte limit', async () => {
+      signInAs(TA)
+      statefulServer()
+      renderPage()
+      const { user, detail } = await open()
+      await user.click(within(detail).getByRole('button', { name: 'Request release' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Request kill switch release' })
+      const reason = within(dialog).getByLabelText('Reason code (required)')
+      await user.type(reason, 'é'.repeat(33))
+      expect(within(dialog).getByRole('button', { name: 'File release request' })).toBeDisabled()
+      await user.clear(reason)
+      await user.type(reason, 'é'.repeat(32))
+      expect(within(dialog).getByRole('button', { name: 'File release request' })).toBeEnabled()
+    })
   })
 })
 

@@ -278,6 +278,8 @@ func killSwitchErrorClass(err error) string {
 		return "cas_conflict"
 	case isKillSwitchTriggerRefusal(err):
 		return "trigger_refusal"
+	case isKillSwitchOpenRequestDuplicate(err):
+		return "duplicate_open_request"
 	default:
 		return "internal_error"
 	}
@@ -318,6 +320,11 @@ func writeKillSwitchError(ctx context.Context, deps Deps, w http.ResponseWriter,
 		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", class)
 		recordKillSwitchRefusalAudit(ctx, deps, c, op, class, targetType, targetID)
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
+	case "duplicate_open_request":
+		// ADR 0114 S6b: a second filing while one is open is a refusal, not an infrastructure failure.
+		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", class)
+		recordKillSwitchRefusalAudit(ctx, deps, c, op, class, targetType, targetID)
+		apierror.Write(w, c.requestID, apierror.CodeKillSwitchReleaseRequestAlreadyOpen, "a release request is already open for this switch")
 	case "trigger_refusal":
 		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", class, "err", err.Error())
 		recordKillSwitchRefusalAudit(ctx, deps, c, op, class, targetType, targetID)
@@ -366,6 +373,19 @@ func isKillSwitchTriggerRefusal(err error) bool {
 	}
 	return pgErr.Code == "P0001"
 }
+
+// killSwitchOneOpenIndex is migration 0105's partial unique index: at most one OPEN release request per switch.
+const killSwitchOneOpenIndex = "payment_kill_switch_release_requests_one_open"
+
+// isKillSwitchOpenRequestDuplicate reports a unique violation (23505) on exactly that index.
+func isKillSwitchOpenRequestDuplicate(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == killSwitchOneOpenIndex
+}
+
+// killSwitchReasonCodeValid mirrors the database CHECK octet_length(reason_code) BETWEEN 1 AND 64. Go's len
+// on a string is its BYTE length, which is what the CHECK counts (a multi-byte character costs more than 1).
+func killSwitchReasonCodeValid(reason string) bool { return len(reason) >= 1 && len(reason) <= 64 }
 
 // logKillSwitchEngagedAlert is S95-C7's "alert on every engage": a
 // structured, allow-listed Error-level log line (this codebase has no
@@ -462,22 +482,27 @@ func engageAuditBeforeState(before payments.KillSwitch, found bool) map[string]a
 // --- DTOs -------------------------------------------------------------
 
 type killSwitchDTO struct {
-	ID               string   `json:"id"`
-	TenantID         string   `json:"tenant_id"`
-	ProviderScope    string   `json:"provider_scope"`
-	OperationScope   string   `json:"operation_scope"`
-	Engaged          bool     `json:"engaged"`
-	EngagedByScope   *string  `json:"engaged_by_scope,omitempty"`
-	ReleaseRequestID *string  `json:"release_request_id,omitempty"`
-	ReasonCode       string   `json:"reason_code"`
-	ChangedBy        staffRef `json:"changed_by"` // null for a tenant caller when the actor is platform staff (ADR 0114 H1)
-	ChangedByScope   string   `json:"changed_by_scope"`
-	ChangedAt        string   `json:"changed_at"`
-	Version          int64    `json:"version"`
-	CreatedAt        string   `json:"created_at"`
+	ID               string  `json:"id"`
+	TenantID         string  `json:"tenant_id"`
+	ProviderScope    string  `json:"provider_scope"`
+	OperationScope   string  `json:"operation_scope"`
+	Engaged          bool    `json:"engaged"`
+	EngagedByScope   *string `json:"engaged_by_scope,omitempty"`
+	ReleaseRequestID *string `json:"release_request_id,omitempty"`
+	// OpenReleaseRequestID (ADR 0114 S6b) is the id of this switch's OPEN release request, or null. It is
+	// computed from payment_kill_switch_release_requests (status open, tenant-scoped, same transaction and RLS
+	// as the switch read), never from release_request_id, which the database fills only at RELEASE time.
+	// Only the id: requester/approver identities are on the request resource, behind the staffViewer helper.
+	OpenReleaseRequestID *string  `json:"open_release_request_id"`
+	ReasonCode           string   `json:"reason_code"`
+	ChangedBy            staffRef `json:"changed_by"` // null for a tenant caller when the actor is platform staff (ADR 0114 H1)
+	ChangedByScope       string   `json:"changed_by_scope"`
+	ChangedAt            string   `json:"changed_at"`
+	Version              int64    `json:"version"`
+	CreatedAt            string   `json:"created_at"`
 }
 
-func toKillSwitchDTO(v staffViewer, ks payments.KillSwitch) killSwitchDTO {
+func toKillSwitchDTO(v staffViewer, ks payments.KillSwitch, openReq *uuid.UUID) killSwitchDTO {
 	var engagedByScope *string
 	if ks.EngagedByScope != nil {
 		s := string(*ks.EngagedByScope)
@@ -486,7 +511,7 @@ func toKillSwitchDTO(v staffViewer, ks payments.KillSwitch) killSwitchDTO {
 	return killSwitchDTO{
 		ID: ks.ID.String(), TenantID: ks.TenantID.String(), ProviderScope: ks.ProviderScope,
 		OperationScope: string(ks.OperationScope), Engaged: ks.Engaged, EngagedByScope: engagedByScope,
-		ReleaseRequestID: uuidPtr(ks.ReleaseRequestID), ReasonCode: ks.ReasonCode,
+		ReleaseRequestID: uuidPtr(ks.ReleaseRequestID), OpenReleaseRequestID: uuidPtr(openReq), ReasonCode: ks.ReasonCode,
 		ChangedBy: v.ref(string(ks.ChangedByScope), ks.ChangedBy), ChangedByScope: string(ks.ChangedByScope),
 		ChangedAt: ks.ChangedAt.UTC().Format(time.RFC3339Nano), Version: ks.Version,
 		CreatedAt: ks.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -544,9 +569,14 @@ func newListKillSwitchesHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		var out []payments.KillSwitch
+		var open map[uuid.UUID]uuid.UUID
 		err := runKillSwitchTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
 			list, err := payments.ListKillSwitches(ctx, tx, c.target)
+			if err != nil {
+				return err
+			}
 			out = list
+			open, err = payments.OpenReleaseRequestIDs(ctx, tx, c.target)
 			return err
 		})
 		if err != nil {
@@ -555,7 +585,11 @@ func newListKillSwitchesHandler(deps Deps) http.HandlerFunc {
 		}
 		dtos := make([]killSwitchDTO, 0, len(out))
 		for _, ks := range out {
-			dtos = append(dtos, toKillSwitchDTO(staffViewerOf(c.tc), ks))
+			var openReq *uuid.UUID
+			if id, ok := open[ks.ID]; ok {
+				openReq = &id
+			}
+			dtos = append(dtos, toKillSwitchDTO(staffViewerOf(c.tc), ks, openReq))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"kill_switches": dtos})
 	}
@@ -574,8 +608,14 @@ func newGetKillSwitchHandler(deps Deps) http.HandlerFunc {
 		}
 		var ks payments.KillSwitch
 		var found bool
+		var openReq *uuid.UUID
 		err = runKillSwitchTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
 			ks, found, err = payments.GetKillSwitchByID(ctx, tx, c.target, id)
+			if err != nil || !found {
+				return err
+			}
+			openReq, err = payments.OpenReleaseRequestID(ctx, tx, c.target, ks.ID)
 			return err
 		})
 		if err != nil {
@@ -586,7 +626,7 @@ func newGetKillSwitchHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks))
+		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks, openReq))
 	}
 }
 
@@ -638,6 +678,10 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, c.requestID, apierror.CodeValidation, "provider_scope, operation_scope and reason_code are required")
 			return
 		}
+		if !killSwitchReasonCodeValid(body.ReasonCode) {
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code must be 1 to 64 bytes")
+			return
+		}
 		switch body.OperationScope {
 		case string(payments.KillSwitchOperationDeposit), string(payments.KillSwitchOperationPayout), string(payments.KillSwitchOperationAny):
 		default:
@@ -661,7 +705,8 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			}
 		}
 		var ks payments.KillSwitch
-		var isTakeover bool // captured for the post-commit alert (ADR 0102 row 8)
+		var openReq *uuid.UUID // the request still open after this engage (a tenant re-engage leaves it open)
+		var isTakeover bool    // captured for the post-commit alert (ADR 0102 row 8)
 		err := runKillSwitchTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
 			// M3: capture the prior state (natural-key lookup - engage has
 			// no id yet on a first-ever engage of this provider/operation
@@ -694,6 +739,9 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 
+			if openReq, err = payments.OpenReleaseRequestID(ctx, tx, c.target, ks.ID); err != nil {
+				return err
+			}
 			isTakeover = foundBefore && before.Engaged && before.EngagedByScope != nil && *before.EngagedByScope == payments.KillSwitchScopeTenant &&
 				ks.EngagedByScope != nil && *ks.EngagedByScope == payments.KillSwitchScopePlatform
 
@@ -724,7 +772,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 		// POST-COMMIT ONLY, detached, in the engage's own scope. The engage
 		// row and its audit row are already committed; no failure of any
 		// class in the alert path can roll back or change this response.
-		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks))
+		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks, openReq))
 		flushResponse(w)
 		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover) // after status, headers and body bytes are flushed (ADR 0102 7.3)
 	}
@@ -753,6 +801,10 @@ func newRequestKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 		}
 		if body.ReasonCode == "" {
 			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code is required")
+			return
+		}
+		if !killSwitchReasonCodeValid(body.ReasonCode) {
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code must be 1 to 64 bytes")
 			return
 		}
 		var req payments.KillSwitchReleaseRequest
@@ -856,7 +908,8 @@ func newApproveKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 			writeKillSwitchError(r.Context(), deps, w, c, "approve_release", "payment_kill_switch_release_request", requestID.String(), err)
 			return
 		}
-		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks))
+		// A released switch has no open request: approval consumed the only open one in this transaction.
+		writeJSON(w, http.StatusOK, toKillSwitchDTO(staffViewerOf(c.tc), ks, nil))
 	}
 }
 

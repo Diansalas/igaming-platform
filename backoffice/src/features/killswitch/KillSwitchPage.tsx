@@ -19,7 +19,7 @@ import { ReleasePanel } from './ReleasePanel'
  * Payment kill switch console (ADR 0114 S6). Route-gated by `killSwitch` as a convenience only; the server is
  * authoritative and every refusal is rendered through the closed code map. The API is per tenant: there is no
  * platform-wide or provider-wide route, no history route and no release-request list, so "history" below is the
- * list of released rows and the release request is reached through the switch.
+ * list of released rows and the open release request is reached through the switch's `open_release_request_id` (S6b).
  */
 export function KillSwitchPage() {
   const { claims } = useAuth()
@@ -136,6 +136,7 @@ export function KillSwitchPage() {
       {engaging && (
         <EngageDialog
           tenantId={tenantId}
+          viewerIsPlatform={platform}
           onClose={() => setEngaging(false)}
           onRefused={refresh}
           onDone={(ks) => {
@@ -181,7 +182,7 @@ function SwitchTable({ title, rows, selectedId, onSelect, empty }: { title: stri
                   <td className="px-3 py-2"><OperationText value={r.operation_scope} /></td>
                   <td className="px-3 py-2">
                     <Badge tone={r.engaged ? 'danger' : 'success'}>{r.engaged ? 'Engaged' : 'Released'}</Badge>
-                    {r.engaged && r.release_request_id ? <span className="ml-2 text-xs text-slate-500">release requested</span> : null}
+                    {r.engaged && r.open_release_request_id ? <span className="ml-2 text-xs text-slate-500">release requested</span> : null}
                   </td>
                   <td className="px-3 py-2">{r.engaged_by_scope ? <ScopeText value={r.engaged_by_scope} /> : '-'}</td>
                   <td className="px-3 py-2"><ActorText id={r.changed_by} scope={r.changed_by_scope} /></td>

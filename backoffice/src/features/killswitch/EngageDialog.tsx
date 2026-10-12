@@ -1,11 +1,12 @@
 import { useMutation } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
-import { KILL_SWITCH_REASON_MAX, engageKillSwitch, type KillSwitch, type KillSwitchOperation } from '../../api/killSwitch'
+import { KILL_SWITCH_REASON_MAX, engageKillSwitch, reasonByteLength, reasonCodeValid, type KillSwitch, type KillSwitchOperation } from '../../api/killSwitch'
 import { Button } from '../../components/Button'
 import { Checkbox, SelectField, TextInput } from '../../components/FormField'
 import { Modal } from '../../components/Modal'
 import { KillSwitchErrorAlert } from './KillSwitchBits'
-import { CONSEQUENCE_ENGAGE, MOCK_BANNER_TITLE, REASON_HELP } from './labels'
+import { refusalIsStale } from './errors'
+import { CONSEQUENCE_ENGAGE, MOCK_BANNER_TITLE, NOTICE_REENGAGE, NOTICE_TAKEOVER_PLATFORM, NOTICE_TAKEOVER_TENANT, REASON_HELP } from './labels'
 
 const OPERATIONS: { value: KillSwitchOperation; label: string }[] = [
   { value: 'payout', label: 'Payouts (outbound withdrawals)' },
@@ -21,11 +22,13 @@ const OPERATIONS: { value: KillSwitchOperation; label: string }[] = [
  */
 export function EngageDialog({
   tenantId,
+  viewerIsPlatform,
   onClose,
   onDone,
   onRefused,
 }: {
   tenantId: string
+  viewerIsPlatform: boolean
   onClose: () => void
   onDone: (ks: KillSwitch) => void
   onRefused: () => void
@@ -38,12 +41,15 @@ export function EngageDialog({
   const m = useMutation({
     mutationFn: () => engageKillSwitch(tenantId, { provider_scope: provider, operation_scope: operation, reason_code: reason }),
     onSuccess: onDone,
-    onError: () => onRefused(),
+    onError: (e) => {
+      if (refusalIsStale(e, 'engage')) onRefused()
+    },
     onSettled: () => {
       busy.current = false
     },
   })
-  const valid = provider !== '' && provider === provider.trim() && reason.trim() !== '' && reason.length <= KILL_SWITCH_REASON_MAX && ack
+  const bytes = reasonByteLength(reason)
+  const valid = provider !== '' && provider === provider.trim() && reasonCodeValid(reason) && ack
   return (
     <Modal title="Engage payment kill switch" onClose={onClose}>
       <div className="flex flex-col gap-4">
@@ -53,6 +59,10 @@ export function EngageDialog({
             <li key={t}>{t}</li>
           ))}
         </ul>
+        <div aria-label="Re-engage and takeover" role="note" className="flex flex-col gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <p>{NOTICE_REENGAGE}</p>
+          <p>{viewerIsPlatform ? NOTICE_TAKEOVER_PLATFORM : NOTICE_TAKEOVER_TENANT}</p>
+        </div>
         <TextInput
           label="Provider"
           value={provider}
@@ -65,8 +75,16 @@ export function EngageDialog({
           label="Reason code (required)"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          help={REASON_HELP}
-          maxLength={KILL_SWITCH_REASON_MAX}
+          help={
+            <>
+              {REASON_HELP}
+              {bytes > KILL_SWITCH_REASON_MAX && (
+                <span role="alert" className="mt-1 block text-red-700">
+                  This reason code is {bytes} bytes; the limit is {KILL_SWITCH_REASON_MAX} bytes. Shorten it.
+                </span>
+              )}
+            </>
+          }
           autoComplete="off"
         />
         <Checkbox label="I understand this stops outbound dispatch and does not release funds or cancel withdrawals" checked={ack} onChange={(e) => setAck(e.target.checked)} />
