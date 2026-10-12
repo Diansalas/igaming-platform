@@ -70,6 +70,7 @@ func TestLaunchCodes_LiteralsAndStatuses(t *testing.T) {
 		{CodeLaunchPriorReject, "LAUNCH_PRIOR_REJECT", 409},
 		{CodeLaunchPriorRejecter, "LAUNCH_PRIOR_REJECTER", 409},
 		{CodeLaunchNotLegacyBaseline, "LAUNCH_NOT_LEGACY_BASELINE", 409},
+		{CodeKillSwitchReleaseRequestAlreadyOpen, "KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN", 409},
 		{CodeLaunchRefusedAtExecution, "LAUNCH_REFUSED_AT_EXECUTION", 409},
 		{CodeLaunchGuardRefused, "LAUNCH_GUARD_REFUSED", 409},
 		{CodeLaunchProofRefused, "LAUNCH_PROOF_REFUSED", 403},

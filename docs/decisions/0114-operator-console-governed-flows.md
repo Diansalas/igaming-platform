@@ -66,7 +66,7 @@ OAS = documented in `docs/api/openapi/platform-api.yaml`. BO = Back Office scree
 | Payout instruments view (state, verification source/expiry, mask) | `GET /v1/admin/players/{playerID}/payout-instruments` (`payout_instrument_routes.go:74`; `payoutinstrument.View`, `ops.go:252-264`) | yes | no | FI (masks), CO, PA read | n/a | UI-ready |
 | Payout instrument suspend | `POST /v1/admin/payout-instruments/{id}/suspend` (`payout_instrument_routes.go:76`) | yes | no | CO act | single actor + reason | UI-ready |
 | Payout instrument verify / reinstate | none | n/a | no | - | - | needs-design (not approved; do not build) |
-| Payment kill switch engage, list, detail, release request/approve/cancel | `/v1/admin/tenants/{tenantID}/payments/kill-switch*` (`payments_kill_switch_handlers.go:65-78`) | yes | no | TA, PA act | release four-eyes + platform lock (migration 0105) | UI-ready (pending release found via `release_request_id` on the switch) |
+| Payment kill switch engage, list, detail, release request/approve/cancel | `/v1/admin/tenants/{tenantID}/payments/kill-switch*` (`payments_kill_switch_handlers.go:65-78`) | yes | no | TA, PA act | release four-eyes + platform lock (migration 0105) | UI-ready after S6b (pending release found via `open_release_request_id` on the switch; `release_request_id` is the approved request, filled only at release time) |
 
 ### 2.2 Ledger governance
 
@@ -481,3 +481,42 @@ guarantees are the live tests** (`TestStaffIdentityHTTP_*`, `TestPlatformActions
 `ShowFreeFormMetadata` (off by default) must get its own allow-list before AUDIT-PRESENTATION-POLICY-1 enables it, because staff
 ids are stored in K1/K2/launch metadata. D-0104-1 (scope-only vs kill-switch actors identified to tenants) remains an OPEN owner
 decision; H1 is not recorded fully closed until it is ruled.
+
+
+## 11. S6b record (kill switch console release flow fix) and S6c ticket
+
+**S6b - IMPLEMENTED against the local DB / MOCK payments (reviews: security APPROVE WITH CONDITIONS, code-reviewer READY WITH
+CONDITIONS; conditions applied in follow-up commits).** The confirmed defect: the console found a pending release request through
+`release_request_id`, which the database fills only at RELEASE time (0106 forces NULL on insert and engage). Fix: the switch DTO
+carries `open_release_request_id` (always present, null when none), read from the request table (status open, tenant-predicated,
+same RLS transaction, no write path); a duplicate filing is 409 `KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN` plus a denied-audit row
+(was a 500); `reason_code` is validated before any transaction: 1 to 64 BYTES, non-blank, no control characters (NUL was a 500),
+no invalid UTF-8 or U+FFFD. No migration. Live tests drive the real sequence (engage, file, GET, self-approve 409, second-principal
+approve), duplicate, cancel, takeover, re-engage effects, expired approval (row aged on the scratch DB with the guard trigger
+disabled there only), tenant isolation and staff-id redaction. Mutation evidence:
+`docs/plans/prh2-hardening-round/adr0114-s6b-mutation-*`: 24 mutants in the first run, 22 killed. The two survivors: **B2** (list
+query without `status='open'`; real survivor, killed after the test gained list-after-cancel/approve assertions) and **B10** (single
+lookup without the tenant predicate; equivalent, the caller has already tenant-predicated the switch read and ids are unique, kept
+as defense in depth). The review-fix run added B11, B11b, B11c, U9, U10 (all killed).
+
+Facts pinned (not assumptions): re-engaging an already engaged pair overwrites `reason_code` and bumps `version`; a same-scope
+re-engage does NOT cancel an open request (it stays open but stale, approval is refused 409); only a platform engage over a
+tenant-engaged switch cancels it; a tenant engage over a platform-engaged switch is 409; tenant staff cannot approve or cancel a
+platform-filed request (409); an open request past `expires_at` or at an old version still holds the one-open slot.
+
+**Tracked LOW (not changed here):** `decodeJSON` accepts trailing JSON values after the first object. It is shared by many
+handlers, so it must not be changed inside S6b; fix globally with its own review. **Tracked LOW:** duplicate filings write
+unlimited denied-audit rows (no rate limit).
+
+### S6c - release request expiry/supersession - NOT IMPLEMENTED (needs `security` review: it changes a trigger)
+
+Problem: nothing moves a request `open -> expired`, so a stale or expired request wedges the one-open slot (see
+`docs/runbooks/payment-kill-switch-release-recovery.md`). Proposal:
+
+- A migration amends `payment_kill_switch_release_requests_guard` so ANY session may move a request `open -> expired`, but only
+  when `now() >= expires_at` OR `expected_version <> the switch's current version` (never a live, current request).
+- `RequestKillSwitchRelease` expires such a request in the same transaction BEFORE the INSERT, writing an audit row with reason
+  `expired_by_supersession` (actor, tenant, before/after). A live request still yields 409.
+- Optional sweeper for expired requests (same audit row).
+- Tests: expired platform-filed request then tenant re-file succeeds; stale-version request is superseded; a live request still
+  409; a tenant cannot expire a live platform request; the audit row exists; mutants for each predicate.

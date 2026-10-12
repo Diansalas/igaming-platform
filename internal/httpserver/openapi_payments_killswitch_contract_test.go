@@ -77,3 +77,33 @@ func TestOpenAPI_PaymentsKillSwitch_RoutesDocumented(t *testing.T) {
 		}
 	}
 }
+
+// ADR 0114 S6b: the open-request contract. The switch exposes open_release_request_id as a REQUIRED nullable
+// field (explicit null, never omitted), release_request_id is documented as release-time only, the filing
+// route documents the duplicate 409 code and the byte-length 400, and the Error enum carries the new code.
+func TestOpenAPI_PaymentsKillSwitch_OpenReleaseRequestContract(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/api/openapi/platform-api.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := string(raw)
+	block := govSchemaBlock(t, spec, "PaymentsKillSwitch")
+	if !regexp.MustCompile(`(?m)^        open_release_request_id:.*nullable: true`).MatchString(block) {
+		t.Error("PaymentsKillSwitch.open_release_request_id must be documented nullable")
+	}
+	if !regexp.MustCompile(`(?m)^      required: \[[^\]]*\bopen_release_request_id\b`).MatchString(block) {
+		t.Error("PaymentsKillSwitch.open_release_request_id must be required (the field is always emitted, null when none)")
+	}
+	if !regexp.MustCompile(`(?m)^        release_request_id:.*only at release time`).MatchString(block) {
+		t.Error("release_request_id must be documented as filled only at release time")
+	}
+	path := openAPIPathBlock(t, spec, "/v1/admin/tenants/{tenantID}/payments/kill-switches/{killSwitchID}/release-requests")
+	for _, want := range []string{"KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN", "BYTES", `"400"`} {
+		if !strings.Contains(path, want) {
+			t.Errorf("release-requests POST must document %q", want)
+		}
+	}
+	if !strings.Contains(spec, "            - KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN\n") {
+		t.Error("the Error code enum must list KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN")
+	}
+}

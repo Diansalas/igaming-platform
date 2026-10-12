@@ -1,0 +1,6 @@
+KILLED(build?): B11 control chars/NUL accepted
+KILLED: B11b whitespace-only accepted
+KILLED: B11c U+FFFD (lone surrogate) accepted
+KILLED: U9 stale 201 fallback never dropped
+KILLED: U10 platform-filed Approve enabled for tenant
+KILLED: B11 control chars/NUL accepted

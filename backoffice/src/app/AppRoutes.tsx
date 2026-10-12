@@ -23,6 +23,7 @@ import { TenantAuditLogPage } from '../features/audit/TenantAuditLogPage'
 import { ConfigurationPage } from '../features/configuration/ConfigurationPage'
 import { CasinoCataloguePage } from '../features/catalogue/CasinoCataloguePage'
 import { AlertsPage } from '../features/alerts/AlertsPage'
+import { KillSwitchPage } from '../features/killswitch/KillSwitchPage'
 import { LaunchQueuePage } from '../features/launch/LaunchQueuePage'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
@@ -78,6 +79,14 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission="alertManage">
               <AlertsPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="payment-kill-switch"
+          element={
+            <RequireNavPermission permission="killSwitch">
+              <KillSwitchPage />
             </RequireNavPermission>
           }
         />

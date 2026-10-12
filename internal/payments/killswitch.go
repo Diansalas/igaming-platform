@@ -210,6 +210,46 @@ func ListKillSwitches(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]Kil
 	return out, rows.Err()
 }
 
+// OpenReleaseRequestIDs maps kill_switch_id -> the id of its OPEN release request, for every switch of
+// tenantID that has one (ADR 0114 S6b). The switch row's own release_request_id is filled only at RELEASE
+// time (migration 0106 forces it NULL on insert and engage), so filing a request never touches the switch
+// row; this read is how a console finds the pending request. "Open" is the row status, not liveness: an
+// open request past expires_at (nothing flips it to expired) or one made stale by a version bump still
+// holds the one-open unique index and is still cancellable, so it is reported. No write path. Explicit
+// tenant predicate on top of RLS (same rationale as GetKillSwitchByID).
+func OpenReleaseRequestIDs(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT kill_switch_id, id FROM payment_kill_switch_release_requests WHERE tenant_id=$1 AND status='open'`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("payments: list open kill switch release requests: %w", err)
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]uuid.UUID{}
+	for rows.Next() {
+		var ksID, reqID uuid.UUID
+		if err := rows.Scan(&ksID, &reqID); err != nil {
+			return nil, fmt.Errorf("payments: scan open kill switch release request: %w", err)
+		}
+		out[ksID] = reqID
+	}
+	return out, rows.Err()
+}
+
+// OpenReleaseRequestID is OpenReleaseRequestIDs for one switch; nil when none is open.
+func OpenReleaseRequestID(ctx context.Context, tx pgx.Tx, tenantID, killSwitchID uuid.UUID) (*uuid.UUID, error) {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM payment_kill_switch_release_requests WHERE tenant_id=$1 AND kill_switch_id=$2 AND status='open'`,
+		tenantID, killSwitchID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("payments: get open kill switch release request: %w", err)
+	}
+	return &id, nil
+}
+
 // RequestKillSwitchRelease files the release request half of four-eyes
 // release (§10.4). ttl bounds expires_at; the trigger independently forces
 // it to at most now()+24h regardless of what is passed here (defense in

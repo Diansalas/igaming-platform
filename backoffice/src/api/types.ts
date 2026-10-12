@@ -58,6 +58,8 @@ export type ApiErrorCode =
   | 'PAYOUT_DESTINATION_NOT_USABLE'
   | 'invalid_request'
   | 'TENANT_CLOSE_BLOCKED_OPEN_ROUNDS'
+  // ADR 0114 S6b: a second kill-switch release request while one is open (409).
+  | 'KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN'
   // ADR 0112 section 9: the closed LAUNCH_* set (internal/apierror).
   | LaunchErrorCode
   | 'network_error';
