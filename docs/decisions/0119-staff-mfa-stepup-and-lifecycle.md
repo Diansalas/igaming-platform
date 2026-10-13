@@ -429,3 +429,180 @@ beyond 5 s of clock skew is also refused.
 | Pending factor | 10 min | fixed |
 
 The configuration can only tighten these values. A value above the bound refuses startup.
+
+## 8. Which operations require step-up (enumerated against the permission matrix) [ORCH-DEFAULT]
+
+### 8.1 Rule
+
+A staff write requires step-up when it does one of these:
+
+- **(a)** moves, releases or creates value: money, bonus value, or payout dispatch;
+- **(b)** changes who can do what: staff, roles, MFA, capability grants;
+- **(c)** creates, approves or rotates a secret or provider credential;
+- **(d)** initiates, approves or executes a four-eyes or governed request;
+- **(e)** loosens a financial, RG, risk, regulatory or availability control, or opens a brand, tenant or market;
+- **(f)** silences or redirects security signals (alert routing).
+
+Classes:
+
+- `critical` (5 min) for (b), (c), (f) and the governance or policy parts of (d) and (e).
+- `financial` (10 min) for (a) and money-decision four-eyes. These decisions come in queues, so the longer window
+  reduces re-prompting without reaching the identity-changing operations.
+
+**Not step-up (aal2 is enough):**
+
+- **Protective, fail-safe actions:** engage a kill switch, suspend a brand or tenant, suspend a player, add an RG
+  restriction, reject or cancel a governed request, reject a withdrawal. The justification:
+  - Requiring a fresh factor during an incident slows the defenders.
+  - These actions move the platform toward safety.
+  - The reverse actions are themselves step-up and four-eyes.
+  - Each one is audited and, where it applies, alerted.
+- **Routine reads and low-impact configuration:** casino game availability, catalogue edits, brand creation (a brand
+  is created `pending_launch` and cannot trade), display names, alert ack/resolve, KYC document review.
+
+### 8.2 Route classification (the golden table pinned by the S4 test)
+
+| Route (method path) | Permission | Class | Rule and justification |
+|---|---|---|---|
+| `POST /v1/admin/withdrawals/{id}/approve` | `withdrawal:approve` | financial | (a)(d): it releases player funds. This **supersedes** the `withdrawal.ErrStepUpRequired` placeholder (section 9.3). |
+| `POST /v1/admin/withdrawals/{id}/submit` | `withdrawal:submit` | financial | (a): it dispatches a payout to the provider |
+| `POST /v1/admin/withdrawals/{id}/resolve` | `withdrawal:submit` | financial | (a): manual outcome of a submitted payout |
+| `POST /v1/admin/withdrawals/{id}/reject` | `withdrawal:reject` | none | protective |
+| `POST .../manual-adjustments` | `ledger_adjustment:initiate` | financial | (a)(d): K2 initiation. Both four-eyes Persons must be strongly authenticated, or a stolen initiator session plus a rubber-stamp approval defeats four-eyes. |
+| `POST .../manual-adjustments/{id}/approve` | `ledger_adjustment:approve` | financial | (a)(d): K2 approval and execution |
+| `POST .../manual-adjustments/{id}/reject\|cancel` | | none | protective |
+| `POST .../payment-force-resolutions` and `/{id}/approve` | `payment_force_resolve:*` | financial | (a)(d): K3 |
+| `POST .../payment-force-resolutions/{id}/reject\|cancel` | | none | protective |
+| `POST .../withdrawal-hold-resolutions` and `/{id}/approve` | `withdrawal_hold_resolution:*` | financial | (a)(d): HSEC release |
+| `POST .../withdrawal-hold-resolutions/{id}/reject\|cancel` | | none | protective |
+| `POST .../payments/kill-switches` (engage) | `payments_kill_switch:engage` | none | protective. It is deliberately fast for incident response. |
+| `POST .../kill-switches/{id}/release-requests` and `.../release-requests/{id}/approve` | `payments_kill_switch:release` | critical | (d)(e): it re-opens payments. Four-eyes. |
+| `POST .../release-requests/{id}/cancel` | | none | protective |
+| `POST .../launch-authorisations` (activate, reactivate, ratify, close) | `launch_authorisation:request` | critical | (d)(e): it opens or changes market availability |
+| `POST .../launch-authorisations` with `action = suspend`, `POST .../brands/{b}/suspend`, `POST .../tenants/{t}/suspend` | `launch_authorisation:suspend` | none | protective (ADR 0112 section 6.3 asymmetry). The handler classifies by `action`. The class is resolved from the validated body **before** the handler runs, through a declared per-route classifier function. That function is pinned by test and is not free-form. |
+| `POST .../launch-authorisations/{id}/approve` | `launch_authorisation:approve` | critical | (d)(e) |
+| `POST .../launch-authorisations/{id}/reject\|cancel` | | none | protective |
+| `POST .../capability-grants/requests`, `/{id}/approve`, `/{id}/revoke` | `capability_grant:*` | critical | (b)(d): K1 grants financial authority. A revoke is protective, but it is critical because an attacker revoking defenders' grants during an incident is a real denial-of-service vector. Low volume. |
+| `POST .../capability-grants/requests/{id}/reject\|cancel` | | none | protective |
+| `POST /v1/admin/financial-policy-changes`, `.../tenants/{t}/financial-policy-changes`, `/{id}/approve` | `financial_policy:*` | critical | (d)(e): it changes the four-eyes thresholds themselves |
+| `POST .../financial-policy-changes/{id}/reject\|cancel` | | none | protective |
+| `POST /v1/admin/withdrawal-policies`, `DELETE /v1/admin/withdrawal-policies/{id}` | `withdrawal_policy:write` | critical | (e): thresholds and `require_step_up` (permission.go:122-127 bypass #3) |
+| `POST .../provider-credential-requests`, `/{id}/decisions`, `/{id}/apply`, `POST .../provider-credentials/{h}/transitions` | `provider_credential:*` | critical | (c). A revoke transition is protective, but it is still critical: revoking production credentials is an outage vector. |
+| `PUT /v1/admin/providers/{p}/capability`, `PUT /v1/admin/casino/providers/{p}/capability` | `provider_config:write`, `casino_config:write` | critical | (c)(e): provider enablement per tenant |
+| `POST /v1/admin/alerting/routes` | `alert:route_manage` | critical | (f): an attacker could reroute or silence alerts |
+| `POST /v1/admin/assets`, `PATCH .../assets/{code}`, `PUT .../assets/{code}/activation\|operation-eligibility\|platform-authorization`, `POST .../assets/change-requests` and `/{id}/decision` | `asset_registry:manage` | critical | (d)(e): what money can move. Dual control. |
+| `PUT /v1/admin/asset-authorizations/*` | `asset_authorization:write` | critical | (e) |
+| `POST /v1/admin/jurisdictions`, `POST /v1/admin/licences`, `PUT .../tenants/{t}/licence` | `jurisdiction_registry:manage`, `tenant_licence:assign` | critical | (e): regulatory basis |
+| `PUT /v1/admin/jurisdiction-resolution-active/{c}`, `PUT /v1/admin/jurisdiction-evidence-collection/{e}`, jurisdiction evaluation-policy writes, operating-market ceiling/tenant/brand policy writes | `jurisdiction_*`, `operating_market_*` | critical | (e) |
+| `POST /v1/admin/sportsbook/jurisdiction-restrictions` and `/{id}/withdraw` | `sportsbook_jurisdiction_restriction:manage` | critical | (e). A withdraw loosens the control. Creating one is protective, but it is grouped for legibility. |
+| `POST /v1/admin/risk/rules` and `/{id}/disable`, `POST /v1/admin/sportsbook/exposure-limits` and `/{id}/disable` | `risk_config:manage`, `sportsbook_exposure_limit:manage` | financial | (e): a disable or a new looser rule exposes the book |
+| `POST /v1/admin/bonus/grants`, `/manual-grants`, `/manual-grants/{id}/activate`, `/economic-operations`, `/bulk-jobs`, `/bulk-jobs/{id}/execute`, `/held-dispositions/{id}/resolve` | `bonus_grant:issue`, `bonus_adjustment:write`, `bonus_bulk:execute`, `bonus_held_disposition:resolve` | financial | (a): creates bonus value |
+| `POST /v1/admin/bonus/change-requests` and `/{id}/decide` | bonus governance | critical | (d) |
+| `POST /v1/admin/bonus/campaigns/{id}/activate`, `/offers/{id}/publish` | `bonus_campaign:activate`, `bonus_offer:manage` | financial | (a): releases value to many players |
+| Campaign, offer and segment create or edit, suggestion claim or decide | bonus authoring | none | configuration. Activation or publishing is the gate. |
+| `POST /v1/admin/casino/games/{g}/change-requests`, `/casino/change-requests/{id}/approvals` | `casino_catalogue:govern` | critical | (d) |
+| `PUT /v1/admin/casino/games`, `PUT .../games/{g}/availability` | `casino_catalogue:manage`, `casino_config:write` | none | catalogue configuration under governance |
+| `POST /v1/admin/players/{id}/suspend`, `POST /v1/admin/rg/restrictions` | `player:suspend`, `rg_restriction:write` | none | protective |
+| `POST /v1/admin/players/{id}/reinstate`, `POST .../identity-review/clear` | `player:suspend`, `identity_review:manage` | critical | (e): lifts a protective control |
+| Clearing an RG restriction (ADR 0026 section 12) | `rg_restriction:write` | critical | (e) |
+| ADR 0115: `POST /v1/admin/players/{id}/rg/limits` that is an **increase or removal** | `PermRGLimitWriteOnPlayerRequest` | critical | (e). It **unblocks the ADR 0115 S2 403**. The player's own `confirm` is still required. A decrease is `none`. Classified by a pinned classifier, like launch. |
+| ADR 0115: RG floor change requests and their approve, `limit-configs` writes | `PermRGConfigWrite` and the floor four-eyes | critical | (d)(e) |
+| `POST /v1/admin/kyc/verifications/{id}/review`, `/documents/{id}/review` | `verification:review` | none [ORCH-DEFAULT, revisit OQ-4] | high volume. KYC approval does not by itself move money: withdrawal approval is step-up. |
+| `POST /v1/admin/payout-instruments/{id}/suspend` | `payout_instrument:suspend` | none | protective |
+| `POST /v1/admin/tenants`, `POST .../brands` | `tenant:write`, `brand:write` | critical (tenant), none (brand) | tenant creation is a platform-level identity boundary. A brand is born `pending_launch`. |
+| All staff lifecycle routes (section 14.2) except `suspend` | `staff:manage` and the new governance permission | critical | (b) |
+| `POST .../staff/{id}/suspend`, `POST /v1/admin/platform-staff/{id}/suspend` | `staff:manage` | critical | (b). Suspension is protective toward the target, but an attacker suspending defenders is a lock-out vector. The last-admin guard bounds it, and step-up makes it costly. |
+| `POST .../staff/{id}/person-link`, `POST /v1/admin/platform-staff/{id}/person-link` | `staff:manage` | critical | (b): Person binding decides four-eyes distinctness |
+| `PATCH .../staff/{id}/display-name`, `PATCH /v1/admin/staff/me/display-name` | | none | cosmetic. Audited (ADR 0104). |
+| `POST /v1/staff/mfa/recovery-codes/regenerate` | own | critical | (b) |
+| `POST /v1/admin/alerts/{id}/ack\|resolve` | `alert:manage` | none | operational |
+| `POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event` | non-production only | none | test support, not mounted in production |
+
+**Pending flows.** A route added later must take a class in the same change, and the golden test makes that visible.
+ADR 0114 S1b, the ADR 0116 AML case actions and the ADR 0107 closed-tenant resolution pick their class from rule 8.1 at
+their own review.
+
+## 9. Integration with the governed flows, the actor proof and Person binding
+
+### 9.1 Actor proof (ADR 0110): no format change, a signer backstop
+
+- **Proof format unchanged.** The proof stays `v1`, and the DB verifier does not change for step-up. The reason:
+  - Under M5 the attacker cannot forge a proof at all.
+  - A proof is minted only by the application, which is where step-up is enforced.
+  - Putting `mfa_at` into the proof would add nothing the DB could check independently, because the DB holds no factor
+    material.
+- **Signer backstop.** `actorproof.Issuer` gains a registry, `actorproof.StepUpOperations`, which maps each proof
+  operation to a class. Its contents:
+  - `ledger_adjustment:initiate|approve`
+  - `payment_force_resolve:request|approve`
+  - `withdrawal_hold_resolution:request|approve`
+  - `capability_grant:request|approve|revoke`
+  - `financial_policy_change:propose|approve`
+  - `launch_authorisation:request|approve`
+  - `staff_lifecycle:request|approve` (new, section 10.4)
+  - `rg_floor_change:*` when ADR 0115 adds it
+- **When a proof is signed** for one of these operations, the issuer requires `auth.StepUpAssertionFrom(ctx)`. The
+  assertion must:
+  - be present;
+  - have `Subject == proof actor`;
+  - have an `MFAAt` no older than the class max-age plus 30 s of in-flight grace.
+- **Otherwise signing returns `ErrStepUpMissing`** and the handler answers 500 (ADR 0110 section 7: a signing failure
+  is a defect, never a 403).
+- **Why have a backstop.** It turns a missing `RequireStepUp` on a route into a loud failure instead of a silent bypass.
+- **Exemptions.** `:cancel`, `:reject` and the launch `:suspend` are not in the registry.
+- **Test support.** `prooftest` and `capability.TestSessionProofHook` (integration tag only) place a synthetic assertion
+  in the context.
+
+### 9.2 Flows without a proof (ADR 0110 T8): withdrawal approvals, kill-switch release, asset dual control, bonus and catalogue governance, provider credentials
+
+- **Route-level only.** For these flows step-up is enforced at the route by `RequireStepUp`. The handler passes the
+  assertion into the domain call where the domain owns a policy decision (9.3).
+- **SQL is a separate threat.** These flows stay open to arbitrary SQL (T8, owner-deferred). Step-up protects them
+  against M1 and M2, not against M5. This is stated, not hidden.
+
+### 9.3 Withdrawal policy `require_step_up`
+
+- **The new contract.** `withdrawal.Approve` gains a parameter `stepUp auth.StepUpAssertion` (zero value means none).
+  The placeholder branch (`withdrawal.go:857-860`) becomes: if `requiresMultipleApprovals && policy.RequireStepUp`,
+  then require `stepUp.MFAAt` to be within `StepUpPolicyMaxAge`, which is 2 min [ORCH-DEFAULT], stricter than the
+  route's `financial` 10 min. Otherwise it returns `ErrStepUpRequired`, and the HTTP layer now maps that to 403
+  `step_up_required` with `max_age = 120`.
+- **The policy flag stays meaningful.** It tightens freshness for large withdrawals.
+- **Still fail-closed.** An automated decision (`isAutomated`) never satisfies a step-up policy.
+
+### 9.4 Person binding
+
+- **The current state.** Four-eyes distinctness counts Persons through `staff_users.person_id`, which is append-only
+  (migration 0034). A NULL Person refuses (ADR 0099 R-4).
+- **What MFA proves.** It proves possession of the factor enrolled to **that staff account**. It does not prove the
+  Person. Person binding stays an administrative fact.
+- **New rules:**
+  - An invitation for any role that holds an approve permission **must carry `person_id`**, enforced in the Go
+    validation and by trigger `SF014`. Those roles are `platform_admin`, `finance`, `tenant_admin` (it holds the
+    `financial_policy:tighten` and `capability_grant` request paths) and `compliance` (launch request).
+    [ORCH-DEFAULT; other roles optional.]
+  - A staff lifecycle approver must be a different staff member **and** a different Person from the requester and from
+    the **target** (`SF032`). Nobody approves their own MFA reset or their own role grant through a second account.
+  - An MFA reset never changes `person_id`. Linking a Person stays a separate `critical` route.
+
+### 9.5 Liveness inside governed transactions (suspension race)
+
+- **The re-assertion.** Every step-up-classified handler re-asserts the actor's liveness **inside its own business
+  transaction** with `SELECT status, role, staff_version FROM staff_users WHERE id = $actor FOR SHARE`. On a mismatch
+  it refuses with `ErrActorNotLive` (401 `session_revoked`).
+- **Why it serialises.** A suspension's `UPDATE staff_users` takes a row lock that conflicts with `FOR SHARE`. Either
+  the governed write commits first (and is audited as having happened before the suspension), or it sees `suspended`
+  and refuses.
+- **Lock order.** The re-assertion is taken at the existing ADR 0082 Amendment A8 position: L1 `staff_users FOR SHARE`,
+  ascending id, **after** the flow's own L1 request-row `FOR UPDATE` and before L2/L3.
+  - K2 and K3 already take this lock (A8), so for them the re-assertion adds only the `role` and `staff_version`
+    comparison to an existing statement.
+  - A flow with no L1 request row (withdrawal approve, kill-switch release, bonus, configuration routes) takes it as
+    its first lock, after its existing withdrawal-row lock where it has one.
+  - Taking it earlier than A8 is **forbidden**. A shared lock queued behind a waiting suspension `UPDATE` would form a
+    deadlock cycle with a peer that holds the request row.
+  - `ledger-finance` confirms the placement in S4.
+- **The suspension transaction** locks only `staff_users` (UPDATE), `sessions` (revocation UPDATE) and the append-only
+  lifecycle rows. It never takes a financial lock, so it cannot form a cycle with an L1-L3 holder.
+- **Existing DB guards are kept.** The guards that already check `staff_users.status = 'active'` (for example
+  migrations 0106 and 0112 `financial_actor_session`) remain unchanged and stay as defence in depth.
