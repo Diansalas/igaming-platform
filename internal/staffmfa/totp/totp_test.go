@@ -174,30 +174,33 @@ func TestVerify_WrongCodeRefused(t *testing.T) {
 	}
 }
 
+// collisionStep is a step whose code equals the code of the next step for the
+// RFC seed (found by exhaustive search; a 1e-6 event). It exercises the
+// "highest matching candidate is burned" rule deterministically.
+const collisionStep = int64(910737)
+
 func TestVerify_HighestMatchingStepIsBurned(t *testing.T) {
-	// Find a step where two window candidates share a code (a 1e-6 event) by
-	// search over a bounded range, then check the highest is returned.
-	for s := int64(1); s < 3_000_000; s++ {
-		a, _ := CodeAtStep(rfcSeed, s)
-		b, _ := CodeAtStep(rfcSeed, s+1)
-		if a != b {
-			continue
-		}
-		got, err := Verify(rfcSeed, a, at(s), 0)
-		if err != nil || got != s+1 {
-			t.Fatalf("collision at %d: got %d, %v; want %d", s, got, err, s+1)
-		}
-		// With s+1 burned, the code is refused even though s is in the window.
-		if _, err := Verify(rfcSeed, a, at(s), s+1); !errors.Is(err, ErrRejected) {
-			t.Fatalf("collision at %d: replay accepted", s)
-		}
-		// With only s burned, s+1 is still acceptable.
-		if got, err := Verify(rfcSeed, a, at(s), s); err != nil || got != s+1 {
-			t.Fatalf("collision at %d: %d, %v", s, got, err)
-		}
-		return
+	s := collisionStep
+	a := code(t, s)
+	if b := code(t, s+1); a != b {
+		t.Fatalf("pinned collision step no longer collides: %s vs %s", a, b)
 	}
-	t.Skip("no adjacent-step collision in the searched range")
+	got, err := Verify(rfcSeed, a, at(s), 0)
+	if err != nil || got != s+1 {
+		t.Fatalf("got %d, %v; want %d", got, err, s+1)
+	}
+	// With s+1 burned, the code is refused even though s is in the window.
+	if _, err := Verify(rfcSeed, a, at(s), s+1); !errors.Is(err, ErrRejected) {
+		t.Fatal("replay accepted")
+	}
+	// With only s burned, s+1 is still acceptable.
+	if got, err := Verify(rfcSeed, a, at(s), s); err != nil || got != s+1 {
+		t.Fatalf("%d, %v", got, err)
+	}
+	// From the step after, both s and s+1 are in the window: still s+1.
+	if got, err := Verify(rfcSeed, a, at(s+1), 0); err != nil || got != s+1 {
+		t.Fatalf("%d, %v", got, err)
+	}
 }
 
 func TestVerify_FailsClosedOnMalformedInput(t *testing.T) {
