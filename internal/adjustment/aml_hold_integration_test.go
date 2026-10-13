@@ -120,3 +120,34 @@ func TestAMLHold_EvaluatorFailure_RefusesAdjustment(t *testing.T) {
 		t.Fatalf("no movement on a failed evaluation: %d", got)
 	}
 }
+
+// Ledger-finance C3: an evaluator failure at SUBMISSION rolls the submission back; the aml.hold_eval_failed alert must not be
+// rolled back with it (it is raised in its own transaction after the rollback).
+func TestAMLHold_EvaluatorFailureAtSubmission_AlertSurvivesTheRollback(t *testing.T) {
+	w := newWorld(t, worldOpts{base: 1})
+	w.fund(10_000)
+	alertRows := func() int {
+		var n int
+		if err := w.pool.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM alerts WHERE kind = 'aml.hold_eval_failed' AND subject_tenant_id = $1`, w.Tenant).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := requestCount(t, w)
+	restore := aml.SetHoldProbeForTest(func(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op aml.Operation) (bool, error) {
+		return false, errors.New("injected hold evaluator failure")
+	})
+	_, err := w.submit(w.F1, w.credit(200, ReasonOperationalErrorCorrection))
+	restore()
+	if !errors.Is(err, ErrAccountUnderReview) {
+		t.Fatalf("a failed evaluator must refuse the submission: %v", err)
+	}
+	if requestCount(t, w) != before {
+		t.Fatal("the refused submission wrote a request row")
+	}
+	if n := alertRows(); n != 1 {
+		t.Fatalf("exactly one aml.hold_eval_failed alert must survive the rollback, got %d", n)
+	}
+}

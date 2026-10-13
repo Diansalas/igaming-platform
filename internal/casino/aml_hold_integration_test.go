@@ -90,6 +90,28 @@ func TestAMLHold_CasinoStake_HeldAndKYCPending_SameDeclineReason(t *testing.T) {
 }
 
 // LF: wins and rollbacks (terminal stake returns) are never gated by a hold.
+// LF C4: a rollback for a transaction never seen writes a tombstone; that is a replay-protection marker, not value entering play, so
+// it is never gated and never refused for a held player (and the late original is then rejected by the tombstone, not by the hold).
+func TestAMLHold_CasinoTombstoneRollbackWithNoOriginal_IsNeverGated(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 5000)
+	provider := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, provider, 100)
+	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	holdCasinoPlayer(t, pool, f, aml.ScopeAllValueMovement)
+	before := cashBalance(t, pool, f)
+	r := callback(t, pool, f, orch, provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-unseen", "bet-never-seen", "round-x", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil))
+	if !r.Tombstoned || r.DeclineReason != "" {
+		t.Fatalf("a tombstone rollback must not be refused by a hold: %+v", r)
+	}
+	if got := cashBalance(t, pool, f); got != before {
+		t.Fatalf("a tombstone moves no value: %d -> %d", before, got)
+	}
+	_ = sessionID
+}
+
 func TestAMLHold_CasinoWinAndRollback_AreNeverGated(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)

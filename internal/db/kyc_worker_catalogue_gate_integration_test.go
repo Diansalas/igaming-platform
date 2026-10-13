@@ -42,6 +42,18 @@ type catalogPolicy struct {
 	roles                         []string
 }
 
+// tableOwnerOf returns the name of the role that owns public.<table> (pg_class.relowner).
+func tableOwnerOf(t *testing.T, rt *Pool, table string) string {
+	t.Helper()
+	var owner string
+	if err := rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = to_regclass('public.' || quote_ident($1))`, table).Scan(&owner)
+	}); err != nil {
+		t.Fatalf("owner of %s: %v", table, err)
+	}
+	return owner
+}
+
 func loadPolicies(t *testing.T, rt *Pool) []catalogPolicy {
 	t.Helper()
 	var out []catalogPolicy
@@ -242,7 +254,10 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 		// policy there, so a re-granted privilege still yields zero rows. The owner-pool probe is the WORST case for such a
 		// policy (it is applied to the very role the probe runs as), so the gate stays conservative; any OTHER role-specific
 		// policy still fails here.
-		if strings.HasPrefix(p.table, "aml_") && p.name == "aml_owner_session" && len(p.roles) == 1 && p.roles[0] != "public" {
+		// The exemption is exact (security F9): the policy's single role must BE the table's owner (pg_class.relowner), it must be
+		// named aml_owner_session, and it may not be a PUBLIC or runtime-role policy.
+		if strings.HasPrefix(p.table, "aml_") && p.name == "aml_owner_session" && len(p.roles) == 1 && p.roles[0] != "public" &&
+			p.roles[0] == tableOwnerOf(t, rt, p.table) && p.roles[0] != "igaming_runtime" {
 			continue
 		}
 		if strings.Join(p.roles, ",") != "public" {

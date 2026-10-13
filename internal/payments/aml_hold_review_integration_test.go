@@ -91,6 +91,29 @@ func TestAMLHold_SweeperT2_EvaluatorFailure_ReschedulesNeverEscalates(t *testing
 	}
 }
 
+// LF C4: a deposit REVERSAL callback returns value to the provider and is never gated or refused for a held player.
+func TestAMLHold_DepositReversalCallback_IsNeverGated(t *testing.T) {
+	pool := testPool(t)
+	f := seedOrchFixture(t, pool)
+	provider := NewMockProvider("mock-psp", "EUR")
+	registerCapability(t, pool, f, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
+	const amount = int64(4_000)
+	ref := loConfirmedDeposit(t, pool, f, orch, provider, amount)
+	holdAllFor(t, pool, f, aml.ScopeAllValueMovement)
+	before := cashBalance(t, pool, f)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "aml-reversal-ref", ref, OutcomeSucceeded, amount, "EUR", "", false)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
+		return err
+	}); err != nil {
+		t.Fatalf("a deposit reversal must not be gated by a hold: %v", err)
+	}
+	if got := cashBalance(t, pool, f); before-got != amount {
+		t.Fatalf("the reversal posts under a hold: %d -> %d", before, got)
+	}
+}
+
 func TestAMLHold_SweeperT2_DefiniteHold_StillEscalates(t *testing.T) {
 	pool := testPool(t)
 	f, orch, _ := fpOrch(t, pool, "mock-aml-hold-t2")
