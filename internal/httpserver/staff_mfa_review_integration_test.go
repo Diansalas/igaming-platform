@@ -253,7 +253,10 @@ func TestStaffMFA_OwnerResetProcedure_S3toS6(t *testing.T) {
 			if s.slug != "" {
 				login["tenant_slug"] = s.slug
 			}
-			w.enrol(s)
+			e := w.enrol(s)
+			// One session already revoked (logout): the guarded session revocation below must not touch it.
+			out := w.fullLogin(s)
+			w.post("/v1/auth/logout", map[string]string{"refresh_token": out.RefreshToken}).want(t, http.StatusNoContent, "")
 			w.inScope(s, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := tx.Exec(ctx, `UPDATE staff_mfa_factors SET hard_locked_at = now() WHERE staff_user_id = $1 AND status = 'active'`, s.ref.StaffID)
 				return err
@@ -275,6 +278,33 @@ func TestStaffMFA_OwnerResetProcedure_S3toS6(t *testing.T) {
 			})
 			if w.liveRecoveryCodes(s) != 0 {
 				t.Fatal("the recovery codes must be revoked")
+			}
+			// Runbook 5.1 step 2b: revoke the account's live sessions (re-review F4). The naive form without
+			// `revoked_at IS NULL` is refused by SF040 (revoked_at is write-once) once any session is revoked.
+			sessionSQL := func(guarded bool) error {
+				return store.WithScope(context.Background(), w.owner, s.ref, func(ctx context.Context, tx pgx.Tx) error {
+					if _, err := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, s.ref.StaffID.String()); err != nil {
+						return err
+					}
+					q := `UPDATE sessions SET revoked_at = now() WHERE principal_type = 'staff' AND principal_id = $1`
+					if guarded {
+						q += ` AND revoked_at IS NULL`
+					}
+					_, err := tx.Exec(ctx, q, s.ref.StaffID)
+					return err
+				})
+			}
+			if err := sessionSQL(false); pgCode(err) != "SF040" {
+				t.Fatalf("the unguarded session revocation must fail SF040 when a session is already revoked, got %v", err)
+			}
+			if err := sessionSQL(true); err != nil {
+				t.Fatalf("the guarded session revocation: %v", err)
+			}
+			w.refresh(e.pair.RefreshToken).want(t, http.StatusUnauthorized, "unauthorized")
+			for _, r := range w.sessions(s) {
+				if r.Revoked == nil {
+					t.Fatalf("session %s must be revoked", r.ID)
+				}
 			}
 			tok := w.bootstrapToken(s) // what cmd/seed-admin -issue-bootstrap issues
 			w.post("/v1/staff/auth/login", login).want(t, http.StatusForbidden, "mfa_enrolment_required")

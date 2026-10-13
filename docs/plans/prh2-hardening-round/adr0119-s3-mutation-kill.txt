@@ -222,3 +222,12 @@ M35 SURVIVED [./internal/httpserver/ -run TestStaffMFA_G1_|TestStaffMFA_HardLock
 
 Totals (final, review round): 78 mutants - KILLED 76, SURVIVED 2 (M13, M35: the same justifications as above),
 ERROR 0. Every review-round mutant (X2 X3 X6 X7, C1a-f, C2a-c, R3a-b, R4a-b, Q12-Q16) is KILLED.
+
+Re-review (2026-10-13), F3 (-operator / -reason character hygiene), run 5 in the branch worktree, verbatim:
+R4c KILLED by TestOperatorContext_RefusesUnsafeCharacters, TestUnsafeAuditRune_CoversDisplayNameHygiene [./cmd/seed-admin/ -run TestOperatorContext|TestUnsafeAuditRune] 2s
+R4d KILLED by TestOperatorContext_RefusesUnsafeCharacters [./cmd/seed-admin/ -run TestOperatorContext|TestUnsafeAuditRune] 2s
+R4e KILLED by TestOperatorContext_RefusesUnsafeCharacters [./cmd/seed-admin/ -run TestOperatorContext|TestUnsafeAuditRune] 2s
+  R4c  unsafeAuditRune without the Cf class (bidi / zero-width accepted)
+  R4d  unsafeAuditRune without Zl / Zp (U+2028 / U+2029 accepted)
+  R4e  validate back to unicode.IsControl only
+Totals including the re-review: 81 mutants - KILLED 79, SURVIVED 2 (M13, M35, justified), ERROR 0.

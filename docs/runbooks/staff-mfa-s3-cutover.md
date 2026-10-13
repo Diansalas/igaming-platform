@@ -79,7 +79,9 @@ seed-admin -email=<staff email> -issue-bootstrap [-tenant-slug=<tenant slug>] \
 ```
 
 - `-operator` and `-reason` are **required** with `-issue-bootstrap` and are recorded in the audit row
-  `staff.bootstrap_token_issued` (security review R4). Neither is a secret; the token is never recorded.
+  `staff.bootstrap_token_issued` (security review R4). Neither is a secret; the token is never recorded. Both refuse
+  control, Unicode format (bidi override / isolate, zero-width) and line / paragraph separator characters
+  (re-review F3).
 - `seed-admin` applies the same staff MFA configuration rules as `platform-api` (security review C2): the published
   `.env.example` keys are refused unless `APP_ENV=development` is set explicitly, and a staff MFA key equal to any
   other platform key (JWT, actor proof, payout instrument, credential fingerprint) is refused.
@@ -127,6 +129,22 @@ end to end). It needs the database OWNER (the migration role), never the runtime
    ```
 
    Anything other than `UPDATE 1` on the first statement: `ROLLBACK` and stop (wrong scope or wrong id).
+
+   Then, still as the owner, revoke the account's live sessions (the refresh path does not re-check the factor
+   before S4a, ADR 0119 S3-R11, so without this an existing session keeps refreshing until its expiry):
+
+   ```sql
+   BEGIN;
+   -- tenant staff only (omit for platform staff):
+   SELECT set_config('app.tenant_id', '<tenant uuid>', true);
+   SELECT set_config('app.principal_id', '<staff uuid>', true);   -- makes the rows visible under FORCE RLS
+   UPDATE sessions SET revoked_at = now()
+    WHERE principal_type = 'staff' AND principal_id = '<staff uuid>' AND revoked_at IS NULL;
+   COMMIT;
+   ```
+
+   Keep `AND revoked_at IS NULL`: `revoked_at` is write-once on staff sessions (`SF040`), so the unguarded form fails
+   the whole statement as soon as one of the account's sessions is already revoked (a logout, a rotation).
 3. Issue a bootstrap token: `seed-admin -email=<email> -issue-bootstrap [-tenant-slug=<slug>] -operator=<who>
    -reason=<ticket>` and deliver it out of band (section 4).
 4. **Expected alert:** the staff member's next password step answers `403 mfa_enrolment_required` and raises the
@@ -134,8 +152,8 @@ end to end). It needs the database OWNER (the migration role), never the runtime
    that had a factor now has none. Acknowledge it against the ticket; an UNEXPECTED one of these alerts is an
    incident (a factor deleted or revoked by someone else).
 5. The staff member redeems the token and enrols (section 4); the confirm revokes every earlier session of the
-   account. Until then an existing session of the account keeps refreshing (no liveness re-check before S4a, ADR 0119
-   S3-R11): if the account may be compromised, suspend it instead and wait for S6. Review the audit rows
+   account again. If the session revocation of step 2 was skipped, an existing session keeps refreshing until then
+   (no liveness re-check before S4a, ADR 0119 S3-R11). Review the audit rows
    `staff.bootstrap_token_issued`, `staff.enrolment_token_redeemed` and `staff.mfa_enrolled` against the ticket.
 
 The owner SQL writes no audit row of its own; the ticket and the `seed-admin` audit row (with `-operator` and
@@ -143,8 +161,10 @@ The owner SQL writes no audit row of its own; the ticket and the `seed-admin` au
 
 ### 5.2 No platform admin can log in
 
-If every platform admin is locked out, either run 5.1 for one of them, or use the existing `cmd/seed-admin` job (ADR
-0119 section 11, OQ-6 default) to create an **additional** platform admin:
+If every platform admin is locked out, either run 5.1 for one of them (including its session revocation), or use the
+existing `cmd/seed-admin` job (ADR 0119 section 11, OQ-6 default) to create an **additional** platform admin. If a
+locked-out admin is suspected compromised, revoke that admin's sessions with the guarded statement of 5.1 step 2
+first:
 
   ```text
   SEED_ADMIN_PASSWORD=<strong password> seed-admin -email=<new break-glass admin email> -create-person
@@ -188,6 +208,7 @@ back the code without the migration leaves staff logins failing closed (`SF040`)
 - Since the S3 security review (R1), `sessions.revoked_at` and `replaced_by_session_id` are write-once on staff rows
   (`SF040`, every role including the owner): a logged-out or rotated staff session cannot be revived by SQL.
   `refresh_token_hash` and `expires_at` are immutable on staff rows (`SF040`) but are not inside the keyed seal
-  (S4b condition, security review C3).
+  (S4b condition, security review C3): the owner or a superuser (who can `ALTER TABLE ... DISABLE TRIGGER`) could
+  still rewrite them.
 - The per-IP limiter is per process (R9); the per-factor counters in the database are the control, and since 0138
   the hard-lock budget cannot be reset by the runtime role (`SF008`).

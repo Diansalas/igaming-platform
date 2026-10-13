@@ -305,11 +305,20 @@ func (o operatorContext) validate(required bool) error {
 			}
 			continue
 		}
-		if len(v) > maxOperatorField || strings.TrimSpace(v) != v || strings.IndexFunc(v, unicode.IsControl) >= 0 || !utf8.ValidString(v) {
-			return fmt.Errorf("%s must be 1-%d bytes of UTF-8 without control characters or surrounding whitespace", name, maxOperatorField)
+		if len(v) > maxOperatorField || strings.TrimSpace(v) != v || strings.IndexFunc(v, unsafeAuditRune) >= 0 || !utf8.ValidString(v) {
+			return fmt.Errorf("%s must be 1-%d bytes of UTF-8 without control, format (bidi / zero-width) or line-separator characters or surrounding whitespace", name, maxOperatorField)
 		}
 	}
 	return nil
+}
+
+// unsafeAuditRune refuses what could make an audit row visually misrepresent who ran the job or why (ADR 0119 S3
+// re-review F3): control characters (Cc), every format character (Cf: the bidi overrides U+202A-U+202E and isolates
+// U+2066-U+2069, the zero-width U+200B-U+200F, U+2060-U+2064, U+FEFF, U+061C, ...) and the line / paragraph
+// separators U+2028 / U+2029 (Zl / Zp). A superset of migration 0109's staff_users_display_name_hygiene class
+// (TestUnsafeAuditRune_CoversDisplayNameHygiene pins that).
+func unsafeAuditRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.In(r, unicode.Zl, unicode.Zp)
 }
 
 func (o operatorContext) metadata(m map[string]any) map[string]any {

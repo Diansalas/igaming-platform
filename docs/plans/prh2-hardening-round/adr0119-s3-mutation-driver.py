@@ -454,6 +454,15 @@ MUTANTS = [
   '''        EXECUTE 'GRANT UPDATE (revoked_at, last_used_at, replaced_by_session_id) ON sessions TO igaming_runtime';''',
   '''        EXECUTE 'GRANT UPDATE (revoked_at, last_used_at, replaced_by_session_id, mfa_at) ON sessions TO igaming_runtime';''',
   HS, 'TestGrants_SessionsAndCutover|TestSessions_SF040Matrix', True),
+ # --- re-review F3: -operator / -reason character hygiene ---
+ ('R4c', 'cmd/seed-admin/main.go',
+  '''	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.In(r, unicode.Zl, unicode.Zp)''',
+  '''	return unicode.IsControl(r) || unicode.In(r, unicode.Zl, unicode.Zp)''', './cmd/seed-admin/', 'TestOperatorContext|TestUnsafeAuditRune', False),
+ ('R4d', 'cmd/seed-admin/main.go',
+  '''	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.In(r, unicode.Zl, unicode.Zp)''',
+  '''	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)''', './cmd/seed-admin/', 'TestOperatorContext|TestUnsafeAuditRune', False),
+ ('R4e', 'cmd/seed-admin/main.go',
+  '''strings.IndexFunc(v, unsafeAuditRune) >= 0''', '''strings.IndexFunc(v, unicode.IsControl) >= 0''', './cmd/seed-admin/', 'TestOperatorContext|TestUnsafeAuditRune', False),
 ]
 
 def sh(cmd, log, timeout=3600):
