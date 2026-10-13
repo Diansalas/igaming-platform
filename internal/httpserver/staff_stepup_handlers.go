@@ -121,13 +121,11 @@ func (r recoveryCodesResponse) wire() any {
 	return recoveryCodesWire{RecoveryCodes: r.RecoveryCodes.reveal()}
 }
 
+// newRecoveryCodesResponse reuses the enrolment response's allow-listed
+// constructor (S3 gate G5: the RevealFor* call sites stay exactly those of
+// staff_auth_secrets.go), keeping only the redacted codes.
 func newRecoveryCodesResponse(batch staffmfa.RecoveryCodeBatch) recoveryCodesResponse {
-	codes := batch.Codes()
-	out := make([]string, 0, len(codes))
-	for _, c := range codes {
-		out = append(out, c.RevealForDisplay())
-	}
-	return recoveryCodesResponse{RecoveryCodes: newRedacted(out)}
+	return recoveryCodesResponse{RecoveryCodes: newEnrolConfirmResponse(batch, staffTokenPair{}).RecoveryCodes}
 }
 
 // stepUpAudit writes one step-up audit row (target: the session). Metadata

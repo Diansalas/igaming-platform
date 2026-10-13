@@ -206,7 +206,9 @@ func TestStatic_AuthtestImportedOnlyByTests(t *testing.T) {
 // Section 5.4: audit metadata in the S3 staff authentication code never carries a secret-shaped key.
 func TestStatic_StaffAuthAuditMetadataKeys(t *testing.T) {
 	files := []string{"internal/httpserver/staff_auth_handlers.go", "internal/httpserver/staff_routes.go", "internal/httpserver/staff_mfa.go",
-		"internal/auth/staff_session.go", "cmd/seed-admin/main.go"}
+		"internal/auth/staff_session.go", "cmd/seed-admin/main.go",
+		// ADR 0119 S4b: the step-up and recovery-code regeneration handlers and the step-up gate.
+		"internal/httpserver/staff_stepup_handlers.go", "internal/httpserver/staff_stepup.go"}
 	srcs := repoGoSources(t)
 	scan := func(path, src string) []string {
 		f, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
