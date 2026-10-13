@@ -25,6 +25,15 @@ AML = db('./internal/aml/', 'Test')
 KYC = db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement')
 ADJ = db('./internal/adjustment/', 'TestAMLHold')
 WD = db('./internal/withdrawal/', 'TestAMLHold')
+def chain(*cmds):
+    return ['bash', '-c', ' && '.join(' '.join(c) for c in cmds)]
+
+
+# Evaluator / composition / gate mutants run the aml suite AND every gate package that exercises the hold read.
+GATES = chain(db('./internal/aml/', 'Test'), db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement'),
+              db('./internal/adjustment/', 'TestAMLHold'), db('./internal/withdrawal/', 'TestAMLHold'),
+              db('./internal/casino/', 'TestAMLHold'), db('./internal/sportsbook/', 'TestAMLHold'),
+              db('./internal/payments/', 'TestAMLHold'))
 LINT = ['go', 'test', '-count=1', './internal/aml/', '-run', 'Lint']
 
 M = [
@@ -134,30 +143,30 @@ M = [
     ('L14 lint: separators break digit runs', 'internal/aml/lint.go', "\t\tif unicode.IsLetter(r) || unicode.IsNumber(r) {\n\t\t\trun = 0", "\t\tif true {\n\t\t\trun = 0", LINT),
     ('L15 lint: filing reference pattern open', 'internal/aml/lint.go', "regexp.MustCompile(`^[A-Za-z0-9._/-]{1,64}$`)", "regexp.MustCompile(`^.*$`)", LINT),
     # ---- Go: evaluator ----
-    ('E1 eval: probe error is not a deny', 'internal/aml/hold_eval.go', "\t\treturn HoldVerdict{EvalFailed: true}, raiseEvalFailed(ctx, tx, tenantID, op)", "\t\treturn HoldVerdict{}, raiseEvalFailed(ctx, tx, tenantID, op)", AML),
-    ('E2 eval: invalid argument allowed', 'internal/aml/hold_eval.go', "\t\treturn HoldVerdict{EvalFailed: true}, nil\n\t}\n\theld, err", "\t\treturn HoldVerdict{}, nil\n\t}\n\theld, err", AML),
-    ('E3 eval: held verdict dropped', 'internal/aml/hold_eval.go', "\tv := HoldVerdict{Held: true}", "\tv := HoldVerdict{}", AML),
-    ('E4 eval: alert result dropped', 'internal/aml/hold_eval.go', "return HoldVerdict{EvalFailed: true}, raiseEvalFailed(ctx, tx, tenantID, op)", "_ = raiseEvalFailed(ctx, tx, tenantID, op)\n\t\treturn HoldVerdict{EvalFailed: true}, nil", AML),
-    ('E5 eval: probe without savepoint rollback', 'internal/aml/hold_eval.go', "\tb.Queue(\"ROLLBACK TO SAVEPOINT \" + sp)\n", "", AML),
-    ('E6 eval: timeout 0 (unbounded)', 'internal/aml/hold_eval.go', "const HoldEvalTimeout = 2 * time.Second", "const HoldEvalTimeout = 0 * time.Second", AML),
-    ('E7 eval: probe against the wrong operation', 'internal/aml/hold_eval.go', "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(op))", "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(OpDeposit))", AML),
-    ('E8 eval: wrong person', 'internal/aml/hold_eval.go', "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(op))", "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, accountID, accountID, string(op))", AML),
+    ('E1 eval: probe error is not a deny', 'internal/aml/hold_eval.go', "\t\treturn HoldVerdict{EvalFailed: true}, raiseEvalFailed(ctx, tx, tenantID, op)", "\t\treturn HoldVerdict{}, raiseEvalFailed(ctx, tx, tenantID, op)", GATES),
+    ('E2 eval: invalid argument allowed', 'internal/aml/hold_eval.go', "\t\treturn HoldVerdict{EvalFailed: true}, nil\n\t}\n\theld, err", "\t\treturn HoldVerdict{}, nil\n\t}\n\theld, err", GATES),
+    ('E3 eval: held verdict dropped', 'internal/aml/hold_eval.go', "\tv := HoldVerdict{Held: true}", "\tv := HoldVerdict{}", GATES),
+    ('E4 eval: alert result dropped', 'internal/aml/hold_eval.go', "return HoldVerdict{EvalFailed: true}, raiseEvalFailed(ctx, tx, tenantID, op)", "_ = raiseEvalFailed(ctx, tx, tenantID, op)\n\t\treturn HoldVerdict{EvalFailed: true}, nil", GATES),
+    ('E5 eval: probe without savepoint rollback', 'internal/aml/hold_eval.go', "\tb.Queue(\"ROLLBACK TO SAVEPOINT \" + sp)\n", "", GATES),
+    ('E6 eval: timeout 0 (unbounded)', 'internal/aml/hold_eval.go', "const HoldEvalTimeout = 2 * time.Second", "const HoldEvalTimeout = 0 * time.Second", GATES),
+    ('E7 eval: probe against the wrong operation', 'internal/aml/hold_eval.go', "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(op))", "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(OpDeposit))", GATES),
+    ('E8 eval: wrong person', 'internal/aml/hold_eval.go', "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(op))", "b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, accountID, accountID, string(op))", GATES),
     # ---- Go: composition / gates ----
-    ('K1 compose: hold error not a deny', 'internal/kyc/enforcement.go', "\t\treturn EnforcementDecision{}, fmt.Errorf(\"%w: %w\", ErrEnforcementUnavailable, hErr)", "\t\treturn kycDecision, nil", KYC),
-    ('K2 compose: held does not deny', 'internal/kyc/enforcement.go', "\tif !verdict.Denied() {\n\t\treturn kycDecision, nil", "\tif true {\n\t\treturn kycDecision, nil", KYC),
-    ('K3 compose: pending code leaks', 'internal/kyc/enforcement.go', "\t\tkycDecision.Code = AccountReviewCode\n\t\tkycDecision.Message = accountReviewMessage\n\t}\n\tif !verdict", "\t}\n\tif !verdict", KYC),
-    ('K4 compose: held output code leaks', 'internal/kyc/enforcement.go', "\tout.Code = AccountReviewCode\n", "\tout.Code = \"kyc_hold\"\n", KYC),
-    ('K5 compose: held output still allowed', 'internal/kyc/enforcement.go', "\tout.Allowed = false\n\tout.Code = AccountReviewCode", "\tout.Allowed = true\n\tout.Code = AccountReviewCode", KYC),
-    ('K6 compose: true outcome not recorded', 'internal/kyc/enforcement.go', "\tif verdict.Held {\n\t\tout.TrueOutcome = OutcomeHeld\n\t}", "", KYC),
-    ('K7 compose: matched trigger leaks', 'internal/kyc/enforcement.go', "\tout.MatchedTrigger = \"\"\n", "", KYC),
-    ('K8 compose: failed KYC loses its result', 'internal/kyc/enforcement.go', "\tif kycDecision.Outcome == OutcomeFailed || kycDecision.Outcome == OutcomeUnavailable {", "\tif false {", KYC),
-    ('K9 op map: sportsbook ungated', 'internal/kyc/enforcement.go', "\t\treturn aml.OpSportsbookStake", "\t\treturn \"\"", KYC),
-    ('K10 op map: payout maps to withdrawal', 'internal/kyc/enforcement.go', "\t\treturn aml.OpPayout", "\t\treturn aml.OpWithdrawal", KYC),
-    ('J1 adjustment: submission not gated', 'internal/adjustment/request.go', "\t} else if v.Denied() {\n\t\treturn Request{}, ErrAccountUnderReview", "\t} else if false {\n\t\treturn Request{}, ErrAccountUnderReview", ADJ),
-    ('J2 adjustment: execution not gated', 'internal/adjustment/execute.go', "\tif holdVerdict.Denied() {", "\tif false {", ADJ),
-    ('J3 adjustment: wallet unresolved treated as held', 'internal/adjustment/aml_hold.go', "\tif errors.Is(err, pgx.ErrNoRows) {\n\t\treturn aml.HoldVerdict{}, nil", "\tif errors.Is(err, pgx.ErrNoRows) {\n\t\treturn aml.HoldVerdict{Held: true}, nil", ADJ),
-    ('J4 adjustment: resolve error allows', 'internal/adjustment/aml_hold.go', "\t\treturn aml.HoldVerdict{EvalFailed: true}, fmt.Errorf(\"adjustment: resolve", "\t\treturn aml.HoldVerdict{}, nil //", ADJ),
-    ('J5 adjustment: wrong operation', 'internal/adjustment/aml_hold.go', "accountID, aml.OpManualAdjustment)", "accountID, aml.OpDeposit)", ADJ),
+    ('K1 compose: hold error not a deny', 'internal/kyc/enforcement.go', "\t\treturn EnforcementDecision{}, fmt.Errorf(\"%w: %w\", ErrEnforcementUnavailable, hErr)", "\t\treturn kycDecision, nil", GATES),
+    ('K2 compose: held does not deny', 'internal/kyc/enforcement.go', "\tif !verdict.Denied() {\n\t\treturn kycDecision, nil", "\tif true {\n\t\treturn kycDecision, nil", GATES),
+    ('K3 compose: pending code leaks', 'internal/kyc/enforcement.go', "\t\tkycDecision.Code = AccountReviewCode\n\t\tkycDecision.Message = accountReviewMessage\n\t}\n\tif !verdict", "\t}\n\tif !verdict", GATES),
+    ('K4 compose: held output code leaks', 'internal/kyc/enforcement.go', "\tout.Code = AccountReviewCode\n", "\tout.Code = \"kyc_hold\"\n", GATES),
+    ('K5 compose: held output still allowed', 'internal/kyc/enforcement.go', "\tout.Allowed = false\n\tout.Code = AccountReviewCode", "\tout.Allowed = true\n\tout.Code = AccountReviewCode", GATES),
+    ('K6 compose: true outcome not recorded', 'internal/kyc/enforcement.go', "\tif verdict.Held {\n\t\tout.TrueOutcome = OutcomeHeld\n\t}", "", GATES),
+    ('K7 compose: matched trigger leaks', 'internal/kyc/enforcement.go', "\tout.MatchedTrigger = \"\"\n", "", GATES),
+    ('K8 compose: failed KYC loses its result', 'internal/kyc/enforcement.go', "\tif kycDecision.Outcome == OutcomeFailed || kycDecision.Outcome == OutcomeUnavailable {", "\tif false {", GATES),
+    ('K9 op map: sportsbook ungated', 'internal/kyc/enforcement.go', "\t\treturn aml.OpSportsbookStake", "\t\treturn \"\"", GATES),
+    ('K10 op map: payout maps to withdrawal', 'internal/kyc/enforcement.go', "\t\treturn aml.OpPayout", "\t\treturn aml.OpWithdrawal", GATES),
+    ('J1 adjustment: submission not gated', 'internal/adjustment/request.go', "\t} else if v.Denied() {\n\t\treturn Request{}, ErrAccountUnderReview", "\t} else if false {\n\t\treturn Request{}, ErrAccountUnderReview", GATES),
+    ('J2 adjustment: execution not gated', 'internal/adjustment/execute.go', "\tif holdVerdict.Denied() {", "\tif false {", GATES),
+    ('J3 adjustment: wallet unresolved treated as held', 'internal/adjustment/aml_hold.go', "\tif errors.Is(err, pgx.ErrNoRows) {\n\t\treturn aml.HoldVerdict{}, nil", "\tif errors.Is(err, pgx.ErrNoRows) {\n\t\treturn aml.HoldVerdict{Held: true}, nil", GATES),
+    ('J4 adjustment: resolve error allows', 'internal/adjustment/aml_hold.go', "\t\treturn aml.HoldVerdict{EvalFailed: true}, fmt.Errorf(\"adjustment: resolve", "\t\treturn aml.HoldVerdict{}, nil //", GATES),
+    ('J5 adjustment: wrong operation', 'internal/adjustment/aml_hold.go', "accountID, aml.OpManualAdjustment)", "accountID, aml.OpDeposit)", GATES),
 ]
 
 only = sys.argv[1:]

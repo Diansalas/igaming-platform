@@ -1,0 +1,13 @@
+KILLED: E1 eval: probe error is not a deny
+KILLED: E2 eval: invalid argument allowed
+KILLED: E3 eval: held verdict dropped
+KILLED: E4 eval: alert result dropped
+KILLED: E5 eval: probe without savepoint rollback
+KILLED: E6 eval: timeout 0 (unbounded)
+KILLED: E7 eval: probe against the wrong operation
+KILLED: E8 eval: wrong person
+KILLED: K1 compose: hold error not a deny
+KILLED: K7 compose: matched trigger leaks
+KILLED: K10 op map: payout maps to withdrawal
+KILLED: J3 adjustment: wallet unresolved treated as held
+EXIT 0

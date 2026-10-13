@@ -156,13 +156,31 @@ func GrantOfficer(t testing.TB, pool *db.Pool, tenantID, grantee uuid.UUID) {
 // platform_admin acting grantee).
 func GrantOfficerAs(t testing.TB, pool *db.Pool, tenantID, grantee uuid.UUID, scope string) {
 	t.Helper()
-	ctx := context.Background()
-	approver, _ := newPlatformAdmin(t, pool)
 	var validUntil *time.Time
 	if scope == "platform" {
 		v := time.Now().Add(time.Hour)
 		validUntil = &v
 	}
+	grantOfficerUntil(t, pool, tenantID, grantee, scope, validUntil)
+}
+
+// GrantOfficerUntil is GrantOfficerAs with an explicit expiry (a short-lived grant, to prove an expired grant neither acts nor
+// counts toward the quorum).
+func GrantOfficerUntil(t testing.TB, pool *db.Pool, tenantID, grantee uuid.UUID, scope string, until time.Time) {
+	t.Helper()
+	grantOfficerUntil(t, pool, tenantID, grantee, scope, &until)
+}
+
+// NewPlatformStaff creates a synthetic platform_admin staff member WITHOUT granting anything.
+func NewPlatformStaff(t testing.TB, pool *db.Pool) (staff, person uuid.UUID) {
+	t.Helper()
+	return newPlatformAdmin(t, pool)
+}
+
+func grantOfficerUntil(t testing.TB, pool *db.Pool, tenantID, grantee uuid.UUID, scope string, validUntil *time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	approver, _ := newPlatformAdmin(t, pool)
 	in := capability.NewRequestInput{GranteeStaffID: grantee, Capability: capability.CapabilityAMLOfficer, ValidFrom: time.Now(), ValidUntil: validUntil, ReasonCode: "fixture"}
 	var reqID uuid.UUID
 	create := func(ctx context.Context, tx pgx.Tx) error {
