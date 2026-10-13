@@ -242,4 +242,7 @@ for name, f, old, new, cmd in M:
                 break
     finally:
         open(path, 'w').write(src)
+        if f.startswith('migrations/'):
+            # Leave the private DB clean for the next (possibly Go-only) mutant.
+            subprocess.run(['env', 'PRIV_DB=adr0116mut', 'PRIV_SRC=' + W, 'bash', S + '/priv_db.sh'], cwd=W, capture_output=True, text=True, timeout=1200)
     print('%s: %s%s' % (verdict, name, ('  [' + first + ']') if first else ''), flush=True)
