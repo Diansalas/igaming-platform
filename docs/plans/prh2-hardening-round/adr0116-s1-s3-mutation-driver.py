@@ -6,14 +6,28 @@ written. Migration mutants rebuild the private DB (adr0116mut) first. Run from t
 Output is the kill list; save with `> docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-log-*.txt`.
 """
 import os
+import shlex
 import subprocess
 import sys
+import time
 
 W = os.getcwd()
 S = '/tmp/claude-0/-home-user-igaming-platform/82298384-cc24-5365-b2fc-220688ed9969/scratchpad'
 U0 = 'migrations/0140_aml_access_foundation.up.sql'
 U1 = 'migrations/0141_aml_holds_and_enforcement.up.sql'
 U2 = 'migrations/0142_aml_cases_and_four_eyes.up.sql'
+
+
+def rebuild_db():
+    """priv_db.sh with retries: a runtime-role connection of the previous test process may still be closing."""
+    r = None
+    for _ in range(4):
+        r = subprocess.run(['env', 'PRIV_DB=adr0116mut', 'PRIV_SRC=' + W, 'bash', S + '/priv_db.sh'], cwd=W,
+                           capture_output=True, text=True, timeout=1200)
+        if r.returncode == 0 or 'pg_signal_backend' not in (r.stdout + r.stderr):
+            break
+        time.sleep(4)
+    return r
 
 
 def db(pkg, run):
@@ -26,7 +40,7 @@ KYC = db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement')
 ADJ = db('./internal/adjustment/', 'TestAMLHold')
 WD = db('./internal/withdrawal/', 'TestAMLHold')
 def chain(*cmds):
-    return ['bash', '-c', ' && '.join(' '.join(c) for c in cmds)]
+    return ['bash', '-c', ' && '.join(' '.join(shlex.quote(a) for a in c) for c in cmds)]
 
 
 # Evaluator / composition / gate mutants run the aml suite AND every gate package that exercises the hold read.
@@ -200,7 +214,7 @@ M = [
     ('N29 payout gate does not convert an evaluator fault', 'internal/payments/payout.go', "return decision.RetryableOnHoldEvalFailure(), params, nil", "return decision, params, nil", PAY),
     ('N30 conversion ignores the KYC outcome', 'internal/kyc/enforcement.go', "	if d.KYCOutcome != OutcomePassed && d.KYCOutcome != OutcomeNotRequired {\n		return d\n	}\n", "", PAY),
     ('N31 conversion applies to a definite hold too', 'internal/kyc/enforcement.go', "	if !d.Hold.EvalFailed || d.Hold.Held {\n		return d\n	}", "	if !d.Hold.Denied() {\n		return d\n	}", PAY),
-    ('N32 adjustment submission raises no detached alert', 'internal/adjustment/request.go', "_ = aml.RaiseHoldEvalFailedDetached(ctx, s.pool, target.tenantID, aml.OpManualAdjustment)", "_ = ctx", ADJ),
+    ('N32 adjustment submission raises no detached alert', 'internal/adjustment/request.go', "_ = aml.RaiseHoldEvalFailedDetached(ctx, s.pool, target.tenantID, aml.OpManualAdjustment)", "_ = aml.OpManualAdjustment", ADJ),
     ('N33 adjustment submission raises the alert in the rolled-back tx', 'internal/adjustment/request.go', "walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID, true)", "walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID, false)", ADJ),
     ('N34 eval-failed typed error not produced', 'internal/adjustment/request.go', "		if v.EvalFailed && !v.Held {\n			return Request{}, &holdEvalFailedError{}\n		}\n", "", ADJ),
 ]
@@ -226,8 +240,7 @@ for name, f, old, new, cmd in M:
             # The aml integration world runs against the PRE-MIGRATED private DB, so a migration mutant must be re-applied:
             # rebuild the DB from the mutated files first. A mutant the migration itself refuses (pre-flight, syntax, a
             # CHECK) is reported as KILLED(migrate).
-            rb = subprocess.run(['env', 'PRIV_DB=adr0116mut', 'PRIV_SRC=' + W, 'bash', S + '/priv_db.sh'], cwd=W,
-                                capture_output=True, text=True, timeout=1200)
+            rb = rebuild_db()
             if rb.returncode != 0 and ('recovery mode' in rb.stdout + rb.stderr or 'failed to connect' in rb.stdout + rb.stderr or 'connection to server' in rb.stdout + rb.stderr):
                 print('INVALID(infra): %s  [%s]' % (name, (rb.stdout + rb.stderr).strip().splitlines()[-1][:140]), flush=True)
                 open(path, 'w').write(src)
@@ -251,7 +264,7 @@ for name, f, old, new, cmd in M:
         open(path, 'w').write(src)
         if f.startswith('migrations/'):
             # Leave the private DB clean for the next (possibly Go-only) mutant.
-            subprocess.run(['env', 'PRIV_DB=adr0116mut', 'PRIV_SRC=' + W, 'bash', S + '/priv_db.sh'], cwd=W, capture_output=True, text=True, timeout=1200)
+            rebuild_db()
     if verdict == 'KILLED' and not first:
         tail = [l.strip() for l in out.splitlines() if l.strip() and 'level=ERROR' not in l]
         first = ('last: ' + tail[-1][:140]) if tail else ''
