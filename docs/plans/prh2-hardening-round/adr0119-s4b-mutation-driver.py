@@ -60,10 +60,9 @@ MUTANTS = [
 			if !ok {''', '''			a, ok := stepUpAssertionFor(r)
 			if !ok && false {''', HS, 'TestRequireStepUp'),
  # --- the four classifiers ---
- ('C01', GATE, '''	if body.Action == launchgov.ActionSuspend {''', '''	if body.Action != "" {''', HS, 'TestClassifiers|TestStepUp_Classifiers'),
- ('C02', GATE, '''	if auth.RoleHasPermission(auth.Role(tc.Role), auth.PermFinancialPolicyAuthor) {
-		return auth.StepUpCritical, nil
-	}''', '', HS, 'TestClassifiers|TestStepUp_Classifiers'),
+ ('C01', GATE, '''	if body.Action == launchgov.ActionSuspend {''', '''	if body.Action == launchgov.ActionSuspend || body.Action != "" {''', HS, 'TestClassifiers|TestStepUp_Classifiers'),
+ ('C02', GATE, '''	if auth.RoleHasPermission(auth.Role(tc.Role), auth.PermFinancialPolicyAuthor) {''',
+  '''	if auth.RoleHasPermission(auth.Role(tc.Role), auth.PermFinancialPolicyAuthor) && false {''', HS, 'TestClassifiers|TestStepUp_Classifiers'),
  ('C03', GATE, '''	if severity == alertResolveCriticalSeverity {
 		return true
 	}''', '', HS, 'TestClassifiers|TestStepUp_Classifiers'),

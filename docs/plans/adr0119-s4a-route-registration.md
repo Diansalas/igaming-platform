@@ -34,8 +34,10 @@
 > routes are already classified here (the staff RG limit route uses the `rgLimitChangeClass` classifier; the RG
 > floor request and approval routes and the limit-config write are `critical`; reject and cancel are `none`).
 
-Status: `IMPLEMENTED` on the S4a branch (not merged; gate G pending). Step-up enforcement is S4b and stays
-`NOT IMPLEMENTED`. ADR record: `docs/decisions/0119-staff-mfa-stepup-and-lifecycle.md` section 25.
+Status: `IMPLEMENTED` on the S4a branch (not merged; gate G pending). Step-up enforcement: `IMPLEMENTED` on the
+unmerged S4b branch (ADR 0119 section 26; the class of every route is now ENFORCED by `requireStepUp`, and the four
+classifier functions exist; contract for the back office: `docs/plans/adr0119-s4b-api-contract.md`). ADR record:
+`docs/decisions/0119-staff-mfa-stepup-and-lifecycle.md` section 25.
 
 ## 1. The chain
 
@@ -56,7 +58,11 @@ auth.Middleware -> auth.RequireStaffPrincipal -> requireLiveStaffSession -> auth
   member has no active, non-hard-locked second factor. A database fault is `503 service_unavailable`.
 - `auth.RequireAAL2` refuses (401) a request without an aal2 staff session in its context (defence in depth: the
   token verifier already refuses any other aal).
-- S4b appends `auth.RequireStepUp(class)` at the end of the chain. S4a records the class only.
+- S4b appends `requireStepUp(deps, class)` at the end of the chain (before the route's own gates): a stale or missing
+  step-up for a financial (10 min) / critical (5 min) route, or a classifier route judged critical, is `403
+  step_up_required` with `max_age` and the RFC 9470 header; a fresh one places the step-up assertion for the actor-proof
+  signer backstop. The freshness instant is the older of the token's `mfa_at` and the sealed session row's, which
+  liveness now verifies (seal format v2).
 
 Metric: `staff_liveness_decisions_total{outcome="allowed|refused|error", reason=...}`. Alert rules:
 `StaffLivenessErrors` (page) and `StaffLivenessRefusals` (ticket) in `deploy/observability/prometheus-alert-rules.yml`
