@@ -134,7 +134,7 @@ func TestMigration0133_IndexShape_LedgerSource_ReadInsideTheRLSWindow(t *testing
 	join := strings.Index(src, "FROM public.wallets wl")
 	sum := strings.Index(src, "FROM public.ledger_entries e")
 	restore := strings.Index(src, "PERFORM set_config('app.tenant_id', COALESCE(v_prev_t, ''), true);")
-	if bind < 0 || read < 0 || join < 0 || sum < 0 || restore < 0 || !(bind < read && read < join && join < sum && sum < restore) {
+	if bind < 0 || read < 0 || join < 0 || sum < 0 || restore < 0 || bind >= read || read >= join || join >= sum || sum >= restore {
 		t.Fatalf("the LA025 read must sit inside the RLS-bound window (bind=%d read=%d join=%d sum=%d restore=%d)", bind, read, join, sum, restore)
 	}
 	if !strings.Contains(src, "la.account_type = 'player_withdrawal_hold'") || !strings.Contains(src, "wl.brand_id = v_brand") {

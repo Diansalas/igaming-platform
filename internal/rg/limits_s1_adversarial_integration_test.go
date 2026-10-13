@@ -833,7 +833,7 @@ func TestRGLimitsS1(t *testing.T) {
 				affected = tag.RowsAffected()
 				return err
 			})
-			if !(codeOf(err) == "RL009" || (err == nil && affected == 0)) {
+			if codeOf(err) != "RL009" && (err != nil || affected != 0) {
 				t.Fatalf("owner %s: must change nothing (err=%v affected=%d)", m.stmt, err, affected)
 			}
 			// With FORCE RLS lifted (owner bypass, rolled back): the deny trigger refuses.
