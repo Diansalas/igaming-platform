@@ -65,6 +65,9 @@ func (c UsageConfig) Windows() []WindowSpec {
 // ReadUsageConfig composes the configuration in force at `at` (nil = now) for the tenant's licence
 // jurisdiction (derived server-side, never from a request).
 func ReadUsageConfig(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, kind ControlKind, asset *string, at *time.Time) (UsageConfig, error) {
+	if err := usageGuard(ctx, tx, tenantID); err != nil {
+		return UsageConfig{}, err
+	}
 	jur, err := tenantJurisdiction(ctx, tx, tenantID)
 	if err != nil {
 		return UsageConfig{}, err
@@ -125,9 +128,14 @@ type EffectiveLimitInputs struct {
 }
 
 // ReadEffectiveLimitInputs reads the composed configuration and the realized player limits of one
-// (kind, asset) for the anchor account. The tx must be a tenant-scoped (staff / system) session;
-// a player session sees only its own rows.
+// (kind, asset) for the anchor account. The tx must be a tenant-scoped (staff / system) session of
+// the request tenant (usageGuard: a player session, another tenant's session or a non-READ-COMMITTED transaction is refused).
 func ReadEffectiveLimitInputs(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, kind ControlKind, asset *string) (EffectiveLimitInputs, error) {
+	// Same scope guard as the usage readers: a player-scoped session sees only its own rows and a session of another
+	// tenant sees none, and either would read as "no limit" (ledger-finance F9).
+	if err := usageGuard(ctx, tx, tenantID); err != nil {
+		return EffectiveLimitInputs{}, err
+	}
 	acct, err := loadAccount(ctx, tx, tenantID, accountID)
 	if err != nil {
 		return EffectiveLimitInputs{}, err

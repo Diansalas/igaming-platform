@@ -113,23 +113,19 @@ func TestRGUsageS3(t *testing.T) {
 			t.Fatalf("unexpected window starts: %v", u.Windows)
 		}
 
-		// Bonus-funded legs counted for both kinds: wager +80, loss 80 - 30 - 80 = -30 in every window
-		// (the 50 conversion is not in the set).
-		bonus := base
-		bonus.WagerCountsBonus, bonus.LossCountsBonus = true, true
-		ub := w.measureStake(t, f, f.tenantA, bonus)
-		wantWB := []string{"540", "1140", "6140", "500"}
-		wantLB := []string{"280", "880", "5880", "240"}
-		for i, ws := range ub.Windows {
-			wantAmt(t, fmt.Sprintf("bonus wager %s", ws.Window.Period), ws.Wager.Account, wantWB[i])
-			wantAmt(t, fmt.Sprintf("bonus loss %s", ws.Window.Period), ws.Loss.Account, wantLB[i])
+		// The fixture holds a locked-bonus casino round: counting bonus-funded legs for EITHER kind is refused (fail closed,
+		// ledger-finance F1), while cash-only measurement (above) ignores the round.
+		for _, fl := range [][2]bool{{true, true}, {true, false}, {false, true}} {
+			bonus := base
+			bonus.WagerCountsBonus, bonus.LossCountsBonus = fl[0], fl[1]
+			err := do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
+				_, err := MeasureStakeUsage(ctx, tx, bonus)
+				return err
+			})
+			if !errors.Is(err, ErrUnrecognizedUsageLeg) {
+				t.Fatalf("flags %v with a locked-bonus casino round must fail closed, got %v", fl, err)
+			}
 		}
-		// The kinds carry independent flags.
-		mixed := base
-		mixed.WagerCountsBonus = true
-		um := w.measureStake(t, f, f.tenantA, mixed)
-		wantAmt(t, "wager with bonus, loss without (24h)", um.Windows[0].Wager.Account, "540")
-		wantAmt(t, "loss without bonus (24h)", um.Windows[0].Loss.Account, "310")
 
 		// tenant_person: A1 + A2 only. X (another Person) and B (another tenant) never join.
 		pr := base
@@ -162,6 +158,51 @@ func TestRGUsageS3(t *testing.T) {
 		ue := w.measureStake(t, f, f.tenantA, eu)
 		wantAmt(t, "EUR wager 24h", ue.Windows[0].Wager.Account, "12345")
 		wantAmt(t, "EUR loss 30d", ue.Windows[2].Loss.Account, "12345")
+	})
+
+	t.Run("BonusLegsCountedWhenFlagged_WithoutLockLegs", func(t *testing.T) {
+		f := w.newFix(t)
+		a := f.acctA1
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: ago(hr), asset: "USD", legs: []s3Leg{{a, ledger.AccountPlayerBonus, "debit", "80"}, houseCr("80")}})
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_win", at: ago(30 * time.Minute), asset: "USD", legs: []s3Leg{houseDr("30"), {a, ledger.AccountPlayerBonus, "credit", "30"}}})
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: ago(hr), asset: "USD", legs: []s3Leg{cashDr(a, "10"), houseCr("10")}})
+		req := UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD", Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &s3T}
+		u := w.measureStake(t, f, f.tenantA, req)
+		wantAmt(t, "cash only wager", u.Windows[0].Wager.Account, "10")
+		wantAmt(t, "cash only loss", u.Windows[0].Loss.Account, "10")
+		req.WagerCountsBonus, req.LossCountsBonus = true, false
+		u = w.measureStake(t, f, f.tenantA, req)
+		wantAmt(t, "wager counts bonus", u.Windows[0].Wager.Account, "90")
+		wantAmt(t, "loss does not (own flag)", u.Windows[0].Loss.Account, "10")
+		req.WagerCountsBonus, req.LossCountsBonus = false, true
+		u = w.measureStake(t, f, f.tenantA, req)
+		wantAmt(t, "wager does not (own flag)", u.Windows[0].Wager.Account, "10")
+		wantAmt(t, "loss counts bonus", u.Windows[0].Loss.Account, "60") // 80 - 30 + 10
+	})
+
+	t.Run("LockedBonusRoundAcrossTwoWindows_FailsClosedInsteadOfUnderCounting", func(t *testing.T) {
+		// ledger-finance F1: stake 80 at T-25h (outside 24h), win 30 + release 80 at T-1h. The release credit lands in the newer
+		// window without the stake debit: raw loss -10 (floored 0) against 70 for a cash-funded round. Refused while counted.
+		f := w.newFix(t)
+		a := f.acctA1
+		c := uuid.New()
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: ago(25 * hr), corr: c, asset: "USD", legs: []s3Leg{
+			{a, ledger.AccountPlayerBonus, "debit", "80"}, {a, ledger.AccountPlayerLockedBonus, "credit", "80"}}})
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_win", at: ago(hr), corr: c, asset: "USD", legs: []s3Leg{
+			houseDr("30"), {a, ledger.AccountPlayerBonus, "credit", "30"},
+			{a, ledger.AccountPlayerLockedBonus, "debit", "80"}, {a, ledger.AccountPlayerBonus, "credit", "80"}}})
+		req := UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD", Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &s3T}
+		req.LossCountsBonus = true
+		err := do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := MeasureStakeUsage(ctx, tx, req)
+			return err
+		})
+		if !errors.Is(err, ErrUnrecognizedUsageLeg) {
+			t.Fatalf("the cross-window locked-bonus round must fail closed, got %v", err)
+		}
+		req.LossCountsBonus = false
+		u := w.measureStake(t, f, f.tenantA, req)
+		wantAmt(t, "bonus not counted: nothing to under-count", u.Windows[0].Loss.Account, "0")
 	})
 
 	t.Run("LossFloor_NetWinGivesNoHeadroomUnlessAttested", func(t *testing.T) {

@@ -478,6 +478,31 @@ func TestRGEffectiveLimitInputsS3(t *testing.T) {
 		}
 		return nil
 	}))
+	// ledger-finance F9: the same scope guard as the usage readers.
+	for name, sc := range map[string]sess{"player session": playerSess(f.tenantA, f.acctA1), "other tenant": staffSess(f.tenantB, f.staffB)} {
+		err := do(w.rt, sc, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ReadEffectiveLimitInputs(ctx, tx, f.tenantA, f.acctA1, ControlWager, eur)
+			return err
+		})
+		if !errors.Is(err, ErrUsageScope) {
+			t.Fatalf("%s must be refused by the guard, got %v", name, err)
+		}
+		err = do(w.rt, sc, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ReadUsageConfig(ctx, tx, f.tenantA, f.brandA1, ControlWager, eur, nil)
+			return err
+		})
+		if !errors.Is(err, ErrUsageScope) {
+			t.Fatalf("ReadUsageConfig: %s must be refused, got %v", name, err)
+		}
+	}
+	rr := staffSess(f.tenantA, f.staffA)
+	rr.iso = pgx.RepeatableRead
+	if err := do(w.rt, rr, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReadEffectiveLimitInputs(ctx, tx, f.tenantA, f.acctA1, ControlWager, eur)
+		return err
+	}); !errors.Is(err, ErrUsageIsolation) {
+		t.Fatalf("repeatable read must be refused, got %v", err)
+	}
 	// The tenant is the session's: another tenant's account is not found.
 	err = do(w.rt, staffSess(f.tenantB, f.staffB), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ReadEffectiveLimitInputs(ctx, tx, f.tenantB, f.acctA1, ControlWager, eur)

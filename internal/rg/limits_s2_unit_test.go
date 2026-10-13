@@ -303,6 +303,7 @@ func TestConfigContentValidate_Rejects(t *testing.T) {
 		{"missing concurrent_chain_aggregation", ControlSessionDuration, func(c *ConfigContent) { c.ConcurrentChainAggregation = nil }},
 		{"session limit with a period list", ControlSessionDuration, func(c *ConfigContent) { c.AllowedPeriods = []string{"rolling_24h"} }},
 		{"missing pending_intent_ttl", ControlDeposit, func(c *ConfigContent) { c.PendingIntentTTLSeconds = nil }},
+		{"pending_intent_ttl with a value is not effective (F10)", ControlDeposit, func(c *ConfigContent) { c.PendingIntentTTLSeconds = &Attested[int64]{Value: ip(7200)} }},
 		{"pending_intent_ttl negative", ControlDeposit, func(c *ConfigContent) { c.PendingIntentTTLSeconds = &Attested[int64]{Value: ip(-3)} }},
 		{"time-out without any/durations", ControlTimeOut, func(c *ConfigContent) { c.AllowedDurationsAny = nil }},
 		{"time-out any=false without durations", ControlTimeOut, func(c *ConfigContent) { c.AllowedDurationsAny = bp(false) }},
