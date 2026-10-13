@@ -17,7 +17,11 @@ func clearEnv(t *testing.T) {
 		// PRH-2 R5 (ADR 0110): the signed-actor-proof key configuration.
 		"ACTOR_PROOF_KEYS", "ACTOR_PROOF_ACTIVE_KID",
 		// B13 (ADR 0111 2.2): payout instrument key families.
-		"PAYOUT_INSTRUMENT_KEYS", "PAYOUT_INSTRUMENT_ACTIVE_KID", "PAYOUT_INSTRUMENT_FP_KEYS", "PAYOUT_INSTRUMENT_FP_ACTIVE_KID"} {
+		"PAYOUT_INSTRUMENT_KEYS", "PAYOUT_INSTRUMENT_ACTIVE_KID", "PAYOUT_INSTRUMENT_FP_KEYS", "PAYOUT_INSTRUMENT_FP_ACTIVE_KID",
+		// ADR 0119 S1: staff MFA key families, issuer and session bounds.
+		"STAFF_MFA_FACTOR_KEYS", "STAFF_MFA_FACTOR_ACTIVE_KID", "STAFF_MFA_MAC_KEYS", "STAFF_MFA_MAC_ACTIVE_KID", "STAFF_MFA_ISSUER",
+		"STAFF_ACCESS_TOKEN_TTL_SECONDS", "STAFF_REFRESH_IDLE_TTL_SECONDS", "STAFF_SESSION_ABSOLUTE_TTL_SECONDS",
+		"STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS", "STAFF_STEP_UP_FINANCIAL_MAX_AGE_SECONDS"} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
@@ -295,6 +299,7 @@ func TestLoad_EnvironmentExplicit_TrueWhenSet(t *testing.T) {
 			t.Setenv("DATABASE_URL", "postgres://localhost/test")
 			t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
 			t.Setenv("APP_ENV", env)
+			setStaffMFAKeys(t) // ADR 0119 S1: required when APP_ENV=production
 
 			cfg, err := Load()
 			if err != nil {
@@ -455,6 +460,7 @@ func TestLoad_ValidAppEnvValuesAccepted(t *testing.T) {
 			t.Setenv("DATABASE_URL", "postgres://localhost/test")
 			t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
 			t.Setenv("APP_ENV", good)
+			setStaffMFAKeys(t) // ADR 0119 S1: required when APP_ENV=production
 
 			cfg, err := Load()
 			if err != nil {
@@ -527,6 +533,7 @@ func TestLoad_ProductionWithTestSupportEndpointsDefaultSucceeds(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")
 	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
 	t.Setenv("APP_ENV", "production")
+	setStaffMFAKeys(t) // ADR 0119 S1: required when APP_ENV=production
 
 	cfg, err := Load()
 	if err != nil {
