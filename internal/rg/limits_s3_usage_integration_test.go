@@ -185,12 +185,17 @@ func TestRGUsageS3(t *testing.T) {
 		// Calendar day (UTC) starts 00:00 exactly.
 		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: time.Date(2025, 3, 12, 0, 0, 0, 0, time.UTC), asset: "USD", legs: []s3Leg{cashDr(a, "100"), houseCr("100")}})
 		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: time.Date(2025, 3, 11, 23, 59, 59, 999999000, time.UTC), asset: "USD", legs: []s3Leg{cashDr(a, "1000"), houseCr("1000")}})
+		// The longest window starts at T-720h exactly: a posting AT that start counts for it (and for no shorter window),
+		// one microsecond before does not.
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: s3T.Add(-720 * hr), asset: "USD", legs: []s3Leg{cashDr(a, "20000"), houseCr("20000")}})
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: s3T.Add(-720*hr - time.Microsecond), asset: "USD", legs: []s3Leg{cashDr(a, "300000"), houseCr("300000")}})
 		// A posting AFTER the replay instant is not part of a replay.
 		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: s3T.Add(time.Microsecond), asset: "USD", legs: []s3Leg{cashDr(a, "10000"), houseCr("10000")}})
 		u := w.measureStake(t, f, f.tenantA, UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD",
-			Windows: []WindowSpec{{Period: PeriodRolling24h}, {Period: PeriodCalendarDay, CalendarTZ: "UTC"}}, At: &s3T})
+			Windows: []WindowSpec{{Period: PeriodRolling24h}, {Period: PeriodCalendarDay, CalendarTZ: "UTC"}, {Period: PeriodRolling30d}}, At: &s3T})
 		wantAmt(t, "rolling 24h", u.Windows[0].Wager.Account, "1101") // 1 + 100 + 1000 (the 23:59:59.999999 bet is inside the last 24h)
 		wantAmt(t, "calendar day", u.Windows[1].Wager.Account, "100")
+		wantAmt(t, "rolling 30d (the bet exactly at the start counts)", u.Windows[2].Wager.Account, "21111") // 1 + 10 + 100 + 1000 + 20000
 	})
 
 	t.Run("WindowRollover_CalendarDayResetsRollingDoesNot", func(t *testing.T) {

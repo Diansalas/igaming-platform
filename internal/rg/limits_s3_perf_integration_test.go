@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -23,11 +24,19 @@ import (
 // logged (evidence), the asserted properties are structural (index used, no sequential scan of
 // ledger_entries / deposit_intents, bounded buffers) - no SLA is claimed.
 
+// Default scale keeps the suite quick; RG_S3_SCALE=large reproduces the evidence run recorded in
+// docs/plans/prh2-hardening-round/adr0115-s3-explain-evidence.txt (about 7 minutes, almost all of it seeding the ledger
+// through the real triggers).
+var perfTargetHistory, perfFiller = func() (int, int) {
+	if os.Getenv("RG_S3_SCALE") == "large" {
+		return 20000, 40000
+	}
+	return 3000, 6000
+}()
+
 const (
-	perfTargetHistory = 20000
-	perfFiller        = 40000
-	perfIndexLedger   = "idx_ledger_entries_tenant_player_asset_created"
-	perfIndexDeposit  = "idx_deposit_intents_tenant_player_asset_created"
+	perfIndexLedger  = "idx_ledger_entries_tenant_player_asset_created"
+	perfIndexDeposit = "idx_deposit_intents_tenant_player_asset_created"
 )
 
 type planNode struct {
@@ -59,8 +68,9 @@ func (w *s1World) bulkLedger(t *testing.T, tenant, acct uuid.UUID, asset string,
 		if n-done < m {
 			m = n - done
 		}
-		bf := from.Add(span * time.Duration(done) / time.Duration(n))
-		bt := from.Add(span * time.Duration(done+m) / time.Duration(n))
+		step := span / time.Duration(n) // divide first: span*done overflows int64 nanoseconds
+		bf := from.Add(step * time.Duration(done))
+		bt := from.Add(step * time.Duration(done+m))
 		w.bulkLedgerBatch(t, tenant, acct, asset, m, bf, bt)
 	}
 }
@@ -159,6 +169,17 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 		}
 		return nil
 	}())
+
+	// The seed must have produced the intended time distribution (a Duration overflow once clustered it).
+	var in30, in7, all int
+	wantOK(t, "distribution", w.owner.WithTenant(ctx, f.tenantA, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE created_at >= $2 - interval '30 days'), count(*) FILTER (WHERE created_at >= $2 - interval '7 days'), count(*)
+			FROM ledger_entries WHERE player_account_id = $1 AND direction = 'debit'`, a, now).Scan(&in30, &in7, &all)
+	}))
+	t.Logf("target player debit entries: %d in total, %d in the last 30 days, %d in the last 7 days (rows the 30-day window must read)", all, in30, in7)
+	if all != perfTargetHistory+300 || in30 < 300+perfTargetHistory/20 || in30 > 300+perfTargetHistory/8 || in7 < 300 || in7 > in30 {
+		t.Fatalf("seed distribution is wrong: total %d, 30d %d, 7d %d", all, in30, in7)
+	}
 
 	windows := []WindowSpec{{Period: PeriodRolling24h}, {Period: PeriodRolling7d}, {Period: PeriodRolling30d}, {Period: PeriodCalendarDay, CalendarTZ: "Europe/Berlin"}}
 	periods, tzs, wss, err := windowArgs(windows)

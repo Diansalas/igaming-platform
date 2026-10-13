@@ -33,6 +33,10 @@ func TestRGDepositUsageS3(t *testing.T) {
 		w.s3Intent(t, f.tenantA, a, usd, "succeeded", "300", ago(3*hr), &d300)
 		d450 := w.s3Deposit(t, f.tenantA, a, usd, "450", ago(3*hr))
 		w.s3Intent(t, f.tenantA, a, usd, "succeeded", "500", ago(3*hr), &d450)
+		// An in-flight-looking intent that ALREADY has its ledger posting (33): it counts once, at the credited amount,
+		// from the ledger side - never also as in-flight.
+		d33 := w.s3Deposit(t, f.tenantA, a, usd, "33", ago(2*hr+30*time.Minute))
+		w.s3Intent(t, f.tenantA, a, usd, "ambiguous", "33", ago(2*hr+30*time.Minute), &d33)
 		// Inbound deposit with no intent.
 		w.s3Deposit(t, f.tenantA, a, usd, "70", ago(4*hr))
 		// A late credit on a failed intent: the money arrived, it counts once (ledger side only).
@@ -53,9 +57,9 @@ func TestRGDepositUsageS3(t *testing.T) {
 		at := s3T
 		req := UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: usd, Windows: s3Windows("UTC"), At: &at}
 		u := w.measureDeposit(t, f, f.tenantA, req)
-		credited := []string{"880", "880", "1880", "880"}
+		credited := []string{"913", "913", "1913", "913"}
 		inflight := []string{"150", "150", "150", "150"}
-		total := []string{"1030", "1030", "2030", "1030"}
+		total := []string{"1063", "1063", "2063", "1063"}
 		for i, ws := range u.Windows {
 			wantAmt(t, "credited "+string(ws.Window.Period), ws.Credited.Account, credited[i])
 			wantAmt(t, "in-flight "+string(ws.Window.Period), ws.InFlight.Account, inflight[i])
@@ -67,19 +71,19 @@ func TestRGDepositUsageS3(t *testing.T) {
 		ex.ExcludeIntentID = &p1
 		ue := w.measureDeposit(t, f, f.tenantA, ex)
 		wantAmt(t, "in-flight without the candidate", ue.Windows[0].InFlight.Account, "50")
-		wantAmt(t, "total without the candidate", ue.Windows[0].Total.Account, "930")
+		wantAmt(t, "total without the candidate", ue.Windows[0].Total.Account, "963")
 
 		// tenant_person: joined by person_id through the tenant's accounts: A1 + A2; X and B never.
 		pr := req
 		pr.Scope = LimitScopeTenantPerson
 		up := w.measureDeposit(t, f, f.tenantA, pr)
 		wantAmt(t, "person in-flight", up.Windows[0].InFlight.Person, "175")
-		wantAmt(t, "person total", up.Windows[0].Total.Person, "1055")
-		wantAmt(t, "anchor total unchanged", up.Windows[0].Total.Account, "1030")
+		wantAmt(t, "person total", up.Windows[0].Total.Person, "1088")
+		wantAmt(t, "anchor total unchanged", up.Windows[0].Total.Account, "1063")
 		if len(up.AccountIDs) != 2 {
 			t.Fatalf("Person set: %v", up.AccountIDs)
 		}
-		wantAmt(t, "person 30d total", up.Windows[2].Total.Person, "2055")
+		wantAmt(t, "person 30d total", up.Windows[2].Total.Person, "2088")
 
 		// EUR is its own asset.
 		eu := req
@@ -295,6 +299,13 @@ func TestRGSessionUsageS3(t *testing.T) {
 	wantOK(t, "floored", err)
 	if uf.ElapsedSeconds != 5*3600+1 {
 		t.Fatalf("floored seconds %d", uf.ElapsedSeconds)
+	}
+	// An instant before the root (clock skew / replay) is zero seconds, never negative.
+	early := ago(6 * hr)
+	ue2, err := run(own, SessionRequest{TenantID: f.tenantA, PlayerAccountID: a, SessionID: s3, At: &early})
+	wantOK(t, "before the root", err)
+	if ue2.ElapsedSeconds != 0 {
+		t.Fatalf("elapsed before the root must be 0, got %d", ue2.ElapsedSeconds)
 	}
 	// Fail closed (never "zero elapsed"): another principal, the wrong account, an unknown session, another tenant.
 	if _, err := run(sess{tenant: f.tenantA.String(), principal: f.acctA2.String()}, SessionRequest{TenantID: f.tenantA, PlayerAccountID: a, SessionID: s3, At: &at}); !errors.Is(err, ErrSessionChainNotFound) {
