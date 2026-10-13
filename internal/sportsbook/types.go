@@ -319,10 +319,11 @@ const (
 	// RejectionKYCDenied is PRH-I3's addition (ADR 0096 §2.4/§3.5): the
 	// KYC "play" enforcement point denied this bet (a jurisdiction has an
 	// active KYC-before-play policy and the player's verification is
-	// pending/failed/unavailable). RejectionCode carries kyc.
-	// EnforcementDecision.Code (a closed enum, e.g. "kyc_sportsbook_play:
-	// pending") - never matched_trigger or policy_version (security
-	// condition 8).
+	// pending/failed/unavailable, or - ADR 0116 s5.1, indistinguishably - an AML
+	// hold or a hold-evaluator failure applies). RejectionCode carries kyc.
+	// EnforcementDecision.Code (a closed enum: "account_review" for pending /
+	// held / evaluator error, otherwise e.g. "kyc_sportsbook_play:failed") -
+	// never matched_trigger or policy_version (security condition 8).
 	RejectionKYCDenied = "kyc_denied"
 	// RejectionTenantNotActive is R3-GAME-POSTINGS-NONACTIVE-1's addition
 	// (owner decision 2026-10-05, ADR 0095 section 40.5): the tenant is
