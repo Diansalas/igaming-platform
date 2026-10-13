@@ -35,7 +35,7 @@ func TestRedaction_NoSecretTypeEverRenders(t *testing.T) {
 	var needles []string
 	addBytes := func(b []byte) {
 		needles = append(needles, string(b), hex.EncodeToString(b), base64.StdEncoding.EncodeToString(b),
-			base64.RawURLEncoding.EncodeToString(b), base32NoPad.EncodeToString(b), fmt.Sprint(b)[1:20])
+			base64.RawURLEncoding.EncodeToString(b), base32NoPad.EncodeToString(b), fmt.Sprintf("%d %d %d %d %d", b[0], b[1], b[2], b[3], b[4]))
 	}
 	addBytes(secret.b)
 	addBytes(tok.secret)
