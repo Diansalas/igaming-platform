@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
@@ -439,6 +440,14 @@ func TestR32_Migration0127_BackfillsExistingDestinationParks(t *testing.T) {
 	if err := r32DownTo0126(t, m); err != nil {
 		t.Fatalf("down to 0126 (empty): %v", err)
 	}
+	// ADR 0116 S1: the world is now BELOW the AML migrations (0140-0142 were rolled back with it), so the real hold read
+	// fails closed and the decision-log CHECK no longer admits the public `review` outcome that a KYC `pending` now records.
+	// Neither is under test here: stub the hold read to "no hold" and re-admit `review` on this scratch schema only.
+	t.Cleanup(kyc.SetHoldEvaluatorForTest(kyc.NoHoldEvaluator))
+	if _, err := m.pool.Raw().Exec(context.Background(), `ALTER TABLE kyc_enforcement_decisions DROP CONSTRAINT kyc_enforcement_decisions_outcome_check,
+		ADD CONSTRAINT kyc_enforcement_decisions_outcome_check CHECK (outcome IN ('not_required','passed','pending','failed','unavailable','review'))`); err != nil {
+		t.Fatalf("scratch CHECK widen: %v", err)
+	}
 	var parks []*b11Parked
 	for i, reason := range []string{r32Reason, TerminalReasonDestinationMismatch} {
 		wr, a := m.payout(int64(1180 + i))
@@ -447,6 +456,15 @@ func TestR32_Migration0127_BackfillsExistingDestinationParks(t *testing.T) {
 		})
 		fresh := m.attempt(a.ID)
 		parks = append(parks, &b11Parked{wr: wr, stale: a, fresh: fresh, ref: *fresh.ProviderReference})
+	}
+	// Restore the pre-0141 decision-log shape (0141's pre-flight refuses anything else): drop the scratch-only `review` rows
+	// written by the fixture payouts, with the append-only trigger lifted for that one statement, then re-assert the CHECK.
+	if _, err := m.pool.Raw().Exec(context.Background(), `ALTER TABLE kyc_enforcement_decisions DISABLE TRIGGER kyc_enforcement_decisions_immutable;
+		DELETE FROM kyc_enforcement_decisions WHERE outcome = 'review';
+		ALTER TABLE kyc_enforcement_decisions ENABLE TRIGGER kyc_enforcement_decisions_immutable;
+		ALTER TABLE kyc_enforcement_decisions DROP CONSTRAINT kyc_enforcement_decisions_outcome_check,
+		ADD CONSTRAINT kyc_enforcement_decisions_outcome_check CHECK (outcome IN ('not_required','passed','pending','failed','unavailable'))`); err != nil {
+		t.Fatalf("scratch CHECK restore: %v", err)
 	}
 	if _, err := m.pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
 		t.Fatalf("up: %v", err)
