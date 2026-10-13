@@ -91,9 +91,8 @@ MUTANTS = [
 	return func(w http.ResponseWriter, r *http.Request) {
 		noStore(w)''', '''func newStaffStepUpHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {''', HS, 'TestStepUp_EndToEnd'),
- ('H07', HND, '''		if err := db.SetSessionInternalOpID(ctx, tx, c.session.SessionID); err != nil {
-			return nil, false, err
-		}''', '', HS, 'TestStepUp_LockoutSharedWithLogin'),
+ ('H07', HND, '''		if err := db.SetSessionInternalOpID(ctx, tx, c.session.SessionID); err != nil {''',
+  '''		if err := db.SetSessionInternalOpID(ctx, tx, uuid.Nil); err != nil {''', HS, 'TestStepUp_LockoutSharedWithLogin'),
  ('H08', HND, '''			case !noFactor && lockedOutcome(vr.Outcome):
 				out = stepUpOutcomeLocked''', '''			case false:
 				out = stepUpOutcomeLocked''', HS, 'TestStepUp_LockoutSharedWithLogin'),
