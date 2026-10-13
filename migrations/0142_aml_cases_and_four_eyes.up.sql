@@ -125,6 +125,8 @@ CREATE TABLE aml_case_events (
     to_status                 TEXT NULL CHECK (to_status IN ('open', 'in_review', 'escalated', 'sar_decision_pending', 'closed_no_action', 'closed_sar_not_filed', 'closed_sar_filed')),
     proposal_kind             TEXT NULL CHECK (proposal_kind IN ('close_sar_not_filed', 'close_sar_filed', 'lift_hold')),
     proposal_seq              INTEGER NULL CHECK (proposal_seq >= 1),
+    -- The person's monotonic hold-change mark at proposal time (security F8; forced by the guard, never trusted).
+    hold_mark                 BIGINT NULL,
     content_hash              TEXT NULL CHECK (content_hash ~ '^[0-9a-f]{64}$'),
     subject_hold_id           UUID NULL,
     note_id                   UUID NULL,
@@ -141,6 +143,7 @@ CREATE TABLE aml_case_events (
     FOREIGN KEY (tenant_id, case_id) REFERENCES aml_cases (tenant_id, id) ON DELETE RESTRICT,
     FOREIGN KEY (tenant_id, subject_hold_id) REFERENCES aml_holds (tenant_id, id) ON DELETE RESTRICT,
     FOREIGN KEY (tenant_id, note_id) REFERENCES aml_case_notes (tenant_id, id) ON DELETE RESTRICT,
+    CHECK ((event_type = 'proposal') = (hold_mark IS NOT NULL)),
     -- Event shape, per type: every field of the type explicit, every other field absent.
     CHECK (event_type <> 'opened' OR (seq = 1 AND from_status IS NULL AND to_status = 'open' AND proposal_kind IS NULL AND proposal_seq IS NULL
                                       AND content_hash IS NULL AND subject_hold_id IS NULL AND note_id IS NULL AND external_filing_reference IS NULL)),
@@ -397,6 +400,7 @@ BEGIN
             RAISE EXCEPTION 'aml: a case can be SAR-flagged only while it is being worked' USING ERRCODE = 'AM010';
         END IF;
     ELSIF NEW.event_type = 'proposal' THEN
+        NEW.hold_mark := public.aml_person_hold_mark(NEW.tenant_id, v_case.person_id);
         IF v_status NOT IN ('in_review', 'escalated', 'sar_decision_pending') THEN
             RAISE EXCEPTION 'aml: a proposal needs a case that is being worked' USING ERRCODE = 'AM010';
         END IF;
@@ -441,9 +445,10 @@ BEGIN
         IF NEW.actor_person_id = v_case.person_id THEN
             RAISE EXCEPTION 'aml: the case subject may not approve on their own case' USING ERRCODE = 'AM011';
         END IF;
-        IF EXISTS (SELECT 1 FROM public.aml_holds h WHERE h.tenant_id = NEW.tenant_id AND h.person_id = v_case.person_id AND h.placed_at > v_prop.created_at)
-           OR EXISTS (SELECT 1 FROM public.aml_hold_lifts l JOIN public.aml_holds h ON h.id = l.hold_id
-                       WHERE h.tenant_id = NEW.tenant_id AND h.person_id = v_case.person_id AND l.lifted_at > v_prop.created_at) THEN
+        -- Any hold PLACED or LIFTED for the subject since the proposal invalidates it. The comparison is of the monotonic
+        -- change_seq mark (0141), not of timestamps, and runs under aml_person_lock (taken by aml_case_lock_for_write), so a
+        -- hold change committing concurrently with the approval is either ordered before it (seen) or after it.
+        IF public.aml_person_hold_mark(NEW.tenant_id, v_case.person_id) IS DISTINCT FROM v_prop.hold_mark THEN
             RAISE EXCEPTION 'aml: a hold changed since the proposal; the proposal is invalid' USING ERRCODE = 'AM012';
         END IF;
         IF NEW.proposal_kind = 'lift_hold' THEN
@@ -520,6 +525,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_alert:raise', 'new',
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_person::text, p_severity, p_reason_code)));
+    PERFORM public.aml_assert_not_subject(a.o_person_id, p_person);
     v_owner := public.aml_owner_scope_of_tenant(p_tenant);
     IF public.aml_actor_owner_scope(a.o_scope) IS DISTINCT FROM v_owner THEN
         RAISE EXCEPTION 'aml: the actor does not own this tenant''s AML scope' USING ERRCODE = 'AM002';
@@ -545,6 +551,7 @@ BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:open', 'new',
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_person::text, p_case_kind, p_reason_code,
             (SELECT string_agg(i::text, ',' ORDER BY i::text) FROM unnest(p_alerts) AS i))));
+    PERFORM public.aml_assert_not_subject(a.o_person_id, p_person);
     v_owner := public.aml_owner_scope_of_tenant(p_tenant);
     IF public.aml_actor_owner_scope(a.o_scope) IS DISTINCT FROM v_owner THEN
         RAISE EXCEPTION 'aml: the actor does not own this tenant''s AML scope' USING ERRCODE = 'AM002';
@@ -568,7 +575,7 @@ END
 $$;
 
 -- Loads the case for a WRITE under a row lock, asserts the actor owns its scope and the expected sequence (CAS).
-CREATE FUNCTION aml_case_lock_for_write(p_tenant uuid, p_case uuid, p_actor_scope text, p_expected_seq integer)
+CREATE FUNCTION aml_case_lock_for_write(p_tenant uuid, p_case uuid, p_actor_scope text, p_actor_person uuid, p_expected_seq integer)
 RETURNS TABLE (o_owner_scope text, o_person_id uuid)
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
@@ -582,6 +589,8 @@ BEGIN
         RAISE EXCEPTION 'aml: not found' USING ERRCODE = 'AM040';
     END IF;
     PERFORM public.aml_assert_write_scope(p_actor_scope, v_case.owner_scope);
+    PERFORM public.aml_assert_not_subject(p_actor_person, v_case.person_id);
+    PERFORM public.aml_person_lock(p_tenant, v_case.person_id);
     v_last := public.aml_case_last_seq(p_case);
     IF p_expected_seq IS DISTINCT FROM v_last THEN
         RAISE EXCEPTION 'aml: the case moved on (expected sequence % but it is %)', p_expected_seq, v_last USING ERRCODE = 'AM012';
@@ -603,7 +612,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:transition', p_case::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_case::text, p_expected_seq::text, p_to_status, p_reason_code)));
-    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, p_expected_seq);
+    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, a.o_person_id, p_expected_seq);
     v_from := public.aml_case_status(p_case);
     INSERT INTO public.aml_case_events (tenant_id, owner_scope, case_id, seq, event_type, from_status, to_status, reason_code, actor_id, actor_person_id, actor_scope)
     VALUES (p_tenant, v_case.o_owner_scope, p_case, p_expected_seq + 1, 'status_changed', v_from, p_to_status, p_reason_code, a.o_actor, a.o_person_id, a.o_scope);
@@ -622,7 +631,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:note', p_case::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_case::text, p_expected_seq::text, p_body, p_lint_version)));
-    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, p_expected_seq);
+    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, a.o_person_id, p_expected_seq);
     INSERT INTO public.aml_case_notes (tenant_id, owner_scope, case_id, body, lint_version, created_by, created_by_person_id, created_by_scope)
     VALUES (p_tenant, v_case.o_owner_scope, p_case, p_body, p_lint_version, a.o_actor, a.o_person_id, a.o_scope)
     RETURNING id INTO v_note;
@@ -642,7 +651,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:flag_sar', p_case::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_case::text, p_expected_seq::text, p_reason_code)));
-    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, p_expected_seq);
+    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, a.o_person_id, p_expected_seq);
     INSERT INTO public.aml_case_events (tenant_id, owner_scope, case_id, seq, event_type, reason_code, actor_id, actor_person_id, actor_scope)
     VALUES (p_tenant, v_case.o_owner_scope, p_case, p_expected_seq + 1, 'sar_flagged', p_reason_code, a.o_actor, a.o_person_id, a.o_scope);
     RETURN p_expected_seq + 1;
@@ -662,7 +671,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:propose', p_case::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_case::text, p_expected_seq::text, p_kind, p_hold::text, p_external_ref, p_reason_code)));
-    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, p_expected_seq);
+    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, a.o_person_id, p_expected_seq);
     v_hash := public.aml_proposal_content_hash(p_tenant, p_case, p_expected_seq + 1, p_kind, p_hold, p_external_ref, p_reason_code, a.o_actor);
     INSERT INTO public.aml_case_events (tenant_id, owner_scope, case_id, seq, event_type, proposal_kind, content_hash, subject_hold_id,
                                         external_filing_reference, reason_code, actor_id, actor_person_id, actor_scope)
@@ -689,7 +698,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:approve', p_case::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_case::text, p_proposal_seq::text, p_content_hash, p_reason_code)));
-    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, p_proposal_seq);
+    SELECT * INTO v_case FROM public.aml_case_lock_for_write(p_tenant, p_case, a.o_scope, a.o_person_id, p_proposal_seq);
     SELECT p.proposal_kind, p.subject_hold_id, p.external_filing_reference INTO v_prop
       FROM public.aml_case_events p WHERE p.case_id = p_case AND p.seq = p_proposal_seq AND p.event_type = 'proposal';
     IF NOT FOUND THEN
@@ -728,6 +737,7 @@ BEGIN
         RAISE EXCEPTION 'aml: not found' USING ERRCODE = 'AM040';
     END IF;
     PERFORM public.aml_assert_row_scope(a.o_scope, c.owner_scope);
+    PERFORM public.aml_assert_not_subject(a.o_person_id, c.person_id);
     o_case_id := c.id; o_owner_scope := c.owner_scope; o_person_id := c.person_id; o_case_kind := c.case_kind;
     o_status := public.aml_case_status(p_case); o_sar_flagged := public.aml_case_sar_flagged(p_case);
     o_last_seq := public.aml_case_last_seq(p_case); o_opened_at := c.opened_at;
@@ -748,11 +758,12 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:read', p_case::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_case::text, 'events')));
-    SELECT x.owner_scope INTO c FROM public.aml_cases x WHERE x.id = p_case AND x.tenant_id = p_tenant;
+    SELECT x.owner_scope, x.person_id INTO c FROM public.aml_cases x WHERE x.id = p_case AND x.tenant_id = p_tenant;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'aml: not found' USING ERRCODE = 'AM040';
     END IF;
     PERFORM public.aml_assert_row_scope(a.o_scope, c.owner_scope);
+    PERFORM public.aml_assert_not_subject(a.o_person_id, c.person_id);
     RETURN QUERY
         SELECT e.seq, e.event_type, e.from_status, e.to_status, e.proposal_kind, e.proposal_seq, e.content_hash, e.subject_hold_id, e.note_id,
                e.external_filing_reference, e.reason_code, e.actor_id, e.actor_scope, e.created_at
@@ -771,11 +782,12 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_case:read', p_case::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_case::text, 'notes')));
-    SELECT x.owner_scope INTO c FROM public.aml_cases x WHERE x.id = p_case AND x.tenant_id = p_tenant;
+    SELECT x.owner_scope, x.person_id INTO c FROM public.aml_cases x WHERE x.id = p_case AND x.tenant_id = p_tenant;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'aml: not found' USING ERRCODE = 'AM040';
     END IF;
     PERFORM public.aml_assert_row_scope(a.o_scope, c.owner_scope);
+    PERFORM public.aml_assert_not_subject(a.o_person_id, c.person_id);
     RETURN QUERY
         SELECT n.id, n.body, n.lint_version, n.created_by, n.created_at FROM public.aml_case_notes n WHERE n.case_id = p_case ORDER BY n.created_at, n.id;
 END
@@ -799,6 +811,7 @@ BEGIN
         SELECT c.id, c.owner_scope, c.person_id, public.aml_case_status(c.id), public.aml_case_sar_flagged(c.id), public.aml_case_last_seq(c.id), c.opened_at
           FROM public.aml_cases c
          WHERE c.tenant_id = p_tenant AND public.aml_scope_compatible(a.o_scope, c.owner_scope)
+           AND c.person_id IS DISTINCT FROM a.o_person_id
          ORDER BY c.opened_at DESC, c.id DESC LIMIT p_limit;
 END
 $$;
@@ -835,7 +848,10 @@ BEGIN
         'aml_case_status(uuid)', 'aml_case_last_seq(uuid)', 'aml_case_sar_flagged(uuid)', 'aml_case_transition_allowed(text, text)',
         'aml_proposal_content_hash(uuid, uuid, integer, text, uuid, text, text, uuid)',
         'aml_alerts_guard()', 'aml_cases_guard()', 'aml_case_alerts_guard()', 'aml_case_notes_guard()', 'aml_case_events_guard()',
-        'aml_case_lock_for_write(uuid, uuid, text, integer)'
+        'aml_case_lock_for_write(uuid, uuid, text, uuid, integer)',
+        -- Not granted to the runtime role until the HD-RET-1 erasure job exists as its caller (security F5): the boolean
+        -- it returns is not a tenant-session need today.
+        'aml_person_has_records(uuid, uuid)'
     ] LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
@@ -847,7 +863,7 @@ BEGIN
         'aml_case_transition(uuid, uuid, integer, text, text)', 'aml_case_add_note(uuid, uuid, integer, text, text)',
         'aml_case_flag_sar(uuid, uuid, integer, text)', 'aml_case_propose(uuid, uuid, integer, text, uuid, text, text)',
         'aml_case_approve(uuid, uuid, integer, text, text)', 'aml_case_read(uuid, uuid)', 'aml_case_events_list(uuid, uuid)',
-        'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)', 'aml_person_has_records(uuid, uuid)'
+        'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)'
     ] LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN

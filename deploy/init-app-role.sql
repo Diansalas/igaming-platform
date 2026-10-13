@@ -210,12 +210,16 @@ BEGIN
         'aml_case_transition(uuid, uuid, integer, text, text)', 'aml_case_add_note(uuid, uuid, integer, text, text)',
         'aml_case_flag_sar(uuid, uuid, integer, text)', 'aml_case_propose(uuid, uuid, integer, text, uuid, text, text)',
         'aml_case_approve(uuid, uuid, integer, text, text)', 'aml_case_read(uuid, uuid)', 'aml_case_events_list(uuid, uuid)',
-        'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)', 'aml_person_has_records(uuid, uuid)'
+        'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)'
     ] LOOP
         IF to_regprocedure('public.' || f) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
         END IF;
     END LOOP;
+    -- NOT granted until the HD-RET-1 erasure job exists as its caller (security F5): re-assert the revoke.
+    IF to_regprocedure('public.aml_person_has_records(uuid, uuid)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION aml_person_has_records(uuid, uuid) FROM igaming_runtime;
+    END IF;
 END
 $$;
 

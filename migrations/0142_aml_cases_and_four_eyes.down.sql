@@ -61,7 +61,7 @@ DROP FUNCTION aml_case_propose(uuid, uuid, integer, text, uuid, text, text);
 DROP FUNCTION aml_case_flag_sar(uuid, uuid, integer, text);
 DROP FUNCTION aml_case_add_note(uuid, uuid, integer, text, text);
 DROP FUNCTION aml_case_transition(uuid, uuid, integer, text, text);
-DROP FUNCTION aml_case_lock_for_write(uuid, uuid, text, integer);
+DROP FUNCTION aml_case_lock_for_write(uuid, uuid, text, uuid, integer);
 DROP FUNCTION aml_case_open(uuid, uuid, text, text, uuid[]);
 DROP FUNCTION aml_alert_raise(uuid, uuid, text, text);
 DROP TABLE aml_case_events;

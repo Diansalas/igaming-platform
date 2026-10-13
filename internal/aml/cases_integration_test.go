@@ -547,7 +547,8 @@ func TestErasure_FailsClosedAgainstAMLRecords(t *testing.T) {
 	clean := c.player()
 	has := func(person uuid.UUID) bool {
 		var b bool
-		if err := c.tenantTx(func(ctx context.Context, tx pgx.Tx) error {
+		// The runtime role has no EXECUTE until the HD-RET-1 job is its caller; the check runs as the owner here.
+		if err := c.Owner.WithTenant(bg, c.Tenant, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT aml_person_has_records($1, $2)`, c.Tenant, person).Scan(&b)
 		}); err != nil {
 			t.Fatal(err)
@@ -562,7 +563,7 @@ func TestErasure_FailsClosedAgainstAMLRecords(t *testing.T) {
 		t.Fatal("a person with a case has AML records; another does not")
 	}
 	// A wrong tenant is refused, never silently false.
-	if err := c.RT.WithTenant(bg, c.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+	if err := c.Owner.WithTenant(bg, c.Tenant, func(ctx context.Context, tx pgx.Tx) error {
 		var b bool
 		return tx.QueryRow(ctx, `SELECT aml_person_has_records($1, $2)`, uuid.New(), c.P.PersonID).Scan(&b)
 	}); pgCode(err) != "AM026" {

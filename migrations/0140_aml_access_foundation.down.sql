@@ -15,7 +15,8 @@ BEGIN
     END IF;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'aml\_%'
                   AND proname NOT IN ('aml_owner_scope_of_tenant', 'aml_scope_compatible',
-                                      'aml_officer_quorum', 'aml_assert_quorum', 'aml_authorize', 'aml_assert_row_scope')) THEN
+                                      'aml_officer_quorum', 'aml_assert_quorum', 'aml_authorize', 'aml_assert_row_scope',
+                                      'aml_platform_grantee_live', 'aml_grant_eligible', 'aml_assert_not_subject')) THEN
         RAISE EXCEPTION 'migration 0140 down refused: AML functions of a later migration still exist; roll those back first' USING ERRCODE = 'AM099';
     END IF;
     -- Request / grant rows are visible only through their own RLS; count them as the owner with RLS lifted for this
@@ -35,6 +36,9 @@ DROP FUNCTION aml_assert_row_scope(text, text);
 DROP FUNCTION aml_authorize(uuid, text, text, text);
 DROP FUNCTION aml_assert_quorum(uuid, text);
 DROP FUNCTION aml_officer_quorum(uuid, text);
+DROP FUNCTION aml_assert_not_subject(uuid, uuid);
+DROP FUNCTION aml_grant_eligible(uuid, uuid, text, uuid);
+DROP FUNCTION aml_platform_grantee_live(uuid, uuid);
 DROP FUNCTION aml_scope_compatible(text, text);
 DROP FUNCTION aml_owner_scope_of_tenant(uuid);
 

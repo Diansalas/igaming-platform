@@ -109,8 +109,11 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 		"aml_hold_active": true, "aml_hold_match": true, "aml_record_enforcement_decision": true, "aml_hold_place": true,
 		"aml_hold_lift": true, "aml_hold_list": true, "aml_alert_raise": true, "aml_case_open": true, "aml_case_transition": true,
 		"aml_case_add_note": true, "aml_case_flag_sar": true, "aml_case_propose": true, "aml_case_approve": true, "aml_case_read": true,
-		"aml_case_events_list": true, "aml_case_notes_list": true, "aml_case_queue": true, "aml_person_has_records": true,
+		"aml_case_events_list": true, "aml_case_notes_list": true, "aml_case_queue": true,
 	}
+	// SECURITY DEFINER but NOT executable by the runtime role: the erasure check (until the HD-RET-1 job is its caller, security F5)
+	// and the platform-grantee liveness helper (reachable only through the owner-run definer chain, security F1/F3).
+	definerNoRuntime := map[string]bool{"aml_person_has_records": true, "aml_platform_grantee_live": true}
 	owner := catalogQuery(t, w, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = 'public.aml_holds'::regclass`)[0][0].(string)
 	rows := catalogQuery(t, w, `SELECT p.oid::regprocedure::text, p.proname, p.prosecdef, coalesce(array_to_string(p.proconfig, ','), ''), pg_get_userbyid(p.proowner),
 			has_function_privilege('igaming_runtime', p.oid, 'EXECUTE'), has_function_privilege('public', p.oid, 'EXECUTE')
@@ -134,6 +137,12 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 			seenAPI[name] = true
 			if !secdef || !rt {
 				t.Errorf("%s: API functions must be SECURITY DEFINER and executable by the runtime role (definer=%v runtime=%v)", sig, secdef, rt)
+			}
+			continue
+		}
+		if definerNoRuntime[name] {
+			if !secdef || rt {
+				t.Errorf("%s: must be SECURITY DEFINER and NOT executable by the runtime role (definer=%v runtime=%v)", sig, secdef, rt)
 			}
 			continue
 		}
@@ -165,6 +174,9 @@ func TestCatalog_EveryOfficerFunctionAuthorisesFirst(t *testing.T) {
 	noProof := map[string]bool{"aml_hold_active": true, "aml_hold_match": true, "aml_record_enforcement_decision": true, "aml_person_has_records": true}
 	for _, r := range rows {
 		name, src := r[0].(string), r[1].(string)
+		if name == "aml_platform_grantee_live" {
+			continue // the pinned liveness helper reads one platform staff row; it has no tenant argument
+		}
 		if noProof[name] {
 			if !strings.Contains(src, "aml_session_tenant()") {
 				t.Errorf("%s: a proof-less read must be bound to the session tenant", name)

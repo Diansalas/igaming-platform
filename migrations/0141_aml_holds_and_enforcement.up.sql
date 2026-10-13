@@ -34,7 +34,10 @@
 --
 -- Enforcement of `held` lives in Go (internal/aml EvaluateHold composed into kyc.EvaluateEnforcement); the DB side is the
 -- authority on WHAT a hold is. A held operation gates only new value entering play or leaving the platform; it never
--- gates settlements, corrections or releases (ADR 0116 s5.1 D9).
+-- gates settlements, reversals or releases (ADR 0116 s5.1 D9). It DOES refuse every MANUAL ADJUSTMENT of the held person's
+-- wallet, including a correcting one (a held balance is never seized, zeroed or refunded): the ledger-finance consequence
+-- (an erroneous credit cannot be reversed, nor an M2 Step B compensating credit posted, while any hold is active) is recorded
+-- for the owner and legal in ADR 0116 s10 (Q7 / HD-AML-9) and is NOT built around here.
 --
 -- SQLSTATE class AM: see 0140. This file uses AM002, AM003, AM004, AM005, AM006, AM007, AM026, AM040, AM098, AM099.
 
@@ -69,20 +72,53 @@ $$;
 -- 1. Public outcome `review` on the tenant-visible decision log
 -- =========================================================================
 ALTER TABLE kyc_enforcement_decisions DROP CONSTRAINT kyc_enforcement_decisions_outcome_check;
+-- NOT VALID then VALIDATE (security F11): the ACCESS EXCLUSIVE lock of the ADD is held only for the catalogue change; the
+-- full-table scan of the (large, append-only) decision log runs under the weaker SHARE UPDATE EXCLUSIVE lock of VALIDATE.
+-- The new CHECK only ADMITS one more value, so VALIDATE cannot fail on existing rows.
 ALTER TABLE kyc_enforcement_decisions ADD CONSTRAINT kyc_enforcement_decisions_outcome_check
-    CHECK (outcome IN ('not_required', 'passed', 'pending', 'failed', 'unavailable', 'review'));
+    CHECK (outcome IN ('not_required', 'passed', 'pending', 'failed', 'unavailable', 'review')) NOT VALID;
+ALTER TABLE kyc_enforcement_decisions VALIDATE CONSTRAINT kyc_enforcement_decisions_outcome_check;
 
 -- =========================================================================
 -- 2. Shared helpers
 -- =========================================================================
 
--- The tenant a session is bound to: app.tenant_id, or the (validated by the caller) acting tenant. NULL when neither.
+-- The tenant a session is bound to: app.tenant_id, or the acting tenant ONLY when the session has exactly the acting shape
+-- (acting tenant AND acting platform principal present, no other principal setting: financial_acting_gucs_exact(), 0112). A
+-- bare app.acting_tenant_id (a forged setting without the acting principal) binds nothing (security F5). The officer functions
+-- additionally validate the acting principal's grant in aml_authorize. NULL when neither.
 CREATE FUNCTION aml_session_tenant() RETURNS uuid
     LANGUAGE sql STABLE
     SET search_path = pg_catalog, public, pg_temp
 AS $$
     SELECT COALESCE(NULLIF(pg_catalog.current_setting('app.tenant_id', true), ''),
-                    NULLIF(pg_catalog.current_setting('app.acting_tenant_id', true), ''))::uuid
+                    CASE WHEN public.financial_acting_gucs_exact()
+                         THEN NULLIF(pg_catalog.current_setting('app.acting_tenant_id', true), '') END)::uuid
+$$;
+
+-- The per-person serialisation point of hold changes and four-eyes proposals / approvals (security F8): a hold placement, a
+-- lift, a proposal and an approval for the same (tenant, person) never interleave, so "no hold changed since the proposal" is
+-- decided against a stable hold set. Transaction-scoped advisory lock; the key is derived from the ids only.
+CREATE FUNCTION aml_person_lock(p_tenant uuid, p_person uuid) RETURNS void
+    LANGUAGE sql VOLATILE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('aml_person:' || p_tenant::text || ':' || p_person::text, 116))
+$$;
+
+-- The monotonic hold-change mark of a person: the highest change_seq of any hold or lift of (tenant, person), 0 when none. A
+-- proposal records the mark; an approval is invalid when the mark has moved. change_seq comes from ONE sequence, assigned
+-- under aml_person_lock, so it orders hold changes of a person independent of clocks and transaction start times.
+CREATE FUNCTION aml_person_hold_mark(p_tenant uuid, p_person uuid) RETURNS bigint
+    LANGUAGE plpgsql STABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    RETURN COALESCE(GREATEST(
+        (SELECT max(h.change_seq) FROM public.aml_holds h WHERE h.tenant_id = p_tenant AND h.person_id = p_person),
+        (SELECT max(l.change_seq) FROM public.aml_hold_lifts l JOIN public.aml_holds h ON h.id = l.hold_id
+          WHERE h.tenant_id = p_tenant AND h.person_id = p_person)), 0);
+END
 $$;
 
 -- A WRITE reaches only rows of the actor's OWN owner scope (ADR 0116 s4.3 "only the hold's owner_scope may lift"): a
@@ -127,6 +163,8 @@ $$;
 -- =========================================================================
 -- 3. aml_holds
 -- =========================================================================
+CREATE SEQUENCE aml_hold_change_seq;
+
 CREATE TABLE aml_holds (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id            UUID NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
@@ -141,6 +179,7 @@ CREATE TABLE aml_holds (
     placed_by_person_id  UUID NOT NULL,
     placed_by_scope      TEXT NOT NULL CHECK (placed_by_scope IN ('tenant', 'platform_acting')),
     placed_at            TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    change_seq           BIGINT NOT NULL DEFAULT nextval('aml_hold_change_seq'),
     UNIQUE (tenant_id, id),
     FOREIGN KEY (player_account_id, tenant_id) REFERENCES player_accounts (id, tenant_id) ON DELETE RESTRICT,
     CHECK (reason_class <> 'confirmed_sanctions' OR hold_scope = 'all_value_movement'),
@@ -157,6 +196,7 @@ CREATE TABLE aml_hold_lifts (
     lifted_by_person_id  UUID NOT NULL,
     lifted_by_scope      TEXT NOT NULL CHECK (lifted_by_scope IN ('tenant', 'platform_acting')),
     lifted_at            TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    change_seq           BIGINT NOT NULL DEFAULT nextval('aml_hold_change_seq'),
     reason_code          TEXT NOT NULL CHECK (reason_code ~ '^[a-z0-9_]{1,64}$'),
     -- The approved four-eyes event that authorises a confirmed_sanctions lift (0142 adds the FK and the event checks).
     approval_event_id    UUID NULL,
@@ -347,6 +387,12 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM public.player_accounts pa WHERE pa.id = p_account AND pa.tenant_id = p_tenant AND pa.person_id = p_person) THEN
         RAISE EXCEPTION 'aml: the account does not belong to this tenant and person' USING ERRCODE = 'AM007';
     END IF;
+    -- A named hold must be a hold of THIS person in THIS tenant (security F7): a decision row never points at another
+    -- person's hold, so an officer reading the evidence log for one person never sees another person's hold id.
+    IF p_hold_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM public.aml_holds h WHERE h.id = p_hold_id AND h.tenant_id = p_tenant AND h.person_id = p_person) THEN
+        RAISE EXCEPTION 'aml: the named hold is not a hold of this person' USING ERRCODE = 'AM007';
+    END IF;
     INSERT INTO public.aml_enforcement_decisions
         (tenant_id, player_account_id, person_id, operation, kyc_outcome, hold_outcome, public_outcome, allowed, hold_id, correlation_id)
     VALUES (p_tenant, p_account, p_person, p_operation, p_kyc_outcome, p_hold_outcome, p_public_outcome, p_allowed, p_hold_id, p_correlation)
@@ -380,7 +426,9 @@ BEGIN
     IF public.aml_actor_owner_scope(a.o_scope) IS DISTINCT FROM v_owner THEN
         RAISE EXCEPTION 'aml: the actor does not own this tenant''s AML scope' USING ERRCODE = 'AM002';
     END IF;
+    PERFORM public.aml_assert_not_subject(a.o_person_id, p_person);
     PERFORM public.aml_assert_quorum(p_tenant, v_owner);
+    PERFORM public.aml_person_lock(p_tenant, p_person);
     INSERT INTO public.aml_holds (tenant_id, owner_scope, person_id, player_account_id, hold_scope, reason_class, reason_code,
                                   placed_by, placed_by_person_id, placed_by_scope)
     VALUES (p_tenant, v_owner, p_person, p_account, p_hold_scope, p_reason_class, p_reason_code, a.o_actor, a.o_person_id, a.o_scope)
@@ -401,11 +449,13 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_hold:lift', p_hold::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_hold::text, p_reason_code)));
-    SELECT h.owner_scope, h.reason_class INTO v_hold FROM public.aml_holds h WHERE h.id = p_hold AND h.tenant_id = p_tenant;
+    SELECT h.owner_scope, h.reason_class, h.person_id INTO v_hold FROM public.aml_holds h WHERE h.id = p_hold AND h.tenant_id = p_tenant;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'aml: not found' USING ERRCODE = 'AM040';
     END IF;
     PERFORM public.aml_assert_write_scope(a.o_scope, v_hold.owner_scope);
+    PERFORM public.aml_assert_not_subject(a.o_person_id, v_hold.person_id);
+    PERFORM public.aml_person_lock(p_tenant, v_hold.person_id);
     IF v_hold.reason_class = 'confirmed_sanctions' THEN
         RAISE EXCEPTION 'aml: a confirmed sanctions hold is lifted only by a proof-bound four-eyes approval' USING ERRCODE = 'AM006';
     END IF;
@@ -429,6 +479,7 @@ DECLARE
 BEGIN
     SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_hold:read', p_person::text,
         public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_person::text)));
+    PERFORM public.aml_assert_not_subject(a.o_person_id, p_person);
     RETURN QUERY
         SELECT h.id, h.owner_scope, h.player_account_id, h.hold_scope, h.reason_class, h.reason_code, h.placed_at,
                (l.id IS NOT NULL), l.lifted_at
@@ -446,6 +497,8 @@ REVOKE ALL ON FUNCTION aml_actor_owner_scope(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_assert_write_scope(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_deny_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_valid_operation(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION aml_person_lock(uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION aml_person_hold_mark(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_holds_guard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_hold_lifts_guard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_hold_match(uuid, uuid, uuid, text) FROM PUBLIC;
@@ -462,6 +515,8 @@ BEGIN
         REVOKE ALL ON FUNCTION aml_assert_write_scope(text, text) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_deny_mutation() FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_valid_operation(text) FROM igaming_runtime;
+        REVOKE ALL ON FUNCTION aml_person_lock(uuid, uuid) FROM igaming_runtime;
+        REVOKE ALL ON FUNCTION aml_person_hold_mark(uuid, uuid) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_holds_guard() FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_hold_lifts_guard() FROM igaming_runtime;
         GRANT EXECUTE ON FUNCTION aml_hold_match(uuid, uuid, uuid, text) TO igaming_runtime;

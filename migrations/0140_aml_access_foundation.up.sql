@@ -147,10 +147,78 @@ AS $$
            END
 $$;
 
--- The quorum readiness count (ADR 0116 s6, deviation above): distinct Persons with an in-force aml_officer grant of the
--- owner scope's grantee scope on the tenant. Runs under the caller's own RLS (tenant session: the tenant's grants;
--- platform_acting session: the acting tenant's grants). The person comes from the request row (0112 captured it at
--- request time precisely because a platform session cannot read a tenant staff row).
+-- LIVE ELIGIBILITY of a grantee (security F1/F3; the ledger_adjustment_eligible_grant pattern of 0113): a grant in force is
+-- not enough. The grantee's staff row must be ACTIVE, hold the catalogue's eligible role NOW (tenant: `compliance`; platform:
+-- `platform_admin`), and its live person_id must equal the grant request's captured grantee_person_id. A demoted, suspended or
+-- re-linked grantee is neither an officer (aml_authorize) nor a quorum member (aml_officer_quorum).
+--
+-- A PLATFORM grantee's staff row is invisible to a tenant session and, in an acting session, to every platform row but the
+-- actor's own, so the platform half runs through a narrow owner-side definer helper. It reads ONE row of platform staff by
+-- id, has its search_path pinned, and clears the tenant / acting settings only around that read (restored before it returns)
+-- so the platform-row policy of staff_users admits it. (It is VOLATILE for that reason, though it changes nothing durable.) EXECUTE is revoked from PUBLIC
+-- and from the runtime role: only the owner-run definer API reaches it.
+CREATE FUNCTION aml_platform_grantee_live(p_staff uuid, p_person uuid) RETURNS boolean
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_tenant text := pg_catalog.current_setting('app.tenant_id', true);
+    v_acting_tenant text := pg_catalog.current_setting('app.acting_tenant_id', true);
+    v_acting_principal text := pg_catalog.current_setting('app.acting_platform_principal_id', true);
+    v_live boolean;
+BEGIN
+    -- A function-level SET of these settings is not permitted to the migration role, so they are cleared and restored by
+    -- hand, transaction-locally, around the ONE read below (nothing else runs between the two set_config blocks, and an error
+    -- aborts the statement and with it the local settings).
+    PERFORM pg_catalog.set_config('app.tenant_id', '', true);
+    PERFORM pg_catalog.set_config('app.acting_tenant_id', '', true);
+    PERFORM pg_catalog.set_config('app.acting_platform_principal_id', '', true);
+    SELECT EXISTS (
+        SELECT 1 FROM public.staff_users s
+         WHERE s.id = p_staff AND s.tenant_id IS NULL AND s.status = 'active' AND s.role = 'platform_admin'
+           AND s.person_id IS NOT NULL AND s.person_id = p_person) INTO v_live;
+    PERFORM pg_catalog.set_config('app.tenant_id', COALESCE(v_tenant, ''), true);
+    PERFORM pg_catalog.set_config('app.acting_tenant_id', COALESCE(v_acting_tenant, ''), true);
+    PERFORM pg_catalog.set_config('app.acting_platform_principal_id', COALESCE(v_acting_principal, ''), true);
+    RETURN v_live;
+END
+$$;
+
+CREATE FUNCTION aml_grant_eligible(p_tenant uuid, p_staff uuid, p_scope text, p_person uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT CASE p_scope
+        WHEN 'tenant' THEN EXISTS (
+            SELECT 1 FROM public.staff_users s
+              JOIN public.financial_capability_catalogue c ON c.capability = 'aml_officer'
+             WHERE s.id = p_staff AND s.tenant_id = p_tenant AND s.status = 'active'
+               AND s.person_id IS NOT NULL AND s.person_id = p_person AND s.role = ANY (c.eligible_tenant_roles))
+        WHEN 'platform' THEN
+            EXISTS (SELECT 1 FROM public.financial_capability_catalogue c WHERE c.capability = 'aml_officer' AND c.platform_grantee_allowed)
+            AND public.aml_platform_grantee_live(p_staff, p_person)
+        ELSE false
+    END
+$$;
+
+-- The conflict-of-interest rule (security F2): an officer never acts on a record whose subject is their own Person. Every
+-- officer function calls it after aml_authorize. AM011 (the four-eyes class) because it is the same rule the approval trigger
+-- already applies to the case subject.
+CREATE FUNCTION aml_assert_not_subject(p_actor_person uuid, p_subject_person uuid) RETURNS void
+    LANGUAGE plpgsql IMMUTABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF p_actor_person IS NULL OR p_subject_person IS NULL OR p_actor_person = p_subject_person THEN
+        RAISE EXCEPTION 'aml: an officer may not act on a record about their own Person' USING ERRCODE = 'AM011';
+    END IF;
+END
+$$;
+
+-- The quorum readiness count (ADR 0116 s6, deviation above): distinct Persons with an in-force aml_officer grant of the owner
+-- scope's grantee scope on the tenant whose grantee is LIVE-eligible (aml_grant_eligible). Runs under the caller's own RLS
+-- (tenant session: the tenant's grants; platform_acting session: the acting tenant's grants). The person comes from the
+-- request row (0112 captured it at request time precisely because a platform session cannot read a tenant staff row).
 CREATE FUNCTION aml_officer_quorum(p_tenant uuid, p_owner_scope text) RETURNS integer
     LANGUAGE sql STABLE
     SET search_path = pg_catalog, public, pg_temp
@@ -164,10 +232,7 @@ AS $$
        AND g.valid_from <= pg_catalog.now()
        AND (g.valid_until IS NULL OR pg_catalog.now() < g.valid_until)
        AND g.grantee_scope = CASE p_owner_scope WHEN 'tenant' THEN 'tenant' WHEN 'platform' THEN 'platform' ELSE '?' END
-       -- A suspended grantee is not an officer: aml_authorize would refuse them (financial_actor_session requires status
-       -- 'active'), so they must not count toward the quorum either. A staff row hidden from the caller's RLS is not excluded
-       -- (the count then equals the pre-fix count; it is never LOWER than the truth for a visible row).
-       AND NOT EXISTS (SELECT 1 FROM public.staff_users su WHERE su.id = g.grantee_staff_id AND su.status <> 'active')
+       AND public.aml_grant_eligible(g.tenant_id, g.grantee_staff_id, g.grantee_scope, r.grantee_person_id)
 $$;
 
 CREATE FUNCTION aml_assert_quorum(p_tenant uuid, p_owner_scope text) RETURNS void
@@ -218,9 +283,12 @@ BEGIN
     -- The SQL re-check of the role (ADR 0116 s3.1 step 2): the actor's OWN grant row, in force, of the matching scope.
     IF NOT EXISTS (
         SELECT 1 FROM public.staff_capability_grants g
+          JOIN public.staff_capability_grant_requests gr ON gr.id = g.request_id
          WHERE g.tenant_id = p_tenant AND g.grantee_staff_id = v.actor AND g.capability = 'aml_officer'
            AND g.grantee_scope = v_grant_scope AND g.revoked_at IS NULL
            AND g.valid_from <= pg_catalog.now() AND (g.valid_until IS NULL OR pg_catalog.now() < g.valid_until)
+           AND gr.grantee_person_id = v.person_id
+           AND public.aml_grant_eligible(p_tenant, v.actor, v_grant_scope, gr.grantee_person_id)
     ) THEN
         RAISE EXCEPTION 'aml: the actor does not hold an in-force aml_officer grant' USING ERRCODE = 'AM001';
     END IF;
@@ -251,6 +319,9 @@ REVOKE ALL ON FUNCTION aml_officer_quorum(uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_assert_quorum(uuid, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_authorize(uuid, text, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_assert_row_scope(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION aml_platform_grantee_live(uuid, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION aml_grant_eligible(uuid, uuid, text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION aml_assert_not_subject(uuid, uuid) FROM PUBLIC;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
@@ -260,6 +331,9 @@ BEGIN
         REVOKE ALL ON FUNCTION aml_assert_quorum(uuid, text) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_authorize(uuid, text, text, text) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_assert_row_scope(text, text) FROM igaming_runtime;
+        REVOKE ALL ON FUNCTION aml_platform_grantee_live(uuid, uuid) FROM igaming_runtime;
+        REVOKE ALL ON FUNCTION aml_grant_eligible(uuid, uuid, text, uuid) FROM igaming_runtime;
+        REVOKE ALL ON FUNCTION aml_assert_not_subject(uuid, uuid) FROM igaming_runtime;
     END IF;
 END
 $$;
