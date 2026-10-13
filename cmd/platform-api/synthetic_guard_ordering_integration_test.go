@@ -14,6 +14,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,12 +80,16 @@ func TestSyntheticGuard_RunsBeforeDBConnect_Subprocess(t *testing.T) {
 	// this test is about. They are irrelevant to guard ordering.
 	var inherited []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "PROVIDER_CREDENTIAL_FINGERPRINT_KEY=") || strings.HasPrefix(kv, "SECRETSTORE_") {
+		if strings.HasPrefix(kv, "PROVIDER_CREDENTIAL_FINGERPRINT_KEY=") || strings.HasPrefix(kv, "SECRETSTORE_") || strings.HasPrefix(kv, "STAFF_MFA_") {
 			continue
 		}
 		inherited = append(inherited, kv)
 	}
-	env := append(inherited,
+	// ADR 0119 S1: config.Load refuses APP_ENV=production without the staff
+	// MFA key families, which would stop the process BEFORE the guard this
+	// test is about; fresh random keys keep the test about guard ordering.
+	env := append(inherited, staffMFAKeyEnv(t)...)
+	env = append(env,
 		"APP_ENV=production",
 		"JWT_SIGNING_SECRET=a-secret-that-is-at-least-32-characters-long",
 		"OTEL_EXPORTER=none",
@@ -134,5 +140,22 @@ func TestSyntheticGuard_RunsBeforeDBConnect_Subprocess_MissingAppEnv(t *testing.
 	}
 	if strings.Contains(stderr, "connect database") || strings.Contains(stderr, "connection refused") {
 		t.Errorf("expected the guard to refuse BEFORE any database connection attempt, but stderr mentions a database error: %s", stderr)
+	}
+}
+
+// staffMFAKeyEnv returns two fresh, independent staff MFA key families
+// (ADR 0119 S1) as environment entries.
+func staffMFAKeyEnv(t *testing.T) []string {
+	t.Helper()
+	key := func() string {
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(b)
+	}
+	return []string{
+		"STAFF_MFA_FACTOR_KEYS=f1:" + key(), "STAFF_MFA_FACTOR_ACTIVE_KID=f1",
+		"STAFF_MFA_MAC_KEYS=m1:" + key(), "STAFF_MFA_MAC_ACTIVE_KID=m1",
 	}
 }

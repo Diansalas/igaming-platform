@@ -73,9 +73,9 @@ is either a secret or noise).
 | Field | Env var | Required | Dev default | Production action |
 |---|---|---|---|---|
 | `JWTActiveKID` | `JWT_ACTIVE_KID` | No | `k1` | Any stable identifier; used only to select the active signing key. Not a secret. |
-| `JWTSigningSecret` | `JWT_SIGNING_SECRET` | Yes — startup fails without it, and fails if under 32 characters | none | **Secret.** Generate with a real CSPRNG (e.g. `openssl rand -base64 48`), at least 32 characters, per environment — never reused between dev/staging/production, and never the value in `.env.example` or any doc. This is the Stage 2 foundation mechanism (HMAC shared secret); `internal/config`'s own doc comment marks production authentication as PROVIDER DEPENDENT — evaluate moving to asymmetric signing backed by a KMS-managed key or a real identity provider before go-live (`docs/security/security-architecture.md`'s production authentication evaluation) rather than treating this as the permanent production mechanism. |
+| `JWTSigningSecret` | `JWT_SIGNING_SECRET` | Yes — startup fails without it, and fails if under 32 characters | none | **Secret.** Startup refuses it when it equals (as text, or as its base64 decoding) any key of another platform key family (ADR 0119 S1 registry). Generate with a real CSPRNG (e.g. `openssl rand -base64 48`), at least 32 characters, per environment — never reused between dev/staging/production, and never the value in `.env.example` or any doc. This is the Stage 2 foundation mechanism (HMAC shared secret); `internal/config`'s own doc comment marks production authentication as PROVIDER DEPENDENT — evaluate moving to asymmetric signing backed by a KMS-managed key or a real identity provider before go-live (`docs/security/security-architecture.md`'s production authentication evaluation) rather than treating this as the permanent production mechanism. |
 | `JWTPreviousKID` | `JWT_PREVIOUS_KID` | No | `k0` | Only meaningful once `JWT_PREVIOUS_SECRET` is also set (key rotation in progress). Not a secret. |
-| `JWTPreviousSecret` | `JWT_PREVIOUS_SECRET` | No, but same 32-char minimum if set, and must differ from `JWTActiveKID`'s KID | none | **Secret when set.** Set this to the OUTGOING signing secret during a rotation window (so already-issued, not-yet-expired tokens still verify), then remove it once the longest-lived outstanding token from before the rotation has expired (`RefreshTokenTTL`, below, bounds how long that window needs to be kept open). |
+| `JWTPreviousSecret` | `JWT_PREVIOUS_SECRET` | No, but same 32-char minimum if set; its KID must differ from `JWTActiveKID`, and the secret itself must differ from `JWT_SIGNING_SECRET` (refused at startup since ADR 0119 S1: the two JWT secrets are separate families of the platform key-family registry) | none | **Secret when set.** Set this to the OUTGOING signing secret during a rotation window (so already-issued, not-yet-expired tokens still verify), then remove it once the longest-lived outstanding token from before the rotation has expired (`RefreshTokenTTL`, below, bounds how long that window needs to be kept open). |
 | `JWTIssuer` | `JWT_ISSUER` | No | `igaming-platform` | Not a secret. Deliberately independent of `OTelServiceName` (see `config.go`'s own comment) — do not repoint it at a telemetry setting. |
 | `JWTAudience` | `JWT_AUDIENCE` | No | `platform-api` | Not a secret. |
 
@@ -229,3 +229,24 @@ requires it to be positive. If it fires, the callback rolls back and the provide
 |---|---|---|---|---|
 | `ActorProofKeys` | `ACTOR_PROOF_KEYS` | **Yes in production** - `cmd/platform-api` refuses to start without it (`actorproof.VerifyConfiguredInProduction`) | none (an absent key leaves K2/K3 governed writes failing closed at the database) | **Secret.** `kid:base64(secret)`, comma-separated, each secret at least 32 bytes decoded, generated from a real secret store; list two keys only during a rotation. The SAME secret must be provisioned by the migration/owner role into `actor_proof_keys` (never by `igaming_runtime`). Must differ from the JWT secrets. Never rendered by `config`. Runbook: `docs/runbooks/operational-runbooks.md` section 15. |
 | `ActorProofActiveKID` | `ACTOR_PROOF_ACTIVE_KID` | **Yes in production** (with the keys) | none | The kid the application signs with. At startup in production the database must hold this kid as an `active` key or the process refuses to start. Not a secret. |
+
+## Staff MFA key families and staff session bounds (ADR 0119 S1)
+
+Status: the library and the configuration validation are `IMPLEMENTED` (ADR 0119 slice S1). Nothing reads
+these keys before slice S3 (staff login with MFA, `NOT IMPLEMENTED`). Runbook: `docs/runbooks/staff-mfa-keys.md`.
+
+| Field | Env var | Required | Dev default | Production action |
+|---|---|---|---|---|
+| `StaffMFAFactorKeys` | `STAFF_MFA_FACTOR_KEYS` | **Yes in production** - `config.Load` refuses `APP_ENV=production` without it. From S3, `staffmfa.VerifyStartup` requires it in every environment. | none | **Secret.** `kid:base64(secret)`, comma-separated, each at least 32 bytes decoded. The AES-256-GCM factor-secret key. Rotates by re-enrolment only. Must differ from every other platform key family (the registry checks every pair). Never in the database, never rendered. |
+| `StaffMFAFactorActiveKID` | `STAFF_MFA_FACTOR_ACTIVE_KID` | **Yes in production** (with the keys) | none | Not a secret. Must name a kid of `STAFF_MFA_FACTOR_KEYS`. |
+| `StaffMFAMACKeys` | `STAFF_MFA_MAC_KEYS` | **Yes in production** | none | **Secret.** Same format. The recovery-code, challenge, enrolment-token and session-assurance HMAC keys. A retired kid stays listed (verify-only) until its rows age out (section 5.3). |
+| `StaffMFAMACActiveKID` | `STAFF_MFA_MAC_ACTIVE_KID` | **Yes in production** (with the keys) | none | Not a secret. |
+| `StaffMFAIssuer` | `STAFF_MFA_ISSUER` | No | `iGaming Platform Back Office` | Platform value shown in authenticator apps; never a brand name. No `:`. |
+| `StaffAccessTokenTTL` | `STAFF_ACCESS_TOKEN_TTL_SECONDS` | No | 900 | Bound 60-900. Can only tighten. |
+| `StaffRefreshIdleTTL` | `STAFF_REFRESH_IDLE_TTL_SECONDS` | No | 1800 | Bound 300-3600. |
+| `StaffSessionAbsoluteTTL` | `STAFF_SESSION_ABSOLUTE_TTL_SECONDS` | No | 43200 | Bound 3600-43200. |
+| `StaffStepUpCriticalMaxAge` | `STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS` | No | 300 | Bound 60-300. |
+| `StaffStepUpFinancialMaxAge` | `STAFF_STEP_UP_FINANCIAL_MAX_AGE_SECONDS` | No | 600 | Bound 60-600. |
+
+The published `.env.example` values of the two families are development placeholders and are refused unless
+`APP_ENV` is explicitly `development`.

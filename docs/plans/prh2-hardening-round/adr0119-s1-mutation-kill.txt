@@ -1,0 +1,229 @@
+ADR 0119 slice S1 mutation-kill evidence (internal/staffmfa, internal/staffmfa/totp, internal/config staff MFA)
+==========================================================================================================
+Method: a private sandbox copy of the worktree (go.mod, go.sum, .env.example, internal/) in the session scratchpad.
+Each mutant replaces one source fragment (or, for the C2 layout mutants V01/V02, a fixed set of fragments in one
+file), runs the unit tests of the named packages (go test -count=1 ./internal/staffmfa/... [./internal/config/...];
+no database), and is KILLED when that run fails. A mutant that does not compile is ERROR and is not evidence. Files
+are always restored.
+Driver: docs/plans/prh2-hardening-round/adr0119-s1-mutation-driver.py (python3 -I driver.py <sandbox> <out> [ids]).
+
+Runs (baseline PASS before every run):
+  pass 1 - first tree: 5 mutants did not compile (rewritten) and S04 survived (exact-JSON pin added); T11 led to
+           TestStatic_SecretComparisonsAreConstantTime.
+  pass 2 - tree 96eb4fd: full set before the security review.
+  pass 3 - token/startup re-check after TokenLen became a constant and the unreachable Open self-check was removed.
+  pass 4 - after the S1 security-review conditions (C2 closures, C3 cross-form registry, C4, nil-AAD integrity,
+           degenerate keys, _SECONDS wrap, otpauth %20): the full set, mutant patterns moved to the new layout, plus
+           the V-series review mutants.
+  pass 5 - S02 S03 S05 C06 re-run (S03/S05 patterns repaired for the closure layout; C06 after
+           TestStaffMFA_ValidateBoundsDirectly was added).
+
+FINAL STATUS PER MUTANT (the last run that ran it wins)
+--------------------------------------------------------------------------------------------------------------
+T01 | KILLED | replay rule > changed to >=
+      --- FAIL: TestVerifyTOTP_AcceptsAndBurns (0.00s); --- FAIL: TestVerify_ReplayRule_SameCodeTwice (0.00s); --- FAIL: TestVerify_ReplayRule_StrictlyGreater (0.00s); --- FAIL: TestVerify_HighestMatchingStepIsBurned (0.00s)
+T02 | KILLED | window widened to +-2 steps
+      --- FAIL: TestVerifyTOTP_IntegrityAndRejections (0.00s); --- FAIL: TestParameters_Pinned (0.00s); --- FAIL: TestVerify_WindowIsExactlyPlusMinusOne (0.00s); --- FAIL: TestVerify_WindowBoundariesWithinAStep (0.00s)
+T03 | KILLED | lowest matching step burned instead of highest
+      --- FAIL: TestVerify_HighestMatchingStepIsBurned (0.00s)
+T04 | KILLED | code character class not checked
+      --- FAIL: TestVerify_FailsClosedOnMalformedInput (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput/space (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput/leading_space (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput/letter (0.00s)
+T05 | KILLED | Verify secret length not checked
+      --- FAIL: TestVerify_FailsClosedOnMalformedInput (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput/short_secret (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput/long_secret (0.00s)
+T06 | KILLED | negative last_used_step admitted
+      --- FAIL: TestVerifyTOTP_IntegrityAndRejections (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput/negative_last_step (0.00s)
+T07 | KILLED | time before epoch admitted
+      --- FAIL: TestVerify_FailsClosedOnMalformedInput (0.00s); --- FAIL: TestVerify_FailsClosedOnMalformedInput/before_epoch (0.00s)
+T08 | KILLED | HOTP dynamic-truncation offset mask
+      --- FAIL: TestRFC6238_AppendixB_SHA1_EightDigits (0.00s); --- FAIL: TestRFC6238_AppendixB_SHA1_SixDigitsAreTheLowOrderDigits (0.00s); --- FAIL: TestRFC4226_AppendixD_HOTP (0.00s); --- FAIL: TestVerify_HighestMatchingStepIsBurned (0.00s)
+T09 | KILLED | HOTP top-bit mask dropped
+      --- FAIL: TestRFC6238_AppendixB_SHA1_EightDigits (0.00s); --- FAIL: TestRFC6238_AppendixB_SHA1_SixDigitsAreTheLowOrderDigits (0.00s); --- FAIL: TestRFC4226_AppendixD_HOTP (0.00s); --- FAIL: TestVerify_HighestMatchingStepIsBurned (0.00s)
+T10 | KILLED | time step changed
+      --- FAIL: TestOTPAuthURI_Format (0.00s); --- FAIL: TestRFC6238_AppendixB_SHA1_EightDigits (0.00s); --- FAIL: TestRFC6238_AppendixB_SHA1_SixDigitsAreTheLowOrderDigits (0.00s); --- FAIL: TestParameters_Pinned (0.00s)
+T11 | KILLED | constant-time comparison replaced by ==
+      --- FAIL: TestStatic_SecretComparisonsAreConstantTime (0.00s)
+K01 | KILLED | HKDF info omits the kid
+      --- FAIL: TestSubkeys_DerivationPinned (0.00s); --- FAIL: TestSubkeys_PairwiseDistinct_AcrossLabelsAndKids (0.00s); --- FAIL: TestFactorKID_BoundIntoSubkey (0.00s); --- FAIL: TestMAC_FormatPinned (0.00s)
+K02 | KILLED | HKDF info separator dropped
+      --- FAIL: TestSubkeys_DerivationPinned (0.00s); --- FAIL: TestMAC_FormatPinned (0.00s)
+K03 | KILLED | ParseKeySet admits short keys
+      --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets (0.00s); --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets/short (0.00s)
+K04 | KILLED | empty entries skipped
+      --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets (0.00s); --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets/empty_entry (0.00s); --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets/trailing_comma (0.00s); --- FAIL: TestStaffMFA_Refusals_WithoutEchoingKeys (0.01s)
+K05 | KILLED | ParseKeySet duplicate value admitted
+      --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets (0.00s); --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets/duplicate_value (0.00s)
+K06 | KILLED | NewKeys cross-family duplicate admitted
+      --- FAIL: TestNewKeys_Refusals (0.00s); --- FAIL: TestNewKeys_Refusals/same_key_across_families (0.00s); --- FAIL: TestNewKeys_Refusals/same_key_across_kids (0.00s)
+K07 | KILLED | unknown factor active kid admitted
+      --- FAIL: TestNewKeys_Refusals (0.00s); --- FAIL: TestNewKeys_Refusals/unknown_factor_active_kid (0.00s); --- FAIL: TestStaffMFA_Refusals_WithoutEchoingKeys (0.01s); --- FAIL: TestStaffMFA_Refusals_WithoutEchoingKeys/unknown_factor_active_kid (0.00s)
+K08 | KILLED | AAD omits staff_user_id
+      --- FAIL: TestFactorAAD_FormatPinned (0.00s); --- FAIL: TestOpen_AADTamper_EachFieldBinds (0.00s); --- FAIL: TestOpen_AADTamper_EachFieldBinds/other_staff_(moved_row) (0.00s); --- FAIL: TestVerifyTOTP_IntegrityAndRejections (0.00s)
+K09 | KILLED | AAD omits tenant (constant marker)
+      --- FAIL: TestFactorAAD_FormatPinned (0.00s); --- FAIL: TestOpen_AADTamper_EachFieldBinds (0.00s); --- FAIL: TestOpen_AADTamper_EachFieldBinds/other_tenant (0.00s); --- FAIL: TestOpen_AADTamper_EachFieldBinds/tenant_row_as_platform (0.00s)
+K10 | KILLED | AAD omits factor_id
+      --- FAIL: TestFactorAAD_FormatPinned (0.00s); --- FAIL: TestOpen_AADTamper_EachFieldBinds (0.00s); --- FAIL: TestOpen_AADTamper_EachFieldBinds/other_factor_id (0.00s)
+K11 | KILLED | platform AAD marker dropped
+      --- FAIL: TestFactorAAD_FormatPinned (0.00s)
+K12 | KILLED | seal ignores the AAD
+      --- FAIL: TestSealOpen_RoundTrip (0.00s); --- FAIL: TestFactorRotation_ByKID (0.00s); --- FAIL: TestVerifyTOTP_AcceptsAndBurns (0.00s); --- FAIL: TestVerifyTOTP_CorrectCodeWhileLockedIsLocked (0.00s)
+K13 | KILLED | unknown kid not reported as integrity
+      --- FAIL: TestOpen_CiphertextTamper (0.00s); --- FAIL: TestOpen_CiphertextTamper/kid_unknown (0.00s); --- FAIL: TestOpen_CiphertextTamper/kid_empty (0.00s); --- FAIL: TestFactorRotation_ByKID (0.00s)
+K14 | KILLED | opened plaintext length not checked
+      --- FAIL: TestOpen_WrongPlaintextLengthIsIntegrity (0.00s)
+K15 | KILLED | nonce length not checked
+      --- FAIL: TestOpen_CiphertextTamper (0.00s); --- FAIL: TestOpen_CiphertextTamper/nonce_short (0.00s); panic: crypto/cipher: incorrect nonce length given to GCM [recovered, repanicked]
+K16 | KILLED | MAC omits staff_user_id
+      --- FAIL: TestMAC_FormatPinned (0.00s); --- FAIL: TestTokenHash_BindsKindStaffAndKey (0.00s); --- FAIL: TestRecoveryCodeHash_BindsStaffAndKey (0.00s)
+K17 | KILLED | MAC omits purpose
+      --- FAIL: TestMAC_FormatPinned (0.00s); --- FAIL: TestTokenHash_BindsKindStaffAndKey (0.00s); --- FAIL: TestEnrolmentTokenKinds_AreSeparated (0.00s)
+K18 | KILLED | challenges use the enrolment subkey
+      --- FAIL: TestMAC_FormatPinned (0.00s)
+K19 | SURVIVED | stored MAC length not checked
+      
+K20 | KILLED | lookups only under the active kid
+      --- FAIL: TestMACKIDs_ActiveFirstThenSorted (0.00s); --- FAIL: TestMACRotation_LookupAndRetirement (0.00s)
+K21 | KILLED | factor master used directly (no HKDF)
+      --- FAIL: TestSubkeys_DerivationPinned (0.00s); --- FAIL: TestKeys_DoNotRetainMasterKeys (0.00s); --- FAIL: TestFactorKID_BoundIntoSubkey (0.00s)
+K22 | KILLED | MAC admits a nil staff id
+      --- FAIL: TestMAC_RefusesInvalidInput (0.00s); --- FAIL: TestRecoveryCodeHash_BindsStaffAndKey (0.00s)
+S01 | KILLED | token row staff binding not checked
+      --- FAIL: TestTokenHash_BindsKindStaffAndKey (0.00s)
+S02 | SURVIVED | Token.Format removed
+      
+S03 | KILLED | EnrolmentMaterial.String leaks the URI
+      --- FAIL: TestRedaction_NoSecretTypeEverRenders (0.00s)
+S04 | KILLED | FactorSecret.MarshalJSON removed
+      --- FAIL: TestRedaction_NoSecretTypeEverRenders (0.00s)
+S05 | KILLED | Assertion.LogValue leaks the code
+      --- FAIL: TestRedaction_NoSecretTypeEverRenders (0.00s)
+S06 | KILLED | ParseToken admits a nil staff id
+      --- FAIL: TestParseToken_FailsClosed (0.00s); --- FAIL: TestParseToken_FailsClosed/nil_staff (0.00s)
+S07 | SURVIVED | token decoding not strict
+      
+R01 | KILLED | L not read as 1
+      --- FAIL: TestNormaliseRecoveryCode (0.00s)
+R02 | SURVIVED | non-ASCII bytes not refused explicitly
+      
+R03 | KILLED | presented length not bounded
+      --- FAIL: TestNormaliseRecoveryCode (0.00s)
+R04 | KILLED | duplicate codes admitted in a batch
+      --- FAIL: TestRecoveryCodes_DeterministicWithInjectedReader (0.00s)
+R05 | KILLED | alphabet contains U
+      --- FAIL: TestErrors_NeverCarryInputs (0.00s); --- FAIL: TestRecoveryCodes_DeterministicWithInjectedReader (0.00s); --- FAIL: TestNormaliseRecoveryCode (0.00s)
+R06 | KILLED | biased symbol mapping
+      --- FAIL: TestRecoveryCodes_DeterministicWithInjectedReader (0.00s)
+R07 | KILLED | any assertion kind read as a recovery code
+      --- FAIL: TestRecoveryCodeFromAssertion (0.00s)
+P01 | KILLED | soft-lock threshold raised
+      --- FAIL: TestPolicyConstants_Pinned (0.00s); --- FAIL: TestCounters_SoftLock_FiveWithinFifteenMinutes (0.00s); --- FAIL: TestCounters_SoftWindowExpires (0.00s); --- FAIL: TestCounters_ClockBackwardsKeepsWindowOpen (0.00s)
+P02 | KILLED | counter not reset when the soft lock is set
+      --- FAIL: TestCounters_SoftLock_FiveWithinFifteenMinutes (0.00s); --- FAIL: TestCounters_SoftWindowExpires (0.00s); --- FAIL: TestCounters_ClockBackwardsKeepsWindowOpen (0.00s)
+P03 | KILLED | window boundary inclusive
+      --- FAIL: TestCounters_SoftWindowExpires (0.00s); --- FAIL: TestCounters_24hWindowExpires (0.00s)
+P04 | KILLED | still locked at locked_until
+      --- FAIL: TestCounters_SoftLock_FiveWithinFifteenMinutes (0.00s); --- FAIL: TestVerifyTOTP_CorrectCodeWhileLockedIsLocked (0.00s)
+P05 | KILLED | hard lock at 11 not 10
+      --- FAIL: TestCounters_HardLock_TenWithin24h (0.00s); --- FAIL: TestCounters_24hWindowExpires (0.00s)
+P06 | KILLED | success also resets the 24h count
+      --- FAIL: TestCounters_SuccessResetsSoftWindowOnly (0.00s)
+P07 | KILLED | invalid counters treated as open
+      --- FAIL: TestCounters_InvalidStatesFailClosed (0.00s); --- FAIL: TestVerifyTOTP_LockedFactorRefusedBeforeAnyComparison (0.00s)
+P08 | KILLED | hard lock evaluated after validity
+      --- FAIL: TestCounters_HardLock_TenWithin24h (0.00s); --- FAIL: TestCounters_InvalidStatesFailClosed (0.00s); --- FAIL: TestVerifyTOTP_LockedFactorRefusedBeforeAnyComparison (0.00s)
+P09 | SURVIVED | zero window start treated as open window
+      
+P10 | KILLED | zero lock state is open
+      --- FAIL: TestCounters_ZeroIsOpen_ZeroLockStateIsInvalid (0.00s)
+F01 | KILLED | locked factor opened/compared before refusing
+      --- FAIL: TestVerifyTOTP_LockedFactorRefusedBeforeAnyComparison (0.00s)
+F02 | KILLED | assertion kind not checked
+      --- FAIL: TestVerifyTOTP_IntegrityAndRejections (0.00s)
+F03 | KILLED | zero Result is accepted
+      --- FAIL: TestVerifyTOTP_IntegrityAndRejections (0.00s)
+F04 | KILLED | hard lock reported as soft lock
+      --- FAIL: TestVerifyTOTP_LockedFactorRefusedBeforeAnyComparison (0.00s)
+U01 | REMOVED | startup Open self-check removed
+      SURVIVED in pass 2: an Open of the ciphertext a successful Seal just produced cannot fail, so the
+      check was unreachable and was deleted from VerifyStartup. U03 covers the seal self-check (KILLED).
+U03 | KILLED | startup seal self-check removed
+      --- FAIL: TestVerifyStartup (0.00s)
+U02 | KILLED | startup MAC self-check removed
+      --- FAIL: TestVerifyStartup (0.00s)
+V01 | KILLED | C2: token material behind a plain pointer (fmt bad-verb path prints the pointee)
+      --- FAIL: TestRedaction_NoSecretTypeEverRenders (0.00s)
+V02 | KILLED | C2: key material behind a plain pointer
+      --- FAIL: TestRedaction_NoSecretTypeEverRenders (0.00s)
+V03 | KILLED | C3: text keys not compared in decoded form
+      --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/JWT_SIGNING_SECRET=base64(X)_vs_PAYOUT_INSTRUMENT_KEYS=p1:X (0.00s)
+V04 | KILLED | C3: kid-list entries not compared in encoded-text form
+      --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/ACTOR_PROOF_KEYS=a1:X_vs_PAYOUT_INSTRUMENT_FP_KEYS=q1:base64(X) (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/STAFF_MFA_MAC_KEYS=m1:base64(X)_vs_STAFF_MFA_FACTOR_KEYS=sf1:X (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/JWT_SIGNING_SECRET=base64(X)_vs_PAYOUT_INSTRUMENT_KEYS=p1:X (0.00s)
+V05 | KILLED | C4: 24h count at the threshold without a hard lock accepted
+      --- FAIL: TestCounters_InvalidStatesFailClosed (0.00s)
+V06 | KILLED | note: invalid AAD on Open not reported as integrity
+      --- FAIL: TestOpen_AADTamper_EachFieldBinds (0.00s)
+V07 | KILLED | note: degenerate key admitted by ParseKeySet
+      --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets (0.00s); --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets/all_one_byte (0.00s); --- FAIL: TestParseKeySet_FailsClosed_WithoutEchoingSecrets/all_zero (0.00s)
+V08 | KILLED | note: degenerate key admitted by NewKeys
+      --- FAIL: TestNewKeys_Refusals (0.00s); --- FAIL: TestNewKeys_Refusals/degenerate_factor_key (0.00s); --- FAIL: TestNewKeys_Refusals/degenerate_mac_key (0.00s)
+V09 | KILLED | note: seconds range not checked before multiplying (int64 wrap)
+      --- FAIL: TestStaffMFA_SessionBounds (0.01s); --- FAIL: TestStaffMFA_SessionBounds/STAFF_ACCESS_TOKEN_TTL_SECONDS (0.00s); --- FAIL: TestStaffMFA_SessionBounds/STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS (0.00s); --- FAIL: TestStaffMFA_SessionBounds/STAFF_STEP_UP_FINANCIAL_MAX_AGE_SECONDS (0.00s)
+V10 | KILLED | note: issuer query escaped with '+' for spaces
+      --- FAIL: TestOTPAuthURI_Format (0.00s)
+V11 | KILLED | note: label escaped with PathEscape ('&', '@', '+' unescaped)
+      --- FAIL: TestOTPAuthURI_Format (0.00s)
+C01 | KILLED | registry entry renamed (completeness pin)
+      --- FAIL: TestPlatformKeyFamilies_RegistryIsComplete (0.00s)
+C02 | KILLED | registry pairwise check disabled
+      --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/JWT_SIGNING_SECRET=X_vs_STAFF_MFA_MAC_KEYS=m1:X (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/JWT_PREVIOUS_SECRET=X_vs_ACTOR_PROOF_KEYS=a1:X (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/PROVIDER_CREDENTIAL_FINGERPRINT_KEY=X_vs_STAFF_MFA_FACTOR_KEYS=sf1:X (0.00s)
+C03 | KILLED | keys not required in production
+      --- FAIL: TestStaffMFA_RequiredInProduction (0.00s)
+C04 | KILLED | placeholder check ignores a missing APP_ENV
+      --- FAIL: TestStaffMFA_PublishedPlaceholders (0.00s); --- FAIL: TestStaffMFA_PublishedPlaceholders/factor_placeholder/APP_ENV= (0.00s); --- FAIL: TestStaffMFA_PublishedPlaceholders/mac_placeholder/APP_ENV= (0.00s); --- FAIL: TestStaffMFA_PublishedPlaceholders/fingerprint_CI_placeholder_reused/APP_ENV= (0.00s)
+C05 | KILLED | CI fingerprint placeholder not refused
+      --- FAIL: TestStaffMFA_PublishedPlaceholders (0.01s); --- FAIL: TestStaffMFA_PublishedPlaceholders/fingerprint_CI_placeholder_reused/APP_ENV=production (0.00s); --- FAIL: TestStaffMFA_PublishedPlaceholders/fingerprint_CI_placeholder_reused/APP_ENV=staging (0.00s); --- FAIL: TestStaffMFA_PublishedPlaceholders/fingerprint_CI_placeholder_reused/APP_ENV= (0.00s)
+C06 | KILLED | session bounds not enforced
+      --- FAIL: TestStaffMFA_ValidateBoundsDirectly (0.00s)
+C07 | KILLED | duration override ignored
+      --- FAIL: TestStaffMFA_SessionBounds (0.00s); --- FAIL: TestStaffMFA_SessionBounds/STAFF_ACCESS_TOKEN_TTL_SECONDS (0.00s); --- FAIL: TestStaffMFA_SessionBounds/STAFF_REFRESH_IDLE_TTL_SECONDS (0.00s); --- FAIL: TestStaffMFA_SessionBounds/STAFF_SESSION_ABSOLUTE_TTL_SECONDS (0.00s)
+C08 | KILLED | issuer not validated
+      --- FAIL: TestStaffMFA_Issuer (0.00s)
+C09 | KILLED | JWT previous secret not in the registry check
+      --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/JWT_PREVIOUS_SECRET=X_vs_ACTOR_PROOF_KEYS=a1:X (0.00s); --- FAIL: TestPlatformKeyFamilies_PairwiseDistinct_Direct (0.00s); --- FAIL: TestPlatformKeyFamilies_PairwiseDistinct_Load (0.02s)
+C10 | KILLED | PAYOUT_INSTRUMENT_FP_KEYS not in the registry check
+      --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/ACTOR_PROOF_KEYS=a1:X_vs_PAYOUT_INSTRUMENT_FP_KEYS=q1:X(url-safe) (0.00s); --- FAIL: TestPlatformKeyFamilies_CrossForm_Direct/ACTOR_PROOF_KEYS=a1:X_vs_PAYOUT_INSTRUMENT_FP_KEYS=q1:base64(X) (0.00s); --- FAIL: TestPlatformKeyFamilies_PairwiseDistinct_Direct (0.00s)
+
+SUMMARY
+--------------------------------------------------------------------------------------------------------------
+Mutants: 85.  KILLED: 79.  REMOVED: 1.  SURVIVED: 5.
+Every SURVIVED row is justified as behaviour-equivalent below; none weakens a control. No ERROR row remains.
+
+JUSTIFICATIONS
+--------------------------------------------------------------------------------------------------------------
+K19 stored MAC length not checked in verifyUnder
+    hmac.Equal returns false for inputs of different length, so removing the explicit length guard cannot change
+    any result. Kept as an explicit fail-closed guard. Equivalent.
+S02 Token.Format removed
+    Since C2 the token material is reachable only through an unexported closure. Without Format, verbs that bypass
+    String (%d, %x on the struct) render the struct's only field, a func value, as an address; String, GoString,
+    LogValue and MarshalJSON still redact. The redaction test therefore still passes: Format is now defence in
+    depth, and its removal is behaviour-equivalent for leakage. Kept.
+S07 token decoding not strict (RawURLEncoding without .Strict())
+    ParseToken first requires exactly 64 characters: 64 x 6 = 384 = 48 x 8 bits, so there are no trailing bits for
+    strictness to reject; CR/LF skipping makes the decoded length short, which the length check refuses. Equivalent.
+R02 non-ASCII bytes not refused explicitly in NormaliseRecoveryCode
+    Every byte >= 0x80 also fails the Crockford-alphabet check that follows. Equivalent.
+P09 zero window start treated as an open window
+    time.Time{} is year 1; now.Sub(zero) saturates to the maximum Duration, never below a window. Equivalent.
+
+ADR 0119 section 17.8 mutants that belong to S1
+--------------------------------------------------------------------------------------------------------------
+">" changed to ">=" in the replay rule ..... T01 KILLED
+window widened to +-2 steps ................ T02 KILLED
+AAD omits staff_user_id / tenant_id ........ K08 KILLED / K09 KILLED
+locked factor compares before refusing ..... F01 KILLED (pure core; the database-backed variant is S2/S3)
+The other 17.8 mutants need the database, HTTP or the flows (S2-S6) and are out of S1 scope.
+
+S1 security review (APPROVE WITH CONDITIONS) mutants
+--------------------------------------------------------------------------------------------------------------
+V01, V02 (C2) | V03, V04 (C3) | V05 (C4) | V06 (nil-AAD integrity) | V07, V08 (degenerate keys) |
+V09 (_SECONDS wrap) | V10, V11 (otpauth %20): all KILLED, see above.

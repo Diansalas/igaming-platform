@@ -5,6 +5,8 @@
   owner question in section 18 blocks the design or slices S1-S9. Each policy value marked **[ORCH-DEFAULT]** is a
   reversible orchestrator/security default. It is **not owner-approved**, and the owner may change it without a
   redesign.
+- **S1 (2026-10-13):** the pure-Go library slice is `IMPLEMENTED` on an unmerged branch, pending gate G. Every other
+  slice stays `NOT IMPLEMENTED`. See section 21.
 - **Revision 2 (2026-10-13):** the S0 design review by `architect` and `ledger-finance` returned ACCEPT WITH
   CONDITIONS. Section 20 resolves every blocking condition (C1-C6) and accuracy fix (C7-C11) in the text, and folds
   in the cheap non-blocking items (N1-N15). The `security` rulings are recorded there: C2 adopts the scoped
@@ -1548,3 +1550,151 @@ The source is the S0 design review by `architect` and `ledger-finance`: ACCEPT W
 - Federated SSO (OIDC or SAML) for external B2B operator staff. `StaffFactor` and `amr` do not preclude it. It would
   need its own ADR.
 - A per-tenant invite email-domain allow-list as configuration (R14).
+
+## 21. S1 implementation record (2026-10-13)
+
+Branch `worktree-agent-aa94adf845a9e85f3`, based on `b480ec6`. **NOT MERGED.** Gate G (live `security` review,
+`code-reviewer`, `qa`) has not run. Nothing below is an approval.
+
+### 21.1 Status labels
+
+| Item | Label |
+|---|---|
+| S1 library: `internal/staffmfa` (TOTP in `internal/staffmfa/totp`, the two key families with HKDF subkeys, factor-secret AEAD with the section 5.3 AAD, keyed hashes, challenge/enrolment tokens, recovery-code generation and normalisation, the section 6.5 counters and policy constants as pure functions, redacting secret types, the `StaffFactor` interface, `VerifyStartup`), the `config.Load` validation of `STAFF_MFA_*`, the section 7.4 bounds and `STAFF_MFA_ISSUER`, the platform key-family registry, and the key-provisioning runbook `docs/runbooks/staff-mfa-keys.md` | `IMPLEMENTED` |
+| A `StaffFactor` implementation (store-backed TOTP factor) | `NOT IMPLEMENTED` (S2/S3) |
+| `VerifyStartup` wired into `cmd/platform-api` and `cmd/seed-admin` | `NOT IMPLEMENTED` (S3) |
+| Session assurance seal (the `ss-v1` canonical form) | `NOT IMPLEMENTED` (S3; S1 only derives its subkey) |
+| Migrations 0137/0138/0139, store layer, every HTTP route, login/step-up/lifecycle flows, back office, runbook campaigns of S9, S-H1 | `NOT IMPLEMENTED` |
+| Production key provisioning | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT` on the operator and the deployment secret store; AWS is OFF) |
+
+Staff login is unchanged: nothing in the running platform reads the new keys or calls the library.
+
+### 21.2 Decisions taken inside S1 (reversible; for the reviewer)
+
+1. **Token wire format carries the staff id.** Section 5.3 binds `staff_user_id` into every keyed hash, but section
+   13.1 item 6 looks challenges and enrolment tokens up by MAC before the staff member is known. To satisfy both, a
+   token is `base64url(staff_user_id[16] || random[32])` (64 characters). The lookup computes the MAC with the
+   embedded id; `VerifyTokenHash` also requires the found row's `staff_user_id` to equal it. The id is not secret
+   from the holder (that staff member). Endpoints that accept more than one purpose (`/enrol/redeem`:
+   `mfa_reset` or `bootstrap`) compute one lookup per purpose (S3).
+2. **Environment variable names.** Section 7.4 names only `STAFF_REFRESH_IDLE_TTL`. S1 uses the repository's
+   `_SECONDS` convention for all five bounds: `STAFF_ACCESS_TOKEN_TTL_SECONDS`, `STAFF_REFRESH_IDLE_TTL_SECONDS`,
+   `STAFF_SESSION_ABSOLUTE_TTL_SECONDS`, `STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS`,
+   `STAFF_STEP_UP_FINANCIAL_MAX_AGE_SECONDS`.
+3. **Where "required" is enforced.** `config.Load` refuses missing keys only when `APP_ENV=production` (explicit).
+   `VerifyStartup` refuses missing keys in every environment, as section 5.1 says, but it is wired in S3: wiring
+   it now would stop every development and test environment while nothing uses the keys. Until S3 a deployment
+   with `APP_ENV` missing loads without keys (residual S1-R1). The placeholder refusal uses `GuardEnvironment()`, so
+   a missing `APP_ENV` is treated as production there.
+4. **Registry scope.** The registry checks every pair of the eight families, in every form a key can be reused in
+   (security review C3): a text key (`JWT_*`, `PROVIDER_CREDENTIAL_FINGERPRINT_KEY`) as its text AND as its base64
+   decoding when it decodes; a kid-list entry as its decoded bytes AND as its encoded text. So
+   `JWT_SIGNING_SECRET=X` with `STAFF_MFA_MAC_KEYS=m1:X` is refused. A value repeated inside one family is
+   each family's own rule (the staff families refuse it; `ACTOR_PROOF_KEYS` still admits it, unchanged). **Behaviour
+   change:** the two JWT secrets are separate registry families, so `JWT_PREVIOUS_SECRET == JWT_SIGNING_SECRET` is
+   now refused at startup.
+5. **`password_reset` token TTL.** Not stated by the ADR; S1 uses the MFA-reset lifetime (24 h), because section
+   6.7 gives it the MFA-reset authority.
+6. **Counter semantics (section 6.5, literal).** The windows are fixed (start + count, the columns of 13.1), not
+   sliding. A success resets the 15-minute window only, never the 24-hour count. Setting a soft lock restarts the
+   15-minute window. Inconsistent counters are `LockInvalid`, which refuses like a lock. A clock that goes
+   backwards keeps a window open.
+7. **Replay rule detail.** When two window candidates share a code (a 1e-6 event), the highest step is burned.
+8. **Strict inputs.** A TOTP code is exactly 6 ASCII digits (the UI strips spaces). Key lists refuse empty entries
+   (a trailing comma), keys over 1024 bytes and duplicate values. Recovery-code input is ASCII only, at most 64
+   bytes before normalisation.
+9. **Published placeholders.** `.env.example` now publishes commented-out development placeholders for both
+   families; they, and the two published fingerprint placeholders, are refused in either staff family unless
+   `APP_ENV` is explicitly `development`.
+10. **Exception list.** `config.Config.Environment`'s list of environment-gated security controls gains item 9 for
+    this rule.
+11. **Secret material behind unexported closures (security review C2).** `FactorSecret`, `Assertion`,
+    `EnrolmentMaterial`, `Token`, `RecoveryCode` and `Keys` hold their material only behind an unexported
+    `func() data` field. fmt and slog cannot call methods on an unexported field of another struct and render it
+    by reflection; a plain pointer is not enough, because fmt's bad-verb path (`%s`, `%d`, `%x` on a pointer)
+    prints the pointee. A func value renders as an address under every verb. Tests cover structs that hold every
+    type in unexported fields, nested, in slices, maps and interfaces.
+12. **Degenerate keys.** A staff MFA key whose bytes are all equal (for example all zero) is refused.
+13. **otpauth escaping.** Issuer and account are percent-encoded with a space as `%20` in both the label and the
+    query; `&`, `=`, `+`, `@`, `/`, `?` and `#` are always encoded.
+14. **Duration settings.** The `_SECONDS` values are range-checked as integers before they are multiplied into a
+    `time.Duration` (`18446744134` would otherwise wrap to about 60 s and pass a bound).
+
+### 21.3 Changed existing tests and assertions
+
+No existing assertion was changed. Test setup changed so existing production-shaped tests keep testing what they
+tested:
+
+- `internal/config/config_test.go`: `clearEnv` clears the new variables; `TestLoad_EnvironmentExplicit_TrueWhenSet`,
+  `TestLoad_ValidAppEnvValuesAccepted` and `TestLoad_ProductionWithTestSupportEndpointsDefaultSucceeds` call
+  `setStaffMFAKeys(t)` before `Load`.
+- `internal/config/fingerprint_key_test.go`: `baseEnv(t, "production")` also sets fresh staff MFA keys.
+- `cmd/platform-api/synthetic_guard_ordering_integration_test.go` (integration tag): the `APP_ENV=production`
+  subprocess gets fresh staff MFA keys and drops inherited `STAFF_MFA_*`, so it still fails on the synthetic guard
+  and not on configuration.
+
+### 21.4 Evidence
+
+- Unit tests (no database): `internal/staffmfa/totp` (RFC 6238 Appendix B SHA-1 vectors at 8 digits and their
+  6-digit low-order form, RFC 4226 Appendix D, window exactly plus or minus 1, replay strictly greater, a pinned
+  adjacent-step collision for the highest-step rule, malformed-input fail-closed, a fuzz target) and
+  `internal/staffmfa` (HKDF derivation pinned against an independent computation, subkey independence, master keys
+  not retained, AEAD round trip, AAD tamper per field, ciphertext/nonce/kid tamper, planted ciphertext, FACTOR and
+  MAC rotation and retirement, MAC format pinned per kind, kind separation, staff binding, recovery-code
+  generation/normalisation, counters, lock-before-compare, redaction under every fmt verb, slog and JSON, error
+  messages, static pins for no environment/clock reads and constant-time comparison), plus
+  `internal/config/staff_mfa_keys_test.go` (required in production, partial refusal, placeholders, redaction,
+  bounds, issuer, registry completeness and the 28-pair distinctness matrix, direct and through `Load`).
+- Mutation pass: `docs/plans/prh2-hardening-round/adr0119-s1-mutation-kill.txt` (driver
+  `adr0119-s1-mutation-driver.py`). Counts are in that file and in 21.6; the S1 rows of the section 17.8 table
+  (replay `>` to `>=`, window +-2, AAD without staff or tenant, compare-before-lock in the pure core) are all
+  KILLED.
+
+### 21.5 Residuals (S1)
+
+| # | Residual | Disposition |
+|---|---|---|
+| S1-R1 | Until S3 wires `VerifyStartup`, a production deployment with `APP_ENV` missing loads without staff MFA keys. Nothing uses them yet, so there is no bypass today; S3 must wire the gate before any login path reads them. | S3 entry gates 21.7 (a) and (c) |
+| S1-R2 | Constant-time behaviour is pinned statically (comparison primitives), not measured. | Accepted |
+| S1-R3 | Keys and secrets live in Go memory and are not zeroised (strings are immutable; the GC copies). | Inherent (M9, R10) |
+| S1-R4 | Reuse of a key across environments is not machine-checkable. | Runbook control |
+| S1-R5 | A token reveals the staff UUID to whoever holds it (the email channel included). | Accepted (21.2 item 1); reviewer to confirm |
+| S1-R6 | Fixed (not sliding) 24 h window: around a window boundary up to 18 failures can occur before the hard lock instead of 10. The soft lock still limits guessing to 5 failures per soft-lock cycle (about 15 minutes). | Accepted by the 13.1 schema; reviewer to confirm |
+
+### 21.6 Security review of S1 (2026-10-13): APPROVE WITH CONDITIONS - disposition
+
+| Item | Disposition (all on the S1 branch) |
+|---|---|
+| C2 redaction of unexported nested fields | Applied: 21.2 item 11. Struct-wrapped cases added to `TestRedaction_NoSecretTypeEverRenders`; a pointer-based layout was tried first and FAILED that test (the bad-verb leak), which is why closures are used. Mutants V01 (token behind a plain pointer) and V02 (keys behind a plain pointer). |
+| C3 registry across text and decoded forms | Applied: 21.2 item 4. `TestPlatformKeyFamilies_CrossForm_*` (JWT signing/previous, fingerprint, `ACTOR_PROOF_KEYS`, `PAYOUT_INSTRUMENT_FP_KEYS`, `PAYOUT_INSTRUMENT_KEYS`, both staff families; direct and through `Load`; a no-false-positive check). Mutants V03, V04. |
+| C4 24 h count at the threshold without `hard_locked_at` | Applied: `Counters.valid()` requires `failed_24h_count < 10` when `hard_locked_at` is NULL, otherwise `LockInvalid`. **S2 obligation:** the `staff_mfa_factors` CHECK must express the same rule (`hard_locked_at IS NOT NULL OR failed_24h_count < 10`). Mutant V05. |
+| C5 checklist | Applied: `production-configuration-checklist.md` states that `JWT_PREVIOUS_SECRET` must differ from `JWT_SIGNING_SECRET` (refused at startup) and that the signing secret is part of the cross-form registry. |
+| Note: Open with an invalid AAD | `OpenFactorSecret` now returns an error matching BOTH `ErrFactorIntegrity` and `ErrInvalidInput`; the doc says no error may be read as "factor absent". Mutant V06. |
+| Note: `_SECONDS` int64 wrap | Applied: 21.2 item 14; `18446744134` and the int64 extremes are in the bounds test. Mutant V09. |
+| Note: otpauth `%20` | Applied: 21.2 item 13; the test parses the URI back and checks one issuer and no `+`. Mutants V10, V11. |
+| Optional: degenerate key | Applied: 21.2 item 12. Mutants V07, V08. |
+
+Mutation evidence after the conditions (`adr0119-s1-mutation-kill.txt`, passes 4 and 5): 85 mutants, 79 KILLED,
+5 SURVIVED and justified as behaviour-equivalent (K19, S02, S07, R02, P09; S02 became equivalent because of C2:
+without `Token.Format` the closure field still renders only as an address), 1 REMOVED (U01), 0 ERROR. Every
+review mutant (V01-V11) is KILLED. `TestStaffMFA_ValidateBoundsDirectly` was added so the bounds check in
+`validateStaffMFA` stays independently tested now that `loadStaffMFA` pre-checks the integer range (mutant C06).
+
+### 21.7 S3 entry gates (recorded by the S1 security review; NOT built in S1)
+
+S3 may not merge unless each of these holds and is tested:
+
+- **(a)** `staffmfa.VerifyStartup` is wired into `cmd/platform-api` and `cmd/seed-admin` before any code reads the
+  keys.
+- **(b)** `*staffmfa.Keys` is built through exactly one constructor that calls `VerifyStartup`, with a static pin
+  that `NewKeys` / `NewKeysFromConfig` are called nowhere else outside tests.
+- **(c)** A subprocess test: with `APP_ENV` unset and no `STAFF_MFA_*` keys, the binary refuses to start (closes
+  S1-R1).
+- **(d)** `/v1/staff/auth/enrol/redeem` resolves `{tenant_slug, email, password}` to the SAME `staff_user_id` as the
+  token and the token row. The tenant and the `StaffRef` come from the row, never from the body or the token.
+- **(e)** A slow-rate MFA-failure alert: second-factor failures after a correct password on 3 or more distinct days
+  within 7 days (S3 or S9).
+- **(f)** The S3 log-capture test (section 17.7) includes struct-wrapped secrets (secret types held in unexported
+  fields of request, response and domain structs).
+- **(g)** The generated `otpauth://` URI is checked with at least one real authenticator app (manual evidence
+  recorded with the S3 gate).

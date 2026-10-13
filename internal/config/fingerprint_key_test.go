@@ -32,6 +32,9 @@ func baseEnv(t *testing.T, appEnv string) {
 	if appEnv != "" {
 		t.Setenv("APP_ENV", appEnv)
 	}
+	if appEnv == "production" {
+		setStaffMFAKeys(t) // ADR 0119 S1: required when APP_ENV=production
+	}
 }
 
 func TestConfig_FingerprintKey_AbsentIsValid(t *testing.T) {

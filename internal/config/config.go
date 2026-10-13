@@ -77,6 +77,14 @@ type Config struct {
 	//     the literal string "production" and has no knowledge of
 	//     GuardEnvironment - only the value main.go passes in changed.
 	//
+	//  9. The ADR 0119 S1 staff MFA key families (validateStaffMFA,
+	//     staff_mfa.go): Load requires them when Environment ==
+	//     "production" and refuses a published placeholder unless
+	//     GuardEnvironment() is "development" (fail closed for a missing
+	//     APP_ENV). staffmfa.VerifyStartup, wired with S3, requires the keys
+	//     in every environment, so this exception only moves the production
+	//     failure earlier.
+	//
 	// (1) fails CLOSED on a mis-set value (a typo just re-enables a check
 	// production should pass anyway). (2)-(6) used to (or, for (5) and (6),
 	// would have) fail OPEN on a typo or an unset variable, per two
@@ -387,6 +395,34 @@ type Config struct {
 	PayoutInstrumentActiveKID   string
 	PayoutInstrumentFPKeys      SecretValue
 	PayoutInstrumentFPActiveKID string
+
+	// ADR 0119 S1 staff MFA key families (section 5.1): STAFF_MFA_FACTOR_KEYS /
+	// STAFF_MFA_FACTOR_ACTIVE_KID (the AES-256-GCM factor-secret key) and
+	// STAFF_MFA_MAC_KEYS / STAFF_MFA_MAC_ACTIVE_KID (the recovery-code,
+	// challenge, enrolment-token and session-assurance HMAC keys). Both are
+	// "kid:base64(secret)" comma-separated and never stored in the database.
+	// Load requires them when APP_ENV=production, refuses a partial or
+	// malformed configuration in every environment, refuses a published
+	// placeholder outside explicit development, and the platform key-family
+	// registry (staff_mfa.go) refuses a value shared with any other family.
+	// staffmfa.VerifyStartup (wired with the S3 flows) requires them in every
+	// environment. SecretValue: never rendered. Runbook:
+	// docs/runbooks/staff-mfa-keys.md.
+	StaffMFAFactorKeys      SecretValue
+	StaffMFAFactorActiveKID string
+	StaffMFAMACKeys         SecretValue
+	StaffMFAMACActiveKID    string
+	// StaffMFAIssuer is the otpauth issuer (STAFF_MFA_ISSUER, default
+	// staffmfa.DefaultIssuer): a platform value, never a brand name.
+	StaffMFAIssuer string
+	// ADR 0119 section 7.4 staff session and step-up durations, each from
+	// <NAME>_SECONDS and bounded by staffmfa's Bound (configuration may only
+	// tighten). Read and validated in S1; consumed from S3/S4b on.
+	StaffAccessTokenTTL        time.Duration
+	StaffRefreshIdleTTL        time.Duration
+	StaffSessionAbsoluteTTL    time.Duration
+	StaffStepUpCriticalMaxAge  time.Duration
+	StaffStepUpFinancialMaxAge time.Duration
 
 	// SecretStoreBackends lists the secret-store backend schemes this
 	// process constructs (SECRETSTORE_BACKENDS, comma-separated, e.g.
@@ -853,6 +889,17 @@ func Load() (Config, error) {
 	}
 	// B13 (ADR 0111 2.2): payout instrument key families.
 	if err := cfg.validatePayoutInstrumentKeys(); err != nil {
+		return Config{}, err
+	}
+	// ADR 0119 S1: staff MFA key families and session bounds, then the single
+	// platform key-family registry (pairwise distinct across every family).
+	if err := loadStaffMFA(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validateStaffMFA(); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validatePlatformKeyFamilies(); err != nil {
 		return Config{}, err
 	}
 
