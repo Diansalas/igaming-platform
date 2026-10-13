@@ -1,6 +1,0 @@
-KILLED: N3 tenant grantee: live person not compared  [--- FAIL: TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum (0.53s)]
-SURVIVED: N5 platform grantee: role not checked
-KILLED: N6 platform grantee: live person not compared  [--- FAIL: TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum (0.56s)]
-SURVIVED: N9 authorize: request person not tied to the live person
-KILLED: N11 not-subject: NULL person admitted  [--- FAIL: TestConflictOfInterest_NullPersonIsRefused (0.14s)]
-EXIT 0
