@@ -35,6 +35,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
@@ -297,6 +298,11 @@ func (m *StaffMFA) recordStepUpFailure(ctx context.Context, tx pgx.Tx, r *http.R
 		alerts = append(alerts, *pattern)
 	}
 	if locked {
+		// The session row must be visible in this transaction (migration 0018's internal-op policy), as on every
+		// other session-mutating path; RevokeSession then ends the whole chain.
+		if err := db.SetSessionInternalOpID(ctx, tx, c.session.SessionID); err != nil {
+			return nil, false, err
+		}
 		if err := auth.RevokeSession(ctx, tx, c.session.SessionID, c.ref.StaffID); err != nil && !errors.Is(err, auth.ErrSessionNotFound) {
 			return nil, false, err
 		}

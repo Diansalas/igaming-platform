@@ -40,6 +40,8 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -98,10 +100,23 @@ func notStepUpRefused(t *testing.T, r mfaResp, what string) {
 // every classifier route given a critical-inducing body); the same staff member with a fresh session passes the gate
 // on each of them; a route classified none never asks, even with the stale token.
 func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
-	w := newMFAW(t)
+	// The stale pass mounts every route (zero-value subsystems, as TestStaffLiveness_EveryGoldenRoute: the gate refuses
+	// before any handler runs). The fresh pass reaches the handlers, so it uses real subsystems only (a mock payment
+	// orchestrator, sportsbook on); a route not mounted there (Go's own 404) is skipped and must be a provider
+	// credential route (pinned below).
+	w := newMFAW(t, func(d *Deps) {
+		d.PaymentOrchestrator, d.ProviderCredentials = &payments.Orchestrator{}, &providercred.Subsystem{}
+		d.SportsbookEnabled, d.SportsbookSettlementSimulationEnabled = true, true
+	})
 	admin := w.staff(nil, "platform_admin")
 	stale := authtest.LiveStaffTokenAged(t, w.rt, testStaffMFAKeys(), w.issuer, admin.ref.StaffID, uuid.Nil, auth.RolePlatformAdmin, 11*time.Minute)
-	fresh := authtest.LiveStaffToken(t, w.rt, testStaffMFAKeys(), w.issuer, admin.ref.StaffID, uuid.Nil, auth.RolePlatformAdmin)
+	w2 := newMFAW(t, func(d *Deps) {
+		d.PaymentOrchestrator, _ = newMockOrchestrator()
+		d.SportsbookEnabled, d.SportsbookSettlementSimulationEnabled = true, true
+	})
+	admin2 := w2.staff(nil, "platform_admin")
+	fresh := authtest.LiveStaffToken(t, w2.rt, testStaffMFAKeys(), w2.issuer, admin2.ref.StaffID, uuid.Nil, auth.RolePlatformAdmin)
+	var skipped []string
 	routes := make([]string, 0, len(staffRouteGolden))
 	for r := range staffRouteGolden {
 		routes = append(routes, r)
@@ -127,7 +142,12 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 				want = 600
 			}
 			stepUpRefused(t, w.do(method, p, stale, body), want, route+" (stale)")
-			notStepUpRefused(t, w.do(method, p, fresh, body), route+" (fresh)")
+			fr := w2.do(method, fillPath(path, w2.tenant.ID), fresh, body)
+			if fr.status == http.StatusNotFound && !strings.Contains(string(fr.body), `"code"`) {
+				skipped = append(skipped, route)
+			} else {
+				notStepUpRefused(t, fr, route+" (fresh)")
+			}
 			counts[class]++
 		case mutating:
 			notStepUpRefused(t, w.do(method, p, stale, body), route+" (none, stale)")
@@ -137,12 +157,18 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 		}
 	}
 	// Non-vacuity: the classified set is the golden table's (S4a + S4b).
-	if counts["critical"] < 50 || counts["financial"] < 20 || counts["classifier:launchActionClass"] != 1 ||
+	// 110 mutating routes: 47 critical, 22 financial, 4 classifier routes, 37 none; 70 reads.
+	if counts["critical"] != 47 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] < 20 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 37 || counts["read"] != 70 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
-	t.Logf("golden coverage: %v", counts)
+	for _, r := range skipped {
+		if !strings.Contains(r, "provider-credential") {
+			t.Errorf("%s was not mounted in the fresh world: only provider-credential routes may be skipped", r)
+		}
+	}
+	t.Logf("golden coverage: %v; fresh pass skipped %d provider-credential routes", counts, len(skipped))
 }
 
 // Section 17.2 boundaries: mfa_at = now - (maxAge - 3 s) passes, now - (maxAge + 1 s) is refused, for each class (the
@@ -421,7 +447,7 @@ func TestStepUp_SealBindsRefreshHashAndIdleExpiry(t *testing.T) {
 				if col == "refresh_token_hash" {
 					_, err = tx.Exec(ctx, `UPDATE sessions SET refresh_token_hash = $2 WHERE id = $1`, sid, hex.EncodeToString(sum[:]))
 				} else {
-					_, err = tx.Exec(ctx, `UPDATE sessions SET expires_at = expires_at + interval '1 day' WHERE id = $1`, sid)
+					_, err = tx.Exec(ctx, `UPDATE sessions SET expires_at = expires_at - interval '1 minute' WHERE id = $1`, sid)
 				}
 				if err != nil {
 					return err
@@ -564,11 +590,11 @@ func TestStepUp_Classifiers(t *testing.T) {
 	notStepUpRefused(t, w.do(http.MethodPost, policy, staleTenant, map[string]any{}), "policy tighten-only caller")
 	stepUpRefused(t, w.do(http.MethodPost, policy, staleAdmin, map[string]any{}), 300, "policy author")
 
-	alertOf := func(kind string, attrs map[string]alerting.AttrValue) string {
+	alertOf := func(kind string, attrs map[string]alerting.AttrValue, subject uuid.UUID) string {
 		disc := "s4b-" + uuid.NewString()
 		var id uuid.UUID
 		if err := w.rt.WithPlatformAdmin(context.Background(), admin.ref.StaffID, func(ctx context.Context, tx pgx.Tx) error {
-			if err := alerting.Raise(ctx, tx, alerting.Alert{Kind: alerting.Kind(kind), Discriminator: disc, Attributes: attrs}); err != nil {
+			if err := alerting.Raise(ctx, tx, alerting.Alert{Kind: alerting.Kind(kind), SubjectTenantID: subject, Discriminator: disc, Attributes: attrs}); err != nil {
 				return err
 			}
 			return tx.QueryRow(ctx, `SELECT id FROM alerts WHERE kind = $1 AND discriminator = $2`, kind, disc).Scan(&id)
@@ -579,16 +605,16 @@ func TestStepUp_Classifiers(t *testing.T) {
 	}
 	staffAttr := map[string]alerting.AttrValue{"staff_id": admin.ref.StaffID.String()}
 	body := map[string]any{"reason_code": "s4b_test"}
-	stepUpRefused(t, w.do(http.MethodPost, alertOf("staff.platform_mfa_recovery_used", staffAttr), staleAdmin, body), 300, "staff.* p3 alert")
-	stepUpRefused(t, w.do(http.MethodPost, alertOf("alerting.raise_failed", map[string]alerting.AttrValue{"kind": "x.y", "sqlstate_class": "42"}), staleAdmin, body), 300, "p1 alert")
+	stepUpRefused(t, w.do(http.MethodPost, alertOf("staff.platform_mfa_recovery_used", staffAttr, uuid.Nil), staleAdmin, body), 300, "staff.* p3 alert")
+	stepUpRefused(t, w.do(http.MethodPost, alertOf("reconciliation.run_failed", map[string]alerting.AttrValue{"stream": "ledger", "phase": "x", "sqlstate_class": "42"}, w.tenant.ID), staleAdmin, body), 300, "p1 alert")
 	stepUpRefused(t, w.do(http.MethodPost, "/v1/admin/alerts/"+uuid.NewString()+"/resolve", staleAdmin, body), 300, "unknown alert")
-	p2 := alertOf("alerting.unrouted", nil)
+	p2 := alertOf("alerting.unrouted", nil, uuid.Nil)
 	r := w.do(http.MethodPost, p2, staleAdmin, body)
 	notStepUpRefused(t, r, "p2 non-staff alert")
 	if r.status != http.StatusOK {
 		t.Fatalf("a non-security alert resolves without step-up: %d %s", r.status, r.body)
 	}
-	tr := w.do(http.MethodPost, alertOf("staff.platform_mfa_integrity", staffAttr), staleTenant, body)
+	tr := w.do(http.MethodPost, alertOf("staff.platform_mfa_integrity", staffAttr, uuid.Nil), staleTenant, body)
 	if tr.status != http.StatusForbidden || tr.code() != "forbidden" {
 		t.Fatalf("a tenant caller keeps the handler's audited 403 (no step-up prompt): %d %s", tr.status, tr.body)
 	}
