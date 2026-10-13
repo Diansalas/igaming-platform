@@ -3,10 +3,13 @@ package aml
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -95,56 +98,76 @@ func RaiseHoldEvalFailedDetached(ctx context.Context, pool *db.Pool, tenantID uu
 	})
 }
 
-// probeHoldActive opens a SAVEPOINT (one round trip), then runs SET LOCAL statement_timeout; SELECT aml_hold_active(...);
-// ROLLBACK TO SAVEPOINT; RELEASE SAVEPOINT as ONE pipelined batch (a second round trip). The rollback undoes the SET LOCAL,
-// so the caller's own timeouts are untouched, and ANY failure inside the savepoint (a missing function, a permission error,
-// a timeout) is contained: the caller's transaction stays usable.
+// probeHoldActive runs SAVEPOINT; set_config('statement_timeout', ..., true); SELECT aml_hold_active(...); ROLLBACK TO
+// SAVEPOINT; RELEASE SAVEPOINT as ONE pipelined round trip. The rollback undoes the set_config, so the caller's own timeouts
+// are untouched, and ANY failure inside the savepoint (a missing function, a permission error, a timeout) is contained: the
+// caller's transaction stays usable.
+//
+// The pipeline is a pgconn batch of UNNAMED statements (Parse/Bind/Describe/Execute per statement, one Sync at the end): the
+// server processes it strictly in order, so the SAVEPOINT has EXECUTED before the hold read is even parsed, and a failure at
+// any later stage (Parse, Bind or execution) lands inside the savepoint. It must NOT be a pgx.Batch: in pgx's default
+// cache-statement mode a pgx.Batch first prepares every statement that is not yet in the connection's statement cache
+// (a fresh connection, an evicted or invalidated entry) in a SEPARATE Parse/Describe + Sync exchange before anything
+// executes, so a Parse failure there (aml_hold_active not resolvable) would abort the caller's transaction with no savepoint
+// to roll back to (ISO-LATENCY-1 security review; pinned by TestHoldProbe_ParseFailure_*).
 func probeHoldActive(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (bool, error) {
 	const sp = "aml_hold_probe"
-	if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
-		return false, fmt.Errorf("aml: hold probe: open savepoint: %w", err)
+	conn := tx.Conn()
+	if conn == nil || conn.PgConn() == nil {
+		return false, fmt.Errorf("aml: hold probe: transaction has no connection")
 	}
-	b := &pgx.Batch{}
-	b.Queue(`SELECT set_config('statement_timeout', $1, true)`, fmt.Sprintf("%d", HoldEvalTimeout.Milliseconds()))
-	b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(op))
-	b.Queue("ROLLBACK TO SAVEPOINT " + sp)
-	b.Queue("RELEASE SAVEPOINT " + sp)
-	br := tx.SendBatch(ctx, b)
-	var (
-		held   bool
-		runErr error
-	)
-	if _, err := br.Exec(); err != nil {
-		runErr = err
-	}
+	b := &pgconn.Batch{}
+	b.ExecParams("SAVEPOINT "+sp, nil, nil, nil, nil)
+	b.ExecParams(`SELECT set_config('statement_timeout', $1, true)`,
+		[][]byte{[]byte(strconv.FormatInt(HoldEvalTimeout.Milliseconds(), 10))}, []uint32{pgtype.TextOID}, nil, nil)
+	b.ExecParams(`SELECT aml_hold_active($1, $2, $3, $4)`,
+		[][]byte{[]byte(tenantID.String()), []byte(personID.String()), []byte(accountID.String()), []byte(string(op))},
+		[]uint32{pgtype.UUIDOID, pgtype.UUIDOID, pgtype.UUIDOID, pgtype.TextOID}, nil, nil)
+	b.ExecParams("ROLLBACK TO SAVEPOINT "+sp, nil, nil, nil, nil)
+	b.ExecParams("RELEASE SAVEPOINT "+sp, nil, nil, nil, nil)
+	results, runErr := conn.PgConn().ExecBatch(ctx, b).ReadAll()
 	if runErr == nil {
-		if err := br.QueryRow().Scan(&held); err != nil {
-			runErr = err
+		// Every statement ran, so the savepoint is already rolled back and released: a decode failure must NOT attempt the
+		// recovery below (ROLLBACK TO a savepoint that no longer exists would itself abort the caller's transaction).
+		var held bool
+		if err := holdProbeResult(results, &held); err != nil {
+			return false, fmt.Errorf("aml: hold probe: %w", err)
+		}
+		return held, nil
+	}
+	// Either the savepoint is still open (the batch stopped at the failing statement) or the batch failed before the
+	// savepoint existed (the caller's transaction was already aborted, or the connection is gone): roll back to it so the
+	// caller's transaction is usable, then release it. If even that fails the transaction is unusable and the caller's next
+	// statement fails, which is itself fail-closed.
+	_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
+	_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT "+sp)
+	return false, fmt.Errorf("aml: hold probe: %w", runErr)
+}
+
+// holdProbeResult checks the five results of the probe pipeline and decodes the hold read (text format boolean). Anything
+// unexpected is an error, which the caller turns into a deny.
+func holdProbeResult(results []*pgconn.Result, held *bool) error {
+	if len(results) != 5 {
+		return fmt.Errorf("probe pipeline returned %d results, want 5", len(results))
+	}
+	for _, r := range results {
+		if r.Err != nil {
+			return r.Err
 		}
 	}
-	if runErr == nil {
-		if _, err := br.Exec(); err != nil {
-			runErr = err
-		}
+	rows := results[2].Rows
+	if len(rows) != 1 || len(rows[0]) != 1 || rows[0][0] == nil {
+		return fmt.Errorf("aml_hold_active returned no single non-NULL value")
 	}
-	if runErr == nil {
-		if _, err := br.Exec(); err != nil {
-			runErr = err
-		}
+	switch string(rows[0][0]) {
+	case "t":
+		*held = true
+	case "f":
+		*held = false
+	default:
+		return fmt.Errorf("aml_hold_active returned an unexpected value")
 	}
-	closeErr := br.Close()
-	if runErr == nil {
-		runErr = closeErr
-	}
-	if runErr != nil {
-		// The savepoint is still open (the batch stopped at the failing statement): roll back to it so the caller's
-		// transaction is usable, then release it. If even that fails the transaction is unusable and the caller's next
-		// statement fails, which is itself fail-closed.
-		_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
-		_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT "+sp)
-		return false, fmt.Errorf("aml: hold probe: %w", runErr)
-	}
-	return held, nil
+	return nil
 }
 
 func matchHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (uuid.UUID, error) {
