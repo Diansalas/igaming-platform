@@ -29,18 +29,18 @@ func registerSportsbookRoutes(mux *http.ServeMux, deps Deps) {
 
 	// Back Office - tenant-wide, staff-scoped, read-only bet visibility.
 	mux.Handle("GET /v1/admin/sportsbook/bets",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookBetRead)(newListAdminBetsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookBetRead)(newListAdminBetsHandler(deps)))))
 
 	// Stage 9.2 (ADR 0083 §5.2/§9.2): platform-admin jurisdiction/market
 	// gating governance for sb_jurisdiction_restrictions - never
 	// RequireTenantScope-wrapped, same reasoning as PUT
 	// /v1/admin/casino/games (a platform-admin token's tenant_id is nil).
 	mux.Handle("POST /v1/admin/sportsbook/jurisdiction-restrictions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionManage)(newCreateSportsbookJurisdictionRestrictionHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionManage)(newCreateSportsbookJurisdictionRestrictionHandler(deps))))
 	mux.Handle("POST /v1/admin/sportsbook/jurisdiction-restrictions/{id}/withdraw",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionManage)(newWithdrawSportsbookJurisdictionRestrictionHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionManage)(newWithdrawSportsbookJurisdictionRestrictionHandler(deps))))
 	mux.Handle("GET /v1/admin/sportsbook/jurisdiction-restrictions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionRead)(newListSportsbookJurisdictionRestrictionsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionRead)(newListSportsbookJurisdictionRestrictionsHandler(deps))))
 
 	// Stage 9.2 Part B2 / Wave 3 (ADR 0083 §6.2.3/§9.2): TENANT-scoped
 	// cross-player book-exposure limit governance for sb_exposure_limits -
@@ -49,11 +49,11 @@ func registerSportsbookRoutes(mux *http.ServeMux, deps Deps) {
 	// this table carries a tenant_id and is ordinary tenant-owned
 	// commercial configuration, not a platform-wide control.
 	mux.Handle("POST /v1/admin/sportsbook/exposure-limits",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitManage)(newCreateSportsbookExposureLimitHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitManage)(newCreateSportsbookExposureLimitHandler(deps)))))
 	mux.Handle("POST /v1/admin/sportsbook/exposure-limits/{id}/disable",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitManage)(newDisableSportsbookExposureLimitHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitManage)(newDisableSportsbookExposureLimitHandler(deps)))))
 	mux.Handle("GET /v1/admin/sportsbook/exposure-limits",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitRead)(newListSportsbookExposureLimitsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitRead)(newListSportsbookExposureLimitsHandler(deps)))))
 
 	// Stage 10 W1 (ADR 0088 §9): the non-production test-support
 	// settlement-simulation route. Registered ONLY when BOTH flags are
@@ -62,12 +62,13 @@ func registerSportsbookRoutes(mux *http.ServeMux, deps Deps) {
 	// never added to the mux at all otherwise, so a request against it
 	// gets Go's own unregistered-path 404, never a 503 from inside a
 	// handler (ADR 0088 §9.1's "the route does not exist there" claim must
-	// be literally true, not just behaviorally true). Chain order matches
-	// ADR 0088 §9.1 exactly: auth.Middleware -> auth.RequireTenantScope ->
-	// auth.RequireStaffPrincipal -> auth.RequirePermission(...).
+	// be literally true, not just behaviorally true). Chain: ADR 0119 S4a's
+	// staffRoute (auth.Middleware -> auth.RequireStaffPrincipal -> liveness ->
+	// aal2), then ADR 0088 §9.1's own gates unchanged: auth.RequireTenantScope
+	// -> auth.RequireStaffPrincipal -> auth.RequirePermission(...).
 	if deps.SportsbookSettlementSimulationEnabled && deps.SportsbookEnabled {
 		mux.Handle("POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event",
-			auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequireStaffPrincipal(
+			staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequireStaffPrincipal(
 				auth.RequirePermission(auth.PermSportsbookSettlementSimulate)(newSimulateSettlementEventHandler(deps))))))
 	}
 }

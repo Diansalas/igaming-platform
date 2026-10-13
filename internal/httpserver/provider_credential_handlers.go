@@ -37,26 +37,23 @@ import (
 // and apply routes are mounted only when it is (security review §3:
 // absent fingerprint key -> routes not mounted).
 func registerProviderCredentialRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/provider-credentials",
-		staff(auth.RequirePermission(auth.PermProviderCredentialRead)(newListProviderCredentialsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermProviderCredentialRead)(newListProviderCredentialsHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/provider-credentials/{handleID}/transitions",
-		staff(auth.RequirePermission(auth.PermProviderCredentialRevoke)(newTransitionProviderCredentialHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermProviderCredentialRevoke)(newTransitionProviderCredentialHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/provider-credential-requests",
-		staff(auth.RequireAnyPermission(auth.PermProviderCredentialRequest, auth.PermProviderCredentialApprove)(newListProviderCredentialRequestsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequireAnyPermission(auth.PermProviderCredentialRequest, auth.PermProviderCredentialApprove)(newListProviderCredentialRequestsHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}",
-		staff(auth.RequireAnyPermission(auth.PermProviderCredentialRequest, auth.PermProviderCredentialApprove)(newGetProviderCredentialRequestHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequireAnyPermission(auth.PermProviderCredentialRequest, auth.PermProviderCredentialApprove)(newGetProviderCredentialRequestHandler(deps))))
 	if deps.ProviderCredentials == nil {
 		return
 	}
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/provider-credential-requests",
-		staff(auth.RequirePermission(auth.PermProviderCredentialRequest)(newFileProviderCredentialRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermProviderCredentialRequest)(newFileProviderCredentialRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/decisions",
-		staff(auth.RequirePermission(auth.PermProviderCredentialApprove)(newDecideProviderCredentialRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermProviderCredentialApprove)(newDecideProviderCredentialRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/apply",
-		staff(auth.RequirePermission(auth.PermProviderCredentialRequest)(newApplyProviderCredentialRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermProviderCredentialRequest)(newApplyProviderCredentialRequestHandler(deps))))
 }
 
 // providerCredentialCall carries what every handler resolves first.

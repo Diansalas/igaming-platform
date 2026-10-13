@@ -169,12 +169,14 @@ func TestWithdrawalApprove_InactiveStaffAccountRejected(t *testing.T) {
 		t.Fatalf("suspend staff account: %v", err)
 	}
 
+	// ADR 0119 S4a: the suspension ends the session on its next request (liveness: 401 session_revoked), before the
+	// approval's own active-staff check, which stays as defence in depth for the in-flight window (R13).
 	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", token.AccessToken, nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		var apiErr apierror.Error
-		decodeBody(t, resp, &apiErr)
-		t.Fatalf("expected 403 for a suspended staff account approving with an already-issued token, got %d: %+v", resp.StatusCode, apiErr)
+	var apiErr apierror.Error
+	decodeBody(t, resp, &apiErr)
+	if resp.StatusCode != http.StatusUnauthorized || apiErr.Code != apierror.CodeSessionRevoked {
+		t.Fatalf("expected 401 session_revoked for a suspended staff account approving with an already-issued token, got %d: %+v", resp.StatusCode, apiErr)
 	}
 	if count := countWithdrawalApprovals(t, pool, tenant.ID, wr.ID); count != 0 {
 		t.Fatalf("expected zero withdrawal_approvals rows after a rejected suspended-staff approval, got %d", count)

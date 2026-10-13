@@ -21,6 +21,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting/alertingtest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
+	tenantctx "github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertworld"
 )
 
@@ -35,6 +36,7 @@ type arAPI struct {
 	srv    *httptest.Server
 	disp   *alerting.Dispatcher
 	admin  uuid.UUID
+	deps   Deps // the server's Deps, for behindChain
 }
 
 func newARAPI(t *testing.T, production bool) *arAPI {
@@ -46,7 +48,7 @@ func newARAPI(t *testing.T, production bool) *arAPI {
 	}
 	issuer := auth.NewIssuer(keys, "ar-test", "ar-test")
 	disp := alerting.NewDispatcher(w.Pool, alerting.DispatcherConfig{}, alerting.LogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	srv := httptest.NewServer(New(Deps{
+	deps := Deps{
 		Logger:                 slog.New(slog.NewTextHandler(io.Discard, nil)),
 		DB:                     w.Pool,
 		AuthIssuer:             issuer,
@@ -56,17 +58,33 @@ func newARAPI(t *testing.T, production bool) *arAPI {
 		RefreshTokenTTL:        time.Hour,
 		AlertRouting:           disp,
 		AlertRoutingProduction: production,
-	}))
+	}
+	srv := httptest.NewServer(New(deps))
 	t.Cleanup(srv.Close)
-	return &arAPI{t: t, w: w, issuer: issuer, srv: srv, disp: disp, admin: w.SeedAdmin()}
+	return &arAPI{t: t, w: w, issuer: issuer, srv: srv, disp: disp, admin: w.SeedAdmin(), deps: deps}
 }
 
 func (a *arAPI) token(subject, tenant uuid.UUID, role auth.Role) string {
 	a.t.Helper()
-	return authtest.StaffToken(a.t, a.issuer, subject, tenant, role) // ADR 0119 S3: aal2 staff token
+	return authtest.ClaimedStaffToken(a.t, a.w.Pool, testStaffMFAKeys(), a.issuer, subject, tenant, role) // ADR 0119 S4a: live aal2 session
 }
 
 func (a *arAPI) adminToken() string { return a.token(a.admin, uuid.Nil, auth.RolePlatformAdmin) }
+
+// tenantStaff provisions an active staff row of role in tenant (runtime role, tenant scope) and returns its id: since
+// ADR 0119 S4a a staff token is only honoured for a live session of a real staff member at the claimed role.
+func (a *arAPI) tenantStaff(tenant uuid.UUID, role string) uuid.UUID {
+	a.t.Helper()
+	id := uuid.New()
+	if err := a.w.Pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', $4, 'active')`,
+			id, tenant, "ar-"+id.String()+"@fixture.invalid", role)
+		return err
+	}); err != nil {
+		a.t.Fatalf("seed tenant staff: %v", err)
+	}
+	return id
+}
 
 type arResp struct {
 	status int
@@ -291,14 +309,27 @@ func TestAlertRoutingAPI_Authorization_EachLayer_DeniedAuditedInCallerScope(t *t
 	tenant := a.w.SeedTenant(a.admin)
 	other := a.w.SeedTenant(a.admin)
 
-	tenantAdmin := a.token(uuid.New(), tenant, auth.RoleTenantAdmin)
+	tenantAdmin := a.token(a.tenantStaff(tenant, "tenant_admin"), tenant, auth.RoleTenantAdmin)
 	compliance := a.token(a.admin, uuid.Nil, auth.RoleCompliance)      // platform scope, wrong permission (layer 1)
 	adminWithTenant := a.token(a.admin, other, auth.RolePlatformAdmin) // has the permission, tenant scoped (layer 2)
 
-	// Layer 1 (permission) and layer 2 (platform scope) on the mutation.
-	for name, tok := range map[string]string{"tenant admin": tenantAdmin, "platform user without alert:route_manage": compliance, "platform_admin presented with a tenant": adminWithTenant} {
-		if r := a.do("POST", "/v1/admin/alerting/routes", tok, routeBody(nil)); r.status != http.StatusForbidden {
-			t.Errorf("%s: POST status %d, want 403", name, r.status)
+	// Layer 1 (permission) and layer 2 (platform scope) on the mutation. ADR 0119 S4a: the two mismatched-claim
+	// tokens (a platform admin's id under a compliance claim; a platform row under a tenant claim) match no live
+	// session and are refused by the staff chain over HTTP; each layer is pinned behind the chain with the same claims.
+	if r := a.do("POST", "/v1/admin/alerting/routes", tenantAdmin, routeBody(nil)); r.status != http.StatusForbidden {
+		t.Errorf("tenant admin: POST status %d, want 403", r.status)
+	}
+	complianceTC := tenantctx.Context{Role: string(auth.RoleCompliance), PrincipalType: string(auth.PrincipalStaff), Subject: a.admin.String()}
+	adminWithTenantTC := tenantctx.Context{TenantID: other, Role: string(auth.RolePlatformAdmin), PrincipalType: string(auth.PrincipalStaff), Subject: a.admin.String()}
+	for name, c := range map[string]struct {
+		tok string
+		tc  tenantctx.Context
+	}{"platform user without alert:route_manage": {compliance, complianceTC}, "platform_admin presented with a tenant": {adminWithTenant, adminWithTenantTC}} {
+		if r := a.do("POST", "/v1/admin/alerting/routes", c.tok, routeBody(nil)); r.status != http.StatusUnauthorized || !strings.Contains(string(r.body), "session_revoked") {
+			t.Errorf("%s over HTTP: POST status %d, want 401 session_revoked", name, r.status)
+		}
+		if rec := behindChain(t, newCreateAlertRouteHandler(a.deps), "POST", "/v1/admin/alerting/routes", nil, c.tc, routeBody(nil)); rec.Code != http.StatusForbidden {
+			t.Errorf("%s behind the chain: POST status %d, want 403", name, rec.Code)
 		}
 	}
 	if a.routeCount() != 0 {
@@ -327,15 +358,33 @@ func TestAlertRoutingAPI_Authorization_EachLayer_DeniedAuditedInCallerScope(t *t
 		if r := a.do("GET", p, tenantAdmin, nil); r.status != http.StatusForbidden {
 			t.Errorf("tenant admin GET %s: %d, want 403", p, r.status)
 		}
-		if r := a.do("GET", p, adminWithTenant, nil); r.status != http.StatusForbidden {
-			t.Errorf("tenant-scoped platform_admin GET %s: %d, want 403 (explicit scope check)", p, r.status)
+		if r := a.do("GET", p, adminWithTenant, nil); r.status != http.StatusUnauthorized {
+			t.Errorf("tenant-scoped platform_admin GET %s over HTTP: %d, want 401 (ADR 0119 S4a chain)", p, r.status)
+		}
+		if rec := behindChain(t, alertReadInner(a.deps, p), "GET", p, nil, adminWithTenantTC, nil); rec.Code != http.StatusForbidden {
+			t.Errorf("tenant-scoped platform_admin GET %s behind the chain: %d, want 403 (explicit scope check)", p, rec.Code)
 		}
 		if r := a.do("GET", p, "", nil); r.status != http.StatusUnauthorized {
 			t.Errorf("anonymous GET %s: %d, want 401", p, r.status)
 		}
 	}
-	if r := a.do("GET", "/v1/admin/alerting/routes", compliance, nil); r.status != http.StatusForbidden {
-		t.Errorf("compliance GET routes: %d, want 403", r.status)
+	if r := a.do("GET", "/v1/admin/alerting/routes", compliance, nil); r.status != http.StatusUnauthorized {
+		t.Errorf("compliance GET routes over HTTP: %d, want 401 (ADR 0119 S4a chain)", r.status)
+	}
+	if rec := behindChain(t, alertReadInner(a.deps, "/v1/admin/alerting/routes"), "GET", "/v1/admin/alerting/routes", nil, complianceTC, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("compliance GET routes behind the chain: %d, want 403", rec.Code)
+	}
+}
+
+// alertReadInner is the inner handler (permission gate + handler) each alert read route registers behind staffRoute.
+func alertReadInner(deps Deps, path string) http.Handler {
+	switch path {
+	case "/v1/admin/alerting/routes":
+		return auth.RequirePermission(auth.PermAlertRouteManage)(newListAlertRoutesHandler(deps))
+	case "/v1/admin/alerting/status":
+		return auth.RequirePermission(auth.PermAlertManage)(newAlertStatusHandler(deps))
+	default:
+		return auth.RequirePermission(auth.PermAlertManage)(newListAlertsHandler(deps))
 	}
 }
 
@@ -346,7 +395,7 @@ func TestAlertRoutingAPI_TenantTokenCannotSeeOrChangeRouting(t *testing.T) {
 	tenantB := a.w.SeedTenant(a.admin)
 	a.w.AddRoute(a.admin, alerting.SeverityP2, 0, alerting.ChannelMock, "secret-rota", true)
 	for _, ten := range []uuid.UUID{tenantA, tenantB} {
-		tok := a.token(uuid.New(), ten, auth.RoleTenantAdmin)
+		tok := a.token(a.tenantStaff(ten, "tenant_admin"), ten, auth.RoleTenantAdmin)
 		r := a.do("GET", "/v1/admin/alerting/routes", tok, nil)
 		if r.status != http.StatusForbidden || strings.Contains(string(r.body), "secret-rota") {
 			t.Fatalf("tenant %s read routes: %d %s", ten, r.status, r.body)
@@ -361,12 +410,23 @@ func TestAlertAdmin_RefusedAckAndResolveAreAudited_AckTakesAReasonCode(t *testin
 	tok := a.adminToken()
 	ackPath := "/v1/admin/alerts/" + id.String() + "/ack"
 
-	// Refused: wrong permission, tenant-scoped, unknown alert, invalid reason.
-	if r := a.do("POST", ackPath, a.token(a.admin, uuid.Nil, auth.RoleCompliance), nil); r.status != http.StatusForbidden {
-		t.Fatalf("permission: %d", r.status)
+	// Refused: wrong permission, tenant-scoped, unknown alert, invalid reason. ADR 0119 S4a: the first two are
+	// mismatched claims, refused by the staff chain over HTTP (401, no audit row); the handler's own refusals and
+	// their audit rows are pinned behind the chain with the same claims.
+	if r := a.do("POST", ackPath, a.token(a.admin, uuid.Nil, auth.RoleCompliance), nil); r.status != http.StatusUnauthorized {
+		t.Fatalf("permission claims over HTTP: %d, want 401", r.status)
 	}
-	if r := a.do("POST", ackPath, a.token(a.admin, tenant, auth.RolePlatformAdmin), nil); r.status != http.StatusForbidden {
-		t.Fatalf("scope: %d", r.status)
+	if r := a.do("POST", ackPath, a.token(a.admin, tenant, auth.RolePlatformAdmin), nil); r.status != http.StatusUnauthorized {
+		t.Fatalf("scope claims over HTTP: %d, want 401", r.status)
+	}
+	ack := newAlertTransitionHandler(a.deps, "ack")
+	if rec := behindChain(t, ack, "POST", ackPath, map[string]string{"alertID": id.String()},
+		tenantctx.Context{Role: string(auth.RoleCompliance), PrincipalType: string(auth.PrincipalStaff), Subject: a.admin.String()}, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("permission: %d", rec.Code)
+	}
+	if rec := behindChain(t, ack, "POST", ackPath, map[string]string{"alertID": id.String()},
+		tenantctx.Context{TenantID: tenant, Role: string(auth.RolePlatformAdmin), PrincipalType: string(auth.PrincipalStaff), Subject: a.admin.String()}, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("scope: %d", rec.Code)
 	}
 	if r := a.do("POST", "/v1/admin/alerts/"+uuid.NewString()+"/ack", tok, nil); r.status != http.StatusNotFound {
 		t.Fatalf("not found: %d", r.status)

@@ -49,6 +49,12 @@ func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 				PrincipalType: string(claims.PrincipalType),
 				Subject:       claims.Subject,
 			})
+			// ADR 0119 S4a: a staff token's verified session assurance (sid,
+			// aal, amr, auth_time, mfa_at, sv) travels with the request for
+			// RequireAAL2, the liveness check and (S4b) RequireStepUp.
+			if s, ok := staffSessionFromClaims(claims); ok {
+				ctx = withStaffSession(ctx, s)
+			}
 			observability.SetTenantIDForLogging(ctx, claims.TenantID.String())
 
 			next.ServeHTTP(w, r.WithContext(ctx))

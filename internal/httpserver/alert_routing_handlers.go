@@ -48,14 +48,14 @@ type AlertRoutingSource interface {
 	ReadinessEvaluatedAt() time.Time
 }
 
-func registerAlertRoutingRoutes(mux *http.ServeMux, deps Deps, staff func(http.Handler) http.Handler) {
-	mux.Handle("POST /v1/admin/alerting/routes", staff(newCreateAlertRouteHandler(deps)))
+func registerAlertRoutingRoutes(mux *http.ServeMux, deps Deps) {
+	mux.Handle("POST /v1/admin/alerting/routes", staffRoute(deps, stepUpCritical, newCreateAlertRouteHandler(deps)))
 	mux.Handle("GET /v1/admin/alerting/routes",
-		staff(auth.RequirePermission(auth.PermAlertRouteManage)(newListAlertRoutesHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAlertRouteManage)(newListAlertRoutesHandler(deps))))
 	mux.Handle("GET /v1/admin/alerting/status",
-		staff(auth.RequirePermission(auth.PermAlertManage)(newAlertStatusHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAlertManage)(newAlertStatusHandler(deps))))
 	mux.Handle("GET /v1/admin/alerts",
-		staff(auth.RequirePermission(auth.PermAlertManage)(newListAlertsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAlertManage)(newListAlertsHandler(deps))))
 }
 
 // platformAlertCaller authenticates and applies the explicit platform-scope

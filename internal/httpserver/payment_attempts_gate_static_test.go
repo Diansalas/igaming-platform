@@ -18,7 +18,8 @@ func TestPaymentAttemptRoutes_GatedOnForceResolveReadAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(src)
-	handles := regexp.MustCompile(`(?m)^\s*mux\.Handle\("GET [^"]+",\n\s*staff\(([^\n]*)\)\)$`).FindAllStringSubmatch(s, -1)
+	// ADR 0119 S4a: registered through staffRoute (class none: reads); the inner gate is unchanged.
+	handles := regexp.MustCompile(`(?m)^\s*mux\.Handle\("GET [^"]+",\n\s*staffRoute\(deps, stepUpNone, ([^\n]*)\)\)$`).FindAllStringSubmatch(s, -1)
 	if len(handles) != 2 {
 		t.Fatalf("expected the two R1 route registrations, found %d", len(handles))
 	}

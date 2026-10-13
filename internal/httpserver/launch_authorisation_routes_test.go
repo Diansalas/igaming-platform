@@ -125,7 +125,8 @@ func TestLaunchRoutes_PermissionPerRoute_Pinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(`mux\.Handle\("(GET|POST) (/v1/[^"]+)",\s*\n\s*staff\((auth\.Perm[A-Za-z]+),`)
+	// ADR 0119 S4a: every launch route is a staffRoute whose inner gate is exactly one RequirePermission.
+	re := regexp.MustCompile(`mux\.Handle\("(GET|POST) (/v1/[^"]+)",\s*\n\s*staffRoute\(deps, \w+, auth\.RequirePermission\((auth\.Perm[A-Za-z]+)\)\(`)
 	got := map[string]string{}
 	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
 		got[m[1]+" "+m[2]] = m[3]
@@ -151,9 +152,10 @@ func TestLaunchRoutes_PermissionPerRoute_Pinned(t *testing.T) {
 			t.Errorf("%s: permission %q, want %q", k, got[k], v)
 		}
 	}
-	// The wrapper must keep the staff-principal gate and the permission gate, in that order.
-	if !strings.Contains(string(src), "auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(auth.RequirePermission(perm)(h)))") {
-		t.Error("the launch routes must be wrapped Middleware -> RequireStaffPrincipal -> RequirePermission")
+	// ADR 0119 S4a: the staff-principal gate (and liveness, aal2) come from staffRoute, whose chain is pinned by
+	// TestStaffRoute_ChainComposition; the permission gate follows it. No other wrapper may remain in this file.
+	if strings.Contains(string(src), "auth.Middleware(") || strings.Count(string(src), "staffRoute(deps, ") != len(want) {
+		t.Error("the launch routes must be registered through staffRoute only")
 	}
 	// The tenant is never read from a body or a query: beginLaunchCall is the only source.
 	if strings.Contains(string(src), "body.TenantID") || strings.Contains(string(src), `Get("tenant_id")`) {
@@ -179,12 +181,15 @@ func TestLaunchRoutes_NilService_503_DBFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// ADR 0119 S4a: a staff request now passes the liveness check before the service is consulted, and with no
+	// database the liveness check fails CLOSED (503 service_unavailable) - DB-free, before any handler runs. The nil
+	// service 503 itself is still covered by the launch HTTP integration tests.
 	for _, p := range []string{"/v1/admin/launch-authorisations", "/v1/admin/tenants/" + uuid.NewString() + "/launch-status-history"} {
 		req := httptest.NewRequest("GET", p, nil)
 		req.Header.Set("Authorization", "Bearer "+tok)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "LAUNCH_AUTHORISATION_UNAVAILABLE") {
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"service_unavailable"`) {
 			t.Errorf("%s: %d %s", p, rec.Code, rec.Body)
 		}
 	}

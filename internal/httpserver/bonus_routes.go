@@ -27,22 +27,22 @@ func registerBonusRoutes(mux *http.ServeMux, deps Deps) {
 	// read-only bonus visibility permission (see that file's own top-of-
 	// file doc comment for why it, not a new permission, is reused here).
 	mux.Handle("GET /v1/admin/bonus/campaigns",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListCampaignsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListCampaignsHandler(deps)))))
 	mux.Handle("GET /v1/admin/bonus/change-requests",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListChangeRequestsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListChangeRequestsHandler(deps)))))
 	mux.Handle("GET /v1/admin/bonus/grants",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListGrantsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListGrantsHandler(deps)))))
 
 	mux.Handle("POST /v1/admin/bonus/campaigns",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusCampaignCreate)(newCreateCampaignHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusCampaignCreate)(newCreateCampaignHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/grants",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusGrantIssue)(newIssueManualGrantHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusGrantIssue)(newIssueManualGrantHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/suggestions/{suggestionID}/claim",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusSuggestionReview)(newClaimSuggestionHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusSuggestionReview)(newClaimSuggestionHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/suggestions/{suggestionID}/decide",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusSuggestionReview)(newDecideSuggestionHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusSuggestionReview)(newDecideSuggestionHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/held-dispositions/{dispositionID}/resolve",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusHeldDispositionResolve)(newResolveHeldDispositionHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusHeldDispositionResolve)(newResolveHeldDispositionHandler(deps)))))
 
 	// Stage 4H-B1 Wave 3 Phase 3 (item F): four-eyes filing/approval and
 	// EOI minting - permission is checked DYNAMICALLY inside each handler
@@ -51,11 +51,11 @@ func registerBonusRoutes(mux *http.ServeMux, deps Deps) {
 	// depends on a request-body field, not the route itself. Only
 	// RequireTenantScope is applied at the route level.
 	mux.Handle("POST /v1/admin/bonus/change-requests",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(newFileChangeRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(newFileChangeRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/bonus/change-requests/{requestID}/decide",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(newDecideChangeRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(newDecideChangeRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/bonus/economic-operations",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(newMintEconomicOperationHandler(deps))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(newMintEconomicOperationHandler(deps))))
 
 	// Stage 4H-B1 Wave 3 Phase 3 (item F): campaign activate / offer
 	// create+version+publish / manual-grant issue+activate / bulk-job
@@ -67,19 +67,19 @@ func registerBonusRoutes(mux *http.ServeMux, deps Deps) {
 	// enforced independently, inside the domain function, never inferred
 	// from this permission check alone.
 	mux.Handle("POST /v1/admin/bonus/campaigns/{campaignID}/activate",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusCampaignActivate)(newActivateCampaignHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusCampaignActivate)(newActivateCampaignHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/offers",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusOfferManage)(newCreateOfferHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusOfferManage)(newCreateOfferHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/offers/{offerID}/versions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusOfferManage)(newCreateOfferVersionHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusOfferManage)(newCreateOfferVersionHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/offers/{offerID}/publish",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusOfferManage)(newPublishOfferHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusOfferManage)(newPublishOfferHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/manual-grants",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusGrantIssue)(newIssueManualGrantRequestHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusGrantIssue)(newIssueManualGrantRequestHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/manual-grants/{grantID}/activate",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusGrantIssue)(newActivateManualGrantHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusGrantIssue)(newActivateManualGrantHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/bulk-jobs",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusBulkExecute)(newCreateBulkGrantJobHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusBulkExecute)(newCreateBulkGrantJobHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/bulk-jobs/{jobID}/execute",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusBulkExecute)(newExecuteBulkGrantJobHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusBulkExecute)(newExecuteBulkGrantJobHandler(deps)))))
 }

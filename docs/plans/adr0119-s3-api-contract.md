@@ -97,5 +97,5 @@ Notes:
 | `POST /v1/staff/auth/step-up` and the `403 step_up_required` modal | S4b (S7b) |
 | `POST /v1/staff/mfa/recovery-codes/regenerate` | S4b (needs step-up `critical`) |
 | `POST /v1/staff/invitations/accept`, `POST /v1/staff/auth/password/redeem` | S6 |
-| `401 session_revoked` (liveness) | S4a |
+| `401 session_revoked` (liveness) | S4a (implemented on the S4a branch: any staff bearer call can answer it; sign in again) |
 | Staff directory and lifecycle screens | S8 |

@@ -34,7 +34,7 @@ func registerAssetRegistryRoutes(mux *http.ServeMux, deps Deps) {
 	// --- Layers 1-3: platform-admin only ---
 
 	mux.Handle("GET /v1/admin/assets",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newListAssetsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAssetRegistryManage)(newListAssetsHandler(deps))))
 
 	// Four-eyes: file a change request, then have a DIFFERENT platform
 	// principal (a different PERSON, since migration 0047 - not merely a
@@ -43,29 +43,29 @@ func registerAssetRegistryRoutes(mux *http.ServeMux, deps Deps) {
 	// platform-wide layer-7 eligibility default, never optional paperwork
 	// around them.
 	mux.Handle("POST /v1/admin/assets/change-requests",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newFileAssetChangeRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAssetRegistryManage)(newFileAssetChangeRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/assets/change-requests/{id}/decision",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newDecideAssetChangeRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAssetRegistryManage)(newDecideAssetChangeRequestHandler(deps))))
 
 	mux.Handle("POST /v1/admin/assets",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newCreateAssetHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAssetRegistryManage)(newCreateAssetHandler(deps))))
 	mux.Handle("PATCH /v1/admin/assets/{code}",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newUpdateAssetMetadataHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAssetRegistryManage)(newUpdateAssetMetadataHandler(deps))))
 	mux.Handle("PUT /v1/admin/assets/{code}/activation",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newSetAssetActivationHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAssetRegistryManage)(newSetAssetActivationHandler(deps))))
 	mux.Handle("PUT /v1/admin/assets/{code}/platform-authorization",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newSetAssetPlatformAuthorizationHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAssetRegistryManage)(newSetAssetPlatformAuthorizationHandler(deps))))
 	// The platform-wide layer-7 default row (tenant_id NULL, ADR 0037
 	// §A.6) - platform-only, unlike the tenant override below.
 	mux.Handle("PUT /v1/admin/assets/{code}/operation-eligibility",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newSetPlatformOperationEligibilityHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAssetRegistryManage)(newSetPlatformOperationEligibilityHandler(deps))))
 
 	// --- Layers 4-7: tenant-scoped ---
 
 	mux.Handle("GET /v1/admin/asset-authorizations",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermAssetAuthorizationWrite)(newListAssetAuthorizationsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermAssetAuthorizationWrite)(newListAssetAuthorizationsHandler(deps)))))
 	mux.Handle("PUT /v1/admin/asset-authorizations/{scopeKind}",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermAssetAuthorizationWrite)(newAuthorizeAssetScopeHandler(deps)))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermAssetAuthorizationWrite)(newAuthorizeAssetScopeHandler(deps)))))
 	mux.Handle("PUT /v1/admin/asset-authorizations/operation-eligibility/{code}",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermAssetAuthorizationWrite)(newSetTenantOperationEligibilityHandler(deps)))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermAssetAuthorizationWrite)(newSetTenantOperationEligibilityHandler(deps)))))
 }

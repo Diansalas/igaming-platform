@@ -25,25 +25,25 @@ func registerKYCRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/me/kyc/documents/{id}/content", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetMyDocumentContentHandler(deps))))
 
 	mux.Handle("GET /v1/admin/kyc/verifications",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListVerificationsForAccountHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListVerificationsForAccountHandler(deps)))))
 	// Stage 5 Back Office: the tenant-wide case queue (no player_account_id
 	// required) - see newListKYCCasesHandler's own doc comment.
 	mux.Handle("GET /v1/admin/kyc/cases",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListKYCCasesHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListKYCCasesHandler(deps)))))
 	mux.Handle("POST /v1/admin/kyc/verifications/{id}/review",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationReview)(newReviewVerificationHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationReview)(newReviewVerificationHandler(deps)))))
 	mux.Handle("GET /v1/admin/kyc/documents",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListDocumentsForAccountHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListDocumentsForAccountHandler(deps)))))
 	mux.Handle("POST /v1/admin/kyc/documents/{id}/review",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationReview)(newReviewDocumentHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationReview)(newReviewDocumentHandler(deps)))))
 	mux.Handle("GET /v1/admin/kyc/documents/{id}/content",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newGetDocumentContentHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newGetDocumentContentHandler(deps)))))
 
 	// PRH-I3 (ADR 0096 §6, security condition 7): compliance/platform_admin
 	// only - never RoleTenantAdmin, even though it holds the broader
 	// PermVerificationRead.
 	mux.Handle("GET /v1/admin/kyc/enforcement-decisions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermKYCEnforcementDecisionRead)(newListKYCEnforcementDecisionsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermKYCEnforcementDecisionRead)(newListKYCEnforcementDecisionsHandler(deps)))))
 
 	// KYC-WH-1 (Stage 10.2, ADR 0091, ruling J7): registered only when
 	// BOTH conditions hold - see Deps.KYCWebhookEnabled's own doc comment.

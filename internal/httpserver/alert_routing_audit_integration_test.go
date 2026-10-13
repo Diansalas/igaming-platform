@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	tenantctx "github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 func (a *arAPI) auditTargets(tenantID uuid.UUID, action string) []string {
@@ -57,13 +59,25 @@ func TestAlertAdmin_DeniedAuditNeverRecordsAHostilePathSegment(t *testing.T) {
 	a := newARAPI(t, false)
 	tenant := a.w.SeedTenant(a.admin)
 	hostile := strings.Repeat("A", 6000) + "%0A%7B%22forged%22:true%7D"
-	tenantTok := a.token(uuid.New(), tenant, auth.RoleTenantAdmin)
+	tenantTok := a.token(a.tenantStaff(tenant, "tenant_admin"), tenant, auth.RoleTenantAdmin)
 	complianceTok := a.token(a.admin, uuid.Nil, auth.RoleCompliance)
+	segment, err := url.PathUnescape(hostile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, op := range []string{"ack", "resolve"} {
-		for _, tok := range []string{tenantTok, complianceTok} {
-			if r := a.do("POST", "/v1/admin/alerts/"+hostile+"/"+op, tok, map[string]any{"reason_code": "x_y"}); r.status != http.StatusForbidden {
-				t.Fatalf("%s: status %d, want 403", op, r.status)
-			}
+		if r := a.do("POST", "/v1/admin/alerts/"+hostile+"/"+op, tenantTok, map[string]any{"reason_code": "x_y"}); r.status != http.StatusForbidden {
+			t.Fatalf("%s: status %d, want 403", op, r.status)
+		}
+		// ADR 0119 S4a: a platform admin's id under a compliance claim matches no live session (401 over HTTP); the
+		// platform-scope denial and its audit are pinned behind the chain with the same claims.
+		if r := a.do("POST", "/v1/admin/alerts/"+hostile+"/"+op, complianceTok, map[string]any{"reason_code": "x_y"}); r.status != http.StatusUnauthorized {
+			t.Fatalf("%s with mismatched claims over HTTP: status %d, want 401", op, r.status)
+		}
+		if rec := behindChain(t, newAlertTransitionHandler(a.deps, op), "POST", "/v1/admin/alerts/x/"+op, map[string]string{"alertID": segment},
+			tenantctx.Context{Role: string(auth.RoleCompliance), PrincipalType: string(auth.PrincipalStaff), Subject: a.admin.String()},
+			map[string]any{"reason_code": "x_y"}); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s behind the chain: status %d, want 403", op, rec.Code)
 		}
 		for _, targets := range [][]string{a.auditTargets(tenant, "alerts."+op), a.auditTargets(uuid.Nil, "alerts."+op)} {
 			if len(targets) != 1 || targets[0] != "invalid_id" {

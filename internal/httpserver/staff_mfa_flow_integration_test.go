@@ -464,7 +464,8 @@ func TestStaffMFA_Redeem_Lockout(t *testing.T) {
 // runtime role cannot touch the immutable assurance columns at all (column grants), and SF040 stops every role.
 func TestStaffMFA_SessionSealTamper(t *testing.T) {
 	w := newMFAW(t)
-	for name, s := range map[string]mfaStaff{"tenant": w.staff(&w.tenant, "support"), "platform": w.staff(nil, "platform_admin")} {
+	// ADR 0119 S4a (S3-R11): a staff refresh needs a usable second factor, so the planted-session staff hold one.
+	for name, s := range map[string]mfaStaff{"tenant": w.withPlaceholderFactor(w.staff(&w.tenant, "support")), "platform": w.withPlaceholderFactor(w.staff(nil, "platform_admin"))} {
 		t.Run(name, func(t *testing.T) {
 			w.t = t
 			kind := string(alerting.KindStaffSessionIntegrity)
@@ -524,7 +525,7 @@ func pgCode(err error) string {
 // idle expiry is capped by it; past the absolute expiry nothing refreshes.
 func TestStaffMFA_RefreshBounds(t *testing.T) {
 	w := newMFAW(t)
-	s := w.staff(&w.tenant, "support")
+	s := w.withPlaceholderFactor(w.staff(&w.tenant, "support")) // ADR 0119 S4a (S3-R11): refresh needs a usable factor
 	now := time.Now()
 	abs := now.Add(10 * time.Minute)
 	tok, _ := w.plantSession(s, now.Add(-11*time.Hour-50*time.Minute), abs, abs, nil)

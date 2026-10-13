@@ -607,7 +607,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/StaffMfaStatus"
         "401":
-          description: Missing, invalid or expired bearer token
+          description: >
+            Missing, invalid or expired bearer token (`unauthorized`), or the staff session is no longer live
+            (`session_revoked`, ADR 0119 S4a liveness: revoked session, inactive staff member, changed role or staff
+            version, revoked or hard-locked second factor, absolute lifetime over).
           content:
             application/json:
               schema:
@@ -8643,6 +8646,23 @@ components:
         legitimately platform-scoped (see docs/decisions/0011) - routes
         that require a real tenant reject a nil one via the
         RequireTenantScope middleware, not at token-verification time.
+
+
+        ADR 0119 S4a (staff route chain): every /v1/admin/ route and every
+        /v1/staff/me/ route runs bearer verification, the staff-principal
+        check (a player or service token is 403 before any database work),
+        a per-request LIVENESS check and an aal2 check before the route's
+        own permission gate. Liveness answers 401 with code
+        `session_revoked` (one answer for every cause: the session behind
+        the token was revoked, logged out or is past its 12 h absolute
+        lifetime; the staff member is no longer active; the role or staff
+        version changed; the second factor was revoked or hard-locked) and
+        503 `service_unavailable` when the check cannot run (fail closed).
+        A client answers `session_revoked` by signing in again. A staff
+        token without aal2 assurance claims, or with a role outside the
+        closed staff role set, is 401 `unauthorized`. The step-up class of
+        each route is recorded (none / financial / critical) but not
+        enforced before S4b.
         This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
         see docs/architecture/05-identity-architecture.md.
   schemas:
@@ -10996,6 +11016,7 @@ components:
             - invalid_challenge
             - invalid_enrolment_token
             - mfa_enrolment_expired
+            - session_revoked
         message:
           type: string
         request_id:

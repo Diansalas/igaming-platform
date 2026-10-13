@@ -132,9 +132,9 @@ func newSRWorld(t *testing.T) *srWorld {
 	reg.Register("mock")
 	f := newFRWorldWithSources(t, reg)
 	w := &srWorld{frWorld: f}
-	w.rmTok = f.a.token(uuid.New(), f.tenant, auth.RoleRiskManager)
-	w.pmTok = f.a.token(uuid.New(), f.tenant, auth.RolePromotionsManager)
-	w.bxTok = f.a.token(uuid.New(), f.tenant, auth.RoleBonusOperations)
+	w.rmTok = f.a.token(f.a.staff(f.tenant, "risk_manager"), f.tenant, auth.RoleRiskManager)
+	w.pmTok = f.a.token(f.a.staff(f.tenant, "promotions_manager"), f.tenant, auth.RolePromotionsManager)
+	w.bxTok = f.a.token(f.a.staff(f.tenant, "bonus_operations"), f.tenant, auth.RoleBonusOperations)
 	for i := 0; i < 3; i++ {
 		w.depA = append(w.depA, f.disputedDeposit())
 	}

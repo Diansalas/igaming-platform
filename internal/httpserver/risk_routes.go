@@ -13,9 +13,9 @@ import (
 // RequirePermission, never inferred from the UI.
 func registerRiskRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/risk/rules",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermRiskConfigRead)(newListRiskRulesHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermRiskConfigRead)(newListRiskRulesHandler(deps)))))
 	mux.Handle("POST /v1/admin/risk/rules",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermRiskConfigManage)(newCreateRiskRuleHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermRiskConfigManage)(newCreateRiskRuleHandler(deps)))))
 	mux.Handle("POST /v1/admin/risk/rules/{id}/disable",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermRiskConfigManage)(newDisableRiskRuleHandler(deps)))))
+		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermRiskConfigManage)(newDisableRiskRuleHandler(deps)))))
 }

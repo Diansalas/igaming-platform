@@ -52,33 +52,30 @@ import (
 )
 
 func registerLaunchAuthorisationRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(perm auth.Permission, h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(auth.RequirePermission(perm)(h)))
-	}
 	// Literal patterns only (the webhook route guard fails closed on any non-literal pattern).
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/launch-readiness",
-		staff(auth.PermLaunchAuthorisationRead, newLaunchReadinessHandler(deps)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationRead)(newLaunchReadinessHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/launch-authorisations",
-		staff(auth.PermLaunchAuthorisationRequest, newLaunchCreateHandler(deps)))
+		staffRoute(deps, stepUpByLaunchAction, auth.RequirePermission(auth.PermLaunchAuthorisationRequest)(newLaunchCreateHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/launch-authorisations",
-		staff(auth.PermLaunchAuthorisationRead, newLaunchListHandler(deps)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationRead)(newLaunchListHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}",
-		staff(auth.PermLaunchAuthorisationRead, newLaunchGetHandler(deps)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationRead)(newLaunchGetHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/approve",
-		staff(auth.PermLaunchAuthorisationApprove, newLaunchDecideHandler(deps, launchgov.DecisionApprove)))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermLaunchAuthorisationApprove)(newLaunchDecideHandler(deps, launchgov.DecisionApprove))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/reject",
-		staff(auth.PermLaunchAuthorisationApprove, newLaunchDecideHandler(deps, launchgov.DecisionReject)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationApprove)(newLaunchDecideHandler(deps, launchgov.DecisionReject))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/cancel",
-		staff(auth.PermLaunchAuthorisationRequest, newLaunchCancelHandler(deps)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationRequest)(newLaunchCancelHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/brands/{brandID}/suspend",
-		staff(auth.PermLaunchAuthorisationSuspend, newLaunchSuspendHandler(deps, true)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationSuspend)(newLaunchSuspendHandler(deps, true))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/suspend",
-		staff(auth.PermLaunchAuthorisationSuspend, newLaunchSuspendHandler(deps, false)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationSuspend)(newLaunchSuspendHandler(deps, false))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/launch-status-history",
-		staff(auth.PermLaunchAuthorisationRead, newLaunchHistoryHandler(deps)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationRead)(newLaunchHistoryHandler(deps))))
 	// Platform-wide approval queue (platform staff only; a tenant caller is refused 403).
 	mux.Handle("GET /v1/admin/launch-authorisations",
-		staff(auth.PermLaunchAuthorisationRead, newLaunchQueueHandler(deps)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLaunchAuthorisationRead)(newLaunchQueueHandler(deps))))
 }
 
 // launchCall is the per-request context.

@@ -161,7 +161,7 @@ func (a *cgAPI) staff(tenantID uuid.UUID, role string) uuid.UUID {
 
 func (a *cgAPI) token(subject, tenantID uuid.UUID, role auth.Role) string {
 	a.t.Helper()
-	return authtest.StaffToken(a.t, a.issuer, subject, tenantID, role) // ADR 0119 S3: aal2 staff token
+	return authtest.ClaimedStaffToken(a.t, a.pool, testStaffMFAKeys(), a.issuer, subject, tenantID, role) // ADR 0119 S4a: live aal2 session
 }
 
 type cgResp struct {

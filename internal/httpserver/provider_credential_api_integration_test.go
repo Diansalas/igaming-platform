@@ -172,7 +172,7 @@ func (a *pcAPI) tenantStaff(tenant uuid.UUID, role string) uuid.UUID {
 }
 
 func (a *pcAPI) token(subject uuid.UUID, tenant uuid.UUID, role auth.Role) string {
-	return authtest.StaffToken(a.t, a.issuer, subject, tenant, role) // ADR 0119 S3: aal2 staff token
+	return authtest.ClaimedStaffToken(a.t, a.pool, testStaffMFAKeys(), a.issuer, subject, tenant, role) // ADR 0119 S4a: live aal2 session
 }
 
 func (a *pcAPI) platformToken(subject uuid.UUID) string {

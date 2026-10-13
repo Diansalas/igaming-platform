@@ -114,14 +114,15 @@ var (
 )
 
 // rolePrincipalValid is the role/principal binding (ADR 0119 S3 security
-// review C1): a staff principal holds a staff role (anything but player and
-// non-empty); a player or service principal holds RolePlayer only; no other
-// principal type exists. Every staff role is reachable only through a staff
-// token, which IssueStaff mints after a verified second factor.
+// review C1): a staff principal holds a role from the CLOSED staff role set
+// (S4a, condition S3-R12: IsStaffRole; an unknown role string is refused, not
+// merely permission-less); a player or service principal holds RolePlayer
+// only; no other principal type exists. Every staff role is reachable only
+// through a staff token, which IssueStaff mints after a verified second factor.
 func rolePrincipalValid(role Role, principalType PrincipalType) bool {
 	switch principalType {
 	case PrincipalStaff:
-		return role != "" && role != RolePlayer
+		return IsStaffRole(role)
 	case PrincipalPlayer, PrincipalService:
 		return role == RolePlayer
 	default:

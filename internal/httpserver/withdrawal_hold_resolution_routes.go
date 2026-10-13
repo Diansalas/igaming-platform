@@ -41,24 +41,21 @@ import (
 )
 
 func registerWithdrawalHoldResolutionRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	svc := payments.NewWithdrawalHoldResolutionService(deps.DB)
 	// Literal patterns only: the webhook route guard (security C3/L8) fails closed on
 	// any non-literal Handle pattern.
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions",
-		staff(auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(newRequestHoldResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(newRequestHoldResolutionHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions",
-		staff(auth.RequirePermission(auth.PermWithdrawalHoldResolutionRead)(newListHoldResolutionsHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRead)(newListHoldResolutionsHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}",
-		staff(auth.RequirePermission(auth.PermWithdrawalHoldResolutionRead)(newGetHoldResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRead)(newGetHoldResolutionHandler(deps, svc))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/approve",
-		staff(auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(newDecideHoldResolutionHandler(deps, svc, payments.ResolutionApprove))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(newDecideHoldResolutionHandler(deps, svc, payments.ResolutionApprove))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/reject",
-		staff(auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(newDecideHoldResolutionHandler(deps, svc, payments.ResolutionReject))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(newDecideHoldResolutionHandler(deps, svc, payments.ResolutionReject))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/cancel",
-		staff(auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(newCancelHoldResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(newCancelHoldResolutionHandler(deps, svc))))
 }
 
 // holdCall is the per-request context, mirroring resolutionCall.

@@ -46,13 +46,10 @@ import (
 )
 
 func registerAlertAdminRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	// The permission check is inside the handler (see the file comment).
-	mux.Handle("POST /v1/admin/alerts/{alertID}/ack", staff(newAlertTransitionHandler(deps, "ack")))
-	mux.Handle("POST /v1/admin/alerts/{alertID}/resolve", staff(newAlertTransitionHandler(deps, "resolve")))
-	registerAlertRoutingRoutes(mux, deps, staff)
+	mux.Handle("POST /v1/admin/alerts/{alertID}/ack", staffRoute(deps, stepUpNone, newAlertTransitionHandler(deps, "ack")))
+	mux.Handle("POST /v1/admin/alerts/{alertID}/resolve", staffRoute(deps, stepUpByAlertKind, newAlertTransitionHandler(deps, "resolve")))
+	registerAlertRoutingRoutes(mux, deps)
 }
 
 // alertDenial describes one refused alert/routing mutation for its denied

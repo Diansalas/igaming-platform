@@ -413,6 +413,15 @@ func newRefreshHandler(deps Deps) http.HandlerFunc {
 				if staff.Status != "active" {
 					return errPrincipalNotActive
 				}
+				// ADR 0119 S4a (S3-R11): a staff session never outlives its second factor - a revoked
+				// or hard-locked factor ends the session at refresh, as liveness does per request.
+				usable, err := staffFactorUsable(ctx, tx, staff.ID)
+				if err != nil {
+					return err
+				}
+				if !usable {
+					return errPrincipalNotActive
+				}
 				role = auth.Role(staff.Role)
 			}
 			return nil

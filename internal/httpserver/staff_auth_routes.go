@@ -2,8 +2,6 @@ package httpserver
 
 import (
 	"net/http"
-
-	"github.com/Diansalas/igaming-platform/internal/auth"
 )
 
 // registerStaffAuthRoutes mounts the ADR 0119 S3 staff authentication
@@ -28,6 +26,7 @@ func registerStaffAuthRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/staff/auth/enrol/redeem",
 		rateLimitFunc(deps.authLimiter, rateBucketCredential, rateLimitCredentialPerMin, newStaffEnrolRedeemHandler(deps)))
 	// Own account only: the subject comes from the token (no permission for MFA self-service, section 14.3).
+	// ADR 0119 S4a: the full staff chain (liveness, aal2), class none (a read).
 	mux.Handle("GET /v1/staff/me/mfa",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(newStaffMFAStatusHandler(deps))))
+		staffRoute(deps, stepUpNone, newStaffMFAStatusHandler(deps)))
 }

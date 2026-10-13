@@ -428,8 +428,10 @@ func TestRGLimitsS2_Floor_RejectCancelAndValidation(t *testing.T) {
 	bad := floorConfig(future, nil)
 	bad["tenant_id"] = f.tenantA.String()
 	w.requestFloor(req, f.jur, bad).want(t, 400, "validation_error")
-	// tenant-scoped callers (even with a platform_admin ROLE claim) cannot reach the platform routes
-	w.call("POST", floorPath, w.tok(w.ops.Requester, f.tenantA, auth.RolePlatformAdmin, auth.PrincipalStaff), "", rgBody{"jurisdiction_code": f.jur, "config": floorConfig(future, nil)}).want(t, 403, "forbidden")
+	// tenant-scoped callers (even with a platform_admin ROLE claim) cannot reach the platform routes. ADR 0119 S4a: a
+	// platform staff id under a tenant claim matches no live session, so the staff chain refuses it first (401
+	// session_revoked); a real tenant caller is refused 403 by the route (next line).
+	w.call("POST", floorPath, w.tok(w.ops.Requester, f.tenantA, auth.RolePlatformAdmin, auth.PrincipalStaff), "", rgBody{"jurisdiction_code": f.jur, "config": floorConfig(future, nil)}).want(t, 401, "session_revoked")
 	w.call("GET", floorPath, w.staff(f.tenantA, f.compA, auth.RoleCompliance), "", nil).want(t, 403, "forbidden")
 	// a platform token cannot use the tenant-scoped surface
 	w.call("GET", "/v1/admin/rg/limit-configs", req, "", nil).want(t, 403, "forbidden")

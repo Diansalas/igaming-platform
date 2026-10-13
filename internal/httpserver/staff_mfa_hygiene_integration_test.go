@@ -133,8 +133,18 @@ func TestStaffMFA_SecretHygiene_LogCapture(t *testing.T) {
 	rf.decode(t, &p3)
 	add(p3.AccessToken, p3.RefreshToken)
 	w.refresh(e2.pair.RefreshToken).want(t, http.StatusUnauthorized, "unauthorized")
-	w.do(http.MethodGet, "/v1/staff/me/mfa", p3.AccessToken, nil).want(t, http.StatusOK, "")
+	// ADR 0119 S4a (section 6.6 side effect): the reuse revoked the whole chain, so p3's access token is refused on its
+	// next request by liveness; My security is exercised with a fresh login.
+	w.do(http.MethodGet, "/v1/staff/me/mfa", p3.AccessToken, nil).want(t, http.StatusUnauthorized, "session_revoked")
+	ch4 := w.login(s)
+	code4 := w.code(s)
+	add(ch4, code4)
+	var p4 tokenPairResponse
+	w.verify(ch4, code4).decode(t, &p4)
+	add(p4.AccessToken, p4.RefreshToken)
+	w.do(http.MethodGet, "/v1/staff/me/mfa", p4.AccessToken, nil).want(t, http.StatusOK, "")
 	w.post("/v1/auth/logout", map[string]string{"refresh_token": p3.RefreshToken}).want(t, http.StatusNoContent, "")
+	w.post("/v1/auth/logout", map[string]string{"refresh_token": p4.RefreshToken}).want(t, http.StatusNoContent, "")
 	serverLog := w.logs.String() // everything the server (and slog.Default) logged during the flows
 
 	// Domain and wire values that hold secrets, built from real material.

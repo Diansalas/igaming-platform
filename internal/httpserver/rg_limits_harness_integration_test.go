@@ -191,7 +191,10 @@ func (r rgResp) want(t *testing.T, status int, code string) {
 
 func (w *rgW) tok(subject, tenantID uuid.UUID, role auth.Role, pt auth.PrincipalType) string {
 	w.t.Helper()
-	return authtest.Token(w.t, w.issuer, subject, tenantID, role, pt) // ADR 0119 S3: staff tokens carry aal2 assurance
+	if pt == auth.PrincipalStaff { // ADR 0119 S4a: a live sealed session (liveness on every staff route)
+		return authtest.ClaimedStaffToken(w.t, w.rt, testStaffMFAKeys(), w.issuer, subject, tenantID, role)
+	}
+	return authtest.Token(w.t, w.issuer, subject, tenantID, role, pt)
 }
 
 // ---- fixture ------------------------------------------------------------------------------------------

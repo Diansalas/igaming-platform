@@ -46,7 +46,7 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	// Back Office - tenant-wide, staff-scoped, read-only round visibility
 	// (Stage 7 §15).
 	mux.Handle("GET /v1/admin/casino/rounds",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoTransactionRead)(newListAdminCasinoRoundsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoTransactionRead)(newListAdminCasinoRoundsHandler(deps)))))
 
 	// Stage 10.3 W2b (CAS-RECON-1): read-only casino reconciliation
 	// evidence and the callback rejection record - tenant-scoped, staff
@@ -54,11 +54,11 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	// resolve or compensate route exists (LEDGER-MANUAL-ADJ-4EYES-1 is NOT
 	// IMPLEMENTED).
 	mux.Handle("GET /v1/admin/casino/reconciliation/runs",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoReconciliationRunsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoReconciliationRunsHandler(deps)))))
 	mux.Handle("GET /v1/admin/casino/reconciliation/mismatches",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoReconciliationMismatchesHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoReconciliationMismatchesHandler(deps)))))
 	mux.Handle("GET /v1/admin/casino/callback-rejections",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoCallbackRejectionsHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoCallbackRejectionsHandler(deps)))))
 
 	// Provider callback (bet/win/rollback) - no bearer-token middleware (a
 	// provider webhook is not an authenticated platform principal); the
@@ -80,7 +80,7 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	// handler ever ran (same reasoning as tenant provisioning in
 	// routes.go).
 	mux.Handle("PUT /v1/admin/casino/games",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermCasinoCatalogueManage)(newUpsertCasinoGameHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCasinoCatalogueManage)(newUpsertCasinoGameHandler(deps))))
 
 	// Stage 9.2 (ADR 0081 §5.2, ARCH-DB-2 Phase 2): four-eyes governance
 	// for the two fail-open/compliance-widening casino_games transitions
@@ -93,15 +93,15 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	// Deliberately NOT wrapped in RequireTenantScope, same reasoning as
 	// PUT /v1/admin/casino/games above.
 	mux.Handle("POST /v1/admin/casino/games/{gameID}/change-requests",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermCasinoCatalogueGovern)(newFileCasinoCatalogueChangeRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCasinoCatalogueGovern)(newFileCasinoCatalogueChangeRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/casino/change-requests/{requestID}/approvals",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermCasinoCatalogueGovern)(newDecideCasinoCatalogueChangeRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCasinoCatalogueGovern)(newDecideCasinoCatalogueChangeRequestHandler(deps))))
 
 	// Tenant-scoped casino provider capability configuration.
 	mux.Handle("PUT /v1/admin/casino/providers/{providerID}/capability",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoConfigWrite)(newWriteCasinoCapabilityHandler(deps)))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoConfigWrite)(newWriteCasinoCapabilityHandler(deps)))))
 
 	// Tenant-scoped game availability (opt-in) configuration.
 	mux.Handle("PUT /v1/admin/casino/games/{gameID}/availability",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoConfigWrite)(newSetCasinoGameAvailabilityHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoConfigWrite)(newSetCasinoGameAvailabilityHandler(deps)))))
 }

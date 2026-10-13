@@ -34,14 +34,11 @@ import (
 //     ledger account or ledger transaction, never a player identity.
 
 func registerStaffReconciliationRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	gate := auth.RequireAnyPermission(auth.PermPaymentForceResolveRead, auth.PermLedgerAdjustmentRead, auth.PermSportsbookReconciliationRead)
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/reconciliation/runs",
-		staff(gate(newStaffReconciliationRunsHandler(deps))))
+		staffRoute(deps, stepUpNone, gate(newStaffReconciliationRunsHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/reconciliation/mismatches",
-		staff(gate(newStaffReconciliationMismatchesHandler(deps))))
+		staffRoute(deps, stepUpNone, gate(newStaffReconciliationMismatchesHandler(deps))))
 }
 
 // staffStreamPermission is the per-stream read permission. A stream not in it is unknown (400).

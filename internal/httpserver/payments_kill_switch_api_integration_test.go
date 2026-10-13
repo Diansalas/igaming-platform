@@ -158,7 +158,10 @@ func (a *ksAPI) player(tenant uuid.UUID) uuid.UUID {
 
 func (a *ksAPI) token(subject uuid.UUID, tenant uuid.UUID, role auth.Role, principal auth.PrincipalType) string {
 	a.t.Helper()
-	return authtest.Token(a.t, a.issuer, subject, tenant, role, principal) // ADR 0119 S3: staff tokens carry aal2 assurance
+	if principal == auth.PrincipalStaff { // ADR 0119 S4a: a live sealed session (liveness on every staff route)
+		return authtest.ClaimedStaffToken(a.t, a.pool, testStaffMFAKeys(), a.issuer, subject, tenant, role)
+	}
+	return authtest.Token(a.t, a.issuer, subject, tenant, role, principal)
 }
 
 type ksResp struct {

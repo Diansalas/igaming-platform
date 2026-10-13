@@ -32,21 +32,21 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	// --- Platform-wide registries ---
 
 	mux.Handle("GET /v1/admin/jurisdictions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListJurisdictionsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListJurisdictionsHandler(deps))))
 	mux.Handle("POST /v1/admin/jurisdictions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateJurisdictionHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateJurisdictionHandler(deps))))
 
 	mux.Handle("GET /v1/admin/licences",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListLicencesHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListLicencesHandler(deps))))
 	mux.Handle("POST /v1/admin/licences",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateLicenceHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateLicenceHandler(deps))))
 
 	// --- Tenant-scoped resolution-active fact (item B-6) ---
 
 	mux.Handle("GET /v1/admin/jurisdiction-resolution-active",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionResolutionActiveWrite)(newListResolutionActiveHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionResolutionActiveWrite)(newListResolutionActiveHandler(deps)))))
 	mux.Handle("PUT /v1/admin/jurisdiction-resolution-active/{operationClass}",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionResolutionActiveWrite)(newSetResolutionActiveHandler(deps)))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionResolutionActiveWrite)(newSetResolutionActiveHandler(deps)))))
 
 	// --- Tenant-scoped evidence-collection-active fact (Stage 4I Phase B) ---
 	//
@@ -60,9 +60,9 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	// write permission rather than a separate read permission, mirroring
 	// the resolution-active block's identical choice above.
 	mux.Handle("GET /v1/admin/jurisdiction-evidence-collection",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionEvidenceCollectionActivate)(newListEvidenceCollectionActiveHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionEvidenceCollectionActivate)(newListEvidenceCollectionActiveHandler(deps)))))
 	mux.Handle("PUT /v1/admin/jurisdiction-evidence-collection/{evidenceType}",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionEvidenceCollectionActivate)(newSetEvidenceCollectionActiveHandler(deps)))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionEvidenceCollectionActivate)(newSetEvidenceCollectionActiveHandler(deps)))))
 
 	// --- Tenant-licence binding (Stage 4I Phase A) ---
 	//
@@ -74,5 +74,5 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	// target ANY tenant here (tenants has no RLS; the tenant id comes
 	// from the path, never the body).
 	mux.Handle("PUT /v1/admin/tenants/{tenantID}/licence",
-		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermTenantLicenceAssign)(newAssignTenantLicenceHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermTenantLicenceAssign)(newAssignTenantLicenceHandler(deps))))
 }
