@@ -181,7 +181,7 @@ M = [
     ('J1 adjustment: submission not gated', 'internal/adjustment/request.go', "	} else if h.denied() {", "	} else if false {", HTTPF4),
     # (J2 retired: the refusal path was unified by F4 option (b); see the F4 mutants)
     ('J3 adjustment: wallet unresolved treated as held', 'internal/adjustment/aml_hold.go', "	if errors.Is(err, pgx.ErrNoRows) {\n		return holdCheck{}, nil", "	if errors.Is(err, pgx.ErrNoRows) {\n		return holdCheck{verdict: aml.HoldVerdict{Held: true}}, nil", HTTPF4),
-    ('J4 adjustment: wallet resolve error allows', 'internal/adjustment/aml_hold.go', "		h.verdict = aml.HoldVerdict{EvalFailed: true}\n		return h, fmt.Errorf(", "		h.verdict = aml.HoldVerdict{}\n		return h, nil //", HTTPF4),
+    ('J4 adjustment: wallet resolve error allows', 'internal/adjustment/aml_hold.go', "		h.verdict = aml.HoldVerdict{EvalFailed: true}\n		return h, fmt.Errorf(", "		h.verdict = aml.HoldVerdict{}\n		_ = fmt.Sprint(err)\n		return h, nil //", HTTPF4),
     ('J5 adjustment: wrong operation', 'internal/adjustment/aml_hold.go', "tenantID, h.personID, h.accountID, aml.OpManualAdjustment)", "tenantID, h.personID, h.accountID, aml.OpDeposit)", HTTPF4),
     # ---- review round 1 (security F1-F8, ledger-finance C1/C3): NEW logic only ----
     ('N1 tenant grantee: staff status not checked', U0, "WHERE s.id = p_staff AND s.tenant_id = p_tenant AND s.status = 'active'", "WHERE s.id = p_staff AND s.tenant_id = p_tenant", AML),

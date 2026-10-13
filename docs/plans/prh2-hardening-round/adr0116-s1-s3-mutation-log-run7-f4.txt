@@ -1,0 +1,11 @@
+KILLED: J1 adjustment: submission not gated  [--- FAIL: TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict (3.55s)]
+KILLED: J3 adjustment: wallet unresolved treated as held  [--- FAIL: TestAMLHold_UnresolvedWallet_IsNotReportedAsUnderReview (0.34s)]
+KILLED: J4 adjustment: wallet resolve error allows  [last: internal/adjustment/aml_hold.go:6:2: "fmt" imported and not used]
+KILLED: J5 adjustment: wrong operation  [--- FAIL: TestAMLHold_RefusesManualAdjustment_AtSubmission (0.76s)]
+KILLED: N32 adjustment refusal raises no detached evaluator alert  [--- FAIL: TestAMLHold_EvaluatorFailureAtSubmission_AlertSurvivesTheRollback (0.36s)]
+KILLED: F4a AML refusal no longer classified as the generic conflict  [--- FAIL: TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict (3.93s)]
+KILLED: F4b execution refusal renders differently  [--- FAIL: TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict (3.80s)]
+KILLED: F4c submission refusal renders differently  [--- FAIL: TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict (4.61s)]
+KILLED: F4d real reason not recorded in the AML log  [--- FAIL: TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict (5.17s)]
+KILLED: F4e execution hold check dropped  [--- FAIL: TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict (4.77s)]
+EXIT 0
