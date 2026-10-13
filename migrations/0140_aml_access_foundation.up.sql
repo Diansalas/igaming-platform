@@ -164,6 +164,10 @@ AS $$
        AND g.valid_from <= pg_catalog.now()
        AND (g.valid_until IS NULL OR pg_catalog.now() < g.valid_until)
        AND g.grantee_scope = CASE p_owner_scope WHEN 'tenant' THEN 'tenant' WHEN 'platform' THEN 'platform' ELSE '?' END
+       -- A suspended grantee is not an officer: aml_authorize would refuse them (financial_actor_session requires status
+       -- 'active'), so they must not count toward the quorum either. A staff row hidden from the caller's RLS is not excluded
+       -- (the count then equals the pre-fix count; it is never LOWER than the truth for a visible row).
+       AND NOT EXISTS (SELECT 1 FROM public.staff_users su WHERE su.id = g.grantee_staff_id AND su.status <> 'active')
 $$;
 
 CREATE FUNCTION aml_assert_quorum(p_tenant uuid, p_owner_scope text) RETURNS void

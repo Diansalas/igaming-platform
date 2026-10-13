@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -145,12 +144,6 @@ func (w *amlWorld) secondBrandAccount(person uuid.UUID) uuid.UUID {
 // asUnprivileged runs fn on the runtime pool in a plain tenant session (no officer shape at all).
 func (w *amlWorld) tenantTx(fn func(ctx context.Context, tx pgx.Tx) error) error {
 	return w.RT.WithTenant(context.Background(), w.Tenant, fn)
-}
-
-// signedFor attaches a valid proof for exactly the given binding using the process issuer (a correctly keyed independent
-// signer), for tests that call the definer functions with raw SQL.
-func signedFor(ctx context.Context, tx pgx.Tx, actor uuid.UUID, scope string, tenant uuid.UUID, op, target, hash string) error {
-	return actorproof.Default().Attach(ctx, tx, actorproof.Claims{Actor: actor, Scope: scope, Tenant: tenant, Operation: op, Target: target, PayloadHash: hash})
 }
 
 // requestAMLGrantAsSessionActor files an aml_officer grant request as whoever the open session resolves to (the test proof hook

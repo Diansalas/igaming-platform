@@ -288,3 +288,33 @@ func TestOfficerGrant_TenantAdminCannotSelfApprove(t *testing.T) {
 		t.Fatalf("an undecided request grants nothing: %v", err)
 	}
 }
+
+// A suspended officer is not an officer: they cannot act (the session refuses them) and must not count toward the quorum.
+func TestPlaceHold_SuspendedOfficerDoesNotCountTowardQuorum(t *testing.T) {
+	w := newWorld(t, "own_licence")
+	q := amlfix.Bootstrap(t, w.Owner, w.Tenant, 2)
+	svc := amlfix.Service(t, w.RT)
+	if err := w.Owner.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, q.Officers[1].StaffID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := w.player()
+	third := amlfix.NewOfficer(t, w.Owner, w.Tenant)
+	q.Officers = append(q.Officers, third)
+	// Officers 0 and 2 are active: quorum met. Suspend officer 2 as well: only officer 0 is active, quorum lost.
+	if _, err := svc.PlaceHold(context.Background(), q.Officers[0].Actor, aml.PlaceHoldInput{PersonID: p.PersonID, Scope: aml.ScopeAllValueMovement, ReasonClass: aml.ReasonManual, ReasonCode: "t"}); err != nil {
+		t.Fatalf("two ACTIVE officers are a quorum (the suspended one is ignored): %v", err)
+	}
+	if err := w.Owner.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, third.StaffID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p2 := w.player()
+	if _, err := svc.PlaceHold(context.Background(), q.Officers[0].Actor, aml.PlaceHoldInput{PersonID: p2.PersonID, Scope: aml.ScopeAllValueMovement, ReasonClass: aml.ReasonManual, ReasonCode: "t"}); !errors.Is(err, aml.ErrQuorum) {
+		t.Fatalf("one active officer is not a quorum although three grants are in force: %v", err)
+	}
+}
