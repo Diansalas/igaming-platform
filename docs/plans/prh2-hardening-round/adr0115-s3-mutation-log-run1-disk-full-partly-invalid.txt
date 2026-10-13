@@ -1,0 +1,95 @@
+KILLED: W1 rolling 24h is 23h
+KILLED: W2 rolling 7d is 167h
+KILLED: W3 rolling 30d is 719h
+KILLED: W4 rolling uses a DST-sensitive day
+KILLED: W5 calendar day truncates to week  [--- FAIL: TestRGDepositUsageS3/CalendarDayInTheHavanaAmbiguousHour_CountsThePostingOfTheFirstHour (0.04s)]
+KILLED: W6 calendar month truncates to day
+SURVIVED: W7 week uses dow (Sunday=0) not isodow
+KILLED: W8 week modulo dropped +7  [--- FAIL: TestRGWindowStartsS3/berlin_week_starting_Sunday_(the_DST_day) (0.00s)]
+KILLED: W9 week start ignored (always Monday)  [--- FAIL: TestRGWindowStartsS3/berlin_week_starting_Sunday_(the_DST_day) (0.00s)]
+KILLED: W10 DST overlap probe off (first occurrence missed)  [--- FAIL: TestRGDepositUsageS3/CalendarDayInTheHavanaAmbiguousHour_CountsThePostingOfTheFirstHour (0.02s)]
+KILLED: W11 DST probe picks the latest  [--- FAIL: TestRGDepositUsageS3/CalendarDayInTheHavanaAmbiguousHour_CountsThePostingOfTheFirstHour (0.02s)]
+KILLED: W12 DST probe boundary exclusive  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.18s)]
+KILLED: W13 DST probe steps forward  [--- FAIL: TestRGDepositUsageS3/CalendarDayInTheHavanaAmbiguousHour_CountsThePostingOfTheFirstHour (0.03s)]
+KILLED: W14 calendar timezone ignored (UTC)  [--- FAIL: TestRGUsageS3/WindowRollover_CalendarDayResetsRollingDoesNot (0.03s)]
+KILLED: W15 local midnight converted in UTC  [--- FAIL: TestRGDepositUsageS3/CalendarDayInTheHavanaAmbiguousHour_CountsThePostingOfTheFirstHour (0.03s)]
+KILLED: W16 windowArgs: rolling windows carry the caller tz
+KILLED: W17 calendar window validation off  [limits_s3_static_test.go:74: [{Period:calendar_day CalendarTZ: WeekStart:0}] must be refused]
+KILLED: W18 week_start range check off  [limits_s3_static_test.go:74: [{Period:calendar_week CalendarTZ:UTC WeekStart:0}] must be refused]
+SURVIVED: W19 window count bound off
+KILLED: U1 window start exclusive (wager)  [--- FAIL: TestRGUsageS3/BoundaryInstantsAreInclusiveAtTheWindowStart (0.05s)]
+SURVIVED: U2 window start exclusive (loss)
+KILLED: U3 prefilter start exclusive  [--- FAIL: TestRGUsageS3/BoundaryInstantsAreInclusiveAtTheWindowStart (0.06s)]
+KILLED: U4 posting after the instant counted  [--- FAIL: TestRGUsageS3/BoundaryInstantsAreInclusiveAtTheWindowStart (0.05s)]
+KILLED: U5 sign flipped  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.27s)]
+KILLED: U6 reversal counted in its own window, not its original's  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.29s)]
+KILLED: U7 wager ignores reversals of stakes  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.31s)]
+KILLED: U8 wager nets every reversal (rollback of a win)  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.28s)]
+KILLED: U9 sportsbook_void original not resolved (no correlation branch)  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.30s)]
+SURVIVED: U10 void original any type
+KILLED: U11 explicit reverses_transaction_id original not resolved  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.28s)]
+KILLED: U12 account figure not restricted to the anchor (wager)  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.35s)]
+SURVIVED: U13 account figure not restricted to the anchor (loss)
+KILLED: U14 Person set joined by account only  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.21s)]
+SURVIVED: U15 Person set ignores the tenant
+KILLED: U16 asset filter dropped (entries)  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.35s)]
+KILLED: U17 loss type set includes deposit-side types  [limits_s3_static_test.go:31: loss types changed: [casino_bet casino_win casino_rollback sportsbook_bet sportsbook_settlement sportsbook_void sportsbook_rollback bonus_con]
+KILLED: U18 loss type set loses casino_win  [limits_s3_static_test.go:31: loss types changed: [casino_bet casino_rollback sportsbook_bet sportsbook_settlement sportsbook_void sportsbook_rollback], want [casino_bet c]
+KILLED: U19 wager measured accounts ignore the flag (always bonus)  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.34s)]
+KILLED: U20 loss measured accounts ignore the flag (never bonus)  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.29s)]
+KILLED: U21 wager flag read from the loss flag  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.25s)]
+INVALID(does not compile): U22 locked accounts measured  [FAIL	github.com/Diansalas/igaming-platform/internal/rg [build failed]]
+INVALID(does not compile): U23 undeclared leg ignored  [FAIL	github.com/Diansalas/igaming-platform/internal/rg [build failed]]
+KILLED: U31 casino cash-lock shape ignored  [--- FAIL: TestRGUsageS3/FailClosed_UndeclaredLegAndUnresolvedReversal (0.06s)]
+KILLED: U32 cash-lock shape check widened to sportsbook types  [--- FAIL: TestRGUsageS3/HandComputedLedger_WindowsReversalsBonusAndPerson (0.27s)]
+KILLED: U24 unresolved reversal ignored  [--- FAIL: TestRGUsageS3/FailClosed_UndeclaredLegAndUnresolvedReversal (0.12s)]
+KILLED: U25 loss floor inverted
+KILLED: U26 loss floor never applied
+KILLED: U27 loss floor flag ignored (always attested)  [--- FAIL: TestRGUsageS3/LossFloor_NetWinGivesNoHeadroomUnlessAttested (0.05s)]
+SURVIVED: U28 Person loss not floored
+KILLED: U29 float parse of minor units  [limits_s3_static_test.go:124: a fractional minor-unit value must be refused]
+KILLED: U30 empty account set is zero usage  [--- FAIL: TestRGUsageS3/Guards_TenantIsolationScopeAndIsolationLevel (0.09s)]
+KILLED: G1 isolation guard off  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.25s)]
+KILLED: G2 tenant mismatch allowed
+KILLED: G3 player scope allowed  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.23s)]
+KILLED: G4 request validation off  [limits_s3_static_test.go:92: {TenantID:aac3f3b5-d982-41d1-8531-84b8b35f6dec PlayerAccountID:45b449dd-c6b6-4bf7-995f-261d34c66edb Scope:platform_person AssetCode:USD Windo]
+KILLED: D1 in-flight includes declined  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.24s)]
+KILLED: D2 in-flight includes failed  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.22s)]
+KILLED: D3 in-flight drops ambiguous  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.23s)]
+KILLED: D4 in-flight counts a posted intent again  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.23s)]
+KILLED: D5 candidate intent not excluded  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.15s)]
+SURVIVED: D6 ledger deposits not restricted to type deposit
+SURVIVED: D7 ledger credit window start exclusive
+SURVIVED: D8 in-flight window start exclusive
+KILLED: D9 in-flight account figure not restricted to the anchor  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.21s)]
+KILLED: D10 deposit account type check off  [--- FAIL: TestRGDepositUsageS3/UndeclaredDepositLegFailsClosed (0.03s)]
+INVALID(does not compile): D11 in-flight taken on every group row  [FAIL	github.com/Diansalas/igaming-platform/internal/rg [build failed]]
+KILLED: D12 in-flight ignored in the total  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.17s)]
+KILLED: D13 Person in-flight ignored  [--- FAIL: TestRGDepositUsageS3/HandComputedIntentsAndLedger (0.21s)]
+SURVIVED: D14 intents of any tenant (tenant predicate dropped)
+KILLED: S1 root is the starting session
+KILLED: S2 revoked chains counted as open
+KILLED: S3 expired chains counted as open
+KILLED: S4 aggregation keeps the later root
+SURVIVED: S5 aggregation ignores the measured chain
+KILLED: S6 negative elapsed not clamped  [limits_s3_deposit_integration_test.go:308: elapsed before the root must be 0, got -3600]
+SURVIVED: S7 principal check off
+KILLED: S8 missing chain is zero elapsed
+SURVIVED: S9 chain depth bound ignored
+KILLED: S10 elapsed rounds up
+KILLED: S11 session of another tenant readable
+KILLED: I1 window timezone dropped from the config windows
+KILLED: I2 week start dropped from the config windows
+KILLED: I3 realized rows of other kinds leak
+KILLED: I4 realized rows of other assets leak
+KILLED: I5 TTL none still reported
+KILLED: I6 missing floor looks configured
+KILLED: I7 loss-may-go-negative defaults true
+KILLED: C1 succeeded without posting ignored  [--- FAIL: TestRGDepositUsageS3/DailyCreditCheck (0.17s)]
+KILLED: C2 posting on unsettled intent ignored
+INVALID(does not compile): C3 amount mismatch ignored  [FAIL	github.com/Diansalas/igaming-platform/internal/rg [build failed]]
+KILLED: C4 account mismatch ignored  [--- FAIL: TestRGDepositUsageS3/DailyCreditCheck (0.15s)]
+KILLED: C5 asset mismatch ignored
+INVALID(does not compile): C6 wrong posting type ignored  [FAIL	github.com/Diansalas/igaming-platform/internal/rg [build failed]]
+INVALID(does not compile): C7 credit check not tenant scoped  [FAIL	github.com/Diansalas/igaming-platform/internal/rg [build failed]]
+INVALID(does not compile): C8 range upper bound inclusive  [FAIL	github.com/Diansalas/igaming-platform/internal/rg [build failed]]

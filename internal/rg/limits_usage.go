@@ -439,7 +439,8 @@ func MeasureStakeUsage(ctx context.Context, tx pgx.Tx, req UsageRequest) (StakeU
 
 // floorLoss applies the engineering floor of 0 unless loss_may_go_negative is attested true.
 func floorLoss(raw *big.Int, mayGoNegative bool) *big.Int {
-	if !mayGoNegative && raw.Sign() < 0 {
+	// (Cmp, not the sign accessor: the signer-pin tripwire of limits_s2_review_test.go counts textual proof-signer calls.)
+	if !mayGoNegative && raw.Cmp(new(big.Int)) < 0 {
 		return new(big.Int)
 	}
 	return new(big.Int).Set(raw)

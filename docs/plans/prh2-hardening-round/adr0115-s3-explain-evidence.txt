@@ -1,188 +1,52 @@
 ADR 0115 S3 - EXPLAIN (ANALYZE, BUFFERS), latency and L0.4 hold-time evidence (local; private scratch database; synthetic data)
 
 Produced by: RG_S3_SCALE=large go test -tags integration -p 1 -count=1 -run TestRGUsageS3ExplainAndLatency -v ./internal/rg
-(PRIV_DB harness, PostgreSQL 16, one machine, no other load). Dataset: 20,300 casino bets for the target player over 400
-days (300 of them in the last 24 h), 40,000 + 40,000 bets for two other accounts of the tenant, 8,000 + 40,000 deposit
-intents, 200,600 ledger_entries rows in total, ANALYZEd. The measurements are for the usage statements themselves, run as the
-RUNTIME role in tenant staff scope (RLS active), inside a transaction holding the L0.4 person advisory lock.
+(PRIV_DB harness, PostgreSQL 16, one shared development machine that other sessions were also using). Dataset: 20,300 casino bets
+for the target player over 400 days (1,751 of them in the last 30 days, 598 in the last 7 days, 300 in the last 24 h), 40,000 +
+40,000 bets for two other accounts of the tenant (the second is the target's Person), 8,000 + 40,000 deposit intents, 200,600
+ledger_entries rows in total, ANALYZEd. The measurements are of the usage statements themselves, run as the RUNTIME role in tenant
+staff scope (RLS active), inside a transaction holding the L0.4 person advisory lock. The Person scope (target + its second
+account) with four windows (24 h, 7 d, 30 d, Berlin calendar day) is the heaviest shape.
 
-WHAT THIS IS NOT: it does not measure the casino bet / sportsbook place / deposit T1 request paths (S4 wires nothing in S3, so
-the p95 DELTA on those three paths named in ADR 0115 3.4 cannot be produced yet). The numbers below are the cost S4 adds to
-each of them (the usage reads) on this dataset; the end-to-end delta must be re-measured when S4 is wired. No SLA is claimed.
-The timings include the round trip to a local PostgreSQL; they come from one run on a shared development machine.
+WHAT THIS IS NOT: it does not measure the casino bet / sportsbook place / deposit T1 request paths. S3 wires nothing, so the p95 DELTA
+on those three paths named in ADR 0115 3.4 cannot be produced yet (label BLOCKED on S4 wiring). The numbers below are the cost S4 adds
+to each of them (the usage reads) on this dataset; the end-to-end delta must be re-measured when S4 is wired. No SLA is claimed.
+Timings include the round trip to a local PostgreSQL and come from one run on a shared machine.
 
-Seeding the ledger through the real triggers dominated the 7 minute run (the balance-projection trigger updates one row per
-entry; batches of 250 transactions keep that linear).
+READING THE NUMBERS. Stake usage p95 is about 87 ms and the L0.4 lock is held about 108 ms (p95) by the two reads together for a
+Person with about 5,000 ledger rows in the 30-day window. The cost is proportional to the rows of the LONGEST window the statement
+reads (the design of 3.4: one scan, every window by FILTER), not to the player's history: the contrast plan below, without the 0135
+index (legacy index idx_ledger_entries_account, 15,498 index entries visited instead of 4,750 rows), shows the same statement taking 109 ms
+instead of 58 ms on this dataset (EXPLAIN ANALYZE execution time, single run). A very high-volume Person (hundreds of thousands of
+entries per 30 days) would pay proportionally more under the lock; the ledger-derived rollup named in 1.4 is the recorded answer and is
+NOT built. This is a decision input for S4, not a defect claim.
+
+Seeding the ledger through the real triggers dominated the 13 minute run (the balance-projection trigger updates one row per entry;
+batches of 250 transactions keep that roughly linear; the machine was shared).
 
 =============================================================================================================================
 === RUN   TestRGUsageS3ExplainAndLatency
-limits_s3_perf_integration_test.go:136: seed target history: 31.692728181s
-limits_s3_perf_integration_test.go:136: seed target last day: 664.122569ms
-limits_s3_perf_integration_test.go:136: seed filler X: 2m1.972782467s
-limits_s3_perf_integration_test.go:136: seed filler A2: 4m22.280698342s
-limits_s3_perf_integration_test.go:136: seed intents: 316.631192ms
-limits_s3_perf_integration_test.go:136: seed intents filler: 1.71945346s
-limits_s3_perf_integration_test.go:200: EXPLAIN (ANALYZE, BUFFERS) stake usage, tenant_person, 4 windows, WITH idx_ledger_entries_tenant_player_asset_created:
-Nested Loop Left Join  (cost=1452.32..1452.48 rows=1 width=624) (actual time=3.438..3.468 rows=1 loops=1)
-  Buffers: shared hit=1221
-  CTE asof
-    ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
-  CTE win
-    ->  CTE Scan on asof a  (cost=0.00..0.32 rows=1 width=32) (actual time=0.038..0.046 rows=1 loops=1)
-          SubPlan 2
-            ->  Subquery Scan on cal  (cost=0.00..0.02 rows=1 width=8) (actual time=0.003..0.005 rows=1 loops=1)
-                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.002 rows=1 loops=1)
-                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.001 rows=0 loops=1)
-                              One-Time Filter: false
-          SubPlan 3
-            ->  Subquery Scan on cal_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
-                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.000 rows=0 loops=1)
-                              One-Time Filter: false
-          SubPlan 4
-            ->  Subquery Scan on cal_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
-                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.000 rows=0 loops=1)
-                              One-Time Filter: false
-          SubPlan 5
-            ->  Aggregate  (cost=0.22..0.23 rows=1 width=8) (actual time=0.025..0.026 rows=1 loops=1)
-                  ->  Result  (cost=0.01..0.18 rows=2 width=4) (actual time=0.017..0.023 rows=1 loops=1)
-                        One-Time Filter: (date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) IS NOT NULL)
-                        ->  Function Scan on generate_series k  (cost=0.01..0.18 rows=2 width=4) (actual time=0.010..0.014 rows=1 loops=1)
-                              Filter: ((((date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) AT TIME ZONE 'Europe/Berlin'::text) - ((k)::double precision * '00:30:00'::interval)) AT TIME ZONE 'Europe/Berlin'::text) >= date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)))
-                              Rows Removed by Filter: 4
-  CTE accts
-    ->  Seq Scan on player_accounts a_1  (cost=1.68..2.84 rows=1 width=16) (actual time=0.016..0.020 rows=2 loops=1)
-          Filter: ((tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND (person_id = $7) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $8)))
-          Rows Removed by Filter: 2
-          Buffers: shared hit=2
-          InitPlan 8 (returns $7)
-            ->  Seq Scan on player_accounts x  (cost=0.26..1.42 rows=1 width=16) (actual time=0.005..0.006 rows=1 loops=1)
-                  Filter: ((id = '104e1669-cebd-40c5-aff1-6eddb878e3ef'::uuid) AND (tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $6)))
-                  Rows Removed by Filter: 3
-                  Buffers: shared hit=1
-                  InitPlan 7 (returns $6)
-                    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-          InitPlan 9 (returns $8)
-            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-  CTE ent
-    ->  Index Scan using idx_ledger_entries_tenant_player_asset_created on ledger_entries le  (cost=0.74..1420.70 rows=4 width=83) (actual time=0.050..0.406 rows=300 loops=1)
-          Index Cond: ((tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND (player_account_id = ANY ($10)) AND (asset_code = 'USD'::text) AND (created_at >= $11) AND (created_at <= $12))
-          Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $13))
-          Buffers: shared hit=20
-          InitPlan 11 (returns $10)
-            ->  CTE Scan on accts  (cost=0.00..0.02 rows=1 width=16) (actual time=0.017..0.019 rows=2 loops=1)
-                  Buffers: shared hit=2
-          InitPlan 12 (returns $11)
-            ->  CTE Scan on win win_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
-          InitPlan 13 (returns $12)
-            ->  CTE Scan on asof  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-          InitPlan 14 (returns $13)
-            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-  CTE scan
-    ->  Nested Loop Left Join  (cost=19.64..27.85 rows=1 width=129) (actual time=0.100..2.591 rows=300 loops=1)
-          Buffers: shared hit=1221
-          InitPlan 16 (returns $15)
-            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-          InitPlan 17 (returns $16)
-            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-          ->  Nested Loop  (cost=1.64..9.83 rows=1 width=157) (actual time=0.091..2.069 rows=300 loops=1)
-                Buffers: shared hit=1221
-                ->  Hash Join  (cost=1.22..1.33 rows=1 width=146) (actual time=0.076..0.637 rows=300 loops=1)
-                      Hash Cond: ((le_1.tenant_id = la.tenant_id) AND (le_1.ledger_account_id = la.id))
-                      Buffers: shared hit=21
-                      ->  CTE Scan on ent le_1  (cost=0.00..0.08 rows=4 width=134) (actual time=0.051..0.523 rows=300 loops=1)
-                            Buffers: shared hit=20
-                      ->  Hash  (cost=1.21..1.21 rows=1 width=44) (actual time=0.011..0.012 rows=4 loops=1)
-                            Buckets: 1024  Batches: 1  Memory Usage: 9kB
-                            Buffers: shared hit=1
-                            ->  Seq Scan on ledger_accounts la  (cost=0.00..1.21 rows=1 width=44) (actual time=0.005..0.008 rows=4 loops=1)
-                                  Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $16))
-                                  Buffers: shared hit=1
-                ->  Index Scan using ledger_transactions_id_tenant_key on ledger_transactions lt  (cost=0.42..8.48 rows=1 width=75) (actual time=0.004..0.004 rows=1 loops=300)
-                      Index Cond: ((id = le_1.ledger_transaction_id) AND (tenant_id = le_1.tenant_id))
-                      Filter: ((transaction_type = ANY ('{casino_bet,casino_win,casino_rollback,sportsbook_bet,sportsbook_settlement,sportsbook_void,sportsbook_rollback}'::text[])) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $15)))
-                      Buffers: shared hit=1200
-          ->  Limit  (cost=17.48..17.48 rows=1 width=19) (actual time=0.001..0.001 rows=0 loops=300)
-                ->  Sort  (cost=17.48..17.48 rows=2 width=19) (actual time=0.001..0.001 rows=0 loops=300)
-                      Sort Key: o1.created_at
-                      Sort Method: quicksort  Memory: 25kB
-                      ->  Append  (cost=0.68..17.47 rows=2 width=19) (actual time=0.001..0.001 rows=0 loops=300)
-                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=300)
-                                  One-Time Filter: (lt.transaction_type = ANY ('{casino_rollback,sportsbook_void,sportsbook_rollback}'::text[]))
-                                  InitPlan 18 (returns $20)
-                                    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-                                  ->  Index Scan using ledger_transactions_id_tenant_key on ledger_transactions o1  (cost=0.68..8.73 rows=1 width=19) (never executed)
-                                        Index Cond: ((id = lt.reverses_transaction_id) AND (tenant_id = lt.tenant_id))
-                                        Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $20))
-                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=300)
-                                  One-Time Filter: ((lt.transaction_type = 'sportsbook_void'::text) AND (lt.reverses_transaction_id IS NULL))
-                                  InitPlan 19 (returns $22)
-                                    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-                                  ->  Index Scan using idx_ledger_transactions_correlation on ledger_transactions o2  (cost=0.68..8.73 rows=1 width=19) (never executed)
-                                        Index Cond: (correlation_id = lt.correlation_id)
-                                        Filter: ((tenant_id = lt.tenant_id) AND (transaction_type = 'sportsbook_bet'::text) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $22)))
-  InitPlan 21 (returns $26)
-    ->  CTE Scan on asof asof_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
-  InitPlan 22 (returns $27)
-    ->  CTE Scan on accts accts_1  (cost=0.00..0.02 rows=1 width=16) (actual time=0.001..0.001 rows=2 loops=1)
-  ->  CTE Scan on win  (cost=0.00..0.02 rows=1 width=32) (actual time=0.039..0.040 rows=1 loops=1)
-  ->  HashAggregate  (cost=0.57..0.70 rows=1 width=552) (actual time=3.391..3.400 rows=1 loops=1)
-        Group Key: scan.account_type
-        Batches: 1  Memory Usage: 24kB
-        Buffers: shared hit=1221
-        InitPlan 23 (returns $28)
-          ->  CTE Scan on win win_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 24 (returns $29)
-          ->  CTE Scan on win win_3  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.000 rows=1 loops=1)
-        InitPlan 25 (returns $30)
-          ->  CTE Scan on win win_4  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.000 rows=1 loops=1)
-        InitPlan 26 (returns $31)
-          ->  CTE Scan on win win_5  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 27 (returns $32)
-          ->  CTE Scan on win win_6  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 28 (returns $33)
-          ->  CTE Scan on win win_7  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 29 (returns $34)
-          ->  CTE Scan on win win_8  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 30 (returns $35)
-          ->  CTE Scan on win win_9  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 31 (returns $36)
-          ->  CTE Scan on win win_10  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.000 rows=1 loops=1)
-        InitPlan 32 (returns $37)
-          ->  CTE Scan on win win_11  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.000 rows=1 loops=1)
-        InitPlan 33 (returns $38)
-          ->  CTE Scan on win win_12  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 34 (returns $39)
-          ->  CTE Scan on win win_13  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 35 (returns $40)
-          ->  CTE Scan on win win_14  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 36 (returns $41)
-          ->  CTE Scan on win win_15  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
-        InitPlan 37 (returns $42)
-          ->  CTE Scan on win win_16  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        InitPlan 38 (returns $43)
-          ->  CTE Scan on win win_17  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
-        ->  CTE Scan on scan  (cost=0.00..0.02 rows=1 width=191) (actual time=0.101..2.742 rows=300 loops=1)
-              Buffers: shared hit=1221
-Planning:
-  Buffers: shared hit=16
-Planning Time: 2.666 ms
-Execution Time: 3.820 ms
-limits_s3_perf_integration_test.go:219: EXPLAIN (ANALYZE, BUFFERS) deposit usage, tenant_person, 4 windows:
-Nested Loop Left Join  (cost=1879.39..1879.55 rows=1 width=616) (actual time=1.052..1.068 rows=1 loops=1)
-  Buffers: shared hit=647
+limits_s3_perf_integration_test.go:146: seed target history: 4m54.936662654s
+limits_s3_perf_integration_test.go:146: seed target last day: 7.335487905s
+limits_s3_perf_integration_test.go:146: seed filler X: 7m22.423829218s
+limits_s3_perf_integration_test.go:146: seed filler A2: 39.384728557s
+limits_s3_perf_integration_test.go:146: seed intents: 375.262639ms
+limits_s3_perf_integration_test.go:146: seed intents filler: 2.850691434s
+limits_s3_perf_integration_test.go:179: target player debit entries: 20300 in total, 1751 in the last 30 days, 598 in the last 7 days (rows the 30-day window must read)
+limits_s3_perf_integration_test.go:221: EXPLAIN (ANALYZE, BUFFERS) stake usage, tenant_person, 4 windows, WITH idx_ledger_entries_tenant_player_asset_created:
+Nested Loop Left Join  (cost=1454.13..1454.29 rows=1 width=632) (actual time=56.857..56.896 rows=1 loops=1)
+  Buffers: shared hit=19183
   CTE asof
     ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
   CTE win
-    ->  CTE Scan on asof a  (cost=0.00..0.32 rows=1 width=32) (actual time=0.037..0.041 rows=1 loops=1)
+    ->  CTE Scan on asof a  (cost=0.00..0.32 rows=1 width=32) (actual time=0.042..0.052 rows=1 loops=1)
           SubPlan 2
-            ->  Subquery Scan on cal  (cost=0.00..0.02 rows=1 width=8) (actual time=0.003..0.004 rows=1 loops=1)
-                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
-                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.001 rows=0 loops=1)
+            ->  Subquery Scan on cal  (cost=0.00..0.02 rows=1 width=8) (actual time=0.003..0.006 rows=1 loops=1)
+                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.003 rows=1 loops=1)
+                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.000 rows=0 loops=1)
                               One-Time Filter: false
           SubPlan 3
-            ->  Subquery Scan on cal_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+            ->  Subquery Scan on cal_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.003 rows=1 loops=1)
                   ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
                         ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.000 rows=0 loops=1)
                               One-Time Filter: false
@@ -192,20 +56,20 @@ Nested Loop Left Join  (cost=1879.39..1879.55 rows=1 width=616) (actual time=1.0
                         ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.000 rows=0 loops=1)
                               One-Time Filter: false
           SubPlan 5
-            ->  Aggregate  (cost=0.22..0.23 rows=1 width=8) (actual time=0.024..0.024 rows=1 loops=1)
-                  ->  Result  (cost=0.01..0.18 rows=2 width=4) (actual time=0.016..0.021 rows=1 loops=1)
+            ->  Aggregate  (cost=0.22..0.23 rows=1 width=8) (actual time=0.028..0.030 rows=1 loops=1)
+                  ->  Result  (cost=0.01..0.18 rows=2 width=4) (actual time=0.020..0.025 rows=1 loops=1)
                         One-Time Filter: (date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) IS NOT NULL)
-                        ->  Function Scan on generate_series k  (cost=0.01..0.18 rows=2 width=4) (actual time=0.009..0.013 rows=1 loops=1)
+                        ->  Function Scan on generate_series k  (cost=0.01..0.18 rows=2 width=4) (actual time=0.010..0.015 rows=1 loops=1)
                               Filter: ((((date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) AT TIME ZONE 'Europe/Berlin'::text) - ((k)::double precision * '00:30:00'::interval)) AT TIME ZONE 'Europe/Berlin'::text) >= date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)))
                               Rows Removed by Filter: 4
   CTE accts
-    ->  Seq Scan on player_accounts a_1  (cost=1.68..2.84 rows=1 width=16) (actual time=0.014..0.016 rows=2 loops=1)
-          Filter: ((tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND (person_id = $7) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $8)))
+    ->  Seq Scan on player_accounts a_1  (cost=1.68..2.84 rows=1 width=16) (actual time=0.022..0.026 rows=2 loops=1)
+          Filter: ((tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND (person_id = $7) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $8)))
           Rows Removed by Filter: 2
           Buffers: shared hit=2
           InitPlan 8 (returns $7)
-            ->  Seq Scan on player_accounts x  (cost=0.26..1.42 rows=1 width=16) (actual time=0.004..0.005 rows=1 loops=1)
-                  Filter: ((id = '104e1669-cebd-40c5-aff1-6eddb878e3ef'::uuid) AND (tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $6)))
+            ->  Seq Scan on player_accounts x  (cost=0.26..1.42 rows=1 width=16) (actual time=0.006..0.008 rows=1 loops=1)
+                  Filter: ((id = 'd17f49e1-1a3d-400a-acc2-7bc609fe9756'::uuid) AND (tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $6)))
                   Rows Removed by Filter: 3
                   Buffers: shared hit=1
                   InitPlan 7 (returns $6)
@@ -213,64 +77,211 @@ Nested Loop Left Join  (cost=1879.39..1879.55 rows=1 width=616) (actual time=1.0
           InitPlan 9 (returns $8)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
   CTE ent
-    ->  Index Scan using idx_ledger_entries_tenant_player_asset_created on ledger_entries le  (cost=0.74..1420.70 rows=4 width=83) (actual time=0.026..0.329 rows=300 loops=1)
-          Index Cond: ((tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND (player_account_id = ANY ($10)) AND (asset_code = 'USD'::text) AND (created_at >= $11) AND (created_at <= $12))
+    ->  Index Scan using idx_ledger_entries_tenant_player_asset_created on ledger_entries le  (cost=0.74..1422.50 rows=4 width=83) (actual time=0.066..6.846 rows=4750 loops=1)
+          Index Cond: ((tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND (player_account_id = ANY ($10)) AND (asset_code = 'USD'::text) AND (created_at >= $11) AND (created_at <= $12))
           Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $13))
-          Buffers: shared hit=18
+          Buffers: shared hit=182
+          InitPlan 11 (returns $10)
+            ->  CTE Scan on accts  (cost=0.00..0.02 rows=1 width=16) (actual time=0.023..0.025 rows=2 loops=1)
+                  Buffers: shared hit=2
+          InitPlan 12 (returns $11)
+            ->  CTE Scan on win win_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+          InitPlan 13 (returns $12)
+            ->  CTE Scan on asof  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+          InitPlan 14 (returns $13)
+            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+  CTE scan
+    ->  Nested Loop Left Join  (cost=19.64..27.85 rows=1 width=129) (actual time=0.174..45.942 rows=4750 loops=1)
+          Buffers: shared hit=19183
+          InitPlan 16 (returns $15)
+            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+          InitPlan 17 (returns $16)
+            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+          ->  Nested Loop  (cost=1.64..9.83 rows=1 width=157) (actual time=0.160..37.379 rows=4750 loops=1)
+                Buffers: shared hit=19183
+                ->  Hash Join  (cost=1.22..1.33 rows=1 width=146) (actual time=0.089..11.317 rows=4750 loops=1)
+                      Hash Cond: ((le_1.tenant_id = la.tenant_id) AND (le_1.ledger_account_id = la.id))
+                      Buffers: shared hit=183
+                      ->  CTE Scan on ent le_1  (cost=0.00..0.08 rows=4 width=134) (actual time=0.067..9.737 rows=4750 loops=1)
+                            Buffers: shared hit=182
+                      ->  Hash  (cost=1.21..1.21 rows=1 width=44) (actual time=0.013..0.014 rows=4 loops=1)
+                            Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                            Buffers: shared hit=1
+                            ->  Seq Scan on ledger_accounts la  (cost=0.00..1.21 rows=1 width=44) (actual time=0.007..0.010 rows=4 loops=1)
+                                  Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $16))
+                                  Buffers: shared hit=1
+                ->  Index Scan using ledger_transactions_id_tenant_key on ledger_transactions lt  (cost=0.42..8.48 rows=1 width=75) (actual time=0.005..0.005 rows=1 loops=4750)
+                      Index Cond: ((id = le_1.ledger_transaction_id) AND (tenant_id = le_1.tenant_id))
+                      Filter: ((transaction_type = ANY ('{casino_bet,casino_win,casino_rollback,sportsbook_bet,sportsbook_settlement,sportsbook_void,sportsbook_rollback}'::text[])) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $15)))
+                      Buffers: shared hit=19000
+          ->  Limit  (cost=17.48..17.48 rows=1 width=19) (actual time=0.001..0.001 rows=0 loops=4750)
+                ->  Sort  (cost=17.48..17.48 rows=2 width=19) (actual time=0.001..0.001 rows=0 loops=4750)
+                      Sort Key: o1.created_at
+                      Sort Method: quicksort  Memory: 25kB
+                      ->  Append  (cost=0.68..17.47 rows=2 width=19) (actual time=0.001..0.001 rows=0 loops=4750)
+                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=4750)
+                                  One-Time Filter: (lt.transaction_type = ANY ('{casino_rollback,sportsbook_void,sportsbook_rollback}'::text[]))
+                                  InitPlan 18 (returns $20)
+                                    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+                                  ->  Index Scan using ledger_transactions_id_tenant_key on ledger_transactions o1  (cost=0.68..8.73 rows=1 width=19) (never executed)
+                                        Index Cond: ((id = lt.reverses_transaction_id) AND (tenant_id = lt.tenant_id))
+                                        Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $20))
+                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=4750)
+                                  One-Time Filter: ((lt.transaction_type = 'sportsbook_void'::text) AND (lt.reverses_transaction_id IS NULL))
+                                  InitPlan 19 (returns $22)
+                                    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+                                  ->  Index Scan using idx_ledger_transactions_correlation on ledger_transactions o2  (cost=0.68..8.73 rows=1 width=19) (never executed)
+                                        Index Cond: (correlation_id = lt.correlation_id)
+                                        Filter: ((tenant_id = lt.tenant_id) AND (transaction_type = 'sportsbook_bet'::text) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $22)))
+  InitPlan 21 (returns $26)
+    ->  CTE Scan on asof asof_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.002..0.003 rows=1 loops=1)
+  InitPlan 22 (returns $27)
+    ->  CTE Scan on accts accts_1  (cost=0.00..0.02 rows=1 width=16) (actual time=0.001..0.001 rows=2 loops=1)
+  ->  CTE Scan on win  (cost=0.00..0.02 rows=1 width=32) (actual time=0.044..0.045 rows=1 loops=1)
+  ->  HashAggregate  (cost=0.57..0.70 rows=1 width=560) (actual time=56.799..56.813 rows=1 loops=1)
+        Group Key: scan.account_type
+        Batches: 1  Memory Usage: 24kB
+        Buffers: shared hit=19183
+        InitPlan 23 (returns $28)
+          ->  CTE Scan on win win_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 24 (returns $29)
+          ->  CTE Scan on win win_3  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+        InitPlan 25 (returns $30)
+          ->  CTE Scan on win win_4  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+        InitPlan 26 (returns $31)
+          ->  CTE Scan on win win_5  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 27 (returns $32)
+          ->  CTE Scan on win win_6  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 28 (returns $33)
+          ->  CTE Scan on win win_7  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 29 (returns $34)
+          ->  CTE Scan on win win_8  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+        InitPlan 30 (returns $35)
+          ->  CTE Scan on win win_9  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+        InitPlan 31 (returns $36)
+          ->  CTE Scan on win win_10  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 32 (returns $37)
+          ->  CTE Scan on win win_11  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+        InitPlan 33 (returns $38)
+          ->  CTE Scan on win win_12  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 34 (returns $39)
+          ->  CTE Scan on win win_13  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 35 (returns $40)
+          ->  CTE Scan on win win_14  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        InitPlan 36 (returns $41)
+          ->  CTE Scan on win win_15  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+        InitPlan 37 (returns $42)
+          ->  CTE Scan on win win_16  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+        InitPlan 38 (returns $43)
+          ->  CTE Scan on win win_17  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+        ->  CTE Scan on scan  (cost=0.00..0.02 rows=1 width=191) (actual time=0.176..49.311 rows=4750 loops=1)
+              Buffers: shared hit=19183
+Planning:
+  Buffers: shared hit=16
+Planning Time: 3.519 ms
+Execution Time: 57.704 ms
+limits_s3_perf_integration_test.go:240: EXPLAIN (ANALYZE, BUFFERS) deposit usage, tenant_person, 4 windows:
+Nested Loop Left Join  (cost=1881.20..1881.36 rows=1 width=616) (actual time=16.692..16.738 rows=1 loops=1)
+  Buffers: shared hit=9708
+  CTE asof
+    ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.002 rows=1 loops=1)
+  CTE win
+    ->  CTE Scan on asof a  (cost=0.00..0.32 rows=1 width=32) (actual time=0.046..0.060 rows=1 loops=1)
+          SubPlan 2
+            ->  Subquery Scan on cal  (cost=0.00..0.02 rows=1 width=8) (actual time=0.003..0.007 rows=1 loops=1)
+                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.003 rows=1 loops=1)
+                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.001 rows=0 loops=1)
+                              One-Time Filter: false
+          SubPlan 3
+            ->  Subquery Scan on cal_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.004 rows=1 loops=1)
+                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.001 rows=0 loops=1)
+                              One-Time Filter: false
+          SubPlan 4
+            ->  Subquery Scan on cal_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.003 rows=1 loops=1)
+                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.001 rows=0 loops=1)
+                              One-Time Filter: false
+          SubPlan 5
+            ->  Aggregate  (cost=0.22..0.23 rows=1 width=8) (actual time=0.029..0.031 rows=1 loops=1)
+                  ->  Result  (cost=0.01..0.18 rows=2 width=4) (actual time=0.020..0.026 rows=1 loops=1)
+                        One-Time Filter: (date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) IS NOT NULL)
+                        ->  Function Scan on generate_series k  (cost=0.01..0.18 rows=2 width=4) (actual time=0.011..0.016 rows=1 loops=1)
+                              Filter: ((((date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) AT TIME ZONE 'Europe/Berlin'::text) - ((k)::double precision * '00:30:00'::interval)) AT TIME ZONE 'Europe/Berlin'::text) >= date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)))
+                              Rows Removed by Filter: 4
+  CTE accts
+    ->  Seq Scan on player_accounts a_1  (cost=1.68..2.84 rows=1 width=16) (actual time=0.019..0.023 rows=2 loops=1)
+          Filter: ((tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND (person_id = $7) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $8)))
+          Rows Removed by Filter: 2
+          Buffers: shared hit=2
+          InitPlan 8 (returns $7)
+            ->  Seq Scan on player_accounts x  (cost=0.26..1.42 rows=1 width=16) (actual time=0.005..0.007 rows=1 loops=1)
+                  Filter: ((id = 'd17f49e1-1a3d-400a-acc2-7bc609fe9756'::uuid) AND (tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $6)))
+                  Rows Removed by Filter: 3
+                  Buffers: shared hit=1
+                  InitPlan 7 (returns $6)
+                    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+          InitPlan 9 (returns $8)
+            ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+  CTE ent
+    ->  Index Scan using idx_ledger_entries_tenant_player_asset_created on ledger_entries le  (cost=0.74..1422.50 rows=4 width=83) (actual time=0.032..7.725 rows=4750 loops=1)
+          Index Cond: ((tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND (player_account_id = ANY ($10)) AND (asset_code = 'USD'::text) AND (created_at >= $11) AND (created_at <= $12))
+          Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $13))
+          Buffers: shared hit=180
           InitPlan 11 (returns $10)
             ->  CTE Scan on accts  (cost=0.00..0.02 rows=1 width=16) (actual time=0.000..0.001 rows=2 loops=1)
           InitPlan 12 (returns $11)
             ->  CTE Scan on win win_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
           InitPlan 13 (returns $12)
-            ->  CTE Scan on asof  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.000 rows=1 loops=1)
+            ->  CTE Scan on asof  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
           InitPlan 14 (returns $13)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
   CTE led
-    ->  Nested Loop  (cost=1.87..4.78 rows=1 width=98) (actual time=0.691..0.693 rows=0 loops=1)
-          Buffers: shared hit=619
+    ->  Nested Loop  (cost=1.87..4.78 rows=1 width=98) (actual time=16.269..16.274 rows=0 loops=1)
+          Buffers: shared hit=9681
           InitPlan 16 (returns $15)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
           InitPlan 17 (returns $16)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-          ->  Hash Join  (cost=1.22..1.33 rows=1 width=146) (actual time=0.054..0.523 rows=300 loops=1)
+          ->  Hash Join  (cost=1.22..1.33 rows=1 width=146) (actual time=0.058..12.048 rows=4750 loops=1)
                 Hash Cond: ((le_1.tenant_id = la.tenant_id) AND (le_1.ledger_account_id = la.id))
-                Buffers: shared hit=19
-                ->  CTE Scan on ent le_1  (cost=0.00..0.08 rows=4 width=134) (actual time=0.027..0.426 rows=300 loops=1)
-                      Buffers: shared hit=18
-                ->  Hash  (cost=1.21..1.21 rows=1 width=44) (actual time=0.013..0.013 rows=4 loops=1)
+                Buffers: shared hit=181
+                ->  CTE Scan on ent le_1  (cost=0.00..0.08 rows=4 width=134) (actual time=0.034..10.366 rows=4750 loops=1)
+                      Buffers: shared hit=180
+                ->  Hash  (cost=1.21..1.21 rows=1 width=44) (actual time=0.014..0.015 rows=4 loops=1)
                       Buckets: 1024  Batches: 1  Memory Usage: 9kB
                       Buffers: shared hit=1
-                      ->  Seq Scan on ledger_accounts la  (cost=0.00..1.21 rows=1 width=44) (actual time=0.007..0.010 rows=4 loops=1)
+                      ->  Seq Scan on ledger_accounts la  (cost=0.00..1.21 rows=1 width=44) (actual time=0.007..0.011 rows=4 loops=1)
                             Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $16))
                             Buffers: shared hit=1
-          ->  Index Scan using ledger_transactions_one_deposit_per_intent on ledger_transactions lt  (cost=0.12..2.93 rows=1 width=32) (actual time=0.000..0.000 rows=0 loops=300)
+          ->  Index Scan using ledger_transactions_one_deposit_per_intent on ledger_transactions lt  (cost=0.12..2.93 rows=1 width=32) (actual time=0.001..0.001 rows=0 loops=4750)
                 Index Cond: (tenant_id = le_1.tenant_id)
                 Filter: ((le_1.ledger_transaction_id = id) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $15)))
-                Buffers: shared hit=600
+                Buffers: shared hit=9500
   CTE inflight
-    ->  Index Scan using idx_deposit_intents_tenant_player_asset_created on deposit_intents di  (cost=0.74..450.19 rows=1 width=29) (actual time=0.310..0.312 rows=0 loops=1)
-          Index Cond: ((tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND (player_account_id = ANY ($20)) AND (asset_code = 'USD'::text) AND (created_at >= $21) AND (created_at <= $22))
+    ->  Index Scan using idx_deposit_intents_tenant_player_asset_created on deposit_intents di  (cost=0.74..450.19 rows=1 width=29) (actual time=0.287..0.291 rows=0 loops=1)
+          Index Cond: ((tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND (player_account_id = ANY ($20)) AND (asset_code = 'USD'::text) AND (created_at >= $21) AND (created_at <= $22))
           Filter: ((ledger_transaction_id IS NULL) AND (status = ANY ('{pending,ambiguous}'::text[])) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $23)))
           Rows Removed by Filter: 599
-          Buffers: shared hit=28
+          Buffers: shared hit=27
           InitPlan 19 (returns $20)
-            ->  CTE Scan on accts accts_1  (cost=0.00..0.02 rows=1 width=16) (actual time=0.015..0.016 rows=2 loops=1)
+            ->  CTE Scan on accts accts_1  (cost=0.00..0.02 rows=1 width=16) (actual time=0.020..0.022 rows=2 loops=1)
                   Buffers: shared hit=2
           InitPlan 20 (returns $21)
-            ->  CTE Scan on win win_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+            ->  CTE Scan on win win_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
           InitPlan 21 (returns $22)
-            ->  CTE Scan on asof asof_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.000 rows=1 loops=1)
+            ->  CTE Scan on asof asof_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
           InitPlan 22 (returns $23)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
   InitPlan 24 (returns $25)
-    ->  CTE Scan on asof asof_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+    ->  CTE Scan on asof asof_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.003..0.004 rows=1 loops=1)
   InitPlan 25 (returns $26)
-    ->  CTE Scan on accts accts_2  (cost=0.00..0.02 rows=1 width=16) (actual time=0.000..0.001 rows=2 loops=1)
-  ->  Nested Loop  (cost=0.25..0.33 rows=1 width=288) (actual time=0.353..0.356 rows=1 loops=1)
-        Buffers: shared hit=28
-        ->  CTE Scan on win  (cost=0.00..0.02 rows=1 width=32) (actual time=0.038..0.038 rows=1 loops=1)
-        ->  Aggregate  (cost=0.25..0.30 rows=1 width=256) (actual time=0.313..0.316 rows=1 loops=1)
-              Buffers: shared hit=28
+    ->  CTE Scan on accts accts_2  (cost=0.00..0.02 rows=1 width=16) (actual time=0.002..0.003 rows=2 loops=1)
+  ->  Nested Loop  (cost=0.25..0.33 rows=1 width=288) (actual time=0.339..0.348 rows=1 loops=1)
+        Buffers: shared hit=27
+        ->  CTE Scan on win  (cost=0.00..0.02 rows=1 width=32) (actual time=0.048..0.050 rows=1 loops=1)
+        ->  Aggregate  (cost=0.25..0.30 rows=1 width=256) (actual time=0.290..0.295 rows=1 loops=1)
+              Buffers: shared hit=27
               InitPlan 26 (returns $27)
                 ->  CTE Scan on win win_3  (cost=0.00..0.02 rows=1 width=8) (never executed)
               InitPlan 27 (returns $28)
@@ -287,12 +298,12 @@ Nested Loop Left Join  (cost=1879.39..1879.55 rows=1 width=616) (actual time=1.0
                 ->  CTE Scan on win win_9  (cost=0.00..0.02 rows=1 width=8) (never executed)
               InitPlan 33 (returns $34)
                 ->  CTE Scan on win win_10  (cost=0.00..0.02 rows=1 width=8) (never executed)
-              ->  CTE Scan on inflight  (cost=0.00..0.02 rows=1 width=54) (actual time=0.311..0.311 rows=0 loops=1)
-                    Buffers: shared hit=28
-  ->  HashAggregate  (cost=0.27..0.34 rows=1 width=288) (actual time=0.694..0.696 rows=0 loops=1)
+              ->  CTE Scan on inflight  (cost=0.00..0.02 rows=1 width=54) (actual time=0.288..0.288 rows=0 loops=1)
+                    Buffers: shared hit=27
+  ->  HashAggregate  (cost=0.27..0.34 rows=1 width=288) (actual time=16.276..16.281 rows=0 loops=1)
         Group Key: led.account_type
         Batches: 1  Memory Usage: 24kB
-        Buffers: shared hit=619
+        Buffers: shared hit=9681
         InitPlan 34 (returns $35)
           ->  CTE Scan on win win_11  (cost=0.00..0.02 rows=1 width=8) (never executed)
         InitPlan 35 (returns $36)
@@ -309,49 +320,49 @@ Nested Loop Left Join  (cost=1879.39..1879.55 rows=1 width=616) (actual time=1.0
           ->  CTE Scan on win win_17  (cost=0.00..0.02 rows=1 width=8) (never executed)
         InitPlan 41 (returns $42)
           ->  CTE Scan on win win_18  (cost=0.00..0.02 rows=1 width=8) (never executed)
-        ->  CTE Scan on led  (cost=0.00..0.02 rows=1 width=118) (actual time=0.692..0.692 rows=0 loops=1)
-              Buffers: shared hit=619
+        ->  CTE Scan on led  (cost=0.00..0.02 rows=1 width=118) (actual time=16.271..16.272 rows=0 loops=1)
+              Buffers: shared hit=9681
 Planning:
   Buffers: shared hit=7
-Planning Time: 2.405 ms
-Execution Time: 1.364 ms
-limits_s3_perf_integration_test.go:256: CONTRAST: same statement WITHOUT idx_ledger_entries_tenant_player_asset_created (only the legacy partial index idx_ledger_entries_player_account is left):
-Nested Loop Left Join  (cost=8805.34..8805.50 rows=1 width=624) (actual time=13.400..13.448 rows=1 loops=1)
-  Buffers: shared hit=1839 read=532 written=170
+Planning Time: 3.190 ms
+Execution Time: 17.398 ms
+limits_s3_perf_integration_test.go:277: CONTRAST: same statement WITHOUT idx_ledger_entries_tenant_player_asset_created (only the legacy partial index idx_ledger_entries_player_account is left):
+Nested Loop Left Join  (cost=9220.01..9220.17 rows=1 width=632) (actual time=107.976..108.022 rows=1 loops=1)
+  Buffers: shared hit=19484 read=1011 written=31
   CTE asof
-    ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+    ->  Result  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.003 rows=1 loops=1)
   CTE win
-    ->  CTE Scan on asof a  (cost=0.00..0.32 rows=1 width=32) (actual time=0.259..0.270 rows=1 loops=1)
+    ->  CTE Scan on asof a  (cost=0.00..0.32 rows=1 width=32) (actual time=0.369..0.380 rows=1 loops=1)
           SubPlan 2
-            ->  Subquery Scan on cal  (cost=0.00..0.02 rows=1 width=8) (actual time=0.003..0.005 rows=1 loops=1)
-                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.002..0.003 rows=1 loops=1)
-                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.000 rows=0 loops=1)
+            ->  Subquery Scan on cal  (cost=0.00..0.02 rows=1 width=8) (actual time=0.005..0.007 rows=1 loops=1)
+                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.003..0.004 rows=1 loops=1)
+                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.001..0.001 rows=0 loops=1)
                               One-Time Filter: false
           SubPlan 3
-            ->  Subquery Scan on cal_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.003 rows=1 loops=1)
-                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+            ->  Subquery Scan on cal_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.002..0.004 rows=1 loops=1)
+                  ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.003 rows=1 loops=1)
                         ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.001 rows=0 loops=1)
                               One-Time Filter: false
           SubPlan 4
-            ->  Subquery Scan on cal_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.003 rows=1 loops=1)
+            ->  Subquery Scan on cal_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.002..0.003 rows=1 loops=1)
                   ->  Aggregate  (cost=0.00..0.01 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
-                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.000 rows=0 loops=1)
+                        ->  Result  (cost=0.00..0.00 rows=0 width=0) (actual time=0.000..0.001 rows=0 loops=1)
                               One-Time Filter: false
           SubPlan 5
-            ->  Aggregate  (cost=0.22..0.23 rows=1 width=8) (actual time=0.242..0.244 rows=1 loops=1)
-                  ->  Result  (cost=0.01..0.18 rows=2 width=4) (actual time=0.233..0.238 rows=1 loops=1)
+            ->  Aggregate  (cost=0.22..0.23 rows=1 width=8) (actual time=0.343..0.345 rows=1 loops=1)
+                  ->  Result  (cost=0.01..0.18 rows=2 width=4) (actual time=0.327..0.337 rows=1 loops=1)
                         One-Time Filter: (date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) IS NOT NULL)
-                        ->  Function Scan on generate_series k  (cost=0.01..0.18 rows=2 width=4) (actual time=0.015..0.020 rows=1 loops=1)
+                        ->  Function Scan on generate_series k  (cost=0.01..0.18 rows=2 width=4) (actual time=0.017..0.026 rows=1 loops=1)
                               Filter: ((((date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)) AT TIME ZONE 'Europe/Berlin'::text) - ((k)::double precision * '00:30:00'::interval)) AT TIME ZONE 'Europe/Berlin'::text) >= date_trunc('day'::text, (a.t AT TIME ZONE 'Europe/Berlin'::text)))
                               Rows Removed by Filter: 4
   CTE accts
-    ->  Seq Scan on player_accounts a_1  (cost=1.68..2.84 rows=1 width=16) (actual time=0.020..0.024 rows=2 loops=1)
-          Filter: ((tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND (person_id = $7) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $8)))
+    ->  Seq Scan on player_accounts a_1  (cost=1.68..2.84 rows=1 width=16) (actual time=0.030..0.035 rows=2 loops=1)
+          Filter: ((tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND (person_id = $7) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $8)))
           Rows Removed by Filter: 2
           Buffers: shared hit=2
           InitPlan 8 (returns $7)
-            ->  Seq Scan on player_accounts x  (cost=0.26..1.42 rows=1 width=16) (actual time=0.007..0.009 rows=1 loops=1)
-                  Filter: ((id = '104e1669-cebd-40c5-aff1-6eddb878e3ef'::uuid) AND (tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $6)))
+            ->  Seq Scan on player_accounts x  (cost=0.26..1.42 rows=1 width=16) (actual time=0.013..0.015 rows=1 loops=1)
+                  Filter: ((id = 'd17f49e1-1a3d-400a-acc2-7bc609fe9756'::uuid) AND (tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $6)))
                   Rows Removed by Filter: 3
                   Buffers: shared hit=1
                   InitPlan 7 (returns $6)
@@ -359,13 +370,14 @@ Nested Loop Left Join  (cost=8805.34..8805.50 rows=1 width=624) (actual time=13.
           InitPlan 9 (returns $8)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
   CTE ent
-    ->  Index Scan using idx_ledger_entries_account on ledger_entries le  (cost=0.74..8773.72 rows=4 width=83) (actual time=1.173..9.782 rows=300 loops=1)
-          Index Cond: ((created_at >= $11) AND (created_at <= $12))
-          Filter: ((tenant_id = '93fa6b58-0996-4d32-9a7e-dacc01ba406d'::uuid) AND (asset_code = 'USD'::text) AND (player_account_id = ANY ($10)) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $13)))
-          Rows Removed by Filter: 300
-          Buffers: shared hit=638 read=532 written=170
+    ->  Bitmap Heap Scan on ledger_entries le  (cost=6954.74..9188.38 rows=4 width=83) (actual time=16.357..31.448 rows=4750 loops=1)
+          Recheck Cond: ((created_at >= $11) AND (created_at <= $12))
+          Filter: ((tenant_id = '97e9287d-f59a-40c9-8b92-29935e229920'::uuid) AND (asset_code = 'USD'::text) AND (player_account_id = ANY ($10)) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $13)))
+          Rows Removed by Filter: 10748
+          Heap Blocks: exact=264
+          Buffers: shared hit=483 read=1011 written=31
           InitPlan 11 (returns $10)
-            ->  CTE Scan on accts  (cost=0.00..0.02 rows=1 width=16) (actual time=0.024..0.026 rows=2 loops=1)
+            ->  CTE Scan on accts  (cost=0.00..0.02 rows=1 width=16) (actual time=0.034..0.037 rows=2 loops=1)
                   Buffers: shared hit=2
           InitPlan 12 (returns $11)
             ->  CTE Scan on win win_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.002..0.003 rows=1 loops=1)
@@ -373,43 +385,46 @@ Nested Loop Left Join  (cost=8805.34..8805.50 rows=1 width=624) (actual time=13.
             ->  CTE Scan on asof  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
           InitPlan 14 (returns $13)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+          ->  Bitmap Index Scan on idx_ledger_entries_account  (cost=0.00..6954.42 rows=1003 width=0) (actual time=16.232..16.233 rows=15498 loops=1)
+                Index Cond: ((created_at >= $11) AND (created_at <= $12))
+                Buffers: shared hit=339 read=889
   CTE scan
-    ->  Nested Loop Left Join  (cost=19.64..27.85 rows=1 width=129) (actual time=1.296..12.170 rows=300 loops=1)
-          Buffers: shared hit=1839 read=532 written=170
+    ->  Nested Loop Left Join  (cost=19.64..27.85 rows=1 width=129) (actual time=16.524..90.967 rows=4750 loops=1)
+          Buffers: shared hit=19484 read=1011 written=31
           InitPlan 16 (returns $15)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
           InitPlan 17 (returns $16)
             ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
-          ->  Nested Loop  (cost=1.64..9.83 rows=1 width=157) (actual time=1.239..11.602 rows=300 loops=1)
-                Buffers: shared hit=1839 read=532 written=170
-                ->  Hash Join  (cost=1.22..1.33 rows=1 width=146) (actual time=1.209..10.075 rows=300 loops=1)
+          ->  Nested Loop  (cost=1.64..9.83 rows=1 width=157) (actual time=16.470..77.494 rows=4750 loops=1)
+                Buffers: shared hit=19484 read=1011 written=31
+                ->  Hash Join  (cost=1.22..1.33 rows=1 width=146) (actual time=16.418..38.707 rows=4750 loops=1)
                       Hash Cond: ((le_1.tenant_id = la.tenant_id) AND (le_1.ledger_account_id = la.id))
-                      Buffers: shared hit=639 read=532 written=170
-                      ->  CTE Scan on ent le_1  (cost=0.00..0.08 rows=4 width=134) (actual time=1.175..9.943 rows=300 loops=1)
-                            Buffers: shared hit=638 read=532 written=170
-                      ->  Hash  (cost=1.21..1.21 rows=1 width=44) (actual time=0.020..0.021 rows=4 loops=1)
+                      Buffers: shared hit=484 read=1011 written=31
+                      ->  CTE Scan on ent le_1  (cost=0.00..0.08 rows=4 width=134) (actual time=16.360..35.835 rows=4750 loops=1)
+                            Buffers: shared hit=483 read=1011 written=31
+                      ->  Hash  (cost=1.21..1.21 rows=1 width=44) (actual time=0.033..0.034 rows=4 loops=1)
                             Buckets: 1024  Batches: 1  Memory Usage: 9kB
                             Buffers: shared hit=1
-                            ->  Seq Scan on ledger_accounts la  (cost=0.00..1.21 rows=1 width=44) (actual time=0.011..0.014 rows=4 loops=1)
+                            ->  Seq Scan on ledger_accounts la  (cost=0.00..1.21 rows=1 width=44) (actual time=0.019..0.024 rows=4 loops=1)
                                   Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((player_account_id IS NOT NULL) AND (player_account_id = (NULLIF(current_setting('app.player_account_id'::text, true), ''::text))::uuid)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $16))
                                   Buffers: shared hit=1
-                ->  Index Scan using ledger_transactions_id_tenant_key on ledger_transactions lt  (cost=0.42..8.48 rows=1 width=75) (actual time=0.005..0.005 rows=1 loops=300)
+                ->  Index Scan using ledger_transactions_id_tenant_key on ledger_transactions lt  (cost=0.42..8.48 rows=1 width=75) (actual time=0.007..0.007 rows=1 loops=4750)
                       Index Cond: ((id = le_1.ledger_transaction_id) AND (tenant_id = le_1.tenant_id))
                       Filter: ((transaction_type = ANY ('{casino_bet,casino_win,casino_rollback,sportsbook_bet,sportsbook_settlement,sportsbook_void,sportsbook_rollback}'::text[])) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $15)))
-                      Buffers: shared hit=1200
-          ->  Limit  (cost=17.48..17.48 rows=1 width=19) (actual time=0.001..0.001 rows=0 loops=300)
-                ->  Sort  (cost=17.48..17.48 rows=2 width=19) (actual time=0.001..0.001 rows=0 loops=300)
+                      Buffers: shared hit=19000
+          ->  Limit  (cost=17.48..17.48 rows=1 width=19) (actual time=0.002..0.002 rows=0 loops=4750)
+                ->  Sort  (cost=17.48..17.48 rows=2 width=19) (actual time=0.002..0.002 rows=0 loops=4750)
                       Sort Key: o1.created_at
                       Sort Method: quicksort  Memory: 25kB
-                      ->  Append  (cost=0.68..17.47 rows=2 width=19) (actual time=0.000..0.000 rows=0 loops=300)
-                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=300)
+                      ->  Append  (cost=0.68..17.47 rows=2 width=19) (actual time=0.001..0.001 rows=0 loops=4750)
+                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=4750)
                                   One-Time Filter: (lt.transaction_type = ANY ('{casino_rollback,sportsbook_void,sportsbook_rollback}'::text[]))
                                   InitPlan 18 (returns $20)
                                     ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
                                   ->  Index Scan using ledger_transactions_id_tenant_key on ledger_transactions o1  (cost=0.68..8.73 rows=1 width=19) (never executed)
                                         Index Cond: ((id = lt.reverses_transaction_id) AND (tenant_id = lt.tenant_id))
                                         Filter: (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $20))
-                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=300)
+                            ->  Result  (cost=0.68..8.73 rows=1 width=19) (actual time=0.000..0.000 rows=0 loops=4750)
                                   One-Time Filter: ((lt.transaction_type = 'sportsbook_void'::text) AND (lt.reverses_transaction_id IS NULL))
                                   InitPlan 19 (returns $22)
                                     ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
@@ -417,16 +432,16 @@ Nested Loop Left Join  (cost=8805.34..8805.50 rows=1 width=624) (actual time=13.
                                         Index Cond: (correlation_id = lt.correlation_id)
                                         Filter: ((tenant_id = lt.tenant_id) AND (transaction_type = 'sportsbook_bet'::text) AND (((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) AND (NULLIF(current_setting('app.player_account_id'::text, true), ''::text) IS NULL)) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $22)))
   InitPlan 21 (returns $26)
-    ->  CTE Scan on asof asof_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+    ->  CTE Scan on asof asof_1  (cost=0.00..0.02 rows=1 width=8) (actual time=0.002..0.002 rows=1 loops=1)
   InitPlan 22 (returns $27)
-    ->  CTE Scan on accts accts_1  (cost=0.00..0.02 rows=1 width=16) (actual time=0.001..0.001 rows=2 loops=1)
-  ->  CTE Scan on win  (cost=0.00..0.02 rows=1 width=32) (actual time=0.260..0.261 rows=1 loops=1)
-  ->  HashAggregate  (cost=0.57..0.70 rows=1 width=552) (actual time=13.115..13.131 rows=1 loops=1)
+    ->  CTE Scan on accts accts_1  (cost=0.00..0.02 rows=1 width=16) (actual time=0.001..0.002 rows=2 loops=1)
+  ->  CTE Scan on win  (cost=0.00..0.02 rows=1 width=32) (actual time=0.371..0.373 rows=1 loops=1)
+  ->  HashAggregate  (cost=0.57..0.70 rows=1 width=560) (actual time=107.580..107.596 rows=1 loops=1)
         Group Key: scan.account_type
         Batches: 1  Memory Usage: 24kB
-        Buffers: shared hit=1839 read=532 written=170
+        Buffers: shared hit=19484 read=1011 written=31
         InitPlan 23 (returns $28)
-          ->  CTE Scan on win win_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+          ->  CTE Scan on win win_2  (cost=0.00..0.02 rows=1 width=8) (actual time=0.002..0.002 rows=1 loops=1)
         InitPlan 24 (returns $29)
           ->  CTE Scan on win win_3  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 25 (returns $30)
@@ -438,32 +453,32 @@ Nested Loop Left Join  (cost=8805.34..8805.50 rows=1 width=624) (actual time=13.
         InitPlan 28 (returns $33)
           ->  CTE Scan on win win_7  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 29 (returns $34)
-          ->  CTE Scan on win win_8  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+          ->  CTE Scan on win win_8  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 30 (returns $35)
           ->  CTE Scan on win win_9  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 31 (returns $36)
-          ->  CTE Scan on win win_10  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+          ->  CTE Scan on win win_10  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 32 (returns $37)
           ->  CTE Scan on win win_11  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 33 (returns $38)
           ->  CTE Scan on win win_12  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 34 (returns $39)
-          ->  CTE Scan on win win_13  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
+          ->  CTE Scan on win win_13  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
         InitPlan 35 (returns $40)
           ->  CTE Scan on win win_14  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 36 (returns $41)
-          ->  CTE Scan on win win_15  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+          ->  CTE Scan on win win_15  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
         InitPlan 37 (returns $42)
-          ->  CTE Scan on win win_16  (cost=0.00..0.02 rows=1 width=8) (actual time=0.000..0.001 rows=1 loops=1)
+          ->  CTE Scan on win win_16  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
         InitPlan 38 (returns $43)
-          ->  CTE Scan on win win_17  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.001 rows=1 loops=1)
-        ->  CTE Scan on scan  (cost=0.00..0.02 rows=1 width=191) (actual time=1.298..12.363 rows=300 loops=1)
-              Buffers: shared hit=1839 read=532 written=170
+          ->  CTE Scan on win win_17  (cost=0.00..0.02 rows=1 width=8) (actual time=0.001..0.002 rows=1 loops=1)
+        ->  CTE Scan on scan  (cost=0.00..0.02 rows=1 width=191) (actual time=16.527..96.264 rows=4750 loops=1)
+              Buffers: shared hit=19484 read=1011 written=31
 Planning:
-  Buffers: shared hit=375
-Planning Time: 3.599 ms
-Execution Time: 14.117 ms
-limits_s3_perf_integration_test.go:289: LATENCY over 300 runs (synthetic ledger: 20300 target-player bets, 200600 ledger rows in the table): stake usage p50=4.103716ms p95=6.649022ms p99=8.866002ms | deposit usage p50=1.936713ms p95=3.737451ms p99=5.699647ms | L0.4 held for both reads p50=6.064457ms p95=10.233959ms p99=12.130599ms
---- PASS: TestRGUsageS3ExplainAndLatency (425.66s)
+  Buffers: shared hit=360
+Planning Time: 6.219 ms
+Execution Time: 109.407 ms
+limits_s3_perf_integration_test.go:310: LATENCY over 300 runs (synthetic ledger: 20300 target-player bets, 200600 ledger rows in the table): stake usage p50=57.526674ms p95=86.588053ms p99=101.412967ms | deposit usage p50=13.920319ms p95=25.687031ms p99=32.313832ms | L0.4 held for both reads p50=73.27755ms p95=108.442908ms p99=123.916064ms
+--- PASS: TestRGUsageS3ExplainAndLatency (817.56s)
 PASS
-ok  	github.com/Diansalas/igaming-platform/internal/rg	425.671s
+ok  	github.com/Diansalas/igaming-platform/internal/rg	817.577s
