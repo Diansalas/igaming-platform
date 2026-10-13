@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
@@ -130,10 +132,13 @@ func (c Config) validateStaffMFA() error {
 
 // platformKeyFamily is one entry of the single registry of platform key
 // families. keys returns the family's key values by kid (empty when the
-// family is not configured).
+// family is not configured); raw returns the configured text; list reports a
+// "kid:base64" list family (otherwise the configured text is the key itself).
 type platformKeyFamily struct {
 	name string
 	keys func(c Config) (map[string][]byte, error)
+	raw  func(c Config) string
+	list bool
 }
 
 func singleKey(kid, v string) map[string][]byte {
@@ -154,63 +159,118 @@ func kidListKeys(name string, raw string, parse func(string) (map[string][]byte,
 	return m, nil
 }
 
-// platformKeyFamilies is THE registry: every platform secret key family the
-// process holds. Every pair of families is checked for distinct key values,
-// so a family added here cannot forget the check. A new platform key family
-// MUST be added here (TestPlatformKeyFamilies_RegistryIsComplete pins the
-// list against the Config fields).
-var platformKeyFamilies = []platformKeyFamily{
-	{"JWT_SIGNING_SECRET", func(c Config) (map[string][]byte, error) {
-		return singleKey(c.JWTActiveKID, c.JWTSigningSecret), nil
-	}},
-	{"JWT_PREVIOUS_SECRET", func(c Config) (map[string][]byte, error) {
-		return singleKey(c.JWTPreviousKID, c.JWTPreviousSecret), nil
-	}},
-	{"PROVIDER_CREDENTIAL_FINGERPRINT_KEY", func(c Config) (map[string][]byte, error) {
-		return singleKey("-", c.ProviderCredentialFingerprintKey.Reveal()), nil
-	}},
-	{"ACTOR_PROOF_KEYS", func(c Config) (map[string][]byte, error) {
-		return kidListKeys("ACTOR_PROOF_KEYS", c.ActorProofKeys.Reveal(), actorproof.ParseKeySet)
-	}},
-	{"PAYOUT_INSTRUMENT_KEYS", func(c Config) (map[string][]byte, error) {
-		return kidListKeys("PAYOUT_INSTRUMENT_KEYS", c.PayoutInstrumentKeys.Reveal(), actorproof.ParseKeySet)
-	}},
-	{"PAYOUT_INSTRUMENT_FP_KEYS", func(c Config) (map[string][]byte, error) {
-		return kidListKeys("PAYOUT_INSTRUMENT_FP_KEYS", c.PayoutInstrumentFPKeys.Reveal(), actorproof.ParseKeySet)
-	}},
-	{staffmfa.EnvFactorKeys, func(c Config) (map[string][]byte, error) {
-		return kidListKeys(staffmfa.EnvFactorKeys, c.StaffMFAFactorKeys.Reveal(), func(raw string) (map[string][]byte, error) {
-			return staffmfa.ParseKeySet(staffmfa.EnvFactorKeys, raw)
-		})
-	}},
-	{staffmfa.EnvMACKeys, func(c Config) (map[string][]byte, error) {
-		return kidListKeys(staffmfa.EnvMACKeys, c.StaffMFAMACKeys.Reveal(), func(raw string) (map[string][]byte, error) {
-			return staffmfa.ParseKeySet(staffmfa.EnvMACKeys, raw)
-		})
-	}},
+// decodeAnyBase64 decodes s under standard or URL-safe base64, padded or raw
+// (strict), the forms the kid-list parsers accept.
+func decodeAnyBase64(s string) ([]byte, bool) {
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding} {
+		if b, err := enc.Strict().DecodeString(s); err == nil && len(b) > 0 {
+			return b, true
+		}
+	}
+	return nil, false
 }
 
-// validatePlatformKeyFamilies refuses any key value that appears in two
-// DIFFERENT registry families (pairwise, every pair). Duplicates inside one
-// family are each family's own rule. Errors name families and kids, never
-// key material.
+// keyForm is one comparable form of one key of a family.
+type keyForm struct {
+	kid, form string
+	v         []byte
+}
+
+// forms returns every form under which a key of the family could be reused
+// by another family (security review C3): the raw text of a text key AND its
+// base64 decoding when it decodes; the decoded bytes of a kid-list entry AND
+// its encoded text. So JWT_SIGNING_SECRET=X and STAFF_MFA_MAC_KEYS=m1:X
+// collide, whichever way round.
+func (f platformKeyFamily) forms(c Config) ([]keyForm, error) {
+	keys, err := f.keys(c)
+	if err != nil {
+		return nil, err
+	}
+	var out []keyForm
+	for _, kid := range sortedKeys(keys) {
+		v := keys[kid]
+		if f.list {
+			out = append(out, keyForm{kid, "decoded", v})
+			continue
+		}
+		out = append(out, keyForm{kid, "text", v})
+		if b, ok := decodeAnyBase64(string(v)); ok {
+			out = append(out, keyForm{kid, "base64-decoded", b})
+		}
+	}
+	if f.list && len(keys) > 0 {
+		for _, part := range strings.Split(f.raw(c), ",") {
+			kid, text, ok := strings.Cut(strings.TrimSpace(part), ":")
+			if ok && text != "" {
+				out = append(out, keyForm{kid, "encoded text", []byte(text)})
+			}
+		}
+	}
+	return out, nil
+}
+
+// platformKeyFamilies is THE registry: every platform secret key family the
+// process holds. Every pair of families is checked for distinct key values in
+// every form (forms), so a family added here cannot forget the check. A new
+// platform key family MUST be added here (TestPlatformKeyFamilies_RegistryIsComplete
+// pins the list against the Config fields).
+var platformKeyFamilies = []platformKeyFamily{
+	{name: "JWT_SIGNING_SECRET", keys: func(c Config) (map[string][]byte, error) {
+		return singleKey(c.JWTActiveKID, c.JWTSigningSecret), nil
+	}},
+	{name: "JWT_PREVIOUS_SECRET", keys: func(c Config) (map[string][]byte, error) {
+		return singleKey(c.JWTPreviousKID, c.JWTPreviousSecret), nil
+	}},
+	{name: "PROVIDER_CREDENTIAL_FINGERPRINT_KEY", keys: func(c Config) (map[string][]byte, error) {
+		return singleKey("-", c.ProviderCredentialFingerprintKey.Reveal()), nil
+	}},
+	{name: "ACTOR_PROOF_KEYS", list: true, raw: func(c Config) string { return c.ActorProofKeys.Reveal() },
+		keys: func(c Config) (map[string][]byte, error) {
+			return kidListKeys("ACTOR_PROOF_KEYS", c.ActorProofKeys.Reveal(), actorproof.ParseKeySet)
+		}},
+	{name: "PAYOUT_INSTRUMENT_KEYS", list: true, raw: func(c Config) string { return c.PayoutInstrumentKeys.Reveal() },
+		keys: func(c Config) (map[string][]byte, error) {
+			return kidListKeys("PAYOUT_INSTRUMENT_KEYS", c.PayoutInstrumentKeys.Reveal(), actorproof.ParseKeySet)
+		}},
+	{name: "PAYOUT_INSTRUMENT_FP_KEYS", list: true, raw: func(c Config) string { return c.PayoutInstrumentFPKeys.Reveal() },
+		keys: func(c Config) (map[string][]byte, error) {
+			return kidListKeys("PAYOUT_INSTRUMENT_FP_KEYS", c.PayoutInstrumentFPKeys.Reveal(), actorproof.ParseKeySet)
+		}},
+	{name: staffmfa.EnvFactorKeys, list: true, raw: func(c Config) string { return c.StaffMFAFactorKeys.Reveal() },
+		keys: func(c Config) (map[string][]byte, error) {
+			return kidListKeys(staffmfa.EnvFactorKeys, c.StaffMFAFactorKeys.Reveal(), func(raw string) (map[string][]byte, error) {
+				return staffmfa.ParseKeySet(staffmfa.EnvFactorKeys, raw)
+			})
+		}},
+	{name: staffmfa.EnvMACKeys, list: true, raw: func(c Config) string { return c.StaffMFAMACKeys.Reveal() },
+		keys: func(c Config) (map[string][]byte, error) {
+			return kidListKeys(staffmfa.EnvMACKeys, c.StaffMFAMACKeys.Reveal(), func(raw string) (map[string][]byte, error) {
+				return staffmfa.ParseKeySet(staffmfa.EnvMACKeys, raw)
+			})
+		}},
+}
+
+// validatePlatformKeyFamilies refuses any key value that appears, in any form,
+// in two DIFFERENT registry families (pairwise, every pair). Duplicates inside
+// one family are each family's own rule. Errors name families, kids and forms,
+// never key material.
 func (c Config) validatePlatformKeyFamilies() error {
-	type owner struct{ family, kid string }
+	type owner struct{ family, kid, form string }
 	seen := map[string]owner{}
 	for _, f := range platformKeyFamilies {
-		keys, err := f.keys(c)
+		forms, err := f.forms(c)
 		if err != nil {
 			return err
 		}
-		mine := map[string]bool{}
-		for _, kid := range sortedKeys(keys) {
-			v := string(keys[kid])
-			if prev, dup := seen[v]; dup && prev.family != f.name {
-				return fmt.Errorf("config: %s key %q must differ from %s key %q (every platform key family must use independent secrets)", f.name, kid, prev.family, prev.kid)
+		for _, k := range forms {
+			v := string(k.v)
+			prev, dup := seen[v]
+			if dup && prev.family != f.name {
+				return fmt.Errorf("config: %s key %q (%s) must differ from %s key %q (%s): every platform key family must use independent secrets, compared as text and as decoded bytes",
+					f.name, k.kid, k.form, prev.family, prev.kid, prev.form)
 			}
-			if !mine[v] {
-				mine[v] = true
-				seen[v] = owner{f.name, kid}
+			if !dup {
+				seen[v] = owner{f.name, k.kid, k.form}
 			}
 		}
 	}
