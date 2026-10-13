@@ -47,9 +47,18 @@ is either a secret or noise).
   `INSERT INTO database_environment (environment) VALUES ('production');` - the row is write-once (the runtime role can
   never write it; the owner cannot change it while the guard trigger is enabled), so no later mistake can turn the
   database into a "test" one. Verify: `SELECT environment, recorded_at, recorded_by FROM database_environment;`.
-- Startup check: `platform-api` with `GuardEnvironment() = production` refuses to start when the anchor says
-  `development` / `test` (`db.VerifyEnvironmentAnchor`, `ErrEnvironmentAnchorMismatch`), fails closed if the anchor cannot be
-  read, and logs a warning while no anchor is recorded (the provisioning step above was skipped).
+- Startup check (launch gate, `IMPLEMENTED`): `platform-api` with `GuardEnvironment() = production` REFUSES to start when
+  the anchor says `development` / `test` (`db.ErrEnvironmentAnchorMismatch`), when NO anchor row is recorded
+  (`db.ErrEnvironmentAnchorUnrecorded`; the error text names the provisioning INSERT above), and when the anchor cannot be
+  read (fail closed). A recorded `production` starts. Non-production guards (development, staging, test) check nothing, so
+  dev / CI / staging need no anchor row. A refused start means the provisioning step below was skipped: run it, do not
+  work around the check.
+- **Where it fits in the deploy checklist:** first production deploy and every new production database (including a
+  restore into a fresh database), strictly between the `cmd/migrate up` step (Pre-launch verification item 5) and the first
+  `platform-api` start (item 1 onward): (a) `migrate up` reaches 0135; (b) the migration-owner role (the existing
+  migration credential, no new role, no password change) runs the one statement above; (c) verify with the SELECT above
+  (`environment = production`); (d) only then start `platform-api`. The statement is idempotent-safe to repeat only in the
+  sense that a second INSERT fails on the primary key: the row is write-once, so there is nothing to undo or retry.
 - A database restored from a test / development backup carries that backup's anchor row: never restore one into production
   (`restore-from-backup.md`).
 
@@ -165,6 +174,10 @@ environment with `APP_ENV=production`:
 5. The migration step (`cmd/migrate up`) has completed successfully
    against this exact environment's database before this step is
    reached — see `docs/architecture/38-deployment-architecture.md` §2.
+   **Then the database environment anchor is recorded** (owner-side
+   `INSERT INTO database_environment (environment) VALUES ('production');`,
+   see "Database environment anchor" above). `platform-api` refuses to start in
+   production without it (`db.ErrEnvironmentAnchorUnrecorded`).
 6. `TEST_SUPPORT_ENDPOINTS_ENABLED` is unset (or explicitly `false`) —
    confirm the process actually started at all: `Load()` refuses to
    start if this is `true` at the same time `APP_ENV=production`, so a

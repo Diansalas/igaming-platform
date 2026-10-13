@@ -717,8 +717,14 @@ until S1-S6 merge.
   synthetic floor for every jurisdiction present when it runs, so a fail-closed test in a
   seeded jurisdiction would pass vacuously.
 - **Launch-gate items (security re-review; they do not block S1):**
-  - `platform-api` must REFUSE to start in production while no environment anchor is recorded.
-    Today it only warns; it already refuses a `development` / `test` anchor.
+  - **DONE (IMPLEMENTED, 2026-10-13):** `platform-api` REFUSES to start in production while no
+    environment anchor is recorded (`db.ErrEnvironmentAnchorUnrecorded`, from
+    `db.VerifyEnvironmentAnchor`; main.go returns the error, no warn path). It also refuses a
+    `development` / `test` anchor and an unreadable anchor; non-production guards are unchanged.
+    Tests: unit (all anchor states x guards, read error), integration against the real table
+    through the runtime role (`internal/db/environment_anchor_integration_test.go`, private DB
+    only), and a main.go call-site AST test. Provisioning step: production-configuration-checklist
+    ("Database environment anchor"). No migration.
   - Re-run the `attestation_ref` sweep (ASCII and "synthetic" detection) under the production
     database collation before launch.
   - `RETURNING seq` on `player_rg_limit_changes` exposes a global sequence value. This is

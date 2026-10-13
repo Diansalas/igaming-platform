@@ -34,7 +34,7 @@
 | Retail/POS | 0 | Architecture only (ADR 0035/0036). Owner-deferred. |
 | Reporting / BI | 5 | No reporting module. CDC is deferred. |
 | Ops: backup/DR, monitoring, alerting, runbooks | 50 | **Implemented (local):** `deploy/drill` (dev-dataset evidence only; no data-bearing backup ever restored). **NOT WIRED:** alert rules in `deploy/observability`; pending signals not emitted. ALERT-DELIVERY-1 is open: nobody is paged. Runbooks are present (launch/suspension, incident with `<NOT ASSIGNED>` recipients, restore, expand/contract). |
-| Infrastructure (CI, IaC, migrations, health) | 60 | **Implemented:** Terraform modules, Docker, health/readiness, `migrate verify`. **Blocked:** GitHub CI (billing); self-hosted runner not authorised. AWS OFF. The production start does not refuse a missing environment anchor; it only warns (`cmd/platform-api/main.go:163`). |
+| Infrastructure (CI, IaC, migrations, health) | 60 | **Implemented:** Terraform modules, Docker, health/readiness, `migrate verify`. **Blocked:** GitHub CI (billing); self-hosted runner not authorised. AWS OFF. The production start now refuses a missing environment anchor (`db.ErrEnvironmentAnchorUnrecorded`; launch-gate item closed, see ADR 0115 implementation record). |
 
 Overall, technically ready-to-launch for a casino-first B2C brand on MOCK providers: about 65-70%. With the sportsbook, AML and B2B scope included: about 55-60%.
 

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -13,26 +14,50 @@ type fakeAnchor struct {
 
 func (f fakeAnchor) ReadEnvironmentAnchor(context.Context) (string, error) { return f.env, f.err }
 
-// ADR 0115 S1 (security LOW): production refuses a development / test anchor, fails closed on a
-// read error, and accepts production / staging / an unrecorded anchor; non-production checks nothing.
+// ADR 0115 S1 (security LOW + launch gate): the four anchor states x the production / non-production
+// guard, plus fail-closed on a read error. Production refuses development / test AND an unrecorded
+// anchor; recorded production passes; every non-production guard checks nothing.
 func TestVerifyEnvironmentAnchor(t *testing.T) {
 	ctx := context.Background()
-	for _, bad := range []string{"development", "test"} {
-		if _, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{env: bad}); !errors.Is(err, ErrEnvironmentAnchorMismatch) {
-			t.Fatalf("anchor %s must refuse a production start, got %v", bad, err)
+	readErr := errors.New("boom")
+	cases := []struct {
+		name    string
+		anchor  string
+		wantErr error // nil = start allowed
+	}{
+		{"unrecorded", "", ErrEnvironmentAnchorUnrecorded},
+		{"production", "production", nil},
+		{"development", "development", ErrEnvironmentAnchorMismatch},
+		{"test", "test", ErrEnvironmentAnchorMismatch},
+		{"staging (not synthetic-admitting; unchanged)", "staging", nil},
+	}
+	for _, c := range cases {
+		got, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{env: c.anchor})
+		if c.wantErr == nil {
+			if err != nil || got != c.anchor {
+				t.Fatalf("production guard, anchor %s: %q %v", c.name, got, err)
+			}
+		} else if !errors.Is(err, c.wantErr) {
+			t.Fatalf("production guard, anchor %s: want %v, got %v", c.name, c.wantErr, err)
+		}
+		// Non-production guards never read or refuse, whatever the anchor (and even a read error).
+		for _, g := range []string{"development", "staging", "test", ""} {
+			if _, err := VerifyEnvironmentAnchor(ctx, g, fakeAnchor{env: c.anchor, err: readErr}); err != nil {
+				t.Fatalf("guard %q anchor %s: non-production must check nothing: %v", g, c.name, err)
+			}
 		}
 	}
-	readErr := errors.New("boom")
 	if _, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{err: readErr}); !errors.Is(err, readErr) {
 		t.Fatalf("an unreadable anchor must fail closed in production, got %v", err)
 	}
-	for _, ok := range []string{"production", "staging", ""} {
-		if got, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{env: ok}); err != nil || got != ok {
-			t.Fatalf("anchor %q: %q %v", ok, got, err)
-		}
+	// A read error must not be mistaken for (or masked as) an unrecorded anchor.
+	if _, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{env: "production", err: readErr}); err == nil {
+		t.Fatal("a read error must refuse even when a value accompanies it")
 	}
-	if _, err := VerifyEnvironmentAnchor(ctx, "development", fakeAnchor{env: "test", err: readErr}); err != nil {
-		t.Fatalf("outside production nothing is checked: %v", err)
+	// The refusal names the provisioning step (what an operator must do).
+	_, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{})
+	if err == nil || !strings.Contains(err.Error(), "INSERT INTO database_environment") || !strings.Contains(err.Error(), "production-configuration-checklist") {
+		t.Fatalf("the unrecorded-anchor error must name the provisioning step: %v", err)
 	}
 }
 

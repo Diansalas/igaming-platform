@@ -13,6 +13,14 @@ import (
 // database_environment anchor (migration 0135) says development or test.
 var ErrEnvironmentAnchorMismatch = errors.New("db: refusing to start: production process on a database anchored as development/test")
 
+// ErrEnvironmentAnchorUnrecorded: a production process is connected to a database with no
+// database_environment row. The database reads that as production, but the launch gate (ADR 0115
+// S1) requires the provisioning step to have RECORDED it, so a database that was never provisioned
+// (or whose anchor was never written) cannot serve production.
+var ErrEnvironmentAnchorUnrecorded = errors.New("db: refusing to start: production process on a database whose database_environment anchor is not recorded; " +
+	"as the migration-owner role run once: INSERT INTO database_environment (environment) VALUES ('production'); " +
+	"(docs/runbooks/production-configuration-checklist.md, \"Database environment anchor\")")
+
 // environmentAnchorReader reads the database_environment anchor ("" when no row is recorded).
 type environmentAnchorReader interface {
 	ReadEnvironmentAnchor(ctx context.Context) (string, error)
@@ -36,8 +44,9 @@ func (p *Pool) ReadEnvironmentAnchor(ctx context.Context) (string, error) {
 
 // VerifyEnvironmentAnchor (ADR 0115 S1, security LOW) refuses a PRODUCTION start (the guarded
 // environment, config.GuardEnvironment) against a database anchored as development or test, and
-// fails closed if the anchor cannot be read in production. Outside production it checks nothing.
-// It returns the anchor so the caller can warn when none is recorded.
+// REFUSES an unrecorded anchor (ErrEnvironmentAnchorUnrecorded; launch gate), and fails closed if
+// the anchor cannot be read in production. Outside production it checks nothing (no new friction
+// for dev / CI / test). It returns the anchor it read.
 func VerifyEnvironmentAnchor(ctx context.Context, guardEnvironment string, r environmentAnchorReader) (string, error) {
 	if guardEnvironment != "production" {
 		return "", nil
@@ -48,6 +57,9 @@ func VerifyEnvironmentAnchor(ctx context.Context, guardEnvironment string, r env
 	}
 	if anchor == "development" || anchor == "test" {
 		return anchor, fmt.Errorf("%w (anchor=%q)", ErrEnvironmentAnchorMismatch, anchor)
+	}
+	if anchor == "" {
+		return anchor, ErrEnvironmentAnchorUnrecorded
 	}
 	return anchor, nil
 }
