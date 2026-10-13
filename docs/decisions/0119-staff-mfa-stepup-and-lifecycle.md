@@ -124,7 +124,7 @@ Consequences:
   helper, `internal/auth/authtest` (S3). A static test pins that only test code imports it, the same pin as
   `prooftest`.
 - There is no legacy-enrolment grace window. Production has never run. When S3 lands, every existing dev or staging
-  staff account is re-seeded or re-invited, and every existing staff session is revoked (section 13.1 step 5).
+  staff account is re-seeded or re-invited, and every existing staff session is revoked by migration 0138 (section 13.1a).
 
 ### 4.2 `StaffFactor` interface (`internal/staffmfa`)
 
