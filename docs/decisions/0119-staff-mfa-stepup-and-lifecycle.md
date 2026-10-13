@@ -526,67 +526,126 @@ Classes:
 - **Routine reads and low-impact configuration:** casino game availability, catalogue edits, brand creation (a brand
   is created `pending_launch` and cannot trade), display names, alert ack/resolve, KYC document review.
 
-### 8.2 Route classification (the golden table pinned by the S4 test)
+### 8.2 Route classification (the golden table pinned by the S4b test)
 
-| Route (method path) | Permission | Class | Rule and justification |
-|---|---|---|---|
-| `POST /v1/admin/withdrawals/{id}/approve` | `withdrawal:approve` | financial | (a)(d): it releases player funds. This **supersedes** the `withdrawal.ErrStepUpRequired` placeholder (section 9.3). |
-| `POST /v1/admin/withdrawals/{id}/submit` | `withdrawal:submit` | financial | (a): it dispatches a payout to the provider |
-| `POST /v1/admin/withdrawals/{id}/resolve` | `withdrawal:submit` | financial | (a): manual outcome of a submitted payout |
-| `POST /v1/admin/withdrawals/{id}/reject` | `withdrawal:reject` | none | protective |
-| `POST .../manual-adjustments` | `ledger_adjustment:initiate` | financial | (a)(d): K2 initiation. Both four-eyes Persons must be strongly authenticated, or a stolen initiator session plus a rubber-stamp approval defeats four-eyes. |
-| `POST .../manual-adjustments/{id}/approve` | `ledger_adjustment:approve` | financial | (a)(d): K2 approval and execution |
-| `POST .../manual-adjustments/{id}/reject\|cancel` | | none | protective |
-| `POST .../payment-force-resolutions` and `/{id}/approve` | `payment_force_resolve:*` | financial | (a)(d): K3 |
-| `POST .../payment-force-resolutions/{id}/reject\|cancel` | | none | protective |
-| `POST .../withdrawal-hold-resolutions` and `/{id}/approve` | `withdrawal_hold_resolution:*` | financial | (a)(d): HSEC release |
-| `POST .../withdrawal-hold-resolutions/{id}/reject\|cancel` | | none | protective |
-| `POST .../payments/kill-switches` (engage) | `payments_kill_switch:engage` | none | protective. It is deliberately fast for incident response. |
-| `POST .../kill-switches/{id}/release-requests` and `.../release-requests/{id}/approve` | `payments_kill_switch:release` | critical | (d)(e): it re-opens payments. Four-eyes. |
-| `POST .../release-requests/{id}/cancel` | | none | protective |
-| `POST .../launch-authorisations` (activate, reactivate, ratify, close) | `launch_authorisation:request` | critical | (d)(e): it opens or changes market availability |
-| `POST .../launch-authorisations` with `action = suspend`, `POST .../brands/{b}/suspend`, `POST .../tenants/{t}/suspend` | `launch_authorisation:suspend` | none | protective (ADR 0112 section 6.3 asymmetry). The handler classifies by `action`. The class is resolved from the validated body **before** the handler runs, through a declared per-route classifier function. That function is pinned by test and is not free-form. |
-| `POST .../launch-authorisations/{id}/approve` | `launch_authorisation:approve` | critical | (d)(e) |
-| `POST .../launch-authorisations/{id}/reject\|cancel` | | none | protective |
-| `POST .../capability-grants/requests`, `/{id}/approve`, `/{id}/revoke` | `capability_grant:*` | critical | (b)(d): K1 grants financial authority. A revoke is protective, but it is critical because an attacker revoking defenders' grants during an incident is a real denial-of-service vector. Low volume. |
-| `POST .../capability-grants/requests/{id}/reject\|cancel` | | none | protective |
-| `POST /v1/admin/financial-policy-changes`, `.../tenants/{t}/financial-policy-changes`, `/{id}/approve` | `financial_policy:*` | critical | (d)(e): it changes the four-eyes thresholds themselves |
-| `POST .../financial-policy-changes/{id}/reject\|cancel` | | none | protective |
-| `POST /v1/admin/withdrawal-policies`, `DELETE /v1/admin/withdrawal-policies/{id}` | `withdrawal_policy:write` | critical | (e): thresholds and `require_step_up` (permission.go:122-127 bypass #3) |
-| `POST .../provider-credential-requests`, `/{id}/decisions`, `/{id}/apply`, `POST .../provider-credentials/{h}/transitions` | `provider_credential:*` | critical | (c). A revoke transition is protective, but it is still critical: revoking production credentials is an outage vector. |
-| `PUT /v1/admin/providers/{p}/capability`, `PUT /v1/admin/casino/providers/{p}/capability` | `provider_config:write`, `casino_config:write` | critical | (c)(e): provider enablement per tenant |
-| `POST /v1/admin/alerting/routes` | `alert:route_manage` | critical | (f): an attacker could reroute or silence alerts |
-| `POST /v1/admin/assets`, `PATCH .../assets/{code}`, `PUT .../assets/{code}/activation\|operation-eligibility\|platform-authorization`, `POST .../assets/change-requests` and `/{id}/decision` | `asset_registry:manage` | critical | (d)(e): what money can move. Dual control. |
-| `PUT /v1/admin/asset-authorizations/*` | `asset_authorization:write` | critical | (e) |
-| `POST /v1/admin/jurisdictions`, `POST /v1/admin/licences`, `PUT .../tenants/{t}/licence` | `jurisdiction_registry:manage`, `tenant_licence:assign` | critical | (e): regulatory basis |
-| `PUT /v1/admin/jurisdiction-resolution-active/{c}`, `PUT /v1/admin/jurisdiction-evidence-collection/{e}`, jurisdiction evaluation-policy writes, operating-market ceiling/tenant/brand policy writes | `jurisdiction_*`, `operating_market_*` | critical | (e) |
-| `POST /v1/admin/sportsbook/jurisdiction-restrictions` and `/{id}/withdraw` | `sportsbook_jurisdiction_restriction:manage` | critical | (e). A withdraw loosens the control. Creating one is protective, but it is grouped for legibility. |
-| `POST /v1/admin/risk/rules` and `/{id}/disable`, `POST /v1/admin/sportsbook/exposure-limits` and `/{id}/disable` | `risk_config:manage`, `sportsbook_exposure_limit:manage` | financial | (e): a disable or a new looser rule exposes the book |
-| `POST /v1/admin/bonus/grants`, `/manual-grants`, `/manual-grants/{id}/activate`, `/economic-operations`, `/bulk-jobs`, `/bulk-jobs/{id}/execute`, `/held-dispositions/{id}/resolve` | `bonus_grant:issue`, `bonus_adjustment:write`, `bonus_bulk:execute`, `bonus_held_disposition:resolve` | financial | (a): creates bonus value |
-| `POST /v1/admin/bonus/change-requests` and `/{id}/decide` | bonus governance | critical | (d) |
-| `POST /v1/admin/bonus/campaigns/{id}/activate`, `/offers/{id}/publish` | `bonus_campaign:activate`, `bonus_offer:manage` | financial | (a): releases value to many players |
-| Campaign, offer and segment create or edit, suggestion claim or decide | bonus authoring | none | configuration. Activation or publishing is the gate. |
-| `POST /v1/admin/casino/games/{g}/change-requests`, `/casino/change-requests/{id}/approvals` | `casino_catalogue:govern` | critical | (d) |
-| `PUT /v1/admin/casino/games`, `PUT .../games/{g}/availability` | `casino_catalogue:manage`, `casino_config:write` | none | catalogue configuration under governance |
-| `POST /v1/admin/players/{id}/suspend`, `POST /v1/admin/rg/restrictions` | `player:suspend`, `rg_restriction:write` | none | protective |
-| `POST /v1/admin/players/{id}/reinstate`, `POST .../identity-review/clear` | `player:suspend`, `identity_review:manage` | critical | (e): lifts a protective control |
-| Clearing an RG restriction (ADR 0026 section 12) | `rg_restriction:write` | critical | (e) |
-| ADR 0115: `POST /v1/admin/players/{id}/rg/limits` that is an **increase or removal** | `PermRGLimitWriteOnPlayerRequest` | critical | (e). It **unblocks the ADR 0115 S2 403**. The player's own `confirm` is still required. A decrease is `none`. Classified by a pinned classifier, like launch. |
-| ADR 0115: RG floor change requests and their approve, `limit-configs` writes | `PermRGConfigWrite` and the floor four-eyes | critical | (d)(e) |
-| `POST /v1/admin/kyc/verifications/{id}/review`, `/documents/{id}/review` | `verification:review` | none [ORCH-DEFAULT, revisit OQ-4] | high volume. KYC approval does not by itself move money: withdrawal approval is step-up. |
-| `POST /v1/admin/payout-instruments/{id}/suspend` | `payout_instrument:suspend` | none | protective |
-| `POST /v1/admin/tenants`, `POST .../brands` | `tenant:write`, `brand:write` | critical (tenant), none (brand) | tenant creation is a platform-level identity boundary. A brand is born `pending_launch`. |
-| All staff lifecycle routes (section 14.2) except `suspend` | `staff:manage` and the new governance permission | critical | (b) |
-| `POST .../staff/{id}/suspend`, `POST /v1/admin/platform-staff/{id}/suspend` | `staff:manage` | critical | (b). Suspension is protective toward the target, but an attacker suspending defenders is a lock-out vector. The last-admin guard bounds it, and step-up makes it costly. |
-| `POST .../staff/{id}/person-link`, `POST /v1/admin/platform-staff/{id}/person-link` | `staff:manage` | critical | (b): Person binding decides four-eyes distinctness |
-| `PATCH .../staff/{id}/display-name`, `PATCH /v1/admin/staff/me/display-name` | | none | cosmetic. Audited (ADR 0104). |
-| `POST /v1/staff/mfa/recovery-codes/regenerate` | own | critical | (b) |
-| `POST /v1/admin/alerts/{id}/ack\|resolve` | `alert:manage` | none | operational |
-| `POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event` | non-production only | none | test support, not mounted in production |
+Only **registered** routes appear here, with exact path strings: the golden test compares strings, and every
+registration is a string literal. The inventory was taken at `a3e56dd`. A row with a **classifier** is a named,
+pinned Go function. It reads only the already-validated body, or the target row, and the handler re-uses the same
+parsed value, so the class cannot change between the classifier and the handler.
 
-**Pending flows.** A route added later must take a class in the same change, and the golden test makes that visible.
-ADR 0114 S1b, the ADR 0116 AML case actions and the ADR 0107 closed-tenant resolution pick their class from rule 8.1 at
-their own review.
+**Withdrawals and payouts**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/withdrawals/{id}/approve` | `withdrawal:approve` | financial (a)(d). Supersedes the `ErrStepUpRequired` placeholder (9.3). |
+| `POST /v1/admin/withdrawals/{id}/submit` | `withdrawal:submit` | financial (a): dispatches a payout |
+| `POST /v1/admin/withdrawals/{id}/resolve` | `withdrawal:submit` | financial (a) |
+| `POST /v1/admin/withdrawals/{id}/reject` | `withdrawal:reject` | none (protective) |
+| `POST /v1/admin/payout-instruments/{id}/suspend` | `payout_instrument:suspend` | none (protective) |
+
+**K1-K3 and HSEC four-eyes**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/tenants/{tenantID}/manual-adjustments`, `POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/approve` | `ledger_adjustment:initiate`, `:approve` | financial (a)(d). Both Persons must be strongly authenticated, or a stolen initiator session plus a rubber-stamp approval defeats four-eyes. |
+| `POST /v1/admin/tenants/{tenantID}/payment-force-resolutions`, `POST /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/approve` | `payment_force_resolve:*` | financial (a)(d) |
+| `POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions`, `POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/approve` | `withdrawal_hold_resolution:*` | financial (a)(d) |
+| `POST /v1/admin/tenants/{tenantID}/capability-grants/requests`, `POST /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/approve`, `POST /v1/admin/tenants/{tenantID}/capability-grants/{grantID}/revoke` | `capability_grant:*` | critical (b)(d). A revoke is protective, but it is critical here: revoking defenders' grants during an incident is a denial-of-service vector, and the volume is low. A deliberate exception to the protective rule. |
+| the `/reject` and `/cancel` routes of all four families above | | none (protective) |
+
+**Policies and governance**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/financial-policy-changes`, `POST /v1/admin/financial-policy-changes/{changeID}/approve` | `financial_policy:author` | critical (d)(e): it changes the four-eyes thresholds themselves |
+| `POST /v1/admin/tenants/{tenantID}/financial-policy-changes` | `financial_policy:author` or `:tighten` | **classifier `financialPolicyChangeClass`**: `none` when the caller holds only `financial_policy:tighten` (the domain already refuses anything but a tightening, so this is protective under rule 8.1); `critical` when the caller authors (platform_admin) |
+| `POST /v1/admin/financial-policy-changes/{changeID}/reject\|cancel` | | none |
+| `POST /v1/admin/withdrawal-policies`, `DELETE /v1/admin/withdrawal-policies/{id}` | `withdrawal_policy:write` | critical (e): thresholds and `require_step_up` (permission.go:122-127 bypass #3) |
+| `POST /v1/admin/bonus/change-requests`, `POST /v1/admin/bonus/change-requests/{requestID}/decide` | bonus governance | critical (d) |
+| `POST /v1/admin/casino/games/{gameID}/change-requests`, `POST /v1/admin/casino/change-requests/{requestID}/approvals` | `casino_catalogue:govern` | critical (d) |
+| `POST /v1/admin/assets/change-requests`, `POST /v1/admin/assets/change-requests/{id}/decision` | `asset_registry:manage` | critical (d) |
+
+**Payments kill switch**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/tenants/{tenantID}/payments/kill-switches` (engage) | `payments_kill_switch:engage` | none: protective, and deliberately fast for incident response |
+| `POST /v1/admin/tenants/{tenantID}/payments/kill-switches/{killSwitchID}/release-requests`, `POST /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}/approve` | `payments_kill_switch:release` | critical (d)(e): re-opens payments, four-eyes |
+| `POST /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}/cancel` | | none |
+
+**Launch and market availability**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/tenants/{tenantID}/launch-authorisations` | `launch_authorisation:request` or `:suspend` | **classifier `launchActionClass`**: `none` for `action = suspend` (ADR 0112 section 6.3 asymmetry); `critical` for activate, reactivate, ratify and close |
+| `POST /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/approve` | `launch_authorisation:approve` | critical (d)(e) |
+| `POST /v1/admin/tenants/{tenantID}/launch-authorisations/{requestID}/reject\|cancel`, `POST /v1/admin/tenants/{tenantID}/brands/{brandID}/suspend`, `POST /v1/admin/tenants/{tenantID}/suspend` | | none (protective) |
+| `POST /v1/admin/tenants` | `tenant:write` | critical: a tenant is a platform-level identity boundary |
+| `POST /v1/admin/tenants/{tenantID}/brands` | `brand:write` | none: a brand is born `pending_launch` |
+
+**Secrets, providers and security signals**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/tenants/{tenantID}/provider-credential-requests`, `POST /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/decisions`, `POST /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/apply`, `POST /v1/admin/tenants/{tenantID}/provider-credentials/{handleID}/transitions` | `provider_credential:*` | critical (c). Revocation is protective, but revoking production credentials is an outage vector. |
+| `PUT /v1/admin/providers/{providerID}/capability`, `PUT /v1/admin/casino/providers/{providerID}/capability` | `provider_config:write`, `casino_config:write` | critical (c)(e) |
+| `POST /v1/admin/alerting/routes` | `alert:route_manage` | critical (f) |
+| `POST /v1/admin/alerts/{alertID}/resolve` | `alert:manage` | **classifier `alertResolveClass`**: `critical` when the alert kind is P1 or security (at least `staff_session_integrity`, `staff_mfa_integrity`, `staff_break_glass_used`, `staff_mfa_hard_locked`, `staff_mfa_recovery_used`; the list is pinned), otherwise `none`. Resolving such an alert from a stolen session would hide the signal (f). |
+| `POST /v1/admin/alerts/{alertID}/ack` | `alert:manage` | none: an ack does not close the alert |
+
+**Regulatory, assets, risk**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/assets`, `PATCH /v1/admin/assets/{code}`, `PUT /v1/admin/assets/{code}/activation`, `PUT /v1/admin/assets/{code}/operation-eligibility`, `PUT /v1/admin/assets/{code}/platform-authorization` | `asset_registry:manage` | critical (e) |
+| `PUT /v1/admin/asset-authorizations/{scopeKind}`, `PUT /v1/admin/asset-authorizations/operation-eligibility/{code}` | `asset_authorization:write` | critical (e) |
+| `POST /v1/admin/jurisdictions`, `POST /v1/admin/licences`, `PUT /v1/admin/tenants/{tenantID}/licence` | `jurisdiction_registry:manage`, `tenant_licence:assign` | critical (e) |
+| `PUT /v1/admin/jurisdiction-resolution-active/{operationClass}`, `PUT /v1/admin/jurisdiction-evidence-collection/{evidenceType}` | `jurisdiction_resolution_active:write`, `jurisdiction_evidence_collection:activate` | critical (e) |
+| `POST /v1/admin/sportsbook/jurisdiction-restrictions`, `POST /v1/admin/sportsbook/jurisdiction-restrictions/{id}/withdraw` | `sportsbook_jurisdiction_restriction:manage` | critical (e). A withdraw loosens. Creation is protective but is grouped for legibility. |
+| `POST /v1/admin/risk/rules`, `POST /v1/admin/risk/rules/{id}/disable`, `POST /v1/admin/sportsbook/exposure-limits`, `POST /v1/admin/sportsbook/exposure-limits/{id}/disable` | `risk_config:manage`, `sportsbook_exposure_limit:manage` | financial (e) |
+
+**Bonus**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/bonus/grants`, `POST /v1/admin/bonus/manual-grants`, `POST /v1/admin/bonus/manual-grants/{grantID}/activate`, `POST /v1/admin/bonus/economic-operations`, `POST /v1/admin/bonus/bulk-jobs`, `POST /v1/admin/bonus/bulk-jobs/{jobID}/execute`, `POST /v1/admin/bonus/held-dispositions/{dispositionID}/resolve` | `bonus_grant:issue`, `bonus_adjustment:write`, `bonus_bulk:execute`, `bonus_held_disposition:resolve` | financial (a) |
+| `POST /v1/admin/bonus/campaigns/{campaignID}/activate`, `POST /v1/admin/bonus/offers/{offerID}/publish` | `bonus_campaign:activate`, `bonus_offer:manage` | financial (a): releases value to many players |
+| `POST /v1/admin/bonus/campaigns`, `POST /v1/admin/bonus/offers`, `POST /v1/admin/bonus/offers/{offerID}/versions`, `POST /v1/admin/bonus/suggestions/{suggestionID}/claim`, `POST /v1/admin/bonus/suggestions/{suggestionID}/decide` | bonus authoring | none: activation or publishing is the gate |
+
+**Players, KYC, RG, catalogue**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/players/{id}/suspend`, `POST /v1/admin/rg/restrictions` | `player:suspend`, `rg_restriction:write` | none (protective) |
+| `POST /v1/admin/players/{id}/reinstate`, `POST /v1/admin/players/{id}/identity-review/clear` | `player:suspend`, `identity_review:manage` | critical (e): lifts a protective control |
+| `POST /v1/admin/kyc/verifications/{id}/review`, `POST /v1/admin/kyc/documents/{id}/review` | `verification:review` | none [ORCH-DEFAULT, OQ-4]. Ledger-finance verified that no production path calls `withdrawal.Approve` with `isAutomated = true`, so a KYC approval does not by itself release funds. |
+| `PUT /v1/admin/casino/games`, `PUT /v1/admin/casino/games/{gameID}/availability` | `casino_catalogue:manage`, `casino_config:write` | none |
+
+**Staff**
+
+| Route | Permission | Class |
+|---|---|---|
+| `POST /v1/admin/tenants/{tenantID}/staff` (the legacy route where the admin chooses the password; it lives until S6) | `staff:manage` | critical (b) |
+| `POST /v1/admin/tenants/{tenantID}/staff/{staffID}/person-link`, `POST /v1/admin/platform-staff/{staffID}/person-link` | `staff:manage` | critical (b): Person binding decides four-eyes distinctness |
+| `PATCH /v1/admin/tenants/{tenantID}/staff/{staffID}/display-name`, `PATCH /v1/admin/staff/me/display-name` | | none: cosmetic, audited (ADR 0104) |
+| the section 14.2 lifecycle routes, including suspend | `staff:manage`, `platform_staff:govern` | critical (b). Suspension is protective toward the target, but an attacker suspending defenders is a lock-out vector, bounded by the last-admin guard. The S6 slice adds these rows. |
+| `POST /v1/staff/mfa/recovery-codes/regenerate` | own account | critical (b). The S3 slice adds this row. |
+
+**Test support:** `POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event` is `none`. It is a test-support route
+and is not mounted in production.
+
+**Classified on arrival.** These routes do not exist yet. Each one takes its class in the slice that registers it, and
+the golden test makes the change visible:
+
+- ADR 0115 S2:
+  - `POST /v1/admin/players/{id}/rg/limits`: classifier, `critical` for an increase or removal, `none` for a
+    decrease. The 403 for staff increases stays until **S4b plus ADR 0115's own classifier slice**.
+  - RG floor change requests, their approvals and their apply (`rg_limit_config:*`): `critical`.
+  - `limit-configs` writes: `critical`.
+- Clearing an RG restriction (ADR 0026 section 12): `critical`.
+- Jurisdiction evaluation-policy writes and operating-market ceiling/tenant/brand policy writes. The permissions exist,
+  but no HTTP route does yet. They take `critical`.
+- ADR 0114 S1b, ADR 0116 AML case actions and ADR 0107 closed-tenant resolution: rule 8.1.
 
 ## 9. Integration with the governed flows, the actor proof and Person binding
 
@@ -606,7 +665,11 @@ their own review.
   - `financial_policy_change:propose|approve`
   - `launch_authorisation:request|approve`
   - `staff_lifecycle:request|approve` (new, section 10.4)
-  - `rg_floor_change:*` when ADR 0115 adds it
+  - `rg_limit_config:request|approve|apply` (ADR 0115, already in `internal/actorproof` and migration 0135). `:apply`
+    is the platform staff member's INSERT of the approved floor row (`created_by_actor_id`, migration 0135 line 829).
+    That is a staff HTTP action executing a four-eyes decision, so it is `critical`, not exempt. If ADR 0115 ever moves
+    `:apply` to a system worker, it must be removed from this registry in the same change. Otherwise the backstop
+    turns it into a 500.
 - **When a proof is signed** for one of these operations, the issuer requires `auth.StepUpAssertionFrom(ctx)`. The
   assertion must:
   - be present;
@@ -651,27 +714,82 @@ their own review.
     the **target** (`SF032`). Nobody approves their own MFA reset or their own role grant through a second account.
   - An MFA reset never changes `person_id`. Linking a Person stays a separate `critical` route.
 
-### 9.5 Liveness inside governed transactions (suspension race)
+### 9.5 Liveness inside governed transactions (suspension race) - scoped (security ruling on review C2)
 
-- **The re-assertion.** Every step-up-classified handler re-asserts the actor's liveness **inside its own business
-  transaction** with `SELECT status, role, staff_version FROM staff_users WHERE id = $actor FOR SHARE`. On a mismatch
-  it refuses with `ErrActorNotLive` (401 `session_revoked`).
-- **Why it serialises.** A suspension's `UPDATE staff_users` takes a row lock that conflicts with `FOR SHARE`. Either
-  the governed write commits first (and is audited as having happened before the suspension), or it sees `suspended`
-  and refuses.
-- **Lock order.** The re-assertion is taken at the existing ADR 0082 Amendment A8 position: L1 `staff_users FOR SHARE`,
-  ascending id, **after** the flow's own L1 request-row `FOR UPDATE` and before L2/L3.
-  - K2 and K3 already take this lock (A8), so for them the re-assertion adds only the `role` and `staff_version`
-    comparison to an existing statement.
-  - A flow with no L1 request row (withdrawal approve, kill-switch release, bonus, configuration routes) takes it as
-    its first lock, after its existing withdrawal-row lock where it has one.
-  - Taking it earlier than A8 is **forbidden**. A shared lock queued behind a waiting suspension `UPDATE` would form a
-    deadlock cycle with a peer that holds the request row.
-  - `ledger-finance` confirms the placement in S4.
-- **The suspension transaction** locks only `staff_users` (UPDATE), `sessions` (revocation UPDATE) and the append-only
-  lifecycle rows. It never takes a financial lock, so it cannot form a cycle with an L1-L3 holder.
-- **Existing DB guards are kept.** The guards that already check `staff_users.status = 'active'` (for example
-  migrations 0106 and 0112 `financial_actor_session`) remain unchanged and stay as defence in depth.
+**Ruling.** `security` adopts the architect's scoped alternative. The universal re-assertion is withdrawn. Reasons:
+
+- **It cannot work as written.** Under `WithTenant(target)` the dual-scope policy of migration 0011 hides a platform
+  admin's own `staff_users` row, so every platform actor would be refused.
+- **The A8 claim was overstated.** K2, K3/M4 and HSEC take the A8 staff `FOR SHARE` only on the final-approval
+  execution path, and today they compare nothing.
+- **The marginal gain is small.** Request-level liveness already refuses every request that starts after the
+  suspension. What remains is the window of a handler that started before the suspension committed: milliseconds.
+  The existing DB status guards (`financial_actor_session`, `financial_acting_session_valid`) still refuse a
+  suspended actor at their own statements. That window is declared as residual R13, not as "closed".
+- **This is not an escalation.** No universal check is required.
+
+**(a) Scope.** The in-transaction re-assertion is required only where the transaction **moves value or changes
+authority** and has a canonical L1 staff position. Every other step-up route relies on the request-level liveness check
+and the existing DB status guards (R13).
+
+| Flow | Where the re-assertion goes | Its L1 predecessor (ADR 0082 A7/A8) | Statement it extends |
+|---|---|---|---|
+| K2 manual adjustment, final approval and execution (`adjustment.DecideInTx` step 4) | the existing A8 staff `FOR SHARE` | `ledger_adjustment_requests FOR UPDATE` | add the acting approver's id to the `ANY($1)` id set; compare `status = 'active'`, `role` and `staff_version` for the actor row against the token |
+| K3 / M4 force resolution, final approval and execution (`payments/manual_resolution.go:1126-1152`) | the existing A8 staff `FOR SHARE` | withdrawal or intent, then `payment_attempts`, then `payment_manual_resolutions FOR UPDATE` | the same |
+| HSEC hold resolution, final approval and execution (`payments/withdrawal_hold_resolution.go:690-722`) | the existing A8 staff `FOR SHARE` | the withdrawal, then the attempts, then `withdrawal_hold_resolutions FOR UPDATE` | the same |
+| Withdrawal `approve` | `approverEligibilityCheck` (`withdrawal_handlers.go:682`) becomes a `FOR SHARE` read | `withdrawal_requests FOR UPDATE` (`lockRequestForUpdate`) | that eligibility read, plus a `staff_version` and `role` comparison |
+| Withdrawal `submit` and `resolve` | a new staff `FOR SHARE` | the flow's **last** preceding L1 row: withdrawal, then `payment_attempts` (A7). Never right after the withdrawal row. | new statement, at the A8 position |
+| K1 capability grant approve and revoke | a new staff `FOR SHARE` | `staff_capability_grant_requests FOR UPDATE` (or the grant row on a revoke) | new statement. The grantee's row is read by the existing K1 logic. |
+| Staff lifecycle execution (10.4) and the tenant lifecycle routes (10.1) | the actor's row `FOR SHARE`, ascending id with the target's row (which the change itself write-locks) | `staff_lifecycle_requests FOR UPDATE` where one exists | new statement |
+
+- **Non-final approvals and initiations** of K2, K3 and HSEC do not move value. They get request-level liveness plus
+  the DB guards (R13).
+- **Flows that take an L0, L0.x advisory or R0 lock** (ADR 0082 N1) take the staff L1 lock **after** it, never as their
+  first lock.
+
+**(b) Visibility.** S4b adds one narrow permissive policy pair on `staff_users`:
+
+```sql
+CREATE POLICY staff_actor_self_select ON staff_users FOR SELECT
+  USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid);
+CREATE POLICY staff_actor_self_lock ON staff_users FOR UPDATE
+  USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid) WITH CHECK (false);
+```
+
+- **Why the second policy.** `FOR SHARE` needs an UPDATE-policy-visible row. `WITH CHECK (false)` means it can never
+  admit an actual UPDATE.
+- **Who sets the GUC.** Only one `db` helper, `db.SetActorStaffIDForCurrentTx`, sets `app.actor_staff_id`, from the
+  verified token subject. A static test pins it as the only setter.
+- **Restrictive fences still apply.** The 0112 acting fence and the migration 0114 KYC-worker fence are not affected.
+- **No new exposure under M5.** The runtime role can already read platform rows through `WithoutTenant`.
+
+**(c) Amendments, landing in S4b with ledger-finance and architect sign-off:**
+
+- **ADR 0099 A-19** (section 6.8 column discipline) admits `staff_version` in the A8 statements of K2, K3/M4 and HSEC.
+  The A-19 static test is updated in the same change.
+- **ADR 0082 Amendment A9** records:
+  - the placement table above as canonical;
+  - that the staff `FOR SHARE` stays at the A8 position (after every L1 row the flow takes, before L2/L3), and after
+    any L0, L0.x or R0 lock;
+  - that the actor's row joins the ascending-id A8 set;
+  - that a suspension transaction locks exactly one `staff_users` row, plus `sessions` and append-only rows.
+
+**Cycle freedom (corrected rationale).**
+
+- The suspension transaction write-locks exactly **one** `staff_users` row and takes no L0-L3 lock. A single-row writer
+  cannot form a cycle with share lockers that each follow one canonical order.
+- PostgreSQL does not queue a new `FOR SHARE` behind a waiting updater when the tuple is already share-locked. The cost
+  is **writer starvation**, which human traffic bounds, not deadlock. The earlier text's deadlock argument is
+  withdrawn.
+- The A8 position is kept for **canonical-order consistency**, not to avoid a cycle.
+
+**Suspension phasing (two transactions).**
+
+1. **T1** revokes all of the target's sessions, live challenges and enrolment tokens, and writes the audit row. It takes
+   no `staff_users` lock and commits at once. From this point liveness refuses every new request from the target.
+2. **T2** runs with `SET LOCAL lock_timeout = '5s'`. It updates `staff_users.status`, which bumps `staff_version`, and
+   writes the lifecycle event. On a lock timeout it retries once. If the retry also times out, it answers 409
+   `lifecycle_busy`. The sessions stay revoked (fail-safe), and the console offers the retry.
 
 ## 10. Staff lifecycle (STAFF-LIFECYCLE-1)
 
