@@ -72,6 +72,86 @@ func TestEligibility_DemotedTenantOfficersAreNoOfficersAndNoQuorum(t *testing.T)
 	}
 }
 
+// relink points an officer's staff row at a DIFFERENT Person. Production forbids it (staff_users.person_id is append-only, 0034); the
+// scratch-state methodology of the K2-G4 tests removes ONLY that guard for the one UPDATE, then restores it.
+func (c *caseWorld) relink(t *testing.T, staff uuid.UUID) {
+	t.Helper()
+	fn := func(ctx context.Context, tx pgx.Tx) error {
+		np := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, np); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `ALTER TABLE staff_users DISABLE TRIGGER staff_users_person_id_append_only`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $2 WHERE id = $1`, staff, np); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `ALTER TABLE staff_users ENABLE TRIGGER staff_users_person_id_append_only`)
+		return err
+	}
+	var err error
+	if c.Scope == "tenant" {
+		err = c.Owner.WithTenant(bg, c.Tenant, fn)
+	} else {
+		err = c.Owner.WithPlatformAdmin(bg, launchfix.Operators().Requester, fn)
+	}
+	if err != nil {
+		t.Fatalf("relink: %v", err)
+	}
+}
+
+// F1: the grantee's live person must still be the person the grant request captured. A re-linked officer is no officer and no quorum.
+func TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum(t *testing.T) {
+	for _, model := range []string{"own_licence", "under_platform_licence"} {
+		t.Run(model, func(t *testing.T) {
+			c := newCaseWorld(t, model)
+			A, B, C := c.Q.Officers[0], c.Q.Officers[1], c.Q.Officers[2]
+			place := func(by aml.Actor) error {
+				_, err := c.Svc.PlaceHold(bg, by, aml.PlaceHoldInput{PersonID: c.w().player().PersonID, Scope: aml.ScopeAllValueMovement, ReasonClass: aml.ReasonManual, ReasonCode: "t"})
+				return err
+			}
+			c.relink(t, B.StaffID)
+			if _, err := c.Svc.OpenCase(bg, B.Actor, c.P.PersonID, aml.CaseKindManual, "t", nil); !errors.Is(err, aml.ErrForbidden) {
+				t.Fatalf("a re-linked officer must be refused: %v", err)
+			}
+			if err := place(A.Actor); err != nil {
+				t.Fatalf("A and C remain, quorum 2: %v", err)
+			}
+			c.relink(t, C.StaffID)
+			if err := place(A.Actor); !errors.Is(err, aml.ErrQuorum) {
+				t.Fatalf("one live officer is not a quorum: %v", err)
+			}
+		})
+	}
+}
+
+// F1 (platform role): a platform grantee must be platform_admin NOW. The staff table may refuse a non-admin platform row outright
+// (then the role term is a pure backstop and this test records that fact instead of asserting behaviour).
+func TestEligibility_PlatformOfficerDemotedToAnotherRole(t *testing.T) {
+	c := newCaseWorld(t, "under_platform_licence")
+	err := c.Owner.WithPlatformAdmin(bg, launchfix.Operators().Requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE staff_users SET role = 'support' WHERE id = $1`, c.Q.Officers[1].StaffID)
+		return e
+	})
+	if err != nil {
+		t.Logf("the staff table refuses a platform row in another role (%v): the role term of aml_platform_grantee_live is a backstop", pgCode(err))
+		return
+	}
+	if _, err := c.Svc.OpenCase(bg, c.Q.Officers[1].Actor, c.P.PersonID, aml.CaseKindManual, "t", nil); !errors.Is(err, aml.ErrForbidden) {
+		t.Fatalf("a platform officer no longer platform_admin must be refused: %v", err)
+	}
+}
+
+func TestConflictOfInterest_NullPersonIsRefused(t *testing.T) {
+	c := newCaseWorld(t, "own_licence")
+	err := c.ownerAs(c.Q.Officers[0].StaffID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT aml_assert_not_subject(NULL, $1)`, uuid.New())
+		return err
+	})
+	wantCode(t, "NULL actor person", err, "AM011")
+}
+
 func TestEligibility_PlatformOfficers_SuspendedOrDemotedAreNoOfficersAndNoQuorum(t *testing.T) {
 	c := newCaseWorld(t, "under_platform_licence")
 	A, B, C := c.Q.Officers[0], c.Q.Officers[1], c.Q.Officers[2]
