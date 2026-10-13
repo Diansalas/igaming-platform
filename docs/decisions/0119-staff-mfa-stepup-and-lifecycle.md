@@ -2296,8 +2296,8 @@ integration): clean. `golangci-lint --build-tags integration --new-from-rev=e779
 `./internal/httpserver/` (`-timeout 60m`, overlapping the mutation pass): PASS except `TestResolutionIsolation_*`
 latency thresholds (`NormalOperation`, `OneTenantStoreOutage`, `MultipleTenantsOutage`), which use no staff route
 (player and webhook routes only) and fail at the base too; every S4a, withdrawal, OpenAPI and staff-identity test
-rerun on the final tree: PASS. Mutation pass over all 62 mutants (the 44 above plus C1a-C1f, X1, X2, X2b, X3, X3b, X4,
-X4b, K1-K3): 60 KILLED, 2 SURVIVED (L20, L20b, justified), 0 ERROR. The C1 regression test found a second real defect
+rerun on the final tree: PASS. Mutation pass over all 60 mutants (the 44 above plus C1a-C1f, X1, X2, X2b, X3, X3b, X4,
+X4b, K1-K3): 58 KILLED, 2 SURVIVED (L20, L20b, justified), 0 ERROR (the first hand-back said 62 / 60: a counting error). The C1 regression test found a second real defect
 on the way: the logout of an already-revoked staff head returned its "not found" from the transaction closure, which
 rolled the chain revocation back (fixed; C1d).
 
@@ -2335,7 +2335,7 @@ rolled the chain revocation back (fixed; C1d).
 
 ### 25.8 Review round (2026-10-13): disposition of the review conditions
 
-`security` (live) and `code-reviewer` / `qa`: APPROVE WITH CONDITIONS. Applied on the branch; re-review pending.
+`security` (live) and `code-reviewer` / `qa`: APPROVE WITH CONDITIONS. Applied on the branch; the security re-review (25.9) added four more items.
 
 | Condition | Disposition | Tests / mutants |
 |---|---|---|
@@ -2348,3 +2348,24 @@ rolled the chain revocation back (fixed; C1d).
 | Security L2 (launch condition) | RECORDED: S4a-R11; S4a-R3 ACCEPTED on (a) D16 and (b) L2 | - |
 | Security note on S3-R13 | RECORDED: S4a-R10 (S4b must use the sealed session row, not the claims) | - |
 | Security F2 (refresh rotates before its re-checks) | Stays S4a-R6 (S4b / S6) | - |
+
+### 25.9 Security re-review (2026-10-13): APPROVE WITH CONDITIONS - disposition
+
+| Item | Disposition | Tests / mutants |
+|---|---|---|
+| 1 (merge condition, reproduced live): ending an OLDER link while a refresh of the head runs left the new head live (one CTE statement walks one READ COMMITTED snapshot; the refresh's new head commits while the statement waits on the head's row lock) | FIXED by a re-snapshot loop (`revokeLinkedStaffSessions`): the CTE repeats until a pass revokes nothing, each pass a new snapshot; bounded at 50 passes, beyond which `ErrChainRevocationUnstable` rolls the whole transaction back (nothing partially revoked is committed; the logout / DELETE / refresh answers 5xx and is retried). Chosen over locking the head first because the head is only known from a snapshot that may already be stale, and the loop also covers refreshes of later heads; a refresh that has not yet locked the head cannot succeed after the revocation commits (its conditional UPDATE needs an unrevoked head) | `TestStaffLiveness_ChainRevocationRacesRefresh` (a held head-row lock; the refresh queued first, the session end second, detected through `pg_locks`; variants delete-predecessor, logout-old-refresh; controls logout-head, delete-head, reuse-old; the new head's access AND refresh token refused, every row revoked); C1g (single snapshot) KILLED |
+| 2: DELETE of one's own already-revoked head answered 404 before the chain step, leaving older links live | FIXED: `RevokeSession` runs the staff chain revocation whatever the presented row's state; 204 when anything was revoked, 404 when nothing was left (logout keeps its idempotent 204). The logout-specific fallback is gone (the same code path now) | `TestStaffLiveness_DeleteRevokedHeadEndsOlderLinks`; C1a, C1d KILLED |
+| 3: `StaffLivenessRefusals` could be masked by a high share of legitimate traffic | FIXED: `... or sum by (reason)(increase(staff_liveness_decisions_total{outcome="refused"}[10m])) > 200` | rules parity PASS |
+| 5: `revokeChainFrom` (1000 hops) rolls back reuse revocation on a very long forward chain | Staff: FIXED, reuse detection on a staff chain uses the re-snapshot CTE (no hop bound, both directions). Players: recorded as S4a-R12 | C1e KILLED |
+| Note: non-literal patterns outside `internal/httpserver` | Recorded as S4a-R13 | - |
+
+| # | Residual | Disposition |
+|---|---|---|
+| S4a-R12 | Refresh-token reuse on a PLAYER chain longer than 1000 links (`revokeChainFrom`'s `maxChainHops`) errors and rolls the reuse revocation back (pre-existing; player access tokens are not liveness-checked, the stolen refresh token is still refused as reused) | Pre-existing; fix with the CTE approach if player chains ever need liveness |
+| S4a-R13 | The repository-wide registration scan finds route registrations whose pattern is a string LITERAL (and every `http.NewServeMux` / `http.Handle(Func)`); a non-literal pattern passed to `X.Handle` outside `internal/httpserver` is not recognised as a route (inside the package every non-literal pattern fails the scan) | Known limit; no such call exists today |
+
+Evidence (final tree): integration `./internal/auth/...`, `./internal/withdrawal/...`, `./deploy/observability/`: PASS;
+the S4a `internal/httpserver` tests (chain, race, liveness, routes, withdrawal pins, OpenAPI, staff identity pins):
+PASS; `go test ./... -count=1`, `gofmt`, `go vet` (plain and integration), `golangci-lint --new-from-rev=e77900e`:
+clean. Mutation (new logic): C1a, C1b, C1c, C1d (re-anchored to the new code), C1e, C1f and the new C1g: all KILLED;
+the mutant set is now 61 (L 34, A 10, C1 7, X 7, K 3).

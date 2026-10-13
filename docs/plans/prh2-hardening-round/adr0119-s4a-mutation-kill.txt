@@ -145,7 +145,8 @@ K1       a client-cancelled request is logged as a database fault
 K2/K3    the route / the staff id missing from the liveness log line
 
 Totals (review-round pass over ALL mutants, tree at ba86b1c..52e37f7 - WIP commits squashed into the S4a commit; X1, X2,
-X2b rerun in their corrected shape): 62 mutants, KILLED 60, SURVIVED 2 (L20, L20b; justified above), ERROR 0.
+X2b rerun in their corrected shape): 60 mutants, KILLED 58, SURVIVED 2 (L20, L20b; justified above), ERROR 0.
+(Corrected: the first hand-back said 62 / 60.)
 
 L01 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_SessionEndRevokesWholeChain
 L02 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
@@ -210,3 +211,19 @@ K3 KILLED by TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation, Te
 
 Discarded (review round): X1, X2, X2b first reported ERROR (build failed: removing the `if !active` block left `active`
 unused); reshaped to `if !active && false` and rerun: all KILLED.
+
+Security re-review (2026-10-13): chain revocation race, revoked-head DELETE
+===========================================================================
+C1a and C1d were re-anchored to the rewritten RevokeSession (C1a: the staff branch skipped; C1d: the session row
+read only when not yet revoked - the pre-fix 404-before-the-chain behaviour). C1e now disables the staff CTE on reuse
+(falling back to the forward-only walk). New: C1g removes the re-snapshot loop (one snapshot only).
+
+C1a KILLED by TestStaffLiveness_DeleteRevokedHeadEndsOlderLinks, TestStaffLiveness_SessionEndRevokesWholeChain
+C1b KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1c KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1d KILLED by TestStaffLiveness_DeleteRevokedHeadEndsOlderLinks, TestStaffLiveness_SessionEndRevokesWholeChain
+C1e KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1g KILLED by TestStaffLiveness_ChainRevocationRacesRefresh
+C1f KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+
+All KILLED. Mutant set now 61: L 34, A 10, C1 7, X 7, K 3; L20 and L20b remain the only (justified) survivors.

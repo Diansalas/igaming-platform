@@ -253,12 +253,17 @@ groups:
         # per reason (revoked, staff_not_active, role_mismatch, version_mismatch, factor_unusable, no_session,
         # absolute_expired, no_assurance) can mean replayed tokens after revocation or forged sids. The threshold is a
         # starting point for a small back-office population.
-        # A ratio over all decisions, with a minimum count so a quiet back office does not alert on a few logouts.
+        # A ratio over all decisions with a minimum count (a quiet back office does not alert on a few logouts), OR
+        # an absolute ceiling (a flood alerts even when legitimate traffic keeps the share under 20 %).
         expr: |
-          (sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m])) > 25)
-            and
-          (sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m]))
-            / ignoring(reason) group_left sum(increase(staff_liveness_decisions_total[10m])) > 0.2)
+          (
+            (sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m])) > 25)
+              and
+            (sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m]))
+              / ignoring(reason) group_left sum(increase(staff_liveness_decisions_total[10m])) > 0.2)
+          )
+            or
+          (sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m])) > 200)
         for: 10m
         labels:
           severity: ticket

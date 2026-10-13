@@ -135,17 +135,23 @@ MUTANTS = [
 }''', AU, AUTH),
  # --- review round (2026-10-13): security C1 (chain revocation), code review CR 1-CR 4 ---
  ('C1a', 'internal/auth/session.go', '''	if principalType == PrincipalStaff {
-		return revokeLinkedStaffSessions(ctx, tx, sessionID, ownerPrincipalID)
-	}''', '''	_ = principalType''', HS, CHAIN),
+		n, err := revokeLinkedStaffSessions(ctx, tx, sessionID, ownerPrincipalID)''', '''	if false && principalType == PrincipalStaff {
+		n, err := revokeLinkedStaffSessions(ctx, tx, sessionID, ownerPrincipalID)''', HS, CHAIN + '|TestStaffLiveness_DeleteRevokedHead'),
  ('C1b', 'internal/auth/session.go', '''JOIN sessions s ON s.id = p.replaced_by_session_id OR s.replaced_by_session_id = c.id''',
   '''JOIN sessions s ON s.id = p.replaced_by_session_id''', HS, CHAIN),
  ('C1c', 'internal/auth/session.go', '''JOIN sessions s ON s.id = p.replaced_by_session_id OR s.replaced_by_session_id = c.id''',
   '''JOIN sessions s ON s.replaced_by_session_id = c.id''', HS, CHAIN),
- ('C1d', 'internal/auth/session.go', '''		if errors.Is(err, ErrSessionNotFound) && row.principalType == PrincipalStaff {''',
-  '''		if false && errors.Is(err, ErrSessionNotFound) && row.principalType == PrincipalStaff {''', HS, CHAIN),
+ ('C1d', 'internal/auth/session.go', '''		`SELECT principal_type FROM sessions WHERE id = $1 AND principal_id = $2`,''',
+  '''		`SELECT principal_type FROM sessions WHERE id = $1 AND principal_id = $2 AND revoked_at IS NULL`,''', HS, CHAIN + '|TestStaffLiveness_DeleteRevokedHead'),
  ('C1e', 'internal/auth/session.go', '''			if staff {
-				// ADR 0119 S4a (security review C1)''', '''			if false {
-				// ADR 0119 S4a (security review C1)''', HS, CHAIN),
+				// ADR 0119 S4a (security review C1 and re-review item 5)''', '''			if false {
+				// ADR 0119 S4a (security review C1 and re-review item 5)''', HS, CHAIN),
+ # security re-review item 1: one snapshot only (the re-snapshot loop removed)
+ ('C1g', 'internal/auth/session.go', '''		if n == 0 {
+			return total, nil
+		}
+	}''', '''		return total, nil
+	}''', HS, 'TestStaffLiveness_ChainRevocationRacesRefresh'),
  ('C1f', 'internal/auth/session.go', '''		   AND revoked_at IS NULL AND replaced_by_session_id IS NULL AND expires_at > now()''',
   '''		   AND revoked_at IS NULL AND expires_at > now()''', HS, CHAIN),
  ('X1', 'internal/withdrawal/withdrawal.go', '''		if !active {

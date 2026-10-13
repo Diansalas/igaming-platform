@@ -16,6 +16,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -649,4 +650,140 @@ func TestStaffLiveness_SessionEndRevokesWholeChain(t *testing.T) {
 			}
 		})
 	}
+}
+
+// waitLockWaiters blocks until at least n backends of this database wait for a lock (the race tests sequence a
+// refresh and a session end behind a held row lock without fixed sleeps).
+func (w *mfaW) waitLockWaiters(n int) {
+	w.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := w.owner.Raw().QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_locks l WHERE NOT l.granted
+			   AND l.pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`).Scan(&waiting); err != nil {
+			w.t.Fatal(err)
+		}
+		if waiting >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			w.t.Fatalf("only %d lock waiters after 10 s, want %d", waiting, n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Security re-review item 1 (reproduced live against the first chain revocation): ending an OLDER link of a staff
+// chain while a refresh of the head is in flight must not leave the head's successor live. A test transaction holds
+// the head row's lock; the refresh of the head queues first, the session end second; on release the refresh commits a
+// new head N, and the end's re-snapshot loop must still revoke N (access AND refresh token refused). Variants: delete
+// the predecessor, log out with the predecessor's (old) refresh token; controls: log out / delete the head, reuse the
+// old refresh token.
+func TestStaffLiveness_ChainRevocationRacesRefresh(t *testing.T) {
+	w := newMFAW(t)
+	for _, end := range []string{"delete-predecessor", "logout-old-refresh", "logout-head", "delete-head", "reuse-old"} {
+		t.Run(end, func(t *testing.T) {
+			w.t = t
+			s := w.staff(&w.tenant, "support")
+			p0 := w.enrol(s).pair
+			r := w.refresh(p0.RefreshToken)
+			r.want(t, http.StatusOK, "")
+			var p1 tokenPairResponse
+			r.decode(t, &p1)
+			s0, s1 := w.sidOf(p0.AccessToken), w.sidOf(p1.AccessToken)
+
+			locked, release, held := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) }) // never leave the lock held on a failure
+			go func() {
+				held <- store.WithScope(context.Background(), w.owner, s.ref, func(ctx context.Context, tx pgx.Tx) error {
+					if err := db.SetSessionInternalOpID(ctx, tx, s1); err != nil {
+						return err
+					}
+					var id uuid.UUID
+					if err := tx.QueryRow(ctx, `SELECT id FROM sessions WHERE id = $1 FOR UPDATE`, s1).Scan(&id); err != nil {
+						return err
+					}
+					close(locked)
+					<-release
+					return nil
+				})
+			}()
+			<-locked
+			var wg sync.WaitGroup
+			var rr, er mfaResp
+			wg.Add(1)
+			go func() { defer wg.Done(); rr = w.refresh(p1.RefreshToken) }() // the refresh of the head, queued first
+			w.waitLockWaiters(1)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				switch end {
+				case "delete-predecessor":
+					er = w.do(http.MethodDelete, "/v1/me/sessions/"+s0.String(), p1.AccessToken, nil)
+				case "logout-old-refresh":
+					er = w.post("/v1/auth/logout", map[string]string{"refresh_token": p0.RefreshToken})
+				case "logout-head":
+					er = w.post("/v1/auth/logout", map[string]string{"refresh_token": p1.RefreshToken})
+				case "delete-head":
+					er = w.do(http.MethodDelete, "/v1/me/sessions/"+s1.String(), p1.AccessToken, nil)
+				case "reuse-old":
+					er = w.refresh(p0.RefreshToken)
+				}
+			}()
+			w.waitLockWaiters(2)
+			releaseOnce.Do(func() { close(release) })
+			if err := <-held; err != nil {
+				t.Fatal(err)
+			}
+			wg.Wait()
+			wantEnd := http.StatusNoContent
+			if end == "reuse-old" {
+				wantEnd = http.StatusUnauthorized
+			}
+			if er.status != wantEnd {
+				t.Fatalf("session end answered %d %s, want %d", er.status, er.body, wantEnd)
+			}
+			if rr.status == http.StatusOK {
+				var n tokenPairResponse
+				rr.decode(t, &n)
+				w.do(http.MethodGet, "/v1/staff/me/mfa", n.AccessToken, nil).want(t, http.StatusUnauthorized, "session_revoked")
+				if again := w.refresh(n.RefreshToken); again.status == http.StatusOK {
+					t.Fatalf("the new head's refresh token still works: %s", again.body)
+				}
+			}
+			for _, tok := range []string{p0.AccessToken, p1.AccessToken} {
+				w.do(http.MethodGet, "/v1/staff/me/mfa", tok, nil).want(t, http.StatusUnauthorized, "session_revoked")
+			}
+			for _, row := range w.sessions(s) {
+				if row.Revoked == nil {
+					t.Fatalf("session %s of the chain is live after the race (refresh answered %d)", row.ID, rr.status)
+				}
+			}
+		})
+	}
+}
+
+// Security re-review item 2: DELETE of one's own already-revoked head still ends the live older links (as logout
+// does) and answers 204; once nothing is left to revoke it answers 404.
+func TestStaffLiveness_DeleteRevokedHeadEndsOlderLinks(t *testing.T) {
+	w := newMFAW(t)
+	s := w.staff(nil, "platform_admin")
+	p0 := w.enrol(s).pair
+	r := w.refresh(p0.RefreshToken)
+	r.want(t, http.StatusOK, "")
+	var p1 tokenPairResponse
+	r.decode(t, &p1)
+	head := w.sidOf(p1.AccessToken)
+	if err := w.ownerSessionExec(s, head, `UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	w.do(http.MethodGet, "/v1/staff/me/mfa", p0.AccessToken, nil).want(t, http.StatusOK, "") // the older link is live
+	w.do(http.MethodDelete, "/v1/me/sessions/"+head.String(), p0.AccessToken, nil).want(t, http.StatusNoContent, "")
+	w.do(http.MethodGet, "/v1/staff/me/mfa", p0.AccessToken, nil).want(t, http.StatusUnauthorized, "session_revoked")
+	// Nothing left to revoke: 404 (a fresh live session of the same staff member makes the call).
+	p2 := w.fullLogin(s)
+	w.do(http.MethodDelete, "/v1/me/sessions/"+head.String(), p2.AccessToken, nil).want(t, http.StatusNotFound, "not_found")
+	w.do(http.MethodGet, "/v1/staff/me/mfa", p2.AccessToken, nil).want(t, http.StatusOK, "") // an unrelated chain is untouched
 }
