@@ -82,14 +82,29 @@ Caveats (stated, not hidden)
 - The mutants are hand-written anchors, not an exhaustive mutation engine. Branches inside the Go service (service.go, holds.go,
   cases.go argument mapping, the payload-digest mirrors) were exercised by the integration and adversarial tests (a mismatched
   digest fails the proof) but were not individually mutated here.
-REVIEW ROUND 1 (security F1-F8, ledger-finance C1 / C3): mutation re-run for the NEW logic only
-------------------------------------------------------------------------------------------------
-Logs : adr0116-s1-s3-mutation-log-run4-review-round.txt  (N1-N34 plus the re-anchored A7, H10, H11, J1, J5)
-       adr0116-s1-s3-mutation-log-run5-review-survivors.txt (the 5 survivors of run4 after two new tests)
-Result: 39 mutants run (34 new + 5 re-anchored). 37 KILLED, 2 JUSTIFIED. Retired: A5b and C14 (superseded by the N-series).
-Run4 left 5 survivors (N3, N5, N6, N9, N11). New tests TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum (both scopes, using the
-K2-G4 scratch methodology: only the person_id append-only trigger is lifted for the one UPDATE) and
-TestConflictOfInterest_NullPersonIsRefused killed N3, N6 and N11 in run5.
+CORRECTION OF THE FIRST-ROUND GATES-LANE RESULT (stated plainly)
+-----------------------------------------------------------------
+The first "gates lane" re-run of the 11 evaluator / composition / adjustment-gate survivors (E1-E8, K1, K7, J3) reported all of them
+KILLED. That result was INVALID: the lane joined its commands without quoting, so the `-run 'TestHold|...'` pipe was interpreted by
+the shell and the lane failed for every mutant, which the driver counted as a kill. It is withdrawn. The driver now quotes the lane
+(shlex), flags any infrastructure failure (database recovery, no space, build cache missing) as INVALID(infra) instead of a kill, and
+prints the last output line for any kill without a failing test name. The lane was re-run properly (run2-gates, run6) and exposed
+seven REAL gaps (E2, E4, E6, K1, K7, J3, J5), now closed by tests. Counts in the round-1 section above (93 killed / 12 justified)
+are superseded by the totals at the end of this file.
+
+REVIEW ROUND 1 (security F1-F8, ledger-finance C1 / C3): mutation re-run for the NEW logic and the re-anchored mutants
+------------------------------------------------------------------------------------------------------------------------
+Logs : adr0116-s1-s3-mutation-log-run4-review-round.txt  N1-N34 plus re-anchored A7, H10, H11, J1, J5 (aml / payments / adjustment
+       lanes; its J1, J5, N26, N32 lines are infrastructure- or compile-invalidated and were re-run in run2-gates)
+       adr0116-s1-s3-mutation-log-run2-gates.txt          the gates-lane re-run (E1-E8, K1, K7, K10, J1, J3, J5, N26, N32)
+       adr0116-s1-s3-mutation-log-run6-final-survivors.txt K1, K7, J5 after the unit / execution tests were added
+Retired: A5b and C14 (superseded by the N-series).
+Result : 39 review-round mutants (34 new + 5 re-anchored): 35 KILLED, 4 JUSTIFIED (N5, N9, N28, N33). Plus E1-E8, K1, K7, K10, J3
+         re-run in the correct lane: all KILLED after the new tests below.
+New tests that closed real gaps: TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum (N3, N6), TestConflictOfInterest_NullPersonIsRefused
+(N11), TestEvaluateHold_InvalidArgumentsAreADeny (E2), TestEvaluateHold_AlertHardErrorPropagates (E1, E4), TestEvaluateHold_TimeoutIsBounded
+(E6), TestComposeHold_* and TestRetryableOnHoldEvalFailure (K1, K7), TestAMLHold_UnresolvedWallet_IsNotReportedAsUnderReview (J3),
+TestAMLHold_WithdrawalOnlyHoldPlacedAfterSubmission_StillRefusesAtExecution (J5), TestAMLHold_PayoutClaim_KYCFailedPlusEvaluatorFailure_StillDenied (N30).
 Justified survivors:
 N5  platform grantee: the platform_admin role term of aml_platform_grantee_live removed.
     UNREACHABLE: staff_users refuses a platform (tenant_id NULL) row in any other role with a CHECK (23514); recorded by
@@ -97,12 +112,17 @@ N5  platform grantee: the platform_admin role term of aml_platform_grantee_live 
 N9  authorize: gr.grantee_person_id = v.person_id removed.
     EQUIVALENT: aml_grant_eligible(...) is called with the same gr.grantee_person_id and compares it with the staff row's LIVE
     person (N3 / N6 are killed), and v.person_id is that same live person; the explicit comparison is redundant by construction.
-Not killable deterministically (concurrency only; kept as a documented control, not claimed as tested): N28 (aml_person_lock a
-no-op) SURVIVED run4 as expected: the lock serialises a hold change that commits concurrently with an approval; the ordering it
-protects cannot be forced in a single-session test. N28 is therefore counted in the 39 as SURVIVED-by-design; the counts above are
-37 killed, 3 survived (N5, N9, N28), all justified.
+N28 aml_person_lock a no-op.
+    CONCURRENCY ONLY: the lock orders a hold change that commits concurrently with an approval; the interleaving cannot be forced in
+    a single-session test. Recorded as a documented control, NOT claimed as tested.
+N33 adjustment submission evaluates with the alert raised in the (rolled-back) transaction instead of deferring it.
+    EQUIVALENT in outcome: the in-transaction alert rolls back and the typed error still makes Service.Submit raise the same alert
+    after the rollback (the alert count is 1 either way). The deferral only avoids a wasted in-transaction insert and keeps a hard
+    alert error from aborting the submission before the refusal is returned.
 
-The earlier statement for run1-3 stands unchanged below.
+TOTALS (all rounds, with the corrections above): 105 + 39 mutants, plus the corrected gates-lane re-run; every survivor is listed
+and justified (round-1 list of 12 unchanged, minus none, plus N5, N9, N28, N33). The pre-flight / down-refusal branches remain
+un-mutated (below).
 
 - The pre-flight (AM098) and down-refusal (AM099) branches of 0140-0142 were NOT mutated in this pass; they are covered by
   TestMigration0140_Preflight, TestMigration0141_Preflight, TestMigration0142_Preflight and

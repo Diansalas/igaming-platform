@@ -737,8 +737,13 @@ All integration runs used `-tags integration -p 1 -count=1` against a private da
   fixed (`TestR32_Migration0127_BackfillsExistingDestinationParks`, 12.5).
 - Migration tests: up/down/up whole-schema snapshot for 0140-0142, pre-flight refusal (AM098) per migration, down refusal (AM099)
   while AML history exists.
-- Mutation pass: 105 mutants, 93 killed, 12 justified survivors, none unexplained (the pre-flight and down-refusal branches were not
-  mutated). `docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-kill.txt` and the three logs beside it.
+- Review round 1 re-run (after the fixes in 12.8): aml, kyc, withdrawal, adjustment, casino, sportsbook, alerting, db, actorproof
+  integration PASS; `internal/payments` shards P, K, R, S, W, D, M each run separately PASS; unit tests, gofmt, vet (+integration),
+  lint (0 issues) PASS.
+- Mutation pass: 105 round-0 mutants plus 39 review-round mutants; every survivor is listed and justified (round 0: 12; round 1: N5,
+  N9, N28, N33); the pre-flight and down-refusal branches were not mutated. One mid-pass result (the first gates-lane re-run) was
+  INVALID (an unquoted regex pipe made every mutant "fail") and is withdrawn in the kill file; the lane was re-run properly and found
+  seven real gaps, now tested. `docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-kill.txt` and the logs beside it.
 
 ### 12.8 Review round 1 disposition (security REJECT as committed, fixable; ledger-finance APPROVE WITH CONDITIONS)
 
