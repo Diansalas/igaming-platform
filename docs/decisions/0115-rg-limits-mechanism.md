@@ -8,6 +8,12 @@ with 2 blockers). Every condition is applied below as ADR text. The review
 disposition table is at the end. Design only: **nothing here is implemented.**
 The labels are `NOT IMPLEMENTED` until slices S1–S6 (§8) merge.
 
+**Pointer (2026-10-13):** ADR 0119 (`0119-staff-mfa-stepup-and-lifecycle.md`) replaces ADR 0017 as the step-up
+mechanism. Every "until ADR 0017 ships" below now reads: staff increases and removals stay 403 until **ADR 0119 S4b**
+(step-up enforcement) **and** this ADR's own classifier slice have both merged. Under ADR 0119 §8.2, a staff increase or
+removal is `critical` step-up and a decrease is `none`. The `rg_limit_config:request|approve|apply` operations are in the
+ADR 0119 §9.1 signer backstop registry (`critical`).
+
 Owner directive 2026-10-11: finish provider-independent RG. No legal value is
 chosen here. Every numeric limit, cool-down, period, duration and cadence is
 **configuration per jurisdiction**, and the configuration has **no default that

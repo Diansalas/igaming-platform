@@ -1,5 +1,7 @@
 # ADR 0017 — Staff MFA and Step-Up Authentication (Architecture Foundation)
 
+- **Pointer (2026-10-13):** superseded in part by ADR 0119 (`0119-staff-mfa-stepup-and-lifecycle.md`, ACCEPTED - PENDING IMPLEMENTATION). It closes the "Open decisions" below with reversible orchestrator defaults. It replaces Argon2id recovery-code hashing with a keyed HMAC, and the data-row MFA policy with a code constant. Nothing is implemented yet; this ADR's status is unchanged.
+
 Status: Architecture foundation only - `NOT IMPLEMENTED`. No code, schema,
 or endpoint in this pass; this documents the target design so Stage 3+
 (or a dedicated future stage) builds against a session/claims shape that
