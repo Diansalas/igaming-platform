@@ -81,9 +81,7 @@ MUTANTS = [
  ('H01', AUS, '''		sessionID, next.MFAAt, newSeal.KID, newSeal.MAC)''', '''		sessionID, cur.MFAAt, newSeal.KID, newSeal.MAC)''', HS, 'TestStepUp_EndToEnd'),
  ('H02a', AUS, '''	if revoked || replaced || absolute == nil || !now.Before(*absolute) {''', '''	if absolute == nil || !now.Before(*absolute) {''', HS, 'TestStepUp_EndToEnd|TestStepUp_RacesRevocation'),
  ('H02b', AUS, '''	if revoked || replaced || absolute == nil || !now.Before(*absolute) {''', '''	if absolute == nil {''', HS, 'TestStepUp_EndToEnd|TestStepUp_RacesRevocation'),
- ('H03', AUS, '''	if !keys.VerifySessionSeal(cur, stored) {
-		return StepUpResult{Legacy: keys.IsLegacySessionSeal(cur, stored)}, ErrStepUpSealInvalid
-	}''', '', HS, 'TestStepUp_'),
+ ('H03', AUS, '''	if !keys.VerifySessionSeal(cur, stored) {''', '''	if !keys.VerifySessionSeal(cur, stored) && false {''', HS, 'TestStepUp_'),
  ('H04', HND, '''	if locked {
 		// The session row must be visible''', '''	if false {
 		// The session row must be visible''', HS, 'TestStepUp_LockoutSharedWithLogin'),
