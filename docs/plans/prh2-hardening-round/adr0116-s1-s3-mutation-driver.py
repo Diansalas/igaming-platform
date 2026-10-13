@@ -178,11 +178,11 @@ M = [
     ('K8 compose: failed KYC loses its result', 'internal/kyc/enforcement.go', "\tif kycDecision.Outcome == OutcomeFailed || kycDecision.Outcome == OutcomeUnavailable {", "\tif false {", GATES),
     ('K9 op map: sportsbook ungated', 'internal/kyc/enforcement.go', "\t\treturn aml.OpSportsbookStake", "\t\treturn \"\"", GATES),
     ('K10 op map: payout maps to withdrawal', 'internal/kyc/enforcement.go', "\t\treturn aml.OpPayout", "\t\treturn aml.OpWithdrawal", GATES),
-    ('J1 adjustment: submission not gated', 'internal/adjustment/request.go', "	} else if v.Denied() {\n		if v.EvalFailed && !v.Held {", "	} else if false {\n		if v.EvalFailed && !v.Held {", GATES),
-    ('J2 adjustment: execution not gated', 'internal/adjustment/execute.go', "\tif holdVerdict.Denied() {", "\tif false {", GATES),
-    ('J3 adjustment: wallet unresolved treated as held', 'internal/adjustment/aml_hold.go', "\tif errors.Is(err, pgx.ErrNoRows) {\n\t\treturn aml.HoldVerdict{}, nil", "\tif errors.Is(err, pgx.ErrNoRows) {\n\t\treturn aml.HoldVerdict{Held: true}, nil", GATES),
-    ('J4 adjustment: resolve error allows', 'internal/adjustment/aml_hold.go', "\t\treturn aml.HoldVerdict{EvalFailed: true}, fmt.Errorf(\"adjustment: resolve", "\t\treturn aml.HoldVerdict{}, nil //", GATES),
-    ('J5 adjustment: wrong operation', 'internal/adjustment/aml_hold.go', "	return aml.EvaluateHold(ctx, tx, tenantID, personID, accountID, aml.OpManualAdjustment)", "	return aml.EvaluateHold(ctx, tx, tenantID, personID, accountID, aml.OpDeposit)", GATES),
+    ('J1 adjustment: submission not gated', 'internal/adjustment/request.go', "	} else if h.denied() {", "	} else if false {", HTTPF4),
+    # (J2 retired: the refusal path was unified by F4 option (b); see the F4 mutants)
+    ('J3 adjustment: wallet unresolved treated as held', 'internal/adjustment/aml_hold.go', "	if errors.Is(err, pgx.ErrNoRows) {\n		return holdCheck{}, nil", "	if errors.Is(err, pgx.ErrNoRows) {\n		return holdCheck{verdict: aml.HoldVerdict{Held: true}}, nil", HTTPF4),
+    ('J4 adjustment: wallet resolve error allows', 'internal/adjustment/aml_hold.go', "		h.verdict = aml.HoldVerdict{EvalFailed: true}\n		return h, fmt.Errorf(", "		h.verdict = aml.HoldVerdict{}\n		return h, nil //", HTTPF4),
+    ('J5 adjustment: wrong operation', 'internal/adjustment/aml_hold.go', "tenantID, h.personID, h.accountID, aml.OpManualAdjustment)", "tenantID, h.personID, h.accountID, aml.OpDeposit)", HTTPF4),
     # ---- review round 1 (security F1-F8, ledger-finance C1/C3): NEW logic only ----
     ('N1 tenant grantee: staff status not checked', U0, "WHERE s.id = p_staff AND s.tenant_id = p_tenant AND s.status = 'active'", "WHERE s.id = p_staff AND s.tenant_id = p_tenant", AML),
     ('N2 tenant grantee: eligible role not checked', U0, "AND s.role = ANY (c.eligible_tenant_roles))", "AND true)", AML),
@@ -215,9 +215,9 @@ M = [
     ('N29 payout gate does not convert an evaluator fault', 'internal/payments/payout.go', "return decision.RetryableOnHoldEvalFailure(), params, nil", "return decision, params, nil", PAY),
     ('N30 conversion ignores the KYC outcome', 'internal/kyc/enforcement.go', "	if d.KYCOutcome != OutcomePassed && d.KYCOutcome != OutcomeNotRequired {\n		return d\n	}\n", "", PAY),
     ('N31 conversion applies to a definite hold too', 'internal/kyc/enforcement.go', "	if !d.Hold.EvalFailed || d.Hold.Held {\n		return d\n	}", "	if !d.Hold.Denied() {\n		return d\n	}", PAY),
-    ('N32 adjustment submission raises no detached alert', 'internal/adjustment/request.go', "_ = aml.RaiseHoldEvalFailedDetached(ctx, s.pool, target.tenantID, aml.OpManualAdjustment)", "_ = aml.OpManualAdjustment", ADJ),
-    ('N33 adjustment submission raises the alert in the rolled-back tx', 'internal/adjustment/request.go', "walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID, true)", "walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID, false)", ADJ),
-    ('N34 eval-failed typed error not produced', 'internal/adjustment/request.go', "		if v.EvalFailed && !v.Held {\n			return Request{}, &holdEvalFailedError{}\n		}\n", "", ADJ),
+    ('N32 adjustment refusal raises no detached evaluator alert', 'internal/adjustment/aml_hold.go', "_ = aml.RaiseHoldEvalFailedDetached(dctx, s.pool, r.tenantID, aml.OpManualAdjustment)", "_ = dctx", HTTPF4),
+    # (N33 retired: the refusal path was unified by F4 option (b); see the F4 mutants)
+    # (N34 retired: the refusal path was unified by F4 option (b); see the F4 mutants)
     # ---- F4 option (b): AML adjustment refusals render as an ordinary conflict ----
     ('F4a AML refusal no longer classified as the generic conflict', 'internal/adjustment/adjustment.go', "case errors.Is(err, ErrNotPending), errors.Is(err, ErrAccountUnderReview):", "case errors.Is(err, ErrNotPending):", HTTPF4),
     ('F4b execution refusal renders differently', 'internal/adjustment/execute.go', "		return Outcome{}, holdCheck.refusal(requestID)", "		return Outcome{}, ErrIntegrity", HTTPF4),
