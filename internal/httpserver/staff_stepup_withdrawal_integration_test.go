@@ -45,7 +45,7 @@ func TestStepUp_WithdrawalPolicy_TwoMinutesBehindTheFinancialRoute(t *testing.T)
 	path := "/v1/admin/withdrawals/" + wr.ID.String() + "/approve"
 	post := func(tok string) (int, apierror.Error, http.Header) {
 		resp := postJSON(t, srv, path, tok, nil)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		b, _ := io.ReadAll(resp.Body)
 		var e apierror.Error
 		_ = json.Unmarshal(b, &e)

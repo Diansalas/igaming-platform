@@ -88,8 +88,6 @@ const (
 	sealV2 sealVersion = 2 // S4b: refresh_token_hash and expires_at bound
 )
 
-func (a SessionAssurance) message() ([]byte, error) { return a.messageVersion(sealV2) }
-
 func (a SessionAssurance) messageVersion(v sealVersion) ([]byte, error) {
 	if v == sealV2 && (!hex64Lower(a.RefreshTokenHash) || a.ExpiresAt.IsZero()) {
 		return nil, ErrInvalidInput
