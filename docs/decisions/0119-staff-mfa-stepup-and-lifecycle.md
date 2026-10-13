@@ -767,3 +767,309 @@ Authentication events go to `audit.Record` only, because they are high volume. T
 | R10 | **Application-host compromise** (it holds the JWT, proof and MFA keys). | Inherent | ADR 0110 T6 |
 | R11 | **A clock skew between the application and an authenticator** larger than ±30 s fails closed (the user cannot log in). | Low | The runbook covers NTP. |
 | R12 | **Email retention.** `email` and `person_id` are kept after offboarding for audit identity. That PII retention needs a data-retention decision. | Compliance | It is recorded. A retention/erasure policy is a separate compliance decision and does not block this ADR. |
+
+## 13. Data model, RLS and migrations
+
+The next free migration number is **0137**. No `migrations/0137*`, `0138*` or `docs/decisions/0119*` exists on any
+branch (`git log --all`, checked 2026-10-13). The orchestrator allocates the final numbers, so the implementer
+re-checks before S2. Every function pins `search_path` (ADR 0108). No function is `SECURITY DEFINER`, apart from the
+existing ADR 0110 verifier, which is extended and not added.
+
+### 13.1 Migration 0137 `staff_mfa` (slice S2)
+
+1. **`staff_mfa_factors`**
+   - Columns:
+     - `id UUID PK DEFAULT gen_random_uuid()`
+     - `tenant_id UUID NULL REFERENCES tenants(id)`
+     - `staff_user_id UUID NOT NULL REFERENCES staff_users(id)`
+     - `factor_type TEXT NOT NULL CHECK (factor_type IN ('totp'))`
+     - `status TEXT NOT NULL CHECK (status IN ('pending','active','revoked'))`
+     - `secret_kid TEXT NOT NULL`, `secret_nonce BYTEA NOT NULL CHECK (octet_length(secret_nonce) = 12)`,
+       `secret_ct BYTEA NOT NULL`
+     - `last_used_step BIGINT NOT NULL DEFAULT 0 CHECK (last_used_step >= 0)`
+     - `failed_count INT NOT NULL DEFAULT 0`, `failed_window_start TIMESTAMPTZ`, `locked_until TIMESTAMPTZ`
+     - `failed_24h_count INT NOT NULL DEFAULT 0`, `failed_24h_start TIMESTAMPTZ`, `hard_locked_at TIMESTAMPTZ`
+     - `pending_expires_at TIMESTAMPTZ`
+     - `created_at`, `activated_at`, `revoked_at`
+     - `revoked_reason TEXT CHECK (revoked_reason IN ('replaced','reset','suspended_compromise','offboarded','pending_superseded','pending_expired'))`
+     - `CHECK ((status = 'pending') = (pending_expires_at IS NOT NULL))`
+   - Indexes:
+     - `UNIQUE (staff_user_id, factor_type) WHERE status = 'active'`
+     - `UNIQUE (staff_user_id, factor_type) WHERE status = 'pending'`
+     - `(tenant_id)`
+   - Triggers:
+     - `sf_factor_tenant_forced` (`SF001`): BEFORE INSERT sets `NEW.tenant_id` from `staff_users` and refuses a
+       supplied value that differs. A composite FK cannot cover the NULL platform arm, because MATCH SIMPLE skips rows
+       with a NULL column.
+     - `sf_factor_guard` (`SF002`): `id`, `tenant_id`, `staff_user_id`, `factor_type`, `secret_*` and `created_at`
+       are immutable. Status may move only `pending -> active|revoked` or `active -> revoked`. `last_used_step` never
+       decreases (`SF003`).
+     - `sf_no_delete` (`SF099`) on DELETE and TRUNCATE.
+2. **`staff_mfa_recovery_codes`**
+   - Columns:
+     - `id`, `tenant_id`, `staff_user_id`
+     - `batch_id UUID NOT NULL`
+     - `code_kid TEXT NOT NULL`, `code_mac BYTEA NOT NULL UNIQUE CHECK (octet_length(code_mac) = 32)`
+     - `created_at`, `consumed_at`, `revoked_at`
+   - Triggers: `SF001` and `SF099`. `sf_recovery_guard` (`SF004`) allows only `consumed_at` and `revoked_at` to move
+     from NULL to a value, never both.
+3. **`staff_auth_challenges`**
+   - Columns:
+     - `id`, `tenant_id`, `staff_user_id`
+     - `purpose TEXT CHECK (purpose IN ('mfa','enrol'))`
+     - `token_kid`, `token_mac BYTEA UNIQUE`
+     - `staff_version_at_issue BIGINT NOT NULL`
+     - `attempts_left SMALLINT NOT NULL CHECK (attempts_left BETWEEN 0 AND 5)`
+     - `expires_at`, `consumed_at`, `created_at`
+     - `via TEXT CHECK (via IN ('login','recovery_code','invite','mfa_reset','bootstrap'))`
+   - Triggers: `SF001` and `SF099`. `sf_challenge_guard` (`SF005`) allows only an `attempts_left` decrement and
+     `consumed_at` moving from NULL to a value.
+4. **`staff_enrolment_tokens`**
+   - Columns:
+     - `id`, `tenant_id`, `staff_user_id`
+     - `purpose TEXT CHECK (purpose IN ('invite','mfa_reset','bootstrap'))`
+     - `token_kid`, `token_mac BYTEA UNIQUE`
+     - `expires_at`, `consumed_at`, `revoked_at`
+     - `issued_by UUID NULL`, `lifecycle_request_id UUID NULL`, `created_at`
+   - Index: `UNIQUE (staff_user_id, purpose) WHERE consumed_at IS NULL AND revoked_at IS NULL`.
+   - Triggers: `SF001` and `SF099`. `sf_enrolment_token_guard` (`SF006`) applies the immutability rules.
+     `sf_enrolment_bootstrap_owner_only` (`SF007`) refuses `purpose = 'bootstrap'` unless `current_user` owns the
+     table.
+5. **`sessions` additions** (section 7.2), the trigger `sessions_staff_assurance_guard` (`SF040`), and **revocation of
+   every live staff session**. The migration sets `revoked_at` on every staff session. It runs as the migration role
+   under the existing FORCE-RLS posture, using the `app.session_internal_op_id` technique of ADR 0016 per row, or a
+   policy-satisfying GUC. The implementer proves that the number of rows affected equals a pre-count, so no session
+   survives without a seal.
+6. **Pre-tenant lookup policies** (the ADR 0016 and migration 0040 pattern): `staff_challenge_select_by_mac`, `USING
+   (token_mac = decode(NULLIF(current_setting('app.staff_challenge_lookup_mac', true), ''), 'hex'))`, and the same for
+   `staff_enrolment_tokens` with `app.staff_enrolment_lookup_mac`. Two new `db.Pool` helpers follow
+   `WithCredentialTokenLookup`. A row is visible only to a caller that already holds a value whose keyed MAC matches.
+
+### 13.2 Migration 0138 `staff_lifecycle` (slice S5)
+
+1. **`staff_users`**
+   - `status` CHECK widens to `('invited','active','suspended','offboarded')`.
+   - `password_hash` drops NOT NULL and gains `CHECK (password_hash IS NOT NULL OR status IN ('invited','offboarded'))`
+     and `CHECK (status <> 'offboarded' OR password_hash IS NULL)`.
+   - New columns: `staff_version BIGINT NOT NULL DEFAULT 1`, `status_changed_at TIMESTAMPTZ`, `offboarded_at
+     TIMESTAMPTZ`, `invited_by UUID NULL`.
+   - Triggers, all BEFORE ROW, named so that they fire in this order:
+     - `sf_10_staff_transition` (`SF010`): the 10.1 graph.
+     - `sf_11_staff_immutable` (`SF011`): `id`, `tenant_id`, `email`, `created_at`.
+     - `sf_12_staff_version` (`SF012`): sets `NEW.staff_version = OLD.staff_version + 1` when `role`, `status`,
+       `password_hash` or `person_id` changes, and refuses any other change to `staff_version`.
+     - `sf_13_staff_self_target` (`SF013`).
+     - `sf_14_staff_person_required` (`SF014`): for an INSERT, or a role change, into
+       `('platform_admin','tenant_admin','finance','compliance')`.
+     - `sf_20_last_admin` (`SF020`, `SF021`).
+     - `zz_sf_30_platform_privileged_governed` (`SF030`).
+   - The existing `staff_users_person_id_append_only` trigger (migration 0034) is kept.
+2. **`staff_lifecycle_events`** (section 10.6). Dual-scope RLS for SELECT. INSERT only. `SF001` and `SF099`.
+3. **`staff_lifecycle_requests`**
+   - Columns:
+     - `id`
+     - `kind CHECK (kind IN ('platform_invite','platform_reactivate','platform_mfa_reset'))`
+     - `target_staff_id UUID NULL` (NULL only for `platform_invite` until execution)
+     - `invite_email TEXT NULL`, `invite_person_id UUID NULL`
+     - `reason_code`, `note`
+     - `requested_by`, `requested_by_person` (both forced)
+     - `required_approvals SMALLINT` (forced to 1)
+     - `payload_hash` (forced; a DB digest of the content)
+     - `state CHECK (state IN ('pending','executing','executed','rejected','cancelled','expired','refused_at_execution'))`
+     - `expires_at` (forced to `now() + 72h`), `created_at`, `decided_at`
+   - RLS: platform session only, with no tenant arm.
+   - Guards: `sf_31_lifecycle_request_guard` (`SF031`: content, forced columns and the state machine; a cancel only by
+     the requester) and `zz_actor_proof_guard` (last).
+4. **`staff_lifecycle_approvals`**
+   - Columns: `id`, `request_id`, `decided_by`, `decided_by_person` (forced), `decision CHECK IN
+     ('approve','reject')`, `reason_code`, `payload_hash`, `created_at`.
+   - `UNIQUE (request_id, decided_by_person)`.
+   - Guards: `sf_32_lifecycle_approval_guard` (`SF032`: the request row was locked `FOR UPDATE` in this txid; distinct
+     staff and Person from the requester and the target; non-NULL Persons; the request is `pending` and not expired;
+     the `payload_hash` matches). `zz_actor_proof_guard` (last). `SF099` makes the table append-only.
+5. **`sf_33_lifecycle_no_executing_at_commit`** (`SF033`): a DEFERRABLE INITIALLY DEFERRED constraint trigger.
+6. **ADR 0110 verifier extension.** The `staff_lifecycle:` prefix is admitted for the `platform` scope. The governed
+   tables are the two above (15 in all). A catalog test pins `zz_actor_proof_guard` as the last BEFORE ROW trigger on
+   both.
+
+### 13.3 RLS summary
+
+| Table | Tenant session | Platform session | Player / service / acting |
+|---|---|---|---|
+| `staff_mfa_factors`, `staff_mfa_recovery_codes`, `staff_auth_challenges`, `staff_enrolment_tokens`, `staff_lifecycle_events` | the dual-scope policy, identical to `staff_users` (migration 0011): own tenant's rows only | platform rows only (`tenant_id IS NULL`) when `app.tenant_id` is empty. Tenant rows are reached by `WithTenant(target)` or `WithPlatformActingInTenant`, as the existing staff handlers do. | none. Plus the 0099 restrictive acting fence entry for the four MFA tables, so a `platform_acting` session cannot read or write another person's factors. |
+| challenges, enrolment tokens (pre-tenant) | plus the single-row lookup-by-MAC SELECT policy | the same | n/a |
+| `staff_lifecycle_requests`, `staff_lifecycle_approvals` | none | SELECT, INSERT, UPDATE (requests: state only) | none |
+
+Every table gets `ENABLE` and `FORCE ROW LEVEL SECURITY`.
+
+### 13.4 Grants to `igaming_runtime`
+
+- **SELECT and INSERT** on every new table.
+- **UPDATE is column-level only:**
+  - factors: `status`, `last_used_step`, `failed_*`, `locked_until`, `hard_locked_at`, `activated_at`, `revoked_at`,
+    `revoked_reason`
+  - recovery codes: `consumed_at`, `revoked_at`
+  - challenges: `attempts_left`, `consumed_at`
+  - enrolment tokens: `consumed_at`, `revoked_at`
+  - lifecycle requests: `state`, `decided_at`
+- **No DELETE or TRUNCATE anywhere.** Expired rows are pruned by an owner-run runbook step, the same as actor-proof
+  nonces.
+- A test asserts the ACLs.
+
+### 13.5 Pinned facts for the catalog tests
+
+- The `SF` guards fire in the order of their names.
+- `zz_actor_proof_guard` is last on the two governed tables.
+- No new function is `SECURITY DEFINER`.
+- `search_path` is pinned on every function.
+- Every table has `FORCE ROW LEVEL SECURITY`.
+- `igaming_runtime` holds no DELETE or TRUNCATE privilege on these tables.
+
+### 13.6 SQLSTATE class `SF` (verified free)
+
+**Verification at `a3e56dd`:**
+
+- Custom classes in `migrations/*.up.sql` (`ERRCODE = '…'`): AP, AR, BR, CG, GP, HR, LA, MA, MR, PC, PI, RL, SP, WD.
+- Additional classes in Go string literals: HS.
+- Classes in ADR texts: the same set.
+- Standard PostgreSQL classes: 00-58, 72, F0, HV, P0, XX. There is no `SF`.
+- `grep -rn 'SF[0-9][0-9][0-9]'` over `migrations`, `internal` and `docs` returns nothing.
+
+**Codes (callers branch on the code only):**
+
+| Code | Meaning |
+|---|---|
+| `SF001` | the tenant of a child row is not the staff member's tenant (forced or refused) |
+| `SF002` | an immutable factor column changed, or an illegal factor status transition |
+| `SF003` | `last_used_step` decreased |
+| `SF004` | a recovery-code mutation other than consume or revoke |
+| `SF005` | a challenge mutation other than an attempt decrement or consume |
+| `SF006` | an enrolment-token mutation other than consume or revoke |
+| `SF007` | a `bootstrap` enrolment token outside the owner path |
+| `SF010` | an illegal staff status transition, or leaving `offboarded` |
+| `SF011` | an immutable `staff_users` column changed (`id`, `tenant_id`, `email`, `created_at`) |
+| `SF012` | `staff_version` was edited directly |
+| `SF013` | a self-targeted status or role change |
+| `SF014` | an approve-capable role without `person_id` |
+| `SF020` | the last active, enrolled platform admin would be removed |
+| `SF021` | the last tenant_admin of a tenant would be removed by a tenant-scoped actor |
+| `SF030` | a privileged platform change without a same-txid `executing` lifecycle request (or the owner path) |
+| `SF031` | a lifecycle request content, forced-column or state violation |
+| `SF032` | an invalid lifecycle approval (same staff or Person as the requester or target, NULL Person, a duplicate Person, not pending, expired, payload mismatch, request not locked in this txid) |
+| `SF033` | a lifecycle request left `executing` at commit |
+| `SF040` | a staff session without assurance columns, or an immutable assurance column changed |
+| `SF099` | an append-only or no-delete violation |
+| `AP001`-`AP005` | unchanged ADR 0110 codes on the two governed tables |
+
+## 14. API, OpenAPI and permissions
+
+### 14.1 Authentication and self-service (`internal/httpserver/staff_auth_routes.go`)
+
+| Route | Auth | Rate bucket | Notes |
+|---|---|---|---|
+| `POST /v1/staff/auth/login` | none | `login` | **Changed response:** a `challenge`, never a `TokenPair` |
+| `POST /v1/staff/auth/mfa/verify` | challenge (`mfa`) | `mfa` | returns a `TokenPair` (aal2) |
+| `POST /v1/staff/auth/mfa/recover` | challenge (`mfa`) | `mfa` | returns a challenge (`enrol`) |
+| `POST /v1/staff/auth/enrol/start` | challenge (`enrol`) | `mfa` | `no-store`. Returns `factor_id`, `otpauth_uri` and `secret_base32` once. |
+| `POST /v1/staff/auth/enrol/confirm` | challenge (`enrol`) | `mfa` | `no-store`. Returns `recovery_codes[10]` and a `TokenPair`. |
+| `POST /v1/staff/auth/enrol/redeem` | enrolment token + password | `credential` | returns a challenge (`enrol`) |
+| `POST /v1/staff/invitations/accept` | invite token + new password | `credential` | returns a challenge (`enrol`) |
+| `POST /v1/staff/auth/step-up` | bearer, staff chain | `mfa` | returns a new access token and `step_up_expires_at` per class |
+| `GET /v1/staff/me/mfa` | bearer, staff chain | none | factor type and status, `activated_at`, recovery codes remaining, `hard_locked` |
+| `POST /v1/staff/mfa/recovery-codes/regenerate` | bearer, step-up critical | none | `no-store` |
+| `POST /v1/auth/refresh` | refresh token | `refresh` | staff rules of 7.2 |
+
+### 14.2 Lifecycle administration
+
+Tenant staff routes live under `/v1/admin/tenants/{tenantID}/staff`. Platform staff routes live under
+`/v1/admin/platform-staff`. Every route is a `staffRoute` and needs a `reason_code` (plus a `note` for `other`) on
+every mutation.
+
+| Route | Permission | Step-up |
+|---|---|---|
+| `GET .../staff`, `GET .../staff/{id}`, `GET .../staff/{id}/lifecycle-events` | `staff:read` (new) | none |
+| `POST .../staff/invitations`. This **replaces** `POST .../staff`, the admin-chosen-password route, which is removed in S6, and its OpenAPI entry with it. | `staff:manage` | critical |
+| `POST .../staff/{id}/invitation/resend`, `POST .../staff/{id}/invitation/revoke` | `staff:manage` | critical |
+| `POST .../staff/{id}/suspend`, `/reactivate`, `/offboard`, `/role`, `/mfa-reset` | `staff:manage`, plus the 10.1 role-authority rules | critical |
+| `GET /v1/admin/platform-staff`, `GET /v1/admin/platform-staff/{id}` | `staff:read`, platform scope | none |
+| `POST /v1/admin/platform-staff/{id}/suspend`, `/offboard` | `staff:manage`, platform scope | critical |
+| `POST /v1/admin/platform/staff-lifecycle-requests` (kind: `platform_invite`, `platform_reactivate` or `platform_mfa_reset`) | `platform_staff:govern` (new) | critical |
+| `GET /v1/admin/platform/staff-lifecycle-requests[/{id}]` | `platform_staff:govern` | none |
+| `POST .../staff-lifecycle-requests/{id}/approve` | `platform_staff:govern` | critical |
+| `POST .../staff-lifecycle-requests/{id}/reject`, `/cancel` | `platform_staff:govern` | none |
+
+**Error codes.** These are new `apierror` codes, and the back office maps them to fixed messages (the ADR 0112 slice 5
+precedent):
+
+- `mfa_enrolment_required`, `mfa_locked`, `invalid_mfa_code`
+- `invalid_challenge` (one code for unknown, expired, consumed or wrong-purpose; it never distinguishes them)
+- `invalid_enrolment_token` (the same rule)
+- `step_up_required` (with `max_age`), `session_revoked`
+- `last_admin`, `self_target_forbidden`, `person_required`, `role_not_grantable`
+- `lifecycle_transition_invalid`, `four_eyes_violation`
+
+### 14.3 Permissions
+
+| Permission | Roles | Notes |
+|---|---|---|
+| `staff:read` (new) | platform_admin; tenant_admin and compliance (own tenant) | Directory and history. A tenant never sees platform staff (ADR 0114 principle 7). |
+| `staff:manage` (existing) | platform_admin, tenant_admin | The 10.1 role-authority rules are enforced in the handler **and** by the existing platform-only creation list |
+| `platform_staff:govern` (new) | platform_admin only | A static governance permission in the ADR 0099 section 3.2 style: not grantable through K1 and never in any tenant role. Pinned by the role-matrix test (the `adr0114_role_matrix_test.go` pattern). |
+
+There is no permission for MFA self-service: every authenticated staff member has it over their own account only,
+because the subject comes from the token.
+
+### 14.4 OpenAPI (`docs/api/openapi/platform-api.yaml`)
+
+- **New tags:** `staff-auth`, `staff-lifecycle`.
+- **Schemas:** `StaffLoginChallenge`, `MfaVerifyRequest`, `MfaRecoverRequest`, `EnrolStartResponse` (marked
+  `x-sensitive: true`), `EnrolConfirmResponse` (`x-sensitive: true`), `EnrolRedeemRequest`, `InvitationAcceptRequest`,
+  `StepUpRequest`, `StepUpResponse`, `StaffMfaStatus`, `StaffDirectoryEntry` (`id`, `email`, `display_name`, `role`,
+  `status`, `mfa: {enrolled, hard_locked}`, `person_linked: bool`, `last_login_at`), `StaffLifecycleEvent`
+  (redacted per ADR 0114 section 4.1 for tenant callers), `StaffLifecycleActionRequest` (`reason_code`, `note?`,
+  `role?`), `PlatformStaffLifecycleRequest`, `PlatformStaffLifecycleDecision`.
+- **Error responses.** Every staff route documents `401 session_revoked` and the step-up `403 step_up_required`
+  response with its `WWW-Authenticate` header.
+- **Tests.** The existing OpenAPI-vs-routes parity test, where present, covers the new routes. S6 adds them otherwise.
+- **Breaking change.** `POST /v1/staff/auth/login` changes its response. The back office is the only client and
+  changes in S7, which ships with S3 behind the same release.
+
+## 15. Back office screens (`backoffice/src`)
+
+1. **Login, two steps** (`auth/LoginPage.tsx`): email, password and an optional tenant slug, then a TOTP field with a
+   "use a recovery code" link. A specific message for `mfa_enrolment_required` ("ask your administrator for an
+   enrolment link") and for `mfa_locked`.
+2. **Enrolment** (`auth/EnrolPage.tsx`, reached from an invite or reset link `/#/enrol?token=` or from the recovery
+   flow):
+   - Set the password (invite only).
+   - Show a QR code **rendered locally** from `otpauth_uri` (a bundled QR library; **no network QR service**), plus a
+     manual secret behind a reveal toggle.
+   - Confirm the code.
+   - Show the recovery codes once, with copy and download (`.txt`). The user must tick "I have stored these codes"
+     before continuing.
+   - The codes are not kept in application state after leaving the page and are never written to `localStorage`.
+3. **Step-up modal** (`auth/StepUpProvider.tsx`): a fetch-layer interceptor.
+   - On `403 step_up_required` it opens a modal with a TOTP field and calls `/v1/staff/auth/step-up`.
+   - It swaps the access token in `tokenStore`, then **retries the original request once with the same body and
+     `Idempotency-Key`**.
+   - It never retries more than once. On cancel, the original action fails visibly.
+   - Every governed dialog (ADR 0114: approve or reject with a frozen `payload_hash`) works unchanged, because the
+     retry resends the frozen payload.
+4. **My security** (`features/account/SecurityPage.tsx`): factor status, recovery codes remaining (warn at 3 or fewer),
+   regenerate (step-up), and own sessions (the existing `/v1/me/sessions`).
+5. **Staff directory** (`features/staff/StaffDirectoryPage.tsx`):
+   - Filters for status, role and MFA state (closed vocabularies).
+   - Tenant callers see their own tenant only. Platform callers get a tenant picker, plus a "Platform staff" tab.
+6. **Staff detail and lifecycle** (`features/staff/StaffDetailPage.tsx`):
+   - Actions shown according to `permissions.ts` hints. The server is authoritative.
+   - Reason-code dialogs. A confirmation that names the effects ("revokes all sessions").
+   - The lifecycle history, and active K1 grants with a revoke link (R7).
+   - The initiator's status on the target's pending governed requests (R6).
+   - Disabled self-target actions (a hint only).
+7. **Invite** (`features/staff/InviteStaffDialog.tsx`): email, role (only the roles this caller may grant), and Person
+   (required for approve-capable roles). It states clearly that the invite is emailed and the inviter never sees a
+   password or token.
+8. **Platform staff four-eyes queue** (`features/staff/PlatformStaffRequestsPage.tsx`): the ADR 0112 launch-queue
+   pattern. The caller's own requests have approve disabled (a hint). The `payload_hash` is frozen.
+
+Every screen uses the ADR 0114 principles 1, 4 and 7, and the code-to-message map (server text never shown).
