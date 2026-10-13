@@ -92,6 +92,10 @@ func TestRetryableOnHoldEvalFailure(t *testing.T) {
 		if (got.Outcome == OutcomeUnavailable) != c.want {
 			t.Errorf("%s: converted=%v want %v (%+v)", name, got.Outcome == OutcomeUnavailable, c.want, got)
 		}
+		if c.want && got.Code != "kyc_unavailable:evaluator" {
+			// The code reaches the tenant-visible audit reason_code: it must be generic (no hold / AML wording).
+			t.Errorf("%s: the converted decision's code must be the generic kyc_unavailable:evaluator, got %q", name, got.Code)
+		}
 		if c.want && (got.Allowed || !got.Hold.EvalFailed) {
 			t.Errorf("%s: the converted decision must deny and keep the verdict: %+v", name, got)
 		}

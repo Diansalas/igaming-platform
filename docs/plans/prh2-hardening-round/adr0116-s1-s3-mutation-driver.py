@@ -45,6 +45,7 @@ def chain(*cmds):
 
 # Evaluator / composition / gate mutants run the aml suite AND every gate package that exercises the hold read.
 HTTPF4 = chain(db('./internal/httpserver/', 'TestManualAdjustmentAPI_F4'), db('./internal/adjustment/', 'TestAMLHold'))
+SIDE = db('./internal/adjustment/', 'TestSideRecord|TestAMLHold')
 PAY = db('./internal/payments/', 'TestAMLHold')
 GATES = chain(db('./internal/aml/', 'Test'), db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement|TestComposeHold|TestRetryableOnHoldEvalFailure'),
               db('./internal/adjustment/', 'TestAMLHold'), db('./internal/withdrawal/', 'TestAMLHold'),
@@ -224,6 +225,14 @@ M = [
     ('F4c submission refusal renders differently', 'internal/adjustment/request.go', "		return Request{}, h.refusal(id)", "		return Request{}, ErrInvalidInput", HTTPF4),
     ('F4d real reason not recorded in the AML log', 'internal/adjustment/aml_hold.go', "	if !errors.As(err, &r) || r.tenantID == uuid.Nil {", "	if true {", HTTPF4),
     ('F4e execution hold check dropped', 'internal/adjustment/execute.go', "	if holdCheck.denied() {", "	if false {", HTTPF4),
+    # ---- re-review conditions (C2, C3, 4, 5, 7) ----
+    ('R1 runtime keeps USAGE on the AML sequence', U1, "        REVOKE ALL ON SEQUENCE aml_hold_change_seq FROM igaming_runtime;\n", "", AML),
+    ('R2 hold guard does not force the change mark', U1, "    NEW.change_seq := pg_catalog.nextval('public.aml_hold_change_seq');\n    IF NEW.owner_scope IS DISTINCT", "    IF NEW.owner_scope IS DISTINCT", AML),
+    ('R3 lift guard does not force the change mark', U2, "    NEW.change_seq := pg_catalog.nextval('public.aml_hold_change_seq');\n    IF NEW.owner_scope <> v_hold.owner_scope", "    IF NEW.owner_scope <> v_hold.owner_scope", AML),
+    ('R4 READ COMMITTED not asserted', U2, "IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN", "IF false THEN", AML),
+    ('R5 side writes unbounded (30 s)', 'internal/adjustment/aml_hold.go', "const sideRecordTimeout = 2 * time.Second", "const sideRecordTimeout = 30 * time.Second", SIDE),
+    ('R6 side-write failure not logged', 'internal/adjustment/aml_hold.go', "	slog.Default().Error(\"adjustment_side_record_failed\", \"step\", step, \"correlation_id\", correlation.String(), \"failure\", kind)", "	_ = kind", SIDE),
+    ('R7 evaluator reason names the hold', 'internal/kyc/enforcement.go', "unavailableDecision(\"evaluator\")", "unavailableDecision(\"hold_evaluator_failed\")", KYC),
 ]
 
 only = sys.argv[1:]

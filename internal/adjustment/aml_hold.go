@@ -119,10 +119,18 @@ func (s *Service) recordAMLRefusal(ctx context.Context, err error) {
 		sideRecordFailed(wctx, "record", r.requestID, werr)
 	}
 	if r.verdict.EvalFailed && !r.verdict.Held {
-		actx, acancel := context.WithTimeout(context.WithoutCancel(ctx), sideRecordTimeout)
-		defer acancel()
-		if aerr := aml.RaiseHoldEvalFailedDetached(actx, s.pool, r.tenantID, aml.OpManualAdjustment); aerr != nil {
-			sideRecordFailed(actx, "notify", r.requestID, aerr)
+		// alerting.RaiseDetached detaches its own context and retries with backoff, so the caller's deadline cannot bound it: run it in the
+		// background and wait at most sideRecordTimeout. A late result is still logged and counted.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if aerr := aml.RaiseHoldEvalFailedDetached(context.WithoutCancel(ctx), s.pool, r.tenantID, aml.OpManualAdjustment); aerr != nil {
+				sideRecordFailed(context.WithoutCancel(ctx), "notify", r.requestID, aerr)
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(sideRecordTimeout):
 		}
 	}
 }
