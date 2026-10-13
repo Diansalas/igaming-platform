@@ -1674,6 +1674,12 @@ tested:
 | Note: otpauth `%20` | Applied: 21.2 item 13; the test parses the URI back and checks one issuer and no `+`. Mutants V10, V11. |
 | Optional: degenerate key | Applied: 21.2 item 12. Mutants V07, V08. |
 
+Mutation evidence after the conditions (`adr0119-s1-mutation-kill.txt`, passes 4 and 5): 85 mutants, 79 KILLED,
+5 SURVIVED and justified as behaviour-equivalent (K19, S02, S07, R02, P09; S02 became equivalent because of C2:
+without `Token.Format` the closure field still renders only as an address), 1 REMOVED (U01), 0 ERROR. Every
+review mutant (V01-V11) is KILLED. `TestStaffMFA_ValidateBoundsDirectly` was added so the bounds check in
+`validateStaffMFA` stays independently tested now that `loadStaffMFA` pre-checks the integer range (mutant C06).
+
 ### 21.7 S3 entry gates (recorded by the S1 security review; NOT built in S1)
 
 S3 may not merge unless each of these holds and is tested:

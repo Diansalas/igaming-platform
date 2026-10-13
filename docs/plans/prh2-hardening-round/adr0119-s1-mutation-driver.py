@@ -45,7 +45,7 @@ M = [
  ("K09", K, "\tif a.TenantID != uuid.Nil {\n\t\ttenant = a.TenantID.String()\n\t}", "", [SM], "AAD omits tenant (constant marker)"),
  ("K10", K, 'return []byte("sf-v1|" + a.FactorID.String() + "|"', 'return []byte("sf-v1|" + "|"', [SM], "AAD omits factor_id"),
  ("K11", K, "tenant := \"platform\"", "tenant := \"\"", [SM], "platform AAD marker dropped"),
- ("K12", K, "gcm.Seal(nil, nonce, secret.b, ad)", "gcm.Seal(nil, nonce, secret.b, ad[:0])", [SM], "seal ignores the AAD"),
+ ("K12", K, "gcm.Seal(nil, nonce, secret.d().b, ad)", "gcm.Seal(nil, nonce, secret.d().b, ad[:0])", [SM], "seal ignores the AAD"),
  ("K13", K, 'return FactorSecret{}, fmt.Errorf("%w: %w", ErrFactorIntegrity, ErrUnknownKID)', "return FactorSecret{}, ErrUnknownKID", [SM], "unknown kid not reported as integrity"),
  ("K14", K, "if err != nil || len(pt) != secretLen(aad.FactorType) {", "if err != nil {", [SM], "opened plaintext length not checked"),
  ("K15", K, "\tif len(s.Nonce) != NonceBytes {\n\t\treturn FactorSecret{}, ErrFactorIntegrity", "\tif len(s.Nonce) == 0 {\n\t\treturn FactorSecret{}, ErrFactorIntegrity", [SM], "nonce length not checked"),
@@ -53,14 +53,14 @@ M = [
  ("K17", K, 'm.Write([]byte(purpose + "|" + staff.String() + "|"))', 'm.Write([]byte(purpose[:0] + staff.String() + "|"))', [SM], "MAC omits purpose"),
  ("K18", K, "\tcase MACChallengeMFA, MACChallengeEnrol:\n\t\treturn s.challenge", "\tcase MACChallengeMFA, MACChallengeEnrol:\n\t\treturn s.enrolment", [SM], "challenges use the enrolment subkey"),
  ("K19", K, "if err != nil || len(stored) != MACBytes {", "if err != nil {", [SM], "stored MAC length not checked"),
- ("K20", K, "\tout := []string{k.macActive}\n\trest", "\treturn []string{k.macActive}\n\tout := []string{k.macActive}\n\trest", [SM], "lookups only under the active kid"),
- ("K21", K, "\t\tk.factor[kid] = sk", "\t\tk.factor[kid] = sk\n\t\t_ = sk\n\t\tk.factor[kid] = append([]byte(nil), m[:32]...)", [SM], "factor master used directly (no HKDF)"),
+ ("K20", K, "\tout := []string{k.m().macActive}\n\trest", "\treturn []string{k.m().macActive}\n\tout := []string{k.m().macActive}\n\trest", [SM], "lookups only under the active kid"),
+ ("K21", K, "\t\tk.m().factor[kid] = sk", "\t\tk.m().factor[kid] = sk\n\t\t_ = sk\n\t\tk.m().factor[kid] = append([]byte(nil), m[:32]...)", [SM], "factor master used directly (no HKDF)"),
  ("K22", K, "\tif !ok || staff == uuid.Nil || len(value) == 0 {", "\tif !ok || len(value) == 0 {", [SM], "MAC admits a nil staff id"),
- ("S01", S, "\tsameStaff := rowStaff == t.staff", "\tsameStaff := true", [SM], "token row staff binding not checked"),
+ ("S01", S, "\tsameStaff := rowStaff == t.d().staff", "\tsameStaff := true", [SM], "token row staff binding not checked"),
  ("S02", S, "func (Token) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(Redacted)) }", "", [SM], "Token.Format removed"),
- ("S03", S, "func (EnrolmentMaterial) String() string { return Redacted }", "func (m EnrolmentMaterial) String() string { return m.uri }", [SM], "EnrolmentMaterial.String leaks the URI"),
+ ("S03", S, "func (EnrolmentMaterial) String() string { return Redacted }", "func (m EnrolmentMaterial) String() string { return m.d().uri }", [SM], "EnrolmentMaterial.String leaks the URI"),
  ("S04", S, "func (FactorSecret) MarshalJSON() ([]byte, error) { return json.Marshal(Redacted) }", "", [SM], "FactorSecret.MarshalJSON removed"),
- ("S05", S, "func (Assertion) LogValue() slog.Value { return slog.StringValue(Redacted) }", "func (a Assertion) LogValue() slog.Value { return slog.StringValue(a.value) }", [SM], "Assertion.LogValue leaks the code"),
+ ("S05", S, "func (Assertion) LogValue() slog.Value { return slog.StringValue(Redacted) }", "func (a Assertion) LogValue() slog.Value { return slog.StringValue(a.d().value) }", [SM], "Assertion.LogValue leaks the code"),
  ("S06", S, "\tif err != nil || staff == uuid.Nil {\n\t\treturn Token{}, ErrInvalidInput", "\tif err != nil {\n\t\treturn Token{}, ErrInvalidInput", [SM], "ParseToken admits a nil staff id"),
  ("S07", S, "raw, err := base64.RawURLEncoding.Strict().DecodeString(s)", "raw, err := base64.RawURLEncoding.DecodeString(s)", [SM], "token decoding not strict"),
  ("R01", R, "\t\tcase 'I', 'L':\n\t\t\tc = '1'", "\t\tcase 'I':\n\t\t\tc = '1'", [SM], "L not read as 1"),
@@ -69,7 +69,7 @@ M = [
  ("R04", R, "\t\tif seen[s] {\n\t\t\tcontinue\n\t\t}", "\t\tif seen[s] && false {\n\t\t\tcontinue\n\t\t}", [SM], "duplicate codes admitted in a batch"),
  ("R05", R, 'const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"', 'const crockford = "0123456789ABCDEFGHJKMNPQRSTUWXYZ"', [SM], "alphabet contains U"),
  ("R06", R, "out[i] = crockford[b&0x1f]", "out[i] = crockford[b%31]", [SM], "biased symbol mapping"),
- ("R07", R, "\tif a.kind != AssertionRecoveryCode {", "\tif false {", [SM], "any assertion kind read as a recovery code"),
+ ("R07", R, "\tif a.d().kind != AssertionRecoveryCode {", "\tif false {", [SM], "any assertion kind read as a recovery code"),
  ("P01", P, "SoftLockThreshold = 5", "SoftLockThreshold = 6", [SM], "soft-lock threshold raised"),
  ("P02", P, "\t\tout.FailedCount, out.FailedWindowStart = 0, time.Time{}\n\t}\n\tif windowOpen(c.Failed24hStart", "\t}\n\tif windowOpen(c.Failed24hStart", [SM], "counter not reset when the soft lock is set"),
  ("P03", P, "return !start.IsZero() && now.Sub(start) < length", "return !start.IsZero() && now.Sub(start) <= length", [SM], "window boundary inclusive"),
@@ -81,22 +81,33 @@ M = [
  ("P09", P, "return !start.IsZero() && now.Sub(start) < length", "return now.Sub(start) < length", [SM], "zero window start treated as open window"),
  ("P10", P, "\tLockInvalid LockState = iota\n\tLockOpen", "\tLockOpen LockState = iota\n\tLockInvalid", [SM], "zero lock state is open"),
  ("F01", F, "\tswitch f.Counters.LockState(now) {\n\tcase LockOpen:\n\tcase LockHard:\n\t\treturn Result{Outcome: OutcomeHardLocked}\n\tdefault: // LockSoft, LockInvalid\n\t\treturn Result{Outcome: OutcomeLocked}\n\t}\n\tif f.AAD.FactorType != FactorTOTP {\n\t\treturn Result{Outcome: OutcomeIntegrity}\n\t}\n\tsecret, err := k.OpenFactorSecret(f.AAD, f.Sealed)\n\tif err != nil {\n\t\treturn Result{Outcome: OutcomeIntegrity}\n\t}", "\tsecret, err := k.OpenFactorSecret(f.AAD, f.Sealed)\n\tif err != nil {\n\t\treturn Result{Outcome: OutcomeIntegrity}\n\t}\n\tswitch f.Counters.LockState(now) {\n\tcase LockOpen:\n\tcase LockHard:\n\t\treturn Result{Outcome: OutcomeHardLocked}\n\tdefault: // LockSoft, LockInvalid\n\t\treturn Result{Outcome: OutcomeLocked}\n\t}", [SM], "locked factor opened/compared before refusing"),
- ("F02", F, "\tif a.kind != AssertionTOTP {\n\t\treturn Result{Outcome: OutcomeRejected}", "\tif false {\n\t\treturn Result{Outcome: OutcomeRejected}", [SM], "assertion kind not checked"),
+ ("F02", F, "\tif a.d().kind != AssertionTOTP {\n\t\treturn Result{Outcome: OutcomeRejected}", "\tif false {\n\t\treturn Result{Outcome: OutcomeRejected}", [SM], "assertion kind not checked"),
  ("F03", F, "\tOutcomeRejected Outcome = iota\n\t// OutcomeAccepted: the assertion verified and was burned.\n\tOutcomeAccepted", "\tOutcomeAccepted Outcome = iota\n\t// OutcomeAccepted: the assertion verified and was burned.\n\tOutcomeRejected", [SM], "zero Result is accepted"),
  ("F04", F, "\tcase LockHard:\n\t\treturn Result{Outcome: OutcomeHardLocked}", "\tcase LockHard:\n\t\treturn Result{Outcome: OutcomeLocked}", [SM], "hard lock reported as soft lock"),
- ("U01", U, "\tif _, err := keys.OpenFactorSecret(aad, sealed); err != nil {", "\tif _, err := keys.OpenFactorSecret(aad, sealed); err != nil && false {", [SM], "startup open self-check removed"),
  ("U03", U, "\tif _, err := keys.SealFactorSecret(aad, secret); err != nil {", "\tif _, err := keys.SealFactorSecret(aad, secret); err != nil && false {", [SM], "startup seal self-check removed"),
  ("U02", U, "\t\tif _, err := keys.macUnder(kid, MACRecoveryCode, probe, []byte(\"self-check\")); err != nil {", "\t\tif _, err := keys.macUnder(kid, MACRecoveryCode, probe, []byte(\"self-check\")); err != nil && false {", [SM], "startup MAC self-check removed"),
- ("C01", C, "\t{staffmfa.EnvFactorKeys, func(c Config) (map[string][]byte, error) {", "\t{\"X\" + staffmfa.EnvFactorKeys, func(c Config) (map[string][]byte, error) {", [CF], "registry entry renamed (completeness pin)"),
- ("C02", C, "if prev, dup := seen[v]; dup && prev.family != f.name {", "if prev, dup := seen[v]; dup && false && prev.family != f.name {", [CF], "registry pairwise check disabled"),
+ # ---- review-condition mutants (security review of S1: C2, C3, C4, notes) ----
+ ("V01", S, ["type Token struct{ f func() tokenData }", "func newTokenValue(v tokenData) Token { return Token{f: func() tokenData { return v }} }", "\tif t.f == nil {\n\t\treturn tokenData{}\n\t}\n\treturn t.f()"], ["type Token struct{ p *tokenData }", "func newTokenValue(v tokenData) Token { return Token{p: &v} }", "\tif t.p == nil {\n\t\treturn tokenData{}\n\t}\n\treturn *t.p"], [SM], "C2: token material behind a plain pointer (fmt bad-verb path prints the pointee)"),
+ ("V02", "internal/staffmfa/keys.go", ["type Keys struct{ km func() *keyMaterial }", "func (k *Keys) m() *keyMaterial { return k.km() }", "k := &Keys{km: func() *keyMaterial { return km }}"], ["type Keys struct{ km *keyMaterial }", "func (k *Keys) m() *keyMaterial { return k.km }", "k := &Keys{km: km}"], [SM], "C2: key material behind a plain pointer"),
+ ("V03", C, "\t\tif b, ok := decodeAnyBase64(string(v)); ok {", "\t\tif b, ok := decodeAnyBase64(string(v)); ok && false {", [CF], "C3: text keys not compared in decoded form"),
+ ("V04", C, "\tif f.list && len(keys) > 0 {", "\tif false && f.list && len(keys) > 0 {", [CF], "C3: kid-list entries not compared in encoded-text form"),
+ ("V05", P, "c.Failed24hCount >= 0 && c.Failed24hCount < HardLockThreshold &&", "c.Failed24hCount >= 0 && c.Failed24hCount <= HardLockThreshold &&", [SM], "C4: 24h count at the threshold without a hard lock accepted"),
+ ("V06", K, "\t\treturn FactorSecret{}, fmt.Errorf(\"%w: %w\", ErrFactorIntegrity, ErrInvalidInput)", "\t\treturn FactorSecret{}, ErrInvalidInput", [SM], "note: invalid AAD on Open not reported as integrity"),
+ ("V07", K, "\t\tif degenerateKey(b) {", "\t\tif degenerateKey(b) && false {", [SM, CF], "note: degenerate key admitted by ParseKeySet"),
+ ("V08", K, "\t\tif degenerateKey(m) {", "\t\tif degenerateKey(m) && false {", [SM], "note: degenerate key admitted by NewKeys"),
+ ("V09", C, "\t\tif n < int64(d.b.Min/time.Second) || n > int64(d.b.Max/time.Second) {", "\t\tif false {", [CF], "note: seconds range not checked before multiplying (int64 wrap)"),
+ ("V10", "internal/staffmfa/otpauth.go", "\"&issuer=\" + uriEscape(issuer) +", "\"&issuer=\" + url.QueryEscape(issuer) +", [SM], "note: issuer query escaped with '+' for spaces"),
+ ("V11", "internal/staffmfa/otpauth.go", "\"otpauth://totp/\" + uriEscape(issuer) + \":\" + uriEscape(account)", "\"otpauth://totp/\" + url.PathEscape(issuer) + \":\" + url.PathEscape(account)", [SM], "note: label escaped with PathEscape ('&', '@', '+' unescaped)"),
+ ("C01", C, "\t{name: staffmfa.EnvFactorKeys, list: true,", "\t{name: \"X\" + staffmfa.EnvFactorKeys, list: true,", [CF], "registry entry renamed (completeness pin)"),
+ ("C02", C, "\t\t\tif dup && prev.family != f.name {", "\t\t\tif dup && false && prev.family != f.name {", [CF], "registry pairwise check disabled"),
  ("C03", C, "\t\tif c.Environment == \"production\" {\n\t\t\treturn fmt.Errorf(\"config: %s / %s and %s / %s are required", "\t\tif false {\n\t\t\treturn fmt.Errorf(\"config: %s / %s and %s / %s are required", [CF], "keys not required in production"),
  ("C04", C, "\tif c.GuardEnvironment() != \"development\" {", "\tif c.Environment != \"development\" {", [CF], "placeholder check ignores a missing APP_ENV"),
  ("C05", C, "\tDevProviderCredentialFingerprintKeyPlaceholder, CIProviderCredentialFingerprintKeyPlaceholder,\n", "\tDevProviderCredentialFingerprintKeyPlaceholder,\n", [CF], "CI fingerprint placeholder not refused"),
  ("C06", C, "\t\tif err := d.b.Check(d.v); err != nil {", "\t\tif err := d.b.Check(d.v); err != nil && false {", [CF], "session bounds not enforced"),
  ("C07", C, "\t\t*d.dst = time.Duration(n) * time.Second", "\t\t_ = n", [CF], "duration override ignored"),
  ("C08", C, "\tif err := staffmfa.ValidateIssuer(c.StaffMFAIssuer); err != nil {", "\tif err := staffmfa.ValidateIssuer(c.StaffMFAIssuer); err != nil && false {", [CF], "issuer not validated"),
- ("C09", C, "\t{\"JWT_PREVIOUS_SECRET\", func(c Config) (map[string][]byte, error) {\n\t\treturn singleKey(c.JWTPreviousKID, c.JWTPreviousSecret), nil", "\t{\"JWT_PREVIOUS_SECRET\", func(c Config) (map[string][]byte, error) {\n\t\treturn nil, nil", [CF], "JWT previous secret not in the registry check"),
- ("C10", C, "\t{\"PAYOUT_INSTRUMENT_FP_KEYS\", func(c Config) (map[string][]byte, error) {\n\t\treturn kidListKeys(\"PAYOUT_INSTRUMENT_FP_KEYS\", c.PayoutInstrumentFPKeys.Reveal(), actorproof.ParseKeySet)", "\t{\"PAYOUT_INSTRUMENT_FP_KEYS\", func(c Config) (map[string][]byte, error) {\n\t\treturn nil, nil", [CF], "PAYOUT_INSTRUMENT_FP_KEYS not in the registry check"),
+ ("C09", C, "\t\treturn singleKey(c.JWTPreviousKID, c.JWTPreviousSecret), nil", "\t\treturn nil, nil", [CF], "JWT previous secret not in the registry check"),
+ ("C10", C, "\t\t\treturn kidListKeys(\"PAYOUT_INSTRUMENT_FP_KEYS\", c.PayoutInstrumentFPKeys.Reveal(), actorproof.ParseKeySet)", "\t\t\treturn nil, nil", [CF], "PAYOUT_INSTRUMENT_FP_KEYS not in the registry check"),
 ]
 
 def run(pkgs):
@@ -114,11 +125,16 @@ if rc != 0:
 for mid, f, old, new, pkgs, desc in M:
     path = root / f
     src = path.read_text()
-    n = src.count(old)
-    if n != 1:
-        lines.append(f"{mid} | ERROR | {desc} | pattern found {n} times")
+    olds = old if isinstance(old, list) else [old]
+    news = new if isinstance(new, list) else [new]
+    counts = [src.count(o) for o in olds]
+    if any(n != 1 for n in counts):
+        lines.append(f"{mid} | ERROR | {desc} | pattern found {counts} times")
         continue
-    path.write_text(src.replace(old, new, 1))
+    mutated = src
+    for o, nw in zip(olds, news):
+        mutated = mutated.replace(o, nw, 1)
+    path.write_text(mutated)
     try:
         rc, o = run(pkgs)
     finally:
