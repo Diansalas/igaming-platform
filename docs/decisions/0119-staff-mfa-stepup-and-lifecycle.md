@@ -7,6 +7,10 @@
   redesign.
 - **S1 (2026-10-13):** the pure-Go library slice is `IMPLEMENTED` on an unmerged branch, pending gate G. Every other
   slice stays `NOT IMPLEMENTED`. See section 21.
+- **S2 (2026-10-13):** migration 0137 (the four MFA tables) and the DB-backed storage layer
+  (`internal/staffmfa/store`) are `IMPLEMENTED` on an unmerged branch, pending gate G. The `sessions` columns, `SF040`
+  and the session revocation moved to 0138 (S3) as the slice plan says; the `staff_users` triggers (`SF010`-`SF014`,
+  `SF020`, `SF021`) stay in 0139. Every other slice stays `NOT IMPLEMENTED`. See section 22.
 - **Revision 2 (2026-10-13):** the S0 design review by `architect` and `ledger-finance` returned ACCEPT WITH
   CONDITIONS. Section 20 resolves every blocking condition (C1-C6) and accuracy fix (C7-C11) in the text, and folds
   in the cheap non-blocking items (N1-N15). The `security` rulings are recorded there: C2 adopts the scoped
@@ -411,7 +415,7 @@ would have been right or wrong.
 The claims are signed by the existing JWT key registry. `Verify` adds two checks: a staff token must carry every claim
 in this table, and its `aal` must be in `{2}`.
 
-### 7.2 `sessions` columns and seal (migration 0137)
+### 7.2 `sessions` columns and seal (migration 0138; moved out of 0137 at S2, section 22.2 D2)
 
 - **New nullable columns:** `aal SMALLINT`, `amr TEXT[]`, `auth_time TIMESTAMPTZ`, `mfa_at TIMESTAMPTZ`,
   `absolute_expires_at TIMESTAMPTZ`, `assurance_kid TEXT`, `assurance_seal BYTEA`.
@@ -1036,9 +1040,10 @@ existing ADR 0110 verifier, which is extended and not added.
    - Triggers: `SF001` and `SF099`. `sf_enrolment_token_guard` (`SF006`) applies the immutability rules.
      `SF007` (bootstrap tokens on the owner path only) is **reserved for S-H1**. A planted bootstrap row is useless
      anyway, because its MAC needs the key.
-5. **`sessions` additions: only the nullable columns of section 7.2.** The `SF040` trigger and the staff-session
-   revocation are **not** in 0137 (review C1). Today's `IssueSession` does not write those columns, so S2 must not
-   break staff login.
+5. **`sessions` additions: none in 0137.** The nullable columns of section 7.2, the `SF040` trigger and the
+   staff-session revocation are **not** in 0137 (review C1): all three are in 0138, which merges with S3. (Revision 2
+   put the nullable columns in 0137; the S2 dispatch moved them to 0138, so that 0137 touches no existing table at
+   all. Today's `IssueSession` does not write those columns, so S2 does not break staff login either way.)
 6. **Pre-tenant lookup policies** (the ADR 0016 and migration 0040 pattern): `staff_challenge_select_by_mac`, `USING
    (token_mac = decode(NULLIF(current_setting('app.staff_challenge_lookup_mac', true), ''), 'hex'))`, and the same for
    `staff_enrolment_tokens` with `app.staff_enrolment_lookup_mac`. Two new `db.Pool` helpers follow
@@ -1118,7 +1123,7 @@ existing ADR 0110 verifier, which is extended and not added.
 
 | Table | Tenant session | Platform session | Player / service / acting |
 |---|---|---|---|
-| `staff_mfa_factors`, `staff_mfa_recovery_codes`, `staff_auth_challenges`, `staff_enrolment_tokens`, `staff_lifecycle_events` | the dual-scope policy, identical to `staff_users` (migration 0011): own tenant's rows only | platform rows only (`tenant_id IS NULL`) when `app.tenant_id` is empty. Tenant rows are reached by `WithTenant(target)` or `WithPlatformActingInTenant`, as the existing staff handlers do. | none. Every restrictive fence that exists on `staff_users` today is replicated on each new staff table: the 0112 acting fence and the migration 0114 KYC-worker fence, plus any platform-service fence. A `platform_acting` session or a worker therefore cannot read or write a staff member's factors. A catalog test asserts that every restrictive policy on `staff_users` has a counterpart on each new staff table (review N3). |
+| `staff_mfa_factors`, `staff_mfa_recovery_codes`, `staff_auth_challenges`, `staff_enrolment_tokens`, `staff_lifecycle_events` | the dual-scope policy, identical to `staff_users` (migration 0011): own tenant's rows only | platform rows only (`tenant_id IS NULL`) when `app.tenant_id` is empty. Tenant rows are reached by `WithTenant(target)` ONLY: an acting session (`WithPlatformActingInTenant`) is refused by the strict acting fence, so S6 MFA resets and every other write to a tenant staff member's MFA rows must use `WithTenant(target)` (S2 review). | none. Every restrictive fence that exists on `staff_users` today is replicated on each new staff table: the 0112 acting fence and the migration 0114 KYC-worker fence, plus any platform-service fence. S2 adds two further RESTRICTIVE fences (D14): `player_scope_fence` (`app.player_account_id` must be empty) and `platform_service_fence` (`app.platform_service_id` must be empty), because `staff_users`' own policy admits player and service sessions. A `platform_acting` session, a player session or any service session therefore cannot read or write a staff member's factors. A catalog test asserts that every restrictive policy on `staff_users` has a counterpart on each new staff table (review N3). |
 | challenges, enrolment tokens (pre-tenant) | plus the single-row lookup-by-MAC SELECT policy | the same | n/a |
 | `staff_lifecycle_requests`, `staff_lifecycle_approvals` | none | SELECT, INSERT, UPDATE (requests: state only) | none |
 
@@ -1129,14 +1134,15 @@ Every table gets `ENABLE` and `FORCE ROW LEVEL SECURITY`.
 - **SELECT and INSERT** on every new table.
 - **UPDATE is column-level only:**
   - factors: `status`, `last_used_step`, `failed_*`, `locked_until`, `hard_locked_at`, `activated_at`, `revoked_at`,
-    `revoked_reason`
+    `revoked_reason`, and `pending_expires_at` (S2: the `pending_expires_at` CHECK forces it to NULL when a factor
+    leaves `pending`; `SF002` lets it only be cleared)
   - recovery codes: `consumed_at`, `revoked_at`
   - challenges: `attempts_left`, `consumed_at`
   - enrolment tokens: `consumed_at`, `revoked_at`
   - lifecycle requests: `state`, `decided_at`
   - `staff_users` (0139): `status`, `role`, `password_hash`, `status_changed_at`, `offboarded_at`. **Not**
     `staff_version`, which only the trigger sets.
-  - `sessions` (0137): INSERT of the new columns; UPDATE of `mfa_at`, `assurance_kid` and `assurance_seal` only. No
+  - `sessions` (0138, not 0137): INSERT of the new columns; UPDATE of `mfa_at`, `assurance_kid` and `assurance_seal` only. No
     UPDATE of `aal`, `amr`, `auth_time` or `absolute_expires_at`, in addition to the `SF040` trigger.
 - **No DELETE or TRUNCATE anywhere.** Expired rows are pruned by an owner-run runbook step, the same as actor-proof
   nonces.
@@ -1187,6 +1193,8 @@ Every table gets `ENABLE` and `FORCE ROW LEVEL SECURITY`.
 | `SF032` | an invalid lifecycle approval (same staff or Person as the requester or target, NULL Person, a duplicate Person, not pending, expired, payload mismatch, request not locked in this txid) |
 | `SF033` | a lifecycle request left `executing` at commit |
 | `SF040` | a staff session without assurance columns, or an immutable assurance column changed |
+| `SF097` | (S2) migration 0137 down refused: MFA data exists |
+| `SF098` | (S2) migration 0137 up pre-flight refused: the `staff_users` RLS posture the new tables replicate has drifted |
 | `SF099` | an append-only or no-delete violation |
 | `AP001`-`AP005` | unchanged ADR 0110 codes on the two governed tables |
 
@@ -1698,3 +1706,161 @@ S3 may not merge unless each of these holds and is tested:
   fields of request, response and domain structs).
 - **(g)** The generated `otpauth://` URI is checked with at least one real authenticator app (manual evidence
   recorded with the S3 gate).
+
+## 22. S2 implementation record (2026-10-13)
+
+Branch `worktree-agent-a61c153a5162a0976`, based on `8d87554` (the merge of S1). **NOT MERGED.** Gate G (live
+`security` review, `code-reviewer`, `qa`) has not run. Nothing below is an approval.
+
+### 22.1 Status labels
+
+| Item | Label |
+|---|---|
+| Migration `0137_staff_mfa` (up and down): `staff_mfa_factors`, `staff_mfa_recovery_codes`, `staff_auth_challenges`, `staff_enrolment_tokens`; SQLSTATE `SF001`-`SF006`, `SF097`, `SF098`, `SF099`; the C4 CHECK; `FORCE ROW LEVEL SECURITY` and the dual-scope policy on all four; the two pre-tenant lookup policies; all eight restrictive `staff_users` fences replicated on each table; column-level runtime grants (mirrored in `deploy/init-app-role.sql`) | `IMPLEMENTED` against the local database |
+| `internal/staffmfa/store`: the database-backed `staffmfa.StaffFactor` for TOTP (`TOTPFactor`: `Begin`, `Confirm`, `Verify`, `VerifyDetailed`) with the replay-protected monotonic burn; `Store`: recovery codes (issue, consume, count), login challenges and enrolment tokens (issue, two-phase resolve, lock, decrement, consume) | `IMPLEMENTED` against the local database |
+| `db.Pool.WithStaffChallengeLookup` / `WithStaffEnrolmentLookup` (the ADR 0016 two-phase lookup helpers) | `IMPLEMENTED` |
+| `EnrolmentMaterial.RevealForEnrolment` (the one exported read, S1 package, additive) | `IMPLEMENTED` |
+| `SF020`, `SF021`, `SF010`-`SF014` and every other `staff_users` change; `staff_version`; lifecycle tables | `NOT IMPLEMENTED` (0139, S5 + S6) |
+| `sessions` assurance columns, the seal, `SF040`, the cutover table, the staff-session revocation | `NOT IMPLEMENTED` (0138, S3) |
+| HTTP routes, login change, step-up, session change, `VerifyStartup` wiring, `cmd/seed-admin`, back office | `NOT IMPLEMENTED` (S3 and later). Staff login on `main` does not touch any of this |
+| Production key provisioning, real email | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`, unchanged from section 21.1) |
+
+### 22.2 Deviations from sections 13.1-13.6 and the slice text (for the reviewer)
+
+| # | Deviation | Reason |
+|---|---|---|
+| D1 | **`SF020` / `SF021` (and their VOLATILE pin) are not in 0137.** The S2 dispatch listed "SF020 VOLATILE trigger function"; section 13.2 puts `SF020`/`SF021` on `staff_users` in 0139, and a trigger on `staff_users` would change existing staff behaviour (no platform admin could be suspended or demoted while no factor can exist before S3). The catalog test `TestCatalog_PoliciesFlagsTriggersFunctions` pins that no function raising `SF010`/`SF020`/`SF021`/`SF030`/`SF040`/`SF007` exists in 0137 and says to flip it into the VOLATILE pin when 0139 lands. | Scope: the ADR text over a summary line; the orchestrator can overrule |
+| D2 | **No `sessions` change at all in 0137.** Revision 2 put the nullable columns in 0137; the S2 dispatch moved them to 0138. Sections 7.2, 13.1 item 5 and 13.4 are amended in place. | Dispatch |
+| D3 | `GRANT UPDATE (pending_expires_at)` on factors, and `SF002` lets it only be cleared. | The CHECK `(status='pending') = (pending_expires_at IS NOT NULL)` forces it to NULL on activation or revocation, so the runtime role must be able to write it. Section 13.4 amended |
+| D4 | Extra CHECKs beyond the ADR: the counters mirror `staffmfa.Counters.valid()` (`failed_count` 0-4, `failed_24h_count` 0-10, a window start exists iff its count is non-zero); the C4 CHECK as section 21.6 asks; the activation / revocation columns agree with `status`; non-empty `secret_ct` and kids; MAC length 32 on the challenge and token tables too (the ADR only gave `code_mac` one); `expires_at > created_at`; `staff_version_at_issue >= 0` | Make the database refuse what the library already treats as locked or invalid |
+| D5 | Extra trigger behaviour beyond the ADR text: a revoked factor is frozen; `activated_at`, `hard_locked_at` and the revocation are write-once; a consumed challenge is frozen; `attempts_left` only decreases; consumed and revoked are never both | Same intent as `SF002`/`SF004`/`SF005`/`SF006`; makes the lockout irreversible by the runtime role |
+| D6 | `issued_by` has a foreign key to `staff_users(id)` (NULL allowed). `lifecycle_request_id` has none (its table is created by 0139) | Audit identity integrity |
+| D7 | New codes `SF097` (down refused, MFA data exists) and `SF098` (up pre-flight refused) | Repo convention (`RL099`, `BR098`); section 13.6 amended |
+| D8 | The pre-flight (`SF098`) is a drift guard on the `staff_users` RLS posture the new tables replicate (FORCE RLS, `dual_scope_isolation`, exactly the eight restrictive fences, `financial_acting_gucs_present`). It reads no row and lifts no `FORCE` | 0137 migrates no data; the only pre-condition that can silently go wrong is the review-N3 fence parity |
+| D9 | Restrictive fences use the **strict** form on the new tables: the acting fence admits no acting session at all (`staff_users` admits the acting principal's own row and the acted tenant's rows). Same policy names and commands, so the parity test matches by name | Section 13.3: an acting session or a worker "cannot read or write a staff member's factors" |
+| D10 | The lookup policies add migration 0040's "and no tenant is set" conjunct, and compare with `decode(..., 'hex')` as the ADR says. The pool helpers accept only 64 lowercase hex characters, so a malformed value never reaches `decode` | ADR 0016 / 0040 pattern |
+| D11 | The store package is `internal/staffmfa/store` (the ADR names no package for the store). `Verify`, `VerifyDetailed` and `ConsumeRecoveryCode` report a refusal through the result with a **nil error** (a caller that rolls back on any error cannot lose the failure counters); `Confirm`, which returns only an error by interface, returns `ErrRejected`/`ErrLocked`/`ErrHardLocked`/`ErrIntegrity` and `store.Refused(err)` tells the caller to commit | Section 6.1 "record then return the outcome" |
+| D12 | `staffmfa.EnrolmentMaterial.RevealForEnrolment` (S1 package, additive): the S1 design left the raw read to an unexported accessor no other package can call | The store tests and the S3 enrolment response need it |
+| D13 | `IssueChallenge` takes `staffVersion` (0 until 0139 adds `staff_users.staff_version`); `staff_version_at_issue` has no foreign key | 0139 |
+| D14 | (security review F1) Two further RESTRICTIVE fences on all four tables: `player_scope_fence` and `platform_service_fence`, each `FOR ALL`, requiring `app.player_account_id` / `app.platform_service_id` to be empty. The catalog parity test is now a superset test (every `staff_users` fence plus exactly these two, pinned by name). The `kyc_worker_fence_*` count pin stays 52 (the new fences have other names); the per-table restrictive count is 8 + 2 = 10. Live tests refuse a player session and each of `alert_dispatcher`, `sportsbook_catalogue_sync`, `kyc_submission_worker` and an unknown service for read, FOR UPDATE, insert, revoke and hard-lock | Section 13.3 said these sessions get no access; `staff_users` is readable by them |
+| D15 | (review F5) `staff_enrolment_tokens.issued_by` has a foreign key to `staff_users(id)` that is NOT tenant-scoped: it can name a staff member of another tenant. It is audit attribution only. S6 must treat the lifecycle event / audit row as the authoritative issuer, or validate `issued_by` in Go | Review F5 |
+
+### 22.3 Decisions taken inside S2 (reversible)
+
+1. **Serialisation point.** The staff member's ACTIVE factor row (`FOR UPDATE`) serialises `Verify`, recovery-code consumption,
+   recovery-code regeneration and the failure counters; the PENDING factor row serialises `Confirm`. `Confirm` then locks the
+   old active row through its `UPDATE`, inside a savepoint; `Verify` never locks a pending row, so no cycle exists between them.
+2. **Two layers behind every single-use rule**: the row lock and a conditional `UPDATE` (`last_used_step < step`,
+   `consumed_at IS NULL`, `revoked_at IS NULL`, `attempts_left > 0`). Each layer has its own test (the conditional alone,
+   without the lock, is tested concurrently; the lock alone by a lock-wait test), so a mutant that drops one is killed by a test
+   that does not depend on the other.
+3. **A keyed MAC is verified against the kid the row names**, not only found by equality, and the purpose is inside the MAC as
+   well as in the purpose column; both are tested independently.
+4. **No tenant GUC is ever set by the store.** The caller opens the scope (`store.WithScope` picks tenant or platform from a
+   `StaffRef` that a lookup returned).
+5. **Hard lock write-once.** Once `hard_locked_at` is set the runtime role cannot clear it (`SF002`): only a new factor (the S6
+   MFA reset) restores access.
+
+### 22.4 Changed existing tests and assertions (every one)
+
+| File | Change | Why |
+|---|---|---|
+| `internal/db/kyc_worker_identity_integration_test.go` | `fencedTables` (ADR 0106 section 3.3, "nine tables") gains `staff_mfa_factors`, `staff_mfa_recovery_codes`, `staff_auth_challenges`, `staff_enrolment_tokens` (thirteen) | The catalogue gate derives the fenced set from the policies; the four new tables carry the KYC worker fence. This also extends T-ID-2 (the worker reads zero rows) to them |
+| `internal/db/kyc_worker_catalogue_gate_integration_test.go` | `expected 36 restrictive kyc_worker_fence_* policies` becomes 52 (9 tables x 4 + 4 tables x 4) | Same |
+| `internal/db/null_arm_replay_static_test.go` | `a18FencedTables` gains the same four tables | A-18 skips tables whose `tenant_id IS NULL` arm is covered by the staff_users-class restrictive fence; the parity is proven by `TestCatalog_RestrictiveFenceParity` and `TestRLS_RestrictiveFences_NoActingNoWorkerAccess` |
+
+No hard-coded migration-head pin exists in the Go tests (searched). `deploy/init-app-role.sql` gains one block (the four
+tables' grants), mirrored by `TestStatic_InitAppRoleSQLMatchesMigration0137Grants`.
+
+### 22.5 Evidence (private database harness only; sanctioned local CI credentials; no role, password or privilege change)
+
+- `internal/staffmfa/store` (integration tag; `TEST_RUNTIME_DATABASE_URL` is the role every assertion runs as; the table owner
+  only provisions tenants and staff and plants tamper rows that the triggers must stop):
+  - **replay and burn:** the same code twice, an older step after a newer one, window T+1 accepted and T+3 refused, 24
+    parallel verifiers of one valid code give exactly one success, `burnStep` alone (no lock) gives exactly one of 16;
+  - **lockout:** 5 failures soft-lock, the 6th attempt with the CORRECT code is answered locked and writes nothing, the
+    locked answer does not depend on the code, expiry, the 24 h window restart, the 10th failure sets the hard lock, a hard
+    lock refuses after any delay and the runtime role cannot clear it, a reset factor is clean, 50 parallel wrong verifies
+    give exactly 5 comparisons and 45 locked answers with exact counters, `Confirm` and recovery-code failures share the budget;
+  - **integrity:** planted, flipped, moved (to a colleague, to platform staff) and unknown-kid ciphertext is
+    `OutcomeIntegrity` (counted, never "absent", never accepted); a factor sealed under another key with the victim's exact
+    AAD is never accepted;
+  - **recovery codes:** stored only as keyed MACs, single use (16 concurrent consumers give one), bound to the staff member,
+    normalisation, regeneration revokes the old batch, a locked factor refuses before any lookup;
+  - **challenges and enrolment tokens:** keyed MAC only, two-phase resolve, purpose and kid bound in the MAC, expiry
+    boundary, single use under concurrency, exhaustion consumes, the `FOR UPDATE` is held (a concurrent locker waits);
+  - **triggers, CHECKs, indexes:** every `SF001`-`SF006` and `SF099` code by direct SQL for every table, the C4 CHECK, the
+    counter CHECKs, the unique indexes, MAC uniqueness;
+  - **RLS, fences, grants:** the dual-scope visibility matrix on every table, cross-tenant and cross-scope writes touch
+    nothing, parity with `staff_users` across 12 GUC combinations, acting and KYC-worker sessions see and write nothing, the
+    lookup policies (one row, SELECT only, only with no tenant, fences apply), the runtime privilege matrix (SELECT, INSERT,
+    column UPDATE only), catalog pins (policies, FORCE, trigger list and timing, functions plain, pinned, volatile);
+  - **adversarial (arbitrary SQL as `igaming_runtime`):** a planted factor, recovery code, challenge or enrolment token with an
+    attacker key or an unkeyed hash is never accepted or found; a MAC rebuilt into a token does not resolve; the pinned
+    residuals `..._Residual_ForgedTenantGUCReadsCiphertextOnly` and `..._Residual_R3_RevokingAFactorIsDenialOfServiceNotBypass`;
+  - **migration (scratch databases):** up / down / up whole-schema snapshot (policies, trigger enablement and definitions,
+    constraints, table and COLUMN ACLs, function flags and bodies, indexes) and the diff only adds objects of the four tables;
+    `SF098` for six drifts (a KYC-worker fence missing, an acting fence missing, an unexpected extra fence, FORCE lifted,
+    the dual-scope policy gone, the acting predicate function gone) with names only and nothing created; `SF097` for data in each of the four tables with counts only, nothing
+    dropped, FORCE still on, and through the real migrate runner;
+  - **static:** no logging, printing, environment, clock or formatted value in the store; grants mirrored in
+    `deploy/init-app-role.sql`; migration scope (no sessions, no `staff_users`, no later-slice SQLSTATE, every function pins its
+    `search_path`, no `SECURITY DEFINER`); SQLSTATE class `SF` only where assigned.
+- Mutation pass: `docs/plans/prh2-hardening-round/adr0119-s2-mutation-kill.txt` (driver
+  `adr0119-s2-mutation-driver.py`). 121 mutants (49 Go in the store and the lookup helpers, 72 SQL in migration 0137 up and
+  down, each SQL mutant on a database REBUILT from the mutated migration; Q66-Q69 are the review's fence mutants): 117 KILLED, 4 SURVIVED and justified as
+  behaviour-equivalent (R03, R07: second layers behind `consumeCode` and the keyed-MAC verification; Q09: `factor_type`
+  has one admitted value and no UPDATE grant; Q19: unreachable behind the frozen-revoked branch), 0 ERROR. The pass found
+  and closed real test gaps: the kid binding of a keyed MAC (C09, C12), the row lock of the challenge / token / pending
+  rows (C13, E08, G02: a lock-wait test), the conditional burn independent of the lock (G03, G03b, G05: a stale-row
+  test), the `Begin` staff predicate (G08), the tenant arm of the down refusal (Q63: a count blind to `FORCE ROW LEVEL
+  SECURITY` missed tenant rows), the purpose column against the purpose inside the MAC (C10, C11, E06), the status graph
+  message (Q15). The file records the discarded runs (a container restart; a connection-exhaustion run whose mass
+  failures looked like kills) so that they cannot be mistaken for evidence.
+
+### 22.6 Residuals (S2)
+
+| # | Residual | Disposition |
+|---|---|---|
+| S2-R1 | **Lockout counters are runtime-writable columns** (the application has to write them). Under M5 (arbitrary SQL as `igaming_runtime`) plus the victim's password, the runtime role can reset `failed_count`, `failed_window_start`, `locked_until`, `failed_24h_count` and `failed_24h_start` at will, and so can PREVENT the hard lock from ever being set: the M4 bound (about 3e-5 per hard-lock cycle) does not hold under M5, and R9's claim that the DB counters are the real control is weakened to a control against non-SQL attackers only. Under M5 the only bound on online guessing is the per-process, per-IP limiter (R9) plus audit. What remains true: `hard_locked_at` is write-once once set, and `last_used_step` is monotonic (replay protection holds under SQL) | Open; S3 entry gate G2 decides (DB-clock rule, audited decreases + alert, or an owner-accepted residual) |
+| S2-R2 | A runtime session can set `hard_locked_at`, `status = 'revoked'` or `last_used_step` upward on a factor it can see: a denial of service (R3), never a bypass | R3 |
+| S2-R3 | Tenant isolation of the new tables is the tenant GUC like every other table (a runtime session that forges `app.tenant_id` reads that tenant's rows: ciphertext and MACs only) | Pinned by the `Residual` tests; M5 |
+| S2-R4 | `Verify` reports `ErrNoActiveFactor` (absent) differently from every outcome. S3's login must collapse that into one response so it is not a factor-existence oracle | S3 gate |
+| S2-R5 | The fixed 24 h window (S1-R6) is stored as the library writes it; the CHECKs do not tighten it | S1-R6 |
+| S2-R6 | Expired rows are never deleted by the runtime role (no DELETE); pruning is an owner runbook step (S9), and the owner is also stopped by `SF099` unless the runbook disables the trigger | S9 must define the prune procedure |
+| S2-R7 | `staff_users` rows referenced by these tables cannot be deleted (foreign keys, no cascade). Offboarding keeps the row anyway (section 10.1) | Intended |
+
+### 22.7 What `security` should probe live (gate G)
+
+1. Forge each GUC (`app.tenant_id`, `app.principal_id`, `app.platform_admin_principal_id`, `app.platform_service_id`,
+   `app.acting_*`, `app.staff_challenge_lookup_mac`, `app.staff_enrolment_lookup_mac`, `app.session_lookup_hash`) in every
+   combination against all four tables: read, `INSERT`, `UPDATE`, `SELECT ... FOR UPDATE`; try to learn a victim's row
+   through the lookup policies without holding the MAC.
+2. Try to defeat the triggers as `igaming_runtime`: `SET session_replication_role = replica`, `ALTER TABLE ... DISABLE TRIGGER`,
+   `COPY`, `INSERT ... ON CONFLICT DO UPDATE` on the unique MAC columns, `UPDATE ... FROM` joins that change `tenant_id`,
+   `TRUNCATE ... CASCADE`, writes through `staff_users` cascades.
+3. Race the burn: many connections, `READ COMMITTED` and `REPEATABLE READ` / `SERIALIZABLE` transactions (the store expects
+   `READ COMMITTED`; a `40001` must fail closed), two pods, a transaction cancelled after the `UPDATE` but before commit, a
+   `Confirm` racing a `Verify` on the old factor, two enrolments begun at once.
+4. Counter manipulation under M5 (S2-R1): which resets can the runtime role perform, and is that acceptable next to the
+   per-IP bucket and the audit alert design for S3?
+5. Planted rows: an active factor with attacker ciphertext (the victim then fails integrity on every login: confirm S3 raises
+   `staff_mfa_integrity` and that a reset restores access), a planted pending factor that blocks enrolment through the unique
+   index, a planted live enrolment token that blocks issuing a new one.
+6. Whether `sf_force_tenant_from_staff` reading `staff_users` under the caller's own RLS (so a platform session cannot write a
+   tenant staff member's rows without `WithTenant(target)`) is the behaviour S3 and S6 want.
+7. Secret hygiene: that nothing in the store, its errors or the Postgres log can carry a code, token, secret or MAC (statement
+   logging, `log_min_error_statement`: the failing statements carry parameters only as `$n`).
+
+### 22.8 S3 entry gates recorded by the S2 security review (NOT built in S2)
+
+S3 may not merge unless each holds and is tested:
+
+- **G1** An HTTP-level test that 5 and 6 wrong codes through the REAL routes persist the soft lock and decrement `attempts_left`, plus a mutant that returns an error from the transaction closure (must be killed). Consider a store-owned transaction wrapper, or aligning `Confirm` with the result-plus-nil-error contract.
+- **G2** Decide S2-R1: a DB-clock rule (`failed_24h_count` may decrease only if its window start is older than 24 h), or audited decreases with an alert, or an owner-accepted residual.
+- **G3** The step burn and the session / challenge consumption happen in one transaction.
+- **G4** The response to a `40001` or a commit failure must not depend on the verification outcome.
+- **G5** A static caller allow-list for every `RevealFor*` method.
+- **G6** The S9 runbook pins `log_parameter_max_length = 0` and keeps `pg_stat_statements` parameter-free.
+- **G7** S2-R4: collapse "no factor" into the single login response and raise `staff_mfa_integrity`.
+- **Note:** between S3 and S6 there is no MFA-reset path. The last platform admin's lockout then needs owner intervention through `cmd/seed-admin`, so S3 must not reach a persistent environment without the runbook.

@@ -616,3 +616,36 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ADR 0119 S2 (migration 0137, staff MFA tables): least-privilege, re-asserted on every run, mirroring
+-- migration 0137's own in-migration grant block. RLS (FORCE on the four tables), the guard triggers and
+-- the append-only (no DELETE / TRUNCATE) trigger are the binding controls; these grants are defence in
+-- depth, narrower than the blanket backfill GRANT above (which would otherwise re-grant UPDATE / DELETE).
+-- SELECT and INSERT on each table; UPDATE is COLUMN-level only and never reaches the immutable columns
+-- (secret_kid / secret_nonce / secret_ct, code_mac, token_mac, tenant_id, staff_user_id ...). The
+-- runtime role can therefore never rewrite a factor secret, a recovery-code or token MAC, or delete a row.
+-- No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.staff_mfa_factors') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON staff_mfa_factors FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_mfa_factors TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, last_used_step, failed_count, failed_window_start, locked_until, failed_24h_count, failed_24h_start, hard_locked_at, pending_expires_at, activated_at, revoked_at, revoked_reason) ON staff_mfa_factors TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.staff_mfa_recovery_codes') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON staff_mfa_recovery_codes FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_mfa_recovery_codes TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (consumed_at, revoked_at) ON staff_mfa_recovery_codes TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.staff_auth_challenges') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON staff_auth_challenges FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_auth_challenges TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (attempts_left, consumed_at) ON staff_auth_challenges TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.staff_enrolment_tokens') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON staff_enrolment_tokens FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_enrolment_tokens TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (consumed_at, revoked_at) ON staff_enrolment_tokens TO igaming_runtime';
+    END IF;
+END
+$$;

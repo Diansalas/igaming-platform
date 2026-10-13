@@ -59,6 +59,15 @@ var a18FencedTables = map[string]bool{
 	"persons":             true,
 	"player_restrictions": true,
 	"risk_rules":          true,
+	// ADR 0119 S2 (migration 0137): the four staff MFA tables copy staff_users' dual-scope policy
+	// (platform arm: tenant_id IS NULL AND no app.tenant_id) and replicate ALL eight of its restrictive
+	// fences (0112 acting fence, 0114 KYC-worker fence), in the strict form that admits no acting
+	// session at all. The fence parity is proven by TestCatalog_RestrictiveFenceParity and
+	// TestRLS_RestrictiveFences_NoActingNoWorkerAccess (internal/staffmfa/store).
+	"staff_mfa_factors":        true,
+	"staff_mfa_recovery_codes": true,
+	"staff_auth_challenges":    true,
+	"staff_enrolment_tokens":   true,
 }
 
 // a18AdditionallyFencedTables are tables whose SELECT NULL arm was found
