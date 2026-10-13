@@ -27,6 +27,9 @@ launch executor (`SET LOCAL`, default 5 s), not per connection.
 
 1. `DATABASE_URL` is the non-owning runtime credential (`docs/security/runtime-role-separation.md`);
    `db.VerifyRuntimeRoleInProduction` refuses to start otherwise (ADR 0112 S11).
+1a. The `database_environment` anchor is recorded as `production` (owner-side, once, after `migrate up`; see
+   `production-configuration-checklist.md`, "Database environment anchor"). `platform-api` refuses to start in production
+   when it is unrecorded or says development / test (`db.VerifyEnvironmentAnchor`).
 2. `DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS` is unset (30 s) or deliberately set; verify on a running task with
    `SHOW idle_in_transaction_session_timeout` from the application's own connection (not a superuser session).
 3. A proxy or pooler in front of PostgreSQL must forward startup parameters. One that rejects them breaks startup

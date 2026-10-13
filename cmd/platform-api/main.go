@@ -155,12 +155,11 @@ func run() error {
 	if err := db.VerifyRuntimeRoleInProduction(ctx, cfg.GuardEnvironment(), pool); err != nil {
 		return err
 	}
-	// ADR 0115 S1 (security LOW): a production process refuses a database anchored as
-	// development / test (that anchor would admit SYNTHETIC-NOT-LEGAL RG configuration).
-	if anchor, err := db.VerifyEnvironmentAnchor(ctx, cfg.GuardEnvironment(), pool); err != nil {
+	// ADR 0115 S1 (security LOW + launch gate): a production process refuses a database
+	// anchored as development / test AND a database whose anchor is not recorded (the
+	// provisioning step in the production configuration checklist was skipped).
+	if _, err := db.VerifyEnvironmentAnchor(ctx, cfg.GuardEnvironment(), pool); err != nil {
 		return err
-	} else if anchor == "" && cfg.GuardEnvironment() == "production" {
-		logger.Warn("database_environment anchor is not recorded; it reads as production (runbook production-configuration-checklist: record 'production' at provisioning)")
 	}
 
 	// PRH-2 R5 (SIGNED-ACTOR-PROOF, ADR 0110): the ONE server-side issuer of
