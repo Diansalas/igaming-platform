@@ -14,7 +14,7 @@
   use a keyed HMAC, not Argon2id (section 6.4); MFA policy is code, not a data row (section 4.1).
 - **Classification:** class A, before technical production readiness. The staff MFA and STAFF-LIFECYCLE-1 rows of
   `docs/plans/platform-reconciliation-2026-10-13.md` (lines 56-57, 215, 229, 239). ADR 0115 S2 staff RG increases stay
-  403 until S4 of this ADR lands.
+  403 until S4b of this ADR plus ADR 0115's own classifier slice land.
 - **Inputs (verified at `a3e56dd`):**
   - `internal/auth/{jwt,session,middleware,permission,password,keys}.go`
   - `internal/httpserver/{staff_routes,auth_routes,admin_routes,routes,ratelimit,withdrawal_handlers}.go`
@@ -24,7 +24,7 @@
   - ADR 0099, 0101, 0110, 0112, 0114, 0115
   - `docs/governance/human-decision-register.md` (H1/T3), `docs/architecture/01-requirements-inventory.md`
 - **Owners:** `security` (mechanism; author); `architect` (claims shape, schema, ADR 0110 extension); `identity-compliance`
-  (lifecycle policy); `qa` (gates); `ledger-finance` (S4 only: the withdrawal and K-flow integration).
+  (lifecycle policy); `qa` (gates); `ledger-finance` (S0 re-check and S4b: section 9.5, ADR 0082 A9, the K-flow integration).
 - **Not a regulatory claim.** These are software controls only. No licence or regulator has approved them.
 
 ## 1. Context: what exists today (verified)
@@ -886,7 +886,7 @@ invited --accept+enrol--> active --suspend--> suspended --reactivate--> active
 - **Actor proof (ADR 0110 extension).**
   - `actor_proof_require` and `internal/actorproof` admit the prefix `staff_lifecycle:` for scope `platform` with a
     NULL tenant, in lockstep. `platform_acting` and `tenant` are refused (`AP004`).
-  - The governed-table list grows from 13 to 15.
+  - The governed-table list grows by 2 (the catalog test counts).
   - `internal/stafflifecycle` joins the `TestStatic_OnlyFourEyesPackagesSign` allow-list. The security review of that
     change is mandatory.
 - **What this closes, and what it does not.**
@@ -953,7 +953,7 @@ Authentication events go to `audit.Record` only, because they are high volume. T
 | # | Residual | Severity | Mitigation / owner |
 |---|---|---|---|
 | R1 | **M5 insider escalation.** An attacker who holds both a legitimate staff account (with its factor) and arbitrary SQL can `UPDATE` their own `role` or `status` (for example, un-suspend themselves or move from support to finance in the same tenant), then log in with their real MFA. `SF010` and `SF012` still admit a legal-looking transition. | High under M5 | **OQ-2:** an `authz_seal` column, `HMAC(staff-authz subkey, id, tenant, role, status, staff_version, person_id)`, written by the application on every lifecycle change and verified at login, refresh and liveness. This is part of H1, so it is not built until the owner authorizes it. Slice S-H1 is specified so it can follow immediately. |
-| R2 | **T3 is narrowed, not closed.** For staff, MFA neutralises SQL-minted rows (no factor, no keyed token), taken-over passwords (factor AEAD) and forged sessions (seal). Player T4 and keyed refresh hashes for players are untouched. `sessions.revoked_at` is not sealed: under M5 a revoked session of an **active** staff member can be un-revoked by SQL. Using it still needs the raw refresh token, so the risk is low. | Medium | H1/T4 owner items stay OPEN. The decision register is updated after S4 to say "staff part narrowed". |
+| R2 | **T3 is narrowed, not closed.** For staff, MFA neutralises SQL-minted rows (no factor, no keyed token), taken-over passwords (factor AEAD) and forged sessions (seal). Player T4 and keyed refresh hashes for players are untouched. `sessions.revoked_at` is not sealed: under M5 a revoked session of an **active** staff member can be un-revoked by SQL. Using it still needs the raw refresh token, so the risk is low. | Medium | H1/T4 owner items stay OPEN. The decision register is updated in S9 to say "staff part narrowed". |
 | R3 | **Factor deletion by SQL** denies service to the victim (a lock-out). It is never a bypass. | Low | Durable alert on missing-factor logins for accounts that previously had one, using the lifecycle events. MFA reset. |
 | R4 | **TOTP is phishable** by a real-time proxy (AitM). | Medium | WebAuthn for platform_admin is the next factor (OQ-3). `StaffFactor` already accommodates it. |
 | R5 | **Token theft inside the step-up window** (5 or 10 min) by an attacker who controls the browser. | Low-medium | Short windows. Liveness revocation. Audit. Per-session step-up failure revocation. |
@@ -1201,6 +1201,7 @@ Every table gets `ENABLE` and `FORCE ROW LEVEL SECURITY`.
 | `POST /v1/staff/auth/enrol/confirm` | challenge (`enrol`) | `mfa` | `no-store`. Returns `recovery_codes[10]` and a `TokenPair`. |
 | `POST /v1/staff/auth/enrol/redeem` | enrolment token + password | `credential` | returns a challenge (`enrol`) |
 | `POST /v1/staff/invitations/accept` | invite token + new password | `credential` | returns a challenge (`enrol`) |
+| `POST /v1/staff/auth/password/redeem` | `password_reset` token + new password + TOTP | `credential` | revokes all sessions and returns an `mfa` challenge (6.7) |
 | `POST /v1/staff/auth/step-up` | bearer, staff chain | `mfa` | returns a new access token and `step_up_expires_at` per class |
 | `GET /v1/staff/me/mfa` | bearer, staff chain | none | factor type and status, `activated_at`, recovery codes remaining, `hard_locked` |
 | `POST /v1/staff/mfa/recovery-codes/regenerate` | bearer, step-up critical | none | `no-store` |
@@ -1217,10 +1218,10 @@ every mutation.
 | `GET .../staff`, `GET .../staff/{id}`, `GET .../staff/{id}/lifecycle-events` | `staff:read` (new) | none |
 | `POST .../staff/invitations`. This **replaces** `POST .../staff`, the admin-chosen-password route, which is removed in S6, and its OpenAPI entry with it. | `staff:manage` | critical |
 | `POST .../staff/{id}/invitation/resend`, `POST .../staff/{id}/invitation/revoke` | `staff:manage` | critical |
-| `POST .../staff/{id}/suspend`, `/reactivate`, `/offboard`, `/role`, `/mfa-reset` | `staff:manage`, plus the 10.1 role-authority rules | critical |
+| `POST .../staff/{id}/suspend`, `/reactivate`, `/offboard`, `/role`, `/mfa-reset`, `/password-reset` | `staff:manage`, plus the 10.1 role-authority rules | critical |
 | `GET /v1/admin/platform-staff`, `GET /v1/admin/platform-staff/{id}` | `staff:read`, platform scope | none |
 | `POST /v1/admin/platform-staff/{id}/suspend`, `/offboard` | `staff:manage`, platform scope | critical |
-| `POST /v1/admin/platform/staff-lifecycle-requests` (kind: `platform_invite`, `platform_reactivate` or `platform_mfa_reset`) | `platform_staff:govern` (new) | critical |
+| `POST /v1/admin/platform/staff-lifecycle-requests` (kind: `platform_invite`, `platform_reactivate`, `platform_mfa_reset` or `platform_password_reset`) | `platform_staff:govern` (new) | critical |
 | `GET /v1/admin/platform/staff-lifecycle-requests[/{id}]` | `platform_staff:govern` | none |
 | `POST .../staff-lifecycle-requests/{id}/approve` | `platform_staff:govern` | critical |
 | `POST .../staff-lifecycle-requests/{id}/reject`, `/cancel` | `platform_staff:govern` | none |
@@ -1232,7 +1233,7 @@ precedent):
 - `invalid_challenge` (one code for unknown, expired, consumed or wrong-purpose; it never distinguishes them)
 - `invalid_enrolment_token` (the same rule)
 - `step_up_required` (with `max_age`), `session_revoked`
-- `last_admin`, `self_target_forbidden`, `person_required`, `role_not_grantable`
+- `last_admin`, `self_target_forbidden`, `person_required`, `role_not_grantable`, `lifecycle_busy`
 - `lifecycle_transition_invalid`, `four_eyes_violation`
 
 ### 14.3 Permissions
@@ -1252,14 +1253,17 @@ because the subject comes from the token.
 - **Schemas:** `StaffLoginChallenge`, `MfaVerifyRequest`, `MfaRecoverRequest`, `EnrolStartResponse` (marked
   `x-sensitive: true`), `EnrolConfirmResponse` (`x-sensitive: true`), `EnrolRedeemRequest`, `InvitationAcceptRequest`,
   `StepUpRequest`, `StepUpResponse`, `StaffMfaStatus`, `StaffDirectoryEntry` (`id`, `email`, `display_name`, `role`,
-  `status`, `mfa: {enrolled, hard_locked}`, `person_linked: bool`, `last_login_at`), `StaffLifecycleEvent`
+  `status`, `mfa: {enrolled, hard_locked}`, `person_linked: bool`, `last_login_at`. `last_login_at` has no column: it is derived at read time as the maximum `auth_time` over the staff member's `sessions` rows, so it is the last completed aal2 login, and NULL when no row remains.), `StaffLifecycleEvent`
   (redacted per ADR 0114 section 4.1 for tenant callers), `StaffLifecycleActionRequest` (`reason_code`, `note?`,
   `role?`), `PlatformStaffLifecycleRequest`, `PlatformStaffLifecycleDecision`.
 - **Error responses.** Every staff route documents `401 session_revoked` and the step-up `403 step_up_required`
   response with its `WWW-Authenticate` header.
 - **Tests.** The existing OpenAPI-vs-routes parity test, where present, covers the new routes. S6 adds them otherwise.
+- **Audit semantics (review N9).** `staff.login_succeeded` keeps its meaning, "a session was issued". After S3, a
+  session is only issued after the second factor. The new action `staff.login_password_verified` covers the first
+  step. The ADR 0104 consumer list and any report that counts logins are told in S3.
 - **Breaking change.** `POST /v1/staff/auth/login` changes its response. The back office is the only client and
-  changes in S7, which ships with S3 behind the same release.
+  changes in S7a, which merges together with S3.
 
 ## 15. Back office screens (`backoffice/src`)
 
@@ -1277,8 +1281,9 @@ because the subject comes from the token.
    - The codes are not kept in application state after leaving the page and are never written to `localStorage`.
 3. **Step-up modal** (`auth/StepUpProvider.tsx`): a fetch-layer interceptor.
    - On `403 step_up_required` it opens a modal with a TOTP field and calls `/v1/staff/auth/step-up`.
-   - It swaps the access token in `tokenStore`, then **retries the original request once with the same body and
-     `Idempotency-Key`**.
+   - It swaps the access token in `tokenStore`, then **re-sends the original request once with the same frozen
+     body**. This is safe because a step-up refusal happens before any write (section 6.6). Bonus routes re-send their
+     own `Idempotency-Key`.
    - It never retries more than once. On cancel, the original action fails visibly.
    - Every governed dialog (ADR 0114: approve or reject with a frozen `payload_hash`) works unchanged, because the
      retry resends the frozen payload.
@@ -1315,22 +1320,22 @@ Extra reviewers are named per slice.
 
 | Slice | Content | Depends on | Extra review |
 |---|---|---|---|
-| **S0** | This ADR. A design check by `architect` (claims shape, ADR 0110 extension, the 13.2 trigger order) and by `ledger-finance` (section 9.5 lock placement). A one-line pointer in ADR 0017. | - | architect, ledger-finance |
-| **S1** | `internal/staffmfa`, pure Go with no DB: the TOTP implementation (RFC 6238 Appendix B vectors), the `StaffFactor` interface, the key family with HKDF subkeys, AEAD seal/open with AAD, keyed MACs, recovery-code generation and normalisation, redacting types, `config.Load` validation of `STAFF_MFA_*` and of the TTL bounds, and `VerifyStartup`. | S0 | - |
-| **S2** | Migration 0137 (13.1), the store layer (`internal/staffmfa/store.go`), the lookup helpers in `internal/db`, and integration tests for every `SF00x`/`SF040` code, the RLS, the ACLs and the catalog pins. | S1 | - |
-| **S3** | The authentication flows: login challenge, verify, recover, enrol start/confirm/redeem, step-up, the new claims (`sid`, `aal`, `amr`, `auth_time`, `mfa_at`, `sv`), the session seal, the staff refresh rules and TTLs, the `mfa` limiter bucket, the `internal/auth/authtest` helper, and the migration of **every** existing staff-token test fixture to it. `cmd/seed-admin` issues a `bootstrap` token. Must ship together with S7. | S2 | qa (fixture migration completeness) |
-| **S4** | Enforcement: the `staffRoute` helper; `RequireLiveStaffSession`, `RequireAAL2` and `RequireStepUp`; re-registering every `/v1/admin` route through the helper with its class (section 8); the static completeness and golden tests; the actor-proof signer backstop (9.1); the `withdrawal.Approve` step-up parameter (9.3); the in-transaction liveness re-assertion in every step-up handler (9.5). **This unblocks ADR 0115 S2 staff increases** (that ADR's own slice wires its classifier). | S3 | ledger-finance (9.3, 9.5, K-flows) |
-| **S5** | Migration 0139 (13.2), `internal/stafflifecycle` (domain plus proof signing), the ADR 0110 verifier and `actorproof` lockstep extension, and the `TestStatic_OnlyFourEyesPackagesSign` allow-list. Can run in parallel with S3 and S4 after S2. | S2 | architect (ADR 0110 extension) |
-| **S6** | The lifecycle HTTP API (14.2), the invitation email (MOCK provider), removal of the admin-chosen-password route, the new permissions and the role-matrix test, OpenAPI (14.4), and the `cmd/seed-admin -break-glass` owner path (section 11). | S4, S5 | identity-compliance (reason codes, policy) |
-| **S7** | Back office: two-step login, enrolment, step-up modal, My security (15.1-15.4). Released together with S3, so the back office never faces a login it cannot complete. | S3 (API); S4 for the modal | - |
-| **S8** | Back office: staff directory, detail and lifecycle, invite, the platform four-eyes queue (15.5-15.8). | S6, S7 | - |
-| **S9** | Runbooks: key provisioning, rotation and rewrap; the lost-device procedure; the break-glass procedure (two operators); pruning; NTP. A launch-gate checklist update. Decision-register and threat-register updates (T3 "staff part narrowed", R1-R12). | S8 | - |
-| **S-H1** (conditional) | The `authz_seal` on `staff_users` (R1). **Built only if the owner answers yes to OQ-2.** | S6 and the owner | security, architect |
+| **S0** | This ADR (revision 2). Pointers in ADR 0017 and ADR 0115. OQ-1 to OQ-6 entered in `docs/governance/human-decision-register.md`. Architect and ledger-finance re-check section 9.5 as rewritten. | - | architect, ledger-finance |
+| **S1** | `internal/staffmfa`, pure Go with no DB: TOTP (RFC 6238 Appendix B vectors), the `StaffFactor` interface, the two key families with HKDF subkeys (`label \|\| kid`), AEAD with AAD, keyed MACs, recovery-code generation and normalisation, redacting types, `config.Load` validation of `STAFF_MFA_*` and the TTL bounds, the pairwise **platform key-family registry** (5.1), `VerifyStartup`. **The key-provisioning runbook** (staging needs keys before S3 deploys). | S0 | - |
+| **S2** | Migration 0137 (13.1, **without** `SF040` and without the session revocation), the store layer, the two-phase lookup helpers in `internal/db`, the restrictive-fence replication and its parity test, and integration tests for every `SF00x` code, the RLS, the ACLs and the catalog pins. Staff login on `main` is unchanged. | S1 | - |
+| **S3 + S7a** (one merge unit) | The authentication flows of section 6: login challenge, verify, recover, enrol start/confirm/redeem, step-up endpoint, password redeem. The new claims, the session seal, the staff refresh rules with the cutover rule, the staff TTLs and the `mfa` limiter bucket. The `internal/auth/authtest` helper, and every existing staff-token fixture migrated to it. `cmd/seed-admin` issues a `bootstrap` token and runs as a deployment job. **Migration 0138** (13.1a). **S7a:** back office two-step login, enrolment and My security. They merge to `main` **together**, because a `main` that cannot log in to the back office breaks every developer and every E2E test. | S2 | qa (fixture-migration completeness) |
+| **S4a** | `staffRoute`, `RequireStaffPrincipal`, `RequireLiveStaffSession` (N1 implementation), `RequireAAL2`. Re-register every `/v1/admin` route through `staffRoute` with an explicit class. In S4a the class is only recorded; enforcement comes in S4b. The static coverage test. **Route-registration freeze:** announced to the ADR 0114 S1b, ADR 0115 S2 and ADR 0116 owners. Any route merged after S4a must use `staffRoute` with a class. | S3 + S7a | - |
+| **S4b + S7b** (one merge unit) | `RequireStepUp` and the three classifiers. The golden table (8.2). The signer backstop with the corrected registry (9.1). The `withdrawal.Approve` step-up parameter (9.3). The scoped in-transaction re-assertion and the `staff_actor_self_*` policies (9.5), with **ADR 0082 Amendment A9** and the **ADR 0099 A-19 amendment** written in the same change. **S7b:** the back office step-up modal. | S4a | **ledger-finance (mandatory:** A9, the placement table, K-flows), architect (A-19, the RLS policy) |
+| **S5 + S6** (one merge unit, review C6) | Migration 0139 (13.2, without `SF030`), `internal/stafflifecycle` (domain plus proof signing), the ADR 0110 verifier and `actorproof` lockstep extension (`staff_lifecycle:`, +2 governed tables), and the `TestStatic_OnlyFourEyesPackagesSign` allow-list. **S6:** the lifecycle HTTP API (14.2), invitation and reset email through `email.Provider`, removal of the legacy admin-chosen-password route, `cmd/seed-admin` requiring a Person, the fixture migration, the new permissions and the role-matrix test, OpenAPI (14.4), and `cmd/seed-admin -break-glass` (section 11). S5 can be developed in parallel after S2, but it merges only together with S6. | S4b | architect (ADR 0110 extension), identity-compliance (reason codes, policy) |
+| **S8** | Back office: staff directory, detail and lifecycle, invite, and the platform four-eyes queue (15.5-15.8). It follows the ADR 0114 console conventions (principles 1, 4 and 7; the code-to-message map). | S5 + S6 | - |
+| **S9** | Runbooks: FACTOR re-enrolment campaign, MAC rotation and recovery-code regeneration, lost device / password / both, break-glass as a deployment job, the 13.1a deploy order, NTP, pruning. The launch-gate checklist update. Decision-register and threat-register updates: T3 "staff part narrowed"; R1 to R14. | S8 | - |
+| **S-H1** (conditional) | `SF030` and `SF007` (OQ-2(a)), and the `authz_seal` on `staff_users` (R1, OQ-2(b)). **Built only for the parts the owner authorizes.** | S5 + S6, and the owner | security, architect |
 
-- **Critical path:** S0 → S1 → S2 → S3 (+S7) → S4 → S6 → S8 → S9. S5 runs in parallel after S2.
+- **Critical path:** S0 → S1 → S2 → (S3+S7a) → S4a → (S4b+S7b) → (S5+S6) → S8 → S9.
+- **ADR 0115:** staff RG increases stay 403 until **S4b plus ADR 0115's own classifier slice**.
 - **Labels until each slice merges:** every item is `NOT IMPLEMENTED`. After merge, the label is `IMPLEMENTED` against
-  the local DB with MOCK email. Real email delivery is `PROVIDER DEPENDENT` (OQ-1). Production key provisioning is
-  `PROVIDER DEPENDENT` on the operator, as for ADR 0110.
+  the local DB with MOCK email. Real email delivery is `PROVIDER DEPENDENT` and gates production startup (R8, OQ-1).
+  Production key provisioning is `PROVIDER DEPENDENT` on the operator, as for ADR 0110.
 
 ## 17. Test plan (`-race -tags integration`, as `igaming_runtime`, private scratch databases)
 
@@ -1364,8 +1369,9 @@ Extra reviewers are named per slice.
   approve` returns 500 `ErrStepUpMissing`, and no row is written. An assertion for a different subject is refused.
 - **Withdrawal policy.** With `require_step_up` above the threshold: fresh at 3 min passes the route but fails the
   policy (403, `max_age = 120`); at 1 min it succeeds. `isAutomated` never satisfies it.
-- **Modal retry idempotency** (BO test plus an API test): a retry with the same `Idempotency-Key` after step-up posts
-  exactly once.
+- **Modal retry safety** (BO test plus an API test, for a four-eyes approve route and a bonus route): the refused
+  attempt leaves no state change, no proof nonce consumed and no audit success row. The single re-send after step-up
+  produces exactly one effect. A second re-send gets the route's normal state-based 409.
 
 ### 17.3 Replay
 
@@ -1400,8 +1406,11 @@ Extra reviewers are named per slice.
   - B committed first: B's approval stands and is audited before the suspension.
   - The suspension committed first: B's re-assertion sees `suspended` and nothing is written.
   - There is no deadlock in either order.
-  - The 9.5 deadlock scenario (a shared lock queued behind a waiting UPDATE) is exercised to prove the A8 placement
-    avoids it.
+  - The static lock-order suite asserts the A9 placement for every flow in the 9.5 table. A B-7-style contention test
+    runs N concurrent approvers against one suspension. It asserts the suspension completes within its `lock_timeout`
+    plus one retry, or answers `lifecycle_busy` with the sessions already revoked.
+  - A platform admin acting under `WithTenant(target)` passes the re-assertion through `staff_actor_self_select`.
+    Without the GUC, the row is invisible and the request is refused (the policy is pinned by test).
 - **Role change mid-session.** The old token gets 401 (role/`sv` mismatch). A refresh issues the new role.
 - **Last admin.** Two platform admins suspend each other concurrently: exactly one succeeds, and the other gets
   `SF020`. A single admin offboarding the only other enrolled admin is refused. Platform removal of a tenant's last
@@ -1418,7 +1427,8 @@ Each of these attacks is attempted by direct SQL, and each must fail:
 - **A forged staff session** with `aal = 2` and a random seal: refresh gives 401, an audit row and the P1 alert.
 - **A deleted factor.** Login gives `mfa_enrolment_required`: no bypass, and enrolment without a keyed token is
   impossible.
-- **Platform admin INSERT, or un-suspend of a platform row**, gives `SF030`.
+- **Platform admin INSERT, or un-suspend of a platform row**, is **accepted** without S-H1. Pinned as
+  `..._Residual_R1_Platform_...`. It turns into an `SF030` refusal test if S-H1 is built.
 - **A lifecycle approval INSERT without a proof** gives `AP001`. One with the same Person gives `SF032`.
 - **Residual R1 is pinned.** A SQL `UPDATE` of the attacker's own tenant row from support to finance is **accepted**,
   and their next real-MFA login yields finance. The test is named `..._Residual_R1_...`, exactly like ADR 0110's
@@ -1449,6 +1459,9 @@ Each of these attacks is attempted by direct SQL, and each must fail:
 | signer backstop removed | 17.2 backstop test |
 | `FOR SHARE` re-assertion removed | 17.5 in-flight governed write |
 | advisory lock removed from `SF020` | 17.5 concurrent mutual suspend |
+| cutover rule raises P1 for pre-cutover NULL seals | the 0138 cutover test |
+| `staff_actor_self_lock` allows UPDATE (`WITH CHECK` dropped) | an RLS test asserting UPDATE through the GUC is refused |
+| hard lock still issues a challenge | 17.4 hard-lock test (no challenge, recovery unreachable) |
 | `SF032` Person check removed | the same-Person approval test |
 | recovery code grants a session instead of an enrol challenge | the recovery flow test |
 | challenge not consumed on success | 17.3 challenge reuse |
@@ -1459,27 +1472,79 @@ Each of these attacks is attempted by direct SQL, and each must fail:
 
 | # | Question | Recommended answer | Default applied if unanswered |
 |---|---|---|---|
-| OQ-1 | Production staff invitations and MFA resets need a real email adapter (PROVIDER DEPENDENT). Until one is contracted, may launch use the owner-run CLI as the only delivery path? | Yes, interim. Contract an email provider before onboarding external B2B operator staff. | CLI-only delivery in production. The HTTP invite route fails closed (`503 email_unavailable`) when only the MOCK provider is configured in production. |
-| OQ-2 | H1 partial authorization: (a) confirm that the `SF030` DB guard (four-eyes-only `platform_admin` creation, with the owner path for bootstrap) may ship; (b) authorize the `staff_users.authz_seal` (S-H1) that closes residual R1. | (a) Yes. (b) Yes. | (a) ships, because it is required to enforce the requested four-eyes in the DB, and it is reversible. (b) is not built and R1 stays OPEN in the threat register. |
+| OQ-1 | A real email adapter is already a launch prerequisite: `email.MockProvider` is synthetic and refused at production startup. Staff invite, MFA reset and password reset depend on it. Does the owner want a **pre-email interim**? Option (a): a non-synthetic "email disabled" provider that makes invite and reset answer 503, listed in the launch-readiness gate, plus a scoped `cmd/staff-admin issue-token` job. That job runs inside the deployment environment with the runtime DB role and `STAFF_MFA_*`, **not** owner credentials. It only delivers a token for an invite or reset that an authorized, step-up-verified admin already created over HTTP, and the operator delivers the token out of band. Option (b): no interim. | (b): no interim. Contract the email provider before launch, which ADR 0030 needs anyway. | (b). Staff onboarding beyond the bootstrap admins is blocked in production until a real email adapter exists. Development and staging use the MOCK provider. |
+| OQ-2 | H1 partial authorization: (a) build `SF030` and `SF007`, which make `platform_admin` creation, platform reactivation and platform reset four-eyes-only at the DB with an owner path for bootstrap; (b) build the `staff_users.authz_seal` that closes residual R1. | (a) Yes. (b) Yes. | **Neither is built** (review C5: an orchestrator default must not override the owner's H1 deferral). S-H1 waits. R1 stays OPEN in the threat register. |
 | OQ-3 | Factor roadmap: TOTP now; WebAuthn (phishing-resistant) for platform_admin, and when? | TOTP at launch for all staff. WebAuthn mandatory for platform_admin within the first post-launch hardening cycle. | TOTP only. `StaffFactor` is ready for WebAuthn. |
 | OQ-4 | Step-up scope and max-ages (section 8, 7.4), notably: KYC review without step-up, and `financial` at 10 min. | Accept as defaulted. Revisit after 30 days of real operator usage. | Section 8 as written. |
 | OQ-5 | Four-eyes depth: one approver for platform-staff changes (two Persons in total); tenant-role changes single-actor with step-up. | Accept. Raise to two approvers only if the platform admin team grows beyond 5. | As written. |
-| OQ-6 | Break-glass: is there no in-application break-glass, with the owner-role CLI as the only escape? | Yes. | As written. |
+| OQ-6 | Break-glass: is there no in-application break-glass, with the `cmd/seed-admin -break-glass` deployment job as the only escape? | Yes. | As written. |
 
-**Status rationale.** No question blocks a slice. OQ-1 limits a production delivery channel (fail-closed). OQ-2(b)
-gates only S-H1. The others confirm reversible defaults. The ADR is therefore `ACCEPTED - PENDING IMPLEMENTATION`.
+**Status rationale.** No question blocks a slice:
+
+- OQ-1 only affects production staff onboarding, which fails closed.
+- OQ-2 gates only S-H1.
+- The others confirm reversible defaults.
+
+The ADR therefore stays `ACCEPTED - PENDING IMPLEMENTATION`. S0 enters the six questions in the decision register.
 
 ## 19. Consequences
 
 - **Every staff login** needs a factor. Existing dev and staging staff must be re-seeded or re-invited when S3 lands,
-  and all staff sessions are revoked then.
-- **Each staff request** costs one extra indexed query (liveness).
+  and migration 0138 revokes every staff session then.
+- **Each staff request** costs one extra short read-only transaction (liveness, 500 ms timeout).
 - **High-risk routes** re-prompt for a TOTP after 5 or 10 minutes.
-- **Admin-chosen staff passwords disappear.**
-- **`platform_admin` grants become four-eyes** and need at least two enrolled platform admins with distinct Persons.
-  Otherwise only the owner path can add one.
-- **The governed-table count** under ADR 0110 rises from 13 to 15.
-- **A new SQLSTATE class `SF`**, and new key family `STAFF_MFA_KEYS`.
-- **ADR 0017** is superseded in part. Its pointer line names this ADR. **ADR 0115** S2 staff increases unblock at S4.
-- **What remains NOT closed** (must not be reported as closed): T3 for players (T4), residual R1 (until OQ-2(b)), T5,
-  T8 and the inherent residuals R10 and R11.
+- **Admin-chosen staff passwords disappear** in S5+S6.
+- **`platform_admin` grants become four-eyes** over HTTP. They need at least two enrolled platform admins with
+  distinct Persons. Otherwise only the `cmd/seed-admin` bootstrap job can add one.
+- **The governed-table count** under ADR 0110 rises by 2.
+- **New:** SQLSTATE class `SF`; key families `STAFF_MFA_FACTOR_KEYS` and `STAFF_MFA_MAC_KEYS`; one platform
+  key-family registry.
+- **Amendments:** ADR 0082 A9 and ADR 0099 A-19, both in S4b.
+- **ADR 0017** is superseded in part, and its pointer line names this ADR.
+- **ADR 0115** S2 staff increases unblock at S4b plus ADR 0115's own classifier slice. ADR 0115 carries a pointer.
+- **What remains NOT closed** (must not be reported as closed):
+  - T3 for players (T4);
+  - residual R1, including its platform half, until S-H1;
+  - T5 and T8;
+  - R13 and R14;
+  - the inherent residuals R10 and R11.
+
+## 20. Review disposition (revision 2, 2026-10-13)
+
+The source is the S0 design review by `architect` and `ledger-finance`: ACCEPT WITH CONDITIONS (orchestrator scratchpad
+`reconciliation/adr0119-design-review.md`).
+
+| Item | Disposition | Where |
+|---|---|---|
+| C1 S2 breaks staff login | `SF040`, the cutover marker and the staff-session revocation move to migration 0138, which merges with S3. The cutover rule: a NULL seal on a pre-cutover session is a plain not-found with no P1. The deploy order is in S9. | 7.2, 13.1 item 5, 13.1a, 16 |
+| C2 universal `FOR SHARE` re-check | **Security ruling: scoped alternative adopted. Universal check withdrawn; no escalation.** The re-assertion applies only where value moves or authority changes. It is folded into the existing A8 statement for K2, K3/M4 and HSEC final approval, and covers withdrawals (`approverEligibilityCheck`; submit and resolve at the A8 position after attempts), K1 and lifecycle. A narrow `app.actor_staff_id` self-select and lock policy pair. ADR 0099 A-19 and ADR 0082 A9 amendments in S4b. Placement table. Corrected cycle rationale. Two-phase suspension with `lock_timeout`. R13 states the remaining window. | 9.5, 12, 16, 17.5 |
+| C3 rewrap contradicts SF002 | No rewrap: the FACTOR family rotates by re-enrolment only. The AEAD key and the MACs are split into two families, so recovery codes no longer hold the factor key. HKDF `info` is `label \|\| kid`. | 5.1-5.3 |
+| C4 OQ-1 interim unreachable | Restated: real email is a launch prerequisite (the mock is synthetic and refused at startup). The interim, if the owner wants one, is an explicit "email disabled" provider plus a scoped deployment-environment CLI under the runtime role, never owner credentials. Default: no interim. `cmd/seed-admin` runs as a deployment job holding `STAFF_MFA_*`. | 6.3, 11, 12 R8, 18 OQ-1 |
+| C5 SF030 is owner-deferred H1 | `SF030` and `SF007` move to S-H1, built only on an OQ-2(a) answer. Section 10.4 "What this closes" is rewritten. The R1 platform-half test is pinned. | 10.4, 13.2, 13.6, 17.6, 18 |
+| C6 S5 breaks legacy create, seeding and fixtures | S5 merges together with S6 (option i). The INSERT rule and the fixture-migration gate are stated. | 13.2, 16 |
+| C7 golden table | Exact registered paths only. Legacy staff-create is `critical`. Kill-switch paths corrected. Non-existent routes are moved to "classified on arrival". Alert resolve uses a classifier (`critical` for P1 and security kinds). The tenant financial-policy route uses a classifier (`none` for tighten-only). The golden table, not the compiler, is the control. KYC stays `none`. | 7.3, 8.2 |
+| C8 retry claim | The retry is safe because the refusal precedes any write. There is no `Idempotency-Key` claim for four-eyes routes. The test is rewritten. | 6.6, 15, 17.2 |
+| C9 hard lock vs recovery | A hard lock is cleared only by an MFA reset; no challenge is issued. Lost password: a `password_reset` token that needs a valid TOTP. Lost both: offboard and re-invite. | 6.1, 6.7, 10.1, 10.5, 13.1, 14 |
+| C10 registry names and counts | `rg_limit_config:request\|approve\|apply`. `:apply` is a staff execution, so it is `critical`, not exempt. "+2 governed tables". | 9.1, 13.2, 19 |
+| C11 overclaims | The invitation claim is restated. R14 covers the inviter choosing the mailbox and Person, with an email-domain allow-list recorded as a deferred consideration. `sessions.revoked_at` unsealed is added under R2. Item 5 of section 2 is qualified. | 2, 3, 6.3, 12 |
+| N1 liveness cost | Batched read-only transaction, 500 ms timeout, released before the handler's connection, 503 on error, metric and alert. | 7.3 |
+| N2 step-up on a replaced row | Chain head only, and the reuse-detection side effect is stated. | 6.6 |
+| N3 fences | Parity with every restrictive fence on `staff_users`, plus a catalog test. | 13.3 |
+| N4 grants | `staff_users` and `sessions` column grants. | 13.4 |
+| N5 two-phase lookup | Stated. | 13.1 item 6 |
+| N6 VOLATILE | Pinned. | 10.3, 13.5 |
+| N7 key distinctness | The pairwise registry includes `PAYOUT_INSTRUMENT_FP_KEYS`. `cmd/seed-admin` needs the keys and runs as a deployment job. | 5.1, 11 |
+| N8 `last_login_at` | Derived from sessions. | 14.4 |
+| N9 audit semantics | `staff.login_succeeded` keeps "session issued". The new `staff.login_password_verified` is announced to ADR 0104 consumers. | 14.4 |
+| N10 person-link logout | Stated. | 10.1 |
+| N11 ADR 0115 pointer | Added in this revision. | ADR 0115 |
+| N12 owner questions in the register | In S0, done in this revision. | `human-decision-register.md` |
+| N13 SQLSTATE and migration numbers | Confirmed. 0137, 0138 and 0139 are to be re-allocated at dispatch. | 2, 13 |
+| N14 federated SSO | Deferred consideration (below). | 20 |
+| N15 tenancy, jurisdiction, provider fit | No change needed. | - |
+
+**Deferred considerations (recorded, not built).**
+
+- Federated SSO (OIDC or SAML) for external B2B operator staff. `StaffFactor` and `amr` do not preclude it. It would
+  need its own ADR.
+- A per-tenant invite email-domain allow-list as configuration (R14).
