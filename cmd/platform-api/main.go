@@ -69,6 +69,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("staff MFA: %w", err)
 	}
+	// ADR 0119 S4b: the step-up class max-ages (section 7.4; config.Load bounds them).
+	if err := staffMFA.SetStepUpPolicy(cfg.StaffStepUpCriticalMaxAge, cfg.StaffStepUpFinancialMaxAge); err != nil {
+		return fmt.Errorf("staff MFA step-up policy: %w", err)
+	}
 
 	// MOCK-ADAPTER-PROD-1 (Stage 10.3, ADR 0085's Stage 10.3 amendment;
 	// security condition C13, ruling R8): the synthetic-component startup

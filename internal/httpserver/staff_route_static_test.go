@@ -253,9 +253,11 @@ func TestStaffRoutes_EveryMutatingRouteClassified(t *testing.T) {
 			t.Errorf("%s: unexpected method", p)
 		}
 	}
-	// 178 staff routes at S4a: 108 mutating, 70 reads. A new route changes this pin and the golden table together.
-	if mutating != 108 || len(staffRouteGolden) != 178 {
-		t.Errorf("golden table: %d routes, %d mutating; pinned 178 and 108", len(staffRouteGolden), mutating)
+	// 178 staff routes at S4a: 108 mutating, 70 reads. S4b adds POST /v1/staff/auth/step-up and
+	// POST /v1/staff/mfa/recovery-codes/regenerate: 180 routes, 110 mutating. A new route changes this pin and the
+	// golden table together.
+	if mutating != 110 || len(staffRouteGolden) != 180 {
+		t.Errorf("golden table: %d routes, %d mutating; pinned 180 and 110", len(staffRouteGolden), mutating)
 	}
 }
 
@@ -373,7 +375,8 @@ func TestStaffRoute_ChainComposition(t *testing.T) {
 	}
 	s := string(src)
 	for _, want := range []string{
-		"return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(requireLiveStaffSession(deps)(auth.RequireAAL2(inner))))",
+		// ADR 0119 S4b: requireStepUp(class) is the last link before the route's own gates.
+		"return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(requireLiveStaffSession(deps)(auth.RequireAAL2(requireStepUp(deps, class)(inner)))))",
 		"staff := requireLiveStaffSession(deps)(auth.RequireAAL2(inner))",
 		"return auth.Middleware(deps.AuthIssuer)(http.HandlerFunc(",
 	} {
@@ -558,20 +561,28 @@ func TestStaffRoutes_ClassifiedOnArrivalAreNotRegistered(t *testing.T) {
 	for _, r := range regs {
 		registered[r.pattern] = true
 	}
-	concrete := 0
-	for _, entry := range staffRoutesClassifiedOnArrival {
-		route, _, _ := strings.Cut(entry, " (")
-		method, _, _ := strings.Cut(route, " ")
-		switch method {
-		case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-			concrete++
-			if registered[route] || staffRouteGolden[route] != "" {
-				t.Errorf("%s is registered: move it from staffRoutesClassifiedOnArrival into staffRouteGolden", route)
+	offenders := func(list []string) []string {
+		var out []string
+		for _, entry := range list {
+			route, _, _ := strings.Cut(entry, " (")
+			method, _, _ := strings.Cut(route, " ")
+			switch method {
+			case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+				if registered[route] || staffRouteGolden[route] != "" {
+					out = append(out, route)
+				}
 			}
 		}
+		return out
 	}
-	if concrete == 0 {
-		t.Error("no concrete route in the classified-on-arrival list: the check is vacuous")
+	for _, route := range offenders(staffRoutesClassifiedOnArrival) {
+		t.Errorf("%s is registered: move it from staffRoutesClassifiedOnArrival into staffRouteGolden", route)
+	}
+	// ADR 0119 S4b moved the last two concrete entries (the step-up endpoint and the regeneration) into the golden
+	// table; the remaining entries are descriptive. Non-vacuity: a planted concrete entry naming a registered route
+	// is reported.
+	if got := offenders([]string{"POST /v1/staff/auth/step-up (planted)", "GET /v1/admin/not-a-route (planted)"}); len(got) != 1 {
+		t.Errorf("planted classified-on-arrival entry: want exactly the registered one reported, got %v", got)
 	}
 }
 

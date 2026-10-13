@@ -26,8 +26,9 @@ func staffAuthRoutes(t *testing.T) [][]string {
 func TestOpenAPI_StaffAuth_RoutesDocumentedBothWays(t *testing.T) {
 	spec := launchSpec(t)
 	routes := staffAuthRoutes(t)
-	if len(routes) != 7 {
-		t.Fatalf("expected 7 mounted staff-auth operations, found %d (update the spec and this test together)", len(routes))
+	// ADR 0119 S4b adds POST /v1/staff/auth/step-up and POST /v1/staff/mfa/recovery-codes/regenerate (7 -> 9).
+	if len(routes) != 9 {
+		t.Fatalf("expected 9 mounted staff-auth operations, found %d (update the spec and this test together)", len(routes))
 	}
 	mounted := map[string]bool{}
 	for _, r := range routes {
@@ -46,6 +47,19 @@ func TestOpenAPI_StaffAuth_RoutesDocumentedBothWays(t *testing.T) {
 			}
 			continue
 		}
+		// ADR 0119 S4b: the two bearer routes that carry a secret (a new access token; new recovery codes).
+		if r[2] == "/v1/staff/auth/step-up" || r[2] == "/v1/staff/mfa/recovery-codes/regenerate" {
+			if !strings.Contains(block, "bearerAuth") || !strings.Contains(block, "#/components/headers/NoStore") || !strings.Contains(block, `"503"`) {
+				t.Errorf("%s: bearerAuth, no-store and 503 must be documented", r[2])
+			}
+			if r[2] == "/v1/staff/auth/step-up" && (!strings.Contains(block, "Rate bucket `mfa`") || !strings.Contains(block, `"429"`)) {
+				t.Errorf("%s: the rate bucket `mfa` and 429 must be documented", r[2])
+			}
+			if r[2] == "/v1/staff/mfa/recovery-codes/regenerate" && !strings.Contains(block, "#/components/responses/StepUpRequired") {
+				t.Errorf("%s: the 403 step_up_required response must be documented", r[2])
+			}
+			continue
+		}
 		if !strings.Contains(block, "security: []") || !strings.Contains(block, "#/components/headers/NoStore") || !strings.Contains(block, `"429"`) || !strings.Contains(block, `"503"`) {
 			t.Errorf("%s %s: unauthenticated, no-store, 429 and 503 must be documented", r[1], r[2])
 		}
@@ -61,7 +75,7 @@ func TestOpenAPI_StaffAuth_RoutesDocumentedBothWays(t *testing.T) {
 		}
 	}
 	// The reverse: nothing documented under the S3 staff-auth paths is unmounted.
-	pathRe := regexp.MustCompile(`(?m)^  (/v1/staff/(?:auth|me)/[^:\s]*):\n((?:    .*\n|\n)*)`)
+	pathRe := regexp.MustCompile(`(?m)^  (/v1/staff/(?:auth|me|mfa)/[^:\s]*):\n((?:    .*\n|\n)*)`)
 	opRe := regexp.MustCompile(`(?m)^    (get|post|put|delete):\n`)
 	documented := 0
 	for _, m := range pathRe.FindAllStringSubmatch(spec, -1) {
@@ -95,6 +109,9 @@ func TestOpenAPI_StaffAuth_DTOsMatchSchemas(t *testing.T) {
 		{enrolRedeemRequest{}, "EnrolRedeemRequest"},
 		{staffMFAStatusResponse{}, "StaffMfaStatus"},
 		{tokenPairResponse{}, "TokenPair"},
+		{stepUpRequest{}, "StepUpRequest"},
+		{stepUpWire{}, "StepUpResponse"},
+		{recoveryCodesWire{}, "RecoveryCodesRegenerateResponse"},
 	} {
 		props := staffAuthSchemaProps(schemaBlock(t, spec, c.schema))
 		seen := map[string]bool{}
@@ -110,7 +127,8 @@ func TestOpenAPI_StaffAuth_DTOsMatchSchemas(t *testing.T) {
 			}
 		}
 	}
-	for _, sensitive := range []string{"StaffAuthChallenge", "StaffLoginChallenge", "EnrolStartResponse", "EnrolConfirmResponse"} {
+	for _, sensitive := range []string{"StaffAuthChallenge", "StaffLoginChallenge", "EnrolStartResponse", "EnrolConfirmResponse",
+		"StepUpResponse", "RecoveryCodesRegenerateResponse"} {
 		if !strings.Contains(schemaBlock(t, spec, sensitive), "x-sensitive: true") {
 			t.Errorf("%s must be marked x-sensitive", sensitive)
 		}

@@ -186,13 +186,15 @@ var staffRouteGolden = map[string]string{
 	"POST /v1/admin/withdrawals/{id}/resolve":                                                     "financial",
 	"POST /v1/admin/withdrawals/{id}/submit":                                                      "financial",
 	"GET /v1/staff/me/mfa":                                                                        "none",
+	// ADR 0119 S4b: the step-up endpoint (class none: it is how a fresh step-up is obtained) and the recovery-code
+	// regeneration (critical, section 8.2 "Staff").
+	"POST /v1/staff/auth/step-up":                  "none",
+	"POST /v1/staff/mfa/recovery-codes/regenerate": "critical",
 }
 
 // staffRoutesClassifiedOnArrival lists routes the ADR names that do NOT exist yet (section 8.2 "Classified on
 // arrival"). A slice that registers one of them adds it to staffRouteGolden with its class and removes it here.
 var staffRoutesClassifiedOnArrival = []string{
-	"POST /v1/staff/auth/step-up (S4b): staff chain; the endpoint itself is how step-up is obtained",
-	"POST /v1/staff/mfa/recovery-codes/regenerate (S4b): critical",
 	"staff lifecycle routes of section 14.2 (S6): critical; reads none; platform four-eyes reject/cancel none",
 	"RG restriction clear (ADR 0026 section 12): critical",
 	"jurisdiction evaluation-policy writes, operating-market ceiling/tenant/brand policy writes: critical",

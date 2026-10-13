@@ -262,7 +262,7 @@ func failurePatternAlert(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef
 	var days int
 	if err := tx.QueryRow(ctx, `SELECT count(DISTINCT date_trunc('day', created_at AT TIME ZONE 'UTC'))
 		FROM audit_log
-		WHERE actor_type = 'staff' AND actor_id = $1 AND action = 'staff.mfa_verification_failed'
+		WHERE actor_type = 'staff' AND actor_id = $1 AND action IN ('staff.mfa_verification_failed', 'staff.step_up_failed')
 		  AND created_at > now() - $2::interval`, staff.StaffID, failurePatternWindow).Scan(&days); err != nil {
 		return nil, fmt.Errorf("httpserver: count second-factor failure days: %w", err)
 	}
