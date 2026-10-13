@@ -334,7 +334,7 @@ func keys(m map[string]bool) []string {
 	return out
 }
 
-// The fences themselves: 36 policies, RESTRICTIVE, literal predicate.
+// The fences themselves: 52 policies (9 tables x 4 commands, plus the 4 staff MFA tables of migration 0137 x 4), RESTRICTIVE, literal predicate.
 func TestKYCWorkerFencePolicies_ExactShape_52(t *testing.T) {
 	rt := kycRuntimePool(t, 5)
 	const pred = "(NULLIF(current_setting('app.platform_service_id'::text, true), ''::text) IS DISTINCT FROM 'kyc_submission_worker'::text)"
@@ -359,8 +359,8 @@ func TestKYCWorkerFencePolicies_ExactShape_52(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 36 {
-		t.Fatalf("expected 36 restrictive kyc_worker_fence_* policies, got %d", len(all))
+	if len(all) != 52 {
+		t.Fatalf("expected 52 restrictive kyc_worker_fence_* policies, got %d", len(all))
 	}
 	for _, f := range all {
 		switch f.cmd {

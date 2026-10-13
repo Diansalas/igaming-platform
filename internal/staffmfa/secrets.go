@@ -147,8 +147,9 @@ func (Assertion) MarshalJSON() ([]byte, error) { return json.Marshal(Redacted) }
 
 // EnrolmentMaterial is what a staff member needs to enrol a factor, returned
 // exactly once: for TOTP, the otpauth URI and the base32 secret. It redacts
-// everywhere; only this package's (future, S3) enrolment response encoder
-// reads it, through the unexported accessors.
+// everywhere; the one exported read is RevealForEnrolment, for the single
+// no-store enrolment response (and tests). Callers of RevealFor* must be
+// allow-listed by a static test (S3 entry gate G5).
 type EnrolmentMaterial struct{ f func() enrolmentData }
 
 // enrolmentData is behind a closure for the same reason as factorSecretData.
@@ -179,6 +180,16 @@ func NewTOTPEnrolmentMaterial(issuer, account string, secret FactorSecret) (Enro
 
 func (m EnrolmentMaterial) otpauthURI() string   { return m.d().uri }
 func (m EnrolmentMaterial) secretBase32() string { return m.d().base32 }
+
+// RevealForEnrolment returns the otpauth URI and the base32 secret, for the
+// single no-store enrolment response (ADR 0119 section 6.2), exactly as
+// RecoveryCode.RevealForDisplay and Token.RevealForDelivery do for their
+// types. The S1 design left the raw read to an accessor that no other package
+// could call; the store layer (S2) and the enrolment handler (S3) both need
+// this one. Never log, audit or cache the result.
+func (m EnrolmentMaterial) RevealForEnrolment() (otpauthURI, secretBase32 string) {
+	return m.d().uri, m.d().base32
+}
 
 // String redacts.
 func (EnrolmentMaterial) String() string { return Redacted }

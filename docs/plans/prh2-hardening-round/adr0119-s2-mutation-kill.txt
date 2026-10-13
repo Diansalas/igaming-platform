@@ -1,0 +1,278 @@
+ADR 0119 S2 mutation pass (migration 0137 + internal/staffmfa/store + the db lookup helpers)
+================================================================================================
+Driver: docs/plans/prh2-hardening-round/adr0119-s2-mutation-driver.py (3 workers; each owns a private copy of the
+worktree; SQL mutants REBUILD a private database from the mutated migration and run the whole store suite incl. the
+scratch-database migration tests against it; Go mutants run the suite minus the scratch-database tests against the
+unmutated private database). Private databases only; no role, password or privilege change.
+
+Result (final): total=121 killed=117 survived=4 error=0 (117 from run 4/5, plus the 4 fence mutants Q66-Q69 added by the security review, run 6; Q37/Q40/Q43/Q46 re-run in run 6 and still KILLED). Baseline (unmutated) PASS.
+
+How to read this file / honest history
+  * Run 1 hit a container / PostgreSQL restart ("database system is in recovery mode", torn Go build cache): its
+    ERRORs and the kills around the outage are NOT evidence and are discarded.
+  * Runs 2 and 3 are discarded too: run 3 used a 40-connection runtime pool x 3 workers, exhausted max_connections
+    and produced MASS failures that looked like kills (the same four early tests failed for unrelated mutants). The
+    driver now (a) uses a private GOCACHE, (b) retries infrastructure faults, (c) prints the first assertion text
+    under each FAIL so a kill can be read, and the test pool is 12 connections.
+  * Run 4 is the evidence below. After it, two tests were sharpened (purpose-column mirror image for C10; the status
+    graph message for Q15) and C10, Q15, Q09, Q19, R03, R07, E06 were re-run (run 5); the C10 and Q15 lines below are
+    from run 5. The tests added during the pass (kid binding, lock-wait, Begin predicate, stale-row burn, activate
+    condition, recovery success reset, tenant-arm down refusal, Confirm lockout) are those that killed G05, G08, G03b,
+    C12, C13, E08, Q63 and friends.
+  * Review mutants named in ADR 0119 section 17.8 for this slice: FOR UPDATE dropped from the factor read (G01, G02,
+    C13, E08), the replay "greater than" (the S1 TOTP mutant T01; here G03/G03b/G05 for the conditional burn), the
+    AAD (G17 for the stored tenant; the AAD fields are S1 K08-K10), hard lock does not need a reset (Q18), locked factor
+    compares before refusing (R01 for recovery; S1 for TOTP), challenge not consumed on success (C01, C04, C05).
+
+SURVIVORS (4), each justified as behaviour-equivalent (a second layer makes the mutated code redundant):
+  R03  consumeMatching without the live-code filter: consumeCode's own conditional (consumed_at IS NULL AND
+       revoked_at IS NULL, proven alone by TestConsumeCode_ConditionAloneAllowsExactlyOne / mutant R02 KILLED) refuses a
+       consumed or revoked code, so the filter only saves a round trip.
+  R07  consumeMatching with the MAC predicate neutralised: every live code of the staff member becomes a candidate and
+       VerifyRecoveryCodeHash (constant-time keyed recomputation, mutant C-series analogue) still selects only the
+       matching one; the predicate only narrows the candidate set.
+  Q09  SF002 on factor_type: the CHECK admits the single value 'totp' and the runtime role has no UPDATE grant on the
+       column (TestSF002 asserts 42501), so a change to any other value is impossible; the guard becomes load-bearing
+       when 'webauthn' is added (that amendment must add the test).
+  Q19  SF002 revocation write-once: revoked_at / revoked_reason are non-NULL only on a revoked row, and a revoked row
+       is already frozen by the preceding branch (Q16 KILLED), so this branch is unreachable.
+
+G01 | KILLED | lockActive: FOR UPDATE dropped
+      --- FAIL: TestFactor_Lockout_ParallelGuessingSerialised (0.19s) :: factor_integration_test.go:508: exactly 5 comparisons may happen before the lock: rejected=44 locked=6; --- FAIL: TestLocks_HoldTheRowUntilTheTransactionEnds (1.56s) :: lockwait_integration_test.go:173: the second transaction did not wait for the row lock (returned <nil>)
+G02 | KILLED | lockPending: FOR UPDATE dropped
+      --- FAIL: TestLocks_HoldTheRowUntilTheTransactionEnds (2.31s) :: lockwait_integration_test.go:183: the second transaction did not wait for the row lock (returned <nil>)
+G03 | KILLED | burnStep: the conditional (last_used_step < step) dropped
+      --- FAIL: TestBurnStep_ConditionAloneAllowsExactlyOne (0.15s) :: factor_integration_test.go:341: burnStep succeeded 16 times for one step, want exactly 1; --- FAIL: TestVerifyLocked_StaleRowCannotBurnAStepTwice (0.07s) :: stale_integration_test.go:42: a stale row must not burn the step a second time: {Result:{Outcome:1 AcceptedStep:59729761 AMR:otp} HardLockSet:false IntegrityFai
+G03b | KILLED | activate: the conditional dropped
+      --- FAIL: TestActivate_ConditionRefusesAnAlreadyBurnedStep (0.04s) :: stale_integration_test.go:70: activate must refuse a step at or below the pending row's last_used_step
+G04 | KILLED | recordOutcome: failure counters not persisted
+      --- FAIL: TestRecovery_SuccessResetsShortWindowOnly (0.12s) :: binding_integration_test.go:28: after three failures: {ID:827f22c5-313d-4aba-8d20-d14effba1e10 Status:active LastUsedStep:59729760 FailedCount:0 Failed24h:0 Loc; --- FAIL: TestFactor_Confirm_LockoutSharesCounters (0.10s) :: confirm_integration_test.go:43: a soft-locked pending factor must answer ErrLocked: <nil>; --- FAIL: TestFactor_Confirm_PlantedCiphertextFailsIntegrity (0.16s) :: confirm_integration_test.go:82: integrity failure must count and not activate: {ID:25b31644-2807-47a7-8fa2-d8863fddc4ba Status:pending LastUsedStep:0 FailedCoun
+G05 | KILLED | VerifyDetailed: the burn result ignored
+      --- FAIL: TestVerifyLocked_StaleRowCannotBurnAStepTwice (0.05s) :: stale_integration_test.go:42: a stale row must not burn the step a second time: {Result:{Outcome:1 AcceptedStep:59729761 AMR:otp} HardLockSet:false IntegrityFai
+G06 | KILLED | lockActive: status = 'active' dropped
+      --- FAIL: TestFactor_Lockout_HardLockNeedsReset (0.06s) :: factor_integration_test.go:441: the new factor must verify: {Result:{Outcome:3 AcceptedStep:0 AMR:} HardLockSet:false IntegrityFailure:false}; --- FAIL: TestAdversarial_Residual_R3_RevokingAFactorIsDenialOfServiceNotBypass (0.04s) :: rls_grants_integration_test.go:639: a revoked factor is absent, never accepted: staffmfa/store: persist counters: staffmfa/store: concurrent modification
+G07 | KILLED | lockActive: tenant predicate dropped
+      --- FAIL: TestFactor_TenantIsolation (0.06s) :: factor_integration_test.go:584: tenant A session, A's staff id as platform: want ErrNoActiveFactor, got <nil>
+G08 | KILLED | Begin: staff tenant predicate dropped
+      --- FAIL: TestFactor_Begin_StaffRefTenantMustMatchTheRow (0.03s) :: lockwait_integration_test.go:29: another tenant: want ErrStaffNotEligible, got staffmfa/store: insert pending factor: ERROR: staff_mfa_factors: tenant_id must b
+G09 | KILLED | Begin: earlier pending factor not superseded
+      --- FAIL: TestFactor_Begin_SupersedesAndExpiresPending (0.05s) :: factor_integration_test.go:128: run: staffmfa/store: concurrent modification
+G10 | KILLED | Begin: revocation reasons swapped
+      --- FAIL: TestFactor_Begin_SupersedesAndExpiresPending (0.07s) :: factor_integration_test.go:148: pending lifecycle: map[57e61e6e-b3c9-4c14-a014-e5f4f3cff4bb:revoked/pending_superseded 5bd736dc-9384-4afd-b698-3c6776a3b465:pend
+G11 | KILLED | Confirm: previous active factor not revoked
+      --- FAIL: TestFactor_BeginConfirm_Lifecycle (0.17s) :: factor_integration_test.go:109: run: staffmfa/store: concurrent modification
+G13 | KILLED | Confirm: pending expiry boundary (>= to >)
+      --- FAIL: TestFactor_Begin_SupersedesAndExpiresPending (0.04s) :: factor_integration_test.go:166: expired confirm: <nil>
+G14 | KILLED | recordOutcome: an integrity failure does not count
+      --- FAIL: TestFactor_Confirm_PlantedCiphertextFailsIntegrity (0.05s) :: confirm_integration_test.go:82: integrity failure must count and not activate: {ID:0f0aefdc-28d0-4080-a5af-cd5595314571 Status:pending LastUsedStep:0 FailedCoun; --- FAIL: TestFactor_Integrity_PlantedAndMovedCiphertext (0.06s) :: factor_integration_test.go:557: moved to another staff member of the tenant: an integrity failure must count, failed_count = 0
+G15 | KILLED | VerifyDetailed: integrity flag never set
+      --- FAIL: TestFactor_Integrity_PlantedAndMovedCiphertext (0.10s) :: factor_integration_test.go:553: moved to platform staff: {Result:{Outcome:4 AcceptedStep:0 AMR:} HardLockSet:false IntegrityFailure:false} <nil>; --- FAIL: TestAdversarial_PlantedRowsWithAttackerKeysAreNeverAccepted (0.05s) :: rls_grants_integration_test.go:550: a factor sealed under another key must fail integrity: {Result:{Outcome:4 AcceptedStep:0 AMR:} HardLockSet:false IntegrityFa
+G16 | KILLED | refusalFor: locked reported as rejected
+      --- FAIL: TestFactor_Confirm_LockoutSharesCounters (0.04s) :: confirm_integration_test.go:43: a soft-locked pending factor must answer ErrLocked: staffmfa/store: assertion rejected
+G16b | KILLED | refusalFor: hard lock reported as soft
+      --- FAIL: TestFactor_Confirm_LockoutSharesCounters (0.11s) :: confirm_integration_test.go:59: a hard-locked pending factor must answer ErrHardLocked: staffmfa/store: factor locked
+G16c | KILLED | refusalFor: integrity reported as rejected
+      --- FAIL: TestFactor_Confirm_PlantedCiphertextFailsIntegrity (0.04s) :: confirm_integration_test.go:79: a planted pending ciphertext must fail integrity: staffmfa/store: assertion rejected
+G17 | KILLED | scanFactor: tenant dropped from the AAD (platform and tenant ciphertext interchangeable)
+      --- FAIL: TestRecovery_SuccessResetsShortWindowOnly (0.10s) :: binding_integration_test.go:19: run: staffmfa/store: factor integrity failure; --- FAIL: TestFactor_Confirm_LockoutSharesCounters (0.04s) :: confirm_integration_test.go:39: wrong confirm 0: staffmfa/store: factor integrity failure; --- FAIL: TestFactor_BeginConfirm_Lifecycle (0.03s) :: factor_integration_test.go:70: wrong code: staffmfa/store: factor integrity failure
+R01 | KILLED | ConsumeRecoveryCode: lock state not checked before the lookup
+      --- FAIL: TestRecovery_ConcurrentUse_ExactlyOneWins (0.18s) :: recovery_integration_test.go:157: staffmfa/store: persist counters: ERROR: new row for relation "staff_mfa_factors" violates check constraint "staff_mfa_factors; --- FAIL: TestRecovery_LockedFactorRefusesBeforeLookup_SharedBudget (0.18s) :: recovery_integration_test.go:238: locked recovery: {Result:{Outcome:1 AcceptedStep:0 AMR:} HardLockSet:false IntegrityFailure:false} live=9
+R02 | KILLED | consumeCode: single-use condition dropped
+      --- FAIL: TestConsumeCode_ConditionAloneAllowsExactlyOne (0.11s) :: recovery_integration_test.go:214: consumeCode reported success 16 times, want exactly 1
+R03 | SURVIVED | consumeMatching: live-code filter dropped (second layer behind consumeCode)
+R04 | KILLED | IssueRecoveryCodes: the old batch is not revoked
+      --- FAIL: TestRecovery_IssueStoresOnlyKeyedMACs (0.08s) :: recovery_integration_test.go:77: after regeneration: 20 live
+R05 | KILLED | IssueRecoveryCodes: the factor lock / active-factor requirement dropped
+      --- FAIL: TestRecovery_IssueStoresOnlyKeyedMACs (0.10s) :: recovery_integration_test.go:93: issue without a factor: <nil>
+R06 | KILLED | ConsumeRecoveryCode: a success does not reset the short window
+      --- FAIL: TestRecovery_SuccessResetsShortWindowOnly (0.13s) :: binding_integration_test.go:34: a success resets the short window only: {ID:d331ba8e-c1de-48dd-8396-f7e5648f1388 Status:active LastUsedStep:59729760 FailedCount
+R07 | SURVIVED | consumeMatching: MAC match dropped from the lookup (verify layer must hold)
+C01 | KILLED | LockChallenge: consumed check dropped
+      --- FAIL: TestChallenge_IssueResolveLockConsume (0.05s) :: tokens_integration_test.go:106: a consumed challenge must be invalid: <nil>
+C02 | KILLED | LockChallenge: expiry boundary (>= to >)
+      --- FAIL: TestChallenge_IssueResolveLockConsume (0.04s) :: tokens_integration_test.go:96: expired: <nil>
+C03 | KILLED | LockChallenge: attempts-left check dropped
+      --- FAIL: TestTokens_ZeroAttemptsAndRevokedAreUnusable (0.06s) :: confirm_integration_test.go:97: a challenge with no attempts left must be invalid: <nil>
+C04 | KILLED | DecrementChallengeAttempts: exhaustion does not consume
+      --- FAIL: TestTokens_ZeroAttemptsAndRevokedAreUnusable (0.06s) :: confirm_integration_test.go:112: decrementing a challenge with no attempts left: staffmfa/store: decrement challenge attempts: expected 1 arguments, got 2; --- FAIL: TestChallenge_AttemptsExhaustAndConsume (0.04s) :: tokens_integration_test.go:139: attempts left = 0, want 4
+C05 | KILLED | ConsumeChallenge: single-use condition dropped
+      --- FAIL: TestConsumeChallenge_ConditionAloneAllowsExactlyOne (0.12s) :: tokens_integration_test.go:224: ConsumeChallenge succeeded 12 times, want 1
+C06 | KILLED | DecrementChallengeAttempts: conditions dropped
+      --- FAIL: TestTokens_ZeroAttemptsAndRevokedAreUnusable (0.06s) :: confirm_integration_test.go:112: decrementing a challenge with no attempts left: staffmfa/store: decrement challenge attempts: ERROR: new row for relation "staf
+C07 | KILLED | IssueChallenge: attempts
+      --- FAIL: TestChallenge_IssueResolveLockConsume (0.05s) :: tokens_integration_test.go:75: lock: {ID:70119ac3-9a6b-421d-9ee2-eb5c18db06cf Staff:{StaffID:d87e8698-b16d-4ca7-9759-71dd55d9b78c TenantID:61a3692b-3450-4a12-83; --- FAIL: TestChallenge_AttemptsExhaustAndConsume (0.07s) :: tokens_integration_test.go:139: attempts left = 2, want 4; --- FAIL: TestSF005_SF006_ChallengeAndTokenGuards (0.07s) :: triggers_integration_test.go:378: decrement: ERROR: staff_auth_challenges: attempts_left only decreases (SF005) (SQLSTATE SF005)
+C08 | KILLED | IssueChallenge: TTL
+      --- FAIL: TestChallenge_IssueResolveLockConsume (0.06s) :: tokens_integration_test.go:75: lock: {ID:37330ca6-2fd6-4f3c-ad7d-c4b5132a62a7 Staff:{StaffID:39382bb1-7aa3-4053-b85d-a2f40f2e82c8 TenantID:b7bb4e69-1fe5-48b7-80
+C09 | KILLED | ResolveChallenge: token verification dropped (MAC equality of the lookup is the first layer)
+      --- FAIL: TestTokens_MACKidMustMatchTheRow (0.07s) :: lockwait_integration_test.go:61: ResolveChallenge with a mismatched row kid: <nil>
+C10 | KILLED | ResolveChallenge: purpose column compare dropped (the purpose is also inside the MAC)
+      --- FAIL: TestPurposeIsBoundInsideTheKeyedMAC (0.05s) :: binding_integration_test.go:71: a row whose purpose column says enrol must not resolve as mfa even with an mfa MAC: <nil>
+C11 | KILLED | challenge kinds: enrol uses the mfa MAC kind (the purpose column must not be the only separation)
+      --- FAIL: TestPurposeIsBoundInsideTheKeyedMAC (0.05s) :: binding_integration_test.go:60: an mfa-purpose MAC under an enrol row must not resolve as enrol: <nil>
+C12 | KILLED | LockChallenge: token verification dropped
+      --- FAIL: TestTokens_MACKidMustMatchTheRow (0.07s) :: lockwait_integration_test.go:68: LockChallenge with a mismatched row kid: <nil>
+C13 | KILLED | LockChallenge: FOR UPDATE dropped
+      --- FAIL: TestLocks_HoldTheRowUntilTheTransactionEnds (0.04s) :: lockwait_integration_test.go:148: the second transaction did not wait for the row lock (returned <nil>)
+E01 | KILLED | LockEnrolmentToken: revoked check dropped
+      --- FAIL: TestEnrolmentToken_ReissueRevokesLiveOne_RevokedIsInvalid (0.07s) :: tokens_integration_test.go:387: a superseded token must be revoked: <nil>
+E02 | KILLED | ConsumeEnrolmentToken: revoked condition dropped
+      --- FAIL: TestTokens_ZeroAttemptsAndRevokedAreUnusable (0.07s) :: confirm_integration_test.go:126: a revoked token must not be consumable: staffmfa/store: consume enrolment token: ERROR: staff_enrolment_tokens: a token is cons
+E03 | KILLED | IssueEnrolmentToken: the live token is not revoked
+      --- FAIL: TestEnrolmentToken_ReissueRevokesLiveOne_RevokedIsInvalid (0.05s) :: tokens_integration_test.go:381: run: staffmfa/store: concurrent modification
+E04 | KILLED | LockEnrolmentToken: expiry boundary
+      --- FAIL: TestEnrolmentToken_IssueResolveConsume_TTLByPurpose (0.08s) :: tokens_integration_test.go:362: invite expired: <nil>
+E05 | KILLED | ConsumeEnrolmentToken: single-use condition dropped
+      --- FAIL: TestEnrolmentToken_ConcurrentConsumeExactlyOne_AndIsolation (0.08s) :: tokens_integration_test.go:466: ConsumeEnrolmentToken succeeded 12 times, want 1
+E06 | KILLED | enrolment kinds: bootstrap uses the invite MAC kind
+      --- FAIL: TestPurposeIsBoundInsideTheKeyedMAC (0.05s) :: binding_integration_test.go:84: an invite-purpose MAC under a bootstrap row must not resolve as bootstrap: <nil>; --- FAIL: TestEnrolmentToken_IssueResolveConsume_TTLByPurpose (0.13s) :: tokens_integration_test.go:343: bootstrap TTL = 72h0m0s, want 24h0m0s
+E08 | KILLED | LockEnrolmentToken: FOR UPDATE dropped
+      --- FAIL: TestLocks_HoldTheRowUntilTheTransactionEnds (0.80s) :: lockwait_integration_test.go:161: the second transaction did not wait for the row lock (returned <nil>)
+E07 | KILLED | LockEnrolmentToken: token verification dropped
+      --- FAIL: TestTokens_MACKidMustMatchTheRow (0.04s) :: lockwait_integration_test.go:89: LockEnrolmentToken with a mismatched row kid: <nil>
+D01 | KILLED | lookup helper: length check dropped
+      --- FAIL: TestRLS_PreTenantLookupPolicies (0.12s) :: rls_grants_integration_test.go:735: fn must not run
+D02 | KILLED | lookup helper: hex alphabet widened
+      --- FAIL: TestRLS_PreTenantLookupPolicies (0.10s) :: rls_grants_integration_test.go:735: fn must not run
+Q01 | KILLED | SF001: a differing supplied tenant admitted
+      --- FAIL: TestSF001_TenantForcedOnEveryTable (0.05s) :: triggers_integration_test.go:92: staff_enrolment_tokens: supplied tenant B for tenant A staff: want SQLSTATE SF001, got "23505" (ERROR: duplicate key value viol
+Q02 | KILLED | SF001: an invisible staff member admitted
+      --- FAIL: TestSF001_TenantForcedOnEveryTable (0.07s) :: triggers_integration_test.go:97: staff_mfa_factors: scope B, staff A: want SQLSTATE SF001, got "42501" (ERROR: new row violates row-level security policy for ta
+Q03 | KILLED | SF001: tenant not forced
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (4.50s) :: migration_0137_integration_test.go:331: staff_mfa_factors/tenant: plant row: ERROR: new row violates row-level security policy for table "staff_mfa_factors" (SQ; --- FAIL: TestSF001_TenantForcedOnEveryTable (0.04s) :: triggers_integration_test.go:77: staff_mfa_recovery_codes: forced insert: ERROR: new row violates row-level security policy for table "staff_mfa_recovery_codes"; --- FAIL: TestUniqueIndexes (0.06s) :: triggers_integration_test.go:293: staff_mfa_recovery_codes: ERROR: new row violates row-level security policy for table "staff_mfa_recovery_codes" (SQLSTATE 425
+Q04 | KILLED | SF099: DELETE allowed
+      --- FAIL: TestSF099_AppendOnly_EveryRole (0.05s) :: triggers_integration_test.go:429: staff_mfa_factors: owner DELETE: want SQLSTATE SF099, got "" (<nil>)
+Q05 | KILLED | SF099: TRUNCATE allowed
+      --- FAIL: TestSF099_AppendOnly_EveryRole (0.11s) :: triggers_integration_test.go:431: staff_mfa_factors: owner TRUNCATE: want SQLSTATE SF099, got "" (<nil>)
+Q06 | KILLED | SF002: factor id mutable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.06s) :: triggers_integration_test.go:125: immutable id: want SQLSTATE SF002, got "" (<nil>)
+Q07 | KILLED | SF002: factor tenant_id mutable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.05s) :: triggers_integration_test.go:125: immutable tenant_id: want SQLSTATE SF002, got "42501" (ERROR: new row violates row-level security policy for table "staff_mfa_
+Q08 | KILLED | SF002: factor staff_user_id mutable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.06s) :: triggers_integration_test.go:125: immutable staff_user_id: want SQLSTATE SF002, got "" (<nil>)
+Q09 | SURVIVED | SF002: factor_type mutable
+Q10 | KILLED | SF002: secret_kid mutable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.07s) :: triggers_integration_test.go:125: immutable secret_kid: want SQLSTATE SF002, got "" (<nil>)
+Q11 | KILLED | SF002: secret_nonce mutable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.06s) :: triggers_integration_test.go:125: immutable secret_nonce: want SQLSTATE SF002, got "" (<nil>)
+Q12 | KILLED | SF002: secret_ct mutable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.03s) :: triggers_integration_test.go:125: immutable secret_ct: want SQLSTATE SF002, got "" (<nil>)
+Q13 | KILLED | SF002: factor created_at mutable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.10s) :: triggers_integration_test.go:125: immutable created_at: want SQLSTATE SF002, got "" (<nil>)
+Q14 | KILLED | SF003: last_used_step may decrease
+      --- FAIL: TestSF002_SF003_FactorGuard (0.09s) :: triggers_integration_test.go:133: last_used_step decrease: want SQLSTATE SF003, got "" (<nil>)
+Q15 | KILLED | SF002: active -> pending admitted
+      --- FAIL: TestSF002_SF003_FactorGuard (0.05s) :: triggers_integration_test.go:132: active -> pending must be refused by the status graph itself: ERROR: staff_mfa_factors: activated_at is write-once (SF002) (SQ
+Q16 | KILLED | SF002: a revoked factor is not frozen
+      --- FAIL: TestSF002_SF003_FactorGuard (0.07s) :: triggers_integration_test.go:150: revoked frozen (counters): want SQLSTATE SF002, got "" (<nil>)
+Q17 | KILLED | SF002: activated_at not write-once
+      --- FAIL: TestSF002_SF003_FactorGuard (0.06s) :: triggers_integration_test.go:138: activated_at rewrite: want SQLSTATE SF002, got "" (<nil>)
+Q18 | KILLED | SF002: hard_locked_at not write-once
+      --- FAIL: TestFactor_Lockout_HardLockNeedsReset (0.11s) :: factor_integration_test.go:428: clearing a hard lock by SQL: want SQLSTATE SF002, got "" (<nil>); --- FAIL: TestSF002_SF003_FactorGuard (0.09s) :: triggers_integration_test.go:142: hard_locked_at cleared: want SQLSTATE SF002, got "23514" (ERROR: new row for relation "staff_mfa_factors" violates check const
+Q19 | SURVIVED | SF002: revocation not write-once (second layer behind the frozen-revoked branch)
+Q20 | KILLED | SF002: pending expiry extendable
+      --- FAIL: TestSF002_SF003_FactorGuard (0.08s) :: triggers_integration_test.go:158: pending expiry extended: want SQLSTATE SF002, got "" (<nil>)
+Q21 | KILLED | SF004: code_mac mutable
+      --- FAIL: TestSF004_RecoveryCodeConsumeOrRevokeOnly (0.08s) :: triggers_integration_test.go:341: recovery code_mac: want SQLSTATE SF004, got "" (<nil>)
+Q22 | KILLED | SF004: consumed_at / revoked_at not write-once
+      --- FAIL: TestSF004_RecoveryCodeConsumeOrRevokeOnly (0.07s) :: triggers_integration_test.go:347: recovery consumed rewrite: want SQLSTATE SF004, got "" (<nil>)
+Q23 | KILLED | SF004: both consumed and revoked (the CHECK raises a different code)
+      --- FAIL: TestSF004_RecoveryCodeConsumeOrRevokeOnly (0.08s) :: triggers_integration_test.go:349: recovery consumed AND revoked: want SQLSTATE SF004, got "23514" (ERROR: new row for relation "staff_mfa_recovery_codes" violat
+Q24 | KILLED | SF005: attempts may increase
+      --- FAIL: TestSF005_SF006_ChallengeAndTokenGuards (0.04s) :: triggers_integration_test.go:380: attempts increased: want SQLSTATE SF005, got "" (<nil>)
+Q25 | KILLED | SF005: consumed challenge not frozen
+      --- FAIL: TestSF005_SF006_ChallengeAndTokenGuards (0.06s) :: triggers_integration_test.go:387: consumed challenge frozen (attempts): want SQLSTATE SF005, got "" (<nil>)
+Q26 | KILLED | SF005: challenge token_mac mutable
+      --- FAIL: TestSF005_SF006_ChallengeAndTokenGuards (0.05s) :: triggers_integration_test.go:375: challenge token_mac: want SQLSTATE SF005, got "" (<nil>)
+Q27 | KILLED | SF006: issued_by mutable
+      --- FAIL: TestSF005_SF006_ChallengeAndTokenGuards (0.11s) :: triggers_integration_test.go:406: token issued_by: want SQLSTATE SF006, got "" (<nil>)
+Q28 | KILLED | SF006: both consumed and revoked (the CHECK raises a different code)
+      --- FAIL: TestSF005_SF006_ChallengeAndTokenGuards (0.07s) :: triggers_integration_test.go:412: token consumed AND revoked: want SQLSTATE SF006, got "23514" (ERROR: new row for relation "staff_enrolment_tokens" violates ch
+Q29 | KILLED | C4 CHECK dropped
+      --- FAIL: TestMigration0137_UpDownUp_WholeSchema (5.39s) :: migration_0137_integration_test.go:184: 0137 snapshot diff lacks "staff_mfa_factors_hard_lock_consistent":; --- FAIL: TestChecks_FactorTable (0.05s) :: triggers_integration_test.go:199: C4: count 10 without hard_locked_at: want CHECK staff_mfa_factors_hard_lock_consistent, got code="" constraint="" (<nil>)
+Q30 | KILLED | failed_count upper bound dropped
+      --- FAIL: TestChecks_FactorTable (0.05s) :: triggers_integration_test.go:205: failed_count 5: want CHECK staff_mfa_factors_failed_count_range, got code="" constraint="" (<nil>)
+Q31 | KILLED | pending-expiry CHECK dropped
+      --- FAIL: TestChecks_FactorTable (0.06s) :: triggers_integration_test.go:214: pending without an expiry: want CHECK staff_mfa_factors_pending_expiry, got code="" constraint="" (<nil>)
+Q32 | KILLED | one-active unique index made non-unique
+      --- FAIL: TestUniqueIndexes (0.06s) :: triggers_integration_test.go:281: second active factor: want SQLSTATE 23505, got "" (<nil>)
+Q33 | KILLED | one-pending unique index made non-unique
+      --- FAIL: TestUniqueIndexes (0.05s) :: triggers_integration_test.go:285: second pending factor: want SQLSTATE 23505, got "" (<nil>)
+Q34 | KILLED | one-live-token unique index made non-unique
+      --- FAIL: TestUniqueIndexes (0.11s) :: triggers_integration_test.go:299: second live invite token: want SQLSTATE 23505, got "" (<nil>)
+Q35 | KILLED | recovery code_mac UNIQUE dropped
+      --- FAIL: TestUniqueIndexes (0.08s) :: triggers_integration_test.go:295: staff_mfa_recovery_codes: duplicate MAC: want SQLSTATE 23505, got "" (<nil>)
+Q36 | KILLED | challenge token_mac UNIQUE dropped
+      --- FAIL: TestUniqueIndexes (0.05s) :: triggers_integration_test.go:295: staff_auth_challenges: duplicate MAC: want SQLSTATE 23505, got "" (<nil>)
+Q37 | KILLED | factors USING: platform arm visible from tenant sessions
+      --- FAIL: TestRLS_DualScope_EveryTable (0.11s) :: rls_grants_integration_test.go:127: staff_mfa_factors / unknown tenant: visible staff map[a5b54166-7950-4135-8123-320b6173a785:true], want map[]; --- FAIL: TestRLS_VisibilityParityWithStaffUsers (0.14s) :: rls_grants_integration_test.go:267: tenant B / staff_mfa_factors: visibility map[15414f39-f561-4595-b9a8-7c3bb2555a01:true 931c73b0-2dca-4b7d-b74b-20fd29d310f0:; --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.05s) :: rls_grants_integration_test.go:370: staff_mfa_factors dual scope policy == staff_users':
+Q38 | KILLED | challenges USING: platform arm visible from tenant sessions
+      --- FAIL: TestRLS_DualScope_EveryTable (0.17s) :: rls_grants_integration_test.go:127: staff_auth_challenges / unknown tenant: visible staff map[3aba1936-4f86-436c-b050-865561f89d78:true], want map[]; --- FAIL: TestRLS_VisibilityParityWithStaffUsers (0.08s) :: rls_grants_integration_test.go:267: tenant A / staff_auth_challenges: visibility map[025f9bed-1eb3-41e3-ad0d-c06c83b04e61:true 27932fca-b7a3-4216-8510-b2728fa48; --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.04s) :: rls_grants_integration_test.go:370: staff_auth_challenges dual scope policy == staff_users':
+Q39 | KILLED | recovery codes WITH CHECK weakened
+      --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.04s) :: rls_grants_integration_test.go:370: staff_mfa_recovery_codes dual scope policy == staff_users':
+Q40 | KILLED | FORCE ROW LEVEL SECURITY dropped on recovery codes
+      --- FAIL: TestMigration0137_UpDownUp_WholeSchema (4.82s) :: migration_0137_integration_test.go:184: 0137 snapshot diff lacks "table:staff_mfa_recovery_codes:rls=true:force=true":; --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (4.62s) :: migration_0137_integration_test.go:360: staff_mfa_factors/platform: a refused down drops nothing and leaves FORCE RLS on: tables=4 functions=7 forced=3 err=<nil; --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.04s) :: rls_grants_integration_test.go:356: staff_mfa_recovery_codes RLS flags:
+Q41 | KILLED | challenge lookup policy: the no-tenant conjunct dropped
+      --- FAIL: TestRLS_PreTenantLookupPolicies (0.07s) :: rls_grants_integration_test.go:685: staff_auth_challenges: tenant B + tenant A's MAC saw 1 of A's rows
+Q42 | KILLED | enrolment lookup policy: the no-tenant conjunct dropped
+      --- FAIL: TestRLS_PreTenantLookupPolicies (0.08s) :: rls_grants_integration_test.go:685: staff_enrolment_tokens: tenant B + tenant A's MAC saw 1 of A's rows
+Q43 | KILLED | acting fence (select) open
+      --- FAIL: TestRLS_RestrictiveFences_NoActingNoWorkerAccess (0.07s) :: rls_grants_integration_test.go:202: staff_mfa_factors / acting principal only: a fenced session saw map[c7d4ca89-7dfa-4a1a-babc-cf2137ba306e:true]; --- FAIL: TestRLS_VisibilityParityWithStaffUsers (0.13s) :: rls_grants_integration_test.go:262: acting full / staff_mfa_factors: fenced session saw map[38016b82-b75b-4707-a647-637e3421a2a5:true]; --- FAIL: TestCatalog_RestrictiveFenceParity (0.04s) :: rls_grants_integration_test.go:315: staff_mfa_factors / acting_fence_select/SELECT: fence family differs on "financial_acting_gucs_present":
+Q44 | KILLED | acting fence (insert) open
+      --- FAIL: TestRLS_RestrictiveFences_NoActingNoWorkerAccess (0.11s) :: rls_grants_integration_test.go:217: staff_mfa_factors / acting tenant + principal, tenant scope: a fenced INSERT must be refused, got <nil>; --- FAIL: TestCatalog_RestrictiveFenceParity (0.05s) :: rls_grants_integration_test.go:315: staff_mfa_factors / acting_fence_insert/INSERT: fence family differs on "financial_acting_gucs_present":
+Q45 | KILLED | acting fence (update) open
+      --- FAIL: TestCatalog_RestrictiveFenceParity (0.05s) :: rls_grants_integration_test.go:315: staff_mfa_factors / acting_fence_update/UPDATE: fence family differs on "financial_acting_gucs_present":
+Q46 | KILLED | KYC worker fence (select) open
+      --- FAIL: TestRLS_RestrictiveFences_NoActingNoWorkerAccess (0.09s) :: rls_grants_integration_test.go:202: staff_mfa_factors / kyc worker, tenant scope: a fenced session saw map[33bff1dd-f94a-4832-956a-88efb8a2f6df:true]; --- FAIL: TestRLS_VisibilityParityWithStaffUsers (0.11s) :: rls_grants_integration_test.go:262: kyc worker / staff_mfa_factors: fenced session saw map[eacb4e87-1503-4a24-a011-14c1d360993b:true]; --- FAIL: TestCatalog_RestrictiveFenceParity (0.05s) :: rls_grants_integration_test.go:315: staff_mfa_factors / kyc_worker_fence_select/SELECT: fence family differs on "kyc_submission_worker":
+Q47 | KILLED | KYC worker fence (delete) missing
+      --- FAIL: TestCatalog_RestrictiveFenceParity (0.06s) :: rls_grants_integration_test.go:305: staff_mfa_factors has 7 restrictive policies, staff_users has 8
+Q48 | KILLED | acting fence (delete) open
+      --- FAIL: TestCatalog_RestrictiveFenceParity (0.05s) :: rls_grants_integration_test.go:315: staff_mfa_factors / acting_fence_delete/DELETE: fence family differs on "financial_acting_gucs_present":
+Q49 | KILLED | runtime may DELETE factors
+      --- FAIL: TestGrants_RuntimeMatrix (0.05s) :: rls_grants_integration_test.go:462: staff_mfa_factors: runtime table privileges = map[DELETE:true INSERT:true REFERENCES:false SELECT:true TRIGGER:false TRUNCAT; --- FAIL: TestStatic_InitAppRoleSQLMatchesMigration0137Grants (0.01s) :: static_test.go:150: migration 0137 grants for staff_mfa_factors = "TABLE:DELETE,INSERT,SELECT;UPDATE(activated_at,failed_24h_count,failed_24h_start,failed_count; --- FAIL: TestSF099_AppendOnly_EveryRole (0.05s) :: triggers_integration_test.go:428: staff_mfa_factors: runtime DELETE: want SQLSTATE 42501, got "SF099" (ERROR: staff_mfa_factors: rows are never deleted (ADR 011
+Q50 | KILLED | runtime may UPDATE secret_ct
+      --- FAIL: TestGrants_RuntimeMatrix (0.07s) :: rls_grants_integration_test.go:468: staff_mfa_factors: runtime UPDATE columns = [activated_at failed_24h_count failed_24h_start failed_count failed_window_start; --- FAIL: TestStatic_InitAppRoleSQLMatchesMigration0137Grants (0.00s) :: static_test.go:150: migration 0137 grants for staff_mfa_factors = "TABLE:INSERT,SELECT;UPDATE(activated_at,failed_24h_count,failed_24h_start,failed_count,failed; --- FAIL: TestSF002_SF003_FactorGuard (0.10s) :: triggers_integration_test.go:173: runtime update of secret_ct: want SQLSTATE 42501, got "" (<nil>)
+Q51 | KILLED | default privileges left on recovery codes (table-level UPDATE / DELETE)
+      --- FAIL: TestGrants_RuntimeMatrix (0.07s) :: rls_grants_integration_test.go:462: staff_mfa_recovery_codes: runtime table privileges = map[DELETE:true INSERT:true REFERENCES:false SELECT:true TRIGGER:false ; --- FAIL: TestSF099_AppendOnly_EveryRole (0.05s) :: triggers_integration_test.go:428: staff_mfa_recovery_codes: runtime DELETE: want SQLSTATE 42501, got "SF099" (ERROR: staff_mfa_recovery_codes: rows are never de
+Q52 | KILLED | runtime may UPDATE token_mac
+      --- FAIL: TestGrants_RuntimeMatrix (0.07s) :: rls_grants_integration_test.go:468: staff_enrolment_tokens: runtime UPDATE columns = [consumed_at revoked_at token_mac], want [consumed_at revoked_at]; --- FAIL: TestStatic_InitAppRoleSQLMatchesMigration0137Grants (0.00s) :: static_test.go:150: migration 0137 grants for staff_enrolment_tokens = "TABLE:INSERT,SELECT;UPDATE(consumed_at,revoked_at,token_mac)", want "TABLE:INSERT,SELECT
+Q53 | KILLED | sf_deny_delete: search_path not pinned
+      --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.06s) :: rls_grants_integration_test.go:401: sf_* functions:; --- FAIL: TestStatic_Migration0137_Scope (0.01s) :: static_test.go:190: functions=7 search_path pins=6, want 7 and 7
+Q54 | KILLED | sf_no_truncate trigger missing on factors
+      --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.06s) :: rls_grants_integration_test.go:380: factor triggers:; --- FAIL: TestSF099_AppendOnly_EveryRole (0.09s) :: triggers_integration_test.go:431: staff_mfa_factors: owner TRUNCATE: want SQLSTATE SF099, got "" (<nil>)
+Q55 | KILLED | factor guard is AFTER, not BEFORE
+      --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.06s) :: rls_grants_integration_test.go:380: factor triggers:; --- FAIL: TestSF002_SF003_FactorGuard (0.03s) :: triggers_integration_test.go:125: immutable tenant_id: want SQLSTATE SF002, got "42501" (ERROR: new row violates row-level security policy for table "staff_mfa_
+Q56 | KILLED | SF001 trigger missing on challenges
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (4.76s) :: migration_0137_integration_test.go:331: staff_auth_challenges/tenant: plant row: ERROR: new row violates row-level security policy for table "staff_auth_challen; --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.06s) :: rls_grants_integration_test.go:386: challenge triggers:; --- FAIL: TestChallenge_IssueRejectsBadInput (0.07s) :: tokens_integration_test.go:288: issue for another tenant's staff: want SQLSTATE SF001, got "42501" (staffmfa/store: insert challenge: ERROR: new row violates ro
+Q57 | KILLED | SF001 function SECURITY DEFINER
+      --- FAIL: TestCatalog_PoliciesFlagsTriggersFunctions (0.06s) :: rls_grants_integration_test.go:401: sf_* functions:; --- FAIL: TestStatic_Migration0137_Scope (0.03s) :: static_test.go:185: migration 0137 up contains a SECURITY DEFINER function (belongs to a later slice or is forbidden)
+Q58 | KILLED | pre-flight: FORCE RLS check dropped
+      --- FAIL: TestMigration0137_PreFlight_RefusesFenceDrift (4.38s) :: migration_0137_integration_test.go:254: FORCE ROW LEVEL SECURITY lifted: want SF098, got <nil>
+Q59 | KILLED | pre-flight: unexpected-fence check dropped
+      --- FAIL: TestMigration0137_PreFlight_RefusesFenceDrift (4.52s) :: migration_0137_integration_test.go:254: a NEW restrictive fence on staff: want SF098, got <nil>
+Q60 | KILLED | pre-flight: missing-fence check dropped
+      --- FAIL: TestMigration0137_PreFlight_RefusesFenceDrift (4.80s) :: migration_0137_integration_test.go:254: missing acting fence (update): want SF098, got <nil>
+Q61 | KILLED | down: enrolment tokens not counted
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (5.54s) :: migration_0137_integration_test.go:343: staff_enrolment_tokens/platform: want SF097, got <nil>
+Q62 | KILLED | down: factors not counted
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (5.36s) :: migration_0137_integration_test.go:343: staff_mfa_factors/platform: want SF097, got <nil>
+Q63 | KILLED | down: FORCE RLS not lifted for the count (RLS-blind count)
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (5.60s) :: migration_0137_integration_test.go:343: staff_mfa_factors/tenant: want SF097, got <nil>
+Q63b | KILLED | down: FORCE RLS not lifted for the recovery-code count
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (5.55s) :: migration_0137_integration_test.go:343: staff_mfa_recovery_codes/tenant: want SF097, got <nil>
+Q63c | KILLED | down: FORCE RLS not lifted for the challenge count
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (4.50s) :: migration_0137_integration_test.go:343: staff_auth_challenges/tenant: want SF097, got <nil>
+Q63d | KILLED | down: FORCE RLS not lifted for the token count
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (4.46s) :: migration_0137_integration_test.go:343: staff_enrolment_tokens/tenant: want SF097, got <nil>
+Q64 | KILLED | down: never refuses
+      --- FAIL: TestMigration0137_Down_RefusesWhileDataExists (4.47s) :: migration_0137_integration_test.go:343: staff_mfa_factors/platform: want SF097, got <nil>
+Q65 | KILLED | pre-flight: FORCE RLS check made vacuous
+      --- FAIL: TestMigration0137_PreFlight_RefusesFenceDrift (4.02s) :: migration_0137_integration_test.go:254: FORCE ROW LEVEL SECURITY lifted: want SF098, got <nil>
+Q66 | KILLED | player scope fence open
+      --- FAIL: TestFences_PlayerAndServiceSessionsAreRefused (0.10s) :: fences_integration_test.go:56: player/read: a fenced session touched 1 rows; --- FAIL: TestRLS_DualScope_EveryTable (0.09s) :: rls_grants_integration_test.go:127: staff_mfa_factors / player GUC, A: visible staff map[ca5238f1-c259-4bd7-849c-069a5ea2e2f1:true], want map[]; --- FAIL: TestRLS_RestrictiveFences_NoActingNoWorkerAccess (0.09s) :: rls_grants_integration_test.go:209: staff_mfa_factors / player scope, tenant: a fenced session saw map[0a78bab6-28ca-40c0-99f4-5774313710a2:true]
+Q67 | KILLED | platform service fence open
+      --- FAIL: TestFences_PlayerAndServiceSessionsAreRefused (0.09s) :: fences_integration_test.go:56: alert_dispatcher/for update: a fenced session touched 1 rows; --- FAIL: TestRLS_RestrictiveFences_NoActingNoWorkerAccess (0.06s) :: rls_grants_integration_test.go:209: staff_mfa_factors / service sportsbook_catalogue_sync, platform: a fenced session saw map[f5ab6d5b-9ab1-4436-80e0-5b310071de; --- FAIL: TestRLS_VisibilityParityWithStaffUsers (0.08s) :: rls_grants_integration_test.go:270: alert dispatcher / staff_mfa_factors: fenced session saw map[2390a2c9-712e-4241-84d0-12e0c664e195:true]
+Q68 | KILLED | player scope fence missing
+      --- FAIL: TestFences_PlayerAndServiceSessionsAreRefused (0.08s) :: fences_integration_test.go:56: player/codes: a fenced session touched 10 rows; --- FAIL: TestRLS_DualScope_EveryTable (0.09s) :: rls_grants_integration_test.go:127: staff_mfa_factors / player GUC, A: visible staff map[883afbb3-d5ea-4bc6-9787-e2b713799e32:true], want map[]; --- FAIL: TestRLS_RestrictiveFences_NoActingNoWorkerAccess (0.07s) :: rls_grants_integration_test.go:209: staff_mfa_factors / player scope, no tenant: a fenced session saw map[d572f99f-f2ea-465d-804a-fd8cbc829614:true]
+Q69 | KILLED | platform service fence narrowed to the KYC worker only (the F1 gap)
+      --- FAIL: TestFences_PlayerAndServiceSessionsAreRefused (0.07s) :: fences_integration_test.go:56: alert_dispatcher/revoke: a fenced session touched 1 rows; --- FAIL: TestRLS_RestrictiveFences_NoActingNoWorkerAccess (0.09s) :: rls_grants_integration_test.go:209: staff_mfa_factors / service sportsbook_catalogue_sync, platform: a fenced session saw map[5c113cba-f260-45f5-9059-b6bc924a0e; --- FAIL: TestRLS_VisibilityParityWithStaffUsers (0.10s) :: rls_grants_integration_test.go:270: alert dispatcher / staff_mfa_factors: fenced session saw map[1815ab54-75d5-4485-8969-e4394b4017ac:true]
+SUMMARY | total=121 killed=117 survived=4 error=0

@@ -185,10 +185,13 @@ func seedFencedRows(t *testing.T, owner *Pool) map[string]uuid.UUID {
 	return ids
 }
 
-// fencedTables are the nine tables of ADR 0106 section 3.3.
+// fencedTables are the nine tables of ADR 0106 section 3.3, plus the four staff MFA tables of migration 0137
+// (ADR 0119 S2, review N3): each replicates every restrictive fence of staff_users, the KYC worker fence
+// included, so the worker sees nothing of them either.
 var fencedTables = []string{
 	"staff_users", "audit_log", "sessions", "login_attempts", "risk_rules",
 	"player_restrictions", "persons", "asset_operation_eligibility", "open_bet_self_exclusion_policies",
+	"staff_mfa_factors", "staff_mfa_recovery_codes", "staff_auth_challenges", "staff_enrolment_tokens",
 }
 
 // workerReferenceAllowlist is ADR 0106 section 3.3's public reference allowlist
