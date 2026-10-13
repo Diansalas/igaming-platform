@@ -702,19 +702,23 @@ coupling, not one slice: the work was done together on one branch because a hold
   players can infer "something is different" (not what); (F6) response timing differs slightly between the paths (the hold probe adds
   two round trips and, on a hit, a match lookup); (F5) the matched hold id is returned to the in-transaction gate and written to the
   AML-scoped log, and `aml_hold_match` stays runtime-executable for that lookup.
-- **F4 (tipping-off on manual adjustments): OPEN, DECISION NEEDED, NOT FIXED.** A hold refuses an adjustment with the dedicated
-  token `account_review` (stored as the request's `refusal_code` at execution and shown in the refusal; the submission refusal is the
-  generic `conflict` body but its audit class has no SQLSTATE suffix). No existing refusal token is a truthful, equally-visible cover
-  for BOTH directions: `open_payment_exposure` is credit-only, `policy_disabled` and `tenant_not_active` are tenant-wide and
-  checkable against other players, `wallet_not_found` is checkable. Options for the owner / `ledger-finance` / `product-owner-proxy`:
-  (a) introduce one deliberately shared token (for example `wallet_not_adjustable`) that is ALSO produced by genuinely non-AML
-  causes (a closed wallet, a frozen asset for that wallet) so it is not AML-specific; (b) map the refusal to the existing
-  `conflict` shape with the same audit class as a genuine conflict and drop the stored token; (c) accept the visible token and
-  record it as a conscious tipping-off exception. Nothing was invented here.
+- **F4 (tipping-off on manual adjustments): DECIDED, option (b), a REVERSIBLE ORCHESTRATOR DEFAULT, NOT owner-approved.** A refusal of
+  a manual adjustment caused by an AML hold or a hold-evaluator failure is mapped, at SUBMISSION and at EXECUTION, to the existing
+  generic `conflict` that tenant staff already see for an ordinary conflict (a decision on a request that is no longer pending): the
+  same HTTP status (409), headers and body, the same denied audit row (same metadata keys, `denied_class` = `conflict:`, no AML token or
+  SQLSTATE suffix). At execution the decision transaction rolls back, so the request stays `pending` with no `refusal_code`
+  (nothing AML-specific is stored on `ledger_adjustment_requests`; the old `account_review` token and `RefusalAccountReview` are gone) and
+  can be decided again once the hold is gone, or expires. The REAL reason (hold or evaluator error, the hold id, operation
+  `manual_adjustment`, KYC outcome `not_evaluated`) is written only to the owner-only AML decision log, in its own transaction after the
+  rollback, together with the evaluator-failure alert. **Residual:** a staff member can still observe that SOME conflict occurred on a
+  request, indistinguishable from an ordinary conflict; a request that keeps conflicting for no visible reason is a weak signal. Options
+  (a) a deliberately shared non-AML token and (c) accepting a visible token remain available if the owner prefers them. Tests:
+  `TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict` (byte-identical status / headers / body and audit shape,
+  submission and execution) and `TestAMLHold_*` in `internal/adjustment`.
 
-### 12.5 Changed existing tests (setup and allow-lists only; no assertion weakened)
+### 12.5 Changed existing tests (setup and allow-lists only, plus the F4 execution assertions below)
 
-kyc `enforcement_savepoint_housekeeping_test.go` (stubs the hold read), withdrawal `migration_0132_integration_test.go`, adjustment
+adjustment `aml_hold_integration_test.go` (F4: a hold-caused EXECUTION refusal is now a generic conflict with the request left pending, not `refused_at_execution` + `account_review`; the old assertion on `RefusalAccountReview` was replaced, three tests), kyc `enforcement_savepoint_housekeeping_test.go` (stubs the hold read), withdrawal `migration_0132_integration_test.go`, adjustment
 `b6_usetime_integration_test.go` (`scratchPoolThroughDir` stubs the read below 0141, covering existing tests that use it),
 reconciliation `migration_0097_integration_test.go`, payments `m4_integrity_review_integration_test.go`
 (`TestR32_Migration0127_BackfillsExistingDestinationParks` runs the gates on a scratch schema rolled back below 0141: it stubs the
@@ -754,7 +758,7 @@ Migrations 0140-0142 were edited in place (unmerged). Software capability only; 
 | Sec F1 live eligibility of the grantee (active, role now, same Person) in `aml_authorize` and the quorum, both scopes | **Applied** (platform half through an owner-side liveness helper) | 0140; tests `TestEligibility_*` (demote tenant officers to `support`, suspend / re-link platform and tenant officers) |
 | Sec F2 conflict of interest on every officer function; queue filters own subject | **Applied** (AM011) | 0140 `aml_assert_not_subject`, 0141, 0142; `TestConflictOfInterest_EveryOfficerFunctionRefusesOwnSubject` (13 functions + queue, both models) |
 | Sec F3 suspended-officer exclusion for platform scope | **Applied** (owner-side helper; the sanctions lift still needs two live Persons) | `TestEligibility_PlatformOfficers_*`, `TestEligibility_SanctionsLiftNeedsTwoLiveOfficers` |
-| Sec F4 tipping-off on manual adjustment refusals | **OPEN, decision needed, NOT fixed**: no existing refusal token is a truthful shared cover; options (a)/(b)/(c) in 12.4 | 12.4 |
+| Sec F4 tipping-off on manual adjustment refusals | **Applied, option (b)** (reversible orchestrator default, not owner-approved): the generic `conflict` at submission and execution, real reason only in the AML decision log; residual in 12.4 | 12.4; `TestManualAdjustmentAPI_F4_*` |
 | Sec F5 `aml_person_has_records` runtime EXECUTE; bare acting tenant; hold id | **Applied** (revoked + `init-app-role.sql`; session tenant requires the exact acting shape); hold id to the in-transaction recorder is **accepted residual** (the gate needs `aml_hold_match`) | 0141, 0142, deploy; `TestSessionTenant_BareActingSettingBindsNothing`, catalogue test |
 | Sec F6 review-cover population; timing | **Accepted residuals**, recorded | 12.4 |
 | Sec F7 decision log names another person's hold | **Applied** (AM007) | 0141; `TestRecordDecision_HoldMustBelongToThePerson` |

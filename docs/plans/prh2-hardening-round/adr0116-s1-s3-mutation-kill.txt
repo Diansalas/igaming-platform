@@ -127,3 +127,13 @@ un-mutated (below).
 - The pre-flight (AM098) and down-refusal (AM099) branches of 0140-0142 were NOT mutated in this pass; they are covered by
   TestMigration0140_Preflight, TestMigration0141_Preflight, TestMigration0142_Preflight and
   TestMigrationDowns_RefuseWhileAMLHistoryExists (plant-and-refuse tests), but a mutation of those branches is a residual.
+
+F4 OPTION (b) (generic conflict for AML adjustment refusals)
+-----------------------------------------------------------
+Logs: adr0116-s1-s3-mutation-log-run7-f4.txt, adr0116-s1-s3-mutation-log-run7b-f4-j4.txt. The adjustment hold-check code was refactored
+(holdCheck / amlRefusal), so J1, J3, J4, J5 and N32 were re-anchored and J2, N33, N34 retired. Added F4a-F4e (classification, execution
+rendering, submission rendering, real-reason record, execution gate). Result: F4a-F4e, J1, J3, J5, N32 KILLED (HTTP byte-identity test
+and the adjustment tests); an invalid compile-error kill of J4 was caught and re-run.
+J4 (wallet-resolve DB error treated as no hold) SURVIVED, justified: the failing SELECT runs inside the refusing transaction, which
+Postgres has then aborted, so every later statement of the same submission / decision fails; the fail-closed result is the aborted
+transaction, not the verdict. Not separately testable without injecting a database fault mid-statement.
