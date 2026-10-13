@@ -941,10 +941,17 @@ indexes are enough, so the reserved 0150 is unused.
   `count_bonus_funded` is true (the request carries one flag per kind). `player_locked_cash` and `player_locked_bonus` are
   declared ignored. With the flag false the whole bonus family is ignored, so wins and returns on bonus-funded legs are
   excluded too. Bonus conversion is not a loss type, so it never reduces loss usage.
-- **Fail closed:** a player-owned leg of any other account type, a reversal whose original cannot be found, or a
-  casino posting that touches `player_locked_cash` stops the measurement (`ErrUnrecognizedUsageLeg`,
-  `ErrUnresolvedReversal`). The last one is deliberate: the locked-cash casino-win shape (ADR 0039 16.4, "not producible
-  by today's postBet") releases the lock into `player_cash` with a credit, which would net the stake out of loss.
+- **Fail closed:** a player-owned leg of any other account type, a reversal whose original cannot be found, a casino
+  posting that touches `player_locked_cash`, and (while a bonus kind is counted, i.e. either `count_bonus_funded` is true) a
+  casino posting that touches `player_locked_bonus` stop the measurement (`ErrUnrecognizedUsageLeg`, `ErrUnresolvedReversal`).
+  The rationale (corrected after ledger-finance F1): the lock release credit of a casino win lands in the window of the WIN.
+  Inside one window the release nets the stake debit correctly, but for a round that spans two windows (stake in the older
+  one, win in the newer) the release credit is booked without its stake debit, so loss is under-counted. Executed example:
+  bonus bet 80 at T-25h, win 30 plus release 80 at T-1h, read raw loss -10 (floored 0) against 70 for a cash-funded round.
+  This applies to locked cash AND locked bonus. Locked cash is not producible by today's postBet (ADR 0039 16.10); a
+  locked-bonus casino round is the intended bonus shape (case B), so with `count_bonus_funded` true the casino path is
+  refused (fail closed) until ledger-finance supplies a window-safe spec; with the flags false the bonus family is ignored
+  and nothing is under-counted. Tests: the exact two-window shape, the one-window fixture, each flag alone.
 - **Reversal window rule** as the ADR: a reversal counts only if its original is inside the same window (the original's
   `created_at`; a stake or a settlement counts by its own).
 - **Loss floor:** 0 unless `loss_may_go_negative` is attested (`LossRaw` and `Loss` are both returned).
@@ -956,7 +963,8 @@ indexes are enough, so the reserved 0150 is unused.
 - **Guards (fail closed, each tested):** the session must be the request tenant's (RLS would otherwise answer zero rows =
   zero usage), must not be player-scoped (a player sees only its own ledger rows, so a Person total would be short), and
   must be READ COMMITTED (the S4 isolation guard is still S4's; this is defence in depth). An unknown anchor account is an
-  error, never zero.
+  error, never zero. `ReadEffectiveLimitInputs` and `ReadUsageConfig` carry the same guard (ledger-finance F9): a player
+  session or another tenant's session would otherwise read as "no limit".
 - **`At` (replay instant)** is a code-only seam for the denial-audit replay and the DST tests; production passes nil
   (`clock_timestamp()` inside the statement). `AuditInputs()` returns the replay inputs of section 4.
 
@@ -987,12 +995,19 @@ indexes are enough, so the reserved 0150 is unused.
 
 **Residuals / required decisions (none silently dropped):**
 
-1. **TTL sweep NOT IMPLEMENTED.** `deposit_intents.status` is a projection of `payment_attempts` (`recomputeIntentProjection`);
-   moving a stale intent to `failed` directly would be overwritten by the next recompute and would bypass the attempt state
-   machine, and the sweeper is the payments owner's. The measurement is conservative: a stale pending intent keeps counting
-   inside its window (tested: it stops counting once its status is `failed`). The composed `pending_intent_ttl` is returned by
-   `ReadUsageConfig`. **Decision for the orchestrator:** payments must give attempts a TTL expiry (which then recomputes the
-   intent) before S4 merges, or the owner accepts that a stuck pending intent holds deposit capacity until it leaves the window.
+1. **TTL sweep NOT IMPLEMENTED; the section 1.4 sentence is SUPERSEDED (ledger-finance F10).** Section 1.4 says a pending
+   intent older than a configured TTL "is moved to `failed` by the existing payments sweeper". That does not describe the
+   sweeper: it already declines expired `created` attempts (T3), while submitted `pending` / `ambiguous` attempts are escalated
+   to staff, not failed (correct, because a provider may still succeed). `deposit_intents.status` is a projection of
+   `payment_attempts` (`recomputeIntentProjection`), so a direct write to `failed` would be overwritten and would bypass the
+   attempt state machine. No component releases the usage of a stuck submitted intent. The measurement is conservative: a
+   stale pending intent keeps counting inside its window (tested: it stops counting once its status is `failed`).
+   **`pending_intent_ttl` therefore has NO effect.** To avoid presenting it as protective, the S2 operator/floor
+   configuration API now rejects any value other than the attested `none` (400 `validation_error`; `ConfigContent.Validate`,
+   a minimal S2 change with tests); the database column and `ReadUsageConfig` still carry it. **Owner / RG acceptance
+   needed:** a deposit blocked by a stuck pending/ambiguous intent (the intent counts at the requested amount until it leaves
+   its window) is a player-facing blocking behaviour that no code releases; it must be accepted by the owner and compliance, or
+   payments must give submitted attempts a resolution path first.
 2. **Cross-account session aggregation BLOCKED.** `sessions` is row-level secured to the caller's own principal (migration
    0018), so one account's measurement cannot see the Person's other accounts' chains, and a zero would be a silent
    under-count. `concurrent_chain_aggregation` at `tenant_person` scope needs a privileged read path (a security decision,
@@ -1004,8 +1019,29 @@ indexes are enough, so the reserved 0150 is unused.
    the guard. The bet and deposit paths use `WithTenant`, which passes.
 5. **Alert delivery** for `rg_deposit_credit_mismatch` is ALERT-DELIVERY-1 (open).
 
-**S4 conditions added by S3:**
+**S4 conditions added by S3 (after the ledger-finance review, APPROVE WITH CONDITIONS):**
 
+- (a) F1 is fixed in S3 (locked-bonus casino rounds are refused while a bonus kind is counted); S4 must not enable
+  `count_bonus_funded=true` on the casino path until a window-safe bonus spec exists.
+- (b) Heavy-player measurement BEFORE the 30-day or calendar-month wager/loss windows are enforced on the casino path:
+  at least 300,000 bet+win ledger rows in 30 days (the cost is about 13 microseconds per row, so 100,000 bets is about 1.3 s
+  p50 under the L0.4 lock), a `statement_timeout` on the usage reads (fail closed), and the decision on the ledger-derived
+  rollup (section 1.4). S3 does not build the rollup.
+- (c) `concurrent_chain_aggregation = true` at `tenant_person` scope with `Coverage = principal_only` must fail closed
+  (`rg_evaluation_unavailable`), or such a configuration must be refused, until a privileged read path exists (a security
+  decision).
+- (d) A Person re-link must take the L0.4 locks of the old and the new Person, or PERSON-RELINK-PIN-1 must be resolved,
+  before Person-scope limits are called enforced.
+- (e) The denial audit stores the COMPUTED figures (usage, limit, window starts). `AuditInputs` alone is not an exact replay:
+  intent status is a mutable projection. A T2 evaluation against an intent that already has its posting counts it twice
+  (the in-flight side is excluded by `ExcludeIntentID`, the ledger side is not): conservative, documented.
+- (f) `pending_intent_ttl` must not be presented as effective (Residual 1).
+- (g) End-to-end evidence through real postings: S3 adds tests that measure after the REAL casino postBet / postWin /
+  postRollback and sportsbook place / settle / void / rollback (`internal/casino/rg_usage_s3_e2e_integration_test.go`,
+  `internal/risk/rg_usage_s3_e2e_integration_test.go`); S4 must extend them to the enforcement call sites.
+- (h) `ReadEffectiveLimitInputs` carries the scope guard (done in S3, F9).
+- (i) The deposit plan was re-measured WITH deposit rows present (the first evidence run seeded none, so its deposit plan was
+  not representative); see the evidence file.
 - Any error from these functions is `rg_evaluation_unavailable` (fail closed); never treat an error as zero usage.
 - Call `MeasureStakeUsage` / `MeasureDepositUsage` after the L0.4 lock, in a READ COMMITTED transaction, with the windows
   from `ReadUsageConfig(...).Windows()`; with a `tenant_person` scope both figures come back and S4 must combine the limits of
@@ -1015,8 +1051,15 @@ indexes are enough, so the reserved 0150 is unused.
 - Re-measure the request-path p95 delta and the L0.4 hold time of a whole bet when S4 is wired (S3 measured the reads only).
 - Run the fail-closed tests in a jurisdiction `rgfix` has not seeded (S1 LF 8).
 
-**Existing assertions changed by S3: none.** S3 adds files only (plus this record and a task-registry row); no existing test,
-fixture or assertion was edited.
+**Existing assertions changed (review round, F10 only):** S3 itself edited no existing assertion. Rejecting a non-`none`
+`pending_intent_ttl` in the S2 configuration API changed these, in
+`internal/httpserver/rg_limits_config_integration_test.go`: (1) the `opDeposit` fixture now sends
+`"pending_intent_ttl": {"none": true}` instead of `{"value": 7200}`; (2) the echo assertion in
+`TestRGLimitsS2_Operator_TightenWritesAndComposes` now expects `pending_intent_ttl.none == true` instead of `.value == 7200`.
+Added (not changed): a 400 case for a TTL value in the same file and in `TestConfigContentValidate_Rejects`
+(`limits_s2_unit_test.go`). In the S3 tests written in this slice, the bonus-counted block of
+`HandComputedLedger_WindowsReversalsBonusAndPerson` now asserts the F1 refusal instead of figures (bonus counting is covered
+by `BonusLegsCountedWhenFlagged_WithoutLockLegs`).
 
 **Verification evidence:** mutation results `docs/plans/prh2-hardening-round/adr0115-s3-mutation-kill.txt` (driver
 `adr0115-s3-mutation-driver.py`); EXPLAIN and latency `docs/plans/prh2-hardening-round/adr0115-s3-explain-evidence.txt`.

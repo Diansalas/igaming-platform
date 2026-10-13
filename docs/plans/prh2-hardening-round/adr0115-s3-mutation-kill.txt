@@ -57,3 +57,8 @@ Coverage map (mutant ids -> what they pin):
   effective-limit inputs: windows, scope of rows, TTL, missing floor, loss attestation ..................... I1-I7
   credit check: each mismatch kind, tenant, half-open range ................................................ C1-C8
   plan shape: the entries scan is planned on its own so the 0135 index drives it ............................ P1
+
+REVIEW ROUND (ledger-finance F1 / F9 / F10; log adr0115-s3-mutation-log-run4-review.txt): 16 mutants of the new logic (the locked-bonus gate
+under each flag combination and shape, the scope guard of ReadEffectiveLimitInputs and of ReadUsageConfig, the pending_intent_ttl rejection)
+plus a re-run of the bonus-flag, undeclared-leg, cash-lock-shape and guard mutants against the changed bonus tests: all 16 KILLED
+(R1-R8, U19-U21, U23, U31, U32, G2, G3). Survivors of the earlier rounds are unchanged (7, justified above).
