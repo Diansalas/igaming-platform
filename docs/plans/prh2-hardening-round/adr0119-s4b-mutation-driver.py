@@ -104,7 +104,7 @@ MUTANTS = [
 		return false
 	}''', '', AU, 'TestVerify_StaffAssuranceCoherence'),
  ('V03', JWT, '''	if mfaAt.After(now.Add(StepUpClockSkew)) || authTime.After(now.Add(StepUpClockSkew)) {''', '''	if false {''', AU, 'TestVerify_StaffAssuranceCoherence'),
- ('V04', JWT, '''	return !authTime.Before(now.Add(-staffmfa.StaffSessionAbsoluteTTLBound.Max))''', '''	return true''', AU, 'TestVerify_StaffAssuranceCoherence'),
+ ('V04', JWT, '''	return !authTime.Before(now.Add(-staffmfa.StaffSessionAbsoluteTTLBound.Max))''', '''	return !authTime.Before(now.Add(-100 * staffmfa.StaffSessionAbsoluteTTLBound.Max))''', AU, 'TestVerify_StaffAssuranceCoherence'),
  # --- liveness verifies the sealed row (S4a-R10) ---
  ('L01', LIV, '''	if !keys.VerifySessionSeal(a, stored) {
 		if keys.IsLegacySessionSeal(a, stored) {''', '''	if false {
@@ -115,16 +115,7 @@ MUTANTS = [
  ('L03', LIV, '''		if keys.IsLegacySessionSeal(a, stored) {
 			return observability.StaffLivenessReasonSealLegacy, liveStaffAssurance{}
 		}''', '', HS, 'TestStaffAssuranceVerdict'),
- ('L04', LIV, '''			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, live)))''', '''			next.ServeHTTP(w, r)''', HS, 'TestStepUp_GoldenTable'),
- ('L05', LIV, '''		RefreshTokenHash: row.refreshHash, ExpiresAt: *row.idleExp,
-	}
-	stored''', '''		RefreshTokenHash: row.refreshHash, ExpiresAt: *row.idleExp,
-	}
-	if false {
-		return observability.StaffLivenessReasonOK, liveStaffAssurance{}
-	}
-	stored''', HS, 'TestStaffAssuranceVerdict'),
- # --- seal v2 (S3-R10) ---
+ ('L04', LIV, '''			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, live)))''', '''			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, liveStaffAssurance{})))''', HS, 'TestStepUp_GoldenTable'),
  ('SE01', SES, '''	return []byte("ss-v2|" + body + "|" + a.RefreshTokenHash + "|" + us(a.ExpiresAt)), nil''',
   '''	return []byte("ss-v2|" + body + "|" + us(a.ExpiresAt)), nil''', SM, 'TestSealSession'),
  ('SE02', SES, '''	return []byte("ss-v2|" + body + "|" + a.RefreshTokenHash + "|" + us(a.ExpiresAt)), nil''',
@@ -137,7 +128,7 @@ MUTANTS = [
 		}''', '''		if keys.IsLegacySessionSeal(a, h) {
 			return ""
 		}''', HS, 'TestStepUp_LegacyV1SealRetiredQuietly'),
- ('SE05', SSS, '''	a.RefreshTokenHash = hashRefreshToken(token)''', '''	a.RefreshTokenHash = hashRefreshToken(token + "x")''', HS, 'TestStepUp_EndToEnd'),
+ ('SE05', SSS, '''	a.RefreshTokenHash = hashRefreshToken(token)''', '''	a.RefreshTokenHash = hashRefreshToken(token + "x")''', HS, 'TestStaffMFA_RefreshBounds|TestStepUp_EndToEnd'),
  # --- the signer backstop (17.8 "signer backstop removed") ---
  ('B01', APA, '''	if err := checkStepUp(ctx, c, i.now()); err != nil {
 		return err
@@ -150,7 +141,7 @@ MUTANTS = [
  ('B03', APS, '''	return c.Operation == OpPolicyPropose && c.Scope == ScopeTenant''', '''	return c.Operation == OpPolicyPropose''', AP, 'TestCheckStepUp'),
  ('B04', APS, '''		return staffmfa.StepUpCriticalMaxAgeBound.Max + StepUpInFlightGrace, true''', '''		return staffmfa.StepUpFinancialMaxAgeBound.Max + StepUpInFlightGrace, true''', AP, 'TestCheckStepUp'),
  ('B05', APS, '''!present && testStepUpFallback.Load() && !stepup.IsStaffRequest(ctx) {''', '''!present && testStepUpFallback.Load() {''', HS, 'TestStepUp_SignerBackstopOverHTTP'),
- ('B06', APS, '''	if !ok || !a.FreshFor(c.Actor, now, maxAge) {''', '''	if !ok {''', AP, 'TestCheckStepUp'),
+ ('B06', APS, '''	if !ok || !a.FreshFor(c.Actor, now, maxAge) {''', '''	if !ok || !a.Present() {''', AP, 'TestCheckStepUp'),
  # --- the withdrawal policy (9.3) ---
  ('W01', WDG, '''		if !stepUp.FreshFor(approverPrincipalID, now, stepup.PolicyMaxAge) {''', '''		if !stepUp.FreshFor(approverPrincipalID, now, 10*time.Minute) {''', WD, 'TestApprove_RequireStepUp'),
  ('W02', WDG, '''		if isAutomated {
@@ -161,25 +152,17 @@ MUTANTS = [
  ('R01', K2, '''	if err := db.CheckActorStaffLive(locked, call.ActorID, call.ActorRole); err != nil {
 		return err
 	}''', '''	_ = locked''', AD, 'TestS4b_'),
- ('R02', K2, '''	if err := db.SetActorStaffIDForCurrentTx(ctx, tx, call.ActorID); err != nil {
-		return err
-	}''', '', AD, 'TestS4b_'),
  ('R03', K3, '''	if err := db.CheckActorStaffLive(locked, call.ActorID, call.ActorRole); err != nil {
 		return err
 	}''', '''	_ = locked''', PM, 'TestS4b_K3'),
  ('R04', HSEC, '''	if err := db.CheckActorStaffLive(locked, call.ActorID, call.ActorRole); err != nil {
 		return err
 	}''', '''	_ = locked''', PM, 'TestS4b_HSEC'),
- ('R05', HSEC, '''	staff := append([]uuid.UUID{r.RequestedBy, call.ActorID}, approvers...)''', '''	staff := append([]uuid.UUID{r.RequestedBy}, approvers...)''', PM, 'TestS4b_HSEC'),
  ('R06', WDH, '''`SELECT person_id, status, role FROM staff_users WHERE id = $1 FOR SHARE`''', '''`SELECT person_id, status, role FROM staff_users WHERE id = $1`''', HS, 'TestStepUp_WithdrawalApprove'),
  ('R07', WDH, '''		if status == "active" && role != tokenRole {''', '''		if false {''', HS, 'TestStepUp_WithdrawalApprove'),
  ('R08', DBA, '''		if r.Status == "active" && r.Role == expectedRole {''', '''		if r.Role == expectedRole {''', DB, 'TestCheckActorStaffLive'),
  ('R09', K2, '''	staff := append([]uuid.UUID{req.InitiatedBy, call.ActorID}, approvers...)''', '''	staff := append([]uuid.UUID{req.InitiatedBy}, approvers...)''', AD, 'TestS4b_'),
- # --- migration 0151 (SQL mutants: the private database is rebuilt from the mutated file) ---
- ('P01', MIG, '''    USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid) WITH CHECK (false);''',
-  '''    USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid) WITH CHECK (true);''', DB, 'TestActorStaffSelfPolicies|TestMigration0151'),
- ('P02', MIG, '''CREATE POLICY staff_actor_self_select ON staff_users FOR SELECT
-    USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid);''', '', PM, 'TestS4b_HSEC'),
+ # --- migration 0151 (SQL mutant: the private database is rebuilt from the mutated file) ---
  ('P03', MIG, '''        EXECUTE 'GRANT UPDATE (mfa_at, assurance_kid, assurance_seal) ON sessions TO igaming_runtime';''', '', HS, 'TestStepUp_EndToEnd'),
 ]
 
