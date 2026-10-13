@@ -2742,6 +2742,439 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- ADR 0115 slice S2: Responsible Gaming limit, time-out and RG-configuration WRITE APIs ---
+  # API only. These record limits and configuration; NOTHING here enforces a limit on a deposit, a
+  # wager, a launch or a login (ADR 0115 S4), measures usage (S3) or has a UI (S5). Every limit and
+  # time-out write requires an Idempotency-Key header (1-120 printable ASCII characters): the same key
+  # with the same request replays the stored result (header Idempotent-Replayed: true), the same key
+  # with a different request is 409 RG_IDEMPOTENCY_MISMATCH. tenant_id, person, brand, scope, the
+  # jurisdiction, the classification of a change and every time are server-decided: a body carrying
+  # any of them (or any unknown field) is 400.
+  /v1/me/rg/limits:
+    get:
+      summary: My responsible-gaming limits and their history (player)
+      description: >
+        Player principals only; identity and tenant come from the token. `limits` is one entry per limit key
+        (kind, scope, asset, period): the realized value of THAT key and its open pending change, if any. The
+        effective limit across scopes and the configuration ceiling (the MIN rule of ADR 0115 2.2) is the
+        enforcement read (S3/S4) and is NOT computed here. `history` is the player's own changes, newest
+        first; a staff-originated change is marked source staff_on_player_request and carries no staff identity.
+        NOTE: the player notification for a staff-originated change is NOT IMPLEMENTED (no player notification
+        channel exists); the change is visible here.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: history_limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: The caller's limits
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGMyLimits" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      summary: Set, decrease, request an increase of, or remove one of my limits (player)
+      description: >
+        Player principals only. `value` is REQUIRED: a positive integer (a decimal string of at most 38 digits, in
+        asset minor units, or seconds for session_duration) or null to remove the limit. The change is
+        classified BY THE DATABASE: an initial value or a decrease takes effect now (201); an increase or a removal
+        waits out the configured cooling-off period and, when configured, needs the player's own confirm
+        (202, effective_at says when; pending true). The API refuses a value above the composed ceiling
+        (422 RG_LIMIT_ABOVE_CEILING) and a period outside the composed allowed_periods
+        (422 RG_PERIOD_NOT_ALLOWED); a kind that is not enabled in the configuration is not offered for an increase or
+        removal (422 RG_NOT_OFFERED); an increase or removal with no configuration in force is
+        409 RG_CONFIG_MISSING. A protective write (initial or decrease) succeeds whatever the enabled state. At most a
+        configured number of open pending changes per player (409 RG_PENDING_CAP, an engineering bound).
+        An account under identity review may not increase or remove a tenant_person limit (403 RG_IDENTITY_REVIEW).
+        Per-player rate limited (429 rate_limited). An unknown field, including tenant_id, is 400.
+        Every request, accepted or refused, is audited (rg.limit.change_requested / rg.limit.change_denied).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RGSetLimitRequest" }
+      responses:
+        "201":
+          description: Applied now (initial value or decrease), or the replay of such a request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGLimitChange" }
+        "202":
+          description: Accepted as a PENDING increase or removal; effective_at says when it takes effect
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGLimitChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "422": { $ref: "#/components/responses/RGUnprocessable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
+  /v1/me/rg/limits/changes/{id}/confirm:
+    post:
+      summary: Confirm a pending increase or removal (player's own session only)
+      description: >
+        Player principals only. Allowed only once the cooling-off period has run (409 RG_COOLING_OFF before),
+        only for the LATEST request of its limit (409 RG_CHANGE_NOT_PENDING otherwise), and only when the change
+        awaits a confirmation. A staff-originated increase is never realized without this call.
+        An unknown id or another player's change is 404. Audited (rg.limit.confirmed / rg.limit.change_denied).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The confirm row (the limit change now in force)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGLimitChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/me/rg/limits/changes/{id}/cancel:
+    post:
+      summary: Cancel a pending increase or removal (player)
+      description: >
+        Player principals only. Cancels the latest pending request of a limit (the limit stays at its realized
+        value); 409 RG_CHANGE_NOT_PENDING when it is not pending. Always allowed while pending (a protective
+        action). Audited (rg.limit.cancelled / rg.limit.change_denied).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The cancel_pending row
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGLimitChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/me/rg/time-out:
+    post:
+      summary: Start a time-out (cooling-off break) (player)
+      description: >
+        Player principals only. A bounded break (duration_hours 1..87600, an engineering bound; the configured
+        allowed_durations narrow it, 422 RG_DURATION_NOT_ALLOWED). The request is in WHOLE HOURS while the configuration is in
+        seconds: a configured duration that is not a multiple of 3600 s can never be requested through this route. A time-out is a PROTECTIVE write: it succeeds whatever the
+        enabled / mandatory state and, with no configuration in force, for any positive duration. It cannot be ended early and
+        never changes wallet status (withdrawals keep working). The reach is the configured time_out scope
+        (platform_person by default; a configured `account` scope is applied as tenant_person, the broader and more
+        protective reach - recorded in the audit row). The restriction is recorded; EvaluateEligibility does not yet read it
+        (ADR 0115 S4), so nothing blocks play yet. Idempotency-Key: honoured under the person lock against the audit record
+        of the earlier request (a replay returns 200 with Idempotent-Replayed: true); it is NOT a database unique constraint.
+        Audited (rg.time_out.created / rg.time_out.denied).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RGTimeOutRequest" }
+      responses:
+        "200":
+          description: Replay of an earlier identical request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGRestriction" }
+        "201":
+          description: The time-out was recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGRestriction" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "422": { $ref: "#/components/responses/RGUnprocessable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
+  /v1/admin/players/{id}/rg/limits:
+    get:
+      summary: One player's current RG limits (staff)
+      description: >
+        rg_limit:read (tenant_admin, compliance), tenant-scoped. {id} is resolved inside the caller's tenant: a player of another
+        tenant is the same 404 as an unknown id. Same shape as the player's own `limits`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The player's limits
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGStaffLimits" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      summary: Record a limit change on a player's request (staff)
+      description: >
+        rg_limit:write_on_player_request (compliance only), tenant-scoped, Idempotency-Key required (the staff key namespace is
+        separate from the player's). reason_code and evidence_ref are REQUIRED. DECREASES and initial values only: a staff-originated
+        increase or removal is 403 RG_STEP_UP_REQUIRED because ADR 0017 step-up is NOT IMPLEMENTED (and even after it ships it is never
+        realized without the player's own confirm). Staff whose Person is the player's Person are refused (403 RG_SELF_TARGET). The
+        value is bounded by the same ceiling / period rules as the player's own request. The change appears in the player's own history
+        (source staff_on_player_request). The player NOTIFICATION is NOT IMPLEMENTED. Every request is audited.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RGStaffSetLimitRequest" }
+      responses:
+        "201":
+          description: Applied now (or the replay of such a request)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGStaffLimitChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "422": { $ref: "#/components/responses/RGUnprocessable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
+  /v1/admin/players/{id}/rg/history:
+    get:
+      summary: One player's RG limit change history (staff)
+      description: >
+        rg_limit:read, tenant-scoped; cross-tenant ids are 404. created_by is the staff id of the caller's OWN tenant, else null
+        (staffViewer redaction, ADR 0114). Limit history never leaves its tenant.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200":
+          description: The changes, newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGStaffHistory" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/admin/rg/limit-configs:
+    get:
+      summary: RG configuration in view of this tenant (staff)
+      description: >
+        rg_config:read (tenant_admin, compliance), tenant-scoped. Returns the jurisdiction FLOOR rows (readable by every session) and THIS
+        tenant's operator rows (row-level security: another tenant's rows are never visible), newest first. created_by is a staff id only
+        for operator rows of the caller's own tenant; floor rows are written by platform staff and show null.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: control_kind, in: query, schema: { type: string, enum: [deposit, loss, wager, session_duration, reality_check_interval, time_out] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: A page of configuration rows
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGConfigList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      summary: Append an operator RG bound for this tenant or one of its brands (staff)
+      description: >
+        rg_config:write (compliance only; an APPLICATION-enforced check - the database binds the row to a same-tenant principal and to
+        tighten-only, not to a permission), tenant-scoped. The jurisdiction is derived from the tenant licence, never the request. Every
+        field of the control kind is explicit (a value or an attested {"none":true}); fields that do not apply are refused; there is no default
+        and no legal value supplied by the platform (compliance supplies the content). The row appends (append-only) and takes effect now or at a
+        future effective_from (a past one is 422 RG_BACKDATED). An operator row may only TIGHTEN restrictive fields and WIDEN option sets
+        relative to the floor / tenant row in force (409 RG_OPERATOR_LOOSENS, the field named in the message); with no floor in force there
+        is nothing to tighten (409 RG_NO_FLOOR_IN_FORCE). attestation_ref is printable ASCII; SYNTHETIC-NOT-LEGAL configuration is refused
+        outside development/test (422 RG_SYNTHETIC_REFUSED). Audited with before/after; a refusal is audited as rg.limit_config.operator_denied.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RGOperatorConfigRequest" }
+      responses:
+        "201":
+          description: The appended operator row
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGConfig" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "422": { $ref: "#/components/responses/RGUnprocessable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
+  /v1/admin/platform/rg/limit-config-change-requests:
+    get:
+      summary: Jurisdiction floor change requests - the approval queue (platform staff)
+      description: >
+        rg_floor:read (platform_admin only), platform-scoped tokens only (a tenant-scoped caller is 403).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, approved, rejected, cancelled] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: A page of requests
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGFloorRequestList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      summary: Propose a jurisdiction floor row (platform staff)
+      description: >
+        rg_floor:request (platform_admin only), platform-scoped tokens only, with a signed actor proof (ADR 0110, operation
+        rg_limit_config:request) bound to the proposal. The proposal is a FLOOR row of the named jurisdiction; effective_from is REQUIRED,
+        in the future and within the 72h request lifetime. The payload_hash is derived by the database from the proposed row. Nothing is in
+        force until a DIFFERENT staff member AND Person approves. No legal value is supplied by the platform: compliance supplies the content
+        and a named signatory in attestation_ref. Audited as rg.limit_config.floor_requested (platform-scope row).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RGFloorRequestBody" }
+      responses:
+        "201":
+          description: The pending request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGFloorRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "422": { $ref: "#/components/responses/RGUnprocessable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
+  /v1/admin/platform/rg/limit-config-change-requests/{id}/approve:
+    post:
+      summary: Approve a floor change request and apply it (platform staff)
+      description: >
+        rg_floor:decide (platform_admin only), platform-scoped tokens only. Four-eyes is enforced by the DATABASE: the approver's Person must
+        differ from the requester's (409 RG_SELF_APPROVAL), the request must be pending and unexpired (409 RG_REQUEST_NOT_PENDING), and the
+        approval carries a signed actor proof bound to the request id and payload hash (403 RG_PROOF_REFUSED otherwise). The approved payload is
+        APPLIED in the same transaction (a second signed proof, rg_limit_config:apply) as an append-only floor row, hash-bound to the approval; a
+        request is single-use. If effective_from has passed by the time of approval, the apply is refused (422 RG_BACKDATED) and the whole
+        approval rolls back: file a new request. Audited (rg.limit_config.floor_approved with before/after and attestation_ref).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The approved request (applied_config_id names the floor row)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGFloorRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "422": { $ref: "#/components/responses/RGUnprocessable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
+  /v1/admin/platform/rg/limit-config-change-requests/{id}/reject:
+    post:
+      summary: Reject a floor change request (platform staff)
+      description: >
+        rg_floor:decide (platform_admin only), platform-scoped tokens only, signed proof (rg_limit_config:reject). The requester's Person
+        may not decide (409 RG_SELF_APPROVAL). Audited (rg.limit_config.floor_rejected).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The rejected request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGFloorRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
+  /v1/admin/platform/rg/limit-config-change-requests/{id}/cancel:
+    post:
+      summary: Cancel a pending floor change request (platform staff, requester only)
+      description: >
+        rg_floor:request (platform_admin only), platform-scoped tokens only, signed proof (rg_limit_config:cancel). Only the requester may
+        cancel (403). Audited (rg.limit_config.floor_cancelled).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The cancelled request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGFloorRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "404": { $ref: "#/components/responses/RGNotFound" }
+        "409": { $ref: "#/components/responses/RGConflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/RGUnavailable" }
+
   /v1/admin/kyc/cases:
     get:
       summary: KYC case queue - tenant-wide (Stage 5, Operator Back Office MVP)
@@ -7910,6 +8343,14 @@ paths:
 
 components:
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        1-120 printable ASCII characters, chosen by the client. The same key with the same request replays the stored result
+        (Idempotent-Replayed: true); the same key with a different request is 409 RG_IDEMPOTENCY_MISMATCH.
+      schema: { type: string, minLength: 1, maxLength: 120, pattern: "^[\\x21-\\x7e]{1,120}$" }
     ProviderCredentialTenantID:
       name: tenantID
       in: path
@@ -8901,7 +9342,7 @@ components:
         id: { type: string, format: uuid }
         restriction_type:
           type: string
-          enum: [self_exclusion]
+          enum: [self_exclusion, time_out]
         scope: { type: string }
         starts_at: { type: string, format: date-time }
         ends_at: { type: string, format: date-time }
@@ -10164,6 +10605,28 @@ components:
             - LAUNCH_PROOF_REFUSED
             - LAUNCH_NO_PERSON
             - LAUNCH_AUTHORISATION_UNAVAILABLE
+            - RG_LIMIT_ABOVE_CEILING
+            - RG_PERIOD_NOT_ALLOWED
+            - RG_DURATION_NOT_ALLOWED
+            - RG_NOT_OFFERED
+            - RG_BACKDATED
+            - RG_SYNTHETIC_REFUSED
+            - RG_NO_CHANGE
+            - RG_CHANGE_NOT_PENDING
+            - RG_COOLING_OFF
+            - RG_CONFIG_MISSING
+            - RG_PENDING_CAP
+            - RG_IDEMPOTENCY_MISMATCH
+            - RG_OPERATOR_LOOSENS
+            - RG_NO_FLOOR_IN_FORCE
+            - RG_SELF_APPROVAL
+            - RG_REQUEST_NOT_PENDING
+            - RG_GUARD_REFUSED
+            - RG_STEP_UP_REQUIRED
+            - RG_SELF_TARGET
+            - RG_IDENTITY_REVIEW
+            - RG_PROOF_REFUSED
+            - RG_UNAVAILABLE
         message:
           type: string
         request_id:
@@ -10176,7 +10639,277 @@ components:
           items:
             type: string
       required: [code, message]
+    RGLimitChange:
+      type: object
+      description: >
+        One stored RG limit change as the PLAYER sees it (internal/httpserver rgLimitChangeResponse). No staff identity: a staff-originated change
+        has source staff_on_player_request and its reason_code only. value null means a removal.
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [deposit, loss, wager, session_duration] }
+        scope: { type: string, enum: [account, tenant_person] }
+        asset_code: { type: string }
+        period: { type: string, enum: [rolling_24h, rolling_7d, rolling_30d, calendar_day, calendar_week, calendar_month] }
+        value: { type: string, nullable: true, description: "Decimal string (NUMERIC(38,0)); null = removal." }
+        change_kind: { type: string, enum: [initial, decrease, increase, removal, cancel_pending, confirm] }
+        pending: { type: boolean }
+        requires_confirmation: { type: boolean }
+        requested_at: { type: string, format: date-time }
+        effective_at: { type: string, format: date-time }
+        supersedes_change_id: { type: string, format: uuid }
+        source: { type: string, enum: [player_self_service, staff_on_player_request] }
+        reason_code: { type: string }
+      required: [id, kind, scope, value, change_kind, pending, requires_confirmation, requested_at, effective_at, source, reason_code]
+    RGLimitState:
+      type: object
+      description: The realized value and open pending change of one limit key.
+      properties:
+        kind: { type: string, enum: [deposit, loss, wager, session_duration] }
+        scope: { type: string, enum: [account, tenant_person] }
+        asset_code: { type: string }
+        period: { type: string }
+        has_value: { type: boolean }
+        value: { type: string, nullable: true }
+        pending: { $ref: "#/components/schemas/RGLimitChange" }
+      required: [kind, scope, has_value, value]
+    RGMyLimits:
+      type: object
+      properties:
+        limits:
+          type: array
+          items: { $ref: "#/components/schemas/RGLimitState" }
+        history:
+          type: array
+          items: { $ref: "#/components/schemas/RGLimitChange" }
+      required: [limits, history]
+    RGSetLimitRequest:
+      type: object
+      description: >
+        value is REQUIRED (a positive integer string / integer, or null to remove). There is no tenant, person, scope, change kind or time
+        field; an unknown field is 400.
+      properties:
+        kind: { type: string, enum: [deposit, loss, wager, session_duration] }
+        asset_code: { type: string, description: "Required for deposit / loss / wager; absent for session_duration." }
+        period: { type: string, enum: [rolling_24h, rolling_7d, rolling_30d, calendar_day, calendar_week, calendar_month], description: "Required for deposit / loss / wager; absent for session_duration." }
+        value:
+          nullable: true
+          description: >
+            A positive integer. SEND IT AS A STRING: a JSON number is accepted only as an integer literal and is read as text, but
+            JSON libraries lose precision above 2^53, and amounts are NUMERIC(38,0) minor units (an exponent-18 asset exceeds 2^53 at
+            once). null removes the limit.
+          oneOf:
+            - { type: string, pattern: "^[1-9][0-9]{0,37}$" }
+            - { type: integer, minimum: 1 }
+      required: [kind, value]
+    RGStaffSetLimitRequest:
+      type: object
+      properties:
+        kind: { type: string, enum: [deposit, loss, wager, session_duration] }
+        asset_code: { type: string }
+        period: { type: string }
+        value:
+          nullable: true
+          oneOf:
+            - { type: string, pattern: "^[1-9][0-9]{0,37}$" }
+            - { type: integer, minimum: 1 }
+        reason_code: { type: string, minLength: 1, maxLength: 64 }
+        evidence_ref: { type: string, minLength: 1, maxLength: 200 }
+      required: [kind, value, reason_code, evidence_ref]
+    RGStaffLimitChange:
+      type: object
+      description: A limit change as TENANT staff see it; created_by is the staff id of the caller's own tenant, else null.
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        scope: { type: string }
+        asset_code: { type: string }
+        period: { type: string }
+        value: { type: string, nullable: true }
+        change_kind: { type: string }
+        pending: { type: boolean }
+        requires_confirmation: { type: boolean }
+        requested_at: { type: string, format: date-time }
+        effective_at: { type: string, format: date-time }
+        supersedes_change_id: { type: string, format: uuid }
+        source: { type: string }
+        reason_code: { type: string }
+        player_account_id: { type: string, format: uuid }
+        evidence_ref: { type: string }
+        created_by_actor_type: { type: string, enum: [player, staff] }
+        created_by: { type: string, format: uuid, nullable: true }
+      required: [id, kind, scope, value, change_kind, pending, requires_confirmation, requested_at, effective_at, source, reason_code, player_account_id, created_by_actor_type, created_by]
+    RGStaffLimits:
+      type: object
+      properties:
+        limits:
+          type: array
+          items: { $ref: "#/components/schemas/RGLimitState" }
+      required: [limits]
+    RGStaffHistory:
+      type: object
+      properties:
+        history:
+          type: array
+          items: { $ref: "#/components/schemas/RGStaffLimitChange" }
+      required: [history]
+    RGTimeOutRequest:
+      type: object
+      properties:
+        duration_hours: { type: integer, minimum: 1, maximum: 87600 }
+      required: [duration_hours]
+    RGAttestedString:
+      type: object
+      description: Exactly one of {"none":true} (an attested "no bound") or {"value":"..."}.
+      properties:
+        none: { type: boolean, enum: [true] }
+        value: { type: string, pattern: "^[1-9][0-9]{0,37}$" }
+    RGAttestedInt:
+      type: object
+      description: Exactly one of {"none":true} or {"value":<seconds>}.
+      properties:
+        none: { type: boolean, enum: [true] }
+        value: { type: integer, minimum: 1 }
+    RGAttestedBool:
+      type: object
+      description: Exactly one of {"none":true} or {"value":true|false}.
+      properties:
+        none: { type: boolean, enum: [true] }
+        value: { type: boolean }
+    RGConfigContent:
+      type: object
+      description: >
+        The content of one RG configuration row (internal/rg.ConfigContent). Which fields are required / forbidden depends on control_kind:
+        every applicable field is explicit (a value or an attested none) - no partial configuration. Intervals are whole seconds.
+        No legal value is supplied by the platform.
+      properties:
+        control_kind: { type: string, enum: [deposit, loss, wager, session_duration, reality_check_interval, time_out] }
+        asset_code: { type: string }
+        effective_from: { type: string, format: date-time }
+        enabled: { type: boolean }
+        mandatory: { type: boolean }
+        ceiling: { $ref: "#/components/schemas/RGAttestedString" }
+        increase_cooldown_seconds: { type: integer, minimum: 1 }
+        increase_requires_reconfirmation: { type: boolean }
+        scope: { type: string, enum: [account, tenant_person, platform_person] }
+        allowed_periods:
+          type: array
+          items: { type: string, enum: [rolling_24h, rolling_7d, rolling_30d, calendar_day, calendar_week, calendar_month] }
+        calendar_tz: { type: string }
+        week_start: { type: integer, minimum: 1, maximum: 7 }
+        count_bonus_funded: { type: boolean }
+        loss_computation: { type: string, enum: [net_of_wins] }
+        loss_may_go_negative: { $ref: "#/components/schemas/RGAttestedBool" }
+        post_session_break: { $ref: "#/components/schemas/RGAttestedInt" }
+        concurrent_chain_aggregation: { $ref: "#/components/schemas/RGAttestedBool" }
+        pending_intent_ttl: { $ref: "#/components/schemas/RGAttestedInt" }
+        allowed_durations_seconds:
+          type: array
+          items: { type: integer, minimum: 1 }
+        allowed_durations_any: { type: boolean }
+        allowed_intervals_seconds:
+          type: array
+          items: { type: integer, minimum: 1 }
+        reason_code: { type: string, minLength: 1, maxLength: 64 }
+        attestation_ref: { type: string, minLength: 1, maxLength: 200, description: "Printable ASCII. A named signatory reference supplied by compliance." }
+      required: [control_kind, reason_code, attestation_ref]
+    RGOperatorConfigRequest:
+      type: object
+      properties:
+        brand_id: { type: string, format: uuid, description: "Optional; must be a brand of the caller's tenant." }
+        config: { $ref: "#/components/schemas/RGConfigContent" }
+      required: [config]
+    RGConfig:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        level: { type: string, enum: [floor, tenant, brand] }
+        jurisdiction_code: { type: string }
+        brand_id: { type: string, format: uuid }
+        config: { $ref: "#/components/schemas/RGConfigContent" }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+      required: [id, level, jurisdiction_code, config, created_by, created_at]
+    RGConfigList:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/RGConfig" }
+    RGFloorRequestBody:
+      type: object
+      properties:
+        jurisdiction_code: { type: string }
+        config: { $ref: "#/components/schemas/RGConfigContent" }
+      required: [jurisdiction_code, config]
+    RGFloorRequest:
+      type: object
+      description: >
+        A jurisdiction floor change request. proposed_config is the proposed row keyed by rg_limit_configs column names (as the database hashes it).
+      properties:
+        id: { type: string, format: uuid }
+        jurisdiction_code: { type: string }
+        control_kind: { type: string }
+        asset_code: { type: string }
+        proposed_config: { type: object }
+        payload_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        reason_code: { type: string }
+        requested_by: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [pending, approved, rejected, cancelled] }
+        decided_by: { type: string, format: uuid, nullable: true }
+        decided_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        applied_config_id: { type: string, format: uuid }
+      required: [id, jurisdiction_code, control_kind, proposed_config, payload_hash, reason_code, requested_by, status, created_at, expires_at]
+    RGFloorRequestList:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/RGFloorRequest" }
   responses:
+    RGNotFound:
+      description: 404 not_found. An unknown id, or an id of another tenant / another player (indistinguishable).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RGForbidden:
+      description: >
+        403. Beyond the generic gate refusals (not the right principal type, permission missing, a tenant token on a platform route): one of
+        RG_STEP_UP_REQUIRED (staff increase / removal, ADR 0017 not implemented), RG_SELF_TARGET, RG_IDENTITY_REVIEW, RG_PROOF_REFUSED
+        (the ADR 0110 signed actor proof), or forbidden.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RGConflict:
+      description: >
+        409. One closed code: RG_NO_CHANGE, RG_CHANGE_NOT_PENDING, RG_COOLING_OFF, RG_CONFIG_MISSING, RG_PENDING_CAP, RG_IDEMPOTENCY_MISMATCH,
+        RG_OPERATOR_LOOSENS, RG_NO_FLOOR_IN_FORCE, RG_SELF_APPROVAL, RG_REQUEST_NOT_PENDING, RG_GUARD_REFUSED. The message is a fixed sentence,
+        never database text.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RGUnprocessable:
+      description: >
+        422. One closed code: RG_LIMIT_ABOVE_CEILING, RG_PERIOD_NOT_ALLOWED, RG_DURATION_NOT_ALLOWED, RG_NOT_OFFERED, RG_BACKDATED,
+        RG_SYNTHETIC_REFUSED.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RGUnavailable:
+      description: 503 RG_UNAVAILABLE. No actor-proof issuer in this process, or a retryable lock timeout / deadlock (Retry-After).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     ResolutionInvalidRequest:
       description: >
         400. invalid_request for a malformed JSON body, an unknown body field

@@ -10,8 +10,10 @@ import (
 // Mirrors registerCasinoRoutes' pattern. Explicitly NOT exposed this
 // stage: any "end restriction early" mutation, a cross-tenant
 // staff-initiated restriction, or any control besides self-exclusion
-// (deposit/loss/wagering/session limits, reality checks, time-outs -
-// ADR 0026 §15's documented extension points).
+// (ADR 0026 §15's documented extension points). Since ADR 0115 slice S2
+// the limit, time-out and RG-configuration WRITE APIs are mounted by
+// registerRGLimitRoutes (rg_limits_routes.go), called at the end of this
+// function; reality checks remain unmounted.
 func registerRGRoutes(mux *http.ServeMux, deps Deps) {
 	// Player self-service: create my own platform-wide self-exclusion, and
 	// read my own restriction status. No permission gate beyond ordinary
@@ -30,4 +32,7 @@ func registerRGRoutes(mux *http.ServeMux, deps Deps) {
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermRGRestrictionWrite)(newCreateStaffRestrictionHandler(deps)))))
 	mux.Handle("GET /v1/admin/rg/restrictions",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermRGRestrictionRead)(newListRestrictionsForAccountHandler(deps)))))
+
+	// ADR 0115 slice S2: RG limit, time-out and configuration write APIs.
+	registerRGLimitRoutes(mux, deps)
 }

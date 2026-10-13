@@ -84,6 +84,43 @@ func TestLaunchCodes_LiteralsAndStatuses(t *testing.T) {
 	}
 }
 
+// ADR 0115 slice S2: the closed RG_* codes keep their literal strings and statuses.
+func TestRGCodes_LiteralsAndStatuses(t *testing.T) {
+	cases := []struct {
+		code    Code
+		literal string
+		status  int
+	}{
+		{CodeRGLimitAboveCeiling, "RG_LIMIT_ABOVE_CEILING", 422},
+		{CodeRGPeriodNotAllowed, "RG_PERIOD_NOT_ALLOWED", 422},
+		{CodeRGDurationNotAllowed, "RG_DURATION_NOT_ALLOWED", 422},
+		{CodeRGNotOffered, "RG_NOT_OFFERED", 422},
+		{CodeRGBackdated, "RG_BACKDATED", 422},
+		{CodeRGSyntheticRefused, "RG_SYNTHETIC_REFUSED", 422},
+		{CodeRGNoChange, "RG_NO_CHANGE", 409},
+		{CodeRGChangeNotPending, "RG_CHANGE_NOT_PENDING", 409},
+		{CodeRGCoolingOff, "RG_COOLING_OFF", 409},
+		{CodeRGConfigMissing, "RG_CONFIG_MISSING", 409},
+		{CodeRGPendingCap, "RG_PENDING_CAP", 409},
+		{CodeRGIdempotencyMismatch, "RG_IDEMPOTENCY_MISMATCH", 409},
+		{CodeRGOperatorLoosens, "RG_OPERATOR_LOOSENS", 409},
+		{CodeRGNoFloor, "RG_NO_FLOOR_IN_FORCE", 409},
+		{CodeRGSelfApproval, "RG_SELF_APPROVAL", 409},
+		{CodeRGRequestNotPending, "RG_REQUEST_NOT_PENDING", 409},
+		{CodeRGGuardRefused, "RG_GUARD_REFUSED", 409},
+		{CodeRGStepUpRequired, "RG_STEP_UP_REQUIRED", 403},
+		{CodeRGSelfTarget, "RG_SELF_TARGET", 403},
+		{CodeRGIdentityReview, "RG_IDENTITY_REVIEW", 403},
+		{CodeRGProofRefused, "RG_PROOF_REFUSED", 403},
+		{CodeRGUnavailable, "RG_UNAVAILABLE", 503},
+	}
+	for _, tc := range cases {
+		if string(tc.code) != tc.literal || Status(tc.code) != tc.status {
+			t.Errorf("%s: literal %q status %d (want %d)", tc.literal, tc.code, Status(tc.code), tc.status)
+		}
+	}
+}
+
 func TestWriteWithCheckCodes_CarriesTheClosedCodes(t *testing.T) {
 	rec := httptest.NewRecorder()
 	WriteWithCheckCodes(rec, "r1", CodeLaunchPreconditionFailed, "refused", []string{"H-2:licence_id_required", "R-LIC-VALID"})

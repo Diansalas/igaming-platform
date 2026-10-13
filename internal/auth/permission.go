@@ -732,6 +732,31 @@ const (
 	PermLaunchAuthorisationRead    Permission = "launch_authorisation:read"
 )
 
+// ADR 0115 slice S2 (RG limits write APIs). STATIC route-level authority; the controls that matter
+// (tighten-only operator rows, floor four-eyes by distinct staff AND Person, signed actor proofs,
+// player-confirm of increases) are the database's and internal/rg's, whatever the role.
+//
+//   - PermRGLimitRead: read ONE player's limits / limit history (own tenant). tenant_admin, compliance.
+//   - PermRGLimitWriteOnPlayerRequest: record a limit change on the player's request (decreases only
+//     until ADR 0017 step-up ships). compliance ONLY (PermRGRestrictionWrite precedent).
+//   - PermRGConfigRead / PermRGConfigWrite: read the floor + this tenant's operator bounds / write an
+//     operator bound row (tighten-only). Write is compliance ONLY: an RG bound is a compliance act and
+//     tenant_admin (which holds PermStaffManage) must not loosen/tighten it by role alone. This is an
+//     APPLICATION-enforced check (HTTP layer); the database binds operator rows to a same-tenant
+//     principal and to tighten-only, not to a permission.
+//   - PermRGFloorRead / PermRGFloorRequest / PermRGFloorDecide: platform_admin ONLY. Jurisdiction
+//     floor change requests (propose / cancel), the queue, and approve / reject. Four-eyes (a
+//     different Person decides) is enforced by the database, not by these permissions.
+const (
+	PermRGLimitRead                 Permission = "rg_limit:read"
+	PermRGLimitWriteOnPlayerRequest Permission = "rg_limit:write_on_player_request"
+	PermRGConfigRead                Permission = "rg_config:read"
+	PermRGConfigWrite               Permission = "rg_config:write"
+	PermRGFloorRead                 Permission = "rg_floor:read"
+	PermRGFloorRequest              Permission = "rg_floor:request"
+	PermRGFloorDecide               Permission = "rg_floor:decide"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -822,6 +847,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermWithdrawalHoldResolutionRequest, PermWithdrawalHoldResolutionApprove, PermWithdrawalHoldResolutionRead,
 		// ADR 0112 slice 3 (6.1): platform_admin is the ONLY holder of :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationApprove, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// ADR 0115 S2: jurisdiction-floor change requests (platform_admin ONLY; four-eyes is the database's).
+		PermRGFloorRead, PermRGFloorRequest, PermRGFloorDecide,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -933,6 +960,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ADR 0112 slice 3 (6.1): request and suspend for the tenant's OWN brands, plus read.
 		// Never :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// ADR 0115 S2: read a player's RG limits and the config in force; never write.
+		PermRGLimitRead, PermRGConfigRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -1008,6 +1037,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ADR 0112 slice 3 (6.1): compliance may request and suspend for its tenant's own
 		// brands and read; never :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// ADR 0115 S2: compliance is the sole writer of operator RG bounds and of limit changes on a
+		// player's request (decreases only until ADR 0017 step-up ships).
+		PermRGLimitRead, PermRGLimitWriteOnPlayerRequest, PermRGConfigRead, PermRGConfigWrite,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing

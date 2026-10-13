@@ -115,6 +115,33 @@ const (
 	CodeLaunchUnavailable                   Code = "LAUNCH_AUTHORISATION_UNAVAILABLE" // 503: the service is not wired in this process
 )
 
+// ADR 0115 slice S2 (Responsible Gaming limit write APIs): the closed RG_* vocabulary. Messages are
+// fixed sentences, never the underlying database error text.
+const (
+	CodeRGLimitAboveCeiling   Code = "RG_LIMIT_ABOVE_CEILING"  // 422: value above the composed ceiling
+	CodeRGPeriodNotAllowed    Code = "RG_PERIOD_NOT_ALLOWED"   // 422: period outside the composed allowed_periods
+	CodeRGDurationNotAllowed  Code = "RG_DURATION_NOT_ALLOWED" // 422: time-out duration outside the configured set
+	CodeRGNotOffered          Code = "RG_NOT_OFFERED"          // 422: the configuration does not offer this change
+	CodeRGBackdated           Code = "RG_BACKDATED"            // 422: effective_from in the past (RL003)
+	CodeRGSyntheticRefused    Code = "RG_SYNTHETIC_REFUSED"    // 422: SYNTHETIC-NOT-LEGAL configuration refused (RL008)
+	CodeRGNoChange            Code = "RG_NO_CHANGE"            // 409: the value equals the limit in force / nothing to remove
+	CodeRGChangeNotPending    Code = "RG_CHANGE_NOT_PENDING"   // 409: not the latest, not pending, or does not await confirmation
+	CodeRGCoolingOff          Code = "RG_COOLING_OFF"          // 409: confirm before the cooling-off period has run
+	CodeRGConfigMissing       Code = "RG_CONFIG_MISSING"       // 409: increase / removal with no configuration in force
+	CodeRGPendingCap          Code = "RG_PENDING_CAP"          // 409: too many open pending changes
+	CodeRGIdempotencyMismatch Code = "RG_IDEMPOTENCY_MISMATCH" // 409: Idempotency-Key reused with a different request
+	CodeRGOperatorLoosens     Code = "RG_OPERATOR_LOOSENS"     // 409: an operator row would loosen the floor / tenant row (RL004)
+	CodeRGNoFloor             Code = "RG_NO_FLOOR_IN_FORCE"    // 409: nothing to tighten (RL005)
+	CodeRGSelfApproval        Code = "RG_SELF_APPROVAL"        // 409: the requester's Person may not decide (RL007)
+	CodeRGRequestNotPending   Code = "RG_REQUEST_NOT_PENDING"  // 409: decided, expired or cancelled change request
+	CodeRGGuardRefused        Code = "RG_GUARD_REFUSED"        // 409: another database guard (RL0xx)
+	CodeRGStepUpRequired      Code = "RG_STEP_UP_REQUIRED"     // 403: staff increase / removal (ADR 0017 step-up not implemented)
+	CodeRGSelfTarget          Code = "RG_SELF_TARGET"          // 403: staff may not change their own Person's limits
+	CodeRGIdentityReview      Code = "RG_IDENTITY_REVIEW"      // 403: account under identity review may not loosen a person-level limit
+	CodeRGProofRefused        Code = "RG_PROOF_REFUSED"        // 403: the ADR 0110 actor proof guard (AP0xx)
+	CodeRGUnavailable         Code = "RG_UNAVAILABLE"          // 503: no proof issuer / temporary lock contention
+)
+
 // Error is the wire format for an API error response.
 type Error struct {
 	Code    Code   `json:"code"`
@@ -136,7 +163,8 @@ func httpStatus(c Code) int {
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
-	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson:
+	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson,
+		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused:
 		return http.StatusForbidden
 	case CodeNotFound, CodeSettlementNotFound:
 		return http.StatusNotFound
@@ -150,11 +178,14 @@ func httpStatus(c Code) int {
 		CodeLaunchIllegalTransition, CodeLaunchSubjectClosed, CodeLaunchWithdrawalsHolding, CodeLaunchOpenBetsBlockClosure,
 		CodeLaunchRetryableLockTimeout, CodeLaunchRequestNotPending, CodeLaunchAlreadyDecided, CodeLaunchStaleReadiness, CodeLaunchPriorReject,
 		CodeLaunchPriorRejecter, CodeLaunchNotLegacyBaseline, CodeLaunchRefusedAtExecution, CodeLaunchGuardRefused,
-		CodeKillSwitchReleaseRequestAlreadyOpen:
+		CodeKillSwitchReleaseRequestAlreadyOpen,
+		CodeRGNoChange, CodeRGChangeNotPending, CodeRGCoolingOff, CodeRGConfigMissing, CodeRGPendingCap,
+		CodeRGIdempotencyMismatch, CodeRGOperatorLoosens, CodeRGNoFloor, CodeRGSelfApproval, CodeRGRequestNotPending, CodeRGGuardRefused:
 		return http.StatusConflict
-	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
+	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch,
+		CodeRGLimitAboveCeiling, CodeRGPeriodNotAllowed, CodeRGDurationNotAllowed, CodeRGNotOffered, CodeRGBackdated, CodeRGSyntheticRefused:
 		return http.StatusUnprocessableEntity
-	case CodeUnavailable, CodeLaunchUnavailable:
+	case CodeUnavailable, CodeLaunchUnavailable, CodeRGUnavailable:
 		return http.StatusServiceUnavailable
 	case CodeRateLimited:
 		return http.StatusTooManyRequests
