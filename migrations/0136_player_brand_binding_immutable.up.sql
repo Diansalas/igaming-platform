@@ -30,7 +30,11 @@
 --   3. Three BEFORE UPDATE ... FOR EACH ROW triggers with a WHEN clause listing exactly the pinned columns, so an
 --      ordinary update (status, password_hash, verified_at, declared residence, KYC status / reason / provider
 --      reference / verified residence) never calls the function. No other BEFORE UPDATE trigger exists on these three
---      tables at authoring time; a later one must keep this guard first by name ordering (record it there).
+--      tables at authoring time. Row-level BEFORE triggers fire in NAME order and a later one can still modify NEW
+--      after this guard has passed, so the guard must fire LAST: a future BEFORE UPDATE trigger on these tables must
+--      sort before `<table>_identity_immutable` (or this guard must be renamed to sort last), recorded in that
+--      migration (security review F3). The catalog test (internal/tenant/migration_0136_integration_test.go) refuses
+--      any other BEFORE UPDATE trigger on these tables until that is done.
 --   4. COMMENT ON TRIGGER citing ADR 0118.
 --
 -- NOT pinned here, deliberately (ADR 0118 s2): player_accounts.person_id (PERSON-RELINK-PIN-1), player_accounts.email,

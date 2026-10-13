@@ -199,8 +199,11 @@ pin) is included.
      schema-qualified references, message names the table and the changed column set, no row values in the message.
   4. Triggers `player_accounts_identity_immutable`, `wallets_identity_immutable`,
      `kyc_verifications_identity_immutable`: `BEFORE UPDATE ... FOR EACH ROW WHEN (<columns> IS DISTINCT FROM ...)`.
-     No other BEFORE UPDATE trigger exists on these three tables today, so firing order is not a concern; if one is
-     added later, name ordering must keep this guard first (record in that migration).
+     No other BEFORE UPDATE trigger exists on these three tables today. **Corrected (security review F3, 2026-10-13):**
+     row-level BEFORE triggers fire in name order and a later BEFORE trigger can still modify `NEW` after this guard
+     has passed, so the guard must fire **LAST**, not first: a future BEFORE UPDATE trigger on these tables must sort
+     before `<table>_identity_immutable` (or the guard is renamed to sort last), recorded in that migration. The T8
+     catalog test refuses any other BEFORE UPDATE trigger on these tables until that is done.
   5. `COMMENT ON TRIGGER` citing this ADR.
 - **No change to any existing function, policy, constraint or grant.** In particular 0128-0135 function bodies are
   not replaced.
@@ -283,12 +286,24 @@ trigger (T4); M8 delete pre-flight class 1 (T9); M9 down leaves a function behin
    stakes only). This ADR closes the re-home path only.
 3. **`person_id` stays mutable** (PERSON-RELINK-PIN-1, section 2).
 4. **Detection limit of the pre-flight** (section 5).
+5. **Re-home by DELETE + INSERT (security review F4, 2026-10-13; follow-up BRAND-DELETE-REHOME-1, class B).**
+   `igaming_runtime` holds DELETE on `player_accounts` and `wallets` and neither table has a delete guard, so a
+   CHILDLESS player (no wallet and no other child row) or an EMPTY wallet (no ledger account) can be deleted and
+   re-inserted under another brand. No value can move this way: a wallet with any ledger account cannot be deleted
+   (`ledger_accounts_wallet_id_fkey`), and a player with a wallet or any other child cannot be deleted (child FKs),
+   so the ledger FK chain blocks every funded case. A deny-delete trigger or a revoked DELETE grant is the
+   candidate fix; NOT implemented here (out of this ADR's scope, recorded for a follow-up).
 
 ## 8. Rollout and runbook notes
 
 - No Go change is required to ship: no production code writes a pinned column (section 3). The migration can ship
   alone.
 - Before applying on a persistent database: take the migration lock window as for 0133; read the class 4 NOTICE.
+  Since security review F2, `cmd/migrate` prints every server notice to stderr as `migrate: NOTICE: <message>`
+  (severity and message only; `db.ConnectWithNoticeHandler`); before F2 the driver discarded it. Alternative, without
+  the runner: a dry run as the table owner in psql, `psql -v ON_ERROR_STOP=1 "$OWNER_URL"` then
+  `BEGIN; \i migrations/0136_player_brand_binding_immutable.up.sql; ROLLBACK;`: psql prints the class 4 NOTICE (or the
+  BR098 refusal) and the ROLLBACK undoes everything (FORCE RLS included), recording nothing in `schema_migrations`.
   Any non-zero class 4 count is investigated as a potential P1 (stranded or moved funds) with ledger-finance before
   any closure is treated as clean.
 - On `BR098`: STOP. Do not repair rows from SQL. Open a P1 incident (it is evidence of past re-home / re-point),
@@ -395,6 +410,29 @@ wallets DISABLE TRIGGER` -> `42501` (must be owner).
 head 0136; repo-wide unit tests PASS; gofmt clean; go vet (default and `-tags integration`) clean; golangci-lint
 (`--build-tags integration --new-from-rev=2ee2041`) 0 issues. Mutation plan M1-M10: **10 of 10 killed** (final pass;
 M4 does not apply; M5 and M10 notes in deviation 6); T11 manually mutated and killed. Evidence file above.
+
+**Security review round 1 (2026-10-13, live, on `4a4e41b`): APPROVE WITH CONDITIONS, no blocker; the attack was
+refused in every form.** Conditions applied on this branch:
+
+- **F2 (done):** the migrate runner surfaced no PostgreSQL NOTICE, so the class 4 report was lost. `internal/db`
+  gains `NoticeHandler` / `ConnectWithNoticeHandler` (pgx `OnNotice` on every pool connection; severity + primary
+  message only; a nil handler is exactly `Connect`), and `cmd/migrate` installs `noticePrinter(os.Stderr)`. Tests:
+  `TestNoticePrinter_FormatsSeverityAndMessage` (unit), `TestBinary_UpPrintsMigrationNotices` (built binary on a
+  scratch database: a migration's RAISE NOTICE / WARNING appear on stderr), `TestMigrateUp_NoticeHandlerReceivesRaiseNotice`
+  (internal/db), and T9 class 4 now applies 0136 through the real runner (`db.MigrateUp`) and asserts the NOTICE.
+  Mutants: handler not installed in `cmd/migrate` -> the binary test fails; `OnNotice` wiring removed in `internal/db`
+  -> the db test and T9 fail. s8 runbook text updated (psql dry run as the alternative).
+- **F3 (done):** s4 item 4 and the 0136 header said the guard must fire FIRST; corrected to LAST (BEFORE row triggers
+  fire in name order and a later one can modify `NEW` after the guard passed). T8 already refuses any other BEFORE
+  UPDATE trigger on the three tables; its message now says why. The 0136 file is unmerged, so its header was edited
+  in place (its checksum changes; any database that applied the earlier text must be rebuilt, local only).
+- **F4 (recorded, not implemented):** s7 item 5, follow-up BRAND-DELETE-REHOME-1 (class B) in the task registry.
+- **F5 (optional, out of scope, recorded):** the pre-flight has no class for a past KYC re-point
+  (`kyc_verifications.player_account_id` / `brand_id` changed before 0136): nothing denormalised records the original
+  binding, so it is a detection blind spot like s5's "no snapshot row" limit. No fix proposed here.
+- **F6 (out of scope, recorded):** `kyc_verifications` has no status-transition guard (any status can be set by the
+  runtime role; 0136 pins the binding columns only). Owner: KYC; tracked with PERSON-RELINK-PIN-1 for the identity /
+  KYC owner decision.
 
 **Residuals (unchanged from s7, plus):** class 3 compares brand / player only (not `asset_code`; an asset re-point of
 a wallet with no ledger account but an adjustment request would not be reported); class 4 counts closed BRANDS only

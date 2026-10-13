@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -292,7 +293,9 @@ func TestMigration0136_Catalog(t *testing.T) {
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		// No other BEFORE UPDATE row trigger on the three tables (ADR 0118 s4 item 4: firing order).
+		// No other BEFORE UPDATE row trigger on the three tables (ADR 0118 s4 item 4, security F3: BEFORE row
+		// triggers fire in name order and a later one could modify NEW after the guard passed, so the guard must
+		// fire LAST; a new BEFORE UPDATE trigger needs that order recorded and this pin updated).
 		rows, err = tx.Query(ctx, `SELECT c.relname || '.' || t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
 			WHERE NOT t.tgisinternal AND c.relname IN ('player_accounts', 'wallets', 'kyc_verifications')
 			  AND (t.tgtype & 2) <> 0 AND (t.tgtype & 16) <> 0 AND t.tgname NOT LIKE '%identity\_immutable'`)
@@ -315,7 +318,7 @@ func TestMigration0136_Catalog(t *testing.T) {
 		t.Fatalf("want exactly three identity-immutable triggers, got %d: %+v", len(got), got)
 	}
 	if len(beforeUpdateOthers) != 0 {
-		t.Fatalf("another BEFORE UPDATE trigger exists on a guarded table (the guard must fire first; record the order): %v", beforeUpdateOthers)
+		t.Fatalf("another BEFORE UPDATE trigger exists on a guarded table (the guard must fire LAST: a later BEFORE trigger could modify NEW after it passed; record the order): %v", beforeUpdateOthers)
 	}
 	whenRe := regexp.MustCompile(`(?i)\bWHEN \((.*)\) EXECUTE FUNCTION`)
 	pairRe := regexp.MustCompile(`(?i)\(?new\.(\w+) IS DISTINCT FROM old\.(\w+)\)?`)
@@ -562,43 +565,31 @@ func TestMigration0136_Preflight(t *testing.T) {
 		t.Fatalf("force-close b2: %v", err)
 	}
 
-	cfg, err := pgx.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Applied through the REAL migrate runner (db.MigrateUp on a pool with the notice handler that
+	// cmd/migrate installs, security review F2): the class 4 NOTICE must reach the operator.
 	var mu sync.Mutex
 	var notices []string
-	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-	cfg.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
+	runner, err := db.ConnectWithNoticeHandler(ctx, url, 2, 5*time.Second, func(sev, msg string) {
 		mu.Lock()
-		notices = append(notices, n.Message)
+		notices = append(notices, sev+": "+msg)
 		mu.Unlock()
-	}
-	conn, err := pgx.ConnectConfig(ctx, cfg)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close(ctx) }()
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
+	defer runner.Close()
+	if applied, err := runner.MigrateUp(ctx, lgMigDir(t, migration0136Version)); err != nil || len(applied) != 1 || applied[0] != migration0136Version {
+		t.Fatalf("class 4 must not refuse (runner): %v %v", applied, err)
 	}
-	if _, err := tx.Exec(ctx, string(upSQL)); err != nil {
-		_ = tx.Rollback(ctx)
-		t.Fatalf("class 4 must not refuse: %v", err)
-	}
-	trg, fns, forced, err := m136Objects(ctx, tx)
+	trg, fns, forced, err := m136Objects(ctx, pool.Raw())
 	if err != nil || trg != 3 || fns != 3 || forced != 7 {
 		t.Fatalf("class 4: the up applies and restores FORCE: triggers=%d functions=%d forced=%d/7 err=%v", trg, fns, forced, err)
-	}
-	if err := tx.Rollback(ctx); err != nil { // the runner path is exercised by T10; keep the scratch at 0135
-		t.Fatal(err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	var found string
 	for _, n := range notices {
-		if strings.Contains(n, "migration 0136 pre-flight (informational") {
+		if strings.HasPrefix(n, "NOTICE: migration 0136 pre-flight (informational") {
 			found = n
 		}
 	}
