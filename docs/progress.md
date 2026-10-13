@@ -8325,3 +8325,11 @@ permission probes.
   - Bonus Wave 4 and AI agents not started.
 
   **Stop: final human gate. The next step needs explicit human authorization.**
+
+
+## 2026-10-13 — Provider-independent completion round (post-PRH)
+
+- Merged to `claude/focused-wright-jw88w9`: ADR 0112 launch authorisation (migrations 0128-0131), ADR 0113 withdrawal state machine + hold invariant (0132-0134), ADR 0114 operator console S0/S1/S2/S4/S6/S6b, ADR 0115 S1 RG schema (0135), local backup/restore drill + alert rule files + runbooks.
+- Migration head 0135. Full local verification at `3145fb3` recorded in task-registry row FULL-VERIFY-HEAD135-2026-10-13 (local evidence only, NOT GitHub CI).
+- Whole-platform reconciliation: `docs/plans/platform-reconciliation-2026-10-13.md`. Technical production readiness NOT MET. Staff MFA/step-up (ADR 0017) is NOT IMPLEMENTED (the earlier gap-audit claim was wrong).
+- Not done by design: no real provider, no sandbox PSP, no AWS, no brand activation, no legal/licensing conclusion.
