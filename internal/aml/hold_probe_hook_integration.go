@@ -28,3 +28,9 @@ func SetHoldProbeForTest(f ProbeFunc) (restore func()) {
 	holdProbe = f
 	return func() { holdProbe = prev }
 }
+
+// RealHoldProbeForTest is the production hold read itself (never the installed hook), so the failure-injection tests exercise
+// the real savepoint / batch mechanism directly.
+func RealHoldProbeForTest(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (bool, error) {
+	return probeHoldActive(ctx, tx, tenantID, personID, accountID, op)
+}
