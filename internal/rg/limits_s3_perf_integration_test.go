@@ -109,6 +109,51 @@ func (w *s1World) bulkLedgerBatch(t *testing.T, tenant, acct uuid.UUID, asset st
 	}
 }
 
+// bulkDeposits inserts n synthetic ledger 'deposit' postings (Dr psp_clearing / Cr player_cash, 100) in batches. The first
+// evidence run seeded none, so its deposit plan was not representative (ledger-finance F-i).
+func (w *s1World) bulkDeposits(t *testing.T, tenant, acct uuid.UUID, asset string, n int, from, to time.Time) {
+	t.Helper()
+	const batch = 250
+	step := to.Sub(from) / time.Duration(n)
+	for done := 0; done < n; done += batch {
+		m := batch
+		if n-done < m {
+			m = n - done
+		}
+		bf, bt := from.Add(step*time.Duration(done)), from.Add(step*time.Duration(done+m))
+		err := w.owner.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+			wid, err := s3Wallet(ctx, tx, tenant, acct, asset)
+			if err != nil {
+				return err
+			}
+			cash, err := ledger.GetOrCreateAccount(ctx, tx, tenant, &wid, ledger.AccountPlayerCash, asset)
+			if err != nil {
+				return err
+			}
+			clearing, err := ledger.GetOrCreateAccount(ctx, tx, tenant, nil, ledger.AccountPSPClearing, asset)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `
+				WITH t AS (
+				  INSERT INTO ledger_transactions (id, tenant_id, transaction_type, idempotency_key, correlation_id, created_at, posted_at)
+				  SELECT gen_random_uuid(), $1::uuid, 'deposit', 'perf-' || gen_random_uuid()::text, gen_random_uuid(), ts, ts
+				    FROM (SELECT $4::timestamptz + (($5::timestamptz - $4::timestamptz) * g / $6::int) AS ts FROM generate_series(0, $6::int - 1) g) s
+				  RETURNING id, created_at
+				)
+				INSERT INTO ledger_entries (ledger_transaction_id, ledger_account_id, tenant_id, asset_code, direction, amount, created_at)
+				SELECT id, $2::uuid, $1::uuid, $7::text, 'credit', 100, created_at FROM t
+				UNION ALL
+				SELECT id, $3::uuid, $1::uuid, $7::text, 'debit', 100, created_at FROM t`,
+				tenant, cash, clearing, bf, bt, m, asset)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("bulk deposits: %v", err)
+		}
+	}
+}
+
 func (w *s1World) bulkIntents(t *testing.T, tenant, acct uuid.UUID, n int, from, to time.Time) {
 	t.Helper()
 	err := w.owner.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
@@ -155,6 +200,12 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 	step("filler A2", func() {
 		w.bulkLedger(t, f.tenantA, f.acctA2, "USD", perfFiller, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
 	})
+	step("deposits (target)", func() {
+		w.bulkDeposits(t, f.tenantA, a, "USD", perfTargetHistory/4, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
+	})
+	step("deposits (filler X)", func() {
+		w.bulkDeposits(t, f.tenantA, f.acctX, "USD", perfFiller, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
+	})
 	step("intents", func() {
 		w.bulkIntents(t, f.tenantA, a, perfFiller/5, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
 	})
@@ -170,6 +221,10 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 		return nil
 	}())
 
+	var totalRows int
+	wantOK(t, "count", w.owner.WithTenant(ctx, f.tenantA, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_entries`).Scan(&totalRows)
+	}))
 	// The seed must have produced the intended time distribution (a Duration overflow once clustered it).
 	var in30, in7, all int
 	wantOK(t, "distribution", w.owner.WithTenant(ctx, f.tenantA, func(ctx context.Context, tx pgx.Tx) error {
@@ -308,7 +363,7 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 		return c[int(float64(len(c)-1)*p)]
 	}
 	t.Logf("LATENCY over %d runs (synthetic ledger: %d target-player bets, %d ledger rows in the table): stake usage p50=%v p95=%v p99=%v | deposit usage p50=%v p95=%v p99=%v | L0.4 held for both reads p50=%v p95=%v p99=%v",
-		runs, perfTargetHistory+300, 2*(perfTargetHistory+300+2*perfFiller), pct(stake, .5), pct(stake, .95), pct(stake, .99), pct(dep, .5), pct(dep, .95), pct(dep, .99), pct(held, .5), pct(held, .95), pct(held, .99))
+		runs, perfTargetHistory+300, totalRows, pct(stake, .5), pct(stake, .95), pct(stake, .99), pct(dep, .5), pct(dep, .95), pct(dep, .99), pct(held, .5), pct(held, .95), pct(held, .99))
 	if pct(stake, .95) > 500*time.Millisecond || pct(dep, .95) > 500*time.Millisecond {
 		t.Fatalf("usage statements take %v / %v at p95 on a small synthetic ledger; that is a regression against the index design", pct(stake, .95), pct(dep, .95))
 	}
