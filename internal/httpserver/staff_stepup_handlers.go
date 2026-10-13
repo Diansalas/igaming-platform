@@ -103,7 +103,7 @@ type stepUpWire struct {
 
 func (r stepUpResponse) wire() any {
 	return stepUpWire{AccessToken: r.AccessToken.reveal(), TokenType: "Bearer", ExpiresIn: r.ExpiresIn,
-		MFAAt: r.MFAAt.UTC().Format(time.RFC3339),
+		MFAAt:           r.MFAAt.UTC().Format(time.RFC3339),
 		StepUpExpiresAt: stepUpExpiriesWire{Financial: r.Financial.UTC().Format(time.RFC3339), Critical: r.Critical.UTC().Format(time.RFC3339)}}
 }
 

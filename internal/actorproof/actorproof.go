@@ -321,7 +321,23 @@ func (i *Issuer) Sign(c Claims) (string, error) {
 // Attach signs c and sets the transaction-local GUC app.actor_proof on tx. It
 // is called AFTER the session (tenant/acting) is open and BEFORE the governed
 // write; the proof is consumed by that write's trigger.
+//
+// ADR 0119 S4b (section 9.1): Attach is the only production signing path, and
+// it applies the signer backstop first: a step-up-classified operation
+// (StepUpOperations) is refused with ErrStepUpMissing unless ctx carries a
+// fresh auth.StepUpAssertion for c.Actor. Sign itself has no context and is
+// used by tests only (a static test pins that production code signs through
+// Attach).
 func (i *Issuer) Attach(ctx context.Context, tx pgx.Tx, c Claims) error {
+	if i == nil {
+		return ErrNoIssuer
+	}
+	if err := c.validate(); err != nil {
+		return err
+	}
+	if err := checkStepUp(ctx, c, i.now()); err != nil {
+		return err
+	}
 	tok, err := i.Sign(c)
 	if err != nil {
 		return err

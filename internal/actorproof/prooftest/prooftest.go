@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 )
 
@@ -234,11 +235,25 @@ func AttachForSession(ctx context.Context, tx pgx.Tx, operation, target, payload
 			return err
 		}
 	}
+	// ADR 0119 S4b (section 9.1 "Test support"): a raw-SQL test simulates the server-side issuer, which signs only
+	// after the HTTP step-up gate verified a fresh second factor; the synthetic assertion stands in for that gate.
+	ctx = WithStepUp(ctx, a)
 	err = iss.Attach(ctx, tx, actorproof.Claims{Actor: a, Scope: scope, Tenant: tn, Operation: operation, Target: target, PayloadHash: payloadHash})
 	if errors.Is(err, actorproof.ErrInvalidClaims) {
 		return nil // an unsignable session (e.g. platform scope) attaches nothing; the database refuses
 	}
 	return err
+}
+
+// WithStepUp returns ctx carrying a synthetic, fresh step-up assertion for
+// actor (ADR 0119 S4b, section 9.1 "Test support"): what the HTTP step-up gate
+// places in a real request after it enforced the route's class. Integration
+// tests that call a governed domain service directly (no HTTP chain) use it;
+// the HTTP tests never do (they exercise the real gate).
+func WithStepUp(ctx context.Context, actor uuid.UUID) context.Context {
+	return auth.ContextWithStepUpAssertion(ctx, auth.StepUpAssertion{
+		Subject: actor, SessionID: uuid.New(), MFAAt: time.Now(), Class: auth.StepUpCritical,
+	})
 }
 
 // ProcessKey returns the process kid and a copy of its key (for tests that need
