@@ -4,7 +4,6 @@ package kyc
 
 import (
 	"context"
-	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,17 +16,11 @@ import (
 // the real hold read fails closed there (aml_hold_active() does not exist), so those tests install "no hold" for the
 // duration of the test. Nothing else may use it.
 
-var holdHookMu sync.Mutex
-
 // SetHoldEvaluatorForTest replaces the AML hold read used by EvaluateEnforcement and returns the restore function.
 func SetHoldEvaluatorForTest(f func(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op aml.Operation) (aml.HoldVerdict, error)) (restore func()) {
-	holdHookMu.Lock()
 	prev := evaluateHold
 	evaluateHold = f
-	return func() {
-		evaluateHold = prev
-		holdHookMu.Unlock()
-	}
+	return func() { evaluateHold = prev }
 }
 
 // NoHoldEvaluator is the "no hold ever" evaluator for schemas that predate the AML objects.

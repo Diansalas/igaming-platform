@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
@@ -205,6 +206,11 @@ func scratchPoolThroughDir(t *testing.T, prefix string, version int64) (*db.Pool
 		if werr := os.WriteFile(filepath.Join(dir, name), b, 0o600); werr != nil {
 			t.Fatal(werr)
 		}
+	}
+	if version < 141 {
+		// ADR 0116 S1: this scratch schema predates the AML objects (migration 0141), where the real hold read fails
+		// closed (aml_hold_active() is missing). The adjustment gate is not under test here: stub the read to "no hold".
+		t.Cleanup(aml.SetHoldProbeForTest(aml.NoHoldProbe))
 	}
 	url := scratchdb.New(t, prefix)
 	pool, err := db.Connect(context.Background(), url, 20, 5*time.Second)

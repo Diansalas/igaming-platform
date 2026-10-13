@@ -1,9 +1,10 @@
 # ADR 0116 — AML Internal Foundation: transaction monitoring, screening, case workflow, SAR export (AML-INTERNAL-FOUNDATION)
 
-- **Status:** **ACCEPTED — pending implementation** (revision 2, 2026-10-12, `architect` with the orchestrator).
-  This is a design only; **nothing is implemented** (label: NOT IMPLEMENTED). Q1–Q8 are recorded as
+- **Status:** **ACCEPTED — slices S1 and S3 IMPLEMENTED on branch (2026-10-13, see §12); S2, S4, S5, S6, S7 NOT
+  IMPLEMENTED** (revision 2, 2026-10-12, `architect` with the orchestrator). Q1–Q8 are recorded as
   **orchestrator defaults that the owner or legal can reverse** (§10). They decide mechanism only. **No legal
-  value is set here.** No migration number is claimed; the orchestrator allocates numbers after head `0132`.
+  value is set here.** Migration numbers: the original text said "after head `0132`"; that is stale. The head at
+  implementation time was `0136`, `0137`-`0139` are reserved for ADR 0119, and S1+S3 use **`0140`, `0141`, `0142`**.
 - **Revisions:**
 
   | Rev | Base | Change |
