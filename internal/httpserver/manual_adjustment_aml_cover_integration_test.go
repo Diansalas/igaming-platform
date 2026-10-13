@@ -108,7 +108,7 @@ func TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConfl
 	var state string
 	var refusal *string
 	var approvals int
-	if err := w.a.pool.WithTenant(context.Background(), w.tenant, func(ctx context.Context, tx pgx.Tx) error {
+	if err := w.a.pool.WithPrincipalScope(context.Background(), w.tenant, w.f1, func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT state, refusal_code FROM ledger_adjustment_requests WHERE id = $1`, d2.ID).Scan(&state, &refusal); err != nil {
 			return err
 		}

@@ -44,6 +44,7 @@ def chain(*cmds):
 
 
 # Evaluator / composition / gate mutants run the aml suite AND every gate package that exercises the hold read.
+HTTPF4 = chain(db('./internal/httpserver/', 'TestManualAdjustmentAPI_F4'), db('./internal/adjustment/', 'TestAMLHold'))
 PAY = db('./internal/payments/', 'TestAMLHold')
 GATES = chain(db('./internal/aml/', 'Test'), db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement|TestComposeHold|TestRetryableOnHoldEvalFailure'),
               db('./internal/adjustment/', 'TestAMLHold'), db('./internal/withdrawal/', 'TestAMLHold'),
@@ -217,6 +218,12 @@ M = [
     ('N32 adjustment submission raises no detached alert', 'internal/adjustment/request.go', "_ = aml.RaiseHoldEvalFailedDetached(ctx, s.pool, target.tenantID, aml.OpManualAdjustment)", "_ = aml.OpManualAdjustment", ADJ),
     ('N33 adjustment submission raises the alert in the rolled-back tx', 'internal/adjustment/request.go', "walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID, true)", "walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID, false)", ADJ),
     ('N34 eval-failed typed error not produced', 'internal/adjustment/request.go', "		if v.EvalFailed && !v.Held {\n			return Request{}, &holdEvalFailedError{}\n		}\n", "", ADJ),
+    # ---- F4 option (b): AML adjustment refusals render as an ordinary conflict ----
+    ('F4a AML refusal no longer classified as the generic conflict', 'internal/adjustment/adjustment.go', "case errors.Is(err, ErrNotPending), errors.Is(err, ErrAccountUnderReview):", "case errors.Is(err, ErrNotPending):", HTTPF4),
+    ('F4b execution refusal renders differently', 'internal/adjustment/execute.go', "		return Outcome{}, holdCheck.refusal(requestID)", "		return Outcome{}, ErrIntegrity", HTTPF4),
+    ('F4c submission refusal renders differently', 'internal/adjustment/request.go', "		return Request{}, h.refusal(id)", "		return Request{}, ErrInvalidInput", HTTPF4),
+    ('F4d real reason not recorded in the AML log', 'internal/adjustment/aml_hold.go', "	if !errors.As(err, &r) || r.tenantID == uuid.Nil {", "	if true {", HTTPF4),
+    ('F4e execution hold check dropped', 'internal/adjustment/execute.go', "	if holdCheck.denied() {", "	if false {", HTTPF4),
 ]
 
 only = sys.argv[1:]
