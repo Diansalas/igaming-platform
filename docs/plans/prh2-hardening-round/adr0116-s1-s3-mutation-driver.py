@@ -36,6 +36,7 @@ M = [
     ('A4 quorum counts expired grants', U0, "       AND (g.valid_until IS NULL OR pg_catalog.now() < g.valid_until)\n       AND g.grantee_scope = CASE",
      "       AND g.grantee_scope = CASE", AML),
     ('A5 quorum ignores the grantee scope', U0, "AND g.grantee_scope = CASE p_owner_scope WHEN 'tenant' THEN 'tenant' WHEN 'platform' THEN 'platform' ELSE '?' END", "", AML),
+    ('A5b quorum counts suspended grantees', U0, "       AND NOT EXISTS (SELECT 1 FROM public.staff_users su WHERE su.id = g.grantee_staff_id AND su.status <> 'active')\n", "", AML),
     ('A6 authorize: session-tenant mismatch allowed', U0, "    IF v.tenant IS DISTINCT FROM p_tenant THEN", "    IF false THEN", AML),
     ('A7 authorize: SQL role re-check dropped', U0, "    IF NOT EXISTS (\n        SELECT 1 FROM public.staff_capability_grants g\n         WHERE g.tenant_id = p_tenant AND g.grantee_staff_id = v.actor",
      "    IF false AND NOT EXISTS (\n        SELECT 1 FROM public.staff_capability_grants g\n         WHERE g.tenant_id = p_tenant AND g.grantee_staff_id = v.actor", AML),
