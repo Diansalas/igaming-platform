@@ -3,17 +3,29 @@
 // share the exact same source of truth for "what is the current session"
 // without a circular import between them.
 //
-// Storage policy (Stage 5 MVP, see the directive's own note): the ACCESS
-// token lives only in this in-memory module variable - it disappears on a
-// full page reload, which is fine because we always hold a refresh token
-// to silently re-establish a session. The REFRESH token lives in
-// sessionStorage (cleared when the tab closes). Production hardening would
-// move both to httpOnly, Secure, SameSite cookies set by the server, which
-// would remove the need for any of this client-side token handling at
-// all - that requires backend changes out of scope for this stage.
+// Storage policy (ADR 0119 S7a, contract docs/plans/adr0119-s3-api-contract.md
+// section 3): BOTH tokens live only in this in-memory module. Nothing is
+// written to localStorage or sessionStorage, so a full page reload ends the
+// session and the operator signs in again with a second factor (staff
+// sessions are 12 h absolute / 30 min idle anyway). Before S7a the refresh
+// token was kept in sessionStorage; that was removed because a staff refresh
+// token now carries aal2 and the contract forbids browser storage for it.
+//
+// Fail closed: setSession refuses any access token that does not decode to
+// an aal2 session (claim `aal` == 2). This is a UI convenience check on an
+// unverified decode - the server is authoritative on every request - but it
+// guarantees the UI never shows a signed-in state for a token the server
+// did not mark as second-factor authenticated.
 import { decodeJwtClaims, type StaffClaims } from './jwt'
 
-const REFRESH_TOKEN_KEY = 'backoffice.refresh_token'
+let refreshToken: string | null = null
+
+// One-time cleanup of the pre-S7a location of the refresh token (it is memory only now).
+try {
+  sessionStorage.removeItem('backoffice.refresh_token')
+} catch {
+  // Storage unavailable: nothing to clean.
+}
 
 interface SessionSnapshot {
   accessToken: string | null
@@ -41,17 +53,29 @@ export function getAccessToken(): string | null {
 }
 
 export function getRefreshToken(): string | null {
-  return sessionStorage.getItem(REFRESH_TOKEN_KEY)
+  return refreshToken
 }
 
-export function setSession(accessToken: string, refreshToken: string): void {
-  snapshot = { accessToken, claims: decodeJwtClaims(accessToken) }
-  sessionStorage.setItem(REFRESH_TOKEN_KEY, refreshToken)
+export class InsufficientAssuranceError extends Error {
+  constructor() {
+    super('session is not a second-factor (aal2) session')
+    this.name = 'InsufficientAssuranceError'
+  }
+}
+
+export function setSession(accessToken: string, newRefreshToken: string): void {
+  const claims = decodeJwtClaims(accessToken)
+  if (!claims || claims.aal !== 2) {
+    clearSession()
+    throw new InsufficientAssuranceError()
+  }
+  snapshot = { accessToken, claims }
+  refreshToken = newRefreshToken
   emit()
 }
 
 export function clearSession(): void {
   snapshot = { accessToken: null, claims: null }
-  sessionStorage.removeItem(REFRESH_TOKEN_KEY)
+  refreshToken = null
   emit()
 }

@@ -2065,3 +2065,80 @@ Review round (security C1-C3, R1-R4; code review F1-F9), further changed asserti
 | Re-review F4: owner session revocation; trigger-disable wording | FIXED: the guarded owner SQL in runbook 5.1 / 5.2 (executed by the procedure test, which also shows the unguarded form failing `SF040`); S3-R10 says "owner or superuser" | `TestStaffMFA_OwnerResetProcedure_S3toS6` |
 | Re-review F1 / F2 / player-session note | RECORDED as S3-R12 (S4a), S3-R13 (S4b), S3-R14 | - |
 | Code review F9: pre-granted `mfa_at` / seal columns | REMOVED from 0138 and `deploy/init-app-role.sql` (D10); S4b grants them | `TestGrants_SessionsAndCutover_RuntimeRole`, `TestStaffMFA_SessionSealTamper`; Q16 |
+
+## 24. S7a implementation record (2026-10-13)
+
+Branch: the S7a worktree branch on top of `ddd3ed6` (the S3 backend), `backoffice/` only. **NOT MERGED**; S3 and S7a merge
+together (section 16). Gate G (live `security` review, `code-reviewer`, `qa`) has not run. Nothing below is an approval.
+No backend Go, migration or OpenAPI file was touched; every call matches `docs/api/openapi/platform-api.yaml` (tag
+`staff-auth`) and `docs/plans/adr0119-s3-api-contract.md`.
+
+### 24.1 Status labels
+
+| Item | Label |
+|---|---|
+| Login in two steps (`auth/LoginPage.tsx`): password, then TOTP; "use a recovery code"; challenge-expiry restart; fixed messages for every contract error code | `IMPLEMENTED` (against the S3 API contract; tested with MSW mocks of the API, not against a running backend) |
+| Recovery-code flow ends in enrolment, never a session | `IMPLEMENTED` (MSW-tested) |
+| Enrolment-link entry (`auth/EnrolPage.tsx`, `/#/enrol?token=` and `/enrol?token=`, token stripped from the URL before the router renders) and `EnrolWizard` (start, secret behind a reveal toggle, copy setup URI, confirm, recovery codes once with copy / download `.txt` / acknowledgement tick) | `IMPLEMENTED` (MSW-tested) |
+| QR code rendering of `otpauth_uri` | `NOT IMPLEMENTED` (no QR library is a dependency and none was added; the setup key and a "Copy setup URI" button are the fallback; decision for the owner / architect below) |
+| "My security" page (`features/account/SecurityPage.tsx`, `/account/security`, link in the top bar): status, type, activation time, locks, recovery codes remaining with a warning at 3 or fewer | `IMPLEMENTED` (MSW-tested) |
+| Recovery-code regeneration on "My security" | `NOT IMPLEMENTED` (the endpoint is S4b and needs step-up; the page shows a labelled note and no action) |
+| Own-sessions list on "My security" (ADR 15.4) | `NOT IMPLEMENTED` (out of the S7a request) |
+| Step-up modal and `403 step_up_required` handling | `NOT IMPLEMENTED` (S7b) |
+| Staff directory, lifecycle, invitations, password redeem (`401 session_revoked`) | `NOT IMPLEMENTED` (S8 / S6 / S4a) |
+| End-to-end check against a running platform-api with a real authenticator app | `BLOCKED` on a human (same as entry gate 21.7 (g)); only mocked-API tests exist |
+
+### 24.2 Decisions taken inside S7a (reversible; for the reviewer)
+
+| # | Decision | Why |
+|---|---|---|
+| U1 | **Both tokens are memory only.** The refresh token moved from `sessionStorage` to a module variable (`auth/tokenStore.ts`). A page reload now ends the session and the user signs in again with a second factor. | Contract section 3: access and refresh tokens are secrets, never `localStorage` / `sessionStorage`. This changes pre-S7a behaviour (silent restore after reload). |
+| U2 | **Fail-closed aal2 gate in `setSession`**: a token pair whose access token does not decode to `aal == 2` is refused, the session is cleared and `InsufficientAssuranceError` is thrown; the same function installs refreshed tokens, so a refresh that returns anything else signs the user out. | "Never show a logged-in state without a valid aal2 session." The decode is unverified and a UI convenience; the server stays authoritative. The UI makes no authorization decision from `aal`, `amr`, `sid`. |
+| U3 | The recovery codes and token pair are held in `EnrolWizard` state; the session is installed only when the user ticks "I have stored these codes" and presses Continue. | The recovery codes must not vanish because an early session install redirected the page. |
+| U4 | `apiFetch` gained an `anonymous` option for the staff-auth calls: no bearer, no refresh-on-401, no session clear on 401, `cache: 'no-store'`. `ApiError` gained `retryAfterSeconds` (from `Retry-After`). | A wrong code answers 401; the old behaviour would have tried a token refresh with a stale token. |
+| U5 | The UI branches on `code` only and renders fixed strings (the contract's suggested wording); the server `message` is never shown on these screens. `unauthorized` outside the password step is treated as an expired challenge. Unknown codes collapse to one generic message. | No oracle through message text. |
+| U6 | Client-side format checks (6 digits; `XXXXX-XXXXX`) run before any call so a typo does not spend one of the 5 challenge attempts. | The server remains authoritative; a malformed code is also a server `invalid_mfa_code`. |
+| U7 | `index.html` gets `<meta name="referrer" content="no-referrer">`. | Defence in depth for the one-time token link and challenge material. |
+| U8 | `Open in authenticator app` link is rendered only if the server URI matches `^otpauth://totp/`. | A hostile `javascript:` URI from a compromised response is never made clickable. |
+
+### 24.3 Changed existing tests and assertions
+
+| File | Change | Why |
+|---|---|---|
+| `src/auth/LoginPage.test.tsx` | rewritten | Login no longer returns a token pair |
+| `src/test/handlers.ts` | login handler returns a challenge; handlers for verify, recover, redeem, enrol start / confirm and `GET /v1/staff/me/mfa` added | S3 API |
+| `src/test/jwt.ts` | test JWTs carry `aal: 2`, `amr: ['pwd','otp']` | U2 |
+
+### 24.4 Evidence
+
+Run in `backoffice/`: `npx tsc -b`, `npm run build`, `npx vitest run` (29 files, 318 tests, all passing at the S7a commit after the security fixes).
+Tests cover every flow and error path of the contract table, keyboard use (Enter submit, focus, tab order), double-submit,
+challenge expiry (fake timers), fail-closed aal, no Web Storage writes and no console output containing any secret
+sentinel, secrets absent from the DOM after unmount, a hostile otpauth URI, and "My security" warnings and degradation.
+
+### 24.5 Contract gaps and residuals
+
+| # | Item |
+|---|---|
+| S7a-G1 | The contract says the enrolment link is `/#/enrol?token=`; the back office uses `BrowserRouter`, so `captureEnrolLinkToken` (run in `main.tsx` before render) reads the fragment form, keeps the token in module memory and rewrites the URL to `/enrol` with `history.replaceState`. **Only the fragment form is accepted** (security review F2): a path or query form (`/enrol?token=`) never keeps the token, the URL is rewritten without the query, and the page shows the fixed invalid-link message. S6 emails and the `cmd/seed-admin` bootstrap output must emit `/#/enrol?token=` only. |
+| S7a-G2 | No session-liveness signal exists before S4a: a suspended user keeps a working UI until the access token expires. The UI cannot detect it. |
+| S7a-R1 | Clipboard and downloaded `.txt` files hold recovery codes outside the app's control; the UI warns but cannot clear them. |
+| S7a-R2 | The `otpauth_uri` and setup key are visible in the DOM of the setup step (unavoidable without a QR canvas; a QR would carry the same data). |
+| S7a-R3 | Memory-only tokens (U1) mean no silent session restore after a reload; JavaScript in the page origin can still read in-memory tokens (XSS), as before. |
+| S7a-R4 | `replaceState` rewrites the current session-history entry only; the browser's global history (address-bar autocomplete, sync) may still hold the original URL containing the one-time token. The token is single-use, bound to the staff member and requires their current password, which limits the exposure. |
+| S7a-R5 | **Deploy requirement (F2):** the back-office origin must send `Referrer-Policy: no-referrer` (cutover runbook precondition 5). The `<meta name="referrer">` is now the first element of `<head>` but is not a substitute. |
+| S7a-O1 | Owner / architect: add a pinned, zero-dependency QR library (for example `qrcode-generator`) so the QR can be shown locally? Not added: the request said not to add dependencies unless unavoidable. |
+
+### 24.6 Security review of S7a (2026-10-13): APPROVE WITH CONDITIONS - disposition
+
+| # | Finding | Disposition |
+|---|---|---|
+| F1 | The login challenge-expiry timer kept running in the `enrol` phase and wiped the recovery codes / session after confirm | Fixed: one absolute deadline fixed when the `mfa` challenge is issued (not restarted on step switches), the timer runs only in the `mfa` and `recovery` phases (the server enforces the `enrol` challenge expiry), and a generation counter drops late responses after Cancel or a restart. Tests: 300 s of fake time with the recovery-codes screen shown keeps the codes; single deadline across step switches; late verify response after Cancel. |
+| F2 | Query-form enrolment link kept the token; referrer meta not first | Fixed: fragment form only; `<meta name="referrer" content="no-referrer">` is the first element of `<head>`; deploy requirement S7a-R5 recorded in the cutover runbook (precondition 5) and the contract page. |
+| F3 | ADR wording on URL stripping; token lifetime in memory | Wording corrected (S7a-R4). The token is cleared from module memory when `EnrolPage` unmounts. A failed redeem does not burn the token (OpenAPI: only success consumes it), so it is kept for a retry while the page is open. |
+| F4 | Recovery codes lost on reload | Fixed: a `beforeunload` prompt is active while the codes are shown and not acknowledged (tested). |
+| F5 | Cached server data survived a session end | Fixed: `AuthProvider` clears the React Query cache whenever the session is null (logout, refresh failure, aal reject; tested). |
+| F6 | Dead bootstrap-refresh branch and stale comments | Removed; `tokenStore` removes the legacy `sessionStorage` key `backoffice.refresh_token` once on load. |
+| F11 | Object URL revoked synchronously; clipboard advice; unmount cleanup claim | The object URL is revoked after 1 s; the setup-URI copy notice tells the user to clear the clipboard; unmount cleanup is described as best-effort (no scrubbing guarantee in JavaScript). |
+| F12 | Accessibility | Error text is linked to inputs with `aria-describedby`; the setup key has a visible label instead of an `aria-label` on a `<p>`. |
+| F13 | Recorded recommendation for S7a-O1 (not built, not blocking) | If a QR is added: vendor the Nayuki QR Code generator (MIT, a single TypeScript file with its licence header) rather than a new npm dependency; render from the module matrix as React `rect` elements or a canvas, never by injecting SVG or HTML strings; no network QR service. `NOT IMPLEMENTED` today. |

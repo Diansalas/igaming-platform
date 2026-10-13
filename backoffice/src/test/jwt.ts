@@ -10,6 +10,8 @@ export function makeTestJwt(claims: Partial<StaffClaims>): string {
     principal_type: 'staff',
     exp: Math.floor(Date.now() / 1000) + 3600,
     iat: Math.floor(Date.now() / 1000),
+    aal: 2,
+    amr: ['pwd', 'otp'],
     ...claims,
   }
   const encode = (obj: unknown) => btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')

@@ -22,7 +22,9 @@ async function toApiError(res: Response): Promise<ApiError> {
   const code = (body.code as ApiErrorBody['code']) ?? 'internal_error'
   const message = body.message ?? res.statusText ?? 'Request failed'
   const checkCodes = Array.isArray(body.check_codes) ? body.check_codes.filter((c): c is string => typeof c === 'string') : []
-  return new ApiError(code as ApiError['code'], message, res.status, body.request_id, checkCodes)
+  const retryAfterRaw = Number(res.headers.get('Retry-After'))
+  const retryAfter = Number.isFinite(retryAfterRaw) && retryAfterRaw > 0 ? Math.floor(retryAfterRaw) : undefined
+  return new ApiError(code as ApiError['code'], message, res.status, body.request_id, checkCodes, retryAfter)
 }
 
 // Refresh calls are made with a bare fetch, never apiFetch - apiFetch's
@@ -68,6 +70,13 @@ export function refreshSessionOnce(): Promise<void> {
 export interface ApiFetchOptions extends RequestInit {
   /** Internal: set to false on the retried attempt to prevent a refresh loop. */
   _isRetry?: boolean
+  /**
+   * Unauthenticated, secret-bearing call (staff login / MFA / enrolment,
+   * ADR 0119): no bearer token is attached, a 401 is a business answer
+   * (wrong code) and never triggers refresh or clears the session, and the
+   * request/response is never cached.
+   */
+  anonymous?: boolean
 }
 
 /**
@@ -78,8 +87,8 @@ export interface ApiFetchOptions extends RequestInit {
  * redirecting to /login) and rethrows.
  */
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
-  const { _isRetry, headers, ...rest } = options
-  const token = getAccessToken()
+  const { _isRetry, anonymous, headers, ...rest } = options
+  const token = anonymous ? null : getAccessToken()
   const mergedHeaders = new Headers(headers)
   if (!mergedHeaders.has('Content-Type') && rest.body) {
     mergedHeaders.set('Content-Type', 'application/json')
@@ -88,12 +97,12 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 
   let res: Response
   try {
-    res = await fetch(`${API_BASE}${path}`, { ...rest, headers: mergedHeaders })
+    res = await fetch(`${API_BASE}${path}`, { ...rest, ...(anonymous ? { cache: 'no-store' as const } : {}), headers: mergedHeaders })
   } catch {
     throw new ApiError('network_error', 'Could not reach the server. Check your connection and try again.', 0)
   }
 
-  if (res.status === 401 && !_isRetry) {
+  if (res.status === 401 && !_isRetry && !anonymous) {
     try {
       await refreshSessionOnce()
     } catch {
@@ -105,7 +114,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 
   if (!res.ok) {
     const err = await toApiError(res)
-    if (res.status === 401) clearSession()
+    if (res.status === 401 && !anonymous) clearSession()
     throw err
   }
 

@@ -62,6 +62,13 @@ export type ApiErrorCode =
   | 'KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN'
   // ADR 0112 section 9: the closed LAUNCH_* set (internal/apierror).
   | LaunchErrorCode
+  // ADR 0119 S3 staff-auth codes (docs/plans/adr0119-s3-api-contract.md section 2).
+  | 'mfa_enrolment_required'
+  | 'mfa_locked'
+  | 'invalid_challenge'
+  | 'invalid_mfa_code'
+  | 'invalid_enrolment_token'
+  | 'mfa_enrolment_expired'
   | 'network_error';
 
 export class ApiError extends Error {
@@ -70,13 +77,23 @@ export class ApiError extends Error {
   readonly requestId?: string;
   /** Closed check codes of a refused launch precondition (ADR 0112); empty otherwise. */
   readonly checkCodes: string[];
+  /** Seconds from a `Retry-After` header, when the server sent a valid one. */
+  readonly retryAfterSeconds?: number;
 
-  constructor(code: ApiErrorCode, message: string, status: number, requestId?: string, checkCodes: string[] = []) {
+  constructor(
+    code: ApiErrorCode,
+    message: string,
+    status: number,
+    requestId?: string,
+    checkCodes: string[] = [],
+    retryAfterSeconds?: number,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.status = status;
     this.requestId = requestId;
     this.checkCodes = checkCodes;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }

@@ -1,11 +1,13 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { LoginPage } from '../auth/LoginPage'
+import { EnrolPage } from '../auth/EnrolPage'
 import { RequireAuth } from '../auth/RequireAuth'
 import { RequireNavPermission } from '../auth/RequireNavPermission'
 import { AppLayout } from '../layout/AppLayout'
 import { BonusLayout } from '../features/bonus/BonusNav'
 import { CampaignListPage } from '../features/bonus/CampaignListPage'
 import { ChangeRequestQueuePage } from '../features/bonus/ChangeRequestQueuePage'
+import { SecurityPage } from '../features/account/SecurityPage'
 import { KycQueuePage } from '../features/kyc/KycQueuePage'
 import { RgQueuePage } from '../features/rg/RgQueuePage'
 import { PlayerDetailPage } from '../features/players/PlayerDetailPage'
@@ -32,6 +34,7 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/enrol" element={<EnrolPage />} />
 
       <Route
         element={
@@ -41,6 +44,7 @@ export function AppRoutes() {
         }
       >
         <Route index element={<HomePage />} />
+        <Route path="account/security" element={<SecurityPage />} />
 
         <Route
           path="tenants"

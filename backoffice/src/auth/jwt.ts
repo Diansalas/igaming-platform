@@ -17,6 +17,10 @@ export interface StaffClaims {
   exp: number
   iat: number
   jti?: string
+  /** Session assurance level (ADR 0119 s7.1). Staff sessions are accepted by the UI only when this is 2. */
+  aal?: number
+  amr?: string[]
+  sid?: string
   iss?: string
   aud?: string[]
 }

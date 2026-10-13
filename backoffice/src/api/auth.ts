@@ -14,13 +14,96 @@ export interface StaffLoginParams {
   password: string
 }
 
-export function staffLogin(params: StaffLoginParams): Promise<TokenPairResponse> {
-  const body: Record<string, string> = { email: params.email, password: params.password }
-  if (params.tenantSlug) body.tenant_slug = params.tenantSlug
-  return apiFetch<TokenPairResponse>('/v1/staff/auth/login', {
-    method: 'POST',
-    body: JSON.stringify(body),
+/**
+ * Single-use staff auth challenge (ADR 0119 s6). SECRET: keep in memory
+ * only, never log, never persist. `mfa` -> verify/recover; `enrol` -> enrol/start.
+ */
+export interface StaffAuthChallenge {
+  type: 'mfa' | 'enrol'
+  token: string
+  expires_in: number
+  methods: Array<'totp' | 'recovery_code'>
+}
+
+export interface EnrolStartResponse {
+  factor_id: string
+  otpauth_uri: string
+  secret_base32: string
+  expires_in: number
+}
+
+export interface EnrolConfirmResponse {
+  recovery_codes: string[]
+  token_pair: TokenPairResponse
+}
+
+export interface StaffMfaStatus {
+  enrolled: boolean
+  factor_type: 'totp' | null
+  activated_at: string | null
+  recovery_codes_remaining: number
+  hard_locked: boolean
+  locked_until: string | null
+}
+
+// All staff-auth calls are `anonymous`: no bearer, no refresh-on-401, no cache.
+function postAnonymous<T>(path: string, body: unknown): Promise<T> {
+  return apiFetch<T>(path, { method: 'POST', body: JSON.stringify(body), anonymous: true })
+}
+
+function credentialBody(p: { tenantSlug?: string; email: string; password: string }): Record<string, string> {
+  const body: Record<string, string> = { email: p.email, password: p.password }
+  if (p.tenantSlug) body.tenant_slug = p.tenantSlug
+  return body
+}
+
+/** Step 1: password. Never returns a token pair (S3 breaking change) - only an `mfa` challenge. */
+export async function staffLogin(params: StaffLoginParams): Promise<StaffAuthChallenge> {
+  const res = await postAnonymous<{ challenge: StaffAuthChallenge }>('/v1/staff/auth/login', credentialBody(params))
+  return res.challenge
+}
+
+export function staffMfaVerify(challengeToken: string, code: string): Promise<TokenPairResponse> {
+  return postAnonymous('/v1/staff/auth/mfa/verify', { challenge_token: challengeToken, code })
+}
+
+/** Lost device: a recovery code yields an `enrol` challenge, never a session. */
+export async function staffMfaRecover(challengeToken: string, recoveryCode: string): Promise<StaffAuthChallenge> {
+  const res = await postAnonymous<{ challenge: StaffAuthChallenge }>('/v1/staff/auth/mfa/recover', {
+    challenge_token: challengeToken,
+    recovery_code: recoveryCode,
   })
+  return res.challenge
+}
+
+export async function staffEnrolRedeem(params: {
+  token: string
+  tenantSlug?: string
+  email: string
+  password: string
+}): Promise<StaffAuthChallenge> {
+  const res = await postAnonymous<{ challenge: StaffAuthChallenge }>('/v1/staff/auth/enrol/redeem', {
+    token: params.token,
+    ...credentialBody(params),
+  })
+  return res.challenge
+}
+
+export function staffEnrolStart(challengeToken: string): Promise<EnrolStartResponse> {
+  return postAnonymous('/v1/staff/auth/enrol/start', { challenge_token: challengeToken })
+}
+
+export function staffEnrolConfirm(challengeToken: string, factorId: string, code: string): Promise<EnrolConfirmResponse> {
+  return postAnonymous('/v1/staff/auth/enrol/confirm', {
+    challenge_token: challengeToken,
+    factor_id: factorId,
+    code,
+  })
+}
+
+/** GET /v1/staff/me/mfa (bearer). Not a secret, but never cached. */
+export function getMyMfaStatus(): Promise<StaffMfaStatus> {
+  return apiFetch<StaffMfaStatus>('/v1/staff/me/mfa', { cache: 'no-store' })
 }
 
 /**

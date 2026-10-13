@@ -30,7 +30,7 @@ A challenge allows 5 wrong codes and lives 5 minutes. After it is exhausted or e
 
 0. (Token path only) `POST /v1/staff/auth/enrol/redeem` `{token, tenant_slug?, email, password}`
    - `200 {"challenge": {"type": "enrol", ...}}`. The token comes from the `cmd/seed-admin` bootstrap job (S3) or an
-     emailed MFA-reset link (S6, not yet built). The back office route `/#/enrol?token=...` reads it.
+     emailed MFA-reset link (S6, not yet built). The back office route `/#/enrol?token=...` reads it. **Only the fragment form is supported** (S7a security review F2): the S6 emails and the `cmd/seed-admin` output must emit `/#/enrol?token=` and never `/enrol?token=`; the back office discards a query-form token and shows a fixed invalid-link page. The back-office origin must also send `Referrer-Policy: no-referrer` (cutover runbook precondition 5).
 1. `POST /v1/staff/auth/enrol/start` `{challenge_token}`
    - `200 {factor_id, otpauth_uri, secret_base32, expires_in: 600}` (x-sensitive). Render `otpauth_uri` as a QR code
      **locally** (bundled library; never a network QR service). Show `secret_base32` behind a reveal toggle. Calling

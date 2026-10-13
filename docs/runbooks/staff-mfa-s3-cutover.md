@@ -40,6 +40,13 @@ ticket), it is labelled as such.
    a workstation (ADR 0119 section 11).
 4. **The back office (slice S7a) is deployed together with S3** (one merge unit, ADR 0119 section 16): the old
    single-step login page cannot complete a login after S3.
+5. **Back office response headers (S7a security review F2, deploy requirement).** The origin that serves the back
+   office must send `Referrer-Policy: no-referrer` (the page also carries a `<meta name="referrer">`, but a header is
+   authoritative and covers the document request itself). Enrolment links must be emitted **only** in the fragment
+   form `https://<back-office-host>/#/enrol?token=...` (a fragment is never sent to a server or in a Referer); the
+   `cmd/seed-admin` bootstrap output and the S6 emails must not use a path or query form (`/enrol?token=`): the
+   back office refuses it and shows a fixed invalid-link page. No existing production configuration checklist covers
+   response headers; add this item when one is written.
 
 ## 3. Deploy order (ADR 0119 section 13.1a item 4)
 

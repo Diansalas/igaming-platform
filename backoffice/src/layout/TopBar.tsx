@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
 import { isPlatformAdmin } from '../auth/jwt'
 import { Button } from '../components/Button'
@@ -15,6 +16,9 @@ export function TopBar() {
         <span className="text-slate-700">
           <span className="font-medium">{claims.role}</span>
         </span>
+        <Link to="/account/security" className="text-brand-700 underline">
+          My security
+        </Link>
         <Button variant="secondary" onClick={logout}>
           Log out
         </Button>
