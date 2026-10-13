@@ -606,3 +606,164 @@ their own review.
   lifecycle rows. It never takes a financial lock, so it cannot form a cycle with an L1-L3 holder.
 - **Existing DB guards are kept.** The guards that already check `staff_users.status = 'active'` (for example
   migrations 0106 and 0112 `financial_actor_session`) remain unchanged and stay as defence in depth.
+
+## 10. Staff lifecycle (STAFF-LIFECYCLE-1)
+
+### 10.1 States and transitions (DB-enforced by `SF010`)
+
+```text
+invited --accept+enrol--> active --suspend--> suspended --reactivate--> active
+   |                        |                    |
+   +--revoke invite--> offboarded <--offboard----+  (offboarded is terminal)
+```
+
+| Transition | Who (server-side; tenant from the token, never the body) | Step-up | Four-eyes | Effects, all in one transaction |
+|---|---|---|---|---|
+| create invitation (`-> invited`) | tenant staff: `staff:manage` in its own tenant, for the roles it may create today (`admin_routes.go:550-585`: tenant_admin may create `tenant_admin`, `support` and `compliance`; platform_admin may create any tenant role). Platform staff: `platform_staff:govern` through a 10.4 request. | critical | platform staff only | `INSERT staff_users(status = 'invited', password_hash = NULL, invited_by)`; an enrolment token (`invite`) is emailed; a lifecycle event; audit `staff.invited` |
+| accept (`invited -> active`) | the invitee, holding the token and choosing a password (minimum length as today) | n/a | no | sets `password_hash`; consumes the token; returns a `purpose = 'enrol'` challenge. The account is `active` but **cannot get a session until a factor is confirmed**. |
+| revoke invitation (`invited -> offboarded`) | same authority as the invitation | critical | no | revokes the token; a lifecycle event |
+| suspend (`active -> suspended`) | tenant staff: `staff:manage` in its own tenant, but tenant_admin only for roles it may create. Platform-only roles (`finance`, `risk_manager`, `promotions_manager`, `bonus_operations`) and platform staff: platform_admin. | critical | no (protective) | `staff_version++` (`SF012`). Revoke all of the target's sessions (`auth.RevokeAllSessionsForPrincipal`), live challenges and enrolment tokens. If the reason is `security_compromise`, also revoke the factors and recovery codes. Lifecycle event and audit. |
+| reactivate (`suspended -> active`) | the authority that may **grant** the target's current role. Platform staff: a 10.4 four-eyes request. | critical | platform staff | `staff_version++`. If the factors were revoked (compromise), an `mfa_reset` token is issued and emailed. Lifecycle event and audit. |
+| offboard (`active\|suspended -> offboarded`) | same as suspend | critical | no | `staff_version++`. `password_hash := NULL`. Revoke all factors, recovery codes, challenges, tokens and sessions. Set `offboarded_at`. `email` and `person_id` are kept, because audit identity must stay resolvable. |
+| role change (`active -> active`, role A to B) | tenant: tenant_admin only where **both** A and B are roles it may create; platform_admin any tenant role. The tenant/platform boundary cannot be crossed (`tenant_id` is immutable, `SF011`; platform_admin is the only platform role). | critical | no for tenant roles (OQ-5); a platform grant **is** an invitation through 10.4 | `staff_version++`. Revoke all sessions. `SF014` (Person required for approve-capable roles). Lifecycle event with before/after role. |
+| MFA reset | tenant staff: as suspend. Platform staff: a 10.4 four-eyes request. | critical | platform staff | revoke factors and recovery codes, revoke all sessions, issue an `mfa_reset` token by email. A hard-locked factor is cleared only this way. |
+| Person link (existing route) | unchanged authority | critical (new) | no | unchanged (append-only, migration 0034) |
+
+- **Reason codes are required on every transition.** The vocabulary is closed, a CHECK in the DB plus Go constants
+  [ORCH-DEFAULT]:
+  - suspend: `security_compromise`, `policy_violation`, `investigation`, `leave_of_absence`, `role_review`, `other`
+  - offboard: `employment_ended`, `contract_ended`, `security_compromise`, `duplicate_account`, `other`
+  - reactivate: `investigation_closed`, `returned_from_leave`, `error_correction`, `other`
+  - role change: `role_change_approved`, `error_correction`, `other`
+  - MFA reset: `device_lost`, `device_replaced`, `hard_locked`, `security_compromise`, `other`
+  - invite revoke: `no_longer_required`, `wrong_details`, `other`
+- **`other` needs a `note`** of 10-500 characters, with the ADR 0104 PII warning. The ADR 0104 display-name hygiene
+  rules apply to the note.
+
+### 10.2 Self-target and the scope fence
+
+- **No self-target.** No actor may suspend, reactivate, offboard, change the role of or MFA-reset **their own**
+  account. This is checked in Go by comparing the token subject with the path id. In the DB, `SF013` refuses a status
+  or role change where `NEW.id = app.principal_id`. That GUC is forgeable by SQL, so `SF013` is defence in depth
+  against an application bug.
+- **Allowed self-service:** re-enrolment through recovery (6.1.3), regenerating one's own recovery codes, one's own
+  display name and one's own sessions.
+- **Scope fence.** A tenant-scoped caller can never reach a platform row: the dual-scope RLS of migration 0011 hides it,
+  and the handler answers 404. A cross-tenant target is also 404 (`canActOnTenant`, then RLS).
+
+### 10.3 Last-admin protection
+
+- **`SF020` (platform).** A BEFORE UPDATE OF `status`, `role` trigger on `staff_users`, for rows with
+  `tenant_id IS NULL`.
+  - It fires when OLD is an active `platform_admin` and NEW is not.
+  - It takes `pg_advisory_xact_lock(hashtext('sf:last_admin:platform'))`, then counts the **other** active platform
+    admins that hold an active factor which is not hard-locked.
+  - If there are none, it refuses.
+  - The advisory lock serialises two admins suspending each other at the same moment. The second transaction re-counts
+    after the first commits, because each statement under READ COMMITTED takes a fresh snapshot.
+- **`SF021` (tenant).** The same rule per tenant, keyed by `sf:last_admin:<tenant_id>`, for `tenant_admin`.
+  - It applies only when the acting session is tenant-scoped, that is when no `app.acting_platform_principal_id` or
+    `app.platform_admin_principal_id` is set.
+  - A platform admin may remove the last tenant_admin (tenant offboarding) with a reason code.
+  - It is an accident guard. GUC forgery under M5 is out of its scope.
+- **The console warns** when fewer than 2 platform admins are active and enrolled, because the 10.4 four-eyes then
+  cannot complete without the owner path (section 11).
+
+### 10.4 Four-eyes for platform-staff changes (`staff_lifecycle_requests` and `staff_lifecycle_approvals`)
+
+- **Kinds:** `platform_invite` (the only way to grant `platform_admin` over HTTP), `platform_reactivate` and
+  `platform_mfa_reset`. A platform suspend or offboard is single-actor, because it is protective and bounded by
+  `SF020`.
+- **Approvals.** One approver plus the requester, so two distinct Persons [ORCH-DEFAULT, OQ-5 may raise it to two
+  approvers]. Approver ≠ requester and ≠ target, by staff id **and** by Person. A NULL Person refuses (`SF032`).
+- **Lifetime.** `expires_at = now() + 72h`, forced by the DB.
+- **Flow (the ADR 0112 S9 pattern):**
+  - The requester INSERTs the request with an actor proof (`staff_lifecycle:request`, scope `platform`, target `new`,
+    payload = a digest of kind, target, email, Person, reason code and note).
+  - The approver locks the request `FOR UPDATE` and INSERTs the approval (proof `staff_lifecycle:approve`, target =
+    request id, payload = the request's `payload_hash`).
+  - It then moves `pending -> executing`, performs the staff change, moves `executing -> executed` and writes the
+    lifecycle event and the audit row, all in one transaction.
+- **`SF030` guard.** It refuses the privileged changes unless this txid has an `executing` request of the matching kind
+  and target, or `current_user` owns the table (the owner path, section 11). The privileged changes are:
+  - INSERT of a `platform_admin` row;
+  - a platform row moving `suspended -> active`;
+  - an INSERT of a `staff_enrolment_tokens` row with `purpose = 'mfa_reset'` for a platform staff member.
+- **`SF033`.** A deferred check at commit: no request is left `executing`.
+- **Actor proof (ADR 0110 extension).**
+  - `actor_proof_require` and `internal/actorproof` admit the prefix `staff_lifecycle:` for scope `platform` with a
+    NULL tenant, in lockstep. `platform_acting` and `tenant` are refused (`AP004`).
+  - The governed-table list grows from 13 to 15.
+  - `internal/stafflifecycle` joins the `TestStatic_OnlyFourEyesPackagesSign` allow-list. The security review of that
+    change is mandatory.
+- **What this closes.** Through `SF030`, a platform_admin INSERT by SQL alone is now refused: it needs a proof-bound
+  approval that SQL cannot forge. ADR 0110 section 8 had deferred this "owner-only lifecycle for platform rows" as part
+  of H1. **It is included here** because the task requires four-eyes for platform role grants, and a DB-enforced
+  four-eyes is the platform's rule (CLAUDE.md). It is reversible (one trigger). OQ-2 asks the owner to confirm it.
+
+### 10.5 MFA reset and hard lock
+
+- **A hard-locked factor** (6.5) blocks login and step-up. Recovery codes still work, through 6.1.3, unless the codes
+  are also exhausted.
+- **Otherwise it needs an MFA reset** under 10.1 or 10.4. The reset revokes everything and emails an `mfa_reset`
+  token. The staff member redeems it with their password (6.3), then enrols.
+- **The resetter never sees the token** and cannot enrol a factor on the target's behalf.
+
+### 10.6 Audit (before/after, actor, reason code)
+
+Every lifecycle change and every MFA event writes, in the same transaction:
+
+1. **A `staff_lifecycle_events` row (append-only, `SF099`).** Columns:
+   - `id`, `tenant_id` (the target's), `staff_user_id`
+   - `event` (closed vocabulary, below)
+   - `actor_type` (`staff`, `system` or `owner`), `actor_staff_id`, `actor_person_id`
+   - `before` JSONB and `after` JSONB: only `status`, `role`, `staff_version`, `person_id`, factor ids and states,
+     never secrets
+   - `reason_code`, `note`, `lifecycle_request_id`
+   - `request_id`, `ip`, `user_agent`, `created_at`
+
+   The `event` values are `invited`, `invite_revoked`, `invite_accepted`, `suspended`, `reactivated`, `offboarded`,
+   `role_changed`, `person_linked`, `mfa_enrolled`, `mfa_reset`, `mfa_hard_locked`, `mfa_recovery_used`,
+   `recovery_codes_regenerated` and `owner_provisioned`.
+2. **An `audit.Record` row.** The action is `staff.<event>`. `Metadata` carries `{reason_code, before, after,
+   lifecycle_request_id}`. A platform actor on a tenant target sets `SubjectTenantID`, so the tenant sees the action
+   (ADR 0104), with the platform actor redacted (ADR 0114 section 4.1).
+
+Authentication events go to `audit.Record` only, because they are high volume. They are `staff.login_password_verified`,
+`staff.login_succeeded`, `staff.mfa_verification_failed`, `staff.step_up_verified`, `staff.step_up_failed`,
+`staff.mfa_locked` and `auth.session_assurance_invalid`.
+
+## 11. Break-glass [ORCH-DEFAULT]
+
+- **None in the application.** There is no "MFA bypass" flag, no master recovery code, no support override and no
+  environment switch.
+- **The only escape is the existing owner path.** `cmd/seed-admin` is run by an operator with **database owner
+  credentials**, which the runtime never holds: production startup refuses the owner role (ADR 0112 S11). In this
+  mode it:
+  1. refuses unless `-break-glass` is given **and** a `-reason` is supplied;
+  2. creates a new `platform_admin` row through the owner path, which `SF030` admits because `current_user` owns the
+     table;
+  3. issues a `bootstrap` enrolment token (keyed; printed once);
+  4. writes an `owner_provisioned` lifecycle event and a platform audit row;
+  5. raises the durable alert `staff_break_glass_used` (P1) to every remaining platform admin.
+- **Usage rule.** Two operators should be present. That is a runbook control (S9), not a software control, and it is
+  stated as such.
+- **Owner reversal.** OQ-6 asks whether the owner wants a governed in-app break-glass instead. The recommendation is
+  no.
+
+## 12. Residuals (stated honestly)
+
+| # | Residual | Severity | Mitigation / owner |
+|---|---|---|---|
+| R1 | **M5 insider escalation.** An attacker who holds both a legitimate staff account (with its factor) and arbitrary SQL can `UPDATE` their own `role` or `status` (for example, un-suspend themselves or move from support to finance in the same tenant), then log in with their real MFA. `SF010` and `SF012` still admit a legal-looking transition. | High under M5 | **OQ-2:** an `authz_seal` column, `HMAC(staff-authz subkey, id, tenant, role, status, staff_version, person_id)`, written by the application on every lifecycle change and verified at login, refresh and liveness. This is part of H1, so it is not built until the owner authorizes it. Slice S-H1 is specified so it can follow immediately. |
+| R2 | **T3 is narrowed, not closed.** For staff, MFA neutralises SQL-minted rows (no factor, no keyed token), taken-over passwords (factor AEAD) and forged sessions (seal). Player T4 and keyed refresh hashes for players are untouched. | Medium | H1/T4 owner items stay OPEN. The decision register is updated after S4 to say "staff part narrowed". |
+| R3 | **Factor deletion by SQL** denies service to the victim (a lock-out). It is never a bypass. | Low | Durable alert on missing-factor logins for accounts that previously had one, using the lifecycle events. MFA reset. |
+| R4 | **TOTP is phishable** by a real-time proxy (AitM). | Medium | WebAuthn for platform_admin is the next factor (OQ-3). `StaffFactor` already accommodates it. |
+| R5 | **Token theft inside the step-up window** (5 or 10 min) by an attacker who controls the browser. | Low-medium | Short windows. Liveness revocation. Audit. Per-session step-up failure revocation. |
+| R6 | **Pending governed requests initiated by a staff member who is later suspended or offboarded** stay approvable by a colleague. The K-flow guards check the acting principal's status, not the initiator's. | Medium | The console shows the initiator's status (S8). A follow-up ADR adds an "initiator still active" check to the K1-K3 and launch guards (it changes existing guards, so it is out of scope here). |
+| R7 | **Active K1 capability grants** of an offboarded staff member stay in the table. They are inert, because `financial_actor_session()` requires `status = 'active'`. | Low | The offboarding screen lists them with a revoke link (critical step-up). |
+| R8 | **Email delivery is MOCK.** Production invites and resets need a real email adapter (PROVIDER DEPENDENT). Until then, the only delivery is the owner-run CLI. | Launch dependency | OQ-1 |
+| R9 | **The per-IP limiter is per process** (`ratelimit.go` caveats). | Low | The per-factor counters are in the DB and global, so they are the real control. |
+| R10 | **Application-host compromise** (it holds the JWT, proof and MFA keys). | Inherent | ADR 0110 T6 |
+| R11 | **A clock skew between the application and an authenticator** larger than ±30 s fails closed (the user cannot log in). | Low | The runbook covers NTP. |
+| R12 | **Email retention.** `email` and `person_id` are kept after offboarding for audit identity. That PII retention needs a data-retention decision. | Compliance | It is recorded. A retention/erasure policy is a separate compliance decision and does not block this ADR. |
