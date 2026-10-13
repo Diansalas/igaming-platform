@@ -5,6 +5,10 @@
   owner question in section 18 blocks the design or slices S1-S9. Each policy value marked **[ORCH-DEFAULT]** is a
   reversible orchestrator/security default. It is **not owner-approved**, and the owner may change it without a
   redesign.
+- **Revision 2 (2026-10-13):** the S0 design review by `architect` and `ledger-finance` returned ACCEPT WITH
+  CONDITIONS. Section 20 resolves every blocking condition (C1-C6) and accuracy fix (C7-C11) in the text, and folds
+  in the cheap non-blocking items (N1-N15). The `security` rulings are recorded there: C2 adopts the scoped
+  re-assertion; C3 rotates factors by re-enrolment only; C5 moves `SF030` to S-H1; C6 merges S5 with S6.
 - **Supersedes in part:** ADR 0017 (architecture foundation, `NOT IMPLEMENTED`). This ADR closes ADR 0017's four "open
   decisions" with reversible defaults. Two ADR 0017 choices change, and the reasons are given in place: recovery codes
   use a keyed HMAC, not Argon2id (section 6.4); MFA policy is code, not a data row (section 4.1).
@@ -53,7 +57,8 @@ Consequences:
    never yields an access token without a verified second factor.
 3. **Secrets.**
    - Factor secrets are encrypted with AES-256-GCM, with AAD bound to the staff member, the tenant and the factor.
-   - The key is a new `STAFF_MFA_KEYS` family that the deployment secret store delivers.
+   - The keys are two new families that the deployment secret store delivers: `STAFF_MFA_FACTOR_KEYS` (AEAD) and
+     `STAFF_MFA_MAC_KEYS` (all keyed MACs).
    - Recovery codes, login challenges and enrolment tokens are stored only as keyed HMACs.
    - None of these values is ever logged, rendered or audited.
 4. **Session assurance.**
@@ -62,7 +67,9 @@ Consequences:
    - A staff session lasts at most 12 h, with a 30 min idle limit [ORCH-DEFAULT].
 5. **Liveness on every staff request.** One indexed query checks that the session is not revoked, that the staff member
    is `active` and that the `role` and `staff_version` match the token. If the check fails, the request is refused.
-   Suspending or offboarding a staff member therefore takes effect on their next request, not 15 minutes later.
+   Suspending or offboarding a staff member therefore takes effect on their next HTTP request, not 15 minutes
+   later. Governed transactions already in flight are covered by section 9.5 and residual R13. Already-queued
+   governed requests are covered by R6.
 6. **Step-up.**
    - `RequireStepUp(class)` is applied per route. Section 8 is the complete classified list.
    - Max-age is 5 min for `critical` and 10 min for `financial` [ORCH-DEFAULT].
@@ -80,14 +87,16 @@ Consequences:
      before and after values, the actor and a reason code.
    - Suspend and offboard revoke every session, and offboard destroys credentials.
    - Granting a platform-staff role (and reactivating platform staff or resetting a platform staff member's MFA) needs
-     four-eyes by distinct Persons. It is bound by a DB guard and an actor proof.
+     four-eyes by distinct Persons, through proof-bound request and approval tables. The extra `staff_users` guard
+     `SF030` is part of the owner-deferred H1 item, so it is built only in S-H1 (section 10.4, OQ-2).
    - The DB keeps at least one active platform_admin (last-admin protection).
    - Invitations replace admin-chosen passwords.
 10. **Break-glass: none in the application** [ORCH-DEFAULT]. The only recovery when no platform_admin can authenticate
-    is the existing owner-role bootstrap (`cmd/seed-admin`, operator-run with database owner credentials). It is
-    audited and alerted (section 11).
-11. **New SQLSTATE class `SF`.** It does not collide with any code used today (section 13.6). Migrations 0137 (MFA) and
-    0138 (lifecycle).
+    is the existing `cmd/seed-admin` bootstrap. It runs as a job **inside the deployment environment**, with the same
+    secret-store injection of the database URL and the MFA keys. It is audited and alerted (section 11).
+11. **New SQLSTATE class `SF`.** It does not collide with any code used today (section 13.6). Three migrations:
+    0137 (MFA tables, S2), 0138 (the staff-session cutover, merged with S3) and 0139 (lifecycle, merged with S6). The
+    orchestrator re-allocates the numbers at dispatch.
 
 ## 3. Threat model (what this defends, and what it does not)
 
@@ -97,10 +106,10 @@ Consequences:
 | M2 | Stolen access or refresh token (XSS, device theft) | Step-up on every high-risk route. The session is limited to 12 h absolute and 30 min idle. The liveness check honours revocation immediately. | Inside the step-up window (5 or 10 min) a token thief who also controls the browser can act. Bounded and audited. |
 | M3 | TOTP replay (shoulder-surf, log, proxy) | Monotonic `last_used_step`; a code is valid only once per factor. | none |
 | M4 | Online TOTP brute force | Per-factor lockout with a `FOR UPDATE` counter. A hard lock after 10 failures in 24 h. The challenge allows 5 attempts. | About 3e-5 success per hard-lock cycle (3 valid codes in 10^6, 10 tries). After a hard lock an admin must reset the factor. |
-| M5 | Arbitrary SQL as `igaming_runtime` (THREAT-MODEL-ARBITRARY-SQL-1): plant a factor, recovery code, challenge or enrolment token; forge a sessions row with `aal=2`; delete a factor to force re-enrolment | AEAD with AAD that binds the factor; keyed HMACs for codes, challenges and tokens; a keyed assurance seal on sessions; MFA policy held in code. A deleted factor causes denial of service, never a bypass, because enrolment needs a keyed enrolment token. | See section 12, R1-R3. **T3 is narrowed for staff, not closed.** A SQL `UPDATE staff_users.role` on a staff member's own row is still accepted, unless the owner authorizes the authz seal in OQ-2. |
-| M6 | Insider tenant_admin escalation (shell accounts, self-grant) | Invitations (the inviter never learns the credentials). The existing platform-only role list is kept. Self-target is refused. Platform roles need four-eyes. | A tenant_admin can still invite a tenant_admin who is an accomplice. That is a legitimate authority, and it is audited. |
-| M7 | A leaving or compromised staff member keeps access | Suspend or offboard revokes sessions and bumps `staff_version`. Liveness refuses the next request. Governed writes re-check liveness `FOR SHARE` inside the transaction. | A request already committed before the suspension stays committed and audited. That is correct. |
-| M8 | Lock-out of governance (all admins suspended or lost factors) | Last-admin guard; four-eyes MFA reset; owner-path bootstrap. | If the owner credentials are also lost, recovery is an operational matter outside this design. |
+| M5 | Arbitrary SQL as `igaming_runtime` (THREAT-MODEL-ARBITRARY-SQL-1): plant a factor, recovery code, challenge or enrolment token; forge a sessions row with `aal=2`; delete a factor to force re-enrolment | AEAD with AAD that binds the factor; keyed HMACs for codes, challenges and tokens; a keyed assurance seal on sessions; MFA policy held in code. A deleted factor causes denial of service, never a bypass, because enrolment needs a keyed enrolment token. | See section 12, R1-R3. **T3 is narrowed for staff, not closed.** A SQL `UPDATE staff_users.role` or `status` on a staff member's own row is still accepted, unless the owner authorizes S-H1 (OQ-2). `sessions.revoked_at` is not sealed (R2). |
+| M6 | Insider tenant_admin escalation (shell accounts, self-grant) | Invitations: the API never returns the credential. The existing platform-only role list is kept. Self-target is refused. Platform roles need four-eyes. | The inviter still chooses the invitee's email address and Person (R14), so an inviter who controls that mailbox gets a working account. A tenant_admin can also invite an accomplice tenant_admin. That is a legitimate authority, and it is audited. |
+| M7 | A leaving or compromised staff member keeps access | Suspend or offboard revokes sessions and bumps `staff_version`. Liveness refuses the next request. Governed writes that move value or change authority re-check liveness `FOR SHARE` inside the transaction (section 9.5). | A request already committed before the suspension stays committed and audited. That is correct. Other step-up routes have a window as long as the handler runs (R13). |
+| M8 | Lock-out of governance (all admins suspended or lost factors) | Last-admin guard; four-eyes MFA reset; the `cmd/seed-admin` bootstrap job (section 11). | If the deployment environment itself is lost, recovery is an operational matter outside this design. |
 | M9 | Application-host compromise | Out of scope: the host holds the JWT, actor-proof and MFA keys. | Same as ADR 0110 T6. |
 | M10 | Secret leakage through logs, audit, errors or a third-party QR service | Secret types redact. Enrolment responses are `no-store`. The QR code is rendered locally in the browser. A static and runtime log-scan test. | none known |
 
@@ -159,34 +168,41 @@ type StaffFactor interface {
 
 ### 5.1 Key family
 
-- **Config.** `STAFF_MFA_KEYS` (`kid:base64(secret)`, comma-separated) and `STAFF_MFA_ACTIVE_KID`, as
-  `config.SecretValue`. The deployment secret store delivers them exactly as it delivers `ACTOR_PROOF_KEYS` and
-  `PAYOUT_INSTRUMENT_KEYS` (ADR 0110 section 6, ADR 0111 section 2.2).
+- **Config: two families, so factor keys and MAC keys can be retired independently** (review C3).
+  - `STAFF_MFA_FACTOR_KEYS` and `STAFF_MFA_FACTOR_ACTIVE_KID`: the AES-256-GCM factor-secret key only.
+  - `STAFF_MFA_MAC_KEYS` and `STAFF_MFA_MAC_ACTIVE_KID`: the four keyed-MAC subkeys of section 5.2.
+  - Both use the `kid:base64(secret)`, comma-separated format and are `config.SecretValue`.
+  - The deployment secret store delivers them exactly as it delivers `ACTOR_PROOF_KEYS` and `PAYOUT_INSTRUMENT_KEYS`
+    (ADR 0110 section 6, ADR 0111 section 2.2).
 - **`config.Load` refuses:**
   - malformed entries;
   - any key under 32 decoded bytes;
   - an unknown active kid;
-  - a key equal to either JWT secret, any actor-proof key, any payout-instrument key, or the provider-credential
-    fingerprint key;
   - outside an explicit development environment, the published `.env.example` placeholder.
+- **One platform key-family registry** (review N7). S1 adds a single registry in `internal/config` of every platform
+  key family, with **pairwise** distinctness checked across all of them: both JWT secrets, `ACTOR_PROOF_KEYS`,
+  `PAYOUT_INSTRUMENT_KEYS`, `PAYOUT_INSTRUMENT_FP_KEYS`, `PROVIDER_CREDENTIAL_FINGERPRINT_KEY` and the two new
+  families. A family added later then cannot forget the check.
 - **Why not `internal/secretstore.Fetcher`.** That package resolves per-tenant provider-credential handles. Its refs
   must sit in the `/provider-creds/` namespace (`secretstore.go:113-152`), and its circuit breaker and negative cache
   are tuned for outbound provider calls. A platform-wide key that every staff login needs belongs with the other
   platform key families, loaded once at startup. "At rest via the secret store" means this: the key material exists
   only in the deployment secret store and in process memory. The database holds only ciphertext and keyed MACs.
-- **Startup gate.** `staffmfa.VerifyStartup` runs from `cmd/platform-api/main.go`. In every environment it refuses to
-  start without a valid family, because staff login cannot work without one. Unlike the actor proof, no environment
+- **Startup gate.** `staffmfa.VerifyStartup` runs from `cmd/platform-api/main.go` and `cmd/seed-admin`. In every
+  environment it refuses to start without both valid families, because staff login cannot work without them. Unlike the actor proof, no environment
   "fails closed at the DB": with no key, there is no staff login.
 
 ### 5.2 Subkeys (HKDF-SHA256, the same construction as `payoutinstrument/keys.go:107-117`)
 
-| Label | Use |
-|---|---|
-| `staff-mfa-factor-aead-v1` | AES-256-GCM key for factor secrets |
-| `staff-mfa-recovery-v1` | HMAC key for recovery-code hashes |
-| `staff-auth-challenge-v1` | HMAC key for login and enrolment challenge-token hashes |
-| `staff-enrolment-token-v1` | HMAC key for invite, enrolment and MFA-reset token hashes |
-| `staff-session-assurance-v1` | HMAC key for the sessions assurance seal |
+The HKDF `info` is `label || "|" || kid`, so a subkey can never be reused across kids.
+
+| Family | Label | Use |
+|---|---|---|
+| FACTOR | `staff-mfa-factor-aead-v1` | AES-256-GCM key for factor secrets |
+| MAC | `staff-mfa-recovery-v1` | HMAC key for recovery-code hashes |
+| MAC | `staff-auth-challenge-v1` | HMAC key for login and enrolment challenge-token hashes |
+| MAC | `staff-enrolment-token-v1` | HMAC key for invite, enrolment and MFA-reset token hashes |
+| MAC | `staff-session-assurance-v1` | HMAC key for the sessions assurance seal |
 
 ### 5.3 Formats
 
@@ -197,15 +213,24 @@ type StaffFactor interface {
   `staff_mfa_integrity` (P1). The factor is never treated as "absent".
 - **Keyed hashes.** `HMAC(subkey(kid), purpose || "|" || staff_user_id || "|" || value)`. The row stores the kid and
   the 32-byte MAC. Every lookup is by MAC, so a lookup of a planted row (any value, but no valid key) finds nothing.
-- **Rotation.**
-  1. Add the new kid to the family and make it active.
-  2. Rewrap the AEAD rows with the job `staffmfa-rewrap`. It is idempotent, runs per row and is audited as
-     `staff.mfa_rewrapped` with counts only.
-  3. Challenges, enrolment tokens and seals have short lifetimes. They age out under the old kid, which stays
-     verify-only for at most 24 h.
-  4. Recovery codes are one-way, so their old kid stays verify-only until every code under it is consumed or
-     regenerated. The runbook (S9) adds a regeneration campaign and a hard retirement date.
-  5. A retired kid is refused.
+- **Rotation of the FACTOR family: by re-enrolment only. No rewrap** (review C3, option ii).
+  - The factor's `secret_*` columns stay immutable (`SF002`), and the runtime has no UPDATE grant on them. A rewrap job
+    would need both owner database credentials and the factor key in one process, which is a worse exposure than the
+    rotation it serves.
+  - Procedure:
+    1. Add the new kid and make it active. New enrolments use it.
+    2. Run an MFA-reset campaign for every factor under the old kid. The S9 runbook names the query that counts them.
+    3. Retire the old kid once no active or pending factor references it.
+  - An emergency rotation after a suspected FACTOR key leak means every staff member re-enrols. That is acceptable at
+    back-office scale, and it is the correct response anyway, because the secrets themselves are exposed.
+- **Rotation of the MAC family.**
+  - Challenges (5 min), enrolment tokens (at most 72 h) and session seals (12 h) age out under the old kid, which stays
+    verify-only for at most 72 h.
+  - Recovery codes are one-way. Their old kid stays verify-only until every code under it is consumed or regenerated,
+    through a regeneration campaign with a hard retirement date (S9 runbook).
+  - This coupling, recovery codes holding the MAC family's old kid, is **accepted explicitly**. It no longer affects
+    the factor key.
+- **A retired kid is refused** in both families.
 
 ### 5.4 Never logged
 
@@ -231,7 +256,8 @@ type StaffFactor interface {
      "expires_in": 300, "methods": ["totp", "recovery_code"]}}`. **No `TokenPair`.**
    - If there is no active factor: return `403 mfa_enrolment_required`. The UI then explains that an enrolment link
      from an administrator is needed (section 6.3). A password alone **never** opens enrolment.
-   - If the factor is hard-locked: return `403 mfa_locked`, which is also audited.
+   - If the factor is hard-locked: return `403 mfa_locked`, which is also audited. No challenge is issued, so neither
+     TOTP nor a recovery code can be presented. A hard lock is cleared **only** by an MFA reset (section 10.5).
    - Audit: `staff.login_password_verified` (it replaces `staff.login_succeeded`, which now means a full aal2 login).
 2. **Second-factor step** (`POST /v1/staff/auth/mfa/verify` with `{challenge_token, code}`):
    - **Lock the challenge.** Look up the challenge by keyed MAC and lock it `FOR UPDATE`. It must be unexpired,
@@ -290,11 +316,16 @@ type StaffFactor interface {
 - **TTL** [ORCH-DEFAULT]: invite 72 h, mfa_reset 24 h, bootstrap 24 h.
 - **One live token.** Issuing a new token for the same `(staff, purpose)` revokes the live one.
 - **Delivery.**
-  - invite and mfa_reset: by email to the staff member's address, through `internal/email.Provider`. MOCK today. A real
-    adapter is PROVIDER DEPENDENT (OQ-1).
-  - bootstrap: printed once by `cmd/seed-admin` on the operator's terminal.
-  - **The token is never returned in an HTTP response to the inviter or the resetter.** This removes the "admin knows
-    the shell account's credentials" weakness of today's creation route (ADR 0024 residual).
+  - invite and mfa_reset: by email to the staff member's address, through `internal/email.Provider`.
+    - `email.MockProvider` is a synthetic component, so `providerkind.RefuseSyntheticInProduction` already refuses to
+      start a production binary with it (`cmd/platform-api/registrations.go:388`).
+    - A real email adapter is therefore **already a launch prerequisite** (ADR 0030 player verification and reset use
+      the same provider). Staff invite and reset are `PROVIDER DEPENDENT` on it. There is no production interim
+      unless the owner chooses one (OQ-1).
+  - bootstrap: printed once by `cmd/seed-admin`, which runs as a job inside the deployment environment (section 11).
+  - **The token is never returned in an HTTP response to the inviter or the resetter.** The API no longer hands the
+    credential to the admin, as today's creation route does. The inviter still chooses the invitee's email address and,
+    for approve-capable roles, the Person. An inviter who controls that mailbox can still activate the account (R14).
 - **Redemption.**
   - `POST /v1/staff/invitations/accept` with `{token, password}` (for an invite: it sets the password and moves
     `invited -> active`).
@@ -334,10 +365,33 @@ would have been right or wrong.
 - **What it does.** It verifies the code against the caller's active factor (replay rule, counters). It updates the
   session row's `mfa_at` and seal, then mints a **new access token** with `mfa_at = now`. The refresh token does not
   change.
+- **Only the chain head.** The `sid` row must have `replaced_by_session_id IS NULL`. Otherwise step-up refuses with 401
+  `session_revoked`, and the client refreshes first. This keeps it from writing `mfa_at` to a dead row (review N2).
+- **Side effect.** `revokeChainFrom` (refresh-token reuse detection) now also kills every outstanding access token of
+  that chain, through liveness.
 - **Audit.** `staff.step_up_verified`, or `staff.step_up_failed` on failure.
 - **Recovery codes are not accepted for step-up.** A staff member who has lost the device recovers through 6.1.3.
-- **The browser flow.** The back office shows a modal, calls step-up, swaps the access token and retries the original
-  request once with the **same** `Idempotency-Key` (section 15.3).
+- **The browser flow.** The back office shows a modal, calls step-up, swaps the access token and re-sends the
+  original request once with the same frozen body (section 15, item 3).
+  - **Why the retry is safe.** A route-level `step_up_required` is returned by middleware before the handler runs, so
+    no write has happened. The domain-level `ErrStepUpRequired` (section 9.3) returns before any insert, and its
+    transaction rolls back.
+  - The admin four-eyes routes carry no `Idempotency-Key`. They are idempotent by state, answering 409 on a repeat
+    (`launch_authorisation_routes.go:27-31`). Bonus routes that read the header re-send their own key.
+
+### 6.7 Lost password, lost device, lost both (review C9)
+
+- **Lost device, password known:** recovery code (6.1.3). If no codes are left, or the factor is hard-locked: MFA reset
+  (10.1, 10.5).
+- **Lost password, device kept:** an administrator issues a `password_reset` enrolment token. Its authority and step-up
+  are the same as MFA reset, and for platform staff it is a 10.4 four-eyes request of kind `platform_password_reset`.
+  The token is emailed. Redemption (`POST /v1/staff/auth/password/redeem` with `{token, new_password, totp_code}`)
+  requires a **valid TOTP from the active factor**. It sets the password, revokes every session and returns an `mfa`
+  challenge. Neither the token alone nor the mailbox alone is enough.
+- **Lost both:** offboard the account and re-invite under a new staff id. The lifecycle events link the two through
+  `note`. The Person link carries over, because it is set at invitation. A self-service path is deliberately not
+  provided.
+
 
 ## 7. Session assurance and liveness
 
@@ -363,9 +417,13 @@ in this table, and its `aal` must be in `{2}`.
   `seal = HMAC(subkey, "ss-v1|" || id || "|" || principal_type || "|" || principal_id || "|" || coalesce(tenant_id,'platform') || "|" || aal || "|" || join(amr,',') || "|" || auth_time || "|" || mfa_at || "|" || absolute_expires_at)`.
   Times are microsecond UTC integers.
 - **On refresh of a staff session, `RotateSession` must:**
-  - **verify the seal**, refusing a missing or bad one as 401 `invalid or expired refresh token`, with an audit row
-    `auth.session_assurance_invalid` and the durable alert `staff_session_integrity` (P1), because this shape only
-    arises from SQL tampering;
+  - **verify the seal**, refusing a missing or bad one as 401 `invalid or expired refresh token`.
+    - **Cutover rule (review C1).** Migration 0138 records its own `now()` in a one-row owner table,
+      `staff_session_cutover(at)`. A staff session with a **NULL** seal and `created_at < cutover.at` predates S3. Its
+      refresh is a plain `ErrSessionNotFound`: no audit P1, no alert.
+    - A **non-NULL bad** seal, or a NULL seal on a session created at or after the cutover, only arises from SQL
+      tampering. It writes an audit row `auth.session_assurance_invalid` and raises the durable alert
+      `staff_session_integrity` (P1).
   - **refuse** when `now > absolute_expires_at`;
   - **copy** `aal`, `amr`, `auth_time`, `mfa_at` and `absolute_expires_at` to the new row and **re-seal** it, because
     the session id changes;
@@ -398,7 +456,15 @@ auth.RequirePermission(perm) [-> auth.RequireTenantScope where the route needs i
   - the staff member is not `active`;
   - `role` differs from the token's `role`, or `staff_version` differs from `sv`.
 - It does **not** refuse on the idle `expires_at`. That governs refresh only; the 15 min access token is the idle unit.
-- On a DB error it returns 503 (fail closed).
+- On a DB error or timeout it returns 503 (fail closed). That is correct, because every staff handler needs the DB
+  anyway.
+- **Implementation (review N1).**
+  - The scope GUCs and the SELECT go in one pgx batch inside a read-only transaction, with `SET LOCAL
+    statement_timeout = '500ms'`.
+  - The liveness transaction **finishes and releases its connection before** the handler acquires its own: no nested
+    pool acquisition, so no pool-exhaustion deadlock.
+  - A metric and an alert track the liveness-refusal and liveness-error rates.
+  - Non-staff tokens are refused by `RequireStaffPrincipal` before any DB work, so there is no DoS amplification.
 - **Cost:** one indexed lookup per staff request. Staff traffic is low (back office).
 
 `RequireStepUp(class)` reads `mfa_at` from the claims. If `now - mfa_at > maxAge(class)`, or `mfa_at` is absent, it
@@ -412,8 +478,8 @@ beyond 5 s of clock skew is also refused.
 - **Coverage.** Every route under `/v1/admin/`, plus `/v1/staff/mfa/*` and `/v1/staff/auth/step-up`, is registered
   through `staffRoute` (AST scan of `mux.Handle` calls, with a planted-offender non-vacuity case).
 - **Classification.** Every mutating method (POST, PUT, PATCH, DELETE) carries an explicit `stepUp` value from the
-  closed set `{none, financial, critical}`. A missing classification does not compile, because the argument is
-  required.
+  closed set `{none, financial, critical}`, or a named classifier (section 8.2). The argument is required, but `none`
+  always compiles, so **the golden table is the control, not the compiler**.
 - **Pinning.** A golden table of route to class (section 8) is pinned by a test, so changing a class is a reviewed diff.
 
 ### 7.4 Max-ages [ORCH-DEFAULT]
@@ -770,7 +836,7 @@ Authentication events go to `audit.Record` only, because they are high volume. T
 
 ## 13. Data model, RLS and migrations
 
-The next free migration number is **0137**. No `migrations/0137*`, `0138*` or `docs/decisions/0119*` exists on any
+The next free migration number is **0137**. No `migrations/0137*`, `0139*` or `docs/decisions/0119*` exists on any
 branch (`git log --all`, checked 2026-10-13). The orchestrator allocates the final numbers, so the implementer
 re-checks before S2. Every function pins `search_path` (ADR 0108). No function is `SECURITY DEFINER`, apart from the
 existing ADR 0110 verifier, which is extended and not added.
@@ -845,7 +911,7 @@ existing ADR 0110 verifier, which is extended and not added.
    `staff_enrolment_tokens` with `app.staff_enrolment_lookup_mac`. Two new `db.Pool` helpers follow
    `WithCredentialTokenLookup`. A row is visible only to a caller that already holds a value whose keyed MAC matches.
 
-### 13.2 Migration 0138 `staff_lifecycle` (slice S5)
+### 13.2 Migration 0139 `staff_lifecycle` (slice S5)
 
 1. **`staff_users`**
    - `status` CHECK widens to `('invited','active','suspended','offboarded')`.
@@ -1093,7 +1159,7 @@ Extra reviewers are named per slice.
 | **S2** | Migration 0137 (13.1), the store layer (`internal/staffmfa/store.go`), the lookup helpers in `internal/db`, and integration tests for every `SF00x`/`SF040` code, the RLS, the ACLs and the catalog pins. | S1 | - |
 | **S3** | The authentication flows: login challenge, verify, recover, enrol start/confirm/redeem, step-up, the new claims (`sid`, `aal`, `amr`, `auth_time`, `mfa_at`, `sv`), the session seal, the staff refresh rules and TTLs, the `mfa` limiter bucket, the `internal/auth/authtest` helper, and the migration of **every** existing staff-token test fixture to it. `cmd/seed-admin` issues a `bootstrap` token. Must ship together with S7. | S2 | qa (fixture migration completeness) |
 | **S4** | Enforcement: the `staffRoute` helper; `RequireLiveStaffSession`, `RequireAAL2` and `RequireStepUp`; re-registering every `/v1/admin` route through the helper with its class (section 8); the static completeness and golden tests; the actor-proof signer backstop (9.1); the `withdrawal.Approve` step-up parameter (9.3); the in-transaction liveness re-assertion in every step-up handler (9.5). **This unblocks ADR 0115 S2 staff increases** (that ADR's own slice wires its classifier). | S3 | ledger-finance (9.3, 9.5, K-flows) |
-| **S5** | Migration 0138 (13.2), `internal/stafflifecycle` (domain plus proof signing), the ADR 0110 verifier and `actorproof` lockstep extension, and the `TestStatic_OnlyFourEyesPackagesSign` allow-list. Can run in parallel with S3 and S4 after S2. | S2 | architect (ADR 0110 extension) |
+| **S5** | Migration 0139 (13.2), `internal/stafflifecycle` (domain plus proof signing), the ADR 0110 verifier and `actorproof` lockstep extension, and the `TestStatic_OnlyFourEyesPackagesSign` allow-list. Can run in parallel with S3 and S4 after S2. | S2 | architect (ADR 0110 extension) |
 | **S6** | The lifecycle HTTP API (14.2), the invitation email (MOCK provider), removal of the admin-chosen-password route, the new permissions and the role-matrix test, OpenAPI (14.4), and the `cmd/seed-admin -break-glass` owner path (section 11). | S4, S5 | identity-compliance (reason codes, policy) |
 | **S7** | Back office: two-step login, enrolment, step-up modal, My security (15.1-15.4). Released together with S3, so the back office never faces a login it cannot complete. | S3 (API); S4 for the modal | - |
 | **S8** | Back office: staff directory, detail and lifecycle, invite, the platform four-eyes queue (15.5-15.8). | S6, S7 | - |
