@@ -8333,3 +8333,11 @@ permission probes.
 - Migration head 0135. Full local verification at `3145fb3` recorded in task-registry row FULL-VERIFY-HEAD135-2026-10-13 (local evidence only, NOT GitHub CI).
 - Whole-platform reconciliation: `docs/plans/platform-reconciliation-2026-10-13.md`. Technical production readiness NOT MET. Staff MFA/step-up (ADR 0017) is NOT IMPLEMENTED (the earlier gap-audit claim was wrong).
 - Not done by design: no real provider, no sandbox PSP, no AWS, no brand activation, no legal/licensing conclusion.
+
+
+## 2026-10-14 — provider-independent completion round, continued
+
+- Merged since 2026-10-13: ADR 0115 S2 (RG limit write APIs) and S3 (usage measurement, read side), ADR 0116 S1+S3 (AML holds/enforcement foundation, cases, four-eyes; migrations 0140-0142), ADR 0118 (player brand binding immutable, 0136), ADR 0119 S1-S4a and S7a (staff MFA library, tables 0137, login/enrol/recover/refresh 0138 + back-office screens, route chain with liveness/aal2). Migration head 0142 (0139 reserved for staff lifecycle).
+- Full local verification at 034cc1d: registry row FULL-VERIFY-HEAD142-2026-10-14 (local only, NOT GitHub CI).
+- Still NOT IMPLEMENTED: ADR 0119 S4b (step-up) and S5/S6/S8/S9 (lifecycle, directory, runbooks), ADR 0115 S4-S6 (enforcement, UI), ADR 0116 S2/S4-S7 (screening, monitoring, SAR export, HTTP/UI, readiness), ADR 0114 S1b/S3/S5/S7/S8, ADR 0117 slices, staff MFA gate 21.7(g) (human).
+- Open owner/legal: D-AML-TIP-1 (launch-blocking for platform-licence tenants), D-0104-1, HIGH residual 9.2 acceptance, HD-RET-1, BACKUP-ROLE-1, HD-AML-1..9, OQ-B4, ALERT-DELIVERY-1, ADR 0119 OQ-1..6, ADR 0115 S4 rollout sequencing.
