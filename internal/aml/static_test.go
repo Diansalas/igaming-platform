@@ -248,17 +248,17 @@ func TestStatic_EnforcementCallSitesAreExactlyTheFiveGates(t *testing.T) {
 	}
 	// The adjustment path refuses on a hold through aml.EvaluateHold directly (not through KYC).
 	adj := productionGoFiles(t)["internal/adjustment/aml_hold.go"]
-	if !regexp.MustCompile(`aml\.EvaluateHold\(`).MatchString(adj) || !regexp.MustCompile(`aml\.OpManualAdjustment`).MatchString(adj) {
+	if !regexp.MustCompile(`aml\.EvaluateHold(DeferringAlert)?\(`).MatchString(adj) || !regexp.MustCompile(`aml\.OpManualAdjustment`).MatchString(adj) {
 		t.Error("the manual adjustment path must evaluate the hold with OpManualAdjustment")
 	}
 	// ...and only the two adjustment sites call it.
 	n := 0
 	for rel, src := range productionGoFiles(t) {
-		if strings.HasPrefix(rel, "internal/adjustment/") && strings.Contains(src, "walletHoldVerdict(") && !strings.HasSuffix(rel, "aml_hold.go") {
-			n += strings.Count(src, "walletHoldVerdict(")
+		if strings.HasPrefix(rel, "internal/adjustment/") && strings.Contains(src, "walletHoldCheck(") && !strings.HasSuffix(rel, "aml_hold.go") {
+			n += strings.Count(src, "walletHoldCheck(")
 		}
 	}
 	if n != 2 {
-		t.Errorf("walletHoldVerdict must be called exactly at submission and at execution, found %d call(s)", n)
+		t.Errorf("walletHoldCheck must be called exactly at submission and at execution, found %d call(s)", n)
 	}
 }
