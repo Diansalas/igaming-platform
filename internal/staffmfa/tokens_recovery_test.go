@@ -25,7 +25,7 @@ func TestToken_WireRoundTrip(t *testing.T) {
 	staff := uuid.New()
 	tok := mustToken(t, staff)
 	wire := tok.RevealForDelivery()
-	if len(wire) != 64 || TokenLen != 64 {
+	if len(wire) != 64 || TokenLen != 64 || TokenLen != base64.RawURLEncoding.EncodedLen(16+tokenSecretBytes) {
 		t.Fatalf("wire length %d", len(wire))
 	}
 	got, err := ParseToken(wire)

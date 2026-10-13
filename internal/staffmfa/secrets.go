@@ -158,8 +158,9 @@ func (EnrolmentMaterial) MarshalJSON() ([]byte, error) { return json.Marshal(Red
 // tokenSecretBytes is the random part of a token (ADR 0119 section 6.3).
 const tokenSecretBytes = 32
 
-// TokenLen is the length of an encoded token.
-var TokenLen = base64.RawURLEncoding.EncodedLen(16 + tokenSecretBytes)
+// TokenLen is the length of an encoded token: base64url without padding of
+// 16 + tokenSecretBytes bytes (pinned by a test against EncodedLen).
+const TokenLen = 64
 
 // Token is a challenge or enrolment token. Its wire form is
 // base64url(staff_user_id[16] || random[32]), 64 characters, no padding.
