@@ -604,3 +604,108 @@ until S3 delivers the quorum, so S1 and S3 are released together for any real te
 | Gated/never-gated lists, each with a test | LF | Applied | §5.1, §7 |
 | Held balances untouched; no seizing adjustment; HD-AML-9 | LF | Applied | §5.1, §10 |
 | LOWs: placement race, replay, rolling windows/dedupe; Q4/Q5/Q7 notes | LF | Applied | §4.3, §2.1, §2.4, §10 |
+
+## 12. Implementation record: slices S1 and S3 (2026-10-13, `identity-compliance`)
+
+Branch work, **not merged, not pushed, not yet reviewed by `security` / `ledger-finance` / `code-reviewer`.** Software capability only:
+nothing here is a regulatory approval, a filing capability, or a statement that any licence condition is met.
+
+**Numbering.** The "after head `0132`" text in the header was stale. Head was `0136`; `0137`-`0139` stay reserved for ADR 0119;
+S1+S3 are migrations **`0140`** (access foundation), **`0141`** (holds and enforcement), **`0142`** (cases and four-eyes). SQLSTATE class
+**`AM`** (new; a grep of migrations, Go and docs found no collision; `SF` is ADR 0119's).
+
+**Pairing.** This ADR lists S1 and S3 as separate slices and says they are "released together for any real tenant". That is a release
+coupling, not one slice: the work was done together on one branch because a hold cannot be activated without the S3 quorum.
+
+### 12.1 Status labels
+
+| Item | Label | Note |
+|---|---|---|
+| S1 holds / enforcement foundation (`aml_holds`, `aml_hold_lifts`, `aml_enforcement_decisions`, `aml_hold_active`, `held` composition, five gates, adjustment refusal, C2, L1/C6) | **IMPLEMENTED** (manual holds) | Activation needs the S3 quorum. Hold reason classes are `manual` and `confirmed_sanctions`; nothing creates the second except an officer. |
+| S3 case model, proof-bound four-eyes, notes and lint, `aml_officer` grant path and quorum, bootstrap runbook, C9 RESTRICT FKs and erasure check function | **IMPLEMENTED** | `docs/runbooks/aml-officer-bootstrap.md`. |
+| Erasure job (HD-RET-1) | **NOT IMPLEMENTED** | Only `aml_person_has_records()` and the RESTRICT FKs exist; erasure fails closed. |
+| S2 screening interface, mock, subject refs, outbox, policies, match to hold | **NOT IMPLEMENTED** | No AML vendor and **no screening mock exists in S1/S3**; the MOCK label belongs to S2. |
+| S4 monitoring, S5 SAR document / export, S6 Back Office + OpenAPI + auth permission constants, S7 readiness and launch criterion | **NOT IMPLEMENTED** | No HTTP route, UI or role mapping was built. |
+| Q5 propagation of platform-owned sanctions holds across tenants | **NOT IMPLEMENTED** | |
+| HD-AML-1..9 | implemented as **reversible orchestrator defaults** | Never owner-approved, never legal conclusions. No threshold, period, rule or policy value is seeded. |
+
+### 12.2 What was built
+
+- **Access (0140).** K1 capability `aml_officer` (classification `outside_mandatory_class`), created only by the existing proof-bound
+  four-eyes grant flow. `aml_authorize()` is the first statement of every AML definer function: it resolves the session actor
+  (tenant or platform-acting only), re-checks in SQL that the actor's own in-force `aml_officer` grant exists for the tenant, then
+  consumes a signed actor proof bound to actor, scope, tenant, operation, target and payload hash. `actor_proof_require` was **not**
+  replaced (ADR 0119 may replace it); the AML admission rule lives in `aml_authorize` and `Claims.validate`.
+- **Holds (0141).** Definer-only tables with FORCE RLS and one owner policy bound to the session tenant, append-only triggers, runtime
+  role revoked. `aml_hold_active` is the single enforcement read. Gates: deposit initiation, withdrawal request, payout claim, casino
+  stake, sportsbook stake, plus manual-adjustment refusal at submission and execution. Never gated: settlements, reversals, releases,
+  completions, rollbacks, bonus conversion, tombstones (a static test pins the five call sites; a live test reads the
+  `transaction_type` CHECK so a new type must be classified).
+- **Composition.** `kyc.EvaluateEnforcement` composes KYC and the hold: public outcome `pending`, code `account_review`; tenant decision
+  log outcome `review`; the true outcome `held`, the hold id and the KYC outcome stay internal (`aml_enforcement_decisions`). An
+  evaluator error is a deny of exactly that operation plus the alert Kind `aml.hold_eval_failed`.
+- **Cases (0142).** Alerts (manual source only), cases, notes, an append-only event log with a state machine, proof-bound four-eyes:
+  the approval must be the event immediately after its proposal, binds the proposal's content hash, refuses the proposer's actor and
+  Person and the case subject, and is invalidated by any hold change since the proposal. Note lint `aml-note-lint-v1` is a guard only.
+- **Fixtures.** `internal/testsupport/amlfix` (integration tag only).
+
+### 12.3 Deviations (each disclosed in the code or here)
+
+1. **Quorum is counted per tenant per owner scope**, not per owner scope globally (K1 grants are per tenant; a platform grantee's
+   grant is bounded by `acting_grant_max_lifetime`, 4 hours). A **suspended grantee does not count** (the check excludes a staff row
+   that is visible to the caller's RLS; a hidden row is not excluded, so the count then equals the pre-fix count).
+2. **No AM020 request guard.** A platform session cannot read tenant staff rows (CG010), so the planned request guard was impossible
+   for tenant grants. A tenant admin can request `aml_officer` but a distinct **platform** co-approver is always required.
+3. **Review rows carry no `matched_trigger`.** The existing KYC decision log records the policy trigger for a `pending`; a `review`
+   row (public result of KYC pending, hold or evaluator error) nulls it, because the trigger would reveal which of the three
+   produced the outcome (C4). Consequence: the KYC policy trigger is not recoverable from the tenant log for `review` rows; the
+   KYC-internal outcome is kept in the AML-scoped decision log for the officer side. This is a design choice for `security` and
+   `product-owner-proxy` to confirm.
+4. **Sweeper T12 re-gate escalates (T16) instead of recalling;** a payout-claim evaluator failure ends in the existing terminal,
+   money-neutral rejection (ADR 5.1).
+5. Existing scratch-schema tests that migrate BELOW 0141 now install a "no hold" stub (see 12.5).
+
+### 12.4 Items for `security` sign-off (not self-approved)
+
+- **Relaxed tripwire:** `internal/db/kyc_worker_catalogue_gate_integration_test.go` now exempts policy `aml_owner_session` on `aml_*`
+  tables from the "no role-specific policy" check. The policy is TO the table owner only, bound to `aml_session_tenant()`.
+- **Signer allow-list:** `internal/actorproof/actorproof_test.go` `staticAllowed` gains `internal/aml`. Also
+  `internal/db/acting_setter_static_test.go` (A16) gains `internal/aml/service.go`, and the alerting static rules gain
+  `internal/aml/hold_eval.go:raiseEvalFailed`.
+- Residuals to probe: `aml_hold_active` discloses holds to a same-tenant session running arbitrary SQL; `aml_record_enforcement_decision`
+  is forgeable by the runtime credential exactly as the existing KYC decision log is; `aml.hold_eval_failed` rows are readable by the
+  subject tenant (routing to `aml_case:read` holders is NOT IMPLEMENTED, ALERT-DELIVERY); notes are plaintext; the acting-session
+  open audit row (operation `compliance`) is tenant-visible.
+
+### 12.5 Changed existing tests (setup and allow-lists only; no assertion weakened)
+
+kyc `enforcement_savepoint_housekeeping_test.go` (stubs the hold read), withdrawal `migration_0132_integration_test.go`, adjustment
+`b6_usetime_integration_test.go` (`scratchPoolThroughDir` stubs the read below 0141, covering existing tests that use it),
+reconciliation `migration_0097_integration_test.go`, payments `m4_integrity_review_integration_test.go`
+(`TestR32_Migration0127_BackfillsExistingDestinationParks` runs the gates on a scratch schema rolled back below 0141: it stubs the
+hold read, re-admits `review` in the old CHECK for the fixture payouts and restores the exact pre-0141 shape before migrating up),
+alerting `static_wiring_test.go`, db `acting_setter_static_test.go` and `kyc_worker_catalogue_gate_integration_test.go`, actorproof
+`actorproof_test.go`. Behavioural changes other tests could depend on: KYC `pending` code is `account_review` (was
+`kyc_<op>:pending`); deposit decline reason loses the `kyc_required:` prefix for pending; decision-log outcome `review`; audit
+metadata `kyc_outcome` is the public value.
+
+### 12.6 Verification (private database; sanctioned local CI credentials only)
+
+All integration runs used `-tags integration -p 1 -count=1` against a private database built from the worktree's migrations.
+- `go test ./... -count=1` (unit): PASS. gofmt: clean. `go vet ./...` and `go vet -tags integration ./...`: PASS.
+- golangci-lint 2.9.0 `--build-tags integration --new-from-rev=b480ec6`: 0 issues (run with a private Go and lint cache).
+- Every package except payments, integration: PASS, except `internal/httpserver` `TestResolutionIsolation_NormalOperation`, a
+  500 ms latency bound that fails intermittently with and without this change (base commit `b480ec6` failed 1 of 3 runs; this
+  branch 2 of 3, under similar low load). The rest of the package passes with `-timeout 60m`.
+- `internal/payments` integration, one shard per initial letter, each separately: all shards PASS (shards D, E, H and R were first
+  disturbed by database connection-slot exhaustion on the shared server and were re-run alone). One real failure was found and
+  fixed (`TestR32_Migration0127_BackfillsExistingDestinationParks`, 12.5).
+- Migration tests: up/down/up whole-schema snapshot for 0140-0142, pre-flight refusal (AM098) per migration, down refusal (AM099)
+  while AML history exists.
+- Mutation pass: 105 mutants, 93 killed, 12 justified survivors, none unexplained (the pre-flight and down-refusal branches were not
+  mutated). `docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-kill.txt` and the three logs beside it.
+
+### 12.7 Open for later slices / decisions
+
+S2, S4, S5, S6, S7 as labelled above; HD-RET-1 erasure job; ALERT-DELIVERY to officers; Q5 propagation; platform-grant re-issue
+cadence (4-hour bound) as an operations task; whether `review` rows should keep the KYC policy trigger.

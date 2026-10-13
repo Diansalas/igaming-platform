@@ -52,7 +52,8 @@ If revocation drops the quorum below two, new holds and approvals are refused wi
 
 ## Known limits (do not paper over)
 
-- Quorum counts do not exclude a suspended platform grantee (residual, security to probe).
+- A suspended grantee does not count toward the quorum, but only when the staff row is visible to the calling session's RLS
+  (security to probe for a platform grantee seen from a tenant session).
 - No alert routing to officers exists yet (ALERT-DELIVERY open); `aml.hold_eval_failed` alerts are visible to platform
   operators through the alert read path only.
 - Erasure of a person with AML records fails closed (`aml_person_has_records`); the erasure job itself (HD-RET-1) is NOT
