@@ -28,6 +28,10 @@ Run 3 (adr0115-s3-mutation-log-run3.txt): 30 mutants re-run with exact failing-t
   C7 was reported KILLED in run 2 without a failing-test name and could not be reproduced (run 3 and two manual runs: it survives), so the
   run 2 kill is treated as a one-off environment failure, NOT a kill. The suite itself is stable: 6 consecutive full passes (-count=6).
 
+Late source change: the existing tripwire test TestSignerCallSitesInRGArePinned (limits_s2_review_test.go, which counts textual
+  `.Sign(` calls in internal/rg) failed on `raw.Sign()` in floorLoss (a math/big accessor, not the proof signer). The test was NOT edited;
+  the S3 code now uses `raw.Cmp(new(big.Int)) < 0`. U25-U28 were re-run on the final source: all KILLED.
+
 FINAL: 96 mutants. 89 killed. 7 survive, each justified:
   W7  week uses extract(dow) instead of isodow ........ EQUIVALENT. The week offset is ((day - week_start + 7) % 7); Sunday is 0 under dow
       and 7 under isodow, and 0 = 7 (mod 7) in that expression, so every input gives the same start.
