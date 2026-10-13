@@ -53,10 +53,17 @@ func OwnerScopeOf(t testing.TB, pool *db.Pool, tenantID uuid.UUID) string {
 
 func newPlatformAdmin(t testing.TB, pool *db.Pool) (staff, person uuid.UUID) {
 	t.Helper()
-	staff, person = uuid.New(), uuid.New()
+	return newPlatformAdminOfPerson(t, pool, uuid.New(), true)
+}
+
+func newPlatformAdminOfPerson(t testing.TB, pool *db.Pool, person uuid.UUID, createPerson bool) (staff, _ uuid.UUID) {
+	t.Helper()
+	staff = uuid.New()
 	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person); err != nil {
-			return err
+		if createPerson {
+			if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person); err != nil {
+				return err
+			}
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
 			VALUES ($1, NULL, $2, '!amlfix-not-a-login', 'platform_admin', 'active', $3)`, staff, "amlfix-"+staff.String()+"@fixture.invalid", person)
@@ -69,10 +76,17 @@ func newPlatformAdmin(t testing.TB, pool *db.Pool) (staff, person uuid.UUID) {
 
 func newTenantCompliance(t testing.TB, pool *db.Pool, tenantID uuid.UUID) (staff, person uuid.UUID) {
 	t.Helper()
-	staff, person = uuid.New(), uuid.New()
+	return newTenantComplianceOfPerson(t, pool, tenantID, uuid.New(), true)
+}
+
+func newTenantComplianceOfPerson(t testing.TB, pool *db.Pool, tenantID, person uuid.UUID, createPerson bool) (staff, _ uuid.UUID) {
+	t.Helper()
+	staff = uuid.New()
 	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person); err != nil {
-			return err
+		if createPerson {
+			if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person); err != nil {
+				return err
+			}
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
 			VALUES ($1, $2, $3, '!amlfix-not-a-login', 'compliance', 'active', $4)`, staff, tenantID, "amlfix-"+staff.String()+"@fixture.invalid", person)
@@ -111,14 +125,39 @@ func newTenantAdmin(t testing.TB, pool *db.Pool, tenantID uuid.UUID) uuid.UUID {
 	return staff
 }
 
+// NewStaffOfPerson creates another staff account (of the kind NewStaff creates) for an EXISTING Person, without granting
+// anything: the shape of "the same human with a second account", or of a case subject who is also staff.
+func NewStaffOfPerson(t testing.TB, pool *db.Pool, tenantID, person uuid.UUID) uuid.UUID {
+	t.Helper()
+	if OwnerScopeOf(t, pool, tenantID) == "tenant" {
+		s, _ := newTenantComplianceOfPerson(t, pool, tenantID, person, false)
+		return s
+	}
+	s, _ := newPlatformAdminOfPerson(t, pool, person, false)
+	return s
+}
+
+// NewTenantComplianceStaff creates a tenant `compliance` staff member regardless of the tenant's licensing model (a
+// tenant-scope officer inside a platform-licensed tenant: it must NOT see platform-owned AML data).
+func NewTenantComplianceStaff(t testing.TB, pool *db.Pool, tenantID uuid.UUID) (staff, person uuid.UUID) {
+	t.Helper()
+	return newTenantCompliance(t, pool, tenantID)
+}
+
 // GrantOfficer grants the aml_officer capability to an existing staff member through the real request -> platform
 // co-approval -> grant flow. A platform grantee (acting officer) is requested by a platform admin; a tenant grantee by a
 // tenant admin of the tenant. The approver is always a distinct platform admin; every Person involved is distinct.
 func GrantOfficer(t testing.TB, pool *db.Pool, tenantID, grantee uuid.UUID) {
 	t.Helper()
+	GrantOfficerAs(t, pool, tenantID, grantee, OwnerScopeOf(t, pool, tenantID))
+}
+
+// GrantOfficerAs is GrantOfficer with an explicit grantee scope: "tenant" (a tenant `compliance` grantee) or "platform" (a
+// platform_admin acting grantee).
+func GrantOfficerAs(t testing.TB, pool *db.Pool, tenantID, grantee uuid.UUID, scope string) {
+	t.Helper()
 	ctx := context.Background()
 	approver, _ := newPlatformAdmin(t, pool)
-	scope := OwnerScopeOf(t, pool, tenantID)
 	var validUntil *time.Time
 	if scope == "platform" {
 		v := time.Now().Add(time.Hour)
@@ -147,6 +186,31 @@ func GrantOfficer(t testing.TB, pool *db.Pool, tenantID, grantee uuid.UUID) {
 	}); err != nil {
 		t.Fatalf("amlfix: approve aml_officer grant: %v", err)
 	}
+}
+
+// RevokeOfficer revokes the officer's in-force aml_officer grant (the emergency stop) through the real K1 revoke path, as a
+// platform principal, so the revoke carries its own signed proof.
+func RevokeOfficer(t testing.TB, pool *db.Pool, tenantID, staffID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	var grantID uuid.UUID
+	if err := pool.WithPlatformAdmin(ctx, mustPlatformAdmin(t, pool), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM staff_capability_grants WHERE tenant_id = $1 AND grantee_staff_id = $2
+			AND capability = 'aml_officer' AND revoked_at IS NULL ORDER BY granted_at DESC LIMIT 1`, tenantID, staffID).Scan(&grantID)
+	}); err != nil {
+		t.Fatalf("amlfix: find grant to revoke: %v", err)
+	}
+	if err := pool.WithPlatformAdmin(ctx, mustPlatformAdmin(t, pool), func(ctx context.Context, tx pgx.Tx) error {
+		return capability.RevokeGrant(ctx, tx, tenantID, grantID, "fixture_revoke")
+	}); err != nil {
+		t.Fatalf("amlfix: revoke aml_officer grant: %v", err)
+	}
+}
+
+func mustPlatformAdmin(t testing.TB, pool *db.Pool) uuid.UUID {
+	t.Helper()
+	s, _ := newPlatformAdmin(t, pool)
+	return s
 }
 
 // NewOfficer creates a staff member and grants it aml_officer.

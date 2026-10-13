@@ -144,7 +144,9 @@ func classify(err error) error {
 	switch pe.Code {
 	case "AM040":
 		return ErrNotFound
-	case "AM001", "AM002", "AM026":
+	case "AM001", "AM002", "AM026", "CG001", "CG020":
+		// CG001 / CG020: the session shape is not a valid staff session, or the platform principal holds no in-force grant for
+		// the tenant (an acting session cannot even be opened).
 		return fmt.Errorf("%w: %s", ErrForbidden, pe.Message)
 	case "AM003":
 		return ErrQuorum

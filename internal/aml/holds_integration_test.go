@@ -62,9 +62,18 @@ func TestPlaceHold_RequiresQuorum_LiftDoesNot(t *testing.T) {
 			if held, err := w.holdActive(p.PersonID, p.AccountID, aml.OpDeposit); err != nil || !held {
 				t.Fatalf("the placed hold must gate: held=%v err=%v", held, err)
 			}
-			// Revoke one officer's grant: the quorum is lost, so no NEW hold may be placed, but the existing hold can still be lifted.
-			if _, err := svc.LiftHold(context.Background(), q.Officers[1].Actor, id, "t"); err != nil {
-				t.Fatalf("lift: %v", err)
+			// Revoke one officer's grant: the quorum is lost, so no NEW hold may be placed, but the existing hold can still be
+			// lifted by the remaining officer (a lost quorum never traps a customer), and the revoked officer can no longer act.
+			amlfix.RevokeOfficer(t, w.Owner, w.Tenant, q.Officers[1].StaffID)
+			p2 := w.player()
+			if _, err := svc.PlaceHold(context.Background(), q.Officers[0].Actor, aml.PlaceHoldInput{PersonID: p2.PersonID, Scope: aml.ScopeAllValueMovement, ReasonClass: aml.ReasonManual, ReasonCode: "t"}); !errors.Is(err, aml.ErrQuorum) {
+				t.Fatalf("a lost quorum must block a NEW hold: %v", err)
+			}
+			if _, err := svc.LiftHold(context.Background(), q.Officers[1].Actor, id, "t"); !errors.Is(err, aml.ErrForbidden) {
+				t.Fatalf("a revoked officer must be refused immediately: %v", err)
+			}
+			if _, err := svc.LiftHold(context.Background(), q.Officers[0].Actor, id, "t"); err != nil {
+				t.Fatalf("lift after a lost quorum: %v", err)
 			}
 		})
 	}
