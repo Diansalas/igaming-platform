@@ -179,7 +179,7 @@ CREATE TABLE aml_enforcement_decisions (
     decided_at         TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     FOREIGN KEY (player_account_id, tenant_id) REFERENCES player_accounts (id, tenant_id) ON DELETE RESTRICT,
     FOREIGN KEY (tenant_id, hold_id) REFERENCES aml_holds (tenant_id, id) ON DELETE RESTRICT,
-    CHECK ((hold_outcome = 'held') = (hold_id IS NOT NULL)),
+    CHECK (hold_outcome = 'held' OR hold_id IS NULL),
     CHECK (hold_outcome = 'none' OR NOT allowed)
 );
 CREATE INDEX aml_enforcement_decisions_player ON aml_enforcement_decisions (tenant_id, player_account_id, decided_at DESC);

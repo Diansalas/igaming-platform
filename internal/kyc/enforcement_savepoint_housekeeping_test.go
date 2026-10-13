@@ -20,6 +20,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/aml"
 )
 
 // fakeNoRowsRow is a pgx.Row whose Scan always reports pgx.ErrNoRows -
@@ -125,6 +127,13 @@ var _ pgx.Tx = (*fakeSavepointTx)(nil)
 // complete this evaluation, and must not report a decision as if it had).
 func TestEvaluateEnforcement_SavepointRollbackFailure_FailsClosedToUnavailable(t *testing.T) {
 	outer := &fakeOuterTx{nested: &fakeSavepointTx{rollbackErr: errors.New("simulated: ROLLBACK TO SAVEPOINT failed")}}
+	// ADR 0116 S1: EvaluateEnforcement now also runs the AML hold read, which needs a real round trip a fake tx cannot
+	// answer. This test is about the KYC savepoint housekeeping only, so the hold read is stubbed to "no hold".
+	prev := evaluateHold
+	evaluateHold = func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID, aml.Operation) aml.HoldVerdict {
+		return aml.HoldVerdict{}
+	}
+	defer func() { evaluateHold = prev }()
 
 	decision, err := EvaluateEnforcement(context.Background(), outer, EnforcementParams{
 		TenantID: uuid.New(), BrandID: uuid.New(), PlayerAccountID: uuid.New(), PersonID: uuid.New(),

@@ -90,6 +90,11 @@ func ListEnforcementDecisionsForPlayer(ctx context.Context, tx pgx.Tx, p ListEnf
 		if err := rows.Scan(&r.ID, &r.Operation, &r.Outcome, &r.MatchedTrigger, &r.PolicyVersion, &r.DecidedAt); err != nil {
 			return nil, fmt.Errorf("kyc: scan enforcement decision: %w", err)
 		}
+		// ADR 0116 s5.1 C4 (migration 0141): historical rows recorded the KYC-only outcome `pending`; new rows record the
+		// public outcome `review` for both a KYC pending and an AML held. A reader sees one vocabulary.
+		if r.Outcome == string(OutcomePending) {
+			r.Outcome = PublicOutcomeReview
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
