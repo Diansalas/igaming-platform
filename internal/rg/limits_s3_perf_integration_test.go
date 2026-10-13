@@ -173,7 +173,7 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 	// The seed must have produced the intended time distribution (a Duration overflow once clustered it).
 	var in30, in7, all int
 	wantOK(t, "distribution", w.owner.WithTenant(ctx, f.tenantA, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE created_at >= $2 - interval '30 days'), count(*) FILTER (WHERE created_at >= $2 - interval '7 days'), count(*)
+		return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE created_at >= $2::timestamptz - interval '30 days'), count(*) FILTER (WHERE created_at >= $2::timestamptz - interval '7 days'), count(*)
 			FROM ledger_entries WHERE player_account_id = $1 AND direction = 'debit'`, a, now).Scan(&in30, &in7, &all)
 	}))
 	t.Logf("target player debit entries: %d in total, %d in the last 30 days, %d in the last 7 days (rows the 30-day window must read)", all, in30, in7)
