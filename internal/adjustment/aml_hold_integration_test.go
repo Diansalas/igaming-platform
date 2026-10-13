@@ -97,6 +97,24 @@ func TestAMLHold_PlacedAfterSubmission_RefusesAtExecution(t *testing.T) {
 	}
 }
 
+// ANY hold refuses the EXECUTION, including a withdrawal-only one (the execution evaluates the manual_adjustment operation, not deposit).
+func TestAMLHold_WithdrawalOnlyHoldPlacedAfterSubmission_StillRefusesAtExecution(t *testing.T) {
+	w := newWorld(t, worldOpts{base: 1})
+	w.fund(10_000)
+	r, err := w.submit(w.F1, w.credit(2_500, ReasonOperationalErrorCorrection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	amlfix.HoldFor(t, w.pool, w.pool, w.Tenant, w.PlayerPerson, nil, aml.ScopeWithdrawalAndPayout)
+	out, err := w.decide(w.F2, r, DecisionApprove)
+	if err != nil || out.Executed || out.Request.State != StateRefusedAtExecution {
+		t.Fatalf("a withdrawal-only hold must still refuse the execution: %+v %v", out, err)
+	}
+	if got := w.playerCash(); got != 10_000 {
+		t.Fatalf("no movement: %d", got)
+	}
+}
+
 // Fail closed: an evaluator failure refuses the adjustment (submission and execution) exactly like a hold.
 func TestAMLHold_EvaluatorFailure_RefusesAdjustment(t *testing.T) {
 	w := newWorld(t, worldOpts{base: 1})

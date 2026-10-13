@@ -36,7 +36,7 @@ def db(pkg, run):
 
 
 AML = db('./internal/aml/', 'Test')
-KYC = db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement')
+KYC = db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement|TestComposeHold|TestRetryableOnHoldEvalFailure')
 ADJ = db('./internal/adjustment/', 'TestAMLHold')
 WD = db('./internal/withdrawal/', 'TestAMLHold')
 def chain(*cmds):
@@ -45,7 +45,7 @@ def chain(*cmds):
 
 # Evaluator / composition / gate mutants run the aml suite AND every gate package that exercises the hold read.
 PAY = db('./internal/payments/', 'TestAMLHold')
-GATES = chain(db('./internal/aml/', 'Test'), db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement'),
+GATES = chain(db('./internal/aml/', 'Test'), db('./internal/kyc/', 'TestHold|TestDecisionReader|TestEnforcement|TestComposeHold|TestRetryableOnHoldEvalFailure'),
               db('./internal/adjustment/', 'TestAMLHold'), db('./internal/withdrawal/', 'TestAMLHold'),
               db('./internal/casino/', 'TestAMLHold'), db('./internal/sportsbook/', 'TestAMLHold'),
               db('./internal/payments/', 'TestAMLHold'))
