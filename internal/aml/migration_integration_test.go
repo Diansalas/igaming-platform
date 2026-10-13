@@ -151,7 +151,7 @@ func wantSame(t *testing.T, what, a, b string) {
 func TestMigrations0140to0142_UpDownUp_WholeSchema(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := scratch(t, "m0140s_")
-	if _, err := pool.MigrateUp(ctx, migDir(t, 136)); err != nil {
+	if _, err := pool.MigrateUp(ctx, migDir(t, 139)); err != nil {
 		t.Fatal(err)
 	}
 	base := snapshot(t, pool)
