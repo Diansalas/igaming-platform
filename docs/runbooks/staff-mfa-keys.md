@@ -29,12 +29,15 @@ Rules enforced by `config.Load` (and again by `staffmfa.NewKeys`):
 
 - every entry is `kid:base64`; a kid is 1-32 characters of `[A-Za-z0-9._-]`; an empty entry (for example a
   trailing comma) is refused;
-- every key decodes to at least 32 bytes (at most 1024);
+- every key decodes to at least 32 bytes (at most 1024), and a key whose bytes are all equal (for example all zero)
+  is refused;
 - each active kid must name a key of its family;
 - no key value may appear under two kids, in both families, or in **any other platform key family**: the single
   registry in `internal/config/staff_mfa.go` checks every pair of `JWT_SIGNING_SECRET`, `JWT_PREVIOUS_SECRET`,
   `PROVIDER_CREDENTIAL_FINGERPRINT_KEY`, `ACTOR_PROOF_KEYS`, `PAYOUT_INSTRUMENT_KEYS`, `PAYOUT_INSTRUMENT_FP_KEYS`,
-  `STAFF_MFA_FACTOR_KEYS` and `STAFF_MFA_MAC_KEYS`;
+  `STAFF_MFA_FACTOR_KEYS` and `STAFF_MFA_MAC_KEYS`. Keys are compared both as text and as decoded bytes, so pasting
+  the base64 text of one family's key as another family's value (for example `JWT_SIGNING_SECRET=X` and
+  `STAFF_MFA_MAC_KEYS=m1:X`) is refused too;
 - a partial configuration (one family without the other, keys without an active kid) is refused in every
   environment;
 - `APP_ENV=production` without both families is refused;
