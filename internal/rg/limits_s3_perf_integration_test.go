@@ -24,8 +24,10 @@ import (
 // ledger_entries / deposit_intents, bounded buffers) - no SLA is claimed.
 
 const (
-	perfIndexLedger  = "idx_ledger_entries_tenant_player_asset_created"
-	perfIndexDeposit = "idx_deposit_intents_tenant_player_asset_created"
+	perfTargetHistory = 20000
+	perfFiller        = 40000
+	perfIndexLedger   = "idx_ledger_entries_tenant_player_asset_created"
+	perfIndexDeposit  = "idx_deposit_intents_tenant_player_asset_created"
 )
 
 type planNode struct {
@@ -47,6 +49,23 @@ func (n planNode) walk(fn func(planNode)) {
 // bulkLedger inserts n synthetic casino_bet transactions (Dr cash / Cr house, 100) for acct spread
 // evenly over [from, to), through the real triggers (nothing disabled).
 func (w *s1World) bulkLedger(t *testing.T, tenant, acct uuid.UUID, asset string, n int, from, to time.Time) {
+	t.Helper()
+	// Batches of 250 transactions: the balance-projection trigger updates one row per entry, and one very large
+	// statement degrades superlinearly on that hot row.
+	const batch = 250
+	span := to.Sub(from)
+	for done := 0; done < n; done += batch {
+		m := batch
+		if n-done < m {
+			m = n - done
+		}
+		bf := from.Add(span * time.Duration(done) / time.Duration(n))
+		bt := from.Add(span * time.Duration(done+m) / time.Duration(n))
+		w.bulkLedgerBatch(t, tenant, acct, asset, m, bf, bt)
+	}
+}
+
+func (w *s1World) bulkLedgerBatch(t *testing.T, tenant, acct uuid.UUID, asset string, n int, from, to time.Time) {
 	t.Helper()
 	err := w.owner.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
 		wid, err := s3Wallet(ctx, tx, tenant, acct, asset)
@@ -111,12 +130,27 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 
 	// Target player: 12,000 bets over 400 days (a long history - the whole-history scan the ADR warns about) plus a busy
 	// last day; two other accounts of the same tenant carry 60,000 more rows so the table is not tiny.
-	w.bulkLedger(t, f.tenantA, a, "USD", 12000, now.Add(-400*24*time.Hour), now.Add(-25*time.Hour))
-	w.bulkLedger(t, f.tenantA, a, "USD", 300, now.Add(-24*time.Hour), now.Add(-time.Minute))
-	w.bulkLedger(t, f.tenantA, f.acctX, "USD", 30000, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
-	w.bulkLedger(t, f.tenantA, f.acctA2, "USD", 30000, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
-	w.bulkIntents(t, f.tenantA, a, 6000, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
-	w.bulkIntents(t, f.tenantA, f.acctX, 20000, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
+	step := func(what string, fn func()) {
+		t0 := time.Now()
+		fn()
+		t.Logf("seed %s: %v", what, time.Since(t0))
+	}
+	step("target history", func() {
+		w.bulkLedger(t, f.tenantA, a, "USD", perfTargetHistory, now.Add(-400*24*time.Hour), now.Add(-25*time.Hour))
+	})
+	step("target last day", func() { w.bulkLedger(t, f.tenantA, a, "USD", 300, now.Add(-24*time.Hour), now.Add(-time.Minute)) })
+	step("filler X", func() {
+		w.bulkLedger(t, f.tenantA, f.acctX, "USD", perfFiller, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
+	})
+	step("filler A2", func() {
+		w.bulkLedger(t, f.tenantA, f.acctA2, "USD", perfFiller, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
+	})
+	step("intents", func() {
+		w.bulkIntents(t, f.tenantA, a, perfFiller/5, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
+	})
+	step("intents filler", func() {
+		w.bulkIntents(t, f.tenantA, f.acctX, perfFiller, now.Add(-400*24*time.Hour), now.Add(-time.Minute))
+	})
 	wantOK(t, "analyze", func() error {
 		for _, tbl := range []string{"ledger_entries", "ledger_transactions", "deposit_intents", "ledger_accounts", "player_accounts"} {
 			if _, err := w.owner.Raw().Exec(ctx, "ANALYZE "+tbl); err != nil {
@@ -252,8 +286,8 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 		sort.Slice(c, func(i, j int) bool { return c[i] < c[j] })
 		return c[int(float64(len(c)-1)*p)]
 	}
-	t.Logf("LATENCY over %d runs (synthetic ledger: %d target-player bets, ~72,000 rows in the table): stake usage p50=%v p95=%v p99=%v | deposit usage p50=%v p95=%v p99=%v | L0.4 held for both reads p50=%v p95=%v p99=%v",
-		runs, 12300, pct(stake, .5), pct(stake, .95), pct(stake, .99), pct(dep, .5), pct(dep, .95), pct(dep, .99), pct(held, .5), pct(held, .95), pct(held, .99))
+	t.Logf("LATENCY over %d runs (synthetic ledger: %d target-player bets, %d ledger rows in the table): stake usage p50=%v p95=%v p99=%v | deposit usage p50=%v p95=%v p99=%v | L0.4 held for both reads p50=%v p95=%v p99=%v",
+		runs, perfTargetHistory+300, 2*(perfTargetHistory+300+2*perfFiller), pct(stake, .5), pct(stake, .95), pct(stake, .99), pct(dep, .5), pct(dep, .95), pct(dep, .99), pct(held, .5), pct(held, .95), pct(held, .99))
 	if pct(stake, .95) > 500*time.Millisecond || pct(dep, .95) > 500*time.Millisecond {
 		t.Fatalf("usage statements take %v / %v at p95 on a small synthetic ledger; that is a regression against the index design", pct(stake, .95), pct(dep, .95))
 	}
@@ -261,10 +295,10 @@ func TestRGUsageS3ExplainAndLatency(t *testing.T) {
 	var u StakeUsage
 	wantOK(t, "scale correctness", do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		u, err = MeasureStakeUsage(ctx, tx, UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD", Windows: []WindowSpec{{Period: PeriodRolling24h}}})
+		u, err = MeasureStakeUsage(ctx, tx, UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD", Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &now})
 		return err
 	}))
-	if got := u.Windows[0].Wager.Account.String(); got != "30000" && got != fmt.Sprint(300*100) {
+	if got := u.Windows[0].Wager.Account.String(); got != fmt.Sprint(300*100) {
 		t.Fatalf("24h wager at scale: %s", got)
 	}
 }

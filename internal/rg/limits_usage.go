@@ -274,10 +274,21 @@ func stakeUsageSQL(n int, person bool) string {
 	}
 	return `WITH ` + windowsCTE(n, 4, 5, 6, 7) + `,
 ` + accountSetCTE + `,
+ent AS MATERIALIZED (
+	-- Planned on its own so the (tenant_id, player_account_id, asset_code, created_at) index of migration 0135
+	-- drives the scan; the joins below only ever see the window's rows.
+	SELECT le.ledger_transaction_id, le.ledger_account_id, le.tenant_id, le.player_account_id, le.direction, le.amount, le.created_at
+	  FROM ledger_entries le
+	 WHERE le.tenant_id = $1
+	   AND le.player_account_id = ANY(ARRAY(SELECT id FROM accts))
+	   AND le.asset_code = $3
+	   AND le.created_at >= (SELECT least(` + strings.Join(least, ", ") + `) FROM win)
+	   AND le.created_at <= (SELECT t FROM asof)
+),
 scan AS MATERIALIZED (
 	SELECT le.player_account_id AS acct, la.account_type, le.direction, le.amount, le.created_at,
 	       lt.transaction_type AS tt, (lt.transaction_type = ANY($10::text[])) AS is_rev, o.ot, o.oc
-	  FROM ledger_entries le
+	  FROM ent le
 	  JOIN ledger_transactions lt ON lt.id = le.ledger_transaction_id AND lt.tenant_id = le.tenant_id
 	  JOIN ledger_accounts la ON la.id = le.ledger_account_id AND la.tenant_id = le.tenant_id
 	  LEFT JOIN LATERAL (
@@ -289,12 +300,7 @@ scan AS MATERIALIZED (
 	           WHERE lt.transaction_type = 'sportsbook_void' AND lt.reverses_transaction_id IS NULL
 	             AND o2.tenant_id = lt.tenant_id AND o2.correlation_id = lt.correlation_id AND o2.transaction_type = 'sportsbook_bet'
 	        ) u ORDER BY u.oc LIMIT 1) o ON true
-	 WHERE le.tenant_id = $1
-	   AND le.player_account_id = ANY(ARRAY(SELECT id FROM accts))
-	   AND le.asset_code = $3
-	   AND le.created_at >= (SELECT least(` + strings.Join(least, ", ") + `) FROM win)
-	   AND le.created_at <= (SELECT t FROM asof)
-	   AND lt.transaction_type = ANY($9::text[])
+	 WHERE lt.transaction_type = ANY($9::text[])
 ),
 scan2 AS (
 	SELECT acct, account_type,
@@ -473,17 +479,22 @@ func depositUsageSQL(n int, person bool) string {
 	}
 	return `WITH ` + windowsCTE(n, 4, 5, 6, 7) + `,
 ` + accountSetCTE + `,
-led AS MATERIALIZED (
-	SELECT le.player_account_id AS acct, la.account_type, le.direction, le.amount, le.created_at
+ent AS MATERIALIZED (
+	-- Planned on its own so the migration-0135 ledger_entries index drives the scan.
+	SELECT le.ledger_transaction_id, le.ledger_account_id, le.tenant_id, le.player_account_id, le.direction, le.amount, le.created_at
 	  FROM ledger_entries le
-	  JOIN ledger_transactions lt ON lt.id = le.ledger_transaction_id AND lt.tenant_id = le.tenant_id
-	  JOIN ledger_accounts la ON la.id = le.ledger_account_id AND la.tenant_id = le.tenant_id
 	 WHERE le.tenant_id = $1
 	   AND le.player_account_id = ANY(ARRAY(SELECT id FROM accts))
 	   AND le.asset_code = $3
 	   AND le.created_at >= (SELECT least(` + strings.Join(least, ", ") + `) FROM win)
 	   AND le.created_at <= (SELECT t FROM asof)
-	   AND lt.transaction_type = 'deposit'
+),
+led AS MATERIALIZED (
+	SELECT le.player_account_id AS acct, la.account_type, le.direction, le.amount, le.created_at
+	  FROM ent le
+	  JOIN ledger_transactions lt ON lt.id = le.ledger_transaction_id AND lt.tenant_id = le.tenant_id
+	  JOIN ledger_accounts la ON la.id = le.ledger_account_id AND la.tenant_id = le.tenant_id
+	 WHERE lt.transaction_type = 'deposit'
 ),
 ledg AS (
 	SELECT account_type, ` + strings.Join(lcols, ", ") + ` FROM led GROUP BY account_type
