@@ -309,6 +309,9 @@ var prooftestImporters = map[string]bool{
 
 var staticAllowed = map[string]bool{
 	filepath.Join("internal", "testsupport", "rgfix"): true, // ADR 0115 S1 fixture (see prooftestImporters)
+	// ADR 0115 S2: internal/rg signs the floor four-eyes proofs (request / approve / reject / cancel /
+	// apply) for the authenticated platform principal (security review mandatory).
+	filepath.Join("internal", "rg"): true,
 	// ADR 0112 slice 3: the launch authorisation service signs request / cancel / approve /
 	// reject / suspend proofs for the authenticated principal (security review mandatory).
 	filepath.Join("internal", "launchgov"):                  true,

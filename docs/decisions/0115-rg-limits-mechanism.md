@@ -742,3 +742,173 @@ until S1-S6 merge.
 - **Application-enforced:** `PermRGConfigWrite` and the staff limit permissions are HTTP-layer
   checks. The database binds operator rows to a same-tenant principal and to tighten-only, not
   to a permission.
+
+## S2 implementation record (write APIs; NO migration; not a status change)
+
+Labels stay as in the Status section until S1-S6 merge. S2 is **API only**: no enforcement hook
+into wallet, payments, casino or sportsbook (S4), no usage measurement (S3), no UI (S5). A recorded
+limit is a stored preference with a server-decided effective time; nothing yet refuses a deposit, a
+wager, a launch or a login because of it.
+
+**Delivered (code: `internal/rg/limits_service.go`, `limits_timeout.go`, `limits_config.go`,
+`limits_refusal.go`; HTTP: `internal/httpserver/rg_limits_*.go`; spec: `docs/api/openapi/platform-api.yaml`):**
+
+| Route | Permission / principal | Status |
+|---|---|---|
+| `GET\|POST /v1/me/rg/limits` | player | IMPLEMENTED |
+| `POST /v1/me/rg/limits/changes/{id}/confirm\|cancel` | player (own session only) | IMPLEMENTED |
+| `POST /v1/me/rg/time-out` | player | IMPLEMENTED (see residual 2, 3) |
+| `GET\|POST /v1/admin/players/{id}/rg/limits`, `GET .../rg/history` | `PermRGLimitRead` / `PermRGLimitWriteOnPlayerRequest` | IMPLEMENTED; staff increase/removal is 403 `RG_STEP_UP_REQUIRED` (ADR 0017 NOT IMPLEMENTED) |
+| `GET\|POST /v1/admin/rg/limit-configs` | `PermRGConfigRead` / `PermRGConfigWrite` (compliance only, app-enforced) | IMPLEMENTED |
+| `GET\|POST /v1/admin/platform/rg/limit-config-change-requests`, `.../{id}/approve\|reject\|cancel` | `PermRGFloorRead` / `PermRGFloorRequest` / `PermRGFloorDecide` (platform_admin only) | IMPLEMENTED |
+
+New permissions: `rg_limit:read` (tenant_admin, compliance), `rg_limit:write_on_player_request`
+(compliance), `rg_config:read` (tenant_admin, compliance), `rg_config:write` (compliance),
+`rg_floor:read|request|decide` (platform_admin). `PermRGConfigWrite` and the staff limit permissions
+stay HTTP-layer checks; the database does not know them. New error vocabulary: the closed `RG_*`
+codes in `internal/apierror` (22 codes, mirrored in the OpenAPI `Error.code` enum and pinned by a
+drift test).
+
+**S2 duties from S1 review, as implemented:**
+
+- The API (not the database) refuses, for an initial value, an increase or a removal ONLY, a value above the composed `ceiling` (422
+  `RG_LIMIT_ABOVE_CEILING`, the ceiling itself is allowed), a `period` outside the composed
+  `allowed_periods` (422 `RG_PERIOD_NOT_ALLOWED`), and an increase/removal of a kind the configuration
+  does not enable (422 `RG_NOT_OFFERED`). An increase/removal with no configuration in force is 409
+  `RG_CONFIG_MISSING` (the SQL function's `RL023`). The limit `scope` is the **composed configured
+  scope**, never a client choice.
+- The classification of every change (initial / decrease / increase / removal / cancel_pending /
+  confirm), `effective_at` and the confirmation need come from the one SQL function; Go previews it
+  with `ClassifyLimitChange` (for the pending cap, the step-up gate and the identity-review gate) and
+  the **stored row is the trigger's**. If the realization instant moves between preview and insert (an
+  earlier pending change becomes effective), the attempt is rolled back to its savepoint and
+  re-classified under the same person lock (at most 4 attempts, then 503 retry).
+- Pending cap: at most `DefaultPendingCap` (5, an engineering anti-abuse bound, not a legal value;
+  injectable) open pending increases/removals per player (account rows plus the Person's `tenant_person`
+  rows visible to the session), counted under the L0.4 person lock so the cap is race-free. Decreases,
+  initial values and cancels are never blocked by it.
+- Idempotency: `Idempotency-Key` (1-120 printable ASCII) is required; the stored key is the S1
+  `UNIQUE (tenant_id, player_account_id, idempotency_key)`; a staff write is stored under a `staff `
+  namespace (a SPACE separator the client key syntax cannot produce, so a player key can never collide with
+  or replay a staff row) and its request hash binds the staff id (another staff member with the same key is
+  409). Same key + same request replays the stored row (`Idempotent-Replayed: true`, same status
+  rule: pending increase/removal 202, else 201), same key + different request is 409
+  `RG_IDEMPOTENCY_MISMATCH`. A concurrent duplicate resolves to the stored row (lookup under the person
+  lock, and again after a failed insert).
+- Writers take only L0.4 (after `SET LOCAL lock_timeout '3s'`); a lock timeout/deadlock is a retryable
+  503 `RG_UNAVAILABLE`, never a silent success. Operator-config writers take a writer-only advisory key
+  (`rg_limit_configs`), never co-held with L0.x or L1+.
+- Every mutation and its audit record share one transaction (injectable audit function; the
+  fail-closed paths are tested for limit, time-out, operator row, floor request and floor approval).
+  Every refusal is audited as `*_denied` in a separate transaction with the closed code. Audit actions:
+  `rg.limit.change_requested|confirmed|cancelled|change_denied`, `rg.time_out.created|denied`,
+  `rg.limit_config.operator_written|operator_denied`, `rg.limit_config.floor_requested|floor_approved|
+  floor_rejected|floor_cancelled|floor_denied`. Entries carry actor, tenant, person, account, kind,
+  asset, period, effective value before/after, pending value, `effective_at`, config version ids,
+  reason, IP, UA, request id; configuration entries carry before/after and `attestation_ref`.
+- Staff identity: responses use the ADR 0114 `staffViewer`/`staffRef` helpers. A tenant caller sees only
+  its own tenant's staff ids; floor rows (platform staff) show `created_by` null; the player's own view
+  of a staff-originated change carries `source` and `reason_code`, no staff id and no evidence ref.
+- Floor four-eyes: `RequestFloor` computes the payload hash with the database function, signs the
+  `rg_limit_config:request` proof (bound to the request digest) and files the request; `DecideFloor`
+  signs approve/reject/cancel (bound to request id and payload hash). **Approval applies the approved
+  payload in the same transaction** with a second signed `rg_limit_config:apply` proof, so the approver
+  cannot approve one thing and apply another and a request is single-use. Distinct staff AND Person,
+  expiry, hash binding and proof verification are the database's; the API maps their refusals
+  (`RG_SELF_APPROVAL`, `RG_REQUEST_NOT_PENDING`, `RG_PROOF_REFUSED`, `RG_BACKDATED`). A proposal's
+  `effective_from` is required, in the future and within the 72 h request lifetime; if it has passed by
+  approval time the apply is refused (no backdating) and the whole approval rolls back (file a new
+  request). `internal/rg` is added to the allow-list of packages that may sign actor proofs
+  (`internal/actorproof` static test); security review of that is mandatory.
+
+**Review follow-ups applied (security live review + ledger-finance, both APPROVE WITH CONDITIONS):**
+
+- F1: a `confirm` loosens a limit, so it is refused 403 `RG_IDENTITY_REVIEW` when the confirming account is
+  under `identity_review_required` and the key is `tenant_person`, and it must come from the account that
+  made the request (403 `forbidden` otherwise; reason: the request was made with that account's standing,
+  and a linked account's identity state is not the requester's). Cancel stays open to any linked account
+  (protective).
+- F2/F3: the staff key namespace and replay binding above. F4: `reason_code`, `evidence_ref`,
+  `jurisdiction_code` and the operator/floor `reason_code` are length-checked printable ASCII (400); SQLSTATE
+  22021 / 22P05 map to 400.
+- LF C1: ceiling and `allowed_periods` refusals apply only when the previewed classification is not a
+  decrease (ADR 3.1: a decrease succeeds above a since-lowered ceiling or on a since-dropped period).
+- LF C2: no `float64` on the config path (the stored proposal is inserted as the bytes the database
+  hashed; the audit view decodes with `UseNumber`); a 38-digit ceiling round-trips exactly (tested).
+- LF C4: a denial audit row carries the attempted `value` (bounded, printable) and the
+  `config_version_ids` in force when known. Refusals that end 503 or internal are now audited too
+  (`code` `unavailable` / `internal`; the audit write itself failing is logged, the refusal stands).
+- `CurrentLimits` is one `DISTINCT ON` + `LATERAL rg_limit_realized` query (no 500-row cap, no N+1).
+- Test seam `LimitsConfig.TestHookBeforeInsert` lets a test move the realization instant between preview
+  and insert to cover the re-classification loop; production leaves it nil. Signer pin: exactly one proof
+  signer call site exists in `internal/rg` (`attach`, `limits_config.go`), enforced by a static test.
+
+**Second security re-review follow-ups:**
+
+- SR-1/SR-2: every caller-supplied field echoed into a denial audit row (kind, asset, period, staff and
+  operator/floor `reason_code`, `attestation_ref`, `jurisdiction_code`, control kind) is bounded to 64
+  bytes of printable ASCII or replaced by the marker `<invalid>`, for all limit, operator-config and floor
+  handlers; a 900 KB field is a 400 and a denial row under 2 KB, and a NUL no longer suppresses the denial
+  row (tested for every route family).
+- SR-3: `reason_code` and `evidence_ref` need a non-space character (whitespace-only is 400). The HTTP
+  stack trims the `Idempotency-Key` header value; that is harmless (the trimmed text is the key stored and
+  compared consistently).
+- SR-4: the signer pin is a **tripwire, not a guarantee**: it counts textual `.Attach(` / `.Sign(` calls in
+  `internal/rg` and does not detect method values, other packages obtaining an issuer, or reflection. As
+  defence in depth `attach` now refuses at runtime any operation outside the closed `OpRGConfig*` set.
+
+**Dispositions recorded (ledger-finance C3, and conditions for later slices):**
+
+- (a) ADR 2.5 "every linked account is notified" of a `tenant_person` change is NOT IMPLEMENTED (no
+  notification channel; same residual as 1 below).
+- (b) An asset with no configuration is accepted for an initial value or a decrease (protective); an
+  increase or removal gets `RL023` (409 `RG_CONFIG_MISSING`). Interpretation of ADR 3.1.
+- (c) `duration_hours` (API, whole hours) versus configured durations in seconds: a configured duration
+  that is not a multiple of 3600 s can never be requested through this route (documented in OpenAPI).
+- Operator-config and floor writes carry no `Idempotency-Key` (like the other admin four-eyes routes they
+  are idempotent by state: a replayed floor decision is `RG_REQUEST_NOT_PENDING`; a replayed operator
+  row is simply an append-only second row, tighten-only). Noted, not a gap in S2's scope.
+- **S4 HARD CONDITION:** `confirm` re-checks neither the ceiling nor `enabled` (a confirm carries the
+  value of the earlier request). The effective limit is the MIN with the composed ceiling at read time
+  (ADR 2.2), so S4 MUST enforce that clamp, with tests: (i) a pending increase confirmed after the ceiling
+  was lowered stays clamped to the ceiling; (ii) after a configuration scope change (account ->
+  tenant_person) the legacy-scope key and the new-scope key are combined by MIN (residual 5).
+- Mutation record: `s2_mutation_results.txt` (scratchpad) holds the complete per-mutant record. U31
+  (`allowed_durations_seconds` required when `any=false`) survives because the later distinct-positive
+  check (U40, killed) refuses the same input - a redundant check, not a gap.
+
+**Interpretations recorded (reversible):**
+
+1. `enabled=false` blocks an **increase/removal** (422 `RG_NOT_OFFERED`), never an initial value or a
+   decrease (ADR 3.1: protective writes succeed whatever the enabled/config state). The same applies to
+   a time-out.
+2. A removal of a `mandatory` limit is not refused at the API (loosening waits out the cooldown like any
+   increase); `rg_limit_required` is the S4 enforcement answer.
+3. The "Go layer" tighten-only check for operator rows is the **audited mapping of the SQL function's
+   refusal** (`RL004`, the loosened field named); Go does not re-implement the comparison.
+
+**Residuals / deviations (each is a decision for the orchestrator, none silently dropped):**
+
+1. **Player notification of a staff-originated change: NOT IMPLEMENTED.** No player notification
+   channel exists. The change is visible in the player's own history (`source` =
+   `staff_on_player_request`). Staff increases are 403 so the `rg_staff_increase_on_player_request`
+   alert never fires.
+2. **Time-out idempotency is not a database constraint** (`player_restrictions` has no key column and S2
+   has no migration). It is honoured under the person lock against the audit record of the earlier
+   request (race-free per Person, tested with parallel requests), but a database-enforced key needs a
+   migration.
+3. **Account-scope time-out is applied as `tenant_person`** (the next broader, more protective reach),
+   because `player_restrictions` cannot encode an account scope without a migration. Both scopes are in
+   the audit row. Resolves the S1 note "Account-scope `time_out` is not yet encoded".
+4. **Rate limit** (burst 10, one write per 2 s per player; engineering bound) is applied to the new limit
+   and time-out writes, not to the existing `POST /v1/me/rg/self-exclusion` (changing a protective
+   existing route is outside S2). In-memory, per replica (same caveat as the other limiters).
+5. After a configuration change of a limit kind's scope (account -> tenant_person), the player API
+   addresses only the new scope's key. Legacy-scope rows stay binding through the S4 MIN rule but can no
+   longer be changed through the API (safe direction; to be resolved with S3/S4 read semantics).
+6. Floor changes are **not** yet tenant-visible through the ADR 0104 feed (a floor has no single subject
+   tenant); tenants see floor rows through `GET /v1/admin/rg/limit-configs`.
+7. Not in S2 (S4/S5): the `time_out` filter and redacted cross-tenant rows on `GET
+   /v1/admin/rg/restrictions`, `GET|PUT /v1/me/rg/reality-check`, ADR 0082 static lock-order suite
+   entries, the effective-limit MIN read, `EvaluateEligibility` reading time-outs.
+8. `evidence_ref` of a staff write is stored and shown to tenant staff, never to the player.

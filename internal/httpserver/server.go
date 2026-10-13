@@ -27,6 +27,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/rg"
 )
 
 // Deps are the dependencies routes need. Kept as one small struct so
@@ -370,6 +371,14 @@ type Deps struct {
 	// PayoutInstrumentRegisterLimiter is the per-player registration limiter
 	// (ADR 0111 2.9); nil builds the production default.
 	PayoutInstrumentRegisterLimiter *admission.GCRALimiter
+
+	// RGLimits is the ADR 0115 S2 RG limit write service; nil builds the production default (real
+	// audit, the process-default actor-proof issuer, DefaultPendingCap). Tests inject a service with a
+	// failing audit function or a small pending cap.
+	RGLimits *rg.Limits
+	// RGWriteLimiter is the per-player rate limiter of the /v1/me/rg limit and time-out writes (ADR 0115
+	// 3.5); nil builds the production default.
+	RGWriteLimiter *admission.GCRALimiter
 
 	// authLimiter is built by New from AuthRateLimitPerMinute/
 	// TrustedProxyCount and shared by every rate-limited route. Unexported
