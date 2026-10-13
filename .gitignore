@@ -1,5 +1,9 @@
 # Go
 /bin/
+# binaries built at the repo root by `go build ./cmd/<name>` (ADR 0119 S3 code review F8)
+/seed-admin
+/platform-api
+/migrate
 *.exe
 *.test
 *.out

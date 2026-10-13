@@ -9,12 +9,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/staffmfa"
+	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
@@ -28,10 +31,33 @@ type staffLoginRequest struct {
 	Password   string `json:"password"`
 }
 
+// newStaffLoginHandler is step 1 of the ADR 0119 two-step staff login
+// (section 6.1, slice S3): the password step. The password lockout, the
+// dummy-hash timing equalisation, the scope check and the status check are
+// unchanged from Stage 2. A correct password NEVER yields a token pair:
+//
+//   - an ACTIVE factor that is not hard-locked: a single-use `mfa` challenge
+//     (5 minutes, 5 attempts) to complete at /v1/staff/auth/mfa/verify or
+//     /mfa/recover;
+//   - no active factor: 403 mfa_enrolment_required (a password alone never
+//     opens enrolment). The answer is the same for a never-enrolled account and
+//     for one whose factor disappeared; the latter also raises the integrity
+//     alert (residual R3, S3 entry gate G7);
+//   - a hard-locked factor: 403 mfa_locked, no challenge (only an MFA reset
+//     clears it).
+//
+// There is no MFA bypass in any environment: a process without the staff MFA
+// subsystem (Deps.StaffMFA nil) answers 503.
 func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
 		requestID := observability.RequestIDFromContext(r.Context())
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+		m := deps.StaffMFA
+		if m == nil {
+			writeStaffAuthUnavailable(w, requestID)
+			return
+		}
 
 		var req staffLoginRequest
 		if err := decodeJSON(r, &req); err != nil {
@@ -55,7 +81,7 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 			}
 			if err != nil {
 				logger.Error("staff_login_tenant_lookup_failed", "error", err)
-				apierror.Write(w, requestID, apierror.CodeInternal, "login failed")
+				writeStaffAuthUnavailable(w, requestID)
 				return
 			}
 			tenantID = t.ID
@@ -84,9 +110,14 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 			outcomeLocked
 			outcomeInvalidCredentials
 			outcomeNotActive
+			outcomeEnrolmentRequired
+			outcomeMFALocked
 		)
 		outcome := outcomeSuccess
-		var tokens tokenPairResponse
+		var (
+			challenge staffChallenge
+			alerts    []staffAlert
+		)
 
 		err := scopeFn(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 			locked, err := identity.IsLockedOut(ctx, tx, identifier)
@@ -175,25 +206,57 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 			if err := recordAttempt(ctx, tx, tenantID, "staff", identifier, ip, true); err != nil {
 				return err
 			}
-			session, err := auth.IssueSession(ctx, tx, auth.PrincipalStaff, staff.ID, tenantID, deps.RefreshTokenTTL, ua, ip)
+			// ADR 0119 section 6.1 step 1: the second factor decides what a correct password buys.
+			ref := staffmfa.StaffRef{StaffID: staff.ID, TenantID: tenantID}
+			now, err := dbNow(ctx, tx)
 			if err != nil {
 				return err
 			}
-			tokens, err = newTokenPair(deps, session, auth.Role(staff.Role), auth.PrincipalStaff)
+			st, err := m.factor.ActiveFactorState(ctx, tx, ref, now)
 			if err != nil {
 				return err
 			}
+			switch {
+			case !st.Exists:
+				outcome = outcomeEnrolmentRequired
+				had, err := m.factor.HadEnrolledFactor(ctx, tx, ref)
+				if err != nil {
+					return err
+				}
+				if had {
+					alerts = append(alerts, newStaffAlert(signalMFAIntegrity, ref, requestID,
+						map[string]alerting.AttrValue{"cause": "factor_missing"}))
+				}
+				return audit.Record(ctx, tx, audit.Entry{
+					TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: staff.ID,
+					Action: "staff.login_denied", TargetType: "staff_user", TargetID: staff.ID.String(),
+					Outcome: audit.OutcomeDenied, IPAddress: ip, UserAgent: ua, RequestID: requestID,
+					Metadata: map[string]any{"reason": "mfa_enrolment_required", "previously_enrolled": had},
+				})
+			case st.HardLocked:
+				outcome = outcomeMFALocked
+				return auditLocked(ctx, tx, r, requestID, ref, "password", true)
+			}
+			tok, err := m.store.IssueChallenge(ctx, tx, ref, store.ChallengeMFA, store.OriginLogin, staffVersionUnversioned, now)
+			if err != nil {
+				return err
+			}
+			challenge = newStaffChallenge(string(store.ChallengeMFA), tok, challengeExpiresIn, mfaChallengeMethods)
+			// staff.login_succeeded now means "a session was issued" (after the second factor, ADR 0119 s14.4 N9);
+			// the password step is staff.login_password_verified.
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: staff.ID,
-				Action: "staff.login_succeeded", TargetType: "staff_user", TargetID: staff.ID.String(),
+				Action: "staff.login_password_verified", TargetType: "staff_user", TargetID: staff.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: ip, UserAgent: ua, RequestID: requestID,
+				Metadata: map[string]any{"next": "mfa_challenge"},
 			})
 		})
 		if err != nil {
 			logger.Error("staff_login_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "login failed")
+			writeStaffAuthUnavailable(w, requestID)
 			return
 		}
+		raiseStaffAlerts(r.Context(), deps.DB, alerts)
 
 		switch outcome {
 		case outcomeLocked:
@@ -202,8 +265,12 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid email or password")
 		case outcomeNotActive:
 			apierror.Write(w, requestID, apierror.CodeForbidden, "this account cannot currently log in")
+		case outcomeEnrolmentRequired:
+			apierror.Write(w, requestID, apierror.CodeMFAEnrolmentRequired, "this account has no second factor; ask an administrator for an enrolment link")
+		case outcomeMFALocked:
+			writeMFAOutcome(w, requestID, mfaLocked)
 		default:
-			writeJSON(w, http.StatusOK, tokens)
+			writeStaffSecretJSON(w, http.StatusOK, challenge)
 		}
 	}
 }

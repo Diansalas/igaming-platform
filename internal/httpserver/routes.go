@@ -52,11 +52,11 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/me/residence", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetMyResidenceHandler(deps))))
 	mux.Handle("PUT /v1/me/residence", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newSetMyResidenceHandler(deps))))
 
-	// Staff auth - separate endpoint from player login (different
+	// Staff auth - separate endpoints from player login (different
 	// credential store, different tenant-resolution rule: platform_admin
-	// omits tenant_slug entirely).
-	mux.Handle("POST /v1/staff/auth/login",
-		rateLimitFunc(deps.authLimiter, rateBucketLogin, rateLimitLoginPerMinute, newStaffLoginHandler(deps)))
+	// omits tenant_slug entirely). ADR 0119 S3: two-step login with a
+	// mandatory second factor - see staff_auth_routes.go.
+	registerStaffAuthRoutes(mux, deps)
 
 	// Platform-admin-only: tenant provisioning is inherently a
 	// platform-level action (see docs/decisions/0011), never tenant-

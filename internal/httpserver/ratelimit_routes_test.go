@@ -34,6 +34,7 @@ func newRateLimitedTestServer(t *testing.T) *httptest.Server {
 		Logger:                 slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
 		DB:                     nil,
 		AuthIssuer:             auth.NewIssuer(keys, "platform-api-test", "platform-api-test"),
+		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:            "platform-api-test",
 		AuthRateLimitPerMinute: 1,
 	}))
@@ -139,6 +140,7 @@ func TestAuthRateLimitPerMinute_NegativeDisablesTheLimiter(t *testing.T) {
 	srv := httptest.NewServer(New(Deps{
 		Logger:                 slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
 		AuthIssuer:             auth.NewIssuer(keys, "platform-api-test", "platform-api-test"),
+		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:            "platform-api-test",
 		AuthRateLimitPerMinute: -1,
 	}))

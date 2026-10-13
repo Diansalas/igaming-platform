@@ -65,6 +65,7 @@ func newUploadSubmitFailureLogRedactionServer(t *testing.T, pool *db.Pool, issue
 		Logger:                 logger,
 		DB:                     pool,
 		AuthIssuer:             issuer,
+		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:            "platform-api-test",
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,
@@ -236,6 +237,7 @@ func TestKYC_UploadOrphanVerification_Returns409NotInternalError(t *testing.T) {
 		Logger:                 slog.New(slog.DiscardHandler),
 		DB:                     pool,
 		AuthIssuer:             issuer,
+		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:            "platform-api-test",
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,

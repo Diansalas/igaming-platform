@@ -66,7 +66,7 @@ func TestAdmission_T10_PreAuthRejection_NeverReadsBody(t *testing.T) {
 		mustCreateBrand(t, pool, tenant)
 		mustRegisterCapability(t, pool, tenant.ID, mockProvider)
 		handler, rt := NewWithAdmission(Deps{
-			DB: pool, AuthIssuer: issuer, ServiceName: "t", Logger: quietLogger,
+			DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "t", Logger: quietLogger,
 			PaymentOrchestrator: orchestrator, WebhookAdmission: testAdmissionSettings(),
 		})
 		if err := rt.LoadDirectory(context.Background()); err != nil {
@@ -92,7 +92,7 @@ func TestAdmission_T10_PreAuthRejection_NeverReadsBody(t *testing.T) {
 		tenant := mustCreateTenant(t, pool)
 		mustCreateBrand(t, pool, tenant)
 		handler, rt := NewWithAdmission(Deps{
-			DB: pool, AuthIssuer: issuer, ServiceName: "t", Logger: quietLogger,
+			DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "t", Logger: quietLogger,
 			CasinoOrchestrator: orchestrator, WebhookAdmission: testAdmissionSettings(),
 		})
 		if err := rt.LoadDirectory(context.Background()); err != nil {
@@ -118,7 +118,7 @@ func TestAdmission_T10_PreAuthRejection_NeverReadsBody(t *testing.T) {
 		tenant := mustCreateTenant(t, pool)
 		mustCreateBrand(t, pool, tenant)
 		handler, rt := NewWithAdmission(Deps{
-			DB: pool, AuthIssuer: issuer, ServiceName: "t", Logger: quietLogger,
+			DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "t", Logger: quietLogger,
 			KYCOrchestrator: orchestrator, KYCWebhookEnabled: true, WebhookAdmission: testAdmissionSettings(),
 		})
 		if err := rt.LoadDirectory(context.Background()); err != nil {

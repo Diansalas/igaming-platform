@@ -34,6 +34,7 @@ func newPrincipalGateTestServer(t *testing.T, issuer *auth.Issuer) *httptest.Ser
 		Logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1})),
 		DB:          nil, // never dereferenced: every request below is denied by middleware
 		AuthIssuer:  issuer,
+		StaffMFA:    testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName: "platform-api-test",
 		// Registers the three Stage 7 play-simulation routes so they are
 		// covered by the table below too.
@@ -107,7 +108,7 @@ func TestPlayerSelfServiceRoutes_RejectStaffPrincipal(t *testing.T) {
 	// A tenant_admin is the strongest realistic tenant-scoped staff
 	// principal - if the gate holds for it, it holds for the narrower
 	// roles (internal/auth's own table test covers every role).
-	staffToken, err := issuer.Issue(uuid.NewString(), uuid.New(), auth.RoleTenantAdmin, auth.PrincipalStaff, time.Hour)
+	staffToken, err := issuer.IssueStaff(unitStaffParams(uuid.New(), uuid.New(), auth.RoleTenantAdmin), time.Hour)
 	if err != nil {
 		t.Fatalf("failed to issue staff token: %v", err)
 	}
@@ -171,7 +172,7 @@ func TestSessionRoutes_RemainOpenToStaffPrincipals(t *testing.T) {
 	issuer := principalGateTestIssuer(t)
 	srv := newPrincipalGateTestServer(t, issuer)
 
-	staffToken, err := issuer.Issue(uuid.NewString(), uuid.New(), auth.RoleSupport, auth.PrincipalStaff, time.Hour)
+	staffToken, err := issuer.IssueStaff(unitStaffParams(uuid.New(), uuid.New(), auth.RoleSupport), time.Hour)
 	if err != nil {
 		t.Fatalf("failed to issue staff token: %v", err)
 	}

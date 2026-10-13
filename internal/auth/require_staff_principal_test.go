@@ -20,7 +20,7 @@ import (
 
 func TestRequireStaffPrincipal_AllowsStaffToken(t *testing.T) {
 	issuer := testIssuer(t)
-	token, err := issuer.Issue(uuid.NewString(), uuid.New(), RoleRiskManager, PrincipalStaff, time.Hour)
+	token, err := issuer.IssueStaff(testStaffParams(uuid.New(), uuid.New(), RoleRiskManager), time.Hour)
 	if err != nil {
 		t.Fatalf("unexpected error issuing token: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestRequireStaffPrincipal_DeniesPlayerPrincipal(t *testing.T) {
 
 func TestRequireStaffPrincipal_DeniesServicePrincipal(t *testing.T) {
 	issuer := testIssuer(t)
-	token, err := issuer.Issue(uuid.NewString(), uuid.New(), RoleSupport, PrincipalService, time.Hour)
+	token, err := issuer.Issue(uuid.NewString(), uuid.New(), RolePlayer, PrincipalService, time.Hour)
 	if err != nil {
 		t.Fatalf("unexpected error issuing token: %v", err)
 	}

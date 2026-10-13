@@ -162,7 +162,7 @@ func newIsoWorld(t *testing.T) *isoWorld {
 		t.Fatal(err)
 	}
 	w.srv = httptest.NewServer(New(Deps{
-		Logger: logger, DB: pool, AuthIssuer: auth.NewIssuer(keys, "platform-api-test", "platform-api-test"),
+		Logger: logger, DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: auth.NewIssuer(keys, "platform-api-test", "platform-api-test"),
 		ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 		CasinoOrchestrator: casinoOrch, PaymentOrchestrator: w.payOrch, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
 		PersonResolver: identityresolution.NewMockPersonResolver(),

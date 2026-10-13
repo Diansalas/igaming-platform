@@ -27,8 +27,11 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
-// t0 is the injected clock origin of every store test (no time.Now in assertions).
-var t0 = time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+// t0 is the injected clock origin of every store test (no time.Now in assertions). ADR 0119 S3: it lies a week in
+// the PAST (minute-aligned, so 30 s TOTP steps align): migration 0138's SF008 rule lets failed_24h_count decrease only
+// once its window is 24 hours old by the DATABASE clock, so a test that moves the injected clock past a 24 hour
+// window must stay behind the real clock (the largest offset used is about 48 h 16 min).
+var t0 = time.Now().UTC().Add(-7 * 24 * time.Hour).Truncate(time.Minute)
 
 var (
 	rtOnce sync.Once

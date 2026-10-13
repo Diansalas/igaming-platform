@@ -232,12 +232,15 @@ requires it to be positive. If it fires, the callback rolls back and the provide
 
 ## Staff MFA key families and staff session bounds (ADR 0119 S1)
 
-Status: the library and the configuration validation are `IMPLEMENTED` (ADR 0119 slice S1). Nothing reads
-these keys before slice S3 (staff login with MFA, `NOT IMPLEMENTED`). Runbook: `docs/runbooks/staff-mfa-keys.md`.
+Status: the library and the configuration validation are `IMPLEMENTED` (ADR 0119 slice S1). Since slice S3 (staff
+login with MFA) `cmd/platform-api` and `cmd/seed-admin` build the keys through `staffmfa.LoadKeys`, which runs
+`staffmfa.VerifyStartup`: **both refuse to start without the two families in every environment** (APP_ENV unset
+included). Runbooks: `docs/runbooks/staff-mfa-keys.md` (keys) and `docs/runbooks/staff-mfa-s3-cutover.md` (the S3
+deploy order, the staff-session cutover and the break-glass path until S6).
 
 | Field | Env var | Required | Dev default | Production action |
 |---|---|---|---|---|
-| `StaffMFAFactorKeys` | `STAFF_MFA_FACTOR_KEYS` | **Yes in production** - `config.Load` refuses `APP_ENV=production` without it. From S3, `staffmfa.VerifyStartup` requires it in every environment. | none | **Secret.** `kid:base64(secret)`, comma-separated, each at least 32 bytes decoded. The AES-256-GCM factor-secret key. Rotates by re-enrolment only. Must differ from every other platform key family (the registry checks every pair). Never in the database, never rendered. |
+| `StaffMFAFactorKeys` | `STAFF_MFA_FACTOR_KEYS` | **Yes, in every environment** - `config.Load` refuses `APP_ENV=production` without it, and since S3 `staffmfa.LoadKeys` / `VerifyStartup` refuses to start without it everywhere. | none | **Secret.** `kid:base64(secret)`, comma-separated, each at least 32 bytes decoded. The AES-256-GCM factor-secret key. Rotates by re-enrolment only. Must differ from every other platform key family (the registry checks every pair). Never in the database, never rendered. |
 | `StaffMFAFactorActiveKID` | `STAFF_MFA_FACTOR_ACTIVE_KID` | **Yes in production** (with the keys) | none | Not a secret. Must name a kid of `STAFF_MFA_FACTOR_KEYS`. |
 | `StaffMFAMACKeys` | `STAFF_MFA_MAC_KEYS` | **Yes in production** | none | **Secret.** Same format. The recovery-code, challenge, enrolment-token and session-assurance HMAC keys. A retired kid stays listed (verify-only) until its rows age out (section 5.3). |
 | `StaffMFAMACActiveKID` | `STAFF_MFA_MAC_ACTIVE_KID` | **Yes in production** (with the keys) | none | Not a secret. |

@@ -148,8 +148,10 @@ func seedFencedRows(t *testing.T, owner *Pool) map[string]uuid.UUID {
 		return err
 	}))
 	must("sessions", owner.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO sessions (principal_type, principal_id, tenant_id, refresh_token_hash, expires_at)
-		                         VALUES ('staff', $1, NULL, $2, now() + interval '1 hour')`, staffID, "kycfence-"+uuid.NewString())
+		// ADR 0119 S3: a staff session fixture carries the assurance columns migration 0138's SF040 requires (the
+		// seal is a well-formed dummy; nothing here refreshes the session).
+		_, err := tx.Exec(ctx, `INSERT INTO sessions (principal_type, principal_id, tenant_id, refresh_token_hash, expires_at, aal, amr, auth_time, mfa_at, absolute_expires_at, assurance_kid, assurance_seal)
+		                         VALUES ('staff', $1, NULL, $2, now() + interval '1 hour', 2, ARRAY['pwd','otp'], now(), now(), now() + interval '2 days', 'probe', decode(repeat('00', 32), 'hex'))`, staffID, "kycfence-"+uuid.NewString())
 		return err
 	}))
 	must("persons", owner.WithPlatformAdmin(ctx, admin, func(ctx context.Context, tx pgx.Tx) error {
@@ -270,7 +272,7 @@ func TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied(t *testing.T) {
 		{"risk_rules UPDATE", `UPDATE risk_rules SET threshold = 1 WHERE tenant_id IS NULL`, nil},
 		{"risk_rules DELETE", `DELETE FROM risk_rules WHERE tenant_id IS NULL`, nil},
 		{"player_restrictions staff insert", `INSERT INTO player_restrictions (person_id, tenant_id, restriction_type, source, created_by_actor_type, created_by_actor_id) VALUES (gen_random_uuid(), NULL, 'self_exclusion', 'staff', 'staff', gen_random_uuid())`, nil},
-		{"sessions insert", `INSERT INTO sessions (principal_type, principal_id, tenant_id, refresh_token_hash, expires_at) VALUES ('staff', gen_random_uuid(), NULL, 'forged', now() + interval '1 hour')`, nil},
+		{"sessions insert", `INSERT INTO sessions (principal_type, principal_id, tenant_id, refresh_token_hash, expires_at, aal, amr, auth_time, mfa_at, absolute_expires_at, assurance_kid, assurance_seal) VALUES ('staff', gen_random_uuid(), NULL, 'forged', now() + interval '1 hour', 2, ARRAY['pwd','otp'], now(), now(), now() + interval '2 days', 'probe', decode(repeat('00', 32), 'hex'))`, nil},
 		{"sessions update", `UPDATE sessions SET revoked_at = now() WHERE tenant_id IS NULL`, nil},
 		{"login_attempts insert", `INSERT INTO login_attempts (tenant_id, principal_type, identifier, succeeded) VALUES (NULL, 'staff', 'x', true)`, nil},
 		{"login_attempts delete", `DELETE FROM login_attempts WHERE tenant_id IS NULL`, nil},

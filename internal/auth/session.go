@@ -52,6 +52,14 @@ type Session struct {
 	TenantID      uuid.UUID // uuid.Nil for a platform-scoped principal
 	RefreshToken  string    // raw token, populated only on issue/rotate
 	ExpiresAt     time.Time
+
+	// Staff session assurance (ADR 0119 section 7.2); zero for players. Set on
+	// issue and rotation of a staff session (IssueStaffSession, RotateSessionWithPolicy).
+	AAL               int
+	AMR               []string
+	AuthTime          time.Time
+	MFAAt             time.Time
+	AbsoluteExpiresAt time.Time
 }
 
 func hashRefreshToken(token string) string {
@@ -67,13 +75,18 @@ func generateRefreshToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// IssueSession creates a brand-new session (not a rotation) and returns
-// it with the raw refresh token set. tx must already be scoped correctly
+// IssueSession creates a brand-new PLAYER session (not a rotation) and returns
+// it with the raw refresh token set. Since ADR 0119 S3 a staff session is
+// issued only by IssueStaffSession, with session assurance; migration 0138's
+// SF040 trigger refuses a staff row written here. tx must already be scoped correctly
 // for tenantID (db.WithTenant for a tenant-scoped principal,
 // db.WithoutTenant for a platform-scoped one) - the caller already knows
 // the tenant at this point (registration/login resolve it from the
 // brand/tenant slug first), unlike rotation below.
 func IssueSession(ctx context.Context, tx pgx.Tx, principalType PrincipalType, principalID, tenantID uuid.UUID, ttl time.Duration, userAgent, ipAddress string) (Session, error) {
+	if principalType == PrincipalStaff {
+		return Session{}, ErrStaffSessionUnavailable // staff sessions: IssueStaffSession only (ADR 0119 S3)
+	}
 	token, err := generateRefreshToken()
 	if err != nil {
 		return Session{}, err
@@ -118,17 +131,30 @@ type sessionRow struct {
 	expiresAt           time.Time
 	revokedAt           *time.Time
 	replacedBySessionID *uuid.UUID
+	// staff is the assurance part of a staff row (nil for a player row).
+	staff *staffAssuranceRow
 }
 
 func lookupSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) (sessionRow, error) {
 	hash := hashRefreshToken(rawToken)
 	var row sessionRow
 	err := pool.WithSessionLookup(ctx, hash, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
+		if err := tx.QueryRow(ctx,
 			`SELECT id, principal_type, principal_id, tenant_id, expires_at, revoked_at, replaced_by_session_id
 			 FROM sessions WHERE refresh_token_hash = $1`,
 			hash,
-		).Scan(&row.id, &row.principalType, &row.principalID, &row.tenantID, &row.expiresAt, &row.revokedAt, &row.replacedBySessionID)
+		).Scan(&row.id, &row.principalType, &row.principalID, &row.tenantID, &row.expiresAt, &row.revokedAt, &row.replacedBySessionID); err != nil {
+			return err
+		}
+		if row.principalType != PrincipalStaff {
+			return nil
+		}
+		st, err := readStaffAssurance(ctx, tx, hash)
+		if err != nil {
+			return err
+		}
+		row.staff = &st
+		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sessionRow{}, ErrSessionNotFound
@@ -182,9 +208,36 @@ func withResolvedScope(ctx context.Context, pool *db.Pool, row sessionRow, fn db
 //   - otherwise (not found, expired, or already revoked): returns
 //     ErrSessionNotFound.
 func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time.Duration, userAgent, ipAddress string) (Session, error) {
+	return RotateSessionWithPolicy(ctx, pool, rawToken, RotationPolicy{PlayerTTL: ttl}, userAgent, ipAddress)
+}
+
+// RotateSessionWithPolicy is RotateSession with the ADR 0119 section 7.2 staff
+// rules. For a STAFF row, before anything else: the assurance seal is verified
+// (a NULL seal on a session created before the 0138 cutover is a plain
+// ErrSessionNotFound; any other missing or bad seal writes the
+// auth.session_assurance_invalid audit row and returns *SessionIntegrityError);
+// a session past absolute_expires_at is ErrSessionNotFound; the successor
+// copies aal, amr, auth_time, mfa_at and absolute_expires_at, is re-sealed
+// (the id changes) and its refresh token lives policy.Staff.IdleTTL, capped at
+// the absolute expiry. A staff row with policy.Staff nil fails closed
+// (ErrStaffSessionUnavailable). Player rows keep policy.PlayerTTL and no seal.
+func RotateSessionWithPolicy(ctx context.Context, pool *db.Pool, rawToken string, policy RotationPolicy, userAgent, ipAddress string) (Session, error) {
 	row, err := lookupSessionByToken(ctx, pool, rawToken)
 	if err != nil {
 		return Session{}, err
+	}
+	staff := row.principalType == PrincipalStaff
+	if staff {
+		if policy.Staff == nil || policy.Staff.Keys == nil || policy.Staff.IdleTTL <= 0 {
+			return Session{}, ErrStaffSessionUnavailable
+		}
+		switch cause := staffSealVerdict(row, policy.Staff.Keys); cause {
+		case "":
+		case integrityCausePreCutoverLegacy:
+			return Session{}, ErrSessionNotFound
+		default:
+			return Session{}, recordSessionIntegrity(ctx, pool, row, cause, userAgent, ipAddress)
+		}
 	}
 
 	if row.replacedBySessionID != nil {
@@ -211,7 +264,11 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 		}
 		return Session{}, ErrSessionReused
 	}
-	if row.revokedAt != nil || time.Now().After(row.expiresAt) {
+	now := time.Now()
+	if row.revokedAt != nil || now.After(row.expiresAt) {
+		return Session{}, ErrSessionNotFound
+	}
+	if staff && !now.Before(*row.staff.absoluteExpiry) {
 		return Session{}, ErrSessionNotFound
 	}
 
@@ -280,7 +337,11 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 			})
 		}
 
-		next, err = IssueSession(ctx, tx, row.principalType, row.principalID, tenantID, ttl, userAgent, ipAddress)
+		if staff {
+			next, err = rotateStaff(ctx, tx, policy.Staff, row, now, userAgent, ipAddress)
+		} else {
+			next, err = IssueSession(ctx, tx, row.principalType, row.principalID, tenantID, policy.PlayerTTL, userAgent, ipAddress)
+		}
 		if err != nil {
 			return err
 		}
@@ -422,9 +483,16 @@ func RevokeSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) e
 	if err != nil {
 		return err
 	}
-	return withResolvedScope(ctx, pool, row, func(ctx context.Context, tx pgx.Tx) error {
+	err = withResolvedScope(ctx, pool, row, func(ctx context.Context, tx pgx.Tx) error {
 		return RevokeSession(ctx, tx, row.id, row.principalID)
 	})
+	if errors.Is(err, ErrSessionNotFound) {
+		// Already revoked (for example by refresh-token reuse detection, which revokes the whole chain): the end
+		// state the caller asked for already holds. Found by the ADR 0119 S3 hygiene test - before, this answered
+		// 500, contrary to the documented idempotent 204.
+		return nil
+	}
+	return err
 }
 
 // ListActiveSessions returns the caller's own live sessions (not

@@ -114,6 +114,41 @@ const KindKYCSubmissionFailedTerminal Kind = "kyc.submission_failed_terminal"
 // recipient; ALERT-DELIVERY-1 OPEN): the row exists, nobody is paged.
 const KindLaunchSuspensionExhausted Kind = "launch.suspension_exhausted"
 
+// ADR 0119 slice S3 (migration 0138): the staff MFA and session security Kinds. Each ADR signal has a TENANT-staff
+// Kind (requires a subject tenant; raised from the staff member's tenant session, so the tenant can read it) and a
+// PLATFORM-staff Kind (no subject; raised from the platform staff member's own platform session). ADR 0102 requires a
+// subject for every business Kind and a platform staff member has no tenant; migration 0138 widens alert_kinds'
+// subject CHECK by exactly the five platform Kinds. All are raised post-commit (alerting.RaisePostCommit), after the
+// business transaction that recorded the event committed. The ADR 0119 names map as staff_mfa_integrity ->
+// staff.mfa_integrity / staff.platform_mfa_integrity, and likewise. Attributes are ids and closed codes only (never a
+// code, token, secret or email). Notification routing is NOT IMPLEMENTED (ALERT-DELIVERY-1 OPEN).
+const (
+	// KindStaffMFAIntegrity (p1): a stored factor failed its AEAD check, or an account that once had an active factor
+	// has none (residual R3, a factor deleted or revoked out of band), or the active factor vanished between the
+	// challenge and its verification.
+	KindStaffMFAIntegrity         Kind = "staff.mfa_integrity"
+	KindStaffPlatformMFAIntegrity Kind = "staff.platform_mfa_integrity"
+	// KindStaffSessionIntegrity (p1): a staff session's assurance seal is missing (after the 0138 cutover) or wrong.
+	KindStaffSessionIntegrity         Kind = "staff.session_integrity"
+	KindStaffPlatformSessionIntegrity Kind = "staff.platform_session_integrity"
+	// KindStaffMFAHardLocked (p2): 10 second-factor failures in 24 hours after a correct password (a compromise
+	// signal); only an MFA reset clears the lock.
+	KindStaffMFAHardLocked         Kind = "staff.mfa_hard_locked"
+	KindStaffPlatformMFAHardLocked Kind = "staff.platform_mfa_hard_locked"
+	// KindStaffMFARecoveryUsed (p3, the ADR's "info"): a recovery code was used.
+	KindStaffMFARecoveryUsed         Kind = "staff.mfa_recovery_used"
+	KindStaffPlatformMFARecoveryUsed Kind = "staff.platform_mfa_recovery_used"
+	// KindStaffMFAFailurePattern (p2, S3 entry gate (e)): second-factor failures after a correct password on 3 or
+	// more distinct days within 7 days (a slow-rate guessing pattern below the lock thresholds).
+	KindStaffMFAFailurePattern         Kind = "staff.mfa_failure_pattern"
+	KindStaffPlatformMFAFailurePattern Kind = "staff.platform_mfa_failure_pattern"
+)
+
+func staffKind(k Kind, sev Severity, platform bool, allowed ...string) KindDef {
+	return KindDef{Kind: k, Severity: sev, Scope: ScopeKindPlatform, RequiresSubject: !platform,
+		InTxRaisableByTenant: !platform, RaiseMode: RaiseModePostCommit, AllowedKeys: keys(allowed...)}
+}
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -207,6 +242,16 @@ var kindDefs = map[Kind]KindDef{
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeDetached,
 		AllowedKeys: keys("subject_kind", "attempts", "request_id"),
 	},
+	KindStaffMFAIntegrity:              staffKind(KindStaffMFAIntegrity, SeverityP1, false, "staff_id", "cause", "request_id"),
+	KindStaffPlatformMFAIntegrity:      staffKind(KindStaffPlatformMFAIntegrity, SeverityP1, true, "staff_id", "cause", "request_id"),
+	KindStaffSessionIntegrity:          staffKind(KindStaffSessionIntegrity, SeverityP1, false, "staff_id", "session_id", "cause", "request_id"),
+	KindStaffPlatformSessionIntegrity:  staffKind(KindStaffPlatformSessionIntegrity, SeverityP1, true, "staff_id", "session_id", "cause", "request_id"),
+	KindStaffMFAHardLocked:             staffKind(KindStaffMFAHardLocked, SeverityP2, false, "staff_id", "factor_id", "request_id"),
+	KindStaffPlatformMFAHardLocked:     staffKind(KindStaffPlatformMFAHardLocked, SeverityP2, true, "staff_id", "factor_id", "request_id"),
+	KindStaffMFARecoveryUsed:           staffKind(KindStaffMFARecoveryUsed, SeverityP3, false, "staff_id", "request_id"),
+	KindStaffPlatformMFARecoveryUsed:   staffKind(KindStaffPlatformMFARecoveryUsed, SeverityP3, true, "staff_id", "request_id"),
+	KindStaffMFAFailurePattern:         staffKind(KindStaffMFAFailurePattern, SeverityP2, false, "staff_id", "distinct_days", "request_id"),
+	KindStaffPlatformMFAFailurePattern: staffKind(KindStaffPlatformMFAFailurePattern, SeverityP2, true, "staff_id", "distinct_days", "request_id"),
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,

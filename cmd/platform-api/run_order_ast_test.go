@@ -51,7 +51,16 @@ func TestRun_GuardAndSchemeValidationPrecedeDBConnect(t *testing.T) {
 	if !ok {
 		t.Fatal("run() does not call db.ConnectWithRuntimeParams")
 	}
-	for _, check := range []string{"refuseSyntheticInProduction", "validateWebhookSchemes"} {
+	// ADR 0119 S3 entry gate 21.7 (a): the staff MFA keys are built (and the
+	// startup gate run) before any database side effect, and before the
+	// synthetic guard so a missing key family is refused in every
+	// environment with its own named error.
+	if loadKeys, ok := first["staffmfa.LoadKeys"]; !ok {
+		t.Fatal("run() does not call staffmfa.LoadKeys")
+	} else if guard, ok := first["refuseSyntheticInProduction"]; !ok || loadKeys >= guard {
+		t.Fatal("run() must call staffmfa.LoadKeys before refuseSyntheticInProduction")
+	}
+	for _, check := range []string{"refuseSyntheticInProduction", "validateWebhookSchemes", "staffmfa.LoadKeys"} {
 		pos, ok := first[check]
 		if !ok {
 			t.Fatalf("run() does not call %s", check)

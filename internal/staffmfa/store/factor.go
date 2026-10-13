@@ -282,39 +282,65 @@ func (f *TOTPFactor) Begin(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffR
 // A wrong, malformed, replayed or locked assertion returns a Refusal after
 // writing the failure counters on the PENDING row (the caller commits).
 func (f *TOTPFactor) Confirm(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef, id uuid.UUID, a staffmfa.Assertion, now time.Time) error {
+	vr, err := f.ConfirmDetailed(ctx, tx, staff, id, a, now)
+	if err != nil {
+		return err
+	}
+	return refusalFor(vr.Outcome)
+}
+
+// ConfirmDetailed is Confirm with the VerifyDetailed contract (ADR 0119 S3
+// entry gate G1): a refusal (wrong, replayed, locked, integrity) is reported
+// ONLY through the result, with a nil error, after its failure counters were
+// written in the caller's transaction; the caller commits after any nil-error
+// return. The error is reserved for faults and for ErrFactorNotFound /
+// ErrPendingExpired / ErrInvalidInput (nothing was written). On
+// OutcomeAccepted the factor is ACTIVE and its previous active factor of the
+// type is revoked ('replaced'); ReplacedFactorID names it (uuid.Nil if none).
+func (f *TOTPFactor) ConfirmDetailed(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef, id uuid.UUID, a staffmfa.Assertion, now time.Time) (ConfirmResult, error) {
 	if !staff.Valid() || id == uuid.Nil || now.IsZero() {
-		return ErrInvalidInput
+		return ConfirmResult{}, ErrInvalidInput
 	}
 	row, err := lockPending(ctx, tx, staff, id)
 	if err != nil {
-		return err
+		return ConfirmResult{}, err
 	}
 	if !now.Before(row.pendingExpires) {
-		return ErrPendingExpired
+		return ConfirmResult{}, ErrPendingExpired
 	}
 	res := f.keys.VerifyTOTP(row.stored(), a, now)
 	if res.Outcome == staffmfa.OutcomeAccepted {
-		ok, err := f.activate(ctx, tx, staff, row, res.AcceptedStep, now)
+		replaced, ok, err := f.activate(ctx, tx, staff, row, res.AcceptedStep, now)
 		if err != nil {
-			return err
+			return ConfirmResult{}, err
 		}
 		if ok {
-			return nil
+			return ConfirmResult{VerifyResult: VerifyResult{Result: res}, ReplacedFactorID: replaced}, nil
 		}
 		res = staffmfa.Result{Outcome: staffmfa.OutcomeRejected} // lost the burn: a replay
 	}
-	_, err = recordOutcome(ctx, tx, row, res, now)
+	hard, err := recordOutcome(ctx, tx, row, res, now)
 	if err != nil {
-		return err
+		return ConfirmResult{}, err
 	}
-	return refusalFor(res.Outcome)
+	return ConfirmResult{VerifyResult: VerifyResult{Result: res, HardLockSet: hard,
+		IntegrityFailure: res.Outcome == staffmfa.OutcomeIntegrity}}, nil
+}
+
+// ConfirmResult is what ConfirmDetailed reports.
+type ConfirmResult struct {
+	VerifyResult
+	// ReplacedFactorID is the previously active factor this confirmation
+	// revoked (uuid.Nil when there was none). Set on OutcomeAccepted only.
+	ReplacedFactorID uuid.UUID
 }
 
 // activate revokes the previous active factor and activates row in a savepoint.
-func (f *TOTPFactor) activate(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef, row factorRow, step int64, now time.Time) (bool, error) {
+// It returns the id of the revoked previous factor (uuid.Nil if none).
+func (f *TOTPFactor) activate(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef, row factorRow, step int64, now time.Time) (uuid.UUID, bool, error) {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("staffmfa/store: savepoint: %w", err)
+		return uuid.Nil, false, fmt.Errorf("staffmfa/store: savepoint: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -322,10 +348,12 @@ func (f *TOTPFactor) activate(ctx context.Context, tx pgx.Tx, staff staffmfa.Sta
 			_ = sp.Rollback(ctx)
 		}
 	}()
-	if _, err := sp.Exec(ctx, `UPDATE staff_mfa_factors SET status = 'revoked', revoked_at = $3, revoked_reason = 'replaced'
-		WHERE staff_user_id = $1 AND tenant_id IS NOT DISTINCT FROM $2::uuid AND factor_type = 'totp' AND status = 'active'`,
-		staff.StaffID, tenantArg(staff.TenantID), now.UTC()); err != nil {
-		return false, fmt.Errorf("staffmfa/store: revoke replaced factor: %w", err)
+	var replaced uuid.UUID
+	if err := sp.QueryRow(ctx, `UPDATE staff_mfa_factors SET status = 'revoked', revoked_at = $3, revoked_reason = 'replaced'
+		WHERE staff_user_id = $1 AND tenant_id IS NOT DISTINCT FROM $2::uuid AND factor_type = 'totp' AND status = 'active'
+		RETURNING id`,
+		staff.StaffID, tenantArg(staff.TenantID), now.UTC()).Scan(&replaced); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, fmt.Errorf("staffmfa/store: revoke replaced factor: %w", err)
 	}
 	// Conditional burn + activation: the pending row starts at last_used_step 0, so any real step passes, and a
 	// replay of a step the row already burned does not.
@@ -334,18 +362,77 @@ func (f *TOTPFactor) activate(ctx context.Context, tx pgx.Tx, staff staffmfa.Sta
 		WHERE id = $1 AND status = 'pending' AND last_used_step < $2`, row.id, step, now.UTC())
 	if err != nil {
 		if isUniqueViolation(err) {
-			return false, ErrConflict
+			return uuid.Nil, false, ErrConflict
 		}
-		return false, fmt.Errorf("staffmfa/store: activate factor: %w", err)
+		return uuid.Nil, false, fmt.Errorf("staffmfa/store: activate factor: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return false, nil // rolled back by the deferred Rollback: the old factor is untouched
+		return uuid.Nil, false, nil // rolled back by the deferred Rollback: the old factor is untouched
 	}
 	if err := sp.Commit(ctx); err != nil {
-		return false, fmt.Errorf("staffmfa/store: release savepoint: %w", err)
+		return uuid.Nil, false, fmt.Errorf("staffmfa/store: release savepoint: %w", err)
 	}
 	committed = true
-	return true, nil
+	return replaced, true, nil
+}
+
+// FactorState is a plain (unlocked) read of the staff member's ACTIVE factor,
+// for the password step of login and the "My security" view. It never opens
+// the secret and never compares anything.
+type FactorState struct {
+	Exists      bool
+	ID          uuid.UUID
+	ActivatedAt time.Time
+	Lock        staffmfa.LockState
+	LockedUntil time.Time // set while soft-locked
+	HardLocked  bool
+}
+
+// ActiveFactorState reads the staff member's ACTIVE TOTP factor (if any) and
+// evaluates its lock state at now. It takes no row lock: the password step
+// only decides whether to issue a challenge, and every verification re-reads
+// the factor FOR UPDATE.
+func (f *TOTPFactor) ActiveFactorState(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef, now time.Time) (FactorState, error) {
+	if !staff.Valid() || now.IsZero() {
+		return FactorState{}, ErrInvalidInput
+	}
+	var activated *time.Time
+	row, err := scanFactor(tx.QueryRow(ctx, `SELECT `+factorColumns+` FROM staff_mfa_factors
+		WHERE staff_user_id = $1 AND tenant_id IS NOT DISTINCT FROM $2::uuid
+		  AND factor_type = 'totp' AND status = 'active'`, staff.StaffID, tenantArg(staff.TenantID)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return FactorState{}, nil
+	}
+	if err != nil {
+		return FactorState{}, fmt.Errorf("staffmfa/store: read active factor: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT activated_at FROM staff_mfa_factors WHERE id = $1`, row.id).Scan(&activated); err != nil {
+		return FactorState{}, fmt.Errorf("staffmfa/store: read active factor: %w", err)
+	}
+	st := FactorState{Exists: true, ID: row.id, ActivatedAt: zeroIfNil(activated), Lock: row.counters.LockState(now)}
+	st.HardLocked = st.Lock == staffmfa.LockHard
+	if st.Lock == staffmfa.LockSoft {
+		st.LockedUntil = row.counters.LockedUntil
+	}
+	return st, nil
+}
+
+// HadEnrolledFactor reports whether the staff member EVER had a factor that
+// was activated (ADR 0119 residual R3): a correct password with no active
+// factor for such an account is an anomaly (a factor deleted or revoked out of
+// band) and raises staff_mfa_integrity. Superseded or expired PENDING factors
+// do not count.
+func (f *TOTPFactor) HadEnrolledFactor(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef) (bool, error) {
+	if !staff.Valid() {
+		return false, ErrInvalidInput
+	}
+	var had bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM staff_mfa_factors
+		WHERE staff_user_id = $1 AND tenant_id IS NOT DISTINCT FROM $2::uuid AND activated_at IS NOT NULL)`,
+		staff.StaffID, tenantArg(staff.TenantID)).Scan(&had); err != nil {
+		return false, fmt.Errorf("staffmfa/store: read factor history: %w", err)
+	}
+	return had, nil
 }
 
 // Verify implements staffmfa.StaffFactor. A refusal (wrong, replayed, locked,

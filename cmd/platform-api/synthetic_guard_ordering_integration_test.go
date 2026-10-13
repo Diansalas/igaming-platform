@@ -129,6 +129,10 @@ func TestSyntheticGuard_RunsBeforeDBConnect_Subprocess_MissingAppEnv(t *testing.
 		"OTEL_EXPORTER=none",
 		"DATABASE_URL=postgres://user:pass@127.0.0.1:1/nonexistent?sslmode=disable&connect_timeout=1",
 	}
+	// ADR 0119 S3: the staff MFA startup gate runs before the synthetic guard
+	// in every environment; fresh keys keep this test about guard ordering
+	// (TestStaffMFAStartupGate_* covers the gate itself).
+	env = append(env, staffMFAKeyEnv(t)...)
 
 	_, stderr, exitCode := runPlatformAPIOnce(t, bin, env)
 

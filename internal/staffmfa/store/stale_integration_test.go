@@ -63,7 +63,7 @@ func TestActivate_ConditionRefusesAnAlreadyBurnedStep(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		ok, err = w.factor.activate(ctx, tx, w.a1, row, step, t0.Add(2*time.Minute))
+		_, ok, err = w.factor.activate(ctx, tx, w.a1, row, step, t0.Add(2*time.Minute))
 		return err
 	})
 	if ok {

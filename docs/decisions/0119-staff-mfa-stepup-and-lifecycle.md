@@ -11,6 +11,11 @@
   (`internal/staffmfa/store`) are `IMPLEMENTED` on an unmerged branch, pending gate G. The `sessions` columns, `SF040`
   and the session revocation moved to 0138 (S3) as the slice plan says; the `staff_users` triggers (`SF010`-`SF014`,
   `SF020`, `SF021`) stay in 0139. Every other slice stays `NOT IMPLEMENTED`. See section 22.
+- **S3 (2026-10-13):** migration 0138 (session assurance, seal, `SF040`, cutover marker, staff-session revocation,
+  `SF008` lockout clock) and the two-step staff login, enrolment, recovery and staff refresh are `IMPLEMENTED` on an
+  unmerged branch, pending gate G and the manual authenticator check (21.7 (g)). Step-up, liveness and lifecycle stay
+  `NOT IMPLEMENTED`. The `security` (live) and `code-reviewer` / `qa` reviews returned APPROVE WITH CONDITIONS; the
+  conditions are applied on the branch (section 23.8) and await re-review. S3 merges together with S7a. See section 23.
 - **Revision 2 (2026-10-13):** the S0 design review by `architect` and `ledger-finance` returned ACCEPT WITH
   CONDITIONS. Section 20 resolves every blocking condition (C1-C6) and accuracy fix (C7-C11) in the text, and folds
   in the cheap non-blocking items (N1-N15). The `security` rulings are recorded there: C2 adopts the scoped
@@ -1192,7 +1197,10 @@ Every table gets `ENABLE` and `FORCE ROW LEVEL SECURITY`.
 | `SF031` | a lifecycle request content, forced-column or state violation |
 | `SF032` | an invalid lifecycle approval (same staff or Person as the requester or target, NULL Person, a duplicate Person, not pending, expired, payload mismatch, request not locked in this txid) |
 | `SF033` | a lifecycle request left `executing` at commit |
+| `SF008` | (S3, gate G2) `failed_24h_count` decreased before its 24 h window (database clock) ended, or `failed_24h_start` moved backwards |
 | `SF040` | a staff session without assurance columns, or an immutable assurance column changed |
+| `SF041` | (S3) migration 0138 up pre-flight refused: `sessions`, the factor counters or the alert kinds drifted, or the staff-session revocation count disagreed with its pre-count |
+| `SF042` | (S3) migration 0138 down refused: staff alerts or live sealed staff sessions exist |
 | `SF097` | (S2) migration 0137 down refused: MFA data exists |
 | `SF098` | (S2) migration 0137 up pre-flight refused: the `staff_users` RLS posture the new tables replicate has drifted |
 | `SF099` | an append-only or no-delete violation |
@@ -1864,3 +1872,196 @@ S3 may not merge unless each holds and is tested:
 - **G6** The S9 runbook pins `log_parameter_max_length = 0` and keeps `pg_stat_statements` parameter-free.
 - **G7** S2-R4: collapse "no factor" into the single login response and raise `staff_mfa_integrity`.
 - **Note:** between S3 and S6 there is no MFA-reset path. The last platform admin's lockout then needs owner intervention through `cmd/seed-admin`, so S3 must not reach a persistent environment without the runbook.
+
+## 23. S3 implementation record (2026-10-13)
+
+Branch `worktree-agent-a8cb2de225b471305`, based on `d2cad31`. **NOT MERGED.** Gate G (live `security` review,
+`code-reviewer`, `qa`) has not run, and entry gate 21.7 (g) (a real authenticator app) needs a human. Nothing below is
+an approval. S3 must not reach a persistent environment without `docs/runbooks/staff-mfa-s3-cutover.md`.
+
+### 23.1 Status labels
+
+| Item | Label |
+|---|---|
+| Migration `0138_staff_session_cutover` (up and down): the seven `sessions` assurance columns and their CHECKs, `staff_session_cutover` (one row, append-only, fenced read policy), `SF040` guard, revocation of every live staff session, column-level `sessions` UPDATE grant, `SF008` lockout clock (gate G2), ten `staff.*` alert kinds, `SF041` pre-flight, `SF042` down refusal | `IMPLEMENTED` against the local database |
+| Staff login: password step returns an `mfa` challenge (or one `403 mfa_enrolment_required` / `403 mfa_locked`); `POST /v1/staff/auth/mfa/verify` (TOTP), `POST /v1/staff/auth/mfa/recover` (recovery code to an `enrol` challenge) | `IMPLEMENTED` |
+| Enrolment: `POST /v1/staff/auth/enrol/redeem`, `/enrol/start`, `/enrol/confirm` (10 recovery codes, aal2 session, all earlier sessions revoked) | `IMPLEMENTED` |
+| `GET /v1/staff/me/mfa` | `IMPLEMENTED` (bearer + `RequireStaffPrincipal`; the S4a staff route chain does not exist yet) |
+| Staff session: keyed seal, claims `sid`/`aal`/`amr`/`auth_time`/`mfa_at`/`sv`, refresh with seal check, 30 min idle, 12 h absolute (S1 config), C1 cutover rule, logout | `IMPLEMENTED` |
+| Per-IP `mfa` rate bucket (30/min) | `IMPLEMENTED` (per process, R9) |
+| Alerts `staff.mfa_integrity`, `staff.session_integrity`, `staff.mfa_hard_locked`, `staff.mfa_recovery_used`, `staff.mfa_failure_pattern` (+ `staff.platform_*` variants) | `IMPLEMENTED` (raised post-commit) |
+| `staffmfa.LoadKeys` as the single key constructor, wired into `cmd/platform-api` and `cmd/seed-admin` | `IMPLEMENTED` |
+| `cmd/seed-admin` bootstrap enrolment token (new admin, or `-issue-bootstrap [-tenant-slug]` for a staff member without an active factor) | `IMPLEMENTED` (owner break-glass path until S6) |
+| OpenAPI (`docs/api/openapi/platform-api.yaml`) and UI contract `docs/plans/adr0119-s3-api-contract.md` | `IMPLEMENTED` (drift tests) |
+| Cutover runbook `docs/runbooks/staff-mfa-s3-cutover.md` | `IMPLEMENTED` (document; not exercised in a persistent environment) |
+| Step-up (S4), staff route chain / liveness / `sv` versioning (S4a, 0139), lifecycle and MFA reset (S5/S6), invitations, password redeem, recovery-code regeneration, back office (S7a, separate agent) | `NOT IMPLEMENTED` |
+| Gate 21.7 (g): `otpauth://` URI checked with a real authenticator | `BLOCKED` on a human (manual evidence) |
+| Production key provisioning, real email delivery of enrolment tokens | `PROVIDER DEPENDENT` / `NOT IMPLEMENTED` |
+
+### 23.2 How each entry gate holds
+
+| Gate | Mechanism | Test(s) |
+|---|---|---|
+| 21.7 (a) | `staffmfa.LoadKeys` (= `NewKeysFromConfig` + `VerifyStartup`) runs in `cmd/platform-api` right after `config.Load`, before the synthetic guard and any DB side effect; `cmd/seed-admin` calls it before connecting | `TestRun_GuardAndSchemeValidationPrecedeDBConnect` (AST order pin), `TestLoadKeys_IsTheStartupGate` |
+| 21.7 (b) | `LoadKeys` is the only constructor outside tests | `TestStatic_StaffMFAKeysSingleConstructor` (qualified-call scan; `payoutinstrument.NewKeys` is not a false positive) |
+| 21.7 (c) | config refuses in every environment when the key family is missing | `TestStaffMFAStartupGate_RefusesWithoutKeys_Subprocess` (APP_ENV unset, no keys: exit non-zero, named error) |
+| 21.7 (d) | redeem: the token row is resolved first; tenant and `StaffRef` come from the row; the `{tenant_slug,email,password}` triple must resolve to the same staff id and tenant; platform tokens refuse a `tenant_slug`; every mismatch is one `401 invalid_enrolment_token`, counts as a failed password attempt and is audited | `TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative`, `TestStaffMFA_Redeem_Lockout` |
+| 21.7 (e) | failures audited as `staff.mfa_verification_failed` on 3 distinct UTC days within 7 days raise `staff.mfa_failure_pattern` (tenant) / `staff.platform_mfa_failure_pattern` | `TestStaffMFA_GateE_SlowRateFailurePattern` (tenant and platform subtests, a 9-day-old row outside the window) |
+| 21.7 (f) | every secret on the HTTP path is a `redacted[T]` (String/GoString/Format/LogValue/MarshalJSON print `[REDACTED]`); raw values reach the wire only through `wire()` inside `writeStaffSecretJSON` | `TestStaffMFA_SecretHygiene_LogCapture` (server log, slog/fmt of struct-wrapped requests, responses, domain types) |
+| G1 | refusals return nil from the transaction closure so counters and `attempts_left` commit | `TestStaffMFA_G1_RefusalsPersistThroughRealRoutes` (5 and 6 wrong codes through the real routes; DB state read back); mutants M01-M03 |
+| G2 | **DB-clock rule chosen** (no owner decision needed): trigger `sf_factor_lockout_clock` raises `SF008` when `failed_24h_count` decreases while `OLD.failed_24h_start > now() - 24h`, or when `failed_24h_start` moves backwards | `TestFactorLockoutClock_SF008` (as `igaming_runtime`); mutants Q04-Q06 |
+| G3 | step burn, challenge consumption, session insert and audit happen in one `m.run` transaction | `TestStaffMFA_G3_BurnConsumeAndSessionInOneTransaction` (a commit fault after the burn leaves step, challenge and sessions untouched); M04 |
+| G4 | every DB fault, `40001` and commit failure answers the same fixed `503 service_unavailable`, independent of the outcome computed before it | `TestStaffMFA_G4_FaultAnswerIndependentOfOutcome` (test-only `commitFault` seam returning `40001`: right code, wrong code and recovery code give the same status, code and message; nothing persists); M23 |
+| G5 | `RevealFor*` static caller allow-list (three sites in `internal/httpserver/staff_auth_secrets.go`, one in `cmd/seed-admin`) | `TestStatic_RevealForCallersAllowlist` |
+| G6 | the cutover runbook pins `log_parameter_max_length = 0`, `log_parameter_max_length_on_error = 0` and parameter-free `pg_stat_statements` as a precondition | runbook only (no DB setting is changed by code) |
+| G7 | at the password step "never enrolled" and "factor vanished" give one `403 mfa_enrolment_required`; the latter (an activated factor row exists) also raises `staff.mfa_integrity`; at `mfa/verify` / `recover` no factor is `401 invalid_mfa_code` plus the integrity alert | `TestStaffMFA_G7_NoFactorIsOneAnswer_AndIntegrityAlerts`; M05, M29, M31 |
+
+Other required tests: `TestStaffMFA_FullFlow_TenantAndPlatform`, `..._HardLock_NoChallenge_AlertRaised`, `..._Replay`,
+`..._RecoveryFlow`, `..._SessionSealTamper`, `..._RefreshBounds`, `..._RateLimit_MFABucket`, `..._TenantIsolation`,
+`..._SuspendedBetweenSteps`, `..._EnrolConfirm_Expiry_And_WrongCode`, `TestMigration0138_UpDownUp_WholeSchema`,
+`..._PreFlight_Refusals`, `..._Cutover_RevocationAndC1Rule`, `..._RollingDeploy_FailsClosed`, `..._Down_Refusals`,
+`TestSessions_SF040Matrix`, `TestGrants_SessionsAndCutover_RuntimeRole`, `TestOpenAPI_StaffAuth_*` (3),
+`TestSealSession_*` (3), `TestIssueStaff_*`, `TestVerify_StaffTokenNeedsEveryAssuranceClaim`,
+`TestIssue_RefusesStaffPrincipal`, `TestSeedAdmin_BootstrapToken_Subprocess`.
+
+### 23.3 Deviations (for the reviewer; each reversible)
+
+| # | Deviation | Reason |
+|---|---|---|
+| D1 | Alert kinds are dotted (`staff.mfa_integrity`, not `staff_mfa_integrity`) and each signal has a `staff.platform_*` variant | Repo kind convention; `alert_kinds_check1` requires a subject tenant for tenant kinds, and a platform staff member has none. The platform variants are subjectless and not tenant-raisable |
+| D2 | 0138 lifts `FORCE ROW LEVEL SECURITY` on `sessions` inside its own transaction to revoke every staff session (with a pre-count assertion), then restores it | The migration owner otherwise sees only GUC-scoped rows and would revoke none |
+| D3 | Deferred endpoints: step-up, recovery-code regeneration (needs step-up), invitations, password redeem, `401 session_revoked` | Slice plan (S4/S6); listed in the contract doc section 4 |
+| D4 | New codes `SF008` (lockout clock), `SF041` (0138 pre-flight), `SF042` (0138 down refused) and API code `mfa_enrolment_expired` (409, a pending factor or `enrol` challenge expired during confirm) | Gate G2; repo migration convention; a distinct, non-secret UI state. Section 13.6 amended |
+| D5 | Every fault on these routes is `503 service_unavailable` with one fixed message, not `500` | Gate G4: one answer independent of the outcome |
+| D6 | `cmd/seed-admin -issue-bootstrap [-tenant-slug]` re-issues a bootstrap token to an existing active staff member WITHOUT an active factor (tenant staff too) | Tenant staff have no other enrolment path before S6 (invitations); refuses when a factor is active |
+| D7 | `sv` is always `0` (`staffVersionUnversioned`) | `staff_users.staff_version` arrives in 0139 |
+| D8 | G7 interpretation as in 23.2 (password step: one 403; second-factor endpoints: `invalid_mfa_code`) | A challenge is only issued to an enrolled account, so "no factor" at verify means it vanished between steps |
+| D9 | Every MFA decision uses the transaction's DB clock (`SELECT now()`) | Agrees with `SF008` and the store CHECKs; immune to app-host clock skew |
+| D10 | 0138 narrows the runtime role's `sessions` UPDATE to exactly the columns S3 writes (`revoked_at`, `last_used_at`, `replaced_by_session_id`), only when the role currently has table-level UPDATE; mirrored in `deploy/init-app-role.sql`. Section 13.4's `mfa_at` / `assurance_kid` / `assurance_seal` grants move to S4b, the slice that first writes them (code review F9) | Least privilege; defence in depth behind `SF040` |
+| D11 | `SF040` freezes more than section 7.2 lists: on staff rows `id`, `principal_id`, `tenant_id`, `created_at`, `refresh_token_hash`, `expires_at`; `revoked_at` and `replaced_by_session_id` write-once (security review R1); `principal_type` on all rows; `mfa_at` monotonic; seal/kid never back to NULL. Binds every role, the owner included | Section 7.2 intent; each is pinned in `TestSessions_SF040Matrix` |
+| D12 | The `staff_session_cutover` read policy is fenced (no `platform_service`, player or acting session) | A18 / KYC-worker / acting fence catalogue tests |
+| D13 | Logout of an already-revoked session answers 204 (was 500) | Pre-existing defect found by the hygiene test |
+| D14 | `auth.IssueSession` and `auth.Issue` refuse `PrincipalStaff`; staff use `IssueStaffSession` / `IssueStaff` | A staff token or session without assurance cannot be minted by mistake |
+| D15 | Player refresh reads the staff assurance in a separate statement | Player refresh keeps working on a 0137 schema during the rolling deploy |
+| D16 | Every integration-test staff login (`mustLoginStaff`) runs the real redeem/enrol/verify flow over HTTP | No bypass exists, so the fixtures cannot use one |
+| D17 | Redeem honours the per-account password lockout and records each failed redeem as a failed staff password attempt | Redeem verifies the password, so it must not be an oracle that ignores the lockout |
+| D18 | Refresh responses (player and staff) carry `Cache-Control: no-store` | Token hygiene |
+| D19 | `GET /v1/staff/me/mfa` uses `auth.Middleware` + `RequireStaffPrincipal`, without liveness | The S4a staff chain does not exist; read-only, own account |
+| D20 | (security review C1) `auth.Issue` and `auth.Verify` bind the role to the principal type: a staff principal holds a staff role (non-empty, not `player`); a player or service principal holds `player` only; no other principal type exists. A hand-signed token with a staff role on a non-staff principal is a 401 | Permissions are looked up by role alone; before the fix a player-principal token with `platform_admin` passed `/v1/admin/tenants` |
+| D21 | (security review C2) `config.ValidateStaffMFAEnv` applies `config.Load`'s staff MFA rules (published placeholders, bounds, issuer, pairwise key-family distinctness) and `cmd/seed-admin` calls it before `staffmfa.LoadKeys` | `seed-admin` minted a bootstrap token under the published `.env.example` keys with `APP_ENV=production` |
+| D22 | (security review R4) `cmd/seed-admin -issue-bootstrap` requires `-operator` and `-reason` and records both in `staff.bootstrap_token_issued` (optional, recorded when given, at account creation) | CLAUDE.md: every mutating administrative action records actor and reason |
+| D23 | (security review R3) `/enrol/redeem` refuses a bootstrap token of a staff member with an active factor: the single `invalid_enrolment_token`, the token is not spent, audit `reason=active_factor`, P1 `staff.mfa_integrity` | Defence in depth behind `cmd/seed-admin`'s own refusal |
+| D24 | Every login fault answers the fixed 503 (was 500 at the password step), and every redeem refusal (the lockout 429 included) pays one Argon2 verification | Code review F6; the review timing note |
+
+### 23.4 Changed existing tests and assertions (every one)
+
+| File | Change | Why |
+|---|---|---|
+| `cmd/platform-api/run_order_ast_test.go` | adds the pin "`staffmfa.LoadKeys` before `refuseSyntheticInProduction`" and requires it before DB connect | Gate (a) |
+| `cmd/platform-api/synthetic_guard_ordering_integration_test.go` | the MissingAppEnv subprocess now gets staff keys | Otherwise it fails on the new key gate before reaching the guard it tests |
+| `internal/adjustment/b3_rls_integration_test.go`, `internal/db/kyc_worker_identity_integration_test.go` (seed and the T-ID-2 insert probe), `internal/db/capability_grant_integration_test.go` | staff `sessions` fixture inserts carry the assurance columns | So the probes still test RLS, not `SF040` |
+| `internal/alerting/alert_test.go` | the five platform staff kinds are allowed to be subjectless platform kinds (and asserted not tenant-raisable) | D1 |
+| `internal/auth/jwt_test.go`, `middleware_test.go`, `require_player_principal_test.go`, `require_staff_principal_test.go` | staff tokens minted with `IssueStaff`; the subject `"admin-1"` became a uuid | D14 |
+| `internal/auth/session_rls_integration_test.go` | staff sessions via `IssueStaffSession` with test keys | D14, `SF040` |
+| `internal/httpserver/identity_flow_integration_test.go` | `TestStaffLogin_PlatformAdminOmitsTenantSlug` and `TestStaffLogin_TenantScopedRequiresTenantSlug` expect `403 mfa_enrolment_required` before enrolment and `200` (challenge) after; `mustLoginStaff` moved to the fixture file | The login response changed (section 14.1) |
+| `internal/httpserver/staff_identity_static_test.go` | four allow-list entries (`Deps.StaffMFA`, the caller's own `FactorID` in three DTOs) | Not a staff identity of another principal |
+| `internal/httpserver/*` (about 45 files, 51 `Deps` literals) | `StaffMFA: testStaffMFA()` added | Login needs the MFA subsystem |
+| token helpers in `rg_limits_harness`, `provider_credential_api`, `alert_routing_http`, `capability_api`, `payments_kill_switch_api`, `payment_deposit_simulation`, `player_surface_principal`, `launch_authorisation_routes_test` | staff tokens via `authtest.StaffToken` / `IssueStaff` | D14 |
+| `internal/staffmfa/store/world_integration_test.go` (`t0` = now-7d truncated), `binding_` and `lockwait_integration_test.go` (`created_at = t0`) | test clock moved into the past | A future `t0` conflicted with `SF008` (DB clock) |
+| `internal/staffmfa/store/rls_grants_integration_test.go` | catalogue pins gain `sf_factor_lockout_clock` and `sf_cutover_immutable`; "no function raises SF040" became "exactly `sessions_staff_assurance_guard` raises SF040" | 0138 |
+| `internal/staffmfa/store/static_test.go` | the SF class allow-list admits `SF008`, `SF040`-`SF042`, `SF099` in 0138 only | 0138 |
+| `internal/staffmfa/store/stale_integration_test.go` | `activate` signature | `ConfirmDetailed` returns the replaced factor id |
+| `internal/staffmfa/store/triggers_integration_test.go` | the "24h window without a count" CHECK probe runs before the count is raised | From a non-zero count it is a decrease, which `SF008` refuses first |
+| `internal/db/null_arm_replay_static_test.go` | unchanged (an entry added during development was removed) | - |
+
+Review round (security C1-C3, R1-R4; code review F1-F9), further changed assertions:
+
+| File | Change | Why |
+|---|---|---|
+| `internal/auth/require_player_principal_test.go`, `require_staff_principal_test.go` | the `...DeniesServicePrincipal` tokens are minted with `RolePlayer` (was `RoleSupport`) | C1: `Issue` refuses a staff role on a service principal; the tests still prove the principal check (403) |
+| `internal/httpserver/sportsbook_settlement_flow_integration_test.go` `TestSettlementSimulate_403ForServicePrincipal` | asserts `Issue` refuses `risk_manager` on a service principal, a hand-signed one is 401, and a legal service token is 403 | C1 |
+| `internal/httpserver/staff_mfa_schema_integration_test.go` `TestGrants_SessionsAndCutover_RuntimeRole` | runtime UPDATE columns are `last_used_at`, `replaced_by_session_id`, `revoked_at` (was also `mfa_at`, `assurance_kid`, `assurance_seal`); the `deploy/init-app-role.sql` mirror string likewise; new pin of the permissive `sessions` policies | F9; C3 |
+| `internal/httpserver/staff_mfa_schema_integration_test.go` `TestSessions_SF040Matrix` | the final block: the runtime role's `mfa_at` UPDATE is now 42501 and the owner moves `mfa_at` / rewrites the seal (was the runtime role); `expires_at` added to the immutable list; write-once cases added | F9; R1 |
+| `internal/httpserver/staff_mfa_flow_integration_test.go` `TestStaffMFA_SessionSealTamper` | (c) the unsealed `mfa_at` edit is made by the owner (the runtime role has no grant); (d) `mfa_at`, the seal and `refresh_token_hash` added to the 42501 list; the seal-NULL / `mfa_at`-backwards SF040 probes run as the owner | F9 |
+| `internal/httpserver/identity_flow_integration_test.go` (the two `TestStaffLogin_*` tests) | the 403 also asserts `code == "mfa_enrolment_required"` | F7 |
+| `cmd/seed-admin/seed_admin_integration_test.go` | every `-issue-bootstrap` run passes `-operator` / `-reason` | R4 |
+
+### 23.5 Evidence (private database harness only; no role, password or privilege change)
+
+- Integration tests run as `igaming_runtime` against private databases (`-tags integration -p 1 -count=1`):
+  `internal/staffmfa/...`, `internal/auth/...`, `internal/tenant`, `internal/db`, `cmd/...` (migrate, platform-api,
+  seed-admin), `internal/config`, `internal/actorproof/...`, `internal/launchgov`, `internal/withdrawal`,
+  `internal/alerting/...`, `internal/adjustment`: PASS. `internal/httpserver` S3 tests, OpenAPI drift, role matrix and
+  staff identity pins: PASS. The full `internal/httpserver` run (`-timeout 60m`): PASS except
+  `TestResolutionIsolation_*` latency thresholds (500 ms / 400 ms), which fail identically at the base `d2cad31` on
+  this host (pre-existing, environmental). `go test ./... -count=1`, gofmt, `go vet` (plain and integration) and
+  `golangci-lint --build-tags integration --new-from-rev=d2cad31`: clean.
+- Review round (section 23.8): the affected packages above, the whole S3 httpserver subset and one full
+  `internal/httpserver` run (`-timeout 60m`) were re-run at the final tree: PASS, except the same three
+  `TestResolutionIsolation_*` latency thresholds (`NormalOperation`, `OneTenantStoreOutage`, `FinancialDuringOutage`),
+  which fail identically at the base `d2cad31` on this host. The whole mutation pass was re-run: 78 mutants, 76
+  KILLED, 2 SURVIVED (M13, M35, justified as before), 0 ERROR; every review-round mutant (X2, X3, X6, X7, C1a-f,
+  C2a-c, R3a-b, R4a-b, Q12-Q16) is KILLED.
+- Mutation pass (first round): `docs/plans/prh2-hardening-round/adr0119-s3-mutation-kill.txt` (driver
+  `adr0119-s3-mutation-driver.py`). 56 mutants (45 Go, 11 SQL on a database rebuilt from the mutated 0138): 54 KILLED,
+  2 SURVIVED and justified as behaviour-equivalent (M13: the Go absolute-expiry check sits behind the CHECK
+  `expires_at <= absolute_expires_at`; M35: app clock vs DB clock on one host), 0 ERROR. The pass found and closed two
+  test gaps: a bare `redacted[T]` passed to slog (the `LogValue` path, M19b) and redemption by a suspended staff
+  member (M52).
+
+### 23.6 Residuals (S3)
+
+| # | Residual | Disposition |
+|---|---|---|
+| S3-R1 | No MFA-reset path until S6. The ONLY procedure for a hard-locked factor, or a lost device with no recovery codes left, is the owner procedure of `docs/runbooks/staff-mfa-s3-cutover.md` section 5.1 (also stated in the contract doc): the database owner revokes the factor and its recovery codes by SQL in the staff member's scope, then runs `cmd/seed-admin -issue-bootstrap -operator -reason`; the next password step answers `403 mfa_enrolment_required` and raises the EXPECTED P1 `staff.mfa_integrity` / `staff.platform_mfa_integrity`. The owner SQL writes no audit row of its own (the ticket and the seed-admin audit row are the record). Pinned by `TestStaffMFA_OwnerResetProcedure_S3toS6` | Runbook; S6 replaces it with the audited four-eyes reset |
+| S3-R2 | No liveness until S4a: a suspended staff member's access token lives up to 15 min (refresh already re-checks status); `sv` is 0. Since the review round, a logged-out or rotated staff session can no longer be revived by SQL (`revoked_at` / `replaced_by_session_id` write-once, `SF040`, every role: security review R1) | S4a + 0139 |
+| S3-R3 | Under M5 the runtime role can still reset the SOFT lock (`failed_count`, `locked_until`); with `SF008` the 24 h hard-lock bound (10 failures) now holds under M5. It can also move `failed_24h_start` forward (delays the window end, never decreases the count) | Accepted with G2; probe live |
+| S3-R4 | Alerts are raised post-commit and best-effort: a failed raise is not retried | Matches the existing post-commit alert pattern |
+| S3-R5 | The `mfa` bucket is per process and per IP (R9) | R9 |
+| S3-R6 | Gate (g) manual authenticator evidence pending | Human |
+| S3-R8 | Refresh-time expiry checks (`expires_at`, `absolute_expires_at`) compare against the application clock (pre-existing refresh code); the MFA decisions and `SF008` use the database clock. Pod/DB skew shifts refresh expiry by the skew only | Move refresh to the DB clock with S4a |
+| S3-R7 | A runtime session that forges tenant GUCs can still read another tenant's `sessions` rows (hashes and seals only; no MAC key) as before 0138 | Existing M5 residual |
+| S3-R9 | (security review R2) A planted bad-seal staff session naming a made-up PLATFORM principal is refused (401) and audited (`auth.session_assurance_invalid`), but its `staff.platform_session_integrity` alert fails the alerts RLS policy (the platform-admin runner's principal does not exist), so only `alerting.raise_failed` is recorded. The tenant variant raises normally | ACCEPTED: the refusal and the audit row stand; the forged principal cannot log in; `alerting.raise_failed` is itself a platform alert |
+| S3-R10 | (security review C3) The keyed seal does not cover `refresh_token_hash` or `expires_at`. Both are immutable on staff rows under `SF040` for every role (and the runtime role holds no UPDATE on either; no permissive DELETE or ALL policy exists on `sessions`, pinned by `TestGrants_SessionsAndCutover_RuntimeRole`), so only a party that can disable triggers - the table owner or a superuser (`ALTER TABLE ... DISABLE TRIGGER`) - could rewrite them | S4b condition: bind both into the seal when S4b re-seals on step-up (a seal-format change was not cheap in S3) |
+| S3-R11 | (security review R5) Staff refresh does not re-check the factor or the hard lock: an existing session survives a hard lock (or the owner revocation of 5.1) until its 30 min idle or 12 h absolute expiry. The owner procedure of S3-R1 therefore includes a guarded owner revocation of the account's sessions (`UPDATE sessions SET revoked_at = now() WHERE principal_type = 'staff' AND principal_id = ... AND revoked_at IS NULL`, with `app.principal_id` set; the unguarded form fails `SF040` once any session is revoked), and the re-enrolment (`/enrol/confirm`) revokes every session again | S4a (liveness re-check on refresh and on every staff route) |
+| S3-R12 | (re-review F1) The C1 binding admits ANY non-empty non-`player` role on a staff principal (an unknown role string holds no permission, so this is not a bypass today) | **S4a condition:** bind staff principals to the closed set of staff roles (the `identity.StaffRole` values), refusing any other role at `Issue`/`IssueStaff`/`Verify` |
+| S3-R13 | (re-review F2) `Verify` checks that `amr` is non-empty and that `auth_time` / `mfa_at` are present, but not that `amr` names a second-factor method, nor `auth_time <= mfa_at <= now + skew`, nor `auth_time` within the absolute session TTL. Tokens are only minted by `IssueStaff` from sealed rows, so this matters only with the signing key | **S4b condition (before step-up ships):** require a second-factor method in `amr` (`otp`, or the recovery path's method), `auth_time <= mfa_at <= now + skew`, and `auth_time` no older than the absolute TTL |
+| S3-R14 | (re-review note) The write-once rules of `SF040` apply to STAFF rows only: on a player session `revoked_at` is not write-once and a NULL `replaced_by_session_id` can be set by the runtime role. Under M5 this is a denial of service (revoking or chaining a player's session), not a revival (refresh-token reuse detection and the token hash still apply) | Recorded; player sessions are outside ADR 0119 |
+
+### 23.7 What `security` should probe live (gate G)
+
+1. GUC forging against `staff_session_cutover` and `sessions` (read, insert, update of each assurance column, `SF040`
+   bypass attempts, the column grant).
+2. Seal forgery: a planted seal under another kid, a seal copied between sessions, an `amr`/`aal` change with seal
+   recomputation impossible without the MAC key; the C1 rule for a backdated `created_at` (immutable under `SF040`).
+3. Timing of `enrol/redeem` and of the password step (enrolled vs not, existing vs not).
+4. Rate buckets: `login` shared with players, `mfa` 30/min, `credential` for redeem; header spoofing of the client IP.
+5. The `commitFault` seam is test-only (unexported field, set only in `_test.go`) and cannot be reached in production.
+6. `SF008` under concurrency (two pods failing and a 24 h roll-over at the same time).
+7. Alert raise scope: a forged principal id in a platform alert, and the tenant subject of tenant alerts.
+8. The logout change (D13): no session existence oracle.
+
+### 23.8 Review round (2026-10-13): disposition of the review conditions
+
+| Condition | Disposition | Tests |
+|---|---|---|
+| Security C1: a staff role on a non-staff principal passed admin routes | FIXED: role/principal binding in `Issue`, `IssueStaff` and `Verify` (D20) | `TestIssue_RefusesStaffRoleOnNonStaffPrincipal`, `TestVerify_RefusesHandSignedRolePrincipalMismatch` (hand-signed, 401 through the middleware), `TestRolePrincipalBinding_StaffRoleOnNonStaffPrincipal_401` (HTTP, hand-signed JWT on `/v1/admin/tenants`); C1a-f |
+| Security C2 + code review F3: seed-admin skipped the placeholder and distinctness checks | FIXED: `config.ValidateStaffMFAEnv` before `LoadKeys` (D21) | `TestValidateStaffMFAEnv_*` (3), `TestSeedAdmin_BootstrapToken_Subprocess` steps 1b (APP_ENV=production and unset with the `.env.example` keys; a key shared with `JWT_SIGNING_SECRET`); C2a-c |
+| Security C3: no runtime path to rewrite `refresh_token_hash` / `expires_at`; seal binding | PINNED: the permissive-policy set of `sessions` (no DELETE / ALL), the runtime UPDATE column set, `expires_at` immutable under `SF040`. Seal binding NOT done (not cheap): S4b condition S3-R10 | `TestGrants_SessionsAndCutover_RuntimeRole`, `TestSessions_SF040Matrix`; Q14 |
+| Security R1: un-revoke / chain-link reset revived old refresh tokens | FIXED in 0138: `revoked_at`, `replaced_by_session_id` write-once on staff rows (`SF040`, every role); S3-R2 text updated | `TestStaffMFA_RevocationAndChainLinkWriteOnce` (HTTP: logout and rotation), `TestSessions_SF040Matrix`; Q12, Q13, Q15 |
+| Security R2: platform session-integrity alert fails the alerts RLS under a forged principal | ACCEPTED and documented (S3-R9) | - |
+| Security R3: redeem did not re-check "no active factor" for bootstrap tokens | FIXED (D23) | `TestStaffMFA_Redeem_BootstrapWithActiveFactorRefused` (tenant, platform); R3a-b |
+| Security R4: seed-admin audit rows lacked operator / reason | FIXED: `-operator`, `-reason` (D22) | `TestSeedAdmin_BootstrapToken_Subprocess`; R4a-b |
+| Security R5: refresh does not re-check factor or hard lock | DEFERRED to S4a (S3-R11) | - |
+| Timing note: the redeem lockout 429 paid no dummy hash | FIXED: every redeem refusal pays one Argon2 verification (D24) | (not measurable in CI; reviewed) |
+| Code review F1: liveness refusal on recover, enrol/start, enrol/confirm | TESTED | `TestStaffMFA_SuspendedBetweenSteps_EverySecondStep`; X2, X3, X6 |
+| Code review F2: G4 for enrol/confirm | TESTED | `TestStaffMFA_G4_EnrolConfirm`; X7 |
+| Code review F4: owner procedure between S3 and S6 | DOCUMENTED identically in the runbook (5.1), S3-R1 and the contract doc; executed by a test | `TestStaffMFA_OwnerResetProcedure_S3toS6` (tenant, platform) |
+| Code review F5: S3 merges together with S7a | Orchestrator | - |
+| Code review F6: contract doc (redeem never 404; login faults) | FIXED: the contract doc; login faults now answer the fixed 503 (D24) | - |
+| Code review F7: assert the 403 code | FIXED | `TestStaffLogin_*` (2) |
+| Code review F8: root binaries | FIXED: `.gitignore` gains `/seed-admin`, `/platform-api`, `/migrate` | - |
+| Re-review F3: `-operator` / `-reason` character hygiene | FIXED: control, Cf (bidi overrides / isolates, zero-width, U+FEFF, U+061C, ...) and Zl / Zp (U+2028 / U+2029) refused; a superset of `staff_users_display_name_hygiene` | `TestOperatorContext_RefusesUnsafeCharacters`, `TestUnsafeAuditRune_CoversDisplayNameHygiene` (every rune the display-name class refuses); R4c-e |
+| Re-review F4: owner session revocation; trigger-disable wording | FIXED: the guarded owner SQL in runbook 5.1 / 5.2 (executed by the procedure test, which also shows the unguarded form failing `SF040`); S3-R10 says "owner or superuser" | `TestStaffMFA_OwnerResetProcedure_S3toS6` |
+| Re-review F1 / F2 / player-session note | RECORDED as S3-R12 (S4a), S3-R13 (S4b), S3-R14 | - |
+| Code review F9: pre-granted `mfa_at` / seal columns | REMOVED from 0138 and `deploy/init-app-role.sql` (D10); S4b grants them | `TestGrants_SessionsAndCutover_RuntimeRole`, `TestStaffMFA_SessionSealTamper`; Q16 |

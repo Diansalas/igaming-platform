@@ -23,8 +23,12 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `production-configuration-checklist.md` — field-by-field production
   config audit.
 - `staff-mfa-keys.md` — ADR 0119 S1: provisioning and rotation of the
-  `STAFF_MFA_FACTOR_KEYS` / `STAFF_MFA_MAC_KEYS` families (library
-  IMPLEMENTED; nothing reads the keys before S3).
+  `STAFF_MFA_FACTOR_KEYS` / `STAFF_MFA_MAC_KEYS` families (required in every
+  environment since S3).
+- `staff-mfa-s3-cutover.md` — ADR 0119 S3: deploy order of the two-step staff
+  login and migration 0138, re-seeding staff, the `cmd/seed-admin` bootstrap and
+  break-glass path until the S6 MFA reset exists, required database logging
+  settings.
 - `self-hosted-runner.md` — PREPARED, NOT ACTIVE: Mac self-hosted CI runner
   plan for CI-BILLING-1 (paired with `.github/workflows/ci-selfhosted.yml`,
   manual dispatch only); no setup until the owner separately authorizes it.

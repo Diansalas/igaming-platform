@@ -45,6 +45,12 @@ func snake(s string) string { return strings.ToLower(snakeRe.ReplaceAllString(s,
 // "map@file.key") -> why this field needs no staffRef. A reason is mandatory. Stale entries fail
 // TestStaffIdentity_StaticPin_AllowlistNotStale.
 var staffIDFieldAllowlist = map[string]string{
+	// --- ADR 0119 S3 staff MFA (none is a staff identity of ANOTHER principal) ---
+	"Deps.StaffMFA":                "dependency wiring (the staff MFA subsystem), never marshalled to a response",
+	"enrolConfirmRequest.FactorID": "request body: the caller's own pending factor id (ADR 0119 S3), caller-supplied input",
+	"enrolStartResponse.FactorID":  "the caller's own new pending factor id, returned only to the staff member enrolling it (ADR 0119 S3)",
+	"enrolStartWire.FactorID":      "wire form of enrolStartResponse.FactorID: the caller's own pending factor id (ADR 0119 S3)",
+
 	// --- request bodies (input from the caller, never a response) ---
 	"createCapabilityGrantRequestBody.GranteeStaffID": "request body: caller-supplied input, not a response field",
 

@@ -877,7 +877,8 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 	// sessions: insert a platform session row.
 	runRefused(t, "insert_platform_session", func(tx pgx.Tx) error {
 		_, err := tx.Exec(context.Background(),
-			`INSERT INTO sessions (id, principal_type, principal_id, refresh_token_hash, expires_at) VALUES (gen_random_uuid(), 'staff', $1, 'x', now() + interval '1 day')`,
+			// ADR 0119 S3: well-formed assurance columns, so the refusal tested is RLS (42501), not SF040.
+			`INSERT INTO sessions (id, principal_type, principal_id, refresh_token_hash, expires_at, aal, amr, auth_time, mfa_at, absolute_expires_at, assurance_kid, assurance_seal) VALUES (gen_random_uuid(), 'staff', $1, 'x', now() + interval '1 day', 2, ARRAY['pwd','otp'], now(), now(), now() + interval '2 days', 'probe', decode(repeat('00', 32), 'hex'))`,
 			principalID)
 		return err
 	})

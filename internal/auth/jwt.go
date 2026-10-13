@@ -70,17 +70,83 @@ const (
 // tokens.md: token verification does not reject a nil tenant; every
 // tenant-scoped operation enforces non-nil tenant_id at the point of use
 // instead (internal/auth.RequireTenantScope).
+//
+// ADR 0119 section 7.1 (slice S3): a STAFF token additionally carries the
+// session assurance claims sid, aal, amr, auth_time, mfa_at and sv, and Verify
+// refuses a staff token without every one of them or with an aal other than
+// StaffAAL. A player or service token never carries them (Verify refuses one
+// that does). Staff tokens are minted only by IssueStaff, after a verified
+// second factor; Issue refuses PrincipalStaff.
 type Claims struct {
 	jwt.RegisteredClaims
 	TenantID      uuid.UUID     `json:"tenant_id"`
 	Role          Role          `json:"role"`
 	PrincipalType PrincipalType `json:"principal_type"`
+
+	// Staff session assurance (ADR 0119 section 7.1). Absent on player and
+	// service tokens.
+	SessionID    string           `json:"sid,omitempty"`
+	AAL          int              `json:"aal,omitempty"`
+	AMR          []string         `json:"amr,omitempty"`
+	AuthTime     *jwt.NumericDate `json:"auth_time,omitempty"`
+	MFAAt        *jwt.NumericDate `json:"mfa_at,omitempty"`
+	StaffVersion *int64           `json:"sv,omitempty"`
 }
+
+// StaffAAL is the only authenticator assurance level a staff access token may
+// carry (ADR 0119 section 7.1): every staff session is issued after a verified
+// second factor. There is no lower level and no bypass.
+const StaffAAL = 2
 
 var (
 	ErrInvalidToken   = errors.New("auth: invalid token")
 	ErrMissingSubject = errors.New("auth: token missing subject")
+	// ErrStaffAssuranceRequired: Issue was asked for a staff token. Staff
+	// tokens are minted only by IssueStaff, with session assurance claims
+	// (ADR 0119 section 4.1: there is no password-only staff token).
+	ErrStaffAssuranceRequired = errors.New("auth: staff tokens are issued only with session assurance (IssueStaff)")
+	// ErrRolePrincipalMismatch: a staff role on a non-staff principal, a
+	// non-staff role on a staff principal, or an unknown principal type (ADR
+	// 0119 S3 security review C1). Permissions are looked up by role alone,
+	// so the role and the principal type must agree before any route sees
+	// the claims.
+	ErrRolePrincipalMismatch = errors.New("auth: role does not match the principal type")
 )
+
+// rolePrincipalValid is the role/principal binding (ADR 0119 S3 security
+// review C1): a staff principal holds a staff role (anything but player and
+// non-empty); a player or service principal holds RolePlayer only; no other
+// principal type exists. Every staff role is reachable only through a staff
+// token, which IssueStaff mints after a verified second factor.
+func rolePrincipalValid(role Role, principalType PrincipalType) bool {
+	switch principalType {
+	case PrincipalStaff:
+		return role != "" && role != RolePlayer
+	case PrincipalPlayer, PrincipalService:
+		return role == RolePlayer
+	default:
+		return false
+	}
+}
+
+// StaffTokenParams are the claims of a staff access token (ADR 0119 section
+// 7.1), taken from the staff session row the token belongs to.
+type StaffTokenParams struct {
+	StaffID      uuid.UUID
+	TenantID     uuid.UUID // uuid.Nil for platform staff
+	Role         Role
+	SessionID    uuid.UUID
+	AAL          int
+	AMR          []string
+	AuthTime     time.Time
+	MFAAt        time.Time
+	StaffVersion int64
+}
+
+func (p StaffTokenParams) valid() bool {
+	return p.StaffID != uuid.Nil && p.SessionID != uuid.Nil && p.Role != "" && p.AAL == StaffAAL &&
+		len(p.AMR) > 0 && !p.AuthTime.IsZero() && !p.MFAAt.IsZero() && p.StaffVersion >= 0
+}
 
 // Issuer signs and verifies platform JWTs using a KeyRegistry.
 type Issuer struct {
@@ -100,12 +166,49 @@ func NewIssuer(keys *KeyRegistry, issuerName, audience string) *Issuer {
 // access-token-level revocation by jti - revocation happens at the
 // session/refresh-token layer (session.go), which is why access tokens
 // are kept short-lived.
+//
+// A staff token is refused here (ErrStaffAssuranceRequired): staff tokens are
+// minted only by IssueStaff. A role that does not match the principal type
+// (any staff role on a player or service principal) is refused too
+// (ErrRolePrincipalMismatch).
 func (i *Issuer) Issue(subject string, tenantID uuid.UUID, role Role, principalType PrincipalType, ttl time.Duration) (string, error) {
 	if subject == "" {
 		return "", ErrMissingSubject
 	}
+	if principalType == PrincipalStaff {
+		return "", ErrStaffAssuranceRequired
+	}
+	if !rolePrincipalValid(role, principalType) {
+		return "", ErrRolePrincipalMismatch
+	}
+	return i.sign(i.baseClaims(subject, tenantID, role, principalType, ttl))
+}
+
+// IssueStaff mints a staff access token carrying the session assurance claims
+// of p (ADR 0119 section 7.1). It is called only after a verified second
+// factor (login, enrolment) or a refresh of a sealed staff session. ttl is the
+// staff access-token TTL (STAFF_ACCESS_TOKEN_TTL_SECONDS, at most 15 min).
+func (i *Issuer) IssueStaff(p StaffTokenParams, ttl time.Duration) (string, error) {
+	if !p.valid() {
+		return "", fmt.Errorf("%w: incomplete staff session assurance", ErrStaffAssuranceRequired)
+	}
+	if !rolePrincipalValid(p.Role, PrincipalStaff) {
+		return "", ErrRolePrincipalMismatch
+	}
+	claims := i.baseClaims(p.StaffID.String(), p.TenantID, p.Role, PrincipalStaff, ttl)
+	sv := p.StaffVersion
+	claims.SessionID = p.SessionID.String()
+	claims.AAL = p.AAL
+	claims.AMR = append([]string(nil), p.AMR...)
+	claims.AuthTime = jwt.NewNumericDate(p.AuthTime)
+	claims.MFAAt = jwt.NewNumericDate(p.MFAAt)
+	claims.StaffVersion = &sv
+	return i.sign(claims)
+}
+
+func (i *Issuer) baseClaims(subject string, tenantID uuid.UUID, role Role, principalType PrincipalType, ttl time.Duration) Claims {
 	now := time.Now()
-	claims := Claims{
+	return Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   subject,
 			Issuer:    i.issuer,
@@ -118,9 +221,37 @@ func (i *Issuer) Issue(subject string, tenantID uuid.UUID, role Role, principalT
 		Role:          role,
 		PrincipalType: principalType,
 	}
+}
+
+func (i *Issuer) sign(claims Claims) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	token.Header["kid"] = i.keys.ActiveKID()
 	return token.SignedString(i.keys.ActiveSecret())
+}
+
+// checkAssurance applies ADR 0119 section 7.1: a staff token carries every
+// assurance claim and aal == StaffAAL; any other token carries none.
+func (c *Claims) checkAssurance() error {
+	if !rolePrincipalValid(c.Role, c.PrincipalType) {
+		return fmt.Errorf("%w: %v", ErrInvalidToken, ErrRolePrincipalMismatch)
+	}
+	if c.PrincipalType != PrincipalStaff {
+		if c.SessionID != "" || c.AAL != 0 || c.AMR != nil || c.AuthTime != nil || c.MFAAt != nil || c.StaffVersion != nil {
+			return fmt.Errorf("%w: staff assurance claims on a non-staff token", ErrInvalidToken)
+		}
+		return nil
+	}
+	sid, err := uuid.Parse(c.SessionID)
+	if err != nil || sid == uuid.Nil {
+		return fmt.Errorf("%w: staff token without a valid sid", ErrInvalidToken)
+	}
+	if c.AAL != StaffAAL {
+		return fmt.Errorf("%w: staff token aal is not %d", ErrInvalidToken, StaffAAL)
+	}
+	if len(c.AMR) == 0 || c.AuthTime == nil || c.MFAAt == nil || c.StaffVersion == nil || *c.StaffVersion < 0 {
+		return fmt.Errorf("%w: staff token without its assurance claims", ErrInvalidToken)
+	}
+	return nil
 }
 
 // Verify parses and validates a bearer token, returning its claims. It
@@ -128,7 +259,11 @@ func (i *Issuer) Issue(subject string, tenantID uuid.UUID, role Role, principalT
 // algorithm-confusion attacks), a "kid" header naming a key not present
 // in the registry, a wrong issuer or audience, a missing or empty
 // subject, and a missing, expired, or not-yet-valid exp/nbf. It does NOT
-// reject a nil tenant_id - see the Claims doc comment.
+// reject a nil tenant_id - see the Claims doc comment. ADR 0119 S3: it also
+// refuses a staff token without every session assurance claim or with an aal
+// other than StaffAAL, and a non-staff token that carries any of them; and
+// (security review C1) any token whose role does not match its principal
+// type, so a hand-signed player token with a staff role is a 401.
 func (i *Issuer) Verify(tokenString string) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (interface{}, error) {
@@ -155,6 +290,9 @@ func (i *Issuer) Verify(tokenString string) (*Claims, error) {
 	}
 	if claims.Subject == "" {
 		return nil, ErrMissingSubject
+	}
+	if err := claims.checkAssurance(); err != nil {
+		return nil, err
 	}
 	return claims, nil
 }

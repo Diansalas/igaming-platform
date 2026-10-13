@@ -1,0 +1,233 @@
+ADR 0119 S3 mutation pass (kill-or-justify), 2026-10-13
+=========================================================
+
+Driver: docs/plans/prh2-hardening-round/adr0119-s3-mutation-driver.py
+  python3 -I adr0119-s3-mutation-driver.py <log> [ID ...]   (env MUT_WT = worktree, MUT_DB = private database)
+Each mutant: apply one textual change, run the named package with
+  -tags integration -p 1 -count=1 -run <regex>
+as igaming_runtime against a PRIVATE database (priv_test.sh), restore the file with `git checkout --`.
+SQL mutants (Q*) rebuild the private database from the mutated migration before the run (priv_db.sh); Q09 runs the
+migration test, which builds its own scratch databases from the mutated file. The run used a separate detached
+worktree of this branch and its own private database (s3mfa_a8cbm), so the main worktree was never mutated.
+
+Totals (final): 56 mutants (45 Go in httpserver / auth / staffmfa / cmd, 11 SQL in migration 0138)
+  KILLED 54, SURVIVED 2 (justified below), ERROR 0.
+
+Run 1 (worktree at f81bbba)
+---------------------------
+M01 KILLED by TestStaffMFA_G1_RefusalsPersistThroughRealRoutes            (G1: verify refusal returned as error -> rolled back)
+M02 KILLED by TestStaffMFA_RecoveryFlow                                   (G1: recover refusal rolled back)
+M03 KILLED by TestStaffMFA_EnrolConfirm_Expiry_And_WrongCode              (G1: confirm refusal rolled back)
+M04 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform, TestStaffMFA_G3_BurnConsumeAndSessionInOneTransaction, TestStaffMFA_Replay (G3: challenge not consumed with the session)
+M05 KILLED by TestStaffMFA_G7_NoFactorIsOneAnswer_AndIntegrityAlerts      (G7: no-factor not collapsed)
+M06 KILLED by TestStaffMFA_G1_RefusalsPersistThroughRealRoutes            (a locked answer spends an attempt)
+M07 KILLED by TestStaffMFA_HardLock_NoChallenge_AlertRaised               (hard lock still issues a challenge)
+M08 KILLED by TestStaffMFA_RecoveryFlow                                   (recovery code grants an mfa, not an enrol, challenge)
+M09 KILLED by TestStaffMFA_SessionSealTamper                              (seal not verified on refresh)
+M10 KILLED by TestMigration0138_Cutover_RevocationAndC1Rule               (C1: pre-cutover NULL seal treated as integrity failure)
+M11 KILLED by TestStaffMFA_RefreshBounds                                  (absolute expiry not copied on rotation)
+M12 KILLED by TestStaffMFA_RefreshBounds                                  (idle expiry not clamped to the absolute expiry)
+M13 SURVIVED                                                              (see justification)
+M14 KILLED by TestVerify_StaffTokenNeedsEveryAssuranceClaim               (aal==2 not required)
+M15 KILLED by TestVerify_StaffTokenNeedsEveryAssuranceClaim               (assurance claims accepted on non-staff tokens)
+M16 KILLED by TestIssue_RefusesStaffPrincipal                             (auth.Issue mints a staff token)
+M17 KILLED by TestSealSession_CanonicalFormPinned, TestSealSession_EveryFieldIsBound (mfa_at not in the seal)
+M18 KILLED by TestSealSession_EveryFieldIsBound                           (seal verified under the active kid, not the stored one)
+M19 KILLED by TestStaffMFA_SecretHygiene_LogCapture                       (redacted Format reveals)
+M19b SURVIVED in run 1 -> test gap, fixed (bare redacted values now logged through slog), KILLED in run 2
+M20 KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative           (gate d: staff id / tenant not compared to the token row)
+M21 ERROR (build failed: mutant left a variable unused) -> mutant rewritten, KILLED in run 2
+M21b KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative          (platform token accepted with a tenant slug)
+M22 KILLED by TestStaffMFA_SuspendedBetweenSteps                          (staff status not re-checked between steps)
+M23 KILLED by TestStaffMFA_G4_FaultAnswerIndependentOfOutcome             (G4: fault answer depends on the outcome)
+M25 KILLED by TestStaffMFA_GateE_SlowRateFailurePattern                   (gate e: 4 days instead of 3)
+M25b KILLED by TestStaffMFA_GateE_SlowRateFailurePattern                  (gate e: 30-day window instead of 7)
+M26 KILLED by TestStaffMFA_RecoveryFlow                                   (confirm does not revoke earlier sessions)
+M28 KILLED by TestStaffMFA_RateLimit_MFABucket                            (mfa bucket 31/min)
+M29 KILLED by TestStaffMFA_G7_NoFactorIsOneAnswer_AndIntegrityAlerts      (R3 integrity alert at the password step dropped)
+M30 KILLED by TestStaffMFA_HardLock_NoChallenge_AlertRaised               (hard-lock alert dropped)
+M31 KILLED by TestStaffMFA_G7_NoFactorIsOneAnswer_AndIntegrityAlerts      (factor integrity alert dropped)
+M32 KILLED by TestStaffMFA_RecoveryFlow                                   (recovery-used alert dropped)
+M33 KILLED by TestStaffMFA_SessionSealTamper                              (session integrity alert dropped)
+M35 SURVIVED                                                              (see justification)
+M37 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform                     (verify resolves an enrol challenge)
+M49 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform                     (verify response not no-store)
+M50 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform                     (enrol/start consumes the challenge)
+M51 KILLED by TestStaffMFA_SuspendedBetweenSteps                          (inactive staff challenge not consumed)
+M52 SURVIVED in run 1 -> test gap (redeem by a suspended staff member untested), fixed, KILLED in run 2
+M53 KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative           (wrong redeem password not recorded as a failed attempt)
+M54 KILLED by TestStaffMFA_Redeem_Lockout                                 (redeem ignores the password lockout)
+M55 KILLED by TestStaffMFA_SecretHygiene_LogCapture                       (logout of a revoked session is a 500 again)
+M56 ERROR (build failed: mutant left a variable unused) -> mutant rewritten, KILLED in run 2
+M57 KILLED by TestStaffMFAStartupGate_RefusesWithoutKeys_Subprocess       (gate c: platform-api starts without VerifyStartup)
+Q01 KILLED by TestSessions_SF040Matrix                                    (SF040: amr not required on insert)
+Q02 KILLED by TestSessions_SF040Matrix                                    (SF040: auth_time mutable)
+Q03 KILLED by TestStaffMFA_SessionSealTamper                              (SF040: seal/kid may return to NULL)
+Q04 KILLED by TestFactorLockoutClock_SF008                                (G2: SF008 decrease rule removed)
+Q05 KILLED by TestFactorLockoutClock_SF008                                (G2: window start may move backwards)
+Q06 KILLED by TestFactorLockoutClock_SF008                                (G2: 1 h instead of 24 h)
+Q07 KILLED by TestGrants_SessionsAndCutover_RuntimeRole                   (cutover read policy admits platform_service sessions)
+Q08 KILLED by TestGrants_SessionsAndCutover_RuntimeRole, TestStaffMFA_SessionSealTamper (runtime may UPDATE sessions.aal)
+Q09 KILLED by TestMigration0138_Cutover_RevocationAndC1Rule               (revocation skipped, count assertion faked)
+Q10 KILLED by TestSessions_SF040Matrix                                    (CHECK expires_at <= absolute_expires_at removed)
+Q11 KILLED by TestSessions_SF040Matrix                                    (CHECK aal = 2 widened to 1..3)
+private DB rebuilt from the committed migrations
+
+Run 2 (worktree at e6de1e4: the two test gaps closed; M21 / M56 rewritten so they compile)
+-----------------------------------------------------------------------------------------
+M19b KILLED by TestStaffMFA_SecretHygiene_LogCapture
+M21  KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative   (mutant: `if err != nil || t.ID == uuid.Nil {`)
+M52  KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative
+M56  KILLED by TestSeedAdmin_BootstrapToken_Subprocess             (mutant: `if state.Exists && false {`)
+
+Survivors (justified)
+---------------------
+M13  internal/auth/session.go: drop `if staff && !now.Before(*row.staff.absoluteExpiry) { return ErrSessionNotFound }`.
+     Behaviour-equivalent: migration 0138's CHECK `sessions_assurance_shape` forces expires_at <= absolute_expires_at
+     on every staff row (Q10 kills its removal), and the line just above already refuses `now.After(expiresAt)`. The
+     two differ only at the single instant now == expires_at == absolute_expires_at, which cannot be hit without a
+     clock seam. Kept as defence in depth.
+M35  internal/httpserver/staff_auth_handlers.go: verify uses time.Now() instead of the transaction's `SELECT now()`.
+     Equivalent on a single test host (the app and DB clocks agree to well under the 30 s TOTP step); the DB-clock
+     choice (deviation D9) matters for clock skew between pods and the database, which this harness cannot create.
+     SF008 independently enforces the 24 h window on the database clock (Q04-Q06).
+
+Not evidence
+------------
+- No discarded runs. The full httpserver run during this pass shared the host; its two TestResolutionIsolation_*
+  latency failures reproduce at the base commit d2cad31 and are unrelated (see the hand-off report).
+
+
+=====================================================================================================================
+Review round (2026-10-13): security C1-C3, R1-R4; code review F1, F2, F9 (X2, X3, X6, X7 are the code reviewer's IDs)
+=====================================================================================================================
+
+The WHOLE pass was re-run (not only the new mutants) on a detached worktree of this branch at d990cf1 with its own
+private database, after the fixes: 78 mutants (the 56 above, with Q08 re-anchored to the narrowed grant and M16 to the
+new Issue body, plus 22 new: X2 X3 X6 X7, C1a-C1f, C2a-C2c, R3a R3b, R4a R4b, Q12-Q16).
+
+New mutants:
+  X2   enrol/confirm: liveness re-check dropped                      (code review)
+  X3   recover: liveness re-check dropped                            (code review)
+  X6   enrol/start: liveness re-check dropped                        (code review)
+  X7   enrol/confirm: the fault answer depends on the outcome (G4)   (code review)
+  C1a  Issue: role/principal binding dropped
+  C1b  Verify: role/principal binding dropped (auth unit)
+  C1c  player/service principals accept any non-empty role
+  C1d  staff principal accepts the player role
+  C1e  an unknown principal type with the player role is accepted
+  C1f  Verify binding dropped, through the HTTP stack (/v1/admin/tenants, sportsbook simulate)
+  C2a  seed-admin skips config.ValidateStaffMFAEnv
+  C2b  ValidateStaffMFAEnv skips the pairwise key-family check
+  C2c  ValidateStaffMFAEnv does not read PAYOUT_INSTRUMENT_FP_KEYS
+  R3a  redeem: the bootstrap/active-factor check dropped
+  R3b  redeem: the integrity alert for it dropped
+  R4a  seed-admin: -reason not recorded in the audit row
+  R4b  seed-admin: -operator / -reason not required with -issue-bootstrap
+  Q12  SF040: revoked_at write-once dropped
+  Q13  SF040: replaced_by_session_id may be cleared to NULL
+  Q14  SF040: expires_at mutable
+  Q15  SF040: revoked_at may move (only NULL refused)
+  Q16  grant: runtime UPDATE on mfa_at re-added (F9)
+
+Run 3 (worktree at d990cf1), verbatim:
+M01 KILLED by TestStaffMFA_G1_RefusalsPersistThroughRealRoutes [./internal/httpserver/ -run TestStaffMFA_G1_] 46s
+M02 KILLED by TestStaffMFA_RecoveryFlow [./internal/httpserver/ -run TestStaffMFA_RecoveryFlow|TestStaffMFA_G4] 28s
+M03 KILLED by TestStaffMFA_EnrolConfirm_Expiry_And_WrongCode [./internal/httpserver/ -run TestStaffMFA_EnrolConfirm] 26s
+M04 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform, TestStaffMFA_G3_BurnConsumeAndSessionInOneTransaction, TestStaffMFA_Replay [./internal/httpserver/ -run TestStaffMFA_FullFlow|TestStaffMFA_Replay|TestStaffMFA_G3] 25s
+M05 KILLED by TestStaffMFA_G7_NoFactorIsOneAnswer_AndIntegrityAlerts [./internal/httpserver/ -run TestStaffMFA_G7] 33s
+M06 KILLED by TestStaffMFA_G1_RefusalsPersistThroughRealRoutes [./internal/httpserver/ -run TestStaffMFA_G1_] 45s
+M07 KILLED by TestStaffMFA_HardLock_NoChallenge_AlertRaised [./internal/httpserver/ -run TestStaffMFA_HardLock] 26s
+M08 KILLED by TestStaffMFA_RecoveryFlow [./internal/httpserver/ -run TestStaffMFA_RecoveryFlow] 25s
+M09 KILLED by TestStaffMFA_SessionSealTamper [./internal/httpserver/ -run TestStaffMFA_SessionSealTamper] 32s
+M10 KILLED by TestMigration0138_Cutover_RevocationAndC1Rule [./internal/httpserver/ -run TestMigration0138_Cutover] 43s
+M11 KILLED by TestStaffMFA_RefreshBounds [./internal/httpserver/ -run TestStaffMFA_RefreshBounds] 48s
+M12 KILLED by TestStaffMFA_RefreshBounds [./internal/httpserver/ -run TestStaffMFA_RefreshBounds] 51s
+M13 SURVIVED [./internal/httpserver/ -run TestStaffMFA_RefreshBounds] 55s
+M14 KILLED by TestVerify_StaffTokenNeedsEveryAssuranceClaim [./internal/auth/ -run TestVerify_StaffToken] 4s
+M15 KILLED by TestVerify_StaffTokenNeedsEveryAssuranceClaim [./internal/auth/ -run TestVerify_StaffToken] 4s
+M16 KILLED by TestIssue_RefusesStaffPrincipal [./internal/auth/ -run TestIssue_RefusesStaffPrincipal] 4s
+M17 KILLED by TestSealSession_CanonicalFormPinned, TestSealSession_EveryFieldIsBound [./internal/staffmfa/ -run TestSealSession] 4s
+M18 KILLED by TestSealSession_EveryFieldIsBound [./internal/staffmfa/ -run TestSealSession] 4s
+M19 KILLED by TestStaffMFA_SecretHygiene_LogCapture [./internal/httpserver/ -run TestStaffMFA_SecretHygiene] 46s
+M19b KILLED by TestStaffMFA_SecretHygiene_LogCapture [./internal/httpserver/ -run TestStaffMFA_SecretHygiene] 30s
+M20 KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative [./internal/httpserver/ -run TestStaffMFA_Redeem_GateD] 22s
+M21 KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative [./internal/httpserver/ -run TestStaffMFA_Redeem_GateD] 21s
+M21b KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative [./internal/httpserver/ -run TestStaffMFA_Redeem_GateD] 22s
+M22 KILLED by TestStaffMFA_SuspendedBetweenSteps, TestStaffMFA_SuspendedBetweenSteps_EverySecondStep [./internal/httpserver/ -run TestStaffMFA_SuspendedBetweenSteps] 22s
+M23 KILLED by TestStaffMFA_G4_FaultAnswerIndependentOfOutcome [./internal/httpserver/ -run TestStaffMFA_G4] 22s
+M25 KILLED by TestStaffMFA_GateE_SlowRateFailurePattern [./internal/httpserver/ -run TestStaffMFA_GateE] 21s
+M25b KILLED by TestStaffMFA_GateE_SlowRateFailurePattern [./internal/httpserver/ -run TestStaffMFA_GateE] 22s
+M26 KILLED by TestStaffMFA_RecoveryFlow [./internal/httpserver/ -run TestStaffMFA_RecoveryFlow] 21s
+M28 KILLED by TestStaffMFA_RateLimit_MFABucket [./internal/httpserver/ -run TestStaffMFA_RateLimit] 21s
+M29 KILLED by TestStaffMFA_G7_NoFactorIsOneAnswer_AndIntegrityAlerts [./internal/httpserver/ -run TestStaffMFA_G7] 23s
+M30 KILLED by TestStaffMFA_HardLock_NoChallenge_AlertRaised [./internal/httpserver/ -run TestStaffMFA_HardLock] 23s
+M31 KILLED by TestStaffMFA_G7_NoFactorIsOneAnswer_AndIntegrityAlerts [./internal/httpserver/ -run TestStaffMFA_G7] 27s
+M32 KILLED by TestStaffMFA_RecoveryFlow [./internal/httpserver/ -run TestStaffMFA_RecoveryFlow] 26s
+M33 KILLED by TestStaffMFA_SessionSealTamper [./internal/httpserver/ -run TestStaffMFA_SessionSealTamper] 28s
+M35 KILLED by TestStaffMFA_Replay [./internal/httpserver/ -run TestStaffMFA_G1_|TestStaffMFA_HardLock|TestStaffMFA_Replay] 55s
+M37 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform [./internal/httpserver/ -run TestStaffMFA_FullFlow] 31s
+M49 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform [./internal/httpserver/ -run TestStaffMFA_FullFlow] 36s
+M50 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform [./internal/httpserver/ -run TestStaffMFA_FullFlow] 29s
+M51 KILLED by TestStaffMFA_SuspendedBetweenSteps, TestStaffMFA_SuspendedBetweenSteps_EverySecondStep [./internal/httpserver/ -run TestStaffMFA_SuspendedBetweenSteps] 33s
+M52 KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative [./internal/httpserver/ -run TestStaffMFA_Redeem_GateD] 36s
+M53 KILLED by TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative [./internal/httpserver/ -run TestStaffMFA_Redeem_GateD] 29s
+M54 KILLED by TestStaffMFA_Redeem_Lockout [./internal/httpserver/ -run TestStaffMFA_Redeem_Lockout] 28s
+M55 KILLED by TestStaffMFA_SecretHygiene_LogCapture [./internal/httpserver/ -run TestStaffMFA_SecretHygiene] 37s
+M56 KILLED by TestSeedAdmin_BootstrapToken_Subprocess [./cmd/seed-admin/ -run TestSeedAdmin] 6s
+M57 KILLED by TestStaffMFAStartupGate_RefusesWithoutKeys_Subprocess [./cmd/platform-api/ -run TestStaffMFAStartupGate] 38s
+Q01 KILLED by TestSessions_SF040Matrix [./internal/httpserver/ -run TestSessions_SF040Matrix] 37s
+Q02 KILLED by TestSessions_SF040Matrix [./internal/httpserver/ -run TestSessions_SF040Matrix] 8s
+Q03 KILLED by TestStaffMFA_SessionSealTamper [./internal/httpserver/ -run TestStaffMFA_SessionSealTamper] 9s
+Q04 KILLED by TestFactorLockoutClock_SF008 [./internal/httpserver/ -run TestFactorLockoutClock_SF008] 9s
+Q05 KILLED by TestFactorLockoutClock_SF008 [./internal/httpserver/ -run TestFactorLockoutClock_SF008] 10s
+Q06 KILLED by TestFactorLockoutClock_SF008 [./internal/httpserver/ -run TestFactorLockoutClock_SF008] 9s
+Q07 KILLED by TestGrants_SessionsAndCutover_RuntimeRole [./internal/httpserver/ -run TestGrants_SessionsAndCutover] 10s
+Q08 KILLED by TestGrants_SessionsAndCutover_RuntimeRole, TestStaffMFA_SessionSealTamper [./internal/httpserver/ -run TestGrants_SessionsAndCutover|TestStaffMFA_SessionSealTamper] 10s
+Q09 KILLED by TestMigration0138_Cutover_RevocationAndC1Rule [./internal/httpserver/ -run TestMigration0138_Cutover] 8s
+Q10 KILLED by TestSessions_SF040Matrix [./internal/httpserver/ -run TestSessions_SF040Matrix] 9s
+Q11 KILLED by TestSessions_SF040Matrix [./internal/httpserver/ -run TestSessions_SF040Matrix] 9s
+X3 KILLED by TestStaffMFA_SuspendedBetweenSteps_EverySecondStep [./internal/httpserver/ -run TestStaffMFA_SuspendedBetweenSteps] 34s
+X6 KILLED by TestStaffMFA_SuspendedBetweenSteps_EverySecondStep [./internal/httpserver/ -run TestStaffMFA_SuspendedBetweenSteps] 37s
+X2 KILLED by TestStaffMFA_SuspendedBetweenSteps_EverySecondStep [./internal/httpserver/ -run TestStaffMFA_SuspendedBetweenSteps] 30s
+X7 KILLED by TestStaffMFA_G4_EnrolConfirm [./internal/httpserver/ -run TestStaffMFA_G4_] 37s
+C1a KILLED by TestIssue_RefusesStaffRoleOnNonStaffPrincipal [./internal/auth/ -run TestIssue_RefusesStaffRole|TestVerify_RefusesHandSigned] 3s
+C1b KILLED by TestVerify_RefusesHandSignedRolePrincipalMismatch [./internal/auth/ -run TestVerify_RefusesHandSigned] 3s
+C1c KILLED by TestIssue_RefusesStaffRoleOnNonStaffPrincipal, TestVerify_RefusesHandSignedRolePrincipalMismatch [./internal/auth/ -run TestIssue_RefusesStaffRole|TestVerify_RefusesHandSigned] 3s
+C1d KILLED by TestIssue_RefusesStaffRoleOnNonStaffPrincipal, TestVerify_RefusesHandSignedRolePrincipalMismatch [./internal/auth/ -run TestIssue_RefusesStaffRole|TestVerify_RefusesHandSigned] 3s
+C1e KILLED by TestVerify_RefusesHandSignedRolePrincipalMismatch [./internal/auth/ -run TestIssue_RefusesStaffRole|TestVerify_RefusesHandSigned] 3s
+C1f KILLED by TestRolePrincipalBinding_StaffRoleOnNonStaffPrincipal_401, TestSettlementSimulate_403ForServicePrincipal [./internal/httpserver/ -run TestRolePrincipalBinding|TestSettlementSimulate_403ForServicePrincipal] 28s
+C2a KILLED by TestSeedAdmin_BootstrapToken_Subprocess [./cmd/seed-admin/ -run TestSeedAdmin] 5s
+C2b KILLED by TestValidateStaffMFAEnv_ReadsTheSameFamiliesAsLoad [./internal/config/ -run TestValidateStaffMFAEnv] 2s
+C2c KILLED by TestValidateStaffMFAEnv_ReadsTheSameFamiliesAsLoad [./internal/config/ -run TestValidateStaffMFAEnv] 3s
+R3a KILLED by TestStaffMFA_Redeem_BootstrapWithActiveFactorRefused [./internal/httpserver/ -run TestStaffMFA_Redeem_] 34s
+R3b KILLED by TestStaffMFA_Redeem_BootstrapWithActiveFactorRefused [./internal/httpserver/ -run TestStaffMFA_Redeem_] 28s
+R4a KILLED by TestSeedAdmin_BootstrapToken_Subprocess [./cmd/seed-admin/ -run TestSeedAdmin] 4s
+R4b KILLED by TestSeedAdmin_BootstrapToken_Subprocess [./cmd/seed-admin/ -run TestSeedAdmin] 5s
+Q12 KILLED by TestSessions_SF040Matrix, TestStaffMFA_RevocationAndChainLinkWriteOnce [./internal/httpserver/ -run TestSessions_SF040Matrix|TestStaffMFA_RevocationAndChainLink] 9s
+Q13 KILLED by TestSessions_SF040Matrix, TestStaffMFA_RevocationAndChainLinkWriteOnce [./internal/httpserver/ -run TestSessions_SF040Matrix|TestStaffMFA_RevocationAndChainLink] 18s
+Q14 KILLED by TestSessions_SF040Matrix [./internal/httpserver/ -run TestSessions_SF040Matrix] 7s
+Q15 KILLED by TestSessions_SF040Matrix [./internal/httpserver/ -run TestSessions_SF040Matrix] 8s
+Q16 KILLED by TestGrants_SessionsAndCutover_RuntimeRole, TestSessions_SF040Matrix [./internal/httpserver/ -run TestGrants_SessionsAndCutover|TestSessions_SF040Matrix] 8s
+private DB rebuilt from the committed migrations
+
+DISCARDED from run 3: the M35 line. TestStaffMFA_Replay was broken at d990cf1 for a reason unrelated to M35 (it
+redeemed a bootstrap token of an ENROLLED staff member, which R3 now refuses on purpose), so that "kill" was the
+broken test, not the mutant. The test was fixed at c60e132 (it uses an unenrolled staff member for the
+purpose-crossing check) and M35 and M04 (whose kill list also named Replay) were re-run:
+
+Run 4 (worktree at c60e132), verbatim:
+M04 KILLED by TestStaffMFA_FullFlow_TenantAndPlatform, TestStaffMFA_G3_BurnConsumeAndSessionInOneTransaction, TestStaffMFA_Replay [./internal/httpserver/ -run TestStaffMFA_FullFlow|TestStaffMFA_Replay|TestStaffMFA_G3] 25s
+M35 SURVIVED [./internal/httpserver/ -run TestStaffMFA_G1_|TestStaffMFA_HardLock|TestStaffMFA_Replay] 80s
+
+Totals (final, review round): 78 mutants - KILLED 76, SURVIVED 2 (M13, M35: the same justifications as above),
+ERROR 0. Every review-round mutant (X2 X3 X6 X7, C1a-f, C2a-c, R3a-b, R4a-b, Q12-Q16) is KILLED.
+
+Re-review (2026-10-13), F3 (-operator / -reason character hygiene), run 5 in the branch worktree, verbatim:
+R4c KILLED by TestOperatorContext_RefusesUnsafeCharacters, TestUnsafeAuditRune_CoversDisplayNameHygiene [./cmd/seed-admin/ -run TestOperatorContext|TestUnsafeAuditRune] 2s
+R4d KILLED by TestOperatorContext_RefusesUnsafeCharacters [./cmd/seed-admin/ -run TestOperatorContext|TestUnsafeAuditRune] 2s
+R4e KILLED by TestOperatorContext_RefusesUnsafeCharacters [./cmd/seed-admin/ -run TestOperatorContext|TestUnsafeAuditRune] 2s
+  R4c  unsafeAuditRune without the Cf class (bidi / zero-width accepted)
+  R4d  unsafeAuditRune without Zl / Zp (U+2028 / U+2029 accepted)
+  R4e  validate back to unicode.IsControl only
+Totals including the re-review: 81 mutants - KILLED 79, SURVIVED 2 (M13, M35, justified), ERROR 0.

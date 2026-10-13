@@ -19,6 +19,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -45,6 +46,7 @@ func newFinancialTestServerWithMockSettlement(t *testing.T, pool *db.Pool, issue
 		Logger:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                  pool,
 		AuthIssuer:          issuer,
+		StaffMFA:            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:         "platform-api-test",
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,
@@ -552,7 +554,7 @@ func TestSimulateDepositCallback_StaffTokenDenied(t *testing.T) {
 	var intent depositIntentResponse
 	decodeBody(t, resp, &intent)
 
-	staffToken, err := issuer.Issue(uuid.NewString(), tenant.ID, auth.RoleTenantAdmin, auth.PrincipalStaff, time.Hour)
+	staffToken, err := issuer.IssueStaff(authtest.StaffParams(uuid.New(), tenant.ID, auth.RoleTenantAdmin), time.Hour)
 	if err != nil {
 		t.Fatalf("issue staff token: %v", err)
 	}

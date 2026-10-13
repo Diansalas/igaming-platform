@@ -142,6 +142,18 @@ const (
 	CodeRGUnavailable         Code = "RG_UNAVAILABLE"          // 503: no proof issuer / temporary lock contention
 )
 
+// ADR 0119 slice S3 (staff MFA): the closed staff authentication vocabulary (section 14.2). Lowercase like the
+// generic codes. invalid_challenge and invalid_enrolment_token are each ONE answer for every cause (unknown, expired,
+// consumed, exhausted, wrong purpose, mismatched credentials) and never distinguish them.
+const (
+	CodeMFAEnrolmentRequired  Code = "mfa_enrolment_required"  // 403: correct password, no active second factor
+	CodeMFALocked             Code = "mfa_locked"              // 403: the factor is soft- or hard-locked; nothing was compared
+	CodeInvalidMFACode        Code = "invalid_mfa_code"        // 401: wrong / malformed / replayed code (an attempt was spent)
+	CodeInvalidChallenge      Code = "invalid_challenge"       // 401: the challenge token is not usable
+	CodeInvalidEnrolmentToken Code = "invalid_enrolment_token" // 401: the enrolment token or the credentials presented with it
+	CodeMFAEnrolmentExpired   Code = "mfa_enrolment_expired"   // 409: the pending factor is unknown or its 10 minutes passed
+)
+
 // Error is the wire format for an API error response.
 type Error struct {
 	Code    Code   `json:"code"`
@@ -161,10 +173,11 @@ func httpStatus(c Code) int {
 	switch c {
 	case CodeValidation, CodeSettlementValidationFailed, CodeInvalidRequest, CodePaymentMethodMismatch:
 		return http.StatusBadRequest
-	case CodeUnauthorized:
+	case CodeUnauthorized, CodeInvalidMFACode, CodeInvalidChallenge, CodeInvalidEnrolmentToken:
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson,
-		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused:
+		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused,
+		CodeMFAEnrolmentRequired, CodeMFALocked:
 		return http.StatusForbidden
 	case CodeNotFound, CodeSettlementNotFound:
 		return http.StatusNotFound
@@ -178,7 +191,7 @@ func httpStatus(c Code) int {
 		CodeLaunchIllegalTransition, CodeLaunchSubjectClosed, CodeLaunchWithdrawalsHolding, CodeLaunchOpenBetsBlockClosure,
 		CodeLaunchRetryableLockTimeout, CodeLaunchRequestNotPending, CodeLaunchAlreadyDecided, CodeLaunchStaleReadiness, CodeLaunchPriorReject,
 		CodeLaunchPriorRejecter, CodeLaunchNotLegacyBaseline, CodeLaunchRefusedAtExecution, CodeLaunchGuardRefused,
-		CodeKillSwitchReleaseRequestAlreadyOpen,
+		CodeKillSwitchReleaseRequestAlreadyOpen, CodeMFAEnrolmentExpired,
 		CodeRGNoChange, CodeRGChangeNotPending, CodeRGCoolingOff, CodeRGConfigMissing, CodeRGPendingCap,
 		CodeRGIdempotencyMismatch, CodeRGOperatorLoosens, CodeRGNoFloor, CodeRGSelfApproval, CodeRGRequestNotPending, CodeRGGuardRefused:
 		return http.StatusConflict

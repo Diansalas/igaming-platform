@@ -190,6 +190,16 @@ paths:
         internal/auth/session.go's RotateSession. The principal's CURRENT
         role/status is re-checked on every refresh, never trusted from
         the prior token.
+        STAFF sessions (ADR 0119 section 7.2, slice S3): the session's keyed
+        assurance seal is verified (a missing or bad seal is refused with the
+        same 401; a tampered row also writes an audit record and raises the P1
+        alert staff.session_integrity / staff.platform_session_integrity),
+        the session is refused past its absolute lifetime (12 h from the
+        second-factor login by default), the new refresh token's idle lifetime
+        is the staff idle TTL (30 min by default, capped at the absolute
+        expiry), and the new access token carries the session's unchanged
+        aal / amr / auth_time / mfa_at claims and the new sid. Staff responses
+        carry Cache-Control no-store.
       security: []
       requestBody:
         required: true
@@ -210,7 +220,7 @@ paths:
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
-          description: Invalid, expired, or reused refresh token
+          description: Invalid, expired, or reused refresh token; for staff also a missing or bad assurance seal or a session past its absolute lifetime (one answer)
           content:
             application/json:
               schema:
@@ -322,47 +332,44 @@ paths:
   # --- Staff auth ---
   /v1/staff/auth/login:
     post:
-      summary: Log in as a staff user (back-office/admin principal)
+      tags: [staff-auth]
+      summary: Staff login, step 1 of 2 (password) - returns an MFA challenge, never a token pair
       description: >
-        Separate credential store and endpoint from player login.
-        tenant_slug is omitted entirely for a platform_admin login (there
-        is no tenant to resolve - see docs/decisions/0011); every other
-        staff role must supply it.
+        ADR 0119 section 6.1 (slice S3). Separate credential store and endpoint from player login. tenant_slug is
+        omitted entirely for a platform_admin login (there is no tenant to resolve - see docs/decisions/0011); every
+        other staff role must supply it. BREAKING CHANGE (S3): a correct password never yields a token pair. When the
+        staff member has an ACTIVE second factor that is not hard-locked, the response is a single-use `mfa`
+        challenge (5 minutes, 5 attempts) to be completed at POST /v1/staff/auth/mfa/verify (TOTP) or
+        POST /v1/staff/auth/mfa/recover (recovery code). There is no MFA bypass in any environment. The password
+        lockout (5 failures per 15 minutes per tenant + email) and the dummy-hash timing equalisation are unchanged.
+        Rate bucket `login` (per IP). Every response carries Cache-Control no-store.
       security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                tenant_slug:
-                  type: string
-                  description: Omit only for a platform_admin login.
-                email: { type: string, format: email }
-                password: { type: string, format: password }
-              required: [email, password]
+              $ref: "#/components/schemas/StaffLoginRequest"
       responses:
         "200":
-          description: Authenticated; returns a token pair
+          description: Password verified; complete the login with the returned `mfa` challenge
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TokenPair"
+                $ref: "#/components/schemas/StaffLoginChallenge"
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
-          description: Invalid email or password
+          description: unauthorized - invalid email or password (one answer for an unknown email, a wrong password and a scope mismatch)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "403":
-          description: Account exists but cannot currently log in
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+          $ref: "#/components/responses/StaffAuthForbidden"
         "404":
           description: Unknown tenant_slug
           content:
@@ -373,6 +380,246 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
+  /v1/staff/auth/mfa/verify:
+    post:
+      tags: [staff-auth]
+      summary: Staff login, step 2 of 2 (TOTP) - returns an aal2 token pair
+      description: >
+        ADR 0119 section 6.1 step 2. Presents the `mfa` challenge from POST /v1/staff/auth/login and a 6-digit TOTP
+        code. On success the challenge is consumed, the code's time step is burned (a code is accepted at most once,
+        and never a code older than the last accepted one) and a staff session is issued with aal=2,
+        amr=["pwd","otp"], auth_time, mfa_at, sid and sv claims; all of this commits in ONE transaction. A wrong
+        code spends one challenge attempt and counts against the factor's failure counters (5 failures in 15 minutes
+        soft-lock the factor for 15 minutes; 10 in 24 hours hard-lock it until an administrative MFA reset). The
+        refusal is committed before the answer is sent. A locked factor is refused BEFORE any comparison, with the
+        same answer whatever the code. Rate bucket `mfa` (30 per IP per minute). Responses carry no-store.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MfaVerifyRequest"
+      responses:
+        "200":
+          description: Authenticated at aal2
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/StaffMfaUnauthorized"
+        "403":
+          $ref: "#/components/responses/StaffAuthForbidden"
+        "429":
+          $ref: "#/components/responses/StaffMfaRateLimited"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
+  /v1/staff/auth/mfa/recover:
+    post:
+      tags: [staff-auth]
+      summary: Use a one-time recovery code - returns an `enrol` challenge, never a session
+      description: >
+        ADR 0119 section 6.1 step 3. Presents the `mfa` challenge and one recovery code (XXXXX-XXXXX; case, hyphens
+        and spaces are ignored, I/L read as 1 and O as 0). A recovery code buys a RE-ENROLMENT, never an aal2 session:
+        on success the code and the `mfa` challenge are consumed and a new `enrol` challenge is returned (continue at
+        POST /v1/staff/auth/enrol/start). The old factor stays active until the new one is confirmed. A wrong code
+        spends one challenge attempt and counts against the same factor failure counters as a TOTP code. The durable
+        alert staff.mfa_recovery_used (or staff.platform_mfa_recovery_used) is raised. Rate bucket `mfa`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MfaRecoverRequest"
+      responses:
+        "200":
+          description: Recovery code accepted; continue with the `enrol` challenge
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffLoginChallenge"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/StaffMfaUnauthorized"
+        "403":
+          $ref: "#/components/responses/StaffAuthForbidden"
+        "429":
+          $ref: "#/components/responses/StaffMfaRateLimited"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
+  /v1/staff/auth/enrol/start:
+    post:
+      tags: [staff-auth]
+      summary: Begin TOTP enrolment - returns the secret exactly once
+      description: >
+        ADR 0119 section 6.2. Needs an `enrol` challenge (from POST /v1/staff/auth/enrol/redeem or
+        POST /v1/staff/auth/mfa/recover). Creates a PENDING factor (10 minutes) and returns its otpauth URI and
+        base32 secret exactly once (render the QR code LOCALLY in the browser - never a network QR service). Does NOT
+        consume the challenge; each call supersedes the staff member's earlier pending factor. The response is
+        x-sensitive and no-store. Rate bucket `mfa`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrolStartRequest"
+      responses:
+        "200":
+          description: Pending factor created
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrolStartResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/StaffMfaUnauthorized"
+        "403":
+          $ref: "#/components/responses/StaffAuthForbidden"
+        "429":
+          $ref: "#/components/responses/StaffMfaRateLimited"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
+  /v1/staff/auth/enrol/confirm:
+    post:
+      tags: [staff-auth]
+      summary: Confirm TOTP enrolment - returns 10 recovery codes and an aal2 token pair, once
+      description: >
+        ADR 0119 section 6.2. Verifies a TOTP code against the PENDING factor, then in ONE transaction: activates it,
+        revokes the previous active factor, replaces every recovery code with 10 new ones, consumes the challenge,
+        revokes every other session of the staff member and issues an aal2 session. The recovery codes are shown
+        exactly once (x-sensitive, no-store); the UI must make the user confirm they stored them. A wrong code
+        spends one challenge attempt and counts against the pending factor's failure counters. Rate bucket `mfa`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrolConfirmRequest"
+      responses:
+        "200":
+          description: Factor active; recovery codes and token pair returned once
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrolConfirmResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/StaffMfaUnauthorized"
+        "403":
+          $ref: "#/components/responses/StaffAuthForbidden"
+        "409":
+          description: >
+            mfa_enrolment_expired - the factor_id names no pending factor of this staff member, or its 10 minute window
+            has passed (restart at POST /v1/staff/auth/enrol/start with the same challenge while it is valid).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/StaffMfaRateLimited"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
+  /v1/staff/auth/enrol/redeem:
+    post:
+      tags: [staff-auth]
+      summary: Redeem an MFA-reset or bootstrap enrolment token (with the current password) - returns an `enrol` challenge
+      description: >
+        ADR 0119 section 6.3 and S3 entry gate (d). The token is delivered out of band (bootstrap: printed once by
+        the cmd/seed-admin deployment job; mfa_reset: emailed, ADR 0119 S6 - NOT IMPLEMENTED until S6). The staff
+        member's tenant and identity come from the TOKEN ROW, never from the body: tenant_slug (omit for platform
+        staff), email and password must resolve to the SAME staff member as the token, who must be active. Every
+        failure (unknown, expired, consumed or revoked token, a token of another purpose, a tenant / email / password
+        that does not match the token's staff member) is the single answer 401 invalid_enrolment_token. A wrong
+        password counts against the same per-identifier password lockout as POST /v1/staff/auth/login. On success the
+        token is consumed and an `enrol` challenge is returned. Rate bucket `credential` (per IP).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrolRedeemRequest"
+      responses:
+        "200":
+          description: Token redeemed; continue with the `enrol` challenge
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffLoginChallenge"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: invalid_enrolment_token - the single answer for every token or credential failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
+  /v1/staff/me/mfa:
+    get:
+      tags: [staff-auth]
+      summary: The caller's own second-factor status (My security)
+      description: >
+        ADR 0119 section 14.1. Any authenticated staff principal, over its own account only (the subject comes from
+        the token; there is no permission for MFA self-service). Never returns a secret or a code.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's factor status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffMfaStatus"
+        "401":
+          description: Missing, invalid or expired bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: forbidden - not a staff principal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
 
   # --- Tenant/brand/staff administration ---
   /v1/admin/tenants:
@@ -8376,6 +8623,12 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+  headers:
+    NoStore:
+      description: "no-store (with Pragma: no-cache): the body carries a secret, a token or a one-time code and must never be cached"
+      schema:
+        type: string
+        enum: [no-store]
   securitySchemes:
     bearerAuth:
       type: http
@@ -8978,6 +9231,116 @@ components:
         token_type: { type: string, example: Bearer }
         expires_in: { type: integer, description: Access token lifetime in seconds }
       required: [access_token, refresh_token, token_type, expires_in]
+    StaffLoginRequest:
+      type: object
+      description: ADR 0119 section 6.1 step 1.
+      properties:
+        tenant_slug:
+          type: string
+          description: Omit only for platform staff (platform_admin).
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+      required: [email, password]
+    StaffAuthChallenge:
+      type: object
+      x-sensitive: true
+      description: >
+        A single-use staff authentication challenge (ADR 0119 sections 6.1-6.3). The token is opaque (64 base64url
+        characters), valid for expires_in seconds and at most 5 wrong attempts; it is stored server-side only as a
+        keyed HMAC. Keep it in memory only (never localStorage), never log it.
+      properties:
+        type:
+          type: string
+          enum: [mfa, enrol]
+          description: "`mfa`: complete at /v1/staff/auth/mfa/verify or /mfa/recover. `enrol`: continue at /v1/staff/auth/enrol/start."
+        token: { type: string }
+        expires_in: { type: integer, description: Seconds until the challenge expires (300) }
+        methods:
+          type: array
+          description: "`mfa`: [totp, recovery_code]. `enrol`: [totp]."
+          items:
+            type: string
+            enum: [totp, recovery_code]
+      required: [type, token, expires_in, methods]
+    StaffLoginChallenge:
+      type: object
+      x-sensitive: true
+      properties:
+        challenge:
+          $ref: "#/components/schemas/StaffAuthChallenge"
+      required: [challenge]
+    MfaVerifyRequest:
+      type: object
+      properties:
+        challenge_token: { type: string, description: The `mfa` challenge token }
+        code: { type: string, description: The 6-digit TOTP code (digits only; strip spaces client-side) }
+      required: [challenge_token, code]
+    MfaRecoverRequest:
+      type: object
+      properties:
+        challenge_token: { type: string, description: The `mfa` challenge token }
+        recovery_code: { type: string, description: One recovery code (XXXXX-XXXXX) }
+      required: [challenge_token, recovery_code]
+    EnrolStartRequest:
+      type: object
+      properties:
+        challenge_token: { type: string, description: The `enrol` challenge token }
+      required: [challenge_token]
+    EnrolStartResponse:
+      type: object
+      x-sensitive: true
+      description: >
+        Shown exactly once (no-store). Render otpauth_uri as a QR code LOCALLY in the browser (a bundled library,
+        never a network QR service); offer secret_base32 behind a reveal toggle for manual entry.
+      properties:
+        factor_id: { type: string, format: uuid }
+        otpauth_uri: { type: string, description: "otpauth://totp/{issuer}:{email}?secret=...&issuer=...&algorithm=SHA1&digits=6&period=30" }
+        secret_base32: { type: string }
+        expires_in: { type: integer, description: Seconds the pending factor stays confirmable (600) }
+      required: [factor_id, otpauth_uri, secret_base32, expires_in]
+    EnrolConfirmRequest:
+      type: object
+      properties:
+        challenge_token: { type: string, description: The `enrol` challenge token }
+        factor_id: { type: string, format: uuid, description: From EnrolStartResponse }
+        code: { type: string, description: A 6-digit TOTP code from the newly enrolled authenticator }
+      required: [challenge_token, factor_id, code]
+    EnrolConfirmResponse:
+      type: object
+      x-sensitive: true
+      description: >
+        Shown exactly once (no-store). The UI must show the 10 recovery codes with copy / download and make the
+        user confirm they stored them; never keep them in application state or localStorage after leaving the page.
+      properties:
+        recovery_codes:
+          type: array
+          minItems: 10
+          maxItems: 10
+          items: { type: string, description: "XXXXX-XXXXX (Crockford base32)" }
+        token_pair:
+          $ref: "#/components/schemas/TokenPair"
+      required: [recovery_codes, token_pair]
+    EnrolRedeemRequest:
+      type: object
+      properties:
+        token: { type: string, description: The enrolment token (bootstrap or mfa_reset), delivered out of band }
+        tenant_slug: { type: string, description: Omit for platform staff }
+        email: { type: string, format: email }
+        password: { type: string, format: password, description: The staff member's CURRENT password }
+      required: [token, email, password]
+    StaffMfaStatus:
+      type: object
+      properties:
+        enrolled: { type: boolean, description: An ACTIVE factor exists }
+        factor_type:
+          type: string
+          nullable: true
+          enum: [totp]
+        activated_at: { type: string, format: date-time, nullable: true }
+        recovery_codes_remaining: { type: integer, description: Unconsumed recovery codes (warn at 3 or fewer) }
+        hard_locked: { type: boolean, description: Only an administrative MFA reset clears a hard lock (ADR 0119 S6) }
+        locked_until: { type: string, format: date-time, nullable: true, description: Soft lock end, when currently soft-locked }
+      required: [enrolled, factor_type, activated_at, recovery_codes_remaining, hard_locked, locked_until]
     PlayerProfile:
       type: object
       properties:
@@ -10627,6 +10990,12 @@ components:
             - RG_IDENTITY_REVIEW
             - RG_PROOF_REFUSED
             - RG_UNAVAILABLE
+            - mfa_enrolment_required
+            - mfa_locked
+            - invalid_mfa_code
+            - invalid_challenge
+            - invalid_enrolment_token
+            - mfa_enrolment_expired
         message:
           type: string
         request_id:
@@ -10872,6 +11241,43 @@ components:
               type: array
               items: { $ref: "#/components/schemas/RGFloorRequest" }
   responses:
+    StaffAuthForbidden:
+      description: >
+        403. One closed code: mfa_enrolment_required (the password is right but the account has no active second
+        factor - an administrator must issue an enrolment link; a password alone never opens enrolment),
+        mfa_locked (the factor is soft- or hard-locked; nothing was compared, the answer does not depend on the
+        code; a hard lock is cleared only by an administrative MFA reset), or forbidden (the account is not active).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffMfaUnauthorized:
+      description: >
+        401. One closed code: invalid_challenge (the single answer for an unknown, expired, consumed, exhausted or
+        wrong-purpose challenge token - restart the login), or invalid_mfa_code (wrong, malformed or already-used
+        code; one challenge attempt was spent and the failure was recorded against the factor).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffMfaRateLimited:
+      description: rate_limited - the per-IP `mfa` bucket (30 per minute) is exhausted; Retry-After is set
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffAuthUnavailable:
+      description: >
+        503 service_unavailable - a database fault, a serialization failure or a commit failure. The answer is the
+        same fixed message whatever the verification outcome would have been (ADR 0119 S3 gate G4); nothing was
+        committed. Retry once with a fresh login if the challenge is no longer valid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     RGNotFound:
       description: 404 not_found. An unknown id, or an id of another tenant / another player (indistinguishable).
       content:

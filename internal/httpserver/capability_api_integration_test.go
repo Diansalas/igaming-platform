@@ -43,6 +43,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -99,6 +100,7 @@ func newCGAPI(t *testing.T) *cgAPI {
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:              pool,
 		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:     "cg-test",
 		AccessTokenTTL:  time.Hour,
 		RefreshTokenTTL: time.Hour,
@@ -159,11 +161,7 @@ func (a *cgAPI) staff(tenantID uuid.UUID, role string) uuid.UUID {
 
 func (a *cgAPI) token(subject, tenantID uuid.UUID, role auth.Role) string {
 	a.t.Helper()
-	tok, err := a.issuer.Issue(subject.String(), tenantID, role, auth.PrincipalStaff, time.Hour)
-	if err != nil {
-		a.t.Fatal(err)
-	}
-	return tok
+	return authtest.StaffToken(a.t, a.issuer, subject, tenantID, role) // ADR 0119 S3: aal2 staff token
 }
 
 type cgResp struct {
