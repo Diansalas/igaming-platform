@@ -216,7 +216,7 @@ M = [
     ('N29 payout gate does not convert an evaluator fault', 'internal/payments/payout.go', "return decision.RetryableOnHoldEvalFailure(), params, nil", "return decision, params, nil", PAY),
     ('N30 conversion ignores the KYC outcome', 'internal/kyc/enforcement.go', "	if d.KYCOutcome != OutcomePassed && d.KYCOutcome != OutcomeNotRequired {\n		return d\n	}\n", "", PAY),
     ('N31 conversion applies to a definite hold too', 'internal/kyc/enforcement.go', "	if !d.Hold.EvalFailed || d.Hold.Held {\n		return d\n	}", "	if !d.Hold.Denied() {\n		return d\n	}", PAY),
-    ('N32 adjustment refusal raises no detached evaluator alert', 'internal/adjustment/aml_hold.go', "_ = aml.RaiseHoldEvalFailedDetached(dctx, s.pool, r.tenantID, aml.OpManualAdjustment)", "_ = dctx", HTTPF4),
+    ('N32 adjustment refusal raises no detached evaluator alert', 'internal/adjustment/aml_hold.go', "aerr := aml.RaiseHoldEvalFailedDetached(context.WithoutCancel(ctx), s.pool, r.tenantID, aml.OpManualAdjustment)", "aerr := error(nil)", HTTPF4),
     # (N33 retired: the refusal path was unified by F4 option (b); see the F4 mutants)
     # (N34 retired: the refusal path was unified by F4 option (b); see the F4 mutants)
     # ---- F4 option (b): AML adjustment refusals render as an ordinary conflict ----
