@@ -45,6 +45,8 @@ func TestRGDepositUsageS3(t *testing.T) {
 		// A reversal does not restore capacity (a withdrawal is not a 'deposit' posting, so it cannot either).
 		w.s3Post(t, f.tenantA, s3Tx{typ: "deposit_reversal", at: ago(30 * time.Minute), reverses: &d300, asset: usd, legs: []s3Leg{
 			cashDr(a, "300"), {uuid.Nil, ledger.AccountPSPClearing, "credit", "300"}}})
+		// A cash credit that is NOT a deposit (a casino win) is not deposit usage.
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_win", at: ago(hr), asset: usd, legs: []s3Leg{houseDr("7"), cashCr(a, "7")}})
 		// 8 days old: only the 30-day window sees it. A 40-day-old pending intent is outside every window.
 		w.s3Deposit(t, f.tenantA, a, usd, "1000", ago(8*day))
 		w.s3Intent(t, f.tenantA, a, usd, "pending", "5", ago(40*day), nil)
@@ -57,7 +59,7 @@ func TestRGDepositUsageS3(t *testing.T) {
 		at := s3T
 		req := UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: usd, Windows: s3Windows("UTC"), At: &at}
 		u := w.measureDeposit(t, f, f.tenantA, req)
-		credited := []string{"913", "913", "1913", "913"}
+		credited := []string{"913", "913", "1913", "913"} // the 7 casino win is not a deposit
 		inflight := []string{"150", "150", "150", "150"}
 		total := []string{"1063", "1063", "2063", "1063"}
 		for i, ws := range u.Windows {
@@ -144,6 +146,19 @@ func TestRGDepositUsageS3(t *testing.T) {
 			return err
 		}))
 		wantAmt(t, "failed intent releases its usage", w.measureDeposit(t, f, f.tenantA, req).Windows[0].Total.Account, "0")
+	})
+
+	t.Run("BoundaryInstantsAreInclusiveAtTheWindowStart", func(t *testing.T) {
+		f := w.newFix(t)
+		a := f.acctA1
+		w.s3Deposit(t, f.tenantA, a, "USD", "1", s3T.Add(-24*hr))
+		w.s3Deposit(t, f.tenantA, a, "USD", "10", s3T.Add(-24*hr-time.Microsecond))
+		w.s3Intent(t, f.tenantA, a, "USD", "pending", "100", s3T.Add(-24*hr), nil)
+		w.s3Intent(t, f.tenantA, a, "USD", "pending", "1000", s3T.Add(-24*hr-time.Microsecond), nil)
+		u := w.measureDeposit(t, f, f.tenantA, UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD",
+			Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &s3T})
+		wantAmt(t, "credited at the start counts", u.Windows[0].Credited.Account, "1")
+		wantAmt(t, "in-flight at the start counts", u.Windows[0].InFlight.Account, "100")
 	})
 
 	t.Run("UndeclaredDepositLegFailsClosed", func(t *testing.T) {
@@ -306,6 +321,24 @@ func TestRGSessionUsageS3(t *testing.T) {
 	wantOK(t, "before the root", err)
 	if ue2.ElapsedSeconds != 0 {
 		t.Fatalf("elapsed before the root must be 0, got %d", ue2.ElapsedSeconds)
+	}
+	// A measured chain that is itself closed (revoked) and OLDER than every open chain still bounds the aggregation.
+	r1, r2 := uuid.New(), uuid.New()
+	revokedAt := s3T.Add(-45 * time.Hour)
+	w.s3Session(t, f.tenantA, a, r2, ago(49*hr), nil, &revokedAt, exp)
+	w.s3Session(t, f.tenantA, a, r1, ago(50*hr), &r2, nil, exp)
+	agr, err := run(own, SessionRequest{TenantID: f.tenantA, PlayerAccountID: a, SessionID: r2, AggregateOpenChains: true, At: &at})
+	wantOK(t, "aggregate from a closed chain", err)
+	if agr.AggregatedRootStartedAt == nil || !agr.AggregatedRootStartedAt.Equal(ago(50*hr)) || agr.OpenChains != 2 {
+		t.Fatalf("the measured chain's own root must bound the aggregation: %+v", agr)
+	}
+	// The chain walk is bounded (a cyclic or corrupt chain fails closed).
+	old := maxSessionChainDepth
+	maxSessionChainDepth = 2
+	_, err = run(own, SessionRequest{TenantID: f.tenantA, PlayerAccountID: a, SessionID: s3, At: &at})
+	maxSessionChainDepth = old
+	if !errors.Is(err, ErrSessionChainTooLong) {
+		t.Fatalf("a chain longer than the bound must fail closed, got %v", err)
 	}
 	// Fail closed (never "zero elapsed"): another principal, the wrong account, an unknown session, another tenant.
 	if _, err := run(sess{tenant: f.tenantA.String(), principal: f.acctA2.String()}, SessionRequest{TenantID: f.tenantA, PlayerAccountID: a, SessionID: s3, At: &at}); !errors.Is(err, ErrSessionChainNotFound) {

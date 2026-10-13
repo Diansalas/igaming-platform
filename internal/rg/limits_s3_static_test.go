@@ -65,15 +65,26 @@ func TestS3WindowSpecValidation(t *testing.T) {
 	if p, tz, ws, err := windowArgs(good); err != nil || len(p) != 4 || tz[0] != "UTC" || ws[0] != 1 || ws[2] != 7 || p[3] != "calendar_month" {
 		t.Fatalf("good specs: %v %v %v %v", p, tz, ws, err)
 	}
+	if _, _, _, err := windowArgs(manyRolling(MaxUsageWindows)); err != nil {
+		t.Errorf("exactly the maximum number of valid windows must be accepted: %v", err)
+	}
 	for _, bad := range [][]WindowSpec{
 		nil, {}, {{Period: "hourly"}}, {{Period: PeriodCalendarDay}}, {{Period: PeriodCalendarDay, CalendarTZ: strings.Repeat("x", 65)}},
 		{{Period: PeriodCalendarWeek, CalendarTZ: "UTC"}}, {{Period: PeriodCalendarWeek, CalendarTZ: "UTC", WeekStart: 8}},
-		make([]WindowSpec, MaxUsageWindows+1),
+		manyRolling(MaxUsageWindows + 1),
 	} {
 		if _, _, _, err := windowArgs(bad); err == nil {
 			t.Errorf("%+v must be refused", bad)
 		}
 	}
+}
+
+func manyRolling(n int) []WindowSpec {
+	out := make([]WindowSpec, n)
+	for i := range out {
+		out[i] = WindowSpec{Period: PeriodRolling24h}
+	}
+	return out
 }
 
 func TestS3UsageRequestValidation(t *testing.T) {

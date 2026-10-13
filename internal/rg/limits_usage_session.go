@@ -31,7 +31,8 @@ var ErrSessionChainNotFound = errors.New("rg: session chain not found for the ac
 // ErrSessionChainTooLong: the chain walk hit its safety bound (corrupted or cyclic chain).
 var ErrSessionChainTooLong = errors.New("rg: session chain walk hit its depth bound")
 
-const maxSessionChainDepth = 100000
+// maxSessionChainDepth bounds the chain walk (a var so a test can lower it).
+var maxSessionChainDepth = 100000
 
 // SessionCoveragePrincipalOnly names the coverage of a SessionUsage: the account's own sessions.
 const SessionCoveragePrincipalOnly = "principal_only"

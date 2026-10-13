@@ -138,6 +138,7 @@ func TestRGUsageS3(t *testing.T) {
 		wantAmt(t, "person wager 24h", up.Windows[0].Wager.Person, "1460")
 		wantAmt(t, "person loss 24h", up.Windows[0].Loss.Person, "1310")
 		wantAmt(t, "account wager 24h (person scope also reports the anchor)", up.Windows[0].Wager.Account, "460")
+		wantAmt(t, "account loss 24h (person scope also reports the anchor)", up.Windows[0].Loss.Account, "310")
 		wantAmt(t, "person wager 7d", up.Windows[1].Wager.Person, "2060")
 		if len(up.AccountIDs) != 2 {
 			t.Fatalf("tenant_person set must be A1+A2, got %v", up.AccountIDs)
@@ -174,6 +175,15 @@ func TestRGUsageS3(t *testing.T) {
 		req.LossMayGoNegative = true
 		u = w.measureStake(t, f, f.tenantA, req)
 		wantAmt(t, "attested negative loss", u.Windows[0].Loss.Account, "-500")
+		// The same floor applies to the Person figure.
+		req.Scope, req.LossMayGoNegative = LimitScopeTenantPerson, false
+		u = w.measureStake(t, f, f.tenantA, req)
+		wantAmt(t, "person raw loss", u.Windows[0].LossRaw.Person, "-500")
+		wantAmt(t, "person floored loss", u.Windows[0].Loss.Person, "0")
+		wantAmt(t, "account floored loss (person scope)", u.Windows[0].Loss.Account, "0")
+		req.LossMayGoNegative = true
+		u = w.measureStake(t, f, f.tenantA, req)
+		wantAmt(t, "person attested negative loss", u.Windows[0].Loss.Person, "-500")
 	})
 
 	t.Run("BoundaryInstantsAreInclusiveAtTheWindowStart", func(t *testing.T) {
@@ -194,6 +204,9 @@ func TestRGUsageS3(t *testing.T) {
 		u := w.measureStake(t, f, f.tenantA, UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD",
 			Windows: []WindowSpec{{Period: PeriodRolling24h}, {Period: PeriodCalendarDay, CalendarTZ: "UTC"}, {Period: PeriodRolling30d}}, At: &s3T})
 		wantAmt(t, "rolling 24h", u.Windows[0].Wager.Account, "1101") // 1 + 100 + 1000 (the 23:59:59.999999 bet is inside the last 24h)
+		wantAmt(t, "rolling 24h loss (the same boundary)", u.Windows[0].Loss.Account, "1101")
+		wantAmt(t, "rolling 30d loss", u.Windows[2].Loss.Account, "21111")
+		wantAmt(t, "calendar day loss", u.Windows[1].Loss.Account, "100")
 		wantAmt(t, "calendar day", u.Windows[1].Wager.Account, "100")
 		wantAmt(t, "rolling 30d (the bet exactly at the start counts)", u.Windows[2].Wager.Account, "21111") // 1 + 10 + 100 + 1000 + 20000
 	})
@@ -213,6 +226,21 @@ func TestRGUsageS3(t *testing.T) {
 		wantAmt(t, "before midnight: rolling", ub.Windows[0].Wager.Account, "70")
 		wantAmt(t, "after midnight: calendar day resets", ua.Windows[1].Wager.Account, "0")
 		wantAmt(t, "after midnight: rolling still counts", ua.Windows[0].Wager.Account, "70")
+	})
+
+	t.Run("VoidOriginIsTheSportsbookBet_NotAnyTransactionOfTheCorrelation", func(t *testing.T) {
+		f := w.newFix(t)
+		a := f.acctA1
+		// A stray transaction under the same correlation id that is OLDER than the bet (T-27h, outside the 24h window)
+		// must not be taken for the void's original; the void's original is the sportsbook_bet (T-1h, inside).
+		corr := uuid.New()
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: ago(27 * hr), corr: corr, asset: "USD", legs: []s3Leg{cashDr(a, "1"), houseCr("1")}})
+		w.s3Post(t, f.tenantA, s3Tx{typ: "sportsbook_bet", at: ago(hr), corr: corr, asset: "USD", legs: []s3Leg{cashDr(a, "70"), lockedCashCr(a, "70")}})
+		w.s3Post(t, f.tenantA, s3Tx{typ: "sportsbook_void", at: ago(30 * time.Minute), corr: corr, asset: "USD", legs: []s3Leg{lockedCashDr(a, "70"), cashCr(a, "70")}})
+		u := w.measureStake(t, f, f.tenantA, UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD",
+			Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &s3T})
+		wantAmt(t, "wager: the voided bet nets to zero", u.Windows[0].Wager.Account, "0")
+		wantAmt(t, "loss: the voided bet nets to zero", u.Windows[0].Loss.Account, "0")
 	})
 
 	t.Run("AmountsAboveInt64_NoInt64NoFloat", func(t *testing.T) {

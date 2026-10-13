@@ -72,8 +72,8 @@ M = [
     ('U20 loss measured accounts ignore the flag (never bonus)', USE, "measuredLoss := inSet(RGCashAccountTypes, *accountType) || (req.LossCountsBonus && inSet(RGBonusAccountTypes, *accountType))",
      "measuredLoss := inSet(RGCashAccountTypes, *accountType)", SUITE),
     ('U21 wager flag read from the loss flag', USE, "(req.WagerCountsBonus && inSet(RGBonusAccountTypes", "(req.LossCountsBonus && inSet(RGBonusAccountTypes", SUITE),
-    ('U22 locked accounts measured', USE, "RGIgnoredAccountTypes = []string{string(ledger.AccountPlayerLockedCash), string(ledger.AccountPlayerLockedBonus)}", "RGIgnoredAccountTypes = []string{}\n\tRGCashAccountTypes = append(RGCashAccountTypes, string(ledger.AccountPlayerLockedCash))", SUITE),
-    ('U23 undeclared leg ignored', USE, "if !known {", "if false {", SUITE),
+    ('U22 locked cash account measured', USE, "RGCashAccountTypes = []string{string(ledger.AccountPlayerCash)}", "RGCashAccountTypes = []string{string(ledger.AccountPlayerCash), string(ledger.AccountPlayerLockedCash)}", SUITE),
+    ('U23 undeclared leg ignored', USE, "if !known {", "if !known && false {", SUITE),
     ('U31 casino cash-lock shape ignored', USE, "if undeclaredShape != nil && *undeclaredShape > 0 {", "if false {", SUITE),
     ('U32 cash-lock shape check widened to sportsbook types', USE, "AND tt IN ('casino_bet', 'casino_win', 'casino_rollback')) AS undeclared_shape",
      "AND tt IN ('casino_bet', 'casino_win', 'casino_rollback', 'sportsbook_bet', 'sportsbook_settlement', 'sportsbook_void')) AS undeclared_shape", SUITE),
@@ -100,7 +100,7 @@ M = [
     ('D8 in-flight window start exclusive', USE, "SUM(amount) FILTER (WHERE created_at >= %s AND acct = $2)::text AS ia%d", "SUM(amount) FILTER (WHERE created_at > %s AND acct = $2)::text AS ia%d", SUITE),
     ('D9 in-flight account figure not restricted to the anchor', USE, "SUM(amount) FILTER (WHERE created_at >= %s AND acct = $2)::text AS ia%d", "SUM(amount) FILTER (WHERE created_at >= %s)::text AS ia%d", SUITE),
     ('D10 deposit account type check off', USE, "if accountType != nil && *accountType != string(ledger.AccountPlayerCash) {", "if false {", SUITE),
-    ('D11 in-flight taken on every group row', USE, "if !inflightTaken {", "if true {", SUITE),
+    ('D11 in-flight taken on every group row', USE, "if !inflightTaken {", "if !inflightTaken || true {", SUITE),
     ('D12 in-flight ignored in the total', USE, "w.Total.Account.Add(w.Credited.Account, w.InFlight.Account)", "w.Total.Account.Set(w.Credited.Account)", SUITE),
     ('D13 Person in-flight ignored', USE, "w.Total.Person.Add(w.Credited.Person, w.InFlight.Person)", "w.Total.Person.Set(w.Credited.Person)", SUITE),
     ('D14 intents of any tenant (tenant predicate dropped)', USE, "FROM deposit_intents di\n\t WHERE di.tenant_id = $1\n", "FROM deposit_intents di\n\t WHERE true\n", SUITE),
@@ -127,7 +127,7 @@ M = [
     # --- credit check ---
     ('C1 succeeded without posting ignored', CRE, "if status == \"succeeded\" {\n\t\t\treturn MismatchSucceededWithoutPosting\n\t\t}", "if false {\n\t\t\treturn MismatchSucceededWithoutPosting\n\t\t}", SUITE),
     ('C2 posting on unsettled intent ignored', CRE, "case status != \"succeeded\":\n\t\treturn MismatchPostingOnUnsettledIntent", "case false:\n\t\treturn MismatchPostingOnUnsettledIntent", SUITE),
-    ('C3 amount mismatch ignored', CRE, "if !ok || want.Cmp(got) != 0 {", "if !ok {", SUITE),
+    ('C3 amount mismatch ignored', CRE, "if !ok || want.Cmp(got) != 0 {", "if !ok || want.Cmp(got) != 0 && false {", SUITE),
     ('C4 account mismatch ignored', CRE, "if len(accounts) != 1 || accounts[0] != player {", "if false {", SUITE),
     ('C5 asset mismatch ignored', CRE, "if len(assets) != 1 || assets[0] != asset {", "if false {", SUITE),
     ('C6 wrong posting type ignored', CRE, "case txType == nil || *txType != \"deposit\":", "case false:", SUITE),
@@ -156,17 +156,26 @@ for name, f, old, new, cmd in M:
     if os.environ.get('DRY'):
         continue
     open(path, 'w').write(src.replace(old, new))
+    marker = os.path.join(S, 's3_mut_marker')
+    open(marker, 'w').write('x')
     try:
         r = subprocess.run(cmd, cwd=W, capture_output=True, text=True, timeout=1800)
         out = r.stdout + r.stderr
         verdict = 'KILLED' if r.returncode != 0 else 'SURVIVED'
+        if 'No space left on device' in out or 'connection refused' in out or 'recovery mode' in out:
+            verdict = 'ENV-FAIL(not evidence)'
         if '[build failed]' in out or '[setup failed]' in out:
             verdict = 'INVALID(does not compile)'
+            out = '\n'.join(l for l in out.splitlines() if '.go:' in l) or out
         first = ''
         for line in out.splitlines():
             if ('--- FAIL' in line and '/' in line) or 'want SQLSTATE' in line or ('.go:' in line and ('want' in line or 'must' in line)) or 'build failed' in line or 'cannot use' in line or 'undefined' in line:
                 first = line.strip()[:170]
                 break
+        if verdict.startswith('INVALID') and not first:
+            first = out.strip()[:200]
     finally:
         open(path, 'w').write(src)
+        # each mutant compiles internal/rg afresh; prune the build-cache entries it created (a run once filled the disk)
+        subprocess.run(['find', os.path.expanduser('~/.cache/go-build'), '-type', 'f', '-newer', marker, '-size', '+1M', '-delete'], capture_output=True)
     print('%s: %s%s' % (verdict, name, ('  [' + first + ']') if first else ''), flush=True)
