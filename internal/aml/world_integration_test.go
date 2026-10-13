@@ -161,3 +161,8 @@ func requestAMLGrantAsSessionActorID(ctx context.Context, tx pgx.Tx, tenant, gra
 	})
 	return req.ID, err
 }
+
+// registerFixturePlayer registers a synthetic player (a new Person) in brand inside tx.
+func registerFixturePlayer(ctx context.Context, tx pgx.Tx, brand identity.Brand) (identity.PlayerAccount, error) {
+	return identity.RegisterPlayer(ctx, tx, brand, "aml-"+uuid.NewString()+"@fixture.invalid", "!x")
+}

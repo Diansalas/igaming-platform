@@ -216,3 +216,49 @@ func TestStatic_AMClassOnlyInAMLMigrations(t *testing.T) {
 		t.Fatalf("expected AM codes in the AML migrations, saw %d files", seen)
 	}
 }
+
+// ADR 0116 s5.1 C6 (value-out catalogue): the production call sites of the KYC / AML enforcement boundary are EXACTLY these five
+// gates. A new file that calls kyc.EvaluateEnforcement (or a gate seam) must be classified here and reviewed by ledger-finance;
+// a gate that disappears (a refactor that drops the call) fails too. Settlement-side files (callbacks, receipts, releases,
+// completions) are deliberately absent: they are never gated.
+func TestStatic_EnforcementCallSitesAreExactlyTheFiveGates(t *testing.T) {
+	want := map[string]bool{
+		"internal/withdrawal/withdrawal.go":   true, // withdrawal request (RequestWithdrawal)
+		"internal/payments/kycgate.go":        true, // deposit initiation + cascade (KYCEnforcementDepositGate)
+		"internal/payments/payout.go":         true, // payout claim (KYCEnforcementPayoutGate)
+		"internal/casino/orchestrator.go":     true, // new casino stake (postBet)
+		"internal/sportsbook/orchestrator.go": true, // new sportsbook stake (PlaceBet)
+	}
+	re := regexp.MustCompile(`kyc\.EvaluateEnforcement\(`)
+	got := map[string]bool{}
+	for rel, src := range productionGoFiles(t) {
+		if re.MatchString(src) {
+			got[rel] = true
+		}
+	}
+	for f := range got {
+		if !want[f] {
+			t.Errorf("%s calls kyc.EvaluateEnforcement but is not a classified gate: classify it (gated vs never-gated) with ledger-finance and add it here", f)
+		}
+	}
+	for f := range want {
+		if !got[f] {
+			t.Errorf("the gate %s no longer calls kyc.EvaluateEnforcement: an enforcement point has disappeared", f)
+		}
+	}
+	// The adjustment path refuses on a hold through aml.EvaluateHold directly (not through KYC).
+	adj := productionGoFiles(t)["internal/adjustment/aml_hold.go"]
+	if !regexp.MustCompile(`aml\.EvaluateHold\(`).MatchString(adj) || !regexp.MustCompile(`aml\.OpManualAdjustment`).MatchString(adj) {
+		t.Error("the manual adjustment path must evaluate the hold with OpManualAdjustment")
+	}
+	// ...and only the two adjustment sites call it.
+	n := 0
+	for rel, src := range productionGoFiles(t) {
+		if strings.HasPrefix(rel, "internal/adjustment/") && strings.Contains(src, "walletHoldVerdict(") && !strings.HasSuffix(rel, "aml_hold.go") {
+			n += strings.Count(src, "walletHoldVerdict(")
+		}
+	}
+	if n != 2 {
+		t.Errorf("walletHoldVerdict must be called exactly at submission and at execution, found %d call(s)", n)
+	}
+}

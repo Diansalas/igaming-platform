@@ -4,6 +4,7 @@ package aml_test
 
 import (
 	"context"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -183,6 +184,69 @@ func TestCatalog_EveryOfficerFunctionAuthorisesFirst(t *testing.T) {
 			if strings.Contains(before, forbidden) {
 				t.Errorf("%s: %q appears before aml_authorize", name, forbidden)
 			}
+		}
+	}
+}
+
+// ADR 0116 s2.1 / s5.1 (C6, LF catalogue test): every ledger transaction type is classified as GATED (new value entering play or
+// leaving the platform; the gate lives in the named place) or NEVER GATED (settlement / correction / release; stated reason).
+// The test reads the LIVE transaction_type CHECK: a future type (a refund, ADR 0007 conversion) FAILS until it is classified
+// and ledger-finance signs it off.
+func TestCatalog_EveryLedgerTransactionTypeIsClassified(t *testing.T) {
+	gated := map[string]string{
+		"deposit":              "initiation gate (payments/kycgate.go); the SETTLEMENT posting of the same type is not gated",
+		"withdrawal_requested": "withdrawal request (withdrawal/withdrawal.go); the payout claim is the second gate (payments/payout.go)",
+		"casino_bet":           "new casino stake (casino/orchestrator.go)",
+		"sportsbook_bet":       "new sportsbook stake (sportsbook/orchestrator.go)",
+		"manual_adjustment":    "refused for a held player at submission and execution (adjustment/aml_hold.go)",
+	}
+	neverGated := map[string]string{
+		"deposit_reversal":      "a reversal of a settled deposit returns value; never blocked",
+		"withdrawal_completed":  "an in-flight payout completes; never recalled",
+		"withdrawal_rejected":   "a release returning held funds to player_cash (also the DenyForCompliance outcome)",
+		"withdrawal_failed":     "a release",
+		"withdrawal_reversed":   "a reversal",
+		"tombstone":             "a replay-protection marker moving no value",
+		"casino_win":            "settlement",
+		"casino_rollback":       "terminal stake return (Q-GP-5)",
+		"bonus_grant":           "value created by the platform, not entering play from the player",
+		"bonus_conversion":      "listed non-gated by ADR 0116 s5.1 (HD-KYC-4 / ADR 0007 conversion gates are separate owner questions)",
+		"bonus_forfeiture":      "removal of bonus value",
+		"bonus_reversal":        "a reversal",
+		"sportsbook_settlement": "settlement",
+		"sportsbook_void":       "terminal stake return",
+		"sportsbook_rollback":   "a settlement rollback",
+	}
+	w := newWorld(t, "under_platform_licence")
+	def := catalogQuery(t, w, `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ledger_transactions'::regclass AND conname LIKE '%transaction_type%'`)
+	if len(def) != 1 {
+		t.Fatalf("the transaction_type CHECK is not found: %v", def)
+	}
+	live := map[string]bool{}
+	for _, m := range regexp.MustCompile(`'([a-z_]+)'::text`).FindAllStringSubmatch(def[0][0].(string), -1) {
+		live[m[1]] = true
+	}
+	if len(live) < 15 {
+		t.Fatalf("the live CHECK parse is broken: %v", live)
+	}
+	for typ := range live {
+		_, g := gated[typ]
+		_, n := neverGated[typ]
+		switch {
+		case g && n:
+			t.Errorf("%s is classified both ways", typ)
+		case !g && !n:
+			t.Errorf("ledger transaction type %q is NOT classified for the AML hold (gated or never-gated): classify it and obtain ledger-finance sign-off", typ)
+		}
+	}
+	for typ := range gated {
+		if !live[typ] {
+			t.Errorf("classified type %q no longer exists", typ)
+		}
+	}
+	for typ := range neverGated {
+		if !live[typ] {
+			t.Errorf("classified type %q no longer exists", typ)
 		}
 	}
 }
