@@ -124,6 +124,16 @@ func TestRedaction_NoSecretTypeEverRenders(t *testing.T) {
 		if s.String() != Redacted {
 			t.Fatalf("%s.String() = %q", name, s.String())
 		}
+		// Each type marshals to exactly the marker (an explicit MarshalJSON,
+		// not the incidental "{}" of a struct with unexported fields, which
+		// would start leaking the day a field is exported).
+		j, err := json.Marshal(s)
+		if err != nil || string(j) != `"`+Redacted+`"` {
+			t.Fatalf("%s JSON = %s, %v", name, j, err)
+		}
+	}
+	if j, _ := json.Marshal(keys); string(j) != `"staffmfa.Keys{redacted}"` {
+		t.Fatalf("Keys JSON = %s", j)
 	}
 }
 
