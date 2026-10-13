@@ -133,7 +133,7 @@ func TestStatic_StepUpBackstopPins(t *testing.T) {
 		if !test && !strings.HasPrefix(rel, "internal/actorproof/") && strings.Contains(src, "actorproof") && signCall.MatchString(src) {
 			signers = append(signers, rel)
 		}
-		if strings.Contains(src, "SetTestStepUpFallback(") && !strings.HasPrefix(rel, "internal/actorproof/stepup_") {
+		if !test && strings.Contains(src, "SetTestStepUpFallback(") {
 			fallbackSetters = append(fallbackSetters, rel)
 		}
 		if !test && strings.Contains(src, "testStepUpFallback.Store(") {
