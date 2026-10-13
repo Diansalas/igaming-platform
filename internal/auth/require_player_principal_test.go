@@ -52,7 +52,7 @@ func TestRequirePlayerPrincipal_DeniesEveryStaffRole(t *testing.T) {
 			if role == RolePlatformAdmin {
 				tenantID = uuid.Nil // platform-scoped principal, ADR 0011
 			}
-			token, err := issuer.Issue(uuid.NewString(), tenantID, role, PrincipalStaff, time.Hour)
+			token, err := issuer.IssueStaff(testStaffParams(uuid.New(), tenantID, role), time.Hour)
 			if err != nil {
 				t.Fatalf("unexpected error issuing token: %v", err)
 			}
@@ -91,7 +91,7 @@ func TestRequirePlayerPrincipal_DeniesEveryStaffRole(t *testing.T) {
 // must not silently inherit the player self-service surface.
 func TestRequirePlayerPrincipal_DeniesServicePrincipal(t *testing.T) {
 	issuer := testIssuer(t)
-	token, err := issuer.Issue(uuid.NewString(), uuid.New(), RoleSupport, PrincipalService, time.Hour)
+	token, err := issuer.Issue(uuid.NewString(), uuid.New(), RolePlayer, PrincipalService, time.Hour)
 	if err != nil {
 		t.Fatalf("unexpected error issuing token: %v", err)
 	}

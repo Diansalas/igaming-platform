@@ -11,6 +11,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -43,6 +44,7 @@ func newSettlementTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, s
 		Logger:                                slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                                    pool,
 		AuthIssuer:                            issuer,
+		StaffMFA:                              testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:                           "platform-api-test",
 		AccessTokenTTL:                        5 * time.Minute,
 		RefreshTokenTTL:                       time.Hour,
@@ -146,14 +148,24 @@ func TestSettlementSimulate_403ForServicePrincipal(t *testing.T) {
 	srv := newSettlementTestServer(t, pool, issuer, true)
 	tenant := mustCreateTenant(t, pool)
 
-	token, err := issuer.Issue(uuid.NewString(), tenant.ID, auth.RoleRiskManager, auth.PrincipalService, time.Hour)
+	// ADR 0119 S3 security review C1: a service principal can no longer hold a staff role at all - Issue refuses it,
+	// and a hand-signed one is 401 (it never reaches the route); a service token with its only legal role is 403.
+	if _, err := issuer.Issue(uuid.NewString(), tenant.ID, auth.RoleRiskManager, auth.PrincipalService, time.Hour); !errors.Is(err, auth.ErrRolePrincipalMismatch) {
+		t.Fatalf("Issue must refuse a service principal with a staff role, got %v", err)
+	}
+	resp := postJSON(t, srv, simulatePath(uuid.NewString()), handSignedToken(t, auth.PrincipalService, auth.RoleRiskManager, tenant.ID),
+		map[string]any{"event_type": "void", "void_reason": "market_cancelled"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for a hand-signed service-principal token holding the right role, got %d", resp.StatusCode)
+	}
+	token, err := issuer.Issue(uuid.NewString(), tenant.ID, auth.RolePlayer, auth.PrincipalService, time.Hour)
 	if err != nil {
 		t.Fatalf("failed to issue service token: %v", err)
 	}
-	resp := postJSON(t, srv, simulatePath(uuid.NewString()), token,
+	resp = postJSON(t, srv, simulatePath(uuid.NewString()), token,
 		map[string]any{"event_type": "void", "void_reason": "market_cancelled"})
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 for a service-principal token even holding the right role, got %d", resp.StatusCode)
+		t.Fatalf("expected 403 for a service-principal token, got %d", resp.StatusCode)
 	}
 }
 

@@ -49,6 +49,7 @@ func newAuditAPI(t *testing.T, resolver audit.PresentationResolver) *ksAPI {
 		Logger:                    slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logBuf), &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                        pool,
 		AuthIssuer:                issuer,
+		StaffMFA:                  testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:               "audit-test",
 		AccessTokenTTL:            time.Hour,
 		RefreshTokenTTL:           time.Hour,

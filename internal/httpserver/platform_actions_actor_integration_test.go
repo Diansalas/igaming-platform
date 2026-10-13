@@ -26,7 +26,7 @@ func withKillSwitchRoutes(a *cgAPI) *ksAPI {
 	orch := payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock},
 		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}).WithPayoutDestinations(pitest.Shared())
 	srv := httptest.NewServer(New(Deps{
-		Logger: slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})), DB: a.pool, AuthIssuer: a.issuer,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})), DB: a.pool, StaffMFA: testStaffMFA(), AuthIssuer: a.issuer,
 		ServiceName: "pa-test", AccessTokenTTL: time.Hour, RefreshTokenTTL: time.Hour,
 		PersonResolver: identityresolution.NewMockPersonResolver(), PaymentOrchestrator: orch,
 	}))

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
@@ -18,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
@@ -335,6 +337,8 @@ func newRefreshHandler(deps Deps) http.HandlerFunc {
 		requestID := observability.RequestIDFromContext(r.Context())
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
 
+		// A refresh response carries a new token pair: never cached (ADR 0119 section 5.4).
+		noStore(w)
 		var req refreshRequest
 		if err := decodeJSON(r, &req); err != nil || req.RefreshToken == "" {
 			apierror.Write(w, requestID, apierror.CodeValidation, "refresh_token is required")
@@ -346,9 +350,28 @@ func newRefreshHandler(deps Deps) http.HandlerFunc {
 		// it is presented without a bearer access token (the access
 		// token may already be expired, which is the whole point of
 		// refreshing). See internal/auth/session.go's RotateSession for
-		// the two-phase lookup-then-scoped-mutate this requires.
-		session, err := auth.RotateSession(r.Context(), deps.DB, req.RefreshToken, deps.RefreshTokenTTL, ua, ip)
+		// the two-phase lookup-then-scoped-mutate this requires. Staff
+		// sessions follow the ADR 0119 section 7.2 rules (seal, cutover,
+		// absolute and idle lifetimes) - RotateSessionWithPolicy.
+		session, err := auth.RotateSessionWithPolicy(r.Context(), deps.DB, req.RefreshToken,
+			auth.RotationPolicy{PlayerTTL: deps.RefreshTokenTTL, Staff: deps.StaffMFA.sessionPolicy()}, ua, ip)
+		var integrity *auth.SessionIntegrityError
 		switch {
+		case errors.As(err, &integrity):
+			// A forged or edited staff session row (ADR 0119 s7.2): the same 401 as an unknown token; the audit row is
+			// written; the P1 alert is raised in the staff member's scope.
+			if integrity.AuditErr != nil {
+				logger.Error("refresh_session_integrity_audit_failed", "error", integrity.AuditErr)
+			}
+			logger.Warn("refresh_staff_session_integrity", "request_id", requestID, "cause", integrity.Cause)
+			staff := staffmfa.StaffRef{StaffID: integrity.PrincipalID, TenantID: integrity.TenantID}
+			raiseStaffAlerts(r.Context(), deps.DB, []staffAlert{newStaffAlert(signalSessionIntegrity, staff, requestID,
+				map[string]alerting.AttrValue{"session_id": integrity.SessionID.String(), "cause": integrity.Cause})})
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid or expired refresh token")
+			return
+		case errors.Is(err, auth.ErrStaffSessionUnavailable):
+			writeStaffAuthUnavailable(w, requestID)
+			return
 		case errors.Is(err, auth.ErrSessionReused):
 			logger.Warn("refresh_token_reuse_detected", "request_id", requestID)
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "refresh token already used; session revoked")
@@ -404,6 +427,17 @@ func newRefreshHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		if session.PrincipalType == auth.PrincipalStaff {
+			// The new access token carries the session's unchanged aal / amr / auth_time / mfa_at and the new sid.
+			pair, err := deps.StaffMFA.mintStaffTokens(deps.AuthIssuer, session, role)
+			if err != nil {
+				logger.Error("refresh_token_issue_failed", "error", err)
+				apierror.Write(w, requestID, apierror.CodeInternal, "refresh failed")
+				return
+			}
+			writeStaffSecretJSON(w, http.StatusOK, pair)
+			return
+		}
 		tokens, err := newTokenPair(deps, session, role, session.PrincipalType)
 		if err != nil {
 			logger.Error("refresh_token_issue_failed", "error", err)

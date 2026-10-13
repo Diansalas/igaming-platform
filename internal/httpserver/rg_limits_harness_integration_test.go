@@ -28,6 +28,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/admission"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/rg"
@@ -94,6 +95,7 @@ func newRGW(t *testing.T, opt rgWOpt) *rgW {
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:              rt,
 		AuthIssuer:      w.issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:     "rg-test",
 		AccessTokenTTL:  time.Hour,
 		RefreshTokenTTL: time.Hour,
@@ -189,11 +191,7 @@ func (r rgResp) want(t *testing.T, status int, code string) {
 
 func (w *rgW) tok(subject, tenantID uuid.UUID, role auth.Role, pt auth.PrincipalType) string {
 	w.t.Helper()
-	tk, err := w.issuer.Issue(subject.String(), tenantID, role, pt, time.Hour)
-	if err != nil {
-		w.t.Fatal(err)
-	}
-	return tk
+	return authtest.Token(w.t, w.issuer, subject, tenantID, role, pt) // ADR 0119 S3: staff tokens carry aal2 assurance
 }
 
 // ---- fixture ------------------------------------------------------------------------------------------

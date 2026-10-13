@@ -88,7 +88,7 @@ func TestMiddleware_AcceptsCaseInsensitiveBearerScheme(t *testing.T) {
 
 func TestMiddleware_AttachesNilTenantForPlatformScopedToken(t *testing.T) {
 	issuer := testIssuer(t)
-	token, err := issuer.Issue("admin-1", uuid.Nil, RolePlatformAdmin, PrincipalStaff, time.Hour)
+	token, err := issuer.IssueStaff(testStaffParams(uuid.New(), uuid.Nil, RolePlatformAdmin), time.Hour)
 	if err != nil {
 		t.Fatalf("unexpected error issuing token: %v", err)
 	}

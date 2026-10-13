@@ -171,7 +171,7 @@ func TestAdmission_C1_KYCCredentialResolutionGateRejection_Maps503(t *testing.T)
 
 	settings := c1AlwaysDenyGateSettings()
 	handler, rt := NewWithAdmission(Deps{
-		DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test",
+		DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test",
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		KYCOrchestrator: orchestrator, KYCWebhookEnabled: true,
 		WebhookAdmission: settings,

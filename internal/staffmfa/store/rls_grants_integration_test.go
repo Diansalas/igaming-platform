@@ -394,6 +394,8 @@ func TestCatalog_PoliciesFlagsTriggersFunctions(t *testing.T) {
 	// name : enabled : BEFORE : ROW : INSERT DELETE UPDATE TRUNCATE flags (insert, delete, update, truncate)
 	eq("factor triggers", trig("staff_mfa_factors"), []string{
 		"sf_factor_tenant_forced:O:true:true:truefalsefalsefalse", "sf_factor_guard:O:true:true:falsefalsetruefalse",
+		// ADR 0119 S3 (migration 0138): the SF008 database-clock rule (S3 entry gate G2), after sf_factor_guard.
+		"sf_factor_lockout_clock:O:true:true:falsefalsetruefalse",
 		"sf_no_delete:O:true:true:falsetruefalsefalse", "sf_no_truncate:O:true:false:falsefalsefalsetrue"})
 	eq("recovery triggers", trig("staff_mfa_recovery_codes"), []string{
 		"sf_recovery_tenant_forced:O:true:true:truefalsefalsefalse", "sf_recovery_guard:O:true:true:falsefalsetruefalse",
@@ -410,16 +412,20 @@ func TestCatalog_PoliciesFlagsTriggersFunctions(t *testing.T) {
 		FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
 		WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'sf\_%'`)
 	wantFn := []string{}
-	for _, n := range []string{"sf_force_tenant_from_staff", "sf_deny_delete", "sf_deny_truncate", "sf_factor_guard", "sf_recovery_guard", "sf_challenge_guard", "sf_enrolment_token_guard"} {
+	// ADR 0119 S3 (migration 0138) adds sf_factor_lockout_clock (SF008, gate G2) and sf_cutover_immutable (SF099).
+	for _, n := range []string{"sf_force_tenant_from_staff", "sf_deny_delete", "sf_deny_truncate", "sf_factor_guard", "sf_recovery_guard", "sf_challenge_guard", "sf_enrolment_token_guard",
+		"sf_factor_lockout_clock", "sf_cutover_immutable"} {
 		wantFn = append(wantFn, n+":plpgsql:secdef=false:vol=v:cfg=search_path=pg_catalog, public, pg_temp")
 	}
 	eq("sf_* functions", fn, wantFn)
 
-	// No function of any kind that raises an SF020/SF021 or SF030/SF040 exists yet: they belong to migrations
-	// 0139 (staff_users), 0138 (sessions) and S-H1. When 0139 lands, flip this into the ADR 0119 s13.5 pin
-	// "the SF020/SF021 trigger function is VOLATILE".
+	// No function of any kind that raises an SF020/SF021 or SF030 exists yet: they belong to migration 0139
+	// (staff_users) and S-H1. When 0139 lands, flip this into the ADR 0119 s13.5 pin "the SF020/SF021 trigger
+	// function is VOLATILE". ADR 0119 S3: SF040 (sessions) now exists in exactly one function, migration 0138's.
 	eq("later-slice SF codes not created in S2", q(`SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace
-		AND (prosrc LIKE '%SF010%' OR prosrc LIKE '%SF020%' OR prosrc LIKE '%SF021%' OR prosrc LIKE '%SF030%' OR prosrc LIKE '%SF040%' OR prosrc LIKE '%SF007%')`), nil)
+		AND (prosrc LIKE '%SF010%' OR prosrc LIKE '%SF020%' OR prosrc LIKE '%SF021%' OR prosrc LIKE '%SF030%' OR prosrc LIKE '%SF007%')`), nil)
+	eq("SF040 raised only by the 0138 sessions guard", q(`SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+		AND prosrc LIKE '%SF040%'`), []string{"sessions_staff_assurance_guard"})
 	// Every function that raises an SF code is non-SECURITY DEFINER with a pinned search_path (ADR 0108).
 	eq("SF-raising functions are plain and pinned", q(`SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND prosrc LIKE '%ERRCODE = ''SF%'
 		AND (prosecdef OR proconfig IS NULL OR NOT (array_to_string(proconfig, ',') LIKE 'search_path=%'))`), nil)

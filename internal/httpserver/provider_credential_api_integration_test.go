@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
@@ -107,7 +108,7 @@ func newPCAPI(t *testing.T, withSubsystem bool) *pcAPI {
 		}
 	}
 	a.srv = httptest.NewServer(New(Deps{
-		Logger: logger, DB: pool, AuthIssuer: a.issuer, ServiceName: "pc-test",
+		Logger: logger, DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: a.issuer, ServiceName: "pc-test",
 		AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 		PersonResolver:      identityresolution.NewMockPersonResolver(),
 		ProviderCredentials: sub,
@@ -171,11 +172,7 @@ func (a *pcAPI) tenantStaff(tenant uuid.UUID, role string) uuid.UUID {
 }
 
 func (a *pcAPI) token(subject uuid.UUID, tenant uuid.UUID, role auth.Role) string {
-	tok, err := a.issuer.Issue(subject.String(), tenant, role, auth.PrincipalStaff, time.Hour)
-	if err != nil {
-		a.t.Fatal(err)
-	}
-	return tok
+	return authtest.StaffToken(a.t, a.issuer, subject, tenant, role) // ADR 0119 S3: aal2 staff token
 }
 
 func (a *pcAPI) platformToken(subject uuid.UUID) string {

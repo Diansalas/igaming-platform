@@ -184,7 +184,9 @@ func TestB3_K11NegativesInsideRealActingExecutorTx(t *testing.T) {
 			probes = append(probes, "platform audit row: written with a non-acting tenant")
 		}
 		_, _ = tx.Exec(ctx, `ROLLBACK TO SAVEPOINT k11a`)
-		try("session row", `INSERT INTO sessions (id, principal_type, principal_id, tenant_id, refresh_token_hash, expires_at) VALUES ($1, 'staff', $2, NULL, $3, now() + interval '1 hour')`,
+		// ADR 0119 S3: the row carries well-formed assurance columns so the probe exercises the acting fence, not
+		// migration 0138's SF040 trigger (which refuses a staff session without them in every scope).
+		try("session row", `INSERT INTO sessions (id, principal_type, principal_id, tenant_id, refresh_token_hash, expires_at, aal, amr, auth_time, mfa_at, absolute_expires_at, assurance_kid, assurance_seal) VALUES ($1, 'staff', $2, NULL, $3, now() + interval '1 hour', 2, ARRAY['pwd','otp'], now(), now(), now() + interval '2 days', 'probe', decode(repeat('00', 32), 'hex'))`,
 			uuid.New(), w.Acting.ID, uuid.NewString())
 		try("persons insert", `INSERT INTO persons (id) VALUES ($1)`, uuid.New())
 		try("persons update", `UPDATE persons SET id = id WHERE id = $1`, w.PlayerPerson)

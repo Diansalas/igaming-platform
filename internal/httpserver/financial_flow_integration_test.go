@@ -67,6 +67,7 @@ func newFinancialTestServerWith(t *testing.T, pool *db.Pool, issuer *auth.Issuer
 		Logger:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                  pool,
 		AuthIssuer:          issuer,
+		StaffMFA:            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:         "platform-api-test",
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,

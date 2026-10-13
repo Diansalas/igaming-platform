@@ -227,11 +227,25 @@ func TestStatic_Migration0137_Scope(t *testing.T) {
 func TestStatic_SQLSTATEClassSF_OnlyS2Codes(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	allowed := map[string]bool{"SF001": true, "SF002": true, "SF003": true, "SF004": true, "SF005": true, "SF006": true, "SF097": true, "SF098": true, "SF099": true}
+	// ADR 0119 S3 (migration 0138, extended deliberately): exactly these codes, in that migration only.
+	allowed0138 := map[string]bool{"'SF008'": true, "'SF040'": true, "'SF041'": true, "'SF042'": true, "'SF099'": true}
 	var offenders []string
 	scan := func(dir, glob string) {
 		files, _ := filepath.Glob(filepath.Join(root, dir, glob))
 		for _, f := range files {
 			if strings.Contains(f, "0137_staff_mfa") {
+				continue
+			}
+			if strings.Contains(f, "0138_staff_session_cutover") {
+				b, err := os.ReadFile(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, m := range regexp.MustCompile(`'SF\d{3}'|"SF\d{3}"`).FindAllString(string(b), -1) {
+					if !allowed0138[m] {
+						offenders = append(offenders, f+": "+m)
+					}
+				}
 				continue
 			}
 			b, err := os.ReadFile(f)
@@ -257,7 +271,7 @@ func TestStatic_SQLSTATEClassSF_OnlyS2Codes(t *testing.T) {
 		}
 	}
 	if len(offenders) != 0 {
-		t.Errorf("SQLSTATE class SF is used outside migration 0137 / internal/staffmfa (extend this test deliberately when a later slice lands): %v", offenders)
+		t.Errorf("SQLSTATE class SF is used outside migrations 0137 / 0138 (S3 codes SF008, SF040-SF042, SF099) / internal/staffmfa (extend this test deliberately when a later slice lands): %v", offenders)
 	}
 	// The allowed set itself is pinned by the migration static test; here only the closed set is declared.
 	if len(allowed) != 9 {

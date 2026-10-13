@@ -649,3 +649,20 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ADR 0119 S3 (migration 0138, staff session assurance): least-privilege, re-asserted on every run, mirroring
+-- migration 0138's own in-migration grant block. The blanket backfill GRANT above re-grants table-level UPDATE on
+-- sessions; this narrows it again to the columns the S3 application writes (revocation, rotation link, last use; the
+-- step-up mfa_at + re-seal columns are granted by S4b, review F9). The runtime role can never UPDATE aal, amr,
+-- auth_time, mfa_at, the seal, absolute_expires_at, expires_at or an identity column (the SF040 trigger refuses the immutable ones for every role). The cutover marker
+-- is owner-written; the runtime role reads it only. No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.staff_session_cutover') IS NOT NULL THEN
+        EXECUTE 'REVOKE UPDATE ON sessions FROM igaming_runtime';
+        EXECUTE 'GRANT UPDATE (revoked_at, last_used_at, replaced_by_session_id) ON sessions TO igaming_runtime';
+        EXECUTE 'REVOKE ALL ON staff_session_cutover FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON staff_session_cutover TO igaming_runtime';
+    END IF;
+END
+$$;

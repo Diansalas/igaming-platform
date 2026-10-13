@@ -20,7 +20,25 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 )
+
+// testStaffSessionKeys is a deterministic, non-degenerate staff MFA key set for the session fixtures (ADR 0119 S3).
+func testStaffSessionKeys(t *testing.T) *staffmfa.Keys {
+	t.Helper()
+	k := func(b byte) []byte {
+		out := make([]byte, 32)
+		for i := range out {
+			out[i] = b + byte(i)
+		}
+		return out
+	}
+	keys, err := staffmfa.NewKeys("f1", map[string][]byte{"f1": k(1)}, "m1", map[string][]byte{"m1": k(101)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return keys
+}
 
 func sessionRLSTestPool(t *testing.T) *db.Pool {
 	t.Helper()
@@ -93,6 +111,15 @@ func issueTestSessionAs(t *testing.T, pool *db.Pool, principalType PrincipalType
 	var session Session
 	err := scope(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
+		if principalType == PrincipalStaff {
+			// ADR 0119 S3: a staff session exists only with session assurance (IssueSession refuses staff and
+			// migration 0138's SF040 trigger refuses an unsealed staff row).
+			session, err = IssueStaffSession(ctx, tx, testStaffSessionKeys(t), StaffSessionParams{
+				StaffID: principalID, TenantID: tenantID, AMR: []string{"pwd", "otp"}, Now: time.Now(),
+				AbsoluteTTL: 12 * time.Hour, IdleTTL: 30 * time.Minute, UserAgent: "test-agent", IPAddress: "127.0.0.1",
+			})
+			return err
+		}
 		session, err = IssueSession(ctx, tx, principalType, principalID, tenantID, time.Hour, "test-agent", "127.0.0.1")
 		return err
 	})

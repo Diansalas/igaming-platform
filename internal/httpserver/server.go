@@ -67,6 +67,14 @@ type Deps struct {
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
 
+	// StaffMFA is the ADR 0119 S3 staff MFA subsystem (NewStaffMFA, from keys
+	// built by staffmfa.LoadKeys). Staff login is two-step and a staff
+	// session exists only after a verified second factor. nil makes every
+	// staff login, second-factor, enrolment and staff refresh request answer
+	// 503: there is no password-only fallback and no bypass mode.
+	// cmd/platform-api always sets it (it refuses to start without the keys).
+	StaffMFA *StaffMFA
+
 	// PaymentOrchestrator resolves/routes deposits and dispatches provider
 	// callbacks (Stage 3B). Nil is treated as "financial routes
 	// disabled" by registerFinancialRoutes, so services that don't need

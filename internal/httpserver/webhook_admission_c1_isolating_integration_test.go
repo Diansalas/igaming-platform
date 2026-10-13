@@ -135,7 +135,7 @@ func TestAdmission_C1a_PaymentsCredentialResolutionGateRejection_Isolated(t *tes
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	handler, rt := NewWithAdmission(Deps{
-		DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
+		DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
 		PaymentOrchestrator: orchestrator, WebhookAdmission: testAdmissionSettings(),
 	})
 	if err := rt.LoadDirectory(context.Background()); err != nil {
@@ -168,7 +168,7 @@ func TestAdmission_C1a_CasinoCredentialResolutionGateRejection_Isolated(t *testi
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	handler, rt := NewWithAdmission(Deps{
-		DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
+		DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
 		CasinoOrchestrator: orchestrator, WebhookAdmission: testAdmissionSettings(),
 	})
 	if err := rt.LoadDirectory(context.Background()); err != nil {
@@ -210,7 +210,7 @@ func TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated(t *testing.
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	settings := testAdmissionSettings()
 	handler, rt := NewWithAdmission(Deps{
-		DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
+		DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
 		AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 		PersonResolver:         identityresolution.NewMockPersonResolver(),
 		KYCOrchestrator:        orchestrator,

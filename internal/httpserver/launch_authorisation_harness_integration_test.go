@@ -112,6 +112,7 @@ func (w *lhWorld) serve(svc *launchgov.Service) {
 		Logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                  w.rt,
 		AuthIssuer:          w.issuer,
+		StaffMFA:            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:         "lh-test",
 		AccessTokenTTL:      time.Hour,
 		RefreshTokenTTL:     time.Hour,

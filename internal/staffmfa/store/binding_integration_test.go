@@ -52,8 +52,9 @@ func TestPurposeIsBoundInsideTheKeyedMAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.mustRun(w.a1, func(ctx context.Context, tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `INSERT INTO staff_auth_challenges (tenant_id, staff_user_id, purpose, token_kid, token_mac, staff_version_at_issue, attempts_left, expires_at, via)
-			VALUES ($1, $2, 'enrol', $3, $4, 0, 5, $5, 'invite')`, w.tenantA, w.a1.StaffID, mfaMAC.KID, mfaMAC.MAC, t0.Add(time.Hour))
+		// ADR 0119 S3: t0 now lies in the past, so the row's created_at is the injected t0 (CHECK expires_at > created_at).
+		_, e := tx.Exec(ctx, `INSERT INTO staff_auth_challenges (tenant_id, staff_user_id, purpose, token_kid, token_mac, staff_version_at_issue, attempts_left, expires_at, created_at, via)
+			VALUES ($1, $2, 'enrol', $3, $4, 0, 5, $5, $6, 'invite')`, w.tenantA, w.a1.StaffID, mfaMAC.KID, mfaMAC.MAC, t0.Add(time.Hour), t0)
 		return e
 	})
 	if _, err := w.st.ResolveChallenge(context.Background(), w.rt, ChallengeEnrol, tok.RevealForDelivery()); !errors.Is(err, ErrInvalidChallenge) {
@@ -80,8 +81,8 @@ func TestPurposeIsBoundInsideTheKeyedMAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.mustRun(w.a2, func(ctx context.Context, tx pgx.Tx) error {
-		_, e := tx.Exec(ctx, `INSERT INTO staff_enrolment_tokens (tenant_id, staff_user_id, purpose, token_kid, token_mac, expires_at)
-			VALUES ($1, $2, 'bootstrap', $3, $4, $5)`, w.tenantA, w.a2.StaffID, inviteMAC.KID, inviteMAC.MAC, t0.Add(time.Hour))
+		_, e := tx.Exec(ctx, `INSERT INTO staff_enrolment_tokens (tenant_id, staff_user_id, purpose, token_kid, token_mac, expires_at, created_at)
+			VALUES ($1, $2, 'bootstrap', $3, $4, $5, $6)`, w.tenantA, w.a2.StaffID, inviteMAC.KID, inviteMAC.MAC, t0.Add(time.Hour), t0)
 		return e
 	})
 	if _, err := w.st.ResolveEnrolmentToken(context.Background(), w.rt, []EnrolmentPurpose{EnrolBootstrap}, tok2.RevealForDelivery()); !errors.Is(err, ErrInvalidEnrolmentToken) {

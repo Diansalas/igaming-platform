@@ -211,6 +211,9 @@ func TestChecks_FactorTable(t *testing.T) {
 	// C4 (security review of S1): the 24 hour count at the hard-lock threshold needs hard_locked_at.
 	wantCheck(t, "C4: count 10 without hard_locked_at", upd(`failed_24h_count = 10, failed_24h_start = now()`), "staff_mfa_factors_hard_lock_consistent")
 	wantCheck(t, "count above 10", upd(`failed_24h_count = 11, failed_24h_start = now(), hard_locked_at = now()`), "staff_mfa_factors_failed_24h_range")
+	// ADR 0119 S3 (migration 0138): probed BEFORE the count is raised below - from a non-zero count this update would
+	// be a decrease, which the SF008 database-clock rule refuses before any CHECK runs.
+	wantCheck(t, "24h window without a count", upd(`failed_24h_count = 0, failed_24h_start = now()`), "staff_mfa_factors_window_24h_agrees")
 	if err := upd(`failed_24h_count = 9, failed_24h_start = now()`); err != nil {
 		t.Fatalf("count 9 without a hard lock must pass: %v", err)
 	}
@@ -218,7 +221,6 @@ func TestChecks_FactorTable(t *testing.T) {
 	wantCheck(t, "failed_count 5", upd(`failed_count = 5, failed_window_start = now()`), "staff_mfa_factors_failed_count_range")
 	wantCheck(t, "failed_count 1 without a window", upd(`failed_count = 1`), "staff_mfa_factors_window_agrees")
 	wantCheck(t, "a window without a count", upd(`failed_window_start = now()`), "staff_mfa_factors_window_agrees")
-	wantCheck(t, "24h window without a count", upd(`failed_24h_count = 0, failed_24h_start = now()`), "staff_mfa_factors_window_24h_agrees")
 	// Row shape.
 	ins := func(status, extra string) error {
 		return w.ownerExec(w.a2, `INSERT INTO staff_mfa_factors (tenant_id, staff_user_id, factor_type, status, secret_kid, secret_nonce, secret_ct`+

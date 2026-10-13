@@ -70,7 +70,7 @@ func newPIEnv(t *testing.T, withService bool) *piEnv {
 	e := &piEnv{owner: owner, rt: rt, logs: &piLogBuffer{}, clock: admission.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))}
 	deps := Deps{
 		Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		DB:     rt, AuthIssuer: issuer, ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
+		DB:     rt, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 		PersonResolver:                  identityresolution.NewMockPersonResolver(),
 		PayoutInstrumentRegisterLimiter: NewPayoutInstrumentRegisterLimiter(e.clock),
 	}

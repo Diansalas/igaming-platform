@@ -28,6 +28,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -98,6 +99,7 @@ func newKSAPI(t *testing.T) *ksAPI {
 		Logger:              slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logBuf), &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                  pool,
 		AuthIssuer:          issuer,
+		StaffMFA:            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:         "ks-test",
 		AccessTokenTTL:      time.Hour,
 		RefreshTokenTTL:     time.Hour,
@@ -156,11 +158,7 @@ func (a *ksAPI) player(tenant uuid.UUID) uuid.UUID {
 
 func (a *ksAPI) token(subject uuid.UUID, tenant uuid.UUID, role auth.Role, principal auth.PrincipalType) string {
 	a.t.Helper()
-	tok, err := a.issuer.Issue(subject.String(), tenant, role, principal, time.Hour)
-	if err != nil {
-		a.t.Fatal(err)
-	}
-	return tok
+	return authtest.Token(a.t, a.issuer, subject, tenant, role, principal) // ADR 0119 S3: staff tokens carry aal2 assurance
 }
 
 type ksResp struct {

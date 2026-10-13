@@ -174,8 +174,8 @@ func TestLaunchRoutes_NilService_503_DBFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer := auth.NewIssuer(keys, "t", "t")
-	h := New(Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), AuthIssuer: issuer, ServiceName: "t", AccessTokenTTL: time.Hour, RefreshTokenTTL: time.Hour})
-	tok, err := issuer.Issue(uuid.NewString(), uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff, time.Hour)
+	h := New(Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "t", AccessTokenTTL: time.Hour, RefreshTokenTTL: time.Hour})
+	tok, err := issuer.IssueStaff(unitStaffParams(uuid.New(), uuid.Nil, auth.RolePlatformAdmin), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -359,11 +359,22 @@ func TestStaffLogin_PlatformAdminOmitsTenantSlug(t *testing.T) {
 	srv := newTestServer(t, pool, issuer)
 	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "admin-password-1")
 
+	// ADR 0119 S3: the password step of an account without a second factor answers 403 mfa_enrolment_required
+	// (never a token pair); once enrolled, the password step answers 200 with an `mfa` challenge. Both prove the
+	// platform-scoped (no tenant_slug) password check succeeded.
 	resp := postJSON(t, srv, "/v1/staff/auth/login", "", map[string]string{
 		"email": admin.Email, "password": "admin-password-1",
 	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 mfa_enrolment_required for an un-enrolled platform admin, got %d", resp.StatusCode)
+	}
+	wantErrorCode(t, resp, "mfa_enrolment_required")
+	_ = mustLoginStaff(t, srv, "", admin.Email, "admin-password-1") // enrols
+	resp = postJSON(t, srv, "/v1/staff/auth/login", "", map[string]string{
+		"email": admin.Email, "password": "admin-password-1",
+	})
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 for platform admin login, got %d", resp.StatusCode)
+		t.Fatalf("expected 200 (mfa challenge) for platform admin login, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }
@@ -384,29 +395,26 @@ func TestStaffLogin_TenantScopedRequiresTenantSlug(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// ADR 0119 S3: with the right tenant_slug the password check succeeds - 403 mfa_enrolment_required before
+	// enrolment, 200 (mfa challenge) after it.
+	resp = postJSON(t, srv, "/v1/staff/auth/login", "", map[string]string{
+		"tenant_slug": tenant.Slug, "email": staff.Email, "password": "ta-password-1",
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 mfa_enrolment_required with the correct tenant_slug before enrolment, got %d", resp.StatusCode)
+	}
+	wantErrorCode(t, resp, "mfa_enrolment_required")
+	_ = mustLoginStaff(t, srv, tenant.Slug, staff.Email, "ta-password-1") // enrols
 	resp = postJSON(t, srv, "/v1/staff/auth/login", "", map[string]string{
 		"tenant_slug": tenant.Slug, "email": staff.Email, "password": "ta-password-1",
 	})
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 with the correct tenant_slug, got %d", resp.StatusCode)
+		t.Errorf("expected 200 (mfa challenge) with the correct tenant_slug, got %d", resp.StatusCode)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
-func mustLoginStaff(t *testing.T, srv *httptest.Server, tenantSlug, email, password string) tokenPairResponse {
-	t.Helper()
-	body := map[string]string{"email": email, "password": password}
-	if tenantSlug != "" {
-		body["tenant_slug"] = tenantSlug
-	}
-	resp := postJSON(t, srv, "/v1/staff/auth/login", "", body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("staff login failed with status %d", resp.StatusCode)
-	}
-	var tokens tokenPairResponse
-	decodeBody(t, resp, &tokens)
-	return tokens
-}
+// mustLoginStaff (ADR 0119 S3) lives in staff_mfa_fixture_integration_test.go: it runs the real two-step MFA flow.
 
 // TestRBAC_RoleDistinctionEnforced is the end-to-end proof that
 // permission-based RBAC actually gates the admin endpoints: support can
@@ -907,4 +915,17 @@ func TestStaffLogin_LockoutHoldsAcrossEmailCaseVariants(t *testing.T) {
 		t.Errorf("expected 429 for correct password while locked out, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// wantErrorCode asserts the error body's code (ADR 0119 S3 code review F7: a 403 alone could be any refusal) and
+// closes the body.
+func wantErrorCode(t *testing.T, resp *http.Response, code string) {
+	t.Helper()
+	defer func() { _ = resp.Body.Close() }()
+	var e struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&e); err != nil || e.Code != code {
+		t.Fatalf("expected error code %q, got %q (%v)", code, e.Code, err)
+	}
 }

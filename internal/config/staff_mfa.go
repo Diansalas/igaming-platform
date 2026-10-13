@@ -70,8 +70,8 @@ func loadStaffMFA(cfg *Config) error {
 // validateStaffMFA applies the ADR 0119 section 5.1 and 7.4 rules:
 //
 //   - the two key families are required when APP_ENV is "production" (the
-//     staffmfa.VerifyStartup gate, wired with the S3 flows, requires them in
-//     every environment);
+//     staffmfa.LoadKeys / VerifyStartup gate, called by cmd/platform-api and
+//     cmd/seed-admin since S3, requires them in every environment);
 //   - a partial configuration (one family, or keys without an active kid) is
 //     refused in every environment;
 //   - malformed entries, keys under 32 decoded bytes, unknown active kids and
@@ -103,12 +103,12 @@ func (c Config) validateStaffMFA() error {
 		return fmt.Errorf("config: STAFF_MFA_ISSUER must be 1-64 bytes of UTF-8 without ':', control characters or surrounding whitespace")
 	}
 
-	keys, err := staffmfa.NewKeysFromConfig(c.StaffMFAFactorActiveKID, c.StaffMFAFactorKeys.Reveal(),
+	configured, err := staffmfa.CheckKeyConfig(c.StaffMFAFactorActiveKID, c.StaffMFAFactorKeys.Reveal(),
 		c.StaffMFAMACActiveKID, c.StaffMFAMACKeys.Reveal())
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	if keys == nil {
+	if !configured {
 		if c.Environment == "production" {
 			return fmt.Errorf("config: %s / %s and %s / %s are required when APP_ENV=production (ADR 0119 section 5.1); see docs/runbooks/staff-mfa-keys.md",
 				staffmfa.EnvFactorKeys, staffmfa.EnvFactorActiveKID, staffmfa.EnvMACKeys, staffmfa.EnvMACActiveKID)
@@ -131,6 +131,44 @@ func (c Config) validateStaffMFA() error {
 		}
 	}
 	return nil
+}
+
+// ValidateStaffMFAEnv applies, to the process environment, exactly the staff
+// MFA rules Load applies (loadStaffMFA, validateStaffMFA and the pairwise
+// platform key-family registry): the published-placeholder refusal outside
+// explicit development, the duration bounds, the issuer, and distinctness
+// from every other platform key family that is set. Binaries that need the
+// staff MFA keys without the whole platform-api configuration (cmd/seed-admin)
+// call it before staffmfa.LoadKeys (ADR 0119 S3 security review C2), so no
+// binary can mint staff MFA material under keys platform-api would refuse.
+func ValidateStaffMFAEnv() error {
+	_, appEnvPresent := os.LookupEnv("APP_ENV")
+	cfg := Config{
+		Environment:         resolveAppEnv(),
+		EnvironmentExplicit: appEnvPresent,
+	}
+	readPlatformKeyFamilies(&cfg)
+	if err := loadStaffMFA(&cfg); err != nil {
+		return err
+	}
+	if err := cfg.validateStaffMFA(); err != nil {
+		return err
+	}
+	return cfg.validatePlatformKeyFamilies()
+}
+
+// readPlatformKeyFamilies reads every NON-staff-MFA platform key family of the
+// registry from the environment, the same variables and defaults as Load
+// (TestValidateStaffMFAEnv_ReadsTheSameFamiliesAsLoad pins the agreement).
+func readPlatformKeyFamilies(cfg *Config) {
+	cfg.JWTActiveKID = getEnvDefault("JWT_ACTIVE_KID", "k1")
+	cfg.JWTSigningSecret = os.Getenv("JWT_SIGNING_SECRET")
+	cfg.JWTPreviousKID = getEnvDefault("JWT_PREVIOUS_KID", "k0")
+	cfg.JWTPreviousSecret = os.Getenv("JWT_PREVIOUS_SECRET")
+	cfg.ProviderCredentialFingerprintKey = NewSecretValue(os.Getenv("PROVIDER_CREDENTIAL_FINGERPRINT_KEY"))
+	cfg.ActorProofKeys = NewSecretValue(os.Getenv("ACTOR_PROOF_KEYS"))
+	cfg.PayoutInstrumentKeys = NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_KEYS"))
+	cfg.PayoutInstrumentFPKeys = NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_FP_KEYS"))
 }
 
 // ---- the platform key-family registry (ADR 0119 section 5.1, review N7) ------

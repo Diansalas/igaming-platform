@@ -92,6 +92,12 @@ const (
 	rateLimitRefreshPerMin    = 120
 	rateBucketCredential      = "credential"
 	rateLimitCredentialPerMin = 20
+	// rateBucketMFA covers the ADR 0119 second-factor and enrolment endpoints
+	// (POST /v1/staff/auth/mfa/*, /v1/staff/auth/enrol/start|confirm; the S4b
+	// step-up endpoint joins it). Section 6.5: 30 per IP per minute. The
+	// per-factor counters in the database are the real control (R9).
+	rateBucketMFA      = "mfa"
+	rateLimitMFAPerMin = 30
 )
 
 // rateLimiterMaxKeys caps how many distinct (bucket, IP) pairs are tracked

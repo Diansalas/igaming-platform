@@ -34,6 +34,7 @@ func newCasinoTestServerWithLogger(t *testing.T, pool *db.Pool, issuer *auth.Iss
 		Logger:                      logger,
 		DB:                          pool,
 		AuthIssuer:                  issuer,
+		StaffMFA:                    testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
 		ServiceName:                 "platform-api-test",
 		AccessTokenTTL:              5 * time.Minute,
 		RefreshTokenTTL:             time.Hour,

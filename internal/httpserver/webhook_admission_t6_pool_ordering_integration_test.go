@@ -217,7 +217,7 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		settings.VerifiedRate["kyc"] = WebhookRateBurst{Rate: 10, Burst: 1}
 		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 		handler, rt := NewWithAdmission(Deps{
-			DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
+			DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
 			AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 			PersonResolver:         identityresolution.NewMockPersonResolver(),
 			KYCOrchestrator:        orchestrator,

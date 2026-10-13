@@ -156,8 +156,16 @@ func TestKinds_ScopeSubjectConsistency(t *testing.T) {
 			}
 			continue
 		}
-		if def.Scope == ScopeKindPlatform && !def.RequiresSubject {
+		// ADR 0119 S3 (migration 0138): exactly the five platform-staff Kinds are subjectless business Kinds (a
+		// platform staff member has no tenant); they mirror the widened alert_kinds_check1 CHECK and are never
+		// raisable in a tenant transaction.
+		subjectless := map[Kind]bool{KindStaffPlatformMFAIntegrity: true, KindStaffPlatformSessionIntegrity: true,
+			KindStaffPlatformMFAHardLocked: true, KindStaffPlatformMFARecoveryUsed: true, KindStaffPlatformMFAFailurePattern: true}
+		if def.Scope == ScopeKindPlatform && !def.RequiresSubject && !subjectless[k] {
 			t.Errorf("platform kind %q (non-meta) must RequireSubject", k)
+		}
+		if subjectless[k] && (def.RequiresSubject || def.InTxRaisableByTenant) {
+			t.Errorf("platform staff kind %q must have RequiresSubject=false and InTxRaisableByTenant=false", k)
 		}
 		if def.Simulation && def.Severity != SeverityP3 {
 			t.Errorf("simulation kind %q must be p3, got %s", k, def.Severity)

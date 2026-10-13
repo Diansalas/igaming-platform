@@ -35,6 +35,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
+	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 )
 
 func main() {
@@ -51,6 +52,22 @@ func run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	// ADR 0119 S3 entry gates 21.7 (a)-(c): the staff MFA key families are
+	// built through their ONE constructor, which runs staffmfa.VerifyStartup,
+	// before anything else - in EVERY environment, APP_ENV unset included
+	// (closes S1-R1). There is no staff login without them and no bypass mode.
+	// Pure: no I/O, so it precedes every side effect.
+	staffMFAKeys, err := staffmfa.LoadKeys(cfg.StaffMFAFactorActiveKID, cfg.StaffMFAFactorKeys.Reveal(),
+		cfg.StaffMFAMACActiveKID, cfg.StaffMFAMACKeys.Reveal())
+	if err != nil {
+		return fmt.Errorf("staff MFA keys: %w", err)
+	}
+	staffMFA, err := httpserver.NewStaffMFA(staffMFAKeys, cfg.StaffMFAIssuer,
+		cfg.StaffAccessTokenTTL, cfg.StaffRefreshIdleTTL, cfg.StaffSessionAbsoluteTTL)
+	if err != nil {
+		return fmt.Errorf("staff MFA: %w", err)
 	}
 
 	// MOCK-ADAPTER-PROD-1 (Stage 10.3, ADR 0085's Stage 10.3 amendment;
@@ -379,6 +396,7 @@ func run() error {
 		ServiceName:                 cfg.OTelServiceName,
 		AccessTokenTTL:              cfg.AccessTokenTTL,
 		RefreshTokenTTL:             cfg.RefreshTokenTTL,
+		StaffMFA:                    staffMFA,
 		PaymentOrchestrator:         orchestrator,
 		StatementSources:            stmtSources,
 		PaymentsOutboundCredentials: providers.paymentsOutboundCredentials(),
