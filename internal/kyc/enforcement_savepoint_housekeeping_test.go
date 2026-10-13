@@ -130,8 +130,8 @@ func TestEvaluateEnforcement_SavepointRollbackFailure_FailsClosedToUnavailable(t
 	// ADR 0116 S1: EvaluateEnforcement now also runs the AML hold read, which needs a real round trip a fake tx cannot
 	// answer. This test is about the KYC savepoint housekeeping only, so the hold read is stubbed to "no hold".
 	prev := evaluateHold
-	evaluateHold = func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID, aml.Operation) aml.HoldVerdict {
-		return aml.HoldVerdict{}
+	evaluateHold = func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID, aml.Operation) (aml.HoldVerdict, error) {
+		return aml.HoldVerdict{}, nil
 	}
 	defer func() { evaluateHold = prev }()
 

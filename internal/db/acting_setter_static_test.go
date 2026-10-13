@@ -148,6 +148,8 @@ func TestA16_OnlyTwoPackagesCallTheActingSetter(t *testing.T) {
 	allowedFile := filepath.Join(root, "internal", "payments", "manual_resolution.go")
 	// HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3, migration 0124): the one further call site.
 	allowedFile2 := filepath.Join(root, "internal", "payments", "withdrawal_hold_resolution.go")
+	// ADR 0116 S3: the AML officer service opens the acting session of a platform aml_officer (one call site, in service.go).
+	allowedFile3 := filepath.Join(root, "internal", "aml", "service.go")
 
 	var violations []string
 	if err := walkGoFilesSkippingHiddenAndTestdata(root, func(path string, src []byte) error {
@@ -157,7 +159,7 @@ func TestA16_OnlyTwoPackagesCallTheActingSetter(t *testing.T) {
 		if !actingSetterCallPattern.Match(src) {
 			return nil
 		}
-		if strings.HasPrefix(path, allowedDir+string(filepath.Separator)) || path == allowedFile || path == allowedFile2 {
+		if strings.HasPrefix(path, allowedDir+string(filepath.Separator)) || path == allowedFile || path == allowedFile2 || path == allowedFile3 {
 			return nil
 		}
 		// The setter's own definition file legitimately contains its own

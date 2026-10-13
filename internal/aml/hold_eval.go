@@ -3,7 +3,6 @@ package aml
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,23 +39,25 @@ var holdProbe = probeHoldActive
 
 // EvaluateHold is the AML enforcement read (ADR 0116 s5.1, L1 / C6): it asks aml_hold_active() whether an active hold
 // gates op for the person in the tenant, INSIDE the caller's transaction, with no I/O other than that single database
-// round trip. It NEVER returns an error: any failure is HoldVerdict{EvalFailed: true}, which every caller treats as a
-// deny. It is safe to call from within a read-only evaluation: the probe runs in a savepoint that is always rolled back,
-// so a failing read never aborts the caller's transaction.
+// round trip. A failure of the read itself is NOT an error return: it is HoldVerdict{EvalFailed: true}, which every caller
+// treats as a deny of exactly this operation. The probe runs in a savepoint that is always rolled back, so a failing read
+// never aborts the caller's transaction.
 //
-// A failed evaluation raises the alert Kind aml.hold_eval_failed (operation name only) in the caller's transaction.
-func EvaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) HoldVerdict {
+// A failed evaluation raises the alert Kind aml.hold_eval_failed (operation name only) in the caller's transaction. The
+// returned error is non-nil ONLY when that alert statement propagated a hard error (the transaction is unusable: a
+// deadlock, a cancelled context); the verdict is still EvalFailed and the caller must treat the whole call as a deny (the
+// LF F4 rule: an in-tx raise result is never dropped).
+func EvaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (HoldVerdict, error) {
 	if tenantID == uuid.Nil || personID == uuid.Nil || accountID == uuid.Nil || !op.Valid() {
 		// A structurally invalid call is a caller bug: deny it. There is no tenant to attribute an alert to.
-		return HoldVerdict{EvalFailed: true}
+		return HoldVerdict{EvalFailed: true}, nil
 	}
 	held, err := holdProbe(ctx, tx, tenantID, personID, accountID, op)
 	if err != nil {
-		raiseEvalFailed(ctx, tx, tenantID, op)
-		return HoldVerdict{EvalFailed: true}
+		return HoldVerdict{EvalFailed: true}, raiseEvalFailed(ctx, tx, tenantID, op)
 	}
 	if !held {
-		return HoldVerdict{}
+		return HoldVerdict{}, nil
 	}
 	v := HoldVerdict{Held: true}
 	// The matched hold id is evidence for the AML-scoped decision log. Its lookup is best effort: the operation is
@@ -64,15 +65,19 @@ func EvaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID 
 	if id, mErr := matchHold(ctx, tx, tenantID, personID, accountID, op); mErr == nil {
 		v.HoldID = id
 	}
-	return v
+	return v, nil
 }
 
-// probeHoldActive runs, in ONE round trip, SAVEPOINT; SET LOCAL statement_timeout; SELECT aml_hold_active(...);
-// ROLLBACK TO SAVEPOINT; RELEASE SAVEPOINT. The rollback undoes the SET LOCAL, so the caller's own timeouts are untouched.
+// probeHoldActive opens a SAVEPOINT (one round trip), then runs SET LOCAL statement_timeout; SELECT aml_hold_active(...);
+// ROLLBACK TO SAVEPOINT; RELEASE SAVEPOINT as ONE pipelined batch (a second round trip). The rollback undoes the SET LOCAL,
+// so the caller's own timeouts are untouched, and ANY failure inside the savepoint (a missing function, a permission error,
+// a timeout) is contained: the caller's transaction stays usable.
 func probeHoldActive(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (bool, error) {
 	const sp = "aml_hold_probe"
+	if _, err := tx.Exec(ctx, "SAVEPOINT "+sp); err != nil {
+		return false, fmt.Errorf("aml: hold probe: open savepoint: %w", err)
+	}
 	b := &pgx.Batch{}
-	b.Queue("SAVEPOINT " + sp)
 	b.Queue(`SELECT set_config('statement_timeout', $1, true)`, fmt.Sprintf("%d", HoldEvalTimeout.Milliseconds()))
 	b.Queue(`SELECT aml_hold_active($1, $2, $3, $4)`, tenantID, personID, accountID, string(op))
 	b.Queue("ROLLBACK TO SAVEPOINT " + sp)
@@ -84,11 +89,6 @@ func probeHoldActive(ctx context.Context, tx pgx.Tx, tenantID, personID, account
 	)
 	if _, err := br.Exec(); err != nil {
 		runErr = err
-	}
-	if runErr == nil {
-		if _, err := br.Exec(); err != nil {
-			runErr = err
-		}
 	}
 	if runErr == nil {
 		if err := br.QueryRow().Scan(&held); err != nil {
@@ -110,9 +110,9 @@ func probeHoldActive(ctx context.Context, tx pgx.Tx, tenantID, personID, account
 		runErr = closeErr
 	}
 	if runErr != nil {
-		// The savepoint may still be open (the batch stopped at the failing statement): roll back to it so the caller's
-		// transaction is usable, then release it. If even that fails, the transaction is unusable and the next statement
-		// of the caller fails, which is itself fail-closed.
+		// The savepoint is still open (the batch stopped at the failing statement): roll back to it so the caller's
+		// transaction is usable, then release it. If even that fails the transaction is unusable and the caller's next
+		// statement fails, which is itself fail-closed.
 		_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+sp)
 		_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT "+sp)
 		return false, fmt.Errorf("aml: hold probe: %w", runErr)
@@ -137,17 +137,14 @@ func matchHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uui
 	return *id, nil
 }
 
-// raiseEvalFailed raises aml.hold_eval_failed in the caller's transaction. The alerting layer swallows only the narrow,
-// documented SQLSTATE classes and never lets a failed raise change the business outcome (ADR 0102 s7.2).
-func raiseEvalFailed(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, op Operation) {
-	err := alerting.RaiseGuarded(ctx, tx, alerting.Alert{
+// raiseEvalFailed raises aml.hold_eval_failed in the caller's transaction and RETURNS the alerting layer's result: it
+// swallows only the narrow, documented SQLSTATE classes (ADR 0102 s7.2); anything else is a hard error the transaction
+// owner must see.
+func raiseEvalFailed(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, op Operation) error {
+	return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
 		Kind:            alerting.KindAMLHoldEvalFailed,
 		SubjectTenantID: tenantID,
 		Discriminator:   "hold_eval:" + string(op),
 		Attributes:      map[string]alerting.AttrValue{"operation": string(op)},
 	})
-	if err != nil {
-		// The denial stands; the evidence is the log line (no ids: operation only).
-		slog.Default().Error("aml_hold_eval_failed_alert_not_raised", "operation", string(op))
-	}
 }

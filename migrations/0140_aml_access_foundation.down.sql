@@ -14,7 +14,7 @@ BEGIN
         RAISE EXCEPTION 'migration 0140 down refused: AML tables of a later migration still exist; roll those back first' USING ERRCODE = 'AM099';
     END IF;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_proc WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'aml\_%'
-                  AND proname NOT IN ('aml_officer_grant_request_guard', 'aml_owner_scope_of_tenant', 'aml_scope_compatible',
+                  AND proname NOT IN ('aml_owner_scope_of_tenant', 'aml_scope_compatible',
                                       'aml_officer_quorum', 'aml_assert_quorum', 'aml_authorize', 'aml_assert_row_scope')) THEN
         RAISE EXCEPTION 'migration 0140 down refused: AML functions of a later migration still exist; roll those back first' USING ERRCODE = 'AM099';
     END IF;
@@ -31,8 +31,6 @@ BEGIN
 END
 $$;
 
-DROP TRIGGER staff_capability_grant_requests_u_aml_officer ON staff_capability_grant_requests;
-DROP FUNCTION aml_officer_grant_request_guard();
 DROP FUNCTION aml_assert_row_scope(text, text);
 DROP FUNCTION aml_authorize(uuid, text, text, text);
 DROP FUNCTION aml_assert_quorum(uuid, text);

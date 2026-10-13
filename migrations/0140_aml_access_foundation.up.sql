@@ -14,9 +14,12 @@
 --   1. The K1 capability `aml_officer` (ADR 0099 catalogue row + operation_kind `aml_officer`, class
 --      `outside_mandatory_class`: it is NOT a financial approval operation). It is created ONLY by the existing
 --      proof-bound four-eyes capability grant flow (0112 / 0120). Role `aml_officer` is NOT added to any auth role.
---   2. staff_capability_grant_requests gets one more BEFORE INSERT guard: only a PLATFORM principal may REQUEST an
---      aml_officer grant (AM020). The 0112 guards already require a distinct platform approver (R-7), distinct Persons
---      (R-4) and a grantee with a linked person_id. A tenant admin can therefore never create or assign the role.
+--   2. NO new request guard: the K1 flow is already four-eyes and proof-bound. A tenant-scope officer is REQUESTED by a
+--      tenant principal of the same tenant (a platform session cannot read tenant staff rows, 0112) and DECIDED only by a
+--      distinct PLATFORM approver (R-7), who must also be a different Person from the requester and the grantee (R-4); a
+--      platform officer (acting, bounded by acting_grant_max_lifetime) is requested by a platform principal (R-6). A tenant
+--      admin therefore can never create or assign the role by themselves: their request is inert until a platform co-approval,
+--      and `staff:manage` cannot set it (it is a capability, not a role). The eligible tenant grantee role is `compliance`.
 --   3. aml_owner_scope_of_tenant(), aml_scope_compatible(), aml_officer_quorum() and aml_authorize(): the ONE
 --      authorisation primitive every AML SECURITY DEFINER function (0141, 0142) calls FIRST. aml_authorize resolves
 --      the actor from the session (financial_actor_session(): tenant | platform_acting only), re-checks IN SQL that the
@@ -38,7 +41,7 @@
 --   AM005 append-only table: UPDATE / DELETE / TRUNCATE refused         AM006 hold lift refused
 --   AM007 hold person / account binding refused (C2)                    AM010 case state machine refused
 --   AM011 four-eyes binding refused                                     AM012 stale or invalid proposal
---   AM013 note refused                                                  AM020 aml_officer request by a non-platform actor
+--   AM013 note refused
 --   AM026 session tenant is not the requested tenant                    AM040 not found (also: out of the actor's scope)
 --   AM098 up pre-flight refused                                         AM099 down refused
 -- AP0xx comes from the 0120 verifier unchanged.
@@ -111,34 +114,7 @@ ALTER TABLE financial_control_classifications FORCE ROW LEVEL SECURITY;
 ALTER TABLE financial_capability_catalogue FORCE ROW LEVEL SECURITY;
 
 -- =========================================================================
--- 2. Only a platform principal may REQUEST an aml_officer grant (ADR 0116 s6: "Tenant admins can never create or
---    assign it, and staff:manage cannot set it"). Fires after 0112's own guard (name order) and before the 0120 proof
---    guard (zz_). Plain invoker function, search_path pinned.
--- =========================================================================
-CREATE FUNCTION aml_officer_grant_request_guard() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path = pg_catalog, public, pg_temp
-AS $$
-DECLARE
-    v_actor record;
-BEGIN
-    IF NEW.capability <> 'aml_officer' THEN
-        RETURN NEW;
-    END IF;
-    SELECT * INTO v_actor FROM public.financial_actor_session();
-    IF v_actor.scope IS DISTINCT FROM 'platform' THEN
-        RAISE EXCEPTION 'aml: only a platform principal may request an aml_officer grant' USING ERRCODE = 'AM020';
-    END IF;
-    RETURN NEW;
-END
-$$;
-
-CREATE TRIGGER staff_capability_grant_requests_u_aml_officer
-    BEFORE INSERT ON staff_capability_grant_requests
-    FOR EACH ROW EXECUTE FUNCTION aml_officer_grant_request_guard();
-
--- =========================================================================
--- 3. Scope helpers and the authorisation primitive
+-- 2. Scope helpers and the authorisation primitive
 -- =========================================================================
 
 -- The owner scope of a tenant's AML data, from the licensing model (ADR 0006): our licence -> 'platform'; the tenant's
@@ -263,9 +239,8 @@ END
 $$;
 
 -- =========================================================================
--- 4. Grants. Helper functions are not callable by the runtime role; the definer API of 0141 / 0142 is.
+-- 3. Grants. Helper functions are not callable by the runtime role; the definer API of 0141 / 0142 is.
 -- =========================================================================
-REVOKE ALL ON FUNCTION aml_officer_grant_request_guard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_owner_scope_of_tenant(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_scope_compatible(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_officer_quorum(uuid, text) FROM PUBLIC;
@@ -275,7 +250,6 @@ REVOKE ALL ON FUNCTION aml_assert_row_scope(text, text) FROM PUBLIC;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
-        REVOKE ALL ON FUNCTION aml_officer_grant_request_guard() FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_owner_scope_of_tenant(uuid) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_scope_compatible(text, text) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_officer_quorum(uuid, text) FROM igaming_runtime;

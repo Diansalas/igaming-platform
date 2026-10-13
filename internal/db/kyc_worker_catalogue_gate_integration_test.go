@@ -237,6 +237,14 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 	// "TO igaming_runtime" policy or a current_user-dependent expression).
 	roleDep := regexp.MustCompile(`(?i)\b(current_user|session_user|current_role|pg_has_role|has_\w+_privilege)\b`)
 	for _, p := range policies {
+		// ADR 0116 (migrations 0141/0142): the AML tables carry ONE policy, aml_owner_session, TO the table OWNER only (the
+		// role of the SECURITY DEFINER functions), bound to the session tenant. The runtime role has no privilege and no
+		// policy there, so a re-granted privilege still yields zero rows. The owner-pool probe is the WORST case for such a
+		// policy (it is applied to the very role the probe runs as), so the gate stays conservative; any OTHER role-specific
+		// policy still fails here.
+		if strings.HasPrefix(p.table, "aml_") && p.name == "aml_owner_session" && len(p.roles) == 1 && p.roles[0] != "public" {
+			continue
+		}
 		if strings.Join(p.roles, ",") != "public" {
 			t.Errorf("policy %s.%s is role-specific (roles=%v): the owner-pool probe is no longer equivalent to the runtime role; revisit the gate", p.table, p.name, p.roles)
 		}

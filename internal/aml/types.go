@@ -144,7 +144,7 @@ func classify(err error) error {
 	switch pe.Code {
 	case "AM040":
 		return ErrNotFound
-	case "AM001", "AM002", "AM020", "AM026":
+	case "AM001", "AM002", "AM026":
 		return fmt.Errorf("%w: %s", ErrForbidden, pe.Message)
 	case "AM003":
 		return ErrQuorum

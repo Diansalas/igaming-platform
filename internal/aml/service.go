@@ -65,6 +65,11 @@ func (s *Service) runActor(ctx context.Context, a Actor, fn func(ctx context.Con
 		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, s.cfg.LockTimeout); err != nil {
 			return fmt.Errorf("aml: set lock_timeout: %w", err)
 		}
+		// Request metadata for the append-only case trail (evidence only; the database validates the shape and ignores
+		// anything unusable). It carries no authority.
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.aml_ip', $1, true), set_config('app.aml_request_id', $2, true)`, a.IPAddress, a.RequestID); err != nil {
+			return fmt.Errorf("aml: set request metadata: %w", err)
+		}
 		return fn(ctx, tx)
 	}
 	var err error
@@ -98,6 +103,7 @@ const (
 	OpProofHoldPlace      = "aml_hold:place"
 	OpProofHoldLift       = "aml_hold:lift"
 	OpProofHoldRead       = "aml_hold:read"
+	OpProofAlertRaise     = "aml_alert:raise"
 	OpProofCaseOpen       = "aml_case:open"
 	OpProofCaseRead       = "aml_case:read"
 	OpProofCaseTransition = "aml_case:transition"
@@ -110,7 +116,7 @@ const (
 // proofOperations is the closed set, exported to the actorproof scope mirror test.
 var proofOperations = map[string]bool{
 	OpProofHoldPlace: true, OpProofHoldLift: true, OpProofHoldRead: true,
-	OpProofCaseOpen: true, OpProofCaseRead: true, OpProofCaseTransition: true, OpProofCaseNote: true,
+	OpProofAlertRaise: true, OpProofCaseOpen: true, OpProofCaseRead: true, OpProofCaseTransition: true, OpProofCaseNote: true,
 	OpProofCaseFlagSAR: true, OpProofCasePropose: true, OpProofCaseApprove: true,
 }
 

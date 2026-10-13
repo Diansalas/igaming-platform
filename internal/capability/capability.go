@@ -46,6 +46,13 @@ const (
 	// only (eligible_tenant_roles is empty; no tenant role is ever eligible).
 	CapabilityWithdrawalHoldResolutionRequest Capability = "withdrawal_hold_resolution:request"
 	CapabilityWithdrawalHoldResolutionApprove Capability = "withdrawal_hold_resolution:approve"
+
+	// ADR 0116 S3 (migration 0140): the AML officer. Granted ONLY by this four-eyes flow: a tenant officer is requested by a
+	// tenant principal and decided by a distinct PLATFORM approver (R-7), a platform (acting) officer is requested by a
+	// platform principal and decided by a distinct platform approver; every Person involved is distinct (R-4). A tenant
+	// admin can therefore never create or assign the role alone. It is not a financial approval operation: nothing in
+	// internal/adjustment or internal/payments consults it.
+	CapabilityAMLOfficer Capability = "aml_officer"
 )
 
 // RequestStatus mirrors staff_capability_grant_requests.status.

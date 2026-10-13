@@ -270,7 +270,7 @@ func EvaluateEnforcement(ctx context.Context, tx pgx.Tx, params EnforcementParam
 	// ADR 0116 s5.1 (L1 / C6): the AML hold check runs UNCONDITIONALLY after the full KYC path, and the two are combined
 	// at the end. It is never skipped by the no-licence `not_required` early return, and the KYC path still runs when a
 	// hold is active, so there is no early-return timing signal.
-	return composeHold(ctx, tx, params, decision), nil
+	return composeHold(ctx, tx, params, decision)
 }
 
 // evaluateHold is the AML enforcement read. It is a package variable ONLY so a pure unit test with a fake pgx.Tx (which
@@ -303,8 +303,13 @@ const accountReviewMessage = "account under review"
 // Public equivalence (C4): a KYC `pending`, an AML `held` and a hold-evaluator error all produce Outcome pending, Allowed
 // false and Code AccountReviewCode - byte-identical at every gate. A KYC `failed` / `unavailable` keeps its own public
 // result (it already denies and the player is told nothing new); the hold is still recorded in the AML-scoped log.
-func composeHold(ctx context.Context, tx pgx.Tx, params EnforcementParams, kycDecision EnforcementDecision) EnforcementDecision {
-	verdict := evaluateHold(ctx, tx, params.TenantID, params.PersonID, params.PlayerAccountID, amlOperationOf(params.Operation))
+func composeHold(ctx context.Context, tx pgx.Tx, params EnforcementParams, kycDecision EnforcementDecision) (EnforcementDecision, error) {
+	verdict, hErr := evaluateHold(ctx, tx, params.TenantID, params.PersonID, params.PlayerAccountID, amlOperationOf(params.Operation))
+	if hErr != nil {
+		// Only a HARD error of the evaluator's alert raise (the transaction is unusable): every caller treats a non-nil
+		// error from EvaluateEnforcement as a deny (ADR 0096 s2.2).
+		return EnforcementDecision{}, fmt.Errorf("%w: %w", ErrEnforcementUnavailable, hErr)
+	}
 	kycDecision.Hold = verdict
 	kycDecision.KYCOutcome = kycDecision.Outcome
 	kycDecision.TrueOutcome = kycDecision.Outcome
@@ -313,13 +318,13 @@ func composeHold(ctx context.Context, tx pgx.Tx, params EnforcementParams, kycDe
 		kycDecision.Message = accountReviewMessage
 	}
 	if !verdict.Denied() {
-		return kycDecision
+		return kycDecision, nil
 	}
 	if kycDecision.Outcome == OutcomeFailed || kycDecision.Outcome == OutcomeUnavailable {
 		if verdict.Held {
 			kycDecision.TrueOutcome = OutcomeHeld
 		}
-		return kycDecision
+		return kycDecision, nil
 	}
 	out := kycDecision
 	out.Outcome = OutcomePending
@@ -330,7 +335,7 @@ func composeHold(ctx context.Context, tx pgx.Tx, params EnforcementParams, kycDe
 	if verdict.Held {
 		out.TrueOutcome = OutcomeHeld
 	}
-	return out
+	return out, nil
 }
 
 // evaluateEnforcementReads is EvaluateEnforcement's dispatch, unchanged in
