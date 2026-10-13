@@ -204,8 +204,10 @@ type HoldResolutionOutcome struct {
 type HoldResolutionCall struct {
 	ActorID  uuid.UUID
 	TenantID uuid.UUID
-	Meta     ResolutionMeta
-	Proofs   *actorproof.Issuer
+	// ActorRole is the verified token's role (ADR 0119 S4b section 9.5).
+	ActorRole string
+	Meta      ResolutionMeta
+	Proofs    *actorproof.Issuer
 }
 
 // attachProof signs and attaches the actor proof for ONE governed write. The scope
@@ -265,7 +267,7 @@ func (s *WithdrawalHoldResolutionService) runSession(ctx context.Context, target
 		return ErrHoldResolutionNotPermitted
 	}
 	return s.pool.WithPlatformActingInTenant(ctx, subject, target.tenantID, resolutionID, OperationKindHoldResolution, func(ctx context.Context, tx pgx.Tx) error {
-		return fn(ctx, tx, HoldResolutionCall{ActorID: subject, TenantID: target.tenantID, Meta: meta, Proofs: s.proofs})
+		return fn(ctx, tx, HoldResolutionCall{ActorID: subject, TenantID: target.tenantID, ActorRole: tc.Role, Meta: meta, Proofs: s.proofs})
 	})
 }
 
@@ -577,7 +579,7 @@ func (s *WithdrawalHoldResolutionService) decideInTx(ctx context.Context, tx pgx
 			"preconditions_hold": holdPreconditionRefusal(ctx, tx, wr, tenantStatus, brandStatus) == "",
 		})
 	}
-	if err := lockHoldResolutionStaffAndGrants(ctx, tx, res); err != nil {
+	if err := lockHoldResolutionStaffAndGrants(ctx, tx, res, call); err != nil {
 		return HoldResolutionOutcome{}, err
 	}
 	st, err = readHoldExecStatus(ctx, tx, id)
@@ -691,7 +693,18 @@ func uuidPtrString(u *uuid.UUID) string {
 // the requester and every candidate approver (ascending id), then their grants in
 // force at now() (ascending id). Only id, tenant_id, role, status, person_id are ever
 // selected from staff_users (A-19 column discipline).
-func lockHoldResolutionStaffAndGrants(ctx context.Context, tx pgx.Tx, r HoldResolution) error {
+//
+// ADR 0119 S4b (section 9.5, ADR 0082 Amendment A9): the SAME statement is the
+// scoped in-transaction re-assertion of the acting staff member. The actor's
+// own id joins the ascending-id set; db.SetActorStaffIDForCurrentTx makes the
+// actor's row visible and FOR SHARE-lockable whatever the session (a platform
+// actor in an acting session; migration 0151's staff_actor_self_* pair); and
+// the actor's row must come back active at the verified token's role
+// (db.CheckActorStaffLive; staff_version joins with migration 0139). A
+// suspension committed first is seen here and nothing is written
+// (db.ErrActorStaffNotLive, 401 session_revoked); a later one waits for this
+// transaction.
+func lockHoldResolutionStaffAndGrants(ctx context.Context, tx pgx.Tx, r HoldResolution, call HoldResolutionCall) error {
 	var approvers []uuid.UUID
 	rows, err := tx.Query(ctx, `SELECT decided_by FROM withdrawal_hold_resolution_approvals
 		WHERE resolution_id = $1 AND decision = 'approve' AND payload_hash = $2 ORDER BY decided_by`, r.ID, r.PayloadHash)
@@ -710,10 +723,17 @@ func lockHoldResolutionStaffAndGrants(ctx context.Context, tx pgx.Tx, r HoldReso
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	staff := append([]uuid.UUID{r.RequestedBy}, approvers...)
-	if err := drainRows(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id FROM staff_users
-		WHERE id = ANY($1) ORDER BY id FOR SHARE`, staff)); err != nil {
+	if err := db.SetActorStaffIDForCurrentTx(ctx, tx, call.ActorID); err != nil {
+		return err
+	}
+	staff := append([]uuid.UUID{r.RequestedBy, call.ActorID}, approvers...)
+	locked, err := db.ScanActorStaffRows(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id FROM staff_users
+		WHERE id = ANY($1) ORDER BY id FOR SHARE`, staff))
+	if err != nil {
 		return fmt.Errorf("payments: lock staff rows: %w", err)
+	}
+	if err := db.CheckActorStaffLive(locked, call.ActorID, call.ActorRole); err != nil {
+		return err
 	}
 	if err := drainRows(tx.Query(ctx, `SELECT id FROM staff_capability_grants
 		WHERE tenant_id = $1 AND revoked_at IS NULL AND valid_from <= now() AND (valid_until IS NULL OR now() < valid_until)

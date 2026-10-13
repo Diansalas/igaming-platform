@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
@@ -167,7 +168,7 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 	// then their grants IN FORCE AT now(), both FOR SHARE, ascending id
 	// (ADR 0099 §7.4, LF F3, architect I-5 / R-12 ruling: never "the
 	// unrevoked grant"). Then recount under the locks.
-	if err := lockStaffAndGrants(ctx, tx, req); err != nil {
+	if err := lockStaffAndGrants(ctx, tx, req, call); err != nil {
 		return Outcome{}, err
 	}
 	st, err = readExecutionStatus(ctx, tx, requestID)
@@ -361,7 +362,18 @@ func buildPosting(req Request, playerCash, house uuid.UUID) ledger.TransactionIn
 // id, tenant_id, role, status, person_id are ever selected from
 // staff_users. A concurrent revoke either committed first (and is re-read
 // as revoked by the recount) or waits for this transaction.
-func lockStaffAndGrants(ctx context.Context, tx pgx.Tx, req Request) error {
+//
+// ADR 0119 S4b (section 9.5, ADR 0082 Amendment A9): the SAME statement is the
+// scoped in-transaction re-assertion of the acting staff member. The actor's
+// own id joins the ascending-id set; db.SetActorStaffIDForCurrentTx makes the
+// actor's row visible and FOR SHARE-lockable whatever the session (a platform
+// actor in an acting session; migration 0151's staff_actor_self_* pair); and
+// the actor's row must come back active at the verified token's role
+// (db.CheckActorStaffLive; staff_version joins with migration 0139). A
+// suspension committed first is seen here and nothing is written
+// (db.ErrActorStaffNotLive, 401 session_revoked); a later one waits for this
+// transaction.
+func lockStaffAndGrants(ctx context.Context, tx pgx.Tx, req Request, call Call) error {
 	var approvers []uuid.UUID
 	rows, err := tx.Query(ctx, `SELECT decided_by FROM ledger_adjustment_approvals
 		WHERE request_id = $1 AND decision = 'approve' AND payload_hash = $2 ORDER BY decided_by`, req.ID, req.PayloadHash)
@@ -380,10 +392,17 @@ func lockStaffAndGrants(ctx context.Context, tx pgx.Tx, req Request) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	staff := append([]uuid.UUID{req.InitiatedBy}, approvers...)
-	if err := drain(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id FROM staff_users
-		WHERE id = ANY($1) ORDER BY id FOR SHARE`, staff)); err != nil {
+	if err := db.SetActorStaffIDForCurrentTx(ctx, tx, call.ActorID); err != nil {
+		return err
+	}
+	staff := append([]uuid.UUID{req.InitiatedBy, call.ActorID}, approvers...)
+	locked, err := db.ScanActorStaffRows(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id FROM staff_users
+		WHERE id = ANY($1) ORDER BY id FOR SHARE`, staff))
+	if err != nil {
 		return fmt.Errorf("adjustment: lock staff rows: %w", err)
+	}
+	if err := db.CheckActorStaffLive(locked, call.ActorID, call.ActorRole); err != nil {
+		return err
 	}
 	if err := drain(tx.Query(ctx, `SELECT id FROM staff_capability_grants
 		WHERE tenant_id = $1 AND revoked_at IS NULL AND valid_from <= now() AND (valid_until IS NULL OR now() < valid_until)
