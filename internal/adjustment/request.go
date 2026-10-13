@@ -152,6 +152,12 @@ func SubmitInTx(ctx context.Context, tx pgx.Tx, call Call, id uuid.UUID, in Subm
 	if err := in.validate(); err != nil {
 		return Request{}, err
 	}
+	// ADR 0116 s5.1: a held player's balance cannot be adjusted. Checked BEFORE the proof is attached and the row is written.
+	if v, err := walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID); err != nil {
+		return Request{}, err
+	} else if v.Denied() {
+		return Request{}, ErrAccountUnderReview
+	}
 	// SIGNED-ACTOR-PROOF (migration 0120): bind the proof to this actor, this
 	// request id and the caller-supplied payload (the same digest the
 	// zz_actor_proof_guard trigger recomputes from the row).

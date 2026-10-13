@@ -199,7 +199,15 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 	// Step 6 - the §5.2 execution re-checks (exposure, asset, tenant
 	// status, compensation cap), via the same function as submission.
 	refusal := ""
-	if !st.Enabled {
+	// ADR 0116 s5.1: a hold placed after submission still refuses the EXECUTION (a held balance is never seized, zeroed or
+	// refunded by a manual adjustment). The refusal reuses the generic account_review token.
+	holdVerdict, holdErr := walletHoldVerdict(ctx, tx, req.TenantID, req.WalletID)
+	if holdErr != nil {
+		return Outcome{}, holdErr
+	}
+	if holdVerdict.Denied() {
+		refusal = "AM006:" + RefusalAccountReview
+	} else if !st.Enabled {
 		refusal = "MA014:policy_disabled"
 	} else {
 		var r *string

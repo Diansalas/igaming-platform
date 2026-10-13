@@ -99,7 +99,16 @@ var (
 	// ErrIntegrity: a condition the design makes unreachable occurred
 	// (e.g. an idempotent replay of a never-executed request's key).
 	ErrIntegrity = errors.New("adjustment: integrity violation")
+	// ErrAccountUnderReview (ADR 0116 s5.1, migration 0141): an active AML hold (or a hold-evaluator failure) on the wallet's
+	// player refuses a manual adjustment: no manual adjustment may seize, zero or refund a held balance (HD-AML-9 is a
+	// separate, unbuilt owner question). The wording and the HTTP class are deliberately generic ("conflict"): a tenant staff
+	// member must not learn that an AML hold exists.
+	ErrAccountUnderReview = errors.New("adjustment: account under review")
 )
+
+// RefusalAccountReview is the refusal code stored on a request refused at execution because of a hold. It is the same
+// generic token the player-facing gates use.
+const RefusalAccountReview = "account_review"
 
 // Target is a route-validated target tenant. Its only constructor applies
 // the canActOnTenant rule (a tenant caller may name only its own tenant; a
@@ -255,7 +264,7 @@ func ClassifyError(err error) ErrClass {
 		return ErrClassNotFound
 	case errors.Is(err, ErrForeignTenant), errors.Is(err, ErrNoAuthContext):
 		return ErrClassForbidden
-	case errors.Is(err, ErrNotPending):
+	case errors.Is(err, ErrNotPending), errors.Is(err, ErrAccountUnderReview):
 		return ErrClassConflict
 	case errors.Is(err, ErrRequestExpired):
 		return ErrClassExpired
