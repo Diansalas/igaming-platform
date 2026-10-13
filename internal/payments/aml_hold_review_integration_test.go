@@ -55,6 +55,25 @@ func TestAMLHold_PayoutClaim_EvaluatorFailure_IsRetryableNotTerminal(t *testing.
 	}
 }
 
+// The conversion is for an evaluator fault ALONE: when the KYC side itself denies (failed verification), an evaluator fault
+// does not turn the claim into a retry; the KYC denial stands (terminal rejection through DenyForCompliance).
+func TestAMLHold_PayoutClaim_KYCFailedPlusEvaluatorFailure_StillDenied(t *testing.T) {
+	pool := testPool(t)
+	amlProofs(t)
+	f, orch, _ := fpOrch(t, pool, "mock-aml-evalfail-kycfailed")
+	wr := approvedWithdrawal(t, pool, f, 2_000, "aml-claim-kycfailed")
+	revokeVerification(t, pool, f)
+	restore := aml.SetHoldProbeForTest(failingHoldProbe)
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	restore()
+	if err != nil || !claim.Denied {
+		t.Fatalf("a KYC denial must stand when the evaluator also fails: %+v %v", claim, err)
+	}
+	if got := fpReqState(t, pool, f, wr.ID); got.State != withdrawal.StateRejected {
+		t.Fatalf("expected the terminal KYC rejection, got %s", got.State)
+	}
+}
+
 func TestAMLHold_SweeperT2_EvaluatorFailure_ReschedulesNeverEscalates(t *testing.T) {
 	pool := testPool(t)
 	amlProofs(t)
