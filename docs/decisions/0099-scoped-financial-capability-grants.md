@@ -449,7 +449,8 @@ locking works. Test A-4b proves the depth semantics (*not executed*).
 Acting-session reads are row-narrowed by RLS (tenant X) and column-narrowed by static test **A-19**.
 Every SQL literal in `internal/adjustment` and `internal/payments/manual_resolution.go`, and every
 helper they call, that reads:
-- `staff_users` selects only `id, tenant_id, role, status, person_id`;
+- `staff_users` selects only `id, tenant_id, role, status, person_id` (and, since the ADR 0119 S4b amendment
+  below, `staff_version` in the A8 statements);
 - `player_accounts` selects only `id, tenant_id, person_id, status`;
 - never `password_hash`, email or other PII.
 
@@ -1265,3 +1266,14 @@ orchestrator; nothing here is claimed as reviewed.
    (`ledger_adjustment_invisible_platform_grant`); its staff status was
    re-checked at its own approval. Tenant-scoped approvers are always
    visible and are re-checked live (`FOR SHARE`).
+
+## Amendment A-19 (2026-10-13) — ADR 0119 S4b section 9.5(c): `staff_version` admitted
+
+**Status: `IMPLEMENTED` on the unmerged S4b branch (static test only); PENDING `architect` and `ledger-finance`
+sign-off.** Section 6.8's column discipline admits `staff_version` in the A8 staff `FOR SHARE` statements of K2,
+K3/M4 and HSEC, so ADR 0119's in-transaction re-assertion (ADR 0082 Amendment A9) can compare it with the token's
+`sv` once migration 0139 (ADR 0119 S5 + S6) adds the column. Until then the statements select exactly `id, tenant_id,
+role, status, person_id` and compare `status` and `role`. The A-19 static test
+(`internal/adjustment/static_test.go`, `staffAllowedCols`) is updated in the same change; `password_hash`, email
+and every other column stay refused.
+
