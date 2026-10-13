@@ -47,7 +47,9 @@ auth.Middleware -> auth.RequireStaffPrincipal -> requireLiveStaffSession -> auth
   the closed staff role set) and attaches the verified `auth.StaffSession` (sid, aal, amr, auth_time, mfa_at, sv).
 - `auth.RequireStaffPrincipal` refuses player and service tokens (403) before any database work.
 - `requireLiveStaffSession` runs ONE query in ONE read-only transaction scoped to the token's tenant (or platform)
-  and principal, with `statement_timeout = 500ms`, sent as one pgx batch; the transaction commits and releases its
+  and principal. `statement_timeout = 500ms` is set first in its own round trip (ADR 0119 section 25.3 D2: a timeout
+  queued in the same pgx batch does not bound the query's Parse on a cold connection); the scope GUCs and the SELECT
+  then go as one pgx batch; the transaction commits and releases its
   connection before the handler runs. It refuses with one `401 session_revoked` when the session row is missing,
   revoked or past its absolute lifetime (database clock), the staff member is not `active`, the role differs from
   the token, the staff version differs from `sv` (every row is version 0 until migration 0139), or the staff
@@ -58,8 +60,12 @@ auth.Middleware -> auth.RequireStaffPrincipal -> requireLiveStaffSession -> auth
 
 Metric: `staff_liveness_decisions_total{outcome="allowed|refused|error", reason=...}`. Alert rules:
 `StaffLivenessErrors` (page) and `StaffLivenessRefusals` (ticket) in `deploy/observability/prometheus-alert-rules.yml`
-(not wired: ALERT-DELIVERY-1). Log events: `staff_liveness_refused` (request id, reason) and `staff_liveness_failed`
-(request id, error).
+(not wired: ALERT-DELIVERY-1; wiring them is launch condition L2). Log events: `staff_liveness_refused` (Warn),
+`staff_liveness_failed` (Error, database fault) and `staff_liveness_cancelled` (Info, the client went away), each with
+reason, staff id, token tenant scope, sid, method, route pattern and client IP (request id once, never a token).
+
+Ending a staff session (logout, `DELETE /v1/me/sessions/{id}`, refresh-token reuse) revokes its whole rotation chain, so
+an access token minted before a refresh is refused too (ADR 0119 section 25.3 D14).
 
 ## 2. Golden classification (178 routes: 108 mutating, 70 reads)
 
@@ -83,6 +89,7 @@ Routes the ADR names that do not exist yet stay on the "classified on arrival" l
 
 ## 3. Not in S4a
 
-Step-up prompts and enforcement, the three classifier functions, the signer backstop, the scoped `FOR SHARE`
+Step-up prompts and enforcement, the four classifier functions (`launchActionClass`, `financialPolicyChangeClass`,
+`alertResolveClass`, `rgLimitChangeClass`), the signer backstop, the scoped `FOR SHARE`
 re-assertion, the `app.actor_staff_id` self-select policy pair (S4b: S4a's liveness query runs in the token's own
 scope and does not need it), lifecycle (S5/S6), UI (S7b/S8).

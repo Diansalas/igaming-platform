@@ -137,6 +137,21 @@ func TestStaffLiveness_RefusalMatrix(t *testing.T) {
 			n := w.reasonCount(observability.StaffLivenessReasonRevoked)
 			w.post("/v1/auth/logout", map[string]string{"refresh_token": pair.RefreshToken}).want(t, http.StatusNoContent, "")
 			w.refusedFor(me(pair.AccessToken), observability.StaffLivenessReasonRevoked, n)
+			// The refusal line identifies the request (security review R3(a), code review CR 4).
+			m, raw := livenessLogLine(t, w.logs.String(), "staff_liveness_refused")
+			wantScope := "platform"
+			if scope.tenant != nil {
+				wantScope = scope.tenant.ID.String()
+			}
+			for k, want := range map[string]string{"staff_id": s.ref.StaffID.String(), "token_tenant": wantScope,
+				"sid": w.sidOf(pair.AccessToken).String(), "method": "GET", "route": "GET /v1/staff/me/mfa", "client_ip": "127.0.0.1"} {
+				if m[k] != want {
+					t.Errorf("staff_liveness_refused %s = %v, want %s", k, m[k], want)
+				}
+			}
+			if strings.Count(raw, `"request_id"`) != 1 || strings.Contains(raw, pair.AccessToken) {
+				t.Errorf("refusal line: one request_id, never the token: %s", raw)
+			}
 			before := w.displayName(s)
 			w.refusedFor(rename(pair.AccessToken), observability.StaffLivenessReasonRevoked, n+1)
 			if after := w.displayName(s); (before == nil) != (after == nil) || (before != nil && *before != *after) {
@@ -557,5 +572,81 @@ func TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped(t *testing.T) {
 			func(pgx.Row) error { return nil }); err == nil {
 			t.Errorf("timeout %s must be refused", bad)
 		}
+	}
+}
+
+// Security review C1 (executed live against the first S4a cut): an access token minted BEFORE a refresh names the
+// replaced predecessor session; ending the session (logout with the current refresh token, DELETE /v1/me/sessions/{sid}
+// of the current session, or refresh-token reuse) must revoke the whole chain so that token is refused too. The
+// active-session list shows only the chain head. Tenant and platform staff.
+func TestStaffLiveness_SessionEndRevokesWholeChain(t *testing.T) {
+	w := newMFAW(t)
+	for _, scope := range []struct {
+		name   string
+		tenant *identity.Tenant
+		role   string
+	}{{"tenant", &w.tenant, "support"}, {"platform", nil, "platform_admin"}} {
+		t.Run(scope.name, func(t *testing.T) {
+			w.t = t
+			me := func(tok string) mfaResp { return w.do(http.MethodGet, "/v1/staff/me/mfa", tok, nil) }
+			rename := func(tok string) mfaResp {
+				return w.do(http.MethodPatch, "/v1/admin/staff/me/display-name", tok, map[string]string{"display_name": "Chain Probe"})
+			}
+			refresh := func(p tokenPairResponse) tokenPairResponse {
+				r := w.refresh(p.RefreshToken)
+				r.want(t, http.StatusOK, "")
+				var next tokenPairResponse
+				r.decode(t, &next)
+				return next
+			}
+			for _, end := range []string{"logout", "delete", "delete a middle link", "reuse", "logout after the head was revoked"} {
+				s := w.staff(scope.tenant, scope.role)
+				p0 := w.enrol(s).pair
+				p1 := refresh(p0)
+				p2 := refresh(p1)
+				for _, tok := range []string{p0.AccessToken, p1.AccessToken, p2.AccessToken} {
+					me(tok).want(t, http.StatusOK, "") // every token of a live chain passes
+				}
+				// The list shows one session (the head), never the replaced links.
+				lr := w.do(http.MethodGet, "/v1/me/sessions", p2.AccessToken, nil)
+				lr.want(t, http.StatusOK, "")
+				var list []sessionResponse
+				lr.decode(t, &list)
+				if len(list) != 1 || list[0].ID != w.sidOf(p2.AccessToken).String() {
+					t.Fatalf("%s: the active-session list must be the chain head only, got %s", end, lr.body)
+				}
+				switch end {
+				case "logout":
+					w.post("/v1/auth/logout", map[string]string{"refresh_token": p2.RefreshToken}).want(t, http.StatusNoContent, "")
+				case "delete":
+					w.do(http.MethodDelete, "/v1/me/sessions/"+w.sidOf(p2.AccessToken).String(), p2.AccessToken, nil).want(t, http.StatusNoContent, "")
+				case "delete a middle link":
+					// A replaced link is the caller's own session too; deleting it ends the chain both ways.
+					w.do(http.MethodDelete, "/v1/me/sessions/"+w.sidOf(p1.AccessToken).String(), p2.AccessToken, nil).want(t, http.StatusNoContent, "")
+				case "reuse":
+					w.refresh(p1.RefreshToken).want(t, http.StatusUnauthorized, "unauthorized") // a replaced token: reuse
+				case "logout after the head was revoked":
+					// The head is revoked on its own (the owner procedure's guarded revocation); its predecessors are
+					// still live until the logout of that head revokes them.
+					if err := w.ownerSessionExec(s, w.sidOf(p2.AccessToken), `UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`); err != nil {
+						t.Fatal(err)
+					}
+					me(p0.AccessToken).want(t, http.StatusOK, "")
+					w.post("/v1/auth/logout", map[string]string{"refresh_token": p2.RefreshToken}).want(t, http.StatusNoContent, "")
+				}
+				for i, tok := range []string{p0.AccessToken, p1.AccessToken, p2.AccessToken} {
+					me(tok).want(t, http.StatusUnauthorized, "session_revoked")
+					rename(tok).want(t, http.StatusUnauthorized, "session_revoked")
+					if t.Failed() {
+						t.Fatalf("%s: token %d still honoured", end, i)
+					}
+				}
+				for _, row := range w.sessions(s) {
+					if row.Revoked == nil {
+						t.Fatalf("%s: session %s of the chain is not revoked", end, row.ID)
+					}
+				}
+			}
+		})
 	}
 }

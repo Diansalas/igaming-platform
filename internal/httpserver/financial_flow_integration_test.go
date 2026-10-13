@@ -25,6 +25,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	tenantctx "github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -63,7 +64,19 @@ func newFinancialTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, or
 // instrument service to prove the fail-closed 503).
 func newFinancialTestServerWith(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *payments.Orchestrator, mutate func(*Deps)) *httptest.Server {
 	t.Helper()
-	deps := Deps{
+	deps := financialTestDeps(pool, issuer, orchestrator)
+	if mutate != nil {
+		mutate(&deps)
+	}
+	srv := httptest.NewServer(New(deps))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// financialTestDeps is the Deps of newFinancialTestServer (ADR 0119 S4a: tests that pin a handler's own checks
+// behind the staff chain build the handler from the same Deps).
+func financialTestDeps(pool *db.Pool, issuer *auth.Issuer, orchestrator *payments.Orchestrator) Deps {
+	return Deps{
 		Logger:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                  pool,
 		AuthIssuer:          issuer,
@@ -75,12 +88,24 @@ func newFinancialTestServerWith(t *testing.T, pool *db.Pool, issuer *auth.Issuer
 		PersonResolver:    identityresolution.NewMockPersonResolver(),
 		PayoutInstruments: pitest.Shared(), // B13-B: a withdrawal request binds a verified payout instrument
 	}
-	if mutate != nil {
-		mutate(&deps)
+}
+
+// withdrawalStateOf reads a withdrawal request's state as the test pool, in the tenant's scope.
+func withdrawalStateOf(t *testing.T, pool *db.Pool, tenantID, requestID uuid.UUID) string {
+	t.Helper()
+	var state string
+	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM withdrawal_requests WHERE id = $1`, requestID).Scan(&state)
+	}); err != nil {
+		t.Fatalf("withdrawal state: %v", err)
 	}
-	srv := httptest.NewServer(New(deps))
-	t.Cleanup(srv.Close)
-	return srv
+	return state
+}
+
+// suspendedFinanceContext is the authenticated context a suspended finance staff member's still-unexpired token
+// carried before ADR 0119 S4a (now refused by liveness; used only behind the chain).
+func suspendedFinanceContext(tenantID, staffID uuid.UUID) tenantctx.Context {
+	return tenantctx.Context{TenantID: tenantID, Role: string(auth.RoleFinance), PrincipalType: string(auth.PrincipalStaff), Subject: staffID.String()}
 }
 
 // registeredPlayer bundles a real, HTTP-registered player's identity and

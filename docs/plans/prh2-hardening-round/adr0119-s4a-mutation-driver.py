@@ -15,6 +15,8 @@ LIVE = 'TestStaffLiveness|TestStaffRefresh_RechecksFactor|TestQueryRowPrincipalS
 STATIC = 'TestStaffRoute|TestLiveIfStaff|TestStaffLivenessVerdict|TestStaffLivenessSQL'
 AUTH = 'TestStaffRoles|TestStaffPrincipal|TestMiddleware|TestRequireAAL2|TestIssueStaff|TestVerify|TestRolePrincipal'
 SL = 'internal/httpserver/staff_liveness.go'
+CHAIN = 'TestStaffLiveness_SessionEndRevokesWholeChain'
+WD = 'TestWithdrawalApprove_InactiveStaffAccountRejected|TestWithdrawalSubmit_SuspendedStaffAccountRejected|TestWithdrawalResolve_SuspendedStaffAccountRejected'
 SR = 'internal/httpserver/staff_route.go'
 MUTANTS = [
  # --- the liveness verdict: each refusal rule (ADR 17.8 "liveness skips the sv comparison" = L05) ---
@@ -49,13 +51,12 @@ MUTANTS = [
    AND su.tenant_id IS NOT DISTINCT FROM $3::uuid`''', '''   AND $3::uuid IS NOT DISTINCT FROM $3::uuid`''', HS, LIVE),
  # --- fail closed ---
  ('L15', SL, '''			if err != nil {
-				observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessError, observability.StaffLivenessReasonDBError)''',
-  '''			if err != nil {
+				if ctx.Err() != nil {''', '''			if err != nil {
 				next.ServeHTTP(w, r)
 				return
 			}
 			if false {
-				observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessError, observability.StaffLivenessReasonDBError)''', HS, LIVE),
+				if ctx.Err() != nil {''', HS, LIVE + '|' + STATIC),
  ('L16', SL, '''			if tcErr != nil || !ok || tc.PrincipalType != string(auth.PrincipalStaff) || idErr != nil || staffID == uuid.Nil {''',
   '''			if tcErr != nil || (!ok && false) || idErr != nil || staffID == uuid.Nil {''', HS, LIVE + '|' + STATIC + '|TestRequireLiveStaffSession'),
  ('L17', SL, '''	if pool == nil {
@@ -132,6 +133,62 @@ MUTANTS = [
  ('A10', 'internal/auth/staff_chain.go', '''	RoleRiskManager, RolePromotionsManager, RoleBonusOperations,
 }''', '''	RoleRiskManager, RolePromotionsManager,
 }''', AU, AUTH),
+ # --- review round (2026-10-13): security C1 (chain revocation), code review CR 1-CR 4 ---
+ ('C1a', 'internal/auth/session.go', '''	if principalType == PrincipalStaff {
+		return revokeLinkedStaffSessions(ctx, tx, sessionID, ownerPrincipalID)
+	}''', '''	_ = principalType''', HS, CHAIN),
+ ('C1b', 'internal/auth/session.go', '''JOIN sessions s ON s.id = p.replaced_by_session_id OR s.replaced_by_session_id = c.id''',
+  '''JOIN sessions s ON s.id = p.replaced_by_session_id''', HS, CHAIN),
+ ('C1c', 'internal/auth/session.go', '''JOIN sessions s ON s.id = p.replaced_by_session_id OR s.replaced_by_session_id = c.id''',
+  '''JOIN sessions s ON s.replaced_by_session_id = c.id''', HS, CHAIN),
+ ('C1d', 'internal/auth/session.go', '''		if errors.Is(err, ErrSessionNotFound) && row.principalType == PrincipalStaff {''',
+  '''		if false && errors.Is(err, ErrSessionNotFound) && row.principalType == PrincipalStaff {''', HS, CHAIN),
+ ('C1e', 'internal/auth/session.go', '''			if staff {
+				// ADR 0119 S4a (security review C1)''', '''			if false {
+				// ADR 0119 S4a (security review C1)''', HS, CHAIN),
+ ('C1f', 'internal/auth/session.go', '''		   AND revoked_at IS NULL AND replaced_by_session_id IS NULL AND expires_at > now()''',
+  '''		   AND revoked_at IS NULL AND expires_at > now()''', HS, CHAIN),
+ ('X1', 'internal/withdrawal/withdrawal.go', '''		if !active {
+			return false, ErrApproverInactive
+		}''', '''		if !active && false {
+			return false, ErrApproverInactive
+		}''', HS, WD),
+ ('X2', 'internal/httpserver/withdrawal_handlers.go', '''			if !active {
+				return withdrawal.ErrApproverInactive
+			}
+
+			// Read-only''', '''			if !active && false {
+				return withdrawal.ErrApproverInactive
+			}
+
+			// Read-only''', HS, WD),
+ ('X2b', 'internal/httpserver/withdrawal_handlers.go', '''			if !active {
+				return withdrawal.ErrApproverInactive
+			}
+			eligible = true''', '''			if !active && false {
+				return withdrawal.ErrApproverInactive
+			}
+			eligible = true''', HS, WD),
+ ('X3', 'internal/httpserver/routes.go', '''	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''',
+  '''	mux.Handle("POST\t/v1/admin/tenants/{tenantID}/staff",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''', HS, STATIC),
+ ('X3b', 'internal/httpserver/routes.go', '''	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''',
+  '''	mux.Handle("POST  /v1/admin/tenants/{tenantID}/staff",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''', HS, STATIC),
+ ('X4', 'internal/httpserver/routes.go', '''	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''',
+  '''	mux.Handle("POST /{version}/admin/tenants/{tenantID}/staff",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''', HS, STATIC),
+ ('X4b', 'internal/httpserver/routes.go', '''	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''',
+  '''	mux.Handle("POST api.internal/v1/admin/tenants/{tenantID}/staff",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))''', HS, STATIC),
+ ('K1', SL, '''				if ctx.Err() != nil {''', '''				if false && ctx.Err() != nil {''', HS, STATIC + '|TestRequireLiveStaffSession'),
+ ('K2', SL, '''"method", r.Method, "route", r.Pattern, "client_ip"''', '''"method", r.Method, "client_ip"''', HS, LIVE + '|TestRequireLiveStaffSession'),
+ ('K3', SL, '''				"staff_id", tc.Subject, "token_tenant", scope, "sid", sess.SessionID.String(),''',
+  '''				"token_tenant", scope, "sid", sess.SessionID.String(),''', HS, LIVE + '|TestRequireLiveStaffSession'),
 ]
 
 def sh(cmd, timeout):

@@ -237,13 +237,15 @@ groups:
         # ADR 0119 S4a (section 7.3, review N1): the per-request staff liveness check could not run and answered
         # 503 (fail closed). Every back-office request needs the database anyway, so any sustained error rate means
         # staff are locked out of the back office.
-        expr: sum(increase(staff_liveness_decisions_total{outcome="error"}[5m])) > 0
+        # reason="db_error" only: a client that went away is reason="client_cancelled" and never pages. A minimum
+        # count keeps a single transient fault from paging.
+        expr: sum(increase(staff_liveness_decisions_total{outcome="error",reason="db_error"}[5m])) >= 3
         for: 5m
         labels:
           severity: page
         annotations:
           summary: "The staff liveness check is failing closed: back-office requests answer 503"
-          description: "reason label is db_error. Check the database, the pool and the 500 ms statement timeout."
+          description: "Check the database, the pool and the 500 ms statement timeout (staff_liveness_failed log lines)."
           runbook: docs/runbooks/incident-response-and-oncall.md
 
       - alert: StaffLivenessRefusals
@@ -251,7 +253,12 @@ groups:
         # per reason (revoked, staff_not_active, role_mismatch, version_mismatch, factor_unusable, no_session,
         # absolute_expired, no_assurance) can mean replayed tokens after revocation or forged sids. The threshold is a
         # starting point for a small back-office population.
-        expr: sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m])) > 25
+        # A ratio over all decisions, with a minimum count so a quiet back office does not alert on a few logouts.
+        expr: |
+          (sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m])) > 25)
+            and
+          (sum by (reason) (increase(staff_liveness_decisions_total{outcome="refused"}[10m]))
+            / ignoring(reason) group_left sum(increase(staff_liveness_decisions_total[10m])) > 0.2)
         for: 10m
         labels:
           severity: ticket

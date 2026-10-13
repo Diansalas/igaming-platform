@@ -13,6 +13,7 @@ package httpserver
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -180,6 +181,15 @@ func TestWithdrawalApprove_InactiveStaffAccountRejected(t *testing.T) {
 	}
 	if count := countWithdrawalApprovals(t, pool, tenant.ID, wr.ID); count != 0 {
 		t.Fatalf("expected zero withdrawal_approvals rows after a rejected suspended-staff approval, got %d", count)
+	}
+	// The domain check (withdrawal.Approve: ErrApproverInactive) behind the chain: 403, zero approval rows.
+	rec := behindChain(t, newApproveWithdrawalHandler(financialTestDeps(pool, issuer, orchestrator)), http.MethodPost,
+		"/v1/admin/withdrawals/"+wr.ID.String()+"/approve", map[string]string{"id": wr.ID.String()}, suspendedFinanceContext(tenant.ID, staff.ID), nil)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "this staff account is not active") {
+		t.Fatalf("behind the chain: expected 403 not-active for a suspended approver, got %d %s", rec.Code, rec.Body)
+	}
+	if count := countWithdrawalApprovals(t, pool, tenant.ID, wr.ID); count != 0 {
+		t.Fatalf("expected zero withdrawal_approvals rows behind the chain, got %d", count)
 	}
 }
 

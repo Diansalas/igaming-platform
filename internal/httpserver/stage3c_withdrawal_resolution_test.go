@@ -16,6 +16,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -53,6 +54,7 @@ type stage3CResolutionFixture struct {
 	srv          *httptest.Server
 	pool         *db.Pool
 	mock         *payments.MockProvider
+	deps         Deps // the server's Deps (behindChain)
 	tenant       identity.Tenant
 	financeToken tokenPairResponse
 	withdrawalID string
@@ -98,7 +100,8 @@ func setupStage3CResolutionFixture(t *testing.T, amount int64) stage3CResolution
 		t.Fatalf("approve withdrawal: status %d", resp.StatusCode)
 	}
 
-	return stage3CResolutionFixture{srv: srv, pool: pool, mock: mock, tenant: tenant, financeToken: financeToken, withdrawalID: wr.ID.String()}
+	return stage3CResolutionFixture{srv: srv, pool: pool, mock: mock, deps: financialTestDeps(pool, issuer, orchestrator), tenant: tenant,
+		financeToken: financeToken, withdrawalID: wr.ID.String()}
 }
 
 func mustResolve(t *testing.T, f stage3CResolutionFixture) submitWithdrawalResponse {
@@ -204,6 +207,47 @@ func TestWithdrawalResolve_SuspendedStaffAccountRejected(t *testing.T) {
 	decodeBody(t, resp, &apiErr)
 	if resp.StatusCode != http.StatusUnauthorized || apiErr.Code != apierror.CodeSessionRevoked {
 		t.Fatalf("expected 401 session_revoked for a suspended staff account resolving with an already-issued token, got %d: %+v", resp.StatusCode, apiErr)
+	}
+	// The handler's own check (the only enforcement point for this transition) behind the chain: 403, nothing moves.
+	rec := behindChain(t, newResolveWithdrawalHandler(f.deps), http.MethodPost, "/v1/admin/withdrawals/"+f.withdrawalID+"/resolve",
+		map[string]string{"id": f.withdrawalID}, suspendedFinanceContext(f.tenant.ID, resolver.ID), nil)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "this staff account is not active") {
+		t.Fatalf("behind the chain: expected 403 not-active for a suspended resolver, got %d %s", rec.Code, rec.Body)
+	}
+	if st := withdrawalStateOf(t, f.pool, f.tenant.ID, uuid.MustParse(f.withdrawalID)); st != "submitted" {
+		t.Fatalf("a refused resolve changed the withdrawal: %s", st)
+	}
+}
+
+// TestWithdrawalSubmit_SuspendedStaffAccountRejected (ADR 0119 S4a code review CR 1): a finance staff member
+// suspended after their token was issued is refused by liveness over HTTP (401), and the submit handler's own
+// active-staff check - the only enforcement point for this transition - refuses behind the chain (403); the
+// withdrawal stays approved and nothing is dispatched.
+func TestWithdrawalSubmit_SuspendedStaffAccountRejected(t *testing.T) {
+	f := setupStage3CResolutionFixture(t, 10000)
+	submitter := mustCreateStaff(t, f.pool, f.tenant.ID, identity.StaffRoleFinance, "a-decent-password-5")
+	submitterToken := mustLoginStaff(t, f.srv, f.tenant.Slug, submitter.Email, "a-decent-password-5")
+	if err := f.pool.WithTenant(context.Background(), f.tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, submitter.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("suspend staff account: %v", err)
+	}
+	body := map[string]string{"payment_method": "bank_transfer"}
+	resp := postJSON(t, f.srv, "/v1/admin/withdrawals/"+f.withdrawalID+"/submit", submitterToken.AccessToken, body)
+	defer func() { _ = resp.Body.Close() }()
+	var apiErr apierror.Error
+	decodeBody(t, resp, &apiErr)
+	if resp.StatusCode != http.StatusUnauthorized || apiErr.Code != apierror.CodeSessionRevoked {
+		t.Fatalf("expected 401 session_revoked over HTTP, got %d: %+v", resp.StatusCode, apiErr)
+	}
+	rec := behindChain(t, newSubmitWithdrawalHandler(f.deps), http.MethodPost, "/v1/admin/withdrawals/"+f.withdrawalID+"/submit",
+		map[string]string{"id": f.withdrawalID}, suspendedFinanceContext(f.tenant.ID, submitter.ID), body)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "this staff account is not active") {
+		t.Fatalf("behind the chain: expected 403 not-active for a suspended submitter, got %d %s", rec.Code, rec.Body)
+	}
+	if st := withdrawalStateOf(t, f.pool, f.tenant.ID, uuid.MustParse(f.withdrawalID)); st != "approved" {
+		t.Fatalf("a refused submit changed the withdrawal: %s", st)
 	}
 }
 

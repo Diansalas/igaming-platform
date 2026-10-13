@@ -40,6 +40,9 @@ const (
 	StaffLivenessReasonFactorUnusable  StaffLivenessReason = "factor_unusable"
 	StaffLivenessReasonNoAssurance     StaffLivenessReason = "no_assurance"
 	StaffLivenessReasonDBError         StaffLivenessReason = "db_error"
+	// StaffLivenessReasonClientCancelled: the request's context ended while the
+	// check ran (the client went away); outcome "error", never paged.
+	StaffLivenessReasonClientCancelled StaffLivenessReason = "client_cancelled"
 )
 
 var staffLivenessDecisionsTotal, _ = staffLivenessMeter.Int64Counter(

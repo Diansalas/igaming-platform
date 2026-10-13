@@ -136,31 +136,50 @@ func isStaffPrincipal(r *http.Request) bool {
 // It runs after auth.Middleware and auth.RequireStaffPrincipal, so the
 // principal is a verified staff token; it refuses any request whose staff
 // session is no longer live.
+//
+// Every decision log line carries what an investigation needs (S4a security
+// review R3(a), code review CR 4): the staff id, the token's tenant scope, the
+// session id, the method, the route pattern and the client IP - never a token.
+// request_id and the logging tenant come from the request logger. A request
+// whose client went away while the check ran is recorded as client_cancelled
+// at Info (code review CR 3), never as a database error.
 func requireLiveStaffSession(deps Deps) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 			requestID := observability.RequestIDFromContext(ctx)
-			logger := observability.LoggerFromContext(ctx, deps.Logger)
 			tc, tcErr := tenant.FromContext(ctx)
 			sess, ok := auth.StaffSessionFromContext(ctx)
 			staffID, idErr := uuid.Parse(tc.Subject)
+			scope := "platform"
+			if tc.TenantID != uuid.Nil {
+				scope = tc.TenantID.String()
+			}
+			logger := observability.LoggerFromContext(ctx, deps.Logger).With(
+				"staff_id", tc.Subject, "token_tenant", scope, "sid", sess.SessionID.String(),
+				"method", r.Method, "route", r.Pattern, "client_ip", trustedProxyClientIP(r, deps.TrustedProxyCount))
 			if tcErr != nil || !ok || tc.PrincipalType != string(auth.PrincipalStaff) || idErr != nil || staffID == uuid.Nil {
 				observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessRefused, observability.StaffLivenessReasonNoAssurance)
-				logger.Warn("staff_liveness_refused", "request_id", requestID, "reason", string(observability.StaffLivenessReasonNoAssurance))
+				logger.Warn("staff_liveness_refused", "reason", string(observability.StaffLivenessReasonNoAssurance))
 				writeSessionRevoked(w, requestID)
 				return
 			}
 			reason, err := checkStaffLiveness(ctx, deps.DB, tc.TenantID, staffID, sess, auth.Role(tc.Role))
 			if err != nil {
-				observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessError, observability.StaffLivenessReasonDBError)
-				logger.Error("staff_liveness_failed", "request_id", requestID, "error", err)
+				if ctx.Err() != nil {
+					// The client went away (or the server is shutting the request down): not a database fault.
+					observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessError, observability.StaffLivenessReasonClientCancelled)
+					logger.Info("staff_liveness_cancelled", "reason", string(observability.StaffLivenessReasonClientCancelled))
+				} else {
+					observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessError, observability.StaffLivenessReasonDBError)
+					logger.Error("staff_liveness_failed", "reason", string(observability.StaffLivenessReasonDBError), "error", err)
+				}
 				apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable")
 				return
 			}
 			if reason != observability.StaffLivenessReasonOK {
 				observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessRefused, reason)
-				logger.Warn("staff_liveness_refused", "request_id", requestID, "reason", string(reason))
+				logger.Warn("staff_liveness_refused", "reason", string(reason))
 				writeSessionRevoked(w, requestID)
 				return
 			}

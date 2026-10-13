@@ -124,3 +124,89 @@ Pass 3 (tree fc4d946): L20 and L20b reported KILLED by TestStaffLiveness_FaultIs
   and mutant L18b reproduces the defect.
 Pass 4 (tree e32040d): every mutant after L18 reported ERROR (build failed): the scratch filesystem was full (ENOSPC). `go clean -cache`
   freed it (the only clean-up used); the mutants were rerun in pass 5 and in the final pass above.
+
+Review round (2026-10-13): security C1, code review CR 1-CR 4
+===============================================================
+
+New mutants
+-----------
+C1a      RevokeSession does not revoke the rest of a staff chain
+C1b      the chain walk follows successors only (predecessors - the pre-refresh tokens - stay live)
+C1c      the chain walk follows predecessors only (deleting a middle link leaves its successors live)
+C1d      logout of an already-revoked staff head does not revoke its predecessors
+C1e      refresh-token reuse does not revoke the staff predecessors
+C1f      GET /v1/me/sessions lists replaced chain links as active sessions
+X1       withdrawal.Approve ignores an inactive approver (domain check)
+X2       the resolve handler ignores an inactive resolver
+X2b      the submit handler ignores an inactive submitter
+X3/X3b   a staff route registered with a tab / a double space between method and path, outside staffRoute
+X4/X4b   a staff route registered with a leading wildcard segment / a host, outside staffRoute
+K1       a client-cancelled request is logged as a database fault
+K2/K3    the route / the staff id missing from the liveness log line
+
+Totals (review-round pass over ALL mutants, tree at ba86b1c..52e37f7 - WIP commits squashed into the S4a commit; X1, X2,
+X2b rerun in their corrected shape): 62 mutants, KILLED 60, SURVIVED 2 (L20, L20b; justified above), ERROR 0.
+
+L01 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_SessionEndRevokesWholeChain
+L02 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L03 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L04 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L05 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L06 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L07 KILLED by TestStaffLiveness_RefusalMatrix
+L08 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix, TestStaffRefresh_RechecksFactor
+L09 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L10 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L11 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_SessionEndRevokesWholeChain
+L12 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L13 KILLED by TestStaffLivenessSQL_Shape
+L14 KILLED by TestStaffLivenessSQL_Shape
+L15 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffLiveness_FaultIs503FailClosed, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L16 KILLED by TestRequireLiveStaffSession_NoAssuranceIsRefusedWithoutDB
+L17 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L18 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped, TestStaffLiveness_FaultIs503FailClosed
+L18b KILLED by TestStaffLiveness_FaultIs503FailClosed
+L19 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped
+L20 SURVIVED
+L20b SURVIVED
+L21 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_QueryPlanAndLatency, TestStaffLiveness_RefusalMatrix
+L22 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped
+L23 KILLED by TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_SessionEndRevokesWholeChain, TestStaffRoute_ChainComposition
+L24 KILLED by TestStaffRoute_ChainComposition
+L25 KILLED by TestStaffRoute_ChainComposition, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L26 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness
+L27 KILLED by TestStaffRoute_ChainComposition
+L28 KILLED by TestStaffRoutes_ClassIdentsAreTheClosedSet
+L29 KILLED by TestStaffRoutes_GoldenClassification
+L30 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+L31 KILLED by TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+L32 KILLED by TestStaffLiveness_RefusalMatrix, TestStaffRefresh_RechecksFactor
+A01 KILLED by TestStaffPrincipal_RoleOutsideClosedSetRefused
+A02 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute
+A03 KILLED by TestRequireAAL2
+A04 KILLED by TestRequireAAL2
+A05 KILLED by TestRequireAAL2
+A06 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_ReleasesConnectionBeforeHandler
+A07 KILLED by TestMiddleware_AttachesStaffSessionForStaffTokensOnly
+A08 KILLED by TestStaffLiveness_RefusalMatrix
+A09 KILLED by TestStaffRoles_ClosedSet_ParityWithIdentityAndDatabase
+A10 KILLED by TestStaffRoles_ClosedSet_ParityWithIdentityAndDatabase
+C1a KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1b KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1c KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1d KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1e KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1f KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+X1 KILLED by TestWithdrawalApprove_InactiveStaffAccountRejected
+X2 KILLED by TestWithdrawalResolve_SuspendedStaffAccountRejected
+X2b KILLED by TestWithdrawalSubmit_SuspendedStaffAccountRejected
+X3 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+X3b KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+X4 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+X4b KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+K1 KILLED by TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation
+K2 KILLED by TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation, TestStaffLiveness_RefusalMatrix
+K3 KILLED by TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation, TestStaffLiveness_RefusalMatrix
+
+Discarded (review round): X1, X2, X2b first reported ERROR (build failed: removing the `if !active` block left `active`
+unused); reshaped to `if !active && false` and rerun: all KILLED.

@@ -250,6 +250,13 @@ func RotateSessionWithPolicy(ctx context.Context, pool *db.Pool, rawToken string
 			if err := revokeChainFrom(ctx, tx, row.id); err != nil {
 				return err
 			}
+			if staff {
+				// ADR 0119 S4a (security review C1): the predecessors' access tokens are still honoured by
+				// liveness unless their rows are revoked too.
+				if err := revokeLinkedStaffSessions(ctx, tx, row.id, row.principalID); err != nil {
+					return err
+				}
+			}
 			tenantID := uuid.Nil
 			if row.tenantID != nil {
 				tenantID = *row.tenantID
@@ -454,16 +461,56 @@ func revokeChainFrom(ctx context.Context, tx pgx.Tx, startID uuid.UUID) error {
 // already revoked - deliberately the same error as "doesn't exist" so a
 // caller can't use the response to enumerate other principals' session
 // ids.
+//
+// ADR 0119 S4a (security review C1): for a STAFF session the whole rotation
+// chain is revoked as well (revokeLinkedStaffSessions): every access token
+// carries the sid of the session it was minted for, so a token minted before
+// a refresh names a replaced (not revoked) predecessor, and the per-request
+// liveness check would otherwise keep honouring it after the logout.
 func RevokeSession(ctx context.Context, tx pgx.Tx, sessionID, ownerPrincipalID uuid.UUID) error {
-	tag, err := tx.Exec(ctx,
-		`UPDATE sessions SET revoked_at = now() WHERE id = $1 AND principal_id = $2 AND revoked_at IS NULL`,
+	var principalType PrincipalType
+	err := tx.QueryRow(ctx,
+		`UPDATE sessions SET revoked_at = now() WHERE id = $1 AND principal_id = $2 AND revoked_at IS NULL RETURNING principal_type`,
 		sessionID, ownerPrincipalID,
-	)
+	).Scan(&principalType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrSessionNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("auth: revoke session: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrSessionNotFound
+	if principalType == PrincipalStaff {
+		return revokeLinkedStaffSessions(ctx, tx, sessionID, ownerPrincipalID)
+	}
+	return nil
+}
+
+// revokeLinkedStaffSessions revokes every staff session of ownerPrincipalID
+// linked to sessionID through replaced_by_session_id, in BOTH directions
+// (predecessors and successors; one recursive CTE, cycle-safe through UNION),
+// within the caller's scoped tx. Only rows not yet revoked are written
+// (`revoked_at IS NULL`: SF040 makes revoked_at write-once on staff rows). It
+// sets app.principal_id for the transaction so the chain's rows are visible
+// under migration 0018's session_select_own_principal policy.
+func revokeLinkedStaffSessions(ctx context.Context, tx pgx.Tx, sessionID, ownerPrincipalID uuid.UUID) error {
+	if err := db.SetPrincipalIDForCurrentTx(ctx, tx, ownerPrincipalID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`WITH RECURSIVE chain(id) AS (
+		     SELECT id FROM sessions WHERE id = $1 AND principal_id = $2 AND principal_type = 'staff'
+		   UNION
+		     SELECT s.id
+		       FROM chain c
+		       JOIN sessions p ON p.id = c.id
+		       JOIN sessions s ON s.id = p.replaced_by_session_id OR s.replaced_by_session_id = c.id
+		      WHERE s.principal_id = $2 AND s.principal_type = 'staff'
+		 )
+		 UPDATE sessions SET revoked_at = now()
+		  WHERE id IN (SELECT id FROM chain) AND principal_id = $2 AND principal_type = 'staff' AND revoked_at IS NULL`,
+		sessionID, ownerPrincipalID,
+	); err != nil {
+		return fmt.Errorf("auth: revoke staff session chain: %w", err)
 	}
 	return nil
 }
@@ -484,7 +531,15 @@ func RevokeSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) e
 		return err
 	}
 	err = withResolvedScope(ctx, pool, row, func(ctx context.Context, tx pgx.Tx) error {
-		return RevokeSession(ctx, tx, row.id, row.principalID)
+		err := RevokeSession(ctx, tx, row.id, row.principalID)
+		if errors.Is(err, ErrSessionNotFound) && row.principalType == PrincipalStaff {
+			// The presented row was already revoked (for example by reuse detection, which walks forward
+			// only): its predecessors may still be live, and their access tokens with them (ADR 0119 S4a C1).
+			// Commit (a non-nil error would roll the chain revocation back); the presented row was already revoked,
+			// which is the idempotent logout the caller asked for.
+			return revokeLinkedStaffSessions(ctx, tx, row.id, row.principalID)
+		}
+		return err
 	})
 	if errors.Is(err, ErrSessionNotFound) {
 		// Already revoked (for example by refresh-token reuse detection, which revokes the whole chain): the end
@@ -496,7 +551,8 @@ func RevokeSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) e
 }
 
 // ListActiveSessions returns the caller's own live sessions (not
-// revoked, not expired) - the "which devices am I logged in on" view
+// revoked, not replaced by a rotation - ADR 0119 S4a: a replaced row is a
+// past link of a chain, not a device - not expired) - the "which devices am I logged in on" view
 // behind GET /v1/me/sessions. Called within the caller's own
 // already-scoped tx (they are authenticated, so their tenant scope, if
 // any, is already established).
@@ -504,7 +560,7 @@ func ListActiveSessions(ctx context.Context, tx pgx.Tx, principalType PrincipalT
 	rows, err := tx.Query(ctx,
 		`SELECT id, tenant_id, expires_at FROM sessions
 		 WHERE principal_type = $1 AND principal_id = $2
-		   AND revoked_at IS NULL AND expires_at > now()
+		   AND revoked_at IS NULL AND replaced_by_session_id IS NULL AND expires_at > now()
 		 ORDER BY created_at DESC`,
 		principalType, principalID,
 	)

@@ -5,6 +5,8 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -89,9 +91,18 @@ func scanStaffRoutes(srcs map[string]string) ([]staffRegistration, []string) {
 				return true
 			}
 			pattern := strings.Trim(lit.Value, "\"`")
+			// Code review CR 2: EVERY pattern of the package has the strict shape "<METHOD> /<path>" (exactly one
+			// space, no host, no other whitespace) and literal first two path segments, so no registration can match
+			// a staff path while escaping the classification below (a tab or double space would hide the method, a
+			// host or a leading wildcard would match /v1/admin/... under a pattern that does not start with it).
+			if !strictPatternRe.MatchString(pattern) {
+				problems = append(problems, fmt.Sprintf("%s: pattern %q is not \"<METHOD> /<path>\" (one space, no host, METHOD in GET|POST|PUT|PATCH|DELETE)", pos, pattern))
+				return true
+			}
 			method, path, hasMethod := strings.Cut(pattern, " ")
-			if !hasMethod {
-				path = pattern
+			if segs := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 3); strings.Contains(segs[0], "{") || len(segs) > 1 && strings.Contains(segs[1], "{") {
+				problems = append(problems, fmt.Sprintf("%s: pattern %q has a wildcard in its first two path segments (it could match a staff path)", pos, pattern))
+				return true
 			}
 			h, _ := call.Args[1].(*ast.CallExpr)
 			switch {
@@ -310,6 +321,15 @@ func TestStaffRoutes_StaticScan_PlantedOffendersFail(t *testing.T) {
 		"non-literal pattern":                             "p := \"POST /v1/admin/q\"\nmux.Handle(p, staffRoute(deps, stepUpNone, h))",
 		"session route without liveIfStaff":               `mux.Handle("DELETE /v1/me/sessions/{id}", auth.Middleware(deps.AuthIssuer)(h))`,
 		"helper wrapped by another middleware":            `mux.Handle("GET /v1/admin/w", withSomething(staffRoute(deps, stepUpNone, h)))`,
+		// Code review CR 2 (X3/X4): shapes that would match a staff path without being recognised as one.
+		"tab instead of a space":        "mux.Handle(\"POST\t/v1/admin/tab\", auth.Middleware(deps.AuthIssuer)(h))",
+		"double space":                  `mux.Handle("POST  /v1/admin/two", auth.Middleware(deps.AuthIssuer)(h))`,
+		"host-qualified pattern":        `mux.Handle("POST api.example.com/v1/admin/host", auth.Middleware(deps.AuthIssuer)(h))`,
+		"wildcard first segment":        `mux.Handle("POST /{version}/admin/w", auth.Middleware(deps.AuthIssuer)(h))`,
+		"wildcard second segment":       `mux.Handle("POST /v1/{area}/w", auth.Middleware(deps.AuthIssuer)(h))`,
+		"catch-all wildcard":            `mux.Handle("GET /{rest...}", h)`,
+		"method outside the closed set": `mux.Handle("HEAD /v1/admin/head", staffRoute(deps, stepUpNone, h))`,
+		"pattern with trailing space":   `mux.Handle("GET /v1/admin/sp ", staffRoute(deps, stepUpNone, h))`,
 	} {
 		_, problems := scanStaffRoutes(wrap(body))
 		if len(problems) == 0 {
@@ -416,6 +436,9 @@ func sweepSign(t *testing.T, c auth.Claims) string {
 }
 
 var pathParamRe = regexp.MustCompile(`\{[^}]+\}`)
+
+// strictPatternRe is the only route-pattern shape the package may register (code review CR 2).
+var strictPatternRe = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE) /\S*$`)
 
 // concretePath fills every {param} of a golden pattern.
 func concretePath(pattern string) (method, path string) {
@@ -549,5 +572,154 @@ func TestStaffRoutes_ClassifiedOnArrivalAreNotRegistered(t *testing.T) {
 	}
 	if concrete == 0 {
 		t.Error("no concrete route in the classified-on-arrival list: the check is vacuous")
+	}
+}
+
+// Code review CR 2: routes are registered only in this package. Every other non-test Go file under internal/ and cmd/
+// is scanned for an http.NewServeMux, a ServeMux field or variable being handed a route (Handle / HandleFunc with a
+// string-literal pattern), or a direct http.Handle / http.HandleFunc on the default mux. The allowlist is this package.
+func TestStaffRoutes_NoRouteRegistrationOutsideHTTPServer(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	allow := map[string]bool{filepath.Join("internal", "httpserver"): true}
+	fset := token.NewFileSet()
+	scanned := 0
+	var offenders []string
+	for _, top := range []string{"internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, _ := filepath.Rel(root, path)
+			if allow[filepath.Dir(rel)] {
+				return nil
+			}
+			f, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+			scanned++
+			offenders = append(offenders, routeRegistrations(fset, f)...)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if scanned < 100 {
+		t.Fatalf("scanned only %d files: the walk is broken", scanned)
+	}
+	for _, o := range offenders {
+		t.Errorf("route registration outside internal/httpserver (bypasses the staff chain checks): %s", o)
+	}
+	// Negative control: a planted registration in another package is found.
+	pf, err := parser.ParseFile(fset, "planted.go", "package x\nimport \"net/http\"\nfunc f(h http.Handler) { m := http.NewServeMux(); m.Handle(\"GET /v1/admin/x\", h); http.HandleFunc(\"/y\", nil) }\n", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := routeRegistrations(fset, pf); len(got) != 3 {
+		t.Fatalf("the planted NewServeMux, Handle and http.HandleFunc must all be found, got %v", got)
+	}
+}
+
+// routeRegistrations returns every route-registration call in f: http.NewServeMux(), any X.Handle / X.HandleFunc whose
+// first argument is a string literal, and http.Handle / http.HandleFunc.
+func routeRegistrations(fset *token.FileSet, f *ast.File) []string {
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, _ := sel.X.(*ast.Ident)
+		switch {
+		case sel.Sel.Name == "NewServeMux" && pkg != nil && pkg.Name == "http":
+			out = append(out, fmt.Sprintf("%s: http.NewServeMux", fset.Position(call.Pos())))
+		case (sel.Sel.Name == "Handle" || sel.Sel.Name == "HandleFunc") && pkg != nil && pkg.Name == "http":
+			out = append(out, fmt.Sprintf("%s: http.%s", fset.Position(call.Pos()), sel.Sel.Name))
+		case (sel.Sel.Name == "Handle" || sel.Sel.Name == "HandleFunc") && len(call.Args) == 2:
+			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				out = append(out, fmt.Sprintf("%s: %s(%s)", fset.Position(call.Pos()), sel.Sel.Name, lit.Value))
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// livenessLogLine returns the last JSON log line whose msg is msg, decoded, and its raw text.
+func livenessLogLine(t *testing.T, logs string, msg string) (map[string]any, string) {
+	t.Helper()
+	var last string
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, `"msg":"`+msg+`"`) {
+			last = l
+		}
+	}
+	if last == "" {
+		t.Fatalf("no %s log line in %s", msg, logs)
+	}
+	m := map[string]any{}
+	if err := json.Unmarshal([]byte(last), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m, last
+}
+
+// Code review CR 3 / CR 4 (DB-free): a liveness fault is logged at ERROR as staff_liveness_failed with the staff id,
+// the token's tenant scope, the sid, the method, the route pattern and the client IP (request_id exactly once); the
+// same fault on a request whose client has gone away is staff_liveness_cancelled at INFO, never a database error.
+func TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation(t *testing.T) {
+	var logs bytes.Buffer
+	h, issuer := sweepServer(t, &logs)
+	p := unitStaffParams(uuid.New(), uuid.New(), auth.RoleSupport)
+	tok, err := issuer.IssueStaff(p, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/staff/me/mfa", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no database: %d", rec.Code)
+	}
+	m, raw := livenessLogLine(t, logs.String(), "staff_liveness_failed")
+	for k, want := range map[string]string{
+		"level": "ERROR", "reason": "db_error", "staff_id": p.StaffID.String(), "token_tenant": p.TenantID.String(),
+		"sid": p.SessionID.String(), "method": "GET", "route": "GET /v1/staff/me/mfa", "client_ip": "192.0.2.1",
+	} {
+		if m[k] != want {
+			t.Errorf("staff_liveness_failed %s = %v, want %s", k, m[k], want)
+		}
+	}
+	if n := strings.Count(raw, `"request_id"`); n != 1 {
+		t.Errorf("request_id appears %d times in %s", n, raw)
+	}
+	if strings.Contains(raw, tok) {
+		t.Fatal("the token reached the log")
+	}
+
+	logs.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req = httptest.NewRequest(http.MethodGet, "/v1/staff/me/mfa", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if strings.Contains(logs.String(), "staff_liveness_failed") || strings.Contains(logs.String(), "db_error") {
+		t.Fatalf("a cancelled request was logged as a database fault: %s", logs.String())
+	}
+	m, _ = livenessLogLine(t, logs.String(), "staff_liveness_cancelled")
+	if m["level"] != "INFO" || m["reason"] != "client_cancelled" {
+		t.Fatalf("cancelled: %v", m)
 	}
 }
