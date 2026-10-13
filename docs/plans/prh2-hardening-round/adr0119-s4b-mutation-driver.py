@@ -79,9 +79,9 @@ MUTANTS = [
 	}''', '', HS, 'TestStepUp_Classifiers'),
  # --- the step-up endpoint and the session write ---
  ('H01', AUS, '''		sessionID, next.MFAAt, newSeal.KID, newSeal.MAC)''', '''		sessionID, cur.MFAAt, newSeal.KID, newSeal.MAC)''', HS, 'TestStepUp_EndToEnd'),
- ('H02a', AUS, '''	if revoked || replaced || absolute == nil || !now.Before(*absolute) {''', '''	if absolute == nil || !now.Before(*absolute) {''', HS, 'TestStepUp_EndToEnd|TestStepUp_RacesRevocation'),
- ('H02b', AUS, '''	if revoked || replaced || absolute == nil || !now.Before(*absolute) {''', '''	if absolute == nil {''', HS, 'TestStepUp_EndToEnd|TestStepUp_RacesRevocation'),
- ('H03', AUS, '''	if !keys.VerifySessionSeal(cur, stored) {''', '''	if !keys.VerifySessionSeal(cur, stored) && false {''', HS, 'TestStepUp_'),
+ ('H02a', AUS, '''	if revoked || replaced || absolute == nil || !now.Before(*absolute) {''', '''	if absolute == nil || !now.Before(*absolute) {''', HS, 'TestStepUp_EndToEnd|TestStepUp_RacesRevocation|TestStepUpStaffSession_DirectRefusals'),
+ ('H02b', AUS, '''	if revoked || replaced || absolute == nil || !now.Before(*absolute) {''', '''	if absolute == nil {''', HS, 'TestStepUp_EndToEnd|TestStepUp_RacesRevocation|TestStepUpStaffSession_DirectRefusals'),
+ ('H03', AUS, '''	if !keys.VerifySessionSeal(cur, stored) {''', '''	if !keys.VerifySessionSeal(cur, stored) && false {''', HS, 'TestStepUp_|TestStepUpStaffSession_DirectRefusals'),
  ('H04', HND, '''	if locked {
 		// The session row must be visible''', '''	if false {
 		// The session row must be visible''', HS, 'TestStepUp_LockoutSharedWithLogin'),
@@ -115,7 +115,8 @@ MUTANTS = [
  ('L03', LIV, '''		if keys.IsLegacySessionSeal(a, stored) {
 			return observability.StaffLivenessReasonSealLegacy, liveStaffAssurance{}
 		}''', '', HS, 'TestStaffAssuranceVerdict'),
- ('L04', LIV, '''			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, live)))''', '''			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, liveStaffAssurance{})))''', HS, 'TestStepUp_GoldenTable'),
+ ('L04', LIV, '''			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, live)))''', '''			_ = live
+			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, liveStaffAssurance{})))''', HS, 'TestStepUp_GoldenTable'),
  ('SE01', SES, '''	return []byte("ss-v2|" + body + "|" + a.RefreshTokenHash + "|" + us(a.ExpiresAt)), nil''',
   '''	return []byte("ss-v2|" + body + "|" + us(a.ExpiresAt)), nil''', SM, 'TestSealSession'),
  ('SE02', SES, '''	return []byte("ss-v2|" + body + "|" + a.RefreshTokenHash + "|" + us(a.ExpiresAt)), nil''',
@@ -141,7 +142,7 @@ MUTANTS = [
  ('B03', APS, '''	return c.Operation == OpPolicyPropose && c.Scope == ScopeTenant''', '''	return c.Operation == OpPolicyPropose''', AP, 'TestCheckStepUp'),
  ('B04', APS, '''		return staffmfa.StepUpCriticalMaxAgeBound.Max + StepUpInFlightGrace, true''', '''		return staffmfa.StepUpFinancialMaxAgeBound.Max + StepUpInFlightGrace, true''', AP, 'TestCheckStepUp'),
  ('B05', APS, '''!present && testStepUpFallback.Load() && !stepup.IsStaffRequest(ctx) {''', '''!present && testStepUpFallback.Load() {''', HS, 'TestStepUp_SignerBackstopOverHTTP'),
- ('B06', APS, '''	if !ok || !a.FreshFor(c.Actor, now, maxAge) {''', '''	if !ok || !a.Present() {''', AP, 'TestCheckStepUp'),
+ ('B06', APS, '''	if !ok || !a.FreshFor(c.Actor, now, maxAge) {''', '''	if _, _ = now, maxAge; !ok || !a.Present() {''', AP, 'TestCheckStepUp'),
  # --- the withdrawal policy (9.3) ---
  ('W01', WDG, '''		if !stepUp.FreshFor(approverPrincipalID, now, stepup.PolicyMaxAge) {''', '''		if !stepUp.FreshFor(approverPrincipalID, now, 10*time.Minute) {''', WD, 'TestApprove_RequireStepUp'),
  ('W02', WDG, '''		if isAutomated {
