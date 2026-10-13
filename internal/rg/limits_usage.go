@@ -307,15 +307,17 @@ scan2 AS (
 	       CASE WHEN direction = 'debit' THEN amount ELSE -amount END AS sg,
 	       CASE WHEN is_rev THEN oc ELSE created_at END AS eff,
 	       (tt = ANY($11::text[]) OR (is_rev AND ot = ANY($11::text[]))) AS wager_row,
-	       (is_rev AND oc IS NULL) AS unresolved
+	       (is_rev AND oc IS NULL) AS unresolved,
+	       (account_type = 'player_locked_cash' AND tt IN ('casino_bet', 'casino_win', 'casino_rollback')) AS undeclared_shape
 	  FROM scan
 ),
 grouped AS (
 	SELECT account_type, count(*) FILTER (WHERE unresolved) AS unresolved,
+	       count(*) FILTER (WHERE undeclared_shape) AS undeclared_shape,
 	       ` + strings.Join(cols, ",\n\t       ") + `
 	  FROM scan2 GROUP BY account_type
 )
-SELECT (SELECT t FROM asof), ` + strings.Join(final, ", ") + `, ARRAY(SELECT id FROM accts), g.account_type, g.unresolved, ` + strings.Join(gcols, ", ") + `
+SELECT (SELECT t FROM asof), ` + strings.Join(final, ", ") + `, ARRAY(SELECT id FROM accts), g.account_type, g.unresolved, g.undeclared_shape, ` + strings.Join(gcols, ", ") + `
   FROM win LEFT JOIN grouped g ON true`
 }
 
@@ -350,13 +352,13 @@ func MeasureStakeUsage(ctx context.Context, tx pgx.Tx, req UsageRequest) (StakeU
 		seen = true
 		starts := make([]*time.Time, n)
 		var accountType *string
-		var unresolved *int64
+		var unresolved, undeclaredShape *int64
 		var asOf time.Time
 		dest := []any{&asOf}
 		for i := range starts {
 			dest = append(dest, &starts[i])
 		}
-		dest = append(dest, &out.AccountIDs, &accountType, &unresolved)
+		dest = append(dest, &out.AccountIDs, &accountType, &unresolved, &undeclaredShape)
 		per := 2
 		if person {
 			per = 4
@@ -380,6 +382,12 @@ func MeasureStakeUsage(ctx context.Context, tx pgx.Tx, req UsageRequest) (StakeU
 		}
 		if unresolved != nil && *unresolved > 0 {
 			return StakeUsage{}, fmt.Errorf("%w: account_type=%s", ErrUnresolvedReversal, *accountType)
+		}
+		if undeclaredShape != nil && *undeclaredShape > 0 {
+			// A casino posting that locks CASH (Dr player_cash / Cr player_locked_cash, released into player_cash on a
+			// win): not producible by today's casino postBet (ADR 0039 section 16.10) and its release credit would
+			// net the stake out of loss usage. The shape is undeclared, so the measurement stops (ADR 0031 section 33).
+			return StakeUsage{}, fmt.Errorf("%w: account_type=%s on a casino transaction", ErrUnrecognizedUsageLeg, *accountType)
 		}
 		measuredWager := inSet(RGCashAccountTypes, *accountType) || (req.WagerCountsBonus && inSet(RGBonusAccountTypes, *accountType))
 		measuredLoss := inSet(RGCashAccountTypes, *accountType) || (req.LossCountsBonus && inSet(RGBonusAccountTypes, *accountType))

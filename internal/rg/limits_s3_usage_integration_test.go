@@ -247,6 +247,19 @@ func TestRGUsageS3(t *testing.T) {
 		if !errors.Is(err, ErrUnrecognizedUsageLeg) {
 			t.Fatalf("an undeclared player-side leg must fail closed, got %v", err)
 		}
+		// A casino win that RELEASES a cash lock into player_cash (the locked-cash origin shape of ADR 0039 section 16.4,
+		// not producible by today's postBet): its release credit would net the stake out of loss, so the shape is undeclared.
+		h := w.newFix(t)
+		w.s3Post(t, h.tenantA, s3Tx{typ: "casino_win", at: ago(hr), asset: "USD", legs: []s3Leg{
+			houseDr("50"), cashCr(h.acctA1, "50"), lockedCashDr(h.acctA1, "20"), cashCr(h.acctA1, "20")}})
+		err = do(w.rt, staffSess(h.tenantA, h.staffA), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := MeasureStakeUsage(ctx, tx, UsageRequest{TenantID: h.tenantA, PlayerAccountID: h.acctA1, Scope: LimitScopeAccount, AssetCode: "USD",
+				Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &s3T})
+			return err
+		})
+		if !errors.Is(err, ErrUnrecognizedUsageLeg) {
+			t.Fatalf("a casino posting that locks cash must fail closed, got %v", err)
+		}
 		// A casino_rollback whose original cannot be resolved.
 		g := w.newFix(t)
 		w.s3Post(t, g.tenantA, s3Tx{typ: "casino_rollback", at: ago(hr), asset: "USD", legs: []s3Leg{cashCr(g.acctA1, "10"), houseDr("10")}})
