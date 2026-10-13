@@ -1,0 +1,53 @@
+ADR 0118 / migration 0136 (BRAND-REHOME-HOLD-1) - mutation-kill evidence (local, private databases; no CI evidence)
+
+Driver: docs/plans/prh2-hardening-round/adr0118-mutation-driver.py. Per mutant: copy the worktree (no .git), apply
+ONE textual mutation to the 0136 up / down file (asserted to apply exactly once), rebuild the private database
+br0136_mut from that copy (priv_db.sh: every migration 0001..0136 applied by cmd/migrate), then run
+  go test -tags integration -count=1 -run TestBrandBinding_ ./internal/launchgov/   (igaming_runtime; owner for T7)
+  go test -tags integration -count=1 -run TestMigration0136_ ./internal/tenant/     (throwaway scratch databases
+                                                                                    migrated from the mutated file)
+Pass 1 (discarded as evidence): ran while two fixtures were being corrected (a re-point target that already owned an
+EUR wallet failed on UNIQUE (player_account_id, asset_code) with 23505 for the wrong reason; a KYC row pinned the
+player being re-homed in the scratch hole test). Both fixtures were fixed and the full set re-run.
+Pass 2 (final tests, this record): 10 of 10 KILLED, 0 survived.
+
+M1 | drop brand_id from the wallets WHEN clause | KILLED by TestBrandBinding_T3_EveryPinnedColumnAlone, TestMigration0136_Catalog
+M2 | drop brand_id from the wallets function body only | KILLED by TestBrandBinding_T3_EveryPinnedColumnAlone, TestMigration0136_Catalog
+M3 | drop the player_accounts trigger | KILLED by TestBrandBinding_T2_TerminalRequest_23503Before_BRAfter, TestBrandBinding_T3_EveryPinnedColumnAlone, TestMigration0136_Catalog, TestMigration0136_Preflight, TestMigration0136_UpDownUp_WholeSchema
+M4 | FOR EACH STATEMENT instead of FOR EACH ROW (wallets) | KILLED (migration does not apply: priv_db rebuild failed)
+M5 | AFTER instead of BEFORE (wallets) | KILLED by TestBrandBinding_T3_EveryPinnedColumnAlone, TestMigration0136_Catalog
+M6 | remove player_account_id from the wallets pin (WHEN and body) | KILLED by TestBrandBinding_T3_EveryPinnedColumnAlone, TestBrandBinding_T4_RepointShapes, TestBrandBinding_T7_OwnerIsBound, TestMigration0136_Catalog, TestMigration0136_RehomeCommitsAt0135_RefusedAt0136
+M7 | remove the kyc_verifications trigger | KILLED by TestBrandBinding_T3_EveryPinnedColumnAlone, TestBrandBinding_T4_RepointShapes, TestBrandBinding_T7_OwnerIsBound, TestMigration0136_Catalog, TestMigration0136_Preflight, TestMigration0136_RehomeCommitsAt0135_RefusedAt0136, TestMigration0136_UpDownUp_WholeSchema
+M8 | delete pre-flight class 1 | KILLED by TestMigration0136_Preflight
+M9 | down leaves a function behind | KILLED by TestMigration0136_UpDownUp_WholeSchema
+M10 | <> instead of IS DISTINCT FROM (all WHEN clauses and bodies) | KILLED by TestMigration0136_Catalog
+
+Notes against ADR 0118 s6 predictions:
+  M2  the function body check is load-bearing: with brand_id dropped from the body only, a brand_id-only change
+      passes the WHEN clause, the function finds nothing and the composite FK raises 23503 (not BR002): T3 kills it.
+  M3  as predicted: the re-home CTE (T1) still fails on BR002 (wallets trigger) and PASSES; T3's player_accounts
+      single-column cases are the behavioural killer (plus T8 / T9 / T10 catalog and object counts).
+  M4  the mutated file does not apply: "statement trigger's WHEN condition cannot reference column values" (42P17).
+  M5  NOT behaviourally equivalent (s6 expected equivalence): an AFTER row trigger runs after the RLS WITH CHECK, so
+      `UPDATE wallets SET tenant_id = <other tenant>` returns 42501 instead of BR002 (T3); T8 kills it via tgtype
+      (17 = ROW|UPDATE instead of 19 = ROW|BEFORE|UPDATE).
+  M10 behaviourally equivalent on these NOT NULL columns (an equivalent mutant at the behaviour level, not a gap);
+      killed statically by T8 (the WHEN clause and the body must use IS DISTINCT FROM for exactly the pinned columns).
+
+T11 static guard, manual mutation: a non-test file internal/wallet/zz_mut.go containing
+`UPDATE wallets SET brand_id = $1 WHERE id = $2` made TestBrandBindingStaticGuard_NoGoWriterOfAPinnedColumn FAIL
+("internal/wallet/zz_mut.go: wallets.brand_id"); file removed. The detector also has its own negative control
+(TestBrandBindingStaticGuard_DetectorControl: 9 forbidden shapes detected, 7 legitimate shapes not flagged).
+
+Extra live probes (private DB br0136_ae8c at 0136, igaming_runtime, each statement in a rolled-back transaction;
+ids redacted; script scratchpad br0136_probe.sh):
+--- MERGE re-home of the wallet
+ERROR:  BR002: wallets: the wallet identity and brand binding are immutable (ADR 0118); refused change of column(s) brand_id
+--- INSERT .. ON CONFLICT DO UPDATE re-point
+ERROR:  BR002: wallets: the wallet identity and brand binding are immutable (ADR 0118); refused change of column(s) brand_id
+--- UPDATE .. FROM re-home
+ERROR:  BR001: player_accounts: the brand binding is immutable (ADR 0118); refused change of column(s) brand_id
+--- session_replication_role
+ERROR:  42501: permission denied to set parameter "session_replication_role"
+--- ALTER TABLE DISABLE TRIGGER
+ERROR:  42501: must be owner of table wallets

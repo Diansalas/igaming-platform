@@ -89,6 +89,7 @@ constraint has a tenant / brand status vocabulary (checked against `pg_constrain
 | `migrations/0130_launch_authorisation_actor_proof.up.sql` | the same `IF OLD.status = 'closed'` (0130 restates the guard again with the C2 one-subject-per-transaction rule added) | closed is terminal, unchanged |
 | `migrations/0130_launch_authorisation_actor_proof.up.sql` | `IF NEW.status = 'closed'` (the closure backstop: LA023 hold-bearing withdrawals, LA024 brand open bets) | it reacts to a status being SET to closed (any prior status) and reads no subject status |
 | `migrations/0133_launch_closure_withdrawal_hold_balance_arm.up.sql` | the same `IF OLD.status = 'closed'` and `IF NEW.status = 'closed'` (0133 restates 0130's guard byte for byte and adds the LA025 ledger closure arm, ADR 0113 slice 2) | closed is terminal, unchanged; LA025 reacts to a status being SET to closed and reads the subject's `player_withdrawal_hold` accounts and their `ledger_entries` (and `wallets.brand_id` for a brand), no subject status |
+| `migrations/0136_player_brand_binding_immutable.up.sql` | `AND b.status = 'closed'` in the up pre-flight (a one-shot `DO` block, not a function or trigger) | ADR 0118 s5 class 4: an INFORMATIONAL count of non-zero `player_cash` / `player_withdrawal_hold` balances (rebuilt from `ledger_entries`) on wallets of a closed brand, reported by `RAISE NOTICE` with counts only; it refuses nothing and gates nothing. `pending_launch` is not closed and a pending brand has no player funds, so it is not reported (correct) |
 
 ## 4. Writers
 

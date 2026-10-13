@@ -1,8 +1,9 @@
 # ADR 0118 - Player brand binding is immutable (BRAND-REHOME-HOLD-1)
 
-- **Status:** ACCEPTED pending implementation (`architect`, 2026-10-13). DESIGN ONLY: no SQL, Go or migration is part
-  of this document. Every item below is `NOT IMPLEMENTED` until migration `0136` and its tests merge with the reviews
-  named in section 9. There is no blocking owner question (section 11 has one non-blocking confirmation).
+- **Status:** ACCEPTED (`architect`, 2026-10-13). **IMPLEMENTED on the implementation branch (2026-10-13,
+  `ledger-finance`), NOT MERGED; pending the section 9 reviews** (security LIVE re-run blocking). Implementation record:
+  section 12. Evidence is MOCK/local only (no GitHub CI, CI-BILLING-1). The original design text below is unchanged
+  except where section 12 records a deviation.
 - **Closes (on implementation):** task-registry row BRAND-REHOME-HOLD-1; ADR 0113 section 9 item 10;
   `docs/plans/platform-reconciliation-2026-10-13.md` class-A item 2/3.
 - **Decision type:** cross-domain integrity control (`identity`, `wallet`, `ledger`, `launchgov`, `kyc`). Author:
@@ -332,3 +333,70 @@ consolidation, rebrand that merges skins, operator acquisition)? **Recommended a
 re-theme is a `brands` configuration change and is unaffected. Moving players between brands would be a new governed
 transfer flow with its own ADR (account close/open plus explicit ledger transfers, ledger-finance owned). This ADR is
 reversible by a later forward migration, so the question does not block implementation.
+
+## 12. Implementation record (2026-10-13, `ledger-finance`; NOT MERGED, pending section 9 reviews)
+
+Branch base `2ee2041`. Labels: migration and tests `IMPLEMENTED`; evidence MOCK/local only (private databases on the
+local CI Postgres; no GitHub CI, CI-BILLING-1). Nothing here is a review sign-off.
+
+**Files.**
+
+| File | What |
+|---|---|
+| `migrations/0136_player_brand_binding_immutable.up.sql` | s4 exactly: `SET LOCAL lock_timeout = '5s'`; pre-flight `BR098` (classes 1-3) + class 4 NOTICE; three plain plpgsql functions (search_path pinned, not SECURITY DEFINER, schema-qualified, message = table + changed column names only); three BEFORE UPDATE ROW triggers with WHEN; `COMMENT ON TRIGGER` |
+| `migrations/0136_player_brand_binding_immutable.down.sql` | drops the three triggers and functions; restores the 0135 schema exactly (T10) |
+| `internal/launchgov/brand_binding_integration_test.go` | T1, T2 (both cases), T3, T4, T5, T7 (runtime role; owner for T7) |
+| `internal/tenant/migration_0136_integration_test.go` | 0135 hole vs 0136 refusal for the CTE (both orders) and the three s1.1 shapes; T8 catalog; T9 pre-flight; T10 up/down/up |
+| `internal/identity/brand_binding_static_test.go` | T11 static writer guard + detector negative control + non-vacuity coverage |
+| `internal/tenant/status_readers_static_test.go`, `docs/security/launch-status-readers.md` | allow-list entry for the class 4 literal `AND b.status = 'closed'` (see deviation 1) |
+| `docs/plans/prh2-hardening-round/adr0118-mutation-kill.txt`, `adr0118-mutation-driver.py` | mutation evidence |
+
+**Deviations from the design text (each reversible, none changes the decision).**
+
+1. s6 "no existing assertion changes": ONE existing static pin gained an allow-list entry.
+   `TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList` (internal/tenant) refuses any
+   tenant/brand status literal comparison outside its reviewed list; the class 4 count compares `b.status = 'closed'`.
+   Added: `migrations/0136_player_brand_binding_immutable.up.sql:AND b.status = 'closed'` (informational NOTICE only,
+   refuses nothing; `pending_launch` is not closed and holds no player funds). No assertion was removed or weakened.
+   No migration-head pin exists in the repository (grep for `0135`/`135` in tests: every 0135 test scopes its
+   migration directory to `<= 135`), so none changed.
+2. Pre-flight additions beyond s5's text: (a) `LOCK TABLE player_accounts, wallets, kyc_verifications IN SHARE ROW
+   EXCLUSIVE MODE` first (the lock `CREATE TRIGGER` takes anyway), so no re-point can land between the scan and the
+   trigger creation; (b) FORCE RLS is lifted on the five tables the counts read (`wallets`, `ledger_accounts`,
+   `ledger_adjustment_requests`, `ledger_entries`, `brands`) inside one `DO` block and restored before the refusal,
+   as 0132 class 9b. Operational consequence: `ALTER TABLE ... NO FORCE` takes ACCESS EXCLUSIVE on those tables
+   (including `ledger_entries`) until the migration commits; the 5 s `lock_timeout` makes a busy table fail the
+   migration fast instead of queueing writers. Same profile as 0132.
+3. T2 second case ("23503 before 0136"): executed on the shared test database by disabling the two 0136 triggers in
+   ONE rolled-back owner transaction (for these tables that is exactly the 0135 schema: 0136 adds only these
+   triggers), then asserting the triggers are enabled again. The scratch-database 0135 evidence (no trigger at all)
+   covers the no-child shapes (CTE both orders, wallet re-point, asset change, KYC re-point).
+4. T5 `declared_residence`: asserted with the exact SET list of `identity.SetPlayerAccountDeclaredResidence` (the
+   function needs an active evidence-collection configuration; its own suite runs it end to end and stays green).
+   status / password_hash / verified_at / status CAS / reinstate go through the real service functions.
+5. T6 inserts: no new test; the existing suites (`identityresolution` concurrent registrations,
+   `wallet` `TestGetOrCreate_ConcurrentFirstUseCreatesExactlyOneWallet`, `kyc`) run green, unchanged, at head 0136.
+6. M5 (AFTER instead of BEFORE) is NOT behaviourally equivalent as s6 predicted: an AFTER row trigger fires after the
+   RLS WITH CHECK, so `wallets SET tenant_id` returns `42501` instead of `BR002` (T3 kills it); the catalog (T8)
+   kills it too. M10 (`<>`) is behaviourally equivalent on these NOT NULL columns and is killed statically by T8
+   (the WHEN clause and the body must be `IS DISTINCT FROM`).
+7. Test placement: behaviour tests in `internal/launchgov` (its world fixtures: governed closures, stranded holds,
+   LA025 counts), migration tests in `internal/tenant` (scratch helpers), static guard in `internal/identity`.
+
+**Extra live probes (private DB at 0136, `igaming_runtime`, rolled back):** `MERGE INTO wallets ... UPDATE SET
+brand_id` -> `BR002`; `INSERT INTO wallets ... ON CONFLICT (id) DO UPDATE SET brand_id` -> `BR002`; `UPDATE
+player_accounts ... FROM (...)` re-home -> `BR001`; `SET session_replication_role = replica` -> `42501`; `ALTER TABLE
+wallets DISABLE TRIGGER` -> `42501` (must be owner).
+
+**Verification (exact commands and results):** see the orchestrator hand-off report and
+`docs/plans/prh2-hardening-round/adr0118-mutation-kill.txt`. Summary: integration suites of `internal/tenant`,
+`internal/identity`, `internal/identityresolution`, `internal/wallet`, `internal/ledger`, `internal/launchgov`,
+`internal/withdrawal`, `internal/reconciliation`, `internal/db`, `cmd/migrate`, `internal/rg`, `internal/kyc` PASS at
+head 0136; repo-wide unit tests PASS; gofmt clean; go vet (default and `-tags integration`) clean; golangci-lint
+(`--build-tags integration --new-from-rev=2ee2041`) 0 issues. Mutation plan M1-M10: **10 of 10 killed** (final pass;
+M4 does not apply; M5 and M10 notes in deviation 6); T11 manually mutated and killed. Evidence file above.
+
+**Residuals (unchanged from s7, plus):** class 3 compares brand / player only (not `asset_code`; an asset re-point of
+a wallet with no ledger account but an adjustment request would not be reported); class 4 counts closed BRANDS only
+(a closed tenant with active brands is not reported); a past re-home of a player with no snapshot row leaves no trace
+(s5). HANDOVER and the registry closure are "on merge" items (s8) and are NOT done here beyond the registry status.

@@ -341,6 +341,12 @@ Numbers are allocated by the orchestrator (next free `0132`).
    of identity, via an ADR): make `brand_id` immutable on `player_accounts` / `wallets`, or refuse a move into a
    non-`active` brand under the brand gate key. Detection today: reconciliation D still sees the hold (D is
    per tenant, not per brand). Registered in `docs/governance/task-registry.md`.
+   **Status 2026-10-13: IMPLEMENTED by ADR 0118 / migration `0136_player_brand_binding_immutable` (decision:
+   re-home is not a supported operation; `player_accounts`, `wallets` and `kyc_verifications` identity columns are
+   immutable, SQLSTATE `BR001`/`BR002`/`BR003`, up pre-flight `BR098`). Closed by ADR 0118 / migration 0136 once
+   the ADR 0118 s9 reviews (security live re-run, ledger-finance, identity owner, code-reviewer, qa) sign off;
+   until then this item stays open in the registry. Evidence: MOCK/local only. Detection after an owner
+   `DISABLE TRIGGER` bypass remains per tenant (follow-up BRAND-CLOSED-BALANCE-CHECK-1).**
 
 ## 10. Work slices (ordered; none starts without orchestrator authorisation)
 
