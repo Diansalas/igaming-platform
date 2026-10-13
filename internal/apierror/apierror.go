@@ -161,6 +161,12 @@ const (
 	CodeSessionRevoked Code = "session_revoked" // 401: the staff session behind this access token is no longer live
 )
 
+// ADR 0119 slice S4b (sections 6.6, 7.3, 9.3): the step-up refusal. 403 with max_age (seconds) and the RFC 9470
+// WWW-Authenticate challenge (set by auth.WriteStepUpRequired, the only caller of WriteStepUpRequired).
+const (
+	CodeStepUpRequired Code = "step_up_required"
+)
+
 // Error is the wire format for an API error response.
 type Error struct {
 	Code    Code   `json:"code"`
@@ -170,6 +176,8 @@ type Error struct {
 	RequestID string `json:"request_id,omitempty"`
 	// CheckCodes is set only by the launch authorisation routes (WriteWithCheckCodes).
 	CheckCodes []string `json:"check_codes,omitempty"`
+	// MaxAge is set only with CodeStepUpRequired (WriteStepUpRequired): the step-up freshness, in seconds.
+	MaxAge *int `json:"max_age,omitempty"`
 }
 
 func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
@@ -184,7 +192,7 @@ func httpStatus(c Code) int {
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson,
 		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused,
-		CodeMFAEnrolmentRequired, CodeMFALocked:
+		CodeMFAEnrolmentRequired, CodeMFALocked, CodeStepUpRequired:
 		return http.StatusForbidden
 	case CodeNotFound, CodeSettlementNotFound:
 		return http.StatusNotFound
@@ -233,6 +241,20 @@ func WriteWithCheckCodes(w http.ResponseWriter, requestID string, code Code, mes
 		Message:    message,
 		RequestID:  requestID,
 		CheckCodes: checkCodes,
+	})
+}
+
+// WriteStepUpRequired writes 403 step_up_required with max_age (seconds). The
+// caller sets the RFC 9470 WWW-Authenticate header first.
+func WriteStepUpRequired(w http.ResponseWriter, requestID string, maxAgeSeconds int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(httpStatus(CodeStepUpRequired))
+	ma := maxAgeSeconds
+	_ = json.NewEncoder(w).Encode(Error{
+		Code:      CodeStepUpRequired,
+		Message:   "a fresh second-factor verification is required",
+		RequestID: requestID,
+		MaxAge:    &ma,
 	})
 }
 

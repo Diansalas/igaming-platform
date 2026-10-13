@@ -131,13 +131,16 @@ type sessionRow struct {
 	expiresAt           time.Time
 	revokedAt           *time.Time
 	replacedBySessionID *uuid.UUID
+	// refreshHash is the row's refresh_token_hash (the lookup key), bound into
+	// the staff seal since format v2 (ADR 0119 S4b, S3-R10).
+	refreshHash string
 	// staff is the assurance part of a staff row (nil for a player row).
 	staff *staffAssuranceRow
 }
 
 func lookupSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) (sessionRow, error) {
 	hash := hashRefreshToken(rawToken)
-	var row sessionRow
+	row := sessionRow{refreshHash: hash}
 	err := pool.WithSessionLookup(ctx, hash, func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx,
 			`SELECT id, principal_type, principal_id, tenant_id, expires_at, revoked_at, replaced_by_session_id
@@ -233,7 +236,7 @@ func RotateSessionWithPolicy(ctx context.Context, pool *db.Pool, rawToken string
 		}
 		switch cause := staffSealVerdict(row, policy.Staff.Keys); cause {
 		case "":
-		case integrityCausePreCutoverLegacy:
+		case integrityCausePreCutoverLegacy, integrityCauseLegacySealV1:
 			return Session{}, ErrSessionNotFound
 		default:
 			return Session{}, recordSessionIntegrity(ctx, pool, row, cause, userAgent, ipAddress)

@@ -37,6 +37,11 @@ const (
 	IntegrityCauseBadSeal          = "bad_seal"
 	IntegrityCauseNullSealPostCut  = "null_seal_after_cutover"
 	integrityCausePreCutoverLegacy = "pre_cutover"
+	// integrityCauseLegacySealV1: a genuine S3-format (v1) seal (ADR 0119 S4b,
+	// condition S3-R10): the session predates seal format v2. Retired quietly
+	// like a pre-cutover row (plain not-found, no audit, no alert): only a holder
+	// of the MAC key could have produced it.
+	integrityCauseLegacySealV1 = "legacy_seal_v1"
 )
 
 // SessionIntegrityError reports a staff session whose assurance seal is
@@ -91,7 +96,7 @@ func IssueStaffSession(ctx context.Context, tx pgx.Tx, keys *staffmfa.Keys, p St
 	if keys == nil {
 		return Session{}, ErrStaffSessionUnavailable
 	}
-	if p.StaffID == uuid.Nil || len(p.AMR) == 0 || p.Now.IsZero() || p.AbsoluteTTL <= 0 || p.IdleTTL <= 0 {
+	if p.StaffID == uuid.Nil || len(p.AMR) == 0 || !HasSecondFactorAMR(p.AMR) || p.Now.IsZero() || p.AbsoluteTTL <= 0 || p.IdleTTL <= 0 {
 		return Session{}, fmt.Errorf("auth: incomplete staff session parameters")
 	}
 	now := staffmfa.SessionTime(p.Now)
@@ -114,13 +119,17 @@ func idleExpiry(now time.Time, idle time.Duration, absolute time.Time) time.Time
 }
 
 func insertStaffSession(ctx context.Context, tx pgx.Tx, keys *staffmfa.Keys, a staffmfa.SessionAssurance, expiresAt time.Time, userAgent, ipAddress string) (Session, error) {
-	seal, err := keys.SealSession(a)
-	if err != nil {
-		return Session{}, fmt.Errorf("auth: seal staff session: %w", err)
-	}
 	token, err := generateRefreshToken()
 	if err != nil {
 		return Session{}, err
+	}
+	// Seal format v2 (S3-R10): the refresh token hash and the idle expiry are bound.
+	expiresAt = staffmfa.SessionTime(expiresAt)
+	a.RefreshTokenHash = hashRefreshToken(token)
+	a.ExpiresAt = expiresAt
+	seal, err := keys.SealSession(a)
+	if err != nil {
+		return Session{}, fmt.Errorf("auth: seal staff session: %w", err)
 	}
 	var tenantIDArg *uuid.UUID
 	if a.TenantID != uuid.Nil {
@@ -131,7 +140,7 @@ func insertStaffSession(ctx context.Context, tx pgx.Tx, keys *staffmfa.Keys, a s
 		`INSERT INTO sessions (id, principal_type, principal_id, tenant_id, refresh_token_hash, user_agent, ip_address, expires_at,
 		                       aal, amr, auth_time, mfa_at, absolute_expires_at, assurance_kid, assurance_seal)
 		 VALUES ($1, 'staff', $2, $3, $4, NULLIF($5, ''), NULLIF($6, '')::inet, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		a.SessionID, a.PrincipalID, tenantIDArg, hashRefreshToken(token), userAgent, ipAddress, expiresAt,
+		a.SessionID, a.PrincipalID, tenantIDArg, a.RefreshTokenHash, userAgent, ipAddress, expiresAt,
 		a.AAL, a.AMR, a.AuthTime, a.MFAAt, a.AbsoluteExpiresAt, seal.KID, seal.MAC,
 	); err != nil {
 		return Session{}, fmt.Errorf("auth: insert staff session: %w", err)
@@ -181,6 +190,7 @@ func (row sessionRow) assurance() (staffmfa.SessionAssurance, staffmfa.KeyedHash
 	return staffmfa.SessionAssurance{
 		SessionID: row.id, PrincipalType: string(row.principalType), PrincipalID: row.principalID, TenantID: tenant,
 		AAL: int(*s.aal), AMR: s.amr, AuthTime: *s.authTime, MFAAt: *s.mfaAt, AbsoluteExpiresAt: *s.absoluteExpiry,
+		RefreshTokenHash: row.refreshHash, ExpiresAt: row.expiresAt,
 	}, staffmfa.KeyedHash{KID: *s.kid, MAC: s.seal}, true
 }
 
@@ -200,7 +210,17 @@ func staffSealVerdict(row sessionRow, keys *staffmfa.Keys) string {
 		return IntegrityCauseNullSealPostCut
 	}
 	a, h, ok := row.assurance()
-	if !ok || !keys.VerifySessionSeal(a, h) {
+	if !ok {
+		return IntegrityCauseBadSeal
+	}
+	if !keys.VerifySessionSeal(a, h) {
+		if keys.IsLegacySessionSeal(a, h) {
+			return integrityCauseLegacySealV1
+		}
+		return IntegrityCauseBadSeal
+	}
+	// S3-R13: a sealed row must also be internally coherent (a second factor named, auth_time <= mfa_at).
+	if a.AAL != StaffAAL || !HasSecondFactorAMR(a.AMR) || a.MFAAt.Before(a.AuthTime) {
 		return IntegrityCauseBadSeal
 	}
 	return ""
@@ -234,5 +254,7 @@ func rotateStaff(ctx context.Context, tx pgx.Tx, p *StaffSessionPolicy, row sess
 	}
 	a.SessionID = uuid.New()
 	a.AMR = append([]string(nil), a.AMR...)
+	// insertStaffSession binds the successor's own refresh token hash and idle expiry.
+	a.RefreshTokenHash, a.ExpiresAt = "", time.Time{}
 	return insertStaffSession(ctx, tx, p.Keys, a, idleExpiry(now, p.IdleTTL, a.AbsoluteExpiresAt), userAgent, ipAddress)
 }

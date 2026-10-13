@@ -23,6 +23,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
@@ -48,10 +49,20 @@ const usableFactorPredicate = `f.status = 'active' AND f.hard_locked_at IS NULL`
 // absolute_expires_at is compared on the DATABASE clock (S3-R8). The staff
 // version is not read: staff_users.staff_version arrives with migration 0139
 // (S5 + S6); until then every staff member is at staffVersionUnversioned.
+//
+// ADR 0119 S4b (conditions S3-R10, S3-R13, S4a-R10): the query also reads the
+// row's sealed assurance - aal, amr, auth_time, mfa_at, absolute_expires_at,
+// the idle expiry and refresh_token_hash (both bound by seal format v2, never
+// compared here), the kid and the seal - and the database clock. Liveness
+// verifies the seal and the row's coherence, and hands the VERIFIED row values
+// to the step-up gate, which therefore never trusts the token's own mfa_at
+// beyond the row's.
 const staffLivenessSQL = `SELECT s.revoked_at IS NOT NULL,
        (s.absolute_expires_at IS NULL OR s.absolute_expires_at <= now()),
        su.status, su.role,
-       EXISTS (SELECT 1 FROM staff_mfa_factors f WHERE f.staff_user_id = su.id AND ` + usableFactorPredicate + `)
+       EXISTS (SELECT 1 FROM staff_mfa_factors f WHERE f.staff_user_id = su.id AND ` + usableFactorPredicate + `),
+       now(), s.aal, s.amr, s.auth_time, s.mfa_at, s.absolute_expires_at, s.expires_at AS sealed_idle_expiry,
+       s.refresh_token_hash, s.assurance_kid, s.assurance_seal
   FROM sessions s
   JOIN staff_users su ON su.id = s.principal_id
  WHERE s.id = $1 AND s.principal_id = $2 AND s.principal_type = 'staff'
@@ -66,6 +77,69 @@ type staffLivenessRow struct {
 	role            string
 	staffVersion    int64 // staffVersionUnversioned until migration 0139
 	factorUsable    bool
+
+	// The sealed assurance (S4b) and the database clock.
+	dbNow                                    time.Time
+	aal                                      *int16
+	amr                                      []string
+	authTime, mfaAt, absoluteExpiry, idleExp *time.Time
+	refreshHash                              string
+	kid                                      *string
+	seal                                     []byte
+}
+
+// liveStaffAssurance is the VERIFIED assurance of the request's session row
+// (seal format v2 verified, coherent), placed in the request context by
+// requireLiveStaffSession for the step-up gate (S4a-R10: mfa_at and auth_time
+// come from the sealed row, never from the token claims alone).
+type liveStaffAssurance struct {
+	SessionID uuid.UUID
+	AMR       []string
+	AuthTime  time.Time
+	MFAAt     time.Time
+	DBNow     time.Time
+}
+
+type liveStaffAssuranceKey struct{}
+
+func withLiveStaffAssurance(ctx context.Context, a liveStaffAssurance) context.Context {
+	return context.WithValue(ctx, liveStaffAssuranceKey{}, a)
+}
+
+func liveStaffAssuranceFrom(ctx context.Context) (liveStaffAssurance, bool) {
+	a, ok := ctx.Value(liveStaffAssuranceKey{}).(liveStaffAssurance)
+	return a, ok && a.SessionID != uuid.Nil
+}
+
+// staffAssuranceVerdict verifies the sealed assurance of a row that passed
+// staffLivenessVerdict: the v2 seal (a genuine v1 seal is seal_legacy, anything
+// else seal_invalid), then coherence (S3-R13): aal 2, amr names a second
+// factor, auth_time <= mfa_at <= now + skew, and auth_time within the
+// configured absolute session TTL. All times are the database clock.
+func staffAssuranceVerdict(row staffLivenessRow, keys *staffmfa.Keys, absoluteTTL time.Duration, sid, staffID, tenantID uuid.UUID) (observability.StaffLivenessReason, liveStaffAssurance) {
+	if keys == nil || row.aal == nil || row.amr == nil || row.authTime == nil || row.mfaAt == nil || row.absoluteExpiry == nil ||
+		row.idleExp == nil || row.kid == nil || row.seal == nil {
+		return observability.StaffLivenessReasonSealInvalid, liveStaffAssurance{}
+	}
+	a := staffmfa.SessionAssurance{
+		SessionID: sid, PrincipalType: string(auth.PrincipalStaff), PrincipalID: staffID, TenantID: tenantID,
+		AAL: int(*row.aal), AMR: row.amr, AuthTime: *row.authTime, MFAAt: *row.mfaAt, AbsoluteExpiresAt: *row.absoluteExpiry,
+		RefreshTokenHash: row.refreshHash, ExpiresAt: *row.idleExp,
+	}
+	stored := staffmfa.KeyedHash{KID: *row.kid, MAC: row.seal}
+	if !keys.VerifySessionSeal(a, stored) {
+		if keys.IsLegacySessionSeal(a, stored) {
+			return observability.StaffLivenessReasonSealLegacy, liveStaffAssurance{}
+		}
+		return observability.StaffLivenessReasonSealInvalid, liveStaffAssurance{}
+	}
+	if a.AAL != auth.StaffAAL || !auth.HasSecondFactorAMR(a.AMR) || a.MFAAt.Before(a.AuthTime) ||
+		a.MFAAt.After(row.dbNow.Add(auth.StepUpClockSkew)) || absoluteTTL <= 0 || a.AuthTime.Before(row.dbNow.Add(-absoluteTTL)) {
+		return observability.StaffLivenessReasonAssuranceIncoherent, liveStaffAssurance{}
+	}
+	return observability.StaffLivenessReasonOK, liveStaffAssurance{
+		SessionID: sid, AMR: append([]string(nil), a.AMR...), AuthTime: a.AuthTime, MFAAt: a.MFAAt, DBNow: row.dbNow,
+	}
 }
 
 // staffLivenessVerdict applies the section 7.3 refusal rules to a found row:
@@ -91,14 +165,22 @@ func staffLivenessVerdict(row staffLivenessRow, tokenRole auth.Role, tokenVersio
 	return observability.StaffLivenessReasonOK
 }
 
-var errStaffLivenessNoDB = errors.New("httpserver: staff liveness: no database")
+var (
+	errStaffLivenessNoDB   = errors.New("httpserver: staff liveness: no database")
+	errStaffLivenessNoKeys = errors.New("httpserver: staff liveness: no staff MFA keys (the seal cannot be verified)")
+)
 
 // checkStaffLiveness runs the liveness query for the session sess of staff
 // member staffID in tenantID's scope (uuid.Nil: platform) and returns the
-// verdict. A non-nil error is a fault (fail closed: 503).
-func checkStaffLiveness(ctx context.Context, pool *db.Pool, tenantID, staffID uuid.UUID, sess auth.StaffSession, role auth.Role) (observability.StaffLivenessReason, error) {
+// verdict and, when it is ok, the verified sealed assurance of the row. A
+// non-nil error is a fault (fail closed: 503). m nil (no staff MFA keys in the
+// process) is a fault too.
+func checkStaffLiveness(ctx context.Context, pool *db.Pool, m *StaffMFA, tenantID, staffID uuid.UUID, sess auth.StaffSession, role auth.Role) (observability.StaffLivenessReason, liveStaffAssurance, error) {
 	if pool == nil {
-		return "", errStaffLivenessNoDB
+		return "", liveStaffAssurance{}, errStaffLivenessNoDB
+	}
+	if m == nil {
+		return "", liveStaffAssurance{}, errStaffLivenessNoKeys
 	}
 	ctx, cancel := context.WithTimeout(ctx, staffLivenessDeadline)
 	defer cancel()
@@ -109,15 +191,21 @@ func checkStaffLiveness(ctx context.Context, pool *db.Pool, tenantID, staffID uu
 	row := staffLivenessRow{staffVersion: staffVersionUnversioned}
 	err := pool.QueryRowPrincipalScopeReadOnly(ctx, tenantID, staffID, staffLivenessStatementTimeout, staffLivenessSQL,
 		[]any{sess.SessionID, staffID, tenantArg}, func(r pgx.Row) error {
-			return r.Scan(&row.revoked, &row.absoluteExpired, &row.status, &row.role, &row.factorUsable)
+			return r.Scan(&row.revoked, &row.absoluteExpired, &row.status, &row.role, &row.factorUsable,
+				&row.dbNow, &row.aal, &row.amr, &row.authTime, &row.mfaAt, &row.absoluteExpiry, &row.idleExp,
+				&row.refreshHash, &row.kid, &row.seal)
 		})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return observability.StaffLivenessReasonNoSession, nil
+		return observability.StaffLivenessReasonNoSession, liveStaffAssurance{}, nil
 	}
 	if err != nil {
-		return "", err
+		return "", liveStaffAssurance{}, err
 	}
-	return staffLivenessVerdict(row, role, sess.StaffVersion), nil
+	if reason := staffLivenessVerdict(row, role, sess.StaffVersion); reason != observability.StaffLivenessReasonOK {
+		return reason, liveStaffAssurance{}, nil
+	}
+	reason, live := staffAssuranceVerdict(row, m.keys, m.absoluteTTL, sess.SessionID, staffID, tenantID)
+	return reason, live, nil
 }
 
 // writeSessionRevoked is the single liveness refusal.
@@ -164,7 +252,7 @@ func requireLiveStaffSession(deps Deps) func(http.Handler) http.Handler {
 				writeSessionRevoked(w, requestID)
 				return
 			}
-			reason, err := checkStaffLiveness(ctx, deps.DB, tc.TenantID, staffID, sess, auth.Role(tc.Role))
+			reason, live, err := checkStaffLiveness(ctx, deps.DB, deps.StaffMFA, tc.TenantID, staffID, sess, auth.Role(tc.Role))
 			if err != nil {
 				if ctx.Err() != nil {
 					// The client went away (or the server is shutting the request down): not a database fault.
@@ -179,12 +267,17 @@ func requireLiveStaffSession(deps Deps) func(http.Handler) http.Handler {
 			}
 			if reason != observability.StaffLivenessReasonOK {
 				observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessRefused, reason)
-				logger.Warn("staff_liveness_refused", "reason", string(reason))
+				if reason == observability.StaffLivenessReasonSealInvalid || reason == observability.StaffLivenessReasonAssuranceIncoherent {
+					// A sealed row that does not verify only arises from SQL tampering (or a key defect): Error, not Warn.
+					logger.Error("staff_liveness_refused", "reason", string(reason))
+				} else {
+					logger.Warn("staff_liveness_refused", "reason", string(reason))
+				}
 				writeSessionRevoked(w, requestID)
 				return
 			}
 			observability.RecordStaffLivenessDecision(ctx, observability.StaffLivenessAllowed, observability.StaffLivenessReasonOK)
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(withLiveStaffAssurance(ctx, live)))
 		})
 	}
 }
