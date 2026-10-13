@@ -269,7 +269,7 @@ for name, f, old, new, cmd in M:
         out = r.stdout + r.stderr
         verdict = 'KILLED' if r.returncode != 0 else 'SURVIVED'
         first = ''
-        infra = ('recovery mode' in out) or ('connection slots' in out) or ('no space left' in out) or ('failed to connect' in out)
+        infra = ('recovery mode' in out) or ('connection slots' in out) or (('no space left' in out) or ('failed to connect' in out)) and '--- FAIL' not in out
         if r.returncode != 0 and infra:
             verdict = 'INVALID(infra)'  # the DB or the disk failed: this run says nothing about the mutant, re-run it
         for line in out.splitlines():
