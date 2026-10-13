@@ -71,6 +71,12 @@ func readExecutionStatus(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) (e
 // anything else - so B-7 can race a revoke against a real execution.
 var testHookAfterShareLocks func(ctx context.Context, requestID uuid.UUID)
 
+// testHookBeforeShareLocks, when set by an in-package test, runs right before
+// the A8 staff/grant FOR SHARE statements of a final approval (after the L1
+// request lock and the approval insert), so ADR 0119 S4b's re-assertion test
+// can commit a suspension or role change of the actor in that window.
+var testHookBeforeShareLocks func(ctx context.Context, requestID uuid.UUID)
+
 // testHookBeforePost, when set by an in-package test, runs after the
 // request is 'executing' and L3 is held, just before ledger.Post - B-15's
 // crash-between-steps-7-and-10 injection point.
@@ -168,6 +174,9 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 	// then their grants IN FORCE AT now(), both FOR SHARE, ascending id
 	// (ADR 0099 §7.4, LF F3, architect I-5 / R-12 ruling: never "the
 	// unrevoked grant"). Then recount under the locks.
+	if testHookBeforeShareLocks != nil {
+		testHookBeforeShareLocks(ctx, requestID)
+	}
 	if err := lockStaffAndGrants(ctx, tx, req, call); err != nil {
 		return Outcome{}, err
 	}
