@@ -15,6 +15,8 @@ S = '/tmp/claude-0/-home-user-igaming-platform/82298384-cc24-5365-b2fc-220688ed9
 DB = os.environ.get('PRIV_DB', 'adr0115s3mut')
 BASE = ['env', 'PRIV_DB=' + DB, 'PRIV_SRC=' + W, 'bash', S + '/priv_test.sh', '-tags', 'integration', '-p', '1', '-count=1', '-failfast']
 SUITE = BASE + ['-run', 'TestRGUsageS3$|TestRGWindowStartsS3|TestRGDepositUsageS3|TestRGSessionUsageS3|TestRGEffectiveLimitInputsS3|TestS3', './internal/rg/']
+UNITRG = ['go', 'test', '-count=1', '-run', 'TestConfigContentValidate', './internal/rg/']
+CFG = 'internal/rg/limits_config.go'
 PERF = BASE + ['-timeout', '20m', '-run', 'TestRGUsageS3ExplainAndLatency', './internal/rg/']
 
 WIN = 'internal/rg/limits_usage_window.go'
@@ -133,6 +135,15 @@ M = [
     ('C6 wrong posting type ignored', CRE, "case txType == nil || *txType != \"deposit\":", "case false:", SUITE),
     ('C7 credit check not tenant scoped', CRE, "WHERE di.tenant_id = $1 AND di.created_at >= $2", "WHERE $1::uuid IS NOT NULL AND di.created_at >= $2", SUITE),
     ('C8 range upper bound inclusive', CRE, "AND di.created_at < $3", "AND di.created_at <= $3", SUITE),
+    # --- ledger-finance review round (F1 locked-bonus fail-closed, F9 reader guard, F10 ttl) ---
+    ('R1 locked-bonus gate ignores the flags', USE, "&& (req.WagerCountsBonus || req.LossCountsBonus) {", "&& true {", SUITE),
+    ('R2 locked-bonus gate ignores the loss flag', USE, "&& (req.WagerCountsBonus || req.LossCountsBonus) {", "&& (req.WagerCountsBonus) {", SUITE),
+    ('R3 locked-bonus gate ignores the wager flag', USE, "&& (req.WagerCountsBonus || req.LossCountsBonus) {", "&& (req.LossCountsBonus) {", SUITE),
+    ('R4 locked-bonus shape only on rollbacks', USE, "(account_type = 'player_locked_bonus' AND tt IN ('casino_bet', 'casino_win', 'casino_rollback')) AS bonus_lock_shape", "(account_type = 'player_locked_bonus' AND tt IN ('casino_rollback')) AS bonus_lock_shape", SUITE),
+    ('R5 locked-bonus gate never fires', USE, "if bonusLockShape != nil && *bonusLockShape > 0 &&", "if false && bonusLockShape != nil && *bonusLockShape > 0 &&", SUITE),
+    ('R6 ReadEffectiveLimitInputs without the scope guard', INP, "if err := usageGuard(ctx, tx, tenantID); err != nil {\n\t\treturn EffectiveLimitInputs{}, err\n\t}", "", SUITE),
+    ('R7 ReadUsageConfig without the scope guard', INP, "if err := usageGuard(ctx, tx, tenantID); err != nil {\n\t\treturn UsageConfig{}, err\n\t}", "", SUITE),
+    ('R8 pending_intent_ttl value accepted', CFG, "if a := c.PendingIntentTTLSeconds; a != nil && !a.None {", "if a := c.PendingIntentTTLSeconds; a != nil && !a.None && false {", UNITRG),
     # --- plan shape (only the performance test sees these) ---
     ('P1 entries scan not planned on its own (joined)', USE, "FROM ledger_entries le\n\t WHERE le.tenant_id = $1\n\t   AND le.player_account_id = ANY(ARRAY(SELECT id FROM accts))\n\t   AND le.asset_code = $3\n\t   AND le.created_at >= (SELECT least(` + strings.Join(least, \", \") + `) FROM win)\n\t   AND le.created_at <= (SELECT t FROM asof)\n),\nscan AS",
      "FROM ledger_entries le, ledger_accounts lax\n\t WHERE lax.id = le.ledger_account_id AND le.tenant_id = $1\n\t   AND le.player_account_id = ANY(ARRAY(SELECT id FROM accts))\n\t   AND le.asset_code = $3\n\t   AND le.created_at >= (SELECT least(` + strings.Join(least, \", \") + `) FROM win)\n\t   AND le.created_at <= (SELECT t FROM asof)\n),\nscan AS", PERF),
