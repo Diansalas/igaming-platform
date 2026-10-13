@@ -12,10 +12,11 @@ package actorproof
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
-	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
+	"github.com/Diansalas/igaming-platform/internal/stepup"
 )
 
 // ErrStepUpMissing: a step-up-classified operation was to be signed without a
@@ -36,33 +37,33 @@ const StepUpInFlightGrace = 30 * time.Second
 // floor row: a staff HTTP action executing a four-eyes decision, so it is
 // critical. If ADR 0115 ever moves it to a system worker, it must leave this
 // registry in the same change (otherwise the backstop turns it into a 500).
-var StepUpOperations = map[string]auth.StepUpClass{
-	OpAdjustmentInitiate:    auth.StepUpFinancial,
-	OpAdjustmentApprove:     auth.StepUpFinancial,
-	OpResolutionRequest:     auth.StepUpFinancial,
-	OpResolutionApprove:     auth.StepUpFinancial,
-	OpHoldResolutionRequest: auth.StepUpFinancial,
-	OpHoldResolutionApprove: auth.StepUpFinancial,
-	OpGrantRequest:          auth.StepUpCritical,
-	OpGrantApprove:          auth.StepUpCritical,
-	OpGrantRevoke:           auth.StepUpCritical,
-	OpPolicyPropose:         auth.StepUpCritical,
-	OpPolicyApprove:         auth.StepUpCritical,
-	OpLaunchRequest:         auth.StepUpCritical,
-	OpLaunchApprove:         auth.StepUpCritical,
-	OpRGConfigRequest:       auth.StepUpCritical,
-	OpRGConfigApprove:       auth.StepUpCritical,
-	OpRGConfigApply:         auth.StepUpCritical,
+var StepUpOperations = map[string]stepup.Class{
+	OpAdjustmentInitiate:    stepup.Financial,
+	OpAdjustmentApprove:     stepup.Financial,
+	OpResolutionRequest:     stepup.Financial,
+	OpResolutionApprove:     stepup.Financial,
+	OpHoldResolutionRequest: stepup.Financial,
+	OpHoldResolutionApprove: stepup.Financial,
+	OpGrantRequest:          stepup.Critical,
+	OpGrantApprove:          stepup.Critical,
+	OpGrantRevoke:           stepup.Critical,
+	OpPolicyPropose:         stepup.Critical,
+	OpPolicyApprove:         stepup.Critical,
+	OpLaunchRequest:         stepup.Critical,
+	OpLaunchApprove:         stepup.Critical,
+	OpRGConfigRequest:       stepup.Critical,
+	OpRGConfigApprove:       stepup.Critical,
+	OpRGConfigApply:         stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4
 // UPPER bound (configuration only ever tightens it, and the route gate has
 // already applied the configured value) plus the in-flight grace.
-func stepUpBackstopMaxAge(c auth.StepUpClass) (time.Duration, bool) {
+func stepUpBackstopMaxAge(c stepup.Class) (time.Duration, bool) {
 	switch c {
-	case auth.StepUpCritical:
+	case stepup.Critical:
 		return staffmfa.StepUpCriticalMaxAgeBound.Max + StepUpInFlightGrace, true
-	case auth.StepUpFinancial:
+	case stepup.Financial:
 		return staffmfa.StepUpFinancialMaxAgeBound.Max + StepUpInFlightGrace, true
 	}
 	return 0, false
@@ -83,6 +84,16 @@ func RequiresStepUp(c Claims) bool {
 	return ok && !stepUpExempt(c)
 }
 
+// testStepUpFallback is integration-test support ONLY (ADR 0119 section 9.1
+// "Test support"): when set, a governed domain call made directly by an
+// integration test - a context that never passed the HTTP staff chain
+// (!stepup.IsStaffRequest) - is treated as carrying a fresh synthetic step-up
+// for its actor. Its only setter, SetTestStepUpFallback, is in
+// testsupport_integration.go (build tag integration), so no production binary
+// can set it; a static test pins that. Every HTTP staff request is marked by
+// auth.Middleware and always meets the real backstop.
+var testStepUpFallback atomic.Bool
+
 // checkStepUp is the backstop: nil when c is not step-up-classified, or when
 // ctx carries a present assertion whose Subject is c.Actor and whose MFAAt is
 // within the class's backstop max-age at now.
@@ -90,11 +101,14 @@ func checkStepUp(ctx context.Context, c Claims, now time.Time) error {
 	if !RequiresStepUp(c) {
 		return nil
 	}
+	if _, present := stepup.From(ctx); !present && testStepUpFallback.Load() && !stepup.IsStaffRequest(ctx) {
+		return nil
+	}
 	maxAge, ok := stepUpBackstopMaxAge(StepUpOperations[c.Operation])
 	if !ok {
 		return ErrStepUpMissing
 	}
-	a, ok := auth.StepUpAssertionFrom(ctx)
+	a, ok := stepup.From(ctx)
 	if !ok || !a.FreshFor(c.Actor, now, maxAge) {
 		return ErrStepUpMissing
 	}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/stepup"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
@@ -54,6 +55,9 @@ func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 			// RequireAAL2, the liveness check and (S4b) RequireStepUp.
 			if s, ok := staffSessionFromClaims(claims); ok {
 				ctx = withStaffSession(ctx, s)
+				// ADR 0119 S4b: mark the request as a staff HTTP request (stepup.IsStaffRequest), so the
+				// integration-test fallback of the actor-proof signer backstop never applies to one.
+				ctx = stepup.WithStaffRequest(ctx)
 			}
 			observability.SetTenantIDForLogging(ctx, claims.TenantID.String())
 

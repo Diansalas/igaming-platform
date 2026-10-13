@@ -510,7 +510,7 @@ func TestStaffLiveness_QueryPlanAndLatency(t *testing.T) {
 		var d []time.Duration
 		for i := 0; i < 300; i++ {
 			start := time.Now()
-			reason, err := checkStaffLiveness(context.Background(), w.rt, s.ref.TenantID, s.ref.StaffID, sess, auth.Role(role))
+			reason, _, err := checkStaffLiveness(context.Background(), w.rt, testStaffMFA(), s.ref.TenantID, s.ref.StaffID, sess, auth.Role(role))
 			d = append(d, time.Since(start))
 			if err != nil || reason != observability.StaffLivenessReasonOK {
 				t.Fatalf("check %d: %v %s", i, err, reason)

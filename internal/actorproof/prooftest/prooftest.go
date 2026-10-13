@@ -29,8 +29,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
-	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
+	"github.com/Diansalas/igaming-platform/internal/stepup"
 )
 
 var (
@@ -251,8 +251,8 @@ func AttachForSession(ctx context.Context, tx pgx.Tx, operation, target, payload
 // tests that call a governed domain service directly (no HTTP chain) use it;
 // the HTTP tests never do (they exercise the real gate).
 func WithStepUp(ctx context.Context, actor uuid.UUID) context.Context {
-	return auth.ContextWithStepUpAssertion(ctx, auth.StepUpAssertion{
-		Subject: actor, SessionID: uuid.New(), MFAAt: time.Now(), Class: auth.StepUpCritical,
+	return stepup.ContextWith(ctx, stepup.Assertion{
+		Subject: actor, SessionID: uuid.New(), MFAAt: time.Now(), Class: stepup.Critical,
 	})
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
@@ -183,7 +184,7 @@ func TestApprove_RequireStepUpFailsClosedWhenAboveThreshold(t *testing.T) {
 		// Never reaches the INSERT (ErrStepUpRequired is returned before
 		// anything is recorded) - alwaysEligible only needs to satisfy
 		// Approve's own Go-level fail-closed-on-nil contract.
-		_, err := Approve(ctx, tx, above.ID, uuid.New(), false, nil, alwaysEligible)
+		_, err := Approve(ctx, tx, above.ID, uuid.New(), false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if !errors.Is(err, ErrStepUpRequired) {
@@ -209,7 +210,7 @@ func TestApprove_RequireStepUpFailsClosedWhenAboveThreshold(t *testing.T) {
 	})
 	belowApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, below.ID, belowApprover, false, nil, alwaysEligible)
+		approved, err := Approve(ctx, tx, below.ID, belowApprover, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}

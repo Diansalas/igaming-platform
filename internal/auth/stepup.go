@@ -30,16 +30,17 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
+	"github.com/Diansalas/igaming-platform/internal/stepup"
 )
 
 // StepUpClockSkew is the tolerated amount by which an mfa_at may lie in the
 // future (database clock vs application clock), section 7.3.
-const StepUpClockSkew = 5 * time.Second
+const StepUpClockSkew = stepup.ClockSkew
 
 // StepUpPolicyMaxAge is the withdrawal policy's require_step_up freshness
 // (ADR 0119 section 9.3, [ORCH-DEFAULT]): stricter than the route's financial
 // window, for large multi-approval withdrawals.
-const StepUpPolicyMaxAge = 2 * time.Minute
+const StepUpPolicyMaxAge = stepup.PolicyMaxAge
 
 // SecondFactorAMR is the closed set of amr values that name a second factor
 // (RFC 8176: otp is TOTP). A staff token or session whose amr names none of
@@ -85,52 +86,28 @@ func (p StepUpPolicy) MaxAge(c StepUpClass) (time.Duration, bool) {
 	return 0, false
 }
 
-// StepUpFresh is the single freshness rule: mfaAt is set, not more than
-// StepUpClockSkew in the future, and now - mfaAt <= maxAge.
+// StepUpFresh is the single freshness rule (stepup.Fresh): mfaAt is set, not
+// more than StepUpClockSkew in the future, and now - mfaAt <= maxAge.
 func StepUpFresh(mfaAt, now time.Time, maxAge time.Duration) bool {
-	if mfaAt.IsZero() || maxAge <= 0 {
-		return false
-	}
-	age := now.Sub(mfaAt)
-	return age >= -StepUpClockSkew && age <= maxAge
+	return stepup.Fresh(mfaAt, now, maxAge)
 }
 
 // StepUpAssertion records that the step-up gate verified a fresh second factor
-// for Subject's session SessionID at MFAAt, for a route of class Class.
-type StepUpAssertion struct {
-	Subject   uuid.UUID
-	SessionID uuid.UUID
-	MFAAt     time.Time
-	Class     StepUpClass
-}
-
-// Present reports whether a is a real assertion (the zero value means none).
-func (a StepUpAssertion) Present() bool {
-	return a.Subject != uuid.Nil && a.SessionID != uuid.Nil && !a.MFAAt.IsZero()
-}
-
-// FreshFor reports whether a is present, names subject, and is fresh for
-// maxAge at now.
-func (a StepUpAssertion) FreshFor(subject uuid.UUID, now time.Time, maxAge time.Duration) bool {
-	return a.Present() && a.Subject == subject && StepUpFresh(a.MFAAt, now, maxAge)
-}
-
-type stepUpAssertionKey struct{}
+// for Subject's session SessionID at MFAAt, for a route of class Class
+// (stepup.Assertion; Present and FreshFor are its methods).
+type StepUpAssertion = stepup.Assertion
 
 // ContextWithStepUpAssertion attaches a to ctx. Production code calls it only
 // from the HTTP step-up gate (internal/httpserver); integration-test support
-// (internal/actorproof/prooftest, internal/auth/authtest) places a synthetic
-// one. A static test pins the callers.
+// (internal/actorproof/prooftest) places a synthetic one through
+// stepup.ContextWith. A static test pins the callers.
 func ContextWithStepUpAssertion(ctx context.Context, a StepUpAssertion) context.Context {
-	return context.WithValue(ctx, stepUpAssertionKey{}, a)
+	return stepup.ContextWith(ctx, a)
 }
 
 // StepUpAssertionFrom returns the request's step-up assertion, if the step-up
 // gate placed one.
-func StepUpAssertionFrom(ctx context.Context) (StepUpAssertion, bool) {
-	a, ok := ctx.Value(stepUpAssertionKey{}).(StepUpAssertion)
-	return a, ok && a.Present()
-}
+func StepUpAssertionFrom(ctx context.Context) (StepUpAssertion, bool) { return stepup.From(ctx) }
 
 // WriteStepUpRequired is the single step-up refusal: 403 step_up_required with
 // max_age (seconds) and the RFC 9470 section 3 challenge.

@@ -26,6 +26,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/adjustment"
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
@@ -433,7 +434,7 @@ func (w *k3World) approveWithdrawal(amount int64, idemKey string) withdrawal.Wit
 	})
 	w.tx(func(ctx context.Context, tx pgx.Tx) error { return withdrawal.MoveToPendingReview(ctx, tx, wr.ID) })
 	w.tx(func(ctx context.Context, tx pgx.Tx) error {
-		ok, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil)
+		ok, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil, auth.StepUpAssertion{})
 		if err == nil && !ok {
 			err = fmt.Errorf("a single automated approval did not approve the request")
 		}

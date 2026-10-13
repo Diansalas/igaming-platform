@@ -24,6 +24,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/stepup"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
@@ -54,24 +55,16 @@ func IsStaffRole(role Role) bool {
 }
 
 // StepUpClass is the step-up class of a staff route (ADR 0119 section 8): a
-// closed vocabulary. In S4a it is only recorded; S4b's RequireStepUp enforces
-// it (critical: 5 min, financial: 10 min, none: aal2 is enough).
-type StepUpClass string
+// closed vocabulary (stepup.Class, whose Valid method it shares). S4b's
+// step-up gate enforces it (critical: 5 min, financial: 10 min, none: aal2 is
+// enough).
+type StepUpClass = stepup.Class
 
 const (
-	StepUpNone      StepUpClass = "none"
-	StepUpFinancial StepUpClass = "financial"
-	StepUpCritical  StepUpClass = "critical"
+	StepUpNone      = stepup.None
+	StepUpFinancial = stepup.Financial
+	StepUpCritical  = stepup.Critical
 )
-
-// Valid reports whether c is one of the three classes.
-func (c StepUpClass) Valid() bool {
-	switch c {
-	case StepUpNone, StepUpFinancial, StepUpCritical:
-		return true
-	}
-	return false
-}
 
 // StaffSession is the verified session assurance of a staff access token
 // (ADR 0119 section 7.1). It is attached to the request context by Middleware

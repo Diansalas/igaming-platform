@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
@@ -460,7 +461,7 @@ func TestFullHappyPath_RequestPendingReviewApproveSubmitComplete(t *testing.T) {
 		var err error
 		// Below the configured policy threshold - a single approval
 		// suffices.
-		approved, err = Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible)
+		approved, err = Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if !approved {
@@ -515,7 +516,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 	var approved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, serviceIdentity, true, nil, nil)
+		approved, err = Approve(ctx, tx, wr.ID, serviceIdentity, true, nil, nil, auth.StepUpAssertion{})
 		return err
 	})
 	if approved {
@@ -525,7 +526,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 	firstApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible)
+		approved, err = Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if approved {
@@ -534,7 +535,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 
 	// The same approver cannot supply the second approval.
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible)
+		_, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if !errors.Is(err, ErrDuplicateApproval) {
@@ -545,7 +546,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 	secondApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, secondApprover, false, nil, alwaysEligible)
+		approved, err = Approve(ctx, tx, wr.ID, secondApprover, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if !approved {
@@ -579,7 +580,7 @@ func TestApprove_BeneficiaryCannotApproveOwnWithdrawal(t *testing.T) {
 		// Never reaches the INSERT (self-approval is refused before it) -
 		// alwaysEligible only needs to satisfy Approve's own Go-level
 		// fail-closed-on-nil contract, not a real staff_users row.
-		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, approverIsBeneficiary, alwaysEligible)
+		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, approverIsBeneficiary, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if !errors.Is(err, ErrSelfApproval) {
@@ -636,7 +637,7 @@ func TestFail_PostSubmissionFailureRestoresPlayerCashBalance(t *testing.T) {
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 	approverID := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible)
+		_, err := Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

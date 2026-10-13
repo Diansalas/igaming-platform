@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
@@ -40,7 +41,7 @@ func f7Submitted(t *testing.T, pool *db.Pool, f fixture, amount int64, key, payo
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return MoveToPendingReview(ctx, tx, wr.ID) })
 	approverID := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible)
+		_, err := Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

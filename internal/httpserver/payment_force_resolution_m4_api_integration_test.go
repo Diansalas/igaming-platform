@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
@@ -76,7 +77,7 @@ func (w *frWorld) unboundPayout(amount int64) (uuid.UUID, uuid.UUID, string) {
 	}
 	do(func(ctx context.Context, tx pgx.Tx) error { return withdrawal.MoveToPendingReview(ctx, tx, wr.ID) })
 	do(func(ctx context.Context, tx pgx.Tx) error {
-		ok, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil)
+		ok, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil, auth.StepUpAssertion{})
 		if err == nil && !ok {
 			err = errors.New("automated approval did not approve")
 		}

@@ -43,6 +43,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
@@ -155,7 +156,7 @@ func TestStage9_DuplicateApproveBySameApprover_RejectedAndNeverCounted(t *testin
 	var firstApproved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		firstApproved, err = Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
+		firstApproved, err = Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if firstApproved {
@@ -163,7 +164,7 @@ func TestStage9_DuplicateApproveBySameApprover_RejectedAndNeverCounted(t *testin
 	}
 
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
+		_, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if !errors.Is(err, ErrDuplicateApproval) {
@@ -211,7 +212,7 @@ func TestStage9_ConcurrentSameApproverDoubleSubmit_RecordsExactlyOneApproval(t *
 			defer wg.Done()
 			<-start
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
+				approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 				results[i] = approved
 				return err
 			})
@@ -266,7 +267,7 @@ func TestStage9_TwoStaffLoginsOnePerson_CannotSatisfyFourEyesAlone(t *testing.T)
 		var approved bool
 		mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			approved, err = Approve(ctx, tx, wr.ID, login, false, nil, alwaysEligible)
+			approved, err = Approve(ctx, tx, wr.ID, login, false, nil, alwaysEligible, auth.StepUpAssertion{})
 			return err
 		})
 		if approved {
@@ -287,7 +288,7 @@ func TestStage9_TwoStaffLoginsOnePerson_CannotSatisfyFourEyesAlone(t *testing.T)
 	var approved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, third, false, nil, alwaysEligible)
+		approved, err = Approve(ctx, tx, wr.ID, third, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
 	if !approved {
@@ -323,7 +324,7 @@ func TestStage9_ConcurrentTwoStaffLoginsOnePerson_CannotSatisfyFourEyesAlone(t *
 			defer wg.Done()
 			<-start
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				approved, err := Approve(ctx, tx, wr.ID, logins[i], false, nil, alwaysEligible)
+				approved, err := Approve(ctx, tx, wr.ID, logins[i], false, nil, alwaysEligible, auth.StepUpAssertion{})
 				results[i] = approved
 				return err
 			})
