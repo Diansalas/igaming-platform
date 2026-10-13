@@ -90,6 +90,8 @@ func TestParseKeySet_FailsClosed_WithoutEchoingSecrets(t *testing.T) {
 		"duplicate kid":     "a:" + good + ",a:" + b64(randBytes(t, 32)),
 		"duplicate value":   "a:" + dupVal + ",b:" + dupVal,
 		"whitespace inside": "a: " + good,
+		"all zero":          "a:" + b64(make([]byte, 32)),
+		"all one byte":      "a:" + b64(bytes.Repeat([]byte{0xA5}, 48)),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -130,6 +132,8 @@ func TestNewKeys_Refusals(t *testing.T) {
 		{"malformed kid in map", "f1", "m1", map[string][]byte{"f1": randBytes(t, 32), "bad kid": randBytes(t, 32)}, f.mac, "malformed"},
 		{"same key across families", "f1", "m1", map[string][]byte{"f1": shared}, map[string][]byte{"m1": shared}, "same value"},
 		{"same key across kids", "f1", "m1", map[string][]byte{"f1": shared, "f2": shared}, f.mac, "same value"},
+		{"degenerate factor key", "f1", "m1", map[string][]byte{"f1": make([]byte, 32)}, f.mac, "degenerate"},
+		{"degenerate mac key", "f1", "m1", f.factor, map[string][]byte{"m1": bytes.Repeat([]byte{7}, 32)}, "degenerate"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -388,8 +392,14 @@ func TestOpen_AADTamper_EachFieldBinds(t *testing.T) {
 	// An invalid factor type is an input error, not an open.
 	bad := aad
 	bad.FactorType = "webauthn"
-	if _, err := k.OpenFactorSecret(bad, sealed); !errors.Is(err, ErrInvalidInput) {
-		t.Fatal("invalid factor type must be refused")
+	if _, err := k.OpenFactorSecret(bad, sealed); !errors.Is(err, ErrInvalidInput) || !errors.Is(err, ErrFactorIntegrity) {
+		t.Fatal("invalid factor type must be refused as an integrity failure")
+	}
+	// A nil-id AAD is also an integrity failure, never "factor absent".
+	for _, nilAAD := range []FactorAAD{{}, {FactorID: aad.FactorID, FactorType: FactorTOTP}, {StaffUserID: aad.StaffUserID, FactorType: FactorTOTP}} {
+		if _, err := k.OpenFactorSecret(nilAAD, sealed); !errors.Is(err, ErrFactorIntegrity) {
+			t.Fatalf("nil AAD %+v must be an integrity failure, got %v", nilAAD, err)
+		}
 	}
 }
 

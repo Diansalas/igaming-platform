@@ -260,7 +260,9 @@ func TestStaffMFA_SessionBounds(t *testing.T) {
 					t.Fatalf("%d must load: %v", ok, err)
 				}
 			}
-			for _, bad := range []string{fmt.Sprint(tc.lo - 1), fmt.Sprint(tc.hi + 1), "0", "-60", "abc", "", "1.5"} {
+			// 18446744134 s * 1e9 wraps int64 to about 60 s, inside several bounds.
+			for _, bad := range []string{fmt.Sprint(tc.lo - 1), fmt.Sprint(tc.hi + 1), "0", "-60", "abc", "", "1.5",
+				"18446744134", "18446744073709551616", "9223372036854775807", "-9223372036854775808", "9223372037"} {
 				baseEnv(t, "development")
 				t.Setenv(tc.env, bad)
 				if _, err := Load(); err == nil || !strings.Contains(err.Error(), tc.env) {

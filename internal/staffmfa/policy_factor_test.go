@@ -4,6 +4,7 @@ import (
 	"errors"
 	"go/parser"
 	"go/token"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -206,6 +207,7 @@ func TestCounters_InvalidStatesFailClosed(t *testing.T) {
 		{Failed24hCount: 1},
 		{Failed24hStart: t0},
 		{Failed24hCount: 11, Failed24hStart: t0},
+		{Failed24hCount: 10, Failed24hStart: t0}, // at the hard-lock threshold without hard_locked_at (C4)
 	}
 	for i, c := range bad {
 		if s := c.LockState(t0); s != LockInvalid || !s.Locked() {
@@ -361,8 +363,8 @@ func TestOTPAuthURI_Format(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "otpauth://totp/iGaming%20Platform%20Back%20Office:jane+ops@example.test" +
-		"?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=iGaming+Platform+Back+Office&algorithm=SHA1&digits=6&period=30"
+	want := "otpauth://totp/iGaming%20Platform%20Back%20Office:jane%2Bops%40example.test" +
+		"?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=iGaming%20Platform%20Back%20Office&algorithm=SHA1&digits=6&period=30"
 	if m.otpauthURI() != want {
 		t.Fatalf("uri = %s", m.otpauthURI())
 	}
@@ -373,9 +375,22 @@ func TestOTPAuthURI_Format(t *testing.T) {
 		t.Fatal("default issuer changed")
 	}
 	// Reserved characters in the account are escaped, not interpreted.
-	m, err = NewTOTPEnrolmentMaterial("Ops", "a/b?c#d&e@x.test", s)
-	if err != nil || !strings.HasPrefix(m.otpauthURI(), "otpauth://totp/Ops:a%2Fb%3Fc%23d&e@x.test?secret=") {
+	m, err = NewTOTPEnrolmentMaterial("Ops & Co=1", "a/b?c#d&e@x.test", s)
+	if err != nil || !strings.HasPrefix(m.otpauthURI(), "otpauth://totp/Ops%20%26%20Co%3D1:a%2Fb%3Fc%23d%26e%40x.test?secret=") ||
+		!strings.Contains(m.otpauthURI(), "&issuer=Ops%20%26%20Co%3D1&algorithm=") {
 		t.Fatalf("escaping: %v", err)
+	}
+	// Parsing the URI back yields exactly one issuer and the original values.
+	u, err := url.Parse(m.otpauthURI())
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	if len(q["issuer"]) != 1 || q.Get("issuer") != "Ops & Co=1" || len(q) != 5 {
+		t.Fatalf("round trip: %v", q)
+	}
+	if strings.Contains(m.otpauthURI(), "+") {
+		t.Fatal("a '+' in the URI would read as a space or a literal plus depending on the app")
 	}
 }
 

@@ -144,6 +144,9 @@ func ParseKeySet(family, raw string) (map[string][]byte, error) {
 		if len(b) < MinKeyBytes {
 			return nil, fmt.Errorf("%w: %s key %q decodes to fewer than %d bytes", ErrKeyConfig, family, kid, MinKeyBytes)
 		}
+		if degenerateKey(b) {
+			return nil, fmt.Errorf("%w: %s key %q is degenerate (every byte has the same value)", ErrKeyConfig, family, kid)
+		}
 		if len(b) > maxKeyBytes {
 			return nil, fmt.Errorf("%w: %s key %q decodes to more than %d bytes", ErrKeyConfig, family, kid, maxKeyBytes)
 		}
@@ -168,6 +171,17 @@ func decodeKey(s string) ([]byte, error) {
 		}
 	}
 	return nil, ErrKeyConfig
+}
+
+// degenerateKey reports a key whose bytes are all equal (for example all
+// zero): a placeholder or a broken generator, never a real secret.
+func degenerateKey(b []byte) bool {
+	for _, c := range b {
+		if c != b[0] {
+			return false
+		}
+	}
+	return true
 }
 
 func deriveSubkey(master []byte, label, kid string) ([]byte, error) {
@@ -209,6 +223,9 @@ func NewKeys(factorActiveKID string, factor map[string][]byte, macActiveKID stri
 		}
 		if len(m) < MinKeyBytes || len(m) > maxKeyBytes {
 			return fmt.Errorf("%w: %s key %q must be %d to %d bytes", ErrKeyConfig, family, kid, MinKeyBytes, maxKeyBytes)
+		}
+		if degenerateKey(m) {
+			return fmt.Errorf("%w: %s key %q is degenerate (every byte has the same value)", ErrKeyConfig, family, kid)
 		}
 		if other, dup := seen[string(m)]; dup {
 			return fmt.Errorf("%w: %s key %q has the same value as %s (the families and their kids must be independent)", ErrKeyConfig, family, kid, other)
@@ -357,11 +374,14 @@ func (k *Keys) SealFactorSecret(aad FactorAAD, secret FactorSecret) (SealedSecre
 // OpenFactorSecret decrypts a stored factor secret. Every failure, including
 // an unknown (retired) kid, malformed columns and a plaintext of the wrong
 // length, is ErrFactorIntegrity (the unknown-kid case also matches
-// ErrUnknownKID). Malformed AAD input is ErrInvalidInput.
+// ErrUnknownKID). Malformed AAD input (a nil factor or staff id, an unknown
+// factor type) matches BOTH ErrFactorIntegrity and ErrInvalidInput: a caller
+// must never read any error from this function as "factor absent" or as a
+// reason to offer enrolment; every error is a verification failure.
 func (k *Keys) OpenFactorSecret(aad FactorAAD, s SealedSecret) (FactorSecret, error) {
 	ad, err := aad.bytes()
 	if err != nil {
-		return FactorSecret{}, err
+		return FactorSecret{}, fmt.Errorf("%w: %w", ErrFactorIntegrity, ErrInvalidInput)
 	}
 	key, ok := k.m().factor[s.KID]
 	if !ok {

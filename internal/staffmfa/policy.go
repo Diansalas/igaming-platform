@@ -117,10 +117,14 @@ type Counters struct {
 }
 
 // valid rejects states the database CHECKs and the transitions below can
-// never produce; such a row is treated as locked (fail closed).
+// never produce; such a row is treated as locked (fail closed). It is only
+// consulted when hard_locked_at is NULL, so a 24 hour count at or above
+// HardLockThreshold without a hard lock is inconsistent (security review C4;
+// the S2 CHECK on staff_mfa_factors must express the same rule:
+// hard_locked_at IS NOT NULL OR failed_24h_count < 10).
 func (c Counters) valid() bool {
 	return c.FailedCount >= 0 && c.FailedCount < SoftLockThreshold &&
-		c.Failed24hCount >= 0 && c.Failed24hCount <= HardLockThreshold &&
+		c.Failed24hCount >= 0 && c.Failed24hCount < HardLockThreshold &&
 		(c.FailedCount == 0) == c.FailedWindowStart.IsZero() &&
 		(c.Failed24hCount == 0) == c.Failed24hStart.IsZero()
 }

@@ -53,9 +53,14 @@ func loadStaffMFA(cfg *Config) error {
 		if !ok {
 			continue
 		}
-		n, err := strconv.Atoi(v)
+		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
 			return fmt.Errorf("config: invalid %s: not an integer number of seconds", d.b.Name)
+		}
+		// Range-check the seconds BEFORE multiplying: n * time.Second can wrap
+		// int64 (18446744134 s wraps to about 60 s) and land inside a bound.
+		if n < int64(d.b.Min/time.Second) || n > int64(d.b.Max/time.Second) {
+			return fmt.Errorf("config: %s must be between %d and %d seconds", d.b.Name, int64(d.b.Min/time.Second), int64(d.b.Max/time.Second))
 		}
 		*d.dst = time.Duration(n) * time.Second
 	}

@@ -55,8 +55,14 @@ func otpauthURI(issuer, account string, secret FactorSecret) (string, error) {
 		return "", ErrInvalidInput
 	}
 	q := "secret=" + base32NoPad.EncodeToString(secret.d().b) +
-		"&issuer=" + url.QueryEscape(issuer) +
+		"&issuer=" + uriEscape(issuer) +
 		"&algorithm=SHA1&digits=" + strconv.Itoa(totp.Digits) +
 		"&period=" + strconv.Itoa(totp.Period)
-	return "otpauth://totp/" + url.PathEscape(issuer) + ":" + url.PathEscape(account) + "?" + q, nil
+	return "otpauth://totp/" + uriEscape(issuer) + ":" + uriEscape(account) + "?" + q, nil
 }
+
+// uriEscape percent-encodes s for both the otpauth label and the query, with
+// a space as %20 everywhere (never "+", which some authenticator apps show
+// literally). Reserved characters such as '&', '=', '?', '#', '/', '+' and '@'
+// are always encoded, so neither part can inject a parameter.
+func uriEscape(s string) string { return strings.ReplaceAll(url.QueryEscape(s), "+", "%20") }
