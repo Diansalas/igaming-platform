@@ -912,3 +912,108 @@ drift test).
    /v1/admin/rg/restrictions`, `GET|PUT /v1/me/rg/reality-check`, ADR 0082 static lock-order suite
    entries, the effective-limit MIN read, `EvaluateEligibility` reading time-outs.
 8. `evidence_ref` of a staff write is stored and shown to tenant staff, never to the player.
+
+## S3 implementation record (usage measurement; NO migration; not a status change)
+
+Labels stay as in the Status section until S1-S6 merge. S3 is the **READ side only**: it measures usage. It is
+**not wired** into wallet, payments, casino, sportsbook or auth (S4), refuses nothing, and a static test
+(`TestS3NoMoneyFloatNoCacheNoWiring`) pins that no package outside `internal/rg` calls it. No migration: the S1/0135
+indexes are enough, so the reserved 0150 is unused.
+
+**Status of each S3 item (exact labels):**
+
+| S3 item (section 8 row) | Label | Where / note |
+|---|---|---|
+| SQL window starts (rolling = fixed hours, calendar = `date_trunc ... AT TIME ZONE`, week start from config, DST) | IMPLEMENTED | `limits_usage_window.go` (`WindowStarts` is the exported probe of the one production expression) |
+| RG-only wager / loss specs, one scan, every window by `FILTER`, account and Person figure in the same scan | IMPLEMENTED (read side). `tenant_person` depends on Person linking: **PROVIDER DEPENDENT / MOCK** (ADR 0027) | `limits_usage.go` `MeasureStakeUsage` |
+| Deposit usage (intents + ledger, Person join) | IMPLEMENTED (read side). Same Person caveat | `MeasureDepositUsage` |
+| Session-duration usage (age of the refresh-chain root) | **PARTIALLY IMPLEMENTED**: the anchor account's own chains. The Person's OTHER accounts' chains are **BLOCKED** (Residual 2) | `limits_usage_session.go` |
+| Effective-limit read inputs | IMPLEMENTED as inputs only. The MIN, the ceiling clamp and the refusal are **NOT IMPLEMENTED** (S4) | `limits_usage_inputs.go` |
+| TTL sweep of stale pending intents to `failed` | **NOT IMPLEMENTED** (deviation, Residual 1) | none; stale intents keep counting |
+| Daily credited-vs-ledger check | **PARTIALLY IMPLEMENTED**: the comparison (`CheckDepositCredits`, six mismatch kinds). Scheduling it and raising `rg_deposit_credit_mismatch` are **NOT IMPLEMENTED** (ALERT-DELIVERY-1, S4) | `limits_usage_creditcheck.go` |
+| EXPLAIN (ANALYZE, BUFFERS) with the 0135 indexes in use | IMPLEMENTED (local, synthetic data) | `docs/plans/prh2-hardening-round/adr0115-s3-explain-evidence.txt` |
+| L0.4 hold time of the usage reads | IMPLEMENTED for the reads only; the hold time of a whole bet is S4 | same file |
+| p95 latency DELTA on casino bet, sportsbook place, deposit T1 | **BLOCKED on S4 wiring**: not producible, nothing is wired. Re-measure when S4 lands | same file states the cost S4 adds |
+
+**Definitions as built (the ledger-finance specs of 3.4).** Risk's cumulative specs are untouched.
+
+- **Measured accounts:** `player_cash`; plus `player_bonus` and `player_bonus_held` when the KIND's own
+  `count_bonus_funded` is true (the request carries one flag per kind). `player_locked_cash` and `player_locked_bonus` are
+  declared ignored. With the flag false the whole bonus family is ignored, so wins and returns on bonus-funded legs are
+  excluded too. Bonus conversion is not a loss type, so it never reduces loss usage.
+- **Fail closed:** a player-owned leg of any other account type, a reversal whose original cannot be found, or a
+  casino posting that touches `player_locked_cash` stops the measurement (`ErrUnrecognizedUsageLeg`,
+  `ErrUnresolvedReversal`). The last one is deliberate: the locked-cash casino-win shape (ADR 0039 16.4, "not producible
+  by today's postBet") releases the lock into `player_cash` with a credit, which would net the stake out of loss.
+- **Reversal window rule** as the ADR: a reversal counts only if its original is inside the same window (the original's
+  `created_at`; a stake or a settlement counts by its own).
+- **Loss floor:** 0 unless `loss_may_go_negative` is attested (`LossRaw` and `Loss` are both returned).
+- **Deposit:** in-flight intents (`pending`, `ambiguous`, no ledger posting yet) at the requested amount by the intent's
+  `created_at`; plus every ledger `deposit` credit to `player_cash` at the credited amount by the posting's
+  `created_at`. So a succeeded intent counts once at the credited amount, an intent-less inbound deposit counts, a late
+  credit on a failed/declined intent counts (the money arrived), a reversal does not restore capacity, and the candidate
+  intent is excluded through `ExcludeIntentID`.
+- **Guards (fail closed, each tested):** the session must be the request tenant's (RLS would otherwise answer zero rows =
+  zero usage), must not be player-scoped (a player sees only its own ledger rows, so a Person total would be short), and
+  must be READ COMMITTED (the S4 isolation guard is still S4's; this is defence in depth). An unknown anchor account is an
+  error, never zero.
+- **`At` (replay instant)** is a code-only seam for the denial-audit replay and the DST tests; production passes nil
+  (`clock_timestamp()` inside the statement). `AuditInputs()` returns the replay inputs of section 4.
+
+**Interpretations and deviations (reversible; each is for ledger-finance to confirm):**
+
+1. **`sportsbook_void` has no `reverses_transaction_id`.** The ADR wager rule says "reversals whose
+   `reverses_transaction_id` is a stake", which would never net a void. Its original is the `sportsbook_bet` of the same
+   tenant and correlation id (the void is by construction the exact inverse of the placement,
+   `verifyVoidReturnsPlacedStake`). A rollback of a `casino_win` or of a `sportsbook_settlement` is never a stake reversal.
+2. **`player_bonus_held`** (the held-win bucket of a terminal bonus grant, ADR 0039 G-2) is part of the bonus family.
+3. **One statement, one snapshot.** The account set is resolved inside the same statement as the totals, and the entries
+   are read by a separately planned `MATERIALIZED` CTE so that `idx_ledger_entries_tenant_player_asset_created` drives the
+   scan (without it the planner started from `ledger_accounts` and used `idx_ledger_entries_account`). The windows are one
+   `FILTER` column each (at most 12 windows).
+4. **DST.** `timestamp AT TIME ZONE tz` resolves an ambiguous local midnight (Havana 2024-11-03: it occurs twice) to the
+   LATER occurrence, which can lie after the current instant (a window start in the future = an under-count). The start is
+   the earliest instant whose local time is still at or after the boundary (probed in 30-minute steps up to 2 hours); a
+   boundary inside a spring-forward gap (Cairo 2024-04-26) resolves to the transition instant. The result is independent of
+   the session `TimeZone`. Week start is ISO day of week (1 = Monday ... 7 = Sunday).
+5. **Cost.** The single scan reads every row of the LONGEST requested window (30 days for `rolling_30d`) on every
+   evaluation. The figures are in the evidence file; a high-volume player pays for 30 days of rows on every bet. The ADR's
+   ledger-derived rollup (covered by the hourly drift job) remains the answer if the measured cost is too high. Not built.
+6. Ledger `created_at` is the posting transaction's START time (`DEFAULT now()`), so a transaction that ran longer than a
+   rolling window can be dated just outside it. Ledger design, not changed here.
+
+**Residuals / required decisions (none silently dropped):**
+
+1. **TTL sweep NOT IMPLEMENTED.** `deposit_intents.status` is a projection of `payment_attempts` (`recomputeIntentProjection`);
+   moving a stale intent to `failed` directly would be overwritten by the next recompute and would bypass the attempt state
+   machine, and the sweeper is the payments owner's. The measurement is conservative: a stale pending intent keeps counting
+   inside its window (tested: it stops counting once its status is `failed`). The composed `pending_intent_ttl` is returned by
+   `ReadUsageConfig`. **Decision for the orchestrator:** payments must give attempts a TTL expiry (which then recomputes the
+   intent) before S4 merges, or the owner accepts that a stuck pending intent holds deposit capacity until it leaves the window.
+2. **Cross-account session aggregation BLOCKED.** `sessions` is row-level secured to the caller's own principal (migration
+   0018), so one account's measurement cannot see the Person's other accounts' chains, and a zero would be a silent
+   under-count. `concurrent_chain_aggregation` at `tenant_person` scope needs a privileged read path (a security decision,
+   probably a migration); S3 reports `Coverage = principal_only`. `post_session_break` (needs the end time of the previous
+   chain) is S4.
+3. **`player_accounts.person_id` is mutable** (PERSON-RELINK-PIN-1 is open): a re-link moves an account into or out of a
+   Person's total between two evaluations. The S4 L0.4 lock serialises evaluation per Person, not a re-link.
+4. **Callers run in a plain tenant session.** A platform-acting-in-tenant session (`app.acting_tenant_id`) is refused by
+   the guard. The bet and deposit paths use `WithTenant`, which passes.
+5. **Alert delivery** for `rg_deposit_credit_mismatch` is ALERT-DELIVERY-1 (open).
+
+**S4 conditions added by S3:**
+
+- Any error from these functions is `rg_evaluation_unavailable` (fail closed); never treat an error as zero usage.
+- Call `MeasureStakeUsage` / `MeasureDepositUsage` after the L0.4 lock, in a READ COMMITTED transaction, with the windows
+  from `ReadUsageConfig(...).Windows()`; with a `tenant_person` scope both figures come back and S4 must combine the limits of
+  both scopes by MIN (the two S2 hard conditions still stand: confirm clamp, legacy scope).
+- `Found == false` from `ReadUsageConfig` is `rg_config_missing`. `Mandatory` with no value and `CeilingNone` is `rg_limit_required`.
+- Pass the candidate intent as `ExcludeIntentID` and add its amount once.
+- Re-measure the request-path p95 delta and the L0.4 hold time of a whole bet when S4 is wired (S3 measured the reads only).
+- Run the fail-closed tests in a jurisdiction `rgfix` has not seeded (S1 LF 8).
+
+**Existing assertions changed by S3: none.** S3 adds files only (plus this record and a task-registry row); no existing test,
+fixture or assertion was edited.
+
+**Verification evidence:** mutation results `docs/plans/prh2-hardening-round/adr0115-s3-mutation-kill.txt` (driver
+`adr0115-s3-mutation-driver.py`); EXPLAIN and latency `docs/plans/prh2-hardening-round/adr0115-s3-explain-evidence.txt`.

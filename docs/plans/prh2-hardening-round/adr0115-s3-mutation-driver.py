@@ -169,7 +169,7 @@ for name, f, old, new, cmd in M:
             out = '\n'.join(l for l in out.splitlines() if '.go:' in l) or out
         first = ''
         for line in out.splitlines():
-            if ('--- FAIL' in line and '/' in line) or 'want SQLSTATE' in line or ('.go:' in line and ('want' in line or 'must' in line)) or 'build failed' in line or 'cannot use' in line or 'undefined' in line:
+            if '--- FAIL' in line or 'want SQLSTATE' in line or ('.go:' in line and ('want' in line or 'must' in line or 'got' in line)) or 'build failed' in line or 'cannot use' in line or 'undefined' in line:
                 first = line.strip()[:170]
                 break
         if verdict.startswith('INVALID') and not first:

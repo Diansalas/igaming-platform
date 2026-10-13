@@ -208,6 +208,8 @@ func TestRGDepositUsageS3(t *testing.T) {
 		dEUR := w.s3Deposit(t, f.tenantA, a, "EUR", "80", ago(2*hr))
 		assetI := w.s3Intent(t, f.tenantA, a, usd, "succeeded", "80", ago(2*hr), &dEUR)
 		w.s3Intent(t, f.tenantA, a, usd, "pending", "5", ago(hr), nil) // not a posting, not succeeded: nothing to compare
+		// The range is half open: an otherwise-reported intent created exactly at the upper bound is outside it.
+		w.s3Intent(t, f.tenantA, a, usd, "succeeded", "9", s3T.Add(hr), nil)
 
 		var got []CreditMismatch
 		wantOK(t, "credit check", do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
@@ -386,7 +388,10 @@ func TestRGEffectiveLimitInputsS3(t *testing.T) {
 		_, err := w.change(pa, c)
 		wantOK(t, "player limit", err)
 	}
-	// Another kind, another asset: must not leak into the wager/EUR inputs.
+	// Another kind on the same asset must not leak into the wager/EUR inputs either.
+	_, err0 := w.change(pa, chg{tenant: f.tenantA, acct: f.acctA1, scope: "account", kind: "deposit", asset: eur, period: strp(string(rolling)), value: strp("5")})
+	wantOK(t, "other kind", err0)
+	// Another asset: must not leak into the wager/EUR inputs.
 	_, err := w.change(pa, chg{tenant: f.tenantA, acct: f.acctA1, scope: "account", kind: "wager", asset: strp("USD"), period: strp(string(rolling)), value: strp("1")})
 	wantOK(t, "other asset", err)
 
@@ -448,6 +453,19 @@ func TestRGEffectiveLimitInputsS3(t *testing.T) {
 	if s := read(ControlSessionDuration, nil); s.PostSessionBreakSeconds == nil || *s.PostSessionBreakSeconds != 3600 || s.ConcurrentChainAggregation == nil || !*s.ConcurrentChainAggregation {
 		t.Fatalf("session config: %+v", s)
 	}
+	// A loss floor that does NOT attest negative loss composes to false (the floor of 0 applies), never to true.
+	h := w.newFix(t)
+	w.floor(t, midFloor(h.jur, "loss"))
+	wantOK(t, "loss floor without the attestation", do(w.rt, staffSess(h.tenantA, h.staffA), func(ctx context.Context, tx pgx.Tx) error {
+		cfg, err := ReadUsageConfig(ctx, tx, h.tenantA, h.brandA1, ControlLoss, eur, nil)
+		if err != nil {
+			return err
+		}
+		if !cfg.Found || cfg.LossMayGoNegative == nil || *cfg.LossMayGoNegative {
+			t.Fatalf("loss_may_go_negative must compose to false: %+v", cfg)
+		}
+		return nil
+	}))
 	// No floor for a jurisdiction: Found=false (rg_config_missing in S4), never a zero-value permissive config.
 	g := w.newFix(t)
 	wantOK(t, "no floor", do(w.rt, staffSess(g.tenantA, g.staffA), func(ctx context.Context, tx pgx.Tx) error {
