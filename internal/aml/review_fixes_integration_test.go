@@ -126,6 +126,55 @@ func TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum(t *testing.T) {
 	}
 }
 
+// The evaluator denies a structurally invalid call (nothing to attribute an alert to, no database round trip).
+func TestEvaluateHold_InvalidArgumentsAreADeny(t *testing.T) {
+	tn, p, a := uuid.New(), uuid.New(), uuid.New()
+	for name, c := range map[string]struct {
+		tenant, person, account uuid.UUID
+		op                      aml.Operation
+	}{
+		"nil tenant":   {uuid.Nil, p, a, aml.OpDeposit},
+		"nil person":   {tn, uuid.Nil, a, aml.OpDeposit},
+		"nil account":  {tn, p, uuid.Nil, aml.OpDeposit},
+		"unknown op":   {tn, p, a, aml.Operation("bogus")},
+		"empty op":     {tn, p, a, aml.Operation("")},
+		"all valid ok": {tn, p, a, aml.OpDeposit},
+	} {
+		if name == "all valid ok" {
+			continue // would reach the database; covered elsewhere
+		}
+		v, err := aml.EvaluateHold(bg, nil, c.tenant, c.person, c.account, c.op)
+		if err != nil || !v.EvalFailed || !v.Denied() {
+			t.Errorf("%s: want a deny (EvalFailed), got %+v err=%v", name, v, err)
+		}
+	}
+}
+
+// LF F4 rule: an in-transaction alert statement that fails HARD is never swallowed by the evaluator: the caller sees the error
+// (and treats the whole call as a deny). A cancelled context makes the alert statement fail with a non-swallowable error.
+func TestEvaluateHold_AlertHardErrorPropagates(t *testing.T) {
+	c := newCaseWorld(t, "own_licence")
+	restore := aml.SetHoldProbeForTest(func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID, aml.Operation) (bool, error) {
+		return false, errors.New("injected evaluator fault")
+	})
+	defer restore()
+	err := c.RT.WithTenant(bg, c.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		v, herr := aml.EvaluateHold(cctx, tx, c.Tenant, c.P.PersonID, c.P.AccountID, aml.OpDeposit)
+		if !v.EvalFailed {
+			t.Errorf("the verdict is still a deny: %+v", v)
+		}
+		if herr == nil {
+			t.Error("a hard alert error must be returned to the caller, not dropped")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // F1 (platform role): a platform grantee must be platform_admin NOW. The staff table may refuse a non-admin platform row outright
 // (then the role term is a pure backstop and this test records that fact instead of asserting behaviour).
 func TestEligibility_PlatformOfficerDemotedToAnotherRole(t *testing.T) {

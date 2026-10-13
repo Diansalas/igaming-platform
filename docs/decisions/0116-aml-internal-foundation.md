@@ -740,6 +740,29 @@ All integration runs used `-tags integration -p 1 -count=1` against a private da
 - Mutation pass: 105 mutants, 93 killed, 12 justified survivors, none unexplained (the pre-flight and down-refusal branches were not
   mutated). `docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-kill.txt` and the three logs beside it.
 
+### 12.8 Review round 1 disposition (security REJECT as committed, fixable; ledger-finance APPROVE WITH CONDITIONS)
+
+Migrations 0140-0142 were edited in place (unmerged). Software capability only; nothing here is a regulatory claim.
+
+| Item | Disposition | Where |
+|---|---|---|
+| Sec F1 live eligibility of the grantee (active, role now, same Person) in `aml_authorize` and the quorum, both scopes | **Applied** (platform half through an owner-side liveness helper) | 0140; tests `TestEligibility_*` (demote tenant officers to `support`, suspend / re-link platform and tenant officers) |
+| Sec F2 conflict of interest on every officer function; queue filters own subject | **Applied** (AM011) | 0140 `aml_assert_not_subject`, 0141, 0142; `TestConflictOfInterest_EveryOfficerFunctionRefusesOwnSubject` (13 functions + queue, both models) |
+| Sec F3 suspended-officer exclusion for platform scope | **Applied** (owner-side helper; the sanctions lift still needs two live Persons) | `TestEligibility_PlatformOfficers_*`, `TestEligibility_SanctionsLiftNeedsTwoLiveOfficers` |
+| Sec F4 tipping-off on manual adjustment refusals | **OPEN, decision needed, NOT fixed**: no existing refusal token is a truthful shared cover; options (a)/(b)/(c) in 12.4 | 12.4 |
+| Sec F5 `aml_person_has_records` runtime EXECUTE; bare acting tenant; hold id | **Applied** (revoked + `init-app-role.sql`; session tenant requires the exact acting shape); hold id to the in-transaction recorder is **accepted residual** (the gate needs `aml_hold_match`) | 0141, 0142, deploy; `TestSessionTenant_BareActingSettingBindsNothing`, catalogue test |
+| Sec F6 review-cover population; timing | **Accepted residuals**, recorded | 12.4 |
+| Sec F7 decision log names another person's hold | **Applied** (AM007) | 0141; `TestRecordDecision_HoldMustBelongToThePerson` |
+| Sec F8 hold-change invalidation race | **Applied**: monotonic `change_seq` mark recorded on the proposal and compared at approval, plus a per-person advisory lock serialising placement, lift, proposal, approval | 0141, 0142; `TestFourEyes_BackdatedHoldChangeStillInvalidatesTheProposal` (the lock itself is concurrency-only and not killable in a single-session test: recorded in the mutation file) |
+| Sec F9 tripwire exemption exact | **Applied**: the policy role must equal `pg_class.relowner` of the table | `internal/db/kyc_worker_catalogue_gate_integration_test.go` |
+| Sec F10 runbook and the `Claims.validate` claim | **Applied** (runbook; 12.2 and the 0140 header corrected: `Claims.validate` has no AML rule) | runbook, 12.2 |
+| Sec F11 `NOT VALID` + `VALIDATE`; note lint; 4-hour cadence | **Applied** (0141); lint documented as an accident guard; cadence in 12.3 / 12.7a / runbook | 0141 |
+| LF C1 evaluator failure at payout claim and sweeper T2 / T12 | **Applied**: the existing `unavailable` branch (approved stays approved, retryable 503, reschedule); a definite hold and a KYC denial still deny | `kyc.RetryableOnHoldEvalFailure`, `evaluatePayoutGate`; `TestAMLHold_PayoutClaim_EvaluatorFailure_*`, `TestAMLHold_SweeperT2_*`, `T12_*`, `KYCFailedPlusEvaluatorFailure_*` |
+| LF C2 withdrawal-only hold blocks correcting adjustments | **Recorded** for the owner and legal (section 10); 0141 header corrected; later option described, **not built** | 10, 0141 |
+| LF C3 alert lost when the adjustment submission rolls back | **Applied**: raised in its own transaction after the rollback | `TestAMLHold_EvaluatorFailureAtSubmission_AlertSurvivesTheRollback` |
+| LF C4 never-gated tests | **Partly applied**: behavioural tests added for deposit reversal, casino tombstone rollback, sweeper T2 / T12 under a hold, claim evaluator failure end to end, placement-versus-gate concurrency; **not behaviourally tested**: bonus conversion / forfeiture, 0124 hold-resolution release (structural pin only), sportsbook cashout does not exist | 12.2 |
+| LF finding 5 probe round trips | **Recorded** as a pre-release measurement item | 12.7a |
+
 ### 12.7a Pre-release items recorded by the review round
 
 - **Hold-probe cost (LF finding 5):** the probe is a SAVEPOINT round trip plus one pipelined batch (two round trips per gated
