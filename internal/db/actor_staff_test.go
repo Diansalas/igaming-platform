@@ -1,11 +1,9 @@
 package db
 
-// ADR 0119 S4b section 9.5(b) / 13.5: SetActorStaffIDForCurrentTx is the ONLY setter of app.actor_staff_id
-// (exactly one setter, pinned), and the pure re-assertion rule.
+// ADR 0119 S4b section 9.5: the pure re-assertion rule, and no app.actor_staff_id setter yet.
 
 import (
 	"errors"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -15,32 +13,29 @@ import (
 
 var actorStaffGUCPattern = regexp.MustCompile(`set_config\(\s*'app\.actor_staff_id'`)
 
-func TestStatic_SetActorStaffIDIsTheOnlySetter(t *testing.T) {
+// ADR 0119 S4b: the app.actor_staff_id GUC of section 9.5(b) is NOT built (no flow re-asserted in S4b needs it).
+// Nothing may set it until the slice that adds the staff_actor_self_* policy pair and its single setter.
+func TestStatic_NoActorStaffIDSetterYet(t *testing.T) {
 	root := repoRootForActingSetterTest(t)
-	allowed := filepath.Join(root, "internal", "db", "actor_staff.go")
 	var offenders []string
-	setterFiles := 0
+	scanned := 0
 	if err := walkGoFilesSkippingHiddenAndTestdata(root, func(path string, src []byte) error {
 		if strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		if !actorStaffGUCPattern.Match(src) {
-			return nil
+		scanned++
+		if actorStaffGUCPattern.Match(src) {
+			offenders = append(offenders, path)
 		}
-		if path == allowed {
-			setterFiles++
-			return nil
-		}
-		offenders = append(offenders, path)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if setterFiles != 1 {
-		t.Fatalf("the setter file must name app.actor_staff_id (found %d)", setterFiles)
+	if scanned == 0 {
+		t.Fatal("vacuous scan")
 	}
 	if len(offenders) > 0 {
-		t.Fatalf("app.actor_staff_id referenced outside internal/db/actor_staff.go: %v", offenders)
+		t.Fatalf("app.actor_staff_id set outside its (future) single setter: %v", offenders)
 	}
 	if !actorStaffGUCPattern.MatchString(`tx.Exec(ctx, "SELECT set_config('app.actor_staff_id', $1, true)")`) {
 		t.Fatal("negative control: the planted setter was not detected")

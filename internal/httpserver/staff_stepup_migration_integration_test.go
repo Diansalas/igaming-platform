@@ -2,8 +2,8 @@
 
 package httpserver
 
-// ADR 0119 S4b, migration 0151 on a scratch database: up adds EXACTLY the two staff_actor_self_* policies and the
-// three column-level UPDATE grants (mfa_at, assurance_kid, assurance_seal) and nothing else; down restores the 0142
+// ADR 0119 S4b, migration 0151 on a scratch database: up adds EXACTLY the three column-level UPDATE grants (mfa_at,
+// assurance_kid, assurance_seal) and nothing else; down restores the 0142
 // schema exactly; up after down equals the first up.
 
 import (
@@ -27,13 +27,9 @@ func TestMigration0151_UpDownUp_WholeSchema(t *testing.T) {
 	if len(removed) != 0 {
 		t.Fatalf("0151 must not change or remove any object; removed: %v", removed)
 	}
-	var policies, grants int
+	var grants int
 	for _, l := range added {
 		switch {
-		case strings.HasPrefix(l, "policy:staff_users:staff_actor_self_select:PERMISSIVE:SELECT:") && strings.Contains(l, "app.actor_staff_id"):
-			policies++
-		case strings.HasPrefix(l, "policy:staff_users:staff_actor_self_lock:PERMISSIVE:UPDATE:") && strings.HasSuffix(l, ":false"):
-			policies++
 		case strings.HasPrefix(l, "colacl:sessions:mfa_at:"), strings.HasPrefix(l, "colacl:sessions:assurance_kid:"),
 			strings.HasPrefix(l, "colacl:sessions:assurance_seal:"):
 			if !strings.Contains(l, "igaming_runtime=w/") {
@@ -44,8 +40,8 @@ func TestMigration0151_UpDownUp_WholeSchema(t *testing.T) {
 			t.Fatalf("0151 added an object outside its scope: %s", l)
 		}
 	}
-	if policies != 2 || grants != 3 {
-		t.Fatalf("want 2 policies and 3 column grants, got %d / %d:\n%s", policies, grants, strings.Join(added, "\n"))
+	if grants != 3 {
+		t.Fatalf("want 3 column grants, got %d:\n%s", grants, strings.Join(added, "\n"))
 	}
 	if rolled, err := pool.MigrateDown(ctx, full, 1); err != nil || len(rolled) != 1 || rolled[0] != m151Version {
 		t.Fatalf("down: %v %v", rolled, err)

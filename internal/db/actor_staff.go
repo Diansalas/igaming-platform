@@ -1,24 +1,18 @@
 package db
 
-// ADR 0119 slice S4b, section 9.5: the scoped in-transaction staff
-// re-assertion of the governed flows that move value or change authority.
+// ADR 0119 S4b, section 9.5: the scoped in-transaction staff re-assertion of
+// the governed flows that move value or change authority (ADR 0082 Amendment
+// A9). CheckActorStaffLive applies it to the rows the flow's own A8 staff FOR
+// SHARE statement returned: the actor's row must be present, active and at the
+// role the verified token names (staff_version joins with migration 0139; every
+// staff member is at version 0 until then).
 //
-// SetActorStaffIDForCurrentTx is the ONLY setter of the transaction-local GUC
-// app.actor_staff_id (a static test, actor_staff_static_test.go, pins that no
-// other Go source sets it). Migration 0151's permissive policy pair
-// staff_actor_self_select / staff_actor_self_lock keys on it: it makes the
-// ACTOR'S OWN staff_users row visible and FOR SHARE-lockable in a governed
-// transaction whose scope would otherwise hide it (a platform actor under
-// WithTenant(target) or WithPlatformActingInTenant). WITH CHECK (false) means
-// it never admits an actual UPDATE, and every restrictive fence still applies.
-//
-// CheckActorStaffLive applies the re-assertion to the rows the flow's own A8
-// staff FOR SHARE statement returned: the actor's row must be present, active
-// and at the role the verified token names (staff_version joins with migration
-// 0139; every staff member is at version 0 until then).
+// The app.actor_staff_id GUC and the staff_actor_self_* policy pair of section
+// 9.5(b) are NOT built: every flow re-asserted in S4b already sees the actor's
+// own row (ADR 0119 S4b-R3 / D13). They land with the first flow that needs
+// them.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 
@@ -31,18 +25,6 @@ import (
 // (suspended, role changed, or the row is not visible). Nothing is written;
 // the HTTP layer answers 401 session_revoked (ADR 0119 section 9.5).
 var ErrActorStaffNotLive = errors.New("db: the acting staff member is no longer live")
-
-// SetActorStaffIDForCurrentTx sets app.actor_staff_id for the rest of tx. The
-// id MUST be the verified token subject of the request (never a body value).
-func SetActorStaffIDForCurrentTx(ctx context.Context, tx pgx.Tx, staffID uuid.UUID) error {
-	if staffID == uuid.Nil {
-		return fmt.Errorf("db: SetActorStaffIDForCurrentTx called with a nil staff id")
-	}
-	if _, err := tx.Exec(ctx, `SELECT set_config('app.actor_staff_id', $1, true)`, staffID.String()); err != nil {
-		return fmt.Errorf("db: set actor staff id: %w", err)
-	}
-	return nil
-}
 
 // ActorStaffRow is the part of a staff_users row the re-assertion compares
 // (ADR 0099 A-19 column discipline: id, role, status; staff_version from 0139).

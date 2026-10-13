@@ -1,6 +1,5 @@
--- ADR 0119 slice S4b (step-up enforcement; ADR 0119 s6.6, s9.5(b), s13.4). IDENTITY / AUTHENTICATION INTEGRITY
--- CONTROL: FOR `security` (live review), `architect` (the RLS policy pair), `ledger-finance` (s9.5 / ADR 0082 A9),
--- `code-reviewer`, `qa` REVIEW BEFORE MERGE (gate G).
+-- ADR 0119 slice S4b (step-up enforcement; ADR 0119 s6.6, s13.4). IDENTITY / AUTHENTICATION INTEGRITY CONTROL: FOR
+-- `security` (live review), `architect`, `code-reviewer`, `qa` REVIEW BEFORE MERGE (gate G).
 --
 -- NUMBERING: 0151, allocated by the orchestrator for S4b. 0139 stays reserved for the staff lifecycle (S5 + S6) and
 -- 0143-0150 for ADR 0116 AML and other in-flight slices; the runner applies versions in order and tolerates gaps
@@ -15,19 +14,14 @@
 --      auth_time, absolute_expires_at, expires_at and the identity columns stay immutable. The keyed seal (format v2
 --      since S4b, binding refresh_token_hash and expires_at: condition S3-R10) defeats a SQL edit of mfa_at: an
 --      unsealed mfa_at fails the seal check on liveness and on refresh. Mirrored by deploy/init-app-role.sql.
---   2. staff_users: one narrow PERMISSIVE policy pair keyed on the transaction-local GUC app.actor_staff_id (ADR 0119
---      s9.5(b)). Only db.SetActorStaffIDForCurrentTx sets it, from the verified token subject, right before a governed
---      transaction's in-transaction staff re-assertion (a static test pins the single setter). It makes the ACTOR'S
---      OWN row visible and FOR SHARE-lockable under WithTenant(target) / WithPlatformActingInTenant, where the
---      dual-scope policy of migration 0011 hides a platform actor's row. staff_actor_self_lock has WITH CHECK (false):
---      it can never admit an actual UPDATE. Every RESTRICTIVE fence on staff_users (the 0112 acting fence, the 0114
---      KYC-worker fence) still applies unchanged. No new exposure under arbitrary SQL as the runtime role: that role
---      can already read platform rows through an empty app.tenant_id.
 --
--- Not here: staff_users.staff_version (0139, S5 + S6), any lifecycle object. No role, password or attribute change.
+-- NOT here: the staff_actor_self_select / staff_actor_self_lock policy pair of ADR 0119 s9.5(b). It is not required by
+-- any flow S4b re-asserts (K2 / K3 / HSEC run in a tenant session for a tenant actor or an acting session for the
+-- acting platform principal, and withdrawal approve is tenant-scoped: the actor's own row is already visible in each);
+-- it lands with the first flow that needs it (K1 platform-scope approvals, the staff lifecycle; ADR 0119 S4b-R3).
+-- Not here either: staff_users.staff_version (0139, S5 + S6). No role, password or attribute change.
 SET LOCAL lock_timeout = '5s';
 
--- 1. sessions: the step-up columns.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
@@ -35,9 +29,3 @@ BEGIN
     END IF;
 END
 $$;
-
--- 2. staff_users: the actor self-select / self-lock pair.
-CREATE POLICY staff_actor_self_select ON staff_users FOR SELECT
-    USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid);
-CREATE POLICY staff_actor_self_lock ON staff_users FOR UPDATE
-    USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid) WITH CHECK (false);

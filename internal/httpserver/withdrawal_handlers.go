@@ -699,10 +699,9 @@ func approverEligibilityCheck(ctx context.Context, tx pgx.Tx) withdrawal.Approve
 // withdrawal APPROVE decision, with ADR 0119 section 9.5's scoped
 // in-transaction staff re-assertion: the approver's own staff_users row is read
 // FOR SHARE (withdrawal.Approve calls it right after lockRequestForUpdate, the
-// flow's L1 withdrawal row, so it sits at the A8 position), made visible by the
-// narrow staff_actor_self_* policy pair (app.actor_staff_id, migration 0151) in
-// whatever scope the transaction runs, and its role is compared with the
-// verified token's. A suspension committed first is seen here (active = false,
+// flow's L1 withdrawal row, so it sits at the A8 position; the route is
+// tenant-scoped, so the approver's own row is visible), and its role is compared
+// with the verified token's. A suspension committed first is seen here (active = false,
 // ErrApproverInactive as before); a role change is db.ErrActorStaffNotLive (401
 // session_revoked). A suspension that starts later waits for this transaction.
 // staff_version joins the comparison with migration 0139 (every row is version
@@ -711,9 +710,6 @@ func approverEligibilityCheckLocked(ctx context.Context, tx pgx.Tx, actor uuid.U
 	return func(approverPrincipalID uuid.UUID) (linked, active bool, err error) {
 		if approverPrincipalID != actor {
 			return false, false, fmt.Errorf("httpserver: approver eligibility: the approver is not the authenticated actor")
-		}
-		if err := db.SetActorStaffIDForCurrentTx(ctx, tx, actor); err != nil {
-			return false, false, err
 		}
 		var personID *uuid.UUID
 		var status, role string

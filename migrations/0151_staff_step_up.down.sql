@@ -4,9 +4,6 @@
 -- with this migration (a pre-S4b binary does not verify v2 seals and refuses such a session on refresh).
 SET LOCAL lock_timeout = '5s';
 
-DROP POLICY staff_actor_self_lock ON staff_users;
-DROP POLICY staff_actor_self_select ON staff_users;
-
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN

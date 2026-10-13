@@ -703,10 +703,10 @@ func uuidPtrString(u *uuid.UUID) string {
 //
 // ADR 0119 S4b (section 9.5, ADR 0082 Amendment A9): the SAME statement is the
 // scoped in-transaction re-assertion of the acting staff member. The actor's
-// own id joins the ascending-id set; db.SetActorStaffIDForCurrentTx makes the
-// actor's row visible and FOR SHARE-lockable whatever the session (a platform
-// actor in an acting session; migration 0151's staff_actor_self_* pair); and
-// the actor's row must come back active at the verified token's role
+// own id joins the ascending-id set (its row is visible in both session shapes
+// this flow runs in: a tenant session for a tenant actor, the acting session for
+// the acting platform principal - the 0112 acting fence admits exactly that id);
+// and the actor's row must come back active at the verified token's role
 // (db.CheckActorStaffLive; staff_version joins with migration 0139). A
 // suspension committed first is seen here and nothing is written
 // (db.ErrActorStaffNotLive, 401 session_revoked); a later one waits for this
@@ -728,9 +728,6 @@ func lockHoldResolutionStaffAndGrants(ctx context.Context, tx pgx.Tx, r HoldReso
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
-	}
-	if err := db.SetActorStaffIDForCurrentTx(ctx, tx, call.ActorID); err != nil {
 		return err
 	}
 	staff := append([]uuid.UUID{r.RequestedBy, call.ActorID}, approvers...)
