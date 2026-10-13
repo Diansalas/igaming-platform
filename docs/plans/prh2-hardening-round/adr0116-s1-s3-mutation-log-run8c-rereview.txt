@@ -1,0 +1,4 @@
+INVALID(infra): N32 adjustment refusal raises no detached evaluator alert
+KILLED: R5 side writes unbounded (30 s)  [--- FAIL: TestSideRecord_StarvedPoolIsBounded (35.03s)]
+KILLED: R6 side-write failure not logged  [--- FAIL: TestSideRecord_FailureIsLoggedGenericallyWithTheCorrelationID (0.26s)]
+EXIT 0

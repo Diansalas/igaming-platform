@@ -271,6 +271,7 @@ for name, f, old, new, cmd in M:
         first = ''
         infra = ('recovery mode' in out) or ('connection slots' in out) or (('no space left' in out) or ('failed to connect' in out)) and '--- FAIL' not in out
         if r.returncode != 0 and infra:
+            first = [l.strip() for l in out.splitlines() if any(k in l for k in ('recovery mode', 'connection slots', 'no space left', 'failed to connect'))][0][:140]
             verdict = 'INVALID(infra)'  # the DB or the disk failed: this run says nothing about the mutant, re-run it
         for line in out.splitlines():
             if ('--- FAIL' in line) or 'want SQLSTATE' in line or ('.go:' in line and 'must' in line):
