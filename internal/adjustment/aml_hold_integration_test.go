@@ -70,29 +70,27 @@ func TestAMLHold_PlacedAfterSubmission_RefusesAtExecution(t *testing.T) {
 		t.Fatalf("submit before any hold: %v", err)
 	}
 	q, hold := amlfix.HoldFor(t, w.pool, w.pool, w.Tenant, w.PlayerPerson, nil, aml.ScopeAllValueMovement)
+	// Security F4 (option b): the execution is refused as a GENERIC CONFLICT (the shape an ordinary non-pending request gets); the
+	// decision transaction rolls back, so the request stays pending with no refusal code and no approval.
 	out, err := w.decide(w.F2, r, DecisionApprove)
-	if err != nil {
-		t.Fatalf("the approval itself is recorded: %v", err)
+	if !errors.Is(err, ErrAccountUnderReview) || ClassifyError(err) != ErrClassConflict || SQLState(err) != "" || out.Executed {
+		t.Fatalf("the execution must be refused as a generic conflict: %+v %v", out, err)
 	}
-	if out.Executed || out.Request.State != StateRefusedAtExecution || out.Request.RefusalCode == nil || *out.Request.RefusalCode != RefusalAccountReview {
-		t.Fatalf("the execution must be refused with the generic token, got %+v", out.Request)
+	if got := w.request(r.ID); got.State != StatePending || got.RefusalCode != nil {
+		t.Fatalf("the refused request stays pending with no AML token: %+v", got)
 	}
 	if got := w.playerCash(); got != 10_000 {
 		t.Fatalf("a held balance must not move: %d", got)
 	}
 	w.assertInvariants()
 
-	// Lift the hold: a fresh request executes normally.
+	// Lift the hold: the SAME request can now be decided and executes normally.
 	q.LiftHold(t, amlfix.Service(t, w.pool), hold)
-	r2, err := w.submit(w.F1, w.credit(500, ReasonOperationalErrorCorrection))
-	if err != nil {
-		t.Fatalf("submit after the lift: %v", err)
-	}
-	out2, err := w.decide(w.F2, r2, DecisionApprove)
+	out2, err := w.decide(w.F2, r, DecisionApprove)
 	if err != nil || !out2.Executed {
 		t.Fatalf("after the lift the adjustment executes: %+v %v", out2, err)
 	}
-	if got := w.playerCash(); got != 10_500 {
+	if got := w.playerCash(); got != 12_500 {
 		t.Fatalf("player_cash after the lifted adjustment: %d", got)
 	}
 }
@@ -107,7 +105,7 @@ func TestAMLHold_WithdrawalOnlyHoldPlacedAfterSubmission_StillRefusesAtExecution
 	}
 	amlfix.HoldFor(t, w.pool, w.pool, w.Tenant, w.PlayerPerson, nil, aml.ScopeWithdrawalAndPayout)
 	out, err := w.decide(w.F2, r, DecisionApprove)
-	if err != nil || out.Executed || out.Request.State != StateRefusedAtExecution {
+	if !errors.Is(err, ErrAccountUnderReview) || out.Executed {
 		t.Fatalf("a withdrawal-only hold must still refuse the execution: %+v %v", out, err)
 	}
 	if got := w.playerCash(); got != 10_000 {
@@ -131,7 +129,7 @@ func TestAMLHold_EvaluatorFailure_RefusesAdjustment(t *testing.T) {
 		t.Fatalf("a failed evaluator must refuse the submission: %v", err)
 	}
 	out, err := w.decide(w.F2, r, DecisionApprove)
-	if err != nil || out.Executed || out.Request.State != StateRefusedAtExecution {
+	if !errors.Is(err, ErrAccountUnderReview) || out.Executed {
 		t.Fatalf("a failed evaluator must refuse the execution: %+v %v", out, err)
 	}
 	if got := w.playerCash(); got != 10_000 {

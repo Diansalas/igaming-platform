@@ -209,8 +209,9 @@ CREATE TABLE aml_enforcement_decisions (
     tenant_id          UUID NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
     player_account_id  UUID NOT NULL,
     person_id          UUID NOT NULL REFERENCES persons (id) ON DELETE RESTRICT,
-    operation          TEXT NOT NULL CHECK (operation IN ('deposit', 'withdrawal_hold', 'withdrawal_payout', 'casino_play', 'sportsbook_play')),
-    kyc_outcome        TEXT NOT NULL CHECK (kyc_outcome IN ('not_required', 'passed', 'pending', 'failed', 'unavailable')),
+    operation          TEXT NOT NULL CHECK (operation IN ('deposit', 'withdrawal_hold', 'withdrawal_payout', 'casino_play', 'sportsbook_play', 'manual_adjustment')),
+    -- 'not_evaluated': a manual adjustment is refused on the hold alone; no KYC evaluation took part (security F4, option b).
+    kyc_outcome        TEXT NOT NULL CHECK (kyc_outcome IN ('not_required', 'passed', 'pending', 'failed', 'unavailable', 'not_evaluated')),
     hold_outcome       TEXT NOT NULL CHECK (hold_outcome IN ('none', 'held', 'eval_error')),
     public_outcome     TEXT NOT NULL CHECK (public_outcome IN ('not_required', 'passed', 'review', 'failed', 'unavailable')),
     allowed            BOOLEAN NOT NULL,

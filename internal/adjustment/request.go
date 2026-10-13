@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
-	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 )
 
@@ -154,13 +153,10 @@ func SubmitInTx(ctx context.Context, tx pgx.Tx, call Call, id uuid.UUID, in Subm
 		return Request{}, err
 	}
 	// ADR 0116 s5.1: a held player's balance cannot be adjusted. Checked BEFORE the proof is attached and the row is written.
-	if v, err := walletHoldVerdict(ctx, tx, call.TenantID, in.WalletID, true); err != nil {
+	if h, err := walletHoldCheck(ctx, tx, call.TenantID, in.WalletID); err != nil {
 		return Request{}, err
-	} else if v.Denied() {
-		if v.EvalFailed && !v.Held {
-			return Request{}, &holdEvalFailedError{}
-		}
-		return Request{}, ErrAccountUnderReview
+	} else if h.denied() {
+		return Request{}, h.refusal(id)
 	}
 	// SIGNED-ACTOR-PROOF (migration 0120): bind the proof to this actor, this
 	// request id and the caller-supplied payload (the same digest the
@@ -334,12 +330,9 @@ func (s *Service) Submit(ctx context.Context, target Target, in SubmitInput, met
 		out, err = SubmitInTx(ctx, tx, call, id, in)
 		return err
 	})
-	var hef *holdEvalFailedError
-	if errors.As(err, &hef) {
-		// The refusal rolled the submission back; the evaluator-failure alert is raised in its own transaction now so it is not
-		// lost with it (ledger-finance C3). Logged-and-continued by the alerting layer; the caller still gets the refusal.
-		_ = aml.RaiseHoldEvalFailedDetached(ctx, s.pool, target.tenantID, aml.OpManualAdjustment)
-	}
+	// The refusal rolled the submission back; the real reason (and the evaluator-failure alert) is recorded now, in its own transaction,
+	// so it is not lost with it (ledger-finance C3) and only the owner-only AML log holds it (security F4).
+	s.recordAMLRefusal(ctx, err)
 	return out, err
 }
 
