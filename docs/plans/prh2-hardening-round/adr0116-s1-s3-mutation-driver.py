@@ -231,7 +231,7 @@ M = [
     ('R3 lift guard does not force the change mark', U2, "    NEW.change_seq := pg_catalog.nextval('public.aml_hold_change_seq');\n    IF NEW.owner_scope <> v_hold.owner_scope", "    IF NEW.owner_scope <> v_hold.owner_scope", AML),
     ('R4 READ COMMITTED not asserted', U2, "IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN", "IF false THEN", AML),
     ('R5 side writes unbounded (30 s)', 'internal/adjustment/aml_hold.go', "const sideRecordTimeout = 2 * time.Second", "const sideRecordTimeout = 30 * time.Second", SIDE),
-    ('R6 side-write failure not logged', 'internal/adjustment/aml_hold.go', "	slog.Default().Error(\"adjustment_side_record_failed\", \"step\", step, \"correlation_id\", correlation.String(), \"failure\", kind)", "	_ = kind", SIDE),
+    ('R6 side-write failure not logged', 'internal/adjustment/aml_hold.go', "	slog.Default().Error(\"adjustment_side_record_failed\", \"step\", step, \"correlation_id\", correlation.String(), \"failure\", kind)", "	_ = slog.Default()\n	_ = kind", SIDE),
     ('R7 evaluator reason names the hold', 'internal/kyc/enforcement.go', "unavailableDecision(\"evaluator\")", "unavailableDecision(\"hold_evaluator_failed\")", KYC),
 ]
 
