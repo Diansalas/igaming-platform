@@ -985,10 +985,12 @@ indexes are enough, so the reserved 0150 is unused.
    boundary inside a spring-forward gap (Cairo 2024-04-26) resolves to the transition instant. The result is independent of
    the session `TimeZone`. Week start is ISO day of week (1 = Monday ... 7 = Sunday).
 5. **Cost.** The single scan reads every row of the LONGEST requested window (30 days for `rolling_30d`) on every
-   evaluation. Measured (synthetic, shared machine, evidence file): for a Person with about 5,000 ledger rows in the 30-day
-   window the stake read is p50 58 ms / p95 87 ms, the deposit read p95 26 ms, and the L0.4 lock is held p95 108 ms by both
-   reads (four windows, `tenant_person`). Without the 0135 index the same statement runs about twice as long. A very
-   high-volume Person pays proportionally more under the lock. The ADR's ledger-derived rollup (covered by the hourly drift
+   evaluation. Measured (synthetic, shared machine, evidence file, second run with deposit rows present): for a Person with about
+   5,000 ledger rows in the 30-day window the stake read is p50 59 ms / p95 85 ms, the deposit read p50 37 ms / p95 52 ms, and
+   the L0.4 lock is held p95 132 ms by both reads (four windows, `tenant_person`). The with/without-0135-index contrast is
+   inconclusive at this dataset size (single runs, noise); the test asserts only that the new index is used. A very
+   high-volume Person pays proportionally more under the lock (about 13 microseconds per row: 100,000 bets is about 1.3 s,
+   ledger-finance's measurement). The ADR's ledger-derived rollup (covered by the hourly drift
    job) remains the answer if S4 finds this too slow. Not built; this is a decision input for S4, not an SLA.
 6. Ledger `created_at` is the posting transaction's START time (`DEFAULT now()`), so a transaction that ran longer than a
    rolling window can be dated just outside it. Ledger design, not changed here.
