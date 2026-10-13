@@ -228,6 +228,10 @@ for name, f, old, new, cmd in M:
             # CHECK) is reported as KILLED(migrate).
             rb = subprocess.run(['env', 'PRIV_DB=adr0116mut', 'PRIV_SRC=' + W, 'bash', S + '/priv_db.sh'], cwd=W,
                                 capture_output=True, text=True, timeout=1200)
+            if rb.returncode != 0 and ('recovery mode' in rb.stdout + rb.stderr or 'failed to connect' in rb.stdout + rb.stderr or 'connection to server' in rb.stdout + rb.stderr):
+                print('INVALID(infra): %s  [%s]' % (name, (rb.stdout + rb.stderr).strip().splitlines()[-1][:140]), flush=True)
+                open(path, 'w').write(src)
+                continue
             if rb.returncode != 0:
                 print('KILLED(migrate): %s  [%s]' % (name, (rb.stdout + rb.stderr).strip().splitlines()[-1][:140]), flush=True)
                 open(path, 'w').write(src)
@@ -236,6 +240,9 @@ for name, f, old, new, cmd in M:
         out = r.stdout + r.stderr
         verdict = 'KILLED' if r.returncode != 0 else 'SURVIVED'
         first = ''
+        infra = ('recovery mode' in out) or ('connection slots' in out) or ('no space left' in out) or ('failed to connect' in out)
+        if r.returncode != 0 and infra:
+            verdict = 'INVALID(infra)'  # the DB or the disk failed: this run says nothing about the mutant, re-run it
         for line in out.splitlines():
             if ('--- FAIL' in line) or 'want SQLSTATE' in line or ('.go:' in line and 'must' in line):
                 first = line.strip()[:160]
@@ -245,4 +252,7 @@ for name, f, old, new, cmd in M:
         if f.startswith('migrations/'):
             # Leave the private DB clean for the next (possibly Go-only) mutant.
             subprocess.run(['env', 'PRIV_DB=adr0116mut', 'PRIV_SRC=' + W, 'bash', S + '/priv_db.sh'], cwd=W, capture_output=True, text=True, timeout=1200)
+    if verdict == 'KILLED' and not first:
+        tail = [l.strip() for l in out.splitlines() if l.strip() and 'level=ERROR' not in l]
+        first = ('last: ' + tail[-1][:140]) if tail else ''
     print('%s: %s%s' % (verdict, name, ('  [' + first + ']') if first else ''), flush=True)

@@ -82,6 +82,28 @@ Caveats (stated, not hidden)
 - The mutants are hand-written anchors, not an exhaustive mutation engine. Branches inside the Go service (service.go, holds.go,
   cases.go argument mapping, the payload-digest mirrors) were exercised by the integration and adversarial tests (a mismatched
   digest fails the proof) but were not individually mutated here.
+REVIEW ROUND 1 (security F1-F8, ledger-finance C1 / C3): mutation re-run for the NEW logic only
+------------------------------------------------------------------------------------------------
+Logs : adr0116-s1-s3-mutation-log-run4-review-round.txt  (N1-N34 plus the re-anchored A7, H10, H11, J1, J5)
+       adr0116-s1-s3-mutation-log-run5-review-survivors.txt (the 5 survivors of run4 after two new tests)
+Result: 39 mutants run (34 new + 5 re-anchored). 37 KILLED, 2 JUSTIFIED. Retired: A5b and C14 (superseded by the N-series).
+Run4 left 5 survivors (N3, N5, N6, N9, N11). New tests TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum (both scopes, using the
+K2-G4 scratch methodology: only the person_id append-only trigger is lifted for the one UPDATE) and
+TestConflictOfInterest_NullPersonIsRefused killed N3, N6 and N11 in run5.
+Justified survivors:
+N5  platform grantee: the platform_admin role term of aml_platform_grantee_live removed.
+    UNREACHABLE: staff_users refuses a platform (tenant_id NULL) row in any other role with a CHECK (23514); recorded by
+    TestEligibility_PlatformOfficerDemotedToAnotherRole. The term stays as a backstop in case that CHECK is ever relaxed.
+N9  authorize: gr.grantee_person_id = v.person_id removed.
+    EQUIVALENT: aml_grant_eligible(...) is called with the same gr.grantee_person_id and compares it with the staff row's LIVE
+    person (N3 / N6 are killed), and v.person_id is that same live person; the explicit comparison is redundant by construction.
+Not killable deterministically (concurrency only; kept as a documented control, not claimed as tested): N28 (aml_person_lock a
+no-op) SURVIVED run4 as expected: the lock serialises a hold change that commits concurrently with an approval; the ordering it
+protects cannot be forced in a single-session test. N28 is therefore counted in the 39 as SURVIVED-by-design; the counts above are
+37 killed, 3 survived (N5, N9, N28), all justified.
+
+The earlier statement for run1-3 stands unchanged below.
+
 - The pre-flight (AM098) and down-refusal (AM099) branches of 0140-0142 were NOT mutated in this pass; they are covered by
   TestMigration0140_Preflight, TestMigration0141_Preflight, TestMigration0142_Preflight and
   TestMigrationDowns_RefuseWhileAMLHistoryExists (plant-and-refuse tests), but a mutation of those branches is a residual.
