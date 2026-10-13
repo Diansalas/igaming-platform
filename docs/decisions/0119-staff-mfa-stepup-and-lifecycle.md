@@ -217,3 +217,215 @@ type StaffFactor interface {
   `internal/stafflifecycle` and the new handlers and rejects any metadata key in `{secret, code, token, uri,
   recovery}`.
 - Each enrolment, recovery-code and token response carries `Cache-Control: no-store` and `Pragma: no-cache`.
+
+## 6. Flows
+
+### 6.1 Login (replaces the current single-step `POST /v1/staff/auth/login`)
+
+1. **Password step** (`POST /v1/staff/auth/login`). The existing password and lockout logic stays as it is, including
+   the dummy-hash timing equalisation, the scope check and the status check. A NULL `password_hash` (an `invited` or
+   `offboarded` row, section 10) is verified against `DummyPasswordHash` and fails as `invalid_credentials`. On a
+   correct password with status `active`:
+   - If the staff member has an ACTIVE factor that is not hard-locked: insert a `staff_auth_challenges` row with
+     `purpose = 'mfa'`, a 5 min TTL and `attempts_left = 5`, and return `200 {"challenge": {"type": "mfa", "token",
+     "expires_in": 300, "methods": ["totp", "recovery_code"]}}`. **No `TokenPair`.**
+   - If there is no active factor: return `403 mfa_enrolment_required`. The UI then explains that an enrolment link
+     from an administrator is needed (section 6.3). A password alone **never** opens enrolment.
+   - If the factor is hard-locked: return `403 mfa_locked`, which is also audited.
+   - Audit: `staff.login_password_verified` (it replaces `staff.login_succeeded`, which now means a full aal2 login).
+2. **Second-factor step** (`POST /v1/staff/auth/mfa/verify` with `{challenge_token, code}`):
+   - **Lock the challenge.** Look up the challenge by keyed MAC and lock it `FOR UPDATE`. It must be unexpired,
+     unconsumed, `purpose = 'mfa'` and `attempts_left > 0`.
+   - **Re-check the staff member.** Re-read the staff row: `active`, and the same `staff_version` as when the challenge
+     was issued.
+   - **Verify.** Call `StaffFactor.Verify`.
+   - **On success.** Consume the challenge, then call `IssueSession` with `aal = 2`, `amr = ["pwd","otp"]`,
+     `auth_time = now`, `mfa_at = now`, `absolute_expires_at = now + 12h` and a seal. Return a `TokenPair` and audit
+     `staff.login_succeeded` with `amr`.
+   - **On failure.** Decrement `attempts_left` and update the factor counters (section 6.5). Audit
+     `staff.mfa_verification_failed`. Return 401 `invalid_mfa_code`. When the challenge is exhausted it is consumed.
+   - **Commit.** The failure writes commit through the same "record then return the outcome" pattern as
+     `staff_routes.go:89-198`, so a refused attempt is never rolled back.
+3. **Recovery-code path** (`POST /v1/staff/auth/mfa/recover` with `{challenge_token, recovery_code}`). The challenge
+   rules are the same.
+   - The recovery code is looked up by keyed MAC among the staff member's unconsumed codes and consumed with
+     `UPDATE ... WHERE consumed_at IS NULL` (`RowsAffected = 1`).
+   - On success the response is **not** a session. The current challenge is consumed, and a new challenge with
+     `purpose = 'enrol'` is returned: a recovery code buys a re-enrolment, never an aal2 session.
+   - The old active TOTP factor is revoked when the new one is confirmed, not before. A recovery attempt by an attacker
+     who has already burned a code therefore does not leave the victim without a factor.
+   - Every other session of the staff member is revoked at confirmation.
+   - Audit `staff.mfa_recovery_used` and raise the durable alert `staff_mfa_recovery_used` (info severity, routed to the
+     staff member's own scope admins and to platform security).
+
+### 6.2 Enrolment (needs a `purpose = 'enrol'` challenge; reached only through 6.1.3 or 6.3)
+
+- `POST /v1/staff/auth/enrol/start` with `{challenge_token}`:
+  - creates a `pending` factor (TTL 10 min);
+  - returns `{factor_id, otpauth_uri, secret_base32}` exactly once, `no-store`;
+  - does **not** consume the challenge;
+  - each call revokes any earlier `pending` factor of the same staff member.
+- `POST /v1/staff/auth/enrol/confirm` with `{challenge_token, factor_id, code}`:
+  - verifies the code against the pending factor, using the same replay rule and the same counters, which live on the
+    pending row;
+  - then, in one transaction:
+    1. activate it, setting `last_used_step` to the step it accepted;
+    2. revoke the previous active factor of the same type;
+    3. revoke and replace all recovery codes with 10 new ones;
+    4. consume the challenge;
+    5. revoke all other sessions;
+    6. issue an aal2 session;
+  - returns `{recovery_codes: [10], token_pair}` once, `no-store`;
+  - audit `staff.mfa_enrolled` (the metadata holds `factor_type`, the replaced factor id and `via ∈ {invite,
+    reset_token, recovery_code, bootstrap}`).
+- **Recovery code format.** 10 codes. Each is 10 characters of Crockford base32 (50 bits), displayed as
+  `XXXXX-XXXXX`. Input is normalised: upper case, hyphens and spaces removed, I and L read as 1, O read as 0.
+- **Regenerating codes.** `POST /v1/staff/mfa/recovery-codes/regenerate` (step-up `critical`) replaces all codes and
+  returns the new ones once.
+
+### 6.3 Enrolment tokens (invite, MFA reset, bootstrap)
+
+- **Purposes.** A `staff_enrolment_tokens` row has `purpose ∈ {invite, mfa_reset, bootstrap}`. The token is 32 random
+  bytes, base64url.
+- **TTL** [ORCH-DEFAULT]: invite 72 h, mfa_reset 24 h, bootstrap 24 h.
+- **One live token.** Issuing a new token for the same `(staff, purpose)` revokes the live one.
+- **Delivery.**
+  - invite and mfa_reset: by email to the staff member's address, through `internal/email.Provider`. MOCK today. A real
+    adapter is PROVIDER DEPENDENT (OQ-1).
+  - bootstrap: printed once by `cmd/seed-admin` on the operator's terminal.
+  - **The token is never returned in an HTTP response to the inviter or the resetter.** This removes the "admin knows
+    the shell account's credentials" weakness of today's creation route (ADR 0024 residual).
+- **Redemption.**
+  - `POST /v1/staff/invitations/accept` with `{token, password}` (for an invite: it sets the password and moves
+    `invited -> active`).
+  - `POST /v1/staff/auth/enrol/redeem` with `{token, tenant_slug?, email, password}` (for mfa_reset and bootstrap: it
+    needs the current password as well).
+  - Both consume the token and return a `purpose = 'enrol'` challenge.
+  - Wrong-token attempts share the per-IP `credential` bucket and are audited.
+  - A redemption for an account that is not `invited` (for an invite) or not `active` (for the others) is refused.
+
+### 6.4 Why recovery codes use a keyed HMAC and not Argon2id (changes ADR 0017)
+
+1. **Planting resistance under M5.** A SQL-written Argon2 hash of a code the attacker chose would work. A keyed HMAC
+   needs a key that the runtime role never sees.
+2. **No denial-of-service lever.** Verifying a code against 10 Argon2id (64 MiB) hashes per attempt would turn the
+   recover endpoint into a memory-exhaustion lever, the same concern as `ratelimit.go:18-25`.
+3. **Offline cracking needs the key.** With 50 bits per code, an offline attack requires the key. If the application
+   host is compromised, the factor secrets go with it (M9) anyway.
+
+### 6.5 Rate limiting and lockout
+
+| Control | Value [ORCH-DEFAULT] | Mechanism |
+|---|---|---|
+| Challenge attempts | 5 per challenge | `attempts_left`, decremented under `FOR UPDATE` |
+| Factor soft lock | 5 failures within 15 min sets `locked_until = now + 15 min` | `failed_count` and `failed_window_start` on the factor row, updated under `FOR UPDATE` (this serialises parallel guesses) |
+| Factor hard lock | 10 failures within 24 h sets `hard_locked_at`. A reset is required (section 10.5). | `failed_24h_count` and `failed_24h_start`. Durable alert `staff_mfa_hard_locked` (P2). Its audit marks it as a compromise signal: the password was correct. |
+| Recovery-code failures | count against the same factor counters | one budget for every second-factor guess |
+| Step-up failures | count against the same factor counters, and 5 failures also revoke the current session | a token thief cannot grind TOTP from inside a session |
+| Per-IP | new bucket `mfa`, 30 per IP per minute, over `/v1/staff/auth/mfa/*`, `/enrol/*` and `/step-up`. The existing `credential` bucket (20 per min) covers `/invitations/accept` and `/enrol/redeem`. | `ratelimit.go` (single process; the same caveats apply) |
+| Password lockout | unchanged (5 per 15 min per identifier) | `login_attempts` |
+
+A locked factor answers `403 mfa_locked` **before** any code comparison. The response is the same whether the code
+would have been right or wrong.
+
+### 6.6 Step-up (`POST /v1/staff/auth/step-up` with `{code}`)
+
+- **Who may call.** It needs a bearer access token that passes the full staff chain (section 7.3) with `aal = 2`.
+- **What it does.** It verifies the code against the caller's active factor (replay rule, counters). It updates the
+  session row's `mfa_at` and seal, then mints a **new access token** with `mfa_at = now`. The refresh token does not
+  change.
+- **Audit.** `staff.step_up_verified`, or `staff.step_up_failed` on failure.
+- **Recovery codes are not accepted for step-up.** A staff member who has lost the device recovers through 6.1.3.
+- **The browser flow.** The back office shows a modal, calls step-up, swaps the access token and retries the original
+  request once with the **same** `Idempotency-Key` (section 15.3).
+
+## 7. Session assurance and liveness
+
+### 7.1 Claims (staff tokens only; player tokens unchanged)
+
+| Claim | Meaning |
+|---|---|
+| `sid` | the session id (a `sessions.id` UUID). This is new for staff. |
+| `aal` | `2` for every staff access token after S3. Any other value is refused by `RequireAAL2`. |
+| `amr` | RFC 8176 values, for example `["pwd","otp"]` |
+| `auth_time` | when the second factor at login was verified (Unix seconds). It is carried unchanged through rotation. |
+| `mfa_at` | the most recent second-factor verification (login or step-up), in Unix seconds |
+| `sv` | `staff_users.staff_version` at issue time |
+
+The claims are signed by the existing JWT key registry. `Verify` adds two checks: a staff token must carry every claim
+in this table, and its `aal` must be in `{2}`.
+
+### 7.2 `sessions` columns and seal (migration 0137)
+
+- **New nullable columns:** `aal SMALLINT`, `amr TEXT[]`, `auth_time TIMESTAMPTZ`, `mfa_at TIMESTAMPTZ`,
+  `absolute_expires_at TIMESTAMPTZ`, `assurance_kid TEXT`, `assurance_seal BYTEA`.
+- **The seal.**
+  `seal = HMAC(subkey, "ss-v1|" || id || "|" || principal_type || "|" || principal_id || "|" || coalesce(tenant_id,'platform') || "|" || aal || "|" || join(amr,',') || "|" || auth_time || "|" || mfa_at || "|" || absolute_expires_at)`.
+  Times are microsecond UTC integers.
+- **On refresh of a staff session, `RotateSession` must:**
+  - **verify the seal**, refusing a missing or bad one as 401 `invalid or expired refresh token`, with an audit row
+    `auth.session_assurance_invalid` and the durable alert `staff_session_integrity` (P1), because this shape only
+    arises from SQL tampering;
+  - **refuse** when `now > absolute_expires_at`;
+  - **copy** `aal`, `amr`, `auth_time`, `mfa_at` and `absolute_expires_at` to the new row and **re-seal** it, because
+    the session id changes;
+  - **use the staff idle TTL** for `expires_at`: `STAFF_REFRESH_IDLE_TTL`, default 30 min [ORCH-DEFAULT], capped at
+    `absolute_expires_at`.
+- **Players** keep `RefreshTokenTTL` and no seal.
+- **The trigger `sessions_staff_assurance_guard` (`SF040`).** For `principal_type = 'staff'`, an INSERT must carry
+  non-NULL `aal`, `auth_time`, `absolute_expires_at` and `assurance_seal`. `auth_time` and `absolute_expires_at` are
+  immutable on UPDATE. The trigger cannot check the HMAC (the DB holds no key), so the seal check stays in Go. The
+  trigger catches application bugs; the seal defeats SQL forgery.
+
+### 7.3 Staff route chain (one helper; no route bypasses it)
+
+`staffRoute(perm, stepUp, h)` composes:
+
+```text
+auth.Middleware -> auth.RequireStaffPrincipal -> RequireLiveStaffSession -> auth.RequireAAL2 ->
+auth.RequirePermission(perm) [-> auth.RequireTenantScope where the route needs it] -> auth.RequireStepUp(class) -> h
+```
+
+`RequireLiveStaffSession` (in `internal/httpserver`, because it needs the DB):
+
+- **The query.** It runs one query in the token's own scope (`WithTenant(tid)` or `WithoutTenant`) with
+  `app.principal_id = sub`, which reuses migration 0018's `session_select_own_principal` policy:
+  `SELECT s.revoked_at, s.expires_at, s.absolute_expires_at, su.status, su.role, su.staff_version FROM sessions s JOIN
+  staff_users su ON su.id = s.principal_id WHERE s.id = $sid AND s.principal_id = $sub`.
+- **It refuses with 401 `session_revoked`** when:
+  - no row is found;
+  - the session is revoked, or past `absolute_expires_at`;
+  - the staff member is not `active`;
+  - `role` differs from the token's `role`, or `staff_version` differs from `sv`.
+- It does **not** refuse on the idle `expires_at`. That governs refresh only; the 15 min access token is the idle unit.
+- On a DB error it returns 503 (fail closed).
+- **Cost:** one indexed lookup per staff request. Staff traffic is low (back office).
+
+`RequireStepUp(class)` reads `mfa_at` from the claims. If `now - mfa_at > maxAge(class)`, or `mfa_at` is absent, it
+returns `403` with `{"error": "step_up_required", "max_age": N}` and the header `WWW-Authenticate: Bearer
+error="insufficient_user_authentication", max_age="N"` (RFC 9470 section 3). Otherwise it places
+`auth.StepUpAssertion{Subject, SessionID, MFAAt}` in the context for the signer backstop (section 9.1). A negative age
+beyond 5 s of clock skew is also refused.
+
+**Static completeness test.**
+
+- **Coverage.** Every route under `/v1/admin/`, plus `/v1/staff/mfa/*` and `/v1/staff/auth/step-up`, is registered
+  through `staffRoute` (AST scan of `mux.Handle` calls, with a planted-offender non-vacuity case).
+- **Classification.** Every mutating method (POST, PUT, PATCH, DELETE) carries an explicit `stepUp` value from the
+  closed set `{none, financial, critical}`. A missing classification does not compile, because the argument is
+  required.
+- **Pinning.** A golden table of route to class (section 8) is pinned by a test, so changing a class is a reviewed diff.
+
+### 7.4 Max-ages [ORCH-DEFAULT]
+
+| Item | Default | Bound enforced in `config.Load` |
+|---|---|---|
+| Staff access token TTL | 15 min (unchanged) | 1-15 min |
+| Staff refresh idle TTL | 30 min | 5-60 min |
+| Staff session absolute (aal2 lifetime) | 12 h from `auth_time` | 1-12 h |
+| Step-up `critical` | 5 min | 1-5 min |
+| Step-up `financial` | 10 min | 1-10 min |
+| Login challenge | 5 min, 5 attempts | fixed |
+| Pending factor | 10 min | fixed |
+
+The configuration can only tighten these values. A value above the bound refuses startup.
