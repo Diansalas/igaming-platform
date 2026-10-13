@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -147,6 +148,13 @@ func TestEvaluateHold_InvalidArgumentsAreADeny(t *testing.T) {
 		if err != nil || !v.EvalFailed || !v.Denied() {
 			t.Errorf("%s: want a deny (EvalFailed), got %+v err=%v", name, v, err)
 		}
+	}
+}
+
+// The hold read is bounded: the engineering default is positive (0 would mean "no statement timeout") and short.
+func TestEvaluateHold_TimeoutIsBounded(t *testing.T) {
+	if aml.HoldEvalTimeout <= 0 || aml.HoldEvalTimeout > 10*time.Second {
+		t.Fatalf("HoldEvalTimeout %s must be positive and bounded", aml.HoldEvalTimeout)
 	}
 }
 

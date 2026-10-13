@@ -121,6 +121,18 @@ func TestAMLHold_EvaluatorFailure_RefusesAdjustment(t *testing.T) {
 	}
 }
 
+// A wallet that does not resolve gets NO invented hold verdict: it falls through to the ordinary payload refusal (not "under review").
+func TestAMLHold_UnresolvedWallet_IsNotReportedAsUnderReview(t *testing.T) {
+	w := newWorld(t, worldOpts{base: 1})
+	w.fund(10_000)
+	in := w.credit(100, ReasonOperationalErrorCorrection)
+	in.WalletID = uuid.New()
+	_, err := w.submit(w.F1, in)
+	if err == nil || errors.Is(err, ErrAccountUnderReview) {
+		t.Fatalf("an unknown wallet must be refused by the ordinary payload rule, not as under review: %v", err)
+	}
+}
+
 // Ledger-finance C3: an evaluator failure at SUBMISSION rolls the submission back; the aml.hold_eval_failed alert must not be
 // rolled back with it (it is raised in its own transaction after the rollback).
 func TestAMLHold_EvaluatorFailureAtSubmission_AlertSurvivesTheRollback(t *testing.T) {

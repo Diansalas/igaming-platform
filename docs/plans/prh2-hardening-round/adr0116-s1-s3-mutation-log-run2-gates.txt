@@ -1,7 +1,17 @@
-KILLED: E1 eval: probe error is not a deny  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.33s)]
-SURVIVED: E2 eval: invalid argument allowed
-KILLED: E3 eval: held verdict dropped  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.39s)]
-SURVIVED: E4 eval: alert result dropped
-KILLED: E5 eval: probe without savepoint rollback  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.46s)]
+KILLED: E1 eval: probe error is not a deny  [--- FAIL: TestEvaluateHold_AlertHardErrorPropagates (0.27s)]
+KILLED: E2 eval: invalid argument allowed  [--- FAIL: TestEvaluateHold_InvalidArgumentsAreADeny (0.00s)]
+KILLED: E3 eval: held verdict dropped  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.38s)]
+KILLED: E4 eval: alert result dropped  [--- FAIL: TestEvaluateHold_AlertHardErrorPropagates (0.20s)]
+KILLED: E5 eval: probe without savepoint rollback  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.39s)]
 SURVIVED: E6 eval: timeout 0 (unbounded)
-EXIT 143
+KILLED: E7 eval: probe against the wrong operation  [--- FAIL: TestHold_EvaluatedEvenWhenKYCIsNotRequired (0.25s)]
+KILLED: E8 eval: wrong person  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.50s)]
+SURVIVED: K1 compose: hold error not a deny
+SURVIVED: K7 compose: matched trigger leaks
+KILLED: K10 op map: payout maps to withdrawal  [--- FAIL: TestHold_EvalFailedAlert_PayloadIsOperationOnly (0.10s)]
+KILLED: J1 adjustment: submission not gated  [--- FAIL: TestAMLHold_RefusesManualAdjustment_AtSubmission (0.46s)]
+SURVIVED: J3 adjustment: wallet unresolved treated as held
+KILLED: J5 adjustment: wrong operation  [last: vet: internal/payments/asset_echo_audit.go:4:2: could not import crypto/sha256 (open /root/.cache/go-build/29/29c59dd205a7c51f2a5dbf96020c1e]
+KILLED(migrate): N26 mark ignores new holds  [/root/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.8.linux-amd64/src/crypto/internal/fips140/ecdh/ecdh.go:11:2: package crypto/internal/fip]
+KILLED: N32 adjustment submission raises no detached alert  [last: /root/go/pkg/mod/github.com/jackc/pgx/v5@v5.11.0/pgconn/config.go:19:2: open /root/.cache/go-build/bc/bc1bac7d31c4198461e5b43d122917d46df743]
+EXIT 0
