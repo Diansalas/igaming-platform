@@ -18,7 +18,7 @@ actor proof bound to the operation and target. Forging session settings grants n
 
 | expected_licensee | owner scope | eligible grantee | who requests | who approves |
 |---|---|---|---|---|
-| `platform` (our licence) | platform | platform staff (acting session, role `compliance` in the tenant) | a platform principal | a distinct platform principal |
+| `platform` (our licence) | platform | platform staff with role `platform_admin` (acting session in the tenant) | a platform principal | a distinct platform principal |
 | `tenant` (BYO licence) | tenant | tenant staff with role `compliance` | a tenant admin of that tenant | a distinct PLATFORM principal (a tenant admin can never self-approve) |
 
 Requester, approver and grantee must be three different Persons (ADR 0112 R-4). A platform grant is bounded by
@@ -26,10 +26,13 @@ Requester, approver and grantee must be three different Persons (ADR 0112 R-4). 
 
 ## Quorum
 
-A hold cannot be placed, and a proposal cannot be approved, unless at least two distinct Persons hold an in-force
-`aml_officer` grant of the matching scope on that tenant (`aml_officer_quorum`). The quorum is counted PER TENANT per
-owner scope (deviation from the ADR text "per owner scope", disclosed in migration 0140). Fewer than two officers means
-every hold placement is refused with SQLSTATE `AM003`: this is intentional (fail closed).
+Only hold PLACEMENT checks the quorum: a new hold cannot be placed unless at least two distinct Persons hold an in-force
+`aml_officer` grant of the matching scope on that tenant whose grantee is LIVE-eligible (`aml_officer_quorum`). Lifting a manual
+hold, reading, and approving a four-eyes proposal do not check the quorum (they need a live officer; an approval also needs a
+second Person). The quorum is counted PER TENANT per owner scope (deviation from the ADR text "per owner scope", disclosed in
+migration 0140). Fewer than two live officers means every hold placement is refused with SQLSTATE `AM003`: this is intentional
+(fail closed). A grantee is live only while the staff row is active, still in the eligible role and the same Person: demoting or
+suspending a grantee removes them from the quorum immediately, without revoking the grant.
 
 ## Bootstrap steps (per tenant)
 
@@ -54,8 +57,11 @@ If revocation drops the quorum below two, new holds and approvals are refused wi
 
 - A suspended grantee does not count toward the quorum, but only when the staff row is visible to the calling session's RLS
   (security to probe for a platform grantee seen from a tenant session).
-- No alert routing to officers exists yet (ALERT-DELIVERY open); `aml.hold_eval_failed` alerts are visible to platform
-  operators through the alert read path only.
+- No alert routing to officers exists yet (ALERT-DELIVERY open). `aml.hold_eval_failed` alert rows are readable by the SUBJECT
+  TENANT's staff under the alert read policy (they infer an evaluator fault, not a hold): see ADR 0116 12.4.
+- An officer never acts on a record about their own Person (AM011); the queue omits their own subject.
+- Platform `aml_officer` grants expire after at most 4 hours; schedule re-grants or the platform quorum lapses.
+- Case notes are plaintext; the lint is an accident guard only.
 - Erasure of a person with AML records fails closed (`aml_person_has_records`); the erasure job itself (HD-RET-1) is NOT
   IMPLEMENTED.
 - Screening, monitoring rules and SAR export are NOT IMPLEMENTED (S2, S4, S5).

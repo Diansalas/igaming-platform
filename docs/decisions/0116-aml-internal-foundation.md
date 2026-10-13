@@ -575,6 +575,7 @@ until S3 delivers the quorum, so S1 and S3 are released together for any real te
 | Q7 HD-AML-7 | PEP hold scope, re-screen interval | Withdrawal + payout hold. **LF note:** this lets deposits and play accumulate value that cannot leave; legal must decide knowing that. Interval: none (legal). |
 | Q8 HD-AML-8 | Retention vs erasure | Retain under the AML legal hold, then pseudonymise (with HD-RET-1). Period: none (legal). |
 | **HD-AML-9** (new, LF) | Forfeiture, or transfer of a held balance to an authority | Not built. No adjustment may seize a held balance. Needs a new posting shape plus LF review (HD-CTF-5 analogue). |
+| **Q7 / HD-AML-9 note (LF C2, for the owner and legal)** | Withdrawal-only hold and manual adjustments | As built, ANY active hold refuses ANY manual adjustment of the held person's wallet, including a CORRECTING one. Consequences to decide knowingly: with a `withdrawal_and_payout` hold an erroneous credit cannot be reversed by a debit adjustment, the M2 Step B compensating credit cannot be posted, and the player can still stake the erroneous balance. A later option, **not built**: allow `compensating_entry` debits that name a causation transaction under a `withdrawal_and_payout` hold (never under `all_value_movement`). |
 
 ## 11. Review disposition (revision 2)
 
@@ -633,14 +634,28 @@ coupling, not one slice: the work was done together on one branch because a hold
 
 - **Access (0140).** K1 capability `aml_officer` (classification `outside_mandatory_class`), created only by the existing proof-bound
   four-eyes grant flow. `aml_authorize()` is the first statement of every AML definer function: it resolves the session actor
-  (tenant or platform-acting only), re-checks in SQL that the actor's own in-force `aml_officer` grant exists for the tenant, then
+  (tenant or platform-acting only), re-checks in SQL that the actor's own `aml_officer` grant is in force for the tenant AND that
+  the grantee is LIVE-eligible now (staff row active, role `compliance` for a tenant grantee or `platform_admin` for a platform
+  grantee, live person equal to the person captured on the grant request: the `ledger_adjustment_eligible_grant` pattern), then
   consumes a signed actor proof bound to actor, scope, tenant, operation, target and payload hash. `actor_proof_require` was **not**
-  replaced (ADR 0119 may replace it); the AML admission rule lives in `aml_authorize` and `Claims.validate`.
+  replaced (ADR 0119 may replace it); the AML admission rule (tenant or platform-acting scope only, closed operation names) lives in
+  `aml_authorize` alone: `internal/actorproof` `Claims.validate` has no AML-specific rule (an earlier draft of this record said it
+  did; that was wrong). The platform half of the liveness check reads a platform staff row the session cannot see, through a narrow
+  owner-side definer helper (`aml_platform_grantee_live`, no runtime EXECUTE).
+- **Conflict of interest.** Every officer function (hold place / lift / list, alert raise, case open / read / events / notes /
+  transition / note / flag / propose / approve) refuses with the four-eyes class (AM011) when the actor's Person is the subject
+  Person; the queue omits the officer's own subject. Hold changes, proposals and approvals for one person are serialised by a
+  per-person advisory lock, and an approval is invalidated by a monotonic hold-change mark (a sequence), not by timestamps.
 - **Holds (0141).** Definer-only tables with FORCE RLS and one owner policy bound to the session tenant, append-only triggers, runtime
   role revoked. `aml_hold_active` is the single enforcement read. Gates: deposit initiation, withdrawal request, payout claim, casino
   stake, sportsbook stake, plus manual-adjustment refusal at submission and execution. Never gated: settlements, reversals, releases,
-  completions, rollbacks, bonus conversion, tombstones (a static test pins the five call sites; a live test reads the
-  `transaction_type` CHECK so a new type must be classified).
+  completions, rollbacks, bonus conversion and forfeiture, hold-resolution releases, tombstones. **Evidence differs per item:** a
+  static test pins the five gate call sites and a live test reads the `transaction_type` CHECK so a new type must be classified
+  (STRUCTURAL: covers every item); BEHAVIOURAL tests under an active hold exist for casino win, casino rollback, casino tombstone
+  rollback with no original, sportsbook settlement and void, deposit settlement callback, deposit reversal callback, withdrawal
+  releases / completions / approvals, in-flight payout completion, and the placement-versus-gate concurrency. **No behavioural test
+  exists** for bonus conversion, bonus forfeiture, or the 0124 hold-resolution release (their packages call no gate; the static
+  pin is the only evidence) and **sportsbook cashout does not exist in this codebase** (nothing to gate or test).
 - **Composition.** `kyc.EvaluateEnforcement` composes KYC and the hold: public outcome `pending`, code `account_review`; tenant decision
   log outcome `review`; the true outcome `held`, the hold id and the KYC outcome stay internal (`aml_enforcement_decisions`). An
   evaluator error is a deny of exactly that operation plus the alert Kind `aml.hold_eval_failed`.
@@ -652,8 +667,10 @@ coupling, not one slice: the work was done together on one branch because a hold
 ### 12.3 Deviations (each disclosed in the code or here)
 
 1. **Quorum is counted per tenant per owner scope**, not per owner scope globally (K1 grants are per tenant; a platform grantee's
-   grant is bounded by `acting_grant_max_lifetime`, 4 hours). A **suspended grantee does not count** (the check excludes a staff row
-   that is visible to the caller's RLS; a hidden row is not excluded, so the count then equals the pre-fix count).
+   grant is bounded by `acting_grant_max_lifetime`, 4 hours, so **the platform quorum lapses 4 hours after the last grant unless
+   grants are re-issued on a cadence**: an operations task, see the runbook). A grantee counts only while LIVE-eligible (active, still
+   in the eligible role, same person): a demoted, suspended or re-linked grantee is neither an officer nor a quorum member, in both
+   scopes (platform via the owner-side liveness helper).
 2. **No AM020 request guard.** A platform session cannot read tenant staff rows (CG010), so the planned request guard was impossible
    for tenant grants. A tenant admin can request `aml_officer` but a distinct **platform** co-approver is always required.
 3. **Review rows carry no `matched_trigger`.** The existing KYC decision log records the policy trigger for a `pending`; a `review`
@@ -672,10 +689,28 @@ coupling, not one slice: the work was done together on one branch because a hold
 - **Signer allow-list:** `internal/actorproof/actorproof_test.go` `staticAllowed` gains `internal/aml`. Also
   `internal/db/acting_setter_static_test.go` (A16) gains `internal/aml/service.go`, and the alerting static rules gain
   `internal/aml/hold_eval.go:raiseEvalFailed`.
-- Residuals to probe: `aml_hold_active` discloses holds to a same-tenant session running arbitrary SQL; `aml_record_enforcement_decision`
-  is forgeable by the runtime credential exactly as the existing KYC decision log is; `aml.hold_eval_failed` rows are readable by the
-  subject tenant (routing to `aml_case:read` holders is NOT IMPLEMENTED, ALERT-DELIVERY); notes are plaintext; the acting-session
+- Residuals to probe: `aml_hold_active` and `aml_hold_match` (granted to the runtime role: the gates need them) disclose hold
+  existence, and the hold id, to ANY tenant for which a session can be formed under arbitrary SQL with forged settings, not only the
+  caller's own tenant (the tenant argument is checked against the session setting, which arbitrary SQL controls);
+  `aml_record_enforcement_decision` is forgeable by the runtime credential exactly as the existing KYC decision log is (it now checks
+  that a named hold belongs to the named person, security F7); `aml.hold_eval_failed` rows are readable by the subject tenant under
+  `alerts_subject_tenant_read` (routing to `aml_case:read` holders is NOT IMPLEMENTED, ALERT-DELIVERY, so the alert is visible to tenant
+  staff and infers an evaluator fault, not a hold); notes are plaintext and the lint is an accident guard only; the acting-session
   open audit row (operation `compliance`) is tenant-visible.
+- **ACCEPTED residuals (recorded, not fixed):** (F6) the public `review` cover is only as good as the population of KYC-pending
+  players: a held player who is NOT KYC-pending is the only `review` among otherwise-`passed` players, so tenant staff comparing
+  players can infer "something is different" (not what); (F6) response timing differs slightly between the paths (the hold probe adds
+  two round trips and, on a hit, a match lookup); (F5) the matched hold id is returned to the in-transaction gate and written to the
+  AML-scoped log, and `aml_hold_match` stays runtime-executable for that lookup.
+- **F4 (tipping-off on manual adjustments): OPEN, DECISION NEEDED, NOT FIXED.** A hold refuses an adjustment with the dedicated
+  token `account_review` (stored as the request's `refusal_code` at execution and shown in the refusal; the submission refusal is the
+  generic `conflict` body but its audit class has no SQLSTATE suffix). No existing refusal token is a truthful, equally-visible cover
+  for BOTH directions: `open_payment_exposure` is credit-only, `policy_disabled` and `tenant_not_active` are tenant-wide and
+  checkable against other players, `wallet_not_found` is checkable. Options for the owner / `ledger-finance` / `product-owner-proxy`:
+  (a) introduce one deliberately shared token (for example `wallet_not_adjustable`) that is ALSO produced by genuinely non-AML
+  causes (a closed wallet, a frozen asset for that wallet) so it is not AML-specific; (b) map the refusal to the existing
+  `conflict` shape with the same audit class as a genuine conflict and drop the stored token; (c) accept the visible token and
+  record it as a conscious tipping-off exception. Nothing was invented here.
 
 ### 12.5 Changed existing tests (setup and allow-lists only; no assertion weakened)
 
@@ -704,6 +739,17 @@ All integration runs used `-tags integration -p 1 -count=1` against a private da
   while AML history exists.
 - Mutation pass: 105 mutants, 93 killed, 12 justified survivors, none unexplained (the pre-flight and down-refusal branches were not
   mutated). `docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-kill.txt` and the three logs beside it.
+
+### 12.7a Pre-release items recorded by the review round
+
+- **Hold-probe cost (LF finding 5):** the probe is a SAVEPOINT round trip plus one pipelined batch (two round trips per gated
+  operation, including every casino and sportsbook stake). The ADR 0096 s7.7 budget (+2 ms p95) was never re-measured with it. Not
+  folded into one batch (the SAVEPOINT must be acknowledged before the batch can rely on it after a Parse failure). Measure before any
+  real tenant; S7 readiness.
+- **Platform quorum cadence:** platform `aml_officer` grants expire after at most 4 hours (K1 bound); the platform quorum lapses
+  without a re-grant cadence.
+- **0141 CHECK:** `kyc_enforcement_decisions_outcome_check` is re-created `NOT VALID` then `VALIDATE`d (the scan runs under the weaker
+  lock); it only admits one more value so validation cannot fail.
 
 ### 12.7 Open for later slices / decisions
 

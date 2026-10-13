@@ -49,7 +49,8 @@
 -- The 0120 verifier (actor_proof_require) is NOT replaced here: it admits any `<family>:<verb>` operation with a tenant
 -- for scope tenant / platform_acting, and ADR 0119 may also replace it (a second CREATE OR REPLACE would silently drop
 -- one of the two families). The AML admission rule (scope tenant | platform_acting only, closed operation names) is
--- enforced by aml_authorize and mirrored by internal/actorproof.Claims.validate.
+-- enforced by aml_authorize alone (internal/actorproof.Claims.validate carries no AML-specific rule; an earlier draft of
+-- this header said it mirrored one, which was wrong).
 
 SET LOCAL lock_timeout = '5s';
 

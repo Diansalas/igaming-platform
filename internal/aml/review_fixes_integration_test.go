@@ -5,6 +5,7 @@ package aml_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -256,6 +257,43 @@ func TestRecordDecision_HoldMustBelongToThePerson(t *testing.T) {
 	if err := call(c.P, hold); err != nil {
 		t.Fatalf("the person's own hold is recorded: %v", err)
 	}
+}
+
+// LF C4 (placement-versus-gate race): gates reading the hold while an officer places it never error and never see a half state; once
+// the placement has committed every later gate read is denied.
+func TestHoldPlacement_ConcurrentWithGateReads(t *testing.T) {
+	c := newCaseWorld(t, "own_licence")
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	errs := make(chan error, 64)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := c.holdActive(c.P.PersonID, c.P.AccountID, aml.OpDeposit); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	hold := c.Q.PlaceHold(t, c.Svc, c.P.PersonID, nil, aml.ScopeAllValueMovement, aml.ReasonManual)
+	close(stop)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("a gate read failed during placement: %v", err)
+	}
+	if held, err := c.holdActive(c.P.PersonID, c.P.AccountID, aml.OpDeposit); err != nil || !held {
+		t.Fatalf("after the placement every gate read is denied: %v %v", held, err)
+	}
+	_ = hold
 }
 
 // Security review F8: a hold placed after the proposal invalidates the approval by the monotonic change mark even when its
