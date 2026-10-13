@@ -133,6 +133,14 @@ four-eyes `manual_adjustment`), never as a balance write-off, and the
 `player_cash` balance of a closed wallet stays visible in the ledger until
 it is discharged by posted entries.
 
+
+**DB-enforced pin (ADR 0118, migration 0136).** A wallet's `id`, `tenant_id`, `brand_id`, `player_account_id`,
+`asset_code` and `created_at` never change after insert (BEFORE UPDATE trigger `wallets_identity_immutable`,
+SQLSTATE `BR002`), and the parent `player_accounts` row's `id`, `tenant_id`, `brand_id`, `created_at` are pinned the
+same way (`BR001`). The composite FK alone did not guarantee "must match it" over time: a single statement could
+move both sides together (BRAND-REHOME-HOLD-1). Moving a player between brands is not a supported operation; a
+future governed transfer needs its own ADR (account close / open plus explicit ledger transfers).
+
 ## Scoping table
 
 | Object | Scope | Notes |

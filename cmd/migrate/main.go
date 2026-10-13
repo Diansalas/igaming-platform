@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -49,7 +50,9 @@ func run() error {
 	}
 
 	ctx := context.Background()
-	pool, err := db.Connect(ctx, databaseURL, 2, 5*time.Second)
+	// Server NOTICEs (a migration's RAISE NOTICE, e.g. the 0136 pre-flight class 4 report of non-zero
+	// balances on a closed brand, ADR 0118 s5 / s8) go to stderr; without a handler the driver drops them.
+	pool, err := db.ConnectWithNoticeHandler(ctx, databaseURL, 2, 5*time.Second, noticePrinter(os.Stderr))
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
 	}
@@ -133,4 +136,12 @@ func checkDownAllowed(appEnv string, isSet bool) error {
 	}
 	return fmt.Errorf("migrate: refusing `down` with APP_ENV=%s: down migrations are for development and staging only "+
 		"(set APP_ENV=development explicitly); in production fix forward or restore (docs/runbooks/operational-runbooks.md section 2)", shown)
+}
+
+// noticePrinter writes each server notice as one "migrate: <SEVERITY>: <message>" line (severity and
+// primary message only; ADR 0118 security review F2).
+func noticePrinter(w io.Writer) db.NoticeHandler {
+	return func(severity, message string) {
+		_, _ = fmt.Fprintf(w, "migrate: %s: %s\n", severity, message)
+	}
 }

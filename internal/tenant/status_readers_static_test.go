@@ -85,6 +85,10 @@ var allowedLiteralCompares = map[string]string{
 	// DOWN restores 0130's body verbatim.
 	"migrations/0133_launch_closure_withdrawal_hold_balance_arm.up.sql:IF OLD.status = 'closed' THEN": "0133 restates 0128 closed is terminal",
 	"migrations/0133_launch_closure_withdrawal_hold_balance_arm.up.sql:IF NEW.status = 'closed' THEN": "0133 closure backstop: LA023 / LA024 (0130) plus LA025 non-zero withdrawal hold balances",
+	// 0136 (ADR 0118 s5 class 4): the up pre-flight's INFORMATIONAL count of non-zero player_cash /
+	// player_withdrawal_hold balances on wallets of a closed brand (RAISE NOTICE only, never refuses,
+	// gates nothing). pending_launch is NOT closed: a pending brand has no player funds to report.
+	"migrations/0136_player_brand_binding_immutable.up.sql:AND b.status = 'closed'": "0136 pre-flight class 4 NOTICE (informational, refuses nothing)",
 }
 
 func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -49,6 +50,23 @@ const appEnvironmentParam = "app.environment"
 // brand gate key or a subject row lock must not starve a suspension indefinitely). A value
 // already present in the database URL wins. Only a closed set of parameter names is accepted.
 func ConnectWithRuntimeParams(ctx context.Context, databaseURL string, maxConns int32, connectTimeout time.Duration, params map[string]string) (*Pool, error) {
+	return connect(ctx, databaseURL, maxConns, connectTimeout, params, nil)
+}
+
+// NoticeHandler receives a server-side NOTICE / WARNING / INFO message raised on one of the pool's
+// connections (for example a migration's RAISE NOTICE): the severity and the primary message only
+// (no detail, hint or context fields). It is called on the connection's reading goroutine.
+type NoticeHandler func(severity, message string)
+
+// ConnectWithNoticeHandler is Connect plus a NoticeHandler on every connection the pool opens. It
+// exists for the migrate runner (ADR 0118 security review F2): PostgreSQL NOTICEs are otherwise
+// discarded by the driver, so a migration pre-flight that reports through RAISE NOTICE (0136 class 4:
+// non-zero balances on a closed brand) would be lost. A nil handler behaves exactly like Connect.
+func ConnectWithNoticeHandler(ctx context.Context, databaseURL string, maxConns int32, connectTimeout time.Duration, h NoticeHandler) (*Pool, error) {
+	return connect(ctx, databaseURL, maxConns, connectTimeout, nil, h)
+}
+
+func connect(ctx context.Context, databaseURL string, maxConns int32, connectTimeout time.Duration, params map[string]string, onNotice NoticeHandler) (*Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("db: parse database url: %w", err)
@@ -79,6 +97,9 @@ func ConnectWithRuntimeParams(ctx context.Context, databaseURL string, maxConns 
 	}
 	cfg.MaxConns = maxConns
 	cfg.ConnConfig.ConnectTimeout = connectTimeout
+	if onNotice != nil {
+		cfg.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) { onNotice(n.Severity, n.Message) }
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
