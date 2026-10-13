@@ -202,6 +202,10 @@ BEGIN
     FOR t IN SELECT c.relname FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND c.relname LIKE 'aml\_%' LOOP
         EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t);
     END LOOP;
+    -- Sequences too (the schema default privileges would otherwise leave USAGE on them for the runtime role).
+    FOR t IN SELECT c.relname FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'S' AND c.relname LIKE 'aml\_%' LOOP
+        EXECUTE format('REVOKE ALL ON SEQUENCE %I FROM igaming_runtime', t);
+    END LOOP;
     FOREACH f IN ARRAY ARRAY[
         'aml_hold_active(uuid, uuid, uuid, text)', 'aml_hold_match(uuid, uuid, uuid, text)',
         'aml_record_enforcement_decision(uuid, uuid, uuid, text, text, text, text, boolean, uuid, uuid)',

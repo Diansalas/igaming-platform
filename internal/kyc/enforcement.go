@@ -351,7 +351,7 @@ func (d EnforcementDecision) RetryableOnHoldEvalFailure() EnforcementDecision {
 	if d.KYCOutcome != OutcomePassed && d.KYCOutcome != OutcomeNotRequired {
 		return d
 	}
-	u := unavailableDecision("hold_evaluator_failed")
+	u := unavailableDecision("evaluator")
 	u.Hold = d.Hold
 	u.KYCOutcome = d.KYCOutcome
 	u.TrueOutcome = OutcomeUnavailable

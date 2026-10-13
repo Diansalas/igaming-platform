@@ -29,10 +29,14 @@ DECLARE
     v_hold  record;
     v_actor record;
 BEGIN
-    SELECT h.tenant_id, h.owner_scope, h.reason_class, h.placed_at INTO v_hold FROM public.aml_holds h WHERE h.id = NEW.hold_id;
+    SELECT h.tenant_id, h.owner_scope, h.reason_class, h.person_id INTO v_hold FROM public.aml_holds h WHERE h.id = NEW.hold_id;
     IF NOT FOUND OR v_hold.tenant_id <> NEW.tenant_id THEN
         RAISE EXCEPTION 'aml: not found' USING ERRCODE = 'AM040';
     END IF;
+    -- The monotonic hold-change mark (security F8) is FORCED here, under the per-person lock, so the invariant does not depend on
+    -- which function (or owner-level statement) inserts the row.
+    PERFORM public.aml_person_lock(NEW.tenant_id, v_hold.person_id);
+    NEW.change_seq := pg_catalog.nextval('public.aml_hold_change_seq');
     IF NEW.owner_scope <> v_hold.owner_scope THEN
         RAISE EXCEPTION 'aml: only the hold''s owner scope may lift it' USING ERRCODE = 'AM006';
     END IF;

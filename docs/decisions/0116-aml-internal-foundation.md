@@ -710,11 +710,22 @@ coupling, not one slice: the work was done together on one branch because a hold
   (nothing AML-specific is stored on `ledger_adjustment_requests`; the old `account_review` token and `RefusalAccountReview` are gone) and
   can be decided again once the hold is gone, or expires. The REAL reason (hold or evaluator error, the hold id, operation
   `manual_adjustment`, KYC outcome `not_evaluated`) is written only to the owner-only AML decision log, in its own transaction after the
-  rollback, together with the evaluator-failure alert. **Residual:** a staff member can still observe that SOME conflict occurred on a
-  request, indistinguishable from an ordinary conflict; a request that keeps conflicting for no visible reason is a weak signal. Options
-  (a) a deliberately shared non-AML token and (c) accepting a visible token remain available if the owner prefers them. Tests:
-  `TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict` (byte-identical status / headers / body and audit shape,
-  submission and execution) and `TestAMLHold_*` in `internal/adjustment`.
+  rollback, together with the evaluator-failure alert.
+
+  **Residual (corrected by the re-review: it is a DETERMINISTIC signal, not a weak one).** Option (b) hides the WORDING, not the
+  FACT. A tenant staff member who can read the denied audit rows and the request can see `denied_class = 'conflict:'` on a request
+  that is still `pending` with NO approval row: the only other producer of that shape is `ErrNotPending`, which needs a request that
+  is no longer pending, so the shape means "a hold or an evaluator fault". **Timing also differs** (measured by the re-review:
+  an ordinary not-pending decide about 1.4 ms against about 18.9 ms for the hold-caused refusal at execution, because the evidence
+  write runs before the response; a successful submit about 12.2 ms against about 6.0 ms for the refusal at submission). The side
+  writes run on the request goroutine, each bounded by 2 s; moving them after the response would shrink but not remove the difference.
+  **This is a launch-blocking OWNER / LEGAL decision for any `under_platform_licence` tenant whose finance staff can approve
+  adjustments** (register row D-AML-TIP-1, non-blocking for engineering): choose (a) one deliberately shared token also produced by
+  genuine non-AML causes, (b) as built, or (c) accept the visible signal. Recommended answer: **(c)** with a documented AML
+  confidentiality duty for adjustment approvers, plus (a) later. Until decided, option (b) stays as the reversible orchestrator default.
+  Tests: `TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict` (byte-identical status / headers / body and
+  audit shape, submission and execution; it does NOT assert the state/approval-row or timing signal) and `TestAMLHold_*` in
+  `internal/adjustment`.
 
 ### 12.5 Changed existing tests (setup and allow-lists only, plus the F4 execution assertions below)
 
@@ -758,7 +769,7 @@ Migrations 0140-0142 were edited in place (unmerged). Software capability only; 
 | Sec F1 live eligibility of the grantee (active, role now, same Person) in `aml_authorize` and the quorum, both scopes | **Applied** (platform half through an owner-side liveness helper) | 0140; tests `TestEligibility_*` (demote tenant officers to `support`, suspend / re-link platform and tenant officers) |
 | Sec F2 conflict of interest on every officer function; queue filters own subject | **Applied** (AM011) | 0140 `aml_assert_not_subject`, 0141, 0142; `TestConflictOfInterest_EveryOfficerFunctionRefusesOwnSubject` (13 functions + queue, both models) |
 | Sec F3 suspended-officer exclusion for platform scope | **Applied** (owner-side helper; the sanctions lift still needs two live Persons) | `TestEligibility_PlatformOfficers_*`, `TestEligibility_SanctionsLiftNeedsTwoLiveOfficers` |
-| Sec F4 tipping-off on manual adjustment refusals | **Applied, option (b)** (reversible orchestrator default, not owner-approved): the generic `conflict` at submission and execution, real reason only in the AML decision log; residual in 12.4 | 12.4; `TestManualAdjustmentAPI_F4_*` |
+| Sec F4 tipping-off on manual adjustment refusals | **Applied, option (b) as a reversible orchestrator default, not owner-approved**: the generic `conflict` wording at submission and execution, real reason only in the AML decision log. The signal itself is NOT hidden (deterministic: `conflict:` on a still-pending request with no approval; timing); owner/legal decision D-AML-TIP-1 is launch-blocking for platform-licensed tenants (12.4) | 12.4; `TestManualAdjustmentAPI_F4_*` |
 | Sec F5 `aml_person_has_records` runtime EXECUTE; bare acting tenant; hold id | **Applied** (revoked + `init-app-role.sql`; session tenant requires the exact acting shape); hold id to the in-transaction recorder is **accepted residual** (the gate needs `aml_hold_match`) | 0141, 0142, deploy; `TestSessionTenant_BareActingSettingBindsNothing`, catalogue test |
 | Sec F6 review-cover population; timing | **Accepted residuals**, recorded | 12.4 |
 | Sec F7 decision log names another person's hold | **Applied** (AM007) | 0141; `TestRecordDecision_HoldMustBelongToThePerson` |
@@ -771,6 +782,18 @@ Migrations 0140-0142 were edited in place (unmerged). Software capability only; 
 | LF C3 alert lost when the adjustment submission rolls back | **Applied**: raised in its own transaction after the rollback | `TestAMLHold_EvaluatorFailureAtSubmission_AlertSurvivesTheRollback` |
 | LF C4 never-gated tests | **Partly applied**: behavioural tests added for deposit reversal, casino tombstone rollback, sweeper T2 / T12 under a hold, claim evaluator failure end to end, placement-versus-gate concurrency; **not behaviourally tested**: bonus conversion / forfeiture, 0124 hold-resolution release (structural pin only), sportsbook cashout does not exist | 12.2 |
 | LF finding 5 probe round trips | **Recorded** as a pre-release measurement item | 12.7a |
+
+### 12.9 Re-review conditions (APPROVE WITH CONDITIONS) applied
+
+- C2: the post-refusal side writes are bounded (2 s each), log failures with a generic event (`adjustment_side_record_failed`, correlation
+  id, SQLSTATE or kind only, no AML wording) and count them (`adjustment_side_record_failures_total`); tests for the failure log and for
+  a starved pool. They still run before the response is written (timing residual in 12.4).
+- C3: the runtime role has no privilege on any `aml_*` sequence (0141, `deploy/init-app-role.sql`, catalogue test).
+- 4: `aml_holds_guard` and `aml_hold_lifts_guard` force `change_seq` from the sequence under the per-person lock, so the F8 invariant does
+  not depend on which statement inserts the row (`TestHoldGuards_ForceTheChangeMark`).
+- 5: case writes refuse non-READ-COMMITTED transactions (AM004; `TestCaseWrites_RefuseRepeatableRead`).
+- 6: runbook corrected. 7: the payout-claim tenant-visible reason is the generic `kyc_unavailable:evaluator`.
+- 1: the F4 residual restated as deterministic and escalated as D-AML-TIP-1 (12.4).
 
 ### 12.7a Pre-release items recorded by the review round
 

@@ -50,13 +50,14 @@ suspending a grantee removes them from the quorum immediately, without revoking 
 ## Revocation
 
 `capability.RevokeGrant` takes effect immediately for the next AML call (the SQL re-check reads the grant at call time).
-If revocation drops the quorum below two, new holds and approvals are refused with `AM003`; existing holds stay in force
-(a lift also needs the quorum).
+If revocation (or a demotion / suspension) drops the quorum below two, only NEW hold placements are refused with `AM003`;
+approvals, lifts and reads do not check the quorum (they need a live officer, and an approval a second Person). Existing holds stay
+in force.
 
 ## Known limits (do not paper over)
 
-- A suspended grantee does not count toward the quorum, but only when the staff row is visible to the calling session's RLS
-  (security to probe for a platform grantee seen from a tenant session).
+- A suspended, demoted or re-linked grantee does not count toward the quorum and cannot act, in both scopes (the platform half is read
+  through an owner-side liveness helper because a platform staff row is invisible to a tenant or acting session).
 - No alert routing to officers exists yet (ALERT-DELIVERY open). `aml.hold_eval_failed` alert rows are readable by the SUBJECT
   TENANT's staff under the alert read policy (they infer an evaluator fault, not a hold): see ADR 0116 12.4.
 - An officer never acts on a record about their own Person (AM011); the queue omits their own subject.

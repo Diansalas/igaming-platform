@@ -256,6 +256,10 @@ DECLARE
     v_actor record;
     v_acct  uuid;
 BEGIN
+    -- The monotonic hold-change mark (security F8) is FORCED here, under the per-person lock, so the invariant does not depend on
+    -- which function (or owner-level statement) inserts the row.
+    PERFORM public.aml_person_lock(NEW.tenant_id, NEW.person_id);
+    NEW.change_seq := pg_catalog.nextval('public.aml_hold_change_seq');
     IF NEW.owner_scope IS DISTINCT FROM public.aml_owner_scope_of_tenant(NEW.tenant_id) THEN
         RAISE EXCEPTION 'aml: the hold owner scope must be the tenant''s licensing owner scope' USING ERRCODE = 'AM002';
     END IF;
@@ -288,10 +292,14 @@ DECLARE
     v_hold  record;
     v_actor record;
 BEGIN
-    SELECT h.tenant_id, h.owner_scope, h.reason_class, h.placed_at INTO v_hold FROM public.aml_holds h WHERE h.id = NEW.hold_id;
+    SELECT h.tenant_id, h.owner_scope, h.reason_class, h.person_id INTO v_hold FROM public.aml_holds h WHERE h.id = NEW.hold_id;
     IF NOT FOUND OR v_hold.tenant_id <> NEW.tenant_id THEN
         RAISE EXCEPTION 'aml: not found' USING ERRCODE = 'AM040';
     END IF;
+    -- The monotonic hold-change mark (security F8) is FORCED here, under the per-person lock, so the invariant does not depend on
+    -- which function (or owner-level statement) inserts the row.
+    PERFORM public.aml_person_lock(NEW.tenant_id, v_hold.person_id);
+    NEW.change_seq := pg_catalog.nextval('public.aml_hold_change_seq');
     IF NEW.owner_scope <> v_hold.owner_scope THEN
         RAISE EXCEPTION 'aml: only the hold''s owner scope may lift it' USING ERRCODE = 'AM006';
     END IF;
@@ -498,6 +506,7 @@ REVOKE ALL ON FUNCTION aml_actor_owner_scope(text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_assert_write_scope(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_deny_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_valid_operation(text) FROM PUBLIC;
+REVOKE ALL ON SEQUENCE aml_hold_change_seq FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_person_lock(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_person_hold_mark(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_holds_guard() FROM PUBLIC;
@@ -516,6 +525,8 @@ BEGIN
         REVOKE ALL ON FUNCTION aml_assert_write_scope(text, text) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_deny_mutation() FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_valid_operation(text) FROM igaming_runtime;
+        -- The default privileges of the schema grant the runtime role USAGE on every new sequence: take it back (nextval is the owner's).
+        REVOKE ALL ON SEQUENCE aml_hold_change_seq FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_person_lock(uuid, uuid) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_person_hold_mark(uuid, uuid) FROM igaming_runtime;
         REVOKE ALL ON FUNCTION aml_holds_guard() FROM igaming_runtime;
