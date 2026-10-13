@@ -112,10 +112,15 @@ func TestSessions_SF040Matrix(t *testing.T) {
 			t.Fatalf("owner UPDATE %s on a staff session: want SF040, got %v", set, err)
 		}
 	}
-	// The runtime role holds no UPDATE on mfa_at or the seal (review F9: granted by S4b, the slice that writes them);
-	// SF040 lets the owner move mfa_at forward and rewrite the seal (the S4b step-up re-seal shape).
-	if err := w.runtimeSessionExec(s, id, `UPDATE sessions SET mfa_at = mfa_at + interval '1 second' WHERE id = $1`); pgCode(err) != "42501" {
-		t.Fatalf("runtime UPDATE mfa_at: want 42501, got %v", err)
+	// ADR 0119 S4b (migration 0151): the runtime role holds UPDATE on mfa_at and the seal again (review F9: granted by
+	// the slice that writes them); SF040 still refuses a backwards mfa_at for it, and an unsealed forward move fails
+	// the seal (TestStaffMFA_SessionSealTamper (c)); SF040 lets the owner move mfa_at forward and rewrite the seal
+	// (the step-up re-seal shape).
+	if err := w.runtimeSessionExec(s, id, `UPDATE sessions SET mfa_at = mfa_at + interval '1 second' WHERE id = $1`); err != nil {
+		t.Fatalf("runtime UPDATE mfa_at forward (S4b grant): %v", err)
+	}
+	if err := w.runtimeSessionExec(s, id, `UPDATE sessions SET mfa_at = mfa_at - interval '1 hour' WHERE id = $1`); pgCode(err) != "SF040" {
+		t.Fatalf("runtime UPDATE mfa_at backwards: want SF040, got %v", err)
 	}
 	if err := w.ownerSessionExec(s, id, `UPDATE sessions SET mfa_at = mfa_at + interval '1 second', assurance_seal = decode(repeat('cd', 32), 'hex') WHERE id = $1`); err != nil {
 		t.Fatalf("SF040 admits mfa_at moving forward and a rewritten seal: %v", err)
@@ -239,7 +244,8 @@ func TestGrants_SessionsAndCutover_RuntimeRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(cols)
-	want := []string{"last_used_at", "replaced_by_session_id", "revoked_at"}
+	// ADR 0119 S4b (migration 0151) re-grants exactly the step-up columns mfa_at, assurance_kid, assurance_seal.
+	want := []string{"assurance_kid", "assurance_seal", "last_used_at", "mfa_at", "replaced_by_session_id", "revoked_at"}
 	if tableUpdate || strings.Join(cols, ",") != strings.Join(want, ",") {
 		t.Fatalf("runtime UPDATE on sessions: table=%v columns=%v, want table=false columns=%v", tableUpdate, cols, want)
 	}
@@ -299,7 +305,8 @@ func TestGrants_SessionsAndCutover_RuntimeRole(t *testing.T) {
 	}
 	for _, must := range []string{"REVOKE UPDATE ON sessions FROM igaming_runtime",
 		"GRANT UPDATE (revoked_at, last_used_at, replaced_by_session_id) ON sessions TO igaming_runtime",
-		"GRANT SELECT ON staff_session_cutover TO igaming_runtime"} {
+		"GRANT SELECT ON staff_session_cutover TO igaming_runtime",
+		"GRANT UPDATE (mfa_at, assurance_kid, assurance_seal) ON sessions TO igaming_runtime"} {
 		if !strings.Contains(string(b), must) {
 			t.Fatalf("deploy/init-app-role.sql must mirror migration 0138: missing %q", must)
 		}
