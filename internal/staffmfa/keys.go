@@ -79,7 +79,8 @@ type macSubkeys struct {
 // The families rotate independently (ADR 0119 section 5.3): the FACTOR family
 // by re-enrolment only, the MAC family by ageing out.
 //
-// Keys has no exported fields and redacts under every fmt verb, slog and JSON.
+// Keys has no exported fields and redacts under every fmt verb, slog and JSON
+// (value receivers, so a dereferenced copy redacts too).
 // It is built only from configuration; there is no random-key fallback and no
 // development bypass.
 type Keys struct {
@@ -93,19 +94,19 @@ type Keys struct {
 const redactedKeys = "staffmfa.Keys{redacted}"
 
 // String never renders key material.
-func (k *Keys) String() string { return redactedKeys }
+func (Keys) String() string { return redactedKeys }
 
 // GoString never renders key material.
-func (k *Keys) GoString() string { return redactedKeys }
+func (Keys) GoString() string { return redactedKeys }
 
 // Format redacts under every verb.
-func (k *Keys) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(redactedKeys)) }
+func (Keys) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(redactedKeys)) }
 
 // LogValue implements slog.LogValuer.
-func (k *Keys) LogValue() slog.Value { return slog.StringValue(redactedKeys) }
+func (Keys) LogValue() slog.Value { return slog.StringValue(redactedKeys) }
 
 // MarshalJSON never renders key material.
-func (k *Keys) MarshalJSON() ([]byte, error) { return []byte(`"` + redactedKeys + `"`), nil }
+func (Keys) MarshalJSON() ([]byte, error) { return []byte(`"` + redactedKeys + `"`), nil }
 
 // ParseKeySet parses one family value: comma-separated "kid:base64(secret)"
 // entries (standard or URL-safe base64, padded or not). It fails closed on an
