@@ -26,8 +26,8 @@ import (
 // routeClass is the step-up classification of a staff route (ADR 0119 section
 // 8.2): either a static auth.StepUpClass or a named classifier. A classifier
 // route's class depends on the validated request (section 8.2); its ceiling is
-// critical. S4a only RECORDS the class; RequireStepUp and the classifier
-// functions are S4b.
+// critical. S4b enforces it: requireStepUp (staff_stepup.go) is the last link
+// of the chain, and stepUpClassifiers holds one Go function per classifier.
 type routeClass struct {
 	static     auth.StepUpClass
 	classifier string
@@ -46,7 +46,7 @@ var (
 )
 
 // routeClassifiers is the closed set of classifier names (pinned by the static
-// test; S4b implements one Go function per name).
+// test; stepUpClassifiers holds one Go function per name).
 var routeClassifiers = map[string]bool{
 	"launchActionClass": true, "financialPolicyChangeClass": true, "alertResolveClass": true, "rgLimitChangeClass": true,
 }
@@ -71,11 +71,12 @@ func (c routeClass) String() string {
 
 // staffRoute wraps inner in the ADR 0119 section 7.3 staff chain:
 //
-//	auth.Middleware -> auth.RequireStaffPrincipal -> requireLiveStaffSession -> auth.RequireAAL2 -> inner
+//	auth.Middleware -> auth.RequireStaffPrincipal -> requireLiveStaffSession -> auth.RequireAAL2 -> requireStepUp(class) -> inner
 //
 // inner carries the route's own gates (auth.RequirePermission, and
-// auth.RequireTenantScope where the route needs it). In S4b
-// auth.RequireStepUp(class) joins at the end of the chain. A non-staff token
+// auth.RequireTenantScope where the route needs it). requireStepUp (S4b)
+// enforces the class before inner (a deviation from section 7.3's order,
+// recorded in ADR 0119 section 26). A non-staff token
 // is refused before any database work; the liveness transaction commits and
 // releases its connection before inner runs. An invalid class or a nil
 // handler is a programming error and panics at registration (process start),
@@ -87,7 +88,7 @@ func staffRoute(deps Deps, class routeClass, inner http.Handler) http.Handler {
 	if inner == nil {
 		panic("httpserver: staffRoute: nil handler")
 	}
-	return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(requireLiveStaffSession(deps)(auth.RequireAAL2(inner))))
+	return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(requireLiveStaffSession(deps)(auth.RequireAAL2(requireStepUp(deps, class)(inner)))))
 }
 
 // liveIfStaff is the chain of the two mixed-principal self-service routes
