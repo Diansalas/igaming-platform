@@ -1270,7 +1270,8 @@ orchestrator; nothing here is claimed as reviewed.
 ## Amendment A-19 (2026-10-13) — ADR 0119 S4b section 9.5(c): `staff_version` admitted
 
 **Status: `IMPLEMENTED` on the unmerged S4b branch (static test only); PENDING `architect` and `ledger-finance`
-sign-off.** Section 6.8's column discipline admits `staff_version` in the A8 staff `FOR SHARE` statements of K2,
+sign-off.** (The `staff_actor_self_*` policy pair of ADR 0119 section 9.5(b) is NOT built in S4b: no re-asserted flow
+needs it.) Section 6.8's column discipline admits `staff_version` in the A8 staff `FOR SHARE` statements of K2,
 K3/M4 and HSEC, so ADR 0119's in-transaction re-assertion (ADR 0082 Amendment A9) can compare it with the token's
 `sv` once migration 0139 (ADR 0119 S5 + S6) adds the column. Until then the statements select exactly `id, tenant_id,
 role, status, person_id` and compare `status` and `role`. The A-19 static test
