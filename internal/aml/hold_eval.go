@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 // HoldEvalTimeout bounds the hold read (ADR 0116 s5.1: "the caller wraps it in SET LOCAL statement_timeout"). It is an
@@ -48,12 +49,27 @@ var holdProbe = probeHoldActive
 // deadlock, a cancelled context); the verdict is still EvalFailed and the caller must treat the whole call as a deny (the
 // LF F4 rule: an in-tx raise result is never dropped).
 func EvaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (HoldVerdict, error) {
+	return evaluateHold(ctx, tx, tenantID, personID, accountID, op, true)
+}
+
+// EvaluateHoldDeferringAlert is EvaluateHold for a caller whose OWN transaction will roll back when the verdict denies (a refusal
+// returned as an error): the aml.hold_eval_failed alert is NOT raised in that transaction (it would be rolled back with it and
+// lost; ledger-finance C3). The caller raises it after the rollback with RaiseHoldEvalFailedDetached when the returned verdict has
+// EvalFailed set.
+func EvaluateHoldDeferringAlert(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (HoldVerdict, error) {
+	return evaluateHold(ctx, tx, tenantID, personID, accountID, op, false)
+}
+
+func evaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation, alertInTx bool) (HoldVerdict, error) {
 	if tenantID == uuid.Nil || personID == uuid.Nil || accountID == uuid.Nil || !op.Valid() {
 		// A structurally invalid call is a caller bug: deny it. There is no tenant to attribute an alert to.
 		return HoldVerdict{EvalFailed: true}, nil
 	}
 	held, err := holdProbe(ctx, tx, tenantID, personID, accountID, op)
 	if err != nil {
+		if !alertInTx {
+			return HoldVerdict{EvalFailed: true}, nil
+		}
 		return HoldVerdict{EvalFailed: true}, raiseEvalFailed(ctx, tx, tenantID, op)
 	}
 	if !held {
@@ -66,6 +82,17 @@ func EvaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID 
 		v.HoldID = id
 	}
 	return v, nil
+}
+
+// RaiseHoldEvalFailedDetached raises aml.hold_eval_failed in its own transaction after the caller's transaction ended (see
+// EvaluateHoldDeferringAlert). Detached and retried by the alerting layer; the returned error is for logging only.
+func RaiseHoldEvalFailedDetached(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, op Operation) error {
+	return alerting.RaiseDetached(ctx, alerting.NewTenantRunner(pool, tenantID), alerting.Alert{
+		Kind:            alerting.KindAMLHoldEvalFailed,
+		SubjectTenantID: tenantID,
+		Discriminator:   "hold_eval:" + string(op),
+		Attributes:      map[string]alerting.AttrValue{"operation": string(op)},
+	})
 }
 
 // probeHoldActive opens a SAVEPOINT (one round trip), then runs SET LOCAL statement_timeout; SELECT aml_hold_active(...);

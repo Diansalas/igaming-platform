@@ -106,6 +106,13 @@ var (
 	ErrAccountUnderReview = errors.New("adjustment: account under review")
 )
 
+// holdEvalFailedError is ErrAccountUnderReview with the extra fact that it was an EVALUATOR FAILURE (not a definite hold), so
+// Service.Submit can raise aml.hold_eval_failed after the rolled-back submission (it satisfies errors.Is(err, ErrAccountUnderReview)).
+type holdEvalFailedError struct{}
+
+func (*holdEvalFailedError) Error() string        { return ErrAccountUnderReview.Error() }
+func (*holdEvalFailedError) Is(target error) bool { return target == ErrAccountUnderReview }
+
 // RefusalAccountReview is the refusal code stored on a request refused at execution because of a hold. It is the same
 // generic token the player-facing gates use.
 const RefusalAccountReview = "account_review"

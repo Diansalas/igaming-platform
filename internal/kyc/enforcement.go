@@ -338,6 +338,26 @@ func composeHold(ctx context.Context, tx pgx.Tx, params EnforcementParams, kycDe
 	return out, nil
 }
 
+// RetryableOnHoldEvalFailure re-expresses a decision that was denied ONLY because the AML hold evaluator failed (the KYC side
+// itself passed or was not required, and no definite hold matched) as the existing `unavailable` outcome (ADR 0116 s5.1, ledger-
+// finance condition C1; ADR 0096 N5 / PAY-KYC-UNAVAIL-1). Used at the payout CLAIM and at the sweeper's T2/T12 re-checks only:
+// there a staff-approved withdrawal must stay approved and be retried, never be rejected or escalated on a transient evaluator
+// fault. Every other decision, including a definite hold, is returned unchanged. The hold verdict is kept so the AML-scoped
+// decision log still records the evaluator error.
+func (d EnforcementDecision) RetryableOnHoldEvalFailure() EnforcementDecision {
+	if !d.Hold.EvalFailed || d.Hold.Held {
+		return d
+	}
+	if d.KYCOutcome != OutcomePassed && d.KYCOutcome != OutcomeNotRequired {
+		return d
+	}
+	u := unavailableDecision("hold_evaluator_failed")
+	u.Hold = d.Hold
+	u.KYCOutcome = d.KYCOutcome
+	u.TrueOutcome = OutcomeUnavailable
+	return u
+}
+
 // evaluateEnforcementReads is EvaluateEnforcement's dispatch, unchanged in
 // behavior from before KYC-ENF-OUTAGE-1 - the only difference is that its
 // caller now always passes a SAVEPOINT-scoped tx, never the caller's own

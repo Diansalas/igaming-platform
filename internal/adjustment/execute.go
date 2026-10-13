@@ -201,7 +201,7 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 	refusal := ""
 	// ADR 0116 s5.1: a hold placed after submission still refuses the EXECUTION (a held balance is never seized, zeroed or
 	// refunded by a manual adjustment). The refusal reuses the generic account_review token.
-	holdVerdict, holdErr := walletHoldVerdict(ctx, tx, req.TenantID, req.WalletID)
+	holdVerdict, holdErr := walletHoldVerdict(ctx, tx, req.TenantID, req.WalletID, false)
 	if holdErr != nil {
 		return Outcome{}, holdErr
 	}

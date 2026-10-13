@@ -140,7 +140,10 @@ func evaluatePayoutGate(ctx context.Context, tx pgx.Tx, kycGate PayoutKYCGate, w
 	if err != nil {
 		return kyc.EnforcementDecision{}, kyc.EnforcementParams{}, fmt.Errorf("%w: %w", ErrPayoutKYCUnavailable, err)
 	}
-	return decision, params, nil
+	// ADR 0116 s5.1 (ledger-finance C1): an AML hold-evaluator FAILURE (not a definite hold) is a transient fault, handled by
+	// the existing `unavailable` branch of every caller (approved stays approved, retryable 503 / sweeper reschedule), never a
+	// terminal DenyForCompliance rejection and never the sticky T16 escalation. A definite hold still denies.
+	return decision.RetryableOnHoldEvalFailure(), params, nil
 }
 
 // ErrPayoutKYCUnavailable means the payout KYC gate could not reach a
