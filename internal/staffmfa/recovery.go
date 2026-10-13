@@ -24,7 +24,22 @@ const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 // RecoveryCode is one normalised recovery code (10 Crockford characters). It
 // redacts everywhere.
-type RecoveryCode struct{ v string }
+type RecoveryCode struct{ f func() recoveryCodeData }
+
+// recoveryCodeData is behind a closure for the same reason as factorSecretData.
+type recoveryCodeData struct{ v string }
+
+func newRecoveryCode(v string) RecoveryCode {
+	c := recoveryCodeData{v: v}
+	return RecoveryCode{f: func() recoveryCodeData { return c }}
+}
+
+func (c RecoveryCode) d() recoveryCodeData {
+	if c.f == nil {
+		return recoveryCodeData{}
+	}
+	return c.f()
+}
 
 // String redacts.
 func (RecoveryCode) String() string { return Redacted }
@@ -44,10 +59,10 @@ func (RecoveryCode) MarshalJSON() ([]byte, error) { return json.Marshal(Redacted
 // RevealForDisplay returns the display form XXXXX-XXXXX, for the single
 // response that shows a new batch once (no-store). Never log it.
 func (c RecoveryCode) RevealForDisplay() string {
-	if len(c.v) != RecoveryCodeChars {
+	if len(c.d().v) != RecoveryCodeChars {
 		return ""
 	}
-	return c.v[:5] + "-" + c.v[5:]
+	return c.d().v[:5] + "-" + c.d().v[5:]
 }
 
 // RecoveryCodeBatch is a freshly generated batch of distinct codes.
@@ -98,7 +113,7 @@ func generateRecoveryCodes(r io.Reader) (RecoveryCodeBatch, error) {
 			continue
 		}
 		seen[s] = true
-		codes = append(codes, RecoveryCode{v: s})
+		codes = append(codes, newRecoveryCode(s))
 	}
 	return RecoveryCodeBatch{codes: codes}, nil
 }
@@ -140,7 +155,7 @@ func NormaliseRecoveryCode(s string) (RecoveryCode, error) {
 	if len(out) != RecoveryCodeChars {
 		return RecoveryCode{}, ErrInvalidInput
 	}
-	return RecoveryCode{v: string(out)}, nil
+	return newRecoveryCode(string(out)), nil
 }
 
 func isCrockford(c byte) bool {
@@ -155,40 +170,40 @@ func isCrockford(c byte) bool {
 // HashRecoveryCode returns the keyed hash of code for staff under the active
 // MAC kid (the code_kid and code_mac columns).
 func (k *Keys) HashRecoveryCode(staff uuid.UUID, code RecoveryCode) (KeyedHash, error) {
-	if len(code.v) != RecoveryCodeChars {
+	if len(code.d().v) != RecoveryCodeChars {
 		return KeyedHash{}, ErrInvalidInput
 	}
-	m, err := k.macUnder(k.macActive, MACRecoveryCode, staff, []byte(code.v))
+	m, err := k.macUnder(k.m().macActive, MACRecoveryCode, staff, []byte(code.d().v))
 	if err != nil {
 		return KeyedHash{}, err
 	}
-	return KeyedHash{KID: k.macActive, MAC: m}, nil
+	return KeyedHash{KID: k.m().macActive, MAC: m}, nil
 }
 
 // RecoveryCodeLookupHashes returns the keyed hash of code for staff under
 // every retained MAC kid, for the lookup among the staff member's unconsumed
 // codes.
 func (k *Keys) RecoveryCodeLookupHashes(staff uuid.UUID, code RecoveryCode) ([]KeyedHash, error) {
-	if len(code.v) != RecoveryCodeChars {
+	if len(code.d().v) != RecoveryCodeChars {
 		return nil, ErrInvalidInput
 	}
-	return k.lookupHashes(MACRecoveryCode, staff, []byte(code.v))
+	return k.lookupHashes(MACRecoveryCode, staff, []byte(code.d().v))
 }
 
 // VerifyRecoveryCodeHash recomputes the keyed hash under the stored kid and
 // compares it in constant time. An unknown (retired) kid is a mismatch.
 func (k *Keys) VerifyRecoveryCodeHash(staff uuid.UUID, code RecoveryCode, stored KeyedHash) bool {
-	if len(code.v) != RecoveryCodeChars {
+	if len(code.d().v) != RecoveryCodeChars {
 		return false
 	}
-	return k.verifyUnder(stored.KID, MACRecoveryCode, staff, []byte(code.v), stored.MAC)
+	return k.verifyUnder(stored.KID, MACRecoveryCode, staff, []byte(code.d().v), stored.MAC)
 }
 
 // RecoveryCodeFromAssertion normalises the code carried by a recovery-code
 // assertion. Any other assertion kind fails closed.
 func RecoveryCodeFromAssertion(a Assertion) (RecoveryCode, error) {
-	if a.kind != AssertionRecoveryCode {
+	if a.d().kind != AssertionRecoveryCode {
 		return RecoveryCode{}, ErrInvalidInput
 	}
-	return NormaliseRecoveryCode(a.value)
+	return NormaliseRecoveryCode(a.d().value)
 }

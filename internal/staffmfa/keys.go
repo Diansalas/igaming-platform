@@ -83,7 +83,15 @@ type macSubkeys struct {
 // (value receivers, so a dereferenced copy redacts too).
 // It is built only from configuration; there is no random-key fallback and no
 // development bypass.
-type Keys struct {
+type Keys struct{ km func() *keyMaterial }
+
+// m returns the key material. Keys is only built by NewKeys.
+func (k *Keys) m() *keyMaterial { return k.km() }
+
+// keyMaterial is reachable only through an unexported closure, so a Keys value
+// held in an UNEXPORTED field of another struct renders as a function address
+// under every fmt verb and slog, never as the subkey maps (security review C2).
+type keyMaterial struct {
 	factorActive string
 	factor       map[string][]byte // kid -> AEAD subkey
 	macActive    string
@@ -191,8 +199,9 @@ func NewKeys(factorActiveKID string, factor map[string][]byte, macActiveKID stri
 	if _, ok := mac[macActiveKID]; !ok {
 		return nil, fmt.Errorf("%w: %s names a kid with no key in %s", ErrKeyConfig, EnvMACActiveKID, EnvMACKeys)
 	}
-	k := &Keys{factorActive: factorActiveKID, macActive: macActiveKID,
+	km := &keyMaterial{factorActive: factorActiveKID, macActive: macActiveKID,
 		factor: map[string][]byte{}, mac: map[string]macSubkeys{}, rnd: rand.Reader}
+	k := &Keys{km: func() *keyMaterial { return km }}
 	seen := map[string]string{}
 	check := func(family, kid string, m []byte) error {
 		if !kidRE.MatchString(kid) {
@@ -216,7 +225,7 @@ func NewKeys(factorActiveKID string, factor map[string][]byte, macActiveKID stri
 		if err != nil {
 			return nil, err
 		}
-		k.factor[kid] = sk
+		k.m().factor[kid] = sk
 	}
 	for _, kid := range sortedKIDs(mac) {
 		m := mac[kid]
@@ -233,7 +242,7 @@ func NewKeys(factorActiveKID string, factor map[string][]byte, macActiveKID stri
 				return nil, err
 			}
 		}
-		k.mac[kid] = s
+		k.m().mac[kid] = s
 	}
 	return k, nil
 }
@@ -268,18 +277,18 @@ func NewKeysFromConfig(factorActiveKID, factorRaw, macActiveKID, macRaw string) 
 }
 
 // FactorKID is the active FACTOR kid: every new factor is sealed under it.
-func (k *Keys) FactorKID() string { return k.factorActive }
+func (k *Keys) FactorKID() string { return k.m().factorActive }
 
 // MACKID is the active MAC kid: every new keyed hash is computed under it.
-func (k *Keys) MACKID() string { return k.macActive }
+func (k *Keys) MACKID() string { return k.m().macActive }
 
 // MACKIDs lists every retained MAC kid (active first, then the verify-only
 // kids, sorted). A lookup by keyed hash computes the MAC under each of them.
 func (k *Keys) MACKIDs() []string {
-	out := []string{k.macActive}
-	rest := make([]string, 0, len(k.mac))
-	for kid := range k.mac {
-		if kid != k.macActive {
+	out := []string{k.m().macActive}
+	rest := make([]string, 0, len(k.m().mac))
+	for kid := range k.m().mac {
+		if kid != k.m().macActive {
 			rest = append(rest, kid)
 		}
 	}
@@ -331,18 +340,18 @@ func (k *Keys) SealFactorSecret(aad FactorAAD, secret FactorSecret) (SealedSecre
 	if err != nil {
 		return SealedSecret{}, err
 	}
-	if len(secret.b) != secretLen(aad.FactorType) {
+	if len(secret.d().b) != secretLen(aad.FactorType) {
 		return SealedSecret{}, ErrInvalidInput
 	}
-	gcm, err := newGCM(k.factor[k.factorActive])
+	gcm, err := newGCM(k.m().factor[k.m().factorActive])
 	if err != nil {
 		return SealedSecret{}, err
 	}
 	nonce := make([]byte, NonceBytes)
-	if _, err := io.ReadFull(k.rnd, nonce); err != nil {
+	if _, err := io.ReadFull(k.m().rnd, nonce); err != nil {
 		return SealedSecret{}, fmt.Errorf("staffmfa: nonce: %w", err)
 	}
-	return SealedSecret{KID: k.factorActive, Nonce: nonce, Ciphertext: gcm.Seal(nil, nonce, secret.b, ad)}, nil
+	return SealedSecret{KID: k.m().factorActive, Nonce: nonce, Ciphertext: gcm.Seal(nil, nonce, secret.d().b, ad)}, nil
 }
 
 // OpenFactorSecret decrypts a stored factor secret. Every failure, including
@@ -354,7 +363,7 @@ func (k *Keys) OpenFactorSecret(aad FactorAAD, s SealedSecret) (FactorSecret, er
 	if err != nil {
 		return FactorSecret{}, err
 	}
-	key, ok := k.factor[s.KID]
+	key, ok := k.m().factor[s.KID]
 	if !ok {
 		return FactorSecret{}, fmt.Errorf("%w: %w", ErrFactorIntegrity, ErrUnknownKID)
 	}
@@ -369,7 +378,7 @@ func (k *Keys) OpenFactorSecret(aad FactorAAD, s SealedSecret) (FactorSecret, er
 	if err != nil || len(pt) != secretLen(aad.FactorType) {
 		return FactorSecret{}, ErrFactorIntegrity
 	}
-	return FactorSecret{b: pt}, nil
+	return newFactorSecret(pt), nil
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {
@@ -449,7 +458,7 @@ func (k *Keys) macUnder(kid string, kind MACKind, staff uuid.UUID, value []byte)
 	if !ok || staff == uuid.Nil || len(value) == 0 {
 		return nil, ErrInvalidInput
 	}
-	sub, ok := k.mac[kid]
+	sub, ok := k.m().mac[kid]
 	if !ok {
 		return nil, ErrUnknownKID
 	}

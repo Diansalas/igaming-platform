@@ -176,10 +176,10 @@ func TestSubkeys_DerivationPinned(t *testing.T) {
 		}
 		return b
 	}
-	if !bytes.Equal(k.factor["f1"], want(f.factor["f1"], "staff-mfa-factor-aead-v1", "f1")) {
+	if !bytes.Equal(k.m().factor["f1"], want(f.factor["f1"], "staff-mfa-factor-aead-v1", "f1")) {
 		t.Fatal("factor subkey derivation changed")
 	}
-	s := k.mac["m1"]
+	s := k.m().mac["m1"]
 	for label, got := range map[string][]byte{
 		"staff-mfa-recovery-v1":      s.recovery,
 		"staff-auth-challenge-v1":    s.challenge,
@@ -245,7 +245,10 @@ func TestKeys_DoNotRetainMasterKeys(t *testing.T) {
 			}
 		}
 	}
-	walk(reflect.ValueOf(k).Elem())
+	walk(reflect.ValueOf(k.m()).Elem())
+	if len(k.m().factor) == 0 || len(k.m().mac) == 0 {
+		t.Fatal("walk is vacuous")
+	}
 }
 
 func TestMACKIDs_ActiveFirstThenSorted(t *testing.T) {
@@ -303,11 +306,11 @@ func TestSealOpen_RoundTrip(t *testing.T) {
 	if sealed.KID != "f1" || len(sealed.Nonce) != NonceBytes || len(sealed.Ciphertext) != 20+16 {
 		t.Fatalf("sealed shape: kid=%s nonce=%d ct=%d", sealed.KID, len(sealed.Nonce), len(sealed.Ciphertext))
 	}
-	if bytes.Contains(sealed.Ciphertext, secret.b) {
+	if bytes.Contains(sealed.Ciphertext, secret.d().b) {
 		t.Fatal("ciphertext contains the plaintext")
 	}
 	got, err := k.OpenFactorSecret(aad, sealed)
-	if err != nil || !bytes.Equal(got.b, secret.b) {
+	if err != nil || !bytes.Equal(got.d().b, secret.d().b) {
 		t.Fatalf("open: %v", err)
 	}
 	// Platform staff (nil tenant).
@@ -329,7 +332,7 @@ func TestSeal_FreshNonceEachTime_AndDeterministicWithInjectedReader(t *testing.T
 	if bytes.Equal(a.Nonce, b.Nonce) || bytes.Equal(a.Ciphertext, b.Ciphertext) {
 		t.Fatal("nonce reuse")
 	}
-	k.rnd = bytes.NewReader(bytes.Repeat([]byte{7}, NonceBytes))
+	k.m().rnd = bytes.NewReader(bytes.Repeat([]byte{7}, NonceBytes))
 	c, err := k.SealFactorSecret(aad, secret)
 	if err != nil || !bytes.Equal(c.Nonce, bytes.Repeat([]byte{7}, NonceBytes)) {
 		t.Fatalf("injected reader not used: %v", err)
@@ -345,7 +348,7 @@ func TestSeal_RefusesBadInput(t *testing.T) {
 	if _, err := k.SealFactorSecret(FactorAAD{}, mustSecret(t)); !errors.Is(err, ErrInvalidInput) {
 		t.Fatal("empty AAD must be refused")
 	}
-	if _, err := k.SealFactorSecret(testAAD(), FactorSecret{b: randBytes(t, 19)}); !errors.Is(err, ErrInvalidInput) {
+	if _, err := k.SealFactorSecret(testAAD(), newFactorSecret(randBytes(t, 19))); !errors.Is(err, ErrInvalidInput) {
 		t.Fatal("a wrong-length secret must be refused")
 	}
 	if _, err := k.SealFactorSecret(testAAD(), FactorSecret{}); !errors.Is(err, ErrInvalidInput) {
@@ -438,7 +441,7 @@ func TestOpen_WrongPlaintextLengthIsIntegrity(t *testing.T) {
 	k, _ := testKeys(t)
 	aad := testAAD()
 	ad, _ := aad.bytes()
-	gcm, err := newGCM(k.factor["f1"])
+	gcm, err := newGCM(k.m().factor["f1"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +467,7 @@ func TestFactorRotation_ByKID(t *testing.T) {
 	}
 	f.factor["f2"] = randBytes(t, 32)
 	rotated := mustKeys(t, f, "f2", "m1")
-	if got, err := rotated.OpenFactorSecret(aad, oldSealed); err != nil || !bytes.Equal(got.b, secret.b) {
+	if got, err := rotated.OpenFactorSecret(aad, oldSealed); err != nil || !bytes.Equal(got.d().b, secret.d().b) {
 		t.Fatalf("old row under a retained kid must open: %v", err)
 	}
 	newSealed, err := rotated.SealFactorSecret(aad, secret)

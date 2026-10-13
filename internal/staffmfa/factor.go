@@ -128,10 +128,10 @@ func (k *Keys) VerifyTOTP(f StoredTOTPFactor, a Assertion, now time.Time) Result
 	if err != nil {
 		return Result{Outcome: OutcomeIntegrity}
 	}
-	if a.kind != AssertionTOTP {
+	if a.d().kind != AssertionTOTP {
 		return Result{Outcome: OutcomeRejected}
 	}
-	step, err := totp.Verify(secret.b, a.value, now, f.LastUsedStep)
+	step, err := totp.Verify(secret.d().b, a.d().value, now, f.LastUsedStep)
 	if err != nil {
 		if errors.Is(err, totp.ErrInvalidSecret) {
 			return Result{Outcome: OutcomeIntegrity}

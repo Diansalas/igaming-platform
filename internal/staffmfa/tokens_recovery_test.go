@@ -29,7 +29,7 @@ func TestToken_WireRoundTrip(t *testing.T) {
 		t.Fatalf("wire length %d", len(wire))
 	}
 	got, err := ParseToken(wire)
-	if err != nil || got.StaffID() != staff || !bytes.Equal(got.secret, tok.secret) {
+	if err != nil || got.StaffID() != staff || !bytes.Equal(got.d().secret, tok.d().secret) {
 		t.Fatalf("round trip: %v", err)
 	}
 	if other := mustToken(t, staff); other.RevealForDelivery() == wire {
@@ -99,7 +99,7 @@ func TestTokenHash_BindsKindStaffAndKey(t *testing.T) {
 		t.Fatal("a row of another staff member verified")
 	}
 	// A token re-labelled with another staff id (same secret) hashes differently.
-	moved := Token{staff: uuid.New(), secret: tok.secret}
+	moved := newTokenValue(tokenData{staff: uuid.New(), secret: tok.d().secret})
 	if mh, _ := k.HashToken(MACChallengeMFA, moved); bytes.Equal(mh.MAC, h.MAC) {
 		t.Fatal("the staff id is not bound into the MAC")
 	}
@@ -221,27 +221,27 @@ func TestRecoveryCodes_Generation(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, c := range codes {
-		if len(c.v) != 10 || seen[c.v] {
+		if len(c.d().v) != 10 || seen[c.d().v] {
 			t.Fatalf("bad or duplicate code")
 		}
-		seen[c.v] = true
-		for i := 0; i < len(c.v); i++ {
-			if !strings.ContainsRune(crockford, rune(c.v[i])) {
+		seen[c.d().v] = true
+		for i := 0; i < len(c.d().v); i++ {
+			if !strings.ContainsRune(crockford, rune(c.d().v[i])) {
 				t.Fatal("code outside the Crockford alphabet")
 			}
 		}
 		d := c.RevealForDisplay()
-		if len(d) != 11 || d[5] != '-' || d[:5]+d[6:] != c.v {
+		if len(d) != 11 || d[5] != '-' || d[:5]+d[6:] != c.d().v {
 			t.Fatalf("display form %q", "redacted-in-test")
 		}
 		n, err := NormaliseRecoveryCode(d)
-		if err != nil || n.v != c.v {
+		if err != nil || n.d().v != c.d().v {
 			t.Fatal("display form must normalise back")
 		}
 	}
 	// Codes() returns a copy.
 	codes[0] = RecoveryCode{}
-	if b.Codes()[0].v == "" {
+	if b.Codes()[0].d().v == "" {
 		t.Fatal("Codes must return a copy")
 	}
 	if (RecoveryCode{}).RevealForDisplay() != "" {
@@ -259,7 +259,7 @@ func TestRecoveryCodes_DeterministicWithInjectedReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Byte i maps to crockford[i & 31].
-	if b.codes[0].v != "0123456789" || b.codes[1].v != "ABCDEFGHJK" || b.codes[2].v != "MNPQRSTVWX" || b.codes[3].v != "YZ01234567" {
+	if b.codes[0].d().v != "0123456789" || b.codes[1].d().v != "ABCDEFGHJK" || b.codes[2].d().v != "MNPQRSTVWX" || b.codes[3].d().v != "YZ01234567" {
 		t.Fatal("generation mapping changed")
 	}
 	// A short random source fails closed.
@@ -276,7 +276,7 @@ func TestRecoveryCodes_DeterministicWithInjectedReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.codes[0].v == b.codes[1].v {
+	if b.codes[0].d().v == b.codes[1].d().v {
 		t.Fatal("duplicate code in a batch")
 	}
 }
@@ -306,8 +306,8 @@ func TestNormaliseRecoveryCode(t *testing.T) {
 	}
 	for in, want := range ok {
 		got, err := NormaliseRecoveryCode(in)
-		if err != nil || got.v != want {
-			t.Fatalf("normalise(%q) = %q, %v; want %q", in, got.v, err, want)
+		if err != nil || got.d().v != want {
+			t.Fatalf("normalise(%q) = %q, %v; want %q", in, got.d().v, err, want)
 		}
 	}
 	bad := []string{
@@ -317,8 +317,8 @@ func TestNormaliseRecoveryCode(t *testing.T) {
 	}
 	for _, in := range bad {
 		got, err := NormaliseRecoveryCode(in)
-		if !errors.Is(err, ErrInvalidInput) || got.v != "" {
-			t.Fatalf("normalise(%q) must fail closed, got %q, %v", in, got.v, err)
+		if !errors.Is(err, ErrInvalidInput) || got.d().v != "" {
+			t.Fatalf("normalise(%q) must fail closed, got %q, %v", in, got.d().v, err)
 		}
 		if in != "" && strings.Contains(err.Error(), in) {
 			t.Fatal("error echoes the code")
@@ -352,7 +352,7 @@ func TestRecoveryCodeHash_BindsStaffAndKey(t *testing.T) {
 		t.Fatal("another staff member's code verified")
 	}
 	// A recovery-code MAC is not a token MAC (different subkey).
-	tokLike := Token{staff: staff, secret: append([]byte(codes[0].v), make([]byte, 22)...)}
+	tokLike := newTokenValue(tokenData{staff: staff, secret: append([]byte(codes[0].d().v), make([]byte, 22)...)})
 	if th, _ := k.HashToken(MACEnrolInvite, tokLike); bytes.Equal(th.MAC, h.MAC) {
 		t.Fatal("subkeys are not separated")
 	}
@@ -384,7 +384,7 @@ func TestRecoveryCodeHash_BindsStaffAndKey(t *testing.T) {
 func TestRecoveryCodeFromAssertion(t *testing.T) {
 	c := mustBatch(t).codes[0]
 	got, err := RecoveryCodeFromAssertion(NewRecoveryCodeAssertion(c.RevealForDisplay()))
-	if err != nil || got.v != c.v {
+	if err != nil || got.d().v != c.d().v {
 		t.Fatal(err)
 	}
 	if _, err := RecoveryCodeFromAssertion(NewTOTPAssertion(c.RevealForDisplay())); !errors.Is(err, ErrInvalidInput) {

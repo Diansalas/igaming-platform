@@ -51,10 +51,10 @@ func otpauthURI(issuer, account string, secret FactorSecret) (string, error) {
 	if !validLabelPart(issuer, maxIssuerLen) || !validLabelPart(account, maxAccountLen) {
 		return "", ErrInvalidInput
 	}
-	if len(secret.b) != totp.SecretBytes {
+	if len(secret.d().b) != totp.SecretBytes {
 		return "", ErrInvalidInput
 	}
-	q := "secret=" + base32NoPad.EncodeToString(secret.b) +
+	q := "secret=" + base32NoPad.EncodeToString(secret.d().b) +
 		"&issuer=" + url.QueryEscape(issuer) +
 		"&algorithm=SHA1&digits=" + strconv.Itoa(totp.Digits) +
 		"&period=" + strconv.Itoa(totp.Period)

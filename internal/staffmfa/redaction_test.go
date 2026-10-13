@@ -37,15 +37,15 @@ func TestRedaction_NoSecretTypeEverRenders(t *testing.T) {
 		needles = append(needles, string(b), hex.EncodeToString(b), base64.StdEncoding.EncodeToString(b),
 			base64.RawURLEncoding.EncodeToString(b), base32NoPad.EncodeToString(b), fmt.Sprintf("%d %d %d %d %d", b[0], b[1], b[2], b[3], b[4]))
 	}
-	addBytes(secret.b)
-	addBytes(tok.secret)
+	addBytes(secret.d().b)
+	addBytes(tok.d().secret)
 	addBytes(fam.factor["f1"])
 	addBytes(fam.mac["m1"])
-	addBytes(keys.factor["f1"])
-	addBytes(keys.mac["m1"].recovery)
+	addBytes(keys.m().factor["f1"])
+	addBytes(keys.m().mac["m1"].recovery)
 	needles = append(needles, tok.RevealForDelivery(), material.otpauthURI(), material.secretBase32(), "492039")
 	for _, c := range batch.codes {
-		needles = append(needles, c.v, c.RevealForDisplay())
+		needles = append(needles, c.d().v, c.RevealForDisplay())
 	}
 
 	values := map[string]any{
@@ -116,6 +116,31 @@ func TestRedaction_NoSecretTypeEverRenders(t *testing.T) {
 	}
 	render("wrapper", w)
 	render("*wrapper", &w)
+
+	// Security review C2: fmt and slog cannot call methods on UNEXPORTED
+	// fields, so a struct that holds these types in unexported fields is
+	// rendered by reflection. The material sits behind a pointer to an
+	// unexported struct, so only an address can appear.
+	type hidden struct {
+		secret   FactorSecret
+		assert   Assertion
+		material EnrolmentMaterial
+		token    Token
+		code     RecoveryCode
+		batch    RecoveryCodeBatch
+		codes    []RecoveryCode
+		keys     Keys
+		keysPtr  *Keys
+		tokens   map[string]Token
+		anyTok   any
+	}
+	h := hidden{secret, recAssertion, material, tok, code, batch, batch.Codes(), *keys, keys, map[string]Token{"t": tok}, tok}
+	render("hidden", h)
+	render("*hidden", &h)
+	type outer struct{ inner hidden }
+	render("nested hidden", outer{h})
+	render("hidden in exported slice", []hidden{h})
+	render("totp assertion hidden", struct{ a Assertion }{totpAssertion})
 	render("slice", []any{secret, tok, code, material})
 
 	// Every redacting String is exactly the marker.

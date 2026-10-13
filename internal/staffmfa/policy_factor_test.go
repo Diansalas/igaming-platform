@@ -233,7 +233,7 @@ func storedFactor(t *testing.T, k *Keys) (StoredTOTPFactor, FactorSecret) {
 
 func codeAt(t *testing.T, s FactorSecret, at time.Time) string {
 	t.Helper()
-	c, err := totp.CodeAt(s.b, at)
+	c, err := totp.CodeAt(s.d().b, at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestFactorType_ClosedVocabulary(t *testing.T) {
 
 func TestOTPAuthURI_Format(t *testing.T) {
 	// The RFC 6238 seed is a public test vector.
-	s := FactorSecret{b: []byte("12345678901234567890")}
+	s := newFactorSecret([]byte("12345678901234567890"))
 	m, err := NewTOTPEnrolmentMaterial(DefaultIssuer, "jane+ops@example.test", s)
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +400,7 @@ func TestOTPAuthURI_FailsClosed(t *testing.T) {
 			t.Fatalf("%q / %q must be refused", tc.issuer, tc.account)
 		}
 	}
-	if _, err := NewTOTPEnrolmentMaterial("Ops", "a@x.test", FactorSecret{b: randBytes(t, 16)}); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewTOTPEnrolmentMaterial("Ops", "a@x.test", newFactorSecret(randBytes(t, 16))); !errors.Is(err, ErrInvalidInput) {
 		t.Fatal("a short secret must be refused")
 	}
 	if err := ValidateIssuer(DefaultIssuer); err != nil {
@@ -425,13 +425,13 @@ func TestVerifyStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A broken factor subkey is caught by the self-check.
-	k.factor[k.factorActive] = []byte("short")
+	k.m().factor[k.m().factorActive] = []byte("short")
 	if err := VerifyStartup(k); !errors.Is(err, ErrStartupGate) {
 		t.Fatalf("broken factor key: %v", err)
 	}
 	// A MAC kid without subkeys (impossible through NewKeys) is caught too.
 	k2, _ := testKeys(t)
-	k2.macActive = "ghost"
+	k2.m().macActive = "ghost"
 	if err := VerifyStartup(k2); !errors.Is(err, ErrStartupGate) {
 		t.Fatalf("broken MAC kid: %v", err)
 	}
