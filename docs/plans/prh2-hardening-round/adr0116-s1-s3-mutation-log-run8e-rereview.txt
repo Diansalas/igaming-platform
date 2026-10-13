@@ -1,0 +1,2 @@
+KILLED: N32 adjustment refusal raises no detached evaluator alert  [--- FAIL: TestAMLHold_EvaluatorFailureAtSubmission_AlertSurvivesTheRollback (0.37s)]
+EXIT 0

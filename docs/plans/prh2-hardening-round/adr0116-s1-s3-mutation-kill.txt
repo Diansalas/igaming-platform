@@ -137,3 +137,12 @@ and the adjustment tests); an invalid compile-error kill of J4 was caught and re
 J4 (wallet-resolve DB error treated as no hold) SURVIVED, justified: the failing SELECT runs inside the refusing transaction, which
 Postgres has then aborted, so every later statement of the same submission / decision fails; the fail-closed result is the aborted
 transaction, not the verdict. Not separately testable without injecting a database fault mid-statement.
+
+RE-REVIEW CONDITIONS (C2, C3, 4, 5, 7)
+--------------------------------------
+Logs: adr0116-s1-s3-mutation-log-run8-rereview.txt (R1-R4, R7 killed; its R5 line was a false survivor: the test derived its bound from the
+constant under test, fixed to an absolute 5.5 s), run8c (R5, R6 killed after the fix; R6's first kill was a compile error and the mutant
+was repaired), run8e (N32 re-anchored, killed). All seven mutants R1-R7 and N32 end KILLED; none survives.
+R1 runtime keeps USAGE on the AML sequence (catalogue test), R2/R3 table guards do not force the change mark (owner-level insert with an
+explicit change_seq), R4 READ COMMITTED not asserted (REPEATABLE READ / SERIALIZABLE refused with AM004), R5 side writes unbounded,
+R6 side-write failure not logged, R7 tenant-visible evaluator reason names the hold.
