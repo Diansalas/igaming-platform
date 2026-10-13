@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -258,7 +259,7 @@ func (c ConfigContent) Validate() error {
 			return invalidf("%s is required for control_kind %s (a value or an attested none; no partial configuration)", n, c.ControlKind)
 		}
 	}
-	if c.ReasonCode == "" || len(c.ReasonCode) > 64 || !printableASCII(c.ReasonCode) {
+	if c.ReasonCode == "" || len(c.ReasonCode) > 64 || !printableASCII(c.ReasonCode) || strings.TrimSpace(c.ReasonCode) == "" {
 		return invalidf("reason_code (1-64 printable ASCII) is required")
 	}
 	if c.AttestationRef == "" || len(c.AttestationRef) > 200 || !printableASCII(c.AttestationRef) {
@@ -699,6 +700,11 @@ func (l *Limits) attach(ctx context.Context, tx pgx.Tx, staff uuid.UUID, op, tar
 	iss := l.issuer()
 	if iss == nil {
 		return refuse(RefusedUnavailable, "no actor-proof issuer")
+	}
+	switch op { // the closed rg_limit_config:* set; anything else is a programming error, never signed
+	case actorproof.OpRGConfigRequest, actorproof.OpRGConfigApprove, actorproof.OpRGConfigReject, actorproof.OpRGConfigCancel, actorproof.OpRGConfigApply:
+	default:
+		return fmt.Errorf("rg: refusing to sign operation %q", op)
 	}
 	if err := iss.Attach(ctx, tx, actorproof.Claims{Actor: staff, Scope: actorproof.ScopePlatform, Operation: op, Target: target, PayloadHash: payload}); err != nil {
 		return fmt.Errorf("rg: sign actor proof: %w", err)

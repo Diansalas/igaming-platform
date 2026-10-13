@@ -7,6 +7,7 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -122,6 +123,67 @@ func TestRGLimitsS2_Review_FreeTextIs400NotFiveHundred(t *testing.T) {
 	if n := w.changeCount(f.tenantA, f.acctX); n != 0 {
 		t.Fatalf("nothing stored: %d", n)
 	}
+	// SR-2: a NUL (which jsonb cannot hold) must not suppress the denial audit: every refusal above left a row
+	if n := len(w.auditRows(f.tenantA, "rg.limit.change_denied")); n != 4 {
+		t.Fatalf("staff NUL / non-ASCII refusals each leave a denial row, got %d", n)
+	}
+	if n := len(w.auditRows(f.tenantA, "rg.limit_config.operator_denied")); n != 2 {
+		t.Fatalf("operator NUL refusals each leave a denial row, got %d", n)
+	}
+	if n := len(w.auditRows(uuid.Nil, "rg.limit_config.floor_denied")); n < 2 {
+		t.Fatalf("floor NUL refusals each leave a denial row, got %d", n)
+	}
+	// SR-3: whitespace-only free text is 400
+	for i, b := range []string{body("   ", "e"), body("r", "  ")} {
+		w.call("POST", path, comp, "ws"+string(rune('a'+i)), b).want(t, 400, "validation_error")
+	}
+	w.call("POST", "/v1/admin/rg/limit-configs", comp, "", rgBody{"config": opDeposit(rgBody{"reason_code": "   "})}).want(t, 400, "validation_error")
+}
+
+// SR-1: caller-supplied fields are bounded and cleaned before they reach the append-only audit row: a
+// 900 KB value is a 400 AND a small denial row.
+func TestRGLimitsS2_Review_OversizedFieldsMakeSmallDenialRows(t *testing.T) {
+	w := newRGW(t, rgWOpt{})
+	f := w.fixture()
+	w.floor(f.jur, "deposit", nil)
+	huge := strings.Repeat("A", 900*1024)
+	comp := w.staff(f.tenantA, f.compA, auth.RoleCompliance)
+	player := w.player(f, f.acctA1)
+	req := w.platform(w.ops.Requester)
+	maxRow := func(tenant uuid.UUID, action string, want int) {
+		t.Helper()
+		rows := w.auditRows(tenant, action)
+		if len(rows) < want {
+			t.Fatalf("%s: want >= %d denial rows, got %d", action, want, len(rows))
+		}
+		for _, r := range rows {
+			b, _ := json.Marshal(r)
+			if len(b) > 2048 {
+				t.Fatalf("%s: a denial row is %d bytes: %.200s", action, len(b), b)
+			}
+		}
+	}
+	lim := func(kind, asset, period string) rgBody {
+		return rgBody{"kind": kind, "asset_code": asset, "period": period, "value": "1"}
+	}
+	w.call("POST", "/v1/me/rg/limits", player, "o1", lim(huge, "EUR", "rolling_24h")).want(t, 400, "validation_error")
+	w.call("POST", "/v1/me/rg/limits", player, "o2", lim("deposit", huge, "rolling_24h")).want(t, 400, "validation_error")
+	w.call("POST", "/v1/me/rg/limits", player, "o3", lim("deposit", "EUR", huge)).want(t, 400, "validation_error")
+	maxRow(f.tenantA, "rg.limit.change_denied", 3)
+	sp := "/v1/admin/players/" + f.acctX.String() + "/rg/limits"
+	sb := staffSet("deposit", "EUR", "rolling_24h", "1")
+	sb["reason_code"] = huge
+	w.call("POST", sp, comp, "o4", sb).want(t, 400, "validation_error")
+	maxRow(f.tenantA, "rg.limit.change_denied", 4)
+	for _, over := range []rgBody{{"reason_code": huge}, {"attestation_ref": huge}, {"asset_code": huge}, {"control_kind": huge}} {
+		w.call("POST", "/v1/admin/rg/limit-configs", comp, "", rgBody{"config": opDeposit(over)}).want(t, 400, "validation_error")
+	}
+	maxRow(f.tenantA, "rg.limit_config.operator_denied", 4)
+	for _, over := range []rgBody{{"reason_code": huge}, {"attestation_ref": huge}, {"control_kind": huge}} {
+		w.requestFloor(req, f.jur, floorConfig(time.Now().Add(time.Hour), over)).want(t, 400, "validation_error")
+	}
+	w.requestFloor(req, huge, floorConfig(time.Now().Add(time.Hour), nil)).want(t, 400, "validation_error")
+	maxRow(uuid.Nil, "rg.limit_config.floor_denied", 4)
 }
 
 // LF C1: a decrease is a protective write and succeeds above a since-lowered ceiling or on a since-dropped period.

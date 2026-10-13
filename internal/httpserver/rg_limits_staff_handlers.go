@@ -173,8 +173,8 @@ func newStaffSetPlayerRGLimitHandler(deps Deps) http.HandlerFunc {
 			rf := writeRGError(w, c, "staff_set_limit", err)
 			auditDenial(r.Context(), deps, c, scope, audit.Entry{TenantID: c.tc.TenantID, ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "rg.limit.change_denied", TargetType: "player_rg_limit_change", Metadata: map[string]any{
-					"player_account_id": playerID.String(), "control_kind": req.Kind, "asset_code": req.AssetCode, "period": req.Period, "value": attemptedValue(req.Value),
-					"reason_code": req.ReasonCode, "source": string(rg.ChangeSourceStaffOnPlayerRequest)}}, rf)
+					"player_account_id": playerID.String(), "control_kind": auditText(req.Kind), "asset_code": auditTextP(req.AssetCode), "period": auditTextP(req.Period), "value": attemptedValue(req.Value),
+					"reason_code": auditText(req.ReasonCode), "source": string(rg.ChangeSourceStaffOnPlayerRequest)}}, rf)
 			return
 		}
 		replayHeader(w, res.Replayed)
@@ -288,8 +288,8 @@ func newWriteRGOperatorConfigHandler(deps Deps) http.HandlerFunc {
 			rf := writeRGError(w, c, "operator_config", err)
 			auditDenial(r.Context(), deps, c, scope, audit.Entry{TenantID: c.tc.TenantID, ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "rg.limit_config.operator_denied", TargetType: "rg_limit_config", Metadata: map[string]any{
-					"control_kind": string(req.Config.ControlKind), "asset_code": req.Config.AssetCode, "brand_id": req.BrandID,
-					"reason_code": req.Config.ReasonCode, "attestation_ref": req.Config.AttestationRef}}, rf)
+					"control_kind": auditText(string(req.Config.ControlKind)), "asset_code": auditTextP(req.Config.AssetCode), "brand_id": req.BrandID,
+					"reason_code": auditText(req.Config.ReasonCode), "attestation_ref": auditText(req.Config.AttestationRef)}}, rf)
 			return
 		}
 		writeJSON(w, http.StatusCreated, toRGConfigResponse(staffViewerOf(c.tc), row))
@@ -361,7 +361,7 @@ func newRequestRGFloorHandler(deps Deps) http.HandlerFunc {
 			rf := writeRGError(w, c, "floor_request", err)
 			auditDenial(r.Context(), deps, c, scope, audit.Entry{ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "rg.limit_config.floor_denied", TargetType: "rg_limit_config_change_request", Metadata: map[string]any{
-					"jurisdiction_code": req.JurisdictionCode, "control_kind": string(req.Config.ControlKind), "op": "request"}}, rf)
+					"jurisdiction_code": auditText(req.JurisdictionCode), "control_kind": auditText(string(req.Config.ControlKind)), "op": "request"}}, rf)
 			return
 		}
 		writeJSON(w, http.StatusCreated, toRGFloorRequestResponse(fr))

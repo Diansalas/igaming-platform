@@ -43,6 +43,9 @@ func TestFreeTextFieldsAreValidated(t *testing.T) {
 		x.ReasonCode = bad
 		wantInvalid(t, x.Validate(), "reason "+bad)
 	}
+	ws := c
+	ws.ReasonCode = "   "
+	wantInvalid(t, ws.Validate(), "whitespace-only reason")
 	ok := c
 	ok.ReasonCode = "printable-reason_01"
 	if err := ok.Validate(); err != nil {

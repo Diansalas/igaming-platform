@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -733,7 +734,8 @@ func (l *Limits) SetLimitOnPlayerRequest(ctx context.Context, tx pgx.Tx, in Staf
 		return ChangeResult{}, err
 	}
 	if len(in.ReasonCode) == 0 || len(in.ReasonCode) > 64 || len(in.EvidenceRef) == 0 || len(in.EvidenceRef) > 200 ||
-		!printableASCII(in.ReasonCode) || !printableASCII(in.EvidenceRef) {
+		!printableASCII(in.ReasonCode) || !printableASCII(in.EvidenceRef) ||
+		strings.TrimSpace(in.ReasonCode) == "" || strings.TrimSpace(in.EvidenceRef) == "" {
 		return ChangeResult{}, invalidf("reason_code (1-64) and evidence_ref (1-200), printable ASCII, are required")
 	}
 	acct, err := loadAccount(ctx, tx, in.TenantID, in.PlayerAccountID)

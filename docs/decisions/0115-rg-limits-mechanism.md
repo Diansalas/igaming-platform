@@ -837,6 +837,20 @@ drift test).
   and insert to cover the re-classification loop; production leaves it nil. Signer pin: exactly one proof
   signer call site exists in `internal/rg` (`attach`, `limits_config.go`), enforced by a static test.
 
+**Second security re-review follow-ups:**
+
+- SR-1/SR-2: every caller-supplied field echoed into a denial audit row (kind, asset, period, staff and
+  operator/floor `reason_code`, `attestation_ref`, `jurisdiction_code`, control kind) is bounded to 64
+  bytes of printable ASCII or replaced by the marker `<invalid>`, for all limit, operator-config and floor
+  handlers; a 900 KB field is a 400 and a denial row under 2 KB, and a NUL no longer suppresses the denial
+  row (tested for every route family).
+- SR-3: `reason_code` and `evidence_ref` need a non-space character (whitespace-only is 400). The HTTP
+  stack trims the `Idempotency-Key` header value; that is harmless (the trimmed text is the key stored and
+  compared consistently).
+- SR-4: the signer pin is a **tripwire, not a guarantee**: it counts textual `.Attach(` / `.Sign(` calls in
+  `internal/rg` and does not detect method values, other packages obtaining an issuer, or reflection. As
+  defence in depth `attach` now refuses at runtime any operation outside the closed `OpRGConfig*` set.
+
 **Dispositions recorded (ledger-finance C3, and conditions for later slices):**
 
 - (a) ADR 2.5 "every linked account is notified" of a `tenant_person` change is NOT IMPLEMENTED (no

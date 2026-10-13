@@ -141,6 +141,27 @@ func (q setLimitRequest) toLimitInput(key string) (rg.LimitInput, error) {
 	return in, nil
 }
 
+// auditText bounds and cleans a caller-supplied string before it is echoed into an append-only audit row:
+// at most 64 bytes of printable ASCII, else a fixed marker. An unvalidated field is never copied verbatim.
+func auditText(s string) string {
+	if len(s) > 64 {
+		return "<invalid>"
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return "<invalid>"
+		}
+	}
+	return s
+}
+
+func auditTextP(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return auditText(*p)
+}
+
 // attemptedValue is the value the caller asked for, as audit text (bounded, printable only).
 func attemptedValue(raw json.RawMessage) string {
 	s := strings.Trim(string(bytes.TrimSpace(raw)), `"`)
@@ -198,7 +219,7 @@ func newSetMyRGLimitHandler(deps Deps, limiter *admission.GCRALimiter) http.Hand
 			rf := writeRGError(w, c, "set_limit", err)
 			auditDenial(r.Context(), deps, c, scope, audit.Entry{TenantID: c.tc.TenantID, ActorType: audit.ActorPlayer, ActorID: c.subject,
 				Action: "rg.limit.change_denied", TargetType: "player_rg_limit_change", Metadata: map[string]any{
-					"control_kind": req.Kind, "asset_code": req.AssetCode, "period": req.Period, "value": attemptedValue(req.Value)}}, rf)
+					"control_kind": auditText(req.Kind), "asset_code": auditTextP(req.AssetCode), "period": auditTextP(req.Period), "value": attemptedValue(req.Value)}}, rf)
 			return
 		}
 		replayHeader(w, res.Replayed)
