@@ -1,7 +1,7 @@
 """ADR 0116 S1+S3 mutation driver (migrations 0140-0142 + Go). Each mutant replaces ONE anchor (which must occur
 exactly once), runs the relevant suite, restores the file. KILLED = the suite failed. The integration suites migrate
 throwaway scratch databases from the worktree's migration files on every run, so a mutated migration is exercised as
-written. Run from the worktree root (no other test run may be active):
+written. Migration mutants rebuild the private DB (adr0116mut) first. Run from the worktree root (no other test run may be active):
     python3 docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-driver.py [name-prefix ...]
 Output is the kill list; save with `> docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-log-*.txt`.
 """
@@ -177,6 +177,16 @@ for name, f, old, new, cmd in M:
         continue
     open(path, 'w').write(src.replace(old, new))
     try:
+        if f.startswith('migrations/'):
+            # The aml integration world runs against the PRE-MIGRATED private DB, so a migration mutant must be re-applied:
+            # rebuild the DB from the mutated files first. A mutant the migration itself refuses (pre-flight, syntax, a
+            # CHECK) is reported as KILLED(migrate).
+            rb = subprocess.run(['env', 'PRIV_DB=adr0116mut', 'PRIV_SRC=' + W, 'bash', S + '/priv_db.sh'], cwd=W,
+                                capture_output=True, text=True, timeout=1200)
+            if rb.returncode != 0:
+                print('KILLED(migrate): %s  [%s]' % (name, (rb.stdout + rb.stderr).strip().splitlines()[-1][:140]), flush=True)
+                open(path, 'w').write(src)
+                continue
         r = subprocess.run(cmd, cwd=W, capture_output=True, text=True, timeout=2400)
         out = r.stdout + r.stderr
         verdict = 'KILLED' if r.returncode != 0 else 'SURVIVED'
