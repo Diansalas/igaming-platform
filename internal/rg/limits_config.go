@@ -315,6 +315,12 @@ func (c ConfigContent) Validate() error {
 	if c.LossComputation != nil && *c.LossComputation != "net_of_wins" {
 		return invalidf("loss_computation supports only net_of_wins")
 	}
+	// pending_intent_ttl has NO effect yet: the payments TTL sweep that would honour it is NOT IMPLEMENTED (ADR 0115 S3
+	// record, residual 1), so a configured value would only look protective. Only the attested "none" is accepted until
+	// the attempt-level expiry exists (ledger-finance F10).
+	if a := c.PendingIntentTTLSeconds; a != nil && !a.None {
+		return invalidf("pending_intent_ttl has no effect yet (the payments expiry that would honour it is not implemented); attest none")
+	}
 	for name, a := range map[string]*Attested[int64]{"post_session_break": c.PostSessionBreakSeconds, "pending_intent_ttl": c.PendingIntentTTLSeconds} {
 		if a != nil && !a.None && (a.Value == nil || !validSeconds(*a.Value)) {
 			return invalidf("%s value must be a positive number of seconds", name)

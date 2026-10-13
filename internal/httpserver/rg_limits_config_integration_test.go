@@ -27,7 +27,7 @@ func opDeposit(over rgBody) rgBody {
 	c := rgBody{"control_kind": "deposit", "asset_code": "EUR", "enabled": true, "mandatory": false, "ceiling": rgBody{"value": "3000"},
 		"increase_cooldown_seconds": 3600, "increase_requires_reconfirmation": true, "scope": "account",
 		"allowed_periods": []string{"rolling_24h", "calendar_day"}, "calendar_tz": "UTC", "week_start": 1,
-		"pending_intent_ttl": rgBody{"value": 7200}, "reason_code": "s2_operator", "attestation_ref": "operator-ref-1"}
+		"pending_intent_ttl": rgBody{"none": true}, "reason_code": "s2_operator", "attestation_ref": "operator-ref-1"}
 	for k, v := range over {
 		if v == nil {
 			delete(c, k)
@@ -50,7 +50,7 @@ func TestRGLimitsS2_Operator_TightenWritesAndComposes(t *testing.T) {
 		t.Fatalf("operator row: %v", o)
 	}
 	cfg := o["config"].(map[string]any)
-	if cfg["ceiling"].(map[string]any)["value"] != "3000" || cfg["increase_cooldown_seconds"] != float64(3600) || cfg["pending_intent_ttl"].(map[string]any)["value"] != float64(7200) {
+	if cfg["ceiling"].(map[string]any)["value"] != "3000" || cfg["increase_cooldown_seconds"] != float64(3600) || cfg["pending_intent_ttl"].(map[string]any)["none"] != true {
 		t.Fatalf("stored config echo: %v", cfg)
 	}
 	// a brand row, stricter still
@@ -175,6 +175,8 @@ func TestRGLimitsS2_Operator_RefusalsAreAudited(t *testing.T) {
 	// shape: partial / extra / malformed
 	post(opDeposit(rgBody{"ceiling": nil})).want(t, 400, "validation_error")
 	post(opDeposit(rgBody{"pending_intent_ttl": nil})).want(t, 400, "validation_error")
+	// F10: a configured TTL has no effect yet, so it is refused rather than presented as protective.
+	post(opDeposit(rgBody{"pending_intent_ttl": rgBody{"value": 7200}})).want(t, 400, "validation_error")
 	post(opDeposit(rgBody{"count_bonus_funded": true})).want(t, 400, "validation_error") // does not apply to a deposit
 	post(opDeposit(rgBody{"increase_cooldown_seconds": 0})).want(t, 400, "validation_error")
 	post(opDeposit(rgBody{"calendar_tz": "Not/AZone"})).want(t, 400, "validation_error")

@@ -1,0 +1,64 @@
+ADR 0115 S3 (usage measurement, internal/rg/limits_usage*.go) - mutation-kill evidence (local, private scratch databases; no CI evidence)
+
+Driver: docs/plans/prh2-hardening-round/adr0115-s3-mutation-driver.py. Each mutant replaces ONE anchor (which must occur exactly
+once), runs the S3 suite with -failfast, restores the file, and prunes the build-cache entries it created. The driver refuses to
+start on a dirty mutation target. The integration suite builds throwaway scratch databases from the worktree's migrations on every
+run and runs every measurement as the RUNTIME role (igaming_runtime, RLS active).
+Suite per mutant: go test -tags integration -p 1 -count=1 -failfast -run 'TestRGUsageS3$|TestRGWindowStartsS3|TestRGDepositUsageS3|
+TestRGSessionUsageS3|TestRGEffectiveLimitInputsS3|TestS3' ./internal/rg/ ; the plan-shape mutant P1 runs TestRGUsageS3ExplainAndLatency.
+
+INCIDENT (recorded, not hidden). Run 1 (adr0115-s3-mutation-log-run1-disk-full-partly-invalid.txt) ran while the machine's disk filled
+up (an unrelated shared-machine condition made worse by this run's own Go build-cache growth: about 95 mutated builds): PostgreSQL went
+into recovery mode and test databases failed with "No space left on device". Every verdict of run 1 is therefore NOT evidence (a "KILLED"
+there may be an environment failure). Run 1 is kept only as a record. The driver now (a) labels any run whose output shows ENOSPC /
+connection loss as ENV-FAIL, (b) labels non-compiling mutants INVALID with the compiler error, (c) prunes its own build-cache entries.
+The leftover scratch database that run 1 created (rg135_d5e220953d5a41b7) was dropped; nothing else was touched.
+
+Run 2 (adr0115-s3-mutation-log-run2.txt): 96 mutants, no INVALID, no ENV-FAIL. 87 reported killed, 9 survived.
+  Survivors: W7 U15 D11 D14 S7 I3 I5 I7 C8.
+  I3 (other kinds leak into the inputs), I7 (loss_may_go_negative defaulting true) and C8 (credit-check range upper bound) were TEST
+  GAPS: tests added (a deposit-kind limit on the same asset; a loss floor that does not attest negative loss; an intent created exactly
+  at the upper bound) and the three mutants re-run: KILLED (run 3).
+  Other gaps found by the first (invalid) pass and closed before run 2: W19 (window-count bound; the old test used invalid specs), U2
+  (loss boundary), U10 (void original taken from any transaction of the correlation), U13 / U28 (account loss figure and Person loss floor
+  under tenant_person scope), D6 (a non-deposit cash credit counted as deposit), D7 / D8 (deposit boundary), S5 (a closed measured chain
+  bounding the aggregation), S9 (chain depth bound; the bound is now a var so the test can lower it).
+Run 3 (adr0115-s3-mutation-log-run3.txt): 30 mutants re-run with exact failing-test names (every blank-reason kill of run 2, plus the
+  fixed gaps): all killed except D11, I5 and C7 (below). P1 killed by the EXPLAIN test.
+  C7 was reported KILLED in run 2 without a failing-test name and could not be reproduced (run 3 and two manual runs: it survives), so the
+  run 2 kill is treated as a one-off environment failure, NOT a kill. The suite itself is stable: 6 consecutive full passes (-count=6).
+
+Late source change: the existing tripwire test TestSignerCallSitesInRGArePinned (limits_s2_review_test.go, which counts textual
+  `.Sign(` calls in internal/rg) failed on `raw.Sign()` in floorLoss (a math/big accessor, not the proof signer). The test was NOT edited;
+  the S3 code now uses `raw.Cmp(new(big.Int)) < 0`. U25-U28 were re-run on the final source: all KILLED.
+
+FINAL: 96 mutants. 89 killed. 7 survive, each justified:
+  W7  week uses extract(dow) instead of isodow ........ EQUIVALENT. The week offset is ((day - week_start + 7) % 7); Sunday is 0 under dow
+      and 7 under isodow, and 0 = 7 (mod 7) in that expression, so every input gives the same start.
+  D11 in-flight figure taken on every ledger group row . EQUIVALENT. The assignment is Set(), not an accumulation, so repeating it with the
+      same value changes nothing.
+  I5  TTL none still reported .......................... EQUIVALENT. rg_limit_config_compose already returns a NULL pending_intent_ttl when
+      the none attestation is present; the Go guard is defence in depth.
+  U15 Person set ignores the tenant ..................... LAYERED. player_accounts is read under the session's tenant RLS, which already
+      restricts the set to the session tenant; the explicit predicate is defence in depth (the ledger scan has its own tenant predicate).
+  D14 deposit_intents scan without the tenant predicate . LAYERED. RLS on deposit_intents plus tenant-owned account ids.
+  C7  credit check without the tenant predicate ......... LAYERED. RLS on deposit_intents / ledger_entries.
+  S7  principal check off ............................... LAYERED. Without it a foreign principal's RLS shows no sessions and the same
+      ErrSessionChainNotFound is returned.
+  Isolating a LAYERED mutant would need a role that bypasses RLS (not permitted: no role changes).
+
+Coverage map (mutant ids -> what they pin):
+  window starts: rolling hours, calendar unit, ISO week arithmetic, DST overlap / gap probe, timezone .... W1-W19
+  wager / loss: boundary, reversal-in-window, void original, Person set, account figure, bonus flags,
+                fail-closed legs, loss floor, no float ......................................................... U1-U32
+  guards: isolation level, tenant, player scope, request validation ......................................... G1-G4
+  deposit: statuses, ledger-vs-intent, candidate exclusion, boundary, account type ......................... D1-D14
+  session: chain root, open chains, revoked / expired, aggregation, floor to seconds, depth bound ........... S1-S11
+  effective-limit inputs: windows, scope of rows, TTL, missing floor, loss attestation ..................... I1-I7
+  credit check: each mismatch kind, tenant, half-open range ................................................ C1-C8
+  plan shape: the entries scan is planned on its own so the 0135 index drives it ............................ P1
+
+REVIEW ROUND (ledger-finance F1 / F9 / F10; log adr0115-s3-mutation-log-run4-review.txt): 16 mutants of the new logic (the locked-bonus gate
+under each flag combination and shape, the scope guard of ReadEffectiveLimitInputs and of ReadUsageConfig, the pending_intent_ttl rejection)
+plus a re-run of the bonus-flag, undeclared-leg, cash-lock-shape and guard mutants against the changed bonus tests: all 16 KILLED
+(R1-R8, U19-U21, U23, U31, U32, G2, G3). Survivors of the earlier rounds are unchanged (7, justified above).
