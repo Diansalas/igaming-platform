@@ -76,6 +76,40 @@ func TestStepUp_WithdrawalPolicy_TwoMinutesBehindTheFinancialRoute(t *testing.T)
 	}
 }
 
+// Section 9.5: approverEligibilityCheckLocked holds the approver's staff row FOR SHARE for the rest of the approval
+// transaction - a concurrent suspension cannot commit until the approval does (it times out on the row lock here).
+func TestStepUp_WithdrawalApprove_EligibilityHoldsTheApproverRowForShare(t *testing.T) {
+	pool, _ := testEnv(t)
+	tn := mustCreateTenant(t, pool)
+	staff := mustCreateStaff(t, pool, tn.ID, identity.StaffRoleFinance, "a-decent-password-1")
+	ctx := context.Background()
+	tx, err := pool.Raw().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tn.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+	linked, active, err := approverEligibilityCheckLocked(ctx, tx, staff.ID, string(auth.RoleFinance))(staff.ID)
+	if err != nil || !linked || !active {
+		t.Fatalf("eligibility: %v %v %v", linked, active, err)
+	}
+	err = pool.WithTenant(ctx, tn.ID, func(ctx context.Context, tx2 pgx.Tx) error {
+		if _, err := tx2.Exec(ctx, `SET LOCAL lock_timeout = '300ms'`); err != nil {
+			return err
+		}
+		_, err := tx2.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, staff.ID)
+		return err
+	})
+	if pgCode(err) != "55P03" {
+		t.Fatalf("a suspension during the approval transaction must wait on the FOR SHARE lock (55P03), got %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Section 9.5: the approver's own row is re-read FOR SHARE inside the approval transaction and compared with the
 // token's role (behind the chain: liveness would refuse a role mismatch first; this pins the in-transaction rule for
 // the R13 window).
