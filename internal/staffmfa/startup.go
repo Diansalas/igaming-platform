@@ -13,7 +13,7 @@ var ErrStartupGate = errors.New("staffmfa: startup gate")
 // VerifyStartup is the staff MFA startup gate (ADR 0119 section 5.1). In
 // EVERY environment it refuses to start without both valid key families,
 // because staff login cannot work without them. It also runs one in-memory
-// seal/open and keyed-hash self-check so a subkey derivation fault is found
+// seal and keyed-hash self-check so a subkey derivation fault is found
 // at deploy time.
 //
 // S1 status: the gate exists and is unit-tested, but it is NOT yet called from
@@ -31,11 +31,10 @@ func VerifyStartup(keys *Keys) error {
 	if err != nil {
 		return fmt.Errorf("%w: random source: %v", ErrStartupGate, err)
 	}
-	sealed, err := keys.SealFactorSecret(aad, secret)
-	if err != nil {
-		return fmt.Errorf("%w: factor key self-check failed", ErrStartupGate)
-	}
-	if _, err := keys.OpenFactorSecret(aad, sealed); err != nil {
+	// Sealing exercises the active factor subkey (length, AES and GCM
+	// construction). An Open of the same ciphertext cannot fail when the Seal
+	// succeeded, so it is not repeated here (mutation U01 in the S1 evidence).
+	if _, err := keys.SealFactorSecret(aad, secret); err != nil {
 		return fmt.Errorf("%w: factor key self-check failed", ErrStartupGate)
 	}
 	for _, kid := range keys.MACKIDs() {

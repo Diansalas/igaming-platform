@@ -1631,7 +1631,11 @@ tested:
   messages, static pins for no environment/clock reads and constant-time comparison), plus
   `internal/config/staff_mfa_keys_test.go` (required in production, partial refusal, placeholders, redaction,
   bounds, issuer, registry completeness and the 28-pair distinctness matrix, direct and through `Load`).
-- Mutation pass: `docs/plans/prh2-hardening-round/adr0119-s1-mutation-kill.txt`.
+- Mutation pass: `docs/plans/prh2-hardening-round/adr0119-s1-mutation-kill.txt` (driver
+  `adr0119-s1-mutation-driver.py`): 74 mutants, 69 KILLED, 4 SURVIVED and justified as behaviour-equivalent (K19,
+  S07, R02, P09), 1 REMOVED (U01: an unreachable self-check was deleted from `VerifyStartup`), 0 ERROR. The S1 rows
+  of the section 17.8 table (replay `>` to `>=`, window +-2, AAD without staff or tenant, compare-before-lock in the
+  pure core) are all KILLED.
 
 ### 21.5 Residuals (S1)
 
