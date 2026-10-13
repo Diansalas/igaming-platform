@@ -22,6 +22,9 @@ Operational incident runbooks now exist (Stage 9) — see:
   `deploy/observability/`.
 - `production-configuration-checklist.md` — field-by-field production
   config audit.
+- `staff-mfa-keys.md` — ADR 0119 S1: provisioning and rotation of the
+  `STAFF_MFA_FACTOR_KEYS` / `STAFF_MFA_MAC_KEYS` families (library
+  IMPLEMENTED; nothing reads the keys before S3).
 - `self-hosted-runner.md` — PREPARED, NOT ACTIVE: Mac self-hosted CI runner
   plan for CI-BILLING-1 (paired with `.github/workflows/ci-selfhosted.yml`,
   manual dispatch only); no setup until the owner separately authorizes it.
