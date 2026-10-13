@@ -1,0 +1,9 @@
+INVALID(infra): N32 adjustment refusal raises no detached evaluator alert
+KILLED: R1 runtime keeps USAGE on the AML sequence  [--- FAIL: TestCatalog_RuntimeHasNoPrivilegeOnAnyAMLSequence (0.09s)]
+KILLED: R2 hold guard does not force the change mark  [--- FAIL: TestHoldGuards_ForceTheChangeMark (0.18s)]
+KILLED: R3 lift guard does not force the change mark  [--- FAIL: TestHoldGuards_ForceTheChangeMark (0.23s)]
+KILLED: R4 READ COMMITTED not asserted  [--- FAIL: TestCaseWrites_RefuseRepeatableRead (0.21s)]
+SURVIVED: R5 side writes unbounded (30 s)
+KILLED: R6 side-write failure not logged  [last: internal/adjustment/aml_hold.go:7:2: "log/slog" imported and not used]
+KILLED: R7 evaluator reason names the hold  [--- FAIL: TestRetryableOnHoldEvalFailure (0.00s)]
+EXIT 0

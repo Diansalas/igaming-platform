@@ -42,6 +42,18 @@ type catalogPolicy struct {
 	roles                         []string
 }
 
+// tableOwnerOf returns the name of the role that owns public.<table> (pg_class.relowner).
+func tableOwnerOf(t *testing.T, rt *Pool, table string) string {
+	t.Helper()
+	var owner string
+	if err := rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = to_regclass('public.' || quote_ident($1))`, table).Scan(&owner)
+	}); err != nil {
+		t.Fatalf("owner of %s: %v", table, err)
+	}
+	return owner
+}
+
 func loadPolicies(t *testing.T, rt *Pool) []catalogPolicy {
 	t.Helper()
 	var out []catalogPolicy
@@ -237,6 +249,17 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 	// "TO igaming_runtime" policy or a current_user-dependent expression).
 	roleDep := regexp.MustCompile(`(?i)\b(current_user|session_user|current_role|pg_has_role|has_\w+_privilege)\b`)
 	for _, p := range policies {
+		// ADR 0116 (migrations 0141/0142): the AML tables carry ONE policy, aml_owner_session, TO the table OWNER only (the
+		// role of the SECURITY DEFINER functions), bound to the session tenant. The runtime role has no privilege and no
+		// policy there, so a re-granted privilege still yields zero rows. The owner-pool probe is the WORST case for such a
+		// policy (it is applied to the very role the probe runs as), so the gate stays conservative; any OTHER role-specific
+		// policy still fails here.
+		// The exemption is exact (security F9): the policy's single role must BE the table's owner (pg_class.relowner), it must be
+		// named aml_owner_session, and it may not be a PUBLIC or runtime-role policy.
+		if strings.HasPrefix(p.table, "aml_") && p.name == "aml_owner_session" && len(p.roles) == 1 && p.roles[0] != "public" &&
+			p.roles[0] == tableOwnerOf(t, rt, p.table) && p.roles[0] != "igaming_runtime" {
+			continue
+		}
 		if strings.Join(p.roles, ",") != "public" {
 			t.Errorf("policy %s.%s is role-specific (roles=%v): the owner-pool probe is no longer equivalent to the runtime role; revisit the gate", p.table, p.name, p.roles)
 		}

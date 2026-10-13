@@ -187,6 +187,46 @@ BEGIN
 END
 $$;
 
+-- ADR 0116 (migrations 0140-0142, AML holds / cases / four-eyes): every aml_* table is DEFINER-ONLY. The blanket backfill
+-- GRANT above ("ALL TABLES IN SCHEMA public") would re-grant the runtime role SELECT/INSERT/UPDATE/DELETE on them every time
+-- this idempotent script is re-run against an already-migrated database; migration 0141/0142 themselves run only once. The
+-- tables also carry FORCE ROW LEVEL SECURITY with ONE policy, for the table OWNER only, so a re-granted privilege would still
+-- yield zero rows (a second, independent denial); the REVOKE below re-asserts the first. The runtime role keeps EXECUTE on the
+-- SECURITY DEFINER officer / enforcement API only; the helper, guard and trigger functions stay owner-only. Guarded: nothing
+-- exists before the migrations ran.
+DO $$
+DECLARE
+    t text;
+    f text;
+BEGIN
+    FOR t IN SELECT c.relname FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND c.relname LIKE 'aml\_%' LOOP
+        EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t);
+    END LOOP;
+    -- Sequences too (the schema default privileges would otherwise leave USAGE on them for the runtime role).
+    FOR t IN SELECT c.relname FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'S' AND c.relname LIKE 'aml\_%' LOOP
+        EXECUTE format('REVOKE ALL ON SEQUENCE %I FROM igaming_runtime', t);
+    END LOOP;
+    FOREACH f IN ARRAY ARRAY[
+        'aml_hold_active(uuid, uuid, uuid, text)', 'aml_hold_match(uuid, uuid, uuid, text)',
+        'aml_record_enforcement_decision(uuid, uuid, uuid, text, text, text, text, boolean, uuid, uuid)',
+        'aml_hold_place(uuid, uuid, uuid, text, text, text)', 'aml_hold_lift(uuid, uuid, text)', 'aml_hold_list(uuid, uuid)',
+        'aml_alert_raise(uuid, uuid, text, text)', 'aml_case_open(uuid, uuid, text, text, uuid[])',
+        'aml_case_transition(uuid, uuid, integer, text, text)', 'aml_case_add_note(uuid, uuid, integer, text, text)',
+        'aml_case_flag_sar(uuid, uuid, integer, text)', 'aml_case_propose(uuid, uuid, integer, text, uuid, text, text)',
+        'aml_case_approve(uuid, uuid, integer, text, text)', 'aml_case_read(uuid, uuid)', 'aml_case_events_list(uuid, uuid)',
+        'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)'
+    ] LOOP
+        IF to_regprocedure('public.' || f) IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
+        END IF;
+    END LOOP;
+    -- NOT granted until the HD-RET-1 erasure job exists as its caller (security F5): re-assert the revoke.
+    IF to_regprocedure('public.aml_person_has_records(uuid, uuid)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION aml_person_has_records(uuid, uuid) FROM igaming_runtime;
+    END IF;
+END
+$$;
+
 -- Stage 10.3 W2a (ADR 0093 §1; migration 0096, provider credentials): the
 -- runtime role's least-privilege grants on the three provider-credential
 -- tables, re-asserted on every run. The blanket backfill GRANT above

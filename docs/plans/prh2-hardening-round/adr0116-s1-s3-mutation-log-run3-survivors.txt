@@ -1,0 +1,32 @@
+KILLED: A2 quorum counts grants not Persons  [--- FAIL: TestQuorum_CountsDistinctInForceOfTheOwnerScope (5.55s)]
+KILLED: A4 quorum counts expired grants  [--- FAIL: TestQuorum_CountsDistinctInForceOfTheOwnerScope (5.68s)]
+KILLED: A5 quorum ignores the grantee scope  [--- FAIL: TestQuorum_CountsDistinctInForceOfTheOwnerScope (5.50s)]
+SURVIVED: A9 authorize: grantee scope not matched
+KILLED: A11 authorize: platform (non-acting) session admitted  [--- FAIL: TestAuthorize_DirectCalls (0.16s)]
+KILLED: A12 authorize: operation name unchecked  [--- FAIL: TestAuthorize_DirectCalls (0.22s)]
+SURVIVED: A13 authorize: personless actor admitted
+KILLED: A15 scope compat: acting actor limited  [--- FAIL: TestScope_PlatformActingReachesTenantOwnedCases (0.26s)]
+KILLED: H1 match ignores lifts  [--- FAIL: TestGuards_HoldMatchIgnoresLiftedHolds (0.22s)]
+SURVIVED: H4 active ignores the tenant
+KILLED: H12 guard: owner scope not forced  [--- FAIL: TestGuards_DirectInserts (0.55s)]
+KILLED: H15 guard: placing actor columns unverified  [--- FAIL: TestGuards_DirectInserts (0.54s)]
+SURVIVED: H19 lift: sanctions hold liftable through the plain path
+KILLED: C1 events: sequence gap allowed  [--- FAIL: TestGuards_DirectInserts (0.71s)]
+KILLED: C2 events: reopen of opened case allowed  [--- FAIL: TestGuards_DirectInserts (0.75s)]
+KILLED: C3 transition: from_status unchecked  [--- FAIL: TestGuards_DirectInserts (0.46s)]
+KILLED: C9 proposal: content hash unchecked  [--- FAIL: TestGuards_FourEyesTriggerDirect (0.24s)]
+SURVIVED: C10 approval: proposer may approve (actor)
+SURVIVED: C13 approval: content binding unchecked
+SURVIVED: C15 approval: already-lifted hold re-approvable
+SURVIVED: C16 approval: from_status unchecked for closures
+KILLED: C17 lift guard 0142: approval event not verified  [--- FAIL: TestGuards_LiftNeedsAMatchingApprovalEvent (0.27s)]
+KILLED: C18 lift guard 0142: sanctions lift without approval  [--- FAIL: TestGuards_LiftNeedsAMatchingApprovalEvent (0.30s)]
+KILLED: C19 note: owner scope of note not the case  [--- FAIL: TestGuards_DirectInserts (0.51s)]
+KILLED: C20 event: owner scope of event not the case  [--- FAIL: TestGuards_DirectInserts (0.45s)]
+KILLED: C21 case: owner scope not forced  [--- FAIL: TestGuards_DirectInserts (0.42s)]
+SURVIVED: C23 CAS: stale expected seq allowed
+KILLED: C25 IP header regex loosened  [--- FAIL: TestGuards_DirectInserts (0.39s)]
+SURVIVED: C27 queue limit unbounded
+SURVIVED: L3 lint: IBAN check off
+SURVIVED: L9 lint: PAN check disabled
+EXIT 0

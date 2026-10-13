@@ -50,6 +50,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
@@ -103,7 +104,24 @@ const (
 	OutcomePending     EnforcementOutcome = "pending"
 	OutcomeFailed      EnforcementOutcome = "failed"
 	OutcomeUnavailable EnforcementOutcome = "unavailable"
+
+	// OutcomeHeld is the INTERNAL sixth outcome of ADR 0116 s5.1 (an extension of ADR 0096 s2.2; s2.3 gains
+	// held -> deny): an active AML hold gates the operation. It is only ever the value of EnforcementDecision.
+	// TrueOutcome. It is NEVER the value of EnforcementDecision.Outcome, which is the PUBLIC outcome every
+	// player-facing and tenant-visible surface renders: a held operation reports Outcome == OutcomePending, code
+	// AccountReviewCode, exactly like a KYC `pending` (no tipping-off, ADR 0116 s5.1 C4). A static test pins that no
+	// production file renders TrueOutcome.
+	OutcomeHeld EnforcementOutcome = "held"
 )
+
+// AccountReviewCode is the ONE player-facing code of every deny that means "your account is under review": a KYC
+// `pending`, an AML `held` and an AML hold-evaluator error (ADR 0116 s5.1 C4). It replaces the earlier
+// "kyc_<operation>:pending" code at all five gates, and the deposit gate's "kyc_required:" decline prefix for it.
+const AccountReviewCode = "account_review"
+
+// PublicOutcomeReview is the outcome recorded in the tenant-visible kyc_enforcement_decisions log for both a KYC `pending`
+// and an AML `held` (migration 0141). Historical rows keep `pending`; readers map it to `review`.
+const PublicOutcomeReview = "review"
 
 // EnforcementParams is EvaluateEnforcement's input. Every identity field
 // MUST be resolved server-side from the authenticated/tenant context -
@@ -152,12 +170,30 @@ type EnforcementParams struct {
 
 // EnforcementDecision is EvaluateEnforcement's output.
 type EnforcementDecision struct {
+	// Outcome is the PUBLIC outcome (never OutcomeHeld): what a player, a gate caller's response and a tenant-visible log
+	// may show.
 	Outcome        EnforcementOutcome
 	Allowed        bool
 	Code           string
 	Message        string
 	MatchedTrigger string
 	PolicyVersion  string
+
+	// Hold is the INTERNAL AML verdict (ADR 0116 s5.1). It is written only to the AML-scoped aml_enforcement_decisions
+	// (by RecordDecision) and must never be rendered. TrueOutcome is OutcomeHeld when the hold changed the result.
+	Hold        aml.HoldVerdict
+	TrueOutcome EnforcementOutcome
+	// KYCOutcome is the KYC side's own outcome before the hold was combined (internal; recorded in the AML-scoped log).
+	KYCOutcome EnforcementOutcome
+}
+
+// PublicOutcome is the outcome string a tenant-visible log may record: `review` for pending (and therefore for held),
+// otherwise the outcome unchanged.
+func (d EnforcementDecision) PublicOutcome() string {
+	if d.Outcome == OutcomePending {
+		return PublicOutcomeReview
+	}
+	return string(d.Outcome)
 }
 
 // ErrEnforcementUnavailable is returned alongside a non-nil error from
@@ -229,9 +265,97 @@ func EvaluateEnforcement(ctx context.Context, tx pgx.Tx, params EnforcementParam
 		// connection/outer transaction is unusable. Fail closed the same
 		// way as any other evaluator failure, rather than propagating a Go
 		// error a caller might mistake for a structural caller bug.
-		return unavailableDecision("savepoint_failed"), nil
+		decision = unavailableDecision("savepoint_failed")
 	}
-	return decision, nil
+	// ADR 0116 s5.1 (L1 / C6): the AML hold check runs UNCONDITIONALLY after the full KYC path, and the two are combined
+	// at the end. It is never skipped by the no-licence `not_required` early return, and the KYC path still runs when a
+	// hold is active, so there is no early-return timing signal.
+	return composeHold(ctx, tx, params, decision)
+}
+
+// evaluateHold is the AML enforcement read. It is a package variable ONLY so a pure unit test with a fake pgx.Tx (which
+// cannot answer a real database round trip) can stand in for it; production code never assigns it (a static test pins
+// that no non-test file does).
+var evaluateHold = aml.EvaluateHold
+
+// amlOperationOf maps a KYC enforcement operation to the AML hold operation it corresponds to.
+func amlOperationOf(op EnforcementOperation) aml.Operation {
+	switch op {
+	case EnforcementDeposit:
+		return aml.OpDeposit
+	case EnforcementWithdrawalHold:
+		return aml.OpWithdrawal
+	case EnforcementWithdrawalPayout:
+		return aml.OpPayout
+	case EnforcementCasinoPlay:
+		return aml.OpCasinoStake
+	case EnforcementSportsbookPlay:
+		return aml.OpSportsbookStake
+	}
+	return ""
+}
+
+// accountReviewMessage is the one internal message of every "account under review" deny.
+const accountReviewMessage = "account under review"
+
+// composeHold combines the KYC decision with the AML hold verdict (ADR 0116 s5.1): deny if either side denies.
+//
+// Public equivalence (C4): a KYC `pending`, an AML `held` and a hold-evaluator error all produce Outcome pending, Allowed
+// false and Code AccountReviewCode - byte-identical at every gate. A KYC `failed` / `unavailable` keeps its own public
+// result (it already denies and the player is told nothing new); the hold is still recorded in the AML-scoped log.
+func composeHold(ctx context.Context, tx pgx.Tx, params EnforcementParams, kycDecision EnforcementDecision) (EnforcementDecision, error) {
+	verdict, hErr := evaluateHold(ctx, tx, params.TenantID, params.PersonID, params.PlayerAccountID, amlOperationOf(params.Operation))
+	if hErr != nil {
+		// Only a HARD error of the evaluator's alert raise (the transaction is unusable): every caller treats a non-nil
+		// error from EvaluateEnforcement as a deny (ADR 0096 s2.2).
+		return EnforcementDecision{}, fmt.Errorf("%w: %w", ErrEnforcementUnavailable, hErr)
+	}
+	kycDecision.Hold = verdict
+	kycDecision.KYCOutcome = kycDecision.Outcome
+	kycDecision.TrueOutcome = kycDecision.Outcome
+	if kycDecision.Outcome == OutcomePending {
+		kycDecision.Code = AccountReviewCode
+		kycDecision.Message = accountReviewMessage
+	}
+	if !verdict.Denied() {
+		return kycDecision, nil
+	}
+	if kycDecision.Outcome == OutcomeFailed || kycDecision.Outcome == OutcomeUnavailable {
+		if verdict.Held {
+			kycDecision.TrueOutcome = OutcomeHeld
+		}
+		return kycDecision, nil
+	}
+	out := kycDecision
+	out.Outcome = OutcomePending
+	out.Allowed = false
+	out.Code = AccountReviewCode
+	out.Message = accountReviewMessage
+	out.MatchedTrigger = ""
+	if verdict.Held {
+		out.TrueOutcome = OutcomeHeld
+	}
+	return out, nil
+}
+
+// RetryableOnHoldEvalFailure re-expresses a decision that was denied ONLY because the AML hold evaluator failed (the KYC side
+// itself passed or was not required, and no definite hold matched) as the existing `unavailable` outcome (ADR 0116 s5.1, ledger-
+// finance condition C1; ADR 0096 N5 / PAY-KYC-UNAVAIL-1). Used at the payout CLAIM and at the sweeper's T2/T12 re-checks only:
+// there a staff-approved withdrawal must stay approved and be retried, never be rejected or escalated on a transient evaluator
+// fault. Every other decision, including a definite hold, is returned unchanged. The hold verdict is kept so the AML-scoped
+// decision log still records the evaluator error.
+func (d EnforcementDecision) RetryableOnHoldEvalFailure() EnforcementDecision {
+	if !d.Hold.EvalFailed || d.Hold.Held {
+		return d
+	}
+	if d.KYCOutcome != OutcomePassed && d.KYCOutcome != OutcomeNotRequired {
+		return d
+	}
+	u := unavailableDecision("evaluator")
+	u.Hold = d.Hold
+	u.KYCOutcome = d.KYCOutcome
+	u.TrueOutcome = OutcomeUnavailable
+	return u
 }
 
 // evaluateEnforcementReads is EvaluateEnforcement's dispatch, unchanged in
@@ -756,8 +880,12 @@ func evaluatePlayTrigger(ctx context.Context, tx pgx.Tx, params EnforcementParam
 // function itself only performs the write, inside whatever transaction
 // the caller passes.
 func RecordDecision(ctx context.Context, tx pgx.Tx, params EnforcementParams, decision EnforcementDecision) error {
+	// ADR 0116 s5.1 C4: the tenant-visible log records the PUBLIC outcome. A KYC `pending` and an AML `held` (and a hold
+	// evaluator error) are both `review`, and a `review` row carries no matched_trigger, so the two are indistinguishable
+	// to a tenant reader. The true outcome and the matched hold go to the AML-scoped log below.
+	publicOutcome := decision.PublicOutcome()
 	var matchedTrigger *string
-	if decision.MatchedTrigger != "" {
+	if decision.MatchedTrigger != "" && publicOutcome != PublicOutcomeReview {
 		matchedTrigger = &decision.MatchedTrigger
 	}
 	if _, err := tx.Exec(ctx, `
@@ -765,9 +893,26 @@ func RecordDecision(ctx context.Context, tx pgx.Tx, params EnforcementParams, de
 			(tenant_id, brand_id, player_account_id, operation, outcome, allowed, matched_trigger, policy_version, correlation_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		params.TenantID, params.BrandID, params.PlayerAccountID, string(params.Operation),
-		string(decision.Outcome), decision.Allowed, matchedTrigger, decision.PolicyVersion, params.CorrelationID,
+		publicOutcome, decision.Allowed, matchedTrigger, decision.PolicyVersion, params.CorrelationID,
 	); err != nil {
 		return fmt.Errorf("kyc: record enforcement decision: %w", err)
+	}
+	if decision.Hold.Denied() {
+		holdOutcome := aml.HoldOutcomeEvalError
+		if decision.Hold.Held {
+			holdOutcome = aml.HoldOutcomeHeld
+		}
+		kycOutcome := string(decision.KYCOutcome)
+		if kycOutcome == "" {
+			kycOutcome = string(decision.Outcome)
+		}
+		if err := aml.RecordEnforcementDecision(ctx, tx, aml.EnforcementRecord{
+			TenantID: params.TenantID, PlayerAccountID: params.PlayerAccountID, PersonID: params.PersonID,
+			Operation: string(params.Operation), KYCOutcome: kycOutcome, HoldOutcome: holdOutcome,
+			PublicOutcome: publicOutcome, Allowed: decision.Allowed, HoldID: decision.Hold.HoldID, CorrelationID: params.CorrelationID,
+		}); err != nil {
+			return err
+		}
 	}
 
 	action := "kyc.enforcement_allowed"
@@ -785,7 +930,7 @@ func RecordDecision(ctx context.Context, tx pgx.Tx, params EnforcementParams, de
 		Outcome:    outcome,
 		Metadata: map[string]any{
 			"operation":      string(params.Operation),
-			"kyc_outcome":    string(decision.Outcome),
+			"kyc_outcome":    publicOutcome,
 			"policy_version": decision.PolicyVersion,
 			"correlation_id": params.CorrelationID.String(),
 		},

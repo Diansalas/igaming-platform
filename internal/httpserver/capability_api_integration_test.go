@@ -167,6 +167,7 @@ func (a *cgAPI) token(subject, tenantID uuid.UUID, role auth.Role) string {
 type cgResp struct {
 	status int
 	body   []byte
+	header http.Header
 }
 
 func (a *cgAPI) do(method, path, token string, body any) cgResp {
@@ -198,7 +199,7 @@ func (a *cgAPI) do(method, path, token string, body any) cgResp {
 	if err != nil {
 		a.t.Fatal(err)
 	}
-	return cgResp{status: resp.StatusCode, body: b}
+	return cgResp{status: resp.StatusCode, body: b, header: resp.Header.Clone()}
 }
 
 func (r cgResp) decode(t *testing.T, v any) {

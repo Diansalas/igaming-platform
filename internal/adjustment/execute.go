@@ -199,6 +199,18 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 	// Step 6 - the §5.2 execution re-checks (exposure, asset, tenant
 	// status, compensation cap), via the same function as submission.
 	refusal := ""
+	// ADR 0116 s5.1: a hold placed after submission still refuses the EXECUTION (a held balance is never seized, zeroed or
+	// refunded by a manual adjustment). Security F4 (option b, reversible default): the refusal is the SAME generic conflict an
+	// ordinary non-pending request gets (ErrNotPending's shape): the decision transaction rolls back, the request stays pending
+	// (it can be decided again once the hold is gone, or expires), no AML token is stored or rendered, and the real reason goes
+	// only to the owner-only AML decision log (Service.Decide, after the rollback).
+	holdCheck, holdErr := walletHoldCheck(ctx, tx, req.TenantID, req.WalletID)
+	if holdErr != nil {
+		return Outcome{}, holdErr
+	}
+	if holdCheck.denied() {
+		return Outcome{}, holdCheck.refusal(requestID)
+	}
 	if !st.Enabled {
 		refusal = "MA014:policy_disabled"
 	} else {
@@ -403,6 +415,7 @@ func (s *Service) Decide(ctx context.Context, target Target, requestID uuid.UUID
 		out, err = DecideInTx(ctx, tx, call, requestID, in)
 		return err
 	})
+	s.recordAMLRefusal(ctx, err)
 	if err == nil && out.Expired {
 		// The expiry transition and its audit are committed; the caller's
 		// decision was not taken.

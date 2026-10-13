@@ -149,6 +149,12 @@ func staffKind(k Kind, sev Severity, platform bool, allowed ...string) KindDef {
 		InTxRaisableByTenant: !platform, RaiseMode: RaiseModePostCommit, AllowedKeys: keys(allowed...)}
 }
 
+// KindAMLHoldEvalFailed is the ADR 0116 s5.1 (migration 0141) Kind: the AML hold evaluator errored or timed out at a
+// money-boundary gate, so the evaluated operation was denied fail-closed. The payload carries the operation name only:
+// no case id, person id, account id or match category (ADR 0116 s5.2). Severity p2 is an ENGINEERING DEFAULT
+// (ALERT-DELIVERY-1 OPEN: nobody is paged).
+const KindAMLHoldEvalFailed Kind = "aml.hold_eval_failed"
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -252,6 +258,12 @@ var kindDefs = map[Kind]KindDef{
 	KindStaffPlatformMFARecoveryUsed:   staffKind(KindStaffPlatformMFARecoveryUsed, SeverityP3, true, "staff_id", "request_id"),
 	KindStaffMFAFailurePattern:         staffKind(KindStaffMFAFailurePattern, SeverityP2, false, "staff_id", "distinct_days", "request_id"),
 	KindStaffPlatformMFAFailurePattern: staffKind(KindStaffPlatformMFAFailurePattern, SeverityP2, true, "staff_id", "distinct_days", "request_id"),
+
+	KindAMLHoldEvalFailed: {
+		Kind: KindAMLHoldEvalFailed, Severity: SeverityP2, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("operation"),
+	},
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,

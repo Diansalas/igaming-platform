@@ -1,0 +1,4 @@
+KILLED: K1 compose: hold error not a deny  [--- FAIL: TestComposeHold_HardEvaluatorErrorIsAnErrorNotAnAllow (0.00s)]
+KILLED: K7 compose: matched trigger leaks  [--- FAIL: TestComposeHold_HeldOverridesPassedAndHidesTheTrigger (0.00s)]
+KILLED: J5 adjustment: wrong operation  [--- FAIL: TestAMLHold_WithdrawalOnlyHoldPlacedAfterSubmission_StillRefusesAtExecution (0.49s)]
+EXIT 0

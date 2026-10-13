@@ -48,6 +48,9 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	// PRH-2 E1 (ADR 0106 section 4.3): the KYC outbox terminal alert, raised in-tx
 	// from the tenant phase-C session by runPhaseC / recordApplyConflict.
 	"internal/kyc/outbox_worker.go:raiseSubmissionFailedTerminal": true,
+	// ADR 0116 S1 (migration 0141): the AML hold-evaluator failure alert, raised in-tx from aml.EvaluateHold inside the
+	// money-boundary gate's own transaction; its result is returned to the gate (never dropped, LF F4).
+	"internal/aml/hold_eval.go:raiseEvalFailed": true,
 }
 
 // evidence/run transaction owners that MUST contain an alerting.InTx call.
@@ -260,6 +263,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 		"raisePayoutDisputeAlert": true, "payoutAlertAfterDispute": true,
 		"raiseReceiptRepairRefusedAlert": true, "raiseReceiptRepairAlertReason": true,
 		"payoutPostM4Cell": true, // ADR 0111 4.8 (F-1): its return value IS the raise
+		"raiseEvalFailed":  true, // ADR 0116 S1: aml.EvaluateHold's in-tx hold-evaluator failure raise
 	}
 	var out []string
 	for _, c := range calls {

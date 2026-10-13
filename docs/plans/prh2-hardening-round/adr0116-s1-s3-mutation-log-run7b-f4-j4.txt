@@ -1,0 +1,2 @@
+SURVIVED: J4 adjustment: wallet resolve error allows
+EXIT 0

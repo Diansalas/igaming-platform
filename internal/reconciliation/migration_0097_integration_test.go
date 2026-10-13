@@ -31,6 +31,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
@@ -74,6 +75,9 @@ func migration0097DirThroughSelf(t *testing.T) string {
 
 func migration0097Scratch(t *testing.T, prefix string) (*db.Pool, string) {
 	t.Helper()
+	// ADR 0116 S1: this scratch schema stops at 0097, before the AML objects (migration 0141) and before the alerts table;
+	// the real hold read fails closed there. The enforcement gate is not under test: stub the read to "no hold".
+	t.Cleanup(kyc.SetHoldEvaluatorForTest(kyc.NoHoldEvaluator))
 	url := scratchdb.New(t, prefix)
 	pool, err := db.Connect(context.Background(), url, 10, 5_000_000_000)
 	if err != nil {

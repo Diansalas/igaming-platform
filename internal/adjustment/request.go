@@ -152,6 +152,12 @@ func SubmitInTx(ctx context.Context, tx pgx.Tx, call Call, id uuid.UUID, in Subm
 	if err := in.validate(); err != nil {
 		return Request{}, err
 	}
+	// ADR 0116 s5.1: a held player's balance cannot be adjusted. Checked BEFORE the proof is attached and the row is written.
+	if h, err := walletHoldCheck(ctx, tx, call.TenantID, in.WalletID); err != nil {
+		return Request{}, err
+	} else if h.denied() {
+		return Request{}, h.refusal(id)
+	}
 	// SIGNED-ACTOR-PROOF (migration 0120): bind the proof to this actor, this
 	// request id and the caller-supplied payload (the same digest the
 	// zz_actor_proof_guard trigger recomputes from the row).
@@ -324,6 +330,9 @@ func (s *Service) Submit(ctx context.Context, target Target, in SubmitInput, met
 		out, err = SubmitInTx(ctx, tx, call, id, in)
 		return err
 	})
+	// The refusal rolled the submission back; the real reason (and the evaluator-failure alert) is recorded now, in its own transaction,
+	// so it is not lost with it (ledger-finance C3) and only the owner-only AML log holds it (security F4).
+	s.recordAMLRefusal(ctx, err)
 	return out, err
 }
 

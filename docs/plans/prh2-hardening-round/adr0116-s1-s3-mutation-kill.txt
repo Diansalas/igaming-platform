@@ -1,0 +1,148 @@
+ADR 0116 S1+S3 mutation pass: kill-or-justify
+==============================================
+
+Driver : docs/plans/prh2-hardening-round/adr0116-s1-s3-mutation-driver.py (105 mutants, each replaces ONE anchor that occurs
+         exactly once; DRY=1 verified every anchor is unique).
+Logs   : adr0116-s1-s3-mutation-log-run1.txt          all 105 mutants, aml-only lane (migration mutants rebuild the private
+                                                      DB from the mutated file first)
+         adr0116-s1-s3-mutation-log-run2-gates.txt    the 11 evaluator / composition / adjustment-gate survivors of run1, re-run
+                                                      in the GATES lane (aml + kyc + adjustment + withdrawal + casino +
+                                                      sportsbook + payments hold tests)
+         adr0116-s1-s3-mutation-log-run3-survivors.txt  the 31 remaining survivors of run1 after the direct-guard tests of
+                                                      internal/aml/guards_integration_test.go were added
+
+Result : 105 mutants. 93 KILLED, 12 SURVIVED and are JUSTIFIED below (each is redundant by construction or an
+         equivalent mutant; none changes an observable outcome through any reachable path). 0 unexplained survivors.
+
+How the 42 survivors of run1 were resolved
+------------------------------------------
+- 11 (E1-E8, K1, K7, J3): LANE problem, not a gap. The evaluator, composition and adjustment gate are exercised by the kyc /
+  adjustment / withdrawal / casino / sportsbook / payments hold tests, which the aml-only lane does not run. Re-run in the
+  GATES lane: all 11 KILLED.
+- 19 (A2, A4, A5, A11, A12, A15, H1, H12, H15, C1, C2, C3, C9, C17, C18, C19, C20, C21, C25): real gaps in the SECOND layer
+  (table triggers and primitives that the definer functions normally pre-empt). Closed by new tests, all KILLED on re-run:
+    TestQuorum_CountsDistinctInForceOfTheOwnerScope (A2 two accounts of one Person; A4 expired grant; A5 other-scope grant)
+    TestAuthorize_DirectCalls (A11 plain platform session; A12 malformed operation name)
+    TestScope_PlatformActingReachesTenantOwnedCases (A15)
+    TestGuards_HoldMatchIgnoresLiftedHolds (H1)
+    TestGuards_DirectInserts (H12, H15, C1, C2, C3, C19, C20, C21, C25: owner-level INSERTs with a consistent forged session)
+    TestGuards_FourEyesTriggerDirect (C9, plus the proposer-self-approval case)
+    TestGuards_LiftNeedsAMatchingApprovalEvent (C17, C18)
+  Also added during the pass (not a survivor of run1): TestPlaceHold_SuspendedOfficerDoesNotCountTowardQuorum (A5b, KILLED).
+- 12: justified survivors, below.
+
+Justified survivors (12)
+------------------------
+A9  authorize: grantee scope not matched (AND g.grantee_scope = v_grant_scope removed).
+    EQUIVALENT. The predicate also pins g.grantee_staff_id = v.actor, and a staff id exists in exactly one scope (a tenant staff
+    row or a platform staff row), so a grant of that staff id always carries that staff's own scope. The scope term cannot
+    exclude a row the staff-id term keeps. (The same predicate in aml_officer_quorum is NOT redundant: it counts other staff;
+    A5 pins it.)
+A13 authorize: personless actor admitted.
+    REDUNDANT BY CONSTRUCTION. An in-force aml_officer grant requires a K1 request that captured grantee_person_id (0112, R-4
+    distinct-Person rule), and the grant is joined through that request in the quorum. I found no path to a grant for a staff
+    row with a NULL person_id, so the actor check cannot be reached with one. Kept as a fail-closed backstop.
+H4  aml_hold_active ignores the tenant.
+    EQUIVALENT under FORCE ROW LEVEL SECURITY: the function runs as the table owner, whose only policy
+    (aml_owner_session) restricts rows to aml_session_tenant(), and the function already refuses p_tenant <> session tenant
+    (AM026, killed mutant H9). The tenant term cannot narrow the result further.
+H19 lift: a confirmed_sanctions hold is liftable through the plain path (the function-level refusal removed).
+    EQUIVALENT in effect. The plain path then inserts a lift without an approval event, and aml_hold_lifts_guard refuses it with
+    the same SQLSTATE (AM006; mutants H17/C18 killed). Two layers, one observable outcome.
+C10 approval: the proposer's own ACTOR may approve (actor-id check removed).
+    EQUIVALENT. The Person check that follows (C11, killed) refuses with the same SQLSTATE (AM011); an actor row has exactly one
+    person, so actor equality implies Person equality. The test TestGuards_FourEyesTriggerDirect/self approval still pins the
+    outcome.
+C13 approval: kind binding removed from the content-binding comparison.
+    EQUIVALENT. The same comparison also compares subject_hold_id and external_filing_reference, and the table shape CHECKs make the
+    proposal kind a function of those two columns ((kind = lift_hold) = (subject_hold_id IS NOT NULL), (kind = close_sar_filed) =
+    (external_filing_reference IS NOT NULL)); so any kind mismatch is also a mismatch of one of the other terms.
+C15 approval: an already-lifted hold re-approvable (the trigger's AM006 backstop removed).
+    UNREACHABLE. The earlier invalidation check ("a hold changed since the proposal", which counts a LIFT after the proposal as a
+    change) fires first with AM012; TestGuards_SecondApprovalOfAnAlreadyLiftedHold pins that the second approval is refused as
+    stale and never surfaces a unique violation from aml_hold_lifts.
+C16 approval: from_status unchecked for closures.
+    UNREACHABLE. A close proposal is only accepted from sar_decision_pending, the approval must be the event immediately after it,
+    so the case status cannot differ at approval time, and the shape CHECK pins from_status = 'sar_decision_pending' for close kinds.
+C23 CAS: stale expected sequence allowed in aml_case_lock_for_write.
+    EQUIVALENT in effect. The events trigger independently requires seq = last + 1 and raises the same SQLSTATE (AM012); mutant C1
+    (trigger check removed) is KILLED, and the function CAS is the earlier of two identical refusals.
+C27 queue limit unbounded (SQL side).
+    REDUNDANT. internal/aml.Service.CaseQueue refuses limits outside 1..100 before any SQL runs (ErrInvalidInput), and the SQL
+    function is revoked from every role except through the proof-bound API. Kept as a backstop for a future caller.
+L3  lint: IBAN check off.
+    REDUNDANT BY CONSTRUCTION. Every IBAN contains a run of >= 9 digits (separators and letters aside, the shortest national
+    BBANs still contain one) and the digit-run rule (L8, killed) refuses it with the same error.
+L9  lint: PAN (Luhn) check off.
+    REDUNDANT BY CONSTRUCTION. A 13-19 digit card number always contains a run of >= 9 digits, which the digit-run rule refuses
+    with the same error. The Luhn rule documents intent and refuses digit groups the run rule would split with letters.
+
+Caveats (stated, not hidden)
+----------------------------
+- The mutants are hand-written anchors, not an exhaustive mutation engine. Branches inside the Go service (service.go, holds.go,
+  cases.go argument mapping, the payload-digest mirrors) were exercised by the integration and adversarial tests (a mismatched
+  digest fails the proof) but were not individually mutated here.
+CORRECTION OF THE FIRST-ROUND GATES-LANE RESULT (stated plainly)
+-----------------------------------------------------------------
+The first "gates lane" re-run of the 11 evaluator / composition / adjustment-gate survivors (E1-E8, K1, K7, J3) reported all of them
+KILLED. That result was INVALID: the lane joined its commands without quoting, so the `-run 'TestHold|...'` pipe was interpreted by
+the shell and the lane failed for every mutant, which the driver counted as a kill. It is withdrawn. The driver now quotes the lane
+(shlex), flags any infrastructure failure (database recovery, no space, build cache missing) as INVALID(infra) instead of a kill, and
+prints the last output line for any kill without a failing test name. The lane was re-run properly (run2-gates, run6) and exposed
+seven REAL gaps (E2, E4, E6, K1, K7, J3, J5), now closed by tests. Counts in the round-1 section above (93 killed / 12 justified)
+are superseded by the totals at the end of this file.
+
+REVIEW ROUND 1 (security F1-F8, ledger-finance C1 / C3): mutation re-run for the NEW logic and the re-anchored mutants
+------------------------------------------------------------------------------------------------------------------------
+Logs : adr0116-s1-s3-mutation-log-run4-review-round.txt  N1-N34 plus re-anchored A7, H10, H11, J1, J5 (aml / payments / adjustment
+       lanes; its J1, J5, N26, N32 lines are infrastructure- or compile-invalidated and were re-run in run2-gates)
+       adr0116-s1-s3-mutation-log-run2-gates.txt          the gates-lane re-run (E1-E8, K1, K7, K10, J1, J3, J5, N26, N32)
+       adr0116-s1-s3-mutation-log-run6-final-survivors.txt K1, K7, J5 after the unit / execution tests were added
+Retired: A5b and C14 (superseded by the N-series).
+Result : 39 review-round mutants (34 new + 5 re-anchored): 35 KILLED, 4 JUSTIFIED (N5, N9, N28, N33). Plus E1-E8, K1, K7, K10, J3
+         re-run in the correct lane: all KILLED after the new tests below.
+New tests that closed real gaps: TestEligibility_RelinkedOfficerIsNoOfficerAndNoQuorum (N3, N6), TestConflictOfInterest_NullPersonIsRefused
+(N11), TestEvaluateHold_InvalidArgumentsAreADeny (E2), TestEvaluateHold_AlertHardErrorPropagates (E1, E4), TestEvaluateHold_TimeoutIsBounded
+(E6), TestComposeHold_* and TestRetryableOnHoldEvalFailure (K1, K7), TestAMLHold_UnresolvedWallet_IsNotReportedAsUnderReview (J3),
+TestAMLHold_WithdrawalOnlyHoldPlacedAfterSubmission_StillRefusesAtExecution (J5), TestAMLHold_PayoutClaim_KYCFailedPlusEvaluatorFailure_StillDenied (N30).
+Justified survivors:
+N5  platform grantee: the platform_admin role term of aml_platform_grantee_live removed.
+    UNREACHABLE: staff_users refuses a platform (tenant_id NULL) row in any other role with a CHECK (23514); recorded by
+    TestEligibility_PlatformOfficerDemotedToAnotherRole. The term stays as a backstop in case that CHECK is ever relaxed.
+N9  authorize: gr.grantee_person_id = v.person_id removed.
+    EQUIVALENT: aml_grant_eligible(...) is called with the same gr.grantee_person_id and compares it with the staff row's LIVE
+    person (N3 / N6 are killed), and v.person_id is that same live person; the explicit comparison is redundant by construction.
+N28 aml_person_lock a no-op.
+    CONCURRENCY ONLY: the lock orders a hold change that commits concurrently with an approval; the interleaving cannot be forced in
+    a single-session test. Recorded as a documented control, NOT claimed as tested.
+N33 adjustment submission evaluates with the alert raised in the (rolled-back) transaction instead of deferring it.
+    EQUIVALENT in outcome: the in-transaction alert rolls back and the typed error still makes Service.Submit raise the same alert
+    after the rollback (the alert count is 1 either way). The deferral only avoids a wasted in-transaction insert and keeps a hard
+    alert error from aborting the submission before the refusal is returned.
+
+TOTALS (all rounds, with the corrections above): 105 + 39 mutants, plus the corrected gates-lane re-run; every survivor is listed
+and justified (round-1 list of 12 unchanged, minus none, plus N5, N9, N28, N33). The pre-flight / down-refusal branches remain
+un-mutated (below).
+
+- The pre-flight (AM098) and down-refusal (AM099) branches of 0140-0142 were NOT mutated in this pass; they are covered by
+  TestMigration0140_Preflight, TestMigration0141_Preflight, TestMigration0142_Preflight and
+  TestMigrationDowns_RefuseWhileAMLHistoryExists (plant-and-refuse tests), but a mutation of those branches is a residual.
+
+F4 OPTION (b) (generic conflict for AML adjustment refusals)
+-----------------------------------------------------------
+Logs: adr0116-s1-s3-mutation-log-run7-f4.txt, adr0116-s1-s3-mutation-log-run7b-f4-j4.txt. The adjustment hold-check code was refactored
+(holdCheck / amlRefusal), so J1, J3, J4, J5 and N32 were re-anchored and J2, N33, N34 retired. Added F4a-F4e (classification, execution
+rendering, submission rendering, real-reason record, execution gate). Result: F4a-F4e, J1, J3, J5, N32 KILLED (HTTP byte-identity test
+and the adjustment tests); an invalid compile-error kill of J4 was caught and re-run.
+J4 (wallet-resolve DB error treated as no hold) SURVIVED, justified: the failing SELECT runs inside the refusing transaction, which
+Postgres has then aborted, so every later statement of the same submission / decision fails; the fail-closed result is the aborted
+transaction, not the verdict. Not separately testable without injecting a database fault mid-statement.
+
+RE-REVIEW CONDITIONS (C2, C3, 4, 5, 7)
+--------------------------------------
+Logs: adr0116-s1-s3-mutation-log-run8-rereview.txt (R1-R4, R7 killed; its R5 line was a false survivor: the test derived its bound from the
+constant under test, fixed to an absolute 5.5 s), run8c (R5, R6 killed after the fix; R6's first kill was a compile error and the mutant
+was repaired), run8e (N32 re-anchored, killed). All seven mutants R1-R7 and N32 end KILLED; none survives.
+R1 runtime keeps USAGE on the AML sequence (catalogue test), R2/R3 table guards do not force the change mark (owner-level insert with an
+explicit change_seq), R4 READ COMMITTED not asserted (REPEATABLE READ / SERIALIZABLE refused with AM004), R5 side writes unbounded,
+R6 side-write failure not logged, R7 tenant-visible evaluator reason names the hold.

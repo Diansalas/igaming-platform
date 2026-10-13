@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
@@ -145,6 +146,10 @@ func m132Diff(a, b string) string {
 func TestMigration0132_PreflightRefusesEveryDirtyClass_ThenUpDownUp(t *testing.T) {
 	ctx := context.Background()
 	pool := m132Scratch(t, "m0132p_")
+	// ADR 0116 S1: this scratch database is migrated to 0131, BEFORE the AML objects exist (migration 0141), so the real
+	// hold read (which fails closed when aml_hold_active() is missing) cannot run here. The data below is built through the
+	// Go writers; the AML hold read is stubbed to "no hold" for this test only.
+	defer kyc.SetHoldEvaluatorForTest(kyc.NoHoldEvaluator)()
 	if _, err := pool.MigrateUp(ctx, m132Dir(t, migration0132Version-1)); err != nil {
 		t.Fatal(err)
 	}

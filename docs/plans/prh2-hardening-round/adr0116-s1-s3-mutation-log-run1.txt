@@ -1,0 +1,106 @@
+KILLED: A1 quorum threshold 1  [--- FAIL: TestPlaceHold_RequiresQuorum_LiftDoesNot (0.36s)]
+SURVIVED: A2 quorum counts grants not Persons
+KILLED: A3 quorum counts revoked grants  [--- FAIL: TestPlaceHold_RequiresQuorum_LiftDoesNot (0.36s)]
+SURVIVED: A4 quorum counts expired grants
+SURVIVED: A5 quorum ignores the grantee scope
+KILLED: A5b quorum counts suspended grantees  [--- FAIL: TestPlaceHold_SuspendedOfficerDoesNotCountTowardQuorum (0.27s)]
+KILLED: A6 authorize: session-tenant mismatch allowed  [--- FAIL: TestRuntime_OfficerAPI_RequiresValidSingleUseBoundProof (0.24s)]
+KILLED: A7 authorize: SQL role re-check dropped  [--- FAIL: TestRuntime_OfficerAPI_RequiresValidSingleUseBoundProof (0.16s)]
+KILLED: A8 authorize: revoked grant accepted  [--- FAIL: TestPlaceHold_RequiresQuorum_LiftDoesNot (0.40s)]
+SURVIVED: A9 authorize: grantee scope not matched
+KILLED: A10 authorize: proof never consumed  [--- FAIL: TestRuntime_OfficerAPI_RequiresValidSingleUseBoundProof (0.17s)]
+SURVIVED: A11 authorize: platform (non-acting) session admitted
+SURVIVED: A12 authorize: operation name unchecked
+SURVIVED: A13 authorize: personless actor admitted
+KILLED: A14 scope compat: tenant actor reaches platform rows  [--- FAIL: TestCase_Isolation_ForeignTenantAndOwnerScope (0.48s)]
+SURVIVED: A15 scope compat: acting actor limited
+KILLED: A16 row scope assertion off  [--- FAIL: TestCase_Isolation_ForeignTenantAndOwnerScope (0.49s)]
+SURVIVED: H1 match ignores lifts
+KILLED: H2 active ignores lifts  [--- FAIL: TestFourEyes_SanctionsHoldLift (0.51s)]
+KILLED: H3 active ignores the person  [--- FAIL: TestHoldActive_ScopeOperationMatrix (0.19s)]
+SURVIVED: H4 active ignores the tenant
+KILLED: H5 active: account-scoped hold applies to every account  [--- FAIL: TestHoldActive_AccountVersusPersonLevel (0.19s)]
+KILLED: H6 active: withdrawal-only hold gates play  [--- FAIL: TestHoldActive_ScopeOperationMatrix (0.21s)]
+KILLED: H7 active: withdrawal-only hold does not gate payout  [--- FAIL: TestHoldActive_ScopeOperationMatrix (0.23s)]
+KILLED: H8 active: withdrawal-only hold does not gate adjustments  [--- FAIL: TestHoldActive_ScopeOperationMatrix (0.25s)]
+KILLED: H9 active: session tenant unchecked  [--- FAIL: TestRuntime_HoldRead_SessionTenantBound_AndDisclosesOwnTenantOnly (0.12s)]
+KILLED: H10 place: quorum not asserted  [--- FAIL: TestPlaceHold_RequiresQuorum_LiftDoesNot (0.34s)]
+KILLED: H11 place: owner scope not enforced  [--- FAIL: TestCase_Isolation_ForeignTenantAndOwnerScope (0.47s)]
+SURVIVED: H12 guard: owner scope not forced
+KILLED: H13 guard: C2 account/person binding off  [--- FAIL: TestPlaceHold_C2_PersonBinding (0.19s)]
+KILLED: H14 guard: C2 person-without-account off  [--- FAIL: TestPlaceHold_C2_PersonBinding (0.27s)]
+SURVIVED: H15 guard: placing actor columns unverified
+KILLED: H16 lift guard: other owner scope may lift  [--- FAIL: TestMigrations0140to0142_UpDownUp_WholeSchema (4.42s)]
+KILLED: H17 lift guard: sanctions lift without approval  [--- FAIL: TestMigrations0140to0142_UpDownUp_WholeSchema (5.11s)]
+KILLED: H18 lift guard: approval accepted for manual hold  [--- FAIL: TestMigrations0140to0142_UpDownUp_WholeSchema (4.09s)]
+SURVIVED: H19 lift: sanctions hold liftable through the plain path
+KILLED: H20 record decision: account/person pairing unchecked  [--- FAIL: TestRuntime_HoldRead_SessionTenantBound_AndDisclosesOwnTenantOnly (0.16s)]
+KILLED: H21 record decision: session tenant unchecked  [--- FAIL: TestRuntime_HoldRead_SessionTenantBound_AndDisclosesOwnTenantOnly (0.16s)]
+KILLED: H22 append-only deny: update allowed  [--- FAIL: TestAppendOnly_BindsTheOwner (0.50s)]
+KILLED: H23 runtime lacks EXECUTE on aml_hold_active  [--- FAIL: TestRuntime_HoldRead_SessionTenantBound_AndDisclosesOwnTenantOnly (0.16s)]
+SURVIVED: C1 events: sequence gap allowed
+SURVIVED: C2 events: reopen of opened case allowed
+SURVIVED: C3 transition: from_status unchecked
+KILLED: C4 transition: SAR closure without approval  [--- FAIL: TestFourEyes_SARClosure_FiledAndNotFiled (0.37s)]
+KILLED: C5 transition: illegal edge allowed  [--- FAIL: TestCase_Lifecycle_StateMachine (0.50s)]
+KILLED: C6 transition: SAR-flagged case closes as no action  [--- FAIL: TestCase_SARFlag_IsIrreversible_AndForbidsNoAction (0.25s)]
+KILLED: C7 sar flag: reversible/repeatable  [--- FAIL: TestCase_SARFlag_IsIrreversible_AndForbidsNoAction (0.23s)]
+KILLED: C8 proposal: subject may propose  [--- FAIL: TestFourEyes_SamePerson_SubjectPerson_Refused (0.69s)]
+SURVIVED: C9 proposal: content hash unchecked
+SURVIVED: C10 approval: proposer may approve (actor)
+KILLED: C11 approval: same Person may approve  [--- FAIL: TestFourEyes_SamePerson_SubjectPerson_Refused (0.51s)]
+KILLED: C12 approval: subject may approve  [--- FAIL: TestFourEyes_SamePerson_SubjectPerson_Refused (0.67s)]
+SURVIVED: C13 approval: content binding unchecked
+KILLED: C14 approval: hold change does not invalidate  [--- FAIL: TestFourEyes_SanctionsHoldLift (0.61s)]
+SURVIVED: C15 approval: already-lifted hold re-approvable
+SURVIVED: C16 approval: from_status unchecked for closures
+SURVIVED: C17 lift guard 0142: approval event not verified
+SURVIVED: C18 lift guard 0142: sanctions lift without approval
+SURVIVED: C19 note: owner scope of note not the case
+SURVIVED: C20 event: owner scope of event not the case
+SURVIVED: C21 case: owner scope not forced
+KILLED: C22 case link: cross-person alert allowed  [--- FAIL: TestAlerts_RaiseAndOpenAlertCase (0.30s)]
+SURVIVED: C23 CAS: stale expected seq allowed
+KILLED: C24 open: owner scope not enforced  [--- FAIL: TestCase_Isolation_ForeignTenantAndOwnerScope (0.62s)]
+SURVIVED: C25 IP header regex loosened
+KILLED: C26 request-id regex loosened  [--- FAIL: TestRuntime_NoAccessToAMLTables_EvenWithForgedOfficerGUCs (0.23s)]
+SURVIVED: C27 queue limit unbounded
+KILLED: L1 lint: email check off  [--- FAIL: TestLintNote_Corpus (0.00s)]
+KILLED: L2 lint: obfuscated email check off  [--- FAIL: TestLintNote_Corpus (0.00s)]
+SURVIVED: L3 lint: IBAN check off
+KILLED: L4 lint: wallet check off  [--- FAIL: TestLintNote_Corpus (0.00s)]
+KILLED: L5 lint: control characters allowed  [--- FAIL: TestLintNote_Corpus (0.01s)]
+KILLED: L6 lint: format characters allowed  [--- FAIL: TestLintNote_Corpus (0.00s)]
+KILLED: L7 lint: size limit off  [--- FAIL: TestLintNote_Corpus (0.01s)]
+KILLED: L8 lint: digit run disabled  [--- FAIL: TestLintNote_Corpus (0.00s)]
+SURVIVED: L9 lint: PAN check disabled
+KILLED: L10 lint: Luhn doubling off  [--- FAIL: TestLintFilingReference (0.00s)]
+KILLED: L11 lint: PAN length lower bound 20  [--- FAIL: TestLintFilingReference (0.00s)]
+KILLED: L12 lint: empty note accepted
+KILLED: L13 lint: invalid UTF-8 accepted
+KILLED: L14 lint: separators break digit runs  [--- FAIL: TestLintNote_Corpus (0.00s)]
+KILLED: L15 lint: filing reference pattern open  [--- FAIL: TestLintFilingReference (0.00s)]
+SURVIVED: E1 eval: probe error is not a deny
+SURVIVED: E2 eval: invalid argument allowed
+SURVIVED: E3 eval: held verdict dropped
+SURVIVED: E4 eval: alert result dropped
+SURVIVED: E5 eval: probe without savepoint rollback
+SURVIVED: E6 eval: timeout 0 (unbounded)
+SURVIVED: E7 eval: probe against the wrong operation
+SURVIVED: E8 eval: wrong person
+SURVIVED: K1 compose: hold error not a deny
+KILLED: K2 compose: held does not deny  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.35s)]
+KILLED: K3 compose: pending code leaks  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.47s)]
+KILLED: K4 compose: held output code leaks  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.36s)]
+KILLED: K5 compose: held output still allowed  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.34s)]
+KILLED: K6 compose: true outcome not recorded  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.68s)]
+SURVIVED: K7 compose: matched trigger leaks
+KILLED: K8 compose: failed KYC loses its result  [--- FAIL: TestHold_KYCFailedKeepsItsOwnPublicResult_ButIsRecorded (0.22s)]
+KILLED: K9 op map: sportsbook ungated  [--- FAIL: TestHoldEquivalence_PendingHeldEvalError_AllFiveOperations (0.53s)]
+KILLED: K10 op map: payout maps to withdrawal  [--- FAIL: TestHold_EvalFailedAlert_PayloadIsOperationOnly (0.08s)]
+KILLED: J1 adjustment: submission not gated
+KILLED: J2 adjustment: execution not gated
+SURVIVED: J3 adjustment: wallet unresolved treated as held
+KILLED: J4 adjustment: resolve error allows
+KILLED: J5 adjustment: wrong operation  [--- FAIL: TestAMLHold_RefusesManualAdjustment_AtSubmission (0.87s)]
+EXIT 0

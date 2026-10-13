@@ -314,7 +314,10 @@ var staticAllowed = map[string]bool{
 	filepath.Join("internal", "rg"): true,
 	// ADR 0112 slice 3: the launch authorisation service signs request / cancel / approve /
 	// reject / suspend proofs for the authenticated principal (security review mandatory).
-	filepath.Join("internal", "launchgov"):                  true,
+	filepath.Join("internal", "launchgov"): true,
+	// ADR 0116 S3 (migrations 0140-0142): the AML officer service signs hold / case / four-eyes proofs for the authenticated
+	// officer (security review mandatory). The fixture package builds officers through the K1 flow and signs nothing itself.
+	filepath.Join("internal", "aml"):                        true,
 	filepath.Join("internal", "testsupport", "launchfix"):   true,
 	filepath.Join("internal", "testsupport", "launchdrive"): true,
 	filepath.Join("internal", "adjustment"):                 true,
