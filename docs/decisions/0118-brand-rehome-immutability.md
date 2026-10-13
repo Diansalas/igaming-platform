@@ -47,8 +47,11 @@ What partially limits it today (verified, section 3): every child table holding 
 request, a deposit intent, a bet, a launch session, a bonus grant, a KYC document, ...) cannot be re-homed: the child
 FK fails at end of statement. The attack therefore works on players whose only brand-bound rows are
 `player_accounts`, `wallets` and `kyc_verifications`, and whose ledger history comes from postings that leave no
-brand-pinned child (for example a governed or raw `manual_adjustment`, or a hold planted by a forged leg - ADR 0113
-residual 9.2/9.5). That is a real population, not a theoretical one.
+brand-pinned child: ordinary cash from a `manual_adjustment` (ADR 0113 residual 9.5) or other postings without a
+pinned child row, and a hold balance that no `withdrawal_requests` row references (`withdrawal_requests` rows are
+never deleted, 0131, so a player with any request, even terminal, is NOT re-homable today: `23503`). The exact
+fixture security executed is in their slices 2-3 review record; this ADR did not re-execute it. The ordinary-cash
+population alone makes this a real hole, not a theoretical one.
 
 ### 1.1 Same-class finding found while verifying (NOT executed; analytically derived)
 
@@ -232,9 +235,11 @@ Integration tests run as `igaming_runtime` unless stated. Each asserts the exact
 - **T1 adversarial CTE (the C2 shape, both orders):** `WITH pa AS (UPDATE player_accounts SET brand_id=B2 ...) UPDATE
   wallets SET brand_id=B2 ...` and the reverse nesting. Expect class `BR` (`BR001` or `BR002`, whichever row fires
   first; assert the class and assert both tables unchanged).
-- **T2 the motivating scenario:** player with a withdrawal hold and no brand-pinned child row (hold built through the
-  0132 legal path helper, then the request driven terminal so only the ledger remains, or the ADR 0113 slice-2
-  stranded-hold fixture); B2 closed after `LA025` evaluated; attempt T1 into B2: refused; `LA025` arithmetic for B1
+- **T2 the motivating scenario:** player with a non-zero `player_withdrawal_hold` balance and NO brand-pinned child
+  row. Note: any `withdrawal_requests` row, even terminal, already makes the re-home fail with `23503` (its brand is
+  pinned and FK-bound), so the fixture must be the stranded-hold shape security used (the ADR 0113 slice-2 stranded
+  hold, owner tamper-plant pattern with `wdpath.OnPersistentDatabase` CI rule); a second case with a terminal request
+  asserts `23503` before 0136 and class `BR` after. B2 closed after `LA025` evaluated; attempt T1 into B2: refused; `LA025` arithmetic for B1
   unchanged; closing B1 still refused with `LA025`.
 - **T3 single-table updates:** each pinned column of each table, alone. `player_accounts.brand_id` alone fails
   on its own trigger (`BR001`) before the FK would.
