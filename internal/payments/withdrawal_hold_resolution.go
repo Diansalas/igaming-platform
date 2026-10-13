@@ -453,6 +453,10 @@ var testHookHoldResolutionAfterLocks func(ctx context.Context, id uuid.UUID)
 // a grant revocation against a real execution (the revoke must wait for the commit).
 var testHookHoldResolutionAfterShareLocks func(ctx context.Context, id uuid.UUID)
 
+// testHookHoldResolutionBeforeShareLocks, when set by an in-package test, runs right
+// before the step 5 staff/grant FOR SHARE statements (ADR 0119 S4b re-assertion test).
+var testHookHoldResolutionBeforeShareLocks func(ctx context.Context, id uuid.UUID)
+
 // Decide opens the caller's acting session and decides.
 func (s *WithdrawalHoldResolutionService) Decide(ctx context.Context, target ResolutionTarget, id uuid.UUID, in HoldResolutionDecisionInput, meta ResolutionMeta) (HoldResolutionOutcome, error) {
 	var out HoldResolutionOutcome
@@ -578,6 +582,9 @@ func (s *WithdrawalHoldResolutionService) decideInTx(ctx context.Context, tx pgx
 			"counted": st.Counted, "required": st.Required, "requester_valid": st.RequesterValid,
 			"preconditions_hold": holdPreconditionRefusal(ctx, tx, wr, tenantStatus, brandStatus) == "",
 		})
+	}
+	if testHookHoldResolutionBeforeShareLocks != nil {
+		testHookHoldResolutionBeforeShareLocks(ctx, id)
 	}
 	if err := lockHoldResolutionStaffAndGrants(ctx, tx, res, call); err != nil {
 		return HoldResolutionOutcome{}, err

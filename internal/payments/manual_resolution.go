@@ -754,6 +754,11 @@ func readResolutionExecStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID) (res
 // TestK3_Y07 races a revoke and a staff suspension against a real execution.
 var testHookResolutionAfterShareLocks func(ctx context.Context, id uuid.UUID)
 
+// testHookResolutionBeforeShareLocks, when set by an in-package test, runs right
+// before the A8 staff/grant FOR SHARE statements of a final approval (ADR 0119
+// S4b: the re-assertion test commits a suspension of the actor in that window).
+var testHookResolutionBeforeShareLocks func(ctx context.Context, id uuid.UUID)
+
 // testHookResolutionBeforePost, when set by an in-package test, runs after the
 // resolution is 'executing' and the attempt is updated, just before the
 // withdrawal posting - C-13's failure-injection point.
@@ -873,6 +878,9 @@ func (s *ManualResolutionService) decideInTx(ctx context.Context, tx pgx.Tx, cal
 	// Step 6: L1 continued - staff rows (requester + candidate approvers) then
 	// their grants IN FORCE AT now(), both FOR SHARE, ascending id. Recount under
 	// the locks.
+	if testHookResolutionBeforeShareLocks != nil {
+		testHookResolutionBeforeShareLocks(ctx, id)
+	}
 	if err := lockResolutionStaffAndGrants(ctx, tx, res, call); err != nil {
 		return ResolutionOutcome{}, err
 	}
