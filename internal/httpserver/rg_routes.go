@@ -29,9 +29,9 @@ func registerRGRoutes(mux *http.ServeMux, deps Deps) {
 	// RoleTenantAdmin for read) is a tenant-scoped role; see ADR 0026 §12
 	// for why no platform-scoped staff-initiated path exists yet.
 	mux.Handle("POST /v1/admin/rg/restrictions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermRGRestrictionWrite)(newCreateStaffRestrictionHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermRGRestrictionWrite)(newCreateStaffRestrictionHandler(deps)))))
 	mux.Handle("GET /v1/admin/rg/restrictions",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermRGRestrictionRead)(newListRestrictionsForAccountHandler(deps)))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermRGRestrictionRead)(newListRestrictionsForAccountHandler(deps)))))
 
 	// ADR 0115 slice S2: RG limit, time-out and configuration write APIs.
 	registerRGLimitRoutes(mux, deps)

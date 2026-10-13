@@ -30,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	tenantctx "github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // newSettlementTestServer mirrors newSportsbookTestServer, with the extra
@@ -842,25 +843,43 @@ func TestSettlementSimulate_DeactivatedActor_403AndAuditRecorded(t *testing.T) {
 		t.Fatalf("failed to suspend staff user: %v", err)
 	}
 
+	// ADR 0119 S4a: the suspension now ends the session on its next request - the staff chain's liveness check
+	// refuses the still-valid token (401 session_revoked) before the handler runs, so no settlement_rejected row is
+	// written for the HTTP attempt (the refusal is logged and counted by the chain, not audited).
 	resp := postJSON(t, srv, simulatePath(bet.ID), tokens.AccessToken,
 		map[string]any{"event_type": "void", "void_reason": "market_cancelled"})
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 for a deactivated staff actor, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 session_revoked for a deactivated staff actor, got %d", resp.StatusCode)
 	}
-
-	var count int
-	var rejectionCode string
-	err = pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT count(*), COALESCE(MAX(metadata->>'rejection_code'), '')
-			   FROM audit_log
-			  WHERE tenant_id = $1 AND target_type = 'sportsbook_bet' AND target_id = $2
-			    AND action = 'sportsbook_bet.settlement_rejected'`,
-			tenant.ID, bet.ID).Scan(&count, &rejectionCode)
-	})
-	if err != nil {
-		t.Fatalf("failed to read rejection audit row: %v", err)
+	rejections := func() (count int, rejectionCode string) {
+		t.Helper()
+		if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT count(*), COALESCE(MAX(metadata->>'rejection_code'), '')
+				   FROM audit_log
+				  WHERE tenant_id = $1 AND target_type = 'sportsbook_bet' AND target_id = $2
+				    AND action = 'sportsbook_bet.settlement_rejected'`,
+				tenant.ID, bet.ID).Scan(&count, &rejectionCode)
+		}); err != nil {
+			t.Fatalf("failed to read rejection audit row: %v", err)
+		}
+		return count, rejectionCode
 	}
+	if n, _ := rejections(); n != 0 {
+		t.Fatalf("the chain refused the request before the handler; want no settlement_rejected row, got %d", n)
+	}
+	// Security review P3-2's in-handler check is kept as defence in depth (it still matters inside the R13 window:
+	// a request admitted just before the suspension committed). Pinned behind the chain with the same claims.
+	deps := Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), DB: pool, AuthIssuer: issuer, StaffMFA: testStaffMFA(),
+		ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour, SportsbookEnabled: true,
+		SportsbookSettlementSimulationEnabled: true, PersonResolver: identityresolution.NewMockPersonResolver()}
+	rec := behindChain(t, newSimulateSettlementEventHandler(deps), http.MethodPost, simulatePath(bet.ID), map[string]string{"id": bet.ID},
+		tenantctx.Context{TenantID: tenant.ID, Role: string(auth.RoleRiskManager), PrincipalType: string(auth.PrincipalStaff), Subject: staff.ID.String()},
+		map[string]any{"event_type": "void", "void_reason": "market_cancelled"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("behind the chain: expected 403 for a deactivated staff actor, got %d %s", rec.Code, rec.Body)
+	}
+	count, rejectionCode := rejections()
 	if count != 1 {
 		t.Fatalf("expected exactly one settlement_rejected audit row, got %d", count)
 	}

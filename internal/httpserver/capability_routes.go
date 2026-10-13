@@ -36,23 +36,20 @@ import (
 )
 
 func registerCapabilityRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests",
-		staff(auth.RequirePermission(auth.PermCapabilityGrantRequest)(newCreateCapabilityGrantRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantRequest)(newCreateCapabilityGrantRequestHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/capability-grants/requests",
-		staff(auth.RequirePermission(auth.PermCapabilityGrantRead)(newListCapabilityGrantRequestsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantRead)(newListCapabilityGrantRequestsHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/cancel",
-		staff(auth.RequirePermission(auth.PermCapabilityGrantRequest)(newCancelCapabilityGrantRequestHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantRequest)(newCancelCapabilityGrantRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/approve",
-		staff(auth.RequirePermission(auth.PermCapabilityGrantApprove)(newDecideCapabilityGrantRequestHandler(deps, "approve"))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantApprove)(newDecideCapabilityGrantRequestHandler(deps, "approve"))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/reject",
-		staff(auth.RequirePermission(auth.PermCapabilityGrantApprove)(newDecideCapabilityGrantRequestHandler(deps, "reject"))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantApprove)(newDecideCapabilityGrantRequestHandler(deps, "reject"))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/capability-grants",
-		staff(auth.RequirePermission(auth.PermCapabilityGrantRead)(newListCapabilityGrantsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantRead)(newListCapabilityGrantsHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/{grantID}/revoke",
-		staff(auth.RequirePermission(auth.PermCapabilityGrantRevoke)(newRevokeCapabilityGrantHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantRevoke)(newRevokeCapabilityGrantHandler(deps))))
 }
 
 // capabilityCall mirrors killSwitchCall exactly - see that type's own doc

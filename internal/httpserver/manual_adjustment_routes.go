@@ -37,41 +37,38 @@ import (
 )
 
 func registerManualAdjustmentRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	svc := adjustment.NewService(deps.DB)
 	// Literal patterns only: the webhook route guard (security C3/L8) fails
 	// closed on any non-literal Handle pattern.
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments",
-		staff(auth.RequirePermission(auth.PermLedgerAdjustmentInitiate)(newSubmitAdjustmentHandler(deps, svc))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermLedgerAdjustmentInitiate)(newSubmitAdjustmentHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/manual-adjustments",
-		staff(auth.RequirePermission(auth.PermLedgerAdjustmentRead)(newListAdjustmentsHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLedgerAdjustmentRead)(newListAdjustmentsHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}",
-		staff(auth.RequirePermission(auth.PermLedgerAdjustmentRead)(newGetAdjustmentHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLedgerAdjustmentRead)(newGetAdjustmentHandler(deps, svc))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/approve",
-		staff(auth.RequirePermission(auth.PermLedgerAdjustmentApprove)(newDecideAdjustmentHandler(deps, svc, adjustment.DecisionApprove))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermLedgerAdjustmentApprove)(newDecideAdjustmentHandler(deps, svc, adjustment.DecisionApprove))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/reject",
-		staff(auth.RequirePermission(auth.PermLedgerAdjustmentApprove)(newDecideAdjustmentHandler(deps, svc, adjustment.DecisionReject))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLedgerAdjustmentApprove)(newDecideAdjustmentHandler(deps, svc, adjustment.DecisionReject))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/cancel",
-		staff(auth.RequirePermission(auth.PermLedgerAdjustmentInitiate)(newCancelAdjustmentHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermLedgerAdjustmentInitiate)(newCancelAdjustmentHandler(deps, svc))))
 
 	// Financial approval policy changes (HD-PRH2-7): platform-family rows
 	// (platform/jurisdiction/profile) on the platform route; tenant/brand
 	// rows and profile assignments on the tenant route. Tenants may only
 	// tighten - enforced by migration 0113, not here.
 	mux.Handle("POST /v1/admin/financial-policy-changes",
-		staff(auth.RequirePermission(auth.PermFinancialPolicyAuthor)(newProposePolicyChangeHandler(deps, svc, false))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermFinancialPolicyAuthor)(newProposePolicyChangeHandler(deps, svc, false))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/financial-policy-changes",
-		staff(auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newProposePolicyChangeHandler(deps, svc, true))))
+		staffRoute(deps, stepUpByFinancialPolicyRun, auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newProposePolicyChangeHandler(deps, svc, true))))
 	mux.Handle("POST /v1/admin/financial-policy-changes/{changeID}/approve",
-		staff(auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newDecidePolicyChangeHandler(deps, svc, adjustment.DecisionApprove))))
+		staffRoute(deps, stepUpCritical, auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newDecidePolicyChangeHandler(deps, svc, adjustment.DecisionApprove))))
 	mux.Handle("POST /v1/admin/financial-policy-changes/{changeID}/reject",
-		staff(auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newDecidePolicyChangeHandler(deps, svc, adjustment.DecisionReject))))
+		staffRoute(deps, stepUpNone, auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newDecidePolicyChangeHandler(deps, svc, adjustment.DecisionReject))))
 	mux.Handle("POST /v1/admin/financial-policy-changes/{changeID}/cancel",
-		staff(auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newCancelPolicyChangeHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequireAnyPermission(auth.PermFinancialPolicyAuthor, auth.PermFinancialPolicyTighten)(newCancelPolicyChangeHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/financial-policies",
-		staff(auth.RequirePermission(auth.PermFinancialPolicyRead)(newListPoliciesHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermFinancialPolicyRead)(newListPoliciesHandler(deps, svc))))
 }
 
 // adjustmentCall is the per-request context, mirroring capabilityCall.

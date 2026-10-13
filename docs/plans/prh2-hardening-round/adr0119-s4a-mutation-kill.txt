@@ -1,0 +1,229 @@
+ADR 0119 S4a mutation pass (kill-or-justify), 2026-10-13
+=========================================================
+
+Driver: docs/plans/prh2-hardening-round/adr0119-s4a-mutation-driver.py
+  python3 -I adr0119-s4a-mutation-driver.py <log> [--check] [ID ...]   (env MUT_WT = tree copy, MUT_DB = private database)
+Each mutant: apply one textual change in a COPY of the branch tree (git archive HEAD, no .git), run the named package with
+  -tags integration -p 1 -count=1 -run <regex>
+as igaming_runtime against a PRIVATE database (priv_test.sh, database s4a_mut_a4112), then write the original file back.
+The main worktree and its test database were never mutated. S4a has no migration, so there are no SQL mutants.
+
+Totals (final pass, tree at fe20714 - a WIP commit later squashed into the S4a commit; its code is identical, the squash
+  adds documentation only): 44 mutants (34 in internal/httpserver + internal/db, 10 in internal/auth)
+  KILLED 42, SURVIVED 2 (justified below), ERROR 0.
+ADR 0119 section 17.8 rows owned by S4a: "liveness skips the sv comparison" = L05, KILLED.
+
+Mutant key
+----------
+L01-L06  liveness verdict: drop each refusal rule (revoked, absolute expiry, status, role, sv, factor)
+L07      no row read as live
+L08/L09  usable-factor rule without the hard lock / without status = 'active'
+L10      absolute expiry never compared with the database clock
+L11      revoked_at ignored
+L12      any session of the principal accepted (sid ignored)
+L13      principal_id predicate dropped from the query
+L14      explicit tenant comparisons dropped from the query
+L15      a database fault passes the request (fail-open)
+L16      the "verified staff session in the context" guard dropped
+L17      no database reads as live
+L18      statement timeout not set
+L18b     statement timeout queued inside the batch (the defect the fault test found: does not bound Parse)
+L19      transaction not READ ONLY
+L20      "no row" not returned as the bare pgx.ErrNoRows
+L20b     a batch-close fault after a no-row scan wraps the no-row error
+L21      app.principal_id not set
+L22      statement-timeout bounds not validated
+L23-L25  chain: liveness / RequireAAL2 / RequireStaffPrincipal removed from staffRoute
+L26      liveIfStaff never checks staff callers
+L27      staffRoute accepts an invalid class
+L28      routeClass.valid admits a static class together with a classifier
+L29      a route reclassified (K1 capability approve critical -> financial)
+L30      a hand-registered admin route (legacy staff create back to auth.Middleware)
+L31      /v1/me/sessions without liveIfStaff
+L32      staff refresh skips the factor re-check (S3-R11)
+A01/A02  closed staff role set reverted to "any non-player role" (S3-R12), auth tests / HTTP sweep
+A03-A05  RequireAAL2: aal not compared / no-session admitted / principal type not checked
+A06      Middleware does not attach the staff session
+A07      staffSessionFromClaims does not check the principal type
+A08      the token's sv not carried into the context
+A09      StaffRoles returns the backing array
+A10      a role dropped from the closed set
+
+Final pass
+----------
+L01 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_RefusalMatrix
+L02 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L03 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L04 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L05 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L06 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L07 KILLED by TestStaffLiveness_RefusalMatrix
+L08 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix, TestStaffRefresh_RechecksFactor
+L09 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L10 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L11 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_RefusalMatrix
+L12 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L13 KILLED by TestStaffLivenessSQL_Shape
+L14 KILLED by TestStaffLivenessSQL_Shape
+L15 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffLiveness_FaultIs503FailClosed, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L16 KILLED by TestRequireLiveStaffSession_NoAssuranceIsRefusedWithoutDB
+L17 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L18 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped, TestStaffLiveness_FaultIs503FailClosed
+L18b KILLED by TestStaffLiveness_FaultIs503FailClosed
+L19 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped
+L20 SURVIVED
+L20b SURVIVED
+L21 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_QueryPlanAndLatency, TestStaffLiveness_RefusalMatrix
+L22 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped
+L23 KILLED by TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_RefusalMatrix, TestStaffRoute_ChainComposition, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L24 KILLED by TestStaffRoute_ChainComposition
+L25 KILLED by TestStaffRoute_ChainComposition, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L26 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness
+L27 KILLED by TestStaffRoute_ChainComposition
+L28 KILLED by TestStaffRoutes_ClassIdentsAreTheClosedSet
+L29 KILLED by TestStaffRoutes_GoldenClassification
+L30 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+L31 KILLED by TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+L32 KILLED by TestStaffLiveness_RefusalMatrix, TestStaffRefresh_RechecksFactor
+A01 KILLED by TestStaffPrincipal_RoleOutsideClosedSetRefused
+A02 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute
+A03 KILLED by TestRequireAAL2
+A04 KILLED by TestRequireAAL2
+A05 KILLED by TestRequireAAL2
+A06 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_ReleasesConnectionBeforeHandler
+A07 KILLED by TestMiddleware_AttachesStaffSessionForStaffTokensOnly
+A08 KILLED by TestStaffLiveness_RefusalMatrix
+A09 KILLED by TestStaffRoles_ClosedSet_ParityWithIdentityAndDatabase
+A10 KILLED by TestStaffRoles_ClosedSet_ParityWithIdentityAndDatabase
+
+Justifications (SURVIVED)
+-------------------------
+L20  Behaviour-equivalent. Without the bare return the error is fmt.Errorf("...: %w", scanErr), and every caller tests
+     errors.Is(err, pgx.ErrNoRows), which sees through the wrap. The bare return is kept for clarity.
+L20b Not inducible in a test: it needs br.Close() to fail AFTER the row scan reported no row (a protocol-level fault in
+     the same batch). The code path keeps such a fault out of "no row" (503, not 401); a mutant that would read it as
+     "no row" would still refuse the request (401), so it cannot fail open either way.
+
+Killed only by a static pin (behaviour-equivalent through another layer; the pin is the control)
+------------------------------------------------------------------------------------------------
+L13  The query without its principal_id predicate still returns no foreign row: migration 0018's
+     session_select_own_principal policy requires principal_id = app.principal_id, which the helper sets from the token
+     subject. TestStaffLivenessSQL_Shape pins the explicit predicate (defence in depth, independent of RLS).
+L14  Same for the tenant comparisons (the dual-scope RLS of sessions and staff_users already enforces them).
+
+Discarded runs (NOT evidence; recorded so they cannot be mistaken for evidence)
+--------------------------------------------------------------------------------
+Pass 1 (tree 4623756): L16, L20, A03, A05 ERROR (build failed: the mutant left a variable or import unused); L13 was
+  killed only because the mutant left $2 unreferenced (a type-inference error, not a behaviour change). Their shapes
+  were corrected (L13 keeps $2 referenced; L16 keeps `ok` used; L20, A03, A05 keep their identifiers used). A07
+  SURVIVED in pass 1 and was then killed by a new direct case in TestMiddleware_AttachesStaffSessionForStaffTokensOnly;
+  L16 SURVIVED in its corrected shape and was then killed by TestRequireLiveStaffSession_NoAssuranceIsRefusedWithoutDB.
+Pass 3 (tree fc4d946): L20 and L20b reported KILLED by TestStaffLiveness_FaultIs503FailClosed. That was the fault test catching a REAL
+  defect in the tree under test (the statement timeout set inside the batch did not bound Parse on a cold connection),
+  not the mutants. The defect was fixed (ADR 0119 section 25.3 D2), the test now checks a cold and a warm connection,
+  and mutant L18b reproduces the defect.
+Pass 4 (tree e32040d): every mutant after L18 reported ERROR (build failed): the scratch filesystem was full (ENOSPC). `go clean -cache`
+  freed it (the only clean-up used); the mutants were rerun in pass 5 and in the final pass above.
+
+Review round (2026-10-13): security C1, code review CR 1-CR 4
+===============================================================
+
+New mutants
+-----------
+C1a      RevokeSession does not revoke the rest of a staff chain
+C1b      the chain walk follows successors only (predecessors - the pre-refresh tokens - stay live)
+C1c      the chain walk follows predecessors only (deleting a middle link leaves its successors live)
+C1d      logout of an already-revoked staff head does not revoke its predecessors
+C1e      refresh-token reuse does not revoke the staff predecessors
+C1f      GET /v1/me/sessions lists replaced chain links as active sessions
+X1       withdrawal.Approve ignores an inactive approver (domain check)
+X2       the resolve handler ignores an inactive resolver
+X2b      the submit handler ignores an inactive submitter
+X3/X3b   a staff route registered with a tab / a double space between method and path, outside staffRoute
+X4/X4b   a staff route registered with a leading wildcard segment / a host, outside staffRoute
+K1       a client-cancelled request is logged as a database fault
+K2/K3    the route / the staff id missing from the liveness log line
+
+Totals (review-round pass over ALL mutants, tree at ba86b1c..52e37f7 - WIP commits squashed into the S4a commit; X1, X2,
+X2b rerun in their corrected shape): 60 mutants, KILLED 58, SURVIVED 2 (L20, L20b; justified above), ERROR 0.
+(Corrected: the first hand-back said 62 / 60.)
+
+L01 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_SessionEndRevokesWholeChain
+L02 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L03 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L04 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L05 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L06 KILLED by TestStaffLivenessVerdict_EachRuleAlone, TestStaffLiveness_RefusalMatrix
+L07 KILLED by TestStaffLiveness_RefusalMatrix
+L08 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix, TestStaffRefresh_RechecksFactor
+L09 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L10 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L11 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_SessionEndRevokesWholeChain
+L12 KILLED by TestStaffLivenessSQL_Shape, TestStaffLiveness_RefusalMatrix
+L13 KILLED by TestStaffLivenessSQL_Shape
+L14 KILLED by TestStaffLivenessSQL_Shape
+L15 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffLiveness_FaultIs503FailClosed, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L16 KILLED by TestRequireLiveStaffSession_NoAssuranceIsRefusedWithoutDB
+L17 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L18 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped, TestStaffLiveness_FaultIs503FailClosed
+L18b KILLED by TestStaffLiveness_FaultIs503FailClosed
+L19 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped
+L20 SURVIVED
+L20b SURVIVED
+L21 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_QueryPlanAndLatency, TestStaffLiveness_RefusalMatrix
+L22 KILLED by TestQueryRowPrincipalScopeReadOnly_IsReadOnlyAndScoped
+L23 KILLED by TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_SessionEndRevokesWholeChain, TestStaffRoute_ChainComposition
+L24 KILLED by TestStaffRoute_ChainComposition
+L25 KILLED by TestStaffRoute_ChainComposition, TestStaffRoutes_DBFree_ChainOnEveryRoute
+L26 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness
+L27 KILLED by TestStaffRoute_ChainComposition
+L28 KILLED by TestStaffRoutes_ClassIdentsAreTheClosedSet
+L29 KILLED by TestStaffRoutes_GoldenClassification
+L30 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+L31 KILLED by TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+L32 KILLED by TestStaffLiveness_RefusalMatrix, TestStaffRefresh_RechecksFactor
+A01 KILLED by TestStaffPrincipal_RoleOutsideClosedSetRefused
+A02 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute
+A03 KILLED by TestRequireAAL2
+A04 KILLED by TestRequireAAL2
+A05 KILLED by TestRequireAAL2
+A06 KILLED by TestLiveIfStaff_PlayerPassesStaffNeedsLiveness, TestStaffLiveness_EveryGoldenRoute, TestStaffLiveness_FaultIs503FailClosed, TestStaffLiveness_RefusalMatrix, TestStaffLiveness_ReleasesConnectionBeforeHandler
+A07 KILLED by TestMiddleware_AttachesStaffSessionForStaffTokensOnly
+A08 KILLED by TestStaffLiveness_RefusalMatrix
+A09 KILLED by TestStaffRoles_ClosedSet_ParityWithIdentityAndDatabase
+A10 KILLED by TestStaffRoles_ClosedSet_ParityWithIdentityAndDatabase
+C1a KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1b KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1c KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1d KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1e KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1f KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+X1 KILLED by TestWithdrawalApprove_InactiveStaffAccountRejected
+X2 KILLED by TestWithdrawalResolve_SuspendedStaffAccountRejected
+X2b KILLED by TestWithdrawalSubmit_SuspendedStaffAccountRejected
+X3 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+X3b KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+X4 KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+X4b KILLED by TestStaffRoutes_DBFree_ChainOnEveryRoute, TestStaffRoutes_EveryStaffRouteRegisteredThroughHelper, TestStaffRoutes_GoldenClassification, TestStaffRoutes_StaticScan_PlantedOffendersFail
+K1 KILLED by TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation
+K2 KILLED by TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation, TestStaffLiveness_RefusalMatrix
+K3 KILLED by TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation, TestStaffLiveness_RefusalMatrix
+
+Discarded (review round): X1, X2, X2b first reported ERROR (build failed: removing the `if !active` block left `active`
+unused); reshaped to `if !active && false` and rerun: all KILLED.
+
+Security re-review (2026-10-13): chain revocation race, revoked-head DELETE
+===========================================================================
+C1a and C1d were re-anchored to the rewritten RevokeSession (C1a: the staff branch skipped; C1d: the session row
+read only when not yet revoked - the pre-fix 404-before-the-chain behaviour). C1e now disables the staff CTE on reuse
+(falling back to the forward-only walk). New: C1g removes the re-snapshot loop (one snapshot only).
+
+C1a KILLED by TestStaffLiveness_DeleteRevokedHeadEndsOlderLinks, TestStaffLiveness_SessionEndRevokesWholeChain
+C1b KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1c KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1d KILLED by TestStaffLiveness_DeleteRevokedHeadEndsOlderLinks, TestStaffLiveness_SessionEndRevokesWholeChain
+C1e KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+C1g KILLED by TestStaffLiveness_ChainRevocationRacesRefresh
+C1f KILLED by TestStaffLiveness_SessionEndRevokesWholeChain
+
+All KILLED. Mutant set now 61: L 34, A 10, C1 7, X 7, K 3; L20 and L20b remain the only (justified) survivors.

@@ -61,23 +61,20 @@ func registerPaymentsKillSwitchRoutes(mux *http.ServeMux, deps Deps) {
 	if deps.PaymentOrchestrator == nil {
 		return
 	}
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payments/kill-switches",
-		staff(auth.RequirePermission(auth.PermPaymentsKillSwitchRead)(newListKillSwitchesHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentsKillSwitchRead)(newListKillSwitchesHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payments/kill-switches/{killSwitchID}",
-		staff(auth.RequirePermission(auth.PermPaymentsKillSwitchRead)(newGetKillSwitchHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentsKillSwitchRead)(newGetKillSwitchHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payments/kill-switches",
-		staff(auth.RequirePermission(auth.PermPaymentsKillSwitchEngage)(newEngageKillSwitchHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentsKillSwitchEngage)(newEngageKillSwitchHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}",
-		staff(auth.RequirePermission(auth.PermPaymentsKillSwitchRead)(newGetKillSwitchReleaseRequestHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentsKillSwitchRead)(newGetKillSwitchReleaseRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payments/kill-switches/{killSwitchID}/release-requests",
-		staff(auth.RequirePermission(auth.PermPaymentsKillSwitchRelease)(newRequestKillSwitchReleaseHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermPaymentsKillSwitchRelease)(newRequestKillSwitchReleaseHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}/approve",
-		staff(auth.RequirePermission(auth.PermPaymentsKillSwitchRelease)(newApproveKillSwitchReleaseHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermPaymentsKillSwitchRelease)(newApproveKillSwitchReleaseHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}/cancel",
-		staff(auth.RequirePermission(auth.PermPaymentsKillSwitchRelease)(newCancelKillSwitchReleaseHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentsKillSwitchRelease)(newCancelKillSwitchReleaseHandler(deps))))
 }
 
 // killSwitchCall carries what every handler resolves first - mirrors

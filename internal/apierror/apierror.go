@@ -154,6 +154,13 @@ const (
 	CodeMFAEnrolmentExpired   Code = "mfa_enrolment_expired"   // 409: the pending factor is unknown or its 10 minutes passed
 )
 
+// ADR 0119 slice S4a (section 7.3): the per-request staff liveness refusal. ONE answer for every cause (session
+// revoked or unknown, absolute lifetime over, staff member not active, role or staff version changed, second factor
+// revoked or hard-locked); the cause goes to the metric and the log, never to the client.
+const (
+	CodeSessionRevoked Code = "session_revoked" // 401: the staff session behind this access token is no longer live
+)
+
 // Error is the wire format for an API error response.
 type Error struct {
 	Code    Code   `json:"code"`
@@ -173,7 +180,7 @@ func httpStatus(c Code) int {
 	switch c {
 	case CodeValidation, CodeSettlementValidationFailed, CodeInvalidRequest, CodePaymentMethodMismatch:
 		return http.StatusBadRequest
-	case CodeUnauthorized, CodeInvalidMFACode, CodeInvalidChallenge, CodeInvalidEnrolmentToken:
+	case CodeUnauthorized, CodeInvalidMFACode, CodeInvalidChallenge, CodeInvalidEnrolmentToken, CodeSessionRevoked:
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson,
 		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused,

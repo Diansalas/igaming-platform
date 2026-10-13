@@ -65,16 +65,13 @@ func registerPayoutInstrumentRoutes(mux *http.ServeMux, deps Deps) {
 	player := func(h http.Handler) http.Handler {
 		return auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(h))
 	}
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	mux.Handle("POST /v1/me/payout-instruments", player(newRegisterPayoutInstrumentHandler(deps, limiter)))
 	mux.Handle("GET /v1/me/payout-instruments", player(newListPayoutInstrumentsHandler(deps)))
 	mux.Handle("POST /v1/me/payout-instruments/{id}/revoke", player(newRevokePayoutInstrumentHandler(deps)))
 	mux.Handle("GET /v1/admin/players/{playerID}/payout-instruments",
-		staff(auth.RequirePermission(auth.PermPayoutInstrumentRead)(newStaffListPayoutInstrumentsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPayoutInstrumentRead)(newStaffListPayoutInstrumentsHandler(deps))))
 	mux.Handle("POST /v1/admin/payout-instruments/{id}/suspend",
-		staff(auth.RequirePermission(auth.PermPayoutInstrumentSuspend)(newSuspendPayoutInstrumentHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPayoutInstrumentSuspend)(newSuspendPayoutInstrumentHandler(deps))))
 }
 
 type registerPayoutInstrumentRequest struct {

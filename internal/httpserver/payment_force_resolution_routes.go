@@ -39,9 +39,6 @@ import (
 )
 
 func registerPaymentForceResolutionRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	svc := payments.NewManualResolutionService(deps.DB, deps.StatementSources)
 	// ADR 0111 4.3: M4 verifies statement-import seals with the B13 key module;
 	// without it every M4 is refused (force_resolve_evidence_unsealed).
@@ -51,17 +48,17 @@ func registerPaymentForceResolutionRoutes(mux *http.ServeMux, deps Deps) {
 	// Literal patterns only: the webhook route guard (security C3/L8) fails
 	// closed on any non-literal Handle pattern.
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveRequest)(newRequestResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermPaymentForceResolveRequest)(newRequestResolutionHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-force-resolutions",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveRead)(newListResolutionsHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newListResolutionsHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveRead)(newGetResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newGetResolutionHandler(deps, svc))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/approve",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveApprove)(newDecideResolutionHandler(deps, svc, payments.ResolutionApprove))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermPaymentForceResolveApprove)(newDecideResolutionHandler(deps, svc, payments.ResolutionApprove))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/reject",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveApprove)(newDecideResolutionHandler(deps, svc, payments.ResolutionReject))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveApprove)(newDecideResolutionHandler(deps, svc, payments.ResolutionReject))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/cancel",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveRequest)(newCancelResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRequest)(newCancelResolutionHandler(deps, svc))))
 }
 
 // resolutionCall is the per-request context, mirroring adjustmentCall.

@@ -38,14 +38,11 @@ import (
 //     call, so a cursor minted for tenant A used against tenant B positions inside B's rows only.
 
 func registerPaymentAttemptReadRoutes(mux *http.ServeMux, deps Deps) {
-	staff := func(h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
-	}
 	// Literal patterns only (the webhook route guard fails closed on any non-literal pattern).
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-attempts",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveRead)(newListPaymentAttemptsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newListPaymentAttemptsHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}",
-		staff(auth.RequirePermission(auth.PermPaymentForceResolveRead)(newGetPaymentAttemptHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newGetPaymentAttemptHandler(deps))))
 }
 
 // --- the closed catalogue of terminal reasons ---

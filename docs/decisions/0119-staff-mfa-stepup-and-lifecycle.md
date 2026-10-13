@@ -16,6 +16,13 @@
   unmerged branch, pending gate G and the manual authenticator check (21.7 (g)). Step-up, liveness and lifecycle stay
   `NOT IMPLEMENTED`. The `security` (live) and `code-reviewer` / `qa` reviews returned APPROVE WITH CONDITIONS; the
   conditions are applied on the branch (section 23.8) and await re-review. S3 merges together with S7a. See section 23.
+- **S4a (2026-10-13):** the staff route chain (`staffRoute`: bearer, staff principal, per-request liveness, aal2), the
+  closed staff role set (S3-R12), the liveness and refresh re-check of the second factor (S3-R11), and the golden
+  step-up classification of all 178 staff routes with its static completeness test are `IMPLEMENTED` on an unmerged
+  branch, pending gate G. No migration. Step-up ENFORCEMENT stays `NOT IMPLEMENTED` (S4b): S4a records the class only.
+  **Route-registration freeze** in force from the S4a merge (`docs/plans/adr0119-s4a-route-registration.md`). The
+  `security` (live) and `code-reviewer` / `qa` reviews returned APPROVE WITH CONDITIONS; the conditions are applied on
+  the branch (section 25.8) and await re-review. See section 25.
 - **Revision 2 (2026-10-13):** the S0 design review by `architect` and `ledger-finance` returned ACCEPT WITH
   CONDITIONS. Section 20 resolves every blocking condition (C1-C6) and accuracy fix (C7-C11) in the text, and folds
   in the cheap non-blocking items (N1-N15). The `security` rulings are recorded there: C2 adopts the scoped
@@ -1343,7 +1350,7 @@ Extra reviewers are named per slice.
 | **S2** | Migration 0137 (13.1, **without** `SF040` and without the session revocation), the store layer, the two-phase lookup helpers in `internal/db`, the restrictive-fence replication and its parity test, and integration tests for every `SF00x` code, the RLS, the ACLs and the catalog pins. Staff login on `main` is unchanged. | S1 | - |
 | **S3 + S7a** (one merge unit) | The authentication flows of section 6: login challenge, verify, recover, enrol start/confirm/redeem, step-up endpoint, password redeem. The new claims, the session seal, the staff refresh rules with the cutover rule, the staff TTLs and the `mfa` limiter bucket. The `internal/auth/authtest` helper, and every existing staff-token fixture migrated to it. `cmd/seed-admin` issues a `bootstrap` token and runs as a deployment job. **Migration 0138** (13.1a). **S7a:** back office two-step login, enrolment and My security. They merge to `main` **together**, because a `main` that cannot log in to the back office breaks every developer and every E2E test. | S2 | qa (fixture-migration completeness) |
 | **S4a** | `staffRoute`, `RequireStaffPrincipal`, `RequireLiveStaffSession` (N1 implementation), `RequireAAL2`. Re-register every `/v1/admin` route through `staffRoute` with an explicit class. In S4a the class is only recorded; enforcement comes in S4b. The static coverage test. **Route-registration freeze:** announced to the ADR 0114 S1b, ADR 0115 S2 and ADR 0116 owners. Any route merged after S4a must use `staffRoute` with a class. | S3 + S7a | - |
-| **S4b + S7b** (one merge unit) | `RequireStepUp` and the three classifiers. The golden table (8.2). The signer backstop with the corrected registry (9.1). The `withdrawal.Approve` step-up parameter (9.3). The scoped in-transaction re-assertion and the `staff_actor_self_*` policies (9.5), with **ADR 0082 Amendment A9** and the **ADR 0099 A-19 amendment** written in the same change. **S7b:** the back office step-up modal. | S4a | **ledger-finance (mandatory:** A9, the placement table, K-flows), architect (A-19, the RLS policy) |
+| **S4b + S7b** (one merge unit) | `RequireStepUp` and the four classifiers (S4a added `rgLimitChangeClass` for the ADR 0115 S2 route; section 25.3 D7). The golden table (8.2). The signer backstop with the corrected registry (9.1). The `withdrawal.Approve` step-up parameter (9.3). The scoped in-transaction re-assertion and the `staff_actor_self_*` policies (9.5), with **ADR 0082 Amendment A9** and the **ADR 0099 A-19 amendment** written in the same change. **S7b:** the back office step-up modal. | S4a | **ledger-finance (mandatory:** A9, the placement table, K-flows), architect (A-19, the RLS policy) |
 | **S5 + S6** (one merge unit, review C6) | Migration 0139 (13.2, without `SF030`), `internal/stafflifecycle` (domain plus proof signing), the ADR 0110 verifier and `actorproof` lockstep extension (`staff_lifecycle:`, +2 governed tables), and the `TestStatic_OnlyFourEyesPackagesSign` allow-list. **S6:** the lifecycle HTTP API (14.2), invitation and reset email through `email.Provider`, removal of the legacy admin-chosen-password route, `cmd/seed-admin` requiring a Person, the fixture migration, the new permissions and the role-matrix test, OpenAPI (14.4), and `cmd/seed-admin -break-glass` (section 11). S5 can be developed in parallel after S2, but it merges only together with S6. | S4b | architect (ADR 0110 extension), identity-compliance (reason codes, policy) |
 | **S8** | Back office: staff directory, detail and lifecycle, invite, and the platform four-eyes queue (15.5-15.8). It follows the ADR 0114 console conventions (principles 1, 4 and 7; the code-to-message map). | S5 + S6 | - |
 | **S9** | Runbooks: FACTOR re-enrolment campaign, MAC rotation and recovery-code regeneration, lost device / password / both, break-glass as a deployment job, the 13.1a deploy order, NTP, pruning. The launch-gate checklist update. Decision-register and threat-register updates: T3 "staff part narrowed"; R1 to R14. | S8 | - |
@@ -2142,3 +2149,223 @@ sentinel, secrets absent from the DOM after unmount, a hostile otpauth URI, and 
 | F11 | Object URL revoked synchronously; clipboard advice; unmount cleanup claim | The object URL is revoked after 1 s; the setup-URI copy notice tells the user to clear the clipboard; unmount cleanup is described as best-effort (no scrubbing guarantee in JavaScript). |
 | F12 | Accessibility | Error text is linked to inputs with `aria-describedby`; the setup key has a visible label instead of an `aria-label` on a `<p>`. |
 | F13 | Recorded recommendation for S7a-O1 (not built, not blocking) | If a QR is added: vendor the Nayuki QR Code generator (MIT, a single TypeScript file with its licence header) rather than a new npm dependency; render from the module matrix as React `rect` elements or a canvas, never by injecting SVG or HTML strings; no network QR service. `NOT IMPLEMENTED` today. |
+
+## 25. S4a implementation record (2026-10-13)
+
+Branch `worktree-agent-a4112bbe45cc66a8e`, based on `e77900e` (S3 + S7a). **NOT MERGED.** Gate G (live `security`
+review, `code-reviewer`, `qa`) has not run. Nothing below is an approval. **No migration** (0139 stays reserved for
+S5/S6; 0140-0142 for the unmerged AML work). Route-registration freeze and the classification rationale:
+`docs/plans/adr0119-s4a-route-registration.md`.
+
+### 25.1 Status labels
+
+| Item | Label |
+|---|---|
+| `staffRoute(deps, class, inner)` (`internal/httpserver/staff_route.go`): `auth.Middleware -> auth.RequireStaffPrincipal -> requireLiveStaffSession -> auth.RequireAAL2 -> inner`; every one of the 178 staff routes (`/v1/admin/...` and `GET /v1/staff/me/mfa`) re-registered through it with a class | `IMPLEMENTED` |
+| `RequireLiveStaffSession` (N1): one read-only transaction in the token's own scope and principal, 500 ms statement timeout, connection released before the handler, `401 session_revoked` on refusal, `503` fail-closed on a fault, metric `staff_liveness_decisions_total{outcome,reason}` | `IMPLEMENTED` against the local database |
+| Liveness rules: session not revoked and within its absolute lifetime (database clock), staff `active`, role equal to the token's, staff version equal to `sv`, an active second factor that is not hard-locked (S3-R11) | `IMPLEMENTED` (staff version: see D1) |
+| `auth.RequireAAL2`; `auth.StaffSession` attached to the request context by `auth.Middleware` | `IMPLEMENTED` |
+| Closed staff role set (S3-R12): `auth.StaffRoles` / `IsStaffRole`; `Issue`, `IssueStaff` and `Verify` refuse a staff principal with any other role | `IMPLEMENTED` |
+| Staff refresh re-checks the second factor (S3-R11): a revoked or hard-locked factor refuses the refresh (403, like a suspended account) | `IMPLEMENTED` |
+| Golden classification table (`staffRouteGolden`, 178 routes: 108 mutating, 70 reads) and the static completeness test, with planted-offender negative controls | `IMPLEMENTED` |
+| `liveIfStaff` on `GET /v1/me/sessions` and `DELETE /v1/me/sessions/{id}` (a staff caller must be live; players unchanged) | `IMPLEMENTED` |
+| Ending a staff session ends its whole rotation chain (security review C1): logout, `DELETE /v1/me/sessions/{id}` and refresh-token reuse revoke every predecessor and successor, so an access token minted before a refresh is refused too; `GET /v1/me/sessions` lists chain heads only (every principal) | `IMPLEMENTED` |
+| `apierror.CodeSessionRevoked` (`session_revoked`, 401) and its OpenAPI documentation (bearer scheme, `/v1/staff/me/mfa`, `Error.code` enum) | `IMPLEMENTED` |
+| Alert rules `StaffLivenessErrors` (page) and `StaffLivenessRefusals` (ticket) | `IMPLEMENTED` as rule text; `NOT IMPLEMENTED` as delivery (ALERT-DELIVERY-1, unchanged) |
+| Step-up enforcement (`RequireStepUp`), the four classifier functions, the signer backstop, the scoped `FOR SHARE` re-assertion, `staff_actor_self_*` policies, ADR 0082 A9 / ADR 0099 A-19 | `NOT IMPLEMENTED` (S4b) |
+| Lifecycle, invitations, MFA reset, `staff_version` column | `NOT IMPLEMENTED` (S5 + S6, migration 0139) |
+| Back office handling of `401 session_revoked` | `NOT IMPLEMENTED` (S7b / S8; the S7a UI already treats any 401 on a bearer call as a session end) |
+
+### 25.2 How the S3 review conditions hold
+
+| Condition | Mechanism | Tests |
+|---|---|---|
+| S3-R11 (liveness re-checks factor / hard lock; refresh re-checks) | `usableFactorPredicate` (`f.status = 'active' AND f.hard_locked_at IS NULL`) in the liveness query and in the staff refresh | `TestStaffLiveness_RefusalMatrix` (hard lock, factor revoked by the S3-R1 owner procedure), `TestStaffRefresh_RechecksFactor`; mutants L06, L08, L09, L32 |
+| S3-R12 (closed staff role set) | `rolePrincipalValid` uses `IsStaffRole`; parity with `identity.StaffRole` and the latest `staff_users_role_check` | `TestStaffRoles_ClosedSet_ParityWithIdentityAndDatabase`, `TestStaffPrincipal_RoleOutsideClosedSetRefused`, the DB-free sweep (`made_up_role` is 401 on every route); A01, A02, A09, A10 |
+| S3-R13 (amr / auth_time / mfa_at checks) | Not in S4a: an S4b condition, before step-up ships | - |
+| S3-R8 (refresh on the database clock) | Partly: liveness compares `absolute_expires_at` with the database clock; the refresh path still uses the application clock | L10 |
+| S3-R2 (no liveness until S4a) | Closed: a suspended, offboarded or role-changed staff member's next request is refused, and so is every access token of a logged-out, deleted or reuse-revoked session chain. **Correction (security review C1):** the first S4a cut claimed "logged-out" here, but an access token minted before a refresh names the replaced predecessor row, which logout did not revoke; it was honoured (200 on a read, 204 on a write) until the chain revocation below | `TestStaffLiveness_RefusalMatrix`, `TestStaffLiveness_EveryGoldenRoute`, `TestStaffLiveness_SessionEndRevokesWholeChain`; C1a-C1f |
+| S3 D19 (`GET /v1/staff/me/mfa` without liveness) | Closed: the route is a `staffRoute` | the sweep and the matrix |
+
+### 25.3 Deviations (for the reviewer; each reversible)
+
+| # | Deviation | Reason |
+|---|---|---|
+| D1 | `sv` is compared with the constant `staffVersionUnversioned` (0): the liveness query reads no `staff_version` column, and a token whose `sv` is not 0 is refused | `staff_users.staff_version` arrives with 0139. When it lands, the query selects the column and nothing else changes (`staffLivenessRow.staffVersion`). Until then a `person_id` or password change is NOT detected by liveness (S4a-R1) |
+| D2 | The statement timeout is set in its own round trip before the batch (scope GUCs + SELECT stay one batch) | Found by the S4a fault test: pgx sends the SELECT's `Parse` before the batch's `set_config` runs, and `Parse` already takes the table locks, so a timeout queued in the same pipeline did not bound a query not yet cached on the connection (2 s instead of 500 ms). Mutant L18b reproduces the defect and is killed |
+| D3 | Each route keeps its own inner order of `auth.RequireTenantScope` and `auth.RequirePermission` (section 7.3 shows permission first) | Behaviour of every existing route is unchanged behind the chain |
+| D4 | Liveness also refuses when no active, non-hard-locked factor exists; a soft lock (`locked_until`) does not end sessions | S3-R11. A soft lock is a guessing throttle; making it end sessions would let a password holder log the victim out |
+| D5 | One `401 session_revoked` for every refusal cause (and for a request with no verified staff session in its context); the cause goes to the metric and the `staff_liveness_refused` log line, never to the client. Refusals are not written to `audit_log` | No oracle; no write on the read path. See S4a-R3 |
+| D6 | `GET /v1/me/sessions` and `DELETE /v1/me/sessions/{id}` use `liveIfStaff` | Section 7.3's list does not name them, but a revoked staff token must not list or touch sessions |
+| D7 | ADR 0115 S2 routes that arrived before S4a are classified here: `POST /v1/admin/players/{id}/rg/limits` classifier `rgLimitChangeClass`; RG floor request / approve and `limit-configs` writes `critical`; floor reject / cancel `none` | Section 8.2 "classified on arrival" |
+| D8 | A classifier route is recorded as `classifier:<name>` (ceiling `critical`); the four functions are S4b | Section 16 S4a: classes recorded only |
+| D9 | OpenAPI documents `session_revoked` once on the `bearerAuth` scheme and on `/v1/staff/me/mfa`, not on every staff operation | Section 14.4's per-route documentation is an OpenAPI pass for S6 (S4a-R8) |
+| D10 | `staff_actor_self_select` / `staff_actor_self_lock` are NOT added | The liveness query runs in the token's own scope, where the dual-scope policy already shows the caller's own row; the policies are needed only by S4b's in-transaction re-assertion under `WithTenant(target)` |
+| D11 | The "alert" of N1 is a Prometheus rule on the metric, not a durable alert kind | A durable kind needs a migration; S4a has none. The rules are unwired like every rule in that file (ALERT-DELIVERY-1) |
+| D12 | The staff refresh still rotates before the status / role / factor re-check (pre-existing order). A refused refresh leaves a rotated successor whose token was never delivered; a retry with the old refresh token is then reuse (chain revoked, audited) | Fail-safe; reordering the refresh is outside S4a (S4a-R6) |
+| D13 | `authtest` gains `LiveStaffToken`, `LiveStaffSession`, `ClaimedStaffToken` and `EnsurePlaceholderFactor` (integration tag only). The placeholder factor has junk ciphertext and can never verify a code | Section 4.1 said S4a changes only this helper. Harness tokens are now claims-faithful: a live session when the staff row is visible in the claimed scope, a bare token otherwise |
+| D14 | (security review C1) The chain revocation applies to STAFF sessions only (`revokeLinkedStaffSessions`, one recursive CTE over `replaced_by_session_id` in both directions, guarded `revoked_at IS NULL`); reuse detection for staff also revokes the predecessors; `ListActiveSessions` excludes replaced rows for every principal | Player access tokens are not checked by liveness, so a player chain needs no change; a replaced row is a past link, not a device |
+| D15 | (code review CR 3) A liveness error while the request's own context is done is `reason="client_cancelled"`, logged at Info as `staff_liveness_cancelled`; only `db_error` pages (`StaffLivenessErrors`, minimum 3 in 5 min); `StaffLivenessRefusals` needs both a count over 25 and a 20 % share of all decisions | A client that goes away is not a database fault |
+| D16 | (code review CR 4, security review R3(a)) Each liveness decision log line carries `staff_id`, `token_tenant` (a tenant id or `platform`), `sid`, `method`, `route` (the mux pattern) and `client_ip` (trusted-proxy aware); `request_id` and the logging `tenant_id` come once from the request logger | Investigation without the token |
+| D17 | (code review CR 2) The static scan requires every pattern of the package to be exactly `<GET|POST|PUT|PATCH|DELETE> /<path>` with literal first two path segments, and a repository-wide scan finds any route registration (`http.NewServeMux`, `http.Handle(Func)`, `X.Handle(Func)("literal", ...)`) outside `internal/httpserver` | A tab, double space, host or leading wildcard could otherwise reach a staff path unclassified |
+
+### 25.4 Changed existing tests and assertions (every one)
+
+Assertions:
+
+| File | Change | Why |
+|---|---|---|
+| `internal/httpserver/launch_authorisation_routes_test.go` `TestLaunchRoutes_PermissionPerRoute_Pinned` | the route regex reads `staffRoute(deps, <class>, auth.RequirePermission(<perm>)(`; the wrapper pin becomes "no `auth.Middleware(` in the file and exactly one `staffRoute` per route" | the chain moved into `staffRoute` (pinned by `TestStaffRoute_ChainComposition`) |
+| same file, `TestLaunchRoutes_NilService_503_DBFree` | a staff token without a database is `503 service_unavailable` from liveness (was `503 LAUNCH_AUTHORISATION_UNAVAILABLE` from the handler); player 403 and anonymous 401 unchanged | liveness runs before the handler and fails closed without a database |
+| `internal/httpserver/payment_attempts_gate_static_test.go` `TestPaymentAttemptRoutes_GatedOnForceResolveReadAlone` | the registration regex reads `staffRoute(deps, stepUpNone, ...)` | same; the gate assertion is unchanged |
+| `internal/httpserver/alert_admin_layers_integration_test.go` `TestAlertAdmin_EachAuthorizationLayerIsPinnedOnItsOwn` | both layer tokens (platform compliance; platform admin under a tenant claim) are `401 session_revoked` over HTTP; each layer's 403 is asserted behind the chain (`behindChain`) | neither claim combination can belong to a live session |
+| `internal/httpserver/alert_routing_audit_integration_test.go` `TestAlertAdmin_DeniedAuditNeverRecordsAHostilePathSegment` | the compliance-claim token is 401 over HTTP; its platform-scope denial and audit target are asserted behind the chain; the tenant token belongs to a real tenant admin row | same |
+| `internal/httpserver/alert_routing_http_integration_test.go` `TestAlertRoutingAPI_Authorization_EachLayer_DeniedAuditedInCallerScope` | the two mismatched-claim tokens are 401 over HTTP for the mutation and the reads; the 403s and the caller-scope denied audit rows come from `behindChain`; the tenant admin is a real row | same; the audit-count assertions are unchanged |
+| same file, `TestAlertAdmin_RefusedAckAndResolveAreAudited_AckTakesAReasonCode` | the permission and scope refusals are 401 over HTTP and 403 behind the chain | same; the audit counts (1 success, 4 denied, 1 tenant row) are unchanged |
+| `internal/httpserver/rg_limits_config_integration_test.go` `TestRGLimitsS2_Floor_RejectCancelAndValidation` | a platform staff id under a tenant claim is `401 session_revoked` (was `403 forbidden`) | no live session matches it |
+| `internal/httpserver/sportsbook_settlement_flow_integration_test.go` `TestSettlementSimulate_DeactivatedActor_403AndAuditRecorded` | over HTTP: 401 and no `settlement_rejected` row; behind the chain: 403 and exactly one `ACTOR_NOT_ACTIVE` row (security review P3-2's in-handler audit kept pinned) | the suspension ends the session on the next request |
+| `internal/httpserver/stage3c_withdrawal_resolution_test.go` `TestWithdrawalResolve_SuspendedStaffAccountRejected` | `401 session_revoked` (was 403) | same |
+| `internal/httpserver/stage3d_withdrawal_governance_test.go` `TestWithdrawalApprove_InactiveStaffAccountRejected` | `401 session_revoked` (was 403); zero approval rows unchanged | same |
+| `internal/httpserver/staff_mfa_hygiene_integration_test.go` `TestStaffMFA_SecretHygiene_LogCapture` | after the refresh-token reuse, `GET /v1/staff/me/mfa` with the chain's access token is `401 session_revoked` (was 200); My security is exercised with a fresh login whose tokens and code join the secret scan | section 6.6 side effect: reuse detection revokes the chain, and liveness now enforces it |
+
+Review round (no existing assertion changed; assertions ADDED to existing tests):
+
+| File | Addition | Why |
+|---|---|---|
+| `internal/httpserver/stage3d_withdrawal_governance_test.go` `TestWithdrawalApprove_InactiveStaffAccountRejected` | behind the chain: 403 "this staff account is not active" (the domain `withdrawal.Approve` check, `ErrApproverInactive`) and zero `withdrawal_approvals` rows | code review CR 1 (mutant X1) |
+| `internal/httpserver/stage3c_withdrawal_resolution_test.go` `TestWithdrawalResolve_SuspendedStaffAccountRejected` | behind the chain: 403 and the withdrawal stays `submitted` | CR 1 (mutant X2) |
+| same file, NEW `TestWithdrawalSubmit_SuspendedStaffAccountRejected` | 401 over HTTP; behind the chain 403 and the withdrawal stays `approved` | CR 1 (mutant X2b) |
+| `internal/httpserver/staff_liveness_integration_test.go` `TestStaffLiveness_RefusalMatrix` | the refusal log line carries staff id, tenant scope, sid, method, route, client IP; one `request_id`; never the token | CR 4 |
+
+`deploy/observability/prometheus-alert-rules.yml`: the two S4a rule expressions changed (D15). `financial_flow_integration_test.go`
+gains `financialTestDeps` (the same Deps as `newFinancialTestServer`), `withdrawalStateOf` and `suspendedFinanceContext`.
+
+Setup only (no assertion changed):
+
+- `internal/httpserver/staff_mfa_flow_integration_test.go` `TestStaffMFA_SessionSealTamper`, `TestStaffMFA_RefreshBounds`: the staff members whose sessions are planted get a placeholder factor (a staff refresh now needs a usable factor).
+- Harness token helpers in `capability_api_`, `provider_credential_api_`, `alert_routing_http_`, `payments_kill_switch_api_` and `rg_limits_harness_integration_test.go`: `authtest.ClaimedStaffToken`.
+- `internal/httpserver/staff_read_routes_integration_test.go` `newSRWorld`: the risk-manager, promotions-manager and bonus-operations tokens belong to real staff rows (were random subjects).
+- `alert_routing_http_` / `alert_routing_audit_integration_test.go`: tenant-admin tokens for real rows (`arAPI.tenantStaff`); `arAPI` keeps its `Deps` for `behindChain`.
+
+No other existing assertion changed: the role matrix (`TestADR0114_RoleMatrix_AgainstRolePermissions` and the permission tests), the OpenAPI drift tests (`TestOpenAPI_*`) and the staff identity pins pass unchanged.
+
+### 25.5 Evidence (private databases; no role, password or privilege change)
+
+All integration runs: `-tags integration -p 1 -count=1`, as `igaming_runtime` against private databases built from this
+tree (`priv_db.sh` / `priv_test.sh`; databases `s4a_live_a4112`, `s4a_pkg_a4112`, `s4a_mut_a4112`, `s4a_base_a4112`).
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` | PASS |
+| `gofmt -l .`; `go vet ./...`; `go vet -tags integration ./...` | clean |
+| `golangci-lint run --build-tags integration --new-from-rev=e77900e ./...` (2.9.0) | 0 issues |
+| integration: `./internal/auth/... ./internal/staffmfa/... ./internal/tenant/... ./internal/db/... ./cmd/... ./internal/config/... ./internal/observability/... ./internal/apierror/... ./deploy/observability/` | PASS |
+| integration: `./internal/httpserver/` full run, `-timeout 60m` (final tree) | PASS except `TestResolutionIsolation_NormalOperation` and `TestResolutionIsolation_FinancialDuringOutage` (500 ms / 400 ms latency thresholds). The same subset at the base `e77900e` on this host, run twice: `NormalOperation` (both runs), `FinancialDuringOutage` and `ConnectionExhaustion` fail. Pre-existing and environmental, as recorded for S3 (23.5) |
+| new S4a tests, OpenAPI drift (`TestOpenAPI_*`), role matrix and permission tests, staff identity pins | PASS |
+
+New tests: `internal/auth/staff_chain_test.go` (closed role set and its parity with `identity` and the latest
+`staff_users_role_check`; mint and verify refusal of a role outside the set; staff session context; `RequireAAL2`);
+`internal/httpserver/staff_route_static_test.go` (coverage scan, golden comparison, mutating-route classification,
+closed class set, ten planted offenders plus an unclassified-route mutant and a hand-registered route on the real
+sources, chain composition pin, the DB-free sweep of all 178 routes x 7 token shapes, `liveIfStaff`, the
+classified-on-arrival list); `staff_route_golden_test.go` (the table); `staff_liveness_unit_test.go` (verdict, query
+shape, the middleware without a database); `openapi_staff_liveness_contract_test.go`; `staff_liveness_integration_test.go`
+(refusal matrix for tenant and platform staff: logout, suspension, role change then refresh to the new role, `sv`
+mismatch, hard lock, revoked factor, unknown / foreign / cross-tenant / cross-scope sid, absolute expiry; a refused write
+writes nothing; fault 503 with a dead pool and with a blocked table on a cold and a warm connection, cut at 503 ms by
+SQLSTATE 57014; a one-connection pool serves a read and a write; every golden route refuses a revoked session and no
+live GET is refused; the refresh factor re-check; EXPLAIN; latency; the read-only helper).
+
+Query plan (`EXPLAIN`, sequential scans disabled to prove index usability): an index scan on each table -
+`sessions` (`idx_sessions_principal` on this small table; `sessions_pkey` is equally usable), `staff_users`
+(`staff_users_id_tenant_unique`), `staff_mfa_factors` (`staff_mfa_factors_one_active`, `staff_user_id = su.id`) - and
+no sequential scan; the default plan is the same. Latency of the liveness check through the helper on the private
+database, 300 checks each: tenant staff p50 0.59 ms, p95 1.06 ms, p99 1.32 ms; platform staff p50 0.50 ms, p95 0.84 ms,
+p99 1.16 ms (a shared development host; not a production figure).
+
+Mutation pass: `docs/plans/prh2-hardening-round/adr0119-s4a-mutation-kill.txt` (driver
+`adr0119-s4a-mutation-driver.py`, run in a copy of the tree against its own database). 44 mutants (34 in
+`internal/httpserver` and `internal/db`, 10 in `internal/auth`): 42 KILLED, 2 SURVIVED and justified (L20
+behaviour-equivalent through `errors.Is`; L20b not inducible), 0 ERROR. Section 17.8's S4a row ("liveness skips the `sv`
+comparison", L05) is KILLED. The pass found one real defect (D2) and two test gaps (A07, L16), all closed.
+
+**Review round (section 25.8), final tree.** `go test ./... -count=1`: PASS. `gofmt`, `go vet` (plain and
+integration): clean. `golangci-lint --build-tags integration --new-from-rev=e77900e`: 0 issues. Integration:
+`./internal/auth/... ./internal/staffmfa/... ./internal/tenant/... ./internal/db/... ./cmd/... ./internal/config/...
+./internal/withdrawal/... ./internal/observability/... ./internal/apierror/... ./deploy/observability/`: PASS. Full
+`./internal/httpserver/` (`-timeout 60m`, overlapping the mutation pass): PASS except `TestResolutionIsolation_*`
+latency thresholds (`NormalOperation`, `OneTenantStoreOutage`, `MultipleTenantsOutage`), which use no staff route
+(player and webhook routes only) and fail at the base too; every S4a, withdrawal, OpenAPI and staff-identity test
+rerun on the final tree: PASS. Mutation pass over all 60 mutants (the 44 above plus C1a-C1f, X1, X2, X2b, X3, X3b, X4,
+X4b, K1-K3): 58 KILLED, 2 SURVIVED (L20, L20b, justified), 0 ERROR (the first hand-back said 62 / 60: a counting error). The C1 regression test found a second real defect
+on the way: the logout of an already-revoked staff head returned its "not found" from the transaction closure, which
+rolled the chain revocation back (fixed; C1d).
+
+### 25.6 Residuals (S4a)
+
+| # | Residual | Disposition |
+|---|---|---|
+| S4a-R1 | `sv` is always 0 until 0139: a `person_id` or password change does not end sessions through liveness (a role or status change does) | 0139 (S5 + S6) bumps `staff_version` and the query reads it (D1) |
+| S4a-R2 | In-handler authorization layers that only mismatched claims could reach (alert layers 1 and 2, the settlement `ACTOR_NOT_ACTIVE` audit, the withdrawal approve / submit / resolve suspended-account checks) are now unreachable over HTTP; they stay as defence in depth for the R13 window. Each is pinned behind the chain (`behindChain`), the withdrawal ones since the review round (code review CR 1; X1, X2, X2b) | Accepted |
+| S4a-R3 | Liveness refusals are logged and counted, not written to `audit_log`; security review P3-2's durable audit row for a deactivated actor now arises only inside the R13 window | **ACCEPTED by `security`** on two conditions: (a) the refusal log line identifies the request (D16, done); (b) **launch condition L2:** ALERT-DELIVERY-1 must wire `StaffLivenessRefusals` and `StaffLivenessErrors` to a named on-call before launch |
+| S4a-R4 | Step-up classes are recorded, not enforced; classifier routes are not evaluated | S4b |
+| S4a-R5 | The alert rules are unwired | ALERT-DELIVERY-1 (unchanged) |
+| S4a-R6 | The staff refresh rotates before its re-checks (D12; security review F2) | Pre-existing; S4b or S6 |
+| S4a-R7 | Under M5 (arbitrary SQL as the runtime role) liveness reads runtime-writable state (`staff_users.status` / `role`; R1) and adds nothing against M5 | R1 / S-H1 (owner) |
+| S4a-R8 | OpenAPI documents `session_revoked` globally, not per operation (D9) | S6 OpenAPI pass |
+| S4a-R9 | One extra short transaction per staff request; under pool exhaustion the 2 s liveness deadline answers 503 | Accepted (section 19); metric and alert |
+| S4a-R10 | (security review, recorded for S4b) S3-R13 is still open: S4b's `RequireStepUp` and the signer backstop must take `mfa_at` and `auth_time` from the SESSION ROW (sealed), not from the token claims, and check `auth_time <= mfa_at <= now + skew` | S4b condition |
+| S4a-R11 | **Launch condition L2** (security review): the S4a alert rules are unwired (S4a-R5); delivery of `StaffLivenessRefusals` / `StaffLivenessErrors` to a named on-call is required before production launch | ALERT-DELIVERY-1 (owner / ops) |
+
+### 25.7 What `security`, `code-reviewer` and `qa` should probe
+
+1. Try to reach any staff handler without the chain: a route registered in another package, a `mux.Handle` built from a
+   non-literal pattern, a pattern without a method, a route under a prefix the static test does not cover.
+2. Forge every claim combination against the liveness query (sid of another principal, another tenant, a platform sid
+   under a tenant claim, a tenant sid under a platform claim, a role outside the closed set, `sv` other than 0) with GUC
+   forging on the same connection impossible (the liveness transaction sets its own GUCs and commits).
+3. Statement-timeout and pool behaviour: cold vs warm connections, a starved pool (the 2 s deadline), `40001` / commit
+   failure of the read-only transaction, cancellation mid-batch; confirm nothing ever passes on an error.
+4. The `behindChain` pins (S4a-R2): is each in-handler layer still worth keeping, and is the pin faithful to the route's
+   inner chain?
+5. Classification review of the golden table against section 8.1, in particular the ADR 0115 S2 rows (D7) and the
+   reads that are now on the chain.
+6. The route-registration freeze: the in-flight branches (ADR 0114 S1b, ADR 0116 AML HTTP, ADR 0115 S5) must rebase and
+   register through `staffRoute`.
+
+### 25.8 Review round (2026-10-13): disposition of the review conditions
+
+`security` (live) and `code-reviewer` / `qa`: APPROVE WITH CONDITIONS. Applied on the branch; the security re-review (25.9) added four more items.
+
+| Condition | Disposition | Tests / mutants |
+|---|---|---|
+| Security C1 (merge condition): a pre-refresh access token survived logout / DELETE (200 on a read, 204 on a write) | FIXED: ending a staff session revokes its whole chain, both directions, on logout, DELETE and reuse; the list shows chain heads only (D14); the 25.2 claim corrected | `TestStaffLiveness_SessionEndRevokesWholeChain` (tenant, platform: logout, delete, delete a middle link, reuse, logout after the head was revoked); C1a-C1f |
+| Code review CR 1 (blocking): no pins for the withdrawal approve / submit / resolve suspended-account checks | FIXED: behind-chain pins (403, zero approval rows, state unchanged); S4a-R2 and 25.4 corrected | the three withdrawal tests; X1, X2, X2b |
+| CR 2: pattern shapes that would escape the scan; registrations in other packages | FIXED: strict pattern shape and literal first two segments for every pattern of the package; repository-wide registration scan with an allowlist (D17) | eight new planted offenders, `TestStaffRoutes_NoRouteRegistrationOutsideHTTPServer`; X3, X3b, X4, X4b |
+| CR 3: a cancelled request counted as a database error | FIXED: `client_cancelled` at Info; alert thresholds with a minimum count and a ratio (D15) | `TestRequireLiveStaffSession_FaultLogFieldsAndClientCancellation`; K1 |
+| CR 4 + security R3(a): the refusal log line did not identify the request; `request_id` twice | FIXED (D16) | same test, `TestStaffLiveness_RefusalMatrix`; K2, K3 |
+| CR 5: documentation drift | FIXED: the plan doc states the timeout's own round trip (D2) and four classifier functions; the S4b slice row says four classifiers | - |
+| Security L2 (launch condition) | RECORDED: S4a-R11; S4a-R3 ACCEPTED on (a) D16 and (b) L2 | - |
+| Security note on S3-R13 | RECORDED: S4a-R10 (S4b must use the sealed session row, not the claims) | - |
+| Security F2 (refresh rotates before its re-checks) | Stays S4a-R6 (S4b / S6) | - |
+
+### 25.9 Security re-review (2026-10-13): APPROVE WITH CONDITIONS - disposition
+
+| Item | Disposition | Tests / mutants |
+|---|---|---|
+| 1 (merge condition, reproduced live): ending an OLDER link while a refresh of the head runs left the new head live (one CTE statement walks one READ COMMITTED snapshot; the refresh's new head commits while the statement waits on the head's row lock) | FIXED by a re-snapshot loop (`revokeLinkedStaffSessions`): the CTE repeats until a pass revokes nothing, each pass a new snapshot; bounded at 50 passes, beyond which `ErrChainRevocationUnstable` rolls the whole transaction back (nothing partially revoked is committed; the logout / DELETE / refresh answers 5xx and is retried). Chosen over locking the head first because the head is only known from a snapshot that may already be stale, and the loop also covers refreshes of later heads; a refresh that has not yet locked the head cannot succeed after the revocation commits (its conditional UPDATE needs an unrevoked head) | `TestStaffLiveness_ChainRevocationRacesRefresh` (a held head-row lock; the refresh queued first, the session end second, detected through `pg_locks`; variants delete-predecessor, logout-old-refresh; controls logout-head, delete-head, reuse-old; the new head's access AND refresh token refused, every row revoked); C1g (single snapshot) KILLED |
+| 2: DELETE of one's own already-revoked head answered 404 before the chain step, leaving older links live | FIXED: `RevokeSession` runs the staff chain revocation whatever the presented row's state; 204 when anything was revoked, 404 when nothing was left (logout keeps its idempotent 204). The logout-specific fallback is gone (the same code path now) | `TestStaffLiveness_DeleteRevokedHeadEndsOlderLinks`; C1a, C1d KILLED |
+| 3: `StaffLivenessRefusals` could be masked by a high share of legitimate traffic | FIXED: `... or sum by (reason)(increase(staff_liveness_decisions_total{outcome="refused"}[10m])) > 200` | rules parity PASS |
+| 5: `revokeChainFrom` (1000 hops) rolls back reuse revocation on a very long forward chain | Staff: FIXED, reuse detection on a staff chain uses the re-snapshot CTE (no hop bound, both directions). Players: recorded as S4a-R12 | C1e KILLED |
+| Note: non-literal patterns outside `internal/httpserver` | Recorded as S4a-R13 | - |
+
+| # | Residual | Disposition |
+|---|---|---|
+| S4a-R12 | Refresh-token reuse on a PLAYER chain longer than 1000 links (`revokeChainFrom`'s `maxChainHops`) errors and rolls the reuse revocation back (pre-existing; player access tokens are not liveness-checked, the stolen refresh token is still refused as reused) | Pre-existing; fix with the CTE approach if player chains ever need liveness |
+| S4a-R13 | The repository-wide registration scan finds route registrations whose pattern is a string LITERAL (and every `http.NewServeMux` / `http.Handle(Func)`); a non-literal pattern passed to `X.Handle` outside `internal/httpserver` is not recognised as a route (inside the package every non-literal pattern fails the scan) | Known limit; no such call exists today |
+
+Evidence (final tree): integration `./internal/auth/...`, `./internal/withdrawal/...`, `./deploy/observability/`: PASS;
+the S4a `internal/httpserver` tests (chain, race, liveness, routes, withdrawal pins, OpenAPI, staff identity pins):
+PASS; `go test ./... -count=1`, `gofmt`, `go vet` (plain and integration), `golangci-lint --new-from-rev=e77900e`:
+clean. Mutation (new logic): C1a, C1b, C1c, C1d (re-anchored to the new code), C1e, C1f and the new C1g: all KILLED;
+the mutant set is now 61 (L 34, A 10, C1 7, X 7, K 3).

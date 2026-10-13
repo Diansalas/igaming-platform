@@ -82,12 +82,6 @@ func registerRGLimitRoutes(mux *http.ServeMux, deps Deps) {
 	player := func(h http.Handler) http.Handler {
 		return auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(h))
 	}
-	tenantStaff := func(perm auth.Permission, h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(auth.RequireTenantScope(auth.RequirePermission(perm)(h))))
-	}
-	platformStaff := func(perm auth.Permission, h http.Handler) http.Handler {
-		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(auth.RequirePermission(perm)(requirePlatformToken(h))))
-	}
 	// Literal patterns only (the webhook route guard fails closed on any non-literal pattern).
 	mux.Handle("GET /v1/me/rg/limits", player(newGetMyRGLimitsHandler(deps)))
 	mux.Handle("POST /v1/me/rg/limits", player(newSetMyRGLimitHandler(deps, limiter)))
@@ -95,21 +89,21 @@ func registerRGLimitRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/me/rg/limits/changes/{id}/cancel", player(newResolveMyRGLimitHandler(deps, limiter, rg.ChangeCancelPending)))
 	mux.Handle("POST /v1/me/rg/time-out", player(newCreateMyTimeOutHandler(deps, limiter)))
 
-	mux.Handle("GET /v1/admin/players/{id}/rg/limits", tenantStaff(auth.PermRGLimitRead, newStaffGetPlayerRGLimitsHandler(deps)))
-	mux.Handle("GET /v1/admin/players/{id}/rg/history", tenantStaff(auth.PermRGLimitRead, newStaffGetPlayerRGHistoryHandler(deps)))
-	mux.Handle("POST /v1/admin/players/{id}/rg/limits", tenantStaff(auth.PermRGLimitWriteOnPlayerRequest, newStaffSetPlayerRGLimitHandler(deps)))
+	mux.Handle("GET /v1/admin/players/{id}/rg/limits", staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermRGLimitRead)(newStaffGetPlayerRGLimitsHandler(deps)))))
+	mux.Handle("GET /v1/admin/players/{id}/rg/history", staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermRGLimitRead)(newStaffGetPlayerRGHistoryHandler(deps)))))
+	mux.Handle("POST /v1/admin/players/{id}/rg/limits", staffRoute(deps, stepUpByRGLimitDirection, auth.RequireTenantScope(auth.RequirePermission(auth.PermRGLimitWriteOnPlayerRequest)(newStaffSetPlayerRGLimitHandler(deps)))))
 
-	mux.Handle("GET /v1/admin/rg/limit-configs", tenantStaff(auth.PermRGConfigRead, newListRGLimitConfigsHandler(deps)))
-	mux.Handle("POST /v1/admin/rg/limit-configs", tenantStaff(auth.PermRGConfigWrite, newWriteRGOperatorConfigHandler(deps)))
+	mux.Handle("GET /v1/admin/rg/limit-configs", staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermRGConfigRead)(newListRGLimitConfigsHandler(deps)))))
+	mux.Handle("POST /v1/admin/rg/limit-configs", staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermRGConfigWrite)(newWriteRGOperatorConfigHandler(deps)))))
 
-	mux.Handle("GET /v1/admin/platform/rg/limit-config-change-requests", platformStaff(auth.PermRGFloorRead, newListRGFloorRequestsHandler(deps)))
-	mux.Handle("POST /v1/admin/platform/rg/limit-config-change-requests", platformStaff(auth.PermRGFloorRequest, newRequestRGFloorHandler(deps)))
+	mux.Handle("GET /v1/admin/platform/rg/limit-config-change-requests", staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermRGFloorRead)(requirePlatformToken(newListRGFloorRequestsHandler(deps)))))
+	mux.Handle("POST /v1/admin/platform/rg/limit-config-change-requests", staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermRGFloorRequest)(requirePlatformToken(newRequestRGFloorHandler(deps)))))
 	mux.Handle("POST /v1/admin/platform/rg/limit-config-change-requests/{id}/approve",
-		platformStaff(auth.PermRGFloorDecide, newDecideRGFloorHandler(deps, rg.FloorApprove)))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermRGFloorDecide)(requirePlatformToken(newDecideRGFloorHandler(deps, rg.FloorApprove)))))
 	mux.Handle("POST /v1/admin/platform/rg/limit-config-change-requests/{id}/reject",
-		platformStaff(auth.PermRGFloorDecide, newDecideRGFloorHandler(deps, rg.FloorReject)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermRGFloorDecide)(requirePlatformToken(newDecideRGFloorHandler(deps, rg.FloorReject)))))
 	mux.Handle("POST /v1/admin/platform/rg/limit-config-change-requests/{id}/cancel",
-		platformStaff(auth.PermRGFloorRequest, newDecideRGFloorHandler(deps, rg.FloorCancel)))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermRGFloorRequest)(requirePlatformToken(newDecideRGFloorHandler(deps, rg.FloorCancel)))))
 }
 
 // requirePlatformToken admits only a PLATFORM-scoped token (no tenant id in the verified claims).
