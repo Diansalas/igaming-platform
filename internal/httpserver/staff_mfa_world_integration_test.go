@@ -478,6 +478,8 @@ type mfaSessionRow struct {
 	CreatedAt   time.Time
 	PrincipalID uuid.UUID
 	TenantID    *uuid.UUID
+	// RefreshHash is refresh_token_hash (bound by seal format v2 since ADR 0119 S4b).
+	RefreshHash string
 }
 
 func (w *mfaW) sessions(s mfaStaff) []mfaSessionRow {
@@ -485,7 +487,7 @@ func (w *mfaW) sessions(s mfaStaff) []mfaSessionRow {
 	var out []mfaSessionRow
 	if err := w.owner.WithPrincipalScope(context.Background(), s.ref.TenantID, s.ref.StaffID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, aal, amr, auth_time, mfa_at, absolute_expires_at, expires_at, revoked_at, replaced_by_session_id,
-				assurance_kid, assurance_seal, created_at, principal_id, tenant_id
+				assurance_kid, assurance_seal, created_at, principal_id, tenant_id, refresh_token_hash
 			FROM sessions WHERE principal_id = $1 ORDER BY created_at`, s.ref.StaffID)
 		if err != nil {
 			return err
@@ -494,7 +496,7 @@ func (w *mfaW) sessions(s mfaStaff) []mfaSessionRow {
 		for rows.Next() {
 			var r mfaSessionRow
 			if err := rows.Scan(&r.ID, &r.AAL, &r.AMR, &r.AuthTime, &r.MFAAt, &r.AbsExpires, &r.Expires, &r.Revoked, &r.ReplacedBy,
-				&r.Kid, &r.Seal, &r.CreatedAt, &r.PrincipalID, &r.TenantID); err != nil {
+				&r.Kid, &r.Seal, &r.CreatedAt, &r.PrincipalID, &r.TenantID, &r.RefreshHash); err != nil {
 				return err
 			}
 			out = append(out, r)
@@ -527,7 +529,8 @@ func sealOK(r mfaSessionRow) bool {
 		tenant = *r.TenantID
 	}
 	return testStaffMFAKeys().VerifySessionSeal(staffmfa.SessionAssurance{SessionID: r.ID, PrincipalType: "staff", PrincipalID: r.PrincipalID,
-		TenantID: tenant, AAL: int(*r.AAL), AMR: r.AMR, AuthTime: *r.AuthTime, MFAAt: *r.MFAAt, AbsoluteExpiresAt: *r.AbsExpires},
+		TenantID: tenant, AAL: int(*r.AAL), AMR: r.AMR, AuthTime: *r.AuthTime, MFAAt: *r.MFAAt, AbsoluteExpiresAt: *r.AbsExpires,
+		RefreshTokenHash: r.RefreshHash, ExpiresAt: r.Expires},
 		staffmfa.KeyedHash{KID: *r.Kid, MAC: r.Seal})
 }
 
@@ -593,9 +596,14 @@ func (w *mfaW) alertAttrs(kind string, staffID uuid.UUID) map[string]any {
 func (w *mfaW) plantSession(s mfaStaff, authTime, absolute, expires time.Time, tamper func([]byte) []byte) (string, uuid.UUID) {
 	w.t.Helper()
 	id := uuid.New()
+	raw := make([]byte, 32)
+	_, _ = rand.Read(raw)
+	token := hex.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(token))
+	// Seal format v2 (ADR 0119 S4b, S3-R10): the refresh token hash and the idle expiry are bound.
 	a := staffmfa.SessionAssurance{SessionID: id, PrincipalType: "staff", PrincipalID: s.ref.StaffID, TenantID: s.ref.TenantID,
 		AAL: 2, AMR: []string{"pwd", "otp"}, AuthTime: staffmfa.SessionTime(authTime), MFAAt: staffmfa.SessionTime(authTime),
-		AbsoluteExpiresAt: staffmfa.SessionTime(absolute)}
+		AbsoluteExpiresAt: staffmfa.SessionTime(absolute), RefreshTokenHash: hex.EncodeToString(sum[:]), ExpiresAt: staffmfa.SessionTime(expires)}
 	seal, err := testStaffMFAKeys().SealSession(a)
 	if err != nil {
 		w.t.Fatal(err)
@@ -604,10 +612,6 @@ func (w *mfaW) plantSession(s mfaStaff, authTime, absolute, expires time.Time, t
 	if tamper != nil {
 		mac = tamper(append([]byte(nil), mac...))
 	}
-	raw := make([]byte, 32)
-	_, _ = rand.Read(raw)
-	token := hex.EncodeToString(raw)
-	sum := sha256.Sum256([]byte(token))
 	var tenantArg any
 	if s.ref.TenantID != uuid.Nil {
 		tenantArg = s.ref.TenantID

@@ -116,9 +116,29 @@ func nullableTenant(id uuid.UUID) any {
 	return id
 }
 
+// LiveStaffTokenAged is LiveStaffToken for a session whose second factor was last verified mfaAge ago (database
+// clock): auth_time = mfa_at = now - mfaAge (ADR 0119 S4b: a stale step-up). The token's mfa_at claim equals the
+// row's (whole seconds).
+func LiveStaffTokenAged(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, issuer *auth.Issuer, staffID, tenantID uuid.UUID, role auth.Role, mfaAge time.Duration) string {
+	tb.Helper()
+	sess := liveStaffSessionAged(tb, pool, keys, staffID, tenantID, mfaAge)
+	p := StaffParams(staffID, tenantID, role)
+	p.SessionID, p.AuthTime, p.MFAAt = sess.ID, sess.AuthTime, sess.MFAAt
+	tok, err := issuer.IssueStaff(p, time.Hour)
+	if err != nil {
+		tb.Fatalf("authtest: issue aged staff token: %v", err)
+	}
+	return tok
+}
+
 // LiveStaffSession writes a sealed aal2 staff session row (and the placeholder factor of LiveStaffToken when the
 // staff member has no active factor) and returns it.
 func LiveStaffSession(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, staffID, tenantID uuid.UUID) auth.Session {
+	tb.Helper()
+	return liveStaffSessionAged(tb, pool, keys, staffID, tenantID, 0)
+}
+
+func liveStaffSessionAged(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, staffID, tenantID uuid.UUID, mfaAge time.Duration) auth.Session {
 	tb.Helper()
 	var sess auth.Session
 	fn := func(ctx context.Context, tx pgx.Tx) error {
@@ -129,6 +149,7 @@ func LiveStaffSession(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, staffID
 		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
 			return err
 		}
+		now = now.Add(-mfaAge)
 		var err error
 		sess, err = auth.IssueStaffSession(ctx, tx, keys, auth.StaffSessionParams{
 			StaffID: staffID, TenantID: tenantID, AMR: []string{staffmfa.AMRPassword, staffmfa.AMROTP},
