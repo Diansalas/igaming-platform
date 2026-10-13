@@ -91,7 +91,8 @@ func TestSideRecord_StarvedPoolIsBounded(t *testing.T) {
 		holdCheck: holdCheck{verdict: aml.HoldVerdict{EvalFailed: true}, tenantID: uuid.New(), accountID: uuid.New(), personID: uuid.New()},
 		requestID: uuid.New(),
 	})
-	if d := time.Since(start); d > 2*sideRecordTimeout+2*time.Second {
+	// ABSOLUTE bound (not derived from the constant under test): two side writes of 2 s each, plus slack.
+	if d := time.Since(start); d > 5500*time.Millisecond {
 		t.Fatalf("a starved pool must not hang the refusal: took %s", d)
 	}
 	if !strings.Contains(buf.String(), "adjustment_side_record_failed") {
