@@ -212,6 +212,8 @@ func TestOpenAPI_GovernedRoutes_DTOsMatchSchemas(t *testing.T) {
 		{"PaymentForceResolution", reflect.TypeOf(resolutionDTO{})},
 		{"WithdrawalHoldResolution", reflect.TypeOf(holdResolutionDTO{})},
 		{"ProviderCredentialHandle", reflect.TypeOf(providerCredentialHandleDTO{})},
+		// ADR 0114 S1b: the alert list/get item (acted-by ids, timestamps, delivery fields).
+		{"PlatformAlert", reflect.TypeOf(alertListItemDTO{})},
 	}
 	for _, c := range cases {
 		got, want := govSchemaProps(t, spec, c.schema), jsonFieldNames(c.typ)
@@ -252,6 +254,7 @@ func TestOpenAPI_GovernedRoutes_RedactionContractDocumented(t *testing.T) {
 		"WithdrawalHoldResolution":         {"requested_by"},
 		"ProviderCredentialHandle":         {"revoked_by"},
 		"AuditEntry":                       {"actor_id"},
+		"PlatformAlert":                    {"acked_by", "resolved_by"}, // ADR 0114 S1b
 	} {
 		block := govSchemaBlock(t, spec, schema)
 		for _, f := range fields {

@@ -1,0 +1,32 @@
+baseline: PASS
+M1 keyset strictness < becomes <= (boundary row repeats): KILLED TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder,TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_SingleReadAndKindFilter,TestAlertListS1b_TieBoundaryInsideATieGroup
+M2 tie-break dropped from ORDER BY: KILLED TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder,TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_TieBoundaryInsideATieGroup
+M3 next page when len(out) >= limit (phantom empty page): KILLED TestAlertListS1b_TieBoundaryInsideATieGroup
+M4 cursor not bound to its filter: KILLED TestAlertCursor_RefusesWrongFilterAndBounds,TestAlertListS1b_CursorTamperAndFilterBinding
+M5 lower time bound removed: KILLED TestAlertCursor_RefusesWrongFilterAndBounds,TestAlertListS1b_CursorTamperAndFilterBinding
+M6 upper time bound removed: KILLED TestAlertCursor_RefusesWrongFilterAndBounds,TestAlertListS1b_CursorTamperAndFilterBinding
+M7 acting ids shown under the tenant scope marker: KILLED TestAlertActorRefs_RoutedThroughTheStaffViewer
+M8 kind filter ignored: KILLED TestAlertListS1b_SingleReadAndKindFilter
+M9 canonical uuid check removed: KILLED TestAlertListS1b_CursorTamperAndFilterBinding
+M10 fetch limit instead of limit+1 (never a cursor): KILLED TestAlertListS1b_CursorTamperAndFilterBinding,TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder,TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_QueryCostIsBoundedByLimit,TestAlertListS1b_SingleReadAndKindFilter,TestAlertListS1b_TieBoundaryInsideATieGroup
+M11 unknown cursor fields allowed: SURVIVED 
+M12 repeated cursor parameters accepted: KILLED TestAlertListS1b_CursorTamperAndFilterBinding
+M13 cursor version unchecked: KILLED TestAlertListS1b_CursorTamperAndFilterBinding
+M14 unknown kind accepted: KILLED TestAlertListS1b_SingleReadAndKindFilter
+M15 next cursor taken from the first row, not the last: KILLED TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder,TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_SingleReadAndKindFilter
+M16 cursor time truncated to milliseconds: KILLED TestAlertCursor_RoundTripKeepsMicrosecondPrecision,TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder,TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_SingleReadAndKindFilter,TestAlertListS1b_TieBoundaryInsideATieGroup
+M17 single read ignores the id: KILLED TestAlertListS1b_ActedByAndTimestamps_AuditedActors,TestAlertListS1b_SingleReadAndKindFilter
+M18 old query shape: LIMIT applied after the lateral join (security F1): SURVIVED 
+M19 cursor canonical-form check removed (security F2): BUILD-FAILED 
+M20 lenient base64 trailing bits accepted: SURVIVED 
+M21 single read accepts non-canonical id (security F3): KILLED TestAlertListS1b_CanonicalIdAndParameters
+M22 repeated list parameters accepted (security F4): KILLED TestAlertListS1b_CanonicalIdAndParameters
+M23 non-canonical limit accepted (+5, 05): KILLED TestAlertListS1b_CanonicalIdAndParameters
+
+Security-round re-run notes (the run above is the full 23-mutant pass):
+M18 old query shape: LIMIT applied after the lateral join (security F1): KILLED TestAlertListPageSQL_LimitAndOrderPrecedeTheLateralJoin,TestAlertListS1b_QueryCostIsBoundedByLimit
+M19 cursor canonical-form check removed (security F2): KILLED TestAlertCursor_OnlyTheCanonicalSpellingIsAccepted
+M20 lenient base64 trailing bits accepted: KILLED TestAlertCursor_OnlyTheCanonicalSpellingIsAccepted
+M11 unknown cursor fields allowed: EQUIVALENT since F2 (the canonical re-encode comparison refuses unknown fields; DisallowUnknownFields is now redundant defence in depth).
+(M18/M19/M20 showed SURVIVED/BUILD-FAILED/SURVIVED on the full run because the plan test called the unmutated builder, M19 left an unused variable, and the base64 test skipped when the payload was a multiple of 3 bytes; fixed by routing the test through alertListPageSQL, adding a DB-free SQL shape pin, and forcing a non-multiple payload, then re-run as shown above.)
+Result: 23 mutants: 22 killed, 1 equivalent (M11). Known gap: the tenant_id IS NULL predicate (no tenant-scope alert kind is seeded).

@@ -255,10 +255,10 @@ func TestStaffRoutes_EveryMutatingRouteClassified(t *testing.T) {
 		}
 	}
 	// 178 staff routes at S4a: 108 mutating, 70 reads. S4b adds POST /v1/staff/auth/step-up and
-	// POST /v1/staff/mfa/recovery-codes/regenerate: 180 routes, 110 mutating. A new route changes this pin and the
+	// POST /v1/staff/mfa/recovery-codes/regenerate: 181 routes (S1b adds GET /v1/admin/alerts/{alertID}), 110 mutating. A new route changes this pin and the
 	// golden table together.
-	if mutating != 110 || len(staffRouteGolden) != 180 {
-		t.Errorf("golden table: %d routes, %d mutating; pinned 180 and 110", len(staffRouteGolden), mutating)
+	if mutating != 110 || len(staffRouteGolden) != 181 {
+		t.Errorf("golden table: %d routes, %d mutating; pinned 181 and 110", len(staffRouteGolden), mutating)
 	}
 }
 
