@@ -39,7 +39,6 @@ type k1World struct {
 	a         *cgAPI
 	tenant    uuid.UUID
 	requester uuid.UUID
-	grantee   uuid.UUID
 	reqTok    string
 }
 

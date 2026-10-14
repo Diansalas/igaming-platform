@@ -56,7 +56,7 @@ func TestStatic_SubmitReassertionPins(t *testing.T) {
 	iReassert := strings.Index(claim, "reassertSubmitter(")
 	iSnapshot := strings.Index(claim, "WriteSnapshot(")
 	iAudit := strings.Index(claim, `Outcome: audit.OutcomeSuccess`)
-	if iAttempt < 0 || iReassert < 0 || iSnapshot < 0 || iAudit < 0 || !(iAttempt < iReassert && iReassert < iSnapshot && iSnapshot < iAudit) {
+	if iAttempt < 0 || iReassert < 0 || iSnapshot < 0 || iAudit < 0 || iAttempt >= iReassert || iReassert >= iSnapshot || iSnapshot >= iAudit {
 		t.Fatalf("ClaimForDispatch order must be attempt < re-assertion < snapshot < success audit, got %d %d %d %d",
 			iAttempt, iReassert, iSnapshot, iAudit)
 	}

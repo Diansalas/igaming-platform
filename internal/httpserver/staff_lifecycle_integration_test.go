@@ -43,7 +43,7 @@ func lcDo(t *testing.T, srv *httptest.Server, method, path, token string, body a
 	} else {
 		resp = postJSON(t, srv, path, token, body)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	return lcResp{status: resp.StatusCode, body: b}
 }

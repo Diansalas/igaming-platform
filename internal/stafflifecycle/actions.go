@@ -260,7 +260,7 @@ func (s *Service) twoPhase(ctx context.Context, actor Actor, targetTenant, staff
 		if err := authorizeTarget(actor, target); err != nil {
 			return err
 		}
-		if !(target.Status == "active" || (to == "offboarded" && target.Status == "suspended")) {
+		if target.Status != "active" && (to != "offboarded" || target.Status != "suspended") {
 			return ErrTransition
 		}
 		if target.Status == "active" {
@@ -309,7 +309,7 @@ func (s *Service) phaseTwo(ctx context.Context, actor Actor, targetTenant, staff
 		if err := authorizeTarget(actor, target); err != nil {
 			return err
 		}
-		if !(target.Status == "active" || (to == "offboarded" && target.Status == "suspended")) {
+		if target.Status != "active" && (to != "offboarded" || target.Status != "suspended") {
 			return ErrTransition
 		}
 		after, err := updateStatus(ctx, tx, target, to, to == "offboarded")

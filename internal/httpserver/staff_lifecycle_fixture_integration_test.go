@@ -150,7 +150,7 @@ func mustInviteStaff(t *testing.T, srv *httptest.Server, adminToken string, tena
 		body["person_id"] = personID.String()
 	}
 	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenantID.String()+"/staff/invitations", adminToken, body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusCreated {
 		var e map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&e)
