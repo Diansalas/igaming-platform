@@ -109,6 +109,9 @@ func (a *arAPI) walk(tok, base string, limit int) []string {
 		if st != http.StatusOK {
 			a.t.Fatalf("page %d: status %d", i, st)
 		}
+		if cursor != "" && len(p.ids) == 0 {
+			a.t.Fatalf("page %d is empty after a cursor: a final full page must not advertise a next_cursor", i)
+		}
 		all = append(all, p.ids...)
 		if p.next == "" {
 			return all
@@ -149,11 +152,6 @@ func TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder(t *testing.T) {
 	if len(p2.ids) != 5 || p2.next != "" {
 		t.Fatalf("second page: %d rows, next=%q", len(p2.ids), p2.next)
 	}
-	// A limit that exactly fits the set has no cursor (no phantom empty page).
-	all, _ := a.alertPage(tok, "?limit=200&severity=p2")
-	if all.next != "" && len(all.ids) < 200 {
-		t.Fatalf("a short page must not carry a cursor: %d rows next=%q", len(all.ids), all.next)
-	}
 }
 
 // Singleton limit walk over a small tied set: the id tie-break is what makes a page boundary
@@ -170,6 +168,13 @@ func TestAlertListS1b_TieBoundaryInsideATieGroup(t *testing.T) {
 	}
 	if !sort.SliceIsSorted(got, func(i, j int) bool { return got[i] > got[j] }) {
 		t.Fatal("within a tie group the order must be id DESC")
+	}
+	// A page that exactly exhausts the set carries no cursor (no phantom empty page).
+	if p, _ := a.alertPage(tok, "?limit=9"); len(p.ids) != 9 || p.next != "" {
+		t.Fatalf("exact-fit page: %d rows next=%q", len(p.ids), p.next)
+	}
+	if p, _ := a.alertPage(tok, "?limit=8"); len(p.ids) != 8 || p.next == "" {
+		t.Fatalf("limit 8 of 9: %d rows next=%q", len(p.ids), p.next)
 	}
 }
 
