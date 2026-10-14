@@ -293,6 +293,18 @@ func DecideAndGrant(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUI
 	if decision == "reject" {
 		op = actorproof.OpGrantReject
 	}
+	if decision == "approve" {
+		// ADR 0119 S5 + S6 (S4b-R3 hard gate, ADR 0082 A9): L1 is the request row FOR UPDATE, then the
+		// approver's own staff row FOR SHARE (the re-assertion). A rejection is protective and not re-asserted.
+		var one int
+		if err := tx.QueryRow(ctx, `SELECT 1 FROM staff_capability_grant_requests WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+			requestID, tenantID).Scan(&one); err != nil {
+			return uuid.Nil, nil, err
+		}
+		if err := reassertActor(ctx, tx); err != nil {
+			return uuid.Nil, nil, err
+		}
+	}
 	d, err := requestDigest(ctx, tx, requestID)
 	if err != nil {
 		return uuid.Nil, nil, err
@@ -336,6 +348,16 @@ func DecideAndGrant(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUI
 // the DB session, never trusted from a caller - this function does not
 // even accept them as parameters.
 func RevokeGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, reasonCode string) error {
+	// ADR 0119 S5 + S6 (S4b-R3 hard gate, ADR 0082 A9): L1 is the grant row FOR UPDATE, then the revoker's own
+	// staff row FOR SHARE (the re-assertion).
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM staff_capability_grants WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+		grantID, tenantID).Scan(&one); err != nil {
+		return err
+	}
+	if err := reassertActor(ctx, tx); err != nil {
+		return err
+	}
 	if err := attachProof(ctx, tx, actorproof.OpGrantRevoke, grantID.String(), revokeDigest(grantID, tenantID, reasonCode)); err != nil {
 		return err
 	}

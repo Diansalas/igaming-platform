@@ -1088,7 +1088,10 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		// ("withdrawal.submit.http") is now written BY ClaimForDispatch
 		// itself, inside the SAME transaction as the deny/allow outcome -
 		// never a best-effort, discardable call made after the fact.
-		actor := payments.SubmitActor{StaffID: submitterID, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID}
+		// ADR 0119 S5 + S6 (S4b-R3 hard gate): the verified role and `sv` travel into the claim transaction, which
+		// re-asserts the submitter's own row FOR SHARE after the payment_attempts row.
+		actor := payments.SubmitActor{StaffID: submitterID, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+			Role: tc.Role, StaffVersion: tc.StaffVersion}
 		claim, err := deps.PaymentOrchestrator.ClaimForDispatch(
 			r.Context(), deps.DB, payments.KYCEnforcementPayoutGate{}, tc.TenantID, id, req.PaymentMethod, actor,
 		)
@@ -1143,6 +1146,14 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			// safe and expected to retry once the switch is released.
 			logger.Error("submit_withdrawal_kill_switch_engaged", "error", err)
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "payouts are temporarily paused for this provider - please retry shortly")
+			return
+		}
+		if errors.Is(err, db.ErrActorStaffNotLive) {
+			// ADR 0119 section 9.5: the submitter stopped being live between liveness and the claim; the whole claim
+			// rolled back (no attempt, the request stays approved).
+			observability.RecordStaffReassertionRefusal(r.Context(), observability.StaffReassertionFlowWithdrawalSubmit)
+			logger.Warn("submit_withdrawal_submitter_not_live", "staff_id", submitterID.String())
+			writeSessionRevoked(w, requestID)
 			return
 		}
 		if err != nil {

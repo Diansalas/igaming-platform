@@ -224,6 +224,34 @@ type SubmitActor struct {
 	IPAddress string
 	UserAgent string
 	RequestID string
+	// Role and StaffVersion are the verified token's role and `sv` claim (ADR 0119 S5 + S6, the S4b-R3 hard gate):
+	// the ALLOW path re-asserts the submitter's own staff row against them, FOR SHARE, inside the claim
+	// transaction right after the payment_attempts row (ADR 0082 A9). The HTTP handler always sets both; an
+	// empty Role is refused (db.ErrActorStaffNotLive) except in integration-test builds, where a domain test
+	// that calls ClaimForDispatch directly without a token may leave it empty (submitReassertionFallbackOn).
+	Role         string
+	StaffVersion int64
+}
+
+// ErrSubmitterNotLive is db.ErrActorStaffNotLive from the submit re-assertion: the submitter was suspended,
+// offboarded, changed role or staff_version after its request passed liveness. The whole claim rolls back
+// (no attempt, the request stays approved); the handler answers 401 session_revoked.
+var ErrSubmitterNotLive = db.ErrActorStaffNotLive
+
+// reassertSubmitter is the ADR 0119 section 9.5 submit re-assertion: the submitter's own staff row FOR SHARE,
+// at the A8 position of the claim transaction (after the withdrawal row and the payment_attempts row; no
+// L2 / L3 lock is taken before it in this transaction). A suspension or role change committed first is seen
+// here and refused; one that starts later waits for this transaction (its T2 lock_timeout bounds the wait).
+func reassertSubmitter(ctx context.Context, tx pgx.Tx, actor SubmitActor) error {
+	if actor.Role == "" && submitReassertionFallbackOn() {
+		return nil
+	}
+	locked, err := db.ScanActorStaffRows(tx.Query(ctx,
+		`SELECT id, role, status, staff_version FROM staff_users WHERE id = $1 FOR SHARE`, actor.StaffID))
+	if err != nil {
+		return fmt.Errorf("payments: re-assert submitter: %w", err)
+	}
+	return db.CheckActorStaffLive(locked, actor.StaffID, db.ActorExpectation{Role: actor.Role, StaffVersion: actor.StaffVersion})
 }
 
 // ClaimResult is ClaimForDispatch's outcome.
@@ -476,6 +504,12 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 				// released (no partial claim, never a Withdraw call).
 				return fmt.Errorf("%w: payout T1p claim refused: %w", ErrPayoutKillSwitchEngaged, err)
 			}
+			return err
+		}
+
+		// ADR 0119 S5 + S6 (S4b-R3 hard gate, ADR 0082 A9): the submitter's own staff row FOR SHARE, after the
+		// payment_attempts row. A refusal rolls the whole claim back (the request stays `approved`).
+		if err := reassertSubmitter(actx, tx, actor); err != nil {
 			return err
 		}
 

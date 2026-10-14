@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 // SIGNED-ACTOR-PROOF for K1 (ADR 0110, migration 0120, review finding H2): every
@@ -25,6 +26,32 @@ type ProofActor struct {
 	Scope  string
 	Tenant uuid.UUID
 	Proofs *actorproof.Issuer // nil means actorproof.Default()
+	// Role and StaffVersion are the verified token's role and `sv` claim (ADR 0119 S5 + S6, the S4b-R3 hard
+	// gate): a grant approval or revocation re-asserts the actor's own staff row against them, FOR SHARE, at the
+	// A8 position (after the request / grant row FOR UPDATE). Empty Role is refused.
+	Role         string
+	StaffVersion int64
+}
+
+// reassertActor is the ADR 0119 section 9.5 K1 re-assertion (approve and revoke; ADR 0082 A9): the acting staff
+// member's own row FOR SHARE, compared with the verified token's role and staff_version. It runs only for an
+// authenticated principal in the context (every HTTP K1 call); the integration-only TestSessionProofHook path
+// (fixtures that open their own sessions without a token) carries no token to compare with, and the database
+// refuses that path in production anyway (no proof, AP001). The row is visible in both K1 session shapes: a tenant
+// caller's own row through the dual-scope policy (db.WithPrincipalScope), a platform caller's own platform row
+// because db.WithPlatformAdmin leaves app.tenant_id empty - so the section 9.5(b) app.actor_staff_id pair is not
+// needed here (verified by TestK1Reassertion_*).
+func reassertActor(ctx context.Context, tx pgx.Tx) error {
+	a, ok := ctx.Value(proofActorKey{}).(ProofActor)
+	if !ok {
+		return nil
+	}
+	locked, err := db.ScanActorStaffRows(tx.Query(ctx,
+		`SELECT id, role, status, staff_version FROM staff_users WHERE id = $1 FOR SHARE`, a.Actor))
+	if err != nil {
+		return err
+	}
+	return db.CheckActorStaffLive(locked, a.Actor, db.ActorExpectation{Role: a.Role, StaffVersion: a.StaffVersion})
 }
 
 // Proof scopes (re-exported so HTTP code need not import actorproof).

@@ -21,6 +21,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
@@ -126,10 +128,12 @@ func runCapabilityTx(ctx context.Context, deps Deps, c capabilityCall, fn func(c
 	// subject) and the route's permission check has passed; the K1 functions sign
 	// for exactly this principal.
 	if c.tc.TenantID == uuid.Nil {
-		ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopePlatform})
+		ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopePlatform,
+			Role: c.tc.Role, StaffVersion: c.tc.StaffVersion})
 		return deps.DB.WithPlatformAdmin(ctx, c.subject, fn)
 	}
-	ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopeTenant, Tenant: c.tc.TenantID})
+	ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopeTenant, Tenant: c.tc.TenantID,
+		Role: c.tc.Role, StaffVersion: c.tc.StaffVersion})
 	return deps.DB.WithPrincipalScope(ctx, c.tc.TenantID, c.subject, fn)
 }
 
@@ -164,6 +168,14 @@ func (c capabilityCall) auditSubjectTenantID() uuid.UUID {
 func writeCapabilityError(ctx context.Context, deps Deps, w http.ResponseWriter, c capabilityCall, op, targetType, targetID string, err error) {
 	if err == pgx.ErrNoRows {
 		apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
+		return
+	}
+	if errors.Is(err, db.ErrActorStaffNotLive) {
+		// ADR 0119 S5 + S6 (S4b-R3 hard gate): the in-transaction re-assertion of the approver / revoker refused;
+		// nothing was written.
+		observability.RecordStaffReassertionRefusal(ctx, observability.StaffReassertionFlowCapabilityGrant)
+		c.logger.Warn("capability_grant_actor_not_live", "op", op)
+		writeSessionRevoked(w, c.requestID)
 		return
 	}
 	class := capability.ClassifyError(err)
