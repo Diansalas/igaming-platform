@@ -252,7 +252,9 @@ type ResolutionCall struct {
 	Scope    string
 	// ActorRole is the verified token's role (ADR 0119 S4b section 9.5).
 	ActorRole string
-	Meta      ResolutionMeta
+	// ActorStaffVersion is the verified token's `sv` claim (ADR 0119 S5 + S6).
+	ActorStaffVersion int64
+	Meta              ResolutionMeta
 	// Proofs signs the SIGNED-ACTOR-PROOF (ADR 0110, migration 0120) for this
 	// call's governed writes. nil means the process-wide actorproof.Default().
 	Proofs *actorproof.Issuer
@@ -506,14 +508,14 @@ func (s *ManualResolutionService) runSession(ctx context.Context, target Resolut
 	}
 	if tc.TenantID == uuid.Nil {
 		return s.pool.WithPlatformActingInTenant(ctx, subject, target.tenantID, resolutionID, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
-			return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: target.tenantID, Scope: ResolutionScopePlatformActing, ActorRole: tc.Role, Meta: meta, Proofs: s.proofs})
+			return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: target.tenantID, Scope: ResolutionScopePlatformActing, ActorRole: tc.Role, ActorStaffVersion: tc.StaffVersion, Meta: meta, Proofs: s.proofs})
 		})
 	}
 	if tc.TenantID != target.tenantID {
 		return ErrResolutionForeignTenant
 	}
 	return s.pool.WithPrincipalScope(ctx, tc.TenantID, subject, func(ctx context.Context, tx pgx.Tx) error {
-		return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: tc.TenantID, Scope: ResolutionScopeTenant, ActorRole: tc.Role, Meta: meta, Proofs: s.proofs})
+		return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: tc.TenantID, Scope: ResolutionScopeTenant, ActorRole: tc.Role, ActorStaffVersion: tc.StaffVersion, Meta: meta, Proofs: s.proofs})
 	})
 }
 
@@ -1170,12 +1172,12 @@ func lockResolutionStaffAndGrants(ctx context.Context, tx pgx.Tx, r ManualResolu
 		return err
 	}
 	staff := append([]uuid.UUID{r.RequestedBy, call.ActorID}, approvers...)
-	locked, err := db.ScanActorStaffRows(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id FROM staff_users
+	locked, err := db.ScanActorStaffRows(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id, staff_version FROM staff_users
 		WHERE id = ANY($1) ORDER BY id FOR SHARE`, staff))
 	if err != nil {
 		return fmt.Errorf("payments: lock staff rows: %w", err)
 	}
-	if err := db.CheckActorStaffLive(locked, call.ActorID, call.ActorRole); err != nil {
+	if err := db.CheckActorStaffLive(locked, call.ActorID, db.ActorExpectation{Role: call.ActorRole, StaffVersion: call.ActorStaffVersion}); err != nil {
 		return err
 	}
 	if err := drainRows(tx.Query(ctx, `SELECT id FROM staff_capability_grants

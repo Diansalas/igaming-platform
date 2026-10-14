@@ -44,12 +44,16 @@ func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 				return
 			}
 
-			ctx := tenant.WithContext(r.Context(), tenant.Context{
+			tc := tenant.Context{
 				TenantID:      claims.TenantID,
 				Role:          string(claims.Role),
 				PrincipalType: string(claims.PrincipalType),
 				Subject:       claims.Subject,
-			})
+			}
+			if claims.PrincipalType == PrincipalStaff && claims.StaffVersion != nil {
+				tc.StaffVersion = *claims.StaffVersion
+			}
+			ctx := tenant.WithContext(r.Context(), tc)
 			// ADR 0119 S4a: a staff token's verified session assurance (sid,
 			// aal, amr, auth_time, mfa_at, sv) travels with the request for
 			// RequireAAL2, the liveness check and (S4b) RequireStepUp.
