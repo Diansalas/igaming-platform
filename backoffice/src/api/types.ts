@@ -69,7 +69,12 @@ export type ApiErrorCode =
   | 'invalid_mfa_code'
   | 'invalid_enrolment_token'
   | 'mfa_enrolment_expired'
-  | 'network_error';
+  | 'network_error'
+  // ADR 0119 S4b/S7b: step-up refusal and the client-side outcomes of the step-up flow.
+  | 'session_revoked'
+  | 'step_up_required'
+  | 'step_up_cancelled'
+  | 'step_up_failed';
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
@@ -79,6 +84,8 @@ export class ApiError extends Error {
   readonly checkCodes: string[];
   /** Seconds from a `Retry-After` header, when the server sent a valid one. */
   readonly retryAfterSeconds?: number;
+  /** Seconds from a `step_up_required` refusal (`max_age`), explanation only; never used to compute freshness. */
+  readonly stepUpMaxAge?: number;
 
   constructor(
     code: ApiErrorCode,
@@ -87,6 +94,7 @@ export class ApiError extends Error {
     requestId?: string,
     checkCodes: string[] = [],
     retryAfterSeconds?: number,
+    stepUpMaxAge?: number,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -95,5 +103,6 @@ export class ApiError extends Error {
     this.requestId = requestId;
     this.checkCodes = checkCodes;
     this.retryAfterSeconds = retryAfterSeconds;
+    this.stepUpMaxAge = stepUpMaxAge;
   }
 }

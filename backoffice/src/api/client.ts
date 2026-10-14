@@ -3,6 +3,7 @@
 // exclusively through the typed functions in this directory, never
 // directly.
 import { clearSession, getAccessToken, getRefreshToken, setSession } from '../auth/tokenStore'
+import { requestStepUp, stepUpNotEffectiveError } from '../auth/stepUpCoordinator'
 import { ApiError, type ApiErrorBody } from './types'
 
 // Relative by default so the Vite dev-server proxy (vite.config.ts)
@@ -24,7 +25,21 @@ async function toApiError(res: Response): Promise<ApiError> {
   const checkCodes = Array.isArray(body.check_codes) ? body.check_codes.filter((c): c is string => typeof c === 'string') : []
   const retryAfterRaw = Number(res.headers.get('Retry-After'))
   const retryAfter = Number.isFinite(retryAfterRaw) && retryAfterRaw > 0 ? Math.floor(retryAfterRaw) : undefined
-  return new ApiError(code as ApiError['code'], message, res.status, body.request_id, checkCodes, retryAfter)
+  return new ApiError(code as ApiError['code'], message, res.status, body.request_id, checkCodes, retryAfter, stepUpMaxAge(body, res))
+}
+
+// `max_age` of a step_up_required refusal: body first, then the RFC 9470 WWW-Authenticate parameter. Used only to
+// explain the prompt, never to compute freshness (the server clock decides).
+function stepUpMaxAge(body: Partial<ApiErrorBody> & { max_age?: unknown }, res: Response): number | undefined {
+  if (body.code !== 'step_up_required') return undefined
+  const fromHeader = /max_age="?(\d+)"?/.exec(res.headers.get('WWW-Authenticate') ?? '')?.[1]
+  const n = typeof body.max_age === 'number' ? body.max_age : Number(fromHeader)
+  return Number.isInteger(n) && n > 0 && n <= 86400 ? n : undefined
+}
+
+// A one-shot stream cannot be sent twice; every request body in this app is a string.
+function isResendable(body: BodyInit | null | undefined): boolean {
+  return !(typeof ReadableStream !== 'undefined' && body instanceof ReadableStream)
 }
 
 // Refresh calls are made with a bare fetch, never apiFetch - apiFetch's
@@ -67,6 +82,11 @@ export function refreshSessionOnce(): Promise<void> {
   return inFlightRefresh
 }
 
+/** Resolves once any in-flight token refresh has settled (success or failure). */
+export function whenRefreshSettled(): Promise<void> {
+  return inFlightRefresh ? inFlightRefresh.then(() => undefined, () => undefined) : Promise.resolve()
+}
+
 export interface ApiFetchOptions extends RequestInit {
   /** Internal: set to false on the retried attempt to prevent a refresh loop. */
   _isRetry?: boolean
@@ -77,6 +97,10 @@ export interface ApiFetchOptions extends RequestInit {
    * request/response is never cached.
    */
   anonymous?: boolean
+  /** Internal: set on the single re-send after a step-up so a second `step_up_required` never prompts again. */
+  _stepUpRetried?: boolean
+  /** The step-up call itself: a refusal there must never start another step-up. */
+  noStepUp?: boolean
 }
 
 /**
@@ -87,7 +111,7 @@ export interface ApiFetchOptions extends RequestInit {
  * redirecting to /login) and rethrows.
  */
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
-  const { _isRetry, anonymous, headers, ...rest } = options
+  const { _isRetry, _stepUpRetried, noStepUp, anonymous, headers, ...rest } = options
   const token = anonymous ? null : getAccessToken()
   const mergedHeaders = new Headers(headers)
   if (!mergedHeaders.has('Content-Type') && rest.body) {
@@ -102,6 +126,18 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     throw new ApiError('network_error', 'Could not reach the server. Check your connection and try again.', 0)
   }
 
+  if (res.status === 401 && !anonymous) {
+    // Two 401 answers are final business answers, not "access token expired": a wrong / replayed step-up code
+    // (`invalid_mfa_code`: must not refresh, must not end the session) and a dead session (`session_revoked`:
+    // refreshing a revoked chain is pointless; sign out). Branch on the code only.
+    const peek = await toApiError(res.clone())
+    if (peek.code === 'invalid_mfa_code') throw peek
+    if (peek.code === 'session_revoked') {
+      clearSession()
+      throw peek
+    }
+  }
+
   if (res.status === 401 && !_isRetry && !anonymous) {
     try {
       await refreshSessionOnce()
@@ -109,11 +145,22 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
       clearSession()
       throw await toApiError(res)
     }
+    // Never replay a TOTP code automatically: the operator enters a fresh one.
+    if (noStepUp) throw await toApiError(res)
     return apiFetch<T>(path, { ...options, _isRetry: true })
   }
 
   if (!res.ok) {
     const err = await toApiError(res)
+    if (res.status === 403 && err.code === 'step_up_required' && !anonymous && !noStepUp) {
+      // ADR 0119 S4b contract section 5: the refusal happened BEFORE any write, so one re-send is safe. The
+      // original options object is reused, hence the same frozen body and the same Idempotency-Key header.
+      // Exactly one re-send per original request; a second refusal fails visibly without prompting.
+      if (_stepUpRetried || !isResendable(rest.body)) throw stepUpNotEffectiveError(err.requestId)
+      await requestStepUp(token, err.stepUpMaxAge)
+      if (rest.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+      return apiFetch<T>(path, { ...options, _stepUpRetried: true })
+    }
     if (res.status === 401 && !anonymous) clearSession()
     throw err
   }

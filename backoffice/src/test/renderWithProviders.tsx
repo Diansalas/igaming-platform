@@ -3,6 +3,7 @@ import { render } from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { AuthProvider } from '../auth/AuthContext'
+import { StepUpProvider } from '../auth/StepUpProvider'
 
 export function renderWithProviders(ui: ReactElement, { route = '/' }: { route?: string } = {}) {
   const queryClient = new QueryClient({
@@ -11,7 +12,9 @@ export function renderWithProviders(ui: ReactElement, { route = '/' }: { route?:
   return render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
+        <StepUpProvider>
+          <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
+        </StepUpProvider>
       </AuthProvider>
     </QueryClientProvider>,
   )

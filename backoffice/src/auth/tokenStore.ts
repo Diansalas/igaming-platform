@@ -79,3 +79,26 @@ export function clearSession(): void {
   refreshToken = null
   emit()
 }
+
+/**
+ * Step-up (ADR 0119 S4b/S7b): swaps ONLY the access token for the one returned by POST /v1/staff/auth/step-up.
+ * The refresh token does not change. Fail closed: the new token must decode to an aal2 session of the SAME
+ * subject as the current one; anything else ends the session and throws InsufficientAssuranceError. There is
+ * no session to step up when signed out.
+ */
+export function replaceAccessToken(accessToken: string): void {
+  const claims = decodeJwtClaims(accessToken)
+  const current = snapshot.claims
+  if (
+    !current ||
+    !claims || claims.aal !== 2 ||
+    claims.sub !== current.sub ||
+    claims.tenant_id !== current.tenant_id ||
+    ((claims.sid !== undefined || current.sid !== undefined) && claims.sid !== current.sid)
+  ) {
+    clearSession()
+    throw new InsufficientAssuranceError()
+  }
+  snapshot = { accessToken, claims }
+  emit()
+}

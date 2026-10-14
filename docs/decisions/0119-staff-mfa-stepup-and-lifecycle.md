@@ -2415,7 +2415,7 @@ orchestrator allocated: 0139 stays reserved for S5 + S6, 0143-0150 for ADR 0116 
 | Section 9.5 re-assertion for withdrawal `submit` / `resolve` and K1 grant approve / revoke | `NOT IMPLEMENTED` (S4b-R3) |
 | `staff_lifecycle:*` in the backstop registry; the lifecycle flows; `staff_version` | `NOT IMPLEMENTED` (S5 + S6, migration 0139) |
 | ADR 0115 staff RG increases | `NOT IMPLEMENTED` by design: they stay refused (`403 RG_STEP_UP_REQUIRED`) until ADR 0115's own classifier slice (S4b-R4) |
-| Back-office step-up modal | `NOT IMPLEMENTED` (S7b, separate agent; contract written) |
+| Back-office step-up modal | `NOT IMPLEMENTED` in S4b; built by S7b, see section 27 (mocked API only) |
 | Production key provisioning; real email | `PROVIDER DEPENDENT` (unchanged) |
 
 ### 26.2 How the review conditions hold
@@ -2596,3 +2596,97 @@ PASS (412 s); payments `TestS4b_*` + K3 Y07 + HSEC concurrency PASS; payments sh
 separate run, `-timeout 120m`) PASS. Mutation: 65 mutants, 63 killed, 2 justified (H02a, R09). The full httpserver
 run was NOT repeated in this round (the previous full run's only failures were the known `TestResolutionIsolation_*`
 latency bound).
+
+## 27. S7b implementation record (2026-10-14)
+
+Branch: the S7b worktree branch on top of `a451e5a` (S4b head; S7a is already in its base via `e77900e`), `backoffice/` and docs
+only. **NOT MERGED**; S7b merges together with S4b (section 16). Gate G (live `security` review, `code-reviewer`, `qa`) has
+not run. Nothing below is an approval. No backend Go, migration or OpenAPI file was touched; every call matches
+`docs/plans/adr0119-s4b-api-contract.md` and the `staff-auth` tag of `docs/api/openapi/platform-api.yaml`.
+
+### 27.1 Status labels
+
+| Item | Label |
+|---|---|
+| Step-up interceptor in `api/client.ts` (`apiFetch`): any non-anonymous call answered `403 step_up_required` waits for the shared prompt, then is re-sent exactly once with the same options (same frozen body, same `Idempotency-Key`) and the refreshed token; a second `step_up_required` fails visibly and never prompts again | `IMPLEMENTED` (tested against MSW mocks of the API only, not a running backend) |
+| Single-flight coordinator (`auth/stepUpCoordinator.ts`) and modal host (`auth/StepUpProvider.tsx`): one modal and one `POST /v1/staff/auth/step-up` for any number of concurrent refusals; cancel, Escape, lockout, session end and host unmount fail every waiter with a fixed-message `ApiError` and re-send nothing | `IMPLEMENTED` (MSW-tested) |
+| Error handling of the step-up call: `invalid_mfa_code` (also the replay case), `validation_error`, `mfa_locked`, `session_revoked`, `unauthorized`, `forbidden`, `rate_limited` (with `Retry-After`), `service_unavailable` (one uniform message), network failure, unknown code | `IMPLEMENTED` (MSW-tested) |
+| Recovery-code regeneration on "My security" (`features/account/SecurityPage.tsx`): confirm, step-up through the interceptor, one-time display with copy / download `.txt` / acknowledgement, `beforeunload` prompt, no timers | `IMPLEMENTED` (MSW-tested) |
+| Own-sessions list on "My security" (section 15.4) | `NOT IMPLEMENTED` (unchanged, out of the S7b request) |
+| Real authenticator, running platform-api, browser-level screen-reader check | `BLOCKED` on a human / environment; only mocked-API tests with jsdom exist |
+| Authorization / step-up class decisions in the UI | none by design: the UI neither predicts nor caches a step-up requirement and never skips the server |
+
+### 27.2 Decisions taken inside S7b (reversible; for the reviewer)
+
+| # | Decision | Why |
+|---|---|---|
+| V1 | The interceptor lives in `apiFetch`, so every feature is covered with no per-screen code. The coordinator is a module singleton (like `tokenStore`); with no `StepUpProvider` mounted a refusal fails closed (`step_up_failed`) instead of hanging. | Contract section 5; fail closed. |
+| V2 | **Exactly one re-send per original request**, for every method. It reuses the original options object (frozen string body, headers). A `ReadableStream` body is never re-sent (none exists in the app). The step-up call itself carries `noStepUp` so its own refusal cannot recurse. | Contract section 5 items 2 and 4: the refusal precedes any write. |
+| V3 | A request SENT before a completed step-up and refused after it (different token than the stepped-up one) is released without a second prompt. The comparison is by token identity with the token minted by the last step-up; any refresh invalidates it. | Avoids a double prompt for concurrent calls without computing freshness client-side. |
+| V4 | `tokenStore.replaceAccessToken` installs the step-up token and keeps the refresh token. It fails closed (session cleared, `InsufficientAssuranceError`) if the token is not aal2 or its `sub` differs from the current session's. | Integrity check on an unverified decode; the server stays authoritative. |
+| V5 | `apiFetch` 401 handling now branches on the code BEFORE refreshing: `invalid_mfa_code` is thrown as-is (no refresh, session kept: a wrong step-up code must not sign the operator out) and `session_revoked` clears the session without a refresh attempt. Other 401s behave as before. | Without this a wrong TOTP code would have refreshed the token and then cleared the session. |
+| V6 | The TOTP field is uncontrolled: the value is read once on submit and cleared at once (see 27.7 F2 for the corrected cleanup); it is never in React state, the coordinator, a cache, storage or a log. A malformed code is rejected locally (does not spend one of the 5 attempts). | No secret persistence. |
+| V7 | Messages are fixed strings keyed on `code`; the server `message` is never rendered (sentinel tests). `max_age` (body, else the `WWW-Authenticate` parameter) is used only to word the prompt ("from the last N minutes"). | Section 15 and the S4b contract (section 2). |
+| V8 | Accessibility: `role="dialog"`, `aria-modal`, labelled and described, error text linked with `aria-describedby`, focus moves to the field and returns to the previous control, Tab / Shift+Tab trap, Escape cancels. The Escape / Tab listener is on `window` in the capture phase and stops propagation so a dialog underneath (a governed dialog) is not also closed. No new dependency. | Basics; `Modal.tsx` has no trap and was left unchanged. |
+| V9 | `RecoveryCodesDisplay` was extracted from `EnrolWizard` (identical behaviour, existing tests unchanged) so enrolment and regeneration share the one-time display, copy, download, acknowledgement and `beforeunload` guard. | One implementation of the secret display. |
+| V10 | The regeneration result is held in component state only (no `useMutation`, so no mutation-cache copy); a `beforeunload` prompt is also active while the request is in flight; the status query is invalidated after every attempt (success or failure). | S7a review lessons F1, F4, F5. |
+
+### 27.3 Changed existing tests and assertions
+
+| File | Change | Why |
+|---|---|---|
+| `src/features/account/SecurityPage.test.tsx` | "offers no regeneration action ... NOT IMPLEMENTED" replaced by "offers regeneration only to an enrolled account" | Regeneration now exists |
+| `src/test/renderWithProviders.tsx`, `src/test/setup.ts` | `StepUpProvider` wraps the tree; coordinator state reset after each test | New provider |
+
+### 27.4 Evidence (local only; NOT GitHub CI)
+
+Run in `backoffice/`: `npx tsc -b` PASS, `npx vitest run` PASS (32 files, 375 tests; 318 before S7b), `npm run build` PASS. New
+tests: `auth/StepUpProvider.test.tsx` (35), `features/account/SecurityPage.regenerate.test.tsx` (18),
+`auth/tokenStoreStepUp.test.ts` (4). Two mutants were applied by hand and killed (retry-once guard removed; `invalid_mfa_code`
+401 bypass removed).
+
+### 27.5 Contract gaps and residuals
+
+| # | Item |
+|---|---|
+| S7b-G1 | None blocking; the contract is sufficient. Observation: it does not say whether an access token minted before a step-up is refused once a newer one exists ("not the session's newest"); the UI therefore always installs the step-up token, including when the user cancelled while the verify call was in flight. |
+| S7b-G2 | `WWW-Authenticate` is read only as a fallback for `max_age`; a cross-origin deployment must expose it (`Access-Control-Expose-Headers`) for the fallback to work. The body carries `max_age`, so nothing depends on it. |
+| S7b-R1 | The regeneration response cannot be recovered if the operator navigates away (in-app route change) or the tab dies after the server committed and before the codes render: the old codes are already revoked. Mitigated by the confirm text, the `beforeunload` guard while in flight, and the status refresh; an in-app navigation block needs a data router (not used). |
+| S7b-R2 | After a step-up the new token is fresh for every request of the session until `max_age` passes (S4b-R5); the UI adds nothing to that. |
+| S7b-R3 | The TOTP field is a normal DOM input: browser extensions, autofill and accessibility tooling can read it. The value is not stored by the app. |
+| S7b-R4 | Escape / Tab handling is global while the modal is open; an iframe or a browser extension overlay is outside the trap. |
+| S7b-R5 | The step-up prompt can precede a `403 forbidden` for a caller without the permission (S4b-R2, contract section 2); the action then fails with the route's own answer and the step-up was spent for nothing. |
+| S7b-R6 | No end-to-end test with a real authenticator or running backend (`BLOCKED`, gate 21.7 (g)). |
+
+### 27.6 What `security`, `code-reviewer` and `qa` should probe
+
+1. Re-send is exactly once per original request across: concurrent requests, a 401-refresh followed by a step-up refusal, a refusal
+   on the re-send, a request sent before / refused after the step-up (V3), and requests started while the modal is already open.
+2. A wrong or replayed code never refreshes the token or ends the session (V5); five wrong codes end the session
+   (`session_revoked` path); `mfa_locked` leaves the session and fails the action visibly.
+3. The TOTP value: not in React state, DOM after submit / cancel / unmount, storage, console, query / mutation cache, error objects.
+4. The recovery codes: not in the query / mutation cache, storage, console or DOM after Done / unmount / session end; no timer
+   path; `beforeunload` states; clipboard and `.txt` residue (S7a-R1).
+5. Capture-phase Escape / Tab handler: no way to leave the trap with the keyboard, no leak to a dialog underneath.
+6. No rendering of any server `message` on the new screens.
+7. A hostile `max_age` (negative, huge, non-numeric) only changes wording; a hostile step-up response (token for another `sub`, aal 1) ends the session.
+8. Live (not mocked): the stepped-up token is accepted on the original route, the refresh token still works afterwards, the
+   `WWW-Authenticate` header is readable by the browser in the real deployment topology.
+
+### 27.7 Security review of S7b (2026-10-14): APPROVE WITH CONDITIONS - disposition
+
+| # | Finding | Disposition |
+|---|---|---|
+| F1 | Leaving My security while the step-up modal was open let the interceptor re-send after a late verify: old codes revoked, new codes nowhere to be shown (P1) | Fixed: `SecurityPage` owns an `AbortController`, passes its signal through `regenerateRecoveryCodes(signal)` to `apiFetch` (which already refuses to re-send once the signal is aborted) and aborts on unmount; results of an aborted call are ignored. Test: unmount the page with the modal open, verify, 0 re-sends (killed by removing the abort). No other feature in `features/*` shows a one-time secret from a response (grep); enrolment uses anonymous calls with no step-up. Residual: an abort during the in-flight re-send itself cannot undo a server commit (S7b-R1 stays). The structural fix is proposed in ADR 0120 (NOT IMPLEMENTED). |
+| F2 | The TOTP input value was not wiped on cancel / unmount (the ref is already null in effect cleanup) | Fixed: the element is captured at effect start and wiped in cleanup; `cancel()` wipes too. Tests assert `.value` on the removed element (cancel, host unmount, wrong code). V6 wording corrected below. |
+| F3 | A racing refresh could supersede the token the step-up call was sent with | Fixed: `staffStepUp` waits for any in-flight refresh first. A 401 on the step-up call refreshes once but never re-sends the code automatically (`noStepUp` requests are not replayed); the prompt stays open with a "session renewed, enter a new code" message. Tests for both. |
+| F4 | Query retry list | Fixed: `step_up_required`, `step_up_cancelled`, `step_up_failed`, `session_revoked`, `mfa_locked` are never retried (test). |
+| F5 | Stale `steppedUpToken` | Fixed: the coordinator subscribes to the session store and forgets it when the session is cleared (test). |
+| F6 | `replaceAccessToken` identity checks | Fixed: `tenant_id` must match; `sid` must match when either token carries one (tests). |
+| F7 | Background still reachable | Fixed: the app subtree is `inert` and `aria-hidden` while the modal is open (layout effect, removed before focus is restored); the Escape / Tab capture handler uses `stopImmediatePropagation` (tests). |
+| F8 | Two-phase regeneration | Recorded as ADR 0120 (PROPOSED, NOT IMPLEMENTED); task-registry row `RECOVERY-CODES-2PHASE-1`. |
+
+Correction to V6: the TOTP field is uncontrolled and its value is read once on submit and cleared at once; the cleanup
+captures the input element itself (React has already cleared the ref by then) so cancel, unmount and failure leave an empty
+value on the removed node. JavaScript gives no stronger scrubbing guarantee; the value can still be seen by browser extensions
+while typed (S7b-R3). Evidence after the fixes: see the S7b commit; `npx tsc -b`, `npx vitest run`, `npm run build` PASS.

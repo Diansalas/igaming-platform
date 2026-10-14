@@ -16,6 +16,7 @@ import {
 import { Button } from '../components/Button'
 import { TextInput } from '../components/FormField'
 import { useAuth } from './AuthContext'
+import { formatRecoveryCodesFile, RecoveryCodesDisplay } from './RecoveryCodesDisplay'
 import { describeStaffAuthError, GENERIC_FAILURE, normaliseTotp } from './staffAuthErrors'
 
 interface Props {
@@ -32,15 +33,7 @@ export function isSafeOtpauthUri(uri: string): boolean {
   return /^otpauth:\/\/totp\/[^\s]+$/.test(uri)
 }
 
-export function formatRecoveryCodesFile(codes: string[]): string {
-  return [
-    'Back office recovery codes',
-    'Each code can be used once. Store them somewhere safe and private.',
-    '',
-    ...codes,
-    '',
-  ].join('\n')
-}
+export { formatRecoveryCodesFile }
 
 export function EnrolWizard({ challengeToken, onRestart, intro }: Props) {
   const { establishSession } = useAuth()
@@ -65,18 +58,6 @@ export function EnrolWizard({ challengeToken, onRestart, intro }: Props) {
     },
     [],
   )
-
-  // Leaving the page with unacknowledged recovery codes loses them for good: ask the browser to confirm.
-  const unacked = done !== null && !acked
-  useEffect(() => {
-    if (!unacked) return
-    const h = (e: BeforeUnloadEvent) => {
-      e.preventDefault()
-      e.returnValue = ''
-    }
-    window.addEventListener('beforeunload', h)
-    return () => window.removeEventListener('beforeunload', h)
-  }, [unacked])
 
   useEffect(() => {
     headingRef.current?.focus()
@@ -143,30 +124,6 @@ export function EnrolWizard({ challengeToken, onRestart, intro }: Props) {
     })
   }
 
-  async function copyCodes() {
-    if (!done) return
-    try {
-      await navigator.clipboard.writeText(done.recovery_codes.join('\n'))
-      setNotice('Recovery codes copied to the clipboard. Clear your clipboard after saving them.')
-    } catch {
-      setNotice('Copy failed. Select the codes and copy them manually.')
-    }
-  }
-
-  function downloadCodes() {
-    if (!done) return
-    const blob = new Blob([formatRecoveryCodesFile(done.recovery_codes)], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'recovery-codes.txt'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    // Revoke after the browser has started the download.
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-  }
-
   async function copyUri() {
     if (!started) return
     try {
@@ -210,26 +167,7 @@ export function EnrolWizard({ challengeToken, onRestart, intro }: Props) {
         <p className="text-sm text-slate-600">
           Each code can be used once if you lose your authenticator. They are shown only now and cannot be shown again.
         </p>
-        <ol aria-label="Recovery codes" className="grid grid-cols-2 gap-1 rounded-md border border-border bg-surface-alt p-3 font-mono text-sm">
-          {done.recovery_codes.map((c) => (
-            <li key={c} className="select-all">
-              {c}
-            </li>
-          ))}
-        </ol>
-        <div className="flex gap-2">
-          <Button type="button" variant="secondary" onClick={copyCodes}>
-            Copy codes
-          </Button>
-          <Button type="button" variant="secondary" onClick={downloadCodes}>
-            Download .txt
-          </Button>
-        </div>
-        {noticeEl}
-        <label className="flex items-start gap-2 text-sm text-slate-700">
-          <input type="checkbox" checked={acked} onChange={(e) => setAcked(e.target.checked)} className="mt-0.5" />
-          <span>I have stored these codes</span>
-        </label>
+        <RecoveryCodesDisplay codes={done.recovery_codes} acked={acked} onAckChange={setAcked} />
         {errorEl}
         <Button type="button" disabled={!acked} onClick={finish}>
           Continue

@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll } from 'vitest'
+import { resetStepUpForTests } from '../auth/stepUpCoordinator'
 import { clearSession } from '../auth/tokenStore'
 import { server } from './mswServer'
 
@@ -13,5 +14,6 @@ afterEach(() => {
   // comment) so a session established in one test must not leak into the
   // next.
   clearSession()
+  resetStepUpForTests()
 })
 afterAll(() => server.close())

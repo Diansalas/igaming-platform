@@ -1,4 +1,4 @@
-import { apiFetch } from './client'
+import { apiFetch, whenRefreshSettled } from './client'
 
 export interface TokenPairResponse {
   access_token: string
@@ -104,6 +104,38 @@ export function staffEnrolConfirm(challengeToken: string, factorId: string, code
 /** GET /v1/staff/me/mfa (bearer). Not a secret, but never cached. */
 export function getMyMfaStatus(): Promise<StaffMfaStatus> {
   return apiFetch<StaffMfaStatus>('/v1/staff/me/mfa', { cache: 'no-store' })
+}
+
+export interface StepUpResponse {
+  access_token: string
+  token_type: string
+  expires_in: number
+  mfa_at: string
+  step_up_expires_at: { financial: string; critical: string }
+}
+
+/**
+ * POST /v1/staff/auth/step-up (bearer): a fresh TOTP code for a new access token. `noStepUp` so a refusal here
+ * can never recurse into the step-up flow. SECRET in the body: callers must not keep the code.
+ */
+export async function staffStepUp(code: string): Promise<StepUpResponse> {
+  // A racing refresh would supersede the token this call is sent with ("not the session's newest"): let it settle first.
+  await whenRefreshSettled()
+  return apiFetch<StepUpResponse>('/v1/staff/auth/step-up', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+    cache: 'no-store',
+    noStepUp: true,
+  })
+}
+
+export interface RecoveryCodesResponse {
+  recovery_codes: string[]
+}
+
+/** POST /v1/staff/mfa/recovery-codes/regenerate (bearer, step-up critical, no body). SECRET response: never cached. */
+export function regenerateRecoveryCodes(signal?: AbortSignal): Promise<RecoveryCodesResponse> {
+  return apiFetch<RecoveryCodesResponse>('/v1/staff/mfa/recovery-codes/regenerate', { method: 'POST', cache: 'no-store', signal })
 }
 
 /**

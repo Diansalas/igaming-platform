@@ -9,7 +9,19 @@ export const queryClient = new QueryClient({
         // those are not transient. Retry a couple of times for anything
         // else (network blips, 5xx).
         if (error instanceof ApiError) {
-          if (['unauthorized', 'forbidden', 'not_found', 'validation_error', 'conflict'].includes(error.code)) {
+          if ([
+              'unauthorized',
+              'forbidden',
+              'not_found',
+              'validation_error',
+              'conflict',
+              // ADR 0119 S7b: step-up and session outcomes are decisions, never transient.
+              'step_up_required',
+              'step_up_cancelled',
+              'step_up_failed',
+              'session_revoked',
+              'mfa_locked',
+            ].includes(error.code)) {
             return false
           }
         }

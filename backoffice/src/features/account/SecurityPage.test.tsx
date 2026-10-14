@@ -73,12 +73,13 @@ describe('SecurityPage', () => {
     expect(await screen.findByText('Not enrolled')).toBeInTheDocument()
   })
 
-  it('offers no regeneration action and labels it NOT IMPLEMENTED', async () => {
+  it('offers regeneration only to an enrolled account (a hint; the server decides)', async () => {
     signInAs({})
+    status({ enrolled: false, factor_type: null, activated_at: null, recovery_codes_remaining: 0 })
     renderWithProviders(<SecurityPage />)
-    await screen.findByText('Enrolled')
+    await screen.findByText('Not enrolled')
     expect(screen.queryByRole('button', { name: /regenerate/i })).not.toBeInTheDocument()
-    expect(screen.getByText(/NOT IMPLEMENTED/)).toBeInTheDocument()
+    expect(screen.queryByText(/NOT IMPLEMENTED/)).not.toBeInTheDocument()
   })
 
   it.each([
