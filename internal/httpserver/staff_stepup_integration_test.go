@@ -158,10 +158,10 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 		}
 	}
 	// Non-vacuity: the classified set is the golden table's (S4a + S4b).
-	// 110 mutating routes: 46 critical, 22 financial, 5 classifier routes, 37 none; 70 reads.
+	// 110 mutating routes: 46 critical, 22 financial, 5 classifier routes, 37 none; 71 reads (S1b adds GET /v1/admin/alerts/{alertID}).
 	if counts["critical"] != 46 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 37 || counts["read"] != 70 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 37 || counts["read"] != 71 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {
