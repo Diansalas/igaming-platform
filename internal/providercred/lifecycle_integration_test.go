@@ -332,11 +332,12 @@ func TestPCRequest_RequesterEligibility(t *testing.T) {
 	f := newFx(t)
 	tenant := f.tenant()
 	tenantAdmin := f.tenantStaff(tenant, "tenant_admin")
-	// ADR 0119 S5: no "unlinked" arm - a platform admin without a Person cannot exist (SF014,
-	// TestPCFixture_UnlinkedPlatformAdminRefusedBySF014).
+	// ADR 0119 S5 + S6 review fix F3: the "unlinked" arm is a LEGACY pre-0139 row (SF014 refuses creating one now,
+	// TestPCFixture_UnlinkedPlatformAdminRefusedBySF014; 0139 does not backfill, so the defence must still hold).
 	for name, principal := range map[string]uuid.UUID{
 		"unresolvable":  uuid.New(),
 		"tenant-scoped": tenantAdmin,
+		"unlinked":      f.legacyUnlinkedAdmin(),
 		"suspended":     f.suspended,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -440,7 +441,8 @@ func TestPCApproval_SamePersonSecondAccountRefused(t *testing.T) {
 	}
 }
 
-// ADR 0119 S5 (migration 0139): the "unlinked platform admin" fixture state is structurally unreachable.
+// ADR 0119 S5 (migration 0139): the runtime role can no longer CREATE an unlinked platform admin (SF014); the legacy
+// rows 0139 does not backfill are what legacyUnlinkedAdmin reproduces.
 func TestPCFixture_UnlinkedPlatformAdminRefusedBySF014(t *testing.T) {
 	f := newFx(t)
 	id := uuid.New()
@@ -459,10 +461,11 @@ func TestPCApproval_ApproverEligibility(t *testing.T) {
 	tenant := f.tenant()
 	r, _ := f.file(f.spec(tenant, "acme", "k1"))
 	tenantAdmin := f.tenantStaff(tenant, "tenant_admin")
-	// ADR 0119 S5: no "unlinked" arm (SF014; see the requester test above).
+	// ADR 0119 S5 + S6 review fix F3: the "unlinked" arm is a legacy pre-0139 row (see the requester test above).
 	for name, principal := range map[string]uuid.UUID{
 		"unresolvable":  uuid.New(),
 		"tenant-scoped": tenantAdmin,
+		"unlinked":      f.legacyUnlinkedAdmin(),
 		"suspended":     f.suspended,
 	} {
 		t.Run(name, func(t *testing.T) {

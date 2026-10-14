@@ -78,9 +78,10 @@ func TestValidateReason_ClosedListsAndNote(t *testing.T) {
 	}
 }
 
-func TestRequestDigest_MatchesTheDatabaseCanonicalForm(t *testing.T) {
-	// k2_canonical: len:value, '~' for NULL, comma-joined; sha256 hex. Pinned so the Go proof payload and
-	// staff_lifecycle_request_digest cannot drift (the integration test checks the database side).
+func TestRequestDigest_IsContentBound(t *testing.T) {
+	// k2_canonical: len:value, '~' for NULL, comma-joined; sha256 hex. This unit test checks only that the digest is
+	// content-bound; equality with the database's staff_lifecycle_request_digest (including non-ASCII notes) is
+	// TestFixRound_F11_RequestDigestEqualsTheDatabase (review fix F11: the earlier name over-claimed).
 	target := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	d := RequestDigest(KindPlatformMFAReset, &target, "", nil, "device_lost", "")
 	if len(d) != 64 || d == RequestDigest(KindPlatformMFAReset, &target, "", nil, "device_replaced", "") {

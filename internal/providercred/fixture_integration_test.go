@@ -32,6 +32,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -109,9 +110,9 @@ type fx struct {
 	approver2  uuid.UUID // platform admin, Person C
 	samePerson uuid.UUID // platform admin, Person A (second account)
 	// unlinked is a platform admin without a Person. ADR 0119 S5 (migration 0139, SF014): such a row can no longer be
-	// created (and person_id is append-only since 0034), so it is uuid.Nil here; the scratch-database test
-	// TestPCApproval_RequesterUnlinkedRefused builds one with SF014 disabled, and TestPCFixture_UnlinkedPlatformAdmin
-	// RefusedBySF014 pins the refusal.
+	// created through the runtime role, but 0139 does not backfill, so a LEGACY one can still exist; it is uuid.Nil
+	// until legacyUnlinkedAdmin builds one (as the owner, SF014 disabled for that one statement: review fix F3), and
+	// TestPCFixture_UnlinkedPlatformAdminRefusedBySF014 pins that the runtime role can no longer create it.
 	unlinked uuid.UUID
 	// suspended is a platform admin, Person D, that is NOT active. ADR 0119 S5: a row is created invited or active
 	// only (SF010) and SF020 refuses suspending a platform admin while no other enrolled one exists, so the fixture
@@ -225,6 +226,26 @@ func (f *fx) nonActivePlatformStaff(person *uuid.UUID) uuid.UUID {
 		return f.platformStaff(person, "invited")
 	}
 	return f.platformStaff(person, "suspended")
+}
+
+// legacyUnlinkedAdmin builds (once per fixture) an ACTIVE platform admin without a Person - a legacy pre-0139 row -
+// through the owner pool, with SF014 disabled for exactly that statement inside the same transaction
+// (staffsv.InsertLegacyUnlinkedStaff: no other session observes the trigger disabled). ADR 0119 S5 + S6 review fix
+// F3: it restores the "unlinked" arms of the requester / approver eligibility tests the S5 change had dropped.
+func (f *fx) legacyUnlinkedAdmin() uuid.UUID {
+	f.t.Helper()
+	if f.unlinked != uuid.Nil {
+		return f.unlinked
+	}
+	id := uuid.New()
+	if err := ownerPool(f.t).WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return staffsv.InsertLegacyUnlinkedStaff(ctx, tx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status)
+			VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active')`, id, "pc-unlinked-"+id.String()+"@test.example")
+	}); err != nil {
+		f.t.Fatalf("seed a legacy unlinked platform admin: %v", err)
+	}
+	f.unlinked = id
+	return id
 }
 
 func (f *fx) tenantStaff(tenantID uuid.UUID, role string) uuid.UUID {

@@ -101,6 +101,7 @@ func TestOpenAPI_StaffLifecycle_DTOsMatchSchemas(t *testing.T) {
 		{"StaffLifecycleEventList", reflect.TypeOf(staffLifecycleEventListDTO{})},
 		{"PlatformStaffLifecycleRequest", reflect.TypeOf(platformStaffLifecycleRequestDTO{})},
 		{"PlatformStaffLifecycleRequestList", reflect.TypeOf(platformStaffLifecycleRequestListDTO{})},
+		{"LinkedStaff", reflect.TypeOf(linkedStaffDTO{})}, // review fix SR-3
 		{"PlatformStaffLifecycleRequestCreate", reflect.TypeOf(platformStaffLifecycleRequestCreate{})},
 		{"PlatformStaffLifecycleDecision", reflect.TypeOf(platformStaffLifecycleDecision{})},
 		{"StaffInvitationRequest", reflect.TypeOf(staffInvitationRequest{})},
@@ -172,7 +173,7 @@ func TestOpenAPI_StaffLifecycle_NoSecretInAnyResponse(t *testing.T) {
 		}
 	}
 	for _, s := range []string{"StaffMfaSummary", "StaffDirectoryEntry", "StaffDirectoryList", "StaffLifecycleResult", "StaffLifecycleState",
-		"StaffLifecycleEvent", "StaffLifecycleEventList", "PlatformStaffLifecycleRequest", "PlatformStaffLifecycleRequestList"} {
+		"StaffLifecycleEvent", "StaffLifecycleEventList", "PlatformStaffLifecycleRequest", "PlatformStaffLifecycleRequestList", "LinkedStaff"} {
 		for _, p := range govSchemaProps(t, spec, s) {
 			if secretShaped(p) && p != "reason_code" {
 				t.Errorf("response schema %s has a secret-shaped property %q", s, p)

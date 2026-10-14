@@ -489,6 +489,10 @@ type linkStaffPersonRequest struct {
 // architecture" - it is deliberately NOT gated by any withdrawal
 // permission, since fixing a linkage is a staff-management action, not a
 // withdrawal decision.
+//
+// Since ADR 0119 S5 + S6 review fix SR-4 the write goes through linkPerson
+// (stafflifecycle.Service.LinkPerson), not identity.LinkStaffPersonID: the
+// rules above still hold, plus the lifecycle rules listed on linkPerson.
 func newLinkStaffPersonHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, ok := beginLifecycleCall(deps, w, r)
@@ -573,6 +577,11 @@ func linkPerson(c lifecycleCall, w http.ResponseWriter, r *http.Request, targetT
 //
 // Route is deliberately NOT parameterized by tenantID (there is no
 // tenant to target - that is the entire point), unlike the sibling route.
+//
+// Since ADR 0119 S5 + S6 review fix SR-4 both routes share linkPerson
+// (stafflifecycle.Service.LinkPerson, platform scope via
+// db.WithPlatformAdmin); the identity.LinkStaffPersonID wording above is
+// historical.
 func newLinkPlatformStaffPersonHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, ok := beginLifecycleCall(deps, w, r)
