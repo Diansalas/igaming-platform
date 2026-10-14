@@ -169,7 +169,7 @@ MUTANTS = [
  ('AR01', GATE, '''	if !auth.RoleHasPermission(auth.Role(tc.Role), auth.PermAlertRouteManage) || tc.TenantID != uuid.Nil {
 		return auth.StepUpNone, nil
 	}
-	return auth.StepUpCritical, nil''', '''	if false {
+	return auth.StepUpCritical, nil''', '''	if _ = tc; false {
 		return auth.StepUpNone, nil
 	}
 	return auth.StepUpCritical, nil''', HS, 'TestClassifiers|TestStepUp_AlertRouteCreate'),
