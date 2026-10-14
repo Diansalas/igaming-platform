@@ -58,12 +58,29 @@ func reassertActor(ctx context.Context, tx pgx.Tx) error {
 	var version int64
 	err := tx.QueryRow(ctx, `SELECT role, status, staff_version FROM staff_users WHERE id = $1 FOR SHARE`, a.Actor).Scan(&role, &status, &version)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrActorNotLive
+		return actorLiveDecision(a, nil)
 	}
 	if err != nil {
 		return err
 	}
-	if status != "active" || role != a.Role || version != a.StaffVersion {
+	return actorLiveDecision(a, &actorRow{Role: role, Status: status, StaffVersion: version})
+}
+
+// actorRow is the actor's own staff row as the re-assertion read it (nil: not visible).
+type actorRow struct {
+	Role         string
+	Status       string
+	StaffVersion int64
+}
+
+// actorLiveDecision is the pure rule of reassertActor - the SAME rule as db.CheckActorStaffLive (this package cannot
+// import internal/db). Ledger-finance review LF-3: TestReassertDecision_EquivalentToCheckActorStaffLive pins that the
+// two agree on a shared table of cases, so a drift in either fails a unit test.
+func actorLiveDecision(a ProofActor, row *actorRow) error {
+	if a.Actor == uuid.Nil || a.Role == "" || a.StaffVersion < 1 || row == nil {
+		return ErrActorNotLive
+	}
+	if row.Status != "active" || row.Role != a.Role || row.StaffVersion != a.StaffVersion {
 		return ErrActorNotLive
 	}
 	return nil

@@ -32,9 +32,17 @@ func TestStatic_K1ReassertionPins(t *testing.T) {
 	i := strings.Index(proof, "func reassertActor(")
 	j := strings.Index(proof[i:], "\n}\n")
 	body := proof[i : i+j]
-	for _, want := range []string{"if !ok {", "if reassertFallbackOn() {", "return ErrActorNotLive", "FOR SHARE", "version != a.StaffVersion", "role != a.Role"} {
+	for _, want := range []string{"if !ok {", "if reassertFallbackOn() {", "return ErrActorNotLive", "FOR SHARE", "return actorLiveDecision(a, nil)", "return actorLiveDecision(a, &actorRow{Role: role, Status: status, StaffVersion: version})"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("reassertActor must contain %q", want)
+		}
+	}
+	// The rule itself (LF-3: its equivalence with db.CheckActorStaffLive is TestReassertDecision_Equivalent...).
+	k := strings.Index(proof, "func actorLiveDecision(")
+	dec := proof[k : k+strings.Index(proof[k:], "\n}\n")]
+	for _, want := range []string{"row == nil", `row.Status != "active"`, "row.Role != a.Role", "row.StaffVersion != a.StaffVersion"} {
+		if !strings.Contains(dec, want) {
+			t.Fatalf("actorLiveDecision must contain %q", want)
 		}
 	}
 	capSrc := read("capability.go")

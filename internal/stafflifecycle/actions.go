@@ -580,6 +580,12 @@ func (s *Service) ChangeRole(ctx context.Context, actor Actor, targetTenant, sta
 	}
 	var res Result
 	err := s.inTargetScope(ctx, actor, targetTenant, func(ctx context.Context, tx pgx.Tx) error {
+		// Ledger-finance review LF-2: the same bounded wait as suspension T2 (ADR 0082 A9 item 6): a role change
+		// queued behind re-asserting share holders gives up after lockTimeout (55P03 -> ErrBusy, 503 lifecycle_busy)
+		// instead of waiting without bound. Nothing is written; the caller retries.
+		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, pgInterval(s.lockTimeout)); err != nil {
+			return err
+		}
 		target, err := lockActorAndTarget(ctx, tx, actor, staffID, targetTenant)
 		if err != nil {
 			return err

@@ -40,6 +40,32 @@ type submitWorld struct {
 	f     payoutFixture
 	orch  *Orchestrator
 	staff uuid.UUID
+	// base is the write counts taken right before the latest claim (ledger-finance review LF-7).
+	base claimWrites
+}
+
+// claimWrites are the rows a claim may write besides the attempt and the state change: the KYC enforcement decision
+// rows of the tenant, the withdrawal.submit.http audit rows of the request, and the destination snapshots of the
+// request (ledger-finance review LF-7: a refusal must commit NONE of them).
+type claimWrites struct {
+	decisions, audits, snapshots int
+}
+
+func (w *submitWorld) writes(wrID uuid.UUID) claimWrites {
+	w.t.Helper()
+	var c claimWrites
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1`, w.f.tenantID).Scan(&c.decisions); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'withdrawal.submit.http' AND target_id = $1`, wrID.String()).Scan(&c.audits); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM payout_attempt_destination_snapshots WHERE withdrawal_request_id = $1`, wrID).Scan(&c.snapshots)
+	}); err != nil {
+		w.t.Fatal(err)
+	}
+	return c
 }
 
 func newSubmitWorld(t *testing.T) *submitWorld {
@@ -68,6 +94,7 @@ func (w *submitWorld) actor(role string, sv int64) SubmitActor {
 }
 
 func (w *submitWorld) claim(wr withdrawal.WithdrawalRequest, a SubmitActor) (ClaimResult, error) {
+	w.base = w.writes(wr.ID)
 	return w.orch.ClaimForDispatch(context.Background(), w.pool, KYCEnforcementPayoutGate{}, w.f.tenantID, wr.ID, "bank_transfer", a)
 }
 
@@ -104,6 +131,10 @@ func (w *submitWorld) assertNothingWritten(wr withdrawal.WithdrawalRequest) {
 	}
 	if s := w.state(wr); s != withdrawal.StateApproved {
 		w.t.Fatalf("a refused claim moved the request to %s", s)
+	}
+	// LF-7: no ALLOW decision row, no B6 audit, no destination snapshot committed by the refused claim.
+	if got := w.writes(wr.ID); got != w.base {
+		w.t.Fatalf("a refused claim committed rows: before %+v, after %+v", w.base, got)
 	}
 }
 
@@ -291,5 +322,33 @@ func TestSubmitReassertion_ClaimFirst_SuspensionWaits(t *testing.T) {
 	}
 	if err := w.change(`UPDATE staff_users SET status = 'suspended' WHERE id = $1`, "2s"); err != nil {
 		t.Fatalf("the suspension after the claim commits: %v", err)
+	}
+}
+
+// Ledger-finance review LF-7: a refused claim (stale sv) followed by a retry with a valid token claims EXACTLY once,
+// and a replay after that is refused (the request is no longer approved) without a second attempt.
+func TestSubmitReassertion_RefusedThenRetried_ClaimsOnce(t *testing.T) {
+	w := newSubmitWorld(t)
+	wr := approvedWithdrawal(t, w.pool, w.f, 500, "s56-retry")
+	if _, err := w.claim(wr, w.actor("finance", 2)); !errors.Is(err, ErrSubmitterNotLive) {
+		t.Fatalf("stale sv: want ErrSubmitterNotLive, got %v", err)
+	}
+	w.assertNothingWritten(wr)
+	res, err := w.claim(wr, w.actor("finance", 1))
+	if err != nil || res.Denied || res.Attempt.ID == uuid.Nil {
+		t.Fatalf("the retry with a valid token must claim: %+v %v", res, err)
+	}
+	after := w.writes(wr.ID)
+	if after.audits != w.base.audits+1 || after.decisions != w.base.decisions+1 {
+		t.Fatalf("the successful claim must write one decision row and one audit row: before %+v, after %+v", w.base, after)
+	}
+	if _, err := w.claim(wr, w.actor("finance", 1)); err == nil {
+		t.Fatal("a replay of the claim must be refused")
+	}
+	if n := countAttempts(t, w.pool, w.f.tenantID, wr.ID); n != 1 {
+		t.Fatalf("attempts %d, want exactly 1", n)
+	}
+	if s := w.state(wr); s == withdrawal.StateApproved {
+		t.Fatal("the claimed request must have left approved")
 	}
 }
