@@ -30,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -131,6 +132,7 @@ func mkStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID, role string, perso
 	if err != nil {
 		t.Fatalf("insert staff %s: %v", role, err)
 	}
+	staffsv.Register(pool, s.ID, tenantID)
 	return s
 }
 
@@ -418,7 +420,8 @@ func (w *world) decidePolicy(c PolicyChange, approver staffMember, d Decision) e
 // ctxFor returns a context carrying actor's verified-token identity, as the
 // HTTP auth middleware would build it.
 func ctxFor(actor staffMember) context.Context {
-	return tenant.WithContext(context.Background(), tenant.Context{TenantID: actor.TenantID, Subject: actor.ID.String(), Role: actor.Role})
+	return tenant.WithContext(context.Background(), tenant.Context{TenantID: actor.TenantID, Subject: actor.ID.String(), Role: actor.Role,
+		StaffVersion: staffsv.Version(actor.ID)})
 }
 
 func (w *world) target() Target {

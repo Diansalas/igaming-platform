@@ -28,7 +28,8 @@ import (
 )
 
 // StaffParams returns the claims of an aal2 staff token for staffID, as issued right after a second-factor login
-// (amr pwd+otp, auth_time = mfa_at = now, a fresh sid, staff version 0 until migration 0139 adds staff_version).
+// (amr pwd+otp, auth_time = mfa_at = now, a fresh sid, staff version 0: a bare token; LiveStaffToken carries the row's
+// staff_users.staff_version, migration 0139).
 func StaffParams(staffID, tenantID uuid.UUID, role auth.Role) auth.StaffTokenParams {
 	now := time.Now()
 	return auth.StaffTokenParams{
@@ -71,9 +72,9 @@ func Token(tb testing.TB, issuer *auth.Issuer, subject, tenantID uuid.UUID, role
 // is the pool the test writes through (the runtime role in the harnesses).
 func LiveStaffToken(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, issuer *auth.Issuer, staffID, tenantID uuid.UUID, role auth.Role) string {
 	tb.Helper()
-	sess := LiveStaffSession(tb, pool, keys, staffID, tenantID)
+	sess, sv := liveStaffSessionVersioned(tb, pool, keys, staffID, tenantID, 0)
 	p := StaffParams(staffID, tenantID, role)
-	p.SessionID, p.AuthTime, p.MFAAt = sess.ID, sess.AuthTime, sess.MFAAt
+	p.SessionID, p.AuthTime, p.MFAAt, p.StaffVersion = sess.ID, sess.AuthTime, sess.MFAAt, sv
 	tok, err := issuer.IssueStaff(p, time.Hour)
 	if err != nil {
 		tb.Fatalf("authtest: issue live staff token: %v", err)
@@ -121,9 +122,9 @@ func nullableTenant(id uuid.UUID) any {
 // row's (whole seconds).
 func LiveStaffTokenAged(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, issuer *auth.Issuer, staffID, tenantID uuid.UUID, role auth.Role, mfaAge time.Duration) string {
 	tb.Helper()
-	sess := liveStaffSessionAged(tb, pool, keys, staffID, tenantID, mfaAge)
+	sess, sv := liveStaffSessionVersioned(tb, pool, keys, staffID, tenantID, mfaAge)
 	p := StaffParams(staffID, tenantID, role)
-	p.SessionID, p.AuthTime, p.MFAAt = sess.ID, sess.AuthTime, sess.MFAAt
+	p.SessionID, p.AuthTime, p.MFAAt, p.StaffVersion = sess.ID, sess.AuthTime, sess.MFAAt, sv
 	tok, err := issuer.IssueStaff(p, time.Hour)
 	if err != nil {
 		tb.Fatalf("authtest: issue aged staff token: %v", err)
@@ -140,9 +141,22 @@ func LiveStaffSession(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, staffID
 
 func liveStaffSessionAged(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, staffID, tenantID uuid.UUID, mfaAge time.Duration) auth.Session {
 	tb.Helper()
+	sess, _ := liveStaffSessionVersioned(tb, pool, keys, staffID, tenantID, mfaAge)
+	return sess
+}
+
+// liveStaffSessionVersioned is liveStaffSessionAged that also returns the staff member's current
+// staff_users.staff_version (ADR 0119 S5 + S6, migration 0139), the `sv` a live token must carry. A staff row that
+// is not visible in the scope (the token will be refused anyway) reports 0.
+func liveStaffSessionVersioned(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, staffID, tenantID uuid.UUID, mfaAge time.Duration) (auth.Session, int64) {
+	tb.Helper()
 	var sess auth.Session
+	var sv int64
 	fn := func(ctx context.Context, tx pgx.Tx) error {
 		if err := EnsurePlaceholderFactor(ctx, tx, staffID); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT staff_version FROM staff_users WHERE id = $1), 0)`, staffID).Scan(&sv); err != nil {
 			return err
 		}
 		var now time.Time
@@ -166,7 +180,27 @@ func liveStaffSessionAged(tb testing.TB, pool *db.Pool, keys *staffmfa.Keys, sta
 	if err != nil {
 		tb.Fatalf("authtest: live staff session for %s: %v", staffID, err)
 	}
-	return sess
+	return sess, sv
+}
+
+// StaffVersion reads staffID's current staff_users.staff_version in its own scope (tenantID; uuid.Nil = platform),
+// for fixtures that build a verified-token context by hand (tenant.Context.StaffVersion). 0 when not visible.
+func StaffVersion(tb testing.TB, pool *db.Pool, staffID, tenantID uuid.UUID) int64 {
+	tb.Helper()
+	var sv int64
+	fn := func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COALESCE((SELECT staff_version FROM staff_users WHERE id = $1), 0)`, staffID).Scan(&sv)
+	}
+	var err error
+	if tenantID != uuid.Nil {
+		err = pool.WithTenant(context.Background(), tenantID, fn)
+	} else {
+		err = pool.WithoutTenant(context.Background(), fn)
+	}
+	if err != nil {
+		tb.Fatalf("authtest: staff version of %s: %v", staffID, err)
+	}
+	return sv
 }
 
 // EnsurePlaceholderFactor plants the LiveStaffToken placeholder factor (pending, then activated: the SF002 status

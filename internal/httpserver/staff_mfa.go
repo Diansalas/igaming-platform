@@ -23,7 +23,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 )
 
-
 // StaffMFA is the ADR 0119 staff MFA subsystem: the key families (built by
 // staffmfa.LoadKeys, so the startup gate has run), the store-backed TOTP
 // factor, the challenge / token / recovery-code store and the staff session

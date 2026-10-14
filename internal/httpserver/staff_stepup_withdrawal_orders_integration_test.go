@@ -51,7 +51,7 @@ func TestStepUp_WithdrawalApprove_ReassertionBothOrders_RealApprove(t *testing.T
 			}
 			var waitErr error
 			err := pool.WithTenant(ctx, tn.ID, func(ctx context.Context, tx pgx.Tx) error {
-				inner := approverEligibilityCheckLocked(ctx, tx, staff.ID, string(auth.RoleFinance))
+				inner := approverEligibilityCheckLocked(ctx, tx, staff.ID, string(auth.RoleFinance), staff.StaffVersion)
 				elig := func(id uuid.UUID) (bool, bool, error) {
 					switch c {
 					case "suspend_first":
