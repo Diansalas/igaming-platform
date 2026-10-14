@@ -638,23 +638,43 @@ ALTER TABLE staff_lifecycle_requests FORCE ROW LEVEL SECURITY;
 ALTER TABLE staff_lifecycle_approvals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staff_lifecycle_approvals FORCE ROW LEVEL SECURITY;
 
--- Platform principal session only; no tenant arm (s13.3).
-DO $$
-DECLARE
-    t    text;
-    pred text := $p$NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+-- Platform principal session only; no tenant arm (s13.3). Written out literally (the A-18 static scan reads
+-- policies lexically).
+CREATE POLICY platform_only_select ON staff_lifecycle_requests FOR SELECT
+    USING (NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
         AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
-        AND NOT financial_acting_gucs_present()$p$;
-BEGIN
-    FOREACH t IN ARRAY ARRAY['staff_lifecycle_requests', 'staff_lifecycle_approvals'] LOOP
-        EXECUTE format('CREATE POLICY platform_only_select ON %I FOR SELECT USING (%s)', t, pred);
-        EXECUTE format('CREATE POLICY platform_only_insert ON %I FOR INSERT WITH CHECK (%s)', t, pred);
-    END LOOP;
-    EXECUTE format('CREATE POLICY platform_only_update ON staff_lifecycle_requests FOR UPDATE USING (%s) WITH CHECK (%s)', pred, pred);
-END
-$$;
+        AND NOT financial_acting_gucs_present());
+CREATE POLICY platform_only_insert ON staff_lifecycle_requests FOR INSERT
+    WITH CHECK (NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present());
+CREATE POLICY platform_only_update ON staff_lifecycle_requests FOR UPDATE
+    USING (NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present())
+    WITH CHECK (NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present());
+CREATE POLICY platform_only_select ON staff_lifecycle_approvals FOR SELECT
+    USING (NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present());
+CREATE POLICY platform_only_insert ON staff_lifecycle_approvals FOR INSERT
+    WITH CHECK (NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present());
 
 -- =========================================================================
 -- 6. staff_lifecycle_events (s10.6)
