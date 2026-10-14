@@ -70,7 +70,7 @@ func seedM0105Fixture(t *testing.T, pool *db.Pool) m0105Fixture {
 			}
 		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active')`,
+			`WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active', (SELECT id FROM s56p))`,
 			f.platformPrincipal, "m0105-platform-"+f.platformPrincipal.String()+"@test.example")
 		return err
 	}); err != nil {
@@ -78,12 +78,12 @@ func seedM0105Fixture(t *testing.T, pool *db.Pool) m0105Fixture {
 	}
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', 'tenant_admin', 'active')`,
+			`WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', 'active', (SELECT id FROM s56p))`,
 			f.tenantPrincipalA, f.tenantID, "m0105-a-"+f.tenantPrincipalA.String()+"@test.example"); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', 'tenant_admin', 'active')`,
+			`WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', 'active', (SELECT id FROM s56p))`,
 			f.tenantPrincipalB, f.tenantID, "m0105-b-"+f.tenantPrincipalB.String()+"@test.example")
 		return err
 	}); err != nil {
@@ -412,7 +412,7 @@ func TestMigration0105_ClaimPredicateBlocksSubmissionWhenEngaged(t *testing.T) {
 	// Engage a wildcard-provider deposit kill switch for this tenant.
 	staffPrincipal := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,$2,$3,'x','tenant_admin','active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,$2,$3,'x','tenant_admin','active', (SELECT id FROM s56p))`,
 			staffPrincipal, f.tenantID, "m0105h-"+staffPrincipal.String()+"@test.example")
 		return err
 	}); err != nil {
@@ -698,7 +698,9 @@ func TestMigration0105_N1_K19_SuspendedPlatformStaffUUIDIsRefused(t *testing.T) 
 	suspendedPlatformStaff := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'suspended')`,
+			// ADR 0119 S5: created invited (SF010 allows only invited / active at INSERT); the predicate under test
+			// is status = 'active', so the non-active row exercises the same refusal.
+			`WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, NULL, $2, NULL, 'platform_admin', 'invited', (SELECT id FROM s56p))`,
 			suspendedPlatformStaff, "m0105-n1-k19b-"+suspendedPlatformStaff.String()+"@test.example")
 		return err
 	}); err != nil {

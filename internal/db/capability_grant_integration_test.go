@@ -862,7 +862,8 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 	// staff_users: insert a platform_admin.
 	runRefused(t, "insert_platform_admin", func(tx pgx.Tx) error {
 		_, err := tx.Exec(context.Background(),
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES (gen_random_uuid(), NULL, $1, 'x', 'platform_admin', 'active')`,
+			// ADR 0119 S5: a (dangling) person_id so SF014 does not pre-empt the RLS refusal under test.
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES (gen_random_uuid(), NULL, $1, 'x', 'platform_admin', 'active', gen_random_uuid())`,
 			"forged-"+uuid.NewString()+"@test.invalid")
 		return err
 	})
@@ -871,7 +872,9 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 	runZeroRows(t, "read_other_platform_staff", `SELECT count(*) FROM staff_users WHERE id = $1`, otherPlatform)
 	// staff_users: update/delete staff.
 	runRefused(t, "update_staff", func(tx pgx.Tx) error {
-		_, err := tx.Exec(context.Background(), `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, principalID)
+		// ADR 0119 S5: a column SF013 (no self status / role change, a BEFORE trigger that would pre-empt the RLS
+		// WITH CHECK refusal under test) does not watch.
+		_, err := tx.Exec(context.Background(), `UPDATE staff_users SET display_name = 'forged' WHERE id = $1`, principalID)
 		return err
 	})
 	// sessions: insert a platform session row.
@@ -1107,8 +1110,15 @@ func TestCapabilityGrant_A8_SuspendedActorRefused(t *testing.T) {
 
 	// Suspend the requester AFTER creating the staff row (status set by
 	// DB fixture, mirroring the ADR's own wording), then attempt a
-	// request through its principal id.
+	// request through its principal id. ADR 0119 S5 + S6: the suspension
+	// is made the way the lifecycle service makes it for a platform actor
+	// (app.actor_staff_id names a platform staff row), since SF021 refuses
+	// a tenant-scoped removal of the tenant's last enrolled tenant_admin.
+	platformActor := cgStaff(t, pool, uuid.Nil, "platform_admin")
 	if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := SetActorStaffIDForCurrentTx(ctx, tx, platformActor); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, requester)
 		return err
 	}); err != nil {

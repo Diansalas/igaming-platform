@@ -57,7 +57,7 @@ func (r *spyPrincipalRunner) Pool() *db.Pool { return r.pool }
 func seedTenantStaffWithID(t *testing.T, pool *db.Pool, tenantID, staffID uuid.UUID) {
 	t.Helper()
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', (SELECT id FROM s56p))`,
 			staffID, tenantID, "staff-"+staffID.String()+"@tenant.test")
 		return err
 	})

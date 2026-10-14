@@ -206,7 +206,7 @@ func (f *fx) tenantStaff(tenantID uuid.UUID, role string) uuid.UUID {
 	f.t.Helper()
 	id := uuid.New()
 	if err := f.rt.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', $4)`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', $4, (SELECT id FROM s56p))`,
 			id, tenantID, "pc-"+id.String()+"@test.example", role)
 		return err
 	}); err != nil {

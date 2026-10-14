@@ -23,7 +23,7 @@ func TestLFC1_a_BusinessWritesBeforeAndAfterSwallowedRaiseSurviveCommit(t *testi
 	var beforeID, afterID uuid.UUID
 	pending, err := InTx(context.Background(), NewTenantRunner(pool, tenantA), func(ctx context.Context, tx pgx.Tx) error {
 		beforeID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+		if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', (SELECT id FROM s56p))`,
 			beforeID, tenantA, "before-"+beforeID.String()+"@tenant.test"); err != nil {
 			return fmt.Errorf("business write before: %w", err)
 		}
@@ -41,7 +41,7 @@ func TestLFC1_a_BusinessWritesBeforeAndAfterSwallowedRaiseSurviveCommit(t *testi
 		}
 
 		afterID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+		if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', (SELECT id FROM s56p))`,
 			afterID, tenantA, "after-"+afterID.String()+"@tenant.test"); err != nil {
 			return fmt.Errorf("business write after: %w", err)
 		}
@@ -137,7 +137,7 @@ func TestLFC1_c_55P03Propagates(t *testing.T) {
 	var businessRowID uuid.UUID
 	_, intxErr := InTx(ctx, NewTenantRunner(pool, tenantA), func(ctx context.Context, tx pgx.Tx) error {
 		businessRowID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+		if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', (SELECT id FROM s56p))`,
 			businessRowID, tenantA, "lockcontention-"+businessRowID.String()+"@tenant.test"); err != nil {
 			return fmt.Errorf("business write: %w", err)
 		}

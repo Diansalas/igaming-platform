@@ -2,7 +2,8 @@
 
 package db
 
-// ADR 0119 S4b, migration 0151: the catalog pins (the step-up column grants; no actor self-policy).
+// ADR 0119 S4b, migration 0151: the catalog pins (the step-up column grants). ADR 0119 S5 + S6 (migration 0139): the
+// s9.5(b) actor self-policy pair now exists, in exactly this shape.
 
 import (
 	"context"
@@ -10,8 +11,8 @@ import (
 	"testing"
 )
 
-// The catalog after 0151: NO staff_actor_self_* policy (not built, S4b-R3); the runtime role's sessions UPDATE columns
-// are exactly the S3 three plus the S4b step-up three.
+// The catalog: exactly the two staff_actor_self_* policies of 0139 (SELECT, and UPDATE with WITH CHECK false: lockable,
+// never updatable); the runtime role's sessions UPDATE columns are exactly the S3 three plus the S4b step-up three.
 func TestMigration0151_CatalogPins(t *testing.T) {
 	owner := testPool(t)
 	ctx := context.Background()
@@ -34,8 +35,18 @@ func TestMigration0151_CatalogPins(t *testing.T) {
 		got[name] = pol{cmd, qual, check}
 	}
 	rows.Close()
-	if len(got) != 0 {
-		t.Fatalf("no staff_actor_self_* policy may exist yet: %+v", got)
+	const key = "(id = (NULLIF(current_setting('app.actor_staff_id'::text, true), ''::text))::uuid)"
+	want := map[string]pol{
+		"staff_actor_self_select": {"r", key, ""},
+		"staff_actor_self_lock":   {"w", key, "false"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("staff_actor_self_* policies: got %+v, want %+v", got, want)
+	}
+	for n, w := range want {
+		if got[n] != w {
+			t.Fatalf("%s: got %+v, want %+v", n, got[n], w)
+		}
 	}
 	var cols []string
 	r2, err := owner.Raw().Query(ctx, `SELECT column_name FROM information_schema.column_privileges

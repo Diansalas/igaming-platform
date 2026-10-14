@@ -357,8 +357,9 @@ func keys(m map[string]bool) []string {
 	return out
 }
 
-// The fences themselves: 52 policies (9 tables x 4 commands, plus the 4 staff MFA tables of migration 0137 x 4), RESTRICTIVE, literal predicate.
-func TestKYCWorkerFencePolicies_ExactShape_52(t *testing.T) {
+// The fences themselves: 56 policies (9 tables x 4 commands, plus the 4 staff MFA tables of migration 0137 x 4, plus
+// staff_lifecycle_events of migration 0139 x 4), RESTRICTIVE, literal predicate.
+func TestKYCWorkerFencePolicies_ExactShape_56(t *testing.T) {
 	rt := kycRuntimePool(t, 5)
 	const pred = "(NULLIF(current_setting('app.platform_service_id'::text, true), ''::text) IS DISTINCT FROM 'kyc_submission_worker'::text)"
 	type fp struct{ table, cmd, qual, check string }
@@ -382,8 +383,8 @@ func TestKYCWorkerFencePolicies_ExactShape_52(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 52 {
-		t.Fatalf("expected 52 restrictive kyc_worker_fence_* policies, got %d", len(all))
+	if len(all) != 56 {
+		t.Fatalf("expected 56 restrictive kyc_worker_fence_* policies, got %d", len(all))
 	}
 	for _, f := range all {
 		switch f.cmd {

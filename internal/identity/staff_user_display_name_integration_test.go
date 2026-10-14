@@ -5,6 +5,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"strings"
 	"testing"
 
@@ -113,7 +114,11 @@ func createTestStaffUser(t *testing.T, pool *db.Pool, tenant Tenant) uuid.UUID {
 	var staff StaffUser
 	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		staff, err = CreateStaffUser(ctx, tx, tenant.ID, email, "x", StaffRoleTenantAdmin, nil)
+		s56p, perr := staffsv.PersonIfRequired(ctx, tx, string(StaffRoleTenantAdmin)) // ADR 0119 S5: SF014
+		if perr != nil {
+			return perr
+		}
+		staff, err = CreateStaffUser(ctx, tx, tenant.ID, email, "x", StaffRoleTenantAdmin, s56p)
 		return err
 	})
 	if err != nil {

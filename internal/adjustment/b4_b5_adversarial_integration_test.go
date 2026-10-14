@@ -119,10 +119,19 @@ func TestB5_IndependenceFloorRefusals(t *testing.T) {
 		t.Fatalf("same Person approving: expected MA031, got %v", err)
 	}
 
-	// An unlinked staff member (NULL person_id) is refused as a K2 actor.
-	unlinked := staffMember{ID: uuid.New(), TenantID: w.Tenant, Role: "finance"}
+	// An unlinked staff member (NULL person_id) is refused as a K2 actor. ADR 0119 S5: an unlinked FINANCE row can
+	// no longer exist (SF014 refuses it at INSERT, asserted here); the K2 Person floor is still exercised with an
+	// unlinked staff member of a role that may exist without a Person.
 	if err := w.pool.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', 'finance', 'active')`,
+			uuid.New(), w.Tenant, "k2-unlinked-fin-"+uuid.NewString()+"@x.invalid")
+		return err
+	}); pgCode(err) != "SF014" {
+		t.Fatalf("unlinked finance staff: expected SF014, got %v", err)
+	}
+	unlinked := staffMember{ID: uuid.New(), TenantID: w.Tenant, Role: "support"}
+	if err := w.pool.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', 'support', 'active')`,
 			unlinked.ID, w.Tenant, "k2-unlinked-"+unlinked.ID.String()+"@x.invalid")
 		return err
 	}); err != nil {

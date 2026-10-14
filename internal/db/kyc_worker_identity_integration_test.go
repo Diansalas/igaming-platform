@@ -135,7 +135,7 @@ func seedFencedRows(t *testing.T, owner *Pool) map[string]uuid.UUID {
 	// staff_users, audit_log, login_attempts: dual_scope NULL arm (WithoutTenant).
 	staffID := uuid.New()
 	must("staff_users", owner.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, NULL, $2, 'x', 'platform_admin', (SELECT id FROM s56p))`,
 			staffID, "kycfence-"+staffID.String()+"@platform.test")
 		return err
 	}))
@@ -189,11 +189,13 @@ func seedFencedRows(t *testing.T, owner *Pool) map[string]uuid.UUID {
 
 // fencedTables are the nine tables of ADR 0106 section 3.3, plus the four staff MFA tables of migration 0137
 // (ADR 0119 S2, review N3): each replicates every restrictive fence of staff_users, the KYC worker fence
-// included, so the worker sees nothing of them either.
+// included, so the worker sees nothing of them either. ADR 0119 S5 + S6 (migration 0139) adds staff_lifecycle_events,
+// which replicates the same fences.
 var fencedTables = []string{
 	"staff_users", "audit_log", "sessions", "login_attempts", "risk_rules",
 	"player_restrictions", "persons", "asset_operation_eligibility", "open_bet_self_exclusion_policies",
 	"staff_mfa_factors", "staff_mfa_recovery_codes", "staff_auth_challenges", "staff_enrolment_tokens",
+	"staff_lifecycle_events",
 }
 
 // workerReferenceAllowlist is ADR 0106 section 3.3's public reference allowlist
@@ -264,7 +266,7 @@ func TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied(t *testing.T) {
 	}
 	// Writes: must be refused (42501) or affect zero rows.
 	writes := []probe{
-		{"INSERT platform staff_users platform_admin (security F1 proof)", `INSERT INTO staff_users (tenant_id, email, password_hash, role) VALUES (NULL, 'forged-admin@platform.test', 'x', 'platform_admin')`, nil},
+		{"INSERT platform staff_users platform_admin (security F1 proof)", `INSERT INTO staff_users (tenant_id, email, password_hash, role, person_id) VALUES (NULL, 'forged-admin@platform.test', 'x', 'platform_admin', gen_random_uuid())`, nil},
 		{"INSERT platform audit_log (security F1 proof)", `INSERT INTO audit_log (tenant_id, actor_type, action, outcome) VALUES (NULL, 'system', 'forged', 'success')`, nil},
 		{"UPDATE staff_users", `UPDATE staff_users SET status = 'suspended' WHERE tenant_id IS NULL`, nil},
 		{"DELETE staff_users", `DELETE FROM staff_users WHERE tenant_id IS NULL`, nil},
@@ -472,7 +474,8 @@ func TestKYCWorkerIdentity_T_ID_4_FreshAndReusedConnection(t *testing.T) {
 		}
 		var execErr error
 		_ = workerTx(one, func(ctx context.Context, tx pgx.Tx) error {
-			_, execErr = tx.Exec(ctx, `INSERT INTO staff_users (tenant_id, email, password_hash, role) VALUES (NULL, 'forged@platform.test', 'x', 'platform_admin')`)
+			// ADR 0119 S5: a person_id so SF014 (BEFORE trigger) does not pre-empt the 42501 under test.
+			_, execErr = tx.Exec(ctx, `INSERT INTO staff_users (tenant_id, email, password_hash, role, person_id) VALUES (NULL, 'forged@platform.test', 'x', 'platform_admin', gen_random_uuid())`)
 			return errors.New("rollback")
 		})
 		if !isCode(execErr, "42501") {

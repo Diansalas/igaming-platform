@@ -252,7 +252,7 @@ func authorizeFreshAssetForBonusWagering(t *testing.T, pool *db.Pool, code strin
 
 	staffID := uuid.New()
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+		if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', (SELECT id FROM s56p))`,
 			staffID, tenantID, staffID.String()+"@tenant.example.com"); err != nil {
 			return err
 		}

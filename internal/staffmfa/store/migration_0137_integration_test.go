@@ -319,11 +319,11 @@ func TestMigration0137_Down_RefusesWhileDataExists(t *testing.T) {
 					if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenant.String()); err != nil {
 						t.Fatal(err)
 					}
-					if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, '!x', 'support')`,
+					if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, '!x', 'support', (SELECT id FROM s56p))`,
 						staff, tenant, staff.String()+"@fixture.invalid"); err != nil {
 						t.Fatalf("%s/%s: plant staff: %v", p.table, arm, err)
 					}
-				} else if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, '!x', 'platform_admin')`,
+				} else if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, NULL, $2, '!x', 'platform_admin', (SELECT id FROM s56p))`,
 					staff, staff.String()+"@fixture.invalid"); err != nil {
 					t.Fatalf("%s/%s: plant staff: %v", p.table, arm, err)
 				}
@@ -374,7 +374,7 @@ func TestMigration0137_Down_RefusesWhileDataExists(t *testing.T) {
 	// Data that was COMMITTED refuses the real runner too (and the migration stays applied).
 	staff := uuid.New()
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, '!x', 'platform_admin')`,
+		if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, NULL, $2, '!x', 'platform_admin', (SELECT id FROM s56p))`,
 			staff, staff.String()+"@fixture.invalid"); err != nil {
 			return err
 		}

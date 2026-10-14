@@ -50,3 +50,19 @@ func Version(staffID uuid.UUID) int64 {
 	}
 	return sv
 }
+
+// personRequiredRoles mirrors migration 0139's SF014 role set (ADR 0119 section 9.4).
+var personRequiredRoles = map[string]bool{"platform_admin": true, "tenant_admin": true, "finance": true, "compliance": true}
+
+// PersonIfRequired creates a fresh Person inside tx and returns its id when role is one SF014 requires a Person for,
+// and nil otherwise: the fixture form of "an approve-capable staff member is linked to a Person".
+func PersonIfRequired(ctx context.Context, tx pgx.Tx, role string) (*uuid.UUID, error) {
+	if !personRequiredRoles[role] {
+		return nil, nil
+	}
+	id := uuid.New()
+	if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, id); err != nil {
+		return nil, err
+	}
+	return &id, nil
+}

@@ -226,7 +226,7 @@ func TestResubmitPayoutAmbiguous_SM2a_KillSwitchReschedulesNeverEscalates(t *tes
 	staffID := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', 'tenant_admin', 'active')`,
+			`WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', 'active', (SELECT id FROM s56p))`,
 			staffID, f.tenantID, "sm2a-"+staffID.String()+"@test.example")
 		return err
 	}); err != nil {

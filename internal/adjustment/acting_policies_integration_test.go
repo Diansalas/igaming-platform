@@ -145,7 +145,7 @@ func gucOnly(table string) string {
 }
 
 func TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction(t *testing.T) {
-	pool := scratchPoolThrough(t, "k2actpol_", 113)
+	pool := scratchPoolThrough(t, "k2actpol_", 151) // ADR 0119 S5: the executor reads staff_users.staff_version (0139); was 113
 	ctx := context.Background()
 	w := newWorldOn(t, pool, worldOpts{base: 1, authorizedAsset: true})
 	w.fund(3_000)

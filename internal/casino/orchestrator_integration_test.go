@@ -206,7 +206,10 @@ func seedSuspendedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, 'suspended')`,
+			// ADR 0119 S5: a row is created invited or active only (SF010), and SF020 refuses suspending a platform admin
+			// while no other enrolled one exists; the eligibility predicates test status = 'active', so the
+			// non-active (invited, password-less) row exercises the same refusal.
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, NULL, 'platform_admin', $3, 'invited')`,
 			id, "platform-admin-suspended-"+id.String()+"@test.example", personID)
 		return err
 	})
