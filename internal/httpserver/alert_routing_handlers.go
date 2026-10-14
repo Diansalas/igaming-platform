@@ -6,7 +6,8 @@ package httpserver
 //	POST /v1/admin/alerting/routes   alert:route_manage  create or supersede a route version
 //	GET  /v1/admin/alerting/routes   alert:route_manage  current (or all) route versions
 //	GET  /v1/admin/alerting/status   alert:manage        readiness per severity, exact missing operator input
-//	GET  /v1/admin/alerts            alert:manage        platform alerts with derived delivery state
+//	GET  /v1/admin/alerts            alert:manage        platform alerts with derived delivery state (keyset-paged)
+//	GET  /v1/admin/alerts/{id}       alert:manage        one platform alert (ADR 0114 S1b)
 //
 // Every endpoint is platform scope only. Three layers, each pinned by its own
 // test: the permission, an explicit tc.TenantID == uuid.Nil check, and the
@@ -56,6 +57,8 @@ func registerAlertRoutingRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAlertManage)(newAlertStatusHandler(deps))))
 	mux.Handle("GET /v1/admin/alerts",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAlertManage)(newListAlertsHandler(deps))))
+	mux.Handle("GET /v1/admin/alerts/{alertID}",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAlertManage)(newGetAlertHandler(deps))))
 }
 
 // platformAlertCaller authenticates and applies the explicit platform-scope
@@ -405,29 +408,77 @@ func newAlertStatusHandler(deps Deps) http.HandlerFunc {
 }
 
 type alertListItemDTO struct {
-	ID               string    `json:"id"`
-	Kind             string    `json:"kind"`
-	Severity         string    `json:"severity"`
-	State            string    `json:"state"`
-	SubjectTenantID  *string   `json:"subject_tenant_id,omitempty"`
-	FirstSeenAt      time.Time `json:"first_seen_at"`
-	DeliveryState    string    `json:"delivery_state"`
-	UnroutedReason   *string   `json:"unrouted_reason,omitempty"`
-	NotifiedAPerson  bool      `json:"notified_a_person"`
-	EscalationStep   *int      `json:"escalation_step,omitempty"`
-	DeliveryChannel  *string   `json:"delivery_channel_kind,omitempty"`
-	DeliveryAttempts *int      `json:"attempt_no,omitempty"`
+	ID               string     `json:"id"`
+	Kind             string     `json:"kind"`
+	Severity         string     `json:"severity"`
+	State            string     `json:"state"`
+	SubjectTenantID  *string    `json:"subject_tenant_id,omitempty"`
+	FirstSeenAt      time.Time  `json:"first_seen_at"`
+	AckedAt          *time.Time `json:"acked_at,omitempty"`
+	ResolvedAt       *time.Time `json:"resolved_at,omitempty"`
+	AckedBy          *staffRef  `json:"acked_by,omitempty"`
+	ResolvedBy       *staffRef  `json:"resolved_by,omitempty"`
+	DeliveryState    string     `json:"delivery_state"`
+	UnroutedReason   *string    `json:"unrouted_reason,omitempty"`
+	NotifiedAPerson  bool       `json:"notified_a_person"`
+	EscalationStep   *int       `json:"escalation_step,omitempty"`
+	DeliveryChannel  *string    `json:"delivery_channel_kind,omitempty"`
+	DeliveryAttempts *int       `json:"attempt_no,omitempty"`
+}
+
+// alertListSelect is the shared projection of the list and the single-alert read. The
+// alerts guard (migration 0110) forces acked_by/resolved_by from the validated platform
+// session, so these columns are always platform actors.
+const alertListSelect = `
+	SELECT a.id::text, a.kind, a.severity, a.state, a.subject_tenant_id::text, a.first_seen_at,
+	       a.acked_at, a.resolved_at, a.acked_by, a.resolved_by,
+	       ld.event, ld.unrouted_reason, ld.channel_kind, ld.escalation_step, ld.attempt_no
+	FROM alerts a
+	LEFT JOIN LATERAL (
+		SELECT d.event, d.unrouted_reason, d.channel_kind, d.escalation_step, d.attempt_no
+		FROM alert_deliveries d WHERE d.alert_id = a.id
+		ORDER BY d.recorded_at DESC, d.id DESC LIMIT 1
+	) ld ON true
+	WHERE a.tenant_id IS NULL`
+
+// scanAlertListItem maps one alertListSelect row. The viewer decides whether the acting
+// staff ids are shown (ADR 0114 S0: every staff-id field goes through the helper); the
+// actors of an alert are always platform actors.
+func scanAlertListItem(row pgx.Row, v staffViewer) (alertListItemDTO, error) {
+	var it alertListItemDTO
+	var event, ch *string
+	var ackedBy, resolvedBy *uuid.UUID
+	if err := row.Scan(&it.ID, &it.Kind, &it.Severity, &it.State, &it.SubjectTenantID, &it.FirstSeenAt,
+		&it.AckedAt, &it.ResolvedAt, &ackedBy, &resolvedBy,
+		&event, &it.UnroutedReason, &ch, &it.EscalationStep, &it.DeliveryAttempts); err != nil {
+		return it, err
+	}
+	platform := staffScopePlatform
+	it.AckedBy = v.optRef(&platform, ackedBy)
+	it.ResolvedBy = v.optRef(&platform, resolvedBy)
+	ev, kind := "", alerting.ChannelKind("")
+	if event != nil {
+		ev = *event
+	}
+	if ch != nil {
+		kind = alerting.ChannelKind(*ch)
+		it.DeliveryChannel = ch
+	}
+	it.DeliveryState = alerting.DeliveryState(ev, kind)
+	it.NotifiedAPerson = it.DeliveryState == alerting.DeliveryStateDelivered
+	return it, nil
 }
 
 func newListAlertsHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		_, actor, requestID, ok := platformAlertCaller(w, r)
+		tc, actor, requestID, ok := platformAlertCaller(w, r)
 		if !ok {
 			return
 		}
+		viewer := staffViewerOf(tc)
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
 		q := r.URL.Query()
-		state, sev := q.Get("state"), q.Get("severity")
+		state, sev, kind := q.Get("state"), q.Get("severity"), q.Get("kind")
 		switch state {
 		case "", "open", "acked", "resolved":
 		default:
@@ -440,6 +491,12 @@ func newListAlertsHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "severity must be p1, p2 or p3")
 			return
 		}
+		if kind != "" {
+			if _, known := alerting.Def(alerting.Kind(kind)); !known {
+				apierror.Write(w, requestID, apierror.CodeValidation, "kind is not a known alert kind")
+				return
+			}
+		}
 		limit := 50
 		if v := q.Get("limit"); v != "" {
 			n, err := strconv.Atoi(v)
@@ -449,42 +506,44 @@ func newListAlertsHandler(deps Deps) http.HandlerFunc {
 			}
 			limit = n
 		}
+		filter := alertCursorFilter(state, sev, kind)
+		var after *alertCursor
+		if raw, present := q["cursor"]; present {
+			if len(raw) != 1 {
+				apierror.Write(w, requestID, apierror.CodeValidation, "cursor is invalid")
+				return
+			}
+			c, err := decodeAlertCursor(raw[0], filter)
+			if err != nil {
+				apierror.Write(w, requestID, apierror.CodeValidation, "cursor is invalid")
+				return
+			}
+			after = &c
+		}
 		out := []alertListItemDTO{}
+		var next *string
 		err := deps.DB.WithPlatformAdmin(r.Context(), actor, func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx, `
-				SELECT a.id::text, a.kind, a.severity, a.state, a.subject_tenant_id::text, a.first_seen_at,
-				       ld.event, ld.unrouted_reason, ld.channel_kind, ld.escalation_step, ld.attempt_no
-				FROM alerts a
-				LEFT JOIN LATERAL (
-					SELECT d.event, d.unrouted_reason, d.channel_kind, d.escalation_step, d.attempt_no
-					FROM alert_deliveries d WHERE d.alert_id = a.id
-					ORDER BY d.recorded_at DESC, d.id DESC LIMIT 1
-				) ld ON true
-				WHERE a.tenant_id IS NULL
-				  AND ($1 = '' OR a.state = $1) AND ($2 = '' OR a.severity = $2)
+			args := []any{state, sev, kind, limit + 1}
+			cond := ""
+			if after != nil {
+				// Strict keyset on (first_seen_at, id) DESC: rows already served are never
+				// repeated and rows inserted later (newer first_seen_at) cannot shift the page.
+				cond = ` AND (a.first_seen_at, a.id) < (timestamptz 'epoch' + $5::bigint * interval '1 microsecond', $6::uuid)`
+				args = append(args, after.Micros, after.ID)
+			}
+			rows, err := tx.Query(ctx, alertListSelect+`
+				  AND ($1 = '' OR a.state = $1) AND ($2 = '' OR a.severity = $2) AND ($3 = '' OR a.kind = $3)`+cond+`
 				ORDER BY a.first_seen_at DESC, a.id DESC
-				LIMIT $3`, state, sev, limit)
+				LIMIT $4`, args...)
 			if err != nil {
 				return err
 			}
 			defer rows.Close()
 			for rows.Next() {
-				var it alertListItemDTO
-				var event, ch *string
-				if err := rows.Scan(&it.ID, &it.Kind, &it.Severity, &it.State, &it.SubjectTenantID, &it.FirstSeenAt,
-					&event, &it.UnroutedReason, &ch, &it.EscalationStep, &it.DeliveryAttempts); err != nil {
+				it, err := scanAlertListItem(rows, viewer)
+				if err != nil {
 					return err
 				}
-				ev, kind := "", alerting.ChannelKind("")
-				if event != nil {
-					ev = *event
-				}
-				if ch != nil {
-					kind = alerting.ChannelKind(*ch)
-					it.DeliveryChannel = ch
-				}
-				it.DeliveryState = alerting.DeliveryState(ev, kind)
-				it.NotifiedAPerson = it.DeliveryState == alerting.DeliveryStateDelivered
 				out = append(out, it)
 			}
 			return rows.Err()
@@ -494,6 +553,42 @@ func newListAlertsHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeInternal, "internal error")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"alerts": out})
+		if len(out) > limit {
+			out = out[:limit]
+			last := out[len(out)-1]
+			c := encodeAlertCursor(last.FirstSeenAt, last.ID, filter)
+			next = &c
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"alerts": out, "next_cursor": next})
+	}
+}
+
+func newGetAlertHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tc, actor, requestID, ok := platformAlertCaller(w, r)
+		if !ok {
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("alertID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeInvalidRequest, "invalid request")
+			return
+		}
+		viewer := staffViewerOf(tc)
+		var it alertListItemDTO
+		err = deps.DB.WithPlatformAdmin(r.Context(), actor, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			it, e = scanAlertListItem(tx.QueryRow(ctx, alertListSelect+` AND a.id = $1`, id), viewer)
+			return e
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+		case err != nil:
+			observability.LoggerFromContext(r.Context(), deps.Logger).Error("alert_get_failed", "sqlstate_class", alertAdminSQLStateClass(err))
+			apierror.Write(w, requestID, apierror.CodeInternal, "internal error")
+		default:
+			writeJSON(w, http.StatusOK, map[string]any{"alert": it})
+		}
 	}
 }
