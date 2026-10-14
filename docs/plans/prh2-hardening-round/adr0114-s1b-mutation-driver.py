@@ -13,13 +13,13 @@ OUT = sys.argv[2]
 
 MUTS = [
     ("M1 keyset strictness < becomes <= (boundary row repeats)", H, "(a.first_seen_at, a.id) < (", "(a.first_seen_at, a.id) <= ("),
-    ("M2 tie-break dropped from ORDER BY", H, "ORDER BY a.first_seen_at DESC, a.id DESC\n\t\t\t\tLIMIT $4", "ORDER BY a.first_seen_at DESC\n\t\t\t\tLIMIT $4"),
+    ("M2 tie-break dropped from ORDER BY", H, "ORDER BY a.first_seen_at DESC, a.id DESC\n\t\tLIMIT $4", "ORDER BY a.first_seen_at DESC\n\t\tLIMIT $4"),
     ("M3 next page when len(out) >= limit (phantom empty page)", H, "if len(out) > limit {", "if len(out) >= limit {"),
     ("M4 cursor not bound to its filter", C, "w.V != alertCursorVersion || w.F != filter ||", "w.V != alertCursorVersion ||"),
     ("M5 lower time bound removed", C, "|| w.T < alertCursorMinMicros", ""),
     ("M6 upper time bound removed", C, "|| w.T > alertCursorMaxMicros", ""),
     ("M7 acting ids shown under the tenant scope marker", H, "platform := staffScopePlatform\n\treturn v.optRef", "platform := staffScopeTenant\n\treturn v.optRef"),
-    ("M8 kind filter ignored", H, " AND ($3 = '' OR a.kind = $3)", ""),
+    ("M8 kind filter ignored", H, " AND ($3 = '' OR a.kind = $3)", " AND ($3 = '' OR a.kind = $3 OR true)"),
     ("M9 canonical uuid check removed", C, "err != nil || id.String() != w.I", "err != nil"),
     ("M10 fetch limit instead of limit+1 (never a cursor)", H, "args := []any{state, sev, kind, limit + 1}", "args := []any{state, sev, kind, limit}"),
     ("M11 unknown cursor fields allowed", C, "dec.DisallowUnknownFields()", ""),
@@ -28,7 +28,13 @@ MUTS = [
     ("M14 unknown kind accepted", H, "if _, known := alerting.Def(alerting.Kind(kind)); !known {", "if _, known := alerting.Def(alerting.Kind(kind)); !known && false {"),
     ("M15 next cursor taken from the first row, not the last", H, "last := out[len(out)-1]", "last := out[0]"),
     ("M16 cursor time truncated to milliseconds", C, "T: firstSeen.UnixMicro()", "T: firstSeen.UnixMilli() * 1000"),
-    ("M17 single read ignores the id", H, "alertListSelect+` AND a.id = $1`, id)", "alertListSelect+` AND ($1::uuid IS NOT NULL)`, id)"),
+    ("M17 single read ignores the id", H, "alertListSQL(`AND a.id = $1`, ``), id)", "alertListSQL(`AND ($1::uuid IS NOT NULL)`, ``), id)"),
+    ("M18 old query shape: LIMIT applied after the lateral join (security F1)", H, "alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder)", 'alertListSQL(alertListInnerTail+cond, alertListOuterOrder+"\\n LIMIT $4")'),
+    ("M19 cursor canonical-form check removed (security F2)", C, "string(canon) != string(raw)", "false"),
+    ("M20 lenient base64 trailing bits accepted", C, "base64.RawURLEncoding.Strict().DecodeString(s)", "base64.RawURLEncoding.DecodeString(s)"),
+    ("M21 single read accepts non-canonical id (security F3)", H, "err != nil || id.String() != rawID {", "err != nil {"),
+    ("M22 repeated list parameters accepted (security F4)", H, "if len(q[k]) > 1 {", "if len(q[k]) > 99 {"),
+    ("M23 non-canonical limit accepted (+5, 05)", H, "|| strconv.Itoa(n) != v {", "{"),
 ]
 
 ONLY = os.environ.get("ONLY")  # e.g. ONLY="M3 " re-runs just the mutants whose name starts with it
