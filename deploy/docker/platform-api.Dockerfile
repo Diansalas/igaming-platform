@@ -49,9 +49,9 @@
 #     <tag>
 
 # GO-TOOLCHAIN-VULN-1: pinned to the exact patch (not a floating minor
-# tag) so the build toolchain matches go.mod's `toolchain go1.26.8` line
+# tag) so the build toolchain matches go.mod's `toolchain go1.26.9` line
 # and is bumped deliberately, not silently, when the next patch lands.
-FROM golang:1.26.8-alpine AS builder
+FROM golang:1.26.9-alpine AS builder
 
 WORKDIR /src
 
