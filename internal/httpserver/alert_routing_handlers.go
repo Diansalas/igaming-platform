@@ -504,6 +504,12 @@ func newListAlertsHandler(deps Deps) http.HandlerFunc {
 		viewer := staffViewerOf(tc)
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
 		q := r.URL.Query()
+		for _, k := range []string{"state", "severity", "kind", "limit"} {
+			if len(q[k]) > 1 { // repeated parameters are refused, not first-wins (security F4)
+				apierror.Write(w, requestID, apierror.CodeValidation, k+" must be given at most once")
+				return
+			}
+		}
 		state, sev, kind := q.Get("state"), q.Get("severity"), q.Get("kind")
 		switch state {
 		case "", "open", "acked", "resolved":
@@ -526,7 +532,7 @@ func newListAlertsHandler(deps Deps) http.HandlerFunc {
 		limit := 50
 		if v := q.Get("limit"); v != "" {
 			n, err := strconv.Atoi(v)
-			if err != nil || n < 1 || n > 200 {
+			if err != nil || n < 1 || n > 200 || strconv.Itoa(n) != v {
 				apierror.Write(w, requestID, apierror.CodeValidation, "limit must be between 1 and 200")
 				return
 			}

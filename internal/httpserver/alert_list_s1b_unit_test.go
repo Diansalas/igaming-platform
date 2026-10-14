@@ -1,7 +1,9 @@
 package httpserver
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -84,5 +86,50 @@ func TestAlertActorRefs_RoutedThroughTheStaffViewer(t *testing.T) {
 	raw, _ := json.Marshal(alertListItemDTO{AckedBy: &staffRef{}})
 	if !strings.Contains(string(raw), `"acked_by":null`) {
 		t.Errorf("zero ref must marshal null: %s", raw)
+	}
+}
+
+// Security F2: only the canonical spelling is accepted. Every alternative spelling of an otherwise
+// valid cursor (case-folded keys, duplicate keys, whitespace, reordered keys, escaped characters,
+// non-canonical base64) is refused.
+func TestAlertCursor_OnlyTheCanonicalSpellingIsAccepted(t *testing.T) {
+	id := uuid.NewString()
+	ts := time.Date(2026, 5, 5, 5, 5, 5, 0, time.UTC).UnixMicro()
+	enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	canon := fmt.Sprintf(`{"v":1,"t":%d,"i":%q,"f":"open||"}`, ts, id)
+	if _, err := decodeAlertCursor(enc(canon), "open||"); err != nil {
+		t.Fatalf("canonical form refused: %v", err)
+	}
+	variants := map[string]string{
+		"uppercase key":    fmt.Sprintf(`{"V":1,"t":%d,"i":%q,"f":"open||"}`, ts, id),
+		"mixed-case key":   fmt.Sprintf(`{"v":1,"T":%d,"i":%q,"f":"open||"}`, ts, id),
+		"duplicate key":    fmt.Sprintf(`{"v":1,"v":1,"t":%d,"i":%q,"f":"open||"}`, ts, id),
+		"duplicate shadow": fmt.Sprintf(`{"v":1,"t":1,"t":%d,"i":%q,"f":"open||"}`, ts, id),
+		"whitespace":       fmt.Sprintf(`{"v": 1,"t":%d,"i":%q,"f":"open||"}`, ts, id),
+		"leading space":    " " + canon,
+		"trailing newline": canon + "\n",
+		"reordered keys":   fmt.Sprintf(`{"t":%d,"v":1,"i":%q,"f":"open||"}`, ts, id),
+		"escaped filter":   fmt.Sprintf(`{"v":1,"t":%d,"i":%q,"f":"open\u007c\u007c"}`, ts, id),
+		"escaped id":       fmt.Sprintf(`{"v":1,"t":%d,"i":"\u0030%s","f":"open||"}`, ts, id[1:]),
+		"exponent number":  fmt.Sprintf(`{"v":1,"t":%de0,"i":%q,"f":"open||"}`, ts, id),
+		"leading zero v":   fmt.Sprintf(`{"v":01,"t":%d,"i":%q,"f":"open||"}`, ts, id),
+	}
+	for name, v := range variants {
+		if _, err := decodeAlertCursor(enc(v), "open||"); err == nil {
+			t.Errorf("%s must be refused: %s", name, v)
+		}
+	}
+	// Non-canonical base64: padding, and trailing bits that Go's lenient decoder would drop.
+	good := enc(canon)
+	if _, err := decodeAlertCursor(good+"=", "open||"); err == nil {
+		t.Error("padded base64 must be refused")
+	}
+	if rem := len(canon) % 3; rem != 0 {
+		alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+		last := strings.IndexByte(alphabet, good[len(good)-1])
+		altered := good[:len(good)-1] + string(alphabet[last^1])
+		if _, err := decodeAlertCursor(altered, "open||"); err == nil {
+			t.Error("base64 with non-zero trailing bits must be refused")
+		}
 	}
 }

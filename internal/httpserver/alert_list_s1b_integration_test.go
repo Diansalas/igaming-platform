@@ -5,6 +5,7 @@ package httpserver
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -504,5 +506,91 @@ func TestAlertListS1b_SingleReadAndKindFilter(t *testing.T) {
 	}
 	if r := a.do("GET", "/v1/admin/alerts/not-a-uuid", tok, nil); r.status != http.StatusBadRequest {
 		t.Errorf("malformed id: %d", r.status)
+	}
+}
+
+// planLoops sums "Actual Loops" of every plan node scanning relation.
+func planLoops(node map[string]any, relation string) float64 {
+	var n float64
+	if rel, _ := node["Relation Name"].(string); rel == relation {
+		l, _ := node["Actual Loops"].(float64)
+		n += l
+	}
+	if kids, ok := node["Plans"].([]any); ok {
+		for _, k := range kids {
+			n += planLoops(k.(map[string]any), relation)
+		}
+	}
+	return n
+}
+
+// Security F1: the list query cost is bounded by the page size, not by the number of platform
+// alerts. With 20k alerts the latest-delivery lookup may run for at most limit+1 rows, with and
+// without a cursor. (Plan-shape pin: a regression that joins deliveries before the top-N makes
+// the loop count equal the number of alerts.)
+func TestAlertListS1b_QueryCostIsBoundedByLimit(t *testing.T) {
+	a := newARAPI(t, false)
+	tenant := a.w.SeedTenant(a.admin)
+	if err := a.w.Pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO alerts (tenant_id, subject_tenant_id, kind, discriminator, attributes)
+			SELECT NULL, $1, 'payment.kill_switch_engaged', 's1b-bulk:' || g, '{}'::jsonb FROM generate_series(1, 20000) g`, tenant)
+		return err
+	}); err != nil {
+		t.Fatalf("bulk seed: %v", err)
+	}
+	const limit = 50
+	cursor := alertCursor{Micros: time.Now().Add(time.Hour).UnixMicro(), ID: uuid.New()}
+	for name, withCursor := range map[string]bool{"first page": false, "with cursor": true} {
+		args := []any{"", "", "", limit + 1}
+		cond := ""
+		if withCursor {
+			cond = ` AND (a.first_seen_at, a.id) < (timestamptz 'epoch' + $5::bigint * interval '1 microsecond', $6::uuid)`
+			args = append(args, cursor.Micros, cursor.ID)
+		}
+		sql := alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder)
+		var raw []byte
+		start := time.Now()
+		if err := a.w.Pool.WithPlatformAdmin(context.Background(), a.admin, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+sql, args...).Scan(&raw)
+		}); err != nil {
+			t.Fatalf("%s: explain: %v", name, err)
+		}
+		var plans []map[string]any
+		if err := json.Unmarshal(raw, &plans); err != nil || len(plans) != 1 {
+			t.Fatalf("%s: plan: %v %s", name, err, raw)
+		}
+		loops := planLoops(plans[0]["Plan"].(map[string]any), "alert_deliveries")
+		if loops > limit+1 {
+			t.Errorf("%s: alert_deliveries probed %v times for a page of %d over 20000 alerts (query cost must not scale with total alerts)", name, loops, limit)
+		}
+		t.Logf("%s: deliveries loops=%v wall=%v", name, loops, time.Since(start))
+	}
+	p, st := a.alertPage(a.adminToken(), "?limit=50")
+	if st != http.StatusOK || len(p.ids) != 50 || p.next == "" {
+		t.Fatalf("page over 20k: %d %d %q", st, len(p.ids), p.next)
+	}
+}
+
+// Security F3/F4: canonical forms only for the single read id and the list parameters.
+func TestAlertListS1b_CanonicalIdAndParameters(t *testing.T) {
+	a := newARAPI(t, false)
+	tenant := a.w.SeedTenant(a.admin)
+	tok := a.adminToken()
+	id := a.w.SeedAlert(tenant, alerting.KindPaymentKillSwitchEngaged, "d:"+uuid.NewString())
+	if r := a.do("GET", "/v1/admin/alerts/"+id.String(), tok, nil); r.status != http.StatusOK {
+		t.Fatalf("canonical id: %d", r.status)
+	}
+	for _, bad := range []string{strings.ToUpper(id.String()), "{" + id.String() + "}", "urn:uuid:" + id.String(), strings.ReplaceAll(id.String(), "-", "")} {
+		if r := a.do("GET", "/v1/admin/alerts/"+url.PathEscape(bad), tok, nil); r.status != http.StatusBadRequest {
+			t.Errorf("non-canonical id %q: %d, want 400", bad, r.status)
+		}
+	}
+	for _, q := range []string{"?limit=%2B5", "?limit=05", "?limit=5&limit=6", "?state=open&state=acked", "?severity=p1&severity=p2", "?kind=payment.kill_switch_engaged&kind=x"} {
+		if r := a.do("GET", "/v1/admin/alerts"+q, tok, nil); r.status != http.StatusBadRequest {
+			t.Errorf("%s: %d, want 400", q, r.status)
+		}
+	}
+	if r := a.do("GET", "/v1/admin/alerts?limit=5&state=open", tok, nil); r.status != http.StatusOK {
+		t.Errorf("canonical params: %d", r.status)
 	}
 }
