@@ -278,8 +278,19 @@ func TestStaffPersonLink_RemediatesUnlinkedAccountThenCanApprove(t *testing.T) {
 		t.Fatalf("seed remediation person: %v", err)
 	}
 
+	// ADR 0119 S5 + S6 review fix SR-4: the person link follows the lifecycle role authority. finance is a
+	// platform-granted role, so the tenant admin is refused (403 role_not_grantable, nothing written) and a platform
+	// admin performs the remediation.
 	resp = postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+unlinked.ID.String()+"/person-link",
 		tenantAdminToken.AccessToken, map[string]string{"person_id": newPersonID.String()})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a tenant admin linking a finance account: want 403, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	platformAdmin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-link-pw-1")
+	platformAdminToken := mustLoginStaff(t, srv, "", platformAdmin.Email, "pa-link-pw-1")
+	resp = postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+unlinked.ID.String()+"/person-link",
+		platformAdminToken.AccessToken, map[string]string{"person_id": newPersonID.String()})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		var apiErr apierror.Error
@@ -462,9 +473,18 @@ func TestStaffPersonLink_CannotRelinkOnceSet(t *testing.T) {
 		t.Fatalf("seed other person: %v", err)
 	}
 
-	// (1) The admin API refuses to relink an already-linked account.
+	// (1) The admin API refuses to relink an already-linked account. ADR 0119 S5 + S6 review fix SR-4: a tenant admin
+	// may not act on a finance account at all (403 role_not_grantable); a platform admin, who may, gets the 409.
+	if r := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+staff.ID.String()+"/person-link",
+		tenantAdminToken.AccessToken, map[string]string{"person_id": otherPersonID.String()}); r.StatusCode != http.StatusForbidden {
+		t.Fatalf("a tenant admin relinking a finance account: want 403, got %d", r.StatusCode)
+	} else {
+		_ = r.Body.Close()
+	}
+	platformAdmin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-relink-pw-1")
+	platformAdminToken := mustLoginStaff(t, srv, "", platformAdmin.Email, "pa-relink-pw-1")
 	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+staff.ID.String()+"/person-link",
-		tenantAdminToken.AccessToken, map[string]string{"person_id": otherPersonID.String()})
+		platformAdminToken.AccessToken, map[string]string{"person_id": otherPersonID.String()})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		var apiErr apierror.Error

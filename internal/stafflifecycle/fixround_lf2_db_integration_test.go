@@ -49,7 +49,11 @@ func TestFixRound_LF2_ChangeRoleBoundedWait(t *testing.T) {
 	}
 	actor := w.actor(pa, uuid.Nil, RolePlatformAdmin)
 	start := time.Now()
-	_, err := w.svc.ChangeRole(context.Background(), actor, w.tenant, su, RoleRiskManager, Reason{Code: "role_change_approved"})
+	// A context deadline well above lockTimeout bounds the test itself: without the lock_timeout the call would wait
+	// for the holder, which is released only after the call returns.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err := w.svc.ChangeRole(ctx, actor, w.tenant, su, RoleRiskManager, Reason{Code: "role_change_approved"})
+	cancel()
 	elapsed := time.Since(start)
 	close(release)
 	<-done

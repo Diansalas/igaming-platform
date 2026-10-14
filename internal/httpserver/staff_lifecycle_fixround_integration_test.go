@@ -196,6 +196,22 @@ func TestFixRound_SR3_ApproverSeesInvitePersonAndInUseRefused(t *testing.T) {
 		seen.InvitePersonStaff[0].ID != bound.ID.String() || seen.InvitePersonStaff[0].Status != "active" {
 		t.Fatalf("the approver must see the Person's live platform link: %d %s", g.status, g.body)
 	}
+	// The list carries the same view (it enriches after closing its result set: a nested query on the open rows
+	// answered 503 "conn busy" before).
+	l := lcDo(t, srv, http.MethodGet, lcRequests, bTok, nil)
+	var list platformStaffLifecycleRequestListDTO
+	if l.status != http.StatusOK || json.Unmarshal(l.body, &list) != nil {
+		t.Fatalf("list: %d %s", l.status, l.body)
+	}
+	found := false
+	for _, x := range list.Requests {
+		if x.ID == req2.ID {
+			found = len(x.InvitePersonStaff) == 1 && x.InvitePersonStaff[0].ID == bound.ID.String()
+		}
+	}
+	if !found {
+		t.Fatalf("the list must show the invitee Person's live platform link: %s", l.body)
+	}
 	lcExpect(t, lcDo(t, srv, http.MethodPost, lcRequests+"/"+req2.ID+"/approve", bTok, map[string]string{"payload_hash": req2.PayloadHash}),
 		http.StatusConflict, "conflict", "execute an invite whose Person is now in use")
 	if mailCount(mail, invitee2) != 0 {

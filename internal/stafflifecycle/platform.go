@@ -260,19 +260,29 @@ func (s *Service) ListRequests(ctx context.Context, actor Actor) ([]Request, err
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
+		// Read every request first and close the result set: the SR-3 enrichment below queries the same transaction's
+		// connection, which cannot run a second statement while rows are still open ("conn busy").
+		var reqs []requestRow
 		for rows.Next() {
 			r, err := scanRequest(rows)
 			if err != nil {
+				rows.Close()
 				return err
 			}
+			reqs = append(reqs, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, r := range reqs {
 			pub, err := withInvitePerson(ctx, tx, r, r.public(now))
 			if err != nil {
 				return err
 			}
 			out = append(out, pub)
 		}
-		return rows.Err()
+		return nil
 	})
 	return out, err
 }
