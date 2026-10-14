@@ -79,7 +79,15 @@ func TestLifecycle_PlatformFourEyes_InviteReactivateResetRejectCancel(t *testing
 		t.Fatalf("the invited platform admin: %s %s", status, role)
 	}
 	fixtureAcceptAndEnrol(t, s, lastMailedToken(t, mail, invitee), "a-decent-password-1")
-	if n := lcCount(t, pool, uuid.Nil, `SELECT count(*) FROM staff_lifecycle_approvals WHERE request_id = $1 AND decided_by = $2 AND decision = 'approve'`, uuid.MustParse(req.ID), b.ID); n != 1 {
+	// The four-eyes tables are visible to a platform session only (platform_only_select).
+	var approvals int
+	if err := pool.WithPlatformAdmin(context.Background(), b.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM staff_lifecycle_approvals WHERE request_id = $1 AND decided_by = $2 AND decision = 'approve'`,
+			uuid.MustParse(req.ID), b.ID).Scan(&approvals)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := approvals; n != 1 {
 		t.Fatalf("approval rows: %d", n)
 	}
 	if n := lcCount(t, pool, uuid.Nil, `SELECT count(*) FROM staff_lifecycle_events WHERE staff_user_id = $1 AND event = 'invited' AND lifecycle_request_id = $2`, newAdmin, uuid.MustParse(req.ID)); n != 1 {

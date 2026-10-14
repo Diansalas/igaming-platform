@@ -13,12 +13,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/email"
@@ -28,6 +30,8 @@ import (
 // newLifecycleTestServer is newTestServer plus a MOCK email provider (returned for the mailbox).
 func newLifecycleTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*httptest.Server, *email.MockProvider) {
 	t.Helper()
+	// The platform four-eyes routes sign actor proofs (ADR 0110): this process's key in the test database.
+	prooftest.Install(t, os.Getenv("TEST_DATABASE_URL"))
 	mail := email.NewMockProvider()
 	deps := financialTestDeps(pool, issuer, nil)
 	deps.EmailProvider = mail

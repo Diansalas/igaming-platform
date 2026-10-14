@@ -72,6 +72,19 @@ func lcStaffRow(t *testing.T, pool *db.Pool, tenantID, staffID uuid.UUID) (statu
 	return
 }
 
+// lcLiveSessions counts staffID's unrevoked sessions in the principal's own scope (a bare tenant session does not
+// see session rows: such a count would be vacuous).
+func lcLiveSessions(t *testing.T, pool *db.Pool, tenantID, staffID uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := pool.WithPrincipalScope(context.Background(), tenantID, staffID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE principal_type = 'staff' AND principal_id = $1 AND revoked_at IS NULL`, staffID).Scan(&n)
+	}); err != nil {
+		t.Fatalf("live sessions: %v", err)
+	}
+	return n
+}
+
 func lcCount(t *testing.T, pool *db.Pool, tenantID uuid.UUID, q string, args ...any) int {
 	t.Helper()
 	var n int
@@ -126,6 +139,9 @@ func TestLifecycle_TenantFullStateMachine(t *testing.T) {
 		http.StatusConflict, "lifecycle_transition_invalid", "active -> reactivate")
 
 	// Suspend: the old token is refused at once; a refresh is refused; status suspended, sv bumped.
+	if lcLiveSessions(t, pool, tn.ID, sid) == 0 {
+		t.Fatal("non-vacuity: the target must hold a live session before the suspension")
+	}
 	_, _, svBefore := lcStaffRow(t, pool, tn.ID, sid)
 	lcExpect(t, lcDo(t, srv, http.MethodPost, base+created.ID+"/suspend", paTok, map[string]string{"reason_code": "investigation"}), http.StatusOK, "", "suspend")
 	if status, _, sv := lcStaffRow(t, pool, tn.ID, sid); status != "suspended" || sv != svBefore+1 {
@@ -135,7 +151,7 @@ func TestLifecycle_TenantFullStateMachine(t *testing.T) {
 	if r := staffFixturePost(t, srv, "/v1/auth/refresh", map[string]string{"refresh_token": pair.RefreshToken}); r.status == http.StatusOK {
 		t.Fatalf("a suspended staff member's refresh must fail: %s", r.body)
 	}
-	if n := lcCount(t, pool, tn.ID, `SELECT count(*) FROM sessions WHERE principal_id = $1 AND revoked_at IS NULL`, sid); n != 0 {
+	if n := lcLiveSessions(t, pool, tn.ID, sid); n != 0 {
 		t.Fatalf("suspension left %d live sessions", n)
 	}
 	// suspended -> suspend / role: illegal.
