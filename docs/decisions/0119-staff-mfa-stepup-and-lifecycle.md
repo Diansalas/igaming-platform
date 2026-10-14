@@ -23,6 +23,16 @@
   **Route-registration freeze** in force from the S4a merge (`docs/plans/adr0119-s4a-route-registration.md`). The
   `security` (live) and `code-reviewer` / `qa` reviews returned APPROVE WITH CONDITIONS; the conditions are applied on
   the branch (section 25.8) and await re-review. See section 25.
+- **S4b (2026-10-13):** step-up ENFORCEMENT is `IMPLEMENTED` on an unmerged branch, pending gate G and the mandatory
+  `ledger-finance` review: `requireStepUp` on every classified staff route (critical 5 min, financial 10 min; `403
+  step_up_required` with the RFC 9470 header), the four classifier functions, `POST /v1/staff/auth/step-up` and
+  `POST /v1/staff/mfa/recovery-codes/regenerate`, the S3-R10 seal v2 (refresh token hash and idle expiry bound), the
+  S3-R13 / S4a-R10 rules (the sealed row, not the claims, decides freshness; incoherent claims refused), migration
+  **0151** (the step-up column grants only), the actor-proof signer backstop, the
+  withdrawal `require_step_up` 2 min rule, and the section 9.5 re-assertion for K2, K3/M4, HSEC and withdrawal approve
+  (ADR 0082 Amendment A9, ADR 0099 A-19 amendment). Withdrawal submit / resolve and K1 re-assertion, the section
+  9.5(b) GUC + `staff_actor_self_*` policy pair, lifecycle, the back-office modal (S7b) and staff RG increases stay
+  `NOT IMPLEMENTED`. See section 26.
 - **Revision 2 (2026-10-13):** the S0 design review by `architect` and `ledger-finance` returned ACCEPT WITH
   CONDITIONS. Section 20 resolves every blocking condition (C1-C6) and accuracy fix (C7-C11) in the text, and folds
   in the cheap non-blocking items (N1-N15). The `security` rulings are recorded there: C2 adopts the scoped
@@ -780,6 +790,11 @@ CREATE POLICY staff_actor_self_lock ON staff_users FOR UPDATE
   verified token subject. A static test pins it as the only setter.
 - **Restrictive fences still apply.** The 0112 acting fence and the migration 0114 KYC-worker fence are not affected.
 - **No new exposure under M5.** The runtime role can already read platform rows through `WithoutTenant`.
+- **S4b implementation note (section 26, D14).** The pair and the GUC are NOT built in S4b: every flow S4b re-asserts
+  (K2, K3/M4, HSEC final approvals; withdrawal approve) already sees the actor's own row (tenant session: the
+  dual-scope policy; acting session: `app.tenant_id` is empty, so the dual-scope policy admits platform rows and the
+  0112 acting fence admits the acting principal). They land with the first flow whose session hides the actor (K1
+  platform-scope approvals, the lifecycle; S4b-R3). Until then a static test pins that nothing sets `app.actor_staff_id`.
 
 **(c) Amendments, landing in S4b with ledger-finance and architect sign-off:**
 
@@ -2369,3 +2384,177 @@ the S4a `internal/httpserver` tests (chain, race, liveness, routes, withdrawal p
 PASS; `go test ./... -count=1`, `gofmt`, `go vet` (plain and integration), `golangci-lint --new-from-rev=e77900e`:
 clean. Mutation (new logic): C1a, C1b, C1c, C1d (re-anchored to the new code), C1e, C1f and the new C1g: all KILLED;
 the mutant set is now 61 (L 34, A 10, C1 7, X 7, K 3).
+
+## 26. S4b implementation record (2026-10-13)
+
+Branch `worktree-agent-aa30e7cd9d960921a`, based on `3019e51` (head 142: S1-S4a + S7a merged). **NOT MERGED.** Gate G
+(live `security` review, `code-reviewer`, `qa`) has not run; **`ledger-finance` review is mandatory** (section 9.5,
+ADR 0082 Amendment A9, the K-flow integration) and `architect` sign-off is required (ADR 0099 A-19 amendment, the
+decision NOT to build the section 9.5(b) policy pair in S4b, the `internal/stepup` package). S4b merges together with S7b (the back-office step-up modal, a separate agent;
+contract `docs/plans/adr0119-s4b-api-contract.md`). Nothing below is an approval. **Migration 0151** (the number the
+orchestrator allocated: 0139 stays reserved for S5 + S6, 0143-0150 for ADR 0116 AML and other in-flight slices).
+
+### 26.1 Status labels
+
+| Item | Label |
+|---|---|
+| `requireStepUp(class)` as the last link of `staffRoute` (critical 5 min, financial 10 min, configurable down to 1 min; `STAFF_STEP_UP_*_MAX_AGE_SECONDS` wired in `cmd/platform-api`), `403 step_up_required` with `max_age` and the RFC 9470 `WWW-Authenticate` header, enforced on every one of the 180 golden routes by class | `IMPLEMENTED` |
+| The four classifier functions (`launchActionClass`, `financialPolicyChangeClass`, `alertResolveClass`, `rgLimitChangeClass`); the classifier reads the SAME body bytes the handler decodes, with the same decoder and type | `IMPLEMENTED` |
+| `POST /v1/staff/auth/step-up` (TOTP only; replay rule and failure counters shared with login; writes only the chain-head row; new access token, refresh token unchanged; the failure that locks the factor revokes the session chain) | `IMPLEMENTED` |
+| `POST /v1/staff/mfa/recovery-codes/regenerate` (step-up critical; the S3 contract left it for S4b, section 23.3 D3) | `IMPLEMENTED` |
+| Conditions S3-R13 / S4a-R10: the freshness instant is the OLDER of the token's `mfa_at` and the sealed session row's; liveness verifies the row's seal and coherence (aal 2, `amr` names a second factor, `auth_time <= mfa_at <= now + 5 s`, `auth_time` within the configured absolute TTL) on the database clock; `auth.Verify` / `IssueStaff` refuse an `amr` without a second factor, `mfa_at < auth_time`, a future `auth_time` / `mfa_at` beyond 5 s, an `auth_time` older than 12 h | `IMPLEMENTED` |
+| Condition S3-R10: seal format v2 binds `refresh_token_hash` and the idle `expires_at`; a genuine v1 (S3) seal is retired quietly (liveness `seal_legacy`, refresh a plain 401, no audit, no alert) | `IMPLEMENTED` |
+| Migration 0151: runtime column UPDATE of `mfa_at`, `assurance_kid`, `assurance_seal` ONLY (mirrored in `deploy/init-app-role.sql`, granted there only once version 151 is applied); down migration | `IMPLEMENTED` against the local database |
+| Section 9.5(b) `app.actor_staff_id` GUC and the `staff_actor_self_select` / `staff_actor_self_lock` policy pair | `NOT IMPLEMENTED` (not required: D14, S4b-R3) |
+| Signer backstop: `actorproof.StepUpOperations` (16 operations, section 9.1 minus `staff_lifecycle:*`), applied in `Issuer.Attach` (the only production signing path, pinned) | `IMPLEMENTED` |
+| `withdrawal.Approve` step-up parameter: `require_step_up` above the threshold needs the approver's own step-up within 2 min (database clock); automated decisions never satisfy it; HTTP `403 step_up_required`, `max_age = 120` | `IMPLEMENTED` |
+| Section 9.5 scoped re-assertion folded into the existing A8 statement for K2, K3/M4 and HSEC final approvals; `approverEligibilityCheck` for withdrawal approve made `FOR SHARE` with a role comparison (`db.CheckActorStaffLive`; `db.ErrActorStaffNotLive` -> `401 session_revoked`); ADR 0082 Amendment A9 and the ADR 0099 A-19 amendment written | `IMPLEMENTED` (pending `ledger-finance` and `architect` sign-off) |
+| Section 9.5 re-assertion for withdrawal `submit` / `resolve` and K1 grant approve / revoke | `NOT IMPLEMENTED` (S4b-R3) |
+| `staff_lifecycle:*` in the backstop registry; the lifecycle flows; `staff_version` | `NOT IMPLEMENTED` (S5 + S6, migration 0139) |
+| ADR 0115 staff RG increases | `NOT IMPLEMENTED` by design: they stay refused (`403 RG_STEP_UP_REQUIRED`) until ADR 0115's own classifier slice (S4b-R4) |
+| Back-office step-up modal | `NOT IMPLEMENTED` (S7b, separate agent; contract written) |
+| Production key provisioning; real email | `PROVIDER DEPENDENT` (unchanged) |
+
+### 26.2 How the review conditions hold
+
+| Condition | Mechanism | Tests / mutants |
+|---|---|---|
+| S3-R10 (seal binding) | Seal format v2 (`ss-v2|...|refresh_token_hash|expires_at`, `staffmfa.SessionAssurance`); every new or rotated staff session and every step-up re-seal is v2; `VerifySessionSeal` accepts v2 only; a genuine v1 seal is recognised (`IsLegacySessionSeal`) and retired without a P1 | `TestSealSession_*` (canonical v2 form pinned, every field bound, malformed hash/expiry refused, legacy recognised but never valid), `TestStepUp_SealBindsRefreshHashAndIdleExpiry` (owner rewrites either column with the SF040 trigger disabled: refresh refused + audited + P1; liveness `seal_invalid`), `TestStepUp_LegacyV1SealRetiredQuietly`; SE01-SE05 |
+| S3-R13 (token claims) | `auth.Verify` / `IssueStaff`: `amr` must name a second factor (`otp`), `auth_time <= mfa_at`, neither more than 5 s in the future, `auth_time` no older than 12 h (the absolute-TTL bound; the configured, shorter, absolute expiry is enforced on the sealed row) | `TestVerify_StaffAssuranceCoherence_S3R13`, `TestIssueStaff_RefusesIncoherentAssurance_S3R13`, `TestStepUp_ForgedAndIncoherentClaims` (hand-signed tokens: 401); V01-V04 |
+| S4a-R10 (row, not claims) | Liveness reads the row's sealed assurance with the database clock, verifies the v2 seal and the row's coherence (new liveness reasons `seal_invalid`, `seal_legacy`, `assurance_incoherent`) and hands the VERIFIED row to the gate; the gate uses the OLDER of the token claim and the row (a forged fresh claim over a stale row is refused; a token minted before a step-up stays stale) | `TestStaffAssuranceVerdict`, `TestStepUp_ForgedAndIncoherentClaims` (fresh claim, 11-minute-old row: 403), `TestStepUp_EndToEnd_TenantAndPlatform` (old token stays stale after the step-up); G01, G02, L01-L05 |
+| Step-up writes only the chain head | `auth.StepUpStaffSession`: the caller's own row (`id`, `principal_id`, tenant) locked `FOR UPDATE`, refused unless not revoked, not replaced and within its absolute expiry, its v2 seal verified, then `UPDATE ... SET mfa_at, assurance_kid, assurance_seal WHERE ... revoked_at IS NULL AND replaced_by_session_id IS NULL` | `TestStepUp_EndToEnd_TenantAndPlatform` (a step-up through a replaced row: 401), `TestStepUp_RacesRevocation_BothOrders`, `TestStepUpStaffSession_DirectRefusals` (tampered seal, absolute expiry at and after the bound, revoked, another staff member's session; row untouched); H01, H02b, H03, P03 (H02a justified, 26.5) |
+| 0151 grants only as needed | `GRANT UPDATE (mfa_at, assurance_kid, assurance_seal)`; nothing else; mirrored in `deploy/init-app-role.sql` (granted only once `schema_migrations` holds version 151) | `TestMigration0151_CatalogPins` (no `staff_actor_self_*` policy; the six runtime UPDATE columns), `TestMigration0151_UpDownUp_WholeSchema` (exactly the three column grants added, nothing else), `TestGrants_SessionsAndCutover_RuntimeRole` (changed, 26.4); P03 |
+| Section 9.5 re-assertion | `db.ScanActorStaffRows` / `db.CheckActorStaffLive` over the rows the EXISTING A8 `FOR SHARE` statement already returns (K2 `lockStaffAndGrants`, K3/M4, HSEC; the acting approver's id added explicitly to the set) and over withdrawal approve's eligibility read (now `FOR SHARE`, after `lockRequestForUpdate`); status `active` and the token's role, else `db.ErrActorStaffNotLive` -> `401 session_revoked`, nothing written | `TestS4b_K2_ActorChangedBeforeA8_IsRefusedAndNothingWritten`, `TestS4b_K2_ApprovalHoldingA8_SuspensionOfTheActorWaits`, `TestS4b_K3_ActorSuspendedBeforeA8_IsRefusedAndNothingWritten`, `TestS4b_HSEC_PlatformActorReasserted_BothOrders`, `TestStepUp_WithdrawalApprove_EligibilityHoldsTheApproverRowForShare`, `TestStepUp_WithdrawalApprove_ReassertsRoleInTransaction`, `TestCheckActorStaffLive`; B-7 / Y07 / HSEC concurrency unchanged; R01, R03, R04, R06-R08 (R09 justified, 26.5) |
+
+### 26.3 Deviations (for the reviewer; each reversible)
+
+| # | Deviation | Reason |
+|---|---|---|
+| D1 | The step-up gate runs BEFORE the route's own permission gate (`staffRoute` wraps the route's `inner`, which carries `RequirePermission` / `RequireTenantScope`; S4a D3). A caller without the permission may be asked to step up first, then gets `403 forbidden` | Inserting the gate between a route's own gates needs every one of the 180 registrations rewritten. Nothing leaks: the class of every route is public (golden table, OpenAPI), and a refusal happens before any write either way. The classifier routes return `none` for a caller their handler refuses anyway, so those handlers' audited denials are unchanged |
+| D2 | The freshness instant is `min(token mfa_at, sealed row mfa_at)`; "now" is the database clock of the liveness query | S4a-R10; one clock with `mfa_at` (written with `SELECT now()`); the claim is whole seconds, so the effective instant is at most 1 s older than the row's |
+| D3 | Seal format v2; a v1 (S3) seal is never accepted: every staff session that exists when S4b deploys must log in again (liveness answers `session_revoked`, refresh 401), without an integrity alert | S3-R10; accepting v1 would keep the unbound hash / expiry for up to 12 h. Operational note for the cutover runbook |
+| D4 | "5 step-up failures revoke the current session" (section 6.5) is implemented as: the step-up failure that leaves the factor LOCKED (soft or hard; the counters are the factor's, shared with login) revokes the calling session's whole chain | One budget for every second-factor guess (section 6.5); no per-session counter is needed, and a mix of login and step-up guesses cannot avoid it. A locked factor answers `mfa_locked` before any comparison and revokes nothing |
+| D5 | `POST /v1/staff/auth/step-up` is a `staffRoute` (class none) with the `mfa` rate bucket INSIDE the chain | The freeze requires `staffRoute`; an unauthenticated request does not consume the bucket (the factor lockout is the real throttle) |
+| D6 | `rgLimitChangeClass`: a removal (`value: null`) or an unparsable body is `critical`; any value is `none`. Whether a value is an increase is decided by the RG domain under its person lock, and the domain still refuses every staff increase (`RG_STEP_UP_REQUIRED`) | ADR 0115: staff increases are NOT enabled by S4b. Enabling them needs ADR 0115's classifier slice to pass the step-up assertion into the domain transaction (the route cannot know the current limit) |
+| D7 | `alertResolveClass`: `critical` for every `staff.*` kind and every `p1` alert, and for an alert that does not exist or cannot be read; `none` otherwise and for a caller the handler refuses (no `alert:manage`, or a tenant session); a database fault is 503 | Section 8.2 (f) "at least" list, pinned as a prefix + severity rule |
+| D8 | `financialPolicyChangeClass` decides by permission (`financial_policy:author` -> critical); the backstop exempts `financial_policy_change:propose` from a TENANT-scope session only (tighten-only callers; `author` is platform_admin only) | Otherwise the backstop would turn every tighten-only proposal into a 500 |
+| D9 | The backstop runs in `Issuer.Attach` (the only production signing path; `Sign` has no context and is test-only, pinned); its max-age is the class's section 7.4 UPPER bound (5 / 10 min) plus 30 s grace, not the configured value | The route gate already applied the configured value; the backstop catches a missing or wrong class |
+| D10 | Integration-test support: `actorproof.SetTestStepUpFallback` (build tag `integration`, set by `prooftest`'s `init`) lets a governed domain service called DIRECTLY by an integration test sign without an assertion. It never applies to an HTTP staff request (`auth.Middleware` marks it, `stepup.WithStaffRequest`) nor to a present-but-wrong assertion | Section 9.1 "Test support"; hundreds of domain tests call the services without the HTTP chain. Production binaries cannot contain the setter (pinned) |
+| D11 | New leaf package `internal/stepup` (class, assertion, freshness); `internal/auth` re-exports the names (`auth.StepUpClass`, `auth.StepUpAssertion`, ...) | `internal/actorproof` and `internal/withdrawal` importing `internal/auth` creates test import cycles (`db` and `tenant` tests import `prooftest`) |
+| D12 | Withdrawal approve (9.5): `approverEligibilityCheckLocked` reads the approver's own row `FOR SHARE` (tenant session: the row is visible) and compares the role; a status other than `active` keeps the pre-existing `ErrApproverInactive` 403 (S4a-R2 pin), a role mismatch is `401 session_revoked`. Reject, submit and resolve keep the unlocked `approverEligibilityCheck` | Section 9.5 table; S4b-R3 for submit / resolve |
+| D13 | Section 9.5 implemented for K2, K3/M4, HSEC and withdrawal approve; NOT for withdrawal submit / resolve and K1 approve / revoke | Scope of this slice as dispatched (fold into the existing A8 statements + `approverEligibilityCheck`); the new statements of the other rows need their own lock-order review (S4b-R3) |
+| D14 | Section 9.5(b)'s `app.actor_staff_id` GUC and `staff_actor_self_*` policy pair are NOT built (an earlier revision of this branch built them; removed). Every flow re-asserted here already sees the actor's own row: tenant sessions through the dual-scope policy; the acting session (K2 / K3 / HSEC for a platform principal) because `app.tenant_id` is empty there, so the dual-scope policy admits platform rows and the 0112 acting fence admits the acting principal's id. The mutation pass showed the GUC mutants equivalent (R02 / R05 / P02) | Section 9.5(b) is "only if required"; building unused RLS surface widens what `igaming_runtime` SQL can reach (M5). It lands with the first flow whose session hides the actor (K1 platform-scope approvals, lifecycle; S4b-R3). ADR 0082 A9 items 3-5 rewritten accordingly |
+| D15 | The `staff.mfa_failure_pattern` count includes `staff.step_up_failed` | The same compromise signal (a correct credential, wrong factor codes) |
+| D16 | Recovery-code regeneration takes no body, audits `staff.mfa_recovery_codes_regenerated`, and reuses the S3 enrolment response constructor (the G5 `RevealFor*` allow-list is unchanged) | Section 6.2; gate G5 |
+| D17 | A step-up refused because the session is not the chain head still burns the code's TOTP step (the transaction commits) | A code is accepted at most once (17.3) |
+| D18 | Withdrawal `require_step_up` is checked on the database clock inside the approval transaction; 2 min is a constant (`stepup.PolicyMaxAge`), not configuration | Section 9.3 [ORCH-DEFAULT] |
+| D19 | The liveness refusal for `seal_invalid` / `assurance_incoherent` is logged at Error and counted, not audited or alerted (the refresh path audits and raises the P1 for the same row) | No writes on the read path (S4a D5) |
+
+### 26.4 Changed existing tests and assertions (every one)
+
+| File | Change | Why |
+|---|---|---|
+| `internal/staffmfa/session_test.go` `TestSealSession_CanonicalFormPinned` | the pinned canonical form is `ss-v2|...|<refresh_token_hash>|<expires_at>` (was `ss-v1|...` without the two fields); `sampleAssurance` gains the two fields | S3-R10 |
+| same file, `TestSealSession_EveryFieldIsBound`, `TestSealSession_RefusesMalformedInput` | cases ADDED (the two new fields; empty / upper-case / short / `|` hash, no expiry) | S3-R10 |
+| `internal/auth/staff_claims_test.go` `TestIssueStaff_RoundTripsTheAssuranceClaims`, `internal/auth/staff_chain_test.go` `TestMiddleware_AttachesStaffSessionForStaffTokensOnly` | the fixed 2027 `auth_time` / `mfa_at` became `now - 1 h` (+100 s / +60 s); the round-trip assertions compare against those | S3-R13: a future `mfa_at` is refused by `Verify` |
+| `internal/httpserver/openapi_staff_auth_contract_test.go` `TestOpenAPI_StaffAuth_RoutesDocumentedBothWays` | 7 -> 9 mounted operations; the two bearer routes are checked for bearerAuth / no-store / 503 (+ the `mfa` bucket and 429 for step-up, the `StepUpRequired` response for regenerate) instead of the unauthenticated rules; the reverse scan covers `/v1/staff/mfa/` too | New routes |
+| same file, `TestOpenAPI_StaffAuth_DTOsMatchSchemas` | DTO list +3 (`stepUpRequest`, `stepUpWire`, `recoveryCodesWire`); `x-sensitive` list +2 | New schemas |
+| `internal/httpserver/staff_liveness_unit_test.go` `TestStaffLivenessSQL_Shape` | "liveness must not READ the idle `expires_at`" became "reads it only as `expires_at AS sealed_idle_expiry`, never compares it"; the sealed-assurance columns are required | Seal v2 binds `expires_at`; liveness still never refuses on the idle expiry |
+| `internal/httpserver/staff_route_static_test.go` `TestStaffRoute_ChainComposition` | the pinned chain string ends `... auth.RequireAAL2(requireStepUp(deps, class)(inner))` | The gate |
+| same file, `TestStaffRoutes_EveryMutatingRouteClassified` | 178 / 108 -> 180 / 110 | Two new routes |
+| same file, `TestStaffRoutes_ClassifiedOnArrivalAreNotRegistered` | the "no concrete entry: vacuous" failure became a planted-list non-vacuity check | The last two concrete entries (step-up, regenerate) moved to the golden table |
+| `internal/httpserver/staff_route_golden_test.go` | +2 golden rows (`POST /v1/staff/auth/step-up` none, `POST /v1/staff/mfa/recovery-codes/regenerate` critical); 2 arrival entries removed | Same |
+| `internal/httpserver/staff_mfa_schema_integration_test.go` `TestGrants_SessionsAndCutover_RuntimeRole` | runtime UPDATE columns +`assurance_kid`, `assurance_seal`, `mfa_at`; the `deploy/init-app-role.sql` mirror must also contain the 0151 grant | Migration 0151 (review F9: granted by the slice that writes them) |
+| same file, `TestSessions_SF040Matrix` | the runtime `mfa_at` forward UPDATE now succeeds (was 42501); a runtime backwards `mfa_at` is `SF040` (added) | Same |
+| `internal/httpserver/staff_mfa_flow_integration_test.go` `TestStaffMFA_SessionSealTamper` | (c) the unsealed forward `mfa_at` edit is made by the RUNTIME role (was the owner) and the session's access token is also refused at liveness (`seal_invalid`, added); (d) `mfa_at = now()` and the seal-to-NULL removed from the runtime 42501 list; the runtime seal-to-NULL is `SF040` (added) | Same; S4a-R10 |
+| same file, `TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative` | the "unknown token" is built so that it always differs from the real one (`"x" + tok[1:]` was the same token whenever the token started with `x`, 1 in 64) | Pre-existing flake, seen in this run |
+| `internal/httpserver/staff_liveness_integration_test.go` `TestStaffLiveness_RefusalMatrix` | the absolute-expiry case plants a 1 h session that ended 1 h ago (was a 12 h session that ended 1 h ago, whose 13 h-old `auth_time` `Verify` now refuses); a token with a 13 h-old `auth_time` is asserted `401 unauthorized` (added) | S3-R13 |
+| `internal/httpserver/staff_mfa_static_test.go` `TestStatic_StaffAuthAuditMetadataKeys` | the scanned files +2 (`staff_stepup_handlers.go`, `staff_stepup.go`) | New audit call sites |
+| `internal/adjustment/static_test.go` (`staffAllowedCols`) | `staff_version` admitted | ADR 0099 A-19 amendment (section 9.5(c)) |
+| `internal/withdrawal/*_test.go` (9 files), `internal/httpserver/payment_force_resolution_m2/m4_api_integration_test.go`, `staff_read_routes_integration_test.go`, `internal/payments/{k3_world,payout_dispatch,b13b_destination}_integration_test.go`, `internal/reconciliation/payout_live_integration_test.go` | every `withdrawal.Approve` call passes the zero assertion `auth.StepUpAssertion{}` (an alias of `stepup.Assertion`; setup only; no assertion changed). `TestApprove_RequireStepUpFailsClosedWhenAboveThreshold` keeps its assertions (no assertion: still `ErrStepUpRequired`) | New parameter (section 9.3) |
+| `internal/httpserver/staff_mfa_world_integration_test.go` (`sealOK`, `plantSession`, `sessions`) | seal v2 (setup) | S3-R10 |
+| `internal/auth/authtest` | `LiveStaffTokenAged` added (setup) | Stale step-up fixtures |
+| `internal/actorproof/prooftest` | `AttachForSession` places a synthetic assertion; `WithStepUp`; the `init` enables the integration-only fallback (D10) | Section 9.1 test support |
+
+Note for the reviewer: an earlier revision of THIS branch pinned the `staff_actor_self_*` policy pair in its own new
+tests (`internal/db/actor_staff*_test.go`, `staff_stepup_migration_integration_test.go`); after the pair was removed
+(D14) they pin its ABSENCE (`TestMigration0151_CatalogPins`, `TestStatic_NoActorStaffIDSetterYet`) and exactly three
+column grants. These are branch-new tests, not existing assertions.
+
+New test files (not changes): `internal/stepup/stepup_test.go`, `internal/auth/stepup_test.go`,
+`internal/actorproof/stepup_test.go`, `internal/actorproof/testsupport_integration_test.go`,
+`internal/db/actor_staff_test.go`, `internal/db/actor_staff_integration_test.go`, `internal/httpserver/staff_stepup_test.go`,
+`internal/httpserver/staff_stepup_integration_test.go`, `internal/httpserver/staff_stepup_direct_integration_test.go`,
+`internal/httpserver/staff_stepup_withdrawal_integration_test.go`, `internal/httpserver/staff_stepup_retry_integration_test.go`,
+`internal/httpserver/staff_stepup_migration_integration_test.go`, `internal/adjustment/s4b_reassertion_integration_test.go`,
+`internal/payments/s4b_reassertion_integration_test.go`, `internal/withdrawal/stepup_policy_integration_test.go`.
+
+No other existing assertion changed: the role matrix, the S3 / S4a HTTP, OpenAPI and staff-identity pins, the K2 / K3
+/ HSEC / B-7 / Y07 concurrency tests and every withdrawal test pass unchanged.
+
+### 26.5 Evidence (local only; NOT GitHub CI)
+
+Private databases only (`priv_db.sh` / `priv_test.sh`, sanctioned local CI credentials; no role or password change).
+Final head of the code: `0c3eb88` plus this documentation commit.
+
+| Command | Result |
+|---|---|
+| `go build ./...`, `go vet ./...`, `go vet -tags integration ./...`, `gofmt -l` | PASS (clean) |
+| `go test ./... -count=1` (unit) | PASS (60 packages ok, 0 FAIL) |
+| `golangci-lint --build-tags integration --new-from-rev=3019e51` (2.9.0) | PASS (0 issues) |
+| `-tags integration -p 1`: `stepup`, `auth/...`, `staffmfa/...`, `actorproof/...`, `db`, `withdrawal`, `adjustment`, `apierror`, `observability`, `cmd/platform-api` (final head) | PASS |
+| `-tags integration -p 1`: `launchgov`, `tenant`, `rg`, `alerting/...`, `reconciliation/...`, `config`, `cmd/migrate`, `cmd/seed-admin`, `deploy/observability` (before the 9.5(b) removal, which does not touch them) | PASS |
+| `-tags integration -p 1 ./internal/aml/` | FAIL: `TestMigrations0140to0142_UpDownUp_WholeSchema` only - PRE-EXISTING: fails identically on a `git archive` of the base `3019e51` |
+| full `./internal/httpserver/` (`-timeout 60m`, final head, 1008 s) | FAIL only `TestResolutionIsolation_NormalOperation` / `_OneTenantStoreOutage` / `_FinancialDuringOutage` (known flaky latency bound, ISO-LATENCY-1; the deposit-callback path is not touched by S4b). Re-run alone: the latter two PASS; `_NormalOperation` 2 of 3 PASS (worst 478 / 494 ms, one run 531 ms vs the 500 ms bound) |
+| `TestStepUp_*`, `TestStepUpStaffSession_DirectRefusals`, `TestMigration0151_*`, `TestGrants_*`, `TestSessions_SF040Matrix` (final head) | PASS |
+| `./internal/payments/` per-letter shards A-Z | PASS (26 shards, 0 FAIL). A first parallel run failed shards B-E en masse and F-Z at package level while other heavy runs shared the machine; every shard was re-run on the final code and passes (B-E, G-Z, A, F) |
+| K2 / K3 / HSEC / B-7 / Y07 concurrency + `TestS4b_*` (adjustment, payments; final head) | PASS |
+| Mutation pass (`docs/plans/prh2-hardening-round/adr0119-s4b-mutation-kill.txt`) | 59 mutants: 57 KILLED, 2 justified (H02a, R09) |
+| `deploy/init-app-role.sql` 0151 block | executed in a rolled-back transaction against the private database: PASS |
+
+### 26.6 Residuals (S4b)
+
+| # | Residual | Disposition |
+|---|---|---|
+| S4b-R1 | Under M5 (arbitrary SQL as the runtime role) the 0151 grant lets SQL move a staff session's `mfa_at` forward (SF040 still refuses backwards / NULL). The edit cannot forge a step-up: the seal no longer verifies, liveness refuses the session (`seal_invalid`) and its refresh is refused, audited and alerted (P1). It is a denial of service against that session only | Accepted; pinned by `TestStaffMFA_SessionSealTamper` (c) |
+| S4b-R2 | The step-up prompt precedes the route's permission check (D1) | Accepted (no write, public classes); revisit if the back office finds the prompt confusing |
+| S4b-R3 | Section 9.5 re-assertion NOT built for withdrawal `submit` / `resolve` and K1 grant `approve` / `revoke`: they rely on the request-level liveness check and the existing DB status guards (R13 window: a handler that started before a suspension committed). The 9.5(b) GUC + `staff_actor_self_*` policy pair are not built either (D14) | Follow-up with `ledger-finance` (new statements at the A8 position after the flow's last L1 row) and `architect` (the policy pair, with the first flow that needs it) |
+| S4b-R4 | ADR 0115 staff RG increases stay refused (`RG_STEP_UP_REQUIRED`); the route classifier marks only removals critical | ADR 0115's classifier slice (pass the assertion into the RG domain transaction) |
+| S4b-R5 | Step-up is per SESSION: after a step-up, every access token minted for that session chain (the step-up response, and any later refresh, which copies `mfa_at`) is fresh; a thief who holds the refresh token benefits within the window | Section 3 M2 residual (bounded by the 5 / 10 min window, the 30 min idle and refresh-token reuse detection) |
+| S4b-R6 | The signer backstop uses the class's UPPER bound (5 / 10 min) + 30 s, not the configured (possibly tighter) max-age | Accepted (D9): the route gate applies the configured value |
+| S4b-R7 | Domain-level integration tests sign through the integration-only fallback (D10); only HTTP tests exercise the real backstop | Accepted; `TestStepUp_SignerBackstopOverHTTP`, `TestTestStepUpFallback_NeverAppliesToAStaffRequest` |
+| S4b-R8 | Every staff session issued before S4b (seal v1) ends at deploy: staff log in again (no alert) | Add to the S9 runbook / deploy note |
+| S4b-R9 | `sv` is still 0 (`staff_version` arrives with 0139): the 9.5 re-assertion compares `status` and `role` only | 0139 (S5 + S6) |
+| S4b-R10 | A `seal_invalid` refusal at liveness is not itself audited or alerted (D19); the P1 arises on the session's next refresh | Accepted; metric + Error log line (`StaffLivenessRefusals` rule) |
+| S4b-R11 | `staff_lifecycle:request|approve` are not in the backstop registry yet | S5 + S6 (with the operations) |
+
+### 26.7 What `security`, `ledger-finance`, `code-reviewer` and `qa` should probe
+
+`security` (live):
+1. Forge every claim shape against a stale row (fresh `mfa_at` claim, future claims, `amr` without `otp`, an
+   `auth_time` older than 12 h, a token for another `sid`) and try to obtain `200` on a critical route; try a token
+   minted before a step-up after the step-up.
+2. SQL as `igaming_runtime`: move `mfa_at` forward on your own session, rewrite the seal from another session, swap
+   `refresh_token_hash` / `expires_at` (needs the trigger disabled: owner); confirm that 0151 added no policy and no
+   column beyond the three, and that nothing sets `app.actor_staff_id`.
+3. Step-up endpoint: replay, the shared lockout (login + step-up guesses), a recovery code, a revoked / replaced /
+   expired session, step-up racing logout / refresh, the `mfa` bucket, response caching (`no-store`).
+4. Classifier evasion: duplicate / case-folded JSON keys, an oversized body, a body that the classifier and the
+   handler could parse differently, an alert whose kind changes between the classifier and the handler (the
+   classifier reads the row once; the handler locks it later - the window is a resolve of a just-raised alert).
+5. The backstop: a governed write reached through a route classified `none`; the integration-only fallback is not in
+   the production binary (`go build` without the tag; the static pin).
+6. The 403 `step_up_required` body / header for every class, and that no handler ran (no audit, no state change).
+
+`ledger-finance` (mandatory): ADR 0082 Amendment A9 (placement table, position, the actor in the ascending-id set,
+item 3's visibility argument per flow, item 5: no lock added or moved, recount unchanged), K2 / K3 / HSEC final approvals under a
+concurrent suspension in both orders, the withdrawal approve `FOR SHARE` (`lockRequestForUpdate` first), and the
+S4b-R3 decision (submit / resolve / K1).
+
+`architect`: the decision not to build the 9.5(b) policy pair in S4b (D14, S4b-R3), the ADR 0099 A-19 amendment, the
+`internal/stepup` package split (D11), migration number 0151 (grants only).
+
+`code-reviewer` / `qa`: the golden-wide test's coverage pins (47 critical, 22 financial, 4 classifier, 37 none
+mutating, 70 reads), the changed assertions of 26.4, the surviving mutants of 26.5, and the static pins (NO setter
+of `app.actor_staff_id` yet, single production caller of `auth.ContextWithStepUpAssertion`, production signs only
+through `Attach`, the integration-only fallback setter).
