@@ -858,7 +858,10 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, db.ErrActorStaffNotLive) {
 			// ADR 0119 S4b (section 9.5): the approver's own row changed role between the request's liveness check and
-			// the transaction's FOR SHARE re-assertion. Nothing was recorded.
+			// the transaction's FOR SHARE re-assertion. Nothing was recorded. Warn + metric (ledger-finance review).
+			observability.LoggerFromContext(r.Context(), deps.Logger).Warn("withdrawal_approve_actor_not_live",
+				"withdrawal_id", id.String())
+			observability.RecordStaffReassertionRefusal(r.Context(), observability.StaffReassertionFlowWithdrawalApprove)
 			writeSessionRevoked(w, requestID)
 			return
 		}

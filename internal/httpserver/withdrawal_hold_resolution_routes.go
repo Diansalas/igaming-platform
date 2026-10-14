@@ -165,6 +165,7 @@ func writeHoldResolutionError(ctx context.Context, deps Deps, w http.ResponseWri
 		// ADR 0119 S4b section 9.5: the actor's own row was suspended or changed role before the A8 re-assertion;
 		// nothing was written.
 		c.logger.Warn("withdrawal_hold_resolution_actor_not_live", "op", op)
+		observability.RecordStaffReassertionRefusal(ctx, observability.StaffReassertionFlowHoldResolution)
 		recordHoldResolutionDenied(ctx, deps, c, op, "actor_not_live", "", ids...)
 		writeSessionRevoked(w, c.requestID)
 		return

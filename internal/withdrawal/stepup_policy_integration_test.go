@@ -24,10 +24,6 @@ func TestApprove_RequireStepUp_FreshnessMatrix(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool, 10_000_000)
 	mustSetWithdrawalPolicyStepUp(t, pool, f.tenantID, "EUR", 50_000, true)
-	var dbNow time.Time
-	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT now()`).Scan(&dbNow)
-	})
 	newPending := func(key string) WithdrawalRequest {
 		wr := mustRequestWithdrawal(t, pool, f, 100_000, key)
 		mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return MoveToPendingReview(ctx, tx, wr.ID) })
@@ -46,8 +42,11 @@ func TestApprove_RequireStepUp_FreshnessMatrix(t *testing.T) {
 		other     bool
 		automated bool
 		zero      bool
+		dbClock   bool // age is measured from the approval transaction's own now() (the clock Approve reads)
 		ok        bool
 	}{
+		{name: "exactly 120 s old on the database clock", age: 120 * time.Second, dbClock: true, ok: true},
+		{name: "120 s + 1 microsecond old on the database clock", age: 120*time.Second + time.Microsecond, dbClock: true},
 		{name: "one minute old", age: time.Minute, ok: true},
 		{name: "three minutes old (route-fresh, policy-stale)", age: 3 * time.Minute},
 		{name: "another principal's assertion", age: 0, other: true},
@@ -71,6 +70,14 @@ func TestApprove_RequireStepUp_FreshnessMatrix(t *testing.T) {
 				elig = nil
 			}
 			err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				if c.dbClock {
+					// now() is the transaction's start time, constant inside it: Approve reads the same instant.
+					var txNow time.Time
+					if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&txNow); err != nil {
+						return err
+					}
+					a.MFAAt = txNow.Add(-c.age)
+				}
 				_, err := Approve(ctx, tx, wr.ID, approver, c.automated, nil, elig, a)
 				return err
 			})
@@ -88,5 +95,4 @@ func TestApprove_RequireStepUp_FreshnessMatrix(t *testing.T) {
 			}
 		})
 	}
-	_ = dbNow
 }
