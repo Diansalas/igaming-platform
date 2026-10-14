@@ -441,7 +441,7 @@ mounted; each DTO's JSON field set equals its schema's property set (reflection)
 properties and carry no tenant field; the redaction contract and the absence of `evidence_reference` are pinned.
 
 
-## 9B. S1b backend API completions (MUST before production console) - NOT IMPLEMENTED
+## 9B. S1b backend API completions (MUST before production console) - MUST items and two SHOULD items IMPLEMENTED against the local DB (record below); reviews pending
 
 Recorded from the S1 reviews (security and code-reviewer, APPROVE WITH CONDITIONS). The S1 console (frontend only)
 works around these gaps and says so on screen; none is built here.
@@ -464,6 +464,50 @@ SHOULD:
 Also pinned for the console: the "MOCK / no delivery channel" banner and "Nobody was notified" wording are hardcoded
 while ALERT-DELIVERY-1 is OPEN and must be derived from `/alerting/status` `human_notification_routes` and each row's
 `notified_a_person` when it closes.
+
+### 9B.1 S1b implementation record
+
+Labels (exact): keyset cursor on `GET /v1/admin/alerts` IMPLEMENTED; `acked_at`/`resolved_at`/`acked_by`/`resolved_by`
+in the list IMPLEMENTED; OpenAPI for `escalation_step`, `delivery_channel_kind`, `attempt_no` (new `PlatformAlert`
+schema) IMPLEMENTED; SHOULD single `GET /v1/admin/alerts/{alertID}` IMPLEMENTED; SHOULD `kind` filter IMPLEMENTED;
+SHOULD closed codes for `/alerting/status` `reason`/`missing_operator_input` NOT IMPLEMENTED (deferred);
+SHOULD `recipient_ref` never a credential/tokened URL: PARTIALLY IMPLEMENTED (existing `ValidateRecipientRef` opaque-id
+check stays; no real channel exists, re-check when one does). Reviews (`security`, `code-reviewer`): pending.
+No migration (no new column; the table is small and platform-owned, see residual 2). No new service boundary.
+
+- **Cursor.** Order `first_seen_at DESC, id DESC`; `limit+1` fetch; response `{alerts, next_cursor}` (`next_cursor` null on
+  the last page, never a phantom empty page). The cursor is opaque base64url JSON `{v,t(unix micros),i(uuid),f(filter)}`
+  (`alert_list_cursor.go`), bound to the `state|severity|kind` filter it was issued for. Strict decode: size cap 400,
+  unknown fields, trailing data, version, canonical lowercase UUID, time within 2000-2200, repeated `cursor` parameter,
+  empty `cursor=` -> 400 `VALIDATION`. It is NOT a credential and NOT signed: a forged well-formed cursor is only a
+  position in data the caller may read anyway. The SQL compares `(first_seen_at, id) < (epoch + micros, uuid)` with an
+  integer-microsecond timestamp (no float).
+- **Actors/timestamps.** `acked_at`, `resolved_at` (omitted while unset), `acked_by`, `resolved_by` are `*staffRef`
+  built by `alertActorRefs` through `staffViewerOf(tc)` with actor scope `platform` (the guard stores only validated
+  platform admins). The routes still refuse every tenant caller (403) before a DTO is built; a tenant viewer would get
+  `null`. A resolve of an open alert records the resolver as acker too (database guard, migration 0110). The static
+  staff-identity pin passed without any allowlist change. D-0104-1 is untouched (this is the platform console only).
+- **Routes.** `GET /v1/admin/alerts/{alertID}` registered with `staffRoute(deps, stepUpNone, ...)`; golden row
+  `"none"`; golden count pin 180 -> 181. 404 for unknown id, 400 for a malformed id, 403 for tenant/other roles.
+- **Changed existing assertions (complete list):** `staff_route_static_test.go` golden-table pin `len(staffRouteGolden) != 180`
+  -> `181` (and its message/comment); `staff_route_golden_test.go` gains the row `GET /v1/admin/alerts/{alertID}: none`;
+  `openapi_governed_routes_contract_test.go` gains the `PlatformAlert`/`alertListItemDTO` case and the `acked_by`/`resolved_by`
+  nullable check (additions, nothing relaxed). The list response gained `next_cursor` and optional fields: additive; the
+  existing `alert_routing_http_integration_test.go` assertions pass unchanged.
+- **UI (types only).** `backoffice/src/api/alerts.ts`: optional new fields, `kind`/`cursor` params, `AlertListPage`,
+  `getAlert`; header comment updated; `alerts.test.ts` added. No component changed; the console still shows the newest
+  page only (consuming `next_cursor` is a later UI slice, residual 1).
+- **Tests** (`alert_list_s1b_integration_test.go`, `alert_list_s1b_unit_test.go`): 205 alerts across a 200-row page and
+  tie groups; limit 1 across a 9-row tie group; stability when alerts are raised between pages and while a writer raises
+  concurrently (every pre-existing alert exactly once, none twice); 20 tampered/foreign-filter cursors; acted-by/at,
+  audited actors equal shown actors; 8 tenant roles x 2 tenants + anonymous x 4 paths refused with no alert data or staff
+  id, no existence oracle; kind filter and single read; helper unit tests. Mutation pass: 17 mutants, 17 killed (first run
+  16, `M3` killed after adding an exact-fit page assertion): `docs/plans/prh2-hardening-round/adr0114-s1b-mutation-kill.txt`.
+- **Residuals.** (1) UI does not page yet: until it does, the 200-newest limitation remains visible in the console.
+  (2) No index on `(first_seen_at, id)`; the sort is over `tenant_id IS NULL` alerts only and is fine at current volume,
+  but add an index (next free migration number, not 0139) if platform alerts grow into the 100k range. (3) The shared
+  `tenant_id IS NULL` predicate cannot be mutation-tested: no tenant-scope alert kind is seeded. (4) The cursor is
+  unsigned by design. (5) Status `reason`/`missing_operator_input` remain open text in the console.
 
 
 ## 10. S0 security re-check disposition (orchestrator, 2026-10-11)
