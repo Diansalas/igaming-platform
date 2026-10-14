@@ -426,20 +426,39 @@ type alertListItemDTO struct {
 	DeliveryAttempts *int       `json:"attempt_no,omitempty"`
 }
 
-// alertListSelect is the shared projection of the list and the single-alert read. The
+// alertListSQL is the shared projection of the list and the single-alert read. The
 // alerts guard (migration 0110) forces acked_by/resolved_by from the validated platform
 // session, so these columns are always platform actors.
-const alertListSelect = `
+//
+// Shape matters (security F1): the keyset filter, ORDER BY and LIMIT are applied to
+// `alerts` FIRST, in the inner query, and only those rows (at most limit+1) are joined to
+// their latest delivery. A single query with the lateral join beside the ORDER BY made the
+// lateral subquery run for every matching alert before the top-N (cost O(all alerts)).
+// TestAlertListS1b_QueryCostIsBoundedByLimit pins the loop count with EXPLAIN (ANALYZE).
+// innerTail is the WHERE extension, ORDER BY and LIMIT of the inner query on alerts a.
+func alertListSQL(innerTail, outerTail string) string {
+	return `
 	SELECT a.id::text, a.kind, a.severity, a.state, a.subject_tenant_id::text, a.first_seen_at,
 	       a.acked_at, a.resolved_at, a.acked_by, a.resolved_by,
 	       ld.event, ld.unrouted_reason, ld.channel_kind, ld.escalation_step, ld.attempt_no
-	FROM alerts a
+	FROM (
+		SELECT * FROM alerts a WHERE a.tenant_id IS NULL ` + innerTail + `
+	) a
 	LEFT JOIN LATERAL (
 		SELECT d.event, d.unrouted_reason, d.channel_kind, d.escalation_step, d.attempt_no
 		FROM alert_deliveries d WHERE d.alert_id = a.id
 		ORDER BY d.recorded_at DESC, d.id DESC LIMIT 1
-	) ld ON true
-	WHERE a.tenant_id IS NULL`
+	) ld ON true ` + outerTail
+}
+
+const (
+	alertListInnerTail = `
+		AND ($1 = '' OR a.state = $1) AND ($2 = '' OR a.severity = $2) AND ($3 = '' OR a.kind = $3)`
+	alertListOrderLimit = `
+		ORDER BY a.first_seen_at DESC, a.id DESC
+		LIMIT $4`
+	alertListOuterOrder = `ORDER BY a.first_seen_at DESC, a.id DESC`
+)
 
 // alertActorRefs routes the acting staff ids of an alert through the S0 helper. The database
 // guard only ever stores validated PLATFORM administrators there, so the actor scope is
@@ -450,7 +469,7 @@ func alertActorRefs(v staffViewer, ackedBy, resolvedBy *uuid.UUID) (acked, resol
 	return v.optRef(&platform, ackedBy), v.optRef(&platform, resolvedBy)
 }
 
-// scanAlertListItem maps one alertListSelect row. The viewer decides whether the acting
+// scanAlertListItem maps one alertListSQL row. The viewer decides whether the acting
 // staff ids are shown (ADR 0114 S0: every staff-id field goes through the helper); the
 // actors of an alert are always platform actors.
 func scanAlertListItem(row pgx.Row, v staffViewer) (alertListItemDTO, error) {
@@ -538,10 +557,7 @@ func newListAlertsHandler(deps Deps) http.HandlerFunc {
 				cond = ` AND (a.first_seen_at, a.id) < (timestamptz 'epoch' + $5::bigint * interval '1 microsecond', $6::uuid)`
 				args = append(args, after.Micros, after.ID)
 			}
-			rows, err := tx.Query(ctx, alertListSelect+`
-				  AND ($1 = '' OR a.state = $1) AND ($2 = '' OR a.severity = $2) AND ($3 = '' OR a.kind = $3)`+cond+`
-				ORDER BY a.first_seen_at DESC, a.id DESC
-				LIMIT $4`, args...)
+			rows, err := tx.Query(ctx, alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder), args...)
 			if err != nil {
 				return err
 			}
@@ -576,8 +592,9 @@ func newGetAlertHandler(deps Deps) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		id, err := uuid.Parse(r.PathValue("alertID"))
-		if err != nil {
+		rawID := r.PathValue("alertID")
+		id, err := uuid.Parse(rawID)
+		if err != nil || id.String() != rawID { // canonical lowercase only (security F3), like the cursor
 			apierror.Write(w, requestID, apierror.CodeInvalidRequest, "invalid request")
 			return
 		}
@@ -585,7 +602,7 @@ func newGetAlertHandler(deps Deps) http.HandlerFunc {
 		var it alertListItemDTO
 		err = deps.DB.WithPlatformAdmin(r.Context(), actor, func(ctx context.Context, tx pgx.Tx) error {
 			var e error
-			it, e = scanAlertListItem(tx.QueryRow(ctx, alertListSelect+` AND a.id = $1`, id), viewer)
+			it, e = scanAlertListItem(tx.QueryRow(ctx, alertListSQL(`AND a.id = $1`, ``), id), viewer)
 			return e
 		})
 		switch {

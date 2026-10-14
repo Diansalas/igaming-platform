@@ -56,7 +56,7 @@ func decodeAlertCursor(s, filter string) (alertCursor, error) {
 	if s == "" || len(s) > alertCursorMaxLen {
 		return alertCursor{}, errAlertCursor
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(s)
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(s)
 	if err != nil {
 		return alertCursor{}, errAlertCursor
 	}
@@ -64,6 +64,13 @@ func decodeAlertCursor(s, filter string) (alertCursor, error) {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&w); err != nil || dec.More() {
+		return alertCursor{}, errAlertCursor
+	}
+	// Canonical form only (security F2): the cursor must be byte-identical to what
+	// encodeAlertCursor produces for the decoded value. That refuses case-folded keys,
+	// duplicate keys, whitespace, reordered keys, escaped characters (for example in the
+	// filter) and any other alternative spelling of the same value.
+	if canon, merr := json.Marshal(w); merr != nil || string(canon) != string(raw) {
 		return alertCursor{}, errAlertCursor
 	}
 	if w.V != alertCursorVersion || w.F != filter || w.T < alertCursorMinMicros || w.T > alertCursorMaxMicros {
