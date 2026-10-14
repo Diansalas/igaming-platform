@@ -102,3 +102,20 @@ V01-V03, L01-L03, SE01-SE04, B01-B05, W01-W03). Their target code did not change
 internal/db/actor_staff.go, internal/adjustment, internal/payments, internal/httpserver/withdrawal_handlers.go and
 migration 0151, whose mutants R01-R09 / P03 were re-run in pass 2; the only other later code change is c298a23, which
 deleted the unused staffmfa message() helper); every killing test passes on the final head.
+
+Review round (security live + ledger-finance, 2026-10-14; logs scratch mut_run4.txt / mut_run5.txt)
+------------
+New mutants (driver now 65; a package prefixed "unit:" runs WITHOUT the integration tag):
+AR01     alertRouteManageClass never answers none (critical for every caller)      KILLED (TestClassifiers_DecisionsAndBodyDiscipline,
+         TestStepUp_AlertRouteCreate_UnauthorisedProbingKeepsTheAuditedRefusal; first attempt was a build error - rewritten)
+AR02     alertRouteManageClass never answers critical                             KILLED (same + TestStepUp_GoldenTable_EveryClassifiedRoute)
+AR03     POST /v1/admin/alerting/routes registered static critical again           KILLED (TestStaffRoutes_GoldenClassification, AlertRouteCreate)
+FB01     production half of the fallback split returns true (unit build)          KILLED (TestAttach_BackstopRefusesBeforeAnyWrite,
+         TestCheckStepUp_Matrix; TestStatic_StepUpBackstopPins also fails on it, checked by hand)
+WB01     withdrawal require_step_up max-age + 1 microsecond                        KILLED (TestApprove_RequireStepUp_FreshnessMatrix: 120 s + 1 us case)
+WB02     withdrawal require_step_up max-age - 1 microsecond                        KILLED (same: exactly-120 s case)
+Re-run against the ported ledger-finance tests: R03 KILLED (now also by TestS4b_K3_ActingActorSuspendedBeforeA8_... and
+TestS4b_K3_TenantActorRoleChangedBeforeA8_...), R06 and R07 KILLED (also by TestStepUp_WithdrawalApprove_ReassertionBothOrders_RealApprove).
+Not mutated: the Warn log line and staff_reassertion_refusals_total on the db.ErrActorStaffNotLive paths (observability
+only, never influences the response; no test reads the metric).
+Totals after the review round: 65 mutants, 63 KILLED, 2 justified (H02a, R09), 0 ERROR.
