@@ -167,6 +167,17 @@ const (
 	CodeStepUpRequired Code = "step_up_required"
 )
 
+// ADR 0119 slices S5 + S6 (section 14.2): the staff lifecycle refusals. Lowercase like the staff auth vocabulary.
+const (
+	CodeLastAdmin                  Code = "last_admin"                   // 409: SF020 / SF021, the last active enrolled admin
+	CodeSelfTargetForbidden        Code = "self_target_forbidden"        // 403: the target is the caller (SF013)
+	CodePersonRequired             Code = "person_required"              // 422: an approve-capable role without a Person (SF014)
+	CodeRoleNotGrantable           Code = "role_not_grantable"           // 403: the caller may not grant / act on that role
+	CodeLifecycleBusy              Code = "lifecycle_busy"               // 409: suspension / offboarding phase 2 lock timeout (twice)
+	CodeLifecycleTransitionInvalid Code = "lifecycle_transition_invalid" // 409: the target is not in a state the action applies to
+	CodeFourEyesViolation          Code = "four_eyes_violation"          // 403: platform four-eyes distinctness (SF032)
+)
+
 // Error is the wire format for an API error response.
 type Error struct {
 	Code    Code   `json:"code"`
@@ -192,7 +203,8 @@ func httpStatus(c Code) int {
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson,
 		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused,
-		CodeMFAEnrolmentRequired, CodeMFALocked, CodeStepUpRequired:
+		CodeMFAEnrolmentRequired, CodeMFALocked, CodeStepUpRequired,
+		CodeSelfTargetForbidden, CodeRoleNotGrantable, CodeFourEyesViolation:
 		return http.StatusForbidden
 	case CodeNotFound, CodeSettlementNotFound:
 		return http.StatusNotFound
@@ -207,10 +219,11 @@ func httpStatus(c Code) int {
 		CodeLaunchRetryableLockTimeout, CodeLaunchRequestNotPending, CodeLaunchAlreadyDecided, CodeLaunchStaleReadiness, CodeLaunchPriorReject,
 		CodeLaunchPriorRejecter, CodeLaunchNotLegacyBaseline, CodeLaunchRefusedAtExecution, CodeLaunchGuardRefused,
 		CodeKillSwitchReleaseRequestAlreadyOpen, CodeMFAEnrolmentExpired,
+		CodeLastAdmin, CodeLifecycleBusy, CodeLifecycleTransitionInvalid,
 		CodeRGNoChange, CodeRGChangeNotPending, CodeRGCoolingOff, CodeRGConfigMissing, CodeRGPendingCap,
 		CodeRGIdempotencyMismatch, CodeRGOperatorLoosens, CodeRGNoFloor, CodeRGSelfApproval, CodeRGRequestNotPending, CodeRGGuardRefused:
 		return http.StatusConflict
-	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch,
+	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch, CodePersonRequired,
 		CodeRGLimitAboveCeiling, CodeRGPeriodNotAllowed, CodeRGDurationNotAllowed, CodeRGNotOffered, CodeRGBackdated, CodeRGSyntheticRefused:
 		return http.StatusUnprocessableEntity
 	case CodeUnavailable, CodeLaunchUnavailable, CodeRGUnavailable:
