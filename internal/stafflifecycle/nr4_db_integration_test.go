@@ -2,17 +2,15 @@
 
 package stafflifecycle
 
-// ADR 0119 S5 + S6 security re-review fix NR-4: one Person is bound to at most ONE live (non-offboarded) platform staff
-// account, enforced by the database (partial unique index staff_users_platform_live_person), not only by the Go
-// check-then-write. Two concurrent bindings of one Person to two platform accounts: the second waits for the first and
-// fails 23505; through the service the loser answers ErrConflict / ErrPersonInUse and writes nothing.
+// ADR 0119 S5 + S6 security re-review NR-4 (Go half): concurrent bindings of one Person through the service serialise
+// on a per-Person advisory lock; the loser answers ErrPersonInUse and writes nothing. The database index is NOT built
+// (see the residual pin below and ADR 0119 section 28.9).
 
 import (
 	"context"
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -33,45 +31,19 @@ func (w *lworld) legacyPlatform() uuid.UUID {
 	return id
 }
 
-func TestNR4_OnePersonOneLivePlatformAccount_SQLRace(t *testing.T) {
+// Residual S56-R14 (pinned visible, R1 class): the database does NOT enforce one live platform account per Person -
+// the partial unique index the re-review recommended (NR-4) is not built (ADR 0119 section 28.9: it would make the
+// same-Person second-platform-account defences of eight other governed flows untestable and needs an architect
+// decision). Raw runtime SQL can still bind one Person to two live platform accounts. When the index lands, this test
+// flips and must be replaced by the race test.
+func TestResidual_NR4_RawSQLCanBindOnePersonToTwoPlatformAccounts(t *testing.T) {
 	w := newLWorld(t)
 	a, b := w.legacyPlatform(), w.legacyPlatform()
 	p := w.person()
-	ctx := context.Background()
-	// tx1 binds a to p and stays open.
-	tx1, err := w.rt.Raw().Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = tx1.Rollback(ctx) }()
-	if _, err := tx1.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, p, a); err != nil {
-		t.Fatalf("tx1: %v", err)
-	}
-	// tx2 binds b to the same p: it must wait for tx1, then fail 23505 once tx1 commits.
-	done := make(chan error, 1)
-	go func() {
-		done <- w.rt.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, p, b)
-			return err
-		})
-	}()
-	select {
-	case err := <-done:
-		t.Fatalf("the second binding must wait for the first (index entry in flight), got %v", err)
-	case <-time.After(500 * time.Millisecond):
-	}
-	if err := tx1.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if got := code(<-done); got != "23505" {
-		t.Fatalf("the second live platform binding of one Person: got %q, want 23505", got)
-	}
-	// Offboarded rows do not count: the index is partial.
-	if err := w.exec(w.owner, uuid.Nil, `UPDATE staff_users SET status = 'offboarded', password_hash = NULL, offboarded_at = now() WHERE id = $1`, a); err != nil {
-		t.Fatalf("offboard a: %v", err)
-	}
-	if err := w.exec(w.rt, uuid.Nil, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, p, b); err != nil {
-		t.Fatalf("binding p to b after a is offboarded: %v", err)
+	for _, id := range []uuid.UUID{a, b} {
+		if err := w.exec(w.rt, uuid.Nil, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, p, id); err != nil {
+			t.Fatalf("raw binding: %v (if this now fails with 23505 the NR-4 index exists: replace this residual pin)", err)
+		}
 	}
 }
 

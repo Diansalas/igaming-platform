@@ -2955,3 +2955,30 @@ the target's sessions through the lifecycle (the ADR 0024 contract is kept: set-
 
 Not re-run in this round: the full httpserver package and the other 24 payments shards (no code they reach changed except
 through the tests listed above). Nothing here is a security approval; the security re-review is pending.
+
+### 28.9 Security re-review conditions (NR-1 to NR-5, 2026-10-14)
+
+Re-review: `docs/plans/prh2-hardening-round/adr0119-s5s6-security-review.md` (commit `42d00df`, approved with
+conditions). Fixed tests-first (each new test failed before its fix) unless stated.
+
+| Item | Disposition | Tests / mutants |
+|---|---|---|
+| NR-1 (MUST) | `EnrolmentIssuersLiveInTx` checks the holder's original inviter (`staff_users.invited_by`) for an `invite` token only; an `mfa_reset` (or any later) token is checked against its own `issued_by`. The SR-2 refusals are unchanged | `TestNR1_MFAResetRedeemsAfterTheOriginalInviterLeft_Tenant` (inviter offboarded, reset by a live platform admin, redeem 200), `TestNR1_..._Platform` (`platform_mfa_reset` after the `platform_invite` requester is offboarded, redeem 200), the SR-2 tests still pass; N1 |
+| NR-2 | A person link by an actor that has no Person is refused (`ErrActorWithoutPerson`, `403 forbidden`, nothing written), on both routes. The pre-launch query "zero unlinked approve-capable accounts" is item 8 of `docs/runbooks/production-configuration-checklist.md` | `TestNR2_PersonLinkByAnActorWithoutAPersonRefused` (two legacy unlinked platform admins cannot cross-link; tenant route; linked-actor control 204); N2 |
+| NR-3 | `cmd/seed-admin` takes the SF020 platform advisory lock (`pg_advisory_xact_lock(hashtext('sf:last_admin:platform'))`) at the start of its transaction in every mode, before the first-admin / break-glass checks | `TestSeedAdmin_ParallelDefaultRuns_ExactlyOneFirstAdmin` (4 parallel runs on a scratch database, the check-to-insert window widened by a scratch-only trigger: exactly 1 created, 3 refused; before the fix 4 of 4 succeeded); N3 |
+| NR-4 | **Go half done; the database index is NOT built (STOPPED AND REPORTED).** Every Person-binding check (`personInUse`: link, platform-invite filing and execution, tenant invite) first takes `pg_advisory_xact_lock(hashtext('sf:person_bind:' \|\| person))`, so concurrent bindings through the service serialise and the loser gets `ErrPersonInUse`. The instructed partial unique index `staff_users (person_id) WHERE tenant_id IS NULL AND status <> 'offboarded'` was added, then removed: on the test database it broke 20+ existing tests in eight other packages (providercred, rg, tenant, assetregistry, casino, adjustment, aml, launchgov), whose fixtures build a SECOND live platform account of the same Person to prove that flow's same-Person refusal (PC044, RG_SELF_APPROVAL, LA012, MA031, the asset registry and catalogue dual control, the AML four-eyes). With the index those defences can no longer be set up, so their tests would have to be rewritten or moved to index-less scratch databases, and the migration would refuse any environment that already holds such a pair. That is a cross-domain decision for the architect / orchestrator, not this slice | `TestNR4_ConcurrentLinkPerson_ExactlyOne` (2 concurrent links of one Person: exactly 1; 5 of 5 runs fail without the lock); residual pin `TestResidual_NR4_RawSQLCanBindOnePersonToTwoPlatformAccounts` (flips when the index lands) |
+| NR-5 | Recorded only: (a) linking an `invited` account ends its invitation token (fails closed; re-invite); (b) a role change out of an invite-capable role does not withdraw that actor's pending invitations; (c) `app.actor_staff_id` stays set to the issuer inside accept / redeem (S56-R13) | - |
+
+New residual **S56-R14**: raw runtime-role SQL can bind one Person to two live platform accounts (no database
+invariant; R1 class), pending the NR-4 index decision. Changed existing assertions: none (new tests only; the NR-1 fix
+narrows a refusal that no existing test asserted for an `mfa_reset` token).
+
+Mutation (re-review round, `docs/plans/prh2-hardening-round/adr0119-s5s6-mutation-kill.txt`): N1-N3 KILLED; N4 (the
+index) was KILLED but is superseded because the index was then removed; N5 (the Go person-bind lock removed) KILLED by
+hand (`TestNR4_ConcurrentLinkPerson_ExactlyOne` fails 5 of 5 runs). 4 / 4 current mutants killed.
+
+Evidence (local only, NOT GitHub CI; private database `s56_d_dev` built from the final tree): gofmt, `go vet` (plain and
+integration), `go test -p 2 ./...`, golangci-lint `--new-from-rev=ff23a5c` plain and integration (0 issues) PASS;
+integration `-p 1` stafflifecycle, cmd/seed-admin, db, identity, providercred, capability PASS; httpserver affected set
+(as in 28.8 plus `NR[0-9]`) PASS. With the (removed) index the eight packages above failed as described; without it
+they were not re-run in this round (no code they reach changed).

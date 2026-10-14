@@ -117,22 +117,6 @@ ALTER TABLE staff_users ADD CONSTRAINT staff_users_offboarded_at_state
 ALTER TABLE staff_users DROP CONSTRAINT staff_users_tenant_id_email_key;
 CREATE UNIQUE INDEX staff_users_live_email ON staff_users (tenant_id, email) NULLS NOT DISTINCT WHERE status <> 'offboarded';
 
--- Security re-review NR-4: one Person is bound to at most ONE live (non-offboarded) PLATFORM staff account, enforced by
--- the database (the Go checks and SF031 stay; this closes their check-then-write race). Tenant accounts are not covered:
--- a Person may hold a platform account and tenant accounts (ADR 0024). Existing duplicates refuse the migration (SF095)
--- with a named message instead of a bare 23505.
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM staff_users WHERE tenant_id IS NULL AND status <> 'offboarded' AND person_id IS NOT NULL
-               GROUP BY person_id HAVING count(*) > 1) THEN
-        RAISE EXCEPTION 'migration 0139: a Person is bound to more than one live platform staff account; resolve (offboard the extra accounts) before migrating. Nothing was changed.'
-            USING ERRCODE = 'SF095';
-    END IF;
-END
-$$;
-CREATE UNIQUE INDEX staff_users_platform_live_person ON staff_users (person_id)
-    WHERE tenant_id IS NULL AND status <> 'offboarded' AND person_id IS NOT NULL;
-
 COMMENT ON COLUMN staff_users.staff_version IS 'ADR 0119 s7.1 / s13.2: bumped by SF012 on every role, status, password_hash or person_id change; carried as the sv claim and compared by liveness and the s9.5 re-assertion. Never written directly.';
 
 -- =========================================================================

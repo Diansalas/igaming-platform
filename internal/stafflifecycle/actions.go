@@ -132,6 +132,13 @@ func validEmail(e string) bool {
 // personInUse reports whether a live (non-offboarded) staff row VISIBLE in the transaction's scope is linked to person
 // (a platform session sees the platform rows, a tenant session the tenant's rows).
 func personInUse(ctx context.Context, tx pgx.Tx, person uuid.UUID) (bool, error) {
+	// Security re-review NR-4 (Go half; the database index is NOT built, see ADR 0119 section 28.9): every check that
+	// precedes binding a Person takes a transaction advisory lock on that Person first, so two concurrent bindings of
+	// one Person (two links, a link and an invitation execution) serialise and the second sees the first's committed
+	// row (READ COMMITTED: a fresh snapshot per statement). Raw runtime SQL is not covered (R1 class, S56-R14).
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('sf:person_bind:' || $1::text))`, person); err != nil {
+		return false, err
+	}
 	var inUse bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM staff_users WHERE person_id = $1 AND status <> 'offboarded')`, person).Scan(&inUse)
 	return inUse, err
