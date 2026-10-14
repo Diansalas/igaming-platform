@@ -150,3 +150,20 @@ func TestDescribeMigrations_FormatsVersionAndDescription(t *testing.T) {
 		t.Errorf("expected %q, got %q", want, got)
 	}
 }
+
+func TestFindVersionGaps_ReservedRangeToleratedOnlyForListedVersions(t *testing.T) {
+	// 142 -> 151 spans exactly the reserved 143-150: tolerated.
+	if gaps := findVersionGaps([]migration{{Version: 142}, {Version: 151}}); len(gaps) != 0 {
+		t.Errorf("reserved range 143-150 must not be reported, got %v", gaps)
+	}
+	// Any version outside the reserved set is still a gap (here 152 is missing before 153).
+	gaps := findVersionGaps([]migration{{Version: 151}, {Version: 153}})
+	if len(gaps) != 1 || !strings.Contains(gaps[0], "152") {
+		t.Errorf("a non-reserved gap must still be reported, got %v", gaps)
+	}
+	// A gap partially inside the reserved range: 142 -> 152 misses 151, which is NOT reserved.
+	gaps = findVersionGaps([]migration{{Version: 142}, {Version: 152}})
+	if len(gaps) != 1 || !strings.Contains(gaps[0], "151") {
+		t.Errorf("only 151 should be reported, got %v", gaps)
+	}
+}

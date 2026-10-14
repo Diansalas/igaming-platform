@@ -118,14 +118,14 @@ jobs:
       - name: Guard - test admin URL is only read by test support code (Stage 10 W0)
         run: |
           # TEST_ADMIN_DATABASE_URL may appear only in _test.go files and in
-          # the integration-tagged internal/testsupport/scratchdb package -
+          # the integration-tagged internal/testsupport/scratchdb and alertworld packages -
           # never in application code or internal/config.
-          offenders="$(grep -rl --include='*.go' 'TEST_ADMIN_DATABASE_URL' . | grep -v '_test\.go$' | grep -v '^\./internal/testsupport/scratchdb/' || true)"
+          offenders="$(grep -rl --include='*.go' 'TEST_ADMIN_DATABASE_URL' . | grep -v '_test\.go$' | grep -v '^\./internal/testsupport/scratchdb/' | grep -v '^\./internal/testsupport/alertworld/' || true)"
           if [ -n "$offenders" ]; then echo "TEST_ADMIN_DATABASE_URL referenced outside test support code:"; echo "$offenders"; exit 1; fi
           if grep -rn 'TEST_ADMIN' internal/config/; then echo "internal/config must never read a TEST_ADMIN setting"; exit 1; fi
           # Every scratchdb file must carry the integration build tag so it
           # is never compiled into an application binary.
-          for f in internal/testsupport/scratchdb/*.go internal/testsupport/wdpath/*.go internal/testsupport/rgfix/*.go; do
+          for f in internal/testsupport/scratchdb/*.go internal/testsupport/alertworld/*.go internal/testsupport/wdpath/*.go internal/testsupport/rgfix/*.go; do
             head -1 "$f" | grep -qx '//go:build integration' || { echo "$f lacks //go:build integration"; exit 1; }
           done
 
