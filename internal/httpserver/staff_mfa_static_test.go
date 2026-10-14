@@ -90,6 +90,8 @@ var revealAllowlist = map[string]bool{
 	"internal/httpserver/staff_auth_secrets.go:newEnrolStartResponse:RevealForEnrolment": true,
 	"internal/httpserver/staff_auth_secrets.go:newEnrolConfirmResponse:RevealForDisplay": true,
 	"cmd/seed-admin/main.go:printBootstrapToken:RevealForDelivery":                       true,
+	// ADR 0119 S5 + S6: the invite / MFA-reset email body (delivered post-commit through email.Provider, never logged).
+	"internal/stafflifecycle/service.go:compose:RevealForDelivery": true,
 }
 
 var revealNames = map[string]bool{"RevealForEnrolment": true, "RevealForDisplay": true, "RevealForDelivery": true}

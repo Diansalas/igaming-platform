@@ -112,7 +112,9 @@ func TestOpenAPI_GovernedRoutes_MountedRoutesDocumented(t *testing.T) {
 func TestOpenAPI_GovernedRoutes_DocumentedOperationsAreMounted(t *testing.T) {
 	spec := readSpec(t)
 	mounted := map[string]bool{}
-	for _, r := range mountedRoutes(t, "capability_routes.go", "manual_adjustment_routes.go", "routes.go", "kyc_routes.go") {
+	// ADR 0119 S5 + S6: the staff lifecycle routes (staff_lifecycle_routes.go) share the platform-staff and
+	// tenant-staff prefixes below: 25 -> 39 documented operations.
+	for _, r := range mountedRoutes(t, "capability_routes.go", "manual_adjustment_routes.go", "routes.go", "kyc_routes.go", "staff_lifecycle_routes.go") {
 		mounted[r] = true
 	}
 	prefixes := []string{
@@ -122,8 +124,8 @@ func TestOpenAPI_GovernedRoutes_DocumentedOperationsAreMounted(t *testing.T) {
 		"/v1/admin/staff/me/display-name", "/v1/admin/platform-staff/", "/v1/admin/tenants/{tenantID}/staff/{staffID}/",
 	}
 	ops := documentedOps(spec, prefixes...)
-	if len(ops) != 25 {
-		t.Fatalf("expected exactly 25 documented operations in the governed families, found %d: %v", len(ops), ops)
+	if len(ops) != 39 {
+		t.Fatalf("expected exactly 39 documented operations in the governed families, found %d: %v", len(ops), ops)
 	}
 	for _, op := range ops {
 		if !mounted[op] {
