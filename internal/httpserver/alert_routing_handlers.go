@@ -441,6 +441,15 @@ const alertListSelect = `
 	) ld ON true
 	WHERE a.tenant_id IS NULL`
 
+// alertActorRefs routes the acting staff ids of an alert through the S0 helper. The database
+// guard only ever stores validated PLATFORM administrators there, so the actor scope is
+// always platform: a platform viewer sees the ids, any tenant viewer would get null (never
+// reachable today: the routes refuse tenant callers first, this is defence in depth).
+func alertActorRefs(v staffViewer, ackedBy, resolvedBy *uuid.UUID) (acked, resolved *staffRef) {
+	platform := staffScopePlatform
+	return v.optRef(&platform, ackedBy), v.optRef(&platform, resolvedBy)
+}
+
 // scanAlertListItem maps one alertListSelect row. The viewer decides whether the acting
 // staff ids are shown (ADR 0114 S0: every staff-id field goes through the helper); the
 // actors of an alert are always platform actors.
@@ -453,9 +462,7 @@ func scanAlertListItem(row pgx.Row, v staffViewer) (alertListItemDTO, error) {
 		&event, &it.UnroutedReason, &ch, &it.EscalationStep, &it.DeliveryAttempts); err != nil {
 		return it, err
 	}
-	platform := staffScopePlatform
-	it.AckedBy = v.optRef(&platform, ackedBy)
-	it.ResolvedBy = v.optRef(&platform, resolvedBy)
+	it.AckedBy, it.ResolvedBy = alertActorRefs(v, ackedBy, resolvedBy)
 	ev, kind := "", alerting.ChannelKind("")
 	if event != nil {
 		ev = *event

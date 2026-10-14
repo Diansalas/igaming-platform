@@ -8579,12 +8579,22 @@ paths:
         recorded_non_human or suppressed. `delivered` is reserved for a
         human-notification channel and does not occur today;
         `notified_a_person` is false for every non-human delivery.
+
+        Paging (ADR 0114 S1b): the order is `first_seen_at` descending, ties broken by `id`
+        descending. When more rows exist the response carries `next_cursor`; send it back
+        unchanged as `cursor` (with the same `state`, `severity` and `kind`) to read the next
+        page. The cursor is opaque, keyset based (alerts raised after the first page was
+        served never shift or repeat a later page) and is NOT a credential. A malformed,
+        tampered, oversized or foreign-filter cursor is refused with 400 and nothing is
+        returned. `next_cursor` is null on the last page.
       security:
         - bearerAuth: []
       parameters:
         - { name: state, in: query, schema: { type: string, enum: [open, acked, resolved] } }
         - { name: severity, in: query, schema: { type: string, enum: [p1, p2, p3] } }
+        - { name: kind, in: query, description: "A known alert kind; an unknown value is a 400.", schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, description: "The `next_cursor` of the previous page.", schema: { type: string, maxLength: 400 } }
       responses:
         "200":
           description: Alerts, newest first
@@ -8592,29 +8602,46 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [alerts, next_cursor]
                 properties:
                   alerts:
                     type: array
-                    items:
-                      type: object
-                      properties:
-                        id: { type: string, format: uuid }
-                        kind: { type: string }
-                        severity: { type: string, enum: [p1, p2, p3] }
-                        state: { type: string, enum: [open, acked, resolved] }
-                        subject_tenant_id: { type: string, format: uuid, nullable: true }
-                        first_seen_at: { type: string, format: date-time }
-                        delivery_state: { type: string, enum: [pending, retrying, unrouted, delivery_failed, suppressed, recorded_non_human, delivered] }
-                        unrouted_reason: { type: string, enum: [no_route, channel_disabled, no_sink], nullable: true }
-                        notified_a_person: { type: boolean }
+                    items: { $ref: "#/components/schemas/PlatformAlert" }
+                  next_cursor: { type: string, nullable: true }
         "400":
-          description: Invalid filter
+          description: Invalid filter, limit or cursor
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: Tenant-scoped caller or missing `alert:manage`
         "500":
           description: Internal error
+  /v1/admin/alerts/{alertID}:
+    get:
+      summary: Read one platform alert (ADR 0114 S1b)
+      description: >
+        Requires `alert:manage` and a platform-scope token; the same item shape as the list.
+        A tenant-scoped caller gets 403 and an unknown id (or an id that is not a
+        platform-owned alert) gets 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: alertID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The alert
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [alert]
+                properties:
+                  alert: { $ref: "#/components/schemas/PlatformAlert" }
+        "400": { description: Malformed alert id }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Tenant-scoped caller or missing `alert:manage` }
+        "404": { description: No such platform alert }
+        "500": { description: Internal error }
   /v1/admin/alerts/{alertID}/ack:
     post:
       summary: Acknowledge a platform alert (optional audited reason_code)
@@ -8760,6 +8787,35 @@ components:
         This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
         see docs/architecture/05-identity-architecture.md.
   schemas:
+    PlatformAlert:
+      type: object
+      description: >
+        A platform-owned durable alert (ADR 0102). `acked_by` and `resolved_by` are the staff
+        ids of the PLATFORM administrators who acted (forced from the validated session by the
+        database guard); they pass through the ADR 0114 S0 staff-identity helper, so a viewer
+        who may not see a platform actor would receive null. The route is platform-scope only
+        today, so a tenant caller is refused (403) before any DTO is built.
+        `escalation_step`, `delivery_channel_kind` and `attempt_no` describe the latest
+        delivery event and are absent when the alert has no delivery event yet.
+        `acked_at`/`acked_by` are set by an ack, or by a resolve of an open alert;
+        `resolved_at`/`resolved_by` by a resolve. All four are absent while unset.
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        severity: { type: string, enum: [p1, p2, p3] }
+        state: { type: string, enum: [open, acked, resolved] }
+        subject_tenant_id: { type: string, format: uuid, nullable: true }
+        first_seen_at: { type: string, format: date-time }
+        acked_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        acked_by: { type: string, format: uuid, nullable: true }
+        resolved_by: { type: string, format: uuid, nullable: true }
+        delivery_state: { type: string, enum: [pending, retrying, unrouted, delivery_failed, suppressed, recorded_non_human, delivered] }
+        unrouted_reason: { type: string, enum: [no_route, channel_disabled, no_sink], nullable: true }
+        notified_a_person: { type: boolean }
+        escalation_step: { type: integer, minimum: 0, maximum: 9 }
+        delivery_channel_kind: { type: string, description: "Channel kind of the latest delivery event (log, mock, or a future human channel kind)." }
+        attempt_no: { type: integer, minimum: 1 }
     AlertRoute:
       type: object
       properties:
