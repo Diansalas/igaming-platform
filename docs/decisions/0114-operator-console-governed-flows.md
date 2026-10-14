@@ -514,7 +514,7 @@ No migration (no new column; the table is small and platform-owned, see residual
   tie groups; limit 1 across a 9-row tie group; stability when alerts are raised between pages and while a writer raises
   concurrently (every pre-existing alert exactly once, none twice); 20 tampered/foreign-filter cursors; acted-by/at,
   audited actors equal shown actors; 8 tenant roles x 2 tenants + anonymous x 4 paths refused with no alert data or staff
-  id, no existence oracle; kind filter and single read; helper unit tests. Mutation pass: 23 mutants, see the kill log (security-round additions M18-M23): `docs/plans/prh2-hardening-round/adr0114-s1b-mutation-kill.txt`.
+  id, no existence oracle; kind filter and single read; helper unit tests. Mutation pass: 23 mutants, 22 killed and 1 equivalent (M11), see the kill log (security-round additions M18-M23): `docs/plans/prh2-hardening-round/adr0114-s1b-mutation-kill.txt`.
 - **Residuals.** (1) UI does not page yet: until it does, the 200-newest limitation remains visible in the console.
   (2) No partial index on `alerts (first_seen_at DESC, id DESC) WHERE tenant_id IS NULL`. The security review (F1)
   measured the first query shape at about 870 ms for 50k alerts because the latest-delivery LATERAL subquery ran for
@@ -522,7 +522,7 @@ No migration (no new column; the table is small and platform-owned, see residual
   filter, ORDER BY and LIMIT now run on `alerts` first and only those at most `limit+1` rows are joined to their
   latest delivery (`alertListSQL`; with 20k alerts the plan probes `alert_deliveries` `limit+1` = 51 times, about 45 ms,
   pinned by `TestAlertListS1b_QueryCostIsBoundedByLimit` via EXPLAIN (ANALYZE) loop count; mutant M18 restores the old
-  shape and is killed). The remaining cost is one scan and top-N sort of the platform alerts. The partial index is
+  shape and is killed by it and by a DB-free SQL shape pin). The remaining cost is one scan and top-N sort of the platform alerts. The partial index is
   TRACKED, NOT ADDED (needs migration 0152 and a justification by measurement; add when platform alerts reach the
   100k range). (3) The shared
   `tenant_id IS NULL` predicate cannot be mutation-tested: no tenant-scope alert kind is seeded. (4) The cursor is
