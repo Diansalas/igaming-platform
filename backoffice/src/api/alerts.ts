@@ -1,7 +1,8 @@
 // ADR 0114 S1 / ADR 0102 alerting client. Wire shapes are copied from docs/api/openapi/platform-api.yaml
 // (/v1/admin/alerts, /ack, /resolve, /v1/admin/alerting/status, /v1/admin/alerting/routes); no field or
-// route is invented. The list route supports ONLY the `state`, `severity` and `limit` (1..200) query
-// parameters: there is no kind filter, no offset/cursor and no single-alert GET (API gaps, see the S1 report).
+// route is invented. The list route supports the `state`, `severity`, `kind`, `limit` (1..200) and `cursor`
+// query parameters (ADR 0114 S1b: keyset paging via `next_cursor`, acted-by/at fields, single-alert GET).
+// The S1 console still reads the newest page only; consuming `next_cursor` is a later UI slice.
 import { apiFetch, buildQuery } from './client'
 
 export type AlertState = 'open' | 'acked' | 'resolved'
@@ -19,6 +20,14 @@ export interface PlatformAlert {
   state: AlertState
   subject_tenant_id?: string | null
   first_seen_at: string
+  /** ADR 0114 S1b: present once acked / resolved (absent while unset). Staff ids are platform admins. */
+  acked_at?: string
+  resolved_at?: string
+  acked_by?: string | null
+  resolved_by?: string | null
+  escalation_step?: number
+  delivery_channel_kind?: string
+  attempt_no?: number
   delivery_state: AlertDeliveryState
   unrouted_reason?: AlertUnroutedReason | null
   notified_a_person: boolean
@@ -27,11 +36,25 @@ export interface PlatformAlert {
 export interface AlertListParams {
   state?: AlertState
   severity?: AlertSeverity
+  /** A known alert kind (an unknown value is a 400). */
+  kind?: string
   limit?: number
+  /** The previous page's `next_cursor`, with the same state/severity/kind. Opaque. */
+  cursor?: string
 }
 
-export function listAlerts(params: AlertListParams): Promise<{ alerts: PlatformAlert[] }> {
+export interface AlertListPage {
+  alerts: PlatformAlert[]
+  /** Null on the last page. */
+  next_cursor?: string | null
+}
+
+export function listAlerts(params: AlertListParams): Promise<AlertListPage> {
   return apiFetch(`/v1/admin/alerts${buildQuery(params)}`)
+}
+
+export function getAlert(id: string): Promise<{ alert: PlatformAlert }> {
+  return apiFetch(`/v1/admin/alerts/${encodeURIComponent(id)}`)
 }
 
 /** The transition response ("The alert after the transition"); the handler returns these fields only. */
