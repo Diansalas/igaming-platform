@@ -354,7 +354,8 @@ func TestCreateStaff_TenantAdminCannotCreateFinanceRole(t *testing.T) {
 	// tenant_admin remains able to invite every OTHER role it may grant for its own tenant - the restriction is
 	// specific to the platform-only roles, not a blanket lockout of staff management.
 	for _, role := range []string{"tenant_admin", "support", "compliance"} {
-		mustInviteStaff(t, srv, token.AccessToken, tenant.ID, role+"-ok-"+uuid.NewString()+"@example.com", role, person)
+		// One Person per live staff account (a Person already linked to a live account is refused with 409).
+		mustInviteStaff(t, srv, token.AccessToken, tenant.ID, role+"-ok-"+uuid.NewString()+"@example.com", role, mustSeedPerson(t, pool))
 	}
 }
 
