@@ -94,10 +94,10 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/brands/{brandID}",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermBrandRead)(newGetBrandHandler(deps))))
 
-	// Staff creation: same platform_admin-may-target-any-tenant,
-	// tenant_admin-only-their-own rule as brand creation.
-	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff",
-		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))
+	// ADR 0119 S5 + S6: staff lifecycle (invitations replace the removed admin-chosen-password creation route
+	// POST /v1/admin/tenants/{tenantID}/staff; directory, suspend / reactivate / offboard / role / MFA reset, the
+	// platform-staff four-eyes and the invitation acceptance) - staff_lifecycle_routes.go.
+	registerStaffLifecycleRoutes(mux, deps)
 
 	// Stage 3D staff-person linkage remediation - lets an admin bring a
 	// legacy unlinked staff account into compliance with the mandatory-

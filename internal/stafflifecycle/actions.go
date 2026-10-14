@@ -589,3 +589,22 @@ func AcceptInvitationInTx(ctx context.Context, tx pgx.Tx, staffID, tenantID uuid
 	}
 	return r.StaffVersion, nil
 }
+
+// PersonLinkedInTx completes a Person link (the existing person-link routes) inside the caller's transaction, right
+// after identity.LinkStaffPersonID: the SF012 trigger has bumped staff_version, so every access token of the target
+// is already refused by liveness; this also ends every session (a refresh would otherwise mint a token at the new
+// version) and writes the person_linked lifecycle event. The route writes its own audit row.
+func PersonLinkedInTx(ctx context.Context, tx pgx.Tx, staffID, tenantID, actor uuid.UUID, meta Meta) error {
+	target, err := readTarget(ctx, tx, staffID, tenantID)
+	if err != nil {
+		return err
+	}
+	before := target.state()
+	before.PersonLinked = false
+	before.StaffVersion--
+	if err := revokeAccess(ctx, tx, staffID); err != nil {
+		return err
+	}
+	return record(ctx, tx, eventIn{target: target, event: "person_linked", actorType: "staff", actor: actor,
+		before: before, after: target.state(), meta: meta, eventOnly: true})
+}

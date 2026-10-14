@@ -260,6 +260,7 @@ type eventIn struct {
 	extraMetadata  map[string]any
 	revokedFactors []uuid.UUID
 	auditOnly      bool // write the audit row only (suspension phase 1)
+	eventOnly      bool // write the event row only (the caller writes its own audit row)
 }
 
 func nullable(s string) *string {
@@ -287,6 +288,9 @@ func record(ctx context.Context, tx pgx.Tx, in eventIn) error {
 			in.requestID, nullable(truncate(in.meta.RequestID, 128)), nullable(truncate(in.meta.IP, 64)), nullable(truncate(in.meta.UserAgent, 512))); err != nil {
 			return fmt.Errorf("stafflifecycle: insert lifecycle event: %w", err)
 		}
+	}
+	if in.eventOnly {
+		return nil
 	}
 	md := map[string]any{"before": before, "after": after}
 	if in.reason.Code != "" {
