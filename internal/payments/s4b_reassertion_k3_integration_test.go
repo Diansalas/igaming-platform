@@ -35,6 +35,9 @@ func s4bSetStaff(t *testing.T, pool *db.Pool, s k3Staff, sql string, lockTimeout
 		return err
 	}
 	if s.TenantID == uuid.Nil {
+		if err := plantSparePlatformAdmin(pool); err != nil { // ADR 0119 S5 + S6: SF020
+			return err
+		}
 		return pool.WithoutTenant(context.Background(), fn)
 	}
 	return pool.WithTenant(context.Background(), s.TenantID, fn)
