@@ -215,8 +215,9 @@ func (f *fx) nonActivePlatformStaff(person *uuid.UUID) uuid.UUID {
 	f.t.Helper()
 	var has0139 bool
 	if err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'public.staff_users'::regclass
-			AND attname = 'staff_version' AND NOT attisdropped)`).Scan(&has0139)
+		// The 0139 status-graph trigger function (a scratch schema may carry the staff_version column alone).
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_proc WHERE proname = 'sf_staff_transition'
+			AND pronamespace = 'public'::regnamespace)`).Scan(&has0139)
 	}); err != nil {
 		f.t.Fatal(err)
 	}

@@ -287,7 +287,14 @@ func TestStaffPersonLink_RemediatesUnlinkedAccountThenCanApprove(t *testing.T) {
 		t.Fatalf("expected 204 linking the staff account, got %d: %+v", resp.StatusCode, apiErr)
 	}
 
-	// Approved after remediation.
+	// Approved after remediation. ADR 0119 S5 + S6: the person link bumps staff_version and ends the account's
+	// sessions (the pre-link token is refused), so the remediated account signs in again.
+	if r := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", token.AccessToken, nil); r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the pre-link token must be refused after the person link, got %d", r.StatusCode)
+	} else {
+		_ = r.Body.Close()
+	}
+	token = mustLoginStaff(t, srv, tenant.Slug, unlinked.Email, "a-decent-password-1")
 	resp2 := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", token.AccessToken, nil)
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {

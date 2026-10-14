@@ -542,7 +542,9 @@ func TestAssetRegistryAPI_PersonLinkingARemediatedPlatformAdminRestoresFourEyes(
 	resp.Body.Close()
 
 	// After remediation the same account is an eligible approver, and the
-	// dual-controlled create goes through.
+	// dual-controlled create goes through. ADR 0119 S5 + S6: the person link
+	// bumps staff_version and ends the account's sessions, so it signs in again.
+	unlinkedToken = mustLoginStaff(t, srv, "", unlinked.Email, "pa-relink-app-1").AccessToken
 	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests/"+reqID+"/decision",
 		http.MethodPost, unlinkedToken, map[string]any{"decision": "approve", "reason_code": "reviewed"})
 	if resp.StatusCode != http.StatusCreated {
