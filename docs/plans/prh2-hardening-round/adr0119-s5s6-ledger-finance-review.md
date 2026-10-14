@@ -7,6 +7,16 @@
   the A9 "K1 session" correction; lock order against ADR 0082 (suspension / role-change writers, T2 `lock_timeout`);
   S56-R5 (withdrawal `resolve`); ledger / balance writes; retry idempotency after a `401 session_revoked`.
 
+**Concurrency note.** While this review ran, fix-round commits `d654c7f` and `610f546` landed on the same branch.
+`d654c7f` also picked up an early draft of this file (it was untracked in the shared worktree). This review covers
+`131f0d8`. A check of the fix-round diff on the reviewed areas found:
+- `capability.reassertActor` now refuses when there is no `ProofActor` in production (review fix F7, build-tag split
+  `reassert_prod.go` / `reassert_integration.go`). That resolves LF-4. I read this change but did not re-test it.
+- The fix-round lifecycle code (`internal/stafflifecycle`, `internal/httpserver`) adds staff-side locks only (issuer
+  and invitee `staff_users` rows). A grep of its added lines finds no withdrawal, payment-attempt, K1, ledger or wallet
+  table. So the "staff writers touch only staff-side tables" premise of section 3 still holds.
+- `payments.reassertSubmitter`, `ClaimForDispatch` and `capability.go` did not change.
+
 ## Verdict
 
 **APPROVED (ledger-finance sign-off on the financial parts), with non-blocking findings LF-1 to LF-7.** The HARD
@@ -149,7 +159,7 @@ idempotency key changed.
 | LF-1 | Low (doc) | Only the ALLOW path of the claim is re-asserted. The KYC-deny branch (`withdrawal.DenyForCompliance`, which releases the hold, a ledger posting), the KYC-unavailable branch (decision row + denied audit) and the destination-refusal branch (denied audit, possibly a P1 alert) commit before reaching `reassertSubmitter`. All are protective and decided by KYC / destination evidence, not by the submitter, so this is financially acceptable. But the A9 table row says only "submit" and does not state this. | State explicitly in the A9 submit row that non-ALLOW outcomes are protective and not re-asserted (the same wording as K1 reject). No code change. |
 | LF-2 | Low | `stafflifecycle.ChangeRole` is single-phase and sets no `lock_timeout`, unlike suspension T2. A9 item 6 bounds writer starvation for suspension only. Not a deadlock (see section 3); a role change can wait without bound behind share holders (in practice short: no provider I/O in any re-asserting transaction). | Either set the same `lock_timeout` in `ChangeRole` (map `55P03` to `lifecycle_busy`) or amend A9 item 6 to say role change is deliberately unbounded. |
 | LF-3 | Low (test gap) | K1 tests cover the platform session only, with suspended and `sv`-only arms. There is no token-role-mismatch arm and no tenant-scope revoke test (`revoked_by_scope = 'tenant'` is allowed by 0112, runs in `WithPrincipalScope`). `reassertActor` re-implements `db.CheckActorStaffLive` (import cycle), so drift between the two is caught only by tests. | Add a K1 role-mismatch arm and a tenant-scope revoke arm (both orders), or a unit test that `reassertActor` and `CheckActorStaffLive` agree on a shared table of cases. |
-| LF-4 | Info | `reassertActor` is a no-op without a `ProofActor` in the context. Safe today because the same path has no actor proof and the database refuses it (AP001), and `TestSessionProofHook` is pinned nil in production. | Keep the pin. If K1 ever gains a non-HTTP caller with its own proof signer, it must also carry `Role` / `StaffVersion`. |
+| LF-4 | Info (resolved by fix-round F7 in `d654c7f`, not re-tested here) | At `131f0d8`, `reassertActor` is a no-op without a `ProofActor` in the context. Safe today because the same path has no actor proof and the database refuses it (AP001), and `TestSessionProofHook` is pinned nil in production. | Keep the pin. If K1 ever gains a non-HTTP caller with its own proof signer, it must also carry `Role` / `StaffVersion`. |
 | LF-5 | Info | K1 `revoke` is the emergency stop (ADR 0099 section 8.1) and is protective, but it is re-asserted per the HARD GATE text. Consequence: an admin whose `sv` was just bumped must log in again before revoking. | No financial objection either way; the architect may keep or relax it. |
 | LF-6 | Info | The re-assertion governs T1p only. A suspension committed after T1p does not stop phase B (`Withdraw`) or phase C. This is by design: the claim is the authorization point and the sweeper would continue the attempt anyway. | None; consistent with the other flows. |
 | LF-7 | Low (test strength) | `assertNothingWritten` in `adr0119_submit_reassert_integration_test.go` checks only "no attempt" and "state approved". It would not catch a regression that commits the ALLOW decision row, the B6 audit or the snapshot on a refusal (for example, an error swallowed on the refusal path). The reviewer's temporary test confirmed this does not happen today. | Extend `assertNothingWritten` with the decision-row, `withdrawal.submit.http` audit and snapshot counts, and add a "refused then retried with a valid token claims once, replay 409" test. |
