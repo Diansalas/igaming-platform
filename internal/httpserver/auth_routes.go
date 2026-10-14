@@ -390,6 +390,7 @@ func newRefreshHandler(deps Deps) http.HandlerFunc {
 		// since their last login must not get a working access token
 		// just because their refresh token was still technically valid.
 		var role auth.Role
+		var staffVersion int64
 		var scopeFn = deps.DB.WithoutTenant
 		if session.TenantID != uuid.Nil {
 			scopeFn = func(ctx context.Context, fn db.TxFunc) error { return deps.DB.WithTenant(ctx, session.TenantID, fn) }
@@ -423,6 +424,7 @@ func newRefreshHandler(deps Deps) http.HandlerFunc {
 					return errPrincipalNotActive
 				}
 				role = auth.Role(staff.Role)
+				staffVersion = staff.StaffVersion
 			}
 			return nil
 		})
@@ -438,7 +440,7 @@ func newRefreshHandler(deps Deps) http.HandlerFunc {
 
 		if session.PrincipalType == auth.PrincipalStaff {
 			// The new access token carries the session's unchanged aal / amr / auth_time / mfa_at and the new sid.
-			pair, err := deps.StaffMFA.mintStaffTokens(deps.AuthIssuer, session, role)
+			pair, err := deps.StaffMFA.mintStaffTokens(deps.AuthIssuer, session, role, staffVersion)
 			if err != nil {
 				logger.Error("refresh_token_issue_failed", "error", err)
 				apierror.Write(w, requestID, apierror.CodeInternal, "refresh failed")

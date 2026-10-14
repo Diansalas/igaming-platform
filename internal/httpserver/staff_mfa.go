@@ -23,10 +23,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 )
 
-// staffVersionUnversioned is the staff_version every staff member has until
-// migration 0139 (S5 + S6) adds staff_users.staff_version: challenges record
-// it at issue (store.IssueChallenge) and staff tokens carry it as `sv`.
-const staffVersionUnversioned int64 = 0
 
 // StaffMFA is the ADR 0119 staff MFA subsystem: the key families (built by
 // staffmfa.LoadKeys, so the startup gate has run), the store-backed TOTP
@@ -125,7 +121,8 @@ func dbNow(ctx context.Context, tx pgx.Tx) (time.Time, error) {
 
 // liveStaff re-reads the staff member inside the scoped transaction: the row
 // must be visible, belong to ref's tenant, be active and still be at the
-// staff version the challenge was issued under.
+// staff version the challenge (or token) was issued under (ADR 0119 S5 + S6:
+// staff_users.staff_version, migration 0139).
 func liveStaff(ctx context.Context, tx pgx.Tx, ref staffmfa.StaffRef, versionAtIssue int64) (identity.StaffUser, bool, error) {
 	s, err := identity.GetStaffUserByID(ctx, tx, ref.StaffID)
 	if errors.Is(err, identity.ErrNotFound) {
@@ -134,17 +131,19 @@ func liveStaff(ctx context.Context, tx pgx.Tx, ref staffmfa.StaffRef, versionAtI
 	if err != nil {
 		return identity.StaffUser{}, false, err
 	}
-	if s.TenantID != ref.TenantID || s.Status != "active" || versionAtIssue != staffVersionUnversioned {
+	if s.TenantID != ref.TenantID || s.Status != identity.StaffStatusActive || versionAtIssue != s.StaffVersion {
 		return s, false, nil
 	}
 	return s, true, nil
 }
 
-// mintStaffTokens builds the aal2 token pair of a staff session.
-func (m *StaffMFA) mintStaffTokens(issuer *auth.Issuer, s auth.Session, role auth.Role) (staffTokenPair, error) {
+// mintStaffTokens builds the aal2 token pair of a staff session. staffVersion
+// is the staff member's CURRENT staff_users.staff_version, read in the same
+// transaction that verified them (the `sv` claim liveness compares).
+func (m *StaffMFA) mintStaffTokens(issuer *auth.Issuer, s auth.Session, role auth.Role, staffVersion int64) (staffTokenPair, error) {
 	access, err := issuer.IssueStaff(auth.StaffTokenParams{
 		StaffID: s.PrincipalID, TenantID: s.TenantID, Role: role, SessionID: s.ID,
-		AAL: s.AAL, AMR: s.AMR, AuthTime: s.AuthTime, MFAAt: s.MFAAt, StaffVersion: staffVersionUnversioned,
+		AAL: s.AAL, AMR: s.AMR, AuthTime: s.AuthTime, MFAAt: s.MFAAt, StaffVersion: staffVersion,
 	}, m.accessTTL)
 	if err != nil {
 		return staffTokenPair{}, err

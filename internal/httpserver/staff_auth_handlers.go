@@ -260,7 +260,7 @@ func newStaffMFAVerifyHandler(deps Deps) http.HandlerFunc {
 				if err != nil {
 					return err
 				}
-				if pair, err = m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role)); err != nil {
+				if pair, err = m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role), staff.StaffVersion); err != nil {
 					return err
 				}
 				out = mfaSuccess
@@ -358,7 +358,7 @@ func newStaffMFARecoverHandler(deps Deps) http.HandlerFunc {
 				if err := m.store.ConsumeChallenge(ctx, tx, ch.ID, now); err != nil {
 					return err
 				}
-				next, err := m.store.IssueChallenge(ctx, tx, ch.Staff, store.ChallengeEnrol, store.OriginRecoveryCode, staffVersionUnversioned, now)
+				next, err := m.store.IssueChallenge(ctx, tx, ch.Staff, store.ChallengeEnrol, store.OriginRecoveryCode, ch.StaffVersionAtIssue, now)
 				if err != nil {
 					return err
 				}
@@ -558,7 +558,7 @@ func newStaffEnrolConfirmHandler(deps Deps) http.HandlerFunc {
 				if err != nil {
 					return err
 				}
-				pair, err := m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role))
+				pair, err := m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role), staff.StaffVersion)
 				if err != nil {
 					return err
 				}
@@ -725,7 +725,7 @@ func newStaffEnrolRedeemHandler(deps Deps) http.HandlerFunc {
 					map[string]any{"reason": "identity_mismatch", "purpose": string(row.Purpose)})
 			}
 			passwordPaid = true
-			ok, err := auth.VerifyPassword(req.Password.reveal(), staff.PasswordHash)
+			ok, err := verifyStaffPassword(req.Password.reveal(), staff)
 			if err != nil {
 				return err
 			}
@@ -760,7 +760,7 @@ func newStaffEnrolRedeemHandler(deps Deps) http.HandlerFunc {
 			if err := m.store.ConsumeEnrolmentToken(ctx, tx, row.ID, now); err != nil {
 				return err
 			}
-			next, err := m.store.IssueChallenge(ctx, tx, row.Staff, store.ChallengeEnrol, redeemOrigin(row.Purpose), staffVersionUnversioned, now)
+			next, err := m.store.IssueChallenge(ctx, tx, row.Staff, store.ChallengeEnrol, redeemOrigin(row.Purpose), staff.StaffVersion, now)
 			if err != nil {
 				return err
 			}

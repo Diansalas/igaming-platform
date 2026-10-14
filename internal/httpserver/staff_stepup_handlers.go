@@ -215,7 +215,7 @@ func newStaffStepUpHandler(deps Deps) http.HandlerFunc {
 				}
 				access, err := deps.AuthIssuer.IssueStaff(auth.StaffTokenParams{
 					StaffID: c.ref.StaffID, TenantID: c.ref.TenantID, Role: c.role, SessionID: res.SessionID,
-					AAL: res.AAL, AMR: res.AMR, AuthTime: res.AuthTime, MFAAt: res.MFAAt, StaffVersion: staffVersionUnversioned,
+					AAL: res.AAL, AMR: res.AMR, AuthTime: res.AuthTime, MFAAt: res.MFAAt, StaffVersion: staff.StaffVersion,
 				}, m.accessTTL)
 				if err != nil {
 					return err

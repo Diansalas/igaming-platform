@@ -46,9 +46,9 @@ const usableFactorPredicate = `f.status = 'active' AND f.hard_locked_at IS NULL`
 // staffLivenessSQL reads the session row named by the token's sid, joined to
 // its staff row, in the token's own scope. The explicit tenant comparisons
 // repeat what RLS already enforces, so the check does not depend on RLS alone.
-// absolute_expires_at is compared on the DATABASE clock (S3-R8). The staff
-// version is not read: staff_users.staff_version arrives with migration 0139
-// (S5 + S6); until then every staff member is at staffVersionUnversioned.
+// absolute_expires_at is compared on the DATABASE clock (S3-R8). ADR 0119 S5 +
+// S6: staff_users.staff_version (migration 0139) is read and compared with the
+// token's `sv` claim.
 //
 // ADR 0119 S4b (conditions S3-R10, S3-R13, S4a-R10): the query also reads the
 // row's sealed assurance - aal, amr, auth_time, mfa_at, absolute_expires_at,
@@ -59,7 +59,7 @@ const usableFactorPredicate = `f.status = 'active' AND f.hard_locked_at IS NULL`
 // beyond the row's.
 const staffLivenessSQL = `SELECT s.revoked_at IS NOT NULL,
        (s.absolute_expires_at IS NULL OR s.absolute_expires_at <= now()),
-       su.status, su.role,
+       su.status, su.role, su.staff_version,
        EXISTS (SELECT 1 FROM staff_mfa_factors f WHERE f.staff_user_id = su.id AND ` + usableFactorPredicate + `),
        now(), s.aal, s.amr, s.auth_time, s.mfa_at, s.absolute_expires_at, s.expires_at AS sealed_idle_expiry,
        s.refresh_token_hash, s.assurance_kid, s.assurance_seal
@@ -75,7 +75,7 @@ type staffLivenessRow struct {
 	absoluteExpired bool
 	status          string
 	role            string
-	staffVersion    int64 // staffVersionUnversioned until migration 0139
+	staffVersion    int64 // staff_users.staff_version (migration 0139)
 	factorUsable    bool
 
 	// The sealed assurance (S4b) and the database clock.
@@ -188,10 +188,10 @@ func checkStaffLiveness(ctx context.Context, pool *db.Pool, m *StaffMFA, tenantI
 	if tenantID != uuid.Nil {
 		tenantArg = tenantID
 	}
-	row := staffLivenessRow{staffVersion: staffVersionUnversioned}
+	var row staffLivenessRow
 	err := pool.QueryRowPrincipalScopeReadOnly(ctx, tenantID, staffID, staffLivenessStatementTimeout, staffLivenessSQL,
 		[]any{sess.SessionID, staffID, tenantArg}, func(r pgx.Row) error {
-			return r.Scan(&row.revoked, &row.absoluteExpired, &row.status, &row.role, &row.factorUsable,
+			return r.Scan(&row.revoked, &row.absoluteExpired, &row.status, &row.role, &row.staffVersion, &row.factorUsable,
 				&row.dbNow, &row.aal, &row.amr, &row.authTime, &row.mfaAt, &row.absoluteExpiry, &row.idleExp,
 				&row.refreshHash, &row.kid, &row.seal)
 		})
