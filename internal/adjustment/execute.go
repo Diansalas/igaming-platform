@@ -402,12 +402,12 @@ func lockStaffAndGrants(ctx context.Context, tx pgx.Tx, req Request, call Call) 
 		return err
 	}
 	staff := append([]uuid.UUID{req.InitiatedBy, call.ActorID}, approvers...)
-	locked, err := db.ScanActorStaffRows(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id FROM staff_users
+	locked, err := db.ScanActorStaffRows(tx.Query(ctx, `SELECT id, tenant_id, role, status, person_id, staff_version FROM staff_users
 		WHERE id = ANY($1) ORDER BY id FOR SHARE`, staff))
 	if err != nil {
 		return fmt.Errorf("adjustment: lock staff rows: %w", err)
 	}
-	if err := db.CheckActorStaffLive(locked, call.ActorID, call.ActorRole); err != nil {
+	if err := db.CheckActorStaffLive(locked, call.ActorID, db.ActorExpectation{Role: call.ActorRole, StaffVersion: call.ActorStaffVersion}); err != nil {
 		return err
 	}
 	if err := drain(tx.Query(ctx, `SELECT id FROM staff_capability_grants

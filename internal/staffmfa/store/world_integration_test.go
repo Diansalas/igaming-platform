@@ -123,7 +123,7 @@ func (w *world) newStaff(tenant *uuid.UUID, role string) staffmfa.StaffRef {
 		if tenant != nil {
 			tid = *tenant
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, '!x', $4)`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, '!x', $4, (SELECT id FROM s56p))`,
 			id, tid, email, role)
 		return err
 	}

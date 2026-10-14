@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
@@ -31,6 +32,19 @@ func (w *world) s4bSetStaff(s staffMember, sql string) error {
 		return err
 	}
 	if s.TenantID == uuid.Nil {
+		// ADR 0119 S5 + S6 (SF020): a platform admin is removed only while another active, enrolled one exists, so
+		// a spare with a (placeholder) active factor is planted first.
+		if err := w.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			spare := uuid.New()
+			if _, err := tx.Exec(ctx, `WITH p AS (SELECT gen_random_uuid() AS id), pi AS (INSERT INTO persons (id) SELECT id FROM p)
+				INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
+				VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active', (SELECT id FROM p))`, spare, "s4b-spare-"+spare.String()+"@x.invalid"); err != nil {
+				return err
+			}
+			return authtest.EnsurePlaceholderFactor(ctx, tx, spare)
+		}); err != nil {
+			return err
+		}
 		return w.pool.WithoutTenant(context.Background(), fn)
 	}
 	return w.pool.WithTenant(context.Background(), s.TenantID, fn)

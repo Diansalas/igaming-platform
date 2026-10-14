@@ -77,7 +77,7 @@ func (a *arAPI) tenantStaff(tenant uuid.UUID, role string) uuid.UUID {
 	a.t.Helper()
 	id := uuid.New()
 	if err := a.w.Pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', $4, 'active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, $2, $3, 'x', $4, 'active', (SELECT id FROM s56p))`,
 			id, tenant, "ar-"+id.String()+"@fixture.invalid", role)
 		return err
 	}); err != nil {

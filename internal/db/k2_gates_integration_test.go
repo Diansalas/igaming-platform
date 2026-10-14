@@ -463,6 +463,9 @@ func TestK2G3_SuspendedGranteeActingOpenRefused(t *testing.T) {
 		t.Fatalf("positive control: valid grant must open: %v", err)
 	}
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := plantEnrolledPlatformAdmin(ctx, tx); err != nil { // ADR 0119 S5 + S6: SF020
+			return err
+		}
 		tag, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, f.GranteeID)
 		if err != nil {
 			return err

@@ -271,6 +271,10 @@ type Deps struct {
 	// "temporarily unavailable".
 	EmailProvider email.Provider
 
+	// StaffBackofficeBaseURL is the back-office origin the ADR 0119 S6 invitation / MFA-reset emails link to
+	// ("<base>/#/enrol?token=..."). Empty: a relative link (development). Not a secret.
+	StaffBackofficeBaseURL string
+
 	// AccountActivationTestSupportEnabled gates Stage 9.3/9.4's
 	// account-activation test-support seam - the identity twin of
 	// CasinoPlaySimulationEnabled/PaymentsMockSettlementEnabled above,

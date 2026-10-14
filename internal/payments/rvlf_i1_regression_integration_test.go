@@ -205,7 +205,7 @@ func TestRVLF_P2_KillSwitch_CascadableDeclineCallback(t *testing.T) {
 
 	principal := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,$2,$3,'x','tenant_admin','active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,$2,$3,'x','tenant_admin','active', (SELECT id FROM s56p))`,
 			principal, f.tenantID, principal.String()+"@rv.example")
 		return err
 	}); err != nil {
@@ -672,7 +672,7 @@ func rvEngageWildcardDepositKillSwitch(t *testing.T, pool *db.Pool, f orchFixtur
 	t.Helper()
 	principal := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,$2,$3,'x','tenant_admin','active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,$2,$3,'x','tenant_admin','active', (SELECT id FROM s56p))`,
 			principal, f.tenantID, principal.String()+"@rv.example")
 		return err
 	}); err != nil {

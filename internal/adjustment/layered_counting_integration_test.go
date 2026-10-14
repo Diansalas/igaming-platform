@@ -23,7 +23,7 @@ import (
 // must then find that the bad one does not count (required = 2 stays
 // unmet). Each case is a distinct §6.2 condition.
 func TestLayered_ExecutionCountIgnoresBadApprovals(t *testing.T) {
-	pool := scratchPoolThrough(t, "k2layer_", 113)
+	pool := scratchPoolThrough(t, "k2layer_", 151) // ADR 0119 S5: the executor reads staff_users.staff_version (0139); was 113
 	ctx := context.Background()
 
 	plant := func(w *world, r Request, decidedBy uuid.UUID, person uuid.UUID, payloadHash string) {

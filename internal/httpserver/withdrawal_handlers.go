@@ -704,24 +704,27 @@ func approverEligibilityCheck(ctx context.Context, tx pgx.Tx) withdrawal.Approve
 // with the verified token's. A suspension committed first is seen here (active = false,
 // ErrApproverInactive as before); a role change is db.ErrActorStaffNotLive (401
 // session_revoked). A suspension that starts later waits for this transaction.
-// staff_version joins the comparison with migration 0139 (every row is version
-// 0 until then).
-func approverEligibilityCheckLocked(ctx context.Context, tx pgx.Tx, actor uuid.UUID, tokenRole string) withdrawal.ApproverEligibility {
+// ADR 0119 S5 + S6 (migration 0139): staff_version joins the comparison - a
+// row whose staff_version differs from the token's `sv` claim (role change,
+// Person link, any lifecycle change since the token was minted) is
+// db.ErrActorStaffNotLive too.
+func approverEligibilityCheckLocked(ctx context.Context, tx pgx.Tx, actor uuid.UUID, tokenRole string, tokenVersion int64) withdrawal.ApproverEligibility {
 	return func(approverPrincipalID uuid.UUID) (linked, active bool, err error) {
 		if approverPrincipalID != actor {
 			return false, false, fmt.Errorf("httpserver: approver eligibility: the approver is not the authenticated actor")
 		}
 		var personID *uuid.UUID
 		var status, role string
-		err = tx.QueryRow(ctx, `SELECT person_id, status, role FROM staff_users WHERE id = $1 FOR SHARE`, approverPrincipalID).
-			Scan(&personID, &status, &role)
+		var version int64
+		err = tx.QueryRow(ctx, `SELECT person_id, status, role, staff_version FROM staff_users WHERE id = $1 FOR SHARE`, approverPrincipalID).
+			Scan(&personID, &status, &role, &version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, false, nil
 		}
 		if err != nil {
 			return false, false, fmt.Errorf("httpserver: approver eligibility lookup: %w", err)
 		}
-		if status == "active" && role != tokenRole {
+		if status == "active" && (role != tokenRole || version != tokenVersion) {
 			return false, false, db.ErrActorStaffNotLive
 		}
 		return personID != nil, status == "active", nil
@@ -808,7 +811,7 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			// the token's role (section 9.5).
 			stepUp, _ := auth.StepUpAssertionFrom(ctx)
 			approved, err = withdrawal.Approve(ctx, tx, id, approverID, false, beneficiaryCheck,
-				approverEligibilityCheckLocked(ctx, tx, approverID, tc.Role), stepUp)
+				approverEligibilityCheckLocked(ctx, tx, approverID, tc.Role, tc.StaffVersion), stepUp)
 			if err != nil {
 				return err
 			}
@@ -1085,7 +1088,10 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		// ("withdrawal.submit.http") is now written BY ClaimForDispatch
 		// itself, inside the SAME transaction as the deny/allow outcome -
 		// never a best-effort, discardable call made after the fact.
-		actor := payments.SubmitActor{StaffID: submitterID, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID}
+		// ADR 0119 S5 + S6 (S4b-R3 hard gate): the verified role and `sv` travel into the claim transaction, which
+		// re-asserts the submitter's own row FOR SHARE after the payment_attempts row.
+		actor := payments.SubmitActor{StaffID: submitterID, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+			Role: tc.Role, StaffVersion: tc.StaffVersion}
 		claim, err := deps.PaymentOrchestrator.ClaimForDispatch(
 			r.Context(), deps.DB, payments.KYCEnforcementPayoutGate{}, tc.TenantID, id, req.PaymentMethod, actor,
 		)
@@ -1140,6 +1146,14 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			// safe and expected to retry once the switch is released.
 			logger.Error("submit_withdrawal_kill_switch_engaged", "error", err)
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "payouts are temporarily paused for this provider - please retry shortly")
+			return
+		}
+		if errors.Is(err, db.ErrActorStaffNotLive) {
+			// ADR 0119 section 9.5: the submitter stopped being live between liveness and the claim; the whole claim
+			// rolled back (no attempt, the request stays approved).
+			observability.RecordStaffReassertionRefusal(r.Context(), observability.StaffReassertionFlowWithdrawalSubmit)
+			logger.Warn("submit_withdrawal_submitter_not_live", "staff_id", submitterID.String())
+			writeSessionRevoked(w, requestID)
 			return
 		}
 		if err != nil {

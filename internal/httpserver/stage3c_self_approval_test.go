@@ -62,7 +62,11 @@ func mustCreateStaffWithPerson(t *testing.T, pool *db.Pool, tenantID uuid.UUID, 
 		t.Fatalf("failed to hash password: %v", err)
 	}
 	var staff identity.StaffUser
-	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	scope := pool.WithoutTenant // ADR 0119 S5 + S6: a platform staff member (uuid.Nil tenant) is created platform-scoped
+	if tenantID != uuid.Nil {
+		scope = func(ctx context.Context, fn db.TxFunc) error { return pool.WithTenant(ctx, tenantID, fn) }
+	}
+	err = scope(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		staff, err = identity.CreateStaffUser(ctx, tx, tenantID, "dualrole-staff-"+suffix+"@test.com", hash, role, personID)
 		return err

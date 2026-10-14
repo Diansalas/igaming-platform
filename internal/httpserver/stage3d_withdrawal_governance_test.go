@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
+	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
 
@@ -277,8 +278,19 @@ func TestStaffPersonLink_RemediatesUnlinkedAccountThenCanApprove(t *testing.T) {
 		t.Fatalf("seed remediation person: %v", err)
 	}
 
+	// ADR 0119 S5 + S6 review fix SR-4: the person link follows the lifecycle role authority. finance is a
+	// platform-granted role, so the tenant admin is refused (403 role_not_grantable, nothing written) and a platform
+	// admin performs the remediation.
 	resp = postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+unlinked.ID.String()+"/person-link",
 		tenantAdminToken.AccessToken, map[string]string{"person_id": newPersonID.String()})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a tenant admin linking a finance account: want 403, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+	platformAdmin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-link-pw-1")
+	platformAdminToken := mustLoginStaff(t, srv, "", platformAdmin.Email, "pa-link-pw-1")
+	resp = postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+unlinked.ID.String()+"/person-link",
+		platformAdminToken.AccessToken, map[string]string{"person_id": newPersonID.String()})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		var apiErr apierror.Error
@@ -286,7 +298,14 @@ func TestStaffPersonLink_RemediatesUnlinkedAccountThenCanApprove(t *testing.T) {
 		t.Fatalf("expected 204 linking the staff account, got %d: %+v", resp.StatusCode, apiErr)
 	}
 
-	// Approved after remediation.
+	// Approved after remediation. ADR 0119 S5 + S6: the person link bumps staff_version and ends the account's
+	// sessions (the pre-link token is refused), so the remediated account signs in again.
+	if r := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", token.AccessToken, nil); r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the pre-link token must be refused after the person link, got %d", r.StatusCode)
+	} else {
+		_ = r.Body.Close()
+	}
+	token = mustLoginStaff(t, srv, tenant.Slug, unlinked.Email, "a-decent-password-1")
 	resp2 := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", token.AccessToken, nil)
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
@@ -308,38 +327,34 @@ func TestStaffPersonLink_RemediatesUnlinkedAccountThenCanApprove(t *testing.T) {
 // newCreateStaffHandler now refuses role="finance" from any tenant-
 // scoped caller outright.
 func TestCreateStaff_TenantAdminCannotCreateFinanceRole(t *testing.T) {
+	// ADR 0119 S6: the admin-chosen-password creation route is removed; staff are created by invitation only. The
+	// same self-escalation guard holds on the invitation route: 403 role_not_grantable, nothing created, no email.
 	pool, issuer := testEnv(t)
-	orchestrator, _ := newMockOrchestrator()
-	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+	srv, mail := newLifecycleTestServer(t, pool, issuer)
 
 	tenant := mustCreateTenant(t, pool)
 	tenantAdmin := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleTenantAdmin, "ta-mint-pw-1")
 	token := mustLoginStaff(t, srv, tenant.Slug, tenantAdmin.Email, "ta-mint-pw-1")
+	person := mustSeedPerson(t, pool)
 
-	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff", token.AccessToken, map[string]string{
-		"email": "shadow-finance@example.com", "password": "a-decent-password-1", "role": "finance",
+	shadow := "shadow-finance-" + uuid.NewString() + "@example.com"
+	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/invitations", token.AccessToken, map[string]string{
+		"email": shadow, "role": "finance", "person_id": person.String(),
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		var apiErr apierror.Error
-		decodeBody(t, resp, &apiErr)
-		t.Fatalf("expected 403 for tenant_admin creating a finance-role staff account, got %d: %+v", resp.StatusCode, apiErr)
+	var apiErr apierror.Error
+	decodeBody(t, resp, &apiErr)
+	if resp.StatusCode != http.StatusForbidden || apiErr.Code != apierror.CodeRoleNotGrantable {
+		t.Fatalf("expected 403 role_not_grantable for tenant_admin inviting a finance-role staff account, got %d: %+v", resp.StatusCode, apiErr)
+	}
+	if mailCount(mail, shadow) != 0 {
+		t.Fatal("a refused invitation must not email anything")
 	}
 
-	// tenant_admin remains able to create every OTHER role for its own
-	// tenant - the restriction is specific to the one role that actually
-	// carries withdrawal authority, not a blanket lockout of staff
-	// management.
+	// tenant_admin remains able to invite every OTHER role it may grant for its own tenant - the restriction is
+	// specific to the platform-only roles, not a blanket lockout of staff management.
 	for _, role := range []string{"tenant_admin", "support", "compliance"} {
-		resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff", token.AccessToken, map[string]string{
-			"email": role + "-ok@example.com", "password": "a-decent-password-1", "role": role,
-		})
-		if resp.StatusCode != http.StatusCreated {
-			var apiErr apierror.Error
-			decodeBody(t, resp, &apiErr)
-			t.Errorf("expected 201 for tenant_admin creating a %q staff account, got %d: %+v", role, resp.StatusCode, apiErr)
-		}
-		resp.Body.Close()
+		mustInviteStaff(t, srv, token.AccessToken, tenant.ID, role+"-ok-"+uuid.NewString()+"@example.com", role, person)
 	}
 }
 
@@ -349,9 +364,13 @@ func TestCreateStaff_TenantAdminCannotCreateFinanceRole(t *testing.T) {
 // authority) can still provision a tenant's finance staff, and that
 // account is immediately usable to approve.
 func TestCreateStaff_PlatformAdminCanCreateFinanceRole(t *testing.T) {
+	// ADR 0119 S6: a platform admin invites the finance staff member (Person required, SF014); the invitee accepts
+	// the emailed token, chooses its own password, enrols, logs in and can approve. The admin never sees a
+	// credential.
 	pool, issuer := testEnv(t)
 	orchestrator, mock := newMockOrchestrator()
-	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+	mail := email.NewMockProvider()
+	srv := newFinancialTestServerWith(t, pool, issuer, orchestrator, func(d *Deps) { d.EmailProvider = mail })
 
 	tenant := mustCreateTenant(t, pool)
 	brand := mustCreateBrand(t, pool, tenant)
@@ -359,36 +378,14 @@ func TestCreateStaff_PlatformAdminCanCreateFinanceRole(t *testing.T) {
 	platformAdmin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-mint-pw-1")
 	platformToken := mustLoginStaff(t, srv, "", platformAdmin.Email, "pa-mint-pw-1")
 
-	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff", platformToken.AccessToken, map[string]string{
-		"email": "real-finance@example.com", "password": "a-decent-password-1", "role": "finance",
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		var apiErr apierror.Error
-		decodeBody(t, resp, &apiErr)
-		t.Fatalf("expected 201 for platform_admin creating a finance-role staff account, got %d: %+v", resp.StatusCode, apiErr)
+	financeEmail := "real-finance-" + uuid.NewString() + "@example.com"
+	created := mustInviteStaff(t, srv, platformToken.AccessToken, tenant.ID, financeEmail, "finance", mustSeedPerson(t, pool))
+	if created.Status != "invited" {
+		t.Fatalf("invited staff status %q", created.Status)
 	}
-	var created staffResponse
-	decodeBody(t, resp, &created)
+	fixtureAcceptAndEnrol(t, srv, lastMailedToken(t, mail, financeEmail), "a-decent-password-1")
 
-	// Link it to a real Person (platform_admin holds PermStaffManage
-	// too) and prove it can approve - the restriction targets WHO can
-	// create the credential, not the finance role's own capability.
-	personID := uuid.New()
-	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
-		return err
-	}); err != nil {
-		t.Fatalf("seed person: %v", err)
-	}
-	linkResp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+created.ID+"/person-link",
-		platformToken.AccessToken, map[string]string{"person_id": personID.String()})
-	linkResp.Body.Close()
-	if linkResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected 204 linking the platform_admin-created finance staff, got %d", linkResp.StatusCode)
-	}
-
-	financeToken := mustLoginStaff(t, srv, tenant.Slug, "real-finance@example.com", "a-decent-password-1")
+	financeToken := mustLoginStaff(t, srv, tenant.Slug, financeEmail, "a-decent-password-1")
 	player := mustRegisterPlayer(t, srv, brand.Slug)
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 100000)
 	wr := mustCreateWithdrawalRequest(t, pool, tenant.ID, brand.ID, player.ID, walletIDFor(t, pool, tenant.ID, player.ID, "EUR"), "EUR", 5000)
@@ -476,9 +473,18 @@ func TestStaffPersonLink_CannotRelinkOnceSet(t *testing.T) {
 		t.Fatalf("seed other person: %v", err)
 	}
 
-	// (1) The admin API refuses to relink an already-linked account.
+	// (1) The admin API refuses to relink an already-linked account. ADR 0119 S5 + S6 review fix SR-4: a tenant admin
+	// may not act on a finance account at all (403 role_not_grantable); a platform admin, who may, gets the 409.
+	if r := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+staff.ID.String()+"/person-link",
+		tenantAdminToken.AccessToken, map[string]string{"person_id": otherPersonID.String()}); r.StatusCode != http.StatusForbidden {
+		t.Fatalf("a tenant admin relinking a finance account: want 403, got %d", r.StatusCode)
+	} else {
+		_ = r.Body.Close()
+	}
+	platformAdmin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-relink-pw-1")
+	platformAdminToken := mustLoginStaff(t, srv, "", platformAdmin.Email, "pa-relink-pw-1")
 	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/"+staff.ID.String()+"/person-link",
-		tenantAdminToken.AccessToken, map[string]string{"person_id": otherPersonID.String()})
+		platformAdminToken.AccessToken, map[string]string{"person_id": otherPersonID.String()})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		var apiErr apierror.Error

@@ -12,11 +12,10 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
-	"github.com/Diansalas/igaming-platform/internal/auth"
-	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/stafflifecycle"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
@@ -462,180 +461,10 @@ func newGetBrandHandler(deps Deps) http.HandlerFunc {
 
 // --- Staff administration ---
 
-type createStaffRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Role     string `json:"role"`
-	// PersonID is optional and almost always omitted - see
-	// identity.StaffUser.PersonID's doc comment. Pass it only when this
-	// staff member is a KNOWN, deliberately identified dual-role
-	// individual (also a player at some brand) - it must name an
-	// existing persons.id or the request fails validation.
-	PersonID string `json:"person_id,omitempty"`
-}
-
-type staffResponse struct {
-	ID       string `json:"id"`
-	TenantID string `json:"tenant_id,omitempty"`
-	Email    string `json:"email"`
-	Role     string `json:"role"`
-	Status   string `json:"status"`
-	PersonID string `json:"person_id,omitempty"`
-}
-
-// newCreateStaffHandler creates a staff user for a specific tenant.
-// Platform_admin creation is deliberately NOT exposed here - it goes
-// through cmd/seed-admin only, since an HTTP endpoint that can mint a
-// platform-wide administrator would itself need to be guarded by an
-// existing platform_admin, and the one-time bootstrap problem that
-// creates is exactly what the CLI tool avoids (see
-// docs/decisions/0014-service-identity-pattern.md).
-//
-// role = "finance" may ONLY be created by a platform-scoped caller
-// (platform_admin) - Stage 3D specialist review (security/ledger-finance/
-// architect, converging independently) found that removing withdrawal
-// permissions from RoleTenantAdmin's OWN role definition (permission.go)
-// does not, by itself, achieve business decision #4/#5's "staff-
-// management and withdrawal-approval authority must be permission-
-// separated": a tenant_admin still holds PermStaffManage, and
-// PermStaffManage alone was sufficient to mint a BRAND NEW finance staff
-// account (with a password and person_id entirely of the tenant_admin's
-// own choosing) and immediately log in as it - a self-service
-// escalation from "can manage staff" to "can approve withdrawals" that
-// no person-linkage check catches, since the shell account can be linked
-// to any existing person the tenant_admin can reference. This is the
-// same class of attack directive item 2 names explicitly: "staff admin
-// must not be able to silently grant withdrawal approval via account
-// creation." Restricting finance-role creation to platform_admin closes
-// it at the one point that actually matters (who can mint the
-// credential), not merely at the role-definition level - see ADR 0024's
-// residual-findings section for the full analysis. tenant_admin remains
-// able to create tenant_admin/support/compliance staff for its own
-// tenant, since none of those roles hold any withdrawal permission.
-func newCreateStaffHandler(deps Deps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
-		tc, err := tenant.FromContext(r.Context())
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
-			return
-		}
-		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
-			return
-		}
-		if !canActOnTenant(tc, targetTenantID) {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
-			return
-		}
-
-		var req createStaffRequest
-		if err := decodeJSON(r, &req); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
-			return
-		}
-		v := validation.New()
-		v.RequireNonEmpty("email", req.Email)
-		if len(req.Password) < minPasswordLen {
-			apierror.Write(w, requestID, apierror.CodeValidation, "password too short")
-			return
-		}
-		v.RequireOneOf("role", req.Role, "tenant_admin", "support", "compliance", "finance", "risk_manager", "promotions_manager", "bonus_operations")
-		var personID *uuid.UUID
-		if req.PersonID != "" {
-			parsed, err := uuid.Parse(req.PersonID)
-			if err != nil {
-				v.Add("person_id", "must be a valid UUID")
-			} else {
-				personID = &parsed
-			}
-		}
-		if v.HasErrors() {
-			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
-			return
-		}
-		if identity.StaffRole(req.Role) == identity.StaffRoleFinance && tc.TenantID != uuid.Nil {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "the finance role may only be created by a platform administrator")
-			return
-		}
-		// Stage 4G: identical reasoning to the finance restriction just
-		// above - a tenant_admin's own PermStaffManage would otherwise let
-		// it mint a risk_manager account (of a password/person_id entirely
-		// of its own choosing) and self-escalate into Risk & Limits
-		// configuration authority, the exact class of attack Stage 3D's
-		// specialist review found for finance.
-		if identity.StaffRole(req.Role) == identity.StaffRoleRiskManager && tc.TenantID != uuid.Nil {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "the risk_manager role may only be created by a platform administrator")
-			return
-		}
-		// Stage 4H-B1 Wave 2 (security-architecture.md's P1 finding,
-		// "the staff-creation allowlist must be extended, or constraint 1
-		// and 2 are both defeated on day one"): identical reasoning to
-		// finance/risk_manager above - a tenant_admin's own
-		// PermStaffManage would otherwise let it mint a bonus_operations
-		// account (of a password/person_id entirely of its own choosing)
-		// and self-escalate into bonus_grant:issue/bonus_adjustment:write/
-		// bonus_bulk:execute/bonus_held_disposition:resolve authority it
-		// was never meant to hold, and a promotions_manager account would
-		// let it self-escalate into Campaign/Offer authoring authority.
-		// Both roles are platform-admin-creatable only, mirroring
-		// finance/risk_manager's own precedent exactly - this is a real
-		// operational cost (a tenant cannot self-serve its own promotions
-		// staffing), not a free win, but it is the correct trade per the
-		// security doc's own analysis.
-		if (identity.StaffRole(req.Role) == identity.StaffRolePromotionsManager || identity.StaffRole(req.Role) == identity.StaffRoleBonusOperations) && tc.TenantID != uuid.Nil {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "the promotions_manager and bonus_operations roles may only be created by a platform administrator")
-			return
-		}
-
-		passwordHash, err := auth.HashPassword(req.Password)
-		if err != nil {
-			logger.Error("create_staff_hash_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to create staff user")
-			return
-		}
-
-		var staff identity.StaffUser
-		subjectID, _ := uuid.Parse(tc.Subject)
-		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
-			staff, err = identity.CreateStaffUser(ctx, tx, targetTenantID, req.Email, passwordHash, identity.StaffRole(req.Role), personID)
-			if err != nil {
-				return err
-			}
-			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: targetTenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
-				Action: "staff.created", TargetType: "staff_user", TargetID: staff.ID.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"role": req.Role, "person_id": req.PersonID},
-			})
-		})
-		if errors.Is(err, identity.ErrEmailTaken) {
-			apierror.Write(w, requestID, apierror.CodeConflict, "a staff user with this email already exists for this tenant")
-			return
-		}
-		if db.IsForeignKeyViolation(err) {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
-			return
-		}
-		if err != nil {
-			logger.Error("create_staff_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to create staff user")
-			return
-		}
-
-		resp := staffResponse{
-			ID: staff.ID.String(), TenantID: targetTenantID.String(), Email: staff.Email, Role: string(staff.Role), Status: staff.Status,
-		}
-		if staff.PersonID != nil {
-			resp.PersonID = staff.PersonID.String()
-		}
-		writeJSON(w, http.StatusCreated, resp)
-	}
-}
+// The admin-chosen-password staff creation route (POST /v1/admin/tenants/{tenantID}/staff) was REMOVED by ADR 0119
+// S6: staff are created by invitation only (staff_lifecycle_routes.go, POST .../staff/invitations), the API never
+// returns or chooses a credential, and platform_admin is created only by an approved platform_invite four-eyes
+// request or the cmd/seed-admin bootstrap / break-glass job.
 
 // --- Staff-person linkage remediation (Stage 3D) ---
 
@@ -660,83 +489,61 @@ type linkStaffPersonRequest struct {
 // architecture" - it is deliberately NOT gated by any withdrawal
 // permission, since fixing a linkage is a staff-management action, not a
 // withdrawal decision.
+//
+// Since ADR 0119 S5 + S6 review fix SR-4 the write goes through linkPerson
+// (stafflifecycle.Service.LinkPerson), not identity.LinkStaffPersonID: the
+// rules above still hold, plus the lifecycle rules listed on linkPerson.
 func newLinkStaffPersonHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
-		tc, err := tenant.FromContext(r.Context())
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+		c, ok := beginLifecycleCall(deps, w, r)
+		if !ok {
 			return
 		}
 		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
 		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid tenant id")
 			return
 		}
-		if !canActOnTenant(tc, targetTenantID) {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+		if !canActOnTenant(c.tc, targetTenantID) {
+			apierror.Write(w, c.requestID, apierror.CodeForbidden, "cannot act on a different tenant")
 			return
 		}
-		staffID, err := uuid.Parse(r.PathValue("staffID"))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid staff id")
-			return
-		}
-
-		var req linkStaffPersonRequest
-		if err := decodeJSON(r, &req); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
-			return
-		}
-		personID, err := uuid.Parse(req.PersonID)
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id must be a valid UUID")
-			return
-		}
-
-		subjectID, _ := uuid.Parse(tc.Subject)
-		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
-			// Confirm staffID actually belongs to targetTenantID before
-			// attempting the link - staff_users' own RLS (dual-mode:
-			// tenant-scoped rows only visible under this tenant's setting)
-			// already prevents cross-tenant reads/writes; this is
-			// belt-and-braces so a not-found in the wrong tenant reports
-			// clearly rather than via a generic "already linked or not
-			// found" from LinkStaffPersonID.
-			if _, err := identity.GetStaffUserByID(ctx, tx, staffID); err != nil {
-				return err
-			}
-			if err := identity.LinkStaffPersonID(ctx, tx, staffID, personID); err != nil {
-				return err
-			}
-			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: targetTenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
-				Action: "staff.person_linked", TargetType: "staff_user", TargetID: staffID.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"person_id": personID.String()},
-			})
-		})
-		if errors.Is(err, identity.ErrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
-			return
-		}
-		if errors.Is(err, identity.ErrPersonNotFound) {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
-			return
-		}
-		if errors.Is(err, identity.ErrAlreadyLinkedOrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeConflict, "staff user not found, or already linked to a person")
-			return
-		}
-		if err != nil {
-			logger.Error("link_staff_person_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to link staff person")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		linkPerson(c, w, r, targetTenantID)
 	}
+}
+
+// linkPerson is the shared body of both person-link routes. ADR 0119 S5 + S6 review fix SR-4: the link runs through
+// the staff lifecycle (stafflifecycle.Service.LinkPerson): self-link refused (403 self_target_forbidden), the role
+// authority applied (403 role_not_grantable: a tenant admin links only accounts of the roles it may act on), the
+// actor re-asserted in the transaction (FOR SHARE, role and staff_version: 401 session_revoked), a Person already bound
+// to another live account refused for a platform account or an approve-capable role (409), the link append-only
+// (409 when already linked), staff_version bumped (SF012), every session of the target ended, and the person_linked
+// event plus the audit row (staff.person_linked / staff.platform_person_linked) written in the same transaction.
+func linkPerson(c lifecycleCall, w http.ResponseWriter, r *http.Request, targetTenantID uuid.UUID) {
+	staffID, err := uuid.Parse(r.PathValue("staffID"))
+	if err != nil {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid staff id")
+		return
+	}
+	var req linkStaffPersonRequest
+	if err := decodeJSON(r, &req); err != nil {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
+		return
+	}
+	personID, err := uuid.Parse(req.PersonID)
+	if err != nil {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "person_id must be a valid UUID")
+		return
+	}
+	if _, err := c.svc.LinkPerson(r.Context(), c.actor, targetTenantID, staffID, personID); err != nil {
+		if errors.Is(err, stafflifecycle.ErrNotFound) {
+			apierror.Write(w, c.requestID, apierror.CodeNotFound, "staff user not found")
+			return
+		}
+		c.writeError(r.Context(), w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // newLinkPlatformStaffPersonHandler is the platform-scoped counterpart to
@@ -770,77 +577,25 @@ func newLinkStaffPersonHandler(deps Deps) http.HandlerFunc {
 //
 // Route is deliberately NOT parameterized by tenantID (there is no
 // tenant to target - that is the entire point), unlike the sibling route.
+//
+// Since ADR 0119 S5 + S6 review fix SR-4 both routes share linkPerson
+// (stafflifecycle.Service.LinkPerson, platform scope via
+// db.WithPlatformAdmin); the identity.LinkStaffPersonID wording above is
+// historical.
 func newLinkPlatformStaffPersonHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
-		tc, err := tenant.FromContext(r.Context())
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+		c, ok := beginLifecycleCall(deps, w, r)
+		if !ok {
 			return
 		}
-		if tc.TenantID != uuid.Nil {
+		if c.tc.TenantID != uuid.Nil {
 			// A tenant-scoped caller (e.g. tenant_admin, who also holds
 			// PermStaffManage) has no legitimate reason to link a
 			// platform-wide staff account's person_id.
-			apierror.Write(w, requestID, apierror.CodeForbidden, "only a platform-scoped caller may act on a platform-wide staff account")
+			apierror.Write(w, c.requestID, apierror.CodeForbidden, "only a platform-scoped caller may act on a platform-wide staff account")
 			return
 		}
-		staffID, err := uuid.Parse(r.PathValue("staffID"))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid staff id")
-			return
-		}
-
-		var req linkStaffPersonRequest
-		if err := decodeJSON(r, &req); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
-			return
-		}
-		personID, err := uuid.Parse(req.PersonID)
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id must be a valid UUID")
-			return
-		}
-
-		subjectID, _ := uuid.Parse(tc.Subject)
-		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			// staff_users' dual_scope_isolation policy (migration 0011)
-			// already confines this connection to tenant_id IS NULL rows,
-			// so a successful lookup here is, by construction, always a
-			// platform-wide staff account - never a tenant-scoped one.
-			if _, err := identity.GetStaffUserByID(ctx, tx, staffID); err != nil {
-				return err
-			}
-			if err := identity.LinkStaffPersonID(ctx, tx, staffID, personID); err != nil {
-				return err
-			}
-			return audit.Record(ctx, tx, audit.Entry{
-				ActorType: audit.ActorStaff, ActorID: subjectID,
-				Action: "staff.platform_person_linked", TargetType: "staff_user", TargetID: staffID.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"person_id": personID.String()},
-			})
-		})
-		if errors.Is(err, identity.ErrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
-			return
-		}
-		if errors.Is(err, identity.ErrPersonNotFound) {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
-			return
-		}
-		if errors.Is(err, identity.ErrAlreadyLinkedOrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeConflict, "staff user not found, or already linked to a person")
-			return
-		}
-		if err != nil {
-			logger.Error("link_platform_staff_person_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to link staff person")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		linkPerson(c, w, r, uuid.Nil)
 	}
 }
 

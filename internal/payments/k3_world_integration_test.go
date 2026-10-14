@@ -33,6 +33,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -128,6 +129,7 @@ func k3MkStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID, role string, per
 	if err != nil {
 		t.Fatalf("insert staff %s: %v", role, err)
 	}
+	staffsv.Register(pool, s.ID, tenantID)
 	return s
 }
 
@@ -359,7 +361,8 @@ func (w *k3World) setTenantStatus(status string) {
 // k3Ctx returns a context carrying actor's verified-token identity, as the HTTP
 // auth middleware would build it.
 func k3Ctx(actor k3Staff) context.Context {
-	return tenant.WithContext(context.Background(), tenant.Context{TenantID: actor.TenantID, Subject: actor.ID.String(), Role: actor.Role})
+	return tenant.WithContext(context.Background(), tenant.Context{TenantID: actor.TenantID, Subject: actor.ID.String(), Role: actor.Role,
+		StaffVersion: staffsv.Version(actor.ID)})
 }
 
 func (w *k3World) target(actor k3Staff) ResolutionTarget {

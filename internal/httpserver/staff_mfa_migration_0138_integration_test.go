@@ -323,7 +323,7 @@ func TestMigration0138_Cutover_RevocationAndC1Rule(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`, plat, "m138-"+plat.String()+"@x.invalid"); err != nil {
+		if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, NULL, $2, 'x', 'platform_admin', (SELECT id FROM s56p))`, plat, "m138-"+plat.String()+"@x.invalid"); err != nil {
 			return err
 		}
 		now := time.Now()
@@ -540,7 +540,7 @@ func TestMigration0138_RollingDeploy_FailsClosed(t *testing.T) {
 	var staffTok string
 	if err := pool137.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		plat := uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`, plat, "m137r-"+plat.String()+"@x.invalid"); err != nil {
+		if _, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, NULL, $2, 'x', 'platform_admin', (SELECT id FROM s56p))`, plat, "m137r-"+plat.String()+"@x.invalid"); err != nil {
 			return err
 		}
 		staffTok, _ = legacyStaffSession(t, tx, plat, nil, time.Now(), time.Now().Add(time.Hour))
@@ -559,7 +559,7 @@ func TestMigration0138_Down_Refusals(t *testing.T) {
 	full := m138MigDir(t, m138Version)
 	plat := uuid.New()
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`, plat, "m138d-"+plat.String()+"@x.invalid")
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, NULL, $2, 'x', 'platform_admin', (SELECT id FROM s56p))`, plat, "m138d-"+plat.String()+"@x.invalid")
 		return err
 	}); err != nil {
 		t.Fatal(err)

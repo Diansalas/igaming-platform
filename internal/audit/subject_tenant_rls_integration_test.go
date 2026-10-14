@@ -10,6 +10,7 @@ package audit
 import (
 	"context"
 	"errors"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -26,7 +27,7 @@ func stPlatformAdmin(t *testing.T, pool *db.Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, NULL, $2, 'x', 'platform_admin', (SELECT id FROM s56p))`,
 			id, "st-admin-"+id.String()+"@example.com")
 		return err
 	}); err != nil {
@@ -45,7 +46,7 @@ func stTenantStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', 'tenant_admin', (SELECT id FROM s56p))`,
 			id, tenantID, "st-tenant-"+id.String()+"@example.com")
 		return err
 	}); err != nil {
@@ -385,6 +386,9 @@ func TestSubjectActorGuard_Refusals(t *testing.T) {
 
 	// (8) A suspended platform admin can still write (Q7: no status check).
 	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := staffsv.PlantEnrolledPlatformAdmin(ctx, tx); err != nil { // ADR 0119 S5 + S6: SF020
+			return err
+		}
 		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, admin)
 		return err
 	}); err != nil {

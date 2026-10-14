@@ -171,8 +171,9 @@ func TestB3_K11NegativesInsideRealActingExecutorTx(t *testing.T) {
 			}
 			_, _ = tx.Exec(ctx, `ROLLBACK TO SAVEPOINT k11`)
 		}
-		try("insert platform_admin", `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active')`,
-			uuid.New(), "k11-"+uuid.NewString()+"@x.invalid")
+		// ADR 0119 S5: linked to an existing Person so SF014 does not pre-empt the acting fence under test.
+		try("insert platform_admin", `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active', $3)`,
+			uuid.New(), "k11-"+uuid.NewString()+"@x.invalid", w.PlayerPerson)
 		// A supplied NULL (platform) tenant is re-forced to the acting
 		// tenant by audit_log_acting_actor: never a platform audit row.
 		if _, err := tx.Exec(ctx, `SAVEPOINT k11a`); err != nil {

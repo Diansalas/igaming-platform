@@ -35,7 +35,10 @@ func TestNoTriggerDisableOutsideTests(t *testing.T) {
 			// must carry the integration build tag, so it can never be part of a
 			// production binary; any other file stays forbidden.
 			if filepath.ToSlash(path) == "../../internal/payoutinstrument/pitest/pitest.go" ||
-				filepath.ToSlash(path) == "../../internal/testsupport/launchfix/launchfix.go" {
+				filepath.ToSlash(path) == "../../internal/testsupport/launchfix/launchfix.go" ||
+				// ADR 0119 S5 + S6: staffsv.InsertLegacyUnlinkedStaff plants a legacy (pre-0139) unlinked staff row
+				// with SF014 disabled for one statement inside the caller's transaction.
+				filepath.ToSlash(path) == "../../internal/testsupport/staffsv/staffsv.go" {
 				if !strings.HasPrefix(string(b), "//go:build integration") {
 					t.Errorf("%s may mention a trigger disable only while it is integration-tag only", path)
 				}

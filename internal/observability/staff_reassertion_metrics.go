@@ -25,6 +25,11 @@ const (
 	StaffReassertionFlowManualAdjustment  StaffReassertionFlow = "manual_adjustment"
 	StaffReassertionFlowForceResolution   StaffReassertionFlow = "payment_force_resolution"
 	StaffReassertionFlowHoldResolution    StaffReassertionFlow = "withdrawal_hold_resolution"
+	// ADR 0119 S5 + S6 (S4b-R3 hard gate): withdrawal submit (inside the ClaimForDispatch transaction, after the
+	// payment_attempts row), K1 capability-grant approve / revoke, and the staff lifecycle transactions.
+	StaffReassertionFlowWithdrawalSubmit StaffReassertionFlow = "withdrawal_submit"
+	StaffReassertionFlowCapabilityGrant  StaffReassertionFlow = "capability_grant"
+	StaffReassertionFlowStaffLifecycle   StaffReassertionFlow = "staff_lifecycle"
 )
 
 var staffReassertionRefusalsTotal, _ = staffReassertionMeter.Int64Counter(

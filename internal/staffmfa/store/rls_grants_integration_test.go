@@ -414,16 +414,27 @@ func TestCatalog_PoliciesFlagsTriggersFunctions(t *testing.T) {
 	wantFn := []string{}
 	// ADR 0119 S3 (migration 0138) adds sf_factor_lockout_clock (SF008, gate G2) and sf_cutover_immutable (SF099).
 	for _, n := range []string{"sf_force_tenant_from_staff", "sf_deny_delete", "sf_deny_truncate", "sf_factor_guard", "sf_recovery_guard", "sf_challenge_guard", "sf_enrolment_token_guard",
-		"sf_factor_lockout_clock", "sf_cutover_immutable"} {
+		"sf_factor_lockout_clock", "sf_cutover_immutable",
+		// ADR 0119 S5 + S6 (migration 0139): the staff_users guards (SF010-SF014, SF020 / SF021) and the lifecycle
+		// four-eyes / event guards.
+		"sf_staff_transition", "sf_staff_immutable", "sf_staff_version", "sf_staff_self_target", "sf_staff_person_required",
+		"sf_last_admin", "sf_lifecycle_request_guard", "sf_lifecycle_approval_guard", "sf_lifecycle_no_executing_at_commit",
+		"sf_deny_update", "sf_lifecycle_event_actor"} {
 		wantFn = append(wantFn, n+":plpgsql:secdef=false:vol=v:cfg=search_path=pg_catalog, public, pg_temp")
 	}
+	// The actor-session reader the SF031 / SF032 guards share is STABLE (it only reads).
+	wantFn = append(wantFn, "sf_lifecycle_actor_session:plpgsql:secdef=false:vol=s:cfg=search_path=pg_catalog, public, pg_temp")
 	eq("sf_* functions", fn, wantFn)
 
-	// No function of any kind that raises an SF020/SF021 or SF030 exists yet: they belong to migration 0139
-	// (staff_users) and S-H1. When 0139 lands, flip this into the ADR 0119 s13.5 pin "the SF020/SF021 trigger
-	// function is VOLATILE". ADR 0119 S3: SF040 (sessions) now exists in exactly one function, migration 0138's.
-	eq("later-slice SF codes not created in S2", q(`SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace
-		AND (prosrc LIKE '%SF010%' OR prosrc LIKE '%SF020%' OR prosrc LIKE '%SF021%' OR prosrc LIKE '%SF030%' OR prosrc LIKE '%SF007%')`), nil)
+	// ADR 0119 s13.5: the SF020 / SF021 last-admin trigger function is VOLATILE (its count after the advisory lock
+	// takes a fresh snapshot), and it is the ONLY function raising them; SF010 is raised only by the transition guard;
+	// SF030 (S-H1) and SF007 are still not created. ADR 0119 S3: SF040 (sessions) exists in exactly one function.
+	eq("SF020 / SF021 only in the VOLATILE last-admin guard", q(`SELECT proname || ':' || provolatile::text FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+		AND (prosrc LIKE '%SF020%' OR prosrc LIKE '%SF021%')`), []string{"sf_last_admin:v"})
+	eq("SF010 only in the transition guard", q(`SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+		AND prosrc LIKE '%SF010%'`), []string{"sf_staff_transition"})
+	eq("later-slice SF codes not created", q(`SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+		AND (prosrc LIKE '%SF030%' OR prosrc LIKE '%SF007%')`), nil)
 	eq("SF040 raised only by the 0138 sessions guard", q(`SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace
 		AND prosrc LIKE '%SF040%'`), []string{"sessions_staff_assurance_guard"})
 	// Every function that raises an SF code is non-SECURITY DEFINER with a pinned search_path (ADR 0108).

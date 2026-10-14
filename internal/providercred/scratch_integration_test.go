@@ -159,6 +159,14 @@ func TestPCApproval_RequesterUnlinkedRefused(t *testing.T) {
 	f := scratchFx(t, w)
 	tenant := f.tenant()
 	reqID := uuid.New()
+	// ADR 0119 S5: an unlinked platform admin is refused at INSERT by SF014 (migration 0139); on this scratch
+	// database the owner builds one with exactly that trigger disabled, then restores it.
+	f.unlinked = uuid.New()
+	w.ownerExec(t,
+		`ALTER TABLE staff_users DISABLE TRIGGER sf_14_staff_person_required`,
+		`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ('`+f.unlinked.String()+`', NULL, 'pc-unlinked-`+f.unlinked.String()+`@test.example', 'x', 'platform_admin', 'active')`,
+		`ALTER TABLE staff_users ENABLE TRIGGER sf_14_staff_person_required`,
+	)
 	w.ownerExec(t,
 		`ALTER TABLE provider_credential_change_requests DISABLE TRIGGER provider_credential_change_requests_before_insert`,
 		`SELECT set_config('app.platform_admin_principal_id', '`+f.unlinked.String()+`', true)`,
@@ -262,6 +270,9 @@ func TestPCHandleTransition_DeleteRefusedAsOwner(t *testing.T) {
 func TestPCMigration_DownRefusesWithRows(t *testing.T) {
 	dir := providerCredMigrationsThrough96(t)
 	w := newScratchWorld(t, "pc_down_", dir)
+	// ADR 0119 S5 + S6: the current Go code reads staff_users.staff_version (migration 0139); this schema stops at
+	// 0096, so the scratch database gets exactly that column (nothing the 0096 down migration touches).
+	w.ownerExec(t, `ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS staff_version BIGINT NOT NULL DEFAULT 1`)
 	f := scratchFx(t, w)
 	f.register(f.spec(f.tenant(), "acme", "k1"))
 

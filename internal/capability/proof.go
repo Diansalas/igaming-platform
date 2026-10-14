@@ -2,6 +2,7 @@ package capability
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,7 +26,70 @@ type ProofActor struct {
 	Scope  string
 	Tenant uuid.UUID
 	Proofs *actorproof.Issuer // nil means actorproof.Default()
+	// Role and StaffVersion are the verified token's role and `sv` claim (ADR 0119 S5 + S6, the S4b-R3 hard
+	// gate): a grant approval or revocation re-asserts the actor's own staff row against them, FOR SHARE, at the
+	// A8 position (after the request / grant row FOR UPDATE). Empty Role is refused.
+	Role         string
+	StaffVersion int64
 }
+
+// reassertActor is the ADR 0119 section 9.5 K1 re-assertion (approve and revoke; ADR 0082 A9): the acting staff
+// member's own row FOR SHARE, compared with the verified token's role and staff_version. It runs only for an
+// authenticated principal in the context (every HTTP K1 call). Without one it refuses in production (review fix F7);
+// the integration-only TestSessionProofHook path (fixtures that open their own sessions without a token) skips it
+// through the build-tag split (reassert_integration.go). The row is visible in both K1 session shapes: a tenant
+// caller's own row through the dual-scope policy (db.WithPrincipalScope), a platform caller's own platform row
+// because db.WithPlatformAdmin leaves app.tenant_id empty - so the section 9.5(b) app.actor_staff_id pair is not
+// needed here (verified by TestK1Reassertion_*).
+func reassertActor(ctx context.Context, tx pgx.Tx) error {
+	a, ok := ctx.Value(proofActorKey{}).(ProofActor)
+	if !ok {
+		// Review fix F7: no authenticated principal is a refusal in production (reassert_prod.go); only the
+		// integration build may skip it for token-less fixtures (reassert_integration.go).
+		if reassertFallbackOn() {
+			return nil
+		}
+		return ErrActorNotLive
+	}
+	if a.Actor == uuid.Nil || a.Role == "" || a.StaffVersion < 1 {
+		return ErrActorNotLive
+	}
+	var role, status string
+	var version int64
+	err := tx.QueryRow(ctx, `SELECT role, status, staff_version FROM staff_users WHERE id = $1 FOR SHARE`, a.Actor).Scan(&role, &status, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return actorLiveDecision(a, nil)
+	}
+	if err != nil {
+		return err
+	}
+	return actorLiveDecision(a, &actorRow{Role: role, Status: status, StaffVersion: version})
+}
+
+// actorRow is the actor's own staff row as the re-assertion read it (nil: not visible).
+type actorRow struct {
+	Role         string
+	Status       string
+	StaffVersion int64
+}
+
+// actorLiveDecision is the pure rule of reassertActor - the SAME rule as db.CheckActorStaffLive (this package cannot
+// import internal/db). Ledger-finance review LF-3: TestReassertDecision_EquivalentToCheckActorStaffLive pins that the
+// two agree on a shared table of cases, so a drift in either fails a unit test.
+func actorLiveDecision(a ProofActor, row *actorRow) error {
+	if a.Actor == uuid.Nil || a.Role == "" || a.StaffVersion < 1 || row == nil {
+		return ErrActorNotLive
+	}
+	if row.Status != "active" || row.Role != a.Role || row.StaffVersion != a.StaffVersion {
+		return ErrActorNotLive
+	}
+	return nil
+}
+
+// ErrActorNotLive is the K1 re-assertion refusal (the same rule as db.CheckActorStaffLive; internal/capability does
+// not import internal/db because the db integration tests import this package). The HTTP layer answers 401
+// session_revoked; nothing was written.
+var ErrActorNotLive = errors.New("capability: the acting staff member is no longer live")
 
 // Proof scopes (re-exported so HTTP code need not import actorproof).
 const (

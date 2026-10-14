@@ -40,6 +40,8 @@ func (w *mfaW) liveTok(s mfaStaff, sid uuid.UUID, mut func(*auth.StaffTokenParam
 	w.t.Helper()
 	p := unitStaffParams(s.ref.StaffID, s.ref.TenantID, auth.Role(s.role))
 	p.SessionID = sid
+	// ADR 0119 S5 + S6: the token carries the row's current staff_version (migration 0139), as a minted token does.
+	p.StaffVersion = authtest.StaffVersion(w.t, w.owner, s.ref.StaffID, s.ref.TenantID)
 	if mut != nil {
 		mut(&p)
 	}
@@ -183,12 +185,12 @@ func TestStaffLiveness_RefusalMatrix(t *testing.T) {
 				me(next.AccessToken).want(t, http.StatusOK, "")
 			}
 
-			// Staff version mismatch (sv ahead of the row; the column arrives with 0139, until then every row is 0).
+			// Staff version mismatch (the token's sv ahead of the row's staff_version, migration 0139).
 			s, pair = enrolled()
 			n = w.reasonCount(observability.StaffLivenessReasonVersionMismatch)
-			w.refusedFor(me(w.liveTok(s, w.sidOf(pair.AccessToken), func(p *auth.StaffTokenParams) { p.StaffVersion = 1 })),
+			w.refusedFor(me(w.liveTok(s, w.sidOf(pair.AccessToken), func(p *auth.StaffTokenParams) { p.StaffVersion++ })),
 				observability.StaffLivenessReasonVersionMismatch, n)
-			me(w.liveTok(s, w.sidOf(pair.AccessToken), nil)).want(t, http.StatusOK, "") // the same sid at sv 0 passes
+			me(w.liveTok(s, w.sidOf(pair.AccessToken), nil)).want(t, http.StatusOK, "") // the same sid at the row's sv passes
 
 			// Hard-locked factor (S3-R11): the session ends on the next request, and the refresh is refused.
 			s, pair = enrolled()
@@ -512,7 +514,7 @@ func TestStaffLiveness_QueryPlanAndLatency(t *testing.T) {
 		}
 		t.Logf("%s liveness plan (enable_seqscan=off):\n%s\ndefault plan:\n%s", role, plan, explain(false))
 
-		sess := auth.StaffSession{SessionID: sid, AAL: auth.StaffAAL, StaffVersion: 0}
+		sess := auth.StaffSession{SessionID: sid, AAL: auth.StaffAAL, StaffVersion: authtest.StaffVersion(t, w.owner, s.ref.StaffID, s.ref.TenantID)}
 		var d []time.Duration
 		for i := 0; i < 300; i++ {
 			start := time.Now()

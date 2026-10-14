@@ -332,10 +332,12 @@ func TestPCRequest_RequesterEligibility(t *testing.T) {
 	f := newFx(t)
 	tenant := f.tenant()
 	tenantAdmin := f.tenantStaff(tenant, "tenant_admin")
+	// ADR 0119 S5 + S6 review fix F3: the "unlinked" arm is a LEGACY pre-0139 row (SF014 refuses creating one now,
+	// TestPCFixture_UnlinkedPlatformAdminRefusedBySF014; 0139 does not backfill, so the defence must still hold).
 	for name, principal := range map[string]uuid.UUID{
 		"unresolvable":  uuid.New(),
 		"tenant-scoped": tenantAdmin,
-		"unlinked":      f.unlinked,
+		"unlinked":      f.legacyUnlinkedAdmin(),
 		"suspended":     f.suspended,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -439,15 +441,31 @@ func TestPCApproval_SamePersonSecondAccountRefused(t *testing.T) {
 	}
 }
 
+// ADR 0119 S5 (migration 0139): the runtime role can no longer CREATE an unlinked platform admin (SF014); the legacy
+// rows 0139 does not backfill are what legacyUnlinkedAdmin reproduces.
+func TestPCFixture_UnlinkedPlatformAdminRefusedBySF014(t *testing.T) {
+	f := newFx(t)
+	id := uuid.New()
+	err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active')`,
+			id, "pc-unlinked-"+id.String()+"@test.example")
+		return err
+	})
+	if pgCode(err) != "SF014" {
+		t.Fatalf("an unlinked platform admin must be refused with SF014, got %v", err)
+	}
+}
+
 func TestPCApproval_ApproverEligibility(t *testing.T) {
 	f := newFx(t)
 	tenant := f.tenant()
 	r, _ := f.file(f.spec(tenant, "acme", "k1"))
 	tenantAdmin := f.tenantStaff(tenant, "tenant_admin")
+	// ADR 0119 S5 + S6 review fix F3: the "unlinked" arm is a legacy pre-0139 row (see the requester test above).
 	for name, principal := range map[string]uuid.UUID{
 		"unresolvable":  uuid.New(),
 		"tenant-scoped": tenantAdmin,
-		"unlinked":      f.unlinked,
+		"unlinked":      f.legacyUnlinkedAdmin(),
 		"suspended":     f.suspended,
 	} {
 		t.Run(name, func(t *testing.T) {

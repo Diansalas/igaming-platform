@@ -25,9 +25,11 @@
 // (the same secret-store injection as platform-api) and refuses to run
 // without them (staffmfa.LoadKeys, S3 entry gate 21.7 (a)).
 //
-// Modes:
-//   - default: create a new platform_admin (-email, SEED_ADMIN_PASSWORD) and
-//     issue its bootstrap token;
+// Modes (every mode requires -operator and -reason, recorded in its audit rows: ADR 0119 S5 + S6 review fix SR-1):
+//   - default: create the platform's FIRST platform_admin (-email, SEED_ADMIN_PASSWORD) and issue its bootstrap
+//     token. Refused once ANY platform_admin row exists, in any status (review fix SR-1 / F1): every later platform
+//     admin is created by an approved platform_invite four-eyes request or, when none can complete, by -break-glass.
+//     It writes an `owner_provisioned` staff lifecycle event (reason initial_bootstrap);
 //   - -issue-bootstrap: issue a fresh bootstrap token for an EXISTING active
 //     staff member (-email; plus -tenant-slug for a tenant staff member, omitted
 //     for platform staff) that has NO active second factor - the S3 cutover
@@ -37,6 +39,17 @@
 //     (including a hard-locked one) is refused: that is an MFA reset (S6), and
 //     until S6 the platform break-glass is creating an ADDITIONAL admin. The
 //     token is still useless without the account's password.
+//   - -break-glass (ADR 0119 S6, section 11): create an ADDITIONAL active platform_admin when no active platform
+//     admin with a usable second factor exists (the four-eyes platform_invite cannot complete). Requires -operator
+//     and -reason, a Person (-person-id or -create-person, SF014), and refuses while a usable platform admin exists
+//     unless -force-additional is also given. It writes an `owner_provisioned` staff lifecycle event and a
+//     `staff.break_glass_used` audit row, prints the bootstrap token once, and raises the P1 alert
+//     staff.platform_break_glass_used after the commit. It runs only as a deployment job (infrastructure IAM), never
+//     on a workstation; two operators should be present (runbook control, S9).
+//
+// ADR 0119 S6: every platform_admin needs a Person (SF014, migration 0139): the create and -break-glass modes refuse
+// unless -person-id or -create-person is given. The HTTP API never creates a platform_admin except through an
+// approved platform_invite four-eyes request.
 package main
 
 import (
@@ -53,6 +66,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/config"
@@ -79,8 +93,10 @@ func run() error {
 	createPerson := flag.Bool("create-person", false, "optional: create a new person cluster and link this platform_admin to it (mutually exclusive with -person-id)")
 	issueBootstrap := flag.Bool("issue-bootstrap", false, "issue a bootstrap enrolment token for an EXISTING active staff member with no active second factor (no account is created)")
 	tenantSlug := flag.String("tenant-slug", "", "with -issue-bootstrap: the tenant of a tenant staff member (omit for platform staff)")
-	operator := flag.String("operator", "", "who runs this job (name or ticket handle); recorded in the audit rows; required with -issue-bootstrap")
-	reason := flag.String("reason", "", "why (reason code or ticket); recorded in the audit rows; required with -issue-bootstrap")
+	operator := flag.String("operator", "", "who runs this job (name or ticket handle); recorded in the audit rows; required in every mode")
+	reason := flag.String("reason", "", "why (reason code or ticket); recorded in the audit rows; required in every mode")
+	breakGlass := flag.Bool("break-glass", false, "ADR 0119 section 11: create an additional platform_admin when no active platform admin with a usable second factor exists")
+	forceAdditional := flag.Bool("force-additional", false, "with -break-glass: proceed even though a usable platform admin exists")
 	flag.Parse()
 
 	if *email == "" {
@@ -95,10 +111,18 @@ func run() error {
 	if *tenantSlug != "" && !*issueBootstrap {
 		return fmt.Errorf("-tenant-slug applies only to -issue-bootstrap (seed-admin creates platform admins only)")
 	}
+	if *breakGlass && *issueBootstrap {
+		return fmt.Errorf("-break-glass and -issue-bootstrap are mutually exclusive")
+	}
+	if *forceAdditional && !*breakGlass {
+		return fmt.Errorf("-force-additional applies only to -break-glass")
+	}
 	// ADR 0119 S3 security review R4: the break-glass re-issue is a mutating
 	// administrative action, so it records who and why (CLAUDE.md audit rule).
+	// ADR 0119 S5 + S6 review fix SR-1: required in EVERY mode (a platform admin is never created without a named
+	// operator and reason).
 	op := operatorContext{Operator: *operator, Reason: *reason}
-	if err := op.validate(*issueBootstrap); err != nil {
+	if err := op.validate(true); err != nil {
 		return err
 	}
 
@@ -118,6 +142,10 @@ func run() error {
 	mfaStore, err := store.New(keys)
 	if err != nil {
 		return err
+	}
+	// ADR 0119 S6 (SF014): a platform_admin needs a Person.
+	if !*issueBootstrap && *personID == "" && !*createPerson {
+		return fmt.Errorf("a platform_admin requires a Person (ADR 0119 SF014): pass -person-id=<uuid> or -create-person")
 	}
 
 	var explicitPersonID uuid.UUID
@@ -160,6 +188,35 @@ func run() error {
 	var staff identity.StaffUser
 	var tok staffmfa.Token
 	err = pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		// Security re-review NR-3: the existence / usability checks below and the INSERT are one critical section.
+		// Both modes take the SF020 platform last-admin advisory lock first (transaction-scoped), so parallel runs
+		// serialise: the second re-checks after the first commits (READ COMMITTED: a fresh snapshot per statement).
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('sf:last_admin:platform'))`); err != nil {
+			return fmt.Errorf("take the platform admin lock: %w", err)
+		}
+		if !*breakGlass {
+			// ADR 0119 S5 + S6 review fix SR-1 / F1: the default mode bootstraps the FIRST platform admin only.
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM staff_users WHERE tenant_id IS NULL AND role = 'platform_admin')`).Scan(&exists); err != nil {
+				return err
+			}
+			if exists {
+				return errNotFirstAdmin
+			}
+		}
+		if *breakGlass {
+			// ADR 0119 section 11 step 2: refuse unless no active platform admin with a usable factor exists.
+			var usable int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM staff_users su
+				WHERE su.tenant_id IS NULL AND su.role = 'platform_admin' AND su.status = 'active'
+				  AND EXISTS (SELECT 1 FROM staff_mfa_factors f WHERE f.staff_user_id = su.id AND f.status = 'active' AND f.hard_locked_at IS NULL)`).
+				Scan(&usable); err != nil {
+				return err
+			}
+			if usable > 0 && !*forceAdditional {
+				return errBreakGlassNotNeeded
+			}
+		}
 		var resolvedPersonID *uuid.UUID
 		switch {
 		case *createPerson:
@@ -186,9 +243,21 @@ func run() error {
 			metadata["person_id"] = resolvedPersonID.String()
 			metadata["person_created"] = *createPerson
 		}
+		action, eventReason := "staff.platform_admin_bootstrapped", "initial_bootstrap"
+		if *breakGlass {
+			action, eventReason = "staff.break_glass_used", "break_glass"
+			metadata["force_additional"] = *forceAdditional
+		}
+		// ADR 0119 section 11 step 5 (and review fix SR-1 for the first bootstrap): the owner_provisioned lifecycle
+		// event (actor_type owner; reason break_glass or initial_bootstrap).
+		if _, err := tx.Exec(ctx, `INSERT INTO staff_lifecycle_events (staff_user_id, event, actor_type, before, after, reason_code)
+			VALUES ($1, 'owner_provisioned', 'owner', '{}'::jsonb, jsonb_build_object('status', 'active', 'role', 'platform_admin',
+				'staff_version', 1, 'person_linked', true), $2)`, staff.ID, eventReason); err != nil {
+			return fmt.Errorf("write the owner_provisioned lifecycle event: %w", err)
+		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			ActorType:  audit.ActorSystem,
-			Action:     "staff.platform_admin_bootstrapped",
+			Action:     action,
 			TargetType: "staff_user", TargetID: staff.ID.String(),
 			Outcome:  audit.OutcomeSuccess,
 			Metadata: metadata,
@@ -202,14 +271,28 @@ func run() error {
 		return fmt.Errorf("create platform admin: %w", err)
 	}
 
-	if staff.PersonID != nil {
-		fmt.Printf("seed-admin: created platform_admin %s (id: %s), linked to person %s\n", staff.Email, staff.ID, staff.PersonID)
-	} else {
-		fmt.Printf("seed-admin: created platform_admin %s (id: %s) - WARNING: no person_id set; this account cannot act as a four-eyes requester/approver on any control requiring resolved person linkage (e.g. Asset Registry) until remediated via POST /v1/admin/platform-staff/{staffID}/person-link\n", staff.Email, staff.ID)
-	}
+	fmt.Printf("seed-admin: created platform_admin %s (id: %s), linked to person %s\n", staff.Email, staff.ID, staff.PersonID)
 	printBootstrapToken(tok)
+	if *breakGlass {
+		// ADR 0119 section 11 step 6: the durable P1 alert, raised after the commit from the new admin's own platform
+		// session (the alerts RLS policy needs an existing platform principal). A failed raise is recorded by the
+		// alerting package as alerting.raise_failed; it does not undo the provisioning.
+		if err := alerting.RaisePostCommit(ctx, alerting.NewPlatformAdminRunner(pool, staff.ID), alerting.Alert{
+			Kind: alerting.KindStaffPlatformBreakGlassUsed, Discriminator: "break_glass:" + staff.ID.String(),
+			Attributes: map[string]alerting.AttrValue{"staff_id": staff.ID.String(), "operator": op.Operator, "reason": op.Reason,
+				"force_additional": *forceAdditional},
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "seed-admin: WARNING: the staff.platform_break_glass_used alert could not be raised:", err)
+		}
+	}
 	return nil
 }
+
+// errNotFirstAdmin: the default mode while a platform_admin row already exists (review fix SR-1 / F1).
+var errNotFirstAdmin = errors.New("refused: a platform_admin already exists; seed-admin creates only the FIRST platform admin - use the platform_invite four-eyes request, or -break-glass (audited, alerted) when no usable platform admin remains")
+
+// errBreakGlassNotNeeded: -break-glass while an active platform admin with a usable second factor exists.
+var errBreakGlassNotNeeded = errors.New("-break-glass refused: an active platform admin with a usable second factor exists; use the platform_invite four-eyes request, or pass -force-additional (audited, alerted) if that admin is compromised")
 
 // issueBootstrapToken issues the keyed bootstrap enrolment token in tx (which
 // is scoped to the staff member's tenant, or platform-scoped) and audits the
@@ -301,7 +384,7 @@ func (o operatorContext) validate(required bool) error {
 	for name, v := range map[string]string{"-operator": o.Operator, "-reason": o.Reason} {
 		if v == "" {
 			if required {
-				return fmt.Errorf("%s is required with -issue-bootstrap (recorded in the audit row)", name)
+				return fmt.Errorf("%s is required (recorded in the audit row)", name)
 			}
 			continue
 		}

@@ -5,6 +5,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"os"
 	"testing"
 	"time"
@@ -250,7 +251,11 @@ func TestStaffUser_PlatformAdminOnlyVisibleWithoutTenant(t *testing.T) {
 	var admin StaffUser
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		admin, err = CreateStaffUser(ctx, tx, uuid.Nil, "admin-"+suffix+"@platform.test", "hash", StaffRolePlatformAdmin, nil)
+		s56p, perr := staffsv.PersonIfRequired(ctx, tx, string(StaffRolePlatformAdmin)) // ADR 0119 S5: SF014
+		if perr != nil {
+			return perr
+		}
+		admin, err = CreateStaffUser(ctx, tx, uuid.Nil, "admin-"+suffix+"@platform.test", "hash", StaffRolePlatformAdmin, s56p)
 		return err
 	})
 	if err != nil {
@@ -292,7 +297,11 @@ func TestStaffUser_TenantScopedNotVisibleFromOtherTenant(t *testing.T) {
 	var staffA StaffUser
 	err := pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		staffA, err = CreateStaffUser(ctx, tx, tenantA.ID, "ta-"+suffix+"@acme.test", "hash", StaffRoleTenantAdmin, nil)
+		s56p, perr := staffsv.PersonIfRequired(ctx, tx, string(StaffRoleTenantAdmin)) // ADR 0119 S5: SF014
+		if perr != nil {
+			return perr
+		}
+		staffA, err = CreateStaffUser(ctx, tx, tenantA.ID, "ta-"+suffix+"@acme.test", "hash", StaffRoleTenantAdmin, s56p)
 		return err
 	})
 	if err != nil {
@@ -317,7 +326,9 @@ func TestCreateStaffUser_PlatformAdminMustBeTenantless(t *testing.T) {
 	// platform_admin must fail at the database level.
 	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, $4, $5)`,
+			// ADR 0119 S5: a (dangling) person_id so SF014 (a BEFORE trigger) passes and the CHECK under test is
+			// what refuses; the FK is checked only at the end of the statement, after the CHECK.
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, $4, $5, gen_random_uuid())`,
 			uuid.New(), tenant.ID, "bad-admin@test.com", "hash", "platform_admin",
 		)
 		return err

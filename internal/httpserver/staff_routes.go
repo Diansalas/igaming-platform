@@ -173,7 +173,9 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 				})
 			}
 
-			passwordOK, err := auth.VerifyPassword(req.Password, staff.PasswordHash)
+			// ADR 0119 S5 + S6: an invited or offboarded account has no password (migration 0139); it pays the
+			// same Argon2 cost and fails as invalid credentials.
+			passwordOK, err := verifyStaffPassword(req.Password, staff)
 			if err != nil {
 				return err
 			}
@@ -237,7 +239,7 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 				outcome = outcomeMFALocked
 				return auditLocked(ctx, tx, r, requestID, ref, "password", true)
 			}
-			tok, err := m.store.IssueChallenge(ctx, tx, ref, store.ChallengeMFA, store.OriginLogin, staffVersionUnversioned, now)
+			tok, err := m.store.IssueChallenge(ctx, tx, ref, store.ChallengeMFA, store.OriginLogin, staff.StaffVersion, now)
 			if err != nil {
 				return err
 			}
@@ -273,6 +275,17 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 			writeStaffSecretJSON(w, http.StatusOK, challenge)
 		}
 	}
+}
+
+// verifyStaffPassword verifies password against the staff member's hash. An
+// account with no password (invited or offboarded, ADR 0119 S5 + S6) pays the
+// dummy Argon2 verification and is always refused.
+func verifyStaffPassword(password string, s identity.StaffUser) (bool, error) {
+	if !s.HasPassword() {
+		_, _ = auth.VerifyPassword(password, auth.DummyPasswordHash)
+		return false, nil
+	}
+	return auth.VerifyPassword(password, s.PasswordHash)
 }
 
 // recordAttempt is a small shared wrapper converting a possibly-nil

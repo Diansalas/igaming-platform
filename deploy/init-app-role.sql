@@ -714,3 +714,26 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ADR 0119 S5 + S6 (migration 0139, staff lifecycle): least-privilege, re-asserted on every run, mirroring migration
+-- 0139's own grant block. The blanket backfill GRANT above re-grants table-level UPDATE on staff_users; this narrows it
+-- to the columns the application writes (status, role, password_hash, status_changed_at, offboarded_at, person_id,
+-- display_name, updated_at) - NEVER staff_version (set only by the SF012 trigger), id, tenant_id, email, created_at or
+-- invited_by. The lifecycle tables: SELECT and INSERT (the four-eyes requests: UPDATE of the state columns only); no
+-- DELETE or TRUNCATE. Applied only once 0139 exists (the to_regclass test). No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.staff_lifecycle_events') IS NOT NULL THEN
+        EXECUTE 'REVOKE UPDATE ON staff_users FROM igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, role, password_hash, status_changed_at, offboarded_at, person_id, display_name, updated_at) ON staff_users TO igaming_runtime';
+        EXECUTE 'REVOKE DELETE ON staff_users FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON staff_lifecycle_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_lifecycle_requests TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (state, decided_at, executing_txid, target_staff_id) ON staff_lifecycle_requests TO igaming_runtime';
+        EXECUTE 'REVOKE ALL ON staff_lifecycle_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_lifecycle_approvals TO igaming_runtime';
+        EXECUTE 'REVOKE ALL ON staff_lifecycle_events FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_lifecycle_events TO igaming_runtime';
+    END IF;
+END
+$$;

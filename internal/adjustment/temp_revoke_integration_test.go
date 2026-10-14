@@ -95,7 +95,7 @@ func shadowK2Tables(rt *db.Pool, w *world, x, y uuid.UUID) error {
 			c     string
 		}{{x, px, "ledger_adjustment:initiate"}, {y, py, "ledger_adjustment:approve"}} {
 			req := uuid.New()
-			if _, err := tx.Exec(ctx, `INSERT INTO pg_temp.staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,$2,$3,'x','finance','active',$4)`,
+			if _, err := tx.Exec(ctx, `INSERT INTO pg_temp.staff_users (id, tenant_id, email, password_hash, role, status, person_id, staff_version) VALUES ($1,$2,$3,'x','finance','active',$4,1)`, /* ADR 0119 S5: CREATE TABLE AS copies no default */
 				s.id, w.Tenant, "forged-"+s.id.String()+"@x", s.p); err != nil {
 				return err
 			}
@@ -302,7 +302,7 @@ func forgeOnSessionPool(t *testing.T, rt1 *db.Pool, w *world, x, y, causation uu
 		c     string
 	}{{x, px, "ledger_adjustment:initiate"}, {y, py, "ledger_adjustment:approve"}} {
 		req := uuid.New()
-		if _, err := conn.Exec(ctx, `INSERT INTO pg_temp.staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,$2,$3,'x','finance','active',$4)`,
+		if _, err := conn.Exec(ctx, `INSERT INTO pg_temp.staff_users (id, tenant_id, email, password_hash, role, status, person_id, staff_version) VALUES ($1,$2,$3,'x','finance','active',$4,1)`, /* ADR 0119 S5: CREATE TABLE AS copies no default */
 			s.id, w.Tenant, "forged-"+s.id.String()+"@x", s.p); err != nil {
 			conn.Release()
 			return err

@@ -68,6 +68,11 @@ var a18FencedTables = map[string]bool{
 	"staff_mfa_recovery_codes": true,
 	"staff_auth_challenges":    true,
 	"staff_enrolment_tokens":   true,
+	// ADR 0119 S5 + S6 (migration 0139): staff_lifecycle_events copies the same dual-scope SELECT / INSERT arms and
+	// replicates the same eight fences plus player_scope_fence and platform_service_fence (the 0137 strict form).
+	// The four-eyes tables (staff_lifecycle_requests / _approvals) have no NULL-tenant arm: their policies require
+	// app.platform_admin_principal_id and are not flagged.
+	"staff_lifecycle_events": true,
 }
 
 // a18AdditionallyFencedTables are tables whose SELECT NULL arm was found

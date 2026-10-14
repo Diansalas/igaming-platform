@@ -83,9 +83,22 @@ var staffIDFieldAllowlist = map[string]string{
 	"exposureLimitResponse.CreatedByActorID":       "RequireTenantScope; sportsbook_exposure_limit:manage is risk_manager only, platform_admin holds neither manage nor read",
 
 	// --- staff provisioning: the person link of a TENANT staff user, returned to its creator / linker ---
-	"createStaffRequest.PersonID":     "request body (input)",
-	"staffResponse.PersonID":          "the person link of the tenant staff user just created in the caller's own tenant (PermStaffManage); not a platform staff id",
-	"linkStaffPersonRequest.PersonID": "request body (input)",
+	// --- ADR 0119 S5 + S6 staff lifecycle (staff_lifecycle_routes.go) ---
+	"Deps.StaffBackofficeBaseURL":                       "dependency wiring (a URL), never marshalled to a response",
+	"staffInvitationRequest.PersonID":                   "request body: caller-supplied input",
+	"platformStaffLifecycleRequestCreate.TargetStaffID": "request body: caller-supplied input (platform_staff:govern, platform_admin only)",
+	"platformStaffLifecycleRequestCreate.PersonID":      "request body: caller-supplied input",
+	"staffDirectoryListDTO.Staff":                       "the directory of the caller's OWN scope (a tenant caller lists its own tenant only; platform staff are platform-caller only); the entries are the listed staff themselves, not actors",
+	"staffLifecycleResultDTO.Staff":                     "the target of the caller's own action, in the caller's own scope (same as the directory)",
+	"staffLifecycleEventDTO.StaffUserID":                "the subject of the history (the path's staff member, in the caller's own scope), not an actor",
+	"staffLifecycleEventDTO.Actor":                      "nested staffLifecycleEventActorDTO whose staff_id IS a staffRef built with staffViewer.ref (platform actors hidden from tenant viewers)",
+	"platformStaffLifecycleRequestDTO.TargetStaffID":    "platform_staff:govern is held by platform_admin only (TestADR0119_StaffLifecycleRoleMatrix)",
+	"platformStaffLifecycleRequestDTO.RequestedBy":      "platform_staff:govern is held by platform_admin only",
+	// ADR 0119 S5 + S6 review fix SR-3: the invitee Person and the live platform accounts already linked to it, on the
+	// same platform-only four-eyes routes.
+	"platformStaffLifecycleRequestDTO.InvitePersonID": "a Person id (not a staff id) on the platform_staff:govern routes (platform_admin only)",
+	"State.StaffVersion":                              "a version counter, not an id",
+	"linkStaffPersonRequest.PersonID":                 "request body (input)",
 }
 
 // finding is one violation of the pin.

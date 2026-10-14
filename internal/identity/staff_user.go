@@ -87,6 +87,43 @@ type StaffUser struct {
 	// Written only through UpdateStaffDisplayName, itself only reachable
 	// from the audited endpoints in internal/httpserver.
 	DisplayName *string
+	// StaffVersion is staff_users.staff_version (ADR 0119 s7.1, migration
+	// 0139): bumped by the SF012 trigger on every role, status,
+	// password_hash or person_id change, and carried as the `sv` claim.
+	StaffVersion int64
+}
+
+// Staff statuses (ADR 0119 s10.1, migration 0139's staff_users_status_check).
+const (
+	StaffStatusInvited    = "invited"
+	StaffStatusActive     = "active"
+	StaffStatusSuspended  = "suspended"
+	StaffStatusOffboarded = "offboarded"
+)
+
+// HasPassword reports whether the staff member has a password: an invited or
+// offboarded account has none (migration 0139). A login or redemption for such
+// an account pays the dummy Argon2 cost and fails as invalid credentials.
+func (s StaffUser) HasPassword() bool { return s.PasswordHash != "" }
+
+// staffUserColumns is the select list scanStaffUser reads. password_hash is
+// NULL for an invited or offboarded account (migration 0139).
+const staffUserColumns = `id, tenant_id, email, password_hash, role, status, person_id, staff_version`
+
+func scanStaffUser(row pgx.Row) (StaffUser, error) {
+	var s StaffUser
+	var tenantID *uuid.UUID
+	var hash *string
+	if err := row.Scan(&s.ID, &tenantID, &s.Email, &hash, &s.Role, &s.Status, &s.PersonID, &s.StaffVersion); err != nil {
+		return StaffUser{}, err
+	}
+	if tenantID != nil {
+		s.TenantID = *tenantID
+	}
+	if hash != nil {
+		s.PasswordHash = *hash
+	}
+	return s, nil
 }
 
 // GetStaffUserByEmail looks up a staff user. If tenantID is uuid.Nil, tx
@@ -96,20 +133,15 @@ type StaffUser struct {
 // based on whether a tenant_slug was supplied at the login endpoint.
 func GetStaffUserByEmail(ctx context.Context, tx pgx.Tx, email string) (StaffUser, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	var s StaffUser
-	var tenantID *uuid.UUID
-	err := tx.QueryRow(ctx,
-		`SELECT id, tenant_id, email, password_hash, role, status, person_id FROM staff_users WHERE email = $1`,
-		email,
-	).Scan(&s.ID, &tenantID, &s.Email, &s.PasswordHash, &s.Role, &s.Status, &s.PersonID)
+	// ADR 0119 S5 + S6 review fix F2: an offboarded row keeps its email as history and a re-invited live row may share
+	// it (at most one non-offboarded row per scope and email, index staff_users_live_email): the live row wins.
+	s, err := scanStaffUser(tx.QueryRow(ctx, `SELECT `+staffUserColumns+` FROM staff_users WHERE email = $1
+		ORDER BY (status = 'offboarded'), created_at DESC, id LIMIT 1`, email))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StaffUser{}, ErrNotFound
 	}
 	if err != nil {
 		return StaffUser{}, fmt.Errorf("identity: get staff user: %w", err)
-	}
-	if tenantID != nil {
-		s.TenantID = *tenantID
 	}
 	return s, nil
 }
@@ -121,20 +153,12 @@ func GetStaffUserByEmail(ctx context.Context, tx pgx.Tx, email string) (StaffUse
 // minting a new access token, rather than trusting whatever the previous
 // token claimed.
 func GetStaffUserByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (StaffUser, error) {
-	var s StaffUser
-	var tenantID *uuid.UUID
-	err := tx.QueryRow(ctx,
-		`SELECT id, tenant_id, email, password_hash, role, status, person_id FROM staff_users WHERE id = $1`,
-		id,
-	).Scan(&s.ID, &tenantID, &s.Email, &s.PasswordHash, &s.Role, &s.Status, &s.PersonID)
+	s, err := scanStaffUser(tx.QueryRow(ctx, `SELECT `+staffUserColumns+` FROM staff_users WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StaffUser{}, ErrNotFound
 	}
 	if err != nil {
 		return StaffUser{}, fmt.Errorf("identity: get staff user by id: %w", err)
-	}
-	if tenantID != nil {
-		s.TenantID = *tenantID
 	}
 	return s, nil
 }
@@ -283,7 +307,7 @@ func UpdateStaffDisplayName(ctx context.Context, tx pgx.Tx, staffID uuid.UUID, d
 
 func CreateStaffUser(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, email, passwordHash string, role StaffRole, personID *uuid.UUID) (StaffUser, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	s := StaffUser{ID: uuid.New(), TenantID: tenantID, Email: email, PasswordHash: passwordHash, Role: role, Status: "active", PersonID: personID}
+	s := StaffUser{ID: uuid.New(), TenantID: tenantID, Email: email, PasswordHash: passwordHash, Role: role, Status: StaffStatusActive, PersonID: personID, StaffVersion: 1}
 
 	var tid *uuid.UUID
 	if tenantID != uuid.Nil {

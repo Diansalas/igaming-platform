@@ -147,7 +147,10 @@ type Call struct {
 	// ActorRole is the verified token's role (ADR 0119 S4b section 9.5: the
 	// A8 statement re-asserts the actor's row against it).
 	ActorRole string
-	Meta      Meta
+	// ActorStaffVersion is the verified token's `sv` claim (ADR 0119 S5 + S6:
+	// the A8 re-assertion also compares staff_version).
+	ActorStaffVersion int64
+	Meta              Meta
 	// Proofs signs the SIGNED-ACTOR-PROOF (ADR 0110, migration 0120) for this
 	// call's governed writes. nil means the process-wide actorproof.Default().
 	Proofs *actorproof.Issuer
@@ -209,14 +212,14 @@ func (s *Service) runSession(ctx context.Context, target Target, requestID uuid.
 	}
 	if tc.TenantID == uuid.Nil {
 		return s.pool.WithPlatformActingInTenant(ctx, subject, target.tenantID, requestID, OperationKind, func(ctx context.Context, tx pgx.Tx) error {
-			return fn(ctx, tx, Call{ActorID: subject, TenantID: target.tenantID, Scope: ScopePlatformActing, ActorRole: tc.Role, Meta: meta, Proofs: s.proofs})
+			return fn(ctx, tx, Call{ActorID: subject, TenantID: target.tenantID, Scope: ScopePlatformActing, ActorRole: tc.Role, ActorStaffVersion: tc.StaffVersion, Meta: meta, Proofs: s.proofs})
 		})
 	}
 	if tc.TenantID != target.tenantID {
 		return ErrForeignTenant
 	}
 	return s.pool.WithPrincipalScope(ctx, tc.TenantID, subject, func(ctx context.Context, tx pgx.Tx) error {
-		return fn(ctx, tx, Call{ActorID: subject, TenantID: tc.TenantID, Scope: ScopeTenant, ActorRole: tc.Role, Meta: meta, Proofs: s.proofs})
+		return fn(ctx, tx, Call{ActorID: subject, TenantID: tc.TenantID, Scope: ScopeTenant, ActorRole: tc.Role, ActorStaffVersion: tc.StaffVersion, Meta: meta, Proofs: s.proofs})
 	})
 }
 

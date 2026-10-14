@@ -28,6 +28,16 @@ const (
 	PermAuditRead     Permission = "audit:read"
 	PermStaffManage   Permission = "staff:manage"
 
+	// PermStaffRead (ADR 0119 S5 + S6, section 14.3) is the staff directory and lifecycle history:
+	// platform_admin (any tenant, and platform staff), tenant_admin and compliance (their own tenant only; a tenant
+	// never sees platform staff). Read-only.
+	PermStaffRead Permission = "staff:read"
+	// PermPlatformStaffGovern (ADR 0119 S5 + S6, sections 10.4 and 14.3) is the platform-staff four-eyes: request,
+	// approve, reject, cancel a platform_invite / platform_reactivate / platform_mfa_reset. A static governance
+	// permission in the ADR 0099 section 3.2 style: platform_admin ONLY, never in a tenant role, never grantable
+	// through K1 (pinned by TestADR0119_StaffLifecycleRoleMatrix).
+	PermPlatformStaffGovern Permission = "platform_staff:govern"
+
 	// PermWithdrawalReview/Approve/Reject/Submit gate the four distinct
 	// withdrawal-governance capabilities the Stage 3D directive requires
 	// be separable (business decision #4/#5: "staff-management authority
@@ -765,6 +775,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	RolePlatformAdmin: permSet(
 		PermTenantRead, PermTenantWrite, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
+		PermStaffRead, PermPlatformStaffGovern, // ADR 0119 S5 + S6
 		PermCasinoCatalogueManage,
 		// Stage 9.2 (ADR 0081 §5.2): the sole grantee of
 		// PermCasinoCatalogueGovern. See that permission's own doc comment.
@@ -877,6 +888,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	RoleTenantAdmin: permSet(
 		PermTenantRead, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
+		PermStaffRead, // ADR 0119 S5 + S6: own tenant only (the routes enforce the tenant)
 		PermProviderConfigWrite, PermWithdrawalPolicyWrite, PermCasinoConfigWrite,
 		// PermRGRestrictionRead only, deliberately NOT PermRGRestrictionWrite -
 		// Stage 4D-RG's own explicit instruction (mirroring Stage 3D business
@@ -974,6 +986,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	),
 	RoleCompliance: permSet(
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead,
+		PermStaffRead, // ADR 0119 S5 + S6: own tenant's directory and history, read-only
 		// ADR 0112 slice 6 (b): read-only visibility of its OWN tenant record and brands, so a
 		// compliance operator can reach the launch panel (brand discovery). The tenant list stays
 		// platform-only (checked in the handler) and the routes enforce canActOnTenant. No write.

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,11 @@ func seedComplianceStaff(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
 	t.Helper()
 	var staffID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		staff, err := identity.CreateStaffUser(ctx, tx, f.tenantID, "reviewer-"+uuid.NewString()+"@example.com", "hash", identity.StaffRoleCompliance, nil)
+		s56p, perr := staffsv.PersonIfRequired(ctx, tx, string(identity.StaffRoleCompliance)) // ADR 0119 S5: SF014
+		if perr != nil {
+			return perr
+		}
+		staff, err := identity.CreateStaffUser(ctx, tx, f.tenantID, "reviewer-"+uuid.NewString()+"@example.com", "hash", identity.StaffRoleCompliance, s56p)
 		staffID = staff.ID
 		return err
 	})

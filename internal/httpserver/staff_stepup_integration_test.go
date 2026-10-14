@@ -157,11 +157,12 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 			counts["read"]++
 		}
 	}
-	// Non-vacuity: the classified set is the golden table's (S4a + S4b).
-	// 110 mutating routes: 46 critical, 22 financial, 5 classifier routes, 37 none; 71 reads (S1b adds GET /v1/admin/alerts/{alertID}).
-	if counts["critical"] != 46 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// Non-vacuity: the classified set is the golden table's (S4a + S4b + S5/S6).
+	// 125 mutating routes: 59 critical, 22 financial, 5 classifier routes, 39 none; 79 reads (S1b adds GET /v1/admin/alerts/{alertID}). ADR 0119 S5 + S6: +14
+	// critical lifecycle routes, -1 (the legacy critical create route), +2 none (four-eyes reject / cancel), +8 reads.
+	if counts["critical"] != 59 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 37 || counts["read"] != 71 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 39 || counts["read"] != 79 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {
@@ -390,7 +391,7 @@ func TestStepUp_ForgedAndIncoherentClaims(t *testing.T) {
 	_, _, sid := w.agedSession(s, 11*time.Minute)
 	now := time.Now()
 	sign := func(mut func(*auth.Claims)) string {
-		sv := int64(0)
+		sv := authtest.StaffVersion(t, w.owner, s.ref.StaffID, s.ref.TenantID) // ADR 0119 S5 + S6: the row's staff_version
 		c := auth.Claims{
 			RegisteredClaims: jwt.RegisteredClaims{Subject: s.ref.StaffID.String(), Issuer: "platform-api-test",
 				Audience: jwt.ClaimStrings{"platform-api-test"}, IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(10 * time.Minute)),

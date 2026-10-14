@@ -90,6 +90,8 @@ var revealAllowlist = map[string]bool{
 	"internal/httpserver/staff_auth_secrets.go:newEnrolStartResponse:RevealForEnrolment": true,
 	"internal/httpserver/staff_auth_secrets.go:newEnrolConfirmResponse:RevealForDisplay": true,
 	"cmd/seed-admin/main.go:printBootstrapToken:RevealForDelivery":                       true,
+	// ADR 0119 S5 + S6: the invite / MFA-reset email body (delivered post-commit through email.Provider, never logged).
+	"internal/stafflifecycle/service.go:compose:RevealForDelivery": true,
 }
 
 var revealNames = map[string]bool{"RevealForEnrolment": true, "RevealForDisplay": true, "RevealForDelivery": true}
@@ -208,7 +210,10 @@ func TestStatic_StaffAuthAuditMetadataKeys(t *testing.T) {
 	files := []string{"internal/httpserver/staff_auth_handlers.go", "internal/httpserver/staff_routes.go", "internal/httpserver/staff_mfa.go",
 		"internal/auth/staff_session.go", "cmd/seed-admin/main.go",
 		// ADR 0119 S4b: the step-up and recovery-code regeneration handlers and the step-up gate.
-		"internal/httpserver/staff_stepup_handlers.go", "internal/httpserver/staff_stepup.go"}
+		"internal/httpserver/staff_stepup_handlers.go", "internal/httpserver/staff_stepup.go",
+		// ADR 0119 S5 + S6 (section 5.4): the lifecycle domain, its routes and the invitation acceptance.
+		"internal/stafflifecycle/service.go", "internal/stafflifecycle/actions.go", "internal/stafflifecycle/platform.go",
+		"internal/httpserver/staff_lifecycle_routes.go", "internal/httpserver/staff_invitation_accept.go"}
 	srcs := repoGoSources(t)
 	scan := func(path, src string) []string {
 		f, err := parser.ParseFile(token.NewFileSet(), path, src, 0)

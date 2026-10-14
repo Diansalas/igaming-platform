@@ -38,6 +38,11 @@ type Context struct {
 	// Subject is the authenticated principal id (player_account id,
 	// staff_user id, or service id) from the JWT "sub" claim.
 	Subject string
+	// StaffVersion is a verified staff token's `sv` claim (ADR 0119 s7.1):
+	// the staff_users.staff_version the token was minted under. The governed
+	// transactions' in-transaction re-assertion (ADR 0119 s9.5) compares it,
+	// with Role, against the actor's row. Zero for a non-staff principal.
+	StaffVersion int64
 }
 
 // WithContext attaches a resolved tenant Context. Only internal/auth's

@@ -91,7 +91,7 @@ func TestStepUp_WithdrawalApprove_EligibilityHoldsTheApproverRowForShare(t *test
 	if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tn.ID.String()); err != nil {
 		t.Fatal(err)
 	}
-	linked, active, err := approverEligibilityCheckLocked(ctx, tx, staff.ID, string(auth.RoleFinance))(staff.ID)
+	linked, active, err := approverEligibilityCheckLocked(ctx, tx, staff.ID, string(auth.RoleFinance), staff.StaffVersion)(staff.ID)
 	if err != nil || !linked || !active {
 		t.Fatalf("eligibility: %v %v %v", linked, active, err)
 	}

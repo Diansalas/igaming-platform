@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"os"
 	"strings"
 	"testing"
@@ -159,10 +160,14 @@ func seedPlatformAdminRaw(t *testing.T, pool *db.Pool, personID *uuid.UUID, stat
 	t.Helper()
 	id := uuid.New()
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status)
-			 VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, $4)`,
-			id, id.String()+"@platform.example.com", personID, status)
+		// ADR 0119 S5: an invited row carries no password (SF010).
+		const q = `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status)
+			 VALUES ($1, NULL, $2, CASE WHEN $4::text = 'invited' THEN NULL ELSE 'x' END, 'platform_admin', $3, $4)`
+		if personID == nil {
+			// A legacy (pre-0139) unlinked platform admin: SF014 now refuses creating one.
+			return staffsv.InsertLegacyUnlinkedStaff(ctx, tx, q, id, id.String()+"@platform.example.com", personID, status)
+		}
+		_, err := tx.Exec(ctx, q, id, id.String()+"@platform.example.com", personID, status)
 		return err
 	})
 	if err != nil {
@@ -176,8 +181,8 @@ func seedTenantStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID) uuid.UUID 
 	id := uuid.New()
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role)
-			 VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+			`WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id)
+			 VALUES ($1, $2, $3, 'x', 'tenant_admin', (SELECT id FROM s56p))`,
 			id, tenantID, id.String()+"@tenant.example.com")
 		return err
 	})
@@ -1719,7 +1724,7 @@ func TestDualControl_SuspendedApproverIsRefused(t *testing.T) {
 	pool := testPool(t)
 	requester := seedPlatformAdmin(t, pool, nil)
 	suspendedPerson := seedPerson(t, pool)
-	suspended := seedPlatformAdminRaw(t, pool, &suspendedPerson, "suspended")
+	suspended := seedPlatformAdminRaw(t, pool, &suspendedPerson, "invited") // ADR 0119 S5: created invited or active only (SF010); non-active is what is refused
 
 	code := newAssetCode()
 	var reqID uuid.UUID
@@ -1764,7 +1769,7 @@ func TestDualControl_SuspendedApproverIsRefused(t *testing.T) {
 func TestDualControl_SuspendedRequesterIsRefused(t *testing.T) {
 	pool := testPool(t)
 	person := seedPerson(t, pool)
-	suspended := seedPlatformAdminRaw(t, pool, &person, "suspended")
+	suspended := seedPlatformAdminRaw(t, pool, &person, "invited") // ADR 0119 S5: created invited or active only (SF010); non-active is what is refused
 
 	err := pool.WithPlatformAdmin(context.Background(), suspended, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{

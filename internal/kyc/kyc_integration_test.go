@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"os"
 	"testing"
 	"time"
@@ -150,7 +151,11 @@ func TestKYCDocuments_CoreFieldsAreImmutable(t *testing.T) {
 	// must still succeed - the trigger allows exactly this shape.
 	var staffID uuid.UUID
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		staff, err := identity.CreateStaffUser(ctx, tx, f.tenantID, "reviewer-"+uuid.NewString()+"@example.com", "hash", identity.StaffRoleCompliance, nil)
+		s56p, perr := staffsv.PersonIfRequired(ctx, tx, string(identity.StaffRoleCompliance)) // ADR 0119 S5: SF014
+		if perr != nil {
+			return perr
+		}
+		staff, err := identity.CreateStaffUser(ctx, tx, f.tenantID, "reviewer-"+uuid.NewString()+"@example.com", "hash", identity.StaffRoleCompliance, s56p)
 		staffID = staff.ID
 		return err
 	})
@@ -379,7 +384,11 @@ func TestKYC_ActionsProduceAuditRecords(t *testing.T) {
 
 	var staffID uuid.UUID
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		staff, err := identity.CreateStaffUser(ctx, tx, f.tenantID, "reviewer-"+uuid.NewString()+"@example.com", "hash", identity.StaffRoleCompliance, nil)
+		s56p, perr := staffsv.PersonIfRequired(ctx, tx, string(identity.StaffRoleCompliance)) // ADR 0119 S5: SF014
+		if perr != nil {
+			return perr
+		}
+		staff, err := identity.CreateStaffUser(ctx, tx, f.tenantID, "reviewer-"+uuid.NewString()+"@example.com", "hash", identity.StaffRoleCompliance, s56p)
 		staffID = staff.ID
 		return err
 	})

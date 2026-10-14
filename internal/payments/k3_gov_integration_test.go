@@ -27,12 +27,13 @@ func (w *k3World) setStaff(id uuid.UUID, column, value string) {
 	})
 }
 
-// mkUnlinkedStaff inserts a tenant staff member with NO linked Person.
+// mkUnlinkedStaff inserts a tenant staff member with NO linked Person. ADR 0119 S5: an unlinked finance row can no
+// longer exist (SF014), so the unlinked actor holds a role that may exist without a Person.
 func (w *k3World) mkUnlinkedStaff() k3Staff {
 	w.t.Helper()
-	s := k3Staff{ID: uuid.New(), TenantID: w.f.tenantID, Role: "finance"}
+	s := k3Staff{ID: uuid.New(), TenantID: w.f.tenantID, Role: "support"}
 	w.tx(func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', 'finance', 'active')`,
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, 'x', 'support', 'active')`,
 			s.ID, w.f.tenantID, "k3-np-"+s.ID.String()+"@test.invalid")
 		return err
 	})

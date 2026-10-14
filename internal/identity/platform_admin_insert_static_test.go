@@ -96,6 +96,11 @@ func TestA14b_OnlySeedAdminReferencesPlatformAdminRole(t *testing.T) {
 	allowed := map[string]bool{
 		filepath.Join(root, "internal", "identity", "staff_user.go"): true,
 		filepath.Join(root, "cmd", "seed-admin", "main.go"):          true,
+		// ADR 0119 S5 + S6: the ONLY HTTP path that creates a platform_admin is the executed platform_invite
+		// four-eyes request (platform.go, proof-bound requests / approvals, SF031 / SF032); actions.go names the
+		// role in the last-admin pre-check query only (no INSERT).
+		filepath.Join(root, "internal", "stafflifecycle", "platform.go"): true,
+		filepath.Join(root, "internal", "stafflifecycle", "actions.go"):  true,
 	}
 	// internal/testsupport/* and internal/providercred/providercredtest
 	// are allow-listed NON-test packages (ADR 0099 §9) whose helpers may

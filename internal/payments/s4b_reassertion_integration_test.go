@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 )
 
 func suspendStaff(t *testing.T, pool *db.Pool, s k3Staff) error {
@@ -27,9 +28,21 @@ func suspendStaff(t *testing.T, pool *db.Pool, s k3Staff) error {
 		return err
 	}
 	if s.TenantID == uuid.Nil {
+		if err := plantSparePlatformAdmin(pool); err != nil {
+			return err
+		}
 		return pool.WithoutTenant(context.Background(), fn)
 	}
 	return pool.WithTenant(context.Background(), s.TenantID, fn)
+}
+
+// plantSparePlatformAdmin commits another active, enrolled platform admin first: ADR 0119 S5 + S6 (migration 0139)
+// SF020 refuses removing a platform admin while no other usable one exists.
+func plantSparePlatformAdmin(pool *db.Pool) error {
+	return pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := staffsv.PlantEnrolledPlatformAdmin(ctx, tx)
+		return err
+	})
 }
 
 func TestS4b_K3_ActorSuspendedBeforeA8_IsRefusedAndNothingWritten(t *testing.T) {

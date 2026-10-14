@@ -229,11 +229,28 @@ func TestStatic_SQLSTATEClassSF_OnlyS2Codes(t *testing.T) {
 	allowed := map[string]bool{"SF001": true, "SF002": true, "SF003": true, "SF004": true, "SF005": true, "SF006": true, "SF097": true, "SF098": true, "SF099": true}
 	// ADR 0119 S3 (migration 0138, extended deliberately): exactly these codes, in that migration only.
 	allowed0138 := map[string]bool{"'SF008'": true, "'SF040'": true, "'SF041'": true, "'SF042'": true, "'SF099'": true}
+	// ADR 0119 S5 + S6 (migration 0139, extended deliberately): exactly these codes, in that migration and in
+	// internal/stafflifecycle (its SQLSTATE-to-error mapping) only. SF030 and SF007 stay reserved for S-H1.
+	allowed0139 := map[string]bool{"SF010": true, "SF011": true, "SF012": true, "SF013": true, "SF014": true, "SF020": true,
+		"SF021": true, "SF031": true, "SF032": true, "SF033": true, "SF094": true, "SF095": true, "SF099": true}
+	stripQuotes := func(m string) string { return strings.Trim(m, "'\"") }
 	var offenders []string
 	scan := func(dir, glob string) {
 		files, _ := filepath.Glob(filepath.Join(root, dir, glob))
 		for _, f := range files {
 			if strings.Contains(f, "0137_staff_mfa") {
+				continue
+			}
+			if strings.Contains(f, "0139_staff_lifecycle") {
+				b, err := os.ReadFile(f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, m := range regexp.MustCompile(`'SF\d{3}'|"SF\d{3}"`).FindAllString(string(b), -1) {
+					if !allowed0139[stripQuotes(m)] {
+						offenders = append(offenders, f+": "+m)
+					}
+				}
 				continue
 			}
 			if strings.Contains(f, "0138_staff_session_cutover") {
@@ -266,6 +283,9 @@ func TestStatic_SQLSTATEClassSF_OnlyS2Codes(t *testing.T) {
 			}
 			b, _ := os.ReadFile(f)
 			for _, m := range regexp.MustCompile(`"SF\d{3}"`).FindAllString(string(b), -1) {
+				if strings.Contains(f, "internal/stafflifecycle/") && allowed0139[stripQuotes(m)] {
+					continue
+				}
 				offenders = append(offenders, f+": "+m)
 			}
 		}

@@ -5,6 +5,7 @@ package launchgov_test
 import (
 	"context"
 	"errors"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"strings"
 	"testing"
 	"time"
@@ -374,10 +375,10 @@ func TestDecide_ApproverWithoutPerson_FailsClosed(t *testing.T) {
 	seen := w.seen(r)
 
 	id := uuid.New()
+	// ADR 0119 S5: SF014 refuses creating such a row; a LEGACY (pre-0139, not backfilled) one is reproduced.
 	if err := w.owner.WithPlatformAdmin(ctx, w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id)
+		return staffsv.InsertLegacyUnlinkedStaff(ctx, tx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id)
 			VALUES ($1, NULL, $2, '!lgov-not-a-login', 'platform_admin', NULL)`, id, "lgov-noperson-"+id.String()+"@fixture.invalid")
-		return err
 	}); err != nil {
 		t.Fatal(err)
 	}

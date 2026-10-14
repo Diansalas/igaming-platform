@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"net/url"
 	"os"
 	"sync"
@@ -181,10 +182,10 @@ func seedUnlinkedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.U
 	t.Helper()
 	id := uuid.New()
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+		// ADR 0119 S5: a legacy (pre-0139) unlinked platform admin; SF014 now refuses creating one.
+		return staffsv.InsertLegacyUnlinkedStaff(ctx, tx,
 			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', NULL, 'active')`,
 			id, "platform-admin-unlinked-"+id.String()+"@test.example")
-		return err
 	})
 	if err != nil {
 		t.Fatalf("seed unlinked platform admin staff principal: %v", err)
@@ -206,7 +207,10 @@ func seedSuspendedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, 'suspended')`,
+			// ADR 0119 S5: a row is created invited or active only (SF010), and SF020 refuses suspending a platform admin
+			// while no other enrolled one exists; the eligibility predicates test status = 'active', so the
+			// non-active (invited, password-less) row exercises the same refusal.
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, NULL, 'platform_admin', $3, 'invited')`,
 			id, "platform-admin-suspended-"+id.String()+"@test.example", personID)
 		return err
 	})

@@ -10,6 +10,7 @@ package sportsbook
 import (
 	"context"
 	"errors"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -27,7 +28,11 @@ func seedActiveStaffWithRole(t *testing.T, pool *db.Pool, tenantID uuid.UUID, ro
 	t.Helper()
 	var id uuid.UUID
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		s, err := identity.CreateStaffUser(ctx, tx, tenantID, "wrong-role-"+uuid.NewString()[:8]+"@example.test", "x", role, nil)
+		s56p, perr := staffsv.PersonIfRequired(ctx, tx, string(role)) // ADR 0119 S5: SF014
+		if perr != nil {
+			return perr
+		}
+		s, err := identity.CreateStaffUser(ctx, tx, tenantID, "wrong-role-"+uuid.NewString()[:8]+"@example.test", "x", role, s56p)
 		id = s.ID
 		return err
 	})

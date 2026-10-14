@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -224,6 +225,11 @@ func scratchPoolThroughDir(t *testing.T, prefix string, version int64) (*db.Pool
 	}
 	if len(applied) == 0 || applied[len(applied)-1] != version {
 		t.Fatalf("expected %d last, got %v", version, applied)
+	}
+	if version >= 120 {
+		// ADR 0110 (migration 0120): a scratch schema with the actor-proof guard needs this process's signing key
+		// (ADR 0119 S5 + S6 moved two K2 scratch tests from 113 to 151, where the executor reads staff_version).
+		prooftest.InstallVia(t, pool.Raw(), url)
 	}
 	return pool, dir
 }

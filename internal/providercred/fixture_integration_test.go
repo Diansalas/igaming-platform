@@ -32,6 +32,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -108,8 +109,15 @@ type fx struct {
 	approver   uuid.UUID // platform admin, Person B
 	approver2  uuid.UUID // platform admin, Person C
 	samePerson uuid.UUID // platform admin, Person A (second account)
-	unlinked   uuid.UUID // platform admin without a Person
-	suspended  uuid.UUID // platform admin, Person D, suspended
+	// unlinked is a platform admin without a Person. ADR 0119 S5 (migration 0139, SF014): such a row can no longer be
+	// created through the runtime role, but 0139 does not backfill, so a LEGACY one can still exist; it is uuid.Nil
+	// until legacyUnlinkedAdmin builds one (as the owner, SF014 disabled for that one statement: review fix F3), and
+	// TestPCFixture_UnlinkedPlatformAdminRefusedBySF014 pins that the runtime role can no longer create it.
+	unlinked uuid.UUID
+	// suspended is a platform admin, Person D, that is NOT active. ADR 0119 S5: a row is created invited or active
+	// only (SF010) and SF020 refuses suspending a platform admin while no other enrolled one exists, so the fixture
+	// is an invited (password-less) row; every eligibility check under test is `status = 'active'`.
+	suspended uuid.UUID
 }
 
 type fakeClock struct {
@@ -172,8 +180,7 @@ func newFxOn(t testing.TB, pool *db.Pool) *fx {
 	f.approver = f.platformStaff(&pB, "active")
 	f.approver2 = f.platformStaff(&pC, "active")
 	f.samePerson = f.platformStaff(&pA, "active")
-	f.unlinked = f.platformStaff(nil, "active")
-	f.suspended = f.platformStaff(&pD, "suspended")
+	f.suspended = f.nonActivePlatformStaff(&pD)
 	return f
 }
 
@@ -194,7 +201,7 @@ func (f *fx) platformStaff(person *uuid.UUID, status string) uuid.UUID {
 	id := uuid.New()
 	if err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
-			VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, $4)`, id, "pc-"+id.String()+"@test.example", status, person)
+			VALUES ($1, NULL, $2, CASE WHEN $3::text = 'invited' THEN NULL ELSE 'x' END, 'platform_admin', $3, $4)`, id, "pc-"+id.String()+"@test.example", status, person)
 		return err
 	}); err != nil {
 		f.t.Fatalf("seed platform staff: %v", err)
@@ -202,11 +209,50 @@ func (f *fx) platformStaff(person *uuid.UUID, status string) uuid.UUID {
 	return id
 }
 
+// nonActivePlatformStaff seeds a platform admin that is NOT active: `suspended` on a schema before migration 0139
+// (the scratch worlds of the providercred migration tests), and `invited` (password-less) from 0139 on, where SF010
+// refuses creating a suspended row.
+func (f *fx) nonActivePlatformStaff(person *uuid.UUID) uuid.UUID {
+	f.t.Helper()
+	var has0139 bool
+	if err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		// The 0139 status-graph trigger function (a scratch schema may carry the staff_version column alone).
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_proc WHERE proname = 'sf_staff_transition'
+			AND pronamespace = 'public'::regnamespace)`).Scan(&has0139)
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	if has0139 {
+		return f.platformStaff(person, "invited")
+	}
+	return f.platformStaff(person, "suspended")
+}
+
+// legacyUnlinkedAdmin builds (once per fixture) an ACTIVE platform admin without a Person - a legacy pre-0139 row -
+// through the owner pool, with SF014 disabled for exactly that statement inside the same transaction
+// (staffsv.InsertLegacyUnlinkedStaff: no other session observes the trigger disabled). ADR 0119 S5 + S6 review fix
+// F3: it restores the "unlinked" arms of the requester / approver eligibility tests the S5 change had dropped.
+func (f *fx) legacyUnlinkedAdmin() uuid.UUID {
+	f.t.Helper()
+	if f.unlinked != uuid.Nil {
+		return f.unlinked
+	}
+	id := uuid.New()
+	if err := ownerPool(f.t).WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return staffsv.InsertLegacyUnlinkedStaff(ctx, tx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status)
+			VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active')`, id, "pc-unlinked-"+id.String()+"@test.example")
+	}); err != nil {
+		f.t.Fatalf("seed a legacy unlinked platform admin: %v", err)
+	}
+	f.unlinked = id
+	return id
+}
+
 func (f *fx) tenantStaff(tenantID uuid.UUID, role string) uuid.UUID {
 	f.t.Helper()
 	id := uuid.New()
 	if err := f.rt.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', $4)`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, $3, 'x', $4, (SELECT id FROM s56p))`,
 			id, tenantID, "pc-"+id.String()+"@test.example", role)
 		return err
 	}); err != nil {

@@ -21,40 +21,41 @@ import (
 // minting a brand-new, self-controlled account holding a narrower,
 // separately-authorized capability) applies equally to risk_manager.
 func TestCreateStaff_TenantAdminCannotCreateRiskManagerRole(t *testing.T) {
+	// ADR 0119 S6: invitation route (the creation route is removed); the same guard, 403 role_not_grantable.
 	pool, issuer := testEnv(t)
-	srv := newTestServer(t, pool, issuer)
+	srv, mail := newLifecycleTestServer(t, pool, issuer)
 
 	tenant := mustCreateTenant(t, pool)
 	tenantAdmin := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleTenantAdmin, "ta-mint-pw-1")
 	token := mustLoginStaff(t, srv, tenant.Slug, tenantAdmin.Email, "ta-mint-pw-1")
 
-	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff", token.AccessToken, map[string]string{
-		"email": "shadow-risk@example.com", "password": "a-decent-password-1", "role": "risk_manager",
+	shadow := "shadow-risk-" + uuid.NewString() + "@example.com"
+	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff/invitations", token.AccessToken, map[string]string{
+		"email": shadow, "role": "risk_manager",
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		var apiErr apierror.Error
-		decodeBody(t, resp, &apiErr)
-		t.Fatalf("expected 403 for tenant_admin creating a risk_manager-role staff account, got %d: %+v", resp.StatusCode, apiErr)
+	var apiErr apierror.Error
+	decodeBody(t, resp, &apiErr)
+	if resp.StatusCode != http.StatusForbidden || apiErr.Code != apierror.CodeRoleNotGrantable {
+		t.Fatalf("expected 403 role_not_grantable for tenant_admin inviting a risk_manager, got %d: %+v", resp.StatusCode, apiErr)
+	}
+	if mailCount(mail, shadow) != 0 {
+		t.Fatal("a refused invitation must not email anything")
 	}
 }
 
 func TestCreateStaff_PlatformAdminCanCreateRiskManagerRole(t *testing.T) {
 	pool, issuer := testEnv(t)
-	srv := newTestServer(t, pool, issuer)
+	srv, mail := newLifecycleTestServer(t, pool, issuer)
 
 	tenant := mustCreateTenant(t, pool)
 	platformAdmin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-mint-pw-1")
 	platformToken := mustLoginStaff(t, srv, "", platformAdmin.Email, "pa-mint-pw-1")
 
-	resp := postJSON(t, srv, "/v1/admin/tenants/"+tenant.ID.String()+"/staff", platformToken.AccessToken, map[string]string{
-		"email": "real-risk-manager@example.com", "password": "a-decent-password-1", "role": "risk_manager",
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		var apiErr apierror.Error
-		decodeBody(t, resp, &apiErr)
-		t.Fatalf("expected 201 for platform_admin creating a risk_manager-role staff account, got %d: %+v", resp.StatusCode, apiErr)
+	addr := "real-risk-manager-" + uuid.NewString() + "@example.com"
+	created := mustInviteStaff(t, srv, platformToken.AccessToken, tenant.ID, addr, "risk_manager", uuid.Nil)
+	if created.Role != "risk_manager" || created.Status != "invited" || mailCount(mail, addr) != 1 {
+		t.Fatalf("unexpected invitation %+v (mails %d)", created, mailCount(mail, addr))
 	}
 }
 

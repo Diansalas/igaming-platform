@@ -239,6 +239,9 @@ func TestPCGovernance_StaffUsersPoliciesUnchanged(t *testing.T) {
 		"kyc_worker_fence_insert": "INSERT",
 		"kyc_worker_fence_update": "UPDATE",
 		"kyc_worker_fence_delete": "DELETE",
+		// ADR 0119 S5 + S6 (migration 0139): the s9.5(b) actor self-visibility pair (lockable, never updatable).
+		"staff_actor_self_select": "SELECT",
+		"staff_actor_self_lock":   "UPDATE",
 	}
 	var sawIsolation bool
 	for _, p := range ps {

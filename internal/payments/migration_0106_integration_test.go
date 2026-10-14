@@ -48,7 +48,7 @@ func TestMigration0106_MixedGUCContextClaimsNothing(t *testing.T) {
 	staff := seedKillSwitchStaff(t, pool, f.tenantID)
 	platformAdmin := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,NULL,$2,'x','platform_admin','active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,NULL,$2,'x','platform_admin','active', (SELECT id FROM s56p))`,
 			platformAdmin, "m0106-plat-"+platformAdmin.String()+"@test.example")
 		return err
 	}); err != nil {
@@ -116,7 +116,7 @@ func TestMigration0106_L1_TenantCannotCancelPlatformRequest(t *testing.T) {
 	tenantStaff := seedKillSwitchStaff(t, pool, f.tenantID)
 	platformAdmin := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,NULL,$2,'x','platform_admin','active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,NULL,$2,'x','platform_admin','active', (SELECT id FROM s56p))`,
 			platformAdmin, "m0106-l1-plat-"+platformAdmin.String()+"@test.example")
 		return err
 	}); err != nil {
@@ -228,7 +228,7 @@ func TestMigration0106_L2_EngageCancelsPreexistingOpenRequest(t *testing.T) {
 	staff := seedKillSwitchStaff(t, pool, f.tenantID)
 	platformAdmin := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,NULL,$2,'x','platform_admin','active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,NULL,$2,'x','platform_admin','active', (SELECT id FROM s56p))`,
 			platformAdmin, "m0106-l2c-plat-"+platformAdmin.String()+"@test.example")
 		return err
 	}); err != nil {
@@ -327,7 +327,9 @@ func TestMigration0106_L4_SuspendedStaffRejectedAsActor(t *testing.T) {
 
 	suspended := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,$2,$3,'x','tenant_admin','suspended')`,
+		// ADR 0119 S5: a staff row is created invited or active only (SF010); the predicate under test is
+		// status = 'active', so a non-active (invited, no password) row exercises the same refusal.
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1,$2,$3,NULL,'tenant_admin','invited', (SELECT id FROM s56p))`,
 			suspended, f.tenantID, "m0106-l4-"+suspended.String()+"@test.example")
 		return err
 	}); err != nil {

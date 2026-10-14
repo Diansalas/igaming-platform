@@ -135,8 +135,18 @@ func mustCreateUnlinkedStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID, ro
 		scope = func(ctx context.Context, fn db.TxFunc) error { return pool.WithTenant(ctx, tenantID, fn) }
 	}
 	err = scope(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		// ADR 0119 S5: SF014 refuses creating an unlinked approve-capable account; these fixtures reproduce a LEGACY
+		// (pre-0139, not backfilled) one, with exactly SF014 disabled for this one statement inside this owner
+		// transaction (never visible to another session).
+		if _, err := tx.Exec(ctx, `ALTER TABLE staff_users DISABLE TRIGGER sf_14_staff_person_required`); err != nil {
+			return err
+		}
 		var err error
 		staff, err = identity.CreateStaffUser(ctx, tx, tenantID, fmt.Sprintf("staff-%s@test.com", suffix), hash, role, nil)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `ALTER TABLE staff_users ENABLE TRIGGER sf_14_staff_person_required`)
 		return err
 	})
 	if err != nil {

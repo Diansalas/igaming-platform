@@ -89,6 +89,9 @@ var allowedLiteralCompares = map[string]string{
 	// player_withdrawal_hold balances on wallets of a closed brand (RAISE NOTICE only, never refuses,
 	// gates nothing). pending_launch is NOT closed: a pending brand has no player funds to report.
 	"migrations/0136_player_brand_binding_immutable.up.sql:AND b.status = 'closed'": "0136 pre-flight class 4 NOTICE (informational, refuses nothing)",
+	// 0139 (ADR 0119 S5 + S6): the STAFF status graph (SF010) of staff_users, not a tenant / brand status; matched only
+	// because the trigger reads OLD.status. 'suspended' here is the staff member's suspension.
+	"migrations/0139_staff_lifecycle.up.sql:OR (OLD.status = 'suspended' AND NEW.status IN ('active', 'offboarded'))) THEN": "0139 staff_users status graph (staff, not tenant / brand)",
 }
 
 func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testing.T) {

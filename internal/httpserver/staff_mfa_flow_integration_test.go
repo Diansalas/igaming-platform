@@ -21,6 +21,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
@@ -91,7 +92,8 @@ func TestStaffMFA_FullFlow_TenantAndPlatform(t *testing.T) {
 			if !row.AuthTime.Equal(*row.MFAAt) || !row.AbsExpires.Equal(row.AuthTime.Add(12*time.Hour)) || !row.Expires.Equal(row.AuthTime.Add(30*time.Minute)) {
 				t.Fatalf("auth_time / mfa_at / absolute / idle: %+v", row)
 			}
-			if claims.AAL != 2 || claims.StaffVersion == nil || *claims.StaffVersion != 0 || claims.AuthTime == nil || claims.MFAAt == nil ||
+			// ADR 0119 S5 + S6: sv is the row's staff_version (migration 0139), not the S3 placeholder 0.
+			if claims.AAL != 2 || claims.StaffVersion == nil || *claims.StaffVersion != authtest.StaffVersion(t, w.owner, s.ref.StaffID, s.ref.TenantID) || claims.AuthTime == nil || claims.MFAAt == nil ||
 				claims.AuthTime.Unix() != row.AuthTime.Unix() || claims.Role != auth.Role(s.role) || claims.TenantID != s.ref.TenantID {
 				t.Fatalf("access token claims: %+v", claims)
 			}

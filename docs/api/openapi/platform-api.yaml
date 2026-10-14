@@ -590,6 +590,46 @@ paths:
         "503":
           $ref: "#/components/responses/StaffAuthUnavailable"
 
+  /v1/staff/invitations/accept:
+    post:
+      tags: [staff-auth]
+      summary: Accept a staff invitation (set the password) - returns an `enrol` challenge
+      description: >
+        ADR 0119 sections 6.3 and 10.1. The invite token arrives by email (link `<backoffice>/#/enrol?token=...&invite=1`,
+        fragment form only). The staff member's tenant and identity come from the TOKEN ROW, never from the body. On
+        success the password is set, the account moves `invited -> active`, the token is consumed and an `enrol`
+        challenge is returned (continue at /v1/staff/auth/enrol/start); no session is issued until a factor is confirmed.
+        Every refusal (unknown, expired, consumed or revoked token; an account that is not invited) is the single answer
+        401 invalid_enrolment_token. Rate bucket `credential` (per IP).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InvitationAcceptRequest" }
+      responses:
+        "200":
+          description: Invitation accepted; continue with the `enrol` challenge
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffLoginChallenge"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: invalid_enrolment_token - the single answer for every token failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
   /v1/staff/me/mfa:
     get:
       tags: [staff-auth]
@@ -951,54 +991,326 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/staff:
-    post:
-      summary: Create a staff user for a tenant
+    get:
+      tags: [staff-lifecycle]
+      summary: List a tenant's staff (directory)
       description: >
-        Requires staff:manage. platform_admin may target any tenant;
-        tenant_admin may only target their own. Cannot create a
-        platform_admin - that role is bootstrapped only via
-        cmd/seed-admin (see docs/decisions/0014).
+        ADR 0119 section 14.2. staff:read (platform_admin any tenant; tenant_admin and compliance their own tenant -
+        another tenant is 404). Never lists platform staff. Sorted by email; at most 500 entries (truncated: true when
+        more exist). Optional filters status and role (closed vocabularies; an unknown value is 400).
       security:
         - bearerAuth: []
       parameters:
-        - name: tenantID
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [invited, active, suspended, offboarded] } }
+        - { name: role, in: query, required: false, schema: { type: string, enum: [tenant_admin, support, compliance, finance, risk_manager, promotions_manager, bonus_operations] } }
+      responses:
+        "200":
+          description: The tenant's staff
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffDirectoryList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}:
+    get:
+      tags: [staff-lifecycle]
+      summary: One tenant staff member
+      description: >
+        staff:read, same scope rules as the list. 404 for an unknown id, another tenant's staff member or a platform row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The staff member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffDirectoryEntry" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/lifecycle-events:
+    get:
+      tags: [staff-lifecycle]
+      summary: A tenant staff member's lifecycle history
+      description: >
+        staff:read, same scope rules as the list. Newest first, at most 200. A tenant viewer sees actor.staff_id null
+        for a platform actor (ADR 0114 H1).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The events
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleEventList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/invitations:
+    post:
+      tags: [staff-lifecycle]
+      summary: Invite a tenant staff member (replaces the removed admin-chosen-password create route)
+      description: >
+        ADR 0119 sections 6.3, 10.1, 14.2. staff:manage. Step-up `critical`. Creates the staff member with status
+        `invited` and no password, and emails a single-use `invite` token (72 h) to the address. The response NEVER
+        carries the token or any credential; email_delivery says whether the email was handed to the provider (MOCK in
+        development; PROVIDER DEPENDENT in production, where the mock provider refuses to start). A tenant admin may
+        invite tenant_admin, support and compliance only (403 role_not_grantable). person_id is required for
+        tenant_admin, finance and compliance (422 person_required) and must name an existing Person (400).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                email: { type: string, format: email }
-                password: { type: string, format: password, minLength: 8 }
-                role:
-                  type: string
-                  enum: [tenant_admin, support, compliance, finance]
-              required: [email, password, role]
+            schema: { $ref: "#/components/schemas/StaffInvitationRequest" }
       responses:
         "201":
-          description: Staff user created
+          description: The invited staff member (never a token)
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/StaffUser"
-        "400":
-          $ref: "#/components/responses/ValidationError"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "409":
-          description: A staff user with this email already exists for this tenant
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "422": { $ref: "#/components/responses/StaffPersonRequired" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/invitation/resend:
+    post:
+      tags: [staff-lifecycle]
+      summary: Re-send a pending invitation
+      description: >
+        Re-issues the invite token of an `invited` staff member (the earlier token stops working) and emails it; never returns it. staff:manage. Step-up `critical` (ADR 0119 section 8.2). A tenant-scoped caller may only name its own
+        tenant (another tenant is 404). Self-target is refused (403 self_target_forbidden). A tenant admin may only act
+        on tenant_admin / support / compliance (403 role_not_grantable). Audited, and one staff_lifecycle_events row with
+        before / after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffEmptyRequest" }
+      responses:
+        "200":
+          description: The target after the change
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-        "500":
-          $ref: "#/components/responses/InternalError"
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/invitation/revoke:
+    post:
+      tags: [staff-lifecycle]
+      summary: Revoke a pending invitation
+      description: >
+        `invited -> offboarded`; the token is revoked. reason_code from the invitation-revoke list. staff:manage. Step-up `critical` (ADR 0119 section 8.2). A tenant-scoped caller may only name its own
+        tenant (another tenant is 404). Self-target is refused (403 self_target_forbidden). A tenant admin may only act
+        on tenant_admin / support / compliance (403 role_not_grantable). Audited, and one staff_lifecycle_events row with
+        before / after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/suspend:
+    post:
+      tags: [staff-lifecycle]
+      summary: Suspend a tenant staff member
+      description: >
+        `active -> suspended`. Phase 1 revokes every session, live challenge and enrolment token of the target and commits; phase 2 changes the status with a 5 s lock timeout and one retry (409 lifecycle_busy when both time out: the sessions stay revoked). reason_code security_compromise also revokes the second factor and recovery codes. staff:manage. Step-up `critical` (ADR 0119 section 8.2). A tenant-scoped caller may only name its own
+        tenant (another tenant is 404). Self-target is refused (403 self_target_forbidden). A tenant admin may only act
+        on tenant_admin / support / compliance (403 role_not_grantable). Audited, and one staff_lifecycle_events row with
+        before / after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/reactivate:
+    post:
+      tags: [staff-lifecycle]
+      summary: Reactivate a suspended tenant staff member
+      description: >
+        `suspended -> active`. When the target has no usable second factor an `mfa_reset` token is emailed (email_delivery). staff:manage. Step-up `critical` (ADR 0119 section 8.2). A tenant-scoped caller may only name its own
+        tenant (another tenant is 404). Self-target is refused (403 self_target_forbidden). A tenant admin may only act
+        on tenant_admin / support / compliance (403 role_not_grantable). Audited, and one staff_lifecycle_events row with
+        before / after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/offboard:
+    post:
+      tags: [staff-lifecycle]
+      summary: Offboard a tenant staff member (terminal)
+      description: >
+        `active | suspended -> offboarded`: the password is removed and every factor, recovery code, challenge, token and session is revoked; email and Person are kept for audit identity. Phase 1 revokes every session, live challenge and enrolment token of the target and commits; phase 2 changes the status with a 5 s lock timeout and one retry (409 lifecycle_busy when both time out: the sessions stay revoked). staff:manage. Step-up `critical` (ADR 0119 section 8.2). A tenant-scoped caller may only name its own
+        tenant (another tenant is 404). Self-target is refused (403 self_target_forbidden). A tenant admin may only act
+        on tenant_admin / support / compliance (403 role_not_grantable). Audited, and one staff_lifecycle_events row with
+        before / after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/role:
+    post:
+      tags: [staff-lifecycle]
+      summary: Change a tenant staff member's role
+      description: >
+        `active` only. Both the old and the new role must be grantable by the caller. Every session of the target ends. A Person is required for tenant_admin, finance and compliance (422 person_required). staff:manage. Step-up `critical` (ADR 0119 section 8.2). A tenant-scoped caller may only name its own
+        tenant (another tenant is 404). Self-target is refused (403 self_target_forbidden). A tenant admin may only act
+        on tenant_admin / support / compliance (403 role_not_grantable). Audited, and one staff_lifecycle_events row with
+        before / after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffRoleChangeRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "422": { $ref: "#/components/responses/StaffPersonRequired" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/tenants/{tenantID}/staff/{staffID}/mfa-reset:
+    post:
+      tags: [staff-lifecycle]
+      summary: Reset a tenant staff member's second factor
+      description: >
+        `active` only. Revokes the factor (clearing a hard lock), the recovery codes, challenges and sessions, and emails an `mfa_reset` token (24 h) that the staff member redeems with their password at POST /v1/staff/auth/enrol/redeem. staff:manage. Step-up `critical` (ADR 0119 section 8.2). A tenant-scoped caller may only name its own
+        tenant (another tenant is 404). Self-target is refused (403 self_target_forbidden). A tenant admin may only act
+        on tenant_admin / support / compliance (403 role_not_grantable). Audited, and one staff_lifecycle_events row with
+        before / after.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
 
   # --- Player administration (tenant-scoped) ---
   /v1/admin/players:
@@ -8187,7 +8499,7 @@ paths:
     post:
       summary: Link a tenant staff account to a Person
       description: >
-        staff:manage (tenant_admin, platform_admin). Stage 3D remediation (ADR 0024): sets person_id only where none is set; an existing link can never be changed (database append-only trigger). A tenant-scoped caller may name only its own tenant (403). 400 when person_id is not a UUID or names no existing Person; 404 when the staff user is not in the tenant; 409 when it is already linked.
+        staff:manage (tenant_admin, platform_admin). Stage 3D remediation (ADR 0024): sets person_id only where none is set; an existing link can never be changed (database append-only trigger). A tenant-scoped caller may name only its own tenant (403). ADR 0119 S5 + S6 review fix SR-4: a link of one's own account is 403 self_target_forbidden; a tenant admin may link only accounts of the roles it may act on (403 role_not_grantable); the caller is re-asserted in the transaction (401 session_revoked); a Person already bound to another live account is refused for an approve-capable role (409). The link bumps the account's staff_version and ends its sessions. 400 when person_id is not a UUID or names no existing Person; 404 when the staff user is not in the tenant; 409 when it is already linked.
       security:
         - bearerAuth: []
       parameters:
@@ -8201,16 +8513,16 @@ paths:
       responses:
         "204": { description: Linked }
         "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
   /v1/admin/platform-staff/{staffID}/person-link:
     post:
       summary: Link a platform staff account to a Person
       description: >
-        staff:manage, and the caller must be platform-scoped (a tenant-scoped caller is refused 403 even though tenant_admin holds the permission). Same contract as the tenant route for a platform-wide staff account (tenant_id null).
+        staff:manage, and the caller must be platform-scoped (a tenant-scoped caller is refused 403 even though tenant_admin holds the permission). Same contract as the tenant route for a platform-wide staff account (tenant_id null), including the ADR 0119 S5 + S6 review fix SR-4 rules (self-link 403 self_target_forbidden, in-transaction re-assertion 401, a Person already bound to another live platform account 409).
       security:
         - bearerAuth: []
       parameters:
@@ -8223,11 +8535,334 @@ paths:
       responses:
         "204": { description: Linked }
         "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform-staff:
+    get:
+      tags: [staff-lifecycle]
+      summary: List platform staff (directory)
+      description: >
+        staff:read and a platform-scoped caller (a tenant-scoped caller is 403: a tenant never sees platform staff).
+        Same shape and limits as the tenant directory.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: status, in: query, required: false, schema: { type: string, enum: [invited, active, suspended, offboarded] } }
+      responses:
+        "200":
+          description: The platform staff
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffDirectoryList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform-staff/{staffID}:
+    get:
+      tags: [staff-lifecycle]
+      summary: One platform staff member
+      description: >
+        staff:read and a platform-scoped caller. 404 for an unknown id or a tenant staff member.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The staff member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffDirectoryEntry" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform-staff/{staffID}/lifecycle-events:
+    get:
+      tags: [staff-lifecycle]
+      summary: A platform staff member's lifecycle history
+      description: >
+        staff:read and a platform-scoped caller. Newest first, at most 200.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The events
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleEventList" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform-staff/{staffID}/suspend:
+    post:
+      tags: [staff-lifecycle]
+      summary: Suspend a platform staff member
+      description: >
+        Single actor (protective), bounded by the last-admin guard (409 last_admin). Phase 1 revokes every session, live challenge and enrolment token of the target and commits; phase 2 changes the status with a 5 s lock timeout and one retry (409 lifecycle_busy when both time out: the sessions stay revoked). staff:manage and a platform-scoped caller (a tenant-scoped caller is 403). Step-up `critical`. Self-target
+        is refused (403 self_target_forbidden). Audited, and one staff_lifecycle_events row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform-staff/{staffID}/offboard:
+    post:
+      tags: [staff-lifecycle]
+      summary: Offboard a platform staff member (terminal)
+      description: >
+        Single actor, bounded by the last-admin guard. Phase 1 revokes every session, live challenge and enrolment token of the target and commits; phase 2 changes the status with a 5 s lock timeout and one retry (409 lifecycle_busy when both time out: the sessions stay revoked). staff:manage and a platform-scoped caller (a tenant-scoped caller is 403). Step-up `critical`. Self-target
+        is refused (403 self_target_forbidden). Audited, and one staff_lifecycle_events row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform-staff/{staffID}/invitation/resend:
+    post:
+      tags: [staff-lifecycle]
+      summary: Re-send a pending platform invitation
+      description: >
+        Only an `invited` platform row (created by an approved platform_invite request). The token is emailed, never returned. staff:manage and a platform-scoped caller (a tenant-scoped caller is 403). Step-up `critical`. Self-target
+        is refused (403 self_target_forbidden). Audited, and one staff_lifecycle_events row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffEmptyRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform-staff/{staffID}/invitation/revoke:
+    post:
+      tags: [staff-lifecycle]
+      summary: Revoke a pending platform invitation
+      description: >
+        `invited -> offboarded`; reason_code from the invitation-revoke list. staff:manage and a platform-scoped caller (a tenant-scoped caller is 403). Step-up `critical`. Self-target
+        is refused (403 self_target_forbidden). Audited, and one staff_lifecycle_events row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: staffID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffLifecycleActionRequest" }
+      responses:
+        "200":
+          description: The target after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffLifecycleResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform/staff-lifecycle-requests:
+    get:
+      tags: [staff-lifecycle]
+      summary: List platform-staff four-eyes requests
+      description: >
+        ADR 0119 section 10.4. platform_staff:govern (platform_admin only). Newest first, at most 200.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStaffLifecycleRequestList" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+    post:
+      tags: [staff-lifecycle]
+      summary: Request a platform-staff change (four-eyes)
+      description: >
+        ADR 0119 section 10.4. platform_staff:govern. Step-up `critical`. Kinds: platform_invite (the only way to create a
+        platform_admin over HTTP; email and person_id required), platform_reactivate and platform_mfa_reset
+        (target_staff_id and reason_code required). platform_password_reset is NOT IMPLEMENTED (400). The requester must
+        have a linked Person; the target may not be the requester (403 self_target_forbidden). The request is bound by
+        a signed actor proof and expires after 72 h.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformStaffLifecycleRequestCreate" }
+      responses:
+        "201":
+          description: The pending request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStaffLifecycleRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "422": { $ref: "#/components/responses/StaffPersonRequired" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform/staff-lifecycle-requests/{requestID}:
+    get:
+      tags: [staff-lifecycle]
+      summary: One platform-staff four-eyes request
+      description: platform_staff:govern.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStaffLifecycleRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform/staff-lifecycle-requests/{requestID}/approve:
+    post:
+      tags: [staff-lifecycle]
+      summary: Approve and execute a platform-staff four-eyes request
+      description: >
+        platform_staff:govern. Step-up `critical`. The approver must be a different staff member AND a different Person from the requester and from the target, and must have a linked Person (403 four_eyes_violation; also enforced by the database, SF032). payload_hash must equal the request's (the frozen value the approver reviewed). The change is executed in the same transaction. A request whose precondition no longer holds answers 409 lifecycle_transition_invalid and stays pending.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlatformStaffLifecycleDecision" }
+      responses:
+        "200":
+          description: The request after the decision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStaffLifecycleRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform/staff-lifecycle-requests/{requestID}/reject:
+    post:
+      tags: [staff-lifecycle]
+      summary: Reject a platform-staff four-eyes request
+      description: >
+        platform_staff:govern. Step-up none (protective). Same distinctness rules as approve.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffEmptyRequest" }
+      responses:
+        "200":
+          description: The request after the decision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStaffLifecycleRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
+  /v1/admin/platform/staff-lifecycle-requests/{requestID}/cancel:
+    post:
+      tags: [staff-lifecycle]
+      summary: Cancel one's own platform-staff four-eyes request
+      description: >
+        platform_staff:govern. Step-up none. The requester only (403 forbidden otherwise).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StaffEmptyRequest" }
+      responses:
+        "200":
+          description: The request after the decision
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformStaffLifecycleRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/StaffLifecycleConflict" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
   /v1/admin/tenants/{tenantID}/payments/kill-switches:
     get:
       summary: List the tenant's payment kill switches (PRH-I1, ADR 0095 §10.5)
@@ -9538,6 +10173,188 @@ components:
           maxItems: 10
           items: { type: string, description: "XXXXX-XXXXX (Crockford base32)" }
       required: [recovery_codes]
+    StaffEmptyRequest:
+      type: object
+      description: An empty JSON object (the action takes no input).
+      additionalProperties: false
+    StaffLifecycleActionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason_code:
+          type: string
+          description: >
+            Closed list per action (ADR 0119 section 10.1). suspend - security_compromise, policy_violation,
+            investigation, leave_of_absence, role_review, other. offboard - employment_ended, contract_ended,
+            security_compromise, duplicate_account, other. reactivate - investigation_closed, returned_from_leave,
+            error_correction, other. MFA reset - device_lost, device_replaced, hard_locked, security_compromise, other.
+            invitation revoke - no_longer_required, wrong_details, other.
+        note:
+          type: string
+          minLength: 10
+          maxLength: 500
+          description: Required for `other`; no control, bidi-override or zero-width characters. Keep personal data out.
+      required: [reason_code]
+    StaffRoleChangeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        role: { type: string, enum: [tenant_admin, support, compliance, finance, risk_manager, promotions_manager, bonus_operations] }
+        reason_code: { type: string, enum: [role_change_approved, error_correction, other] }
+        note: { type: string, minLength: 10, maxLength: 500 }
+      required: [role, reason_code]
+    StaffInvitationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email }
+        role: { type: string, enum: [tenant_admin, support, compliance, finance, risk_manager, promotions_manager, bonus_operations] }
+        person_id: { type: string, format: uuid, description: Required for tenant_admin, finance and compliance }
+      required: [email, role]
+    StaffMfaSummary:
+      type: object
+      properties:
+        enrolled: { type: boolean }
+        hard_locked: { type: boolean }
+      required: [enrolled, hard_locked]
+    StaffDirectoryEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid, description: Absent for platform staff }
+        email: { type: string, format: email }
+        display_name: { type: string, nullable: true }
+        role: { type: string, enum: [platform_admin, tenant_admin, support, compliance, finance, risk_manager, promotions_manager, bonus_operations] }
+        status: { type: string, enum: [invited, active, suspended, offboarded] }
+        mfa: { $ref: "#/components/schemas/StaffMfaSummary" }
+        person_linked: { type: boolean }
+        last_login_at: { type: string, format: date-time, nullable: true, description: The newest aal2 session auth_time }
+        created_at: { type: string, format: date-time }
+        status_changed_at: { type: string, format: date-time, nullable: true }
+      required: [id, email, display_name, role, status, mfa, person_linked, last_login_at, created_at, status_changed_at]
+    StaffDirectoryList:
+      type: object
+      properties:
+        staff:
+          type: array
+          items: { $ref: "#/components/schemas/StaffDirectoryEntry" }
+        truncated: { type: boolean }
+      required: [staff, truncated]
+    StaffLifecycleResult:
+      type: object
+      description: The target after the change. Never carries a token, password or factor material.
+      properties:
+        staff: { $ref: "#/components/schemas/StaffDirectoryEntry" }
+        email_delivery:
+          type: string
+          enum: [sent, failed]
+          description: Present when the action emailed a token (invite, resend, MFA reset, a reactivation without a usable factor)
+      required: [staff]
+    StaffLifecycleState:
+      type: object
+      properties:
+        status: { type: string }
+        role: { type: string }
+        staff_version: { type: integer, format: int64 }
+        person_linked: { type: boolean }
+    StaffLifecycleEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        staff_user_id: { type: string, format: uuid }
+        event:
+          type: string
+          enum: [invited, invite_revoked, invite_accepted, suspended, reactivated, offboarded, role_changed, person_linked, mfa_enrolled, mfa_reset, mfa_hard_locked, mfa_recovery_used, recovery_codes_regenerated, owner_provisioned]
+        actor:
+          type: object
+          properties:
+            type: { type: string, enum: [staff, system, owner] }
+            staff_id: { type: string, format: uuid, nullable: true, description: null for a platform actor seen by a tenant viewer (ADR 0114 H1) }
+          required: [type, staff_id]
+        before: { $ref: "#/components/schemas/StaffLifecycleState" }
+        after: { $ref: "#/components/schemas/StaffLifecycleState" }
+        reason_code: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        lifecycle_request_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+      required: [id, staff_user_id, event, actor, before, after, reason_code, note, lifecycle_request_id, created_at]
+    StaffLifecycleEventList:
+      type: object
+      properties:
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/StaffLifecycleEvent" }
+      required: [events]
+    PlatformStaffLifecycleRequestCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        kind: { type: string, enum: [platform_invite, platform_reactivate, platform_mfa_reset] }
+        target_staff_id: { type: string, format: uuid, description: platform_reactivate / platform_mfa_reset }
+        email: { type: string, format: email, description: platform_invite }
+        person_id: { type: string, format: uuid, description: platform_invite (required) }
+        reason_code: { type: string, description: platform_reactivate (reactivate list) / platform_mfa_reset (MFA reset list) }
+        note: { type: string, minLength: 10, maxLength: 500 }
+      required: [kind]
+    PlatformStaffLifecycleRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [platform_invite, platform_reactivate, platform_mfa_reset, platform_password_reset] }
+        state: { type: string, enum: [pending, executed, rejected, cancelled, expired] }
+        target_staff_id: { type: string, format: uuid, nullable: true }
+        invite_email: { type: string, nullable: true }
+        invite_person_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The invitee Person of a platform_invite (ADR 0119 review fix SR-3), so the approver can judge Person distinctness.
+        invite_person_staff:
+          type: array
+          nullable: true
+          description: The live (non-offboarded) platform staff accounts already linked to invite_person_id (an invitation naming one is refused at filing and at execution); null for other kinds.
+          items: { $ref: "#/components/schemas/LinkedStaff" }
+        email_delivery:
+          type: string
+          enum: [sent, failed]
+          description: Approve only (review fix F5) - whether the invitation / MFA-reset email was handed off; on failed, use the invitation resend route (an MFA reset needs a new request).
+        reason_code: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        requested_by: { type: string, format: uuid }
+        required_approvals: { type: integer }
+        payload_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time, nullable: true }
+      required: [id, kind, state, target_staff_id, invite_email, invite_person_id, invite_person_staff, reason_code, note, requested_by, required_approvals, payload_hash, expires_at, created_at, decided_at]
+    LinkedStaff:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        status: { type: string, enum: [invited, active, suspended] }
+      required: [id, email, status]
+    PlatformStaffLifecycleRequestList:
+      type: object
+      properties:
+        requests:
+          type: array
+          items: { $ref: "#/components/schemas/PlatformStaffLifecycleRequest" }
+      required: [requests]
+    PlatformStaffLifecycleDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        payload_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: The frozen hash the approver reviewed }
+      required: [payload_hash]
+    InvitationAcceptRequest:
+      type: object
+      x-sensitive: true
+      additionalProperties: false
+      properties:
+        token: { type: string, description: The single-use invite token from the email (never logged) }
+        password: { type: string, format: password, minLength: 12, description: At least 12 characters for every staff role (ADR 0119 review fix SR-9). }
+      required: [token, password]
     StaffMfaStatus:
       type: object
       properties:
@@ -11208,6 +12025,13 @@ components:
             - mfa_enrolment_expired
             - session_revoked
             - step_up_required
+            - last_admin
+            - self_target_forbidden
+            - person_required
+            - role_not_grantable
+            - lifecycle_busy
+            - lifecycle_transition_invalid
+            - four_eyes_violation
         message:
           type: string
         max_age:
@@ -11467,6 +12291,49 @@ components:
         WWW-Authenticate:
           description: 'RFC 9470: Bearer realm="platform-api", error="insufficient_user_authentication", error_description="...", max_age="N"'
           schema: { type: string }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffSessionRevoked:
+      description: >
+        401. unauthorized (no or invalid bearer token) or session_revoked (the staff session is no longer live: revoked,
+        suspended, offboarded, role or staff_version changed, second factor revoked or hard-locked; the in-transaction
+        re-assertion of a governed write gives the same answer).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffLifecycleForbidden:
+      description: >
+        403. forbidden (permission, or a tenant caller on a platform route), step_up_required (with max_age and the
+        RFC 9470 WWW-Authenticate header; nothing was written), self_target_forbidden, role_not_grantable, or
+        four_eyes_violation (platform four-eyes distinctness by staff id and by Person).
+      headers:
+        WWW-Authenticate:
+          description: Set with step_up_required (RFC 9470)
+          schema: { type: string }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffLifecycleConflict:
+      description: >
+        409. conflict (email already used in the scope), lifecycle_transition_invalid (the target is not in a state the
+        action applies to), last_admin (SF020 / SF021), or lifecycle_busy (the suspension / offboarding status change
+        could not take the row lock within 5 s twice; the target's sessions are already revoked - retry).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffPersonRequired:
+      description: 422 person_required - platform_admin, tenant_admin, finance and compliance need a linked Person (SF014).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    StaffLifecycleUnavailable:
+      description: 503 service_unavailable - a database fault, no actor-proof key, or no staff MFA keys. Nothing was committed by the failing phase.
       content:
         application/json:
           schema:

@@ -35,6 +35,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/stafflifecycle"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -260,7 +261,7 @@ func newStaffMFAVerifyHandler(deps Deps) http.HandlerFunc {
 				if err != nil {
 					return err
 				}
-				if pair, err = m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role)); err != nil {
+				if pair, err = m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role), staff.StaffVersion); err != nil {
 					return err
 				}
 				out = mfaSuccess
@@ -358,7 +359,7 @@ func newStaffMFARecoverHandler(deps Deps) http.HandlerFunc {
 				if err := m.store.ConsumeChallenge(ctx, tx, ch.ID, now); err != nil {
 					return err
 				}
-				next, err := m.store.IssueChallenge(ctx, tx, ch.Staff, store.ChallengeEnrol, store.OriginRecoveryCode, staffVersionUnversioned, now)
+				next, err := m.store.IssueChallenge(ctx, tx, ch.Staff, store.ChallengeEnrol, store.OriginRecoveryCode, ch.StaffVersionAtIssue, now)
 				if err != nil {
 					return err
 				}
@@ -558,7 +559,7 @@ func newStaffEnrolConfirmHandler(deps Deps) http.HandlerFunc {
 				if err != nil {
 					return err
 				}
-				pair, err := m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role))
+				pair, err := m.mintStaffTokens(deps.AuthIssuer, s, auth.Role(staff.Role), staff.StaffVersion)
 				if err != nil {
 					return err
 				}
@@ -703,6 +704,19 @@ func newStaffEnrolRedeemHandler(deps Deps) http.HandlerFunc {
 				return staffAudit(ctx, tx, r, requestID, ref.Staff, "staff.enrolment_token_rejected", audit.OutcomeDenied,
 					map[string]any{"reason": "password_lockout"})
 			}
+			// ADR 0119 S5 + S6 review fix SR-2: an MFA-reset token whose issuer is no longer active is refused (the
+			// issuer's row FOR SHARE before the token lock, the order a concurrent suspension also takes).
+			if ref.Purpose == store.EnrolMFAReset {
+				live, err := stafflifecycle.EnrolmentIssuersLiveInTx(ctx, tx, ref.ID)
+				if err != nil {
+					return err
+				}
+				if !live {
+					out = mfaInvalidEnrolmentToken
+					return staffAudit(ctx, tx, r, requestID, ref.Staff, "staff.enrolment_token_rejected", audit.OutcomeFailure,
+						map[string]any{"reason": "issuer_not_live", "purpose": string(ref.Purpose)})
+				}
+			}
 			row, err := m.store.LockEnrolmentToken(ctx, tx, ref.Purpose, tok, now)
 			if errors.Is(err, store.ErrInvalidEnrolmentToken) {
 				out = mfaInvalidEnrolmentToken
@@ -725,7 +739,7 @@ func newStaffEnrolRedeemHandler(deps Deps) http.HandlerFunc {
 					map[string]any{"reason": "identity_mismatch", "purpose": string(row.Purpose)})
 			}
 			passwordPaid = true
-			ok, err := auth.VerifyPassword(req.Password.reveal(), staff.PasswordHash)
+			ok, err := verifyStaffPassword(req.Password.reveal(), staff)
 			if err != nil {
 				return err
 			}
@@ -760,7 +774,7 @@ func newStaffEnrolRedeemHandler(deps Deps) http.HandlerFunc {
 			if err := m.store.ConsumeEnrolmentToken(ctx, tx, row.ID, now); err != nil {
 				return err
 			}
-			next, err := m.store.IssueChallenge(ctx, tx, row.Staff, store.ChallengeEnrol, redeemOrigin(row.Purpose), staffVersionUnversioned, now)
+			next, err := m.store.IssueChallenge(ctx, tx, row.Staff, store.ChallengeEnrol, redeemOrigin(row.Purpose), staff.StaffVersion, now)
 			if err != nil {
 				return err
 			}

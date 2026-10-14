@@ -141,7 +141,7 @@ func (w *mfaW) staff(tenant *identity.Tenant, role string) mfaStaff {
 		if tenant != nil {
 			tid = tenant.ID
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, $4, $5, 'active')`,
+		_, err := tx.Exec(ctx, `WITH s56p AS (SELECT gen_random_uuid() AS id), s56i AS (INSERT INTO persons (id) SELECT id FROM s56p) INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, $2, $3, $4, $5, 'active', (SELECT id FROM s56p))`,
 			id, tid, s.email, hash, role)
 		return err
 	}

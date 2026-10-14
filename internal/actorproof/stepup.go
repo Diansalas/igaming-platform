@@ -30,7 +30,8 @@ const StepUpInFlightGrace = 30 * time.Second
 // (ADR 0119 section 9.1), each with the class whose max-age the backstop
 // applies. The reject / cancel operations and the launch suspend are NOT here
 // (protective, section 8.1). Every key is a proof operation constant; a static
-// test pins the set. staff_lifecycle:request|approve join with S5 + S6.
+// test pins the set. staff_lifecycle:request|approve joined with S5 + S6
+// (section 10.4: a platform-staff grant, reactivation or MFA reset).
 //
 // rg_limit_config:apply is the platform staff member's INSERT of the approved
 // floor row: a staff HTTP action executing a four-eyes decision, so it is
@@ -53,6 +54,8 @@ var StepUpOperations = map[string]stepup.Class{
 	OpRGConfigRequest:       stepup.Critical,
 	OpRGConfigApprove:       stepup.Critical,
 	OpRGConfigApply:         stepup.Critical,
+	OpStaffLifecycleRequest: stepup.Critical,
+	OpStaffLifecycleApprove: stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4
