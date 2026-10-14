@@ -32,7 +32,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
-	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
@@ -170,7 +169,7 @@ func writeCapabilityError(ctx context.Context, deps Deps, w http.ResponseWriter,
 		apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
 		return
 	}
-	if errors.Is(err, db.ErrActorStaffNotLive) {
+	if errors.Is(err, capability.ErrActorNotLive) {
 		// ADR 0119 S5 + S6 (S4b-R3 hard gate): the in-transaction re-assertion of the approver / revoker refused;
 		// nothing was written.
 		observability.RecordStaffReassertionRefusal(ctx, observability.StaffReassertionFlowCapabilityGrant)

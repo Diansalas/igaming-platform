@@ -2,13 +2,13 @@ package capability
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
-	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 // SIGNED-ACTOR-PROOF for K1 (ADR 0110, migration 0120, review finding H2): every
@@ -46,13 +46,28 @@ func reassertActor(ctx context.Context, tx pgx.Tx) error {
 	if !ok {
 		return nil
 	}
-	locked, err := db.ScanActorStaffRows(tx.Query(ctx,
-		`SELECT id, role, status, staff_version FROM staff_users WHERE id = $1 FOR SHARE`, a.Actor))
+	if a.Actor == uuid.Nil || a.Role == "" || a.StaffVersion < 1 {
+		return ErrActorNotLive
+	}
+	var role, status string
+	var version int64
+	err := tx.QueryRow(ctx, `SELECT role, status, staff_version FROM staff_users WHERE id = $1 FOR SHARE`, a.Actor).Scan(&role, &status, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrActorNotLive
+	}
 	if err != nil {
 		return err
 	}
-	return db.CheckActorStaffLive(locked, a.Actor, db.ActorExpectation{Role: a.Role, StaffVersion: a.StaffVersion})
+	if status != "active" || role != a.Role || version != a.StaffVersion {
+		return ErrActorNotLive
+	}
+	return nil
 }
+
+// ErrActorNotLive is the K1 re-assertion refusal (the same rule as db.CheckActorStaffLive; internal/capability does
+// not import internal/db because the db integration tests import this package). The HTTP layer answers 401
+// session_revoked; nothing was written.
+var ErrActorNotLive = errors.New("capability: the acting staff member is no longer live")
 
 // Proof scopes (re-exported so HTTP code need not import actorproof).
 const (
