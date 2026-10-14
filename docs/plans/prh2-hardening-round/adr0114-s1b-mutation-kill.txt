@@ -16,3 +16,8 @@ M14 unknown kind accepted: KILLED TestAlertListS1b_SingleReadAndKindFilter
 M15 next cursor taken from the first row, not the last: KILLED TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder,TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_SingleReadAndKindFilter
 M16 cursor time truncated to milliseconds: KILLED TestAlertCursor_RoundTripKeepsMicrosecondPrecision,TestAlertListS1b_KeysetReachesBeyond200_TiesAndOrder,TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_SingleReadAndKindFilter,TestAlertListS1b_TieBoundaryInsideATieGroup
 M17 single read ignores the id: KILLED TestAlertListS1b_ActedByAndTimestamps_AuditedActors,TestAlertListS1b_SingleReadAndKindFilter
+
+Re-run after strengthening tests (exact-fit page, no empty page after a cursor):
+M3 next page when len(out) >= limit (phantom empty page): KILLED TestAlertListS1b_KeysetStableUnderConcurrentInserts,TestAlertListS1b_TieBoundaryInsideATieGroup
+
+Result: 17 mutants, 17 KILLED (M3 on the second run). Not mutated / known gap: the platform-only 'a.tenant_id IS NULL' predicate of the shared SELECT (no tenant-scope alert kind is seeded, so a tenant-owned alert row cannot be built to distinguish it; the tenant-caller refusals are pinned by TestAlertListS1b_TenantAndRoleMatrix_NoLeak and the explicit TenantID != Nil gate).

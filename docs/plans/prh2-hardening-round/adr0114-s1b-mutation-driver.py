@@ -31,6 +31,10 @@ MUTS = [
     ("M17 single read ignores the id", H, "alertListSelect+` AND a.id = $1`, id)", "alertListSelect+` AND ($1::uuid IS NOT NULL)`, id)"),
 ]
 
+ONLY = os.environ.get("ONLY")  # e.g. ONLY="M3 " re-runs just the mutants whose name starts with it
+if ONLY:
+    MUTS = [m for m in MUTS if m[0].startswith(ONLY)]
+
 def run():
     p = subprocess.run(["bash", RUN, "-tags", "integration", "./internal/httpserver", "-count=1", "-timeout", "20m",
                         "-run", "TestAlertListS1b|TestAlertCursor|TestAlertActorRefs"], capture_output=True, text=True)
