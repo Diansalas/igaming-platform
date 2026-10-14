@@ -142,6 +142,9 @@ const (
 	// more distinct days within 7 days (a slow-rate guessing pattern below the lock thresholds).
 	KindStaffMFAFailurePattern         Kind = "staff.mfa_failure_pattern"
 	KindStaffPlatformMFAFailurePattern Kind = "staff.platform_mfa_failure_pattern"
+	// KindStaffPlatformBreakGlassUsed (p1, ADR 0119 S6 section 11, migration 0139): cmd/seed-admin -break-glass
+	// created a platform admin. Platform-only (subjectless), raised post-commit by the job.
+	KindStaffPlatformBreakGlassUsed Kind = "staff.platform_break_glass_used"
 )
 
 func staffKind(k Kind, sev Severity, platform bool, allowed ...string) KindDef {
@@ -258,6 +261,7 @@ var kindDefs = map[Kind]KindDef{
 	KindStaffPlatformMFARecoveryUsed:   staffKind(KindStaffPlatformMFARecoveryUsed, SeverityP3, true, "staff_id", "request_id"),
 	KindStaffMFAFailurePattern:         staffKind(KindStaffMFAFailurePattern, SeverityP2, false, "staff_id", "distinct_days", "request_id"),
 	KindStaffPlatformMFAFailurePattern: staffKind(KindStaffPlatformMFAFailurePattern, SeverityP2, true, "staff_id", "distinct_days", "request_id"),
+	KindStaffPlatformBreakGlassUsed:    staffKind(KindStaffPlatformBreakGlassUsed, SeverityP1, true, "staff_id", "operator", "reason", "force_additional"),
 
 	KindAMLHoldEvalFailed: {
 		Kind: KindAMLHoldEvalFailed, Severity: SeverityP2, Scope: ScopeKindPlatform,

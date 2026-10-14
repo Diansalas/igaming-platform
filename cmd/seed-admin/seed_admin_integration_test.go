@@ -72,7 +72,10 @@ func seedTenantStaff(t *testing.T, pool *db.Pool) (string, string) {
 	}
 	email := "seed-ta-" + uuid.NewString() + "@fixture.invalid"
 	if err := pool.WithTenant(context.Background(), tn.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (tenant_id, email, password_hash, role) VALUES ($1, $2, 'x', 'tenant_admin')`, tn.ID, email)
+		// ADR 0119 S6 (SF014): a tenant_admin needs a Person (fixture setup only).
+		person := uuid.New()
+		_, err := tx.Exec(ctx, `WITH p AS (INSERT INTO persons (id) VALUES ($3))
+			INSERT INTO staff_users (tenant_id, email, password_hash, role, person_id) VALUES ($1, $2, 'x', 'tenant_admin', $3)`, tn.ID, email, person)
 		return err
 	}); err != nil {
 		t.Fatal(err)

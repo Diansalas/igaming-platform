@@ -160,7 +160,9 @@ func TestKinds_ScopeSubjectConsistency(t *testing.T) {
 		// platform staff member has no tenant); they mirror the widened alert_kinds_check1 CHECK and are never
 		// raisable in a tenant transaction.
 		subjectless := map[Kind]bool{KindStaffPlatformMFAIntegrity: true, KindStaffPlatformSessionIntegrity: true,
-			KindStaffPlatformMFAHardLocked: true, KindStaffPlatformMFARecoveryUsed: true, KindStaffPlatformMFAFailurePattern: true}
+			KindStaffPlatformMFAHardLocked: true, KindStaffPlatformMFARecoveryUsed: true, KindStaffPlatformMFAFailurePattern: true,
+			// ADR 0119 S6 (migration 0139): the break-glass Kind.
+			KindStaffPlatformBreakGlassUsed: true}
 		if def.Scope == ScopeKindPlatform && !def.RequiresSubject && !subjectless[k] {
 			t.Errorf("platform kind %q (non-meta) must RequireSubject", k)
 		}
