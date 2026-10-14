@@ -39,7 +39,7 @@ WWW-Authenticate: Bearer realm="platform-api", error="insufficient_user_authenti
 Use `max_age` only to explain the prompt; never compute freshness client-side (the server clock and the sealed
 session row decide).
 
-The classes of every route are pinned in `internal/httpserver/staff_route_golden_test.go` (`staffRouteGolden`). Four
+The classes of every route are pinned in `internal/httpserver/staff_route_golden_test.go` (`staffRouteGolden`). Five
 routes are classified per request:
 
 | Route | Rule |
@@ -47,6 +47,7 @@ routes are classified per request:
 | `POST /v1/admin/tenants/{tenantID}/launch-authorisations` | `none` when `action` is `suspend` (the route then refuses it with 400 anyway: suspensions use their own routes); `critical` otherwise |
 | `POST /v1/admin/tenants/{tenantID}/financial-policy-changes` | `none` when the caller holds only `financial_policy:tighten`; `critical` when the caller holds `financial_policy:author` |
 | `POST /v1/admin/alerts/{alertID}/resolve` | `critical` when the alert's kind is in the pinned security / P1 list (every `staff.*` kind, `alerting.raise_failed` and every `p1` severity alert) or the alert cannot be read; `none` otherwise and for a caller the handler refuses anyway (no `alert:manage`, or a tenant session) |
+| `POST /v1/admin/alerting/routes` | `none` for a caller the handler refuses anyway (no `alert:route_manage`, or a tenant session: the handler's audited `403 forbidden`); `critical` for every caller it admits (platform admin) |
 | `POST /v1/admin/players/{id}/rg/limits` | `critical` for a removal (`value: null`); `none` for a value. A staff **increase** stays refused by the RG domain with `403 RG_STEP_UP_REQUIRED` whatever the step-up state (ADR 0115: staff increases are NOT enabled by S4b) |
 
 Ordering: the step-up gate runs after the bearer, staff-principal, liveness and aal2 checks and **before the route's
@@ -57,6 +58,11 @@ receive `403 forbidden`. The UI must not treat a completed step-up as a promise 
 
 - **Auth:** `Authorization: Bearer <staff access token>` through the full staff chain (liveness, aal2). Rate bucket
   `mfa` (30 per IP per minute, shared with the login second-factor steps). Responses are `no-store`.
+- **Never auto-retry or double-submit this request** (no automatic retry on timeout or network error, no second
+  submit while one is in flight, disable the submit button until the response). Each duplicate submission of a valid
+  code is a replay and counts as a FAILURE on the factor's counter, which is shared with login; five failures lock the
+  factor and revoke the session (security review of S4b, finding 2). On a transport error, close the modal and let the
+  user start again with a new code.
 - **Body:** `{"code": "123456"}` - a 6-digit TOTP code. **Recovery codes are not accepted** (a staff member who lost
   the device signs out and uses the recovery flow of the login).
 - **200:**
@@ -97,7 +103,8 @@ receive `403 forbidden`. The UI must not treat a completed step-up as a promise 
 
 ## 5. The modal (S7b; ADR 0119 section 15 item 3)
 
-1. On `403 step_up_required` from any staff call: open the modal (TOTP field), call `POST /v1/staff/auth/step-up`.
+1. On `403 step_up_required` from any staff call: open the modal (TOTP field), call `POST /v1/staff/auth/step-up`
+   exactly once per code entered (never automatically retried, see section 3).
 2. On `200`: swap the access token, then **re-send the original request exactly once**, with the same frozen body
    and the same `Idempotency-Key` header if it had one. Never retry more than once; never re-send after a second
    `step_up_required` (show the failure).

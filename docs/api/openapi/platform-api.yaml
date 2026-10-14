@@ -636,6 +636,8 @@ paths:
         not revoked) gets mfa_at = now and a new keyed seal, and a NEW ACCESS TOKEN is returned with mfa_at = now; the
         refresh token does not change. Five failed step-ups on the same session within 15 minutes revoke the session
         (that answer is session_revoked). Rate bucket `mfa` (30 per IP per minute). Responses carry no-store.
+        A client MUST NEVER auto-retry or double-submit this request: a duplicate submission of a valid code is a
+        replay and counts as a failure on the shared counter (five lock the factor and revoke the session).
       security:
         - bearerAuth: []
       requestBody:

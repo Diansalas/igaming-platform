@@ -25,7 +25,7 @@
   the branch (section 25.8) and await re-review. See section 25.
 - **S4b (2026-10-13):** step-up ENFORCEMENT is `IMPLEMENTED` on an unmerged branch, pending gate G and the mandatory
   `ledger-finance` review: `requireStepUp` on every classified staff route (critical 5 min, financial 10 min; `403
-  step_up_required` with the RFC 9470 header), the four classifier functions, `POST /v1/staff/auth/step-up` and
+  step_up_required` with the RFC 9470 header), the four classifier functions plus `alertRouteManageClass`, `POST /v1/staff/auth/step-up` and
   `POST /v1/staff/mfa/recovery-codes/regenerate`, the S3-R10 seal v2 (refresh token hash and idle expiry bound), the
   S3-R13 / S4a-R10 rules (the sealed row, not the claims, decides freshness; incoherent claims refused), migration
   **0151** (the step-up column grants only), the actor-proof signer backstop, the
@@ -617,7 +617,7 @@ parsed value, so the class cannot change between the classifier and the handler.
 |---|---|---|
 | `POST /v1/admin/tenants/{tenantID}/provider-credential-requests`, `POST /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/decisions`, `POST /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/apply`, `POST /v1/admin/tenants/{tenantID}/provider-credentials/{handleID}/transitions` | `provider_credential:*` | critical (c). Revocation is protective, but revoking production credentials is an outage vector. |
 | `PUT /v1/admin/providers/{providerID}/capability`, `PUT /v1/admin/casino/providers/{providerID}/capability` | `provider_config:write`, `casino_config:write` | critical (c)(e) |
-| `POST /v1/admin/alerting/routes` | `alert:route_manage` | critical (f) |
+| `POST /v1/admin/alerting/routes` | `alert:route_manage` | critical (f). **S4b (security review finding 1):** classifier `alertRouteManageClass` - `none` for a caller the handler refuses anyway (no `alert:route_manage`, or a tenant session) so its audited 403 is kept; `critical` for every caller the handler admits |
 | `POST /v1/admin/alerts/{alertID}/resolve` | `alert:manage` | **classifier `alertResolveClass`**: `critical` when the alert kind is P1 or security (at least `staff_session_integrity`, `staff_mfa_integrity`, `staff_break_glass_used`, `staff_mfa_hard_locked`, `staff_mfa_recovery_used`; the list is pinned), otherwise `none`. Resolving such an alert from a stolen session would hide the signal (f). |
 | `POST /v1/admin/alerts/{alertID}/ack` | `alert:manage` | none: an ack does not close the alert |
 
@@ -1449,7 +1449,10 @@ Extra reviewers are named per slice.
   - The static lock-order suite asserts the A9 placement for every flow in the 9.5 table. A B-7-style contention test
     runs N concurrent approvers against one suspension. It asserts the suspension completes within its `lock_timeout`
     plus one retry, or answers `lifecycle_busy` with the sessions already revoked.
-  - A platform admin acting under `WithTenant(target)` passes the re-assertion through `staff_actor_self_select`.
+  - A platform admin acting for a tenant passes the re-assertion WITHOUT any extra policy in every flow S4b re-asserts
+    (the acting session has an empty `app.tenant_id`: the dual-scope policy admits platform rows and the 0112 acting
+    fence admits the acting principal; S4b D14). The `staff_actor_self_*` pair is needed only by K1's platform
+    session (S4b-R3 hard gate).
     Without the GUC, the row is invisible and the request is refused (the policy is pinned by test).
 - **Role change mid-session.** The old token gets 401 (role/`sv` mismatch). A refresh issues the new role.
 - **Last admin.** Two platform admins suspend each other concurrently: exactly one succeeds, and the other gets
@@ -2399,7 +2402,7 @@ orchestrator allocated: 0139 stays reserved for S5 + S6, 0143-0150 for ADR 0116 
 | Item | Label |
 |---|---|
 | `requireStepUp(class)` as the last link of `staffRoute` (critical 5 min, financial 10 min, configurable down to 1 min; `STAFF_STEP_UP_*_MAX_AGE_SECONDS` wired in `cmd/platform-api`), `403 step_up_required` with `max_age` and the RFC 9470 `WWW-Authenticate` header, enforced on every one of the 180 golden routes by class | `IMPLEMENTED` |
-| The four classifier functions (`launchActionClass`, `financialPolicyChangeClass`, `alertResolveClass`, `rgLimitChangeClass`); the classifier reads the SAME body bytes the handler decodes, with the same decoder and type | `IMPLEMENTED` |
+| The four classifier functions (`launchActionClass`, `financialPolicyChangeClass`, `alertResolveClass`, `rgLimitChangeClass`) plus `alertRouteManageClass` (security review, D20); the classifier reads the SAME body bytes the handler decodes, with the same decoder and type | `IMPLEMENTED` |
 | `POST /v1/staff/auth/step-up` (TOTP only; replay rule and failure counters shared with login; writes only the chain-head row; new access token, refresh token unchanged; the failure that locks the factor revokes the session chain) | `IMPLEMENTED` |
 | `POST /v1/staff/mfa/recovery-codes/regenerate` (step-up critical; the S3 contract left it for S4b, section 23.3 D3) | `IMPLEMENTED` |
 | Conditions S3-R13 / S4a-R10: the freshness instant is the OLDER of the token's `mfa_at` and the sealed session row's; liveness verifies the row's seal and coherence (aal 2, `amr` names a second factor, `auth_time <= mfa_at <= now + 5 s`, `auth_time` within the configured absolute TTL) on the database clock; `auth.Verify` / `IssueStaff` refuse an `amr` without a second factor, `mfa_at < auth_time`, a future `auth_time` / `mfa_at` beyond 5 s, an `auth_time` older than 12 h | `IMPLEMENTED` |
@@ -2439,7 +2442,7 @@ orchestrator allocated: 0139 stays reserved for S5 + S6, 0143-0150 for ADR 0116 
 | D7 | `alertResolveClass`: `critical` for every `staff.*` kind and every `p1` alert, and for an alert that does not exist or cannot be read; `none` otherwise and for a caller the handler refuses (no `alert:manage`, or a tenant session); a database fault is 503 | Section 8.2 (f) "at least" list, pinned as a prefix + severity rule |
 | D8 | `financialPolicyChangeClass` decides by permission (`financial_policy:author` -> critical); the backstop exempts `financial_policy_change:propose` from a TENANT-scope session only (tighten-only callers; `author` is platform_admin only) | Otherwise the backstop would turn every tighten-only proposal into a 500 |
 | D9 | The backstop runs in `Issuer.Attach` (the only production signing path; `Sign` has no context and is test-only, pinned); its max-age is the class's section 7.4 UPPER bound (5 / 10 min) plus 30 s grace, not the configured value | The route gate already applied the configured value; the backstop catches a missing or wrong class |
-| D10 | Integration-test support: `actorproof.SetTestStepUpFallback` (build tag `integration`, set by `prooftest`'s `init`) lets a governed domain service called DIRECTLY by an integration test sign without an assertion. It never applies to an HTTP staff request (`auth.Middleware` marks it, `stepup.WithStaffRequest`) nor to a present-but-wrong assertion | Section 9.1 "Test support"; hundreds of domain tests call the services without the HTTP chain. Production binaries cannot contain the setter (pinned) |
+| D10 | Integration-test support: `actorproof.SetTestStepUpFallback` (build tag `integration`, set by `prooftest`'s `init`) lets a governed domain service called DIRECTLY by an integration test sign without an assertion. It never applies to an HTTP staff request (`auth.Middleware` marks it, `stepup.WithStaffRequest`) nor to a present-but-wrong assertion. Split by build tag (security review finding 5): `stepup_fallback_prod.go` (`!integration`) is `func testStepUpFallbackOn() bool { return false }`; the switch variable and its setter exist only in `testsupport_integration.go` (`integration`). `go tool nm` on a plain `go build ./cmd/platform-api` shows no `testStepUpFallback` symbol (control: the `-tags integration` build has it) | Section 9.1 "Test support"; hundreds of domain tests call the services without the HTTP chain. Production binaries contain neither the switch nor the setter (pinned by `TestStatic_StepUpBackstopPins`) |
 | D11 | New leaf package `internal/stepup` (class, assertion, freshness); `internal/auth` re-exports the names (`auth.StepUpClass`, `auth.StepUpAssertion`, ...) | `internal/actorproof` and `internal/withdrawal` importing `internal/auth` creates test import cycles (`db` and `tenant` tests import `prooftest`) |
 | D12 | Withdrawal approve (9.5): `approverEligibilityCheckLocked` reads the approver's own row `FOR SHARE` (tenant session: the row is visible) and compares the role; a status other than `active` keeps the pre-existing `ErrApproverInactive` 403 (S4a-R2 pin), a role mismatch is `401 session_revoked`. Reject, submit and resolve keep the unlocked `approverEligibilityCheck` | Section 9.5 table; S4b-R3 for submit / resolve |
 | D13 | Section 9.5 implemented for K2, K3/M4, HSEC and withdrawal approve; NOT for withdrawal submit / resolve and K1 approve / revoke | Scope of this slice as dispatched (fold into the existing A8 statements + `approverEligibilityCheck`); the new statements of the other rows need their own lock-order review (S4b-R3) |
@@ -2449,6 +2452,8 @@ orchestrator allocated: 0139 stays reserved for S5 + S6, 0143-0150 for ADR 0116 
 | D17 | A step-up refused because the session is not the chain head still burns the code's TOTP step (the transaction commits) | A code is accepted at most once (17.3) |
 | D18 | Withdrawal `require_step_up` is checked on the database clock inside the approval transaction; 2 min is a constant (`stepup.PolicyMaxAge`), not configuration | Section 9.3 [ORCH-DEFAULT] |
 | D19 | The liveness refusal for `seal_invalid` / `assurance_incoherent` is logged at Error and counted, not audited or alerted (the refresh path audits and raises the P1 for the same row) | No writes on the read path (S4a D5) |
+| D20 | `POST /v1/admin/alerting/routes` moved from static `critical` to the classifier `alertRouteManageClass` (security review finding 1): it is the only critical route whose permission check is inside the handler and audits the refusal; a static class answered an unauthorised caller with `step_up_required` and skipped that audit row | `TestStepUp_AlertRouteCreate_UnauthorisedProbingKeepsTheAuditedRefusal`; golden row changed (26.4) |
+| D21 | `POST /v1/staff/auth/step-up` must NEVER be auto-retried or double-submitted by a client: each duplicate submission of a valid code is a replay and counts as a failure on the factor's shared counter; five failures lock the factor and revoke the session chain (D4). Recorded in the UI contract; S7b already follows it | Security review finding 2 |
 
 ### 26.4 Changed existing tests and assertions (every one)
 
@@ -2475,6 +2480,12 @@ orchestrator allocated: 0139 stays reserved for S5 + S6, 0143-0150 for ADR 0116 
 | `internal/httpserver/staff_mfa_world_integration_test.go` (`sealOK`, `plantSession`, `sessions`) | seal v2 (setup) | S3-R10 |
 | `internal/auth/authtest` | `LiveStaffTokenAged` added (setup) | Stale step-up fixtures |
 | `internal/actorproof/prooftest` | `AttachForSession` places a synthetic assertion; `WithStepUp`; the `init` enables the integration-only fallback (D10) | Section 9.1 test support |
+| `internal/httpserver/staff_route_golden_test.go` (review round) | `POST /v1/admin/alerting/routes`: `critical` -> `classifier:alertRouteManageClass` | D20 |
+| `internal/httpserver/staff_route_static_test.go` `TestStaffRoutes_ClassIdentsAreTheClosedSet` (review round) | the classifier set +`alertRouteManageClass`; `routeClassIdents` +`stepUpByAlertRouteManager` | D20 |
+| `internal/httpserver/staff_stepup_test.go` `TestStepUpClassifiers_ParityWithRouteClassifiers` (branch-new; review round) | 4 -> 5 classifiers; `TestClassifiers_DecisionsAndBodyDiscipline` +3 cases | D20 |
+| `internal/httpserver/staff_stepup_integration_test.go` `TestStepUp_GoldenTable_EveryClassifiedRoute` (branch-new; review round) | coverage pin 47 critical / 4 classifier -> 46 critical / 5 classifier | D20 |
+| `internal/actorproof/stepup_test.go` (branch-new; review round) | the "fallback off" check reads `testStepUpFallbackOn()`; `TestStatic_StepUpBackstopPins` also pins `stepup_fallback_prod.go` | D10 split |
+| `internal/withdrawal/stepup_policy_integration_test.go` (branch-new; review round) | +2 cases: exactly 120 s old on the transaction's `now()` passes, 120 s + 1 us is refused | Ledger-finance review |
 
 Note for the reviewer: an earlier revision of THIS branch pinned the `staff_actor_self_*` policy pair in its own new
 tests (`internal/db/actor_staff*_test.go`, `staff_stepup_migration_integration_test.go`); after the pair was removed
@@ -2518,12 +2529,13 @@ Final head of the code: `0c3eb88` plus this documentation commit.
 |---|---|---|
 | S4b-R1 | Under M5 (arbitrary SQL as the runtime role) the 0151 grant lets SQL move a staff session's `mfa_at` forward (SF040 still refuses backwards / NULL). The edit cannot forge a step-up: the seal no longer verifies, liveness refuses the session (`seal_invalid`) and its refresh is refused, audited and alerted (P1). It is a denial of service against that session only | Accepted; pinned by `TestStaffMFA_SessionSealTamper` (c) |
 | S4b-R2 | The step-up prompt precedes the route's permission check (D1) | Accepted (no write, public classes); revisit if the back office finds the prompt confusing |
-| S4b-R3 | Section 9.5 re-assertion NOT built for withdrawal `submit` / `resolve` and K1 grant `approve` / `revoke`: they rely on the request-level liveness check and the existing DB status guards (R13 window: a handler that started before a suspension committed). The 9.5(b) GUC + `staff_actor_self_*` policy pair are not built either (D14) | Follow-up with `ledger-finance` (new statements at the A8 position after the flow's last L1 row) and `architect` (the policy pair, with the first flow that needs it) |
+| S4b-R3 | Section 9.5 re-assertion NOT built for withdrawal `submit` / `resolve` and K1 grant `approve` / `revoke`: they rely on the request-level liveness check and the existing DB status guards (R13 window: a handler that started before a suspension committed). Submit's window is WIDER than R13: its eligibility check commits in a separate transaction before `ClaimForDispatch`, possibly with a KYC-gate call in between. The 9.5(b) GUC + `staff_actor_self_*` policy pair are not built either (D14) | **HARD GATE (ledger-finance review): must merge WITH OR BEFORE the first production suspension / role-change writer (S5 + S6).** Submit: a new staff `FOR SHARE` inside the `ClaimForDispatch` transaction after `payment_attempts`. K1: a new `FOR SHARE` at the A8 position plus the 9.5(b) GUC and policy pair for K1's platform session. Recorded in ADR 0082 A9 |
 | S4b-R4 | ADR 0115 staff RG increases stay refused (`RG_STEP_UP_REQUIRED`); the route classifier marks only removals critical | ADR 0115's classifier slice (pass the assertion into the RG domain transaction) |
 | S4b-R5 | Step-up is per SESSION: after a step-up, every access token minted for that session chain (the step-up response, and any later refresh, which copies `mfa_at`) is fresh; a thief who holds the refresh token benefits within the window | Section 3 M2 residual (bounded by the 5 / 10 min window, the 30 min idle and refresh-token reuse detection) |
 | S4b-R6 | The signer backstop uses the class's UPPER bound (5 / 10 min) + 30 s, not the configured (possibly tighter) max-age | Accepted (D9): the route gate applies the configured value |
 | S4b-R7 | Domain-level integration tests sign through the integration-only fallback (D10); only HTTP tests exercise the real backstop | Accepted; `TestStepUp_SignerBackstopOverHTTP`, `TestTestStepUpFallback_NeverAppliesToAStaffRequest` |
-| S4b-R8 | Every staff session issued before S4b (seal v1) ends at deploy: staff log in again (no alert) | Add to the S9 runbook / deploy note |
+| S4b-R8 | Every staff session issued before S4b (seal v1) ends at deploy: staff log in again (no alert) | Recorded in `docs/runbooks/staff-mfa-s3-cutover.md` section 9 (S4b deploy note); carry into the S9 deploy runbook list |
+| S4b-R12 | `IsLegacySessionSeal` has no sunset: the quiet v1 retirement (no audit, no alert) stays in the code indefinitely. 12 h after the S4b deploy (the absolute-TTL ceiling) no genuine v1 session can be live, so any later "legacy" seal is a forgery and should be treated as `bad_seal` (audited, P1) | Tracked for S9: turn the quiet legacy path into `bad_seal` (security review finding 6) |
 | S4b-R9 | `sv` is still 0 (`staff_version` arrives with 0139): the 9.5 re-assertion compares `status` and `role` only | 0139 (S5 + S6) |
 | S4b-R10 | A `seal_invalid` refusal at liveness is not itself audited or alerted (D19); the P1 arises on the session's next refresh | Accepted; metric + Error log line (`StaffLivenessRefusals` rule) |
 | S4b-R11 | `staff_lifecycle:request|approve` are not in the backstop registry yet | S5 + S6 (with the operations) |
@@ -2554,7 +2566,7 @@ S4b-R3 decision (submit / resolve / K1).
 `architect`: the decision not to build the 9.5(b) policy pair in S4b (D14, S4b-R3), the ADR 0099 A-19 amendment, the
 `internal/stepup` package split (D11), migration number 0151 (grants only).
 
-`code-reviewer` / `qa`: the golden-wide test's coverage pins (47 critical, 22 financial, 4 classifier, 37 none
+`code-reviewer` / `qa`: the golden-wide test's coverage pins (46 critical, 22 financial, 5 classifier, 37 none
 mutating, 70 reads), the changed assertions of 26.4, the surviving mutants of 26.5, and the static pins (NO setter
 of `app.actor_staff_id` yet, single production caller of `auth.ContextWithStepUpAssertion`, production signs only
 through `Attach`, the integration-only fallback setter).

@@ -7,9 +7,10 @@ package adjustment
 // "suspend the approver" against "the approver's final approval":
 //   - the suspension (or a role change) committed between the request lock and the A8 statement: the re-assertion
 //     sees it, nothing is written (the approval insert rolls back with the transaction), db.ErrActorStaffNotLive;
-//   - the approval holds its A8 locks first: the suspension waits for it (the actor's own row is now in the A8 set,
-//     made visible for a platform actor by migration 0151's staff_actor_self_* pair), the approval commits, then the
-//     suspension completes. No deadlock in either order.
+//   - the approval holds its A8 locks first: the suspension waits for it (the actor's own row is in the A8 set; it
+//     is visible in both families without any extra policy: the dual-scope policy in a tenant session, and in the
+//     acting session the dual-scope policy with an empty app.tenant_id plus the 0112 acting fence), the approval
+//     commits, then the suspension completes. No deadlock in either order.
 
 import (
 	"context"

@@ -1925,17 +1925,44 @@ id was already in the A8 set through `decided_by`; adding it explicitly makes th
 ADR 0119 section 9.5 two-transaction phasing, S5 + S6). A single-row writer cannot form a cycle with share lockers
 that each follow one canonical order. The cost is writer starvation under human traffic, not deadlock.
 
-**5. What changes.** No lock is added or moved (the actor's row was already locked through `decided_by`; the
-withdrawal approve eligibility read gains `FOR SHARE` at its existing position). What is new is the COMPARISON: a
-suspension or role change of the acting approver committed after the request lock and before the A8 statement is now
-refused (`db.ErrActorStaffNotLive`) instead of being left to the recount's live grant / person checks and the DB
-status guards. The recount semantics are unchanged.
+**5. What changes.** For K2, K3/M4 and HSEC no lock is added or moved: the actor's row was already locked by the
+existing A8 statement through `decided_by`. **Withdrawal approve DOES add a share lock:** its eligibility read of the
+approver's own `staff_users` row was a plain read and becomes `FOR SHARE`, at the read's existing position (after
+`lockRequestForUpdate`, the flow's L1 row; the A8 position). A concurrent suspension or role change of that approver
+now waits for the approval transaction (both orders tested). What is new everywhere is the COMPARISON: a suspension or
+role change of the acting approver committed after the request lock and before the A8 statement is now refused
+(`db.ErrActorStaffNotLive`, Warn log + `staff_reassertion_refusals_total{flow}`) instead of being left to the recount's
+live grant / person checks and the DB status guards. The recount semantics are unchanged.
+
+**6. Writer starvation bound.** A suspension's T2 (the single `staff_users` row write, ADR 0119 section 9.5
+two-transaction phasing) runs with a `lock_timeout`. An execution that holds its A8 share locks longer than that
+timeout makes T2 fail `55P03` (S5 + S6 answer `lifecycle_busy` with the sessions already revoked by T1) while the
+execution still commits cleanly: no deadlock and no partial money outcome
+(`TestS4b_K3_ExecutionHoldingA8_T2LockTimeoutIs55P03_ExecutionCommits`).
+
+**HARD GATE (ledger-finance review of S4b; architect / orchestrator must enforce).** The section 9.5 re-assertion for
+withdrawal `submit` and for K1 grant `approve` / `revoke` MUST merge WITH OR BEFORE the first production writer of a
+staff suspension or role change (ADR 0119 S5 + S6). Until then no production code path suspends staff or changes a role
+mid-session, so the windows are latent. Shape, for the record:
+- **Withdrawal submit:** a new staff `FOR SHARE` inside the `ClaimForDispatch` transaction, after `payment_attempts`
+  (the flow's last L1 row). Submit's window is WIDER than R13: its eligibility check commits in a separate transaction
+  BEFORE `ClaimForDispatch`, possibly with a KYC-gate provider call in between, so a suspension can land between the
+  check and the dispatch claim.
+- **K1 approve / revoke:** a new staff `FOR SHARE` at the A8 position; K1 runs in a platform session that hides a
+  tenant actor's row and the acting principal's own row under `WithTenant(target)`, so it needs ADR 0119 section
+  9.5(b)'s `app.actor_staff_id` GUC and `staff_actor_self_*` policy pair, built in the same change.
+- Withdrawal `resolve` follows the same rule if it gains a production staff path that moves value.
 
 **Tests:** `TestS4b_K2_ActorChangedBeforeA8_IsRefusedAndNothingWritten` (tenant / acting, suspension and role change
 committed between the request lock and the A8 statement: nothing written), `TestS4b_K2_ApprovalHoldingA8_SuspensionOfTheActorWaits`
 (tenant / acting), `TestS4b_K3_ActorSuspendedBeforeA8_IsRefusedAndNothingWritten`,
 `TestS4b_HSEC_PlatformActorReasserted_BothOrders`, `TestStepUp_WithdrawalApprove_EligibilityHoldsTheApproverRowForShare`,
-`TestStepUp_WithdrawalApprove_ReassertsRoleInTransaction`; the existing B-7 / Y07 / HSEC concurrency tests pass
+`TestStepUp_WithdrawalApprove_ReassertsRoleInTransaction`; from the ledger-finance review:
+`TestS4b_K3_ActingActorSuspendedBeforeA8_IsRefusedAndNothingWritten`,
+`TestS4b_K3_TenantActorRoleChangedBeforeA8_IsRefusedAndNothingWritten`,
+`TestS4b_K3_ExecutionHoldingA8_SuspensionWaits_BothFamilies`,
+`TestS4b_K3_ExecutionHoldingA8_T2LockTimeoutIs55P03_ExecutionCommits`,
+`TestStepUp_WithdrawalApprove_ReassertionBothOrders_RealApprove` (through the real `withdrawal.Approve`); the existing B-7 / Y07 / HSEC concurrency tests pass
 unchanged. Mutants R01, R03, R04, R06-R09:
 `docs/plans/prh2-hardening-round/adr0119-s4b-mutation-kill.txt`.
 
