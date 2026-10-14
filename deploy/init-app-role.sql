@@ -726,6 +726,7 @@ BEGIN
     IF to_regclass('public.staff_lifecycle_events') IS NOT NULL THEN
         EXECUTE 'REVOKE UPDATE ON staff_users FROM igaming_runtime';
         EXECUTE 'GRANT UPDATE (status, role, password_hash, status_changed_at, offboarded_at, person_id, display_name, updated_at) ON staff_users TO igaming_runtime';
+        EXECUTE 'REVOKE DELETE ON staff_users FROM igaming_runtime';
         EXECUTE 'REVOKE ALL ON staff_lifecycle_requests FROM igaming_runtime';
         EXECUTE 'GRANT SELECT, INSERT ON staff_lifecycle_requests TO igaming_runtime';
         EXECUTE 'GRANT UPDATE (state, decided_at, executing_txid, target_staff_id) ON staff_lifecycle_requests TO igaming_runtime';

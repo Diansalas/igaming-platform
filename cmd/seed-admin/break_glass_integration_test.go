@@ -9,30 +9,21 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
-	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
 
 func TestSeedAdmin_BreakGlass_Subprocess(t *testing.T) {
-	ownerURL := os.Getenv("TEST_DATABASE_URL")
-	if ownerURL == "" {
-		t.Fatal("TEST_DATABASE_URL must be set")
-	}
+	// A scratch database (review fix F4): the usable / not-usable platform admin state is this test's own.
+	ownerURL, pool := seedScratch(t)
 	bin := buildSeedAdmin(t)
 	fk, mk := randKey(t), randKey(t)
 	env := []string{"PATH=" + os.Getenv("PATH"), "DATABASE_URL=" + ownerURL, "SEED_ADMIN_PASSWORD=a-seed-admin-password-1",
 		"STAFF_MFA_FACTOR_KEYS=f1:" + fk, "STAFF_MFA_FACTOR_ACTIVE_KID=f1", "STAFF_MFA_MAC_KEYS=m1:" + mk, "STAFF_MFA_MAC_ACTIVE_KID=m1"}
-	pool, err := db.Connect(context.Background(), ownerURL, 2, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
 	exists := func(email string) bool {
 		var ok bool
 		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
@@ -55,12 +46,19 @@ func TestSeedAdmin_BreakGlass_Subprocess(t *testing.T) {
 	}
 
 	// 1. A platform_admin always needs a Person (SF014): the create and -break-glass modes refuse without one.
-	for _, args := range [][]string{{}, {"-break-glass", "-operator=ops-alice", "-reason=INC-9", "-force-additional"}} {
+	for _, args := range [][]string{append([]string{}, opArgs...), {"-break-glass", "-operator=ops-alice", "-reason=INC-9", "-force-additional"}} {
 		email := "bg-noperson-" + uuid.NewString() + "@fixture.invalid"
 		_, stderr, code := runSeedAdmin(t, bin, env, append([]string{"-email=" + email}, args...)...)
 		if code == 0 || !strings.Contains(stderr, "requires a Person") || exists(email) {
 			t.Fatalf("no Person %v must refuse and create nothing: %d %s", args, code, stderr)
 		}
+	}
+	// 1b. Review fix SR-1 / F1: the DEFAULT mode is refused while a platform_admin exists (with a Person, an operator
+	// and a reason): no row, no token, no event.
+	sneaky := "bg-sneaky-" + uuid.NewString() + "@fixture.invalid"
+	stdout0, stderr0, code0 := runSeedAdmin(t, bin, env, append([]string{"-email=" + sneaky, "-create-person"}, opArgs...)...)
+	if code0 == 0 || !strings.Contains(stderr0, "a platform_admin already exists") || exists(sneaky) || len(tokenLine.FindAllString(stdout0, -1)) != 0 {
+		t.Fatalf("the default mode with an existing platform_admin must refuse and create nothing: %d %q %s", code0, stdout0, stderr0)
 	}
 	// 2. -break-glass needs -operator and -reason.
 	email := "bg-" + uuid.NewString() + "@fixture.invalid"
@@ -75,7 +73,7 @@ func TestSeedAdmin_BreakGlass_Subprocess(t *testing.T) {
 	if code == 0 || !strings.Contains(stderr, "usable second factor exists") || exists(email) {
 		t.Fatalf("-break-glass with a usable admin must refuse: %d %s", code, stderr)
 	}
-	if _, _, code := runSeedAdmin(t, bin, env, "-email="+email, "-create-person", "-force-additional"); code == 0 || exists(email) {
+	if _, _, code := runSeedAdmin(t, bin, env, append([]string{"-email=" + email, "-create-person", "-force-additional"}, opArgs...)...); code == 0 || exists(email) {
 		t.Fatal("-force-additional without -break-glass must refuse")
 	}
 	// 4. -force-additional: created active with a Person, one token printed, owner_provisioned event, audit row, P1 alert.

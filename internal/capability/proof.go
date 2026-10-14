@@ -35,16 +35,21 @@ type ProofActor struct {
 
 // reassertActor is the ADR 0119 section 9.5 K1 re-assertion (approve and revoke; ADR 0082 A9): the acting staff
 // member's own row FOR SHARE, compared with the verified token's role and staff_version. It runs only for an
-// authenticated principal in the context (every HTTP K1 call); the integration-only TestSessionProofHook path
-// (fixtures that open their own sessions without a token) carries no token to compare with, and the database
-// refuses that path in production anyway (no proof, AP001). The row is visible in both K1 session shapes: a tenant
+// authenticated principal in the context (every HTTP K1 call). Without one it refuses in production (review fix F7);
+// the integration-only TestSessionProofHook path (fixtures that open their own sessions without a token) skips it
+// through the build-tag split (reassert_integration.go). The row is visible in both K1 session shapes: a tenant
 // caller's own row through the dual-scope policy (db.WithPrincipalScope), a platform caller's own platform row
 // because db.WithPlatformAdmin leaves app.tenant_id empty - so the section 9.5(b) app.actor_staff_id pair is not
 // needed here (verified by TestK1Reassertion_*).
 func reassertActor(ctx context.Context, tx pgx.Tx) error {
 	a, ok := ctx.Value(proofActorKey{}).(ProofActor)
 	if !ok {
-		return nil
+		// Review fix F7: no authenticated principal is a refusal in production (reassert_prod.go); only the
+		// integration build may skip it for token-less fixtures (reassert_integration.go).
+		if reassertFallbackOn() {
+			return nil
+		}
+		return ErrActorNotLive
 	}
 	if a.Actor == uuid.Nil || a.Role == "" || a.StaffVersion < 1 {
 		return ErrActorNotLive

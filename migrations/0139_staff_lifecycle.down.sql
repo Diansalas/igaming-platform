@@ -26,6 +26,8 @@ DECLARE
     v_apps   bigint;
     v_alerts bigint;
 BEGIN
+    -- (Review fix F2: a duplicate live / offboarded email pair needs an offboarded row, so this count also refuses
+    -- every state the restored UNIQUE NULLS NOT DISTINCT (tenant_id, email) could not hold.)
     SELECT pg_catalog.count(*) INTO v_staff FROM public.staff_users WHERE status IN ('invited', 'offboarded');
     SELECT pg_catalog.count(*) INTO v_events FROM public.staff_lifecycle_events;
     SELECT pg_catalog.count(*) INTO v_reqs FROM public.staff_lifecycle_requests;
@@ -46,6 +48,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
         EXECUTE 'REVOKE UPDATE (status, role, password_hash, status_changed_at, offboarded_at, person_id, display_name, updated_at) ON staff_users FROM igaming_runtime';
         EXECUTE 'GRANT UPDATE ON staff_users TO igaming_runtime';
+        EXECUTE 'GRANT DELETE ON staff_users TO igaming_runtime';
     END IF;
 END
 $$;
@@ -229,6 +232,8 @@ DROP FUNCTION sf_staff_immutable();
 DROP FUNCTION sf_staff_transition();
 
 -- 2. Columns and CHECKs.
+DROP INDEX staff_users_live_email;
+ALTER TABLE staff_users ADD CONSTRAINT staff_users_tenant_id_email_key UNIQUE NULLS NOT DISTINCT (tenant_id, email);
 ALTER TABLE staff_users DROP CONSTRAINT staff_users_offboarded_at_state;
 ALTER TABLE staff_users DROP COLUMN invited_by;
 ALTER TABLE staff_users DROP COLUMN offboarded_at;

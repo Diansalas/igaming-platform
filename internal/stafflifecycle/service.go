@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -325,11 +327,18 @@ func record(ctx context.Context, tx pgx.Tx, in eventIn) error {
 	})
 }
 
+// truncate cuts s to at most n bytes on a rune boundary, after replacing invalid UTF-8 (review fix F9: a byte cut
+// inside a multi-byte character, or a non-UTF-8 header byte, would make the event INSERT fail with 22021).
 func truncate(s string, n int) string {
+	s = strings.ToValidUTF8(s, "?")
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // ---- error mapping -----------------------------------------------------------------------------------------------
@@ -356,6 +365,8 @@ func mapDBError(err error) error {
 		return fmt.Errorf("%w (%s)", ErrFourEyes, pgErr.Code)
 	case "55P03":
 		return fmt.Errorf("%w (%s)", ErrBusy, pgErr.Code)
+	case "AP001", "AP002", "AP003", "AP004", "AP005":
+		return fmt.Errorf("%w (%s)", ErrProofRefused, pgErr.Code)
 	case "23505":
 		return fmt.Errorf("%w (%s)", ErrConflict, pgErr.Code)
 	case "23503":
@@ -382,6 +393,8 @@ func (s *Service) deliver(ctx context.Context, mails []mail) Delivery {
 		return DeliveryNone
 	}
 	out := DeliverySent
+	// Review fix F5: the hand-off runs after the commit and must not be cut short by the caller disconnecting.
+	ctx = context.WithoutCancel(ctx)
 	for _, m := range mails {
 		subject, body := s.compose(m)
 		if err := s.mailer.Send(ctx, email.Message{To: m.to, Subject: subject, Body: body}); err != nil {

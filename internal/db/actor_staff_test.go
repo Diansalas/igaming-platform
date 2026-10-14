@@ -13,7 +13,52 @@ import (
 	"github.com/google/uuid"
 )
 
-var actorStaffGUCPattern = regexp.MustCompile(`set_config\(\s*'app\.actor_staff_id'`)
+// Review fix F6: any form that sets the GUC (set_config, SET [LOCAL] / SET SESSION).
+var actorStaffGUCPattern = regexp.MustCompile(`(?i)set_config\(\s*'app\.actor_staff_id'|\bSET\s+(LOCAL\s+|SESSION\s+)?"?app\.actor_staff_id`)
+
+var setterCallPattern = regexp.MustCompile(`\bSetActorStaffIDForCurrentTx\(`)
+
+// Review fix F6 (ADR 0119 S5 + S6): the 9.5(b) pair is used by the staff lifecycle ONLY. Every non-test call of
+// SetActorStaffIDForCurrentTx is in internal/stafflifecycle (the platform-actor-on-tenant-target scope and the
+// enrolment-issuer check); a new caller anywhere else (which would make a platform actor's own row lockable in another
+// tenant-scoped flow, and make SF021 stand aside) fails here.
+func TestStatic_ActorStaffIDSetterCallers(t *testing.T) {
+	root := repoRootForActingSetterTest(t)
+	callers := map[string]int{}
+	if err := walkGoFilesSkippingHiddenAndTestdata(root, func(path string, src []byte) error {
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		for _, line := range strings.Split(string(src), "\n") {
+			l := strings.TrimSpace(line)
+			if strings.HasPrefix(l, "//") || strings.HasPrefix(l, "func SetActorStaffIDForCurrentTx(") {
+				continue
+			}
+			if setterCallPattern.MatchString(l) {
+				callers[rel]++
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"internal/stafflifecycle/service.go": 1, "internal/stafflifecycle/actions.go": 1}
+	if len(callers) != len(want) {
+		t.Fatalf("SetActorStaffIDForCurrentTx callers %v, want exactly %v", callers, want)
+	}
+	for f, n := range want {
+		if callers[f] != n {
+			t.Fatalf("SetActorStaffIDForCurrentTx callers %v, want exactly %v", callers, want)
+		}
+	}
+	for _, planted := range []string{`tx.Exec(ctx, "SET LOCAL app.actor_staff_id = '1'")`, `SET app.actor_staff_id TO x`} {
+		if !actorStaffGUCPattern.MatchString(planted) {
+			t.Fatalf("negative control: %q was not detected", planted)
+		}
+	}
+}
 
 // ADR 0119 S5 + S6 (section 9.5(b), section 13.5 "exactly one setter"): app.actor_staff_id is set ONLY by
 // SetActorStaffIDForCurrentTx in internal/db/actor_staff.go. (S4b pinned that nothing set it; this test replaces

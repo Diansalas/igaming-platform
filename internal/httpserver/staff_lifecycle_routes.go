@@ -210,6 +210,12 @@ func (c lifecycleCall) writeError(ctx context.Context, w http.ResponseWriter, er
 		apierror.Write(w, c.requestID, apierror.CodeLifecycleBusy, "the staff record is busy; the sessions are already revoked, retry")
 	case errors.Is(err, stafflifecycle.ErrConflict):
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "a staff user with this email already exists in this scope")
+	case errors.Is(err, stafflifecycle.ErrPersonInUse):
+		apierror.Write(w, c.requestID, apierror.CodeConflict, "the Person is already linked to a live staff account")
+	case errors.Is(err, stafflifecycle.ErrAlreadyLinked):
+		apierror.Write(w, c.requestID, apierror.CodeConflict, "staff user not found, or already linked to a person")
+	case errors.Is(err, stafflifecycle.ErrProofRefused):
+		apierror.Write(w, c.requestID, apierror.CodeForbidden, "the signed actor proof was refused")
 	case errors.Is(err, stafflifecycle.ErrUnavailable):
 		apierror.Write(w, c.requestID, apierror.CodeUnavailable, "staff administration is temporarily unavailable")
 	default:
@@ -272,19 +278,29 @@ type staffLifecycleEventListDTO struct {
 }
 
 type platformStaffLifecycleRequestDTO struct {
-	ID                string  `json:"id"`
-	Kind              string  `json:"kind"`
-	State             string  `json:"state"`
-	TargetStaffID     *string `json:"target_staff_id"`
-	InviteEmail       *string `json:"invite_email"`
-	ReasonCode        *string `json:"reason_code"`
-	Note              *string `json:"note"`
-	RequestedBy       string  `json:"requested_by"`
-	RequiredApprovals int     `json:"required_approvals"`
-	PayloadHash       string  `json:"payload_hash"`
-	ExpiresAt         string  `json:"expires_at"`
-	CreatedAt         string  `json:"created_at"`
-	DecidedAt         *string `json:"decided_at"`
+	ID                string           `json:"id"`
+	Kind              string           `json:"kind"`
+	State             string           `json:"state"`
+	TargetStaffID     *string          `json:"target_staff_id"`
+	InviteEmail       *string          `json:"invite_email"`
+	InvitePersonID    *string          `json:"invite_person_id"`
+	InvitePersonStaff []linkedStaffDTO `json:"invite_person_staff"`
+	EmailDelivery     string           `json:"email_delivery,omitempty"`
+	ReasonCode        *string          `json:"reason_code"`
+	Note              *string          `json:"note"`
+	RequestedBy       string           `json:"requested_by"`
+	RequiredApprovals int              `json:"required_approvals"`
+	PayloadHash       string           `json:"payload_hash"`
+	ExpiresAt         string           `json:"expires_at"`
+	CreatedAt         string           `json:"created_at"`
+	DecidedAt         *string          `json:"decided_at"`
+}
+
+// linkedStaffDTO is a live platform staff account already linked to an invitation's Person (review fix SR-3).
+type linkedStaffDTO struct {
+	ID     string `json:"id"`
+	Email  string `json:"email"`
+	Status string `json:"status"`
 }
 
 type platformStaffLifecycleRequestListDTO struct {
@@ -339,8 +355,16 @@ func toStaffLifecycleEventDTO(v staffViewer, e stafflifecycle.Event) staffLifecy
 }
 
 func toLifecycleRequestDTO(r stafflifecycle.Request) platformStaffLifecycleRequestDTO {
+	var linked []linkedStaffDTO
+	if r.InvitePersonID != nil {
+		linked = []linkedStaffDTO{}
+		for _, l := range r.InvitePersonStaff {
+			linked = append(linked, linkedStaffDTO{ID: l.ID.String(), Email: l.Email, Status: l.Status})
+		}
+	}
 	return platformStaffLifecycleRequestDTO{ID: r.ID.String(), Kind: r.Kind, State: r.State, TargetStaffID: lcOptUUID(r.TargetStaffID),
-		InviteEmail: r.InviteEmail, ReasonCode: r.ReasonCode, Note: r.Note, RequestedBy: r.RequestedBy.String(),
+		InviteEmail: r.InviteEmail, InvitePersonID: lcOptUUID(r.InvitePersonID), InvitePersonStaff: linked,
+		ReasonCode: r.ReasonCode, Note: r.Note, RequestedBy: r.RequestedBy.String(),
 		RequiredApprovals: r.RequiredApprovals, PayloadHash: r.PayloadHash, ExpiresAt: lcTime(r.ExpiresAt),
 		CreatedAt: lcTime(r.CreatedAt), DecidedAt: optTime(r.DecidedAt)}
 }
@@ -702,6 +726,7 @@ func newDecideLifecycleRequestHandler(deps Deps, decision string) http.HandlerFu
 			return
 		}
 		var out stafflifecycle.Request
+		var delivery stafflifecycle.Delivery
 		var err error
 		switch decision {
 		case "approve":
@@ -709,7 +734,7 @@ func newDecideLifecycleRequestHandler(deps Deps, decision string) http.HandlerFu
 				apierror.Write(w, c.requestID, apierror.CodeValidation, "payload_hash is required")
 				return
 			}
-			out, _, err = c.svc.Approve(r.Context(), c.actor, id, body.PayloadHash)
+			out, delivery, err = c.svc.Approve(r.Context(), c.actor, id, body.PayloadHash)
 		case "reject":
 			if body.PayloadHash != "" {
 				apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
@@ -727,7 +752,10 @@ func newDecideLifecycleRequestHandler(deps Deps, decision string) http.HandlerFu
 			c.writeError(r.Context(), w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, toLifecycleRequestDTO(out))
+		dto := toLifecycleRequestDTO(out)
+		// Review fix F5: the approver learns whether the invitation / reset email was handed off.
+		dto.EmailDelivery = string(delivery)
+		writeJSON(w, http.StatusOK, dto)
 	}
 }
 

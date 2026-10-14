@@ -491,88 +491,55 @@ type linkStaffPersonRequest struct {
 // withdrawal decision.
 func newLinkStaffPersonHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
-		tc, err := tenant.FromContext(r.Context())
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+		c, ok := beginLifecycleCall(deps, w, r)
+		if !ok {
 			return
 		}
 		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
 		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid tenant id")
 			return
 		}
-		if !canActOnTenant(tc, targetTenantID) {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+		if !canActOnTenant(c.tc, targetTenantID) {
+			apierror.Write(w, c.requestID, apierror.CodeForbidden, "cannot act on a different tenant")
 			return
 		}
-		staffID, err := uuid.Parse(r.PathValue("staffID"))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid staff id")
-			return
-		}
-
-		var req linkStaffPersonRequest
-		if err := decodeJSON(r, &req); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
-			return
-		}
-		personID, err := uuid.Parse(req.PersonID)
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id must be a valid UUID")
-			return
-		}
-
-		subjectID, _ := uuid.Parse(tc.Subject)
-		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
-			// Confirm staffID actually belongs to targetTenantID before
-			// attempting the link - staff_users' own RLS (dual-mode:
-			// tenant-scoped rows only visible under this tenant's setting)
-			// already prevents cross-tenant reads/writes; this is
-			// belt-and-braces so a not-found in the wrong tenant reports
-			// clearly rather than via a generic "already linked or not
-			// found" from LinkStaffPersonID.
-			if _, err := identity.GetStaffUserByID(ctx, tx, staffID); err != nil {
-				return err
-			}
-			if err := identity.LinkStaffPersonID(ctx, tx, staffID, personID); err != nil {
-				return err
-			}
-			// ADR 0119 S5 + S6: the link bumps staff_version (SF012); every session of the target ends and the
-			// person_linked lifecycle event is written. A platform caller acting on a tenant row writes the event
-			// with its own id (the actor Person is resolved when visible).
-			if err := stafflifecycle.PersonLinkedInTx(ctx, tx, staffID, targetTenantID, subjectID,
-				stafflifecycle.Meta{RequestID: requestID, IP: clientIP(r), UserAgent: r.UserAgent()}); err != nil {
-				return err
-			}
-			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: targetTenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
-				Action: "staff.person_linked", TargetType: "staff_user", TargetID: staffID.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"person_id": personID.String()},
-			})
-		})
-		if errors.Is(err, identity.ErrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
-			return
-		}
-		if errors.Is(err, identity.ErrPersonNotFound) {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
-			return
-		}
-		if errors.Is(err, identity.ErrAlreadyLinkedOrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeConflict, "staff user not found, or already linked to a person")
-			return
-		}
-		if err != nil {
-			logger.Error("link_staff_person_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to link staff person")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		linkPerson(c, w, r, targetTenantID)
 	}
+}
+
+// linkPerson is the shared body of both person-link routes. ADR 0119 S5 + S6 review fix SR-4: the link runs through
+// the staff lifecycle (stafflifecycle.Service.LinkPerson): self-link refused (403 self_target_forbidden), the role
+// authority applied (403 role_not_grantable: a tenant admin links only accounts of the roles it may act on), the
+// actor re-asserted in the transaction (FOR SHARE, role and staff_version: 401 session_revoked), a Person already bound
+// to another live account refused for a platform account or an approve-capable role (409), the link append-only
+// (409 when already linked), staff_version bumped (SF012), every session of the target ended, and the person_linked
+// event plus the audit row (staff.person_linked / staff.platform_person_linked) written in the same transaction.
+func linkPerson(c lifecycleCall, w http.ResponseWriter, r *http.Request, targetTenantID uuid.UUID) {
+	staffID, err := uuid.Parse(r.PathValue("staffID"))
+	if err != nil {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid staff id")
+		return
+	}
+	var req linkStaffPersonRequest
+	if err := decodeJSON(r, &req); err != nil {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
+		return
+	}
+	personID, err := uuid.Parse(req.PersonID)
+	if err != nil {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "person_id must be a valid UUID")
+		return
+	}
+	if _, err := c.svc.LinkPerson(r.Context(), c.actor, targetTenantID, staffID, personID); err != nil {
+		if errors.Is(err, stafflifecycle.ErrNotFound) {
+			apierror.Write(w, c.requestID, apierror.CodeNotFound, "staff user not found")
+			return
+		}
+		c.writeError(r.Context(), w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // newLinkPlatformStaffPersonHandler is the platform-scoped counterpart to
@@ -608,79 +575,18 @@ func newLinkStaffPersonHandler(deps Deps) http.HandlerFunc {
 // tenant to target - that is the entire point), unlike the sibling route.
 func newLinkPlatformStaffPersonHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
-		tc, err := tenant.FromContext(r.Context())
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+		c, ok := beginLifecycleCall(deps, w, r)
+		if !ok {
 			return
 		}
-		if tc.TenantID != uuid.Nil {
+		if c.tc.TenantID != uuid.Nil {
 			// A tenant-scoped caller (e.g. tenant_admin, who also holds
 			// PermStaffManage) has no legitimate reason to link a
 			// platform-wide staff account's person_id.
-			apierror.Write(w, requestID, apierror.CodeForbidden, "only a platform-scoped caller may act on a platform-wide staff account")
+			apierror.Write(w, c.requestID, apierror.CodeForbidden, "only a platform-scoped caller may act on a platform-wide staff account")
 			return
 		}
-		staffID, err := uuid.Parse(r.PathValue("staffID"))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid staff id")
-			return
-		}
-
-		var req linkStaffPersonRequest
-		if err := decodeJSON(r, &req); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
-			return
-		}
-		personID, err := uuid.Parse(req.PersonID)
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id must be a valid UUID")
-			return
-		}
-
-		subjectID, _ := uuid.Parse(tc.Subject)
-		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			// staff_users' dual_scope_isolation policy (migration 0011)
-			// already confines this connection to tenant_id IS NULL rows,
-			// so a successful lookup here is, by construction, always a
-			// platform-wide staff account - never a tenant-scoped one.
-			if _, err := identity.GetStaffUserByID(ctx, tx, staffID); err != nil {
-				return err
-			}
-			if err := identity.LinkStaffPersonID(ctx, tx, staffID, personID); err != nil {
-				return err
-			}
-			if err := stafflifecycle.PersonLinkedInTx(ctx, tx, staffID, uuid.Nil, subjectID,
-				stafflifecycle.Meta{RequestID: requestID, IP: clientIP(r), UserAgent: r.UserAgent()}); err != nil {
-				return err
-			}
-			return audit.Record(ctx, tx, audit.Entry{
-				ActorType: audit.ActorStaff, ActorID: subjectID,
-				Action: "staff.platform_person_linked", TargetType: "staff_user", TargetID: staffID.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"person_id": personID.String()},
-			})
-		})
-		if errors.Is(err, identity.ErrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
-			return
-		}
-		if errors.Is(err, identity.ErrPersonNotFound) {
-			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
-			return
-		}
-		if errors.Is(err, identity.ErrAlreadyLinkedOrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeConflict, "staff user not found, or already linked to a person")
-			return
-		}
-		if err != nil {
-			logger.Error("link_platform_staff_person_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to link staff person")
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		linkPerson(c, w, r, uuid.Nil)
 	}
 }
 

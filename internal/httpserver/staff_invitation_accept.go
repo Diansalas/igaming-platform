@@ -22,6 +22,10 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 )
 
+// minStaffPasswordLen is the staff password floor at invitation acceptance (review fix SR-9: the cmd/seed-admin
+// platform_admin floor, for every staff role).
+const minStaffPasswordLen = 12
+
 type invitationAcceptRequest struct {
 	Token    redacted[string] `json:"token"`
 	Password redacted[string] `json:"password"`
@@ -44,8 +48,8 @@ func newInvitationAcceptHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
-		if req.Token.reveal() == "" || len(req.Password.reveal()) < minPasswordLen {
-			apierror.Write(w, requestID, apierror.CodeValidation, "token and a password of at least 8 characters are required")
+		if req.Token.reveal() == "" || len(req.Password.reveal()) < minStaffPasswordLen {
+			apierror.Write(w, requestID, apierror.CodeValidation, "token and a password of at least 12 characters are required")
 			return
 		}
 		ip, ua := clientIP(r), r.UserAgent()
@@ -89,6 +93,17 @@ func newInvitationAcceptHandler(deps Deps) http.HandlerFunc {
 			now, err := dbNow(ctx, tx)
 			if err != nil {
 				return err
+			}
+			// Review fix SR-2: the inviter (and the token's issuer) must still be active; taken FOR SHARE before the
+			// token and the invitee are locked (the order a concurrent suspension of the inviter also takes).
+			live, err := stafflifecycle.EnrolmentIssuersLiveInTx(ctx, tx, ref.ID)
+			if err != nil {
+				return err
+			}
+			if !live {
+				out = mfaInvalidEnrolmentToken
+				return staffAudit(ctx, tx, r, requestID, ref.Staff, "staff.enrolment_token_rejected", audit.OutcomeFailure,
+					map[string]any{"reason": "issuer_not_live", "purpose": string(store.EnrolInvite)})
 			}
 			row, err := m.store.LockEnrolmentToken(ctx, tx, store.EnrolInvite, tok, now)
 			if errors.Is(err, store.ErrInvalidEnrolmentToken) {

@@ -35,6 +35,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/stafflifecycle"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -702,6 +703,19 @@ func newStaffEnrolRedeemHandler(deps Deps) http.HandlerFunc {
 				out = mfaPasswordLockout
 				return staffAudit(ctx, tx, r, requestID, ref.Staff, "staff.enrolment_token_rejected", audit.OutcomeDenied,
 					map[string]any{"reason": "password_lockout"})
+			}
+			// ADR 0119 S5 + S6 review fix SR-2: an MFA-reset token whose issuer is no longer active is refused (the
+			// issuer's row FOR SHARE before the token lock, the order a concurrent suspension also takes).
+			if ref.Purpose == store.EnrolMFAReset {
+				live, err := stafflifecycle.EnrolmentIssuersLiveInTx(ctx, tx, ref.ID)
+				if err != nil {
+					return err
+				}
+				if !live {
+					out = mfaInvalidEnrolmentToken
+					return staffAudit(ctx, tx, r, requestID, ref.Staff, "staff.enrolment_token_rejected", audit.OutcomeFailure,
+						map[string]any{"reason": "issuer_not_live", "purpose": string(ref.Purpose)})
+				}
 			}
 			row, err := m.store.LockEnrolmentToken(ctx, tx, ref.Purpose, tok, now)
 			if errors.Is(err, store.ErrInvalidEnrolmentToken) {

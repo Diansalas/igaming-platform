@@ -45,6 +45,12 @@ var (
 	ErrNotImplemented      = errors.New("stafflifecycle: not implemented in this slice")
 	ErrUnavailable         = errors.New("stafflifecycle: unavailable (no proof issuer or MFA keys)")
 	ErrPayloadHashMismatch = errors.New("stafflifecycle: payload_hash does not match the request")
+	// ErrPersonInUse (review fix SR-3): the invitee Person is already bound to a live staff account in the scope.
+	ErrPersonInUse = errors.New("stafflifecycle: the Person is already linked to a live staff account")
+	// ErrAlreadyLinked: a person link on an account that already has a Person (0034: append-only).
+	ErrAlreadyLinked = errors.New("stafflifecycle: the staff account is already linked to a Person")
+	// ErrProofRefused (review fix F10): the database refused the actor proof (AP001-AP005).
+	ErrProofRefused = errors.New("stafflifecycle: the actor proof was refused")
 )
 
 // Roles (mirrors identity.StaffRole; kept as strings so the package carries no auth dependency for the matrix).

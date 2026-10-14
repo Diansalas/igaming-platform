@@ -4,7 +4,9 @@
 // (staffmfa.LoadKeys, before touching the database), creates a platform_admin and prints a single-use bootstrap
 // enrolment token exactly once (stored only as a keyed MAC), re-issues one for an existing admin WITHOUT an active
 // factor (the S3 cutover re-seed / break-glass path), and refuses to re-issue for an admin that HAS one (an MFA reset
-// is S6). Runs the real compiled binary against TEST_DATABASE_URL (table owner).
+// is S6). Runs the real compiled binary against a SCRATCH database (table owner): ADR 0119 S5 + S6 review fixes SR-1
+// and F4 - the default mode creates only the FIRST platform admin, so it needs a database with none, and the test
+// must not depend on (or disturb) the shared database other packages use in parallel.
 package main
 
 import (
@@ -27,7 +29,26 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
+
+// opArgs are the -operator / -reason every seed-admin mode requires (review fix SR-1).
+var opArgs = []string{"-operator=ops-alice", "-reason=INC-0 bootstrap"}
+
+// seedScratch creates a migrated scratch database and returns its owner URL and a pool on it.
+func seedScratch(t *testing.T) (string, *db.Pool) {
+	t.Helper()
+	url := scratchdb.New(t, "seedadm_")
+	pool, err := db.Connect(context.Background(), url, 4, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.MigrateUp(context.Background(), "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch: %v", err)
+	}
+	return url, pool
+}
 
 func buildSeedAdmin(t *testing.T) string {
 	t.Helper()
@@ -59,9 +80,9 @@ func runSeedAdmin(t *testing.T, bin string, env []string, args ...string) (strin
 
 // seedTenantStaff provisions a tenant (as a seeded platform operator) and an active tenant_admin; returns the slug
 // and the email.
-func seedTenantStaff(t *testing.T, pool *db.Pool) (string, string) {
+func seedTenantStaff(t *testing.T, url string, pool *db.Pool) (string, string) {
 	t.Helper()
-	launchfix.SeedOperators(t)
+	launchfix.SeedOperatorsAt(t, url)
 	var tn identity.Tenant
 	if err := pool.WithPlatformAdmin(context.Background(), launchfix.Operators().Requester, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -117,10 +138,7 @@ func readEnvExampleKeys(t *testing.T) []string {
 var tokenLine = regexp.MustCompile(`(?m)^([A-Za-z0-9_-]{64})$`)
 
 func TestSeedAdmin_BootstrapToken_Subprocess(t *testing.T) {
-	ownerURL := os.Getenv("TEST_DATABASE_URL")
-	if ownerURL == "" {
-		t.Fatal("TEST_DATABASE_URL must be set")
-	}
+	ownerURL, pool := seedScratch(t)
 	bin := buildSeedAdmin(t)
 	fk, mk := randKey(t), randKey(t)
 	keysEnv := []string{"STAFF_MFA_FACTOR_KEYS=f1:" + fk, "STAFF_MFA_FACTOR_ACTIVE_KID=f1", "STAFF_MFA_MAC_KEYS=m1:" + mk, "STAFF_MFA_MAC_ACTIVE_KID=m1"}
@@ -132,15 +150,10 @@ func TestSeedAdmin_BootstrapToken_Subprocess(t *testing.T) {
 	base := []string{"PATH=" + os.Getenv("PATH"), "DATABASE_URL=" + ownerURL, "SEED_ADMIN_PASSWORD=a-seed-admin-password-1"}
 
 	// 1. Without keys: refused before the database (the account is not created).
-	_, stderr, code := runSeedAdmin(t, bin, base, "-email="+email)
+	_, stderr, code := runSeedAdmin(t, bin, base, append([]string{"-email=" + email}, opArgs...)...)
 	if code == 0 || !strings.Contains(stderr, "staff MFA keys") {
 		t.Fatalf("seed-admin without keys must refuse: %d %s", code, stderr)
 	}
-	pool, err := db.Connect(context.Background(), ownerURL, 2, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
 	staffByEmail := func() (identity.StaffUser, error) {
 		var s identity.StaffUser
 		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
@@ -157,7 +170,7 @@ func TestSeedAdmin_BootstrapToken_Subprocess(t *testing.T) {
 	// refuses them: APP_ENV=production and APP_ENV unset (production by default); nothing is created or printed.
 	example := readEnvExampleKeys(t)
 	for _, appEnv := range [][]string{{"APP_ENV=production"}, nil} {
-		stdout, stderr, code := runSeedAdmin(t, bin, append(append(append([]string{}, base...), example...), appEnv...), "-email="+email)
+		stdout, stderr, code := runSeedAdmin(t, bin, append(append(append([]string{}, base...), example...), appEnv...), append([]string{"-email=" + email}, opArgs...)...)
 		if code == 0 || !strings.Contains(stderr, "placeholder") || len(tokenLine.FindAllString(stdout, -1)) != 0 {
 			t.Fatalf("seed-admin with the published placeholder keys (%v) must refuse: %d %q %s", appEnv, code, stdout, stderr)
 		}
@@ -166,13 +179,24 @@ func TestSeedAdmin_BootstrapToken_Subprocess(t *testing.T) {
 		}
 	}
 	// A staff MFA key equal to another platform key family is refused too (pairwise distinctness).
-	_, stderr, code = runSeedAdmin(t, bin, append(append(append([]string{}, base...), keysEnv...), "JWT_SIGNING_SECRET="+mk), "-email="+email)
+	_, stderr, code = runSeedAdmin(t, bin, append(append(append([]string{}, base...), keysEnv...), "JWT_SIGNING_SECRET="+mk), append([]string{"-email=" + email}, opArgs...)...)
 	if code == 0 || !strings.Contains(stderr, "JWT_SIGNING_SECRET") {
 		t.Fatalf("a staff MFA key shared with JWT_SIGNING_SECRET must be refused: %d %s", code, stderr)
 	}
 
+	// 1c. Review fix SR-1: -operator and -reason are required in the default mode too; nothing is created.
+	for _, missing := range [][]string{{"-reason=INC-0"}, {"-operator=ops-alice"}} {
+		_, stderr, code := runSeedAdmin(t, bin, append(append([]string{}, base...), keysEnv...), append([]string{"-email=" + email, "-create-person"}, missing...)...)
+		if code == 0 || !strings.Contains(stderr, "is required") {
+			t.Fatalf("default mode without %v must refuse: %d %s", missing, code, stderr)
+		}
+		if _, err := staffByEmail(); err == nil {
+			t.Fatal("a refused run must not create the account")
+		}
+	}
+
 	// 2. Create: a platform_admin and ONE printed bootstrap token that resolves (keyed MAC) to it.
-	stdout, stderr, code := runSeedAdmin(t, bin, append(append([]string{}, base...), keysEnv...), "-email="+email, "-create-person")
+	stdout, stderr, code := runSeedAdmin(t, bin, append(append([]string{}, base...), keysEnv...), append([]string{"-email=" + email, "-create-person"}, opArgs...)...)
 	if code != 0 {
 		t.Fatalf("seed-admin create: %d %s", code, stderr)
 	}
@@ -199,6 +223,32 @@ func TestSeedAdmin_BootstrapToken_Subprocess(t *testing.T) {
 	})
 	if audits != 2 {
 		t.Fatalf("creation and token issue must be audited (without the token): %d", audits)
+	}
+	// Review fix SR-1: the bootstrap writes the owner_provisioned event and names the operator in its audit row.
+	var events, named int
+	_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM staff_lifecycle_events WHERE staff_user_id = $1 AND event = 'owner_provisioned'
+			AND actor_type = 'owner' AND reason_code = 'initial_bootstrap'`, staff.ID).Scan(&events); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE target_id = $1 AND action = 'staff.platform_admin_bootstrapped'
+			AND metadata->>'operator' = 'ops-alice' AND metadata->>'reason' = 'INC-0 bootstrap'`, staff.ID.String()).Scan(&named)
+	})
+	if events != 1 || named != 1 {
+		t.Fatalf("the first bootstrap must write one owner_provisioned event (%d) and an audit row naming the operator (%d)", events, named)
+	}
+	// 2b. Review fix SR-1 / F1: a second default run is refused once a platform_admin exists, and creates nothing.
+	second := "seed-second-" + uuid.NewString() + "@fixture.invalid"
+	stdout, stderr, code = runSeedAdmin(t, bin, append(append([]string{}, base...), keysEnv...), append([]string{"-email=" + second, "-create-person"}, opArgs...)...)
+	if code == 0 || !strings.Contains(stderr, "a platform_admin already exists") || len(tokenLine.FindAllString(stdout, -1)) != 0 {
+		t.Fatalf("the default mode must refuse once a platform_admin exists: %d %q %s", code, stdout, stderr)
+	}
+	var secondRows int
+	_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM staff_users WHERE email = $1`, second).Scan(&secondRows)
+	})
+	if secondRows != 0 {
+		t.Fatal("a refused default run must not create the account")
 	}
 
 	// 3. -issue-bootstrap for the same admin (no factor yet): a fresh token; the first one is revoked. The break-glass
@@ -239,7 +289,7 @@ func TestSeedAdmin_BootstrapToken_Subprocess(t *testing.T) {
 	}
 
 	// 3b. A TENANT staff member (the S3 re-seed: no invite / reset path before S6): -issue-bootstrap -tenant-slug.
-	tenantSlug, tenantStaffEmail := seedTenantStaff(t, pool)
+	tenantSlug, tenantStaffEmail := seedTenantStaff(t, ownerURL, pool)
 	stdout, stderr, code = runSeedAdmin(t, bin, append([]string{"PATH=" + os.Getenv("PATH"), "DATABASE_URL=" + ownerURL}, keysEnv...),
 		"-email="+tenantStaffEmail, "-issue-bootstrap", "-tenant-slug="+tenantSlug, "-operator=ops-alice", "-reason=INC-2")
 	if code != 0 || len(tokenLine.FindAllString(stdout, -1)) != 1 {

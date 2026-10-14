@@ -111,6 +111,11 @@ ALTER TABLE staff_users ADD COLUMN offboarded_at TIMESTAMPTZ NULL;
 ALTER TABLE staff_users ADD COLUMN invited_by UUID NULL REFERENCES staff_users (id);
 ALTER TABLE staff_users ADD CONSTRAINT staff_users_offboarded_at_state
     CHECK ((status = 'offboarded') = (offboarded_at IS NOT NULL));
+-- Review fix F2 (orchestrator decision 2026-10-14, reversible): the email is unique per scope among the NON-offboarded
+-- rows only, so an offboarded person can be re-invited with the same mailbox (ADR 0119 s6.7 "offboard and re-invite").
+-- The offboarded row keeps its email (SF011, immutable) as history; at most one live row per (scope, email).
+ALTER TABLE staff_users DROP CONSTRAINT staff_users_tenant_id_email_key;
+CREATE UNIQUE INDEX staff_users_live_email ON staff_users (tenant_id, email) NULLS NOT DISTINCT WHERE status <> 'offboarded';
 
 COMMENT ON COLUMN staff_users.staff_version IS 'ADR 0119 s7.1 / s13.2: bumped by SF012 on every role, status, password_hash or person_id change; carried as the sv claim and compared by liveness and the s9.5 re-assertion. Never written directly.';
 
@@ -264,9 +269,15 @@ BEGIN
         RETURN NEW;
     END IF;
     IF OLD.tenant_id IS NOT NULL AND OLD.role = 'tenant_admin' THEN
-        v_platform := NULLIF(pg_catalog.current_setting('app.acting_platform_principal_id', true), '') IS NOT NULL
-            OR NULLIF(pg_catalog.current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
-            OR (v_actor IS NOT NULL AND EXISTS (SELECT 1 FROM public.staff_users a WHERE a.id = v_actor::uuid AND a.tenant_id IS NULL));
+        -- Review fix SR-7: a platform GUC stands SF021 aside only when it names an EXISTING, ACTIVE platform_admin row
+        -- visible in this session; a forged / nonexistent value does not.
+        SELECT EXISTS (SELECT 1 FROM public.staff_users a
+                        WHERE a.tenant_id IS NULL AND a.role = 'platform_admin' AND a.status = 'active'
+                          AND a.id::text = ANY (ARRAY[
+                                NULLIF(pg_catalog.current_setting('app.acting_platform_principal_id', true), ''),
+                                NULLIF(pg_catalog.current_setting('app.platform_admin_principal_id', true), ''),
+                                v_actor]))
+          INTO v_platform;
         IF v_platform THEN
             RETURN NEW;
         END IF;
@@ -300,10 +311,12 @@ CREATE TRIGGER sf_20_last_admin BEFORE UPDATE OF status, role ON staff_users
 -- =========================================================================
 -- 4. The s9.5(b) actor self-visibility pair (only setter: db.SetActorStaffIDForCurrentTx)
 -- =========================================================================
+-- Review fix SR-7: only a PLATFORM row (tenant_id IS NULL) is ever admitted: a forged GUC naming a staff member of
+-- another tenant reveals nothing.
 CREATE POLICY staff_actor_self_select ON staff_users FOR SELECT
-    USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid);
+    USING (tenant_id IS NULL AND id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid);
 CREATE POLICY staff_actor_self_lock ON staff_users FOR UPDATE
-    USING (id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid) WITH CHECK (false);
+    USING (tenant_id IS NULL AND id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid) WITH CHECK (false);
 
 -- =========================================================================
 -- 5. Platform four-eyes: staff_lifecycle_requests / staff_lifecycle_approvals (s10.4)
@@ -427,6 +440,16 @@ BEGIN
         IF NEW.kind = 'platform_invite' AND NEW.invite_person_id = v_actor.person_id THEN
             RAISE EXCEPTION 'staff_lifecycle_requests: the invitee Person may not be the requester''s Person (SF031)' USING ERRCODE = 'SF031';
         END IF;
+        -- Review fix F12: an invitation names no target at filing (the target is set once, at execution).
+        IF NEW.kind = 'platform_invite' AND NEW.target_staff_id IS NOT NULL THEN
+            RAISE EXCEPTION 'staff_lifecycle_requests: an invitation names no target staff member (SF031)' USING ERRCODE = 'SF031';
+        END IF;
+        -- Review fix SR-3: the invitee Person must not already be bound to a live (non-offboarded) platform staff
+        -- account; otherwise one human would hold two Persons' worth of four-eyes decisions. No exception exists.
+        IF NEW.kind = 'platform_invite' AND EXISTS (SELECT 1 FROM public.staff_users su
+                WHERE su.tenant_id IS NULL AND su.person_id = NEW.invite_person_id AND su.status <> 'offboarded') THEN
+            RAISE EXCEPTION 'staff_lifecycle_requests: the invitee Person is already linked to a platform staff account (SF031)' USING ERRCODE = 'SF031';
+        END IF;
         v_hash := public.staff_lifecycle_request_digest(NEW.kind, NEW.target_staff_id, NEW.invite_email, NEW.invite_person_id,
                                                          NEW.reason_code, NEW.note);
         IF NEW.payload_hash IS NOT NULL AND NEW.payload_hash <> v_hash THEN
@@ -530,6 +553,12 @@ BEGIN
     END IF;
     IF v_req.state <> 'pending' OR pg_catalog.clock_timestamp() >= v_req.expires_at THEN
         RAISE EXCEPTION 'staff_lifecycle_approvals: the request is not pending (SF032)' USING ERRCODE = 'SF032';
+    END IF;
+    -- Review fix SR-5: a request whose requester is no longer an active staff member cannot be approved (a reject
+    -- stays possible: it is protective).
+    IF NEW.decision = 'approve' AND NOT EXISTS (SELECT 1 FROM public.staff_users su
+            WHERE su.id = v_req.requested_by AND su.status = 'active') THEN
+        RAISE EXCEPTION 'staff_lifecycle_approvals: the requester is no longer an active staff member (SF032)' USING ERRCODE = 'SF032';
     END IF;
     IF v_actor.actor = v_req.requested_by OR v_actor.person_id = v_req.requested_by_person THEN
         RAISE EXCEPTION 'staff_lifecycle_approvals: the requester may not decide (staff id or Person) (SF032)' USING ERRCODE = 'SF032';
@@ -696,7 +725,7 @@ CREATE TABLE staff_lifecycle_events (
                              'employment_ended', 'contract_ended', 'duplicate_account',
                              'investigation_closed', 'returned_from_leave', 'error_correction',
                              'role_change_approved', 'device_lost', 'device_replaced', 'hard_locked',
-                             'no_longer_required', 'wrong_details', 'break_glass', 'other')),
+                             'no_longer_required', 'wrong_details', 'break_glass', 'initial_bootstrap', 'issuer_removed', 'other')),
     note                 TEXT NULL CHECK (note IS NULL OR (char_length(note) BETWEEN 10 AND 500 AND note !~ '[[:cntrl:]]'
                              AND note !~ E'[\u202A-\u202E\u2066-\u2069\u200B-\u200F\u2060-\u2064\uFEFF\u061C]')),
     lifecycle_request_id UUID NULL REFERENCES staff_lifecycle_requests (id),
@@ -943,6 +972,8 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
         EXECUTE 'REVOKE UPDATE ON staff_users FROM igaming_runtime';
         EXECUTE 'GRANT UPDATE (status, role, password_hash, status_changed_at, offboarded_at, person_id, display_name, updated_at) ON staff_users TO igaming_runtime';
+        -- Review fix SR-6: no application path deletes a staff row (offboarding is the terminal state).
+        EXECUTE 'REVOKE DELETE ON staff_users FROM igaming_runtime';
         EXECUTE 'REVOKE ALL ON staff_lifecycle_requests FROM igaming_runtime';
         EXECUTE 'GRANT SELECT, INSERT ON staff_lifecycle_requests TO igaming_runtime';
         EXECUTE 'GRANT UPDATE (state, decided_at, executing_txid, target_staff_id) ON staff_lifecycle_requests TO igaming_runtime';

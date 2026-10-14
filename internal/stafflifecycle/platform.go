@@ -3,6 +3,7 @@ package stafflifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -37,6 +38,40 @@ type Request struct {
 	ExpiresAt         time.Time
 	CreatedAt         time.Time
 	DecidedAt         *time.Time
+	// InvitePersonID and InvitePersonStaff (review fix SR-3): what the approver must see to judge Person distinctness:
+	// the invitee Person and every live (non-offboarded) platform staff account already linked to it (the four-eyes
+	// session sees platform rows only).
+	InvitePersonID    *uuid.UUID
+	InvitePersonStaff []LinkedStaff
+}
+
+// LinkedStaff is a live staff account linked to a Person (no credential).
+type LinkedStaff struct {
+	ID     uuid.UUID
+	Email  string
+	Status string
+}
+
+// withInvitePerson fills the SR-3 view of an invitation request in the caller's (platform) transaction.
+func withInvitePerson(ctx context.Context, tx pgx.Tx, r requestRow, out Request) (Request, error) {
+	out.InvitePersonID = r.invitePerson
+	if r.invitePerson == nil {
+		return out, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT id, email, status FROM staff_users WHERE person_id = $1 AND status <> 'offboarded' ORDER BY id`, *r.invitePerson)
+	if err != nil {
+		return out, err
+	}
+	linked, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (LinkedStaff, error) {
+		var l LinkedStaff
+		err := row.Scan(&l.ID, &l.Email, &l.Status)
+		return l, err
+	})
+	if err != nil {
+		return out, err
+	}
+	out.InvitePersonStaff = linked
+	return out, nil
 }
 
 // RequestInput is a four-eyes request.
@@ -147,12 +182,21 @@ func (s *Service) CreateRequest(ctx context.Context, actor Actor, in RequestInpu
 			if *in.PersonID == *person {
 				return ErrFourEyes
 			}
+			// Review fix F2: an offboarded account keeps its email as history; only a live one blocks a re-invite.
 			var taken bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM staff_users WHERE tenant_id IS NULL AND email = $1)`, email).Scan(&taken); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM staff_users WHERE tenant_id IS NULL AND email = $1 AND status <> 'offboarded')`, email).Scan(&taken); err != nil {
 				return err
 			}
 			if taken {
 				return ErrConflict
+			}
+			// Review fix SR-3 (SF031 repeats it): the invitee Person may not already be bound to a live platform account.
+			inUse, err := personInUse(ctx, tx, *in.PersonID)
+			if err != nil {
+				return err
+			}
+			if inUse {
+				return ErrPersonInUse
 			}
 		default:
 			target, err := readTarget(ctx, tx, *in.TargetStaffID, uuid.Nil)
@@ -178,7 +222,9 @@ func (s *Service) CreateRequest(ctx context.Context, actor Actor, in RequestInpu
 		if err != nil {
 			return mapDBError(err)
 		}
-		out = r.Request
+		if out, err = withInvitePerson(ctx, tx, r, r.Request); err != nil {
+			return err
+		}
 		return recordRequestAudit(ctx, tx, actor, r, "staff.lifecycle_requested")
 	})
 	return out, mapDBError(err)
@@ -220,7 +266,11 @@ func (s *Service) ListRequests(ctx context.Context, actor Actor) ([]Request, err
 			if err != nil {
 				return err
 			}
-			out = append(out, r.public(now))
+			pub, err := withInvitePerson(ctx, tx, r, r.public(now))
+			if err != nil {
+				return err
+			}
+			out = append(out, pub)
 		}
 		return rows.Err()
 	})
@@ -245,8 +295,8 @@ func (s *Service) GetRequest(ctx context.Context, actor Actor, id uuid.UUID) (Re
 		if err != nil {
 			return err
 		}
-		out = r.public(now)
-		return nil
+		out, err = withInvitePerson(ctx, tx, r, r.public(now))
+		return err
 	})
 	return out, err
 }
@@ -266,7 +316,7 @@ func (s *Service) Approve(ctx context.Context, actor Actor, id uuid.UUID, payloa
 	var mails []mail
 	err := s.pool.WithPlatformAdmin(ctx, actor.StaffID, func(ctx context.Context, tx pgx.Tx) error {
 		mails = nil
-		req, err := s.lockPending(ctx, tx, actor, id)
+		req, err := s.lockPending(ctx, tx, actor, id, true)
 		if err != nil {
 			return err
 		}
@@ -298,6 +348,14 @@ func (s *Service) Approve(ctx context.Context, actor Actor, id uuid.UUID, payloa
 		var createdTarget *uuid.UUID
 		switch req.Kind {
 		case KindPlatformInvite:
+			// Review fix SR-3 at execution: the Person may have been bound to another account since the filing.
+			inUse, err := personInUse(ctx, tx, *req.invitePerson)
+			if err != nil {
+				return err
+			}
+			if inUse {
+				return ErrPersonInUse
+			}
 			newID := uuid.New()
 			if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id, invited_by)
 				VALUES ($1, NULL, $2, NULL, 'platform_admin', 'invited', $3, $4)`, newID, *req.InviteEmail, req.invitePerson, req.RequestedBy); err != nil {
@@ -347,8 +405,8 @@ func (s *Service) Approve(ctx context.Context, actor Actor, id uuid.UUID, payloa
 		if err != nil {
 			return mapDBError(err)
 		}
-		out = r.Request
-		return nil
+		out, err = withInvitePerson(ctx, tx, r, r.Request)
+		return err
 	})
 	if err != nil {
 		return Request{}, DeliveryNone, mapDBError(err)
@@ -369,8 +427,8 @@ func reasonOf(r requestRow) Reason {
 
 // lockPending locks the request (L1) and applies the Go four-eyes checks the database repeats (SF032): pending and
 // unexpired; the decider is neither the requester (staff id or Person) nor the target (staff id or Person) nor the
-// invitee's Person; the decider has a Person.
-func (s *Service) lockPending(ctx context.Context, tx pgx.Tx, actor Actor, id uuid.UUID) (requestRow, error) {
+// invitee's Person; the decider has a Person; for an approval (review fix SR-5) the requester is still active.
+func (s *Service) lockPending(ctx context.Context, tx pgx.Tx, actor Actor, id uuid.UUID, approve bool) (requestRow, error) {
 	req, err := scanRequest(tx.QueryRow(ctx, `SELECT `+requestColumns+` FROM staff_lifecycle_requests WHERE id = $1 FOR UPDATE`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return requestRow{}, ErrNotFound
@@ -399,6 +457,16 @@ func (s *Service) lockPending(ctx context.Context, tx pgx.Tx, actor Actor, id uu
 	if requesterPerson == *person || (req.invitePerson != nil && *req.invitePerson == *person) {
 		return requestRow{}, ErrFourEyes
 	}
+	if approve {
+		var requesterStatus string
+		err := tx.QueryRow(ctx, `SELECT status FROM staff_users WHERE id = $1`, req.RequestedBy).Scan(&requesterStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return requestRow{}, err
+		}
+		if requesterStatus != "active" {
+			return requestRow{}, fmt.Errorf("%w: the requester is no longer an active staff member", ErrTransition)
+		}
+	}
 	if req.TargetStaffID != nil {
 		if *req.TargetStaffID == actor.StaffID {
 			return requestRow{}, ErrFourEyes
@@ -421,8 +489,12 @@ func (s *Service) Reject(ctx context.Context, actor Actor, id uuid.UUID) (Reques
 	}
 	var out Request
 	err := s.pool.WithPlatformAdmin(ctx, actor.StaffID, func(ctx context.Context, tx pgx.Tx) error {
-		req, err := s.lockPending(ctx, tx, actor, id)
+		req, err := s.lockPending(ctx, tx, actor, id, false)
 		if err != nil {
+			return err
+		}
+		// Review fix SR-8: the decider's own row FOR SHARE against the verified token (role, staff_version).
+		if err := reassertActorOnly(ctx, tx, actor); err != nil {
 			return err
 		}
 		if err := s.attach(ctx, tx, actor, actorproof.OpStaffLifecycleReject, req.ID.String(), req.PayloadHash); err != nil {
@@ -461,6 +533,10 @@ func (s *Service) Cancel(ctx context.Context, actor Actor, id uuid.UUID) (Reques
 		}
 		if req.State != "pending" {
 			return ErrTransition
+		}
+		// Review fix SR-8: the requester's own row FOR SHARE against the verified token.
+		if err := reassertActorOnly(ctx, tx, actor); err != nil {
+			return err
 		}
 		if err := s.attach(ctx, tx, actor, actorproof.OpStaffLifecycleCancel, req.ID.String(), req.PayloadHash); err != nil {
 			return err

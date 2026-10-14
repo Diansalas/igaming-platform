@@ -6,6 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"fmt"
+	"sort"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -75,6 +78,17 @@ func (s *Service) Invite(ctx context.Context, actor Actor, targetTenant uuid.UUI
 		if err := reassertActorOnly(ctx, tx, actor); err != nil {
 			return err
 		}
+		// Review fix SR-3 (the recommended tenant twin): an approve-capable invitation may not bind a Person that is
+		// already linked to a live staff account in this scope.
+		if in.PersonID != nil && PersonRequired(in.Role) {
+			inUse, err := personInUse(ctx, tx, *in.PersonID)
+			if err != nil {
+				return err
+			}
+			if inUse {
+				return ErrPersonInUse
+			}
+		}
 		id := uuid.New()
 		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id, invited_by)
 			VALUES ($1, $2, $3, NULL, $4, 'invited', $5, $6)`, id, targetTenant, email, in.Role, in.PersonID, actor.StaffID); err != nil {
@@ -113,6 +127,14 @@ func validEmail(e string) bool {
 	}
 	at := strings.IndexByte(e, '@')
 	return at > 0 && at < len(e)-1 && strings.Count(e, "@") == 1
+}
+
+// personInUse reports whether a live (non-offboarded) staff row VISIBLE in the transaction's scope is linked to person
+// (a platform session sees the platform rows, a tenant session the tenant's rows).
+func personInUse(ctx context.Context, tx pgx.Tx, person uuid.UUID) (bool, error) {
+	var inUse bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM staff_users WHERE person_id = $1 AND status <> 'offboarded')`, person).Scan(&inUse)
+	return inUse, err
 }
 
 // reassertActorOnly is the re-assertion for a change that write-locks no existing staff row (an invitation): the
@@ -329,15 +351,22 @@ func (s *Service) phaseTwo(ctx context.Context, actor Actor, targetTenant, staff
 		if err := revokeAccess(ctx, tx, target.ID); err != nil {
 			return err
 		}
+		invites, tokens, err := revokeIssuedBy(ctx, tx, actor, target)
+		if err != nil {
+			return err
+		}
 		if err := record(ctx, tx, eventIn{target: target, event: to, actorType: "staff", actor: actor.StaffID,
-			before: target.state(), after: after, reason: reason, meta: actor.Meta, revokedFactors: revoked}); err != nil {
+			before: target.state(), after: after, reason: reason, meta: actor.Meta, revokedFactors: revoked,
+			extraMetadata: map[string]any{"revoked_invitations": invites, "revoked_issued_tokens": tokens}}); err != nil {
 			return err
 		}
 		res.Staff, err = loadStaff(ctx, tx, target.ID)
 		return err
 	})
+	// A lock timeout (or a deadlock victim) is retried once by twoPhase. Review fix F8: updateStatus maps a 55P03 to
+	// ErrBusy already, so that wrapping is recognised too.
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+	if (errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")) || errors.Is(err, ErrBusy) {
 		return Result{}, errLockTimeout
 	}
 	return res, mapDBError(err)
@@ -345,6 +374,92 @@ func (s *Service) phaseTwo(ctx context.Context, actor Actor, targetTenant, staff
 
 func pgInterval(d time.Duration) string {
 	return d.String()
+}
+
+// revokeIssuedBy is review fix SR-2: when a staff member is suspended or offboarded, what they issued and nobody has
+// used yet goes with them. Every `invited` row they invited is offboarded (event invite_revoked, reason
+// issuer_removed) and every live invite / mfa_reset token they issued is revoked. Only the rows VISIBLE in this
+// transaction's scope are reached (a platform admin's invitations into a tenant are not visible in the platform
+// session); for those, the acceptance and redemption paths refuse a token whose issuer is no longer active
+// (EnrolmentIssuersLiveInTx). The issuer's row is already locked FOR UPDATE (lockActorAndTarget), which serialises
+// this with an acceptance (that takes the issuer FOR SHARE first).
+func revokeIssuedBy(ctx context.Context, tx pgx.Tx, actor Actor, issuer staffRow) (int, int64, error) {
+	rows, err := tx.Query(ctx, `SELECT `+staffRowColumns+` FROM staff_users WHERE invited_by = $1 AND status = 'invited' ORDER BY id FOR UPDATE`, issuer.ID)
+	if err != nil {
+		return 0, 0, err
+	}
+	invited, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (staffRow, error) { return scanStaffRow(r) })
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, inv := range invited {
+		after, err := updateStatus(ctx, tx, inv, "offboarded", false)
+		if err != nil {
+			return 0, 0, err
+		}
+		if err := revokeAccess(ctx, tx, inv.ID); err != nil {
+			return 0, 0, err
+		}
+		if err := record(ctx, tx, eventIn{target: inv, event: "invite_revoked", actorType: "staff", actor: actor.StaffID,
+			before: inv.state(), after: after, reason: Reason{Code: reasonIssuerRemoved}, meta: actor.Meta,
+			extraMetadata: map[string]any{"issuer_staff_id": issuer.ID.String()}}); err != nil {
+			return 0, 0, err
+		}
+	}
+	tag, err := tx.Exec(ctx, `UPDATE staff_enrolment_tokens SET revoked_at = now()
+		WHERE issued_by = $1 AND purpose IN ('invite', 'mfa_reset') AND consumed_at IS NULL AND revoked_at IS NULL`, issuer.ID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("stafflifecycle: revoke issued tokens: %w", err)
+	}
+	return len(invited), tag.RowsAffected(), nil
+}
+
+// reasonIssuerRemoved is the system reason of an invitation revoked because its issuer was suspended or offboarded
+// (event vocabulary only; never accepted from a caller).
+const reasonIssuerRemoved = "issuer_removed"
+
+// EnrolmentIssuersLiveInTx is the review fix SR-2 backstop of the invitation acceptance and the MFA-reset redemption:
+// the staff members who issued the token (staff_enrolment_tokens.issued_by) and invited its holder
+// (staff_users.invited_by) must still be ACTIVE. Each issuer row is taken FOR SHARE BEFORE the caller locks the token
+// or the invitee row, so a concurrent suspension of the issuer (which holds the issuer FOR UPDATE, then the invitee and
+// the token) is serialised in one order: committed first, the acceptance sees the issuer suspended and is refused;
+// started later, it waits for the acceptance. An issuer of another scope (a platform admin who invited tenant staff)
+// is made visible through the s9.5(b) pair (db.SetActorStaffIDForCurrentTx; the pair admits platform rows only). A
+// system-issued token (no issuer, e.g. seed-admin bootstrap) has nothing to check.
+func EnrolmentIssuersLiveInTx(ctx context.Context, tx pgx.Tx, tokenID uuid.UUID) (bool, error) {
+	var issuedBy, invitedBy *uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT t.issued_by, su.invited_by FROM staff_enrolment_tokens t
+		JOIN staff_users su ON su.id = t.staff_user_id WHERE t.id = $1`, tokenID).Scan(&issuedBy, &invitedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var ids []uuid.UUID
+	for _, p := range []*uuid.UUID{issuedBy, invitedBy} {
+		if p != nil && (len(ids) == 0 || ids[0] != *p) {
+			ids = append(ids, *p)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return lessUUID(ids[i], ids[j]) })
+	for _, id := range ids {
+		if err := db.SetActorStaffIDForCurrentTx(ctx, tx, id); err != nil {
+			return false, err
+		}
+		var status string
+		err := tx.QueryRow(ctx, `SELECT status FROM staff_users WHERE id = $1 FOR SHARE`, id).Scan(&status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if status != "active" {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // lastAdminWouldBeRemoved is the T1 pre-check of SF020 / SF021 (the trigger in T2 decides; this keeps the last
@@ -590,21 +705,60 @@ func AcceptInvitationInTx(ctx context.Context, tx pgx.Tx, staffID, tenantID uuid
 	return r.StaffVersion, nil
 }
 
-// PersonLinkedInTx completes a Person link (the existing person-link routes) inside the caller's transaction, right
-// after identity.LinkStaffPersonID: the SF012 trigger has bumped staff_version, so every access token of the target
-// is already refused by liveness; this also ends every session (a refresh would otherwise mint a token at the new
-// version) and writes the person_linked lifecycle event. The route writes its own audit row.
-func PersonLinkedInTx(ctx context.Context, tx pgx.Tx, staffID, tenantID, actor uuid.UUID, meta Meta) error {
-	target, err := readTarget(ctx, tx, staffID, tenantID)
-	if err != nil {
-		return err
+// LinkPerson is the person-link remediation behind the two existing person-link routes (Stage 3D / 4H-B0-R6), moved
+// into the lifecycle by review fix SR-4: the same authority as every other lifecycle action. It refuses a self-link,
+// applies the role authority (a tenant admin may link only accounts of the roles it may act on), takes the actor's own
+// row FOR SHARE and the target's FOR UPDATE with the re-assertion (active, role, staff_version), and refuses a Person
+// that is already bound to another live account in the scope for a platform account or an approve-capable role (the
+// SR-3 rule). The link is append-only (0034); SF012 bumps staff_version, every session of the target ends, and the
+// person_linked event plus the route's audit row (staff.person_linked / staff.platform_person_linked) are written.
+func (s *Service) LinkPerson(ctx context.Context, actor Actor, targetTenant, staffID, person uuid.UUID) (Result, error) {
+	if err := refuseSelf(actor, staffID); err != nil {
+		return Result{}, err
 	}
-	before := target.state()
-	before.PersonLinked = false
-	before.StaffVersion--
-	if err := revokeAccess(ctx, tx, staffID); err != nil {
+	var res Result
+	err := s.inTargetScope(ctx, actor, targetTenant, func(ctx context.Context, tx pgx.Tx) error {
+		target, err := lockActorAndTarget(ctx, tx, actor, staffID, targetTenant)
+		if err != nil {
+			return err
+		}
+		if err := authorizeTarget(actor, target); err != nil {
+			return err
+		}
+		if target.PersonID != nil {
+			return ErrAlreadyLinked
+		}
+		if targetTenant == uuid.Nil || PersonRequired(target.Role) {
+			inUse, err := personInUse(ctx, tx, person)
+			if err != nil {
+				return err
+			}
+			if inUse {
+				return ErrPersonInUse
+			}
+		}
+		r, err := scanStaffRow(tx.QueryRow(ctx, `UPDATE staff_users SET person_id = $2, updated_at = now() WHERE id = $1 AND person_id IS NULL
+			RETURNING `+staffRowColumns, staffID, person))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAlreadyLinked
+		}
+		if err != nil {
+			return mapDBError(err)
+		}
+		if err := revokeAccess(ctx, tx, staffID); err != nil {
+			return err
+		}
+		action := "staff.person_linked"
+		if targetTenant == uuid.Nil {
+			action = "staff.platform_person_linked"
+		}
+		if err := record(ctx, tx, eventIn{target: target, event: "person_linked", actorType: "staff", actor: actor.StaffID,
+			before: target.state(), after: r.state(), meta: actor.Meta, auditAction: action,
+			extraMetadata: map[string]any{"person_id": person.String()}}); err != nil {
+			return err
+		}
+		res.Staff, err = loadStaff(ctx, tx, staffID)
 		return err
-	}
-	return record(ctx, tx, eventIn{target: target, event: "person_linked", actorType: "staff", actor: actor,
-		before: before, after: target.state(), meta: meta, eventOnly: true})
+	})
+	return res, mapDBError(err)
 }
