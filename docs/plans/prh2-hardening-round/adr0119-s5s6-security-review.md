@@ -182,3 +182,113 @@ Align the floor to at least 12 for approve-capable roles, or for all staff.
 6. SR-6: `DELETE FROM staff_users` as runtime gives 42501.
 7. SR-7: SF021 with a forged nonexistent platform GUC still refuses. A forged `actor_staff_id` naming a tenant row reveals nothing
    cross-tenant.
+
+## Re-review of the fix round (head `3568afc`)
+
+- Reviewer: `security` specialist. Date: 2026-10-14. Scope: the fix-round diff `b7f01c3..3568afc` against SR-1 to SR-9 above,
+  plus the security-relevant code-review items (F1, F2, F5, F7, F8, F10, F12) and the K1 re-assertion change (LF-3 / LF-4).
+  I did not re-review the ledger-finance items for financial correctness.
+- Method: live, on three PRIVATE databases built with the scratchpad `priv_db.sh` (`priv_secrev_s5s6_rr`,
+  `priv_secrev_rr_seed`, `priv_secrev_rr_down`), all dropped afterwards. Read-only discovery used the owner and the test-admin
+  connections. Probes ran as `igaming_runtime`. No shared role, password or test infrastructure was changed. I did not use sudo.
+  I ran a temporary HTTP probe test (three probes) and deleted it. It is not committed.
+- Suites run on the private DB (all pass): `-tags integration -p 1` `./internal/stafflifecycle/`, `./cmd/seed-admin/`, and the
+  lifecycle / invitation / person-link / ADR0119 / fix-round / staff-auth / enrol / golden subset of `./internal/httpserver/`.
+  `go build ./...` is clean.
+
+### Verdict
+
+**APPROVED WITH CONDITIONS.** SR-1 to SR-9 are closed or reduced to stated residuals. The fix round introduced one Medium
+regression (NR-1). It fails closed, so it is not a security bypass, but it breaks the MFA-reset recovery path and must be
+fixed before S5 + S6 is labelled `IMPLEMENTED`. NR-2 needs a fix or a recorded owner acceptance. NR-3 to NR-5 are Low / Info
+and do not block.
+
+**Launch-blocking:** none of the original SR-1 / SR-2 / SR-3 remain open. **NR-1 is launch-blocking as an operational
+item:** staff turnover makes it certain in production. NR-2 is launch-blocking only if any unlinked approve-capable platform
+account exists in the launch database. A pre-launch query that confirms zero such rows discharges it.
+
+### Original findings: status
+
+| # | Status | Evidence |
+|---|---|---|
+| SR-1 | **Closed** (residual NR-3) | Live CLI, runtime URL. Without `-operator` the run is refused (`-operator is required`). The default mode is refused once any `platform_admin` row exists in any status (code: `EXISTS` without a status filter; subprocess test 2b). The first bootstrap writes `owner_provisioned` / `initial_bootstrap` plus an audit row that names the operator. The default mode still requires a Person (SF014 message). |
+| SR-2 | **Closed** (regression NR-1) | `revokeIssuedBy` in suspension / offboarding T2 offboards same-scope `invited` rows (`invite_revoked` / `issuer_removed`) and revokes live `invite` / `mfa_reset` tokens. The `EnrolmentIssuersLiveInTx` backstop on accept and on reset-redeem covers the cross-scope issuer (verified by `TestFixRound_SR2_*` over HTTP and DB). Both orders: (a) suspension first means the accept is refused 401 with audit `issuer_not_live`; (b) accept holds the issuer FOR SHARE, the suspension T2 hits `lock_timeout` and returns `ErrBusy` without committing, then succeeds afterwards; an invitation accepted before the suspension stays active. Lock order is issuer then invitee/token on both sides, so there is no deadlock cycle. |
+| SR-3 | **Closed** (residual NR-4) | GET / list / create / approve return `invite_person_id` and `invite_person_staff` (live platform links). Person reuse is refused in Go at filing (409), by SF031 on direct SQL INSERT, and in Go again at execution (409, no mail). The tenant twin is applied to approve-capable tenant invites. `ListRequests` now drains and closes the result set before enrichment, which is correct (`rows.Close()` then `rows.Err()`). |
+| SR-4 | **Mostly closed** (residual NR-2) | Both routes go through `stafflifecycle.LinkPerson`: `refuseSelf` (403 `self_target_forbidden`), `authorizeTarget` (403 `role_not_grantable` for finance / risk_manager by a tenant admin), `lockActorAndTarget` with in-transaction re-assertion (stale sv gives 401 `session_revoked`, nothing written), 409 when already linked, 409 when the Person is in use. The link bumps sv (SF012), `revokeAccess` ends the target's sessions, and the event and audit row are written in one transaction. Not addressed: the single-actor link between two accounts held by one human (NR-2). |
+| SR-5 | **Closed** | Go `lockPending(approve=true)` and SF032 refuse approval when the requester is not `active`. A reject is still possible. Pending requests are not auto-cancelled; a reactivated requester's request becomes approvable again. I accept this: reactivation is itself an audited decision. |
+| SR-6 | **Closed** | `information_schema` shows the runtime grants on `staff_users` as `INSERT, SELECT` plus column-level UPDATE on the 8 lifecycle columns only. Live `DELETE` as runtime (tenant scope and platform scope) gives `permission denied`. `deploy/init-app-role.sql` re-revokes DELETE after its blanket backfill GRANT (line 99, then 729), so the order is correct. No production Go code deletes staff rows. The test `DELETE`s run on the owner pool. The down migration re-grants DELETE. The recommended deny-delete trigger was not added; the owner role can still delete. I accept this. |
+| SR-7 | **Closed** (stated residual) | SF021 accepts only a GUC naming an existing, active, VISIBLE `platform_admin` row. A forged nonexistent id, a tenant row, or a real platform admin in `app.platform_admin_principal_id` under tenant scope (not visible) does not bypass. The self pair now carries `tenant_id IS NULL`: live, a forged `app.actor_staff_id` naming another tenant's staff member returns 0 rows. Residual (by design, it is the production path): a runtime SQL session that forges `app.actor_staff_id` = a REAL active platform admin's UUID still stands SF021 aside. This is R1 class (runtime SQL is not bound to a session). |
+| SR-8 | **Closed** | `Reject` / `Cancel` call `reassertActorOnly`. A stale sv gives `ErrActorNotLive` and the request stays pending. The P2 alert on rejects of recovery kinds was not added. Non-blocking recommendation. |
+| SR-9 | **Closed** | The acceptance floor is 12 for every staff role (11 gives 400; exactly 12 is accepted and the token is not consumed on refusal). No other staff password-setting route exists; `minPasswordLen = 8` remains for players only. |
+| F2 | **Closed** | Partial unique index `staff_users_live_email (tenant_id, email) NULLS NOT DISTINCT WHERE status <> 'offboarded'`. `GetStaffUserByEmail` orders the live row first, so an offboarded row's old password is never chosen. Down / up round trip, live (APP_ENV=development, 5 steps): down restores `staff_users_tenant_id_email_key` and runtime `DELETE`; up restores the partial index and the revocation. The down guard refuses any `invited` / `offboarded` row, so the restored UNIQUE cannot fail. |
+| F7 / LF-4 | **Closed** | K1 `reassertActor` without a `ProofActor` refuses in the production build (`reassert_prod.go`, build tag `!integration`). The only production callers (`capability_routes.go`) always attach one. The integration-only skip lives in `reassert_integration.go`. |
+| F10 / F12 / F5 / F8 | **Closed** | AP001-AP005 map to 403. SF031 refuses a `platform_invite` with `target_staff_id` at INSERT. The approve answers `email_delivery`, and mail hand-off uses `context.WithoutCancel`. 55P03 / 40P01 / `ErrBusy` from the status UPDATE are retried. |
+
+### New findings from the fix round
+
+#### NR-1 (Medium; condition; operational launch blocker): MFA-reset redemption is refused when the target's ORIGINAL inviter is no longer active
+
+`EnrolmentIssuersLiveInTx` always checks both `staff_enrolment_tokens.issued_by` and the holder's `staff_users.invited_by`.
+For an `invite` token this is right. For an `mfa_reset` token, `invited_by` is the person who invited the holder, possibly
+years earlier, and has nothing to do with the reset.
+
+Live repro (HTTP): TA invites support W; W accepts and enrols. PA offboards TA (`employment_ended`, 200). PA, who is
+active, issues `mfa-reset` for W (200, mail sent). W redeems and gets **401 `invalid_enrolment_token`**, with audit
+`issuer_not_live`. Every staff member whose inviter has since left can never recover a lost device by the normal path. The
+same holds for platform admins created by `platform_invite` once the original requester is gone: `platform_mfa_reset` stops
+working, and the only remaining route is break-glass.
+
+Fix: for `purpose = 'mfa_reset'`, check only `issued_by`. Keep both checks for `invite`. Test: a reset issued by a live admin
+for a staff member whose inviter is offboarded redeems with 200, and the existing issuer-suspended refusal still holds.
+
+#### NR-2 (Low; fix or record owner acceptance): two legacy unlinked platform accounts held by one human can cross-link and then self-approve
+
+`refuseSelf` blocks linking your own account. It does not block linking your other account. Live repro: legacy unlinked
+platform admins A and B belong to one human. A links B to Person P1 (204). B logs in again and links A to Person P2 (204). A
+files a `platform_invite`, and **B approves it (200, `executed`)**. This is the remaining half of original SR-4: the person
+link is still single-actor, and the linking actor itself need not have a Person.
+
+Precondition: unlinked approve-capable platform rows exist (pre-0139 data; not backfilled). The fresh-install paths cannot
+create them: seed-admin requires a Person, and `platform_invite` binds one.
+
+Fix (any one):
+- the platform person-link refuses an actor with no Person;
+- link a platform / approve-capable account through four-eyes;
+- or record an owner acceptance together with a pre-launch query that confirms zero rows of
+  `staff_users WHERE person_id IS NULL AND role IN (<approve-capable>) AND status <> 'offboarded'`.
+
+#### NR-3 (Low): the seed-admin "first admin only" check is not atomic
+
+The default mode runs `SELECT EXISTS (... platform_admin)` and then INSERTs with no lock. Live: on an empty private DB, 4
+parallel default runs produced **3 active platform admins** (the 4th was refused). Each run is audited with operator, reason
+and `owner_provisioned`, and needs deployment-job access, so this is Low. The `-break-glass` "no usable admin" count has the same
+check-then-insert shape. Fix: take a transaction advisory lock (or the SF020 lock) before the check in both modes.
+
+#### NR-4 (Low): Person reuse has no database invariant at execution, so it is check-then-insert
+
+SF031 checks reuse only when the request is filed. At execution, `Approve`'s `personInUse` is a plain `SELECT EXISTS` with
+no lock, and a concurrent `LinkPerson` of another platform account to the same Person takes no common lock. Two concurrent
+commits can therefore bind one Person to two live platform accounts. As a side note, a direct runtime INSERT can do the same:
+that is R1 class. Recommend a partial unique index `staff_users (person_id) WHERE tenant_id IS NULL AND status <> 'offboarded'`
+(the comment in 0139 says "No exception exists"), which also closes NR-2's "Person in use" race.
+
+#### NR-5 (Info)
+
+- Person-linking an `invited` account (allowed, 204) runs `revokeAccess` and kills the outstanding invitation token. Live: the
+  accept then gives 401. This fails closed; it needs re-invite. Consider refusing the link on `invited` rows (the Person belongs
+  in the invitation).
+- `ChangeRole` (for example, demoting a tenant_admin) does not withdraw invitations the demoted actor issued, and the issuer
+  check passes because they stay `active`. Consider applying `revokeIssuedBy` on demotion out of an invite-capable role.
+- `EnrolmentIssuersLiveInTx` leaves `app.actor_staff_id` set to the issuer for the rest of the unauthenticated accept / redeem
+  transaction. I found no trigger that misattributes because of it (SF013 / SF021 do not apply to `invited -> active`). Keep
+  it in mind if a later trigger reads that GUC as "the actor".
+
+### Required tests for `qa` (in addition to those listed above, which the fix round added)
+
+1. NR-1: a reset by a live issuer for a staff member whose inviter is offboarded or suspended redeems with 200. Cover tenant
+   and platform (`platform_mfa_reset` after the original `platform_invite` requester is offboarded).
+2. NR-2 (if fixed in code): the cross-link sequence above ends with the link refused, or with the approval refused.
+3. NR-3 (if fixed): N parallel default seed-admin runs on an empty DB create exactly one platform admin.
+
+Not in scope of this re-review: penetration testing, the back-office UI, financial invariants of the LF items, and S3 MFA
+internals. Passing this re-review does not make the subsystem "secure"; it records what was probed.
