@@ -70,7 +70,7 @@ func TestValidateReason_ClosedListsAndNote(t *testing.T) {
 	}
 	for name, note := range map[string]string{
 		"short": "too short", "long": strings.Repeat("x", 501), "control": "line one\nline two!",
-		"bidi": "abc‮defghijk", "zero width": "abc​defghijk", "bom": "abc﻿defghijk", "alm": "abc؜defghijk",
+		"bidi": "abc\u202Edefghijk", "zero width": "abc\u200Bdefghijk", "bom": "abc\uFEFFdefghijk", "alm": "abc\u061Cdefghijk",
 	} {
 		if err := ValidateReason(ActionSuspend, Reason{Code: "other", Note: note}); !errors.Is(err, ErrInvalidInput) {
 			t.Errorf("note %s accepted", name)

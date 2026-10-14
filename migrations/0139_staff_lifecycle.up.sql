@@ -317,7 +317,7 @@ CREATE TABLE staff_lifecycle_requests (
     invite_person_id    UUID NULL REFERENCES persons (id),
     reason_code         TEXT NULL,
     note                TEXT NULL CHECK (note IS NULL OR (char_length(note) BETWEEN 10 AND 500 AND note !~ '[[:cntrl:]]'
-                                         AND note !~ E'[‪-‮⁦-⁩​-‏⁠-⁤﻿؜]')),
+                                         AND note !~ E'[\u202A-\u202E\u2066-\u2069\u200B-\u200F\u2060-\u2064\uFEFF\u061C]')),
     requested_by        UUID NOT NULL REFERENCES staff_users (id),
     requested_by_person UUID NOT NULL,
     required_approvals  SMALLINT NOT NULL DEFAULT 1 CHECK (required_approvals = 1),
@@ -678,7 +678,7 @@ CREATE TABLE staff_lifecycle_events (
                              'role_change_approved', 'device_lost', 'device_replaced', 'hard_locked',
                              'no_longer_required', 'wrong_details', 'break_glass', 'other')),
     note                 TEXT NULL CHECK (note IS NULL OR (char_length(note) BETWEEN 10 AND 500 AND note !~ '[[:cntrl:]]'
-                             AND note !~ E'[‪-‮⁦-⁩​-‏⁠-⁤﻿؜]')),
+                             AND note !~ E'[\u202A-\u202E\u2066-\u2069\u200B-\u200F\u2060-\u2064\uFEFF\u061C]')),
     lifecycle_request_id UUID NULL REFERENCES staff_lifecycle_requests (id),
     request_id           TEXT NULL CHECK (request_id IS NULL OR octet_length(request_id) <= 128),
     ip                   TEXT NULL CHECK (ip IS NULL OR octet_length(ip) <= 64),
