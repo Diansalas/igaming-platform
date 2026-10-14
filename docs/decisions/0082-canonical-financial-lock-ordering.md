@@ -59,10 +59,12 @@ id joins the ascending-id A8 set, and its row must be `active` at the verified
 token's role. No new lock class, no new exception, no new position. See
 "Amendment A9" at the end of this file. Status: `IMPLEMENTED` on the unmerged
 S4b branch for K2, K3/M4 and HSEC final approvals and the withdrawal approve
-eligibility read; withdrawal submit / resolve, K1 approve / revoke, the
-staff-lifecycle flows and the `staff_actor_self_*` policy pair `NOT IMPLEMENTED`
-(see A9). Pending `ledger-finance`
-(mandatory) and `architect` sign-off.
+eligibility read. **ADR 0119 S5 + S6 (2026-10-14, unmerged branch):** withdrawal
+`submit`, K1 approve / revoke and the staff-lifecycle flows are `IMPLEMENTED`
+(the A9 HARD GATE, see "S5 + S6" at the end of Amendment A9), together with
+`staff_version` (the comparison now includes it) and the `staff_actor_self_*`
+policy pair (used by the lifecycle only); withdrawal `resolve` stays
+`NOT IMPLEMENTED`. Pending `ledger-finance` (mandatory) and `architect` sign-off.
 
 ## Context
 
@@ -1901,9 +1903,10 @@ authority and has a canonical L1 staff position:
 | K3 / M4 force resolution, final approval + execution | the existing A8 staff `FOR SHARE` | withdrawal or intent, then `payment_attempts`, then `payment_manual_resolutions FOR UPDATE` | the same | `IMPLEMENTED` (`lockResolutionStaffAndGrants`) |
 | HSEC hold resolution, final approval + execution | the existing A8 staff `FOR SHARE` | the withdrawal, then the attempts, then `withdrawal_hold_resolutions FOR UPDATE` | the same | `IMPLEMENTED` (`lockHoldResolutionStaffAndGrants`) |
 | Withdrawal `approve` | the approver eligibility read becomes `FOR SHARE` (`approverEligibilityCheckLocked`, called by `withdrawal.Approve` right after `lockRequestForUpdate`) | `withdrawal_requests FOR UPDATE` | that read, plus a role comparison | `IMPLEMENTED` |
-| Withdrawal `submit` / `resolve` | a new staff `FOR SHARE` after the flow's LAST L1 row (withdrawal, then `payment_attempts`), never right after the withdrawal row | | new statement | `NOT IMPLEMENTED` (S4b residual S4b-R3; request-level liveness + the existing DB guards cover them, ADR 0119 R13) |
-| K1 capability grant approve / revoke | a new staff `FOR SHARE` after `staff_capability_grant_requests FOR UPDATE` (or the grant row) | | new statement | `NOT IMPLEMENTED` (S4b-R3) |
-| Staff lifecycle execution (ADR 0119 10.4) | the actor's row `FOR SHARE`, ascending id with the target's row | `staff_lifecycle_requests FOR UPDATE` | new statement | `NOT IMPLEMENTED` (S5 + S6) |
+| Withdrawal `submit` | a new staff `FOR SHARE` after the flow's LAST L1 row (withdrawal, then `payment_attempts`), never right after the withdrawal row | `withdrawal_requests`, then `payment_attempts` (`InsertSubmittingAttempt`) | new statement (`payments.reassertSubmitter`, inside `ClaimForDispatch`'s T1p transaction, before the destination snapshot and the staff-attribution audit) | `IMPLEMENTED` (ADR 0119 S5 + S6, unmerged) |
+| Withdrawal `resolve` | the same rule | | | `NOT IMPLEMENTED` (residual ADR 0119 S56-R5) |
+| K1 capability grant approve / revoke | a new staff `FOR SHARE` after `staff_capability_grant_requests FOR UPDATE` (approve) or the grant row `FOR UPDATE` (revoke); reject and cancel are protective and not re-asserted | the request / grant row | new statement (`capability.reassertActor`) | `IMPLEMENTED` (ADR 0119 S5 + S6, unmerged) |
+| Staff lifecycle execution (ADR 0119 10.4, and every single-actor lifecycle action) | the actor's row `FOR SHARE` and the target's row `FOR UPDATE`, ascending id | `staff_lifecycle_requests FOR UPDATE` (four-eyes execution) | new statement (`stafflifecycle.lockActorAndTarget`) | `IMPLEMENTED` (ADR 0119 S5 + S6, unmerged) |
 
 **2. Position.** The staff `FOR SHARE` stays at the A8 position: after every L1 row the flow takes, before L2/L3,
 and after any L0, L0.x or R0 lock. The actor's row joins the ascending-id A8 set (`WHERE id = ANY($1) ORDER BY id
@@ -1953,7 +1956,40 @@ mid-session, so the windows are latent. Shape, for the record:
   9.5(b)'s `app.actor_staff_id` GUC and `staff_actor_self_*` policy pair, built in the same change.
 - Withdrawal `resolve` follows the same rule if it gains a production staff path that moves value.
 
-**Tests:** `TestS4b_K2_ActorChangedBeforeA8_IsRefusedAndNothingWritten` (tenant / acting, suspension and role change
+**S5 + S6 (ADR 0119, 2026-10-14; unmerged branch; pending `ledger-finance` and `architect`).** The HARD GATE is met
+in the same change that adds the first production suspension / role-change writer:
+- **Withdrawal submit:** `payments.reassertSubmitter` reads `SELECT id, role, status, staff_version FROM staff_users
+  WHERE id = $1 FOR SHARE` right after `InsertSubmittingAttempt` (the last L1 row) and compares it with the verified
+  token's role and `sv` (`db.CheckActorStaffLive`). A refusal rolls the whole T1p back (no attempt, the request stays
+  `approved`, no provider call); the handler answers `401 session_revoked` and counts
+  `staff_reassertion_refusals_total{flow="withdrawal_submit"}`. An empty token role is refused in production; only the
+  integration build may skip it for domain tests that call `ClaimForDispatch` without a token (build-tag split,
+  `submit_reassert_prod.go` returns `false`, pinned by `TestStatic_SubmitReassertionPins`).
+- **K1 approve / revoke:** `capability.reassertActor` after the request / grant row `FOR UPDATE`, the same comparison.
+  **Correction to the shape recorded above:** K1 does NOT run under `WithTenant(target)`. The platform path runs in
+  `db.WithPlatformAdmin` (`app.tenant_id` empty, so the dual-scope policy admits the platform actor's own row) and the
+  tenant path in `db.WithPrincipalScope` (the actor's own tenant row). So K1 needs no `app.actor_staff_id` GUC; the
+  positive both-order tests prove the row is visible and locked (a hidden row would refuse every approval, and the
+  suspension would not wait). The GUC and the `staff_actor_self_*` pair were built in the same change for the one flow
+  that needs them: a platform actor acting on a TENANT target in the lifecycle (`WithTenant(target)` +
+  `db.SetActorStaffIDForCurrentTx`, the only setter, pinned).
+- **Lifecycle:** suspension and offboarding are two-phase (ADR 0119 9.5): T1 revokes sessions / challenges / tokens
+  without a staff lock; T2 sets `lock_timeout` (5 s), locks actor (`FOR SHARE`) and target (`FOR UPDATE`) in ascending
+  id order, re-asserts the actor and writes; a `55P03` is retried once, a second is `lifecycle_busy` (sessions already
+  revoked).
+- `staff_version` (migration 0139, `SF012`) joins the comparison everywhere `db.CheckActorStaffLive` is used (K2, K3/M4,
+  HSEC, withdrawal approve, submit, lifecycle) and in K1.
+
+Tests (both orders, through the real code): `TestSubmitReassertion_ChangeCommittedFirst_Refused` (suspension, role
+change, `sv`-only, stale token role / `sv`), `TestSubmitReassertion_SuspensionInFlightFirst_ClaimWaitsThenRefused`,
+`TestSubmitReassertion_ClaimFirst_SuspensionWaits` (55P03, the claim commits, the suspension completes after),
+`TestSubmitReassertion_UnknownStaffAndEmptyRole_Refused`, `TestSubmitWithdrawalHandler_SubmitterSuspendedInFlight_401NothingWritten`
+(HTTP), `TestK1Reassertion_Approve_ChangeFirst_Refused`, `TestK1Reassertion_Approve_ApprovalFirst_SuspensionWaits`,
+`TestK1Reassertion_Revoke_ChangeFirst_Refused`, `TestK1Reassertion_Revoke_RevokeFirst_SuspensionWaits` (HTTP, scratch
+database), `TestLifecycleReassertion_ActorChangedIsRefused`, `TestTwoPhaseSuspension_*`. Mutants G1-G8:
+`docs/plans/prh2-hardening-round/adr0119-s5s6-mutation-kill.txt`.
+
+**Tests (S4b):** `TestS4b_K2_ActorChangedBeforeA8_IsRefusedAndNothingWritten` (tenant / acting, suspension and role change
 committed between the request lock and the A8 statement: nothing written), `TestS4b_K2_ApprovalHoldingA8_SuspensionOfTheActorWaits`
 (tenant / acting), `TestS4b_K3_ActorSuspendedBeforeA8_IsRefusedAndNothingWritten`,
 `TestS4b_HSEC_PlatformActorReasserted_BothOrders`, `TestStepUp_WithdrawalApprove_EligibilityHoldsTheApproverRowForShare`,

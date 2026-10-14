@@ -509,14 +509,26 @@ func TestGrantsAndCatalog_Pins(t *testing.T) {
 	if err := w.exec(w.owner, w.tenant, `INSERT INTO staff_lifecycle_events (staff_user_id, event, actor_type) VALUES ($1, 'suspended', 'system')`, id); err != nil {
 		t.Fatal(err)
 	}
+	// Three layers: the runtime role has no UPDATE / DELETE grant (42501); the table has no UPDATE / DELETE policy, so
+	// under FORCE RLS even the owner's statement matches no row; and the sf_no_update / sf_no_delete row triggers
+	// (SF099) refuse a session that bypasses RLS.
 	for _, sql := range []string{`UPDATE staff_lifecycle_events SET event = 'reactivated' WHERE staff_user_id = $1`, `DELETE FROM staff_lifecycle_events WHERE staff_user_id = $1`} {
-		if got := code(w.exec(w.owner, w.tenant, sql, id)); got != "SF099" {
-			t.Errorf("owner %s: %q", sql, got)
-		}
 		if got := code(w.exec(w.rt, w.tenant, sql, id)); got != "42501" {
 			t.Errorf("runtime %s: %q", sql, got)
 		}
+		if err := w.exec(w.owner, w.tenant, sql, id); err != nil {
+			t.Errorf("owner %s: %v (FORCE RLS with no UPDATE / DELETE policy matches no row)", sql, err)
+		}
 	}
+	var n int
+	var ev string
+	if err := w.scope(w.owner, w.tenant, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*), max(event) FROM staff_lifecycle_events WHERE staff_user_id = $1`, id).Scan(&n, &ev)
+	}); err != nil || n != 1 || ev != "suspended" {
+		t.Fatalf("the event row must be unchanged: %d %q %v", n, ev, err)
+	}
+	eq("append-only triggers on the events table", q(`SELECT tgname::text FROM pg_trigger WHERE tgrelid = 'staff_lifecycle_events'::regclass AND NOT tgisinternal
+		AND tgname IN ('sf_no_update', 'sf_no_delete', 'sf_no_truncate')`), []string{"sf_no_delete", "sf_no_truncate", "sf_no_update"})
 }
 
 // Residual R1 (section 17.6, owner-deferred S-H1): under arbitrary SQL as the runtime role, a staff member's own
