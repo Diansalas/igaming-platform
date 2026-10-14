@@ -70,7 +70,7 @@ func TestFixRound_SR2_AcceptRefusedOnceTheInviterIsSuspended(t *testing.T) {
 	}
 	lcExpect(t, func() lcResp {
 		r := staffFixturePost(t, srv, "/v1/staff/invitations/accept", map[string]string{"token": lastMailedToken(t, mail, x), "password": "a-decent-password-1"})
-		return lcResp{status: r.status, body: r.body}
+		return lcResp(r)
 	}(), http.StatusUnauthorized, "invalid_enrolment_token", "accept after the inviter's suspension")
 
 	// 2. Cross scope: a platform admin invites tenant staff, then is suspended by another platform admin. The
@@ -85,7 +85,7 @@ func TestFixRound_SR2_AcceptRefusedOnceTheInviterIsSuspended(t *testing.T) {
 		t.Fatalf("non-vacuity: the cross-scope invitation must still be invited, got %s", status)
 	}
 	r := staffFixturePost(t, srv, "/v1/staff/invitations/accept", map[string]string{"token": lastMailedToken(t, mail, y), "password": "a-decent-password-1"})
-	if r.status != http.StatusUnauthorized || (lcResp{status: r.status, body: r.body}).code() != "invalid_enrolment_token" {
+	if r.status != http.StatusUnauthorized || (lcResp(r)).code() != "invalid_enrolment_token" {
 		t.Fatalf("accept after the cross-scope inviter's suspension: %d %s", r.status, r.body)
 	}
 	if status, _, _ := lcStaffRow(t, pool, tn.ID, uuid.MustParse(yr.ID)); status != "invited" {
@@ -116,7 +116,7 @@ func TestFixRound_SR2_MFAResetRedeemRefusedOnceTheIssuerIsSuspended(t *testing.T
 	base := "/v1/admin/tenants/" + tn.ID.String() + "/staff/"
 	redeem := func(addr, password string) lcResp {
 		r := staffFixturePost(t, srv, "/v1/staff/auth/enrol/redeem", map[string]string{"token": lastMailedToken(t, mail, addr), "tenant_slug": tn.Slug, "email": addr, "password": password})
-		return lcResp{status: r.status, body: r.body}
+		return lcResp(r)
 	}
 	for _, sc := range []struct {
 		name     string
@@ -265,7 +265,7 @@ func TestFixRound_SR9_AcceptPasswordFloor(t *testing.T) {
 	created := mustInviteStaff(t, srv, paTok, tn.ID, addr, "support", uuid.Nil)
 	tok := lastMailedToken(t, mail, addr)
 	r := staffFixturePost(t, srv, "/v1/staff/invitations/accept", map[string]string{"token": tok, "password": "elevenchars"})
-	lcExpect(t, lcResp{status: r.status, body: r.body}, http.StatusBadRequest, "validation_error", "an 11-character password")
+	lcExpect(t, lcResp(r), http.StatusBadRequest, "validation_error", "an 11-character password")
 	if status, _, _ := lcStaffRow(t, pool, tn.ID, uuid.MustParse(created.ID)); status != "invited" {
 		t.Fatalf("a refused acceptance must change nothing: %s", status)
 	}
