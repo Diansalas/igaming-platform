@@ -1,0 +1,53 @@
+ADR 0119 S5 + S6 mutation pass (2026-10-14). LOCAL evidence only, NOT GitHub CI.
+
+Method: scratchpad/s56/mutate.py on an exported copy of the branch HEAD (git archive), private database s56_a031_mut
+(rebuilt from the mutated migration for every migration mutant, and restored clean afterwards). Each mutant is ONE
+exact source replacement; the named targeted test run is executed with -tags integration -p 1 -count=1; KILLED when
+the run fails. BASE lines are the unmutated controls of every targeted run (all must PASS).
+
+Format: id | mutant | file | verdict | duration | first failing lines
+
+BASE | unmutated control | ./internal/payments/ -run TestSubmitReassertion_ | PASS
+BASE | unmutated control | ./internal/payments/ -run TestSubmitReassertion_ChangeCommittedFirst | PASS
+BASE | unmutated control | ./internal/stafflifecycle/ -run TestLifecycleReassertion_ | PASS
+BASE | unmutated control | ./internal/httpserver/ -run TestK1Reassertion_ | PASS
+BASE | unmutated control | ./internal/httpserver/ -run TestK1Reassertion_Revoke | PASS
+BASE | unmutated control | ./internal/httpserver/ -run TestK1Reassertion_Approve | PASS
+BASE | unmutated control | ./internal/payments/ -run TestStatic_SubmitReassertionPins | PASS
+BASE | unmutated control | ./internal/stafflifecycle/ -run TestLastAdmin_Platform_ConcurrentMutualSuspension | PASS
+BASE | unmutated control | ./internal/httpserver/ -run TestLifecycle_SF032_And_ProofRequired_DirectSQL | PASS
+BASE | unmutated control | ./internal/stafflifecycle/ -run TestActorSelfPolicyPair_VisibleLockableNeverUpdatable | PASS
+BASE | unmutated control | ./internal/httpserver/ -run TestLifecycle_SelfTarget_RefusedByHTTPAndDatabase | PASS
+BASE | unmutated control | ./internal/httpserver/ -run TestOpenAPI_StaffLifecycle_NoSecretInAnyResponse | PASS
+BASE | unmutated control | ./internal/stafflifecycle/ -run TestTwoPhaseSuspension_ | PASS
+BASE | unmutated control | ./internal/stafflifecycle/ -run TestTriggers_SF010_SF014_Matrix | PASS
+BASE | unmutated control | ./internal/httpserver/ -run TestLifecycle_TenantFullStateMachine | PASS
+G1 | withdrawal submit: FOR SHARE dropped from the submitter re-assertion | internal/payments/payout.go: | KILLED | 77s | --- FAIL: TestSubmitReassertion_SuspensionInFlightFirst_ClaimWaitsThenRefused (15.58s) ; adr0119_submit_reassert_integration_test.go:221: the claim never parked on a lock ; --- FAIL: TestSubmitReassertion_ClaimFirst_SuspensionWaits (4.90s) ; adr0119_submit_reassert_integration_test.go:284: the suspension must wait on the claim's FOR SHARE (55P03), got <nil>
+G2 | withdrawal submit: the re-assertion call removed from ClaimForDispatch | internal/payments/payout.go: | KILLED | 77s | --- FAIL: TestSubmitReassertion_ChangeCommittedFirst_Refused (26.69s) ; --- FAIL: TestSubmitReassertion_ChangeCommittedFirst_Refused/suspended (5.49s) ; adr0119_submit_reassert_integration_test.go:171: want ErrSubmitterNotLive, got <nil> ; --- FAIL: TestSubmitReassertion_ChangeCommittedFirst_Refused/role_changed (5.27s)
+G3 | db.CheckActorStaffLive: the staff_version comparison removed (submit, K2/K3/HSEC, lifecycle) | internal/db/actor_staff.go: | KILLED | 68s | --- FAIL: TestSubmitReassertion_ChangeCommittedFirst_Refused (24.65s) ; --- FAIL: TestSubmitReassertion_ChangeCommittedFirst_Refused/staff_version_only (5.24s) ; adr0119_submit_reassert_integration_test.go:171: want ErrSubmitterNotLive, got <nil> ; --- FAIL: TestSubmitReassertion_ChangeCommittedFirst_Refused/token_sv_mismatch (4.41s)
+G3b | the same mutant, against the lifecycle actor re-assertion | internal/db/actor_staff.go: | SURVIVED | 3s | 
+G4 | K1: FOR SHARE dropped from reassertActor | internal/capability/proof.go: | KILLED | 57s | --- FAIL: TestK1Reassertion_Approve_ApprovalFirst_SuspensionWaits (5.43s) ; adr0119_k1_reassert_integration_test.go:278: the suspension must wait on the approval's FOR SHARE (55P03), got <nil> ; --- FAIL: TestK1Reassertion_Revoke_RevokeFirst_SuspensionWaits (5.88s) ; adr0119_k1_reassert_integration_test.go:335: the suspension must wait on the revocation's FOR SHARE (55P03), got <nil>
+G5 | K1: the staff_version comparison removed | internal/capability/proof.go: | KILLED | 48s | --- FAIL: TestK1Reassertion_Approve_ChangeFirst_Refused (4.45s) ; --- FAIL: TestK1Reassertion_Approve_ChangeFirst_Refused/staff_version_only (0.14s) ; adr0119_k1_reassert_integration_test.go:252: approve after the approver changed: want 401 session_revoked, got 200 {"id":"f2701b47-57c9-4a36-b940-8653d723e61b","tenant_id":"8d0f09b4-e2ac-41bc-89d5-edd473585b4d","grantee_staff_id":"855fe10a-35cb-4cd2-8a1c-f6c7f58ccf25","grantee_scope":"tenant","capability":"ledger_adjustment:initiate","valid_from":"2026-10-14T04:29:46Z","granted_at":"2026-10-14T04:29:46Z"} ; --- FAIL: TestK1Reassertion_Revoke_Cha
+G6 | K1: the revoke re-assertion removed | internal/capability/capability.go: | KILLED | 35s | --- FAIL: TestK1Reassertion_Revoke_ChangeFirst_Refused (6.03s) ; --- FAIL: TestK1Reassertion_Revoke_ChangeFirst_Refused/suspended (0.12s) ; adr0119_k1_reassert_integration_test.go:312: revoke after the revoker changed: want 401 session_revoked, got 500 {"code":"internal_error","message":"internal error","request_id":"6a1a1f43-9c25-41b3-b747-815d27eb2603"} ; --- FAIL: TestK1Reassertion_Revoke_ChangeFirst_Refused/staff_version_only (0.12s)
+G7 | K1: the approve re-assertion removed | internal/capability/capability.go: | KILLED | 37s | --- FAIL: TestK1Reassertion_Approve_ChangeFirst_Refused (4.93s) ; --- FAIL: TestK1Reassertion_Approve_ChangeFirst_Refused/suspended (0.09s) ; adr0119_k1_reassert_integration_test.go:252: approve after the approver changed: want 401 session_revoked, got 500 {"code":"internal_error","message":"internal error","request_id":"422e380a-0281-4966-8032-9649da0c964e"} ; --- FAIL: TestK1Reassertion_Approve_ChangeFirst_Refused/staff_version_only (0.09s)
+G8 | production build: the empty-role fallback switched on | internal/payments/submit_reassert_prod.go: | KILLED | 2s | --- FAIL: TestStatic_SubmitReassertionPins (0.00s) ; submit_reassert_static_test.go:32: the production submitReassertionFallbackOn must return false
+L1 | SF020: the platform advisory lock removed (re-count without serialisation) | migrations/0139_staff_lifecycle.up.sql: | KILLED | 3s | --- FAIL: TestLastAdmin_Platform_ConcurrentMutualSuspension (0.32s) ; lifecycle_db_integration_test.go:344: mutual suspension: 2 succeeded, 0 refused (want exactly 1 and 1): [<nil> <nil>]
+L2 | SF032: the requester-Person arm removed | migrations/0139_staff_lifecycle.up.sql: | KILLED | 4s | --- FAIL: TestLifecycle_SF032_And_ProofRequired_DirectSQL (0.85s) ; staff_lifecycle_platform_integration_test.go:170: same-Person approval by SQL: AP001
+L3 | staff_actor_self_lock: WITH CHECK (false) dropped (the policy would admit an UPDATE) | migrations/0139_staff_lifecycle.up.sql: | KILLED | 2s | --- FAIL: TestActorSelfPolicyPair_VisibleLockableNeverUpdatable (0.11s) ; lifecycle_db_integration_test.go:280: an UPDATE through staff_actor_self_lock must be refused (WITH CHECK false): <nil>
+L4 | SF013: the database self-target trigger made a no-op | migrations/0139_staff_lifecycle.up.sql: | KILLED | 4s | --- FAIL: TestLifecycle_SelfTarget_RefusedByHTTPAndDatabase (1.09s) ; staff_lifecycle_integration_test.go:294: SF013 via app.principal_id: ERROR: staff_users: the last active, enrolled tenant admin of the tenant cannot be removed by a tenant-scoped actor (SF021) (SQLSTATE SF021)
+L5 | Go self-target refusal removed (refuseSelf returns nil) | internal/stafflifecycle/actions.go: | KILLED | 26s | --- FAIL: TestLifecycle_SelfTarget_RefusedByHTTPAndDatabase (0.80s) ; staff_lifecycle_integration_test.go:276: self suspend: got 409 {"code":"last_admin","message":"the last active, enrolled administrator cannot be removed","request_id":"53cc4d95-24a1-4c0c-80a8-b725072407f7"}
+L6 | the invite / lifecycle response carries a token field | internal/httpserver/staff_lifecycle_routes.go: | KILLED | 25s | --- FAIL: TestOpenAPI_StaffLifecycle_NoSecretInAnyResponse (0.01s) ; staff_lifecycle_openapi_contract_test.go:170: response DTO staffLifecycleResultDTO has a secret-shaped field "invite_token"
+L7 | two-phase suspension: the T2 retry removed | internal/stafflifecycle/actions.go: | KILLED | 3s | --- FAIL: TestTwoPhaseSuspension_T2RetriedOnceSucceedsWhenTheLockClears (0.64s) ; lifecycle_db_integration_test.go:603: the retried T2 must succeed once the lock clears, got stafflifecycle: the staff row is busy; the sessions are revoked, retry
+L8 | SF014: the Person requirement made a no-op | migrations/0139_staff_lifecycle.up.sql: | KILLED | 2s | --- FAIL: TestTriggers_SF010_SF014_Matrix (0.11s) ; lifecycle_db_integration_test.go:165: insert approve-capable without Person: got "", want SF014
+L9 | SF010: the invited row's edge set widened to admit invited -> suspended | migrations/0139_staff_lifecycle.up.sql: | SURVIVED | 2s | 
+L10 | SF012: staff_version no longer bumped on a status change | migrations/0139_staff_lifecycle.up.sql: | KILLED | 4s | --- FAIL: TestLifecycle_TenantFullStateMachine (1.11s) ; staff_lifecycle_integration_test.go:148: suspended row: suspended sv=2 (was 2)
+L11 | lifecycle: the sessions are no longer revoked on suspension (revokeAccess a no-op) | internal/stafflifecycle/service.go: | KILLED | 26s | --- FAIL: TestLifecycle_TenantFullStateMachine (1.18s) ; staff_lifecycle_integration_test.go:155: suspension left 2 live sessions
+
+Second round (after strengthening the tests; the first round left G3b and L9 SURVIVED):
+- G3b survived because TestLifecycleReassertion_ActorChangedIsRefused had no staff_version-only arm: added (password change, actor still active at the same role, stale sv refused; control with the current sv succeeds).
+- L9 survived because TestTriggers_SF010_SF014_Matrix did not exercise the invited row's edges: added invited -> suspended (SF010), invited -> active without a password (23514), invited -> offboarded (allowed).
+
+G3b | the same mutant, against the lifecycle actor re-assertion | internal/db/actor_staff.go: | KILLED | 2s | --- FAIL: TestLifecycleReassertion_ActorChangedIsRefused (0.17s) ; lifecycle_db_integration_test.go:478: a stale sv alone must be refused: <nil>
+L9 | SF010: the invited row's edge set widened to admit invited -> suspended | migrations/0139_staff_lifecycle.up.sql: | KILLED | 3s | --- FAIL: TestTriggers_SF010_SF014_Matrix (0.17s) ; lifecycle_db_integration_test.go:221: runtime invited -> suspended: got "23514", want "SF010"
+
+Result: 21 mutants (G1-G8, G3b, L1-L11), 21 KILLED after the second round, 0 SURVIVED. Not covered by a mutant: SF011 / SF031 / SF033 bodies (pinned by the trigger matrix and the four-eyes tests), the email compose path.

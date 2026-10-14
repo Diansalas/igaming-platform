@@ -206,6 +206,21 @@ func TestTriggers_SF010_SF014_Matrix(t *testing.T) {
 	if sv1 != sv0+1 {
 		t.Fatalf("staff_version %d -> %d, want +1 (status) and +0 (display name)", sv0, sv1)
 	}
+	// The invited row's edges: only active (with a password: the acceptance) or offboarded (a revoked invitation).
+	inv := uuid.New()
+	if err := w.exec(w.owner, w.tenant, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, NULL, 'support', 'invited')`,
+		inv, w.tenant, "inv-"+inv.String()+"@f.invalid"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, q, want string }{
+		{"invited -> suspended", `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, "SF010"},
+		{"invited -> active without a password", `UPDATE staff_users SET status = 'active' WHERE id = $1`, "23514"},
+		{"invited -> offboarded", `UPDATE staff_users SET status = 'offboarded' WHERE id = $1`, ""},
+	} {
+		if got := code(w.exec(w.rt, w.tenant, c.q, inv)); got != c.want {
+			t.Errorf("runtime %s: got %q, want %q", c.name, got, c.want)
+		}
+	}
 	// Offboarded is terminal.
 	if err := w.exec(w.rt, w.tenant, `UPDATE staff_users SET status = 'offboarded', password_hash = NULL WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
