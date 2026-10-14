@@ -213,6 +213,18 @@ environment with `APP_ENV=production`:
      (`MOCK-ADAPTER-PROD-1`). Record this explicitly if a future
      environment sets `TEST_SUPPORT_ENDPOINTS_ENABLED=false` while still
      relying on the MOCK payments adapter for anything.
+8. **Zero unlinked approve-capable staff accounts** (ADR 0119 S5 + S6 security re-review NR-2; residual S56-R2).
+   Migration 0139 refuses CREATING an approve-capable account without a Person (SF014) but does not backfill legacy
+   rows, and a person link by an actor without a Person is refused (NR-2). Before launch, as the table owner, this
+   query must return **0**; otherwise link (through a Person-linked platform admin) or offboard each listed account
+   first, and re-run:
+
+   ```sql
+   SELECT id, tenant_id, email, role, status FROM staff_users
+    WHERE person_id IS NULL
+      AND role IN ('platform_admin', 'tenant_admin', 'finance', 'compliance')
+      AND status <> 'offboarded';
+   ```
 
 ## Webhook body-read deadline (ADR 0097 A5, `BodyReadTimeout`)
 

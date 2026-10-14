@@ -30,12 +30,15 @@ import (
 
 // Errors (the HTTP layer maps each to one closed apierror code).
 var (
-	ErrInvalidInput        = errors.New("stafflifecycle: invalid input")
-	ErrNotFound            = errors.New("stafflifecycle: not found")
-	ErrForbidden           = errors.New("stafflifecycle: forbidden")
-	ErrSelfTarget          = errors.New("stafflifecycle: a staff member may not act on their own account")
-	ErrRoleNotGrantable    = errors.New("stafflifecycle: the caller may not grant or act on this role")
-	ErrPersonRequired      = errors.New("stafflifecycle: the role requires a linked Person")
+	ErrInvalidInput     = errors.New("stafflifecycle: invalid input")
+	ErrNotFound         = errors.New("stafflifecycle: not found")
+	ErrForbidden        = errors.New("stafflifecycle: forbidden")
+	ErrSelfTarget       = errors.New("stafflifecycle: a staff member may not act on their own account")
+	ErrRoleNotGrantable = errors.New("stafflifecycle: the caller may not grant or act on this role")
+	ErrPersonRequired   = errors.New("stafflifecycle: the role requires a linked Person")
+	// ErrActorWithoutPerson: the acting staff member has no linked Person (security re-review NR-2: a person link by
+	// such an actor is refused).
+	ErrActorWithoutPerson  = errors.New("stafflifecycle: the acting staff member has no linked Person")
 	ErrPersonNotFound      = errors.New("stafflifecycle: person_id does not reference an existing Person")
 	ErrTransition          = errors.New("stafflifecycle: the target is not in a state the action applies to")
 	ErrLastAdmin           = errors.New("stafflifecycle: the last active, enrolled admin cannot be removed")

@@ -232,6 +232,7 @@ DROP FUNCTION sf_staff_immutable();
 DROP FUNCTION sf_staff_transition();
 
 -- 2. Columns and CHECKs.
+DROP INDEX staff_users_platform_live_person;
 DROP INDEX staff_users_live_email;
 ALTER TABLE staff_users ADD CONSTRAINT staff_users_tenant_id_email_key UNIQUE NULLS NOT DISTINCT (tenant_id, email);
 ALTER TABLE staff_users DROP CONSTRAINT staff_users_offboarded_at_state;

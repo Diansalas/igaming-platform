@@ -210,6 +210,8 @@ func (c lifecycleCall) writeError(ctx context.Context, w http.ResponseWriter, er
 		apierror.Write(w, c.requestID, apierror.CodeLifecycleBusy, "the staff record is busy; the sessions are already revoked, retry")
 	case errors.Is(err, stafflifecycle.ErrConflict):
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "a staff user with this email already exists in this scope")
+	case errors.Is(err, stafflifecycle.ErrActorWithoutPerson):
+		apierror.Write(w, c.requestID, apierror.CodeForbidden, "the acting staff member has no linked Person")
 	case errors.Is(err, stafflifecycle.ErrPersonInUse):
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "the Person is already linked to a live staff account")
 	case errors.Is(err, stafflifecycle.ErrAlreadyLinked):

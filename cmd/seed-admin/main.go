@@ -188,6 +188,12 @@ func run() error {
 	var staff identity.StaffUser
 	var tok staffmfa.Token
 	err = pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		// Security re-review NR-3: the existence / usability checks below and the INSERT are one critical section.
+		// Both modes take the SF020 platform last-admin advisory lock first (transaction-scoped), so parallel runs
+		// serialise: the second re-checks after the first commits (READ COMMITTED: a fresh snapshot per statement).
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('sf:last_admin:platform'))`); err != nil {
+			return fmt.Errorf("take the platform admin lock: %w", err)
+		}
 		if !*breakGlass {
 			// ADR 0119 S5 + S6 review fix SR-1 / F1: the default mode bootstraps the FIRST platform admin only.
 			var exists bool

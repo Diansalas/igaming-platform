@@ -419,8 +419,8 @@ func revokeIssuedBy(ctx context.Context, tx pgx.Tx, actor Actor, issuer staffRow
 const reasonIssuerRemoved = "issuer_removed"
 
 // EnrolmentIssuersLiveInTx is the review fix SR-2 backstop of the invitation acceptance and the MFA-reset redemption:
-// the staff members who issued the token (staff_enrolment_tokens.issued_by) and invited its holder
-// (staff_users.invited_by) must still be ACTIVE. Each issuer row is taken FOR SHARE BEFORE the caller locks the token
+// the staff member who issued the token (staff_enrolment_tokens.issued_by) and, for an INVITATION token only, the one
+// who invited its holder (staff_users.invited_by; security re-review NR-1) must still be ACTIVE. Each issuer row is taken FOR SHARE BEFORE the caller locks the token
 // or the invitee row, so a concurrent suspension of the issuer (which holds the issuer FOR UPDATE, then the invitee and
 // the token) is serialised in one order: committed first, the acceptance sees the issuer suspended and is refused;
 // started later, it waits for the acceptance. An issuer of another scope (a platform admin who invited tenant staff)
@@ -428,13 +428,19 @@ const reasonIssuerRemoved = "issuer_removed"
 // system-issued token (no issuer, e.g. seed-admin bootstrap) has nothing to check.
 func EnrolmentIssuersLiveInTx(ctx context.Context, tx pgx.Tx, tokenID uuid.UUID) (bool, error) {
 	var issuedBy, invitedBy *uuid.UUID
-	err := tx.QueryRow(ctx, `SELECT t.issued_by, su.invited_by FROM staff_enrolment_tokens t
-		JOIN staff_users su ON su.id = t.staff_user_id WHERE t.id = $1`, tokenID).Scan(&issuedBy, &invitedBy)
+	var purpose string
+	err := tx.QueryRow(ctx, `SELECT t.issued_by, su.invited_by, t.purpose::text FROM staff_enrolment_tokens t
+		JOIN staff_users su ON su.id = t.staff_user_id WHERE t.id = $1`, tokenID).Scan(&issuedBy, &invitedBy, &purpose)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
+	}
+	// Security re-review NR-1: the holder's original inviter matters for the INVITATION only. An MFA-reset (or any
+	// later) token is checked against its own issuer: an inviter who has since left must not block device recovery.
+	if purpose != "invite" {
+		invitedBy = nil
 	}
 	var ids []uuid.UUID
 	for _, p := range []*uuid.UUID{issuedBy, invitedBy} {
@@ -730,6 +736,16 @@ func (s *Service) LinkPerson(ctx context.Context, actor Actor, targetTenant, sta
 		}
 		if err := authorizeTarget(actor, target); err != nil {
 			return err
+		}
+		// Security re-review NR-2: the linking actor must itself have a Person (fail closed). Two legacy unlinked
+		// accounts held by one human could otherwise link each other to two different Persons and then count as two
+		// pairs of eyes. The actor's row is already locked FOR SHARE (and visible) by lockActorAndTarget.
+		var actorPerson *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, actor.StaffID).Scan(&actorPerson); err != nil {
+			return err
+		}
+		if actorPerson == nil {
+			return ErrActorWithoutPerson
 		}
 		if target.PersonID != nil {
 			return ErrAlreadyLinked
