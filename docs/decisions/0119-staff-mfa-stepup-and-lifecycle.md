@@ -2697,3 +2697,165 @@ Correction to V6: the TOTP field is uncontrolled and its value is read once on s
 captures the input element itself (React has already cleared the ref by then) so cancel, unmount and failure leave an empty
 value on the removed node. JavaScript gives no stronger scrubbing guarantee; the value can still be seen by browser extensions
 while typed (S7b-R3). Evidence after the fixes: see the S7b commit; `npx tsc -b`, `npx vitest run`, `npm run build` PASS.
+
+## 28. S5 + S6 implementation record (2026-10-14)
+
+Worktree branch `worktree-agent-a031d51e36f08b4f0`, based on `ff23a5c`. **NOT MERGED, NOT PUSHED.** Gate G (live
+`security` review, `code-reviewer`, `qa`) has not run. **`ledger-finance` review is mandatory** (the ADR 0082 A9 HARD
+GATE: withdrawal submit and K1 re-assertion) and **`architect` sign-off is required** (migration 0139, the section 9.5(b)
+policy pair, the A9 shape correction for K1). Nothing below is an approval. Migration **0139** (reserved for this slice).
+The back-office UI is S8 (contract `docs/plans/adr0119-s5s6-api-contract.md`). SF030 / SF007 (S-H1) and WebAuthn are
+out of scope and not built.
+
+### 28.1 Status labels
+
+| Item | Label |
+|---|---|
+| Migration 0139 (up + down; down refuses with `SF094` once lifecycle data, invited / offboarded rows or a break-glass alert exist; up has the `SF095` pre-flight): `staff_users.status` adds `invited` / `offboarded`; `password_hash` nullable with the password-state CHECKs; `staff_version` (>= 1), `status_changed_at`, `offboarded_at`, `invited_by`; triggers `SF010` (status graph, INSERT invited / active only), `SF011` (identity columns immutable), `SF012` (`staff_version` set only by the trigger: +1 on role, status, password or Person change), `SF013` (no self status / role change; the invited -> active acceptance excepted), `SF014` (Person required for platform_admin, tenant_admin, finance, compliance at INSERT and role change), `SF020` / `SF021` (last-admin, advisory lock, VOLATILE re-count) | `IMPLEMENTED` against the local database |
+| Section 9.5(b) `app.actor_staff_id` GUC and the `staff_actor_self_select` / `staff_actor_self_lock` (WITH CHECK false) pair; `db.SetActorStaffIDForCurrentTx` is the only setter (static pin) | `IMPLEMENTED`; used ONLY by the lifecycle path where a platform actor acts on a tenant target (`WithTenant(target)`) |
+| `staff_lifecycle_requests` / `staff_lifecycle_approvals` (platform four-eyes: `SF031` content and state machine, `SF032` approver distinct by staff id AND Person from the requester, the target and the invitee, request locked `FOR UPDATE`, `SF033` deferred no-executing-at-commit, `zz_actor_proof_guard`, platform-only RLS) and `staff_lifecycle_events` (append-only, tenant forced, dual-scope, the staff_users fences, closed event / reason vocabularies) | `IMPLEMENTED` |
+| `actor_proof_require` + Go `actorproof`: `staff_lifecycle:{request,approve,reject,cancel}`, scope platform only; request / approve in the step-up backstop registry (critical) | `IMPLEMENTED` |
+| `internal/stafflifecycle`: invite (S3 enrolment machinery, token emailed, never returned), resend, revoke invitation, suspend / offboard (two-phase: T1 revokes sessions, challenges, enrolment tokens; T2 `lock_timeout` 5 s, ascending-id actor `FOR SHARE` + target `FOR UPDATE`, actor re-asserted, one retry on `55P03`, then `lifecycle_busy`), reactivate, role change, MFA reset (factor and recovery codes revoked, sessions revoked, re-enrolment emailed), person-link revocation hook, invitation acceptance; lifecycle events + audit rows (actor, tenant, before / after, IP, reason code) | `IMPLEMENTED` |
+| Platform four-eyes kinds `platform_invite`, `platform_reactivate`, `platform_mfa_reset` (request -> distinct approval -> execution in the approval transaction) | `IMPLEMENTED` |
+| `platform_password_reset` (kind allowed by the table; API answers 400) and staff password reset in general | `NOT IMPLEMENTED` |
+| Last-admin protection: Go pre-check + `SF020` (platform, always) / `SF021` (tenant, tenant-scoped actor only) | `IMPLEMENTED` |
+| Self-targeting refusal: Go (`self_target_forbidden`) and `SF013` | `IMPLEMENTED` |
+| HTTP: 25 lifecycle routes: 24 staff routes all through `staffRoute` (golden rows; every mutating one class `critical` except the four-eyes reject / cancel, D14) and the unauthenticated `POST /v1/staff/invitations/accept` (credential rate bucket, token-authenticated, like the S3 enrolment redeem); OpenAPI (routes, schemas, responses, error codes); `staff:read` / `platform_staff:govern` permissions and the role matrix; seven new closed error codes | `IMPLEMENTED` |
+| Legacy admin-chosen-password `POST /v1/admin/tenants/{tenantID}/staff` | `IMPLEMENTED` (removed: route, handler, OpenAPI operation; every fixture migrated) |
+| `cmd/seed-admin`: Person required (SF014); `-break-glass` (refused while a usable platform admin exists unless `-force-additional`; `owner_provisioned` event, `staff.break_glass_used` audit, P1 alert `staff.platform_break_glass_used`) | `IMPLEMENTED` |
+| HARD GATE (ADR 0082 A9): withdrawal `submit` re-assertion (`FOR SHARE` after `payment_attempts`, inside `ClaimForDispatch`) and K1 approve / revoke re-assertion (`FOR SHARE` after the request / grant row) with `staff_version` | `IMPLEMENTED` (both orders tested; pending `ledger-finance`) |
+| Withdrawal `resolve` re-assertion | `NOT IMPLEMENTED` (S56-R5) |
+| Email delivery (invite, MFA reset) | `MOCK` locally; `PROVIDER DEPENDENT` in production. OQ-1 default (b) is honoured, no interim: production startup already refuses the synthetic MOCK provider (`refuseSyntheticInProduction`, R8), so no HTTP invite exists in production until a real adapter is contracted; a nil provider makes invite / resend / MFA reset answer 503 before any write |
+| Per-tenant invitation email-domain allow-list | `NOT IMPLEMENTED` (deferred consideration, R14) |
+| SF030 / SF007 (S-H1), WebAuthn, back-office lifecycle UI (S8) | `NOT IMPLEMENTED` (out of scope) |
+
+### 28.2 How the review conditions hold
+
+| Condition | Mechanism | Tests / mutants |
+|---|---|---|
+| S4b-R3 / ADR 0082 A9 HARD GATE (merge with or before the first suspension / role-change writer) | Same change as the first writer. Submit: `payments.reassertSubmitter` (`FOR SHARE`, role + `sv`, refusal rolls the whole T1p back, `401 session_revoked`, metric `withdrawal_submit`); an empty role is refused in production (build-tag split, `submit_reassert_prod.go`). K1: `capability.reassertActor` after the request / grant row `FOR UPDATE` (`capability.ErrActorNotLive` -> `401 session_revoked`, metric `capability_grant`) | `TestSubmitReassertion_*` (5 tests, both orders, real `ClaimForDispatch`), `TestSubmitWithdrawalHandler_SubmitterSuspendedInFlight_401NothingWritten`, `TestK1Reassertion_*` (4 tests, both orders, HTTP), `TestStatic_SubmitReassertionPins`; G1-G8 |
+| 9.5(b) visibility | K1: platform path `WithPlatformAdmin` (empty `app.tenant_id`: the actor's platform row is visible), tenant path `WithPrincipalScope`; no GUC needed (the A9 "under `WithTenant(target)`" note is corrected in ADR 0082). Lifecycle platform-on-tenant: `WithTenant(target)` + `SetActorStaffIDForCurrentTx` | `TestActorSelfPolicyPair_VisibleLockableNeverUpdatable`, the K1 positive orders (a hidden row would refuse every approval), `TestLifecycle_TenantFullStateMachine` (platform actor on a tenant target); L3 |
+| C5 (SF030 to S-H1) | Not created; pinned absent | `TestGrantsAndCatalog_Pins`, `TestRLS_*` / sf_* function pins (staffmfa/store) |
+| C6 (S5 merges with S6) | One branch, one migration | - |
+| S3-R11 (factor re-check) | Liveness and refresh now compare `staff_version` (`sv` claim) instead of the S3 placeholder | existing S4a / S4b liveness tests + `TestLifecycle_*` (old token `session_revoked` after every change) |
+| Two-phase suspension | T1 / T2 as specified; `lifecycle_busy` leaves the sessions revoked; T2 retried once | `TestTwoPhaseSuspension_BusyLeavesSessionsRevoked`, `TestTwoPhaseSuspension_T2RetriedOnceSucceedsWhenTheLockClears`; L7 |
+| Last admin | `SF020` / `SF021` advisory-locked re-count; Go pre-check | `TestLastAdmin_Platform_ConcurrentMutualSuspension`, `TestLastAdmin_TenantScopedRefused_PlatformAllowed`; L1 |
+| Four-eyes by staff id AND Person | Go `lockPending` + `SF032` | `TestLifecycle_PlatformFourEyes_InviteReactivateResetRejectCancel`, `TestLifecycle_SF032_And_ProofRequired_DirectSQL`; L2 |
+
+### 28.3 Deviations (for the reviewer; each reversible)
+
+| # | Deviation | Reason |
+|---|---|---|
+| S56-D1 | `last_login_at` in the directory is derived from the audit log (newest `staff.login_succeeded`), not a column | No new column; the audit row is the authoritative record |
+| S56-D2 | A tenant lifecycle action by a platform actor writes a TENANT-owned audit / event row with a platform actor | The target's tenant owns its history (tenant admins can read it) |
+| S56-D3 | Invite and resend carry no reason code (only the closed lists of 10.1 for the other actions) | Section 10.1 lists reasons for removals / restorations only |
+| S56-D4 | Extra platform routes: `POST /v1/admin/platform-staff/{id}/invitation/resend` and `/revoke` | A pending platform invitation must be revocable without a second four-eyes |
+| S56-D5 | The runtime `staff_users` UPDATE grant is column-level and includes `person_id`, `display_name`, `updated_at` besides the lifecycle columns | The existing person-link and display-name routes write them |
+| S56-D6 | `SF021` treats a session whose `app.actor_staff_id` names a PLATFORM staff row as platform-scoped | The lifecycle platform-on-tenant path runs `WithTenant(target)`; the GUC is forgeable by runtime SQL (R1, S-H1) |
+| S56-D7 | `SF013` exempts `invited -> active` (acceptance by the invitee itself) | The acceptance is the invitee's own transition |
+| S56-D8 | `mfa_enrolled` and similar events are not written by the S3 enrolment paths | S3 paths unchanged; the lifecycle events cover the lifecycle actions |
+| S56-D9 | `StaffBackofficeBaseURL` (invitation link base) is empty by default: the email carries `/#/enrol?token=...&invite=1` | Deployment configuration; S8 owns the route |
+| S56-D10 | Request states `refused_at_execution` and `expired` are allowed by the table but never written (execution refusals roll back; expiry is evaluated, not swept) | No sweeper in this slice |
+| S56-D11 | The submit re-assertion's empty-role skip exists in integration builds only (`SetTestSubmitReassertionFallback`, default on) | Domain tests call `ClaimForDispatch` without a token; the S4b D10 build-tag precedent |
+| S56-D12 | K1 re-asserts approve and revoke only; reject and cancel are protective | As ADR 0082 A9 |
+| S56-D14 | The four-eyes `reject` and `cancel` routes are class `none` (every other mutating lifecycle route is `critical`); the backstop registry holds `staff_lifecycle:request` and `:approve` only | Protective actions (they can only stop a change), as K1 / ADR 0112 reject and cancel |
+| S56-D13 | Commit trailer `Co-Authored-By: Claude Opus 5.5` (the session's attribution rule), not the "Sonnet 5.5" the dispatch named | Session attribution instruction |
+
+### 28.4 Changed existing tests and assertions (every one)
+
+**Assertions changed (semantics or pinned values):**
+
+| File | Change | Why |
+|---|---|---|
+| `internal/httpserver/staff_route_golden_test.go`, `staff_route_static_test.go` | +24 lifecycle rows (critical / none as 28.3 D14), legacy `POST /v1/admin/tenants/{tenantID}/staff` row removed; route counts 180 / 110 -> 203 / 125 | New routes; legacy route removed |
+| `internal/httpserver/openapi_governed_routes_contract_test.go` | `staff_lifecycle_routes.go` scanned; documented governed operations 25 -> 39 | New documented operations |
+| `internal/httpserver/staff_identity_static_test.go` | staff identity DTO allow-list: legacy create entries replaced by the lifecycle DTOs | Legacy route removed |
+| `internal/httpserver/staff_mfa_static_test.go` | `RevealFor*` allow-list + `stafflifecycle/service.go:compose:RevealForDelivery`; audit-metadata key scan extended to the lifecycle files | The invite / reset email body is the only new reveal site |
+| `internal/httpserver/admin_routes_test.go` | deleted (legacy create-route unit tests); the role-allow-list coverage moved to `stafflifecycle/model_test.go` (`TestGrantable_RoleAuthorityMatrix`) | Legacy route removed |
+| `internal/httpserver/stage3d_withdrawal_governance_test.go` (2 tests), `risk_flow_integration_test.go` (2 tests) | create staff through the invitation flow instead of the legacy route; same assertions | Legacy route removed |
+| `internal/httpserver/staff_stepup_withdrawal_integration_test.go`, `staff_stepup_withdrawal_orders_integration_test.go` | pass the staff row's real `staff_version` into `approverEligibilityCheckLocked` | `sv` comparison |
+| `internal/db/actor_staff_test.go` | `TestStatic_NoActorStaffIDSetterYet` -> `TestStatic_ActorStaffIDSingleSetter`; `TestCheckActorStaffLive` gains `sv` cases | 9.5(b) built |
+| `internal/db/actor_staff_integration_test.go` | "no `staff_actor_self_*` policy may exist yet" -> the exact pair (SELECT; UPDATE with `WITH CHECK false`) | 9.5(b) built |
+| `internal/db/null_arm_replay_static_test.go` | A-18 fenced tables + `staff_lifecycle_events` | New dual-scope table |
+| `internal/db/kyc_worker_identity_integration_test.go` | fenced tables + `staff_lifecycle_events`; the two forged platform_admin INSERT probes carry a (dangling) `person_id` so SF014 does not pre-empt the 42501 under test | New fenced table; SF014 is a BEFORE trigger |
+| `internal/db/kyc_worker_catalogue_gate_integration_test.go` | `TestKYCWorkerFencePolicies_ExactShape_52` -> `_56` | +4 fences on the events table |
+| `internal/db/capability_grant_integration_test.go` | forged platform_admin probe with a dangling `person_id`; the `update_staff` RLS probe writes `display_name` instead of `status` (SF013 would pre-empt the 42501); the A8 suspended-actor fixture suspends through a platform actor (`SetActorStaffIDForCurrentTx`) because SF021 refuses a tenant-scoped removal of the last enrolled tenant admin | SF014 / SF013 / SF021 ordering |
+| `internal/db/capability_grant_r12_integration_test.go` (2 tests), `k2_gates_integration_test.go` (1), `internal/audit/subject_tenant_rls_integration_test.go` (1), `internal/adjustment/s4b_reassertion_integration_test.go` (helper) | plant another active, enrolled platform admin before suspending a platform admin | SF020 |
+| `internal/identity/identity_integration_test.go` | the tenant-scoped platform_admin CHECK test carries a dangling `person_id` (CHECK 23514 still the refusal) | SF014 is a BEFORE trigger |
+| `internal/identity/platform_admin_insert_static_test.go` | A-14b allow-list + `stafflifecycle/platform.go`, `actions.go` | New platform_admin writers (four-eyes executed) |
+| `internal/staffmfa/store/static_test.go` | SF SQLSTATE class pin + the 0139 codes | New codes |
+| `internal/staffmfa/store/rls_grants_integration_test.go` | `sf_*` function list + the 0139 functions; "SF010 / SF020 / SF021 not created in S2" flipped into "SF020 / SF021 only in the VOLATILE `sf_last_admin`" and "SF010 only in `sf_staff_transition`"; SF030 / SF007 still absent | 0139 landed (the pin's own instruction, s13.5) |
+| `internal/tenant/status_readers_static_test.go` | + the 0139 staff status-graph line (registered in `docs/security/launch-status-readers.md`) | New status literal reader |
+| `internal/tenant/no_trigger_disable_test.go` | + `internal/testsupport/staffsv/staffsv.go` (integration-tag only) as a sanctioned exception | Legacy-row helper (28.6 S56-R8) |
+| `internal/tenant/launch_governance_integration_test.go` (`TestLaunchGov_Approver_WithoutPerson_Refused`) | now ALSO asserts SF014 refuses the unlinked insert; LA012 / LA001 kept, on a legacy-shaped row | SF014; S56-R2 |
+| `internal/launchgov/review_integration_test.go`, `internal/assetregistry/assetregistry_integration_test.go` (unlinked helpers), `internal/casino/orchestrator_integration_test.go` (unlinked helper) | unlinked platform admins created as legacy-shaped rows (`staffsv.InsertLegacyUnlinkedStaff`) | SF014; S56-R2 |
+| `internal/adjustment/b4_b5_adversarial_integration_test.go` (`TestB5_IndependenceFloorRefusals`) | asserts SF014 refuses an unlinked finance row; the K2 unlinked-actor arm uses an unlinked `support` row | SF014 |
+| `internal/payments/k3_gov_integration_test.go` (`mkUnlinkedStaff`) | unlinked actor role finance -> support | SF014 |
+| `internal/withdrawal/adversarial_test.go` (2 tests) | unlinked approver role finance -> support | SF014 |
+| `internal/providercred/lifecycle_integration_test.go` (2 tests) | "unlinked" arms removed (a platform admin cannot be unlinked); new `TestPCFixture_UnlinkedPlatformAdminRefusedBySF014` | SF014 (the runtime-role fixture cannot build a legacy row) |
+| `internal/providercred/scratch_integration_test.go` (`TestPCApproval_RequesterUnlinkedRefused`) | builds the unlinked requester on its scratch database with SF014 disabled for one statement | SF014 |
+| `internal/providercred/rls_integration_test.go` | staff_users policy allow-map + `staff_actor_self_select` / `_lock` | 9.5(b) pair |
+| `internal/providercred/fixture_integration_test.go` | "suspended" platform admin seeded `invited` on a 0139 schema (`suspended` before 0139) | SF010 / SF020 |
+| `internal/payments/migration_0105_integration_test.go` (N1-K19b), `migration_0106_integration_test.go` (L4), `internal/assetregistry` (2 suspended tests), `internal/casino` (suspended helper) | the non-active staff row is created `invited` (password-less) instead of `suspended`; every predicate under test is `status = 'active'` | SF010 (INSERT invited / active only) and SF020 |
+| `internal/adjustment/acting_policies_integration_test.go`, `layered_counting_integration_test.go` | scratch schema 113 -> 151 (the executor reads `staff_version`); `scratchPoolThroughDir` installs the proof key when version >= 120 | 0139 column |
+| `internal/adjustment/temp_revoke_integration_test.go` | the shadow `pg_temp.staff_users` rows state `staff_version = 1` | `CREATE TABLE AS` copies no default |
+| `internal/actorproof/stepup_test.go`, `actorproof_test.go` | backstop registry + `staff_lifecycle:request` / `:approve`; static signer allow-list + `internal/stafflifecycle` | New governed operations |
+| `internal/alerting/alert_test.go` | subjectless kind set + `staff.platform_break_glass_used` | New P1 kind |
+| `cmd/seed-admin/seed_admin_integration_test.go` | `seedTenantStaff` links a Person | SF014 |
+| `internal/payments/hsec_hold_resolution_db_integration_test.go` (`TestHSEC_HoldRelease_ActorProofTriggerOnGovernedTables_Last`) | governed tables 13 -> 15 (+ `staff_lifecycle_requests`, `staff_lifecycle_approvals`) | New governed tables |
+| `internal/payments/s4b_reassertion_integration_test.go`, `s4b_reassertion_k3_integration_test.go` (helpers) | plant another active, enrolled platform admin before suspending a platform actor | SF020 |
+| `internal/httpserver/staff_liveness_integration_test.go` | `liveTok` carries the row's `staff_version`; the version-mismatch case is the row's `sv + 1` (was "1 against a row at 0"); the plan / latency check uses the row's `sv` | 0139: rows start at 1 |
+| `internal/httpserver/staff_mfa_flow_integration_test.go` | the access token's `sv` equals the row's `staff_version` (was the S3 placeholder 0) | 0139 |
+| `internal/httpserver/staff_stepup_integration_test.go` | golden coverage counts critical 46 -> 59, none-mutating 37 -> 39, reads 70 -> 78; the forged-claims token carries the row's `sv` | New routes; 0139 |
+| `internal/httpserver/identity_flow_integration_test.go` (`mustCreateUnlinkedStaff`) | creates a LEGACY unlinked account (SF014 disabled for that one statement inside the owner transaction) | SF014; S56-R2 |
+| `internal/httpserver/asset_registry_admin_test.go` (`TestAssetRegistryAPI_PersonLinkingARemediatedPlatformAdminRestoresFourEyes`), `stage3d_withdrawal_governance_test.go` (`TestStaffPersonLink_RemediatesUnlinkedAccountThenCanApprove`) | the remediated account signs in again after the person link (the link bumps `sv` and ends its sessions); the stage3d test also asserts the pre-link token is now refused | Person-link revocation (S5 + S6) |
+| `internal/providercred/scratch_integration_test.go` (`TestPCMigration_DownRefusesWithRows`) | the 0096 scratch schema gets the `staff_version` column the current code reads | 0139 column |
+
+**Fixture-only changes (no assertion changed):** a Person is created and linked in the `staff_users` INSERT of 48
+fixture sites (`WITH ... INSERT INTO persons ...`) in `internal/{alerting,audit,assetregistry,bonus,casino,db,kyc,
+providercred,staffmfa/store,payments}` test files, `internal/testsupport/alertworld/world.go` and the httpserver
+fixtures (`alert_routing_http`, `casino_flow`, `payments_kill_switch_api`, `provider_credential_api`,
+`staff_mfa_migration_0138`, `staff_mfa_world`); `identity.CreateStaffUser` callers in `internal/{identity,kyc,
+sportsbook}` tests use `staffsv.PersonIfRequired`; `mustCreateStaffWithPerson` opens a platform-scoped transaction for a
+platform staff member; `internal/auth/authtest` reads the real `sv`; `internal/adjustment/fixture_integration_test.go`
+and `internal/payments/k3_world_integration_test.go` build contexts with the row's `sv` (`staffsv`).
+
+### 28.5 Evidence (local only; NOT GitHub CI)
+
+Private databases only (`priv_db.sh` / `priv_test.sh`, sanctioned local credentials; no role, password or privilege
+change; scratch databases created by the tests themselves). NOT GitHub CI.
+
+| Command | Result |
+|---|---|
+| `gofmt -l internal cmd deploy` | PASS (no output) |
+| `go vet ./...` and `go vet -tags integration ./...` | PASS |
+| `go test ./... -count=1` | PASS (61 packages `ok`) |
+| `golangci-lint run --build-tags integration --new-from-rev=ff23a5c ./...` (2.9.0) | PASS (0 issues; 7 found and fixed on the way: 2 errcheck, 4 staticcheck QF1001, 1 unused) |
+| `-tags integration -p 1`, every package except httpserver and payments (`s56_a031_full`) | 59 `ok`, 1 FAIL (`providercred` `TestPCMigration_DownRefusesWithRows`: a 0096 scratch schema read by 0139 code; fixed, 28.4); `providercred`, `stafflifecycle`, `tenant` re-run in full after the last test changes: PASS |
+| httpserver, full package, `-timeout 60m` (second run, after the fixture fixes of the first) | PASS except `TestResolutionIsolation_NormalOperation` / `_MultipleTenantsOutage` (latency bound 500 ms; 503-640 ms deposits). Known timing-flaky: `_MultipleTenantsOutage` passes in isolation; `_NormalOperation` fails the SAME way on the unmodified base `ff23a5c` (control run on a private base database), so it is environmental, not a regression of this slice |
+| payments, 26 per-letter shards (`^Test[A-Z]`, each a separate run) | 24 PASS; H (`TestHSEC_HoldRelease_ActorProofTriggerOnGovernedTables_Last`: governed tables 13 -> 15) and S (three S4b tests suspending a platform admin: SF020) failed, fixed (28.4); shards H and S re-run: PASS |
+| HARD GATE tests (`TestSubmitReassertion_*`, `TestSubmitWithdrawalHandler_SubmitterSuspendedInFlight_401NothingWritten`, `TestK1Reassertion_*`) | PASS (inside the shard / package runs above and targeted runs) |
+| Lifecycle tests (`internal/stafflifecycle`, `TestLifecycle_*`, `TestOpenAPI_StaffLifecycle_*`, `TestSign_StaffLifecycle_ScopeMatrix`, `TestADR0119_StaffLifecycleRoleMatrix`, `TestSeedAdmin_BreakGlass_Subprocess`) | PASS |
+| Migration 0139 up / down / up | the down refusals (SF094) and the clean round trip were checked on a private database (schema dump identical after up-down-up); `cmd/migrate` tests PASS |
+| Mutation pass (`docs/plans/prh2-hardening-round/adr0119-s5s6-mutation-kill.txt`) | 21 mutants (G1-G8, G3b, L1-L11), all KILLED; the first round left G3b (lifecycle `sv`-only arm) and L9 (invited-row edges) SURVIVED, the tests were strengthened and both are killed in the second round; every targeted run passes unmutated (BASE controls) |
+
+### 28.6 Residuals (S5 + S6)
+
+| # | Residual |
+|---|---|
+| S56-R1 | R1 stands (owner-deferred S-H1): arbitrary runtime-role SQL can still change a staff row within the trigger rules (e.g. support -> finance with a Person; un-suspend a platform row), and the 9.5(b) GUC is forgeable by such SQL. Pinned visible by `TestResidual_R1_*` |
+| S56-R2 | Legacy unlinked approve-capable rows created before 0139 are not backfilled or blocked by 0139; the downstream "no Person" refusals (asset registry, catalogue, launch governance, K1 / K2 / K3, withdrawal) remain load-bearing and are still tested with legacy-shaped rows |
+| S56-R3 | Email is `MOCK` / `PROVIDER DEPENDENT`: staff onboarding beyond the bootstrap admins is blocked in production until a real adapter exists (OQ-1 (b)) |
+| S56-R4 | Password reset is not implemented (lost password = offboard + re-invite, or seed-admin break-glass for the platform) |
+| S56-R5 | Withdrawal `resolve` has no in-transaction re-assertion (request-level liveness + DB guards only, as before) |
+| S56-R6 | A tenant admin can invite an accomplice tenant admin and choose the invitee's mailbox and Person (R14); the email-domain allow-list stays deferred |
+| S56-R7 | `SF020` counts platform admins with an active, non-hard-locked factor; a soft-locked factor still counts as usable |
+| S56-R8 | Several destructive test fixtures run against the shared private test database: the last-admin tests revoke other platform admins' factors (`neutralisePlatformAdmins`), and the legacy-row helper disables `SF014` for one statement inside one owner transaction (never visible to other sessions) |
+| S56-R9 | No end-to-end UI test (S8) and no real authenticator in these tests |
+
+### 28.7 What `security`, `ledger-finance`, `architect` and `code-reviewer` should probe
+
+- **security:** the SF013 / SF021 GUC-based detection under runtime SQL (R1); the invite / accept flow (token only in the email, single use, `x-sensitive` accept body, no token in any response, the accept route outside `staffRoute` by design); the break-glass refusal rule and P1; the role matrix (`staff:read`, `platform_staff:govern`) and the tenant / platform route split; tenant isolation of every read; the column-level grant (D5); the `invited` login path (no password, generic 401).
+- **ledger-finance:** the submit re-assertion position (after `payment_attempts`, before the snapshot and the B6 audit) and its rollback (no attempt, request stays `approved`, no provider call); the K1 positions; the A9 table rows and the correction about K1 sessions; S56-R5 (resolve); the two-phase T2 `lock_timeout` against execution share locks (A9 item 6).
+- **architect:** migration 0139 shape (column grants, SF numbering, the 9.5(b) pair used by the lifecycle only), the down-migration refusals, the four-eyes tables against the ADR 0112 / 0135 pattern, the scratch-version bumps in K2 tests.
+- **code-reviewer:** `internal/stafflifecycle` (error mapping to the closed codes, `record` audit / event split, `mapDBError`), the HTTP handlers, the fixture migration (48 sites rewritten with a Person CTE; the legacy-row helper; the spare-admin helper), every changed assertion in 28.4.
