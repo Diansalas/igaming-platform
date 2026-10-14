@@ -332,10 +332,11 @@ func TestPCRequest_RequesterEligibility(t *testing.T) {
 	f := newFx(t)
 	tenant := f.tenant()
 	tenantAdmin := f.tenantStaff(tenant, "tenant_admin")
+	// ADR 0119 S5: no "unlinked" arm - a platform admin without a Person cannot exist (SF014,
+	// TestPCFixture_UnlinkedPlatformAdminRefusedBySF014).
 	for name, principal := range map[string]uuid.UUID{
 		"unresolvable":  uuid.New(),
 		"tenant-scoped": tenantAdmin,
-		"unlinked":      f.unlinked,
 		"suspended":     f.suspended,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -439,15 +440,29 @@ func TestPCApproval_SamePersonSecondAccountRefused(t *testing.T) {
 	}
 }
 
+// ADR 0119 S5 (migration 0139): the "unlinked platform admin" fixture state is structurally unreachable.
+func TestPCFixture_UnlinkedPlatformAdminRefusedBySF014(t *testing.T) {
+	f := newFx(t)
+	id := uuid.New()
+	err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'active')`,
+			id, "pc-unlinked-"+id.String()+"@test.example")
+		return err
+	})
+	if pgCode(err) != "SF014" {
+		t.Fatalf("an unlinked platform admin must be refused with SF014, got %v", err)
+	}
+}
+
 func TestPCApproval_ApproverEligibility(t *testing.T) {
 	f := newFx(t)
 	tenant := f.tenant()
 	r, _ := f.file(f.spec(tenant, "acme", "k1"))
 	tenantAdmin := f.tenantStaff(tenant, "tenant_admin")
+	// ADR 0119 S5: no "unlinked" arm (SF014; see the requester test above).
 	for name, principal := range map[string]uuid.UUID{
 		"unresolvable":  uuid.New(),
 		"tenant-scoped": tenantAdmin,
-		"unlinked":      f.unlinked,
 		"suspended":     f.suspended,
 	} {
 		t.Run(name, func(t *testing.T) {

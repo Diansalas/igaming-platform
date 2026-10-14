@@ -108,8 +108,15 @@ type fx struct {
 	approver   uuid.UUID // platform admin, Person B
 	approver2  uuid.UUID // platform admin, Person C
 	samePerson uuid.UUID // platform admin, Person A (second account)
-	unlinked   uuid.UUID // platform admin without a Person
-	suspended  uuid.UUID // platform admin, Person D, suspended
+	// unlinked is a platform admin without a Person. ADR 0119 S5 (migration 0139, SF014): such a row can no longer be
+	// created (and person_id is append-only since 0034), so it is uuid.Nil here; the scratch-database test
+	// TestPCApproval_RequesterUnlinkedRefused builds one with SF014 disabled, and TestPCFixture_UnlinkedPlatformAdmin
+	// RefusedBySF014 pins the refusal.
+	unlinked uuid.UUID
+	// suspended is a platform admin, Person D, that is NOT active. ADR 0119 S5: a row is created invited or active
+	// only (SF010) and SF020 refuses suspending a platform admin while no other enrolled one exists, so the fixture
+	// is an invited (password-less) row; every eligibility check under test is `status = 'active'`.
+	suspended uuid.UUID
 }
 
 type fakeClock struct {
@@ -172,8 +179,7 @@ func newFxOn(t testing.TB, pool *db.Pool) *fx {
 	f.approver = f.platformStaff(&pB, "active")
 	f.approver2 = f.platformStaff(&pC, "active")
 	f.samePerson = f.platformStaff(&pA, "active")
-	f.unlinked = f.platformStaff(nil, "active")
-	f.suspended = f.platformStaff(&pD, "suspended")
+	f.suspended = f.platformStaff(&pD, "invited")
 	return f
 }
 
@@ -194,7 +200,7 @@ func (f *fx) platformStaff(person *uuid.UUID, status string) uuid.UUID {
 	id := uuid.New()
 	if err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
-			VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, $4)`, id, "pc-"+id.String()+"@test.example", status, person)
+			VALUES ($1, NULL, $2, CASE WHEN $3::text = 'invited' THEN NULL ELSE 'x' END, 'platform_admin', $3, $4)`, id, "pc-"+id.String()+"@test.example", status, person)
 		return err
 	}); err != nil {
 		f.t.Fatalf("seed platform staff: %v", err)

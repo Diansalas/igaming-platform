@@ -690,8 +690,10 @@ func TestWithdrawalApprovalsGovernance_UnlinkedStaffDirectSQLRejected(t *testing
 	unlinkedStaffID := uuid.New()
 	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
+			// ADR 0119 S5: an unlinked FINANCE row can no longer exist (SF014, migration 0139); the unlinked
+			// staff member holds a role that may exist without a Person (the trigger under test checks the Person).
 			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
-			 VALUES ($1, $2, $3, 'x', 'finance', 'active', NULL)`,
+			 VALUES ($1, $2, $3, 'x', 'support', 'active', NULL)`,
 			unlinkedStaffID, f.tenantID, unlinkedStaffID.String()+"@example.com",
 		)
 		return err
@@ -856,8 +858,10 @@ func TestWithdrawalApprovalsGovernance_AutomatedFlagCannotBypassLinkageCheck(t *
 	unlinkedStaffID := uuid.New()
 	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
+			// ADR 0119 S5: an unlinked FINANCE row can no longer exist (SF014, migration 0139); the unlinked
+			// staff member holds a role that may exist without a Person (the trigger under test checks the Person).
 			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
-			 VALUES ($1, $2, $3, 'x', 'finance', 'active', NULL)`,
+			 VALUES ($1, $2, $3, 'x', 'support', 'active', NULL)`,
 			unlinkedStaffID, f.tenantID, unlinkedStaffID.String()+"@example.com",
 		)
 		return err
