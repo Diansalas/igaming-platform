@@ -8499,7 +8499,7 @@ paths:
     post:
       summary: Link a tenant staff account to a Person
       description: >
-        staff:manage (tenant_admin, platform_admin). Stage 3D remediation (ADR 0024): sets person_id only where none is set; an existing link can never be changed (database append-only trigger). A tenant-scoped caller may name only its own tenant (403). 400 when person_id is not a UUID or names no existing Person; 404 when the staff user is not in the tenant; 409 when it is already linked.
+        staff:manage (tenant_admin, platform_admin). Stage 3D remediation (ADR 0024): sets person_id only where none is set; an existing link can never be changed (database append-only trigger). A tenant-scoped caller may name only its own tenant (403). ADR 0119 S5 + S6 review fix SR-4: a link of one's own account is 403 self_target_forbidden; a tenant admin may link only accounts of the roles it may act on (403 role_not_grantable); the caller is re-asserted in the transaction (401 session_revoked); a Person already bound to another live account is refused for an approve-capable role (409). The link bumps the account's staff_version and ends its sessions. 400 when person_id is not a UUID or names no existing Person; 404 when the staff user is not in the tenant; 409 when it is already linked.
       security:
         - bearerAuth: []
       parameters:
@@ -8513,16 +8513,16 @@ paths:
       responses:
         "204": { description: Linked }
         "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
   /v1/admin/platform-staff/{staffID}/person-link:
     post:
       summary: Link a platform staff account to a Person
       description: >
-        staff:manage, and the caller must be platform-scoped (a tenant-scoped caller is refused 403 even though tenant_admin holds the permission). Same contract as the tenant route for a platform-wide staff account (tenant_id null).
+        staff:manage, and the caller must be platform-scoped (a tenant-scoped caller is refused 403 even though tenant_admin holds the permission). Same contract as the tenant route for a platform-wide staff account (tenant_id null), including the ADR 0119 S5 + S6 review fix SR-4 rules (self-link 403 self_target_forbidden, in-transaction re-assertion 401, a Person already bound to another live platform account 409).
       security:
         - bearerAuth: []
       parameters:
@@ -8535,11 +8535,11 @@ paths:
       responses:
         "204": { description: Linked }
         "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
+        "401": { $ref: "#/components/responses/StaffSessionRevoked" }
+        "403": { $ref: "#/components/responses/StaffLifecycleForbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/StaffLifecycleUnavailable" }
   /v1/admin/platform-staff:
     get:
       tags: [staff-lifecycle]
@@ -10245,6 +10245,20 @@ components:
         state: { type: string, enum: [pending, executed, rejected, cancelled, expired] }
         target_staff_id: { type: string, format: uuid, nullable: true }
         invite_email: { type: string, nullable: true }
+        invite_person_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The invitee Person of a platform_invite (ADR 0119 review fix SR-3), so the approver can judge Person distinctness.
+        invite_person_staff:
+          type: array
+          nullable: true
+          description: The live (non-offboarded) platform staff accounts already linked to invite_person_id (an invitation naming one is refused at filing and at execution); null for other kinds.
+          items: { $ref: "#/components/schemas/LinkedStaff" }
+        email_delivery:
+          type: string
+          enum: [sent, failed]
+          description: Approve only (review fix F5) - whether the invitation / MFA-reset email was handed off; on failed, use the invitation resend route (an MFA reset needs a new request).
         reason_code: { type: string, nullable: true }
         note: { type: string, nullable: true }
         requested_by: { type: string, format: uuid }
@@ -10253,7 +10267,14 @@ components:
         expires_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
         decided_at: { type: string, format: date-time, nullable: true }
-      required: [id, kind, state, target_staff_id, invite_email, reason_code, note, requested_by, required_approvals, payload_hash, expires_at, created_at, decided_at]
+      required: [id, kind, state, target_staff_id, invite_email, invite_person_id, invite_person_staff, reason_code, note, requested_by, required_approvals, payload_hash, expires_at, created_at, decided_at]
+    LinkedStaff:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        status: { type: string, enum: [invited, active, suspended] }
+      required: [id, email, status]
     PlatformStaffLifecycleRequestList:
       type: object
       properties:
@@ -10273,7 +10294,7 @@ components:
       additionalProperties: false
       properties:
         token: { type: string, description: The single-use invite token from the email (never logged) }
-        password: { type: string, format: password, minLength: 8 }
+        password: { type: string, format: password, minLength: 12, description: At least 12 characters for every staff role (ADR 0119 review fix SR-9). }
       required: [token, password]
     StaffMfaStatus:
       type: object

@@ -35,7 +35,9 @@ func TestMigration0151_CatalogPins(t *testing.T) {
 		got[name] = pol{cmd, qual, check}
 	}
 	rows.Close()
-	const key = "(id = (NULLIF(current_setting('app.actor_staff_id'::text, true), ''::text))::uuid)"
+	// ADR 0119 S5 + S6 review fix SR-7: the pair admits PLATFORM rows only (tenant_id IS NULL), so a forged
+	// app.actor_staff_id naming a tenant staff member of another tenant reveals nothing.
+	const key = "((tenant_id IS NULL) AND (id = (NULLIF(current_setting('app.actor_staff_id'::text, true), ''::text))::uuid))"
 	want := map[string]pol{
 		"staff_actor_self_select": {"r", key, ""},
 		"staff_actor_self_lock":   {"w", key, "false"},

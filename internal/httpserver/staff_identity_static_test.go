@@ -94,8 +94,11 @@ var staffIDFieldAllowlist = map[string]string{
 	"staffLifecycleEventDTO.Actor":                      "nested staffLifecycleEventActorDTO whose staff_id IS a staffRef built with staffViewer.ref (platform actors hidden from tenant viewers)",
 	"platformStaffLifecycleRequestDTO.TargetStaffID":    "platform_staff:govern is held by platform_admin only (TestADR0119_StaffLifecycleRoleMatrix)",
 	"platformStaffLifecycleRequestDTO.RequestedBy":      "platform_staff:govern is held by platform_admin only",
-	"State.StaffVersion":                                "a version counter, not an id",
-	"linkStaffPersonRequest.PersonID":                   "request body (input)",
+	// ADR 0119 S5 + S6 review fix SR-3: the invitee Person and the live platform accounts already linked to it, on the
+	// same platform-only four-eyes routes.
+	"platformStaffLifecycleRequestDTO.InvitePersonID": "a Person id (not a staff id) on the platform_staff:govern routes (platform_admin only)",
+	"State.StaffVersion":                              "a version counter, not an id",
+	"linkStaffPersonRequest.PersonID":                 "request body (input)",
 }
 
 // finding is one violation of the pin.

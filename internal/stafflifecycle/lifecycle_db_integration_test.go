@@ -9,6 +9,7 @@ package stafflifecycle
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 var (
@@ -96,6 +98,70 @@ func newLWorld(t *testing.T) *lworld {
 		t.Fatal(err)
 	}
 	w.svc = svc
+	return w
+}
+
+// newLWorldScratch is newLWorld on a SCRATCH database of its own (review fix F4): a test whose rule counts the WHOLE
+// platform (SF020: the platform's usable admins) needs a hermetic population, and must not change state other
+// packages read when `go test -tags=integration ./...` runs packages in parallel against the shared database.
+func newLWorldScratch(t *testing.T, prefix string) *lworld {
+	t.Helper()
+	rtURL := os.Getenv("TEST_RUNTIME_DATABASE_URL")
+	if rtURL == "" {
+		t.Skip("TEST_RUNTIME_DATABASE_URL not set")
+	}
+	ownerURL := scratchdb.New(t, prefix)
+	u, err := url.Parse(ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbName := strings.TrimPrefix(u.Path, "/")
+	ru, err := url.Parse(rtURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ru.Path = "/" + dbName
+	conn, err := pgx.Connect(context.Background(), ownerURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`GRANT CONNECT ON DATABASE ` + pgx.Identifier{dbName}.Sanitize() + ` TO igaming_runtime`,
+		`GRANT USAGE ON SCHEMA public TO igaming_runtime`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO igaming_runtime`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO igaming_runtime`,
+	} {
+		if _, err := conn.Exec(context.Background(), stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = conn.Close(context.Background())
+	owner, err := db.Connect(context.Background(), ownerURL, 6, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(owner.Close)
+	if _, err := owner.MigrateUp(context.Background(), "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch: %v", err)
+	}
+	prooftest.InstallVia(t, owner.Raw(), ownerURL)
+	rt, err := db.Connect(context.Background(), ru.String(), 8, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt.Close)
+	w := &lworld{t: t, rt: rt, owner: owner, mail: email.NewMockProvider()}
+	launchfix.SeedOperatorsAt(t, ownerURL)
+	if err := w.owner.WithPlatformAdmin(context.Background(), launchfix.Operators().Requester, func(ctx context.Context, tx pgx.Tx) error {
+		tn, err := launchfix.CreateTenant(ctx, tx, "sl", "sl-"+uuid.NewString()[:12], "under_platform_licence")
+		w.tenant = tn.ID
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if w.svc, err = New(w.rt, testKeys(t), w.mail, ""); err != nil {
+		t.Fatal(err)
+	}
 	return w
 }
 
@@ -296,32 +362,14 @@ func TestActorSelfPolicyPair_VisibleLockableNeverUpdatable(t *testing.T) {
 	}
 }
 
-// neutralisePlatformAdmins revokes the factor of every OTHER usable platform admin (TEST DATABASE ONLY - the
-// private harness database): last-admin protection counts the whole platform, so a hermetic last-admin test needs
-// the rest of the platform to be unusable. Revocation is permanent (SF002); later fixtures re-plant placeholder
-// factors (authtest.EnsurePlaceholderFactor) for the admins they use.
-func neutralisePlatformAdmins(t *testing.T, owner *db.Pool, keep ...uuid.UUID) {
-	t.Helper()
-	ids := make([]string, len(keep))
-	for i, k := range keep {
-		ids[i] = k.String()
-	}
-	if err := owner.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE staff_mfa_factors SET status = 'revoked', revoked_at = now(), revoked_reason = 'reset', pending_expires_at = NULL
-			WHERE tenant_id IS NULL AND status IN ('active', 'pending') AND NOT (staff_user_id::text = ANY ($1))`, ids)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // SF020: two platform admins remove each other at the same moment: exactly one succeeds, the other is SF020 (the
 // advisory lock serialises them and the second re-counts after the first commits). Then the survivor cannot be removed.
 func TestLastAdmin_Platform_ConcurrentMutualSuspension(t *testing.T) {
-	w := newLWorld(t)
+	// Review fix F4: a scratch database, so a and b are the ONLY usable platform admins without touching any other
+	// package's admins (this replaces neutralisePlatformAdmins on the shared database).
+	w := newLWorldScratch(t, "sl_lastadm_")
 	a := w.staff(uuid.Nil, RolePlatformAdmin, true)
 	b := w.staff(uuid.Nil, RolePlatformAdmin, true)
-	neutralisePlatformAdmins(t, w.owner, a, b)
 
 	start := make(chan struct{})
 	errs := make([]error, 2)
@@ -380,8 +428,6 @@ func TestLastAdmin_Platform_ConcurrentMutualSuspension(t *testing.T) {
 	if !errors.Is(err, ErrLastAdmin) {
 		t.Fatalf("service suspension of the last admin: %v", err)
 	}
-	// Re-plant a usable factor for the survivor's peer so later tests keep a usable platform.
-	_ = w.scope(w.owner, uuid.Nil, func(ctx context.Context, tx pgx.Tx) error { return authtest.EnsurePlaceholderFactor(ctx, tx, other) })
 }
 
 // The two-phase suspension: when T2 cannot take the target's row lock (5 s here shortened), it retries once and

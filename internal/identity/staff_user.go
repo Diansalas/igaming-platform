@@ -133,7 +133,10 @@ func scanStaffUser(row pgx.Row) (StaffUser, error) {
 // based on whether a tenant_slug was supplied at the login endpoint.
 func GetStaffUserByEmail(ctx context.Context, tx pgx.Tx, email string) (StaffUser, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	s, err := scanStaffUser(tx.QueryRow(ctx, `SELECT `+staffUserColumns+` FROM staff_users WHERE email = $1`, email))
+	// ADR 0119 S5 + S6 review fix F2: an offboarded row keeps its email as history and a re-invited live row may share
+	// it (at most one non-offboarded row per scope and email, index staff_users_live_email): the live row wins.
+	s, err := scanStaffUser(tx.QueryRow(ctx, `SELECT `+staffUserColumns+` FROM staff_users WHERE email = $1
+		ORDER BY (status = 'offboarded'), created_at DESC, id LIMIT 1`, email))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StaffUser{}, ErrNotFound
 	}
