@@ -27,11 +27,16 @@ HEAD at start of audit: `48c5014` (clean, pushed). Local evidence:
 | GitHub CI | FOUND: NOT billing-blocked (billing blocked only runs #365–~#593). Since #600 every run fails at the step "Guard - test admin URL…" because integration-tagged `internal/testsupport/alertworld/world.go` reads `TEST_ADMIN_DATABASE_URL`; all later steps (build, migrations, unit, integration, race, reversibility, govulncheck) never ran → zero hosted evidence for ~200 commits. FIXED in 888de6d (guard allows `alertworld`, which carries the integration tag; tag check extended to it). Run #820 on 888de6d: see §1.2 |
 
 ### 1.1 httpserver full package
-Recorded in the task registry row `PLATFORM-COMPLETION-AUDIT-2026-10-14` when the run completes (see that row for the final number).
+`go test -tags integration -count=1 -p 1 ./internal/httpserver -v` on a private DB at 48c5014 + test-only moves: `ok ... 1968s`, PASS=933 FAIL=0 SKIP=0.
 
-### 1.2 Hosted CI
-Recorded in the same registry row. Whatever the hosted run reveals past the guard is real work (likely the ADR 0094 timing lane,
-`TestResolutionIsolation_NormalOperation`).
+### 1.2 Hosted CI (first real hosted evidence in ~200 commits)
+Steps fixed in sequence: guard (888de6d) → golangci-lint unused helper (dc27079) → go.mod tidy order (07d60ff) → govulncheck stdlib net/http finding, toolchain 1.26.8→1.26.9 (90ced2d) → lint-schema fetch (transient, re-run once).
+Run #823 attempt 2 (90ced2d): gofmt, vet, lint, dependency drift, govulncheck, build, migrations up, `migrate verify`, unit race: PASS; frontend (b2c, backoffice), frontend-image x2, infrastructure: PASS.
+**FAIL: "Integration tests (RLS, HTTP foundation, race detector)"** (later steps skipped). Annotations (log download is not available to this session) show:
+- `internal/httpserver`: `panic: test timed out after 10m0s` — the CI step has no `-timeout`; this package takes ~33 min locally (harness defect: needs an explicit timeout and/or sharding).
+- `internal/kyc`: `TestWithdrawalDeleteGuard_NoRoleCanDeleteOrTruncate`, `TestWithdrawalDeleteGuard_ReviewExploitSequence_IsRefused`, `TestOutboxState_59_NoIdleInTransactionDuringVendorCall` FAIL.
+- `internal/launchgov`: FAIL (test names not exposed by annotations).
+These all PASS locally under `-p 1` on a private DB; the CI runs packages in parallel on one shared DB with its own role setup, so these are either shared-state interference or role-setup differences — root cause NOT yet established. This is A1 work and is NOT closed.
 
 ## 2. Platform status by domain (technical, providers MOCK)
 
