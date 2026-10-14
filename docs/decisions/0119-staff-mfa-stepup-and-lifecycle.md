@@ -2570,3 +2570,29 @@ S4b-R3 decision (submit / resolve / K1).
 mutating, 70 reads), the changed assertions of 26.4, the surviving mutants of 26.5, and the static pins (NO setter
 of `app.actor_staff_id` yet, single production caller of `auth.ContextWithStepUpAssertion`, production signs only
 through `Attach`, the integration-only fallback setter).
+
+### 26.8 Review round (security live + ledger-finance, 2026-10-14): APPROVE WITH CONDITIONS, no veto
+
+Applied on the branch (still NOT MERGED; gate G code-reviewer / qa and architect sign-off pending):
+
+| Finding | Disposition |
+|---|---|
+| LF: K3 acting-family re-assertion in both orders, K3 tenant role change, the T2 `lock_timeout` starvation bound, withdrawal approve both orders through the real `withdrawal.Approve` | FIXED: the reviewer's scratch tests ported as `TestS4b_K3_ActingActorSuspendedBeforeA8_IsRefusedAndNothingWritten`, `TestS4b_K3_TenantActorRoleChangedBeforeA8_IsRefusedAndNothingWritten`, `TestS4b_K3_ExecutionHoldingA8_SuspensionWaits_BothFamilies`, `TestS4b_K3_ExecutionHoldingA8_T2LockTimeoutIs55P03_ExecutionCommits` (`internal/payments/s4b_reassertion_k3_integration_test.go`) and `TestStepUp_WithdrawalApprove_ReassertionBothOrders_RealApprove` (`internal/httpserver/staff_stepup_withdrawal_orders_integration_test.go`) |
+| LF: stale documentation | FIXED: the K2 test header, section 17.5, ADR 0082 A9 item 5 (withdrawal approve DOES add a share lock where there was a plain read); A9 item 6 records the starvation bound |
+| LF: HARD GATE | RECORDED in ADR 0082 A9 and S4b-R3: the re-assertion for withdrawal submit (new `FOR SHARE` in the `ClaimForDispatch` transaction after `payment_attempts`; submit's window is wider than R13) and for K1 approve / revoke (with the 9.5(b) GUC + policy pair) must merge WITH OR BEFORE the first production suspension / role-change writer (S5 + S6) |
+| LF (non-blocking): observability of the refusal | FIXED: Warn log + `staff_reassertion_refusals_total{flow}` on every `db.ErrActorStaffNotLive` path (withdrawal approve, K2, K3, HSEC). Not mutation-tested (observability only) |
+| LF (non-blocking): 120 s boundary on the database clock | FIXED: the freshness matrix measures from the approval transaction's own `now()`: exactly 120 s passes, 120 s + 1 us is refused (mutants WB01 / WB02 killed) |
+| Security 1: `POST /v1/admin/alerting/routes` refusal audit | FIXED: classifier `alertRouteManageClass` (D20); golden row, unit cases, `TestStepUp_AlertRouteCreate_UnauthorisedProbingKeepsTheAuditedRefusal`; mutants AR01-AR03 killed |
+| Security 2: never auto-retry the step-up POST | RECORDED: D21, the UI contract (sections 3 and 5) and the OpenAPI description |
+| Security 3: K3 test gap | FIXED by the LF port above |
+| Security 5: fallback variable in production binaries | FIXED: split by build tag (D10); `go tool nm` on `go build ./cmd/platform-api` shows no `testStepUpFallback` symbol, the `-tags integration` build does (control); static pin extended; mutant FB01 (unit build) killed |
+| Security 6: `IsLegacySessionSeal` has no sunset | RECORDED: S4b-R12 (S9: quiet legacy retirement becomes an alerting `bad_seal`); S4b-R8 added to `docs/runbooks/staff-mfa-s3-cutover.md` section 9 for the S9 deploy runbook list |
+
+Evidence (local, private databases; final code head `12208e1` + this documentation commit): gofmt / vet / vet
+-tags integration clean; `go test ./... -count=1` PASS (60 packages); golangci-lint `--new-from-rev=3019e51` 0 issues;
+`-tags integration -p 1` PASS for `stepup`, `auth/...`, `staffmfa/...`, `actorproof/...`, `db`, `withdrawal`,
+`adjustment`, `observability`, `cmd/...`; httpserver S4b / staff / alert / withdrawal / resolution / OpenAPI selection
+PASS (412 s); payments `TestS4b_*` + K3 Y07 + HSEC concurrency PASS; payments shards K, M, H, P, D, W, B (each a
+separate run, `-timeout 120m`) PASS. Mutation: 65 mutants, 63 killed, 2 justified (H02a, R09). The full httpserver
+run was NOT repeated in this round (the previous full run's only failures were the known `TestResolutionIsolation_*`
+latency bound).
