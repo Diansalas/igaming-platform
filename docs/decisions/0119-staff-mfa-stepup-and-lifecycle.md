@@ -33,6 +33,13 @@
   (ADR 0082 Amendment A9, ADR 0099 A-19 amendment). Withdrawal submit / resolve and K1 re-assertion, the section
   9.5(b) GUC + `staff_actor_self_*` policy pair, lifecycle, the back-office modal (S7b) and staff RG increases stay
   `NOT IMPLEMENTED`. See section 26.
+- **S5 + S6 (2026-10-14):** migration **0139** (staff lifecycle schema, `staff_version`, `SF010`-`SF014`, `SF020` /
+  `SF021`, the section 9.5(b) pair, the platform four-eyes and lifecycle-event tables) and the staff lifecycle
+  (invite / accept, suspend / offboard two-phase, reactivate, role change, MFA reset, platform four-eyes, last-admin,
+  self-target refusal, break-glass) are `IMPLEMENTED` on an unmerged branch, pending gate G, the mandatory
+  `ledger-finance` review and `architect` sign-off. The ADR 0082 A9 HARD GATE (withdrawal submit and K1 approve / revoke
+  re-assertion) lands in the same change. Password reset, withdrawal `resolve` re-assertion and the email-domain
+  allow-list stay `NOT IMPLEMENTED`; email is `MOCK` / `PROVIDER DEPENDENT`. See section 28.
 - **Revision 2 (2026-10-13):** the S0 design review by `architect` and `ledger-finance` returned ACCEPT WITH
   CONDITIONS. Section 20 resolves every blocking condition (C1-C6) and accuracy fix (C7-C11) in the text, and folds
   in the cheap non-blocking items (N1-N15). The `security` rulings are recorded there: C2 adopts the scoped

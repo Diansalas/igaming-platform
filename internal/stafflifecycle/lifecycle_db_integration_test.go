@@ -419,7 +419,7 @@ func TestLifecycleReassertion_ActorChangedIsRefused(t *testing.T) {
 	pa := w.staff(uuid.Nil, RolePlatformAdmin, true)
 	target := w.staff(w.tenant, RoleSupport, true)
 	stale := w.actor(pa, uuid.Nil, RolePlatformAdmin)
-	// A Person link bumps the actor's staff_version (SF012): the token's sv is now stale.
+	// A display-name change does NOT bump staff_version (SF012 watches role, status, password and Person only).
 	if err := w.exec(w.owner, uuid.Nil, `UPDATE staff_users SET display_name = 'x' WHERE id = $1`, pa); err != nil {
 		t.Fatal(err)
 	}
@@ -450,6 +450,21 @@ func TestLifecycleReassertion_ActorChangedIsRefused(t *testing.T) {
 	})
 	if role != RoleSupport {
 		t.Fatal("nothing may be written by a refused actor")
+	}
+
+	// staff_version ALONE: the actor stays active at the same role, but its password changed (SF012: sv + 1), so the
+	// token minted before is stale and refused.
+	pa2 := w.staff(uuid.Nil, RolePlatformAdmin, true)
+	stale2 := w.actor(pa2, uuid.Nil, RolePlatformAdmin)
+	if err := w.exec(w.owner, uuid.Nil, `UPDATE staff_users SET password_hash = 'rotated' WHERE id = $1`, pa2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.svc.ChangeRole(context.Background(), stale2, w.tenant, target, RoleCompliance, Reason{Code: "role_change_approved"}); !errors.Is(err, db.ErrActorStaffNotLive) {
+		t.Fatalf("a stale sv alone must be refused: %v", err)
+	}
+	// Control: the same actor with its current sv succeeds.
+	if _, err := w.svc.ChangeRole(context.Background(), w.actor(pa2, uuid.Nil, RolePlatformAdmin), w.tenant, target, RoleCompliance, Reason{Code: "role_change_approved"}); err != nil {
+		t.Fatalf("the live actor (current sv): %v", err)
 	}
 }
 
