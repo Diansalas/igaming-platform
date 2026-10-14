@@ -8586,7 +8586,9 @@ paths:
         page. The cursor is opaque, keyset based (alerts raised after the first page was
         served never shift or repeat a later page) and is NOT a credential. A malformed,
         tampered, oversized or foreign-filter cursor is refused with 400 and nothing is
-        returned. `next_cursor` is null on the last page.
+        returned. `next_cursor` is null on the last page. Only the canonical spelling of a
+        cursor is accepted, `state`, `severity`, `kind`, `limit` and `cursor` may each be given
+        at most once, and `limit` is a canonical decimal (no sign, no leading zero).
       security:
         - bearerAuth: []
       parameters:
@@ -8622,7 +8624,8 @@ paths:
       description: >
         Requires `alert:manage` and a platform-scope token; the same item shape as the list.
         A tenant-scoped caller gets 403 and an unknown id (or an id that is not a
-        platform-owned alert) gets 404.
+        platform-owned alert) gets 404. The id must be the canonical lowercase UUID form
+        (any other spelling is a 400).
       security:
         - bearerAuth: []
       parameters:
