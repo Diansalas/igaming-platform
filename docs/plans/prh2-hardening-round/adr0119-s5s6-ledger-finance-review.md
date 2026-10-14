@@ -29,7 +29,7 @@ scratchpad `priv_db.sh` / `priv_test.sh`). No shared role, password or test infr
 | `TestK1Reassertion_*` (4 tests, suspended and `sv`-only arms), `TestSubmitWithdrawalHandler_SubmitterSuspendedInFlight_401NothingWritten` (httpserver) | PASS |
 | `internal/stafflifecycle`, `internal/db` (integration) | PASS |
 | `internal/httpserver -run 'Withdrawal\|Capability\|K1\|Submit'` (integration) | PASS |
-| `internal/payments -run 'Claim\|Payout\|Submit\|S4b\|K3\|HSEC\|Hold'` (integration) | see "Payments suite" below |
+| `internal/payments -run 'Claim\|Payout\|Submit\|S4b\|K3\|HSEC\|Hold'` (integration) | 261 PASS, then aborted by a full host disk (ENOSPC); see "Payments suite" below |
 | Unit `internal/payments`, `internal/capability` | PASS |
 | A temporary reviewer test (written, run, deleted; not committed) through the real `ClaimForDispatch` | PASS, see below |
 
@@ -161,4 +161,10 @@ None of LF-1 to LF-7 blocks merge from the ledger-finance side.
 The first broad run (`-run 'Claim|Payout|Submit|S4b|K3|HSEC|Hold'`, `-timeout 20m`) hit the 20-minute test binary
 timeout inside `TestK3_C17b_T11_GuardMatrixIsIdenticalOn0107AndHead`. That is a combinatorial scratch-schema matrix of
 the `payment_attempts` guard; neither it nor that guard changed on this branch. It was re-run excluding that test
-(`-skip GuardMatrix`, `-timeout 60m`); result: PAYMENTS_RESULT_PLACEHOLDER.
+(`-skip GuardMatrix`, `-timeout 60m`). Result: 261 tests PASS (including every submit, K3, S4b, HSEC and hold
+test), then `TestPayoutDispatch_R1_NotSentAfterCallbackPending_IsNoOp` FAILED on an environment error: its scratch
+migration hit `ERROR: could not extend file ...: No space left on device (SQLSTATE 53100)`. The host disk is full
+(`df`: 100 %, about 110 MB free), and the run aborted on the next test (broken pipe). This failure is not caused by
+the change. The tests after that point (the tail of the payout dispatch round-3 / poll files) were **not run** and
+remain unverified by this review. The reviewer dropped its own private database; no other database was touched. The
+orchestrator should free disk (leaked scratch databases) before the final gate run.
