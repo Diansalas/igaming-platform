@@ -179,7 +179,7 @@ func newFxOn(t testing.TB, pool *db.Pool) *fx {
 	f.approver = f.platformStaff(&pB, "active")
 	f.approver2 = f.platformStaff(&pC, "active")
 	f.samePerson = f.platformStaff(&pA, "active")
-	f.suspended = f.platformStaff(&pD, "invited")
+	f.suspended = f.nonActivePlatformStaff(&pD)
 	return f
 }
 
@@ -206,6 +206,24 @@ func (f *fx) platformStaff(person *uuid.UUID, status string) uuid.UUID {
 		f.t.Fatalf("seed platform staff: %v", err)
 	}
 	return id
+}
+
+// nonActivePlatformStaff seeds a platform admin that is NOT active: `suspended` on a schema before migration 0139
+// (the scratch worlds of the providercred migration tests), and `invited` (password-less) from 0139 on, where SF010
+// refuses creating a suspended row.
+func (f *fx) nonActivePlatformStaff(person *uuid.UUID) uuid.UUID {
+	f.t.Helper()
+	var has0139 bool
+	if err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'public.staff_users'::regclass
+			AND attname = 'staff_version' AND NOT attisdropped)`).Scan(&has0139)
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+	if has0139 {
+		return f.platformStaff(person, "invited")
+	}
+	return f.platformStaff(person, "suspended")
 }
 
 func (f *fx) tenantStaff(tenantID uuid.UUID, role string) uuid.UUID {

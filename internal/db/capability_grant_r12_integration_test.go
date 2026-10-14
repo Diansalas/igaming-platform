@@ -644,6 +644,9 @@ func TestCapabilityGrant_I5_PlatformGranteeLiveReRead(t *testing.T) {
 		t.Fatalf("create G-P2 request: %v", err)
 	}
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := plantEnrolledPlatformAdmin(ctx, tx); err != nil { // ADR 0119 S5 + S6: SF020
+			return err
+		}
 		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, granteeP2)
 		return err
 	}); err != nil {
@@ -790,6 +793,9 @@ func TestCapabilityGrant_RC2_SuspendedPlatformActorRefused(t *testing.T) {
 	suspend := func(id uuid.UUID) {
 		t.Helper()
 		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := plantEnrolledPlatformAdmin(ctx, tx); err != nil { // ADR 0119 S5 + S6: SF020
+				return err
+			}
 			_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, id)
 			return err
 		}); err != nil {

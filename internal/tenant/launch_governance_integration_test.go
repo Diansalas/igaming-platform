@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"os"
 	"strings"
 	"sync"
@@ -1208,18 +1209,29 @@ func TestLaunchGov_Approver_WithoutPerson_Refused(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// ADR 0119 S5: a platform_admin without a Person can no longer be created (SF014 at INSERT; person_id is
-	// append-only since 0034, so it cannot be unlinked later either). The LA012 / LA001 no-Person arms are now
-	// defence in depth behind SF014; the structural refusal is what this test pins.
+	// ADR 0119 S5: a platform_admin without a Person can no longer be created (SF014 at INSERT) ...
 	noPerson := uuid.New()
+	const insertNoPerson = `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, '!x', 'platform_admin')`
 	err := w.owner.WithPlatformAdmin(ctx, w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, '!x', 'platform_admin')`,
-			noPerson, "lg-noperson-"+noPerson.String()+"@fixture.invalid")
+		_, err := tx.Exec(ctx, insertNoPerson, noPerson, "lg-noperson-"+noPerson.String()+"@fixture.invalid")
 		return err
 	})
 	wantCode(t, "creating a platform_admin without a Person", err, "SF014")
-	_ = reqID
-	_ = hash
+	// ... but 0139 does not backfill, so a LEGACY (pre-0139) unlinked row can still exist: the LA012 / LA001 arms
+	// stay load-bearing. Such a row is reproduced with SF014 disabled for that one statement, in-transaction.
+	if err := w.owner.WithPlatformAdmin(ctx, w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		return staffsv.InsertLegacyUnlinkedStaff(ctx, tx, insertNoPerson, noPerson, "lg-noperson-"+noPerson.String()+"@fixture.invalid")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = w.platformRT(noPerson, func(ctx context.Context, tx pgx.Tx) error { return lgApprove(ctx, tx, reqID, hash, "approve") })
+	wantCode(t, "approval by a staff member without a Person", err, "LA012")
+	// ... and such a staff member cannot request either.
+	err = w.platformRT(noPerson, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := lgRequest(ctx, tx, f.tenantID, &f.brandID, "suspend")
+		return err
+	})
+	wantCode(t, "request by a staff member without a Person", err, "LA001")
 }
 
 // A governed suspension authorises exactly its own transition: inside the same transaction the

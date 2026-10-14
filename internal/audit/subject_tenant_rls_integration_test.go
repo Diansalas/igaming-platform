@@ -10,6 +10,7 @@ package audit
 import (
 	"context"
 	"errors"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -385,6 +386,9 @@ func TestSubjectActorGuard_Refusals(t *testing.T) {
 
 	// (8) A suspended platform admin can still write (Q7: no status check).
 	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := staffsv.PlantEnrolledPlatformAdmin(ctx, tx); err != nil { // ADR 0119 S5 + S6: SF020
+			return err
+		}
 		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, admin)
 		return err
 	}); err != nil {

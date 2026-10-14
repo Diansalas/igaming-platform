@@ -544,3 +544,38 @@ func TestResidual_R1_Platform_UnsuspendBySQLAccepted(t *testing.T) {
 }
 
 var _ = auth.PrincipalStaff
+
+// Two-phase suspension, T2 retried ONCE on a lock timeout (ADR 0119 section 11): the target's row is held for longer
+// than one lock_timeout but less than two; the first T2 attempt times out (55P03), the retry acquires the row and the
+// suspension commits. Without the retry the call answers ErrBusy.
+func TestTwoPhaseSuspension_T2RetriedOnceSucceedsWhenTheLockClears(t *testing.T) {
+	w := newLWorld(t)
+	w.svc.lockTimeout = 400 * time.Millisecond
+	ta := w.staff(w.tenant, RoleTenantAdmin, true)
+	target := w.staff(w.tenant, RoleSupport, true)
+	hold, err := w.owner.Raw().Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hold.Rollback(context.Background()) }()
+	if _, err := hold.Exec(context.Background(), `SELECT set_config('app.tenant_id', $1, true)`, w.tenant.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hold.Exec(context.Background(), `SELECT 1 FROM staff_users WHERE id = $1 FOR UPDATE`, target); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(600 * time.Millisecond) // > one lock_timeout, < two
+		_ = hold.Rollback(context.Background())
+		close(released)
+	}()
+	res, err := w.svc.Suspend(context.Background(), w.actor(ta, w.tenant, RoleTenantAdmin), w.tenant, target, Reason{Code: "investigation"})
+	<-released
+	if err != nil {
+		t.Fatalf("the retried T2 must succeed once the lock clears, got %v", err)
+	}
+	if res.Staff.Status != "suspended" {
+		t.Fatalf("status %s", res.Staff.Status)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"net/url"
 	"os"
 	"sync"
@@ -181,10 +182,10 @@ func seedUnlinkedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.U
 	t.Helper()
 	id := uuid.New()
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+		// ADR 0119 S5: a legacy (pre-0139) unlinked platform admin; SF014 now refuses creating one.
+		return staffsv.InsertLegacyUnlinkedStaff(ctx, tx,
 			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', NULL, 'active')`,
 			id, "platform-admin-unlinked-"+id.String()+"@test.example")
-		return err
 	})
 	if err != nil {
 		t.Fatalf("seed unlinked platform admin staff principal: %v", err)
