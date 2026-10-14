@@ -27,6 +27,8 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 		"financial_policy_change:propose": stepup.Critical, "financial_policy_change:approve": stepup.Critical,
 		"launch_authorisation:request": stepup.Critical, "launch_authorisation:approve": stepup.Critical,
 		"rg_limit_config:request": stepup.Critical, "rg_limit_config:approve": stepup.Critical, "rg_limit_config:apply": stepup.Critical,
+		// ADR 0119 S5 + S6 (S4b-R11 closed).
+		"staff_lifecycle:request": stepup.Critical, "staff_lifecycle:approve": stepup.Critical,
 	}
 	if len(StepUpOperations) != len(want) {
 		t.Fatalf("registry has %d operations, ADR 0119 section 9.1 pins %d", len(StepUpOperations), len(want))
@@ -39,7 +41,7 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 	// The protective operations are never in the registry (section 8.1 / 9.1 exemptions).
 	for _, op := range []string{OpAdjustmentReject, OpAdjustmentCancel, OpResolutionReject, OpResolutionCancel, OpHoldResolutionReject,
 		OpHoldResolutionCancel, OpGrantReject, OpGrantCancel, OpPolicyReject, OpPolicyCancel, OpLaunchSuspend, OpLaunchCancel,
-		OpLaunchReject, OpRGConfigReject, OpRGConfigCancel} {
+		OpLaunchReject, OpRGConfigReject, OpRGConfigCancel, OpStaffLifecycleReject, OpStaffLifecycleCancel} {
 		if _, ok := StepUpOperations[op]; ok {
 			t.Errorf("%s is protective and must not require step-up", op)
 		}

@@ -103,6 +103,15 @@ const (
 	OpRGConfigReject  = "rg_limit_config:reject"
 	OpRGConfigCancel  = "rg_limit_config:cancel"
 	OpRGConfigApply   = "rg_limit_config:apply"
+
+	// ADR 0119 S5 + S6 (migration 0139, section 10.4): the platform-staff four-eyes
+	// (staff_lifecycle_requests / staff_lifecycle_approvals). Provable for scope
+	// platform (NULL tenant) only; the operation set is closed in lockstep with
+	// actor_proof_require.
+	OpStaffLifecycleRequest = "staff_lifecycle:request"
+	OpStaffLifecycleApprove = "staff_lifecycle:approve"
+	OpStaffLifecycleReject  = "staff_lifecycle:reject"
+	OpStaffLifecycleCancel  = "staff_lifecycle:cancel"
 )
 
 // Scopes the database admits.
@@ -162,6 +171,8 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: launch_authorisation operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, rgConfigOperationPrefix) && !rgConfigOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: rg_limit_config operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, staffLifecycleOperationPrefix) && !staffLifecycleOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: staff_lifecycle operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):
@@ -174,7 +185,20 @@ func (c Claims) validate() error {
 
 func platformOperation(op string) bool {
 	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:") ||
-		strings.HasPrefix(op, launchOperationPrefix) || strings.HasPrefix(op, rgConfigOperationPrefix)
+		strings.HasPrefix(op, launchOperationPrefix) || strings.HasPrefix(op, rgConfigOperationPrefix) ||
+		strings.HasPrefix(op, staffLifecycleOperationPrefix)
+}
+
+const staffLifecycleOperationPrefix = "staff_lifecycle:"
+
+// staffLifecycleOperationAdmitted mirrors migration 0139's actor_proof_require block: the closed staff_lifecycle
+// operation set, scope platform only.
+func staffLifecycleOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpStaffLifecycleRequest, OpStaffLifecycleApprove, OpStaffLifecycleReject, OpStaffLifecycleCancel:
+		return scope == ScopePlatform
+	}
+	return false
 }
 
 const rgConfigOperationPrefix = "rg_limit_config:"

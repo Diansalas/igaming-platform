@@ -317,7 +317,10 @@ var staticAllowed = map[string]bool{
 	filepath.Join("internal", "launchgov"): true,
 	// ADR 0116 S3 (migrations 0140-0142): the AML officer service signs hold / case / four-eyes proofs for the authenticated
 	// officer (security review mandatory). The fixture package builds officers through the K1 flow and signs nothing itself.
-	filepath.Join("internal", "aml"):                        true,
+	filepath.Join("internal", "aml"): true,
+	// ADR 0119 S5 + S6 (section 10.4): the staff lifecycle service signs the platform-staff four-eyes proofs (request /
+	// approve / reject / cancel) for the authenticated platform principal (security review mandatory).
+	filepath.Join("internal", "stafflifecycle"):             true,
 	filepath.Join("internal", "testsupport", "launchfix"):   true,
 	filepath.Join("internal", "testsupport", "launchdrive"): true,
 	filepath.Join("internal", "adjustment"):                 true,
