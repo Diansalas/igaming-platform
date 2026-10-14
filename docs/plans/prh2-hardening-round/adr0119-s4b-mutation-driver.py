@@ -1,5 +1,6 @@
 # ADR 0119 S4b mutation driver. Usage: python3 -I adr0119-s4b-mutation-driver.py <out_log> [--check] [ID ...]
-# Each mutant: (id, file, old, new, test package, -run regex). The driver runs in a COPY of the worktree (MUT_WT; no
+# Each mutant: (id, file, old, new, test package, -run regex). A package prefixed "unit:" runs WITHOUT the integration
+# build tag (for code compiled only into non-integration builds, e.g. the production half of the fallback split). The driver runs in a COPY of the worktree (MUT_WT; no
 # .git) against its own private database (MUT_DB), so the main worktree and its test databases are never touched.
 # Go mutants: the original file content is written back after every mutant (and checked before the first). SQL
 # mutants (file under migrations/): the private database is rebuilt from the mutated migrations before the test and
@@ -164,6 +165,27 @@ MUTANTS = [
  ('R08', DBA, '''		if r.Status == "active" && r.Role == expectedRole {''', '''		if r.Role == expectedRole {''', DB, 'TestCheckActorStaffLive'),
  ('R09', K2, '''	staff := append([]uuid.UUID{req.InitiatedBy, call.ActorID}, approvers...)''', '''	staff := append([]uuid.UUID{req.InitiatedBy}, approvers...)''', AD, 'TestS4b_'),
  # --- migration 0151 (SQL mutant: the private database is rebuilt from the mutated file) ---
+ # --- review round (security finding 1 / 5, ledger-finance boundary) ---
+ ('AR01', GATE, '''	if !auth.RoleHasPermission(auth.Role(tc.Role), auth.PermAlertRouteManage) || tc.TenantID != uuid.Nil {
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpCritical, nil''', '''	if false {
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpCritical, nil''', HS, 'TestClassifiers|TestStepUp_AlertRouteCreate'),
+ ('AR02', GATE, '''	if !auth.RoleHasPermission(auth.Role(tc.Role), auth.PermAlertRouteManage) || tc.TenantID != uuid.Nil {
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpCritical, nil''', '''	if !auth.RoleHasPermission(auth.Role(tc.Role), auth.PermAlertRouteManage) || tc.TenantID != uuid.Nil {
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpNone, nil''', HS, 'TestClassifiers|TestStepUp_AlertRouteCreate|TestStepUp_GoldenTable'),
+ ('AR03', 'internal/httpserver/alert_routing_handlers.go', '''staffRoute(deps, stepUpByAlertRouteManager, newCreateAlertRouteHandler(deps)))''',
+  '''staffRoute(deps, stepUpCritical, newCreateAlertRouteHandler(deps)))''', HS, 'TestStaffRoutes_GoldenClassification|TestStepUp_AlertRouteCreate'),
+ ('FB01', 'internal/actorproof/stepup_fallback_prod.go', '''func testStepUpFallbackOn() bool { return false }''', '''func testStepUpFallbackOn() bool { return true }''',
+  'unit:' + AP, 'TestCheckStepUp|TestAttach|TestStatic_StepUpBackstopPins'),
+ ('WB01', WDG, '''		if !stepUp.FreshFor(approverPrincipalID, now, stepup.PolicyMaxAge) {''', '''		if !stepUp.FreshFor(approverPrincipalID, now, stepup.PolicyMaxAge+1000) {''', WD, 'TestApprove_RequireStepUp_FreshnessMatrix'),
+ ('WB02', WDG, '''		if !stepUp.FreshFor(approverPrincipalID, now, stepup.PolicyMaxAge) {''', '''		if !stepUp.FreshFor(approverPrincipalID, now, stepup.PolicyMaxAge-1000) {''', WD, 'TestApprove_RequireStepUp_FreshnessMatrix'),
  ('P03', MIG, '''        EXECUTE 'GRANT UPDATE (mfa_at, assurance_kid, assurance_seal) ON sessions TO igaming_runtime';''', '', HS, 'TestStepUp_EndToEnd'),
 ]
 
@@ -200,7 +222,10 @@ def main():
         try:
             if sql:
                 rebuild()
-            rc, txt = sh(['bash', S + '/priv_test.sh', '-tags', 'integration', '-p', '1', '-count=1', '-timeout', '40m', pkg, '-run', run], 3000)
+            tags = ['-tags', 'integration']
+            if pkg.startswith('unit:'):
+                tags, pkg = [], pkg[len('unit:'):]
+            rc, txt = sh(['bash', S + '/priv_test.sh'] + tags + ['-p', '1', '-count=1', '-timeout', '40m', pkg, '-run', run], 3000)
             fails = [l for l in txt.splitlines() if l.startswith('--- FAIL') or 'build failed' in l or l.startswith('panic')]
             if rc == 0:
                 verdict = 'SURVIVED'
