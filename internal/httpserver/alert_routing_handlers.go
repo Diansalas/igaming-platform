@@ -451,6 +451,11 @@ func alertListSQL(innerTail, outerTail string) string {
 	) ld ON true ` + outerTail
 }
 
+// alertListPageSQL is the list query for one page; cond is the optional keyset condition.
+func alertListPageSQL(cond string) string {
+	return alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder)
+}
+
 const (
 	alertListInnerTail = `
 		AND ($1 = '' OR a.state = $1) AND ($2 = '' OR a.severity = $2) AND ($3 = '' OR a.kind = $3)`
@@ -563,7 +568,7 @@ func newListAlertsHandler(deps Deps) http.HandlerFunc {
 				cond = ` AND (a.first_seen_at, a.id) < (timestamptz 'epoch' + $5::bigint * interval '1 microsecond', $6::uuid)`
 				args = append(args, after.Micros, after.ID)
 			}
-			rows, err := tx.Query(ctx, alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder), args...)
+			rows, err := tx.Query(ctx, alertListPageSQL(cond), args...)
 			if err != nil {
 				return err
 			}

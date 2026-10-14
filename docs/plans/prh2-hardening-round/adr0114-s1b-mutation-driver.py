@@ -29,8 +29,8 @@ MUTS = [
     ("M15 next cursor taken from the first row, not the last", H, "last := out[len(out)-1]", "last := out[0]"),
     ("M16 cursor time truncated to milliseconds", C, "T: firstSeen.UnixMicro()", "T: firstSeen.UnixMilli() * 1000"),
     ("M17 single read ignores the id", H, "alertListSQL(`AND a.id = $1`, ``), id)", "alertListSQL(`AND ($1::uuid IS NOT NULL)`, ``), id)"),
-    ("M18 old query shape: LIMIT applied after the lateral join (security F1)", H, "alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder)", 'alertListSQL(alertListInnerTail+cond, alertListOuterOrder+"\\n LIMIT $4")'),
-    ("M19 cursor canonical-form check removed (security F2)", C, "string(canon) != string(raw)", "false"),
+    ("M18 old query shape: LIMIT applied after the lateral join (security F1)", H, "return alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder)", 'return alertListSQL(alertListInnerTail+cond, alertListOuterOrder+"\\n LIMIT $4")'),
+    ("M19 cursor canonical-form check removed (security F2)", C, "string(canon) != string(raw)", "string(canon) != string(raw) && false"),
     ("M20 lenient base64 trailing bits accepted", C, "base64.RawURLEncoding.Strict().DecodeString(s)", "base64.RawURLEncoding.DecodeString(s)"),
     ("M21 single read accepts non-canonical id (security F3)", H, "err != nil || id.String() != rawID {", "err != nil {"),
     ("M22 repeated list parameters accepted (security F4)", H, "if len(q[k]) > 1 {", "if len(q[k]) > 99 {"),
@@ -43,7 +43,7 @@ if ONLY:
 
 def run():
     p = subprocess.run(["bash", RUN, "-tags", "integration", "./internal/httpserver", "-count=1", "-timeout", "20m",
-                        "-run", "TestAlertListS1b|TestAlertCursor|TestAlertActorRefs"], capture_output=True, text=True)
+                        "-run", "TestAlertListS1b|TestAlertListPageSQL|TestAlertCursor|TestAlertActorRefs"], capture_output=True, text=True)
     return p.returncode, (p.stdout + p.stderr)
 
 lines = []

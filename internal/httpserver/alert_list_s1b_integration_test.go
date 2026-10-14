@@ -547,7 +547,7 @@ func TestAlertListS1b_QueryCostIsBoundedByLimit(t *testing.T) {
 			cond = ` AND (a.first_seen_at, a.id) < (timestamptz 'epoch' + $5::bigint * interval '1 microsecond', $6::uuid)`
 			args = append(args, cursor.Micros, cursor.ID)
 		}
-		sql := alertListSQL(alertListInnerTail+cond+alertListOrderLimit, alertListOuterOrder)
+		sql := alertListPageSQL(cond)
 		var raw []byte
 		start := time.Now()
 		if err := a.w.Pool.WithPlatformAdmin(context.Background(), a.admin, func(ctx context.Context, tx pgx.Tx) error {

@@ -124,12 +124,37 @@ func TestAlertCursor_OnlyTheCanonicalSpellingIsAccepted(t *testing.T) {
 	if _, err := decodeAlertCursor(good+"=", "open||"); err == nil {
 		t.Error("padded base64 must be refused")
 	}
-	if rem := len(canon) % 3; rem != 0 {
+	// pick a filter length so the payload is not a multiple of 3 bytes (trailing bits exist)
+	pad := ""
+	for len(fmt.Sprintf(`{"v":1,"t":%d,"i":%q,"f":"open||%s"}`, ts, id, pad))%3 == 0 {
+		pad += "x"
+	}
+	canon = fmt.Sprintf(`{"v":1,"t":%d,"i":%q,"f":"open||%s"}`, ts, id, pad)
+	good = enc(canon)
+	if _, err := decodeAlertCursor(good, "open||"+pad); err != nil {
+		t.Fatalf("padded-filter canonical refused: %v", err)
+	}
+	{
 		alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 		last := strings.IndexByte(alphabet, good[len(good)-1])
 		altered := good[:len(good)-1] + string(alphabet[last^1])
-		if _, err := decodeAlertCursor(altered, "open||"); err == nil {
+		if _, err := decodeAlertCursor(altered, "open||"+pad); err == nil {
 			t.Error("base64 with non-zero trailing bits must be refused")
 		}
+	}
+}
+
+// Security F1 shape pin (DB-free): the keyset condition, ORDER BY and LIMIT are inside the inner
+// query on alerts, BEFORE the latest-delivery lateral join, so deliveries are only probed for the page.
+func TestAlertListPageSQL_LimitAndOrderPrecedeTheLateralJoin(t *testing.T) {
+	q := alertListPageSQL(" AND x")
+	lateral := strings.Index(q, "LEFT JOIN LATERAL")
+	innerLimit := strings.Index(q, "LIMIT $4")
+	innerOrder := strings.Index(q, "ORDER BY a.first_seen_at DESC, a.id DESC")
+	if lateral < 0 || innerLimit < 0 || innerOrder < 0 || innerLimit > lateral || innerOrder > lateral {
+		t.Fatalf("ORDER BY and LIMIT must precede the lateral join:\n%s", q)
+	}
+	if strings.Count(q, "LIMIT $4") != 1 {
+		t.Fatalf("the page LIMIT must appear exactly once:\n%s", q)
 	}
 }
