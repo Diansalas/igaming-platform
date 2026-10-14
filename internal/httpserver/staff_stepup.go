@@ -1,7 +1,8 @@
 package httpserver
 
 // ADR 0119 slice S4b (sections 7.3, 8.2, 9.1): RequireStepUp, the last link of
-// the staff route chain, and the four named classifiers.
+// the staff route chain, and the named classifiers (the four of section 8.2
+// plus alertRouteManageClass, security review finding 1).
 //
 //	auth.Middleware -> auth.RequireStaffPrincipal -> requireLiveStaffSession -> auth.RequireAAL2 -> requireStepUp(class) -> inner
 //
@@ -54,6 +55,7 @@ var stepUpClassifiers = map[string]stepUpClassifier{
 	"financialPolicyChangeClass": financialPolicyChangeClass,
 	"alertResolveClass":          alertResolveClass,
 	"rgLimitChangeClass":         rgLimitChangeClass,
+	"alertRouteManageClass":      alertRouteManageClass,
 }
 
 // requireStepUp enforces class. It must run after requireLiveStaffSession (it
@@ -264,6 +266,24 @@ func alertResolveClass(deps Deps, r *http.Request) (auth.StepUpClass, error) {
 		return auth.StepUpCritical, nil
 	}
 	return auth.StepUpNone, nil
+}
+
+// alertRouteManageClass (security review of S4b, finding 1): POST
+// /v1/admin/alerting/routes checks its permission INSIDE the handler so that a
+// refusal is audited (alert_route.create denied). A static critical class would
+// answer an unauthorised caller with step_up_required before that audit row is
+// written. So: none for a caller the handler refuses anyway (no
+// alert:route_manage, or a tenant session) - the handler then writes its
+// audited 403 - and critical for every caller the handler admits. No body read.
+func alertRouteManageClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
+	tc, err := tenant.FromContext(r.Context())
+	if err != nil {
+		return auth.StepUpCritical, nil
+	}
+	if !auth.RoleHasPermission(auth.Role(tc.Role), auth.PermAlertRouteManage) || tc.TenantID != uuid.Nil {
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpCritical, nil
 }
 
 // rgLimitChangeClass: critical for a removal (value null) and for a body the

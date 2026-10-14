@@ -43,12 +43,14 @@ var (
 	stepUpByFinancialPolicyRun = routeClass{classifier: "financialPolicyChangeClass"} // none for tighten-only callers; critical for authors
 	stepUpByAlertKind          = routeClass{classifier: "alertResolveClass"}          // critical for P1 / security kinds; none otherwise
 	stepUpByRGLimitDirection   = routeClass{classifier: "rgLimitChangeClass"}         // critical for an increase or removal; none for a decrease
+	stepUpByAlertRouteManager  = routeClass{classifier: "alertRouteManageClass"}      // critical for a caller the handler admits; none otherwise
 )
 
 // routeClassifiers is the closed set of classifier names (pinned by the static
 // test; stepUpClassifiers holds one Go function per name).
 var routeClassifiers = map[string]bool{
 	"launchActionClass": true, "financialPolicyChangeClass": true, "alertResolveClass": true, "rgLimitChangeClass": true,
+	"alertRouteManageClass": true,
 }
 
 // valid reports whether c is exactly one of: a valid static class, or a known

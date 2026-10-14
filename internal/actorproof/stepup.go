@@ -12,7 +12,6 @@ package actorproof
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
@@ -84,15 +83,16 @@ func RequiresStepUp(c Claims) bool {
 	return ok && !stepUpExempt(c)
 }
 
-// testStepUpFallback is integration-test support ONLY (ADR 0119 section 9.1
-// "Test support"): when set, a governed domain call made directly by an
-// integration test - a context that never passed the HTTP staff chain
+// testStepUpFallbackOn is integration-test support ONLY (ADR 0119 section 9.1
+// "Test support"): when it reports true, a governed domain call made directly
+// by an integration test - a context that never passed the HTTP staff chain
 // (!stepup.IsStaffRequest) - is treated as carrying a fresh synthetic step-up
-// for its actor. Its only setter, SetTestStepUpFallback, is in
-// testsupport_integration.go (build tag integration), so no production binary
-// can set it; a static test pins that. Every HTTP staff request is marked by
+// for its actor. It is split by build tag (security review of S4b, finding 5):
+// stepup_fallback_prod.go (!integration) returns the constant false, so a
+// production binary has no fallback variable at all; testsupport_integration.go
+// (integration) holds the switch and its only setter, SetTestStepUpFallback.
+// Static tests pin both files. Every HTTP staff request is marked by
 // auth.Middleware and always meets the real backstop.
-var testStepUpFallback atomic.Bool
 
 // checkStepUp is the backstop: nil when c is not step-up-classified, or when
 // ctx carries a present assertion whose Subject is c.Actor and whose MFAAt is
@@ -101,7 +101,7 @@ func checkStepUp(ctx context.Context, c Claims, now time.Time) error {
 	if !RequiresStepUp(c) {
 		return nil
 	}
-	if _, present := stepup.From(ctx); !present && testStepUpFallback.Load() && !stepup.IsStaffRequest(ctx) {
+	if _, present := stepup.From(ctx); !present && testStepUpFallbackOn() && !stepup.IsStaffRequest(ctx) {
 		return nil
 	}
 	maxAge, ok := stepUpBackstopMaxAge(StepUpOperations[c.Operation])

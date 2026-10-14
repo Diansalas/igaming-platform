@@ -9,7 +9,7 @@ package httpserver
 // GET routes are "none" by rule (reads never step up). S4a records the class only; S4b enforces it.
 var staffRouteGolden = map[string]string{
 	"GET /v1/admin/alerting/routes":                                                               "none",
-	"POST /v1/admin/alerting/routes":                                                              "critical",
+	"POST /v1/admin/alerting/routes":                                                              "classifier:alertRouteManageClass",
 	"GET /v1/admin/alerting/status":                                                               "none",
 	"GET /v1/admin/alerts":                                                                        "none",
 	"POST /v1/admin/alerts/{alertID}/ack":                                                         "none",

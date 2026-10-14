@@ -2,8 +2,17 @@
 
 package actorproof
 
+import "sync/atomic"
+
+// testStepUpFallback is the integration-build switch behind testStepUpFallbackOn
+// (stepup.go). Production builds compile stepup_fallback_prod.go instead, where
+// the answer is the constant false and this variable does not exist.
+var testStepUpFallback atomic.Bool
+
+func testStepUpFallbackOn() bool { return testStepUpFallback.Load() }
+
 // SetTestStepUpFallback switches the signer backstop's integration-test
-// fallback (see testStepUpFallback in stepup.go). INTEGRATION BUILDS ONLY: this
+// fallback (see testStepUpFallbackOn in stepup.go). INTEGRATION BUILDS ONLY: this
 // file carries the integration build tag, so no production binary contains the
 // setter. internal/actorproof/prooftest.Install turns it on for integration
 // test processes, so a governed domain service called directly by a test (no

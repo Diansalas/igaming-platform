@@ -41,8 +41,8 @@ func TestStepUpClassifiers_ParityWithRouteClassifiers(t *testing.T) {
 	}
 	sort.Strings(a)
 	sort.Strings(b)
-	if strings.Join(a, ",") != strings.Join(b, ",") || len(a) != 4 {
-		t.Fatalf("routeClassifiers %v vs stepUpClassifiers %v (ADR 0119 section 8.2: four classifiers)", a, b)
+	if strings.Join(a, ",") != strings.Join(b, ",") || len(a) != 5 {
+		t.Fatalf("routeClassifiers %v vs stepUpClassifiers %v (ADR 0119 section 8.2: four classifiers + alertRouteManageClass)", a, b)
 	}
 }
 
@@ -83,6 +83,9 @@ func TestClassifiers_DecisionsAndBodyDiscipline(t *testing.T) {
 		{"rg duplicate value, last wins", rgLimitChangeClass, auth.RoleSupport, `{"kind":"deposit","value":"5","value":null}`, auth.StepUpCritical},
 		{"rg malformed", rgLimitChangeClass, auth.RoleSupport, `nope`, auth.StepUpCritical},
 		{"alert tenant caller (handler refuses)", alertResolveClass, auth.RoleTenantAdmin, `{}`, auth.StepUpNone},
+		{"alert route platform admin", alertRouteManageClass, auth.RolePlatformAdmin, `{"severity":"p1"}`, auth.StepUpCritical},
+		{"alert route tenant admin (handler refuses)", alertRouteManageClass, auth.RoleTenantAdmin, `{"severity":"p1"}`, auth.StepUpNone},
+		{"alert route support (handler refuses)", alertRouteManageClass, auth.RoleSupport, `{}`, auth.StepUpNone},
 	} {
 		tenantID := uuid.Nil
 		if c.role != auth.RolePlatformAdmin {

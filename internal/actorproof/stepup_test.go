@@ -102,7 +102,7 @@ func TestAttach_BackstopRefusesBeforeAnyWrite(t *testing.T) {
 	if err := i.Attach(stepup.ContextWith(context.Background(), stepup.Assertion{Subject: c.Actor, SessionID: uuid.New(), MFAAt: time.Now()}), nil, bad); !errors.Is(err, ErrInvalidClaims) {
 		t.Fatalf("invalid claims: %v", err)
 	}
-	if testStepUpFallback.Load() {
+	if testStepUpFallbackOn() {
 		t.Fatal("the integration-test fallback must be off in a plain (non-integration) test binary")
 	}
 }
@@ -162,6 +162,12 @@ func TestStatic_StepUpBackstopPins(t *testing.T) {
 		if err != nil || !strings.HasPrefix(string(b), "//go:build integration\n") {
 			t.Errorf("%s must carry the integration build tag", f)
 		}
+	}
+	// The production half of the split: !integration, and a constant false (no variable to flip).
+	prod, err := os.ReadFile(filepath.Join(root, "internal", "actorproof", "stepup_fallback_prod.go"))
+	if err != nil || !strings.HasPrefix(string(prod), "//go:build !integration\n") ||
+		!strings.Contains(string(prod), "func testStepUpFallbackOn() bool { return false }") || strings.Contains(string(prod), "var ") {
+		t.Errorf("stepup_fallback_prod.go must be !integration and return the constant false (err %v)", err)
 	}
 	sort.Strings(contextWith)
 	if strings.Join(contextWith, ",") != "internal/actorproof/prooftest/prooftest.go,internal/auth/stepup.go" {

@@ -49,7 +49,7 @@ type AlertRoutingSource interface {
 }
 
 func registerAlertRoutingRoutes(mux *http.ServeMux, deps Deps) {
-	mux.Handle("POST /v1/admin/alerting/routes", staffRoute(deps, stepUpCritical, newCreateAlertRouteHandler(deps)))
+	mux.Handle("POST /v1/admin/alerting/routes", staffRoute(deps, stepUpByAlertRouteManager, newCreateAlertRouteHandler(deps)))
 	mux.Handle("GET /v1/admin/alerting/routes",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAlertRouteManage)(newListAlertRoutesHandler(deps))))
 	mux.Handle("GET /v1/admin/alerting/status",

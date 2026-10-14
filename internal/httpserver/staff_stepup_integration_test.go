@@ -64,6 +64,7 @@ var classifierCriticalBody = map[string]any{
 	"classifier:launchActionClass":          map[string]any{"action": "activate", "reason_code": "x"},
 	"classifier:financialPolicyChangeClass": map[string]any{},
 	"classifier:alertResolveClass":          map[string]any{"reason_code": "x"},
+	"classifier:alertRouteManageClass":      map[string]any{},
 	"classifier:rgLimitChangeClass":         map[string]any{"kind": "deposit", "value": nil},
 }
 
@@ -157,8 +158,8 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 		}
 	}
 	// Non-vacuity: the classified set is the golden table's (S4a + S4b).
-	// 110 mutating routes: 47 critical, 22 financial, 4 classifier routes, 37 none; 70 reads.
-	if counts["critical"] != 47 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// 110 mutating routes: 46 critical, 22 financial, 5 classifier routes, 37 none; 70 reads.
+	if counts["critical"] != 46 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
 		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 37 || counts["read"] != 70 {
 		t.Fatalf("unexpected coverage: %v", counts)
@@ -743,5 +744,35 @@ func TestStepUp_SecretHygiene(t *testing.T) {
 	}
 	if strings.Contains(w.logs.String(), "max_age_seconds") && strings.Contains(w.logs.String(), code) {
 		t.Fatal("a refusal log carries the code")
+	}
+}
+
+// Security review of S4b, finding 1: POST /v1/admin/alerting/routes checks alert:route_manage INSIDE its handler so a
+// refusal is audited. alertRouteManageClass keeps that: a stale tenant_admin (no permission, tenant session) and a
+// stale support caller get the handler's audited 403 forbidden (alert_route.create denied, one row each), never a
+// step-up prompt; a stale platform_admin is asked to step up (critical, 300 s) and nothing is audited for it.
+func TestStepUp_AlertRouteCreate_UnauthorisedProbingKeepsTheAuditedRefusal(t *testing.T) {
+	w := newMFAW(t)
+	admin := w.staff(nil, "platform_admin")
+	staleAdmin := authtest.LiveStaffTokenAged(t, w.rt, testStaffMFAKeys(), w.issuer, admin.ref.StaffID, uuid.Nil, auth.RolePlatformAdmin, 11*time.Minute)
+	const path = "/v1/admin/alerting/routes"
+	body := map[string]any{"severity": "p1", "channel_kind": "log", "enabled": true, "reason_code": "initial_setup"}
+	for _, role := range []struct {
+		name string
+		r    auth.Role
+	}{{"tenant_admin", auth.RoleTenantAdmin}, {"support", auth.RoleSupport}} {
+		s := w.staff(&w.tenant, role.name)
+		stale := authtest.LiveStaffTokenAged(t, w.rt, testStaffMFAKeys(), w.issuer, s.ref.StaffID, w.tenant.ID, role.r, 11*time.Minute)
+		r := w.do(http.MethodPost, path, stale, body)
+		if r.status != http.StatusForbidden || r.code() != "forbidden" {
+			t.Fatalf("%s: want the handler's 403 forbidden (no step-up prompt), got %d %s", role.name, r.status, r.body)
+		}
+		if n := w.auditCount(s, "alert_route.create"); n != 1 {
+			t.Fatalf("%s: the refusal must be audited exactly once, got %d", role.name, n)
+		}
+	}
+	stepUpRefused(t, w.do(http.MethodPost, path, staleAdmin, body), 300, "alert route create, platform admin")
+	if n := w.auditCount(admin, "alert_route.create"); n != 0 {
+		t.Fatalf("the step-up refusal runs before the handler: no audit row, got %d", n)
 	}
 }
