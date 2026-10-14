@@ -665,3 +665,12 @@ func containsAny(hay string, needles []string) []string {
 	}
 	return found
 }
+
+// newTestStaffMFA builds a private subsystem over the same keys (for a test that sets a commit fault or other TTLs).
+func newTestStaffMFA(accessTTL, idleTTL, absoluteTTL time.Duration) *StaffMFA {
+	m, err := NewStaffMFA(testStaffMFAKeys(), testStaffMFAIssuer, accessTTL, idleTTL, absoluteTTL)
+	if err != nil {
+		panic(err)
+	}
+	return m
+}
