@@ -219,3 +219,15 @@ back the code without the migration leaves staff logins failing closed (`SF040`)
   still rewrite them.
 - The per-IP limiter is per process (R9); the per-factor counters in the database are the control, and since 0138
   the hard-lock budget cannot be reset by the runtime role (`SF008`).
+
+## 9. S4b deploy note (ADR 0119 S4b-R8, S4b-R12)
+
+- S4b changes the staff session seal format to v2 (it binds the refresh token hash and the idle expiry, condition
+  S3-R10). A session sealed by S3 (v1) is never accepted again: at the S4b deploy **every live staff session ends**.
+  Staff see `401 session_revoked` (refresh: `401`) and must log in again. This is expected and raises **no** alert and
+  no `auth.session_assurance_invalid` audit row (the liveness reason `seal_legacy` is counted). Announce the re-login
+  in the change ticket.
+- 12 hours after the deploy (the absolute-TTL ceiling) no genuine v1 session can still exist. The quiet legacy path
+  has no sunset in S4b (S4b-R12): until S9 turns it into an alerting `bad_seal`, treat any `seal_legacy` count after
+  that point as a possible forgery and investigate.
+- Carry both items into the S9 deploy runbook list.

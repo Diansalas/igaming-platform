@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -66,8 +67,16 @@ func TestStaffLivenessSQL_Shape(t *testing.T) {
 			t.Errorf("liveness query lacks %q", want)
 		}
 	}
-	if strings.Contains(q, "expires_at,") || strings.Contains(q, "s.expires_at") {
-		t.Error("liveness must not read the idle expires_at")
+	// ADR 0119 S4b: the idle expires_at is READ only as a sealed value (seal format v2 binds it, S3-R10) and is never
+	// COMPARED: liveness does not refuse on the idle expiry (the 15 min access token is the idle unit).
+	if strings.Count(q, "expires_at AS sealed_idle_expiry") != 1 ||
+		regexp.MustCompile(`s\.expires_at\s*(<|>|=|IS|BETWEEN)`).MatchString(q) || strings.Contains(q, "s.expires_at <") {
+		t.Error("liveness must read the idle expires_at only as the sealed value, never compare it")
+	}
+	for _, want := range []string{"now(), s.aal, s.amr, s.auth_time, s.mfa_at, s.absolute_expires_at", "s.refresh_token_hash, s.assurance_kid, s.assurance_seal"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("liveness query lacks the sealed assurance read %q", want)
+		}
 	}
 	if usableFactorPredicate != `f.status = 'active' AND f.hard_locked_at IS NULL` {
 		t.Error("the usable-factor rule changed")

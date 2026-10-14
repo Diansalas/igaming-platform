@@ -29,4 +29,11 @@ func registerStaffAuthRoutes(mux *http.ServeMux, deps Deps) {
 	// ADR 0119 S4a: the full staff chain (liveness, aal2), class none (a read).
 	mux.Handle("GET /v1/staff/me/mfa",
 		staffRoute(deps, stepUpNone, newStaffMFAStatusHandler(deps)))
+	// ADR 0119 S4b (section 6.6): the step-up itself. The full staff chain (the caller must hold a live aal2
+	// session), class none (it is what produces the fresh step-up), rate bucket `mfa` (section 6.5).
+	mux.Handle("POST /v1/staff/auth/step-up",
+		staffRoute(deps, stepUpNone, rateLimitFunc(deps.authLimiter, rateBucketMFA, rateLimitMFAPerMin, newStaffStepUpHandler(deps))))
+	// ADR 0119 S4b (sections 6.2, 8.2): replacing the caller's own recovery codes needs a critical step-up.
+	mux.Handle("POST /v1/staff/mfa/recovery-codes/regenerate",
+		staffRoute(deps, stepUpCritical, newStaffRecoveryCodesRegenerateHandler(deps)))
 }

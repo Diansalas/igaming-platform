@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 )
@@ -222,7 +223,7 @@ func approvedRequest(t *testing.T, pool *db.Pool, f fixture, amount int64, idemK
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 	approver := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
+		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}

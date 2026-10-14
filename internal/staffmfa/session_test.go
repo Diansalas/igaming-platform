@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,8 @@ func sampleAssurance() SessionAssurance {
 		AuthTime:          time.UnixMicro(1_800_000_000_123_456).UTC(),
 		MFAAt:             time.UnixMicro(1_800_000_060_000_001).UTC(),
 		AbsoluteExpiresAt: time.UnixMicro(1_800_043_200_123_456).UTC(),
+		RefreshTokenHash:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01",
+		ExpiresAt:         time.UnixMicro(1_800_001_800_000_002).UTC(),
 	}
 }
 
@@ -60,9 +63,9 @@ func TestSealSession_CanonicalFormPinned(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := hmac.New(sha256.New, sub)
-	m.Write([]byte("ss-v1|11111111-1111-4111-8111-111111111111|staff|22222222-2222-4222-8222-222222222222|33333333-3333-4333-8333-333333333333|2|pwd,otp|1800000000123456|1800000060000001|1800043200123456"))
+	m.Write([]byte("ss-v2|11111111-1111-4111-8111-111111111111|staff|22222222-2222-4222-8222-222222222222|33333333-3333-4333-8333-333333333333|2|pwd,otp|1800000000123456|1800000060000001|1800043200123456|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01|1800001800000002"))
 	if got.KID != "m1" || !hmac.Equal(got.MAC, m.Sum(nil)) {
-		t.Fatal("the seal is not HMAC(staff-session-assurance-v1 subkey, the ss-v1 canonical form)")
+		t.Fatal("the seal is not HMAC(staff-session-assurance-v1 subkey, the ss-v2 canonical form)")
 	}
 	if !k.VerifySessionSeal(a, got) {
 		t.Fatal("round trip")
@@ -71,7 +74,7 @@ func TestSealSession_CanonicalFormPinned(t *testing.T) {
 	a.TenantID = uuid.Nil
 	p, _ := k.SealSession(a)
 	m = hmac.New(sha256.New, sub)
-	m.Write([]byte("ss-v1|11111111-1111-4111-8111-111111111111|staff|22222222-2222-4222-8222-222222222222|platform|2|pwd,otp|1800000000123456|1800000060000001|1800043200123456"))
+	m.Write([]byte("ss-v2|11111111-1111-4111-8111-111111111111|staff|22222222-2222-4222-8222-222222222222|platform|2|pwd,otp|1800000000123456|1800000060000001|1800043200123456|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01|1800001800000002"))
 	if !hmac.Equal(p.MAC, m.Sum(nil)) {
 		t.Fatal("platform staff seal")
 	}
@@ -95,6 +98,9 @@ func TestSealSession_EveryFieldIsBound(t *testing.T) {
 		"auth_time": func(a *SessionAssurance) { a.AuthTime = a.AuthTime.Add(time.Microsecond) },
 		"mfa_at":    func(a *SessionAssurance) { a.MFAAt = a.MFAAt.Add(time.Microsecond) },
 		"absolute":  func(a *SessionAssurance) { a.AbsoluteExpiresAt = a.AbsoluteExpiresAt.Add(time.Microsecond) },
+		// S4b (S3-R10): the refresh token hash and the idle expiry are bound.
+		"refresh_token_hash": func(a *SessionAssurance) { a.RefreshTokenHash = strings.Repeat("c", 64) },
+		"expires_at":         func(a *SessionAssurance) { a.ExpiresAt = a.ExpiresAt.Add(time.Microsecond) },
 	} {
 		a := base
 		a.AMR = append([]string(nil), base.AMR...)
@@ -138,6 +144,11 @@ func TestSealSession_RefusesMalformedInput(t *testing.T) {
 		"no auth_time":   func(a *SessionAssurance) { a.AuthTime = time.Time{} },
 		"no mfa_at":      func(a *SessionAssurance) { a.MFAAt = time.Time{} },
 		"no absolute":    func(a *SessionAssurance) { a.AbsoluteExpiresAt = time.Time{} },
+		"no token hash":  func(a *SessionAssurance) { a.RefreshTokenHash = "" },
+		"upper hash":     func(a *SessionAssurance) { a.RefreshTokenHash = strings.ToUpper(a.RefreshTokenHash) },
+		"short hash":     func(a *SessionAssurance) { a.RefreshTokenHash = a.RefreshTokenHash[:63] },
+		"hash with pipe": func(a *SessionAssurance) { a.RefreshTokenHash = a.RefreshTokenHash[:63] + "|" },
+		"no expires_at":  func(a *SessionAssurance) { a.ExpiresAt = time.Time{} },
 	} {
 		a := sampleAssurance()
 		mut(&a)
@@ -185,5 +196,43 @@ func TestLoadKeys_IsTheStartupGate(t *testing.T) {
 	}
 	if _, err := CheckKeyConfig("f1", f, "", ""); err == nil {
 		t.Fatal("CheckKeyConfig must refuse a partial configuration")
+	}
+}
+
+// S4b (S3-R10): a genuine S3-format (v1) seal is recognised as legacy but never verifies; a v2 seal is never
+// "legacy"; a tampered v1 seal is neither.
+func TestSealSession_LegacyV1RecognisedNeverValid(t *testing.T) {
+	k, master := sealKeys(t)
+	a := sampleAssurance()
+	sub, err := hkdf.Key(sha256.New, master, nil, "staff-session-assurance-v1|m1", 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hmac.New(sha256.New, sub)
+	m.Write([]byte("ss-v1|11111111-1111-4111-8111-111111111111|staff|22222222-2222-4222-8222-222222222222|33333333-3333-4333-8333-333333333333|2|pwd,otp|1800000000123456|1800000060000001|1800043200123456"))
+	v1 := KeyedHash{KID: "m1", MAC: m.Sum(nil)}
+	if k.VerifySessionSeal(a, v1) {
+		t.Fatal("a v1 seal must never verify after S4b")
+	}
+	if !k.IsLegacySessionSeal(a, v1) {
+		t.Fatal("a genuine v1 seal must be recognised as legacy")
+	}
+	// The v1 form never covered the token hash: the legacy recognition is independent of it (the row is retired anyway).
+	b := a
+	b.RefreshTokenHash = ""
+	if !k.IsLegacySessionSeal(b, v1) {
+		t.Fatal("legacy recognition must not depend on the v2-only fields")
+	}
+	v2, err := k.SealSession(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.IsLegacySessionSeal(a, v2) {
+		t.Fatal("a v2 seal is not legacy")
+	}
+	bad := KeyedHash{KID: "m1", MAC: append([]byte(nil), v1.MAC...)}
+	bad.MAC[0] ^= 1
+	if k.IsLegacySessionSeal(a, bad) || k.IsLegacySessionSeal(a, KeyedHash{KID: "m1", MAC: v1.MAC[:31]}) || k.IsLegacySessionSeal(a, KeyedHash{KID: "zz", MAC: v1.MAC}) {
+		t.Fatal("a tampered v1 seal is not legacy")
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
@@ -526,7 +527,7 @@ func TestB13B_T1p_NonSyntheticAdapter_TieringMatrix(t *testing.T) {
 		if err := withdrawal.MoveToPendingReview(ctx, tx, wr2.ID); err != nil {
 			return err
 		}
-		_, err = withdrawal.Approve(ctx, tx, wr2.ID, uuid.New(), true, nil, nil)
+		_, err = withdrawal.Approve(ctx, tx, wr2.ID, uuid.New(), true, nil, nil, auth.StepUpAssertion{})
 		return err
 	}); err != nil {
 		t.Fatalf("request/approve with the sandbox instrument: %v", err)

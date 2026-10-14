@@ -31,6 +31,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
+	"github.com/Diansalas/igaming-platform/internal/stepup"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
@@ -95,12 +96,12 @@ var (
 
 	// ErrStepUpRequired is returned by Approve when the resolved
 	// ApprovalPolicy.RequireStepUp (policy.go) is true for a decision at
-	// or above threshold and no step-up/MFA challenge exists yet (ADR
-	// 0017 preserved: MFA itself is not implemented here). Approve's own
-	// doc comment below has the full Stage 3C directive item 6
-	// rationale and the exact point a real MFA integration should hook
-	// in.
-	ErrStepUpRequired = errors.New("withdrawal: this decision requires a step-up/MFA challenge, which is not yet implemented (ADR 0017)")
+	// or above threshold and the caller's step-up assertion is missing,
+	// names another principal, or is older than auth.StepUpPolicyMaxAge
+	// (2 min; ADR 0119 section 9.3, slice S4b). An automated decision
+	// never satisfies it. The HTTP layer answers 403 step_up_required
+	// with max_age = 120.
+	ErrStepUpRequired = errors.New("withdrawal: this decision requires a fresh step-up (ADR 0119 section 9.3)")
 
 	// ErrApproverNotLinked is returned by Approve/Reject when the
 	// caller-supplied ApproverEligibility reports that approverPrincipalID
@@ -790,12 +791,15 @@ type ApproverEligibility func(approverPrincipalID uuid.UUID) (linked, active boo
 // isAutomated is false; a nil value there is itself a fail-closed
 // ErrInvalidInput, not a skip.
 //
-// If the resolved policy requires a step-up/MFA challenge for a request
-// at or above threshold (ApprovalPolicy.RequireStepUp - directive item
-// 6), this returns ErrStepUpRequired before recording anything: MFA is
-// not implemented (ADR 0017 preserved), so a policy that asks for it
-// must fail closed, never silently approve as if the challenge had
-// happened.
+// If the resolved policy requires a step-up for a request at or above
+// threshold (ApprovalPolicy.RequireStepUp - directive item 6), stepUp must
+// be the HTTP step-up gate's assertion for approverPrincipalID with an MFAAt
+// no older than auth.StepUpPolicyMaxAge (2 min, ADR 0119 section 9.3 - stricter
+// than the route's financial 10 min) on the transaction's database clock;
+// otherwise this returns ErrStepUpRequired before recording anything (the
+// transaction rolls back, so the client's single re-send after a step-up is
+// safe). An automated decision (isAutomated) never satisfies it. The zero
+// stepUp means "no step-up".
 //
 // The policy resolution, distinct-approvers count, and the threshold
 // comparison all run inside the same transaction (tx) as the approval
@@ -807,6 +811,7 @@ type ApproverEligibility func(approverPrincipalID uuid.UUID) (linked, active boo
 func Approve(
 	ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID,
 	isAutomated bool, beneficiaryCheck BeneficiaryCheck, approverEligibility ApproverEligibility,
+	stepUp stepup.Assertion,
 ) (approved bool, err error) {
 	if approverPrincipalID == uuid.Nil {
 		return false, fmt.Errorf("%w: approver principal id is required", ErrInvalidInput)
@@ -856,7 +861,16 @@ func Approve(
 
 	requiresMultipleApprovals := wr.Amount >= policy.ThresholdAmount
 	if requiresMultipleApprovals && policy.RequireStepUp {
-		return false, ErrStepUpRequired
+		if isAutomated {
+			return false, ErrStepUpRequired
+		}
+		var now time.Time
+		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+			return false, fmt.Errorf("withdrawal: read database clock: %w", err)
+		}
+		if !stepUp.FreshFor(approverPrincipalID, now, stepup.PolicyMaxAge) {
+			return false, ErrStepUpRequired
+		}
 	}
 
 	approvalID := uuid.New()

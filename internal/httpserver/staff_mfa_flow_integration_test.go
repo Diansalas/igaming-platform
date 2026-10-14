@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/store"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa/totp"
@@ -411,7 +412,11 @@ func TestStaffMFA_Redeem_GateD_TokenRowIsAuthoritative(t *testing.T) {
 	try("A's credentials, another tenant's slug", map[string]string{"token": tokA, "tenant_slug": w.other.Slug, "email": a.email, "password": a.password})
 	try("A's credentials, no tenant slug", map[string]string{"token": tokA, "email": a.email, "password": a.password})
 	try("another tenant's staff with A's token and slug", map[string]string{"token": tokA, "tenant_slug": a.slug, "email": otherTenantStaff.email, "password": otherTenantStaff.password})
-	try("an unknown token", map[string]string{"token": "x" + tokA[1:], "tenant_slug": a.slug, "email": a.email, "password": a.password})
+	unknown := "x" + tokA[1:]
+	if tokA[0] == 'x' { // pre-existing flake (1 in 64): the substitution must change the token
+		unknown = "y" + tokA[1:]
+	}
+	try("an unknown token", map[string]string{"token": unknown, "tenant_slug": a.slug, "email": a.email, "password": a.password})
 	try("platform token with a tenant slug", map[string]string{"token": w.bootstrapToken(plat), "tenant_slug": a.slug, "email": plat.email, "password": plat.password})
 	if w.auditCount(a, "staff.enrolment_token_rejected") < 2 {
 		t.Fatal("token-bound refusals must be audited")
@@ -485,12 +490,18 @@ func TestStaffMFA_SessionSealTamper(t *testing.T) {
 			if attrs := w.alertAttrs(kind, s.ref.StaffID); attrs["cause"] != auth.IntegrityCauseBadSeal || attrs["session_id"] != id.String() {
 				t.Fatalf("alert attributes: %v", attrs)
 			}
-			// (c) a valid session whose mfa_at is moved forward without re-sealing (SF040 admits the move; since review F9
-			// only the owner can write mfa_at, the runtime role gets 42501 - see (d)).
+			// (c) a valid session whose mfa_at is moved forward without re-sealing (SF040 admits the move; since ADR 0119
+			// S4b, migration 0151, the RUNTIME role holds the mfa_at grant again - the arbitrary-SQL forged step-up):
+			// the refresh fails the seal, and so does the session's access token at liveness (seal_invalid), so a
+			// forged step-up state is never honoured.
 			tok, id = w.plantSession(s, now, now.Add(12*time.Hour), now.Add(30*time.Minute), nil)
-			if err := w.ownerSessionExec(s, id, `UPDATE sessions SET mfa_at = mfa_at + interval '1 minute' WHERE id = $1`); err != nil {
+			if err := w.runtimeSessionExec(s, id, `UPDATE sessions SET mfa_at = mfa_at + interval '1 minute' WHERE id = $1`); err != nil {
 				t.Fatal(err)
 			}
+			before := w.reasonCount(observability.StaffLivenessReasonSealInvalid)
+			w.refusedFor(w.do(http.MethodGet, "/v1/staff/me/mfa", w.liveTok(s, id, func(p *auth.StaffTokenParams) {
+				p.AuthTime, p.MFAAt = staffmfa.SessionTime(now), staffmfa.SessionTime(now)
+			}), nil), observability.StaffLivenessReasonSealInvalid, before)
 			w.refresh(tok).want(t, http.StatusUnauthorized, "unauthorized")
 			if w.auditCount(s, "auth.session_assurance_invalid") != 2 {
 				t.Fatal("an edited mfa_at must fail the seal")
@@ -498,10 +509,15 @@ func TestStaffMFA_SessionSealTamper(t *testing.T) {
 			// (d) the runtime role cannot UPDATE an immutable assurance column (column-level grant: 42501) ...
 			_, id = w.plantSession(s, now, now.Add(12*time.Hour), now.Add(30*time.Minute), nil)
 			for _, col := range []string{"aal = 2", "amr = ARRAY['pwd']", "auth_time = now()", "absolute_expires_at = now() + interval '1 hour'", "expires_at = now()", "principal_id = gen_random_uuid()",
-				"mfa_at = now()", "assurance_seal = NULL, assurance_kid = NULL", "refresh_token_hash = 'x'"} {
+				"refresh_token_hash = 'x'"} {
 				if err := w.runtimeSessionExec(s, id, `UPDATE sessions SET `+col+` WHERE id = $1`); pgCode(err) != "42501" {
 					t.Fatalf("runtime UPDATE %s: want 42501, got %v", col, err)
 				}
+			}
+			// ... ADR 0119 S4b (0151): mfa_at and the seal are runtime-writable again, but SF040 still refuses nulling the
+			// seal for it (and a backwards mfa_at, TestSessions_SF040Matrix).
+			if err := w.runtimeSessionExec(s, id, `UPDATE sessions SET assurance_seal = NULL, assurance_kid = NULL WHERE id = $1`); pgCode(err) != "SF040" {
+				t.Fatalf("runtime UPDATE seal = NULL: want SF040, got %v", err)
 			}
 			// ... and even the owner cannot null the seal or move mfa_at backwards (SF040).
 			for _, set := range []string{"assurance_seal = NULL, assurance_kid = NULL", "mfa_at = mfa_at - interval '1 hour'"} {

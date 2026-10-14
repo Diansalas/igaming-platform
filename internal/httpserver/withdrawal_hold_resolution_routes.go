@@ -25,6 +25,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -159,6 +161,15 @@ func recordHoldResolutionDenied(ctx context.Context, deps Deps, c holdCall, op, 
 // writeHoldResolutionError maps payments.ClassifyHoldResolutionError to one fixed
 // closed-token body per class; every refusal also writes a denied audit row.
 func writeHoldResolutionError(ctx context.Context, deps Deps, w http.ResponseWriter, c holdCall, op string, err error, ids ...string) {
+	if errors.Is(err, db.ErrActorStaffNotLive) {
+		// ADR 0119 S4b section 9.5: the actor's own row was suspended or changed role before the A8 re-assertion;
+		// nothing was written.
+		c.logger.Warn("withdrawal_hold_resolution_actor_not_live", "op", op)
+		observability.RecordStaffReassertionRefusal(ctx, observability.StaffReassertionFlowHoldResolution)
+		recordHoldResolutionDenied(ctx, deps, c, op, "actor_not_live", "", ids...)
+		writeSessionRevoked(w, c.requestID)
+		return
+	}
 	class := payments.ClassifyHoldResolutionError(err)
 	token := payments.HoldResolutionToken(class)
 	switch class {

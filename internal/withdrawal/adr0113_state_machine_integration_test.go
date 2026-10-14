@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
@@ -136,7 +137,7 @@ func (w *a13World) at(t *testing.T, s State) WithdrawalRequest {
 	toApproved := func() {
 		toPending()
 		step(func(ctx context.Context, tx pgx.Tx) error {
-			ok, err := Approve(ctx, tx, wr.ID, w.approver, false, nil, alwaysEligible)
+			ok, err := Approve(ctx, tx, wr.ID, w.approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 			if err == nil && !ok {
 				err = errors.New("not approved")
 			}
@@ -358,7 +359,7 @@ func (w *a13World) legalEdge(t *testing.T, from, to State) (bool, error) {
 		case edge{StateRequested, StateCancelled}:
 			return Cancel(ctx, tx, wr.ID)
 		case edge{StatePendingReview, StateApproved}:
-			_, err := Approve(ctx, tx, wr.ID, w.approver, false, nil, alwaysEligible)
+			_, err := Approve(ctx, tx, wr.ID, w.approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 			return err
 		case edge{StatePendingReview, StateRejected}:
 			return Reject(ctx, tx, wr.ID, w.approver, "a13_rejected", alwaysEligible)
@@ -1050,7 +1051,7 @@ func TestADR0113_ConcurrentEdgeRaces(t *testing.T) {
 			map[State]bool{StateCancelled: true, StatePendingReview: true}},
 		{"Approve vs Reject", StatePendingReview,
 			func(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-				_, err := Approve(ctx, tx, id, w.approver, false, nil, alwaysEligible)
+				_, err := Approve(ctx, tx, id, w.approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 				return err
 			},
 			func(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {

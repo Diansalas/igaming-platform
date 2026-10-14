@@ -53,6 +53,17 @@ See "Amendment A8" at the end of this file. The manual-adjustment order is
 `IMPLEMENTED` by K2 (`internal/adjustment/execute.go`, migration 0113); the
 M1/M2 orders are K3's and NOT IMPLEMENTED until K3 lands.
 
+**Amended 2026-10-13 — Amendment A9 (ADR 0119 S4b, section 9.5).** The A8 staff
+`FOR SHARE` statement also re-asserts the ACTING staff member: the actor's own
+id joins the ascending-id A8 set, and its row must be `active` at the verified
+token's role. No new lock class, no new exception, no new position. See
+"Amendment A9" at the end of this file. Status: `IMPLEMENTED` on the unmerged
+S4b branch for K2, K3/M4 and HSEC final approvals and the withdrawal approve
+eligibility read; withdrawal submit / resolve, K1 approve / revoke, the
+staff-lifecycle flows and the `staff_actor_self_*` policy pair `NOT IMPLEMENTED`
+(see A9). Pending `ledger-finance`
+(mandatory) and `architect` sign-off.
+
 ## Context
 
 ### The reported defect
@@ -1875,4 +1886,83 @@ tenant and acting sessions; real contention proven via
 Mutants "drop FOR SHARE (staff)", "drop FOR SHARE (grants)" and "drop the L2
 lock" are killed (`docs/plans/payment-readiness/evidence/prh2-k2-mutation-kill.txt`).
 **M1/M2 orders: NOT IMPLEMENTED** (K3, ADR 0101).
+
+## Amendment A9 — 2026-10-13 — ADR 0119 S4b (section 9.5): the scoped in-transaction staff re-assertion
+
+**Status: `IMPLEMENTED` on the unmerged S4b branch for the flows marked so below; PENDING `ledger-finance`
+(mandatory) and `architect` sign-off.** No new lock class, no new named exception, no new lock position.
+
+**1. Placement table (canonical).** The re-assertion runs only where the transaction moves value or changes
+authority and has a canonical L1 staff position:
+
+| Flow | Where | Its L1 predecessor | Statement | Status |
+|---|---|---|---|---|
+| K2 manual adjustment, final approval + execution (`adjustment.DecideInTx` step 4) | the existing A8 staff `FOR SHARE` | `ledger_adjustment_requests FOR UPDATE` | the A8 statement; the acting approver's id is added explicitly to the `ANY($1)` set | `IMPLEMENTED` (`lockStaffAndGrants`) |
+| K3 / M4 force resolution, final approval + execution | the existing A8 staff `FOR SHARE` | withdrawal or intent, then `payment_attempts`, then `payment_manual_resolutions FOR UPDATE` | the same | `IMPLEMENTED` (`lockResolutionStaffAndGrants`) |
+| HSEC hold resolution, final approval + execution | the existing A8 staff `FOR SHARE` | the withdrawal, then the attempts, then `withdrawal_hold_resolutions FOR UPDATE` | the same | `IMPLEMENTED` (`lockHoldResolutionStaffAndGrants`) |
+| Withdrawal `approve` | the approver eligibility read becomes `FOR SHARE` (`approverEligibilityCheckLocked`, called by `withdrawal.Approve` right after `lockRequestForUpdate`) | `withdrawal_requests FOR UPDATE` | that read, plus a role comparison | `IMPLEMENTED` |
+| Withdrawal `submit` / `resolve` | a new staff `FOR SHARE` after the flow's LAST L1 row (withdrawal, then `payment_attempts`), never right after the withdrawal row | | new statement | `NOT IMPLEMENTED` (S4b residual S4b-R3; request-level liveness + the existing DB guards cover them, ADR 0119 R13) |
+| K1 capability grant approve / revoke | a new staff `FOR SHARE` after `staff_capability_grant_requests FOR UPDATE` (or the grant row) | | new statement | `NOT IMPLEMENTED` (S4b-R3) |
+| Staff lifecycle execution (ADR 0119 10.4) | the actor's row `FOR SHARE`, ascending id with the target's row | `staff_lifecycle_requests FOR UPDATE` | new statement | `NOT IMPLEMENTED` (S5 + S6) |
+
+**2. Position.** The staff `FOR SHARE` stays at the A8 position: after every L1 row the flow takes, before L2/L3,
+and after any L0, L0.x or R0 lock. The actor's row joins the ascending-id A8 set (`WHERE id = ANY($1) ORDER BY id
+FOR SHARE`; a duplicate id in the array locks once). The comparison (`db.CheckActorStaffLive`: present, `active`,
+role equal to the token's; `staff_version` joins with migration 0139) happens on the rows the statement returned;
+a mismatch returns `db.ErrActorStaffNotLive`, the transaction rolls back (nothing written) and the HTTP layer
+answers `401 session_revoked`.
+
+**3. Visibility.** Every flow re-asserted here already sees the actor's own `staff_users` row in the session it
+runs in: K2 / K3 run in a tenant session for a tenant actor (the dual-scope policy) or in the acting session for the
+acting platform principal (the dual-scope policy admits platform rows when `app.tenant_id` is empty, and the 0112
+acting fence admits exactly the acting principal's id); HSEC is acting-only; withdrawal approve is tenant-scoped. So
+ADR 0119 section 9.5(b)'s `app.actor_staff_id` GUC and `staff_actor_self_*` policy pair are NOT built in S4b; they
+land with the first flow whose session hides the actor (K1 platform-scope approvals, the staff lifecycle; ADR 0119
+S4b-R3). Because the actor already approved in this transaction (the approval insert precedes the A8 statement), its
+id was already in the A8 set through `decided_by`; adding it explicitly makes the re-assertion independent of that.
+
+**4. Writers.** A suspension transaction locks exactly one `staff_users` row (plus `sessions` and append-only rows;
+ADR 0119 section 9.5 two-transaction phasing, S5 + S6). A single-row writer cannot form a cycle with share lockers
+that each follow one canonical order. The cost is writer starvation under human traffic, not deadlock.
+
+**5. What changes.** For K2, K3/M4 and HSEC no lock is added or moved: the actor's row was already locked by the
+existing A8 statement through `decided_by`. **Withdrawal approve DOES add a share lock:** its eligibility read of the
+approver's own `staff_users` row was a plain read and becomes `FOR SHARE`, at the read's existing position (after
+`lockRequestForUpdate`, the flow's L1 row; the A8 position). A concurrent suspension or role change of that approver
+now waits for the approval transaction (both orders tested). What is new everywhere is the COMPARISON: a suspension or
+role change of the acting approver committed after the request lock and before the A8 statement is now refused
+(`db.ErrActorStaffNotLive`, Warn log + `staff_reassertion_refusals_total{flow}`) instead of being left to the recount's
+live grant / person checks and the DB status guards. The recount semantics are unchanged.
+
+**6. Writer starvation bound.** A suspension's T2 (the single `staff_users` row write, ADR 0119 section 9.5
+two-transaction phasing) runs with a `lock_timeout`. An execution that holds its A8 share locks longer than that
+timeout makes T2 fail `55P03` (S5 + S6 answer `lifecycle_busy` with the sessions already revoked by T1) while the
+execution still commits cleanly: no deadlock and no partial money outcome
+(`TestS4b_K3_ExecutionHoldingA8_T2LockTimeoutIs55P03_ExecutionCommits`).
+
+**HARD GATE (ledger-finance review of S4b; architect / orchestrator must enforce).** The section 9.5 re-assertion for
+withdrawal `submit` and for K1 grant `approve` / `revoke` MUST merge WITH OR BEFORE the first production writer of a
+staff suspension or role change (ADR 0119 S5 + S6). Until then no production code path suspends staff or changes a role
+mid-session, so the windows are latent. Shape, for the record:
+- **Withdrawal submit:** a new staff `FOR SHARE` inside the `ClaimForDispatch` transaction, after `payment_attempts`
+  (the flow's last L1 row). Submit's window is WIDER than R13: its eligibility check commits in a separate transaction
+  BEFORE `ClaimForDispatch`, possibly with a KYC-gate provider call in between, so a suspension can land between the
+  check and the dispatch claim.
+- **K1 approve / revoke:** a new staff `FOR SHARE` at the A8 position; K1 runs in a platform session that hides a
+  tenant actor's row and the acting principal's own row under `WithTenant(target)`, so it needs ADR 0119 section
+  9.5(b)'s `app.actor_staff_id` GUC and `staff_actor_self_*` policy pair, built in the same change.
+- Withdrawal `resolve` follows the same rule if it gains a production staff path that moves value.
+
+**Tests:** `TestS4b_K2_ActorChangedBeforeA8_IsRefusedAndNothingWritten` (tenant / acting, suspension and role change
+committed between the request lock and the A8 statement: nothing written), `TestS4b_K2_ApprovalHoldingA8_SuspensionOfTheActorWaits`
+(tenant / acting), `TestS4b_K3_ActorSuspendedBeforeA8_IsRefusedAndNothingWritten`,
+`TestS4b_HSEC_PlatformActorReasserted_BothOrders`, `TestStepUp_WithdrawalApprove_EligibilityHoldsTheApproverRowForShare`,
+`TestStepUp_WithdrawalApprove_ReassertsRoleInTransaction`; from the ledger-finance review:
+`TestS4b_K3_ActingActorSuspendedBeforeA8_IsRefusedAndNothingWritten`,
+`TestS4b_K3_TenantActorRoleChangedBeforeA8_IsRefusedAndNothingWritten`,
+`TestS4b_K3_ExecutionHoldingA8_SuspensionWaits_BothFamilies`,
+`TestS4b_K3_ExecutionHoldingA8_T2LockTimeoutIs55P03_ExecutionCommits`,
+`TestStepUp_WithdrawalApprove_ReassertionBothOrders_RealApprove` (through the real `withdrawal.Approve`); the existing B-7 / Y07 / HSEC concurrency tests pass
+unchanged. Mutants R01, R03, R04, R06-R09:
+`docs/plans/prh2-hardening-round/adr0119-s4b-mutation-kill.txt`.
 

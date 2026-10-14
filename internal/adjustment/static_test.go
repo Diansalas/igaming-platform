@@ -108,8 +108,10 @@ func TestB21_GuardCatchesPlant(t *testing.T) {
 var (
 	fromStaffOrPlayers = regexp.MustCompile(`(?i)\bFROM\s+(staff_users|player_accounts)\b`)
 	selectKeyword      = regexp.MustCompile(`(?i)\bSELECT\b`)
-	staffAllowedCols   = map[string]bool{"id": true, "tenant_id": true, "role": true, "status": true, "person_id": true}
-	playerAllowedCols  = map[string]bool{"id": true, "tenant_id": true, "person_id": true, "status": true}
+	// ADR 0099 A-19 as amended by ADR 0119 S4b (section 9.5(c)): staff_version is admitted in the A8 statements
+	// (the in-transaction re-assertion compares it once migration 0139 adds the column).
+	staffAllowedCols  = map[string]bool{"id": true, "tenant_id": true, "role": true, "status": true, "person_id": true, "staff_version": true}
+	playerAllowedCols = map[string]bool{"id": true, "tenant_id": true, "person_id": true, "status": true}
 )
 
 // a19Violations applies ADR 0099 §6.8 / A-19 column discipline to a

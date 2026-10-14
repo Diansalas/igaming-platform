@@ -43,6 +43,15 @@ const (
 	// StaffLivenessReasonClientCancelled: the request's context ended while the
 	// check ran (the client went away); outcome "error", never paged.
 	StaffLivenessReasonClientCancelled StaffLivenessReason = "client_cancelled"
+	// ADR 0119 S4b (conditions S3-R10, S3-R13, S4a-R10): liveness verifies the
+	// session row's keyed assurance seal (format v2) and its coherence, because
+	// the step-up gate takes mfa_at from that row. seal_invalid is tampering
+	// (paged through the refusal rule and logged at Error); seal_legacy is a
+	// genuine pre-S4b (v1) seal, retired by a re-login; assurance_incoherent is
+	// a sealed row whose amr names no second factor or whose times disagree.
+	StaffLivenessReasonSealInvalid         StaffLivenessReason = "seal_invalid"
+	StaffLivenessReasonSealLegacy          StaffLivenessReason = "seal_legacy"
+	StaffLivenessReasonAssuranceIncoherent StaffLivenessReason = "assurance_incoherent"
 )
 
 var staffLivenessDecisionsTotal, _ = staffLivenessMeter.Int64Counter(

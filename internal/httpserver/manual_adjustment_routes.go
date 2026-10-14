@@ -21,6 +21,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
@@ -167,6 +169,15 @@ func recordAdjustmentDenied(ctx context.Context, deps Deps, c adjustmentCall, op
 // writeAdjustmentError maps adjustment.ClassifyError to one fixed body per
 // class; a refusal also writes a denied audit row.
 func writeAdjustmentError(ctx context.Context, deps Deps, w http.ResponseWriter, c adjustmentCall, op string, err error) {
+	if errors.Is(err, db.ErrActorStaffNotLive) {
+		// ADR 0119 S4b section 9.5: the actor's own row was suspended or changed role before the A8 re-assertion;
+		// nothing was written.
+		c.logger.Warn("ledger_adjustment_actor_not_live", "op", op)
+		observability.RecordStaffReassertionRefusal(ctx, observability.StaffReassertionFlowManualAdjustment)
+		recordAdjustmentDenied(ctx, deps, c, op, "actor_not_live")
+		writeSessionRevoked(w, c.requestID)
+		return
+	}
 	class := adjustment.ClassifyError(err)
 	switch class {
 	case adjustment.ErrClassNotFound:

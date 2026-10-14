@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
@@ -70,7 +71,7 @@ func TestPaymentStatement_LivePayoutPath_AgainstWiredMockSource_NoMismatches(t *
 		if err := withdrawal.MoveToPendingReview(ctx, tx, wr.ID); err != nil {
 			return err
 		}
-		_, err = withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil)
+		_, err = withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil, auth.StepUpAssertion{})
 		return err
 	}); err != nil {
 		t.Fatalf("request/approve: %v", err)

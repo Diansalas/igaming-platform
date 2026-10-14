@@ -26,6 +26,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 )
 
 // Role is a coarse RBAC role. See permission.go for the permission sets
@@ -146,7 +148,24 @@ type StaffTokenParams struct {
 
 func (p StaffTokenParams) valid() bool {
 	return p.StaffID != uuid.Nil && p.SessionID != uuid.Nil && p.Role != "" && p.AAL == StaffAAL &&
-		len(p.AMR) > 0 && !p.AuthTime.IsZero() && !p.MFAAt.IsZero() && p.StaffVersion >= 0
+		len(p.AMR) > 0 && HasSecondFactorAMR(p.AMR) && !p.AuthTime.IsZero() && !p.MFAAt.IsZero() &&
+		!p.MFAAt.Before(p.AuthTime) && p.StaffVersion >= 0
+}
+
+// staffAssuranceTimesValid is condition S3-R13 (ADR 0119 S4b, before step-up
+// ships) on a staff token's times, at now: auth_time <= mfa_at <= now + skew
+// (whole seconds: the claims are NumericDates), and auth_time no older than the
+// longest admissible staff session (StaffSessionAbsoluteTTLBound.Max, 12 h; the
+// configured, possibly shorter, absolute expiry is enforced on the sealed
+// session row by liveness and refresh).
+func staffAssuranceTimesValid(authTime, mfaAt, now time.Time) bool {
+	if mfaAt.Before(authTime) {
+		return false
+	}
+	if mfaAt.After(now.Add(StepUpClockSkew)) || authTime.After(now.Add(StepUpClockSkew)) {
+		return false
+	}
+	return !authTime.Before(now.Add(-staffmfa.StaffSessionAbsoluteTTLBound.Max))
 }
 
 // Issuer signs and verifies platform JWTs using a KeyRegistry.
@@ -251,6 +270,13 @@ func (c *Claims) checkAssurance() error {
 	}
 	if len(c.AMR) == 0 || c.AuthTime == nil || c.MFAAt == nil || c.StaffVersion == nil || *c.StaffVersion < 0 {
 		return fmt.Errorf("%w: staff token without its assurance claims", ErrInvalidToken)
+	}
+	// S3-R13: amr names a second factor; auth_time <= mfa_at <= now + skew; auth_time within the absolute TTL bound.
+	if !HasSecondFactorAMR(c.AMR) {
+		return fmt.Errorf("%w: staff token amr names no second factor", ErrInvalidToken)
+	}
+	if !staffAssuranceTimesValid(c.AuthTime.Time, c.MFAAt.Time, time.Now()) {
+		return fmt.Errorf("%w: staff token assurance times are not coherent", ErrInvalidToken)
 	}
 	return nil
 }

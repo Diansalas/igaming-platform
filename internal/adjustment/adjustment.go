@@ -144,7 +144,10 @@ type Call struct {
 	ActorID  uuid.UUID
 	TenantID uuid.UUID
 	Scope    string
-	Meta     Meta
+	// ActorRole is the verified token's role (ADR 0119 S4b section 9.5: the
+	// A8 statement re-asserts the actor's row against it).
+	ActorRole string
+	Meta      Meta
 	// Proofs signs the SIGNED-ACTOR-PROOF (ADR 0110, migration 0120) for this
 	// call's governed writes. nil means the process-wide actorproof.Default().
 	Proofs *actorproof.Issuer
@@ -206,14 +209,14 @@ func (s *Service) runSession(ctx context.Context, target Target, requestID uuid.
 	}
 	if tc.TenantID == uuid.Nil {
 		return s.pool.WithPlatformActingInTenant(ctx, subject, target.tenantID, requestID, OperationKind, func(ctx context.Context, tx pgx.Tx) error {
-			return fn(ctx, tx, Call{ActorID: subject, TenantID: target.tenantID, Scope: ScopePlatformActing, Meta: meta, Proofs: s.proofs})
+			return fn(ctx, tx, Call{ActorID: subject, TenantID: target.tenantID, Scope: ScopePlatformActing, ActorRole: tc.Role, Meta: meta, Proofs: s.proofs})
 		})
 	}
 	if tc.TenantID != target.tenantID {
 		return ErrForeignTenant
 	}
 	return s.pool.WithPrincipalScope(ctx, tc.TenantID, subject, func(ctx context.Context, tx pgx.Tx) error {
-		return fn(ctx, tx, Call{ActorID: subject, TenantID: tc.TenantID, Scope: ScopeTenant, Meta: meta, Proofs: s.proofs})
+		return fn(ctx, tx, Call{ActorID: subject, TenantID: tc.TenantID, Scope: ScopeTenant, ActorRole: tc.Role, Meta: meta, Proofs: s.proofs})
 	})
 }
 
@@ -258,6 +261,9 @@ func ClassifyError(err error) ErrClass {
 		return ErrClassNone
 	case errors.Is(err, ErrNotFound), errors.Is(err, pgx.ErrNoRows):
 		return ErrClassNotFound
+	case errors.Is(err, db.ErrActorStaffNotLive):
+		// ADR 0119 S4b section 9.5: the HTTP layer answers 401 session_revoked before classifying.
+		return ErrClassSessionInvalid
 	case errors.Is(err, ErrForeignTenant), errors.Is(err, ErrNoAuthContext):
 		return ErrClassForbidden
 	case errors.Is(err, ErrNotPending), errors.Is(err, ErrAccountUnderReview):

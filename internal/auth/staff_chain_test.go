@@ -105,8 +105,10 @@ func TestMiddleware_AttachesStaffSessionForStaffTokensOnly(t *testing.T) {
 	issuer := testIssuer(t)
 	p := testStaffParams(uuid.New(), uuid.New(), RoleFinance)
 	p.StaffVersion = 3
-	p.AuthTime = time.Unix(1_800_000_000, 0)
-	p.MFAAt = time.Unix(1_800_000_060, 0)
+	// S4b (S3-R13): coherent times at verification.
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	p.AuthTime = base
+	p.MFAAt = base.Add(60 * time.Second)
 	staff, err := issuer.IssueStaff(p, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -123,8 +125,8 @@ func TestMiddleware_AttachesStaffSessionForStaffTokensOnly(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.Header.Set("Authorization", "Bearer "+staff)
 	h.ServeHTTP(httptest.NewRecorder(), req)
-	if !ok || got.SessionID != p.SessionID || got.AAL != StaffAAL || got.StaffVersion != 3 || got.AuthTime.Unix() != 1_800_000_000 ||
-		got.MFAAt.Unix() != 1_800_000_060 || len(got.AMR) != 2 {
+	if !ok || got.SessionID != p.SessionID || got.AAL != StaffAAL || got.StaffVersion != 3 || got.AuthTime.Unix() != base.Unix() ||
+		got.MFAAt.Unix() != base.Unix()+60 || len(got.AMR) != 2 {
 		t.Fatalf("staff session: %+v %v", got, ok)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/x", nil)

@@ -23,6 +23,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -167,6 +169,15 @@ func recordResolutionDenied(ctx context.Context, deps Deps, c resolutionCall, op
 // writeResolutionError maps payments.ClassifyResolutionError to one fixed
 // closed-token body per class; every refusal also writes a denied audit row.
 func writeResolutionError(ctx context.Context, deps Deps, w http.ResponseWriter, c resolutionCall, op string, err error, ids ...string) {
+	if errors.Is(err, db.ErrActorStaffNotLive) {
+		// ADR 0119 S4b section 9.5: the actor's own row was suspended or changed role before the A8 re-assertion;
+		// nothing was written.
+		c.logger.Warn("payment_force_resolution_actor_not_live", "op", op)
+		observability.RecordStaffReassertionRefusal(ctx, observability.StaffReassertionFlowForceResolution)
+		recordResolutionDenied(ctx, deps, c, op, "actor_not_live", "", ids...)
+		writeSessionRevoked(w, c.requestID)
+		return
+	}
 	class := payments.ClassifyResolutionError(err)
 	token := payments.ResolutionToken(class)
 	switch class {

@@ -230,12 +230,18 @@ func TestStaffLiveness_RefusalMatrix(t *testing.T) {
 			}
 
 			// Past the absolute lifetime (database clock): a sealed session planted with an absolute expiry in the past.
+			// ADR 0119 S4b (S3-R13): the token's auth_time must lie within the 12 h bound for the token to verify at
+			// all, so the planted session has a one-hour absolute lifetime that ended an hour ago; a token whose
+			// auth_time is older than 12 h is refused by the verifier itself (401 unauthorized, before liveness).
 			s, _ = enrolled()
 			n = w.reasonCount(observability.StaffLivenessReasonAbsoluteExpired)
-			past := time.Now().Add(-13 * time.Hour)
-			_, sid := w.plantSession(s, past, past.Add(12*time.Hour), past.Add(30*time.Minute), nil)
+			past := time.Now().Add(-2 * time.Hour)
+			_, sid := w.plantSession(s, past, past.Add(time.Hour), past.Add(30*time.Minute), nil)
 			w.refusedFor(me(w.liveTok(s, sid, func(p *auth.StaffTokenParams) { p.AuthTime, p.MFAAt = past, past })),
 				observability.StaffLivenessReasonAbsoluteExpired, n)
+			older := time.Now().Add(-13 * time.Hour)
+			_, oldSid := w.plantSession(s, older, older.Add(12*time.Hour), older.Add(30*time.Minute), nil)
+			me(w.liveTok(s, oldSid, func(p *auth.StaffTokenParams) { p.AuthTime, p.MFAAt = older, older })).want(t, http.StatusUnauthorized, "unauthorized")
 		})
 	}
 }
@@ -510,7 +516,7 @@ func TestStaffLiveness_QueryPlanAndLatency(t *testing.T) {
 		var d []time.Duration
 		for i := 0; i < 300; i++ {
 			start := time.Now()
-			reason, err := checkStaffLiveness(context.Background(), w.rt, s.ref.TenantID, s.ref.StaffID, sess, auth.Role(role))
+			reason, _, err := checkStaffLiveness(context.Background(), w.rt, testStaffMFA(), s.ref.TenantID, s.ref.StaffID, sess, auth.Role(role))
 			d = append(d, time.Since(start))
 			if err != nil || reason != observability.StaffLivenessReasonOK {
 				t.Fatalf("check %d: %v %s", i, err, reason)

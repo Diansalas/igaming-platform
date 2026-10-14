@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
@@ -694,6 +695,39 @@ func approverEligibilityCheck(ctx context.Context, tx pgx.Tx) withdrawal.Approve
 	}
 }
 
+// approverEligibilityCheckLocked is approverEligibilityCheck for the
+// withdrawal APPROVE decision, with ADR 0119 section 9.5's scoped
+// in-transaction staff re-assertion: the approver's own staff_users row is read
+// FOR SHARE (withdrawal.Approve calls it right after lockRequestForUpdate, the
+// flow's L1 withdrawal row, so it sits at the A8 position; the route is
+// tenant-scoped, so the approver's own row is visible), and its role is compared
+// with the verified token's. A suspension committed first is seen here (active = false,
+// ErrApproverInactive as before); a role change is db.ErrActorStaffNotLive (401
+// session_revoked). A suspension that starts later waits for this transaction.
+// staff_version joins the comparison with migration 0139 (every row is version
+// 0 until then).
+func approverEligibilityCheckLocked(ctx context.Context, tx pgx.Tx, actor uuid.UUID, tokenRole string) withdrawal.ApproverEligibility {
+	return func(approverPrincipalID uuid.UUID) (linked, active bool, err error) {
+		if approverPrincipalID != actor {
+			return false, false, fmt.Errorf("httpserver: approver eligibility: the approver is not the authenticated actor")
+		}
+		var personID *uuid.UUID
+		var status, role string
+		err = tx.QueryRow(ctx, `SELECT person_id, status, role FROM staff_users WHERE id = $1 FOR SHARE`, approverPrincipalID).
+			Scan(&personID, &status, &role)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, false, nil
+		}
+		if err != nil {
+			return false, false, fmt.Errorf("httpserver: approver eligibility lookup: %w", err)
+		}
+		if status == "active" && role != tokenRole {
+			return false, false, db.ErrActorStaffNotLive
+		}
+		return personID != nil, status == "active", nil
+	}
+}
+
 type approveWithdrawalResponse struct {
 	Approved bool `json:"approved"`
 }
@@ -769,7 +803,12 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 				return isBeneficiary, err
 			}
 			var err error
-			approved, err = withdrawal.Approve(ctx, tx, id, approverID, false, beneficiaryCheck, approverEligibilityCheck(ctx, tx))
+			// ADR 0119 S4b: the route gate's step-up assertion feeds the policy's 2 min require_step_up rule (section
+			// 9.3), and the approver's own staff row is re-asserted FOR SHARE, after the withdrawal FOR UPDATE, against
+			// the token's role (section 9.5).
+			stepUp, _ := auth.StepUpAssertionFrom(ctx)
+			approved, err = withdrawal.Approve(ctx, tx, id, approverID, false, beneficiaryCheck,
+				approverEligibilityCheckLocked(ctx, tx, approverID, tc.Role), stepUp)
 			if err != nil {
 				return err
 			}
@@ -812,10 +851,18 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if errors.Is(err, withdrawal.ErrStepUpRequired) {
-			// Stage 3C directive item 6: the resolved policy requires a
-			// step-up/MFA challenge this platform cannot yet perform
-			// (ADR 0017) - fail closed rather than silently approve.
-			apierror.Write(w, requestID, apierror.CodeForbidden, "this withdrawal requires a step-up/MFA challenge that is not yet available")
+			// ADR 0119 S4b (section 9.3): the policy's require_step_up needs a step-up within 2 minutes. Nothing was
+			// recorded (the transaction rolled back), so the client's single re-send after a step-up is safe.
+			auth.WriteStepUpRequired(w, requestID, auth.StepUpPolicyMaxAge)
+			return
+		}
+		if errors.Is(err, db.ErrActorStaffNotLive) {
+			// ADR 0119 S4b (section 9.5): the approver's own row changed role between the request's liveness check and
+			// the transaction's FOR SHARE re-assertion. Nothing was recorded. Warn + metric (ledger-finance review).
+			observability.LoggerFromContext(r.Context(), deps.Logger).Warn("withdrawal_approve_actor_not_live",
+				"withdrawal_id", id.String())
+			observability.RecordStaffReassertionRefusal(r.Context(), observability.StaffReassertionFlowWithdrawalApprove)
+			writeSessionRevoked(w, requestID)
 			return
 		}
 		if err != nil {

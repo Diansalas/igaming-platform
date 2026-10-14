@@ -41,6 +41,9 @@ type StaffMFA struct {
 	accessTTL   time.Duration
 	idleTTL     time.Duration
 	absoluteTTL time.Duration
+	// stepUp is the step-up class max-age policy (ADR 0119 S4b, section 7.4):
+	// the defaults unless SetStepUpPolicy tightened them.
+	stepUp auth.StepUpPolicy
 
 	// commitFault, when set (tests in this package only), runs at the very end
 	// of every second-factor transaction closure, after every write and before
@@ -71,7 +74,20 @@ func NewStaffMFA(keys *staffmfa.Keys, issuer string, accessTTL, idleTTL, absolut
 	if err != nil {
 		return nil, err
 	}
-	return &StaffMFA{keys: keys, factor: factor, store: st, accessTTL: accessTTL, idleTTL: idleTTL, absoluteTTL: absoluteTTL}, nil
+	return &StaffMFA{keys: keys, factor: factor, store: st, accessTTL: accessTTL, idleTTL: idleTTL, absoluteTTL: absoluteTTL,
+		stepUp: auth.DefaultStepUpPolicy()}, nil
+}
+
+// SetStepUpPolicy installs the configured step-up max-ages
+// (STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS / _FINANCIAL_, already bounded by
+// config.Load). A value outside the section 7.4 bounds is refused.
+func (m *StaffMFA) SetStepUpPolicy(critical, financial time.Duration) error {
+	p := auth.StepUpPolicy{Critical: critical, Financial: financial}
+	if !p.Valid() {
+		return fmt.Errorf("httpserver: step-up max-ages out of bounds")
+	}
+	m.stepUp = p
+	return nil
 }
 
 // sessionPolicy is the staff rotation policy of RotateSessionWithPolicy.
@@ -246,7 +262,7 @@ func failurePatternAlert(ctx context.Context, tx pgx.Tx, staff staffmfa.StaffRef
 	var days int
 	if err := tx.QueryRow(ctx, `SELECT count(DISTINCT date_trunc('day', created_at AT TIME ZONE 'UTC'))
 		FROM audit_log
-		WHERE actor_type = 'staff' AND actor_id = $1 AND action = 'staff.mfa_verification_failed'
+		WHERE actor_type = 'staff' AND actor_id = $1 AND action IN ('staff.mfa_verification_failed', 'staff.step_up_failed')
 		  AND created_at > now() - $2::interval`, staff.StaffID, failurePatternWindow).Scan(&days); err != nil {
 		return nil, fmt.Errorf("httpserver: count second-factor failure days: %w", err)
 	}

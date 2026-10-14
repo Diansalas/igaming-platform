@@ -22,8 +22,10 @@ func TestIssue_RefusesStaffPrincipal(t *testing.T) {
 func TestIssueStaff_RoundTripsTheAssuranceClaims(t *testing.T) {
 	issuer := testIssuer(t)
 	p := testStaffParams(uuid.New(), uuid.New(), RoleCompliance)
-	p.AuthTime = time.Unix(1_800_000_000, 0)
-	p.MFAAt = time.Unix(1_800_000_100, 0)
+	// S4b (S3-R13): the times must be coherent at verification (past, auth_time <= mfa_at, within 12 h).
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	p.AuthTime = base
+	p.MFAAt = base.Add(100 * time.Second)
 	p.StaffVersion = 7
 	tok, err := issuer.IssueStaff(p, 15*time.Minute)
 	if err != nil {
@@ -35,7 +37,7 @@ func TestIssueStaff_RoundTripsTheAssuranceClaims(t *testing.T) {
 	}
 	if c.Subject != p.StaffID.String() || c.TenantID != p.TenantID || c.Role != RoleCompliance || c.PrincipalType != PrincipalStaff ||
 		c.SessionID != p.SessionID.String() || c.AAL != StaffAAL || len(c.AMR) != 2 || c.AMR[0] != "pwd" || c.AMR[1] != "otp" ||
-		c.AuthTime.Unix() != 1_800_000_000 || c.MFAAt.Unix() != 1_800_000_100 || c.StaffVersion == nil || *c.StaffVersion != 7 {
+		c.AuthTime.Unix() != base.Unix() || c.MFAAt.Unix() != base.Unix()+100 || c.StaffVersion == nil || *c.StaffVersion != 7 {
 		t.Fatalf("claims: %+v", c)
 	}
 	if got := c.ExpiresAt.Sub(c.IssuedAt.Time); got != 15*time.Minute {

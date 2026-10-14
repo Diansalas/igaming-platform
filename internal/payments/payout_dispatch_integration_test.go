@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
@@ -148,7 +149,7 @@ func approvedWithdrawal(t *testing.T, pool *db.Pool, f payoutFixture, amount int
 		t.Fatalf("move to pending review: %v", err)
 	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil)
+		approved, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}

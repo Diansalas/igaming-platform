@@ -624,6 +624,87 @@ paths:
         "503":
           $ref: "#/components/responses/StaffAuthUnavailable"
 
+  /v1/staff/auth/step-up:
+    post:
+      tags: [staff-auth]
+      summary: Step-up - verify a fresh TOTP code and receive a new access token
+      description: >
+        ADR 0119 section 6.6 (slice S4b). Bearer staff access token through the full staff chain (liveness, aal2).
+        Verifies a 6-digit TOTP code against the caller's own active factor with the same replay rule and the same
+        failure counters as login (5 failures in 15 minutes soft-lock the factor; 10 in 24 hours hard-lock it).
+        Recovery codes are NOT accepted. On success the session row (it must be the newest link of its rotation chain,
+        not revoked) gets mfa_at = now and a new keyed seal, and a NEW ACCESS TOKEN is returned with mfa_at = now; the
+        refresh token does not change. Five failed step-ups on the same session within 15 minutes revoke the session
+        (that answer is session_revoked). Rate bucket `mfa` (30 per IP per minute). Responses carry no-store.
+        A client MUST NEVER auto-retry or double-submit this request: a duplicate submission of a valid code is a
+        replay and counts as a failure on the shared counter (five lock the factor and revoke the session).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StepUpRequest"
+      responses:
+        "200":
+          description: Stepped up; replace the access token
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StepUpResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: >
+            invalid_mfa_code (wrong, malformed or already-used code; the failure was counted against the factor),
+            session_revoked (the session is no longer live, the token is not the session's newest link, or five failed
+            step-ups revoked it) or unauthorized (missing / invalid bearer token).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/StaffAuthForbidden"
+        "429":
+          $ref: "#/components/responses/StaffMfaRateLimited"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
+  /v1/staff/mfa/recovery-codes/regenerate:
+    post:
+      tags: [staff-auth]
+      summary: Replace the caller's recovery codes (step-up critical)
+      description: >
+        ADR 0119 sections 6.2 and 14.1 (slice S4b). Bearer staff access token through the full staff chain, step-up
+        class critical. Own account only (the subject comes from the token). Revokes every unconsumed recovery code of
+        the caller and returns 10 new ones exactly once (no-store). No request body.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The new recovery codes (shown once)
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryCodesRegenerateResponse"
+        "401":
+          description: session_revoked (the staff session is no longer live) or unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/StepUpRequired"
+        "503":
+          $ref: "#/components/responses/StaffAuthUnavailable"
+
   # --- Tenant/brand/staff administration ---
   /v1/admin/tenants:
     get:
@@ -8660,9 +8741,22 @@ components:
         503 `service_unavailable` when the check cannot run (fail closed).
         A client answers `session_revoked` by signing in again. A staff
         token without aal2 assurance claims, or with a role outside the
-        closed staff role set, is 401 `unauthorized`. The step-up class of
-        each route is recorded (none / financial / critical) but not
-        enforced before S4b.
+        closed staff role set, is 401 `unauthorized`.
+
+
+        ADR 0119 S4b (step-up): every staff route has a step-up class
+        (none / financial / critical, or a named per-request classifier;
+        internal/httpserver/staff_route_golden_test.go). A route of class
+        financial (default 600 s) or critical (default 300 s) answers 403
+        `step_up_required` with `max_age` (seconds) and the RFC 9470 header
+        `WWW-Authenticate: Bearer error="insufficient_user_authentication",
+        max_age="N"` when the caller's last second-factor verification (the
+        older of the token's mfa_at and the sealed session row's) is older
+        than the class allows; nothing was written. The step-up gate runs
+        BEFORE the route's own permission gate. Obtain a fresh token at
+        POST /v1/staff/auth/step-up and re-send the request once. A
+        withdrawal approval under a policy with require_step_up needs a
+        step-up within 120 s (same 403, max_age 120).
         This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
         see docs/architecture/05-identity-architecture.md.
   schemas:
@@ -9348,6 +9442,43 @@ components:
         email: { type: string, format: email }
         password: { type: string, format: password, description: The staff member's CURRENT password }
       required: [token, email, password]
+    StepUpRequest:
+      type: object
+      properties:
+        code: { type: string, description: The 6-digit TOTP code (digits only; recovery codes are not accepted) }
+      required: [code]
+    StepUpResponse:
+      type: object
+      x-sensitive: true
+      description: >
+        A new access token carrying mfa_at = now (no refresh token: the refresh token does not change). Keep it in
+        memory only, never log it.
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Access token lifetime in seconds }
+        mfa_at: { type: string, format: date-time, description: The verified step-up instant (database clock) }
+        step_up_expires_at:
+          type: object
+          description: When this step-up stops satisfying each class (mfa_at + the class max-age)
+          properties:
+            financial: { type: string, format: date-time }
+            critical: { type: string, format: date-time }
+          required: [financial, critical]
+      required: [access_token, token_type, expires_in, mfa_at, step_up_expires_at]
+    RecoveryCodesRegenerateResponse:
+      type: object
+      x-sensitive: true
+      description: >
+        Shown exactly once (no-store). Every earlier unconsumed recovery code was revoked. Never keep the codes in
+        application state or localStorage after leaving the page.
+      properties:
+        recovery_codes:
+          type: array
+          minItems: 10
+          maxItems: 10
+          items: { type: string, description: "XXXXX-XXXXX (Crockford base32)" }
+      required: [recovery_codes]
     StaffMfaStatus:
       type: object
       properties:
@@ -11017,8 +11148,14 @@ components:
             - invalid_enrolment_token
             - mfa_enrolment_expired
             - session_revoked
+            - step_up_required
         message:
           type: string
+        max_age:
+          type: integer
+          description: >
+            Set only with `step_up_required` (ADR 0119 S4b): the step-up freshness the refused action needs, in
+            seconds (300 critical, 600 financial, 120 withdrawal policy by default).
         request_id:
           type: string
         check_codes:
@@ -11262,6 +11399,19 @@ components:
               type: array
               items: { $ref: "#/components/schemas/RGFloorRequest" }
   responses:
+    StepUpRequired:
+      description: >
+        403 step_up_required (ADR 0119 S4b): the caller's last second-factor verification is older than the route's
+        step-up class allows (or, for 403 forbidden, the caller lacks the permission). Nothing was written. Obtain a
+        fresh access token at POST /v1/staff/auth/step-up and re-send the original request exactly once.
+      headers:
+        WWW-Authenticate:
+          description: 'RFC 9470: Bearer realm="platform-api", error="insufficient_user_authentication", error_description="...", max_age="N"'
+          schema: { type: string }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     StaffAuthForbidden:
       description: >
         403. One closed code: mfa_enrolment_required (the password is right but the account has no active second

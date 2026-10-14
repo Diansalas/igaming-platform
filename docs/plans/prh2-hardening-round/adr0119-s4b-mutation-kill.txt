@@ -1,0 +1,121 @@
+ADR 0119 S4b mutation pass (kill-or-justify), 2026-10-13
+=========================================================
+
+Driver: docs/plans/prh2-hardening-round/adr0119-s4b-mutation-driver.py
+  python3 -I adr0119-s4b-mutation-driver.py <log> [--check] [ID ...]   (env MUT_WT = tree copy, MUT_DB = private database)
+Each mutant: apply one textual change in a COPY of the branch tree (git archive HEAD, no .git), run the named package with
+  -tags integration -p 1 -count=1 -run <regex>
+as igaming_runtime against a PRIVATE database (priv_test.sh, database s4b_aa30_mut), then write the original file back.
+The SQL mutant (P03, migrations/0151) rebuilds the private database from the mutated migration and again from the
+restored one afterwards. The main worktree and its test databases were never mutated.
+
+Totals (final driver, 59 mutants; three passes, each on a fresh `git archive` of the then-current branch head):
+  KILLED 57, SURVIVED 2 (justified below: H02a, R09), ERROR 0.
+ADR 0119 section 17.8 rows owned by S4b:
+  "RequireStepUp uses the token iat / claims instead of the sealed mfa_at"  = G01, G02  KILLED
+  "signer backstop removed"                                               = B01, B01h KILLED
+  "FOR SHARE re-assertion removed"                                        = R01, R03, R04, R06 KILLED
+  "step-up writes a non-head row"                                         = H02b KILLED, H02a justified
+  "seal does not bind refresh hash / idle expiry"                         = SE01, SE02, SE05 KILLED
+
+Mutant key
+----------
+S01-S03  freshness rule: +1 min window; future skew ignored; assertion subject ignored
+G01/G02  gate uses the claim only / never takes the older of claim and sealed row
+G03      gate max-age + 10 min
+G04      regenerate route registered financial instead of critical
+G05      every non-critical static class treated as none
+G06      a classifier verdict of none no longer passes the request through unchecked
+G07      the gate does not place the assertion in the context
+G08      the gate passes without a verified live assurance
+C01-C08  the four classifiers: launch any action as none; policy author never critical; p1 severity not critical;
+         staff.* prefix dropped; unknown alert none; RG null removal not critical; body not restored for the handler;
+         tenant / non-manage caller not short-circuited
+H01      step-up writes the OLD mfa_at
+H02a     revoked / replaced not checked after the FOR UPDATE read (absolute expiry still checked)
+H02b     revoked / replaced / absolute expiry not checked after the FOR UPDATE read
+H03      the row's v2 seal not verified before re-sealing
+H04-H08  lockout: no chain revocation when the factor locks; soft / hard lock not treated as locked; no-store dropped;
+         revocation without the session internal-op id; locked outcome branch removed
+V01-V04  S3-R13 tokens: amr without a second factor; mfa_at < auth_time; future claims; auth_time age bound x100
+L01-L04  liveness: seal not verified; coherence reduced to aal; legacy seal not distinguished; empty assurance handed on
+SE01-SE05 seal v2: refresh hash unbound; idle expiry unbound; v1 MAC for new seals; legacy reported as tampering;
+         wrong refresh hash sealed at refresh
+B01/B01h backstop removed from Attach (unit / over HTTP)
+B02-B06  registry entry dropped; propose exemption for any scope; critical bound = financial bound; fallback applies to
+         staff HTTP requests; freshness not checked (presence only)
+W01-W03  withdrawal policy 10 min instead of 2; automated decision satisfies it; plain 403 without step_up_required
+R01/R03/R04 the 9.5 comparison dropped in K2 / K3 / HSEC (the A8 rows are still locked)
+R06      withdrawal approve eligibility read without FOR SHARE
+R07      withdrawal approve role comparison dropped
+R08      CheckActorStaffLive ignores status
+R09      K2: the acting approver's id not added explicitly to the A8 set
+P03      migration 0151 without the column grant
+
+Pass 1 (64 mutants, tree before the GUC removal; log scratch mut_run1.txt)
+------
+KILLED 47: S01 S02 S03 G01-G08 C03-C08 H01 H04 H05 H06 H08 V01 V02 V03 L01 L02 L03 SE01-SE04 B01 B01h B02-B05 W01-W03
+           R01 R03 R04 R08 P01 P03
+SURVIVED 8: H02a H02b L05 SE05 R02 R09 P02 (+ R05, see below)
+ERROR (build) 10: C01 C02 H03 H07 V04 L04 B06 R05 R06 R07 (mutant text left an unused variable / import: driver bugs,
+           not code properties; each mutant rewritten to compile and re-run in pass 2 / 3)
+Dispositions after pass 1:
+  L05     removed: a no-op (the replacement equalled the original after gofmt).
+  SE05    the -run regex selected the wrong test (refresh path); regex fixed -> pass 2.
+  R02, R05, P01, P02  the app.actor_staff_id GUC, its setter and the staff_actor_self_* policy pair. R02 / R05 / P02
+          survived because they are EQUIVALENT: in every re-asserted flow the actor's own staff_users row is already
+          visible (tenant session: dual-scope policy; acting session: app.tenant_id is empty, so the dual-scope policy
+          admits platform rows and the 0112 acting fence admits the acting principal) and already in the A8 set
+          through decided_by. ADR 0119 section 9.5(b) builds them "only if required": they were REMOVED from the code,
+          migration 0151 and the tests (ADR 0119 D14, S4b-R3; ADR 0082 A9 items 3-5 rewritten). The four mutants were
+          removed with them.
+
+Pass 2 (18 mutants, tree after the GUC removal; log scratch mut_run2.txt)
+------
+KILLED 12: C01 C02 H07 V04 SE05 R01 R03 R04 R06 R07 R08 P03
+SURVIVED 4: H02a H02b H03 R09
+ERROR (build) 2: L04 B06 (still an unused variable; rewritten)
+H02b / H03: over HTTP the liveness gate refuses an absolute-expired session and a bad seal BEFORE the step-up handler
+  runs, so these guards were reachable only in the race window. New test TestStepUpStaffSession_DirectRefusals calls
+  auth.StepUpStaffSession directly as igaming_runtime (tampered seal; now = absolute expiry and +1 s; revoked;
+  another staff member's session; control case) -> pass 3.
+
+Pass 3 (5 mutants, branch head eab4987; log scratch mut_run3.txt)
+------
+KILLED 4: H02b (TestStepUpStaffSession_DirectRefusals), H03 (same), L04 (TestStepUp_GoldenTable_EveryClassifiedRoute),
+          B06 (TestCheckStepUp_Matrix)
+SURVIVED 1: H02a
+
+Justified survivors
+-------------------
+H02a  Dropping the revoked / replaced check after the FOR UPDATE read is caught by the second, independent guard: the
+      UPDATE is `WHERE id = $1 AND revoked_at IS NULL AND replaced_by_session_id IS NULL`, so a revoked or replaced row
+      updates 0 rows and StepUpStaffSession returns ErrStepUpNotChainHead (fail closed) - the same observable result.
+      Both guards are kept deliberately (defence in depth); the test exercises the behaviour (revoked row refused,
+      untouched), which no single-guard mutant can change. Equivalent by construction.
+R09   The acting approver's id is added explicitly to the K2 A8 set. Its approval row is inserted earlier in the same
+      transaction, so its id is already in the set through decided_by; removing the explicit id is equivalent today.
+      Kept so the re-assertion does not depend on the order of the approval insert (ADR 0082 A9 item 3).
+
+Not re-run on the final head: the pass-1 KILLED mutants outside the re-assertion (S, G, C03-C08, H01/H04-H06/H08,
+V01-V03, L01-L03, SE01-SE04, B01-B05, W01-W03). Their target code did not change after pass 1 (the GUC removal touched
+internal/db/actor_staff.go, internal/adjustment, internal/payments, internal/httpserver/withdrawal_handlers.go and
+migration 0151, whose mutants R01-R09 / P03 were re-run in pass 2; the only other later code change is c298a23, which
+deleted the unused staffmfa message() helper); every killing test passes on the final head.
+
+Review round (security live + ledger-finance, 2026-10-14; logs scratch mut_run4.txt / mut_run5.txt)
+------------
+New mutants (driver now 65; a package prefixed "unit:" runs WITHOUT the integration tag):
+AR01     alertRouteManageClass never answers none (critical for every caller)      KILLED (TestClassifiers_DecisionsAndBodyDiscipline,
+         TestStepUp_AlertRouteCreate_UnauthorisedProbingKeepsTheAuditedRefusal; first attempt was a build error - rewritten)
+AR02     alertRouteManageClass never answers critical                             KILLED (same + TestStepUp_GoldenTable_EveryClassifiedRoute)
+AR03     POST /v1/admin/alerting/routes registered static critical again           KILLED (TestStaffRoutes_GoldenClassification, AlertRouteCreate)
+FB01     production half of the fallback split returns true (unit build)          KILLED (TestAttach_BackstopRefusesBeforeAnyWrite,
+         TestCheckStepUp_Matrix; TestStatic_StepUpBackstopPins also fails on it, checked by hand)
+WB01     withdrawal require_step_up max-age + 1 microsecond                        KILLED (TestApprove_RequireStepUp_FreshnessMatrix: 120 s + 1 us case)
+WB02     withdrawal require_step_up max-age - 1 microsecond                        KILLED (same: exactly-120 s case)
+Re-run against the ported ledger-finance tests: R03 KILLED (now also by TestS4b_K3_ActingActorSuspendedBeforeA8_... and
+TestS4b_K3_TenantActorRoleChangedBeforeA8_...), R06 and R07 KILLED (also by TestStepUp_WithdrawalApprove_ReassertionBothOrders_RealApprove).
+Not mutated: the Warn log line and staff_reassertion_refusals_total on the db.ErrActorStaffNotLive paths (observability
+only, never influences the response; no test reads the metric).
+Totals after the review round: 65 mutants, 63 KILLED, 2 justified (H02a, R09), 0 ERROR.

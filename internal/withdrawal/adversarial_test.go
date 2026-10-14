@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
@@ -200,7 +201,7 @@ func TestReject_DuplicateDecisionBySameApproverRejected(t *testing.T) {
 	// 100,000 minor units, via ">="): two humans required, so one
 	// approval leaves the request open to a second decision attempt.
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
+		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}
@@ -258,7 +259,7 @@ func TestWithdrawalApprovals_ApproverPrincipalIdImmutableAndAccurate(t *testing.
 
 	approver := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
+		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}
@@ -343,7 +344,7 @@ func TestApprove_ThresholdAmountRecordedPerDecisionAndCurrentThresholdGovernsRea
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 50_000, 2, time.Now().Add(-time.Hour))
 	approver1 := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver1, false, nil, alwaysEligible)
+		approved, err := Approve(ctx, tx, wr.ID, approver1, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}
@@ -361,7 +362,7 @@ func TestApprove_ThresholdAmountRecordedPerDecisionAndCurrentThresholdGovernsRea
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 200_000, 2, time.Now())
 	approver2 := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver2, false, nil, alwaysEligible)
+		approved, err := Approve(ctx, tx, wr.ID, approver2, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}
@@ -448,7 +449,7 @@ func TestLockApprovedForSubmission_ConcurrentSubmitsOnlyOneReachesProvider(t *te
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 	firstApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible)
+		approved, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err != nil {
 			return err
 		}
@@ -550,7 +551,7 @@ func TestApprove_ConcurrentDistinctApproversOnlyRequiredCountSatisfiesReadiness(
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				approved, err := Approve(ctx, tx, wr.ID, approvers[i], false, nil, alwaysEligible)
+				approved, err := Approve(ctx, tx, wr.ID, approvers[i], false, nil, alwaysEligible, auth.StepUpAssertion{})
 				results[i] = approved
 				return err
 			})

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/aml"
+	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/amlfix"
 )
@@ -94,7 +95,7 @@ func TestAMLHold_NeverGatesReleasesCompletionsOrApprovals(t *testing.T) {
 		}
 	}
 	run("a staff approval", func(ctx context.Context, tx pgx.Tx) error {
-		ok, err := Approve(ctx, tx, toApprove.ID, w.approver, false, nil, alwaysEligible)
+		ok, err := Approve(ctx, tx, toApprove.ID, w.approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		if err == nil && !ok {
 			err = errors.New("not approved")
 		}

@@ -63,7 +63,7 @@ func (w *frWorld) parkedPayout(amount int64, reason string) (wd, att uuid.UUID) 
 	}
 	do(func(ctx context.Context, tx pgx.Tx) error { return withdrawal.MoveToPendingReview(ctx, tx, wr.ID) })
 	do(func(ctx context.Context, tx pgx.Tx) error {
-		ok, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil)
+		ok, err := withdrawal.Approve(ctx, tx, wr.ID, uuid.New(), true, nil, nil, auth.StepUpAssertion{})
 		if err == nil && !ok {
 			err = errors.New("automated approval did not approve")
 		}
