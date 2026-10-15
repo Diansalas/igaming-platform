@@ -320,9 +320,15 @@ func (o *Orchestrator) InitiateDepositAttempt(
 	redirectURL, hostedFieldToken := gr.Value.RedirectURL, gr.Value.HostedFieldToken
 
 	// --- Phase C: apply the evidence, CAS, in a fresh tx ---------------
+	// PAY-H-FOLLOWUPS-1 (12): detached and bounded, exactly like driveCreatedAttempt's phase C (PRH-2 H, LF F1), so a
+	// phase-B result (possibly a capture) is always recorded even if the request context is cancelled or its deadline
+	// passes during the provider call. Since B6 the first attempt's phase C can also post through the T6 drain, which
+	// is why this stopped being "symmetry only" (ADR 0095 41.5 N2).
+	phaseCtx, cancelPhaseC := context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)
+	defer cancelPhaseC()
 	var cascadeChild *PaymentAttempt
 	// ADR 0102 I-wire (B-1): evidence transaction owner - alerting.InTx, Flush after commit.
-	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, attempt.TenantID), func(actx context.Context, tx pgx.Tx) error {
+	pending, err := alerting.InTx(phaseCtx, alerting.NewTenantRunner(pool, attempt.TenantID), func(actx context.Context, tx pgx.Tx) error {
 		// Lock parent before attempt (ADR 0095 §14).
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)

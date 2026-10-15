@@ -393,6 +393,31 @@ groups:
           description: "Each failed run also raises a reconciliation.run_failed durable alert (P1) naming the stream and phase."
           runbook: docs/runbooks/operational-runbooks.md
 
+      - alert: PaymentProviderNotReconciled
+        # A11 (PAY-K3-STATEMENT-SOURCE-WIRING-1): a (tenant, provider) pair whose payment_statement outcome is NOT
+        # "reconciled up to now" because the provider is configured but has no (eligible) statement source, or its
+        # provider listing failed. Never a clean result: the pair also holds ReconciliationStale at 0.
+        expr: sum by (reason) (reconciliation_payment_unreconciled{reason=~"no_source|source_not_eligible|scope_unavailable"}) > 0
+        for: 30m
+        labels:
+          severity: page
+        annotations:
+          summary: "A configured payment provider is not being reconciled (no eligible statement source)"
+          description: "Also raised per pair as the reconciliation.run_failed durable alert (phase no_statement_source / source_not_eligible / scope). Money movements of that provider are unchecked until a statement source is registered."
+          runbook: docs/runbooks/observability-and-alerting.md
+
+      - alert: PaymentStatementBacklog
+        # R3-OBS-BOUND-1 (A11): runs keep hitting the per-run line bound, so the provider is reconciled only up to a
+        # cursor that trails now. Raise RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES or investigate the volume.
+        expr: sum(reconciliation_payment_unreconciled{reason="truncated"}) > 0
+        for: 6h
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A payment statement stays truncated at the per-run bound for 6 hours (reconciliation is behind)"
+          description: "A truncated run is never a clean claim; the next run continues from the persisted cursor. A backlog that never drains means the bound is below the provider's volume per sweep."
+          runbook: docs/runbooks/observability-and-alerting.md
+
       - alert: ReconciliationListingFailed
         # R3-LISTING-FAILURE-LOG-ONLY-1 (A9): a tenant listing failed, so nothing (or not every tenant) was reconciled.
         expr: increase(reconciliation_sweeps_total{result="listing_failed"}[30m]) > 0
