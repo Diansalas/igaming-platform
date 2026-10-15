@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Allow-list validation of the role statements restore.sh replays from a backup's globals.sql (--apply-globals).
-# SOURCED by restore.sh. The checksum manifest is unsigned, so a party who can replace the backup directory could also
-# replace globals.sql; replaying it blindly as a role-creating restore user would be a privilege-escalation path
+# SOURCED by restore.sh. The set is signed (lib-sign.sh), but a compromised backup pipeline could sign a hostile globals.sql, so
+# replaying it blindly as a role-creating restore user would be a privilege-escalation path
 # (e.g. `ALTER ROLE igaming WITH SUPERUSER`). Only the exact, expected shapes pass; anything else aborts the restore
 # before any role or database is created.
 #

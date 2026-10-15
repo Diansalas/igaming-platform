@@ -33,6 +33,11 @@
 
 \getenv backup_verifier IGAMING_BACKUP_PASSWORD_VERIFIER
 \getenv backup_valid_until BACKUP_ROLE_VALID_UNTIL
+\getenv backup_iam_only BACKUP_ROLE_IAM_ONLY
+\if :{?backup_iam_only}
+\else
+\set backup_iam_only ''
+\endif
 \if :{?backup_valid_until}
 \else
 \set backup_valid_until ''
@@ -44,6 +49,7 @@
 
 \o /dev/null
 SELECT set_config('igaming.backup_verifier', :'backup_verifier', false);
+SELECT set_config('igaming.iam_only', :'backup_iam_only', false);
 SELECT set_config('igaming.backup_valid_until',
                   CASE WHEN :'backup_valid_until' = '' THEN (now() + interval '24 hours')::text ELSE :'backup_valid_until' END,
                   false);
@@ -52,8 +58,26 @@ SELECT set_config('igaming.backup_valid_until',
 DO $$
 DECLARE
     v     text := current_setting('igaming.backup_verifier');
+    iam   boolean := current_setting('igaming.iam_only') = '1';
     until timestamptz;
 BEGIN
+    -- IAM-ONLY PATH (BACKUP_ROLE_IAM_ONLY=1; staging/production on RDS, ADR 0122 section 3): the role has NO password at all (a NULL password cannot be used to
+    -- log in), validity is not time-boxed in the database (the 15-minute IAM token is the time box, scoped by rds-db:connect), and rds_iam is granted when it exists.
+    IF iam THEN
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_backup') THEN
+                EXECUTE 'CREATE ROLE igaming_backup LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS NOINHERIT CONNECTION LIMIT 2 PASSWORD NULL';
+            ELSE
+                EXECUTE format('ALTER ROLE igaming_backup WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS NOINHERIT CONNECTION LIMIT 2 PASSWORD NULL VALID UNTIL %L', 'infinity');
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam') THEN
+                EXECUTE format('%s %I TO %I', 'GRANT', 'rds_iam', 'igaming_backup');
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE EXCEPTION 'igaming_backup IAM-only role create/alter failed (SQLSTATE %)', SQLSTATE;
+        END;
+        RETURN;
+    END IF;
     IF v IS NULL OR v !~ '^SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$' THEN
         RAISE EXCEPTION 'IGAMING_BACKUP_PASSWORD_VERIFIER must be a SCRAM-SHA-256 verifier (compute it with deploy/backup/scramhash; the clear-text password is never accepted)';
     END IF;
@@ -126,7 +150,7 @@ $$;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
-               JOIN pg_roles u ON u.oid = m.member WHERE u.rolname = 'igaming_backup') THEN
+               JOIN pg_roles u ON u.oid = m.member WHERE u.rolname = 'igaming_backup' AND r.rolname <> 'rds_iam') THEN
         RAISE EXCEPTION 'igaming_backup must not be a member of any role';
     END IF;
 END

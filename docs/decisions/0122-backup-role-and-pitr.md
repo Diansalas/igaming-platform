@@ -109,8 +109,14 @@ A logical backup set contains PII and financial data. Required, and enforced by 
    `manifest.json`) is signed with an Ed25519 key (`openssl pkeyutl -sign -rawin`, OpenSSL >= 3; key by reference
    `BACKUP_SIGNING_KEY_FILE`, mode 0600/0400, never inside the backup directory). `restore.sh` verifies `SHA256SUMS.sig` against a
    **pinned** public key (`RESTORE_VERIFY_PUBKEY_FILE` plus its SHA-256 DER fingerprint `RESTORE_VERIFY_PUBKEY_SHA256`, supplied by
-   the operator or change control, **never read from the backup directory**) **before** checksumming, decrypting or contacting any
-   database. There is no "allow unsigned" switch. Drilled: unsigned set, attacker-signed replacement set, key placed inside the
+   the operator or change control, **never read from the backup directory**; the key is copied into the private work directory before it is
+   fingerprinted and used) **before** checksumming, decrypting or contacting any database. **What is verified is what is used (re-review
+   SR12R-1):** `SHA256SUMS` and `SHA256SUMS.sig` are copied into a private 0700 work directory and verified there; the backup directory must
+   hold only regular files, every one listed in the signed list (an **unlisted file, a symlink or a sub-directory is refused**, so a plaintext
+   `db.dump` placed beside a signed encrypted set cannot shadow it); the signed list must name exactly one form (plain, `.age` or `.gpg`) of
+   each of `db.dump`, `globals.sql`, `baseline.txt` plus `manifest.json` and nothing else; each listed artefact is copied into the work
+   directory, hashed there and only the copies are decrypted and restored (no re-read of the shared storage); the decrypted dump's hash must equal the
+   signed manifest's `plaintext_dump_sha256`; the source environment anchor is taken from the signed manifest and must equal the baseline's. There is no "allow unsigned" switch. Drilled: unsigned set, attacker-signed replacement set, key placed inside the
    backup directory, wrong or missing pin, manifest altered after signing, checksum list altered, garbage signature: all refused with
    zero database connections. Signing-key custody: the runner holds the private key as a secret-store/KMS-wrapped file (an AWS KMS
    asymmetric signing key is the production target and is NOT built here: PROVIDER/INFRA DEPENDENT); the verification fingerprint is
@@ -150,8 +156,21 @@ A superuser or `rds_superuser` member is refused for the load (override `RESTORE
 local throwaway target and is used by nothing). Drilled: a validly-signed archive whose expression-index function runs `COPY ... TO
 PROGRAM` fails harmlessly as the non-superuser restore role (transaction rolled back, database dropped, no file created), is refused
 outright for the superuser, and a **control** (the naive procedure: `pg_restore` by hand as the superuser) shows the same archive DOES
-run the planted command. Not covered by this: a malicious archive can still consume resources or read what the owner role can read
-within the new empty database; it cannot touch other databases or roles.
+run the planted command. **CORRECTION (re-review SR12R-2):** the earlier text claimed the archive "cannot touch other databases or roles". That is false. Acting as
+the owner role the archive can run `ALTER ROLE <owner> PASSWORD / SET ...`, which is cluster-global and commits with an otherwise successful
+restore (reproduced); a loading identity with `CREATEROLE` or membership in `pg_execute_server_program` / `pg_*_server_files` / `pg_*_all_data` /
+`pg_signal_backend` / `rds_superuser` would also be able to create login roles, run programs or read files. What the scripts now enforce, and what they do not:
+
+- **Preventive:** the loading identity AND the owner role must hold none of SUPERUSER, CREATEROLE, BYPASSRLS, REPLICATION and must be a member of no `pg_*`
+  (other than `pg_database_owner`) or `rds_*` role (recursive `pg_has_role`), refused before any database is created (drilled: pg_execute_server_program via the owner,
+  CREATEROLE, five other pg_* roles). On RDS the master user is an `rds_superuser` member, so a separate plain owner login must exist (staging plan 9.2).
+- **Detective:** a fingerprint of role attributes, per-role settings and role memberships is compared before and after the load; a change (e.g. a planted
+  `ALTER ROLE igaming SET ...`) makes the load exit 3, drops the database and instructs the operator to treat it as an incident (drilled). When the connecting role is
+  the owner, a fresh connection after the load proves its credential still works (a planted `ALTER ROLE igaming PASSWORD` is detected; drilled).
+- **Not preventable in the database:** an owner can always alter its own password and settings; passwords are not readable by a plain role, so a password change
+  by a connecting role other than the owner is not detected. Mitigation: the restore owner credential is single-use and **every project credential is re-provisioned
+  after any restore** (runbook section 5), which also overwrites a planted password; a planted `ALTER ROLE ... SET` is caught by the fingerprint.
+- A malicious archive can still consume resources and read/write within the new empty database.
 
 **Owner role allow-list (M3).** `--owner-role` is `igaming` unless an explicit `RESTORE_OWNER_ROLE_OVERRIDE=<name>` is set;
 `postgres`, `igaming_backup`, `igaming_runtime`, `rdsadmin` and `rds_superuser` are always refused, and the owner must be
@@ -160,7 +179,9 @@ NOSUPERUSER, NOBYPASSRLS and NOCREATEROLE (drilled).
 **The environment anchor is not restored (M4).** `database_environment` is table data and its write-once guard is post-data, so the
 archive would decide the anchor. `baseline.sql` now records the **source** anchor (`META|environment_anchor`, also in the signed
 manifest); `restore.sh` requires `RESTORE_EXPECT_SOURCE_ENVIRONMENT` to equal it (the restorer must state what they believe they are
-restoring), refuses a non-`production` source for any target that is not a throwaway drill instance, and **excludes the anchor's
+restoring), requires an explicit `RESTORE_TARGET_ENVIRONMENT` and allows a restore only when **source and target environments are equal** (re-review SR12R-5:
+a staging backup restores into staging without anyone recording `production` on it; a development or staging set can never enter production; restoring a production
+set into staging is refused and needs a deliberate, separately approved procedure), and **excludes the anchor's
 TABLE DATA** from the restore (`pg_restore -L`). After a restore the anchor is therefore BLANK and a production `platform-api`
 **refuses to start** until the owner records it (drilled with a development-source backup: `verify.sh` asserts 0 rows and that
 the production guard refuses). The owner records `production` **only after verifying that the source environment was production**;
@@ -288,3 +309,19 @@ invalidates in-flight proofs (short-lived by design) and a smaller blast radius 
 runbook, and a test that a restored database cannot verify proofs signed by the source's key. Until decided, the runbook requires
 rotating `actor_proof_keys` and resetting staff passwords after ANY suspected exposure of a backup set (`backup-restore-dr.md`
 section 5a).
+
+## 11. Re-review of the fix round (`docs/plans/a12-backup-drill-record.md` section 8): dispositions and recorded design decisions
+
+| Finding | Disposition |
+|---|---|
+| SR12R-1 (HIGH) signature bypass by an unlisted plaintext file / TOCTOU | **FIXED**: private copies, strict listed-names-only directory, no symlinks, exact form per artefact, decrypted-bytes hash against the signed manifest, anchor from the signed manifest. Drilled: PoC (plaintext `db.dump` with a planted `ALTER ROLE ... PASSWORD`, `baseline.txt`, `globals.sql` beside a signed encrypted set) refused with 0 database connections and the owner credential unchanged; symlink, sub-directory, two-forms list, manifest hash and anchor mismatches; originals overwritten after verification (test hook) do not affect the restore |
+| SR12R-2 (MED) role memberships | **FIXED** (preventive + detective) and the section 5a claim corrected; see there |
+| SR12R-3 (MED) IPv6 spellings | **FIXED**: a real IPv6 parser (`bk_ipv6_expand`: `::` compression anywhere, leading zeros, embedded dotted quad) classifies `::`, `::1`, `::ffff:127.x`, `::127.x`; an invalid literal is refused; unit tests carry every spelling listed by the reviewer plus more, each with and without the acknowledgement, on 5432 |
+| SR12R-4 (MED) `sslmode=require` | **FIXED**: a non-local target needs `sslmode=verify-full` and `BACKUP_PGSSLROOTCERT` (the RDS CA bundle); weaker modes refused (unit-tested, drilled); staging plan corrected |
+| SR12R-5 anchor rule vs staging | **FIXED**: `RESTORE_TARGET_ENVIRONMENT` must equal the source |
+| SR12R-6 sweep follows symlinks | **FIXED**: only real directories matching the run-name pattern; `.incomplete` records `host:pid`; another host's runs are never touched (drilled) |
+| SR12R-7 chmod of the temp root | **FIXED**: a pre-existing root is never chmod-ed; a non-drill target must set `BACKUP_TMPDIR` to a 0700 directory owned by the invoking user |
+| SR12R-8 DSN password | **FIXED**: any `password`/`passwd` key in a URL or DSN is refused (case-insensitive) |
+| SR12R-9 IAM-only role path and token refresh | **IMPLEMENTED (simplest safe form), unproven on RDS**: `BACKUP_ROLE_IAM_ONLY=1` creates/alters `igaming_backup` with a NULL password and grants `rds_iam` where it exists; `BACKUP_IAM_TOKEN_COMMAND` (trusted operator configuration, e.g. `aws rds generate-db-auth-token ...`) is run before EVERY new connection (preflight, snapshot holder, `pg_dump`, `pg_dumpall`) and its token written to a private passfile in the work directory. Drilled with the role password standing in for a token; the real token flow, token lifetime vs. the longest single connection (a connection that outlives 15 minutes is unaffected: tokens are only checked at connect) and `rds-db:connect` scoping remain staging-plan items |
+| SR12R-10 freshness / environment binding | **PARTIALLY IMPLEMENTED, rest recorded**: the restore prints `created_utc` and the SHA-256 of `SHA256SUMS` and **requires `RESTORE_EXPECT_SET_SHA256` (from the runner's out-of-band backup log) for any non-drill target**, which pins WHICH signed set may be restored (rollback protection); the verification key is copied before use; source = target environment is enforced (SR12R-5). **Decision recorded, not built:** one Ed25519 signing key and one pinned fingerprint **per environment** (a staging key can never verify a production set because the fingerprint is pinned per environment in change control); a maximum-age policy and a signed "latest" pointer need the backup runner and its log (gap G1) and are future work |
+| Informational | `lib-globals.sh` header corrected; use of `RESTORE_OWNER_ROLE_OVERRIDE` is now logged |

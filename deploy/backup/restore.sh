@@ -2,7 +2,8 @@
 # Restore a logical backup (deploy/backup/backup.sh) into a NEW, EMPTY database (ADR 0122). Never restores over an existing populated
 # database. Human-run (or drill-run) operation; never part of any automated pipeline against a shared database.
 #
-#   RESTORE_CONFIRM=<new db> RESTORE_EXPECT_SOURCE_ENVIRONMENT=<production|development|test|unrecorded> \
+#   RESTORE_CONFIRM=<new db> RESTORE_EXPECT_SOURCE_ENVIRONMENT=<anchor of the set> RESTORE_TARGET_ENVIRONMENT=<must be the same> \
+#   RESTORE_EXPECT_SET_SHA256=<sha256 of SHA256SUMS from the runner's out-of-band log; required off the drill> \
 #   RESTORE_VERIFY_PUBKEY_FILE=<pem> RESTORE_VERIFY_PUBKEY_SHA256=<pinned fingerprint> \
 #   BACKUP_PGHOST=... BACKUP_PGPORT=... BACKUP_PGUSER=<role> BACKUP_PGDATABASE=<maintenance db> BACKUP_PGPASSFILE=... \
 #   deploy/backup/restore.sh --backup-dir <run dir> --new-database igaming_restored [--phase all|provision|load] [--apply-globals]
@@ -33,7 +34,8 @@
 #   6. post-restore-grants.sql (database ACL, schema owner) and ANALYZE
 # NOT done here: credentials, the anchor, `cmd/migrate verify`, the data comparison (verify.sh), reconciliation.
 #
-# Test hook (drill only): RESTORE_TEST_FAULT=kill_midway terminates pg_restore part-way to prove the rollback.
+# Test hooks (drill only): RESTORE_TEST_FAULT=kill_midway terminates pg_restore part-way to prove the rollback; =swap_after_verify overwrites the
+# originals after verification to prove only the verified private copies are used.
 # Exit: 0 ok; 2 refused/usage/preflight; 3 restore failed (target dropped).
 set -euo pipefail
 
@@ -97,55 +99,111 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---- 1. authenticity first, then integrity ---------------------------------------------------------------------
-bk_verify_set_signature "$BACKUP_DIR"
-if ! ( cd "$BACKUP_DIR" && sha256sum --check --strict --quiet SHA256SUMS ) >"${WORK}/sum.out" 2>&1; then
+# ---- 1. authenticity first, on PRIVATE COPIES (A12 re-review SR12R-1) --------------------------------------------------
+# What is verified must be exactly what is used: SHA256SUMS(.sig) and every listed artefact are copied into the private work directory, the signature and
+# the checksums are checked on the COPIES, and only the copies are decrypted and restored. The backup directory may hold nothing else: an unlisted file
+# (e.g. a plaintext db.dump beside an encrypted set), a symlink or a sub-directory is refused.
+SETDIR="${WORK}/set"; mkdir -m 700 "$SETDIR"
+while IFS= read -r -d '' e; do
+  { [ -f "$e" ] && [ ! -L "$e" ]; } || bk_die "${e} in the backup directory is not a regular file (symlink / directory / special file); refusing"
+done < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -print0)
+for f in SHA256SUMS SHA256SUMS.sig; do
+  if [ -f "${BACKUP_DIR}/${f}" ] && [ ! -L "${BACKUP_DIR}/${f}" ]; then cp -- "${BACKUP_DIR}/${f}" "${SETDIR}/${f}"; fi
+done
+bk_verify_set_signature "$SETDIR" "$BACKUP_DIR" "$WORK"
+SUMS_SHA="$(sha256sum <"${SETDIR}/SHA256SUMS" | cut -d' ' -f1)"
+declare -A LISTED=()
+while read -r h n; do
+  n="${n#\*}"
+  [[ "$h" =~ ^[0-9a-f]{64}$ ]] && [[ "$n" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || bk_die "the signed SHA256SUMS holds a malformed line; refusing"
+  [ -z "${LISTED[$n]:-}" ] || bk_die "the signed SHA256SUMS lists ${n} twice; refusing"
+  LISTED[$n]="$h"
+done <"${SETDIR}/SHA256SUMS"
+ENCEXT=""; ENCEXT_SET=0
+for f in db.dump globals.sql baseline.txt; do
+  hit=""; nhit=0
+  for ext in "" .age .gpg; do if [ -n "${LISTED[${f}${ext}]:-}" ]; then hit="$ext"; nhit=$((nhit + 1)); fi; done
+  [ "$nhit" = 1 ] || bk_die "the signed SHA256SUMS must list exactly one form of ${f} (found ${nhit}); refusing"
+  if [ "$ENCEXT_SET" = 0 ]; then ENCEXT="$hit"; ENCEXT_SET=1; elif [ "$ENCEXT" != "$hit" ]; then bk_die "the signed set mixes encrypted and plaintext artefacts; refusing"; fi
+done
+[ -n "${LISTED[manifest.json]:-}" ] || bk_die "the signed SHA256SUMS does not list manifest.json; refusing"
+[ "${#LISTED[@]}" = 4 ] || bk_die "the signed SHA256SUMS lists unexpected entries; refusing"
+while IFS= read -r -d '' e; do
+  n="${e##*/}"
+  case "$n" in SHA256SUMS|SHA256SUMS.sig) continue ;; esac
+  [ -n "${LISTED[$n]:-}" ] || bk_die "UNLISTED file '${n}' in the backup directory: it is not covered by the signed manifest; refusing (nothing was restored)"
+done < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -print0)
+for n in "${!LISTED[@]}"; do
+  cp --no-dereference -- "${BACKUP_DIR}/${n}" "${SETDIR}/${n}" 2>/dev/null || bk_die "CHECKSUM MISMATCH or missing file: ${n} listed in the signed manifest cannot be read from ${BACKUP_DIR}"
+done
+if ! ( cd "$SETDIR" && sha256sum --check --strict --quiet SHA256SUMS ) >"${WORK}/sum.out" 2>&1; then
   bk_die "CHECKSUM MISMATCH or missing file in ${BACKUP_DIR} - the backup is corrupted or tampered with; nothing was restored. $(head -3 "${WORK}/sum.out" | tr '\n' ' ')"
 fi
-for f in db.dump globals.sql baseline.txt manifest.json; do
-  # every artefact the restore reads must be covered by the SIGNED manifest (an unlisted replacement file would not be checked)
-  n="$(awk -v f="$f" '{ n = $2; sub(/^\*/, "", n); sub(/\.(age|gpg)$/, "", n); if (n == f) c++ } END { print c + 0 }' "${BACKUP_DIR}/SHA256SUMS")"
-  [ "$n" = 1 ] || bk_die "the signed SHA256SUMS does not list exactly one ${f} artefact (${n}); refusing"
-done
+# DRILL-ONLY fault: overwrite the originals in the backup directory AFTER verification. Only the private copies are used, so the restore must still produce the signed content.
+if [ "${RESTORE_TEST_FAULT:-}" = "swap_after_verify" ]; then
+  [ "$BK_TARGET_LOCAL" -eq 1 ] || bk_die "RESTORE_TEST_FAULT is honoured only for a throwaway drill target"
+  for n in "${!LISTED[@]}" SHA256SUMS SHA256SUMS.sig; do printf 'EVIL' >"${BACKUP_DIR}/${n}"; done
+fi
+# freshness / identity of the set (SR12R-10): the operator compares this with the runner's out-of-band backup log
+M_CREATED="$(sed -n 's/.*"created_utc": "\([0-9TZ]*\)".*/\1/p' "${SETDIR}/manifest.json")"
+bk_log "signed set: created_utc=${M_CREATED:-?} SHA256SUMS sha256=${SUMS_SHA}"
+if [ -n "${RESTORE_EXPECT_SET_SHA256:-}" ]; then
+  [ "${RESTORE_EXPECT_SET_SHA256}" = "$SUMS_SHA" ] || bk_die "the set's SHA256SUMS hash (${SUMS_SHA}) does not equal RESTORE_EXPECT_SET_SHA256: this is not the set the backup runner reported (an older or substituted set); refusing"
+elif [ "$BK_TARGET_LOCAL" -ne 1 ]; then
+  bk_die "RESTORE_EXPECT_SET_SHA256 (the SHA-256 of SHA256SUMS from the backup runner's out-of-band log) is required for a non-drill target: it pins WHICH signed set may be restored (rollback protection)"
+fi
 
-# ---- 2. decrypt into the private work dir ---------------------------------------------------------------------------
+# ---- 2. decrypt the private copies into the private work dir ---------------------------------------------------------
 materialise() { # name -> path of the plaintext copy
   local f="$1"
-  if [ -f "${BACKUP_DIR}/${f}" ]; then printf '%s' "${BACKUP_DIR}/${f}"; return; fi
-  if [ -f "${BACKUP_DIR}/${f}.age" ]; then
-    bk_need_tools age
-    [ -n "${RESTORE_AGE_IDENTITY_FILE:-}" ] && [ -f "${RESTORE_AGE_IDENTITY_FILE}" ] || bk_die "backup is age-encrypted: RESTORE_AGE_IDENTITY_FILE (path to the private identity, from the secret store) is required"
-    age -d -i "$RESTORE_AGE_IDENTITY_FILE" -o "${WORK}/${f}" "${BACKUP_DIR}/${f}.age" || bk_die "age decryption of ${f} failed (wrong identity?)"
-    printf '%s' "${WORK}/${f}"; return
-  fi
-  if [ -f "${BACKUP_DIR}/${f}.gpg" ]; then
-    bk_need_tools gpg
-    gpg --batch --yes --quiet --output "${WORK}/${f}" --decrypt "${BACKUP_DIR}/${f}.gpg" || bk_die "gpg decryption of ${f} failed (key not available?)"
-    printf '%s' "${WORK}/${f}"; return
-  fi
-  bk_die "artifact ${f} not found"
+  case "$ENCEXT" in
+    "") printf '%s' "${SETDIR}/${f}" ;;
+    .age)
+      bk_need_tools age
+      [ -n "${RESTORE_AGE_IDENTITY_FILE:-}" ] && [ -f "${RESTORE_AGE_IDENTITY_FILE}" ] || bk_die "backup is age-encrypted: RESTORE_AGE_IDENTITY_FILE (path to the private identity, from the secret store) is required"
+      age -d -i "$RESTORE_AGE_IDENTITY_FILE" -o "${WORK}/${f}" "${SETDIR}/${f}.age" || bk_die "age decryption of ${f} failed (wrong identity?)"
+      printf '%s' "${WORK}/${f}" ;;
+    .gpg)
+      bk_need_tools gpg
+      gpg --batch --yes --quiet --output "${WORK}/${f}" --decrypt "${SETDIR}/${f}.gpg" || bk_die "gpg decryption of ${f} failed (key not available?)"
+      printf '%s' "${WORK}/${f}" ;;
+  esac
 }
 DUMP="$(materialise db.dump)"; GLOBALS="$(materialise globals.sql)"; BASELINE="$(materialise baseline.txt)"
 
-# ---- 3. the archive must parse; source environment (M4) -------------------------------------------------------------
+# ---- 3. the signed manifest binds the decrypted bytes and the environment ---------------------------------------------
+M_SHA="$(sed -n 's/.*"plaintext_dump_sha256": "\([0-9a-f]\{64\}\)".*/\1/p' "${SETDIR}/manifest.json")"
+[ -n "$M_SHA" ] || bk_die "the signed manifest carries no plaintext_dump_sha256; refusing"
+[ "$(sha256sum <"$DUMP" | cut -d' ' -f1)" = "$M_SHA" ] || bk_die "the decrypted dump does not match the signed manifest's plaintext_dump_sha256; refusing"
 pg_restore --list "$DUMP" >"${WORK}/toc.txt" 2>"${WORK}/toc.err" || bk_die "pg_restore cannot read the dump (truncated or not a custom-format archive): $(head -2 "${WORK}/toc.err" | tr '\n' ' ')"
-SRC_ENV="$(grep '^META|environment_anchor|' "$BASELINE" | cut -d'|' -f3- || true)"
-[ -n "$SRC_ENV" ] || bk_die "baseline.txt carries no source environment anchor (META|environment_anchor); refusing to guess what is being restored"
+SRC_ENV="$(sed -n 's/.*"environment_anchor": "\([a-z]*\)".*/\1/p' "${SETDIR}/manifest.json")"
+[ -n "$SRC_ENV" ] || bk_die "the signed manifest carries no source environment anchor; refusing to guess what is being restored"
+[ "$(grep '^META|environment_anchor|' "$BASELINE" | cut -d'|' -f3- || true)" = "$SRC_ENV" ] || bk_die "the baseline's environment anchor differs from the signed manifest's ('${SRC_ENV}'); refusing"
 [ "${RESTORE_EXPECT_SOURCE_ENVIRONMENT:-}" = "$SRC_ENV" ] \
   || bk_die "RESTORE_EXPECT_SOURCE_ENVIRONMENT must equal the backup's source environment anchor ('${SRC_ENV}'): state what you believe you are restoring; a mismatch is refused"
-if [ "$SRC_ENV" != production ] && [ "$BK_TARGET_LOCAL" -ne 1 ]; then
-  bk_die "the backup's source environment is '${SRC_ENV}', not production: restoring a development/test/unrecorded source into a non-drill target is refused (synthetic accounts and known test passwords would enter that environment)"
-fi
+case "${RESTORE_TARGET_ENVIRONMENT:-}" in production|staging|development|test|unrecorded) ;; *) bk_die "RESTORE_TARGET_ENVIRONMENT (production|staging|development|test|unrecorded) is required: what environment is the restore target?" ;; esac
+[ "$SRC_ENV" = "$RESTORE_TARGET_ENVIRONMENT" ] \
+  || bk_die "the backup's source environment is '${SRC_ENV}' but the target environment is '${RESTORE_TARGET_ENVIRONMENT}': a restore is only allowed between the same environment (synthetic accounts and known test passwords must never enter another environment, and a copy must never be recorded as production)"
 
 ME="$(bk_sql "SELECT current_user")"
 case "$ME" in
   igaming_runtime|igaming_backup) bk_die "restoring as ${ME} is refused: the runtime role owns nothing and must never create objects; the backup role is SELECT-only. Use the restore role (the owner role, or a CREATEDB role that is a member of ${OWNER_ROLE})" ;;
 esac
-IFS='|' read -r R_SUPER R_CREATEDB R_PRIV R_MEMBER <<<"$(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -c "SELECT rolsuper::int, rolcreatedb::int, (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_superuser') AND pg_has_role(current_user, 'rds_superuser', 'MEMBER'))::int, (current_user = '${OWNER_ROLE}' OR CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${OWNER_ROLE}') THEN pg_has_role(current_user, '${OWNER_ROLE}', 'MEMBER') ELSE false END)::int FROM pg_roles WHERE rolname = current_user")"
+role_privs() { # role -> comma list of privileges that make a role dangerous as a restore identity or object owner (empty = none)
+  bk_sql "SELECT concat_ws(',', CASE WHEN r.rolsuper THEN 'SUPERUSER' END, CASE WHEN r.rolcreaterole THEN 'CREATEROLE' END, CASE WHEN r.rolbypassrls THEN 'BYPASSRLS' END, CASE WHEN r.rolreplication THEN 'REPLICATION' END, (SELECT string_agg('member-of-' || g.rolname, ',' ORDER BY g.rolname) FROM pg_roles g WHERE ((g.rolname LIKE 'pg\_%' AND g.rolname <> 'pg_database_owner') OR g.rolname LIKE 'rds\_%' OR g.rolname = 'rdsadmin') AND g.oid <> r.oid AND pg_has_role(r.oid, g.oid, 'MEMBER'))) FROM pg_roles r WHERE r.rolname = '$1'"
+}
+role_sig() { # fingerprint of everything about roles that a load could change (no passwords: not readable by a plain role)
+  bk_sql "SELECT md5(coalesce((SELECT string_agg(concat_ws('|', rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil, coalesce(rolconfig::text, '')), ';' ORDER BY rolname) FROM pg_roles), '') || '#' || coalesce((SELECT string_agg(roleid::text || '>' || member::text || ':' || admin_option::text, ';' ORDER BY roleid, member) FROM pg_auth_members), '') || '#' || coalesce((SELECT string_agg(setdatabase::text || '/' || setrole::text || '=' || setconfig::text, ';' ORDER BY setdatabase, setrole) FROM pg_db_role_setting), ''))"
+}
+IFS='|' read -r R_SUPER R_CREATEDB R_MEMBER <<<"$(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -c "SELECT rolsuper::int, rolcreatedb::int, (current_user = '${OWNER_ROLE}' OR CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${OWNER_ROLE}') THEN pg_has_role(current_user, '${OWNER_ROLE}', 'MEMBER') ELSE false END)::int FROM pg_roles WHERE rolname = current_user")"
+ME_PRIVS="$(role_privs "$ME")"
 if [ "$PHASE" != provision ]; then
-  if [ "$R_SUPER" = 1 ] || [ "$R_PRIV" = 1 ]; then
+  # The archive runs with this session's rights (and, as the owner, may alter the owner role itself). So the loading identity must be a plain
+  # NOSUPERUSER, NOCREATEROLE role with NO membership in pg_execute_server_program / pg_*_server_files / pg_*_all_data / pg_signal_backend /
+  # rds_superuser or any other pg_* / rds_* role (A12 re-review SR12R-2).
+  if [ -n "$ME_PRIVS" ]; then
     [ "${RESTORE_ALLOW_PRIVILEGED_DATA_ROLE:-}" = "drill-only" ] && [ "$BK_TARGET_LOCAL" -eq 1 ] \
-      || bk_die "refusing to run the archive as ${ME}: a superuser / rds_superuser member would give a (possibly planted) archive entry its privileges (COPY ... TO PROGRAM, ALTER ROLE, RESET ROLE). Create the roles and the empty database with --phase provision, then run --phase load as the non-superuser owner role ${OWNER_ROLE}"
+      || bk_die "refusing to run the archive as ${ME}: it holds ${ME_PRIVS}, which would give a (possibly planted) archive entry those privileges (COPY ... TO PROGRAM, CREATE ROLE, ALTER ROLE, file access). Create the roles and the empty database with --phase provision, then run --phase load as the plain non-superuser owner role ${OWNER_ROLE}"
   fi
   [ "$R_SUPER" = 1 ] || [ "$R_MEMBER" = 1 ] || bk_die "restore role ${ME} is neither ${OWNER_ROLE} nor a member of it; the restored objects must be owned by ${OWNER_ROLE}"
 fi
@@ -182,8 +240,9 @@ if [ "$PHASE" != load ]; then
 fi
 # the owner role must be unprivileged (M3)
 if [ "$(bk_sql "SELECT count(*) FROM pg_roles WHERE rolname = '${OWNER_ROLE}'")" = 1 ]; then
-  [ "$(bk_sql "SELECT (NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole)::int FROM pg_roles WHERE rolname = '${OWNER_ROLE}'")" = 1 ] \
-    || bk_die "owner role ${OWNER_ROLE} is a superuser / BYPASSRLS / CREATEROLE role: refusing to make it the owner of the restored objects"
+  OWN_PRIVS="$(role_privs "$OWNER_ROLE")"
+  [ -z "$OWN_PRIVS" ] || bk_die "owner role ${OWNER_ROLE} holds ${OWN_PRIVS}: refusing to make it the owner of the restored objects (the archive runs as the owner and would inherit these privileges)"
+  if [ "$OWNER_ROLE" != igaming ]; then bk_log "NOTICE: RESTORE_OWNER_ROLE_OVERRIDE in use: owner role ${OWNER_ROLE} instead of igaming"; fi
 elif [ "$PHASE" = load ]; then
   bk_die "owner role ${OWNER_ROLE} does not exist on the target; run --phase provision first"
 fi
@@ -250,9 +309,21 @@ if [ "${RESTORE_TEST_FAULT:-}" = "kill_midway" ]; then
   [ "$RC_RESTORE" -ne 0 ] || { bk_log "pg_restore finished before the fault could be injected"; exit 3; }
   bk_log "pg_restore failed: terminated part-way by the injected fault (exit ${RC_RESTORE})"; exit 3
 fi
+ROLESIG0="$(role_sig)"
 PGDATABASE="$NEW_DB" pg_restore --single-transaction --exit-on-error --no-owner --role="$OWNER_ROLE" -L "${WORK}/toc.filtered" \
   --dbname="$NEW_DB" "$DUMP" >"${WORK}/restore.out" 2>"${WORK}/restore.err" \
   || { bk_log "pg_restore failed: $(head -4 "${WORK}/restore.err" | tr '\n' ' ')"; exit 3; }
+# The archive ran as the owner role and can alter ROLES, which are cluster-global and survive a rollback of the database. Detect what can be detected:
+# attributes, per-role settings, memberships, and (when the connecting role is the owner) that its own credential still works. Anything else: the runbook
+# requires re-provisioning every project credential after a restore (A12 re-review SR12R-2).
+if [ "$ME" = "$OWNER_ROLE" ] && ! bk_sql "SELECT 1" >/dev/null 2>&1; then
+  bk_log "CREDENTIAL CHANGE DETECTED: ${ME} can no longer connect with its credential after the load (the archive changed its password?). Treat as an incident; remove that new database by hand and rotate every project credential"
+  exit 3
+fi
+if [ "$(role_sig)" != "$ROLESIG0" ]; then
+  bk_log "ROLE CHANGE DETECTED: the archive changed role attributes, per-role settings or memberships during the load. Treat as an incident: rotate every project credential and inspect the cluster's roles; the restored database is dropped"
+  exit 3
+fi
 T_RESTORE1="$(now_s)"
 
 # ---- 7. database-level privileges, statistics ------------------------------------------------------------------------

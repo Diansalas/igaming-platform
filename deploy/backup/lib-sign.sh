@@ -31,16 +31,19 @@ bk_sign_set() {
     || bk_die "signing failed (is ${key} an Ed25519 private key and OpenSSL >= 3.0 available?)"
 }
 
-# bk_verify_set_signature <run dir> : refuse unless SHA256SUMS carries a valid signature by the PINNED key
+# bk_verify_set_signature <sums dir> <backup dir> <work dir> : refuse unless SHA256SUMS in <sums dir> carries a valid signature by the PINNED key.
+# <sums dir> must be a PRIVATE COPY of the signed files (the caller copies SHA256SUMS and SHA256SUMS.sig out of the backup directory first, so what is
+# verified is what is used afterwards: no re-read race, SR12R-1). The public key is likewise copied into <work dir> before it is fingerprinted and used (SR12R-10).
 bk_verify_set_signature() {
-  local dir="$1" pub="${RESTORE_VERIFY_PUBKEY_FILE:-}" pin="${RESTORE_VERIFY_PUBKEY_SHA256:-}" fp
+  local dir="$1" bdir="$2" work="$3" pub="${RESTORE_VERIFY_PUBKEY_FILE:-}" pin="${RESTORE_VERIFY_PUBKEY_SHA256:-}" fp
   [ -n "$pub" ] && [ -n "$pin" ] || bk_die "RESTORE_VERIFY_PUBKEY_FILE and RESTORE_VERIFY_PUBKEY_SHA256 (pinned fingerprint) are required: a backup set is only restored if its signature verifies against a key pinned outside the backup directory"
   [ -f "$pub" ] || bk_die "verification key missing: ${pub}"
-  case "$(readlink -f "$pub")" in "$(readlink -f "$dir")"/*) bk_die "the verification key must not be read from the backup directory" ;; esac
+  case "$(readlink -f "$pub")" in "$(readlink -f "$bdir")"/*) bk_die "the verification key must not be read from the backup directory" ;; esac
   [[ "$pin" =~ ^[0-9a-f]{64}$ ]] || bk_die "RESTORE_VERIFY_PUBKEY_SHA256 must be 64 lower-case hex characters"
-  fp="$(bk_pubkey_fingerprint "$pub")"
+  cp -- "$pub" "${work}/verify-key.pub" || bk_die "cannot copy the verification key"
+  fp="$(bk_pubkey_fingerprint "${work}/verify-key.pub")"
   [ "$fp" = "$pin" ] || bk_die "the verification key's fingerprint (${fp}) does not equal the pinned RESTORE_VERIFY_PUBKEY_SHA256; refusing"
-  [ -f "${dir}/SHA256SUMS" ] && [ -f "${dir}/SHA256SUMS.sig" ] || bk_die "UNSIGNED backup set (SHA256SUMS or SHA256SUMS.sig missing) in ${dir}: refusing; nothing was restored"
-  openssl pkeyutl -verify -rawin -pubin -inkey "$pub" -in "${dir}/SHA256SUMS" -sigfile "${dir}/SHA256SUMS.sig" >/dev/null 2>&1 \
-    || bk_die "SIGNATURE VERIFICATION FAILED for ${dir}: the set was not signed by the pinned key or was altered; nothing was restored"
+  [ -f "${dir}/SHA256SUMS" ] && [ -f "${dir}/SHA256SUMS.sig" ] || bk_die "UNSIGNED backup set (SHA256SUMS or SHA256SUMS.sig missing) in ${bdir}: refusing; nothing was restored"
+  openssl pkeyutl -verify -rawin -pubin -inkey "${work}/verify-key.pub" -in "${dir}/SHA256SUMS" -sigfile "${dir}/SHA256SUMS.sig" >/dev/null 2>&1 \
+    || bk_die "SIGNATURE VERIFICATION FAILED for ${bdir}: the set was not signed by the pinned key or was altered; nothing was restored"
 }

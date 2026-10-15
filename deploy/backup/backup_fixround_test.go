@@ -35,7 +35,7 @@ func guard(t *testing.T, host, port string, env ...string) (int, string) {
 func TestGuardCanonicalisesAliasesOfTheSharedCluster(t *testing.T) {
 	host, _ := os.Hostname()
 	aliases := []string{"127.0.0.1", "localhost", "LOCALHOST", "localhost.", "LocalHost.", "127.0.0.2", "127.1", "127.0.0.01", "0.0.0.0", "::1", "[::1]", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "[::ffff:127.0.0.1]",
-		"::", "a,127.0.0.1", "127.0.0.1,a", "127.0.0.1,", " 127.0.0.1", "127.0.0.1 ", "user@127.0.0.1", "127.0.0.1%lo", "/var/run/postgresql", "127.0.0.1/8"}
+		"::", "0::1", "0:0::1", "::0:1", "::0001", "0000::0001", "[0::1]", "0:0:0:0:0:ffff:127.0.0.1", "0::ffff:7f00:1", "::ffff:7f00:1", "::ffff:127.0.0.2", "::127.0.0.1", "0::0", "0:0:0:0:0:0:0:0", "[::ffff:127.0.0.1]", "0::ffff:0.0.0.0", "a,127.0.0.1", "127.0.0.1,a", "127.0.0.1,", " 127.0.0.1", "127.0.0.1 ", "user@127.0.0.1", "127.0.0.1%lo", "/var/run/postgresql", "127.0.0.1/8"}
 	if host != "" {
 		aliases = append(aliases, host, strings.ToUpper(host), host+".")
 	}
@@ -48,7 +48,7 @@ func TestGuardCanonicalisesAliasesOfTheSharedCluster(t *testing.T) {
 		}
 	}
 	// local aliases are admitted only on a drill port, and are reported local
-	for _, h := range []string{"127.0.0.1", "localhost", "LOCALHOST", "localhost.", "127.0.0.2", "127.1", "::1", "[::1]", "::ffff:127.0.0.1"} {
+	for _, h := range []string{"127.0.0.1", "localhost", "LOCALHOST", "localhost.", "127.0.0.2", "127.1", "::1", "[::1]", "::ffff:127.0.0.1", "0::1", "0::ffff:7f00:1"} {
 		code, out := guard(t, h, "5499")
 		if code != 0 || !strings.Contains(out, "LOCAL=1") {
 			t.Errorf("local alias %q on drill port 5499: code=%d out=%s", h, code, out)
@@ -66,6 +66,15 @@ func TestGuardCanonicalisesAliasesOfTheSharedCluster(t *testing.T) {
 	}
 	if code, out := guard(t, "DB.Example.Invalid.", "5432", "BACKUP_ALLOW_REMOTE_TARGET=db.example.invalid"); code != 0 || !strings.Contains(out, "LOCAL=0") {
 		t.Errorf("remote host with exact acknowledgement (case/trailing dot canonicalised) refused: code=%d %s", code, out)
+	}
+	for _, bad := range []string{"1:2:3", "::g", "1::2::3", "12345::1", ":::1", "1:2:3:4:5:6:7:8:9", "::ffff:300.1.1.1"} {
+		if code, out := guard(t, bad, "5499", "BACKUP_ALLOW_REMOTE_TARGET="+bad); code == 0 {
+			t.Errorf("invalid IPv6 literal %q admitted: %s", bad, out)
+		}
+	}
+	// a global IPv6 address is genuinely remote: it needs the acknowledgement and is then allowed (even on 5432)
+	if code, out := guard(t, "2001:db8::1", "5432", "BACKUP_ALLOW_REMOTE_TARGET=2001:db8::1"); code != 0 || !strings.Contains(out, "LOCAL=0") {
+		t.Errorf("global IPv6 with acknowledgement refused: code=%d %s", code, out)
 	}
 	if code, _ := guard(t, "", "5499"); code == 0 {
 		t.Error("empty host admitted")
@@ -154,8 +163,12 @@ func TestSigningLibrary(t *testing.T) {
 	if out, err := sign("a.pem"); err != nil {
 		t.Fatalf("signing failed: %v %s", err, out)
 	}
+	work := filepath.Join(dir, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	verify := func(pub, pin string) error {
-		_, err := sh(`bk_verify_set_signature `+set, "RESTORE_VERIFY_PUBKEY_FILE="+pub, "RESTORE_VERIFY_PUBKEY_SHA256="+pin)
+		_, err := sh(`bk_verify_set_signature `+set+` `+set+` `+work, "RESTORE_VERIFY_PUBKEY_FILE="+pub, "RESTORE_VERIFY_PUBKEY_SHA256="+pin)
 		return err
 	}
 	if err := verify(keys+"/a.pub", pinA); err != nil {
@@ -214,14 +227,14 @@ func TestSigningLibrary(t *testing.T) {
 // Ordering properties of the scripts that a behavioural drill can only sample: pin them textually.
 func TestSignatureAndEncryptionOrdering(t *testing.T) {
 	r := stripComments(read(t, "deploy/backup/restore.sh"))
-	sig := strings.Index(r, "bk_verify_set_signature \"$BACKUP_DIR\"")
+	sig := strings.Index(r, "bk_verify_set_signature \"$SETDIR\"")
 	for _, later := range []string{`sha256sum --check`, `materialise db.dump`, `pg_restore --list`, `bk_sql "SELECT current_user"`, `CREATE DATABASE`, `age -d`, `gpg --batch`} {
 		i := strings.Index(r, later)
 		if i < 0 || sig < 0 || sig > i {
 			t.Errorf("restore.sh must verify the signature (%d) before %q (%d)", sig, later, i)
 		}
 	}
-	for _, want := range []string{"RESTORE_OWNER_ROLE_OVERRIDE", "--phase", "refusing to run the archive as", "TABLE DATA public database_environment", "RESTORE_EXPECT_SOURCE_ENVIRONMENT", `--role="$OWNER_ROLE"`, "pg_restore --single-transaction --exit-on-error --no-owner"} {
+	for _, want := range []string{"RESTORE_OWNER_ROLE_OVERRIDE", "--phase", "refusing to run the archive as", "TABLE DATA public database_environment", "RESTORE_EXPECT_SOURCE_ENVIRONMENT", "RESTORE_TARGET_ENVIRONMENT", "RESTORE_EXPECT_SET_SHA256", "UNLISTED file", "cp --no-dereference", "plaintext_dump_sha256", "ROLE CHANGE DETECTED", "CREDENTIAL CHANGE DETECTED", "member-of-", `--role="$OWNER_ROLE"`, "pg_restore --single-transaction --exit-on-error --no-owner"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("restore.sh lost %q", want)
 		}
@@ -274,5 +287,62 @@ func TestHardenSurfaceSQL(t *testing.T) {
 		if regexp.MustCompile(`(-f|\\i)\s+"?[^\n]*harden-backup-surface\.sql`).MatchString(body) && base(f) != "lib-provision.sh" {
 			t.Errorf("%s applies harden-backup-surface.sql; only lib-provision.sh (throwaway clusters) may", f)
 		}
+	}
+}
+
+// SR12R-1: the restore must never resolve an artefact by anything but the verified private copy; pin the shape of the code.
+func TestRestoreUsesOnlyVerifiedCopies(t *testing.T) {
+	r := stripComments(read(t, "deploy/backup/restore.sh"))
+	if strings.Contains(r, `"${BACKUP_DIR}/${f}"`) && strings.Contains(r, `-f "${BACKUP_DIR}/${f}" ]; then printf`) {
+		t.Error("restore.sh must not prefer a plaintext file in the backup directory (materialise from the private copy only)")
+	}
+	for _, bad := range []string{`pg_restore --list "${BACKUP_DIR}`, `age -d -i "$RESTORE_AGE_IDENTITY_FILE" -o "${WORK}/${f}" "${BACKUP_DIR}`, `gpg --batch --yes --quiet --output "${WORK}/${f}" --decrypt "${BACKUP_DIR}`} {
+		if strings.Contains(r, bad) {
+			t.Errorf("restore.sh reads %q straight from the backup directory", bad)
+		}
+	}
+	if n := strings.Count(r, "SHA256SUMS"); n < 5 {
+		t.Errorf("restore.sh no longer handles SHA256SUMS in the expected places (%d)", n)
+	}
+}
+
+// SR12R-4: a remote target needs sslmode=verify-full and a root certificate; exercised through the real bk_connect_env.
+func TestRemoteTargetNeedsVerifyFull(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	dir := t.TempDir()
+	pf := filepath.Join(dir, "pgpass")
+	ca := filepath.Join(dir, "ca.pem")
+	for _, f := range []string{pf, ca} {
+		if err := os.WriteFile(f, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(env ...string) (int, string) {
+		script := `. "$1"; bk_connect_env; echo "MODE=${PGSSLMODE} ROOT=${PGSSLROOTCERT}"`
+		cmd := exec.Command("bash", "-c", script, "x", filepath.Join(root(t), "deploy/backup/lib-common.sh"))
+		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "BACKUP_PGHOST=db.example.invalid", "BACKUP_ALLOW_REMOTE_TARGET=db.example.invalid",
+			"BACKUP_PGPORT=5432", "BACKUP_PGDATABASE=igaming", "BACKUP_PGUSER=igaming_backup", "BACKUP_PGPASSFILE=" + pf}, env...)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		return code, string(out)
+	}
+	if code, _ := run(); code == 0 {
+		t.Error("remote target without a root certificate was admitted")
+	}
+	if code, _ := run("BACKUP_PGSSLROOTCERT=" + ca + ".missing"); code == 0 {
+		t.Error("remote target with a missing root certificate file was admitted")
+	}
+	for _, mode := range []string{"require", "prefer", "disable", "verify-ca", "allow"} {
+		if code, _ := run("BACKUP_PGSSLROOTCERT="+ca, "BACKUP_PGSSLMODE="+mode); code == 0 {
+			t.Errorf("remote target admitted with sslmode=%s", mode)
+		}
+	}
+	if code, out := run("BACKUP_PGSSLROOTCERT=" + ca); code != 0 || !strings.Contains(out, "MODE=verify-full") || !strings.Contains(out, "ROOT="+ca) {
+		t.Errorf("remote target with root cert refused or wrong mode: %d %s", code, out)
 	}
 }

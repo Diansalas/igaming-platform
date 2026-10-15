@@ -92,14 +92,23 @@ trap cleanup EXIT
 
 bk_sweep_stale
 mkdir -p "$OUT_DIR"
-for d in "${OUT_DIR}"/*/; do   # orphaned incomplete runs of killed processes (no plaintext can be there, but do not leave partial sets around)
-  [ -f "${d}.incomplete" ] || continue
-  op="$(cat "${d}.incomplete" 2>/dev/null || true)"
-  if [ -z "$op" ] || ! kill -0 "$op" 2>/dev/null; then rm -rf "$d"; bk_log "swept orphaned incomplete run directory ${d}"; fi
-done
+bk_sweep_runs "$OUT_DIR"
 
 # ---- preflight: who are we, may we do this? --------------------------------------------------------------------------
 TMPW="$(bk_mktemp_dir run)"
+# IAM database authentication (M8, SR12R-9): BACKUP_IAM_TOKEN_COMMAND prints a fresh short-lived token (e.g. `aws rds generate-db-auth-token ...`; operator-supplied,
+# trusted configuration). A token is valid ~15 minutes and only checked when a connection is OPENED, so a fresh private passfile is written before EVERY new
+# connection (preflight, snapshot holder, pg_dump, pg_dumpall): a long dump cannot fail at the globals step, and no long-lived password exists.
+bk_iam_refresh() {
+  [ "${BK_IAM_MODE:-0}" = 1 ] || return 0
+  local t
+  t="$(bash -c "$BACKUP_IAM_TOKEN_COMMAND" 2>/dev/null)" || bk_die "BACKUP_IAM_TOKEN_COMMAND failed; nothing was dumped"
+  [[ "$t" =~ ^[!-~]{8,4096}$ ]] || bk_die "the IAM token command produced no usable single-line token; nothing was dumped"
+  t="${t//\\/\\\\}"; t="${t//:/\\:}"
+  (umask 077; printf '%s:%s:*:%s:%s\n' "$BK_CANON_HOST" "$BACKUP_PGPORT" "$BACKUP_PGUSER" "$t" >"${TMPW}/iam.pgpass.new") && mv -f "${TMPW}/iam.pgpass.new" "${TMPW}/iam.pgpass"
+  export PGPASSFILE="${TMPW}/iam.pgpass"
+}
+bk_iam_refresh
 if ! PRE="$(psql -X -q -At -v ON_ERROR_STOP=1 -F '|' -c "SELECT rolsuper::int, rolbypassrls::int, rolcreaterole::int, rolcreatedb::int, rolreplication::int, current_setting('server_version_num')::int FROM pg_roles WHERE rolname = current_user" 2>"${TMPW}/pre.err")"; then
   bk_die "cannot connect as ${BACKUP_PGUSER} to ${BACKUP_PGHOST}:${BACKUP_PGPORT}/${BACKUP_PGDATABASE}: $(head -2 "${TMPW}/pre.err" | tr '\n' ' ') (typical causes: the time-boxed backup credential EXPIRED - re-mint it with init-backup-role.sql / the secret store job; wrong passfile; role missing; host not allowed)"
 fi
@@ -157,12 +166,13 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${OUT_DIR}/${STAMP}-${BACKUP_PGDATABASE}${LABEL:+-$LABEL}"
 [ ! -e "$RUN_DIR" ] || { RUN_DIR=""; bk_die "refusing to overwrite an existing run directory"; }
 mkdir -m 700 "$RUN_DIR"
-printf '%s' "$$" >"${RUN_DIR}/.incomplete"
+printf '%s:%s' "$(hostname)" "$$" >"${RUN_DIR}/.incomplete"
 
 T0="$(now_s)"
 
 # ---- one exported snapshot shared by pg_dump and the baseline queries -------------------------------------------------
 mkfifo "${TMPW}/in" "${TMPW}/out"
+bk_iam_refresh
 psql -X -q -At -v ON_ERROR_STOP=1 <"${TMPW}/in" >"${TMPW}/out" 2>"${TMPW}/holder.err" &
 SESSION_PID=$!
 exec 7>"${TMPW}/in" 8<"${TMPW}/out"
@@ -198,6 +208,7 @@ if [ "$FAULT" = slow_dump ]; then sleep "${BACKUP_TEST_SLOW_SECONDS:-12}" & SLEE
 
 # the dump, STREAMED through the encryptor: no plaintext on the backup volume
 DUMP_OUT="${RUN_DIR}/db.dump${EXT}"
+bk_iam_refresh
 (
   set -o pipefail
   pg_dump -Fc --snapshot="$SNAP" 2>"${TMPW}/pg_dump.err" | tee >(sha256sum | cut -d' ' -f1 >"${TMPW}/plain.sha") | enc_stream >"${DUMP_OUT}.partial" 2>"${TMPW}/enc.err"
@@ -230,6 +241,7 @@ SESSION_PID=""; DRAIN_PID=""
 exec 8<&-
 
 # role/grant definitions (no passwords: pg_dumpall without role-password access needs only pg_roles), streamed likewise
+bk_iam_refresh
 pg_dumpall --globals-only --no-role-passwords --database="${BACKUP_PGDATABASE}" 2>"${TMPW}/globals.err" | enc_stream >"${RUN_DIR}/globals.sql${EXT}" \
   || bk_die "pg_dumpall --globals-only or encryption failed: $(head -3 "${TMPW}/globals.err" | tr '\n' ' ')"
 [ -s "${RUN_DIR}/globals.sql${EXT}" ] || bk_die "globals output is empty"

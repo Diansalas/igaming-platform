@@ -97,7 +97,8 @@ already exists.
 - [ ] 4.2 **Backup-role credential.** Preferred and required: IAM database authentication (no secret exists). Create the runner's IAM policy
       allowing `rds-db:connect` on `arn:aws:rds-db:eu-central-1:<account>:dbuser:<DbiResourceId>/igaming_backup` ONLY, attach it to the backup
       runner identity (**gap G1: the runner identity does not exist yet**), and confirm `aws rds generate-db-auth-token` + `psql` works
-      (token valid 15 minutes, `sslmode=require`; the passfile for the scripts is built from the token at run time, never stored).
+      (token valid 15 minutes; use `sslmode=verify-full` with the RDS CA bundle, **never `require`**, which does not authenticate the server and would let an on-path attacker capture the token and the dump;
+      the scripts build the passfile from `BACKUP_IAM_TOKEN_COMMAND` before every new connection and never store it).
       *Exception path only if IAM auth is unusable (record why)*: create a Secrets Manager secret `igaming-staging/db-backup`
       (`{"username":"igaming_backup","password":"<generated>"}`) with a generator, never a typed value; pass its ARN as
       `-var backup_runner_secret_arn=<arn>`; resource policy limited to the runner. The password then NEVER goes to the server as text:
@@ -161,12 +162,17 @@ already exists.
 
 ## 9. Logical backup and restore on RDS
 
+- [ ] 9.0 Connection settings for every script against RDS: `BACKUP_PGHOST=<endpoint>`, `BACKUP_ALLOW_REMOTE_TARGET=<endpoint>`, `BACKUP_PGSSLROOTCERT=<path to the RDS global CA bundle>`
+      (the scripts force `sslmode=verify-full` for any non-local target and refuse weaker modes), `BACKUP_TMPDIR=<private 0700 scratch directory, tmpfs or encrypted volume>`,
+      `BACKUP_IAM_TOKEN_COMMAND='aws rds generate-db-auth-token --hostname <endpoint> --port 5432 --username igaming_backup --region eu-central-1'`.
+      Provision the role with `BACKUP_ROLE_IAM_ONLY=1` (no password at all).
 - [ ] 9.1 `deploy/backup/backup.sh` from the runner (inside the VPC; **gap G1: runner placement/schedule undecided**) with
       `BACKUP_ENCRYPT_AGE_RECIPIENT` (public) and `BACKUP_SIGNING_KEY_FILE` set; check `manifest.json` (`"encryption": "age"`, `signed`),
       `SHA256SUMS` + `SHA256SUMS.sig`, and that no plaintext artefact exists in the output; time it. **Production dumps are taken from a
       PITR/snapshot clone, not from the primary** (ADR 0122 section 5c); in staging the instance is dumped directly (small data).
 - [ ] 9.2 Restore in the **two-phase** form, never as the master user for the data load: `RESTORE_VERIFY_PUBKEY_FILE`/`RESTORE_VERIFY_PUBKEY_SHA256`
-      pinned, `RESTORE_EXPECT_SOURCE_ENVIRONMENT=<the source anchor>`; `restore.sh --phase provision` as the master (`igaming`, a member of
+      pinned, `RESTORE_EXPECT_SOURCE_ENVIRONMENT=<the source anchor>`, `RESTORE_TARGET_ENVIRONMENT=staging` (must equal the source: a staging set restores into staging; production is never recorded on it),
+      `RESTORE_EXPECT_SET_SHA256=<SHA-256 of SHA256SUMS from the backup runner's log>`; `restore.sh --phase provision` as the master (`igaming`, a member of
       `rds_superuser`: creates only the empty database; roles already exist from step 3/5), set the owner's credential, then `restore.sh --phase load`
       as a **non-`rds_superuser`** owner login (**unverified on RDS: the master `igaming` IS an `rds_superuser` member, so a separate
       NOSUPERUSER owner login that is a member of `igaming`, or `igaming` itself without `rds_superuser`, has to exist; the script refuses a

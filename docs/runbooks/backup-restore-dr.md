@@ -61,7 +61,8 @@ sign.pem; openssl pkey -in sign.pem -pubout -out sign.pub; openssl pkey -pubin -
   the break-glass grant, time-boxed and logged in CloudTrail.
 
 Target guard (all scripts): the host is **canonicalised** (lower-cased, brackets and trailing dots stripped; a comma list, whitespace, userinfo, a slash, a
-backslash or `%` is rejected) and resolved (`getent ahosts`); anything that resolves to this machine (`127.0.0.0/8` including `127.1` and `127.0.0.2`, `0.0.0.0`,
+backslash or `%` is rejected), IPv6 literals are parsed by a real parser (`::` compression, leading zeros, embedded IPv4; an invalid literal is refused) and names are resolved (`getent ahosts`);
+a remote target additionally requires `sslmode=verify-full` with `BACKUP_PGSSLROOTCERT` (the CA bundle) and a private `BACKUP_TMPDIR`; anything that resolves to this machine (`127.0.0.0/8` including `127.1` and `127.0.0.2`, `0.0.0.0`,
 `::`, `::1`, `::ffff:127.x`, `LOCALHOST`, `localhost.`, `[::1]`, this host's own name) is "local", and local on port 5432 (the shared development/CI cluster) is
 **always refused with no acknowledgement that overrides it**; a local target must be a drill port (`BACKUP_DRILL_PORTS`, default 5499 5498 5497); a remote host
 (staging RDS, later) is refused unless `BACKUP_ALLOW_REMOTE_TARGET=<exactly that host>` is set for that invocation. Production is not authorised.
@@ -120,8 +121,10 @@ the restored ledger.
 2. Provision the empty PostgreSQL 16 server (same major version; the dump records `server_version_num`).
 3. Fetch the newest backup set. Keep the decryption identity in the restorer's secret store (`RESTORE_AGE_IDENTITY_FILE=<path>` for age; gpg uses the
    restorer's keyring), and have the **pinned verification key** and its fingerprint (`RESTORE_VERIFY_PUBKEY_FILE`, `RESTORE_VERIFY_PUBKEY_SHA256`) from change
-   control. State what you believe you are restoring: `RESTORE_EXPECT_SOURCE_ENVIRONMENT=<production|development|test|staging|unrecorded>` (it must equal the set's
-   source anchor; a non-production source is refused for any target that is not a throwaway drill instance).
+   control, and `RESTORE_EXPECT_SET_SHA256` (the SHA-256 of `SHA256SUMS` from the backup runner's out-of-band log: it pins WHICH set; `restore.sh` prints `created_utc` and the
+   hash). The backup directory must contain only the signed files (no extra file, symlink or sub-directory: refused). State what you believe you are restoring: `RESTORE_EXPECT_SOURCE_ENVIRONMENT=<production|development|test|staging|unrecorded>` (it must equal the set's
+   signed source anchor) and `RESTORE_TARGET_ENVIRONMENT=<environment of the target>`, which **must equal the source**: a development/staging copy can never enter another
+   environment, and nobody ever has to record `production` on a copy.
 4. **Two phases, two identities** (a dump is executable SQL; ADR 0122 section 5a). On the new empty cluster:
    - `RESTORE_CONFIRM=<new db> deploy/backup/restore.sh --backup-dir <set> --new-database <new db> --apply-globals --phase provision` as the bootstrap
      superuser: verifies the **signature first** (before checksums, decryption or any database contact), then the checksums, then creates the three project roles

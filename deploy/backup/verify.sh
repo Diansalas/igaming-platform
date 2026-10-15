@@ -50,6 +50,9 @@ VERIFY_RUNTIME_PGPASSFILE="${VERIFY_RUNTIME_PGPASSFILE:-$VERIFY_OWNER_PGPASSFILE
 for u in "$VERIFY_OWNER_DATABASE_URL" "$VERIFY_RUNTIME_DATABASE_URL"; do
   ui="${u#*://}"; ui="${ui%%/*}"
   case "$ui" in *@*) case "${ui%%@*}" in *:*) bk_die "VERIFY_*_DATABASE_URL must not embed a password (use VERIFY_OWNER_PGPASSFILE / VERIFY_RUNTIME_PGPASSFILE)" ;; esac ;; esac
+  # also no password key in a query string or a keyword/value DSN (SR12R-8)
+  lu="${u,,}"
+  case "$lu" in *password=*|*password\ =*|*passwd=*) bk_die "VERIFY_*_DATABASE_URL must not embed a password (a password key was found); use the passfile" ;; esac
 done
 : "${MIGRATE_BIN:?MIGRATE_BIN is required}"
 : "${RESTORECHECK_BIN:?RESTORECHECK_BIN is required}"

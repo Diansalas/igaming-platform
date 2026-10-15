@@ -484,3 +484,188 @@ Fix:
 - Penetration testing.
 
 This re-review records what was checked at `fdab1de`. It does not certify the subsystem as secure.
+
+## 9. Fix round 2 (after the re-review in section 8)
+
+Merged `763504c` (already in the branch); all of SR12R-1..10 addressed in code, tests, drill and ADR 0122 section 11. Disposition per finding is in ADR 0122 section 11.
+Full-scale `deploy/backup/drill.sh` on the merged tree (head 0157): **116 PASS / 0 FAIL** (was 93; 23 new assertions). `go test -count=1 ./deploy/...` PASS (new: IPv6 spellings,
+remote `verify-full`, restore-uses-private-copies pins, signing library with the new signature of `bk_verify_set_signature`).
+
+New drill assertions: `restore_refuses_unlisted_plaintext_beside_signed_encrypted_set` + `unlisted_plaintext_poc_did_not_change_owner_credential` (the reviewer's PoC: 0 database
+connections, owner credential unchanged), `restore_refuses_symlink_in_backup_dir`, `..._subdirectory_...`, `..._signed_list_with_two_forms_of_the_dump`,
+`..._dump_not_matching_signed_manifest_hash`, `..._manifest_anchor_differing_from_baseline`, `..._set_not_matching_pinned_set_hash`, `..._other_target_environment`,
+`restore_requires_target_environment`, `restore_uses_only_verified_private_copies` (originals overwritten after verification), `restore_refuses_owner_or_loader_in_pg_execute_server_program`,
+`restore_refuses_loader_with_createrole`, `restore_refuses_loader_in_privileged_pg_roles`, `planted_alter_role_set_detected_and_database_dropped`, `planted_owner_password_change_detected`,
+`backup_remote_target_requires_root_cert`, `..._refuses_weaker_sslmode`, `..._requires_private_scratch_dir`, `backup_sweep_ignores_symlinks_and_other_hosts_runs`,
+`backup_iam_token_mode_refreshes_per_connection`, `backup_iam_token_command_failure_fails_closed`, `init_backup_role_iam_only_path_has_no_password`.
+Changed: F2b/F2c/mal fixtures also recompute the manifest's `plaintext_dump_sha256` (what a compromised signer would do), restore calls carry `RESTORE_TARGET_ENVIRONMENT` and the runner-reported set hash.
+
+Still NOT proven / recorded: RDS behaviour (IAM auth, the real token flow, `rds_superuser` master vs a plain owner login for the load), KMS signing, per-environment signing keys and
+a maximum-age/"latest" pointer (recorded in ADR section 11, needs the backup runner), detection of a password change by a loader that is not the owner.
+
+Raw results of the final full run:
+
+```
+TIMING|migrate_up_seconds|3.16
+RESULT|cluster_and_roles|PASS|throwaway cluster /tmp/pgdrill-lw6nPU/src on 127.0.0.1:5499; roles igaming, igaming_runtime (deploy/init-app-role.sql), igaming_backup (client-side SCRAM verifier), drill_restore, drill_replicator; harden-backup-surface.sql applied; 7 migrate log lines
+TIMING|seed_seconds|623.13
+SIZE|source_ledger_entries|112912
+SIZE|source_ledger_transactions|56424
+SIZE|source_total_rows|286999
+SIZE|source_database_bytes|167017495
+DATA|seed_tally|{"players_per_tenant":24,"seconds":620.371389091,"tally":{"adjustments_executed":16,"adjustments_submitted":24,"alerts_explicit":4,"bonus_grants_issued":12,"casino_wagers":38400,"casino_wins":17400,"deposits_EUR":288,"deposits_USD":32,"reconciliation_runs":4,"sportsbook_bets":192,"sportsbook_settled":64,"withdrawals":24},"tenant_ids":["4e7e9dcb-fb1b-4bc9-a8a9-c94f3dc0f33e","7513f26d-ddd2-4ab8-abee-322d6020111b","9dd66905-8001-4b23-be12-0d1f6f1e8679","ba0389a7-bad0-4399-9ddc-3cd18502a52e"],"tenants":4}
+DATA|ledger_transaction_types|casino_bet=38400, casino_win=17400, deposit=320, sportsbook_bet=192, sportsbook_settlement=64, withdrawal_requested=24, manual_adjustment=16, withdrawal_rejected=8
+DATA|withdrawal_states|cancelled=4, approved=4, rejected=4, submitted=8, pending_review=4
+DATA|adjustment_states|executed=16, cancelled=4, rejected=4
+DATA|audit_rows_alerts_bonus_grants|113922 / 4 / 12
+RESULT|synthetic_world_loaded_through_platform_services|PASS|112912 ledger entries in 56424 transactions, 286999 rows in the database (target >= 100000)
+RESULT|owner_plain_dump_refused|PASS|pg_dump as the migration owner FAILS: pg_dump: error: query failed: ERROR:  query would be affected by row-level security policy for table "alert_deliveries"
+RESULT|owner_dump_with_enable_row_security_is_incomplete|PASS|pg_dump --enable-row-security as the owner also fails: pg_dump: error: Dumping the contents of table "financial_approval_policies" failed: PQgetResult() failed.
+RESULT|runtime_role_dump_refused|PASS|pg_dump as igaming_runtime FAILS: pg_dump: error: query failed: ERROR:  permission denied for table actor_proof_keys
+RESULT|backup_role_dump_complete|PASS|pg_dump as igaming_backup holds all 112912 ledger_entries
+RESULT|backup_role_cannot_write_or_escalate|PASS|15/15 probes denied (DML, DDL, TRUNCATE, TEMP, trigger disable, SET ROLE, replica mode, CREATE/ALTER ROLE, COPY PROGRAM, file read, reload conf)
+RESULT|backup_role_attributes|PASS|NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 2, member of no role, VALID UNTIL set
+RESULT|backup_role_connection_limit_enforced|PASS|a third concurrent session is refused (CONNECTION LIMIT 2)
+RESULT|backup_role_activity_is_audited|PASS|server log holds 28 connection, 27 disconnection and 689 statement lines for igaming_backup (log_connections, log_disconnections, ALTER ROLE ... SET log_statement; on RDS pgaudit)
+RESULT|backup_role_abuse_primitives_denied|PASS|8/8 denied for igaming_backup: session advisory locks (migration/withdrawal/reconciliation stall), pg_logical_emit_message (unbounded WAL), large objects, NOTIFY, CONNECT to postgres/template1
+RESULT|hardening_keeps_platform_roles_working|PASS|igaming and igaming_runtime still take advisory locks (reconciliation, status gates); the full seed ran after the hardening
+RESULT|backup_credential_never_in_server_log|PASS|log_statement=all during minting: the statements are logged (18 lines) but the password is NOT in the server log; control: a naive CREATE ROLE ... PASSWORD :'pw' DOES leak its password into the same log
+RESULT|init_backup_role_rejects_cleartext_password|PASS|refused: must be a SCRAM-SHA-256 verifier (compute it with deploy/backup/scramhash; the clear-text 
+RESULT|init_backup_role_rejects_unbounded_validity|PASS|VALID UNTIL 'infinity' refused (credential validity is bounded to 48 h)
+RESULT|backup_refuses_without_encryption_policy|PASS|refused: backup: no encryption recipient configured. A real dump contains PII, financial data and signing keys: set BAC
+TIMING|backup_total_seconds|6.63
+TIMING|backup_baseline_seconds|2.77
+TIMING|backup_pg_dump_seconds|3.56
+TIMING|backup_encrypt_seconds|0.03
+SIZE|dump_bytes|18515127
+SIZE|backup_directory_bytes|18747195
+RESULT|logical_backup_written|PASS|20261015T210723Z-igaming_platform_dev-plain: SHA256SUMS SHA256SUMS.sig baseline.txt db.dump globals.sql manifest.json 
+RESULT|baseline_covers_latest_migrations|PASS|migration head 157; 156 tables hashed, incl. aml_screening_policies/results, alert_retention_runs, alerts, alert_deliveries with FORCE RLS, the AML SECURITY DEFINER functions' ACLs and their append-only triggers
+RESULT|plain_backup_manifest_is_truthful_and_signed|PASS|manifest says encryption=none (synthetic override), environment_anchor=development; manifest.json is covered by the signed SHA256SUMS
+TIMING|backup_encrypted_total_seconds|6.66
+TIMING|backup_encrypted_encrypt_seconds|0.03
+RESULT|encryption_hook_age|PASS|artifacts age-encrypted (SHA256SUMS SHA256SUMS.sig baseline.txt.age db.dump.age globals.sql.age manifest.json ); no plaintext dump left
+RESULT|encrypted_backup_is_really_encrypted|PASS|age magic on db.dump/globals.sql/baseline.txt, no PGDMP/CREATE ROLE/TABLE| plaintext markers in the files, no plaintext artefact or .partial in the run directory, manifest encryption=age (derived from the files, not from configuration)
+RESULT|no_plaintext_archive_outside_the_synthetic_set|PASS|no PGDMP archive in the repo working directory, backup root, work dir or controlled temp root other than the deliberately plaintext synthetic set
+RESULT|backup_mistyped_age_recipient_fails_closed|PASS|exit 2: backup: age cannot encrypt to BACKUP_ENCRYPT_AGE_RECIPIENT (age: error: malformed recipient "age1<ephemeral-recipient-redacted>": in; no run directory, no plaintext, no temporary files left
+RESULT|backup_malformed_age_recipient_fails_closed|PASS|exit 2: backup: BACKUP_ENCRYPT_AGE_RECIPIENT is not a well-formed age recipient; refusing to dump (nothing was written); no run directory, no plaintext, no temporary files left
+RESULT|backup_unknown_gpg_key_fails_closed|PASS|exit 2: backup: gpg key 0000000000000000000000000000000000000000 is not in the keyring; refusing to dump (nothing was written); no run directory, no plaintext, no temporary files left
+RESULT|backup_short_gpg_id_refused|PASS|exit 2: backup: BACKUP_ENCRYPT_GPG_RECIPIENT must be a FULL 40-hex key fingerprint (a short id or a user-id string can be spoofed); refusing to dump; no run directory, no plaintext, no temporary files left
+RESULT|backup_unencrypted_override_refused_for_remote_target|PASS|exit 2: backup: no encryption recipient configured. A real dump contains PII, financial data and signing keys: set BACKUP_ENCRYPT_AGE_RECIPIENT or BACKUP_ENCRYPT_GPG_RE; no run directory, no plaintext, no temporary files left
+RESULT|backup_unencrypted_override_needs_exact_value|PASS|exit 2: backup: no encryption recipient configured. A real dump contains PII, financial data and signing keys: set BACKUP_ENCRYPT_AGE_RECIPIENT or BACKUP_ENCRYPT_GPG_RE; no run directory, no plaintext, no temporary files left
+RESULT|backup_encryptor_killed_midstream_fails_closed|PASS|exit 2: backup: pg_dump or the encryptor failed: ==> /tmp/pgdrill-lw6nPU/tmp/bk-run.lrj4IVPt/pg_dump.err <==  ==> /tmp/pgdrill-lw6nPU/tmp/bk-run.lrj4IVPt/enc.err <== /h; no run directory, no plaintext, no temporary files left
+RESULT|backup_snapshot_holder_survives_idle_timeout_via_keepalive|PASS|role idle_in_transaction_session_timeout=3s, the dump was delayed 9 s (3x the timeout): the keepalive kept the exported snapshot alive and the backup completed and was signed
+RESULT|backup_without_keepalive_holder_death_fails_loudly|PASS|control: with the keepalive disabled the server's idle timeout killed the snapshot holder and the backup FAILED (exit 2: backup: pg_dump or the encryptor failed: ==> /tmp/pgdrill-lw6nPU/tmp/bk-run.KdxXHH9i/pg_dump.err <== pg_dump: error: query failed: ERROR:  invalid sna); nothing kept
+RESULT|backup_killed_snapshot_holder_fails_loudly|PASS|exit 2: Terminated; no run directory, no plaintext, no temporary files left
+RESULT|backup_sigTERM_mid_dump_cleans_up|PASS|SIGTERM sent while a .partial ciphertext existed (dump in flight): exit 143; run directory and temp dir removed, no plaintext, snapshot-holder session gone, encryptor child terminated
+RESULT|backup_sigINT_mid_dump_cleans_up|PASS|SIGINT sent while a .partial ciphertext existed (dump in flight): exit 130; run directory and temp dir removed, no plaintext, snapshot-holder session gone, encryptor child terminated
+RESULT|backup_sigpipe_closed_stdout_cleans_up|PASS|stdout closed by the consumer: exit 1 (not a silent SIGPIPE death), no output directory kept, no temp files left
+RESULT|backup_sweep_ignores_symlinks_and_other_hosts_runs|PASS|a symlinked run name and a run recorded by another host were left untouched (only real same-host orphans are removed)
+RESULT|backup_startup_sweeps_stale_temp_and_orphan_runs|PASS|a stale temp directory and an orphaned incomplete run directory of a dead pid were removed at the next start
+RESULT|backup_temp_root_is_private|PASS|controlled temp root mode 700; per-run directories are mktemp -d (0700) with unpredictable names
+RESULT|backup_remote_target_requires_root_cert|PASS|exit 2: backup: a remote target requires BACKUP_PGSSLROOTCERT (path to the CA bundle, e.g. the RDS global bundle) for sslmode=verify-full; no run directory, no plaintext, no temporary files left
+RESULT|backup_remote_target_refuses_weaker_sslmode|PASS|exit 2: backup: a remote target requires sslmode=verify-full (BACKUP_PGSSLMODE=require is refused); no run directory, no plaintext, no temporary files left
+RESULT|backup_remote_target_requires_private_scratch_dir|PASS|exit 2: backup: BACKUP_TMPDIR (a private scratch directory, ideally tmpfs or an encrypted volume) is required for a non-drill target; no run directory, no plaintext, no temporary files left
+RESULT|backup_iam_token_mode_refreshes_per_connection|PASS|no password passfile configured: BACKUP_IAM_TOKEN_COMMAND supplied the credential for the preflight, the snapshot holder, pg_dump and pg_dumpall (the globals step opens a NEW connection); the private token passfile was removed with the temp dir
+RESULT|backup_iam_token_command_failure_fails_closed|PASS|exit 2: backup: BACKUP_IAM_TOKEN_COMMAND failed; nothing was dumped; no run directory, no plaintext, no temporary files left
+TIMING|restore_total_seconds|12.01
+TIMING|restore_integrity_and_decrypt_seconds|1.09
+TIMING|restore_pg_restore_seconds|8.40
+TIMING|restore_grants_seconds|0.10
+TIMING|restore_analyze_seconds|2.12
+RESULT|logical_restore_into_new_database|PASS|signature verified against the pinned key, then restored into igaming_restored on the same cluster as the non-superuser restore role (single transaction, no trigger/RLS bypass)
+TIMING|verify_total_seconds|6.09
+RESULT|logical_restore_verified|PASS|VERIFY RESULT: PASS (31 checks); 31 checks
+RESULT|restore_does_not_carry_environment_anchor|PASS|source anchor 'development', restored database_environment holds 0 rows; a production-process startup guard REFUSES the restored database until the owner records the environment (restorecheck: startup_guard_production_process_refused_when_unrecorded PASS)
+RESULT|restore_refuses_wrong_expected_source_environment|PASS|restoring a 'development' backup while asserting 'production' is refused; no database created
+RESULT|encrypted_backup_restores|PASS|age-encrypted backup decrypted and restored: ledger_entries=112912
+RESULT|restore_leaves_no_decrypted_material|PASS|after an encrypted restore the controlled temp root is empty (decrypted dump/globals/baseline removed)
+RESULT|negative_control_verify_detects_tampered_ledger|PASS|verify FAILED as required on a copy with one ledger amount +7; detected by: equal_TABLE invariants_all_zero 
+RESULT|negative_control_reverted_verify_passes_again|PASS|after undoing the damage verify passes again (the failure was the damage, nothing else)
+RESULT|failure_corrupted_dump_detected_before_restore|PASS|checksum mismatch reported, exit 2, no database created
+RESULT|failure_truncated_dump_detected_by_checksum|PASS|checksum mismatch, exit 2, no database created
+RESULT|failure_truncated_dump_with_valid_checksum_refused|PASS|pg_restore refused the unreadable archive (pg_restore failed: pg_restore: error: could not read from input file: end of file 
+restore: FAILED (exit 3); database f2b_db created by this run was dropped); exit 3; no database created
+RESULT|failure_corrupt_dump_with_valid_checksum_rolled_back|PASS|8 bytes flipped at 95% of a validly-signed archive: mid-restore (backup: pg_restore failed: pg_restore: error: could not uncompress data: incorrect data check ); exit 3; no database left (single transaction rolled back / half-created database dropped)
+RESULT|failure_restore_as_igaming_runtime_refused|PASS|clear refusal, exit 2, no database created
+RESULT|failure_restore_as_igaming_backup_refused|PASS|clear refusal, exit 2, no database created
+RESULT|failure_restore_into_existing_database_refused|PASS|refused (database exists), existing ledger_entries unchanged (112912)
+RESULT|failure_insufficient_disk_backup_refused|PASS|refused before writing anything: backup: insufficient disk space in /tmp/pgdrill-lw6nPU/backups: 654 MB free, 999999999 MB required (BACKUP_MIN_FREE_MB).
+RESULT|failure_insufficient_disk_restore_refused|PASS|refused, no database created
+RESULT|failure_partial_restore_rolled_back|PASS|pg_restore terminated part-way (injected fault: client killed once the new database had grown), exit 3; the single transaction rolled back and the half-created database was dropped
+RESULT|failure_backup_credential_expired_fails_closed|PASS|exit 2: backup: cannot connect as igaming_backup to 127.0.0.1:5499/igaming_platform_dev: psql: error: connection to server at "127.0.0.1", port 5499 failed: FATAL:  password authentication failed for user "ig
+RESULT|failure_backup_credential_missing_fails_closed|PASS|exit 2: backup: credential file missing: /tmp/pgdrill-lw6nPU/secrets/does-not-exist (the backup credential was not provisioned, or it expired and wa
+RESULT|failure_backup_as_owner_role_refused|PASS|refused before dumping: backup: role igaming does not have BYPASSRLS: under FORCE ROW LEVEL SECURITY a dump by this role is refused or silently INCOMPLETE (BACKUP-ROLE-1). Us
+RESULT|guard_refuses_shared_cluster_5432|PASS|refused without connecting
+RESULT|guard_refuses_remote_host_without_explicit_allow|PASS|refused without connecting
+RESULT|guard_refuses_aliases_of_the_shared_cluster|PASS|9/9 aliases of 127.0.0.1:5432 refused by the guard BEFORE any connection (127.0.0.2, 127.1, 0.0.0.0, ::ffff:127.0.0.1, LOCALHOST, localhost., [::1], a,127.0.0.1, this host's own name)
+RESULT|restore_owner_role_allow_list|PASS|--owner-role postgres, igaming_backup, igaming_runtime, rdsadmin, rds_superuser refused outright; an unlisted name (app_owner) needs the explicit RESTORE_OWNER_ROLE_OVERRIDE; no database created in any case
+RESULT|restore_refuses_unsigned_set|PASS|refused (exit 2): backup: UNSIGNED backup set (SHA256SUMS or SHA256SUMS.sig missing) in /tmp/pgdrill-lw6nPU/backups/h3: refusing; nothing was restored; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_attacker_signed_replacement_set|PASS|refused (exit 2): backup: SIGNATURE VERIFICATION FAILED for /tmp/pgdrill-lw6nPU/backups/h3: the set was not signed by the pinned key or was altered; nothing was restore; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_verification_key_inside_backup_dir|PASS|refused (exit 2): backup: the verification key must not be read from the backup directory; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_verification_key_not_matching_pin|PASS|refused (exit 2): backup: the verification key's fingerprint (b616a75681ba516f7fd176a5c5328fc6c78d12a34a2a495a9e83c153f19bab5b) does not equal the pinned RESTORE_VERIFY; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_requires_pinned_fingerprint|PASS|refused (exit 2): backup: RESTORE_VERIFY_PUBKEY_FILE and RESTORE_VERIFY_PUBKEY_SHA256 (pinned fingerprint) are required: a backup set is only restored if its signature ; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_manifest_altered_after_signing|PASS|refused (exit 2): backup: CHECKSUM MISMATCH or missing file in /tmp/pgdrill-lw6nPU/backups/h3 - the backup is corrupted or tampered with; nothing was restored. manifest; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_checksum_list_altered_after_signing|PASS|refused (exit 2): backup: SIGNATURE VERIFICATION FAILED for /tmp/pgdrill-lw6nPU/backups/h3: the set was not signed by the pinned key or was altered; nothing was restore; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_garbage_signature|PASS|refused (exit 2): backup: SIGNATURE VERIFICATION FAILED for /tmp/pgdrill-lw6nPU/backups/h3: the set was not signed by the pinned key or was altered; nothing was restore; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|backup_requires_signing_key|PASS|exit 2: backup: BACKUP_SIGNING_KEY_FILE is required: backup sets must be signed (A12 security review H3); no run directory, no plaintext, no temporary files left
+RESULT|backup_refuses_unusable_signing_key|PASS|exit 2: backup: the signing key cannot sign (not an Ed25519 PEM private key, or OpenSSL < 3.0); refusing to dump; no run directory, no plaintext, no temporary files left
+RESULT|malicious_archive_entry_fails_harmlessly_as_nonsuperuser|PASS|COPY ... TO PROGRAM planted in a CHECK-constraint function: the non-superuser restore role could not run it (permission denied to COPY to or from an external program DETAIL:  Only roles with privileg); single transaction rolled back, flag file NOT created, no database left
+RESULT|restore_refuses_superuser_for_data_load|PASS|pg_restore as the cluster superuser is refused before any database is created: backup: signed set: created_utc=20261015T210723Z SHA256SUMS sha256=d7a9d7d31192cb5086fa2b5908bfae928b95d6077fdf3de60b8f066756003d7d
+RESULT|negative_control_naive_superuser_restore_executes_planted_command|PASS|control: the same archive restored the naive way (pg_restore as the superuser) RAN the planted COPY ... TO PROGRAM (flag file created by the server): exactly what the two-phase, non-superuser load prevents
+RESULT|restore_refuses_unlisted_plaintext_beside_signed_encrypted_set|PASS|refused (exit 2): backup: UNLISTED file 'db.dump' in the backup directory: it is not covered by the signed manifest; refusing (nothing was restored); no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|unlisted_plaintext_poc_did_not_change_owner_credential|PASS|the planted ALTER ROLE ... PASSWORD never ran: igaming still logs in with its own credential
+RESULT|restore_refuses_symlink_in_backup_dir|PASS|refused (exit 2): backup: /tmp/pgdrill-lw6nPU/backups/sr1/globals.sql in the backup directory is not a regular file (symlink / directory / special file); refusing; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_subdirectory_in_backup_dir|PASS|refused (exit 2): backup: /tmp/pgdrill-lw6nPU/backups/sr1/sub in the backup directory is not a regular file (symlink / directory / special file); refusing; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_signed_list_with_two_forms_of_the_dump|PASS|refused (exit 2): backup: the signed SHA256SUMS must list exactly one form of db.dump (found 2); refusing; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_dump_not_matching_signed_manifest_hash|PASS|refused (exit 2): backup: signed set: created_utc=20261015T210723Z SHA256SUMS sha256=679f3f294ea13c9d896aaf2201b62c8b140f1b71b988740a8cad607439f94eb7; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_manifest_anchor_differing_from_baseline|PASS|refused (exit 2): backup: signed set: created_utc=20261015T210723Z SHA256SUMS sha256=8863e82ca6df4da35be881a8b642a2c94bae6e2bb0312a39f730f0fc1a99faca; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_set_not_matching_pinned_set_hash|PASS|refused (exit 2): backup: signed set: created_utc=20261015T210723Z SHA256SUMS sha256=498150bf608b2d3886af5e54150adbcc602f7ab124961c81fd3d1dc90799a44b; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_refuses_other_target_environment|PASS|refused (exit 2): backup: signed set: created_utc=20261015T210723Z SHA256SUMS sha256=498150bf608b2d3886af5e54150adbcc602f7ab124961c81fd3d1dc90799a44b; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_requires_target_environment|PASS|refused (exit 2): backup: signed set: created_utc=20261015T210723Z SHA256SUMS sha256=498150bf608b2d3886af5e54150adbcc602f7ab124961c81fd3d1dc90799a44b; no database contact (0 new connections), nothing decrypted, nothing restored
+RESULT|restore_uses_only_verified_private_copies|PASS|originals overwritten after verification (db.dump now starts with EVIL), the restore still loaded the signed content: ledger_entries=112912
+RESULT|restore_refuses_owner_or_loader_in_pg_execute_server_program|PASS|with igaming a member of pg_execute_server_program: the loading role (via igaming) and the owner check both refuse; no database created
+RESULT|restore_refuses_loader_with_createrole|PASS|a CREATEROLE loading role is refused (a planted CREATE ROLE ... LOGIN would be a persistent backdoor)
+RESULT|restore_refuses_loader_in_privileged_pg_roles|PASS|membership in pg_write_server_files, pg_read_server_files, pg_read_all_data, pg_write_all_data, pg_signal_backend each refused for the loading role
+RESULT|planted_alter_role_set_detected_and_database_dropped|PASS|an archive entry that ran ALTER ROLE igaming SET work_mem committed a cluster-global role change; the load detected it (exit 3) and dropped the database
+RESULT|planted_owner_password_change_detected|PASS|an archive entry changed the owner's password (cluster-global, committed); reconnecting as the owner failed and the load exited 3 with an incident message (credential then restored by the drill's superuser)
+TIMING|fullloss_empty_cluster_initdb_and_start_seconds|1.12
+RESULT|failure_tampered_globals_refused|PASS|ALTER ROLE igaming WITH SUPERUSER in a validly-signed globals.sql refused by the allow-list; no role or database created
+RESULT|fullloss_provision_phase_creates_roles_and_empty_database|PASS|superuser phase created the project roles WITHOUT passwords and an empty database owned by igaming (0 objects); no archive content executed
+RESULT|restored_roles_have_no_password_until_reprovisioned|PASS|igaming/igaming_runtime/igaming_backup cannot log in after restore (no passwords in the dump, by design)
+RESULT|fullloss_load_phase_refuses_superuser|PASS|--phase load as the bootstrap superuser refused; the database is still empty
+TIMING|fullloss_restore_total_seconds|11.35
+TIMING|fullloss_restore_integrity_and_decrypt_seconds|0.87
+TIMING|fullloss_restore_pg_restore_seconds|8.30
+TIMING|fullloss_restore_grants_seconds|0.07
+TIMING|fullloss_restore_analyze_seconds|2.09
+TIMING|fullloss_provision_and_load_phases_seconds|13.75
+RESULT|full_loss_restore_into_new_cluster|PASS|two-phase restore: roles + empty database created by the bootstrap superuser WITHOUT passwords, archive then loaded as the NON-superuser igaming
+TIMING|fullloss_reprovision_credentials_seconds|0.16
+TIMING|fullloss_verify_total_seconds|6.12
+RESULT|full_loss_restore_verified|PASS|VERIFY RESULT: PASS (31 checks); incl. database_environment anchor BLANK => a production platform-api would REFUSE to start until the owner records it
+RESULT|hardening_must_be_reapplied_after_full_loss_restore|PASS|on the restored cluster the backup role could take advisory locks until harden-backup-surface.sql was re-run (pg_catalog grants are not part of a dump), then it could not: the runbook post-restore checklist includes the step
+RESULT|anchor_recorded_truthfully_production_guard_refuses_dev_data|PASS|owner recorded 'development' (the source environment); the production startup guard REFUSES this database, so a restored dev backup can never be started as production by accident
+RESULT|init_backup_role_iam_only_path_has_no_password|PASS|BACKUP_ROLE_IAM_ONLY=1: igaming_backup has a NULL password (the old password no longer works), BYPASSRLS and CONNECTION LIMIT 2 intact; rds_iam is granted only where it exists
+TIMING|base_backup_seconds|1.90
+SIZE|base_backup_bytes|207953225
+RESULT|base_backup_verifies|PASS|pg_verifybackup: backup successfully verified
+SIZE|wal_segments_replayed_from_base_end_to_target|5
+RESULT|operator_error_is_visible_on_source|PASS|source casino_provider_rounds 106 -> 0; ledger_entries now 116080 (expected-at-target 115080)
+TIMING|wal_archive_lag_seconds|9.06
+RESULT|archive_lag_bounded|PASS|last commit's segment 000000010000000000000047 reached the archive 9.06 s after the commit (archive_timeout=30s)
+SIZE|wal_archive_bytes|637534549
+TIMING|pitr_base_copy_seconds|0.34
+TIMING|pitr_recovery_named_restore_point_seconds|2.10
+TIMING|pitr_recovery_named_total_incl_copy_seconds|2.44
+RESULT|named_rows_after_target_absent_before_present|PASS|ledger_entries recovered=115080 (== expected at target 115080; source now 116080); tenants=5; casino_provider_rounds=102 (operator deletion undone)
+RESULT|named_verify_against_expected_at_target|PASS|VERIFY RESULT: PASS (31 checks)
+TIMING|pitr_recovery_timestamp_seconds|2.13
+TIMING|pitr_recovery_timestamp_total_incl_copy_seconds|2.64
+RESULT|time_rows_after_target_absent_before_present|PASS|ledger_entries recovered=115080 (== expected at target 115080; source now 116080); tenants=5; casino_provider_rounds=102 (operator deletion undone)
+RESULT|time_verify_against_expected_at_target|PASS|VERIFY RESULT: PASS (31 checks)
+RESULT|wal_continuity_check_clean_archive|PASS|no gap between 000000010000000000000043 and the target segment 000000010000000000000047
+RESULT|wal_gap_detected_by_continuity_check|PASS|continuity check reports missing: 000000010000000000000044
+RESULT|wal_gap_recovery_refused|PASS|server did not promote; log: 2026-10-15 21:12:17.769 UTC [11630] FATAL:  recovery ended before configured recovery target was reached
+PITR_TARGET|lsn=0/4700B2F8|segment=000000010000000000000047|time=2026-10-15 21:11:30.247533+00
+```
