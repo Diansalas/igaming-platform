@@ -834,6 +834,9 @@ Discriminator `stream:payment_statement:provider:<id>:<phase>` (ONE open alert p
 - `source_not_eligible`: a source is registered but cannot vouch for this provider (it speaks for another provider id, or it is a MOCK source
   where mock components are not allowed). It is never fetched.
 - `scope`: the tenant's provider listing failed (database).
+- `cursor_anomaly` (SR11-1): run rows exist for the pair above its backed cursor that no stored import backs. They are IGNORED by the cursor
+  read (the stream keeps fetching from the genuine cursor) but are a forgery/corruption indicator: treat as a security incident (who wrote
+  `reconciliation_runs`?), keep the rows as evidence, and do not resolve the alert until security has reviewed.
 - `truncated`: the run stopped at the per-run line bound (`RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`). The run matched only the window the
   source vouched for (`window_truncated=true` in `reconciliation_runs` and the audit row) and the next run continues from the persisted
   cursor (`reconciliation_runs.coverage_end` of the provider's last committed run). It is not a failure and not a clean claim; it clears

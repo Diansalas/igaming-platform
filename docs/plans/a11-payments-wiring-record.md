@@ -46,8 +46,11 @@ causes a fetch of a provider only tenant 1 has; each tenant keeps its own cursor
   unsplittable group is refused with `ErrPaymentStatementUnpageable`, a P1, rather than guessed).
 - **Cursor** (migration 0160, additive): `reconciliation_runs.provider_id`, `window_truncated`, plus the existing `coverage_end` (0152), all
   written in the run's own INSERT under the stream's per-tenant advisory lock. The cursor for (tenant, provider) is
-  `max(coverage_end)` of its COMMITTED payment_statement runs (never from audit rows; future-dated/forged-high values beyond `now()+5 min`
-  are ignored). A failed fetch, ingest or match writes no run row, so the cursor cannot advance past an unmatched window.
+  `max(coverage_end)` of its COMMITTED payment_statement runs that a stored import BACKS (same tenant, provider and `coverage_end`; a genuine
+  run's import is committed before its match), never from audit rows, and never in the future of the server clock (a continuation statement whose
+  `CoverageEnd` is in the future is refused). A run row with no backing import (a forgery) is ignored and raises a durable P1 (phase
+  `cursor_anomaly`). This closes the single-forged-row blinding found by security (SR11-1); it does NOT stop an attacker who can forge the import
+  row as well (arbitrary SQL in a system-shaped tenant session): see the OPEN row SR11-1 in section 6. A failed fetch, ingest or match writes no run row, so the cursor cannot advance past an unmatched window.
 - **Continuation contract** (`validateBoundedWindow`, refusals are P1 failed runs with nothing stored): the statement starts EXACTLY at the cursor
   (a gap would skip a window, an overlap would count lines twice), holds no line dated before it, never exceeds the bound, and a truncated one
   makes strict progress, ends no later than the requested end and holds only lines before its `CoverageEnd`.
@@ -149,7 +152,20 @@ Open (not decided here):
 
 ## 6. Proposed registry text (for the orchestrator to apply)
 
-OPEN rows to register (ledger-finance review, section 9): **LF-A11-1** (matcher windowing vs bounded line dating; MEDIUM; MUST CLOSE BEFORE
+OPEN rows to register (security review section 10, ledger-finance review section 9):
+
+- **SR11-1 (HIGH; binding before the first non-MOCK statement source; owner security + architect, ledger-finance consulted)**: the payment_statement
+  cursor selects what is fetched, so a forged cursor silently blinds the pair. A11 mitigates the cheap case (unbacked run rows are ignored and
+  alerted; future cursors refused), but the stream is NOT protected against an attacker who can also forge imports. Options for the architect:
+  (a) make `reconciliation_runs`/imports unwritable by the runtime role for these columns (owner-only table or SECURITY DEFINER writer: an
+  ADR-level role change, human-authorised); (b) a periodic cursor-independent lookback re-match (e.g. daily over the last N days; safe because imports
+  are content-addressed and lines dedupe on content, but it needs a source that can serve an arbitrary past window) so a forged cursor delays
+  detection instead of preventing it; (c) anchor the cursor to an HMAC seal like import seals (`ImportSealer` exists for imports) so a forged row fails
+  verification. Do not fold into R3-OBS-BOUND-1; do not describe the stream as forgery-proof.
+- **SR11-2** (future `coverage_end` as cursor): CLOSED by the future-CoverageEnd refusal and the cursor read's `coverage_end <= now()`; the
+  settle lag (LF-A11-2) remains open.
+
+Ledger-finance rows (section 9): **LF-A11-1** (matcher windowing vs bounded line dating; MEDIUM; MUST CLOSE BEFORE
 THE FIRST NON-MOCK STATEMENT SOURCE; see 9.4), **LF-A11-2** (completeness horizon, record-time `OccurredAt`, per-provider settle lag, stuck-cursor
 handling; PROVIDER DEPENDENT; binding before the first non-MOCK source), **LF-A11-6** (provider-side time-ordered paging; same binding),
 **H-W1 second half** (gate M2 on "the last run for (tenant, provider) succeeded"; OWN OPEN real-money row, LF-A11-8; do not fold it into the
@@ -192,8 +208,11 @@ Security (credential/PCI/RLS boundaries; none of this touches PAN or hosted fiel
 1. Registry: can a Synthetic, nil, typed-nil, duplicate, blank-id or unattested source reach the scheduler in production? (`TestRegistry_*`)
 2. Can the scoped sweep fetch for a provider the tenant does not have, or use another tenant's credential? (provider list is the tenant's own
    RLS read; the credential resolves per tenant inside the gate; `TestScoped_PerTenantIsolation`.)
-3. Forged cursor: the runtime role may INSERT `reconciliation_runs` (accepted SR3B-3 posture). A forged far-future `coverage_end` is ignored; a
-   forged value within 5 minutes of now skips at most that window; a forged low value re-matches. Is that acceptable for a real PSP?
+3. Forged cursor: the runtime role may INSERT `reconciliation_runs` AND (in the system shape) `payment_statement_imports`. The cursor SELECTS what is
+   fetched, so (unlike casino_statement's validating anchor) a forged value is silent data loss, not a loud refusal. Mitigated in A11: a run row with
+   no backing import is ignored and alerted (`cursor_anomaly`); future-dated cursors are never accepted. NOT mitigated: a forger who writes a matching
+   import too, or a genuine-looking pair, still skips every line since the last genuine run, repeatably, with runs reading clean. That is SR11-1
+   (OPEN, binding before the first non-MOCK source; options in section 6). Earlier text ("skips at most that window") was wrong and is withdrawn.
    (`TestBound_ForgedCursorsAreIgnored`)
 4. A hostile provider id (from a capability/attempt row) in alert discriminators/audit/logs: `discPart` keeps the discriminator charset safe; the
    the audit/log value is sanitised the same way (`invalid_provider_id` for an unsafe id).
@@ -359,3 +378,18 @@ mitigation is a design decision (architect + security; any DB-role change is hum
 real PSP statement source or real-money payment reconciliation relies on this stream.
 
 This review is not a statement that A11 is "secure". It covers code- and design-level review of the diff above against MOCK providers only.
+
+### 10.3 Responses to the security review (A11 follow-up)
+
+- **SR11-1**: wording corrected (1.2, 7.3, recheck row); registered as its own OPEN row (section 6) with options for the architect. Implemented the
+  cheap safe mitigations: cursor read requires a backing import and `coverage_end <= now()`; unbacked run rows above the cursor raise a durable P1
+  `stream:payment_statement:provider:<id>:cursor_anomaly`. Tests: `TestBound_SR11_ForgedInSkewCursorDoesNotBlindTheStream_AndIsReportedLoudly`
+  (reproduced the blinding against the old query), `TestBound_ForgedCursorsAreIgnored`. Mutants killed: backing clause removed, anomaly alert
+  removed. The `coverage_end <= now()` term in the cursor read is redundant with the backing requirement plus the future refusal (its mutant survives
+  by design; kept as defence in depth).
+- **SR11-2**: future-CoverageEnd refusal in continuation mode (`TestBound_SR11_FutureCoverageEndIsRefusedInContinuationMode`).
+- **SR11-3**: error built from the sanitised id (`TestScoped_SR11_HostileProviderIDNeverReachesTheAuditError`).
+- **SR11-4**: durable Denied audit rows for S-L1 submit/resolve refusals and for the self-approval refusal (`TestSL1_RefusalsAreAuditedDenied`,
+  `TestWithdrawalApprove_SelfApprovalRejected`).
+- **SR11-6**: S-L4(2) is committed with `FOR SHARE` and tests (see 9.4); wording "CLOSED" applies to the committed code.
+- SR11-7 (static test that only `_test.go` assigns `payoutClaimAfterRoutingHook`) not added (optional).
