@@ -126,6 +126,30 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 			}),
 		)
 
+		// SR8-5: a cheap pre-check BEFORE the Argon2id hash (~64 MiB, tens of
+		// milliseconds of CPU), so a refused-market registration cannot be used to
+		// amplify CPU/memory. The refusal is already disclosed by the response, so a
+		// faster refusal adds no oracle. The authoritative check is the one inside the
+		// account-creation transaction below; this one only ever refuses early.
+		var preDenied bool
+		if perr := deps.DB.WithTenant(r.Context(), brand.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			d, gerr := marketGuard(ctx, tx)
+			if gerr != nil {
+				return gerr
+			}
+			preDenied = !d.Allowed
+			return nil
+		}); perr != nil {
+			logger.Error("register_market_precheck_failed", "error", perr)
+			apierror.Write(w, requestID, apierror.CodeInternal, "registration failed")
+			return
+		}
+		if preDenied {
+			logger.Warn("register_refused_market_not_available", "brand_id", brand.ID.String())
+			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+			return
+		}
+
 		passwordHash, err := auth.HashPassword(req.Password)
 		if err != nil {
 			logger.Error("register_hash_failed", "error", err)

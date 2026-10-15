@@ -165,12 +165,26 @@ func TestInitiateDepositAttempt_MarketGuardRunsBeforeAnyRowExistsInsideTheTransa
 	}
 }
 
-// nil means "no market gate" (library/test callers only); the HTTP handler
-// always sets it. Pinned so the semantics are explicit, not accidental.
-func TestInitiateDepositAttempt_NilMarketGuardIsTheUngatedLibraryPath(t *testing.T) {
+// SR8-3: an empty guard REFUSES (it used to mean "ungated"). Nothing is read or
+// written; a caller that really wants no gate passes marketgate.UngatedForTests.
+func TestInitiateDepositAttempt_EmptyMarketGuardRefuses(t *testing.T) {
 	r := newMarketDepositRig(t, "mock-psp-mkt-f")
 	res, err := r.initiate(t, "mkt-nil", nil)
+	if !errors.Is(err, marketgate.ErrGuardRequired) || res.AttemptCreated || res.MarketDenied {
+		t.Fatalf("empty guard: want ErrGuardRequired and nothing created, got %+v err=%v", res, err)
+	}
+	if n := r.intentCount(t); n != 0 {
+		t.Fatalf("an empty guard created %d intents", n)
+	}
+	if n := r.providerCalls(); n != 0 {
+		t.Fatalf("an empty guard reached the provider %d times", n)
+	}
+}
+
+func TestInitiateDepositAttempt_NamedUngatedSentinelProceeds(t *testing.T) {
+	r := newMarketDepositRig(t, "mock-psp-mkt-g")
+	res, err := r.initiate(t, "mkt-ungated", marketgate.UngatedForTests)
 	if err != nil || res.MarketDenied || !res.AttemptCreated {
-		t.Fatalf("nil guard: want normal processing, got %+v err=%v", res, err)
+		t.Fatalf("named ungated sentinel: want normal processing, got %+v err=%v", res, err)
 	}
 }

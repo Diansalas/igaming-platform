@@ -83,9 +83,19 @@ const (
 	// OpLaunch is a casino game launch (and the launch-session / token
 	// mint it performs): operation "wagering", product "casino".
 	OpLaunch Operation = "launch"
+	// OpSportsbookWager is a sportsbook bet placement (SR8-1): operation
+	// "wagering", product "sportsbook" (ADR 0083 5.3.3's contract).
+	OpSportsbookWager Operation = "sportsbook_wagering"
+	// OpCasinoBet is a NEW casino bet (a vendor callback, so it has no
+	// player request evidence): operation "wagering", product "casino".
+	// Used only by the brand-level AnyCountryPermits check, never by Check.
+	OpCasinoBet Operation = "casino_wagering"
 )
 
-const productCasino = "casino"
+const (
+	productCasino     = "casino"
+	productSportsbook = "sportsbook"
+)
 
 // Stable internal refusal reason codes (audit and logs only; never sent to
 // the player).
@@ -103,6 +113,19 @@ const PlayerMessage = "this service is not available in your region"
 // ErrInvalidRequest is a caller bug (missing tenant/brand, unknown
 // operation). Callers must treat any error from Check as a refusal.
 var ErrInvalidRequest = errors.New("marketgate: invalid request")
+
+// ErrGuardRequired is returned by an orchestrator entry point (LaunchGame,
+// InitiateDepositAttempt, PlaceBet) called with an empty MarketGuard (SR8-3):
+// the guard is mandatory and an empty one REFUSES. A library or test caller
+// that deliberately runs without a market gate passes UngatedForTests.
+var ErrGuardRequired = errors.New("marketgate: a market guard is required (an empty guard refuses; tests pass marketgate.UngatedForTests)")
+
+// UngatedForTests is the explicit, named "no market gate" guard for tests and
+// tooling. It allows everything and writes nothing. No production code may
+// reference it: TestProductionCodeNeverUsesTheUngatedSentinels scans the module.
+var UngatedForTests Guard = func(context.Context, pgx.Tx) (Decision, error) {
+	return Decision{Allowed: true}, nil
+}
 
 // DefaultLocateTimeout bounds the evidence lookup so a slow vendor cannot
 // hold a player request open. A timeout is unknown evidence (refuse).
@@ -163,6 +186,7 @@ type Checker interface {
 type Gate struct {
 	locator geolocation.Locator
 	timeout time.Duration
+	slots   chan struct{}
 }
 
 var _ Checker = (*Gate)(nil)
@@ -170,33 +194,57 @@ var _ Checker = (*Gate)(nil)
 // New returns a Gate over locator. A nil locator is legal and means every
 // request has unknown evidence (refuse).
 func New(locator geolocation.Locator) *Gate {
-	return &Gate{locator: locator, timeout: DefaultLocateTimeout}
+	return &Gate{locator: locator, timeout: DefaultLocateTimeout, slots: make(chan struct{}, maxInflightLookups)}
 }
 
+// maxInflightLookups bounds the lookups a Gate lets run past their deadline
+// (SR8-4). A Locator that ignores its context keeps its goroutine until it
+// returns; the semaphore caps how many such goroutines can exist at once, and a
+// request that cannot get a slot is treated as UNKNOWN immediately (refuse), so
+// a hung vendor can cost at most this many parked goroutines, never unbounded
+// memory, and never delays a player request past the deadline.
+const maxInflightLookups = 128
+
 // Locate resolves the request's country evidence. It never errors and
-// never panics: every failure is UNKNOWN.
-func (g *Gate) Locate(ctx context.Context, req LocateRequest) (ev Evidence) {
+// never panics, and it NEVER waits longer than the Gate's timeout even if
+// the Locator ignores its context: the lookup runs in its own goroutine and a
+// late answer is discarded. Every failure is UNKNOWN.
+func (g *Gate) Locate(ctx context.Context, req LocateRequest) Evidence {
 	if g == nil || g.locator == nil {
 		return Evidence{}
 	}
-	defer func() {
-		if recover() != nil {
-			ev = Evidence{}
-		}
-	}()
+	select {
+	case g.slots <- struct{}{}:
+	default:
+		return Evidence{} // too many abandoned lookups in flight: unknown
+	}
 	lctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
-	res, err := g.locator.GetSignal(lctx, geolocation.SignalRequest{
-		TenantID: req.TenantID, BrandID: req.BrandID, PlayerAccountID: req.PlayerAccountID,
-		RequestID: req.RequestID, IPAddress: req.IPAddress,
-	})
-	if err != nil || lctx.Err() != nil {
+	done := make(chan Evidence, 1)
+	go func() {
+		defer func() { <-g.slots }()
+		defer func() {
+			if recover() != nil {
+				done <- Evidence{}
+			}
+		}()
+		res, err := g.locator.GetSignal(lctx, geolocation.SignalRequest{
+			TenantID: req.TenantID, BrandID: req.BrandID, PlayerAccountID: req.PlayerAccountID,
+			RequestID: req.RequestID, IPAddress: req.IPAddress,
+		})
+		if err != nil || lctx.Err() != nil ||
+			res.Outcome != geolocation.SignalResolved || !validation.IsISO3166Alpha2(res.CountryCode) {
+			done <- Evidence{}
+			return
+		}
+		done <- Evidence{country: res.CountryCode, known: true}
+	}()
+	select {
+	case ev := <-done:
+		return ev
+	case <-lctx.Done():
 		return Evidence{}
 	}
-	if res.Outcome != geolocation.SignalResolved || !validation.IsISO3166Alpha2(res.CountryCode) {
-		return Evidence{}
-	}
-	return Evidence{country: res.CountryCode, known: true}
 }
 
 // Guard returns the in-transaction check for req over ev.
@@ -213,8 +261,11 @@ func opCodes(op Operation) (operation string, product *string, ok bool) {
 		return "registration", nil, true
 	case OpDeposit:
 		return "deposit", nil, true
-	case OpLaunch:
+	case OpLaunch, OpCasinoBet:
 		p := productCasino
+		return "wagering", &p, true
+	case OpSportsbookWager:
+		p := productSportsbook
 		return "wagering", &p, true
 	}
 	return "", nil, false
@@ -277,11 +328,21 @@ func Check(ctx context.Context, tx pgx.Tx, req Request, ev Evidence) (Decision, 
 }
 
 func refuse(ctx context.Context, tx pgx.Tx, req Request, reason, evidence, marketOutcome string) (Decision, error) {
+	write, suppressed := refusalAudit.take(refusalKey{
+		tenant: req.TenantID, brand: req.BrandID, player: req.PlayerAccountID, op: req.Operation, reason: reason,
+	})
+	if !write {
+		// The refusal stands; only its audit row is sampled away (SR8-5).
+		return Decision{Allowed: false, Code: reason}, nil
+	}
 	meta := map[string]any{
 		"operation":   string(req.Operation),
 		"reason_code": reason,
 		"evidence":    evidence, // "resolved" | "unknown" - never the country
 		"brand_id":    req.BrandID.String(),
+	}
+	if suppressed > 0 {
+		meta["suppressed_since_last_row"] = suppressed
 	}
 	if marketOutcome != "" {
 		meta["market_outcome"] = marketOutcome

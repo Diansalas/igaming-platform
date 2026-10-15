@@ -79,7 +79,7 @@ func newCasWorld(t *testing.T, pool *db.Pool) *casWorld {
 	w := &casWorld{pool: pool, f: seedFixture(t, pool)}
 	sbFund(t, pool, w.f, 1_000_000)
 	w.mock = casino.NewMockCasinoProvider(casProvider, "EUR")
-	w.orch = casino.NewOrchestrator(map[string]casino.CasinoProvider{casProvider: w.mock}, casino.NewMockWebhookCredentials(w.mock))
+	w.orch = casino.NewOrchestrator(map[string]casino.CasinoProvider{casProvider: w.mock}, casino.NewMockWebhookCredentials(w.mock)).WithUngatedMarketOpenForTests()
 	err := pool.WithPlatformAdmin(context.Background(), casSeedPlatformAdmin(t, pool), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		w.game, err = casino.UpsertGame(ctx, tx, casino.UpsertGameInput{

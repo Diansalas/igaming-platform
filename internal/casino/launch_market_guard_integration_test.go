@@ -134,10 +134,22 @@ func TestLaunchGame_MarketGuardAllowProceedsToMintTheSession(t *testing.T) {
 	}
 }
 
-func TestLaunchGame_NilMarketGuardIsTheUngatedLibraryPath(t *testing.T) {
+// SR8-3: an empty guard REFUSES; the named sentinel is the only ungated path.
+func TestLaunchGame_EmptyMarketGuardRefuses(t *testing.T) {
 	orch, f, game, sessions := marketLaunchRig(t)
 	res, err := launchWith(t, orch, f, game.ID, ModeDemo, nil)
+	if !errors.Is(err, marketgate.ErrGuardRequired) || res.LaunchURL != "" {
+		t.Fatalf("empty guard: want ErrGuardRequired, got %+v err=%v", res, err)
+	}
+	if sessions() != 0 {
+		t.Fatal("an empty guard minted a session")
+	}
+}
+
+func TestLaunchGame_NamedUngatedSentinelProceeds(t *testing.T) {
+	orch, f, game, sessions := marketLaunchRig(t)
+	res, err := launchWith(t, orch, f, game.ID, ModeDemo, marketgate.UngatedForTests)
 	if err != nil || res.Denied || sessions() != 1 {
-		t.Fatalf("nil guard: want normal processing, got %+v err=%v sessions=%d", res, err, sessions())
+		t.Fatalf("named sentinel: want normal processing, got %+v err=%v sessions=%d", res, err, sessions())
 	}
 }

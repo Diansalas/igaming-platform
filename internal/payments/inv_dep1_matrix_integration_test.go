@@ -331,7 +331,7 @@ func TestINVDEP1_A_OriginalSucceedsFirst_CreatedSiblingRejected(t *testing.T) {
 
 func TestINVDEP1_B_FallbackSucceedsFirst(t *testing.T) {
 	s := newInvDep1Setup(t, "invdep1-b-orig", "invdep1-b-fb")
-	res, err := s.orch.InitiateDepositAttempt(context.Background(), s.pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := s.orch.InitiateDepositAttempt(context.Background(), s.pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: s.f.tenantID, BrandID: s.f.brandID, PlayerAccountID: s.f.playerAccountID, WalletID: s.f.walletID},
 		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "invdep1-b",
 	})
@@ -591,7 +591,7 @@ func TestINVDEP1_E_DuplicateOriginalSuccessCallback(t *testing.T) {
 
 func TestINVDEP1_F_DuplicateFallbackSuccessCallback(t *testing.T) {
 	s := newInvDep1Setup(t, "invdep1-f-orig", "invdep1-f-fb")
-	res, err := s.orch.InitiateDepositAttempt(context.Background(), s.pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := s.orch.InitiateDepositAttempt(context.Background(), s.pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: s.f.tenantID, BrandID: s.f.brandID, PlayerAccountID: s.f.playerAccountID, WalletID: s.f.walletID},
 		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "invdep1-f",
 	})
@@ -780,7 +780,7 @@ func TestINVDEP1_H_ThreeDistinctReferences_AllButFirstDisputed(t *testing.T) {
 
 func TestINVDEP1_I_TimeoutThenFallbackThenLateOriginal(t *testing.T) {
 	s := newInvDep1SetupWith(t, "invdep1-i-orig", "invdep1-i-fb", true)
-	res, err := s.orch.InitiateDepositAttempt(context.Background(), s.pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := s.orch.InitiateDepositAttempt(context.Background(), s.pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: s.f.tenantID, BrandID: s.f.brandID, PlayerAccountID: s.f.playerAccountID, WalletID: s.f.walletID},
 		AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "invdep1-i",
 	})
@@ -1088,7 +1088,7 @@ func TestINVDEP1_Inverted_T13SecondCapture_BecomesDisputed_NoSecondPosting(t *te
 	orch := NewOrchestrator(map[string]PaymentProvider{"invdep1-t13inv-a": providerA, "invdep1-t13inv-b": providerB},
 		MultiWebhookCredentialResolver{"invdep1-t13inv-a": NewMockWebhookCredentials(providerA), "invdep1-t13inv-b": NewMockWebhookCredentials(providerB)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "invdep1-t13inv",
 	})

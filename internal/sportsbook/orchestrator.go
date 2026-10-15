@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/money"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
@@ -54,6 +55,18 @@ type PlaceBetParams struct {
 	ExpectedOddsNumerator   int64
 	ExpectedOddsDenominator int64
 	IdempotencyKey          string
+	// MarketGuard is the A8 operating-market gate (internal/marketgate,
+	// OpSportsbookWager), built by the HTTP handler from server-derived
+	// identifiers and request-evidenced country and evaluated by PlaceBet as the
+	// FIRST statement after parameter validation - before the idempotency lookup
+	// (a replay is refused too), before any catalogue read and before any ledger
+	// lock or write. REQUIRED (SR8-3): an empty guard makes PlaceBet return
+	// marketgate.ErrGuardRequired; tests pass marketgate.UngatedForTests. A
+	// refusal is PlaceBetResult.MarketDenied (a result, so the guard's audit row
+	// commits with the caller's transaction); a guard error fails the placement
+	// closed. This is ADR 0083 5.3.3's "rung 2", implemented by owner/orchestrator
+	// decision ahead of the HDR-J-7 answer (see docs/plans/a8-market-blocking-record.md).
+	MarketGuard marketgate.Guard
 }
 
 // PlaceBetResult is PlaceBet's output. A rejection (Accepted == false) is
@@ -71,6 +84,11 @@ type PlaceBetResult struct {
 	RejectionCategory string
 	RejectionCode     string
 	RejectionMessage  string
+	// MarketDenied is true when the operating-market gate refused the placement
+	// (PlaceBetParams.MarketGuard): nothing was written except the gate's audit
+	// row; Accepted is false and no Rejection* field is set. Callers must check it
+	// first and answer with the generic 403.
+	MarketDenied bool
 }
 
 // PlaceBet validates the selection, evaluates RG eligibility and Risk
@@ -102,8 +120,10 @@ type PlaceBetResult struct {
 // migration-0084). See jurisdiction.go's own doc comment for the shared
 // evaluation both this function and the catalogue annotators
 // (catalogue.go) call (INV-SB-JUR-1). Rung 2 (licence-ceiling/operating-
-// market policy) remains SPECIFIED, NOT IMPLEMENTED - BLOCKED on HDR-J-7
-// (ADR 0083 §5.3.3) - see jurisdiction.go's own closing doc comment.
+// market policy) is now enforced by PlaceBetParams.MarketGuard (A8 / SR8-1,
+// internal/marketgate): a deliberate deviation from ADR 0083 §5.3.3's "blocked
+// on HDR-J-7, no stub" made by owner/orchestrator decision, with country
+// evidence from the request's Locator and unknown evidence refusing.
 //
 // Exposure (Stage 9.2, ADR 0083 Part B2/Wave 3): a cross-player,
 // per-(scope_kind, asset_code) trading-book exposure ceiling
@@ -139,6 +159,19 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	}
 	if params.IdempotencyKey == "" {
 		return PlaceBetResult{}, fmt.Errorf("%w: idempotency_key is required", ErrInvalidInput)
+	}
+
+	// A8 / SR8-1: the operating-market gate, before anything is read or written
+	// (replays included). Mandatory (SR8-3).
+	if params.MarketGuard == nil {
+		return PlaceBetResult{}, marketgate.ErrGuardRequired
+	}
+	decision, gerr := params.MarketGuard(ctx, tx)
+	if gerr != nil {
+		return PlaceBetResult{}, fmt.Errorf("sportsbook: operating-market gate: %w", gerr)
+	}
+	if !decision.Allowed {
+		return PlaceBetResult{MarketDenied: true}, nil
 	}
 
 	// Idempotency short-circuit, BEFORE any RG/risk/balance evaluation -

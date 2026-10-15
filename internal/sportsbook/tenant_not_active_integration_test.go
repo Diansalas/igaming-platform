@@ -147,7 +147,7 @@ func placeBetRT(t *testing.T, pool *db.Pool, f sbFixture, sel Selection, stake i
 	var result PlaceBetResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = PlaceBet(ctx, tx, PlaceBetParams{
+		result, err = PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: stake,
 			ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,

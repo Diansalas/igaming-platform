@@ -102,8 +102,8 @@ func TestLaunchGame_NoConnectionHeldAcrossHealthAndLaunchCalls(t *testing.T) {
 		return base.Launch(ctx, req)
 	}
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
-	result, err := orch.LaunchGame(context.Background(), singleConnPool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
+	result, err := orch.LaunchGame(context.Background(), singleConnPool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -169,11 +169,11 @@ func TestLaunchGame_RefusesUnderTxscopeHeld(t *testing.T) {
 		launchCalls++
 		return base.Launch(ctx, req)
 	}
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
 
 	var launchErr error
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, launchErr = orch.LaunchGame(ctx, pool, ctxObliviousResolver{}, LaunchGameParams{
+		_, launchErr = orch.LaunchGame(ctx, pool, ctxObliviousResolver{}, LaunchGameParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 		})
@@ -222,8 +222,8 @@ func tryAcquireConnection(pool *db.Pool, tenantID uuid.UUID) error {
 // no transaction runner configured must be a clean, typed error, never a
 // nil-pointer panic reaching the caller.
 func TestLaunchGame_NilPoolFailsClosedWithoutPanic(t *testing.T) {
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": NewMockCasinoProvider("mock-casino", "EUR")}, nil)
-	_, err := orch.LaunchGame(context.Background(), nil, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": NewMockCasinoProvider("mock-casino", "EUR")}, nil).WithUngatedMarketOpenForTests()
+	_, err := orch.LaunchGame(context.Background(), nil, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: uuid.New(), BrandID: uuid.New(), PlayerAccountID: uuid.New(), WalletID: uuid.New(),
 		GameID: uuid.New(), AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -244,9 +244,9 @@ func TestLaunchGame_NilOutboundResolverFailsClosedAndRevokesSession(t *testing.T
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	result, err := orch.LaunchGame(context.Background(), pool, nil, LaunchGameParams{
+	result, err := orch.LaunchGame(context.Background(), pool, nil, LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -274,10 +274,10 @@ func TestLaunchGame_CredentialBindingMismatchFailsClosedAndRevokesSession(t *tes
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	wrongTenantResolver := mismatchedOutboundResolver{}
-	result, err := orch.LaunchGame(context.Background(), pool, wrongTenantResolver, LaunchGameParams{
+	result, err := orch.LaunchGame(context.Background(), pool, wrongTenantResolver, LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -302,9 +302,9 @@ func TestLaunchGame_AuditsLaunchRequestedInPhaseAAndLaunchedInPhaseC(t *testing.
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -345,8 +345,8 @@ func TestLaunchGame_ProviderDeclinedRevokesSession(t *testing.T) {
 	}
 	enableGameForTenant(t, pool, f, game.ID)
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
-	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -389,8 +389,8 @@ func TestLaunchGame_CallContextFieldsPassedToProvider(t *testing.T) {
 		return base.Launch(ctx, req)
 	}
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
-	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -447,8 +447,8 @@ func TestLaunchGame_CtxCancelledDuringLaunch_StillRevokesAndAudits(t *testing.T)
 		return LaunchResult{}, errors.New("simulated transport failure after client disconnect")
 	}
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
-	_, err := orch.LaunchGame(ctx, pool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
+	_, err := orch.LaunchGame(ctx, pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -523,8 +523,8 @@ func TestLaunchGame_CtxCancelledAfterVendorAccept_StillAuditsLaunched(t *testing
 		return result, err
 	}
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
-	result, err := orch.LaunchGame(ctx, pool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
+	result, err := orch.LaunchGame(ctx, pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -580,8 +580,8 @@ func TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText(t *testing.T) {
 		return LaunchResult{}, &url.Error{Op: "Post", URL: secretURL, Err: errors.New("connection refused")}
 	}
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
-	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -621,9 +621,9 @@ func TestLaunchGame_CircuitOpenRevokesAndAudits(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	provider.SetHealth(ProviderHealth{CircuitState: CircuitOpen})
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -649,9 +649,9 @@ func TestLaunchGame_ResolverErrorRevokesAuditsAndMapsToProviderUnavailable(t *te
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	_, err := orch.LaunchGame(context.Background(), pool, failingOutboundResolver{}, LaunchGameParams{
+	_, err := orch.LaunchGame(context.Background(), pool, failingOutboundResolver{}, LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -743,8 +743,8 @@ func TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet(t *testin
 		return LaunchResult{}, errors.New("simulated transport failure after vendor consumed the token")
 	}
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
-	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})

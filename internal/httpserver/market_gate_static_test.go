@@ -72,6 +72,7 @@ func TestMarketGate_ThreeHandlersFailClosedWithoutAGate(t *testing.T) {
 		{"auth_routes.go", "newRegisterHandler"},
 		{"deposit_handlers.go", "newInitiateDepositHandler"},
 		{"casino_handlers.go", "newLaunchCasinoGameHandler"},
+		{"sportsbook_handlers.go", "newPlaceBetHandler"},
 	} {
 		if !usesDepsMarketGateNilCheck(funcDecl(t, c.file, c.fn)) {
 			t.Errorf("%s must refuse (503) when deps.MarketGate == nil", c.fn)
@@ -79,7 +80,10 @@ func TestMarketGate_ThreeHandlersFailClosedWithoutAGate(t *testing.T) {
 	}
 }
 
-func TestMarketGate_DepositAndLaunchHandBackTheGuardToTheOrchestrator(t *testing.T) {
+func TestMarketGate_DepositLaunchAndPlaceBetHandBackTheGuardToTheOrchestrator(t *testing.T) {
+	if !setsCompositeKey(funcDecl(t, "sportsbook_handlers.go", "newPlaceBetHandler"), "MarketGuard") {
+		t.Error("newPlaceBetHandler must set PlaceBetParams.MarketGuard (the in-PlaceBet enforcement point)")
+	}
 	if !setsCompositeKey(funcDecl(t, "deposit_handlers.go", "newInitiateDepositHandler"), "MarketGuard") {
 		t.Error("newInitiateDepositHandler must set InitiateDepositParams.MarketGuard (the in-phase-A enforcement point)")
 	}

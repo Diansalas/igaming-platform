@@ -75,7 +75,7 @@ func TestInitiateDepositAttempt_INV_IO_1_NoTxHeldDuringProviderCall(t *testing.T
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-a": provider}, MultiWebhookCredentialResolver{"mock-psp-v2-a": NewMockWebhookCredentials(inner)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "v2-txscope",
 	})
@@ -102,7 +102,7 @@ func TestInitiateDepositAttempt_PendingOutcome_T4(t *testing.T) {
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-b": provider}, MultiWebhookCredentialResolver{"mock-psp-v2-b": NewMockWebhookCredentials(provider)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "v2-pending",
 	})
@@ -127,7 +127,7 @@ func TestInitiateDepositAttempt_DeclinedOutcome_T8(t *testing.T) {
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-c": provider}, MultiWebhookCredentialResolver{"mock-psp-v2-c": NewMockWebhookCredentials(provider)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountPlayerDeclineNoCascade, PaymentMethod: "card", IdempotencyKey: "v2-declined",
 	})
@@ -167,7 +167,7 @@ func TestInitiateDepositAttempt_NonCascadableDeclineNeverCascadesToAvailableFall
 	registerCapability(t, pool, f, fallback, 20)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-nc-a": declining, "mock-psp-v2-nc-b": fallback}, MultiWebhookCredentialResolver{"mock-psp-v2-nc-a": NewMockWebhookCredentials(declining.MockProvider), "mock-psp-v2-nc-b": NewMockWebhookCredentials(fallback.MockProvider)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountPlayerDeclineNoCascade, PaymentMethod: "card", IdempotencyKey: "v2-nc-fallback",
 	})
@@ -217,7 +217,7 @@ func TestInitiateDepositAttempt_AmbiguousOutcome_T6(t *testing.T) {
 	registerCapability(t, pool, f, fallback, 20)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-d": provider, "mock-psp-v2-d-fallback": fallback}, MultiWebhookCredentialResolver{"mock-psp-v2-d": NewMockWebhookCredentials(provider.MockProvider), "mock-psp-v2-d-fallback": NewMockWebhookCredentials(fallback.MockProvider)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "v2-ambiguous",
 	})
@@ -284,7 +284,7 @@ func TestInitiateDepositAttempt_KillSwitchEngaged_DeclinesCleanly_T3(t *testing.
 		t.Fatalf("engage kill switch: %v", err)
 	}
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "v2-kill-switch",
 	})
@@ -364,7 +364,7 @@ func TestDriveCreatedAttemptCascade_KillSwitchOnFallbackProvider_DeclinesCleanly
 		t.Fatalf("engage kill switch: %v", err)
 	}
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "ks-t2-t3-1",
 	})
@@ -432,7 +432,7 @@ func TestInitiateDepositAttempt_CredentialBindingMismatch_T5_NoCall(t *testing.T
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-e": provider}, MultiWebhookCredentialResolver{"mock-psp-v2-e": NewMockWebhookCredentials(provider)})
 
 	resolver := &mismatchedDomainResolver{}
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "v2-cred-mismatch",
 	})
@@ -461,7 +461,7 @@ func TestDenyingKYCGate_DeniesBeforeAnyAttempt(t *testing.T) {
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-f": provider}, MultiWebhookCredentialResolver{"mock-psp-v2-f": NewMockWebhookCredentials(provider)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, denyingKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, denyingKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "v2-kyc-deny",
 	})

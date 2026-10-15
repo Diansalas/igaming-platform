@@ -160,7 +160,7 @@ func TestAdmission_C1a_CasinoCredentialResolutionGateRejection_Isolated(t *testi
 	pool, issuer := testEnv(t)
 	sub := c1IsolatingRealSubsystem(t)
 	mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
-	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, sub.Resolver("casino"))
+	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 
 	tenant := mustCreateTenant(t, pool)
 	mustCreateBrand(t, pool, tenant)

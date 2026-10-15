@@ -127,7 +127,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("tenant_unknown", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		genuine := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "cas-log-1", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,
 			"/v1/webhooks/casino/does-not-exist-slug/mock-casino", genuine, webhookauth.ReasonTenantUnknown)
@@ -135,7 +135,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("tenant_inactive", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		genuine := mock.CallbackPayload(suspendedTenant.ID, casino.CallbackEventBet, "cas-log-2", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,
 			"/v1/webhooks/casino/"+suspendedTenant.Slug+"/mock-casino", genuine, webhookauth.ReasonTenantInactive)
@@ -143,7 +143,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("provider_unregistered", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		genuine := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "cas-log-3", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,
 			"/v1/webhooks/casino/"+activeTenant.Slug+"/not-a-real-provider", genuine, webhookauth.ReasonProviderUnregistered)
@@ -151,7 +151,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("no_resolver", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, nil)
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, nil).WithUngatedMarketOpenForTests()
 		genuine := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "cas-log-4", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,
 			"/v1/webhooks/casino/"+activeTenant.Slug+"/mock-casino", genuine, webhookauth.ReasonNoResolver)
@@ -159,7 +159,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("signature_invalid", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		genuine := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "cas-log-5", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 		genuine.Header.Set(webhookauth.CasinoSignatureHeader, "v1="+"0000000000000000000000000000000000000000000000000000000000000000"[:64])
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,
@@ -168,7 +168,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("provider_invalid", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		genuine := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "cas-log-6", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,
 			"/v1/webhooks/casino/"+activeTenant.Slug+"/BAD_ID!", genuine, webhookauth.ReasonProviderInvalid)
@@ -176,7 +176,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("body_too_large", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		oversized := webhookauth.Inbound{Header: map[string][]string{}, Body: make([]byte, maxCasinoWebhookBodyBytes+1)}
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,
 			"/v1/webhooks/casino/"+activeTenant.Slug+"/mock-casino", oversized, webhookauth.ReasonBodyTooLarge)
@@ -184,7 +184,7 @@ func TestCasinoWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	t.Run("signature_missing", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
-		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		genuine := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "cas-log-7", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 		noHeaders := webhookauth.Inbound{Header: map[string][]string{}, Body: genuine.Body}
 		runCasinoAuthFailureLogCase(t, pool, issuer, orch,

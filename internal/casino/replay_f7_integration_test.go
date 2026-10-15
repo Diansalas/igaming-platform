@@ -38,7 +38,7 @@ func newF7CasinoEnv(t *testing.T, funding int64) f7CasinoEnv {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	return f7CasinoEnv{pool: pool, f: f, provider: provider, orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)), sessionID: sessionID}
+	return f7CasinoEnv{pool: pool, f: f, provider: provider, orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests(), sessionID: sessionID}
 }
 
 func (e f7CasinoEnv) deliver(payload webhookauth.Inbound) (ReceiveCallbackResult, error) {

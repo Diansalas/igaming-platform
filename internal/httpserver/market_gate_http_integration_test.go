@@ -123,6 +123,7 @@ type marketWorld struct {
 	player     registeredPlayer
 	regCounter int
 	deps       Deps
+	selection  uuid.UUID // a sportsbook selection (SR8-1)
 }
 
 func newMarketWorld(t *testing.T) *marketWorld {
@@ -135,6 +136,7 @@ func newMarketWorld(t *testing.T) *marketWorld {
 	deps.CasinoOrchestrator = casOrch
 	deps.CasinoOutboundCredentials = casino.NewMockOutboundResolver()
 	deps.MarketGate = marketgate.New(locator) // the REAL gate
+	deps.SportsbookEnabled = true
 	srv := httptest.NewServer(New(deps))
 	t.Cleanup(srv.Close)
 
@@ -159,6 +161,8 @@ func newMarketWorld(t *testing.T) *marketWorld {
 	// A player registered while the market is open (locator MT).
 	w.player = mustRegisterPlayer(t, srv, w.brand.Slug)
 	mustActivatePlayer(t, pool, w.tenant.ID, w.player.ID)
+	w.selection = mustSeedSportsbookSelection(t, pool, 250, 100)
+	fundWallet(t, pool, w.tenant.ID, w.brand.ID, w.player.ID, "EUR", 1_000_000)
 	return w
 }
 
@@ -178,6 +182,17 @@ func (w *marketWorld) deposit(t *testing.T) *http.Response {
 func (w *marketWorld) launch(t *testing.T) *http.Response {
 	return postJSON(t, w.srv, "/v1/me/casino/games/"+w.gameID.String()+"/launch", w.player.Tokens.AccessToken,
 		map[string]string{"asset_code": "EUR", "mode": "demo"})
+}
+
+func (w *marketWorld) bet(t *testing.T) *http.Response {
+	return postJSON(t, w.srv, "/v1/me/sportsbook/bets", w.player.Tokens.AccessToken,
+		placeBetRequestBody(w.selection, 1000, 250, 100, uuid.NewString()))
+}
+
+// sportsbookRows counts the rows a placement writes: bets and sportsbook_bet ledger transactions.
+func (w *marketWorld) sportsbookRows(t *testing.T) (bets, ledgerTx int) {
+	return countTenantRows(t, w.pool, w.tenant.ID, `SELECT count(*) FROM sportsbook_bets WHERE tenant_id = $1`, w.tenant.ID),
+		countTenantRows(t, w.pool, w.tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'sportsbook_bet'`, w.tenant.ID)
 }
 
 func (w *marketWorld) counts(t *testing.T) (players, intents, sessions, wallets int) {

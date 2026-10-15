@@ -332,10 +332,9 @@ type InitiateDepositParams struct {
 	// and no provider call, leaves the idempotency key unconsumed, and
 	// commits only the gate's own refusal audit row
 	// (InitiateDepositAttemptResult.MarketDenied). An error from the guard
-	// fails the request closed. nil means "no market gate": legal only for
-	// library and test callers - the deposit handler, the only player-
-	// request entry point, always sets it and refuses to run without a
-	// configured gate. Deliberately NOT consulted on the sweeper's cascade
+	// fails the request closed. REQUIRED (SR8-3): an empty guard makes
+	// InitiateDepositAttempt return marketgate.ErrGuardRequired; tests and
+	// tooling pass marketgate.UngatedForTests explicitly. Deliberately NOT consulted on the sweeper's cascade
 	// drive or on provider callbacks/credit (no request evidence exists
 	// there, and refusing to credit an already-captured deposit would
 	// strand player funds: see docs/plans/a8-market-blocking-record.md).

@@ -21,7 +21,7 @@ func TestRGUsageS3_RealCasinoPostings(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	deliver := func(ev CallbackEventType, txID, orig, round string, amount int64, session uuid.UUID) {
 		t.Helper()

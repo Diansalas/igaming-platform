@@ -32,7 +32,7 @@ func TestCasinoWebhook_TamperMatrix_ExactReason(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	genuine := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c5-reason-bet-1", "", "round-c5-reason", "game-1",
 		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())

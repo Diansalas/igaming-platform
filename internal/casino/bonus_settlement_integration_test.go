@@ -476,7 +476,7 @@ func TestPostWin_LockAlreadyReleased(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-lf18")
@@ -512,7 +512,7 @@ func TestPostWin_LockedBonusOrdinary_GrantNonTerminal(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-ordinary-1")
@@ -593,7 +593,7 @@ func TestPostWin_LockedBonusTerminalGrant_CapturesUnconditionally(t *testing.T) 
 			f := seedCasinoFixture(t, pool)
 			provider := NewMockCasinoProvider("mock-casino", "EUR")
 			registerCasinoCapability(t, pool, f, provider, 100)
-			orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+			orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 			co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 			grantID := seedActivatedGrant(t, pool, f, co, "trig-term-"+tc.name)
@@ -679,7 +679,7 @@ func TestPostRollback_PlainLockRollback_RecomputesExposure(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-rollback-1")
@@ -734,7 +734,7 @@ func TestPostRollback_HeldWinRollback_VoidsDispositionAndFinalizesGrant(t *testi
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-heldrb-1")
@@ -806,7 +806,7 @@ func TestPostRollback_HeldWinRollback_DuplicateIsIdempotent(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-dup-1")
@@ -888,7 +888,7 @@ func TestPostRollback_HeldWinRollback_ConcurrentDistinctRollbacks(t *testing.T) 
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-race-1")
@@ -970,7 +970,7 @@ func TestPostRollback_HeldWinRollback_RollbackRacesDirectResolution(t *testing.T
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-race2-1")
@@ -1063,7 +1063,7 @@ func TestPostRollback_HeldWinRollback_AlreadyResolved_FailsClosed(t *testing.T) 
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-lf10-1")
@@ -1137,7 +1137,7 @@ func TestPostWin_PlainCashWin_NeverTouchesBonusMachinery(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-native-1", "", "round-native-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

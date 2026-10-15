@@ -106,7 +106,7 @@ func TestInitiateDeposit_ConcurrentSameIdempotencyKey_OnlyOneProviderCall(t *tes
 	registerCapability(t, pool, f, spy, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": spy}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(spy.MockProvider)})
 
-	params := InitiateDepositParams{
+	params := InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 4000, PaymentMethod: "card", IdempotencyKey: "dep-concurrent-same-key",
 	}
@@ -154,7 +154,7 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacksOnlyOnePosts(t *testing.T) 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 9000, PaymentMethod: "card", IdempotencyKey: "dep-concurrent-callback",
 		})
@@ -212,7 +212,7 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey(t
 	var intent DepositIntent
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 9000, PaymentMethod: "card", IdempotencyKey: "dep-r0-block",
 		})
@@ -298,7 +298,7 @@ func TestInitiateDeposit_RetryWithDifferentAmountRejected(t *testing.T) {
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
-	original := InitiateDepositParams{
+	original := InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 3000, PaymentMethod: "card", IdempotencyKey: "dep-same-key-different-payload",
 	}
@@ -356,7 +356,7 @@ func TestInitiateDeposit_ProviderTransportError_AmbiguousNotCascadedThenRetryNoS
 	registerCapability(t, pool, f, accepting, 20)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": failing, "mock-b": accepting}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(failing.MockProvider), "mock-b": NewMockWebhookCredentials(accepting.MockProvider)})
 
-	params := InitiateDepositParams{
+	params := InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 4500, PaymentMethod: "card", IdempotencyKey: "dep-timeout",
 	}
@@ -449,7 +449,7 @@ func TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded(t *
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4700, PaymentMethod: "card", IdempotencyKey: "dep-cb-ambiguous",
 		})
@@ -529,7 +529,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	var intentA DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intentA, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intentA, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 3300, PaymentMethod: "card", IdempotencyKey: "dep-swap-a",
 		})
@@ -574,7 +574,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	var intentB DepositIntent
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intentB, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intentB, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 2200, PaymentMethod: "card", IdempotencyKey: "dep-swap-b",
 		})
@@ -655,7 +655,7 @@ func TestInitiateDeposit_CapabilityMethodMismatch_NeverCallsProvider(t *testing.
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider.MockProvider)})
 
-	intent, err := mustInitiateDepositAttempt(pool, orch, InitiateDepositParams{
+	intent, err := mustInitiateDepositAttempt(pool, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "crypto_rail", IdempotencyKey: "dep-method-mismatch",
 	})

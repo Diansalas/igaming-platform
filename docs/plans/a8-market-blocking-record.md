@@ -234,3 +234,51 @@ relates to this change.
    production there; wiring ignores the value).
 10. Concurrency: config change vs in-flight request (tested at the gate); a long transaction that read the policy before a
     disable commits is allowed by READ COMMITTED - the window is the transaction itself (for deposit: phase A).
+
+## 10. Round 2 (security review `docs/plans/prh2-hardening-round/a8-security-review.md`, SR8-1..10)
+
+Merged the integration tip first (A3, A4, A7, A9, A10a, A10b). Conflicts resolved keeping both sides:
+`cmd/platform-api/registrations.go` (Geolocation AND AMLScreening bundle fields/registrations), `docs/api/openapi/platform-api.yaml`
+(LaunchCheck code list now names R-MARKET-CONFIG next to the A7 R-AML-* codes; `MarketNotAvailable` response next to the
+`Aml*` responses), `internal/launchgov/readiness.go` (both `marketConfigCheck` and `amlChecks` appended). **`SnapshotVersion`
+2 -> 3** (deliberate: the merged check set differs from A7's v2; `readiness_aml_test.go`'s pin changed from 2 to 3).
+
+| Finding | Done |
+|---|---|
+| SR8-1 sportsbook placement | `marketgate.OpSportsbookWager` = ("wagering","sportsbook"). `POST /v1/me/sportsbook/bets`: handler evaluates the gate inside the placement tx before the wallet get-or-create; `sportsbook.PlaceBet` evaluates `PlaceBetParams.MarketGuard` as its first statement after validation (before the idempotency lookup: replays refused). Refusal = `PlaceBetResult.MarketDenied` -> `403 MARKET_NOT_AVAILABLE`, nothing locked or written. Same contract, audit, OpenAPI (403 added, route text), b2c mapping (`BetSlip`). Nil gate -> 503. **ADR 0083 5.3.3 deviation recorded as an in-ADR amendment** (UNKNOWN evidence refuses; HDR-J-7 stays open). |
+| SR8-2 (a) | `CASINO_SESSION_MAX_LIFETIME` (default 4h, bounded 1m..72h, fails startup otherwise) -> `casino.Orchestrator.SetSessionMaxLifetime`. `postBet` refuses a NEW bet on a consumed session older than that (DB clock, `created_at`), `ErrLaunchSessionRequired`, nothing written. |
+| SR8-2 (b) | `marketgate.BrandOpen`/`AnyCountryPermits` (the R-MARKET-CONFIG resolver logic, now shared; DB clock; no player evidence). `postBet` DECLINES a NEW bet (`market_unavailable`, audit `casino_bet.denied_market_closed`, no ledger write) when no country permits casino wagering for the brand; an error to decide fails closed. Sportsbook needs no separate brand-level check: its per-request gate is strictly stronger (a closed market has no country that passes). |
+| SR8-2 (c) | `BootstrapLaunch` step 4 gains `market_closed` (revoke + audit + commit, the existing definitive-denial path; HTTP stays the constant 403). |
+| SR8-2 settlement | `postWin`/`postRollback`/replay/tombstone never reach either check (tested: two open bets, market closes, win posts and rollback posts, new bet declined, ledger balanced; win after lifetime posts). |
+| SR8-2 concurrency | `TestPostBet_DisableRacingBets...`: 12 bets race a disable; every outcome is accepted-and-posted or declined-and-unposted, ledger balanced, balance equals accepted bets, next bet declined. |
+| SR8-3 | Empty `MarketGuard` refuses (`marketgate.ErrGuardRequired`) in `LaunchGame`, `InitiateDepositAttempt`, `PlaceBet`. Tests pass the explicit named `marketgate.UngatedForTests` (per-package `testUngatedGuard`); casino orchestrator tests use `Orchestrator.WithUngatedMarketOpenForTests()` for the new brand-level check (default and production = ENFORCED, nothing to wire). Code scans (`internal/marketgate/callers_scan_test.go`): every production call of the three entry points passes a non-nil `MarketGuard` literal; no production file outside marketgate/casino-definition references either ungated sentinel. |
+| SR8-4 | `Gate.Locate` runs the lookup in its own goroutine with a hard deadline; a late answer is discarded. Abandoned lookups are bounded by a 128-slot semaphore (a request that cannot get a slot is UNKNOWN at once), so a hung vendor can park at most 128 goroutines. Test with a Locator that ignores cancellation. |
+| SR8-5 | (a) Registration runs the gate as a pre-check BEFORE the Argon2id hash (AST test pins the order); the authoritative in-transaction check stays. (b) Audit flood: refusal audit rows are sampled per (tenant, brand, operation, reason, player) token bucket - burst 5, then 1/minute - and the next written row carries `suppressed_since_last_row`. Registration has no player, so all anonymous refusals of a brand share one bucket; no IP or hash is stored. The refusal itself is never sampled. Process-local (N instances = N x the cap), map bounded at 10k keys. Chosen as the simplest sound option over a DB counter table (needs a migration) or per-IP keys (needs an identifier we deliberately never store). |
+| SR8-6, 8 | Recorded only. A real Locator must receive the `TrustedProxyCount`-aware rightmost-untrusted-hop IP (`ratelimit.go`'s extraction), never the leftmost `X-Forwarded-For` nor a client-suppliable country header; budget vendor quota (`Locate` runs on every gated request). Timing difference unknown-vs-not-permitted is within noise; re-measure with a vendor. |
+| SR8-7, 9, 10 | Recorded only. `market_outcome` is staff-readable in `audit_log` (accepted); the READ COMMITTED window inside phase A and phase B continuing after a disable last milliseconds (accepted); `R-MARKET-CONFIG` uses the application clock, the gate and `BrandOpen` the database clock (readiness advisory, gate enforces). |
+
+Residual (PROVIDER DEPENDENT): a player who moves from an allowed country to an excluded one INSIDE a market that stays open is
+not detected after launch; the maximum session lifetime is the only bound (a casino bet is a vendor callback with no player
+request). Real detection needs a per-bet vendor geolocation signal.
+
+### Round-2 changed assertions
+
+* `internal/launchgov/readiness_aml_test.go`: `SnapshotVersion != 2` -> `!= 3` (check set grew by `R-MARKET-CONFIG`).
+* `TestInitiateDepositAttempt_NilMarketGuardIsTheUngatedLibraryPath` replaced by `..._EmptyMarketGuardRefuses` + `..._NamedUngatedSentinelProceeds`;
+  `TestLaunchGame_NilMarketGuardIsTheUngatedLibraryPath` replaced by `..._EmptyMarketGuardRefuses` + `..._NamedUngatedSentinelProceeds`
+  (my own round-1 tests: nil used to mean ungated, now it refuses).
+* Mechanical harness edits (no assertion touched): `MarketGuard: testUngatedGuard` added to every `LaunchGameParams{}`,
+  `InitiateDepositParams{}` and `PlaceBetParams{}` literal in existing tests (casino, payments, httpserver, sportsbook,
+  reconciliation, risk), and `.WithUngatedMarketOpenForTests()` appended to every `casino.NewOrchestrator(...)` in existing tests
+  (these tests are about bet mechanics, not market configuration).
+
+### Round-2 verification
+
+gofmt clean; `go vet ./...` and `go vet -tags integration ./...` clean; golangci-lint 0 issues; `go test ./...` PASS. Integration (private DB,
+`-tags integration -count=1 -p 1`): marketgate, operatingmarket, geolocation, config, `./cmd/...`, apierror, launchgov, sportsbook, casino,
+reconciliation, risk, kyc PASS (whole packages); httpserver (the register/deposit/launch/sportsbook/market/launch-authorisation/casino/
+stage-acceptance set, 300+ tests, plus all new market files) PASS after one load flake of `TestResolutionIsolation_NormalOperation`
+(failed while b2c/backoffice vitest ran concurrently on the same CPUs, passes alone, whole `TestResolutionIsolation*` group re-run green);
+payments: the 207 tests in files that call `InitiateDepositAttempt` PASS; `-race` PASS for marketgate, operatingmarket, identity.
+b2c vitest (98 tests) + build PASS; backoffice `tsc -b` + vitest PASS (a different single test timed out once under the same
+load, green alone). Mutation pass round 2: 14 mutants, 14 killed (two build-failure "kills" redone).

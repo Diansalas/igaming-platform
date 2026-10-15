@@ -497,7 +497,7 @@ func TestA7_3_DeferredReceiptAppliedVsFreshCallback_SameAttempt(t *testing.T) {
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"a7-3": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"a7-3": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "a7-3",
 	})

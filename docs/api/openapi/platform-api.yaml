@@ -2008,6 +2008,12 @@ paths:
         webhook-decline precedent. Full server-authoritative chain:
         validation -> RG eligibility -> risk evaluation -> wallet balance
         authorization -> ledger post + bet row, in one transaction.
+        The A8 operating-market gate (internal/marketgate, SR8-1) runs
+        FIRST, before the wallet is touched and again as the first statement
+        of PlaceBet (a replay of an earlier idempotency key included): a
+        refusal is `403 MARKET_NOT_AVAILABLE` (not the 200 accepted=false
+        shape), locks no stake and writes no ledger row. This applies ADR
+        0083 5.3.3's rung 2 ahead of the HDR-J-7 answer, by owner decision.
       security:
         - bearerAuth: []
       requestBody:
@@ -2017,6 +2023,8 @@ paths:
             schema:
               $ref: "#/components/schemas/PlaceBetRequest"
       responses:
+        "403":
+          $ref: "#/components/responses/MarketNotAvailable"
         "201":
           description: Bet accepted
           content:
@@ -2036,7 +2044,7 @@ paths:
         "404":
           description: Selection not found
         "503":
-          description: Sportsbook is not enabled on this deployment
+          description: Sportsbook is not enabled on this deployment, or no operating-market gate is configured (fail closed)
     get:
       summary: List the caller's own bet history
       description: Player-authenticated, restricted to the caller's own bets (WithPlayerScope).
@@ -13311,7 +13319,7 @@ components:
         a caller which rung blocked or whether their location could not be determined. The country is NEVER
         read from the request (body, headers, query); it is derived server-side. Nothing is created (a refused
         deposit creates no intent, attempt or provider call and does not consume the idempotency key; a refused
-        launch mints no session or token; a refused registration creates no account). A deployment with no
+        launch mints no session or token; a refused registration creates no account; a refused sportsbook bet locks no stake and writes no ledger row). A deployment with no
         market gate configured answers 503 `service_unavailable` instead.
       content:
         application/json:

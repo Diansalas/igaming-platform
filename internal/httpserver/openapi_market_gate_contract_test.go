@@ -42,6 +42,7 @@ func TestOpenAPI_MarketGate_ThreeOperationsDocumentTheGenericRefusal(t *testing.
 		{"/v1/auth/register", "post"},
 		{"/v1/me/deposits", "post"},
 		{"/v1/me/casino/games/{gameID}/launch", "post"},
+		{"/v1/me/sportsbook/bets", "post"},
 	} {
 		block := opBlock(t, spec, op.path, op.method)
 		if !regexp.MustCompile(`(?m)^        "403":\n          \$ref: "#/components/responses/MarketNotAvailable"`).MatchString(block) {

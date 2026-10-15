@@ -53,6 +53,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
@@ -103,6 +104,11 @@ func (o *Orchestrator) InitiateDepositAttempt(
 	if err := validateInitiateDepositParams(params); err != nil {
 		return InitiateDepositAttemptResult{}, err
 	}
+	// SR8-3: the market guard is mandatory; an empty one refuses before anything
+	// is read or written.
+	if params.MarketGuard == nil {
+		return InitiateDepositAttemptResult{}, marketgate.ErrGuardRequired
+	}
 
 	// --- Phase A0: load routing candidates (read-only tx), then rank ---
 	// OUTSIDE any transaction (ADR 0095 §9.6/§5.1: "health filter outside
@@ -138,15 +144,13 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		// and before any row exists - a refused request (replay included)
 		// creates nothing. The refusal is a result, not an error, so this
 		// transaction commits the gate's audit row.
-		if params.MarketGuard != nil {
-			decision, gerr := params.MarketGuard(actx, tx)
-			if gerr != nil {
-				return fmt.Errorf("payments: operating-market gate: %w", gerr)
-			}
-			if !decision.Allowed {
-				marketDenied = true
-				return nil
-			}
+		decision, gerr := params.MarketGuard(actx, tx)
+		if gerr != nil {
+			return fmt.Errorf("payments: operating-market gate: %w", gerr)
+		}
+		if !decision.Allowed {
+			marketDenied = true
+			return nil
 		}
 		// H-SEC-5: a NEW deposit intent/attempt for a tenant or brand that is
 		// not 'active' is refused, in THIS tx, before the first insert (no

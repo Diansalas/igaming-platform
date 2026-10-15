@@ -66,7 +66,7 @@ func TestLockOrder_ConcurrentBetAndWinOnSameWallet_NoDeadlock(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// Seed a settled round so the win below has a real, unreversed bet to
 	// settle - resolveWinOrigin derives the credited wallet and account
@@ -184,7 +184,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		provider := NewMockCasinoProvider("mock-casino", "EUR")
 		registerCasinoCapability(t, pool, f, provider, 100)
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 		co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 		grantID := seedActivatedGrant(t, pool, f, co, "lockorder-lock1d")
@@ -264,7 +264,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		provider := NewMockCasinoProvider("mock-casino", "EUR")
 		registerCasinoCapability(t, pool, f, provider, 100)
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 		co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 		// One Grant the conversion will act on (completed) and one the

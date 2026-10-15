@@ -342,6 +342,8 @@ func run() error {
 	// item - not this stage's scope).
 	casinoOrchestrator := casino.NewOrchestrator(providers.casinoAdapters(), providers.casinoOrchestratorResolver())
 	casinoOrchestrator.SetWebhookLogger(logger) // W2A-SEC-2 matched-key_id line
+	// SR8-2: absolute maximum lifetime of a consumed launch session for NEW bets.
+	casinoOrchestrator.SetSessionMaxLifetime(cfg.CasinoSessionMaxLifetime)
 
 	// Stage 6 ships a mock sportsbook provider only (CLAUDE.md's "does not
 	// integrate a real provider without a confirmed commercial

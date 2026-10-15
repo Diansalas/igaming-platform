@@ -1,0 +1,98 @@
+package marketgate
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
+)
+
+// maxCountriesScanned bounds the per-call resolver work of AnyCountryPermits
+// (there are fewer than 250 ISO-3166-1 alpha-2 codes).
+const maxCountriesScanned = 250
+
+// AnyCountryPermits is the BRAND-LEVEL "is the market still open?" question
+// (SR8-2): does the operating-market configuration currently permit AT LEAST
+// ONE country for every one of ops, for this tenant (and brand when non-nil)
+// at asOf? It needs no player evidence, so it can run where no request exists
+// (a casino vendor callback, the launch-token bootstrap), and it resolves
+// through operatingmarket.ResolveOperatingCountryPolicy itself (licence
+// ceiling, tenant, brand and operation rungs) - never a re-implementation.
+//
+// configured reports whether any country has an enabled tenant-rung row at
+// all (distinguishes "never configured" from "configured but every country is
+// closed" for the readiness item's detail codes). tx MUST be a tenant-scoped,
+// non-player-scoped transaction for tenantID. A non-nil error means "could not
+// decide": callers must treat it as closed.
+func AnyCountryPermits(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID, asOf time.Time, ops ...Operation) (configured, open bool, err error) {
+	if tenantID == uuid.Nil || len(ops) == 0 {
+		return false, false, fmt.Errorf("%w: tenant and at least one operation are required", ErrInvalidRequest)
+	}
+	type spec struct {
+		op      string
+		product *string
+	}
+	specs := make([]spec, 0, len(ops))
+	for _, o := range ops {
+		code, product, ok := opCodes(o)
+		if !ok {
+			return false, false, fmt.Errorf("%w: unknown operation %q", ErrInvalidRequest, o)
+		}
+		specs = append(specs, spec{code, product})
+	}
+	policies, err := operatingmarket.ListCurrentOperatingCountryPolicies(ctx, tx, tenantID, asOf)
+	if err != nil {
+		return false, false, fmt.Errorf("marketgate: list current policies: %w", err)
+	}
+	seen := map[string]bool{}
+	var countries []string
+	for _, p := range policies {
+		if p.Scope == operatingmarket.ScopeTenant && p.Status == operatingmarket.StatusActive &&
+			p.State == operatingmarket.StateEnabled && !seen[p.CountryCode] && len(countries) < maxCountriesScanned {
+			seen[p.CountryCode] = true
+			countries = append(countries, p.CountryCode)
+		}
+	}
+	if len(countries) == 0 {
+		return false, false, nil
+	}
+	for _, cc := range countries {
+		all := true
+		for _, sp := range specs {
+			res, err := operatingmarket.ResolveOperatingCountryPolicy(ctx, tx, operatingmarket.Query{
+				TenantID: tenantID, BrandID: brandID, CountryCode: cc,
+				OperationCode: sp.op, ProductCode: sp.product, AsOf: asOf,
+			})
+			if err != nil {
+				return true, false, fmt.Errorf("marketgate: resolve %s: %w", cc, err)
+			}
+			if !res.Permitted() {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true, true, nil
+		}
+	}
+	return true, false, nil
+}
+
+// BrandOpen is AnyCountryPermits at the DATABASE clock (the clock that stamped
+// every policy row), for enforcement points (casino new bets, the launch-token
+// bootstrap). Reads only; writes nothing; an error means closed.
+func BrandOpen(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, ops ...Operation) (bool, error) {
+	if brandID == uuid.Nil {
+		return false, fmt.Errorf("%w: brand is required", ErrInvalidRequest)
+	}
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err != nil {
+		return false, fmt.Errorf("marketgate: read database clock: %w", err)
+	}
+	_, open, err := AnyCountryPermits(ctx, tx, tenantID, &brandID, asOf, ops...)
+	return open, err
+}
