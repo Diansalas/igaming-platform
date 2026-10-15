@@ -213,6 +213,19 @@ type Config struct {
 	// observability backend to send to.
 	OTelExporter string
 
+	// A9 observability and alert delivery (internal/config/observability.go). All default to
+	// disabled/empty. MetricsAddr is the DEDICATED Prometheus listener (never the public API mux).
+	// AlertEmailRecipients / AlertWebhookURL are platform-level alert targets (config, not code); the
+	// webhook signing secret is only a secret-store REFERENCE (AlertWebhookSecretRef).
+	// AlertRetention == 0 means no purge job.
+	MetricsAddr             string
+	MetricsAllowNonLoopback bool
+	AlertEmailRecipients    []string
+	AlertWebhookURL         string
+	AlertWebhookSecretRef   string
+	AlertRetention          time.Duration
+	AlertRetentionInterval  time.Duration
+
 	// ReconciliationInterval is the cadence of the ledger-vs-projection
 	// reconciliation sweep (internal/reconciliation.RunSchedulerLoop,
 	// Stage 3C directive item 4). Defaults to the Blueprint's target
@@ -900,6 +913,13 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if err := cfg.validatePlatformKeyFamilies(); err != nil {
+		return Config{}, err
+	}
+	// A9: metrics listener, alert recipients/webhook, alert retention.
+	if err := loadObservability(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validateObservability(); err != nil {
 		return Config{}, err
 	}
 

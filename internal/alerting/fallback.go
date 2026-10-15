@@ -8,6 +8,8 @@ package alerting
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/jackc/pgx/v5"
@@ -71,4 +73,55 @@ func raiseFailed(ctx context.Context, pool *db.Pool, kind Kind, sqlstateClass st
 		recordRaiseFailure(ctx, kind, "fallback")
 		slog.Default().Error("alert_raise_fallback_failed", "kind", kind, "sqlstate_class", sqlstateClass, "error", err)
 	}
+}
+
+// raiseSweepFailedAs performs the validated RaiseSweepFailed (sweep_failed.go) under the alert_dispatcher
+// platform-service identity. It is here, not in sweep_failed.go, because this file is one of the two files
+// allowed to use db.ServiceAlertDispatcher. The Alert it writes is the ONLY non-meta Kind this identity can
+// raise (migration 0156's policy names it explicitly).
+func raiseSweepFailedAs(ctx context.Context, pool *db.Pool, phase, sqlstateClass string) error {
+	dctx, cancel := detachedCtx(ctx)
+	defer cancel()
+	if pool == nil {
+		recordRaiseFailure(dctx, KindReconciliationSweepFailed, "detached")
+		return errors.New("alerting: RaiseSweepFailed: no pool")
+	}
+	a := Alert{
+		Kind:          KindReconciliationSweepFailed,
+		Discriminator: "phase:" + phase,
+		Attributes:    map[string]AttrValue{"phase": phase, "sqlstate_class": sqlstateClass},
+	}
+	v, err := a.validate()
+	if err != nil {
+		recordRaiseFailure(dctx, a.Kind, "detached")
+		raiseFailed(dctx, pool, a.Kind, sqlstateClassGoValidation)
+		return err
+	}
+	attrsJSON, err := json.Marshal(v.attrs)
+	if err != nil {
+		recordRaiseFailure(dctx, a.Kind, "detached")
+		return fmt.Errorf("alerting: marshal attributes: %w", err)
+	}
+
+	clock := clockFromContext(dctx)
+	var lastErr error
+	for attempt, wait := range flushBackoff {
+		if attempt > 0 {
+			clock.Sleep(dctx, wait)
+		}
+		lastErr = pool.WithPlatformService(dctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
+			return insertOrAttachOccurrence(ctx, tx, a, attrsJSON)
+		})
+		if lastErr == nil {
+			return nil
+		}
+	}
+	class, _ := classifySQLState(lastErr)
+	if class == "" {
+		class = sqlstateClassUnknown
+	}
+	recordRaiseFailure(dctx, a.Kind, "detached")
+	slog.Default().Error("alert_raise_detached_exhausted", "kind", a.Kind, "sqlstate_class", class)
+	raiseFailed(dctx, pool, a.Kind, class)
+	return lastErr
 }

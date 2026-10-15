@@ -15,10 +15,11 @@ package httpserver
 // checked inside the POST handler so a refused attempt writes a denied audit
 // row in the caller's own scope (security L-1).
 //
-// A route is configuration, not a notification. No route here reaches a
-// person: only the log and mock channel kinds exist, both non-human, and the
-// database refuses to enable a route for any human-notification kind (SR-7:
-// four-eyes not built). recipient_ref is an opaque vendor target id; it is
+// A route is configuration, not a notification. log and mock routes reach no
+// person. email and webhook routes can, but the database refuses to enable one
+// unless it supersedes a disabled version staged by a DIFFERENT platform admin
+// (SR-7 four-eyes, migration 0156); the actual addresses and URL are platform
+// configuration, never route data. recipient_ref is an opaque target id; it is
 // never recorded verbatim in the audit log (only "recipient_ref_present"), and
 // the database row is the sole place it lives.
 
@@ -87,7 +88,9 @@ var routeReasonCodes = map[string]bool{
 	"correction": true, "decommission": true, "drill": true,
 }
 
-var routeChannelKinds = map[alerting.ChannelKind]bool{alerting.ChannelLog: true, alerting.ChannelMock: true}
+var routeChannelKinds = map[alerting.ChannelKind]bool{
+	alerting.ChannelLog: true, alerting.ChannelMock: true, alerting.ChannelEmail: true, alerting.ChannelWebhook: true,
+}
 
 type createAlertRouteRequest struct {
 	Severity             string   `json:"severity"`
@@ -260,11 +263,22 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 					return errRouteCurrentExists
 				}
 			}
+			// SR-7 four-eyes (migration 0156): ENABLING a human-notification route approves the staged
+			// (disabled) version it supersedes; the database requires that staging to be by a DIFFERENT
+			// platform admin. With no supersedes_id there is nothing to approve and the database refuses (AR001).
+			var stagedRouteID *uuid.UUID
+			var stagedBy uuid.UUID
+			if req.Enabled && alerting.ChannelKindIsHumanNotification(kind) && req.SupersedesID != nil {
+				stagedRouteID = &supersedes
+				if err := tx.QueryRow(ctx, `SELECT created_by FROM alert_routes WHERE id = $1`, supersedes).Scan(&stagedBy); err != nil {
+					return err
+				}
+			}
 			var newID uuid.UUID
-			if err := tx.QueryRow(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, escalate_after, enabled, reason_code)
-				VALUES ('platform', $1, $2, $3, $4, CASE WHEN $5::float8 IS NULL THEN NULL ELSE make_interval(secs => $5::float8) END, $6, $7)
+			if err := tx.QueryRow(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, escalate_after, enabled, reason_code, staged_route_id)
+				VALUES ('platform', $1, $2, $3, $4, CASE WHEN $5::float8 IS NULL THEN NULL ELSE make_interval(secs => $5::float8) END, $6, $7, $8)
 				RETURNING id`,
-				req.Severity, req.EscalationStep, req.ChannelKind, req.RecipientRef, req.EscalateAfterSeconds, req.Enabled, req.ReasonCode).Scan(&newID); err != nil {
+				req.Severity, req.EscalationStep, req.ChannelKind, req.RecipientRef, req.EscalateAfterSeconds, req.Enabled, req.ReasonCode, stagedRouteID).Scan(&newID); err != nil {
 				return err
 			}
 			if req.SupersedesID != nil {
@@ -289,6 +303,11 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 			if before != nil {
 				meta["before"] = before
 			}
+			if stagedRouteID != nil {
+				// The four-eyes record: who staged the version this actor approved.
+				meta["four_eyes_staged_route_id"] = stagedRouteID.String()
+				meta["four_eyes_staged_by"] = stagedBy.String()
+			}
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: uuid.Nil, ActorType: audit.ActorStaff, ActorID: actor,
 				Action: "alert_route.create", TargetType: "alert_route", TargetID: newID.String(),
@@ -310,8 +329,9 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 			deny.reason = "current_route_exists"
 			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeConflict, "a current route exists for this severity and step; supply supersedes_id")
 		case errors.As(err, &pgErr) && pgErr.Code == "AR001":
-			deny.reason = "sr7_four_eyes_not_built"
-			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeValidation, "SR-7: four-eyes approval required; not built")
+			deny.reason = "sr7_four_eyes_required"
+			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeValidation,
+				"SR-7: four-eyes approval required: stage the route disabled, then a different platform admin enables it by superseding that staged version")
 		case errors.As(err, &pgErr) && pgErr.Code == "23514":
 			deny.reason = "routing_rule_violation"
 			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeValidation, "the route violates a routing rule")

@@ -13,7 +13,8 @@ package observability_test
 //   - every `event:` in log-event-alert-rules.yml is a string literal in non-test Go code;
 //   - every entry in pending-signals.yml still names a metric that does NOT exist (so a newly added
 //     instrument forces the entry to be promoted into the real rules);
-//   - every runbook path referenced exists, and each file states that it is NOT wired and that
+//   - every runbook path referenced exists, and each file states its true status (the metric rules: emitted and
+//     scrapeable but NOT DEPLOYED; the log-event rules and the pending signals: NOT WIRED) and that
 //     ALERT-DELIVERY-1 is OPEN (so none of these files can be mistaken for working alerting).
 //
 // It does not evaluate PromQL (no promtool in this repository). Syntax errors in an expression are
@@ -446,7 +447,7 @@ func TestPendingSignalsAreStillAbsent(t *testing.T) {
 	text := readFile(t, filepath.Join(root, "deploy/observability/pending-signals.yml"))
 	names := regexp.MustCompile(`(?m)^\s+proposed_metric:\s*(\S+)`).FindAllStringSubmatch(text, -1)
 	if len(names) < 3 {
-		t.Fatalf("parsed %d pending signals; expected the db pool, reconciliation staleness and drift entries", len(names))
+		t.Fatalf("parsed %d pending signals; expected the kill-switch state, provider latency and per-tenant SLO entries", len(names))
 	}
 	for _, n := range names {
 		if custom[n[1]] || strings.Contains(src, `"`+n[1]+`"`) {
@@ -455,14 +456,32 @@ func TestPendingSignalsAreStillAbsent(t *testing.T) {
 	}
 }
 
-func TestRuleFilesAreHonestAboutBeingUnwired(t *testing.T) {
+// A9 changed what is true: the metric rules are now backed by a real, scrapeable exposition, so
+// prometheus-alert-rules.yml must NOT claim "NOT WIRED" any more, and must say what is still not true (nothing
+// evaluates it in any real environment; ALERT-DELIVERY-1 is OPEN). The log-event rules and the pending signals
+// are still unwired / unimplemented and must keep saying so.
+func TestRuleFilesAreHonestAboutTheirStatus(t *testing.T) {
 	root := repoRoot(t)
-	for _, f := range []string{"prometheus-alert-rules.yml", "log-event-alert-rules.yml", "pending-signals.yml"} {
+	header := func(f string) string {
 		text := readFile(t, filepath.Join(root, "deploy/observability", f))
-		head := text
-		if len(head) > 1800 {
-			head = head[:1800]
+		if len(text) > 1800 {
+			text = text[:1800]
 		}
+		return text
+	}
+
+	prom := header("prometheus-alert-rules.yml")
+	for _, must := range []string{"EMITTED AND SCRAPEABLE", "NOT DEPLOYED", "ALERT-DELIVERY-1 is OPEN"} {
+		if !strings.Contains(prom, must) {
+			t.Errorf("prometheus-alert-rules.yml header must state %q", must)
+		}
+	}
+	if strings.Contains(prom, "STATUS: NOT WIRED") {
+		t.Error("prometheus-alert-rules.yml header still says NOT WIRED although the series are emitted and scrapeable")
+	}
+
+	for _, f := range []string{"log-event-alert-rules.yml", "pending-signals.yml"} {
+		head := header(f)
 		if !strings.Contains(head, "NOT WIRED") {
 			t.Errorf("%s must state NOT WIRED in its header", f)
 		}

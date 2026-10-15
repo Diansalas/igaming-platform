@@ -8,11 +8,13 @@ This documents two separate things, and does not blur them:
 1. **What is instrumented today** - real, running code, cited by file and
    log-event/span name, checked against HEAD as of Stage 9.
 2. **A minimum alert-rule list** for a future deployment to wire up. No
-   metrics backend (Prometheus, Grafana, Datadog, etc.) is deployed
-   anywhere in this repository or its `deploy/` assets today - `internal/
-   observability`'s `InitMetrics`/`InitTracing` register an OpenTelemetry
-   SDK provider with a `stdout` exporter only (Stage 1 default,
-   `internal/config`'s `OTEL_EXPORTER` env var). The rules below are
+   metrics backend (Prometheus, Grafana, Datadog, etc.) is DEPLOYED in any
+   environment. Since A9 the platform can EXPOSE its metrics in Prometheus
+   text format on a dedicated listener (`METRICS_ADDR`, section 4 and
+   `alert-delivery-channels.md` section 6; off unless set), and
+   `deploy/observability/prometheus.yml` plus `docker-compose.observability.yml`
+   are a working local scrape example; traces and the periodic metric dump
+   still go to the `stdout` exporter (`OTEL_EXPORTER`). The rules below are
    **alert RULES to configure once a real metrics/log backend exists**,
    not a working config for one. Do not read this document as claiming a
    paging pipeline exists - it does not (`PROVIDER DEPENDENT`).
@@ -513,7 +515,7 @@ Routes are authored through the audited platform-admin API (permission
 `alert:route_manage`, platform scope only, separate from `alert:manage`):
 
 - `POST /v1/admin/alerting/routes` with `severity`, `escalation_step`,
-  `channel_kind` (`log` or `mock`), `recipient_ref` (optional while
+  `channel_kind` (`log`, `mock`, and since A9 `email` or `webhook`), `recipient_ref` (optional while
   disabled), `escalate_after_seconds` (optional), `enabled`, `reason_code`
   (closed vocabulary: `initial_setup`, `on_call_change`,
   `escalation_change`, `correction`, `decommission`, `drill`) and, to change
@@ -523,9 +525,11 @@ Routes are authored through the audited platform-admin API (permission
 - A new route starts DISABLED unless you send `enabled: true`; enabling
   requires a `recipient_ref`. `recipient_ref` is an opaque target id: no
   email, phone, address, URL or key-shaped value is accepted.
-- The database refuses to enable a route for any channel kind that notifies
-  a person ("SR-7: four-eyes approval required; not built"). In production,
-  enabling a p1/p2 route on log/mock is refused too.
+- The database refuses to enable a route for a channel kind that notifies a
+  person (`email`, `webhook`) unless it supersedes a DISABLED version staged by
+  a DIFFERENT platform admin (SR-7 four-eyes, migration 0156; procedure in
+  `alert-delivery-channels.md` section 3). In production, enabling a p1/p2
+  route on log/mock is refused too.
 - `GET /v1/admin/alerting/routes[?include_superseded=true]` lists versions;
   `GET /v1/admin/alerting/status` shows, per severity, routes configured and
   enabled, human-notification routes, `ready` and the exact missing operator
@@ -541,13 +545,15 @@ Routes are authored through the audited platform-admin API (permission
 Underlying table facts:
 
 - `channel_kind` is `'log'` (IMPLEMENTED - `alerting.LogSink`, writes a
-  structured log line) or `'mock'` (MOCK - `alerting.MockSink`, test/dev
-  only, configurable failure/timeout, never wired to a real vendor). A
-  real channel (email/SMS/pager/chat webhook) is **PROVIDER DEPENDENT**
-  and requires an ADR amendment plus the ADR §6.2 preconditions (four-eyes
-  or an audited `alerting.route_changed` alert on every route change;
-  superseding the last effective p1 route is refused) before it may be
-  added.
+  structured log line), `'mock'` (MOCK - `alerting.MockSink`, test/dev
+  only, never wired to a binary), `'email'` (IMPLEMENTED over the provider
+  interface; with `email.MockProvider` it reaches no person) or `'webhook'`
+  (IMPLEMENTED: one HMAC-signed HTTPS endpoint). Recipients and the URL are
+  platform configuration (`ALERT_EMAIL_RECIPIENTS`, `ALERT_WEBHOOK_URL`), not route
+  data. A vendor-specific channel (SMS, a pager API) is still **PROVIDER
+  DEPENDENT**. Still open from ADR §6.2: an audited `alerting.route_changed`
+  alert on every route change, and refusing to supersede the last effective p1
+  route.
 - `recipient_ref` is an **opaque** reference (`CHECK` refuses email and
   phone number shapes outright) - it names a recipient by an internal key
   the eventual real channel's adapter resolves, never a literal contact
@@ -686,11 +692,16 @@ Nothing below is decided or provisioned by engineering; each needs a named human
 5. A real channel adapter that passes `alertingtest.RunChannelConformance`
    (dedupe on `DedupKey`, honours ctx, no secrets or bodies in logs, never uses
    `recipient_ref` as an address), together with four-eyes route approval and the
-   security re-review (ADR 0102 section 18.3, replacing the SR-7 database guard).
+   security re-review (ADR 0102 section 18.3). A9 status: the webhook and email
+   channels pass the conformance suite and the SR-7 four-eyes is built (migration
+   0156); the security re-review and a REAL email provider / webhook receiver are
+   still outstanding.
 6. H5 enforce versus report for routing readiness, and H9 whether this gates the
    launch of money-moving flows.
 7. H8 the external monitor's own notification target.
-8. ALERT-RETENTION-1 and a new K2 breach paging (ADR 0102 section 17.7).
+8. ALERT-RETENTION-1 (A9: the purge exists, migration 0157, and is OFF until
+   `ALERT_RETENTION_DAYS` is set after the legal horizon decision) and a new K2
+   breach paging (ADR 0102 section 17.7).
 
 Until then: every alert is `unrouted` or recorded to a non-human channel, and no
 person is notified of anything.
@@ -746,20 +757,83 @@ must still review the latest run's open mismatch rows on every sweep.
 
 ### What is still stubbed / not yet wired
 
-- **The dispatcher runs (LogSink only) but delivers nothing real.** It is wired
-  in `cmd/platform-api/main.go` (ADR 0102 §17.6). With no `alert_routes` row
-  every alert is `unrouted`; the log sink only records deliveries for routes
-  that do not yet exist.
-- **No route exists** (HD-PRH2-4-OPS), so every alert is
-  `unrouted` until a human configures routes. Real channels are PROVIDER
-  DEPENDENT; only the log sink and the MOCK sink exist.
-- **Route authoring is an audited API** (ADR 0102 section 18) but only for log
-  and mock: the database refuses to enable a route for a human-notification
-  channel until four-eyes exists. `alert_routing_ready` is always 0 today.
+- **The dispatcher runs but delivers nothing real until a human route is live.**
+  It is wired in `cmd/platform-api/main.go` (ADR 0102 §17.6) with the log sink plus
+  the email/webhook sinks IF configured (A9). With no `alert_routes` row every
+  alert is `unrouted`.
+- **No route exists** (HD-PRH2-4-OPS), so every alert is `unrouted` until two
+  platform admins author and approve one (`alert-delivery-channels.md` section 3).
+  The email channel has only a MOCK provider; a real email provider is PROVIDER
+  DEPENDENT.
+- **Route authoring is an audited API** (ADR 0102 section 18); enabling a
+  human-notification route needs SR-7 four-eyes (built, migration 0156).
+  `alert_routing_ready` stays 0 until such a route is enabled AND its sink reports
+  a human notification in this process.
 - **Dedicated per-reason Kinds** for the T10 parks need a migration and are
   deferred (ALERT-KINDS-DEDICATED-1).
-- **Retention** (`alert_occurrences`/`alert_deliveries` grow without bound) has
-  no partitioning/archival policy yet - registered as `ALERT-RETENTION-1`.
+- **Retention**: implemented (A9, migration 0157, `alerting_purge_resolved`),
+  off until `ALERT_RETENTION_DAYS` is set.
+
+## 4. A9 signals, alert kinds and their response
+
+Implemented in A9 (metrics exposition, `deploy/observability/prometheus-alert-rules.yml`; the rules are parity-tested against the
+code and against the real exposition). Labels are bounded: `stream`, `severity`, `result`, `channel_kind`, `error_class`, `table`;
+there is **no tenant label** and no free text.
+
+| Metric | Meaning | Rule |
+|---|---|---|
+| `db_pool_max_connections`, `db_pool_acquired_connections`, `db_pool_idle_connections` | application pool size and use | `DbPoolSaturated` (>90% for 5 m, page) |
+| `db_pool_acquire_wait_seconds_total`, `db_pool_empty_acquires_total` | time and count of callers that waited for a connection | `DbPoolAcquireWaiting` (rate >0.5 for 10 m, ticket) |
+| `reconciliation_last_success_unix_seconds{stream}` | OLDEST per-tenant last success of the stream; `0` = a tenant never succeeded in this process | `ReconciliationStale` (>2 h, page) |
+| `reconciliation_last_sweep_unix_seconds` | end of the last COMPLETE sweep (not advanced when tenant listing failed) | `ReconciliationSweepStalled` (>2 h, page) |
+| `reconciliation_mismatches_open{stream}` | mismatches reported by each tenant's latest completed run, summed; a failed run does not clear it | `ReconciliationMismatchesOpen` (>0, page) |
+| `reconciliation_runs_total{stream,result}` | per-tenant stream runs: success, mismatch, failed, skipped (lock contention) | `ReconciliationRunFailures` (ticket) |
+| `reconciliation_sweeps_total{result}` | sweeps: ok or listing_failed | `ReconciliationListingFailed` (page) |
+| `alert_undelivered_count{severity}`, `alert_undelivered_oldest_age_seconds{severity}` | open, unacknowledged, non-simulation alerts nobody has been notified of (no delivery, unrouted, failed, dead, or sent only through a channel that reaches no person) | `AlertUndeliveredP1Old` (>15 m, page), `AlertUndeliveredP2Old` (>2 h, ticket) |
+| `alert_delivery_attempts_total{channel_kind,result,error_class,notification}` | every delivery attempt; a failure is counted, never dropped | `AlertDeliveryFailing` (ticket) |
+| `alert_retention_purged_total{table}`, `alert_retention_runs_total{result}`, `alert_retention_last_run_unix_seconds` | the retention purge | `AlertRetentionFailing`, `AlertRetentionStale` (ticket) |
+
+Per-process state: the reconciliation series are held in memory and start empty after a restart (the first sweep runs at once); in a
+multi-instance deployment each instance has its own series. The alert backlog is as fresh as the last completed dispatcher
+pass (`alert_dispatcher_passes_total` is the liveness signal).
+
+### Runbook: `reconciliation.sweep_failed` (P1, platform, no subject)
+
+Raised (A9, R3-LISTING-FAILURE-LOG-ONLY-1) when the reconciliation scheduler cannot LIST tenants, or a whole sweep panics. Attributes:
+`phase` (`list_active`, `list_non_active`, `panic`, `unknown`) and `sqlstate_class`; never error text. One open alert per phase
+(repeats add occurrences). Meaning: nothing (or not every tenant) was reconciled in that sweep; with `list_non_active` the closed-tenant
+observation (ledger drift, payment statement) is switched off while it persists. Per-tenant failures are
+`reconciliation.run_failed` instead.
+
+1. `GET /v1/admin/alerts` to read the alert; check the `ReconciliationListingFailed` / `ReconciliationSweepStalled` rules and
+   `reconciliation_sweeps_total{result="listing_failed"}`.
+2. The cause is almost always the database (pool exhausted, failover, statement timeout): see `DbPoolSaturated`, `/readyz`,
+   `operational-runbooks.md` section 7. `sqlstate_class` `08` connection, `53` resources, `57` cancel/shutdown, `58` non-PG error.
+   `phase=panic`: a bug; find the `reconciliation sweep: recovered from panic` log line (panic TYPE only) and report it.
+3. Verify recovery: `reconciliation_last_sweep_unix_seconds` advances and `reconciliation_sweeps_total{result="ok"}` rises. Then
+   acknowledge/resolve the alert in the back office (platform admin, reason code). Do not resolve it before a complete sweep.
+4. Because the money-drift check did not run, run the per-tenant check by hand if the gap exceeded two hours
+   (`operational-runbooks.md` section 3) before declaring all clear.
+
+### Runbook: `reconciliation.run_failed` (P1, per tenant and stream)
+
+Already raised by the scheduler for every failed per-tenant stream run (RECON-RUN-FAILED-ALERT-1 was closed by I-wire; this
+re-verifies it: `scheduler.go` raises it from all five stream functions, detached, discriminator `stream:<stream>[:provider:<id>]`,
+no raise on graceful-shutdown cancellation). Attributes `stream`, `phase`, `sqlstate_class`. See `operational-runbooks.md` section 3
+(and the `ErrWithdrawalHoldCheckBlind` note) and the `reconciliation_runs_total{result="failed"}` series.
+
+### Runbook: undelivered alerts (`AlertUndeliveredP1Old`, `alert_undelivered_*`)
+
+An open P1 older than 15 minutes that nobody was told about. Today (no human route) this fires whenever a P1 exists; that is the
+honest ALERT-DELIVERY-1 state, not something to silence. Check `GET /v1/admin/alerting/status` for the missing operator input and
+`alert-delivery-channels.md` section 3. If a route is live, look at `AlertDeliveryFailing` and `alert_dead_total` (a dead delivery is
+terminal, handle by hand).
+
+### Runbook: `DbPoolSaturated`
+
+`db_pool_acquired_connections` near `db_pool_max_connections` with `db_pool_acquire_wait_seconds_total` rising. Look for long
+transactions in `pg_stat_activity`, a slow query, or a traffic spike; the 5xx ratio and `ReadinessFailing` follow. Raising
+`DATABASE_MAX_CONNS` is a capacity decision bounded by the database's `max_connections`; do not do it as a first reflex.
 
 ## Known gaps (recorded honestly, not silently deferred)
 
@@ -788,11 +862,11 @@ must still review the latest run's open mismatch rows on every sweep.
 - **`internal/eventbus`** has no real producer/consumer to instrument
   (see §1) - revisit once bonus-engine/reporting-CDC or any other
   consumer actually starts publishing through it.
-- **Metrics backend.** No Prometheus/OTLP collector/Grafana exists in
-  `deploy/` today. Every alert rule above assumes a future log-query or
-  metrics backend capable of reading the JSON log stream and/or the OTel
-  stdout trace/metric exporters' eventual real backend - this document
-  defines the RULES, not a working pipeline (`PROVIDER DEPENDENT`).
+- **Metrics backend.** Metrics are exposed (A9, `METRICS_ADDR`), but no
+  Prometheus/Alertmanager/Grafana is DEPLOYED anywhere: `deploy/observability/
+  docker-compose.observability.yml` is a local example. The log-event rules
+  still assume a future log-query backend. This document defines the RULES, not a
+  working pipeline (`PROVIDER DEPENDENT`).
 
 ## PRH-2 K3 — what the force-resolution kinds emit (and do not)
 
