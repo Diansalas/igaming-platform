@@ -307,8 +307,10 @@ func TestRGUsageS3(t *testing.T) {
 		a := f.acctA1
 		req := UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD", Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &s3T}
 		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_bet", at: ago(hr), asset: "USD", legs: []s3Leg{cashDr(a, "10"), houseCr("10")}})
-		// A casino_win that touches a player-owned manual_adjustment leg: undeclared for the RG specs.
-		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_win", at: ago(hr), asset: "USD", legs: []s3Leg{houseDr("5"), {a, ledger.AccountManualAdjustment, "credit", "5"}}})
+		// A casino_win that touches a player-owned (wallet-scoped) psp_clearing leg: undeclared for the RG specs. (Was a
+		// wallet-scoped manual_adjustment leg; since migration 0153's MA052 no non-manual_adjustment transaction may touch
+		// a manual_adjustment account, so another undeclared player-side type stands in. The assertion is unchanged.)
+		w.s3Post(t, f.tenantA, s3Tx{typ: "casino_win", at: ago(hr), asset: "USD", legs: []s3Leg{houseDr("5"), {a, ledger.AccountPSPClearing, "credit", "5"}}})
 		err := do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := MeasureStakeUsage(ctx, tx, req)
 			return err

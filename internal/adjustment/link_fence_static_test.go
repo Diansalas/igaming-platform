@@ -17,7 +17,10 @@ import (
 	"testing"
 )
 
-var linkFenceExemptionCall = regexp.MustCompile(`\badjlinkfix\.Without\(|\badjlinkpost\.Post\(|\bmustPostFixture\(|\bwithoutLinkFence\(`)
+// The helper calls, AND (L3, ledger-finance A4 review) any raw DISABLE TRIGGER of one of the two 0153 fence
+// triggers, so a test cannot switch the fence off by plain SQL without being inventoried.
+var linkFenceExemptionCall = regexp.MustCompile(`\badjlinkfix\.Without\(|\badjlinkpost\.Post\(|\bmustPostFixture\(|\bwithoutLinkFence\(` +
+	`|(?i)DISABLE\s+TRIGGER\s+(ledger_transactions|ledger_entries)_manual_adjustment_link`)
 
 // linkFenceExemptionInventory: every file that calls the exemption, and why. Paths are repo-relative, slash form.
 var linkFenceExemptionInventory = map[string]string{
@@ -25,6 +28,8 @@ var linkFenceExemptionInventory = map[string]string{
 	"internal/adjustment/b11_b17_integration_test.go":                    "B-12: proves the 0113 link trigger (MA040) still refuses forged links with the 0153 fence absent",
 	"internal/adjustment/b23_b25_integration_test.go":                    "B-25: plants a rogue posting through the owner residual so the detective recon kind is still proven",
 	"internal/adjustment/k2_security_conditions_integration_test.go":     "K2-R1: plants a governed-key posting for a pending request to prove the MA040 non-executed-exit backstop",
+	"internal/adjustment/link_fence_0153_integration_test.go":            "raw DISABLE of the TRANSACTION fence only, inside a rolled-back savepoint/transaction, to prove the ENTRY fence holds on its own",
+	"internal/adjustment/temp_revoke_integration_test.go":                "raw DISABLE of both fence triggers on a SCRATCH database only, to keep proving 0116's own non-vacuity",
 	"internal/casino/bonus_settlement_integration_test.go":               "fixture: drains a round lock / funds a wallet with a generic posting",
 	"internal/casino/orchestrator_integration_test.go":                   "fixture: funds the wallet",
 	"internal/idempotency/integration_test.go":                           "fixture: FIRST post of the in-house vehicle; every replay runs with the fence enabled",
@@ -89,10 +94,15 @@ func TestLinkFence0153_ExemptionCallersInventoried(t *testing.T) {
 }
 
 func TestLinkFence0153_ExemptionCallRegexCatchesPlants(t *testing.T) {
-	for _, plant := range []string{`adjlinkfix.Without(ctx, tx, fn)`, `adjlinkpost.Post(ctx, tx, in)`, `mustPostFixture(t, pool, f, in)`, `withoutLinkFence(build)`} {
+	for _, plant := range []string{`adjlinkfix.Without(ctx, tx, fn)`, `adjlinkpost.Post(ctx, tx, in)`, `mustPostFixture(t, pool, f, in)`, `withoutLinkFence(build)`,
+		"ALTER TABLE ledger_transactions DISABLE TRIGGER ledger_transactions_manual_adjustment_link",
+		"alter table ledger_entries disable  trigger ledger_entries_manual_adjustment_link"} {
 		if !linkFenceExemptionCall.MatchString(plant) {
 			t.Fatalf("plant not detected: %s", plant)
 		}
+	}
+	if linkFenceExemptionCall.MatchString(`ALTER TABLE ledger_adjustment_requests DISABLE TRIGGER ledger_adjustment_requests_guard`) {
+		t.Fatal("a disable of another trigger was flagged")
 	}
 	if linkFenceExemptionCall.MatchString(`// adjlinkfix.Without is documented here`) {
 		t.Fatal("a prose mention was flagged")

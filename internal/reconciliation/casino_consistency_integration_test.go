@@ -494,7 +494,10 @@ func TestCasinoConsistency_C2_PostingShapeMismatch(t *testing.T) {
 		w := newCasWorld(t, testPool(t))
 		w.mustRunClean(t)
 		cash, house := w.accounts(t, w.f.walletID)
-		other := w.acct(t, nil, ledger.AccountManualAdjustment)
+		// Any non-player, non-house_gaming account. (Was manual_adjustment; since migration 0153's MA052 no
+		// non-manual_adjustment transaction may touch that account, so psp_clearing stands in. The rule under test,
+		// "the stake/payout must be on house_gaming", is unchanged.)
+		other := w.acct(t, nil, ledger.AccountPSPClearing)
 		w.bindRound(t, round)
 		entries := []ledger.EntryInput{{LedgerAccountID: cash, Direction: ledger.Debit, Amount: houseAmt + otherAmt},
 			{LedgerAccountID: other, Direction: ledger.Credit, Amount: otherAmt}}
@@ -517,7 +520,10 @@ func TestCasinoConsistency_C2_PostingShapeMismatch(t *testing.T) {
 		w.mustDeliver(t, casino.CallbackEventBet, round+"-bet", "", round, 1000)
 		w.mustRunClean(t)
 		cash, house := w.accounts(t, w.f.walletID)
-		other := w.acct(t, nil, ledger.AccountManualAdjustment)
+		// Any non-player, non-house_gaming account. (Was manual_adjustment; since migration 0153's MA052 no
+		// non-manual_adjustment transaction may touch that account, so psp_clearing stands in. The rule under test,
+		// "the stake/payout must be on house_gaming", is unchanged.)
+		other := w.acct(t, nil, ledger.AccountPSPClearing)
 		entries := []ledger.EntryInput{{LedgerAccountID: other, Direction: ledger.Debit, Amount: otherAmt},
 			{LedgerAccountID: cash, Direction: ledger.Credit, Amount: houseAmt + otherAmt}}
 		if houseAmt > 0 {

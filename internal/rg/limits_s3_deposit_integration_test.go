@@ -164,8 +164,10 @@ func TestRGDepositUsageS3(t *testing.T) {
 	t.Run("UndeclaredDepositLegFailsClosed", func(t *testing.T) {
 		f := w.newFix(t)
 		a := f.acctA1
+		// The undeclared player-side leg is a wallet-scoped psp_clearing account. (Was a wallet-scoped manual_adjustment
+		// account; since migration 0153's MA052 no deposit may touch a manual_adjustment account. Assertion unchanged.)
 		w.s3Post(t, f.tenantA, s3Tx{typ: "deposit", at: ago(hr), asset: "USD", legs: []s3Leg{
-			{uuid.Nil, ledger.AccountPSPClearing, "debit", "10"}, {a, ledger.AccountManualAdjustment, "credit", "10"}}})
+			{uuid.Nil, ledger.AccountPSPClearing, "debit", "10"}, {a, ledger.AccountPSPClearing, "credit", "10"}}})
 		err := do(w.rt, staffSess(f.tenantA, f.staffA), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := MeasureDepositUsage(ctx, tx, UsageRequest{TenantID: f.tenantA, PlayerAccountID: a, Scope: LimitScopeAccount, AssetCode: "USD",
 				Windows: []WindowSpec{{Period: PeriodRolling24h}}, At: &s3T})

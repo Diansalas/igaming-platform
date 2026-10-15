@@ -826,6 +826,72 @@ func TestLinkFence0153_ExecutedRequestCannotPostAgain(t *testing.T) {
 	w.assertInvariants()
 }
 
+// (11) MA052 (security A4 F1): no transaction type other than manual_adjustment may post to a manual_adjustment
+// account - the security review's repro (a runtime system-tenant session minting player cash with a
+// bonus_forfeiture against the house manual_adjustment account) and a deposit, for the runtime role AND the owner,
+// via ledger.Post and raw SQL; the debit and the credit leg are each refused; nothing moves. The governed path
+// (house leg of a manual_adjustment) is unaffected.
+func TestLinkFence0153_OtherTypesCannotUseTheManualAdjustmentAccount(t *testing.T) {
+	w := newWorld(t, worldOpts{base: 1})
+	rt := tempRevokeRuntimePool(t)
+	pc, house := w.accounts(t)
+	reason := "forfeit"
+	cashBefore := w.playerCash()
+	for _, role := range []struct {
+		name string
+		pool *db.Pool
+	}{{"owner", w.pool}, {"runtime", rt}} {
+		for _, c := range []struct {
+			name string
+			fn   func(ctx context.Context, tx pgx.Tx) error
+		}{
+			{"bonus_forfeiture via ledger.Post (security repro)", func(ctx context.Context, tx pgx.Tx) error {
+				_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxBonusForfeiture,
+					IdempotencyKey: "ma052-" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
+					Entries: []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: 777_777}, {LedgerAccountID: pc, Direction: ledger.Credit, Amount: 777_777}}})
+				return err
+			}},
+			{"deposit via ledger.Post", func(ctx context.Context, tx pgx.Tx) error {
+				pid, ptx := "ma052", uuid.NewString()
+				_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxDeposit,
+					IdempotencyKey: pid + ":" + ptx, ProviderID: &pid, ProviderTxID: &ptx, CorrelationID: uuid.New(),
+					Entries: []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: 5}, {LedgerAccountID: pc, Direction: ledger.Credit, Amount: 5}}})
+				return err
+			}},
+			{"raw: credit leg on the house account (player debit first)", func(ctx context.Context, tx pgx.Tx) error {
+				id := uuid.New()
+				if err := lf153InsTx(ctx, tx, w.Tenant, id, "bonus_forfeiture", "ma052-raw-"+id.String(), uuid.New(), &reason, nil, nil, nil, nil); err != nil {
+					return err
+				}
+				if err := lf153InsEntry(ctx, tx, id, pc, w.Tenant, "debit", 1); err != nil {
+					return err
+				}
+				return lf153InsEntry(ctx, tx, id, house, w.Tenant, "credit", 1)
+			}},
+		} {
+			err := role.pool.WithTenant(context.Background(), w.Tenant, c.fn)
+			if pgCode(err) != "MA052" || !strings.Contains(err.Error(), "may not post to a manual_adjustment account") {
+				t.Errorf("%s / %s: want MA052, got %v", role.name, c.name, err)
+			}
+		}
+	}
+	if got := w.playerCash(); got != cashBefore {
+		t.Fatalf("player_cash moved: %d -> %d", cashBefore, got)
+	}
+	// Control: the governed path still posts its house leg.
+	r, err := w.submit(w.F1, w.credit(12, ReasonOperationalErrorCorrection))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := w.decide(w.F2, r, DecisionApprove); err != nil || !out.Executed {
+		t.Fatalf("governed path after MA052: %v %+v", err, out)
+	}
+	if got := w.playerCash(); got != cashBefore+12 {
+		t.Fatalf("player_cash after the governed credit: %d", got)
+	}
+	w.assertInvariants()
+}
+
 // (10) Tenant isolation: another tenant's session can neither post for this tenant's executing request (invisible
 // to it: MA050) nor write into this tenant (RLS: 42501), and an entry cannot cross tenants.
 func TestLinkFence0153_TenantIsolation(t *testing.T) {

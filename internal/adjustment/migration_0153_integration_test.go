@@ -176,6 +176,20 @@ func TestMigration0153_UpDownUp_WholeSchemaAndData(t *testing.T) {
 		}
 		return s
 	}
+	// A non-manual_adjustment type on the house manual_adjustment account (MA052, security A4 F1).
+	otherType := func() error {
+		pc, house := w.accounts(t)
+		reason := "m0153-ma052"
+		return pool.WithTenant(ctx, w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxBonusForfeiture,
+				IdempotencyKey: "m0153-ma052-" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
+				Entries: []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: 1}, {LedgerAccountID: pc, Direction: ledger.Credit, Amount: 1}}})
+			if err == nil {
+				return errLF153Rollback // never commit a probe posting
+			}
+			return err
+		})
+	}
 	unlinked := func() error {
 		pc, house := w.accounts(t)
 		reason := "m0153"
@@ -192,6 +206,9 @@ func TestMigration0153_UpDownUp_WholeSchemaAndData(t *testing.T) {
 	}
 	if err := unlinked(); pgCode(err) != "MA050" {
 		t.Fatalf("after up the fence must refuse an unlinked posting, got %v", err)
+	}
+	if err := otherType(); pgCode(err) != "MA052" {
+		t.Fatalf("after up a bonus_forfeiture on the manual_adjustment account must be refused (MA052), got %v", err)
 	}
 	dataBefore := rows()
 	if !strings.HasSuffix(dataBefore, "/0") {
@@ -214,6 +231,9 @@ func TestMigration0153_UpDownUp_WholeSchemaAndData(t *testing.T) {
 		if err := unlinked(); err != errLF153Rollback {
 			t.Fatalf("round %d: after down an unlinked posting should be admitted (and rolled back by the probe), got %v", round, err)
 		}
+		if err := otherType(); err != errLF153Rollback {
+			t.Fatalf("round %d: after down MA052 must be gone (the probe posting admitted, then rolled back), got %v", round, err)
+		}
 		if applied, err := pool.MigrateUp(ctx, full); err != nil || len(applied) != 1 || applied[0] != m153Version {
 			t.Fatalf("round %d up: %v %v", round, applied, err)
 		}
@@ -223,6 +243,9 @@ func TestMigration0153_UpDownUp_WholeSchemaAndData(t *testing.T) {
 		}
 		if err := unlinked(); pgCode(err) != "MA050" {
 			t.Fatalf("round %d: after re-up the fence must refuse again, got %v", round, err)
+		}
+		if err := otherType(); pgCode(err) != "MA052" {
+			t.Fatalf("round %d: after re-up MA052 must refuse again, got %v", round, err)
 		}
 	}
 	w.assertInvariants()

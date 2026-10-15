@@ -22,19 +22,26 @@ Merge 0152 first, or renumber, before hosted CI.
 Replace the MANUAL-ADJ-LINK-1 row's status cell with:
 
 > **IMPLEMENTED 2026-10-15 (A4, branch `worktree-agent-aae3ab5308d231dfa`, migration 0153, ADR 0100 §21); NOT
-> MERGED; reviews pending (`security` required).** Two NOT DEFERRABLE AFTER INSERT constraint triggers, for every
+> MERGED. Reviews: security ACCEPT WITH CONDITIONS (`b9cd9ef`; C-1, C-2 addressed in the final round),
+> ledger-finance APPROVED (`a36714b`; L1-L3, I2 addressed); hosted CI pending.** Two NOT DEFERRABLE AFTER INSERT constraint triggers, for every
 > session and role (no GUC, role or environment condition; no SECURITY DEFINER; search_path pinned):
 > `ledger_transactions_manual_adjustment_link` (MA050: the row must be the posting of a request visible to the
 > session, executing in THIS transaction, payload hash intact, still counted as approved by
 > `ledger_adjustment_execution_status()`, keys equal) and `ledger_entries_manual_adjustment_link` (MA051: every
 > entry of a manual_adjustment is one leg of the closed §4 shape of the request executing in this transaction,
-> one per direction). AFTER, not BEFORE, so replays keep the ADR 0020 idempotency contract. ADR 0082 lock order
+> one per direction; MA052: no other transaction type may post to a `manual_adjustment` account - security F1,
+> built after the full suites showed no legitimate user). The approval recount is as of the deciding
+> transaction's `now()` (same as the 0113 guard). AFTER, not BEFORE, so replays keep the ADR 0020 idempotency contract. ADR 0082 lock order
 > unchanged. Fixtures: 32 ungoverned `TxManualAdjustment` references in 20 files (the "19 files"; 4 needed no change: tenant/migration_0136, ledger_integration L247, lockorder_canonical_order, lockorder_multipost) moved to the owner-only fixture exemption
 > (`internal/testsupport/adjlinkfix`: the existing ADR 0110 §9.4 owner DISABLE TRIGGER residual, integration-only,
 > inventoried by a static test) or, where a trigger disable is impossible (a lock-order race; a runtime-role
-> probe), to another non-governed type; no assertion weakened or deleted. Mutation pass: see
-> `docs/plans/a4-adjustment-fence-record.md`. Residuals: owner/superuser DDL (detector `ledger_unlinked_manual_
-> adjustment` kept as backstop), ADR 0110 T5 non-governed posting types, pre-0153 rows. B-21 kept.
+> probe), to another non-governed type; no assertion weakened or deleted. **Accepted deviation (security C-1):**
+> the fixtures use this owner-only trigger-disable exemption, NOT the request-backed helpers the row and ADR 0100
+> §12 called for. Mutation pass: ADR 0100 §21.6 (final: 47 mutants, 41 killed, 6 equivalent; logs under
+> `docs/plans/prh2-hardening-round/a4-mutation-*`). Residuals: owner and superuser DDL (detector
+> `ledger_unlinked_manual_adjustment` kept as backstop; `session_replication_role` is superuser-only),
+> ADR 0110 T5 non-governed posting types on other accounts (incl. appending to committed non-adjustment
+> transactions, security F5), pre-0153 rows (runbook: operational-runbooks §11 "Applying migration 0153"). B-21 kept.
 
 Related rows to annotate (no status change proposed):
 
@@ -47,14 +54,16 @@ Related rows to annotate (no status change proposed):
 
 | Area | Change |
 |---|---|
-| `migrations/0153_manual_adjustment_link_fence.{up,down}.sql` | The fence (2 functions, 2 constraint triggers); idempotent; down drops them, touches no row |
+| `migrations/0153_manual_adjustment_link_fence.{up,down}.sql` | The fence (2 functions, 2 constraint triggers; MA050/MA051/MA052); idempotent; down drops them, touches no row |
 | `internal/testsupport/adjlinkfix` (new, integration-only) | `Without(ctx, tx, fn)`: disables exactly the two 0153 triggers in the caller's owner tx, re-enables in the same tx; fires only the two ledger tables' deferrable checks early (never another table's) so ALTER TABLE is legal; no-op below 0153 |
 | `internal/testsupport/adjlinkpost` (new, integration-only) | `Post` = `adjlinkfix.Without` around one `ledger.Post` (separate package: `internal/ledger`'s own tests import adjlinkfix) |
 | `internal/tenant/no_trigger_disable_test.go` | adjlinkfix added to the allowlist of integration-only trigger-disable fixtures (with launchfix, staffsv, pitest) |
 | `internal/adjustment/link_fence_0153_integration_test.go` (new) | The fence tests (below) |
 | `internal/adjustment/migration_0153_integration_test.go` (new) | Up/down/up whole schema + data |
-| `internal/adjustment/link_fence_static_test.go` (new) | Exemption caller inventory; names match the migration; no bypass tokens in the SQL |
-| ADR 0100 §21 (+ pointers in §12, §16, §20.4) | Decision, threat model, exemption inventory, residuals |
+| `internal/adjustment/link_fence_static_test.go` (new) | Exemption caller inventory (helper calls AND any raw `DISABLE TRIGGER` of a fence trigger, L3); names match the migration; no bypass tokens in the SQL |
+| ADR 0100 §21 (+ pointers in §12, §16, §20.4) | Decision, threat model, exemption inventory, accepted fixture deviation (C-1), residuals, mutation table |
+| `docs/runbooks/operational-runbooks.md` §11 | "Applying migration 0153": the pre-apply reconciliation step and the post-0153 P1 rule (I2) |
+| `docs/plans/prh2-hardening-round/a4-mutation-driver.py`, `a4-mutation-kill.txt`, `a4-mutation-log-round1.txt` | Mutation driver and complete kill logs (L1) |
 
 ## Fixture disposition (every file)
 
@@ -69,7 +78,8 @@ Related rows to annotate (no status change proposed):
 | ledger/replay_integration_test.go | 1 | owner exemption for the original; replays unexempted |
 | ledger/lockorder_integration_test.go | 2 | type -> `bonus_forfeiture` (a disable would serialize the ABBA racers); inputs otherwise identical |
 | ledger/ledger_integration_test.go L247, lockorder_multipost, lockorder_canonical_order | 4 | unchanged (conflict / pre-insert paths never reach the fence) |
-| reconciliation/casino_consistency_integration_test.go | 1 | owner exemption |
+| reconciliation/casino_consistency_integration_test.go | 1 | owner exemption; final round: C2 injections' wrong account `manual_adjustment` -> `psp_clearing` (MA052) |
+| rg/limits_s3_usage + limits_s3_deposit_integration_test.go | 0 MA postings | final round: injected undeclared player-side leg `manual_adjustment` -> wallet-scoped `psp_clearing` (MA052) |
 | reconciliation/sportsbook_settlement_integration_test.go | 1 | owner exemption |
 | reconciliation/unlinked_manual_adjustment_helpers_integration_test.go | 0 | comment updated (tolerance still needed: fixtures still plant unlinked postings) |
 | risk/cumulative_leg_integration_test.go | 1 | owner exemption |
@@ -105,7 +115,45 @@ Related rows to annotate (no status change proposed):
 6. **Lock-order racers**: transaction type only (manual_adjustment -> bonus_forfeiture); every assertion
    unchanged.
 
+Final round (after the security and ledger-finance reviews):
+
+7. **Casino C2 detector** (`TestCasinoConsistency_C2_PostingShapeMismatch`, 4 subtests): the deliberately
+   malformed bet/win's arbitrary non-house account changed from `manual_adjustment` to `psp_clearing` (MA052
+   now refuses the former at the DB). Assertions (only the `bet_house_credit` / `win_house_debit` finding, exact
+   evidence text) unchanged.
+8. **RG S3 undeclared leg** (`FailClosed_UndeclaredLegAndUnresolvedReversal`, `UndeclaredDepositLegFailsClosed`):
+   the injected undeclared player-side leg changed from a wallet-scoped `manual_adjustment` account to a
+   wallet-scoped `psp_clearing` account. Assertions (`ErrUnrecognizedUsageLeg`) unchanged.
+9. **Inventory test** (`TestLinkFence0153_ExemptionCallersInventoried`): STRENGTHENED (L3) - it now also flags any
+   raw `DISABLE TRIGGER` of a fence trigger; two files added with justifications.
+10. **Migration test** (`TestMigration0153_UpDownUp_WholeSchemaAndData`): extended - MA052 enforced after each up,
+   absent after each down.
+11. **New test** `TestLinkFence0153_OtherTypesCannotUseTheManualAdjustmentAccount` (security F1 repro refused for
+   runtime and owner; governed path unaffected).
+
+Nothing deleted or weakened in this round.
+
 ## Test evidence (private DB rebuilt from migrations by `priv_db.sh`, `priv_test.sh`; local, NOT CI)
+
+Final round (0153 with MA052; private DB rebuilt from migrations; `-v -timeout 150m`; local, NOT CI; the host
+was shared with other sessions' test runs, so durations are inflated):
+
+| Command | Result |
+|---|---|
+| `gofmt -l`, `go vet ./...`, `go vet -tags integration ./...`, `golangci-lint run ./...` | clean / 0 issues |
+| `go test -count=1 ./...` | PASS |
+| integration ledger, adjustment, reconciliation, db (first run) | FAIL 1 test / 4 subtests: `TestCasinoConsistency_C2_PostingShapeMismatch` - MA052 refused its injected `manual_adjustment` counter-account (the evidence for item 7 above) |
+| same, rerun after the C2 change (`int_core2`) | PASS (586 PASS, 0 FAIL) |
+| integration casino, sportsbook, bonus, wallet, tenant, launchgov | PASS (736 / 0), no MA052 |
+| integration risk, idempotency, aml, withdrawal | PASS (265 / 0), no MA052 |
+| integration rg (after the S3 change; the two S3 tests had hit MA052 before it) | PASS (99 / 0) |
+| httpserver `-run 'ManualAdjustment\|Adjustment\|StaffIdentityRedaction\|StaffReadRoutes\|OpenAPIGoverned'` | PASS |
+| payments `-run '^Test[A-Z]'`, all 26 letters, `-timeout 150m` | PASS, 0 FAIL, no MA052 (H 79, K 100, R 213 PASS) |
+| `-race` integration adjustment, ledger | PASS |
+| mutation pass (driver committed) | 47 mutants: 41 killed, 6 equivalent |
+| `go run ./cmd/migrate verify` | still FAIL only on the 0152 gap (merge dependency) |
+
+First round:
 
 | Command | Result |
 |---|---|
@@ -124,5 +172,9 @@ Related rows to annotate (no status change proposed):
 
 ## Mutation pass (kill-or-justify)
 
-44 mutants of 0153 applied to the live private schema: 39 killed, 5 survived, all 5 equivalent and
-justified. Table: ADR 0100 §21.6.
+See ADR 0100 §21.6 for the table and the justification of each survivor.
+
+- Final pass, on the 0153 that will merge (with MA052): **47 mutants, 41 killed, 6 survived, all 6 equivalent**
+  (T06, T07, E01, E08, E09, E18). Log: `docs/plans/prh2-hardening-round/a4-mutation-kill.txt`.
+- First pass (before MA052): **44 mutants, 38 killed, 6 survived** (same six). *Corrected: this record and §21.6
+  first said "39 killed, 5 survived" (ledger-finance L1).* Log: `docs/plans/prh2-hardening-round/a4-mutation-log-round1.txt`.

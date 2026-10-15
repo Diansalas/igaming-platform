@@ -27,7 +27,13 @@
 --        (d) is still counted as satisfied: ledger_adjustment_execution_
 --            status() (the ONE 0113 implementation of the four-eyes /
 --            threshold count) reports enabled, initiator_valid and
---            counted >= required, evaluated again here;
+--            counted >= required, evaluated again here - AS OF now(),
+--            exactly like the 0113 guard (policies effective_from <= now(),
+--            grants in force at now()): a policy tightening or grant revocation
+--            committed while the decision is in flight is NOT caught (same
+--            semantics as 0113's "tightened after submission"); only
+--            non-time-versioned inputs can differ between the two evaluations,
+--            and any divergence fails closed (MA050, the decision rolls back);
 --        (e) matches the row's keys: reason_code and causation_id equal
 --            the request's, provider_id / provider_tx_id /
 --            reverses_transaction_id NULL.
@@ -44,6 +50,11 @@
 --      most one leg per direction. A parent the session cannot see in the
 --      entry's tenant fails closed (the parent's type is unknowable).
 --      Refusal: SQLSTATE MA051.
+--   3. In the same entry trigger: an entry whose parent is NOT a
+--      manual_adjustment may not post to an account of type
+--      'manual_adjustment' (security A4 F1: that account carries governed
+--      adjustments only; no legitimate other type posts to it - the full
+--      integration suites were the evidence). Refusal: SQLSTATE MA052.
 --
 -- WHY AFTER (constraint) TRIGGERS, NOT BEFORE. An AFTER ROW trigger fires
 -- only for a row that was actually inserted. A replay of an already-posted
@@ -75,13 +86,15 @@
 -- OUT OF SCOPE (ADR 0100 section 21.5 residuals): the table owner (and a
 -- superuser) can ALTER TABLE ... DISABLE TRIGGER - the existing ADR 0110
 -- section 9.4 owner residual, also used by integration-only fixtures; it is
--- not a new exemption and this migration adds no owner/GUC bypass. Ordinary
--- non-governed posting types (ADR 0110 T5) are not fenced here. A session
+-- not a new exemption and this migration adds no owner/GUC bypass. Only a
+-- superuser (or a role granted SET on it) can use session_replication_role;
+-- the non-superuser owner gets 42501 (PG16). Ordinary non-governed posting
+-- types (ADR 0110 T5) are not fenced here beyond item 3. A session
 -- holding a genuine, proof-backed final approval in its own transaction is
 -- the governed path itself.
 --
 -- SQLSTATEs (class MA, 0113's space): MA050 transaction fence, MA051 entry
--- fence.
+-- fence, MA052 manual_adjustment account used by another transaction type.
 
 CREATE OR REPLACE FUNCTION ledger_manual_adjustment_link_check() RETURNS trigger
     LANGUAGE plpgsql
@@ -149,6 +162,13 @@ BEGIN
             USING ERRCODE = 'MA051';
     END IF;
     IF v_tx.transaction_type <> 'manual_adjustment' THEN
+        -- (3) The manual_adjustment account type belongs to governed adjustments only: no other transaction
+        -- type may post to it (security A4 F1; ADR 0110 T5 narrowed for this account).
+        IF EXISTS (SELECT 1 FROM public.ledger_accounts la
+                    WHERE la.id = NEW.ledger_account_id AND la.account_type = 'manual_adjustment') THEN
+            RAISE EXCEPTION 'ledger_entries: a % transaction may not post to a manual_adjustment account', v_tx.transaction_type
+                USING ERRCODE = 'MA052';
+        END IF;
         RETURN NULL;
     END IF;
 

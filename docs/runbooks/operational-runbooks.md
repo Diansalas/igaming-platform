@@ -351,6 +351,37 @@ Treat it as a financial incident (§3): identify the writer (application logs,
 effect ONLY with a governed `compensating_entry` request whose causation is
 the unlinked transaction. Never edit or delete ledger rows.
 
+**Applying migration 0153 (MANUAL-ADJ-LINK-1, ADR 0100 §21) to an environment that holds real ledger data.**
+0153 makes the database refuse, for every session, a `manual_adjustment` posting that is not a governed request
+executing in the same transaction (`MA050`), any entry of such a posting outside the approved shape (`MA051`),
+and any other transaction type touching a `manual_adjustment` account (`MA052`). It does NOT re-validate rows
+written before it. So, BEFORE applying it:
+1. For every tenant (active or not), take the latest `ledger_vs_projection` run that started after the
+   change freeze (or wait for the next hourly run) and read its `ledger_unlinked_manual_adjustment` rows.
+   Cross-check directly, per tenant, in a tenant-scoped owner session
+   (`SELECT set_config('app.tenant_id', '<tenant>', true)` first; the ledger tables are FORCE RLS):
+   ```sql
+   SELECT t.id, t.created_at FROM ledger_transactions t
+    WHERE t.tenant_id = '<tenant>' AND t.transaction_type = 'manual_adjustment'
+      AND t.created_at >= (SELECT governed_since FROM financial_control_classifications WHERE operation_kind = 'ledger_adjustment')
+      AND NOT EXISTS (SELECT 1 FROM ledger_adjustment_requests r WHERE r.ledger_transaction_id = t.id AND r.state = 'executed');
+   -- MA052's pre-existing equivalent: other transaction types on a manual_adjustment account
+   SELECT t.id, t.transaction_type FROM ledger_entries e
+     JOIN ledger_accounts la ON la.id = e.ledger_account_id AND la.account_type = 'manual_adjustment'
+     JOIN ledger_transactions t ON t.id = e.ledger_transaction_id
+    WHERE e.tenant_id = '<tenant>' AND t.transaction_type <> 'manual_adjustment';
+   ```
+2. Require **zero** rows, or every row individually classified (writer identified, economic effect assessed,
+   correction - if any - planned as a governed `compensating_entry`) and signed off by `ledger-finance` in the
+   change record. Do not apply 0153 with an unclassified row: afterwards nothing distinguishes it from a new one.
+3. **After 0153, any NEW `ledger_unlinked_manual_adjustment` finding means the fence was bypassed by owner or
+   superuser DDL** (a disabled or dropped trigger, `session_replication_role = replica` by a superuser): a P1
+   security and financial incident (§3, §9). Check `pg_trigger.tgenabled` for
+   `ledger_transactions_manual_adjustment_link` / `ledger_entries_manual_adjustment_link` (must be `O`) and the
+   DB audit log for DDL by the owner role.
+4. The 0153 down migration removes the fence (no data change). Run it only together with a rollback of the code
+   that depends on it, and keep the detector's P1 routing live while it is absent.
+
 **What this is not:** software four-eyes is not a legal or licensing
 approval. Real threshold values and the HD-PRH2-8 below-threshold question
 are human decisions.
