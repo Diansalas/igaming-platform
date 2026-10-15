@@ -269,8 +269,9 @@ func reconcilePaymentNotReconciled(ctx context.Context, pool *db.Pool, logger *s
 	}
 	out := StreamOutcome{ProviderID: providerID, NotReconciled: reason,
 		Err: fmt.Errorf("reconciliation: payment_statement %s phase: %w", phase, cause)}
-	shown := providerID
-	if shown == "" {
+	// The id comes from a database row, not a validated source: only a charset-safe value reaches logs and audit.
+	shown := discPart(providerID)
+	if providerID == "" {
 		shown = "<none>"
 	}
 	if logger != nil {

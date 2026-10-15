@@ -704,3 +704,42 @@ func TestBound_ConcurrentSweepsNeverLeaveAGap(t *testing.T) {
 		t.Fatalf("want all 5 lines imported, got %d: %v", len(refs), refs)
 	}
 }
+
+// A provider the tenant has payment attempts with but no capability row for any more (configuration drift) is still
+// in scope: it is reconciled when a source exists, and reported as not reconciled when its source was removed (R-S1).
+func TestScoped_ProviderKnownOnlyFromAttemptsIsStillInScope(t *testing.T) {
+	w := newPayWorld(t)
+	w.deposit(t, 1000) // routes to A
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM provider_capabilities WHERE tenant_id = $1 AND provider_id = $2`, w.f.tenantID, payProvA)
+		return err
+	}); err != nil {
+		t.Fatalf("remove the capability row: %v", err)
+	}
+	o := scopedSweep(t, w.pool, w.f, PaymentSweepConfig{Resolver: mapResolver{payProvA: w.srcA, payProvB: w.srcB}, AllowSynthetic: true})
+	if a := outcomeFor(t, o, payProvA); a.Err != nil || a.Run.ID == uuid.Nil {
+		t.Fatalf("A (attempts only) must still be reconciled: %+v", a)
+	}
+	o = scopedSweep(t, w.pool, w.f, PaymentSweepConfig{Resolver: mapResolver{payProvB: w.srcB}, AllowSynthetic: true})
+	if a := outcomeFor(t, o, payProvA); a.NotReconciled != NotReconciledNoSource {
+		t.Fatalf("A's source was removed while its attempts exist: must be reported, got %+v", a)
+	}
+}
+
+// A status change after the cursor is re-reported in the window it happened in (the MOCK dates bounded lines by their
+// last change), so a lost callback is still detected in continuation mode.
+func TestBound_StatusChangeAfterTheCursorIsReReported(t *testing.T) {
+	w := newPayWorld(t)
+	a := w.deposit(t, 700)
+	cfg := PaymentSweepConfig{Resolver: mapResolver{payProvA: w.srcA, payProvB: w.srcB}, AllowSynthetic: true, RunLineBound: 100}
+	scopedSweep(t, w.pool, w.f, cfg)
+	if a.ProviderReference == nil {
+		t.Fatal("fixture attempt has no provider reference")
+	}
+	w.mockA.Resolve(*a.ProviderReference, payments.OutcomeSucceeded, "", false) // the provider settles; the platform never hears
+	o := scopedSweep(t, w.pool, w.f, cfg)
+	got := outcomeFor(t, o, payProvA)
+	if got.Err != nil || got.Run.Status != StatusMismatchesFound {
+		t.Fatalf("the settled-but-unposted deposit must surface as a mismatch in the later window: %+v", got)
+	}
+}

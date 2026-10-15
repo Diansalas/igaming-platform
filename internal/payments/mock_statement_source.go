@@ -150,12 +150,19 @@ func (m *MockProvider) statementFor(cc CallContext, maxLines int, req statement.
 	if cc.ProviderID != m.providerID {
 		return out, nil
 	}
+	// Bounded/continuation mode dates each line by its last status change (see mockAttempt.changedAt); the
+	// unbounded legacy mode keeps dating by creation.
+	bounded := !cursor.IsZero() || req.MaxLines > 0
 	lines := statement.NewPaymentLineCollector(maxLines)
 	for ref, a := range m.attempts {
 		if !a.tenantTagged || a.tenantID != cc.TenantID {
 			continue
 		}
-		if !cursor.IsZero() && a.createdAt.UTC().Truncate(time.Microsecond).Before(cursor) {
+		at := a.createdAt
+		if bounded && !a.changedAt.IsZero() {
+			at = a.changedAt
+		}
+		if !cursor.IsZero() && at.UTC().Truncate(time.Microsecond).Before(cursor) {
 			continue // already covered by the run that produced the cursor
 		}
 		kind := statement.PaymentLineDeposit
@@ -171,7 +178,7 @@ func (m *MockProvider) statementFor(cc CallContext, maxLines int, req statement.
 		}
 		if err := lines.Add(statement.PaymentStatementLine{
 			ProviderID: m.providerID, ProviderReference: ref, MerchantReference: a.merchantReference,
-			Kind: kind, Status: status, Amount: a.amount, AssetCode: a.assetCode, OccurredAt: a.createdAt,
+			Kind: kind, Status: status, Amount: a.amount, AssetCode: a.assetCode, OccurredAt: at,
 		}); err != nil {
 			return statement.PaymentStatement{}, err
 		}
