@@ -203,6 +203,11 @@ type Deps struct {
 	// convention, fail closed); cmd/platform-api always sets it.
 	LaunchAuthorisation *launchgov.Service
 
+	// AML is the ADR 0116 officer service behind the AML routes (aml_routes.go). nil makes every AML route answer 503: there
+	// is no fallback and no bypass. Production wiring passes *aml.Service, built with the process actor-proof issuer (nil in
+	// non-production leaves every governed AML write failing closed with ErrProofUnavailable).
+	AML AMLOfficerAPI
+
 	// PersonResolver is Stage 4E's identity-resolution boundary, consulted
 	// by newRegisterHandler BEFORE a Person is ever created - unlike
 	// PaymentOrchestrator/CasinoOrchestrator, this is NOT "nil means the

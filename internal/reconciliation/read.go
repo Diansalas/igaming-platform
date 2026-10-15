@@ -134,6 +134,8 @@ var StaffViewStreams = []Stream{StreamPaymentStatement, StreamLedgerVsProjection
 // LedgerVsProjectionMismatchKinds are the kinds the ledger_vs_projection stream records.
 var LedgerVsProjectionMismatchKinds = []MismatchKind{
 	MismatchKindMissingProjection, MismatchKindBalanceMismatch, MismatchKindLedgerUnlinkedManualAdjustment,
+	// ADR 0113 s4.4 check D (withdrawal hold, invariant #12): recorded in the ledger_vs_projection run (G5).
+	MismatchKindWithdrawalHoldOpenMismatch, MismatchKindWithdrawalRequestLedgerLinkInvalid,
 }
 
 // PaymentStatementMismatchKinds are the kinds the payment_statement stream records.

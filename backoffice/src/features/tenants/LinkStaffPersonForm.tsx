@@ -7,7 +7,7 @@ import { Card } from '../../components/Card'
 import { TextInput } from '../../components/FormField'
 import { describeError, type ErrorDetails } from '../../lib/apiErrorMessage'
 import { useOnceGuard } from '../../lib/useOnceGuard'
-import { PERSON_ID_HELP } from './CreateStaffForm'
+import { PERSON_ID_HELP } from './personHelp'
 
 /**
  * POST /v1/admin/tenants/{tenantID}/staff/{staffID}/person-link - PermStaffManage.
@@ -46,7 +46,7 @@ export function LinkStaffPersonForm({ tenantId }: { tenantId: string }) {
     <Card title="Link staff to person">
       <form onSubmit={onSubmit} className="flex flex-col gap-4" noValidate>
         <p className="text-sm text-slate-500">
-          For a staff account created without a person ID. An existing link can never be changed.
+          For a staff account invited without a Person ID. An existing link can never be changed.
         </p>
         <div className="grid gap-4 sm:grid-cols-2">
           <TextInput label="Staff ID to link" value={staffId} onChange={(e) => setStaffId(e.target.value)} required />

@@ -32,6 +32,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkpost"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
 
@@ -220,7 +221,7 @@ func drainRoundLock(t *testing.T, pool *db.Pool, f casinoFixture, providerID, ro
 		if err != nil {
 			return err
 		}
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+		_, err = adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "drain-" + uuid.New().String(), CorrelationID: roundCorrelationID(f.tenantID, providerID, roundID),
 			ReasonCode: &reason,
@@ -258,7 +259,7 @@ func postManualAdjustment(t *testing.T, pool *db.Pool, f casinoFixture, amount i
 		if err != nil {
 			return err
 		}
-		result, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		result, err := adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "fixture-adj-" + uuid.New().String(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{

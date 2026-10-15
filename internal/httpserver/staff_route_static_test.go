@@ -38,6 +38,7 @@ var routeClassIdents = map[string]routeClass{
 	"stepUpByLaunchAction": stepUpByLaunchAction, "stepUpByFinancialPolicyRun": stepUpByFinancialPolicyRun,
 	"stepUpByAlertKind": stepUpByAlertKind, "stepUpByRGLimitDirection": stepUpByRGLimitDirection,
 	"stepUpByAlertRouteManager": stepUpByAlertRouteManager,
+	"stepUpByAMLHoldPlace":      stepUpByAMLHoldPlace, "stepUpByAMLTransition": stepUpByAMLTransition,
 }
 
 // mixedPrincipalStaffPaths are the self-service routes any principal may call, where a STAFF caller must still pass
@@ -259,8 +260,9 @@ func TestStaffRoutes_EveryMutatingRouteClassified(t *testing.T) {
 	// golden table together.
 	// ADR 0119 S5 + S6: +24 lifecycle routes (8 reads, 16 mutating), -1 the removed legacy staff creation route:
 	// 203 routes + S1b GET /v1/admin/alerts/{alertID} = 204 routes, 125 mutating.
-	if mutating != 125 || len(staffRouteGolden) != 204 {
-		t.Errorf("golden table: %d routes, %d mutating; pinned 204 and 125", len(staffRouteGolden), mutating)
+	// ADR 0116 A7: +11 AML officer routes (3 reads, 8 mutating): 215 routes, 133 mutating.
+	if mutating != 133 || len(staffRouteGolden) != 215 {
+		t.Errorf("golden table: %d routes, %d mutating; pinned 215 and 133", len(staffRouteGolden), mutating)
 	}
 }
 
@@ -286,7 +288,7 @@ func TestStaffRoutes_ClassIdentsAreTheClosedSet(t *testing.T) {
 	if len(strs) != len(routeClassIdents) {
 		t.Error("two class identifiers have the same value")
 	}
-	want := []string{"alertResolveClass", "alertRouteManageClass", "financialPolicyChangeClass", "launchActionClass", "rgLimitChangeClass"}
+	want := []string{"alertResolveClass", "alertRouteManageClass", "amlHoldPlaceClass", "amlTransitionClass", "financialPolicyChangeClass", "launchActionClass", "rgLimitChangeClass"}
 	var got []string
 	for n := range routeClassifiers {
 		got = append(got, n)

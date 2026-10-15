@@ -38,7 +38,10 @@ func TestNoTriggerDisableOutsideTests(t *testing.T) {
 				filepath.ToSlash(path) == "../../internal/testsupport/launchfix/launchfix.go" ||
 				// ADR 0119 S5 + S6: staffsv.InsertLegacyUnlinkedStaff plants a legacy (pre-0139) unlinked staff row
 				// with SF014 disabled for one statement inside the caller's transaction.
-				filepath.ToSlash(path) == "../../internal/testsupport/staffsv/staffsv.go" {
+				filepath.ToSlash(path) == "../../internal/testsupport/staffsv/staffsv.go" ||
+				// MANUAL-ADJ-LINK-1 (migration 0153, ADR 0100 s21): adjlinkfix.Without is the owner-only fixture
+				// exemption from the manual_adjustment link fence (the ADR 0110 s9.4 owner residual, no new bypass).
+				filepath.ToSlash(path) == "../../internal/testsupport/adjlinkfix/adjlinkfix.go" {
 				if !strings.HasPrefix(string(b), "//go:build integration") {
 					t.Errorf("%s may mention a trigger disable only while it is integration-tag only", path)
 				}

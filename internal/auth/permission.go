@@ -767,6 +767,26 @@ const (
 	PermRGFloorDecide               Permission = "rg_floor:decide"
 )
 
+// ADR 0116 s6 (A7, S6 minimal): the AML officer route gates. STATIC half of the two-layer design, exactly the
+// ledger_adjustment pattern: these permissions are only the route gate. The authority is the in-force `aml_officer`
+// capability GRANT plus a signed actor proof, both re-checked in SQL by aml_authorize (migration 0140); a JWT role is never
+// trusted for it. Only `compliance` (tenant grantee) and `platform_admin` (platform grantee, which additionally needs an
+// acting session for the target tenant) can ever be an aml_officer grantee, so only those two roles hold these.
+// `aml_officer` is a capability, NOT a role, and is never added to a role or to staff:manage (a tenant admin cannot create
+// or assign an officer, ADR 0116 s6 B4). A holder of the permission without the grant is refused by the database.
+//
+//   - PermAMLCaseRead: queue, case detail (events, notes) and a person's holds.
+//   - PermAMLCaseWork: open a case, transition, add a note, flag SAR, PROPOSE a four-eyes action.
+//   - PermAMLCaseCloseApprove: APPROVE a four-eyes action (SAR closure, confirmed-sanctions hold lift). The database
+//     refuses the proposer, the proposer's Person and the case subject.
+//   - PermAMLHoldManage: place a hold, lift a manual hold.
+const (
+	PermAMLCaseRead         Permission = "aml_case:read"
+	PermAMLCaseWork         Permission = "aml_case:work"
+	PermAMLCaseCloseApprove Permission = "aml_case:close_approve"
+	PermAMLHoldManage       Permission = "aml_hold:manage"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -860,6 +880,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationApprove, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 		// ADR 0115 S2: jurisdiction-floor change requests (platform_admin ONLY; four-eyes is the database's).
 		PermRGFloorRead, PermRGFloorRequest, PermRGFloorDecide,
+		// ADR 0116 s6 (A7): the static half of the AML officer gates; the aml_officer grant + acting session are the authority.
+		PermAMLCaseRead, PermAMLCaseWork, PermAMLCaseCloseApprove, PermAMLHoldManage,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -1053,6 +1075,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ADR 0115 S2: compliance is the sole writer of operator RG bounds and of limit changes on a
 		// player's request (decreases only until ADR 0017 step-up ships).
 		PermRGLimitRead, PermRGLimitWriteOnPlayerRequest, PermRGConfigRead, PermRGConfigWrite,
+		// ADR 0116 s6 (A7): the static half of the AML officer gates (the grant, proof and quorum are the database's).
+		PermAMLCaseRead, PermAMLCaseWork, PermAMLCaseCloseApprove, PermAMLHoldManage,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing

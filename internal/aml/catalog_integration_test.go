@@ -110,6 +110,9 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 		"aml_hold_lift": true, "aml_hold_list": true, "aml_alert_raise": true, "aml_case_open": true, "aml_case_transition": true,
 		"aml_case_add_note": true, "aml_case_flag_sar": true, "aml_case_propose": true, "aml_case_approve": true, "aml_case_read": true,
 		"aml_case_events_list": true, "aml_case_notes_list": true, "aml_case_queue": true,
+		// migration 0154 (A7): screening policy / record / list and the launch readiness reader.
+		"aml_screening_policy_set": true, "aml_screening_policy_effective": true, "aml_screening_record": true, "aml_screening_list": true,
+		"aml_readiness": true,
 	}
 	// SECURITY DEFINER but NOT executable by the runtime role: the erasure check (until the HD-RET-1 job is its caller, security F5)
 	// and the platform-grantee liveness helper (reachable only through the owner-run definer chain, security F1/F3).
@@ -171,7 +174,9 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 func TestCatalog_EveryOfficerFunctionAuthorisesFirst(t *testing.T) {
 	w := newWorld(t, "under_platform_licence")
 	rows := catalogQuery(t, w, `SELECT p.proname, p.prosrc FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'aml\_%' AND p.prosecdef`)
-	noProof := map[string]bool{"aml_hold_active": true, "aml_hold_match": true, "aml_record_enforcement_decision": true, "aml_person_has_records": true}
+	// 0154: the policy and readiness readers are proof-less, session-tenant-bound reads (no result, hold, case or person is disclosed).
+	noProof := map[string]bool{"aml_hold_active": true, "aml_hold_match": true, "aml_record_enforcement_decision": true, "aml_person_has_records": true,
+		"aml_screening_policy_effective": true, "aml_readiness": true}
 	for _, r := range rows {
 		name, src := r[0].(string), r[1].(string)
 		if name == "aml_platform_grantee_live" {

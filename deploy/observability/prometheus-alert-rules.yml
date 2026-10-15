@@ -1,23 +1,26 @@
-# Prometheus-format alert rules for the metrics platform-api ALREADY EMITS (OPS-READINESS-LOCAL).
+# Prometheus-format alert rules for the metrics platform-api emits (OPS-READINESS-LOCAL, A9).
 #
-# STATUS: NOT WIRED. No Prometheus (or any metrics backend) exists in any environment. platform-api's
-# OTEL_EXPORTER supports only "stdout" and "none" today (internal/observability/metrics.go), so none of
-# the series below is scrapeable anywhere, and no Alertmanager / receiver / recipient exists.
-# ALERT-DELIVERY-1 is OPEN: even a firing rule pages nobody. Writing these rules is not alerting.
-# Wiring them needs (a) a Prometheus-compatible OTel exporter or collector [PROVIDER DEPENDENT / AWS],
-# (b) an Alertmanager route to a named human on-call [HD-PRH2-4-OPS, HUMAN decision]. Nothing here
-# invents a recipient; every rule carries only a `severity` label, never a receiver.
+# STATUS: EMITTED AND SCRAPEABLE; NOT DEPLOYED. Every series below is emitted by platform-api and is exposed in
+# Prometheus text format on the dedicated metrics listener (METRICS_ADDR; internal/observability/prometheus.go;
+# disabled unless set; never on the public API mux). deploy/observability/prometheus.yml and
+# docker-compose.observability.yml are a working scrape + rule-evaluation EXAMPLE for development and staging.
+# What does NOT exist: a Prometheus / Alertmanager in any real environment, and any Alertmanager route or
+# recipient. A rule that fires here pages nobody by itself. ALERT-DELIVERY-1 is OPEN: the durable-alert path
+# (internal/alerting; email + one webhook channel, owner decision 2026-10-15) delivers only once a human has
+# staged and a second admin has enabled a route (SR-7) AND a real email provider / webhook receiver exists.
+# Every rule carries only a `severity` label, never a receiver or recipient.
 #
-# Metric names assume the standard OpenTelemetry -> Prometheus translation: instrument names pass
-# through unchanged (all counters already end in _total, no units are set on the custom instruments);
-# the otelhttp histogram `http.server.request.duration` (unit s) becomes
-# `http_server_request_duration_seconds_{bucket,count,sum}` with dotted attribute names underscored.
+# Metric names assume the standard OpenTelemetry -> Prometheus translation as done by the exporter in
+# internal/observability (instrument names pass through unchanged; counters that already end in _total are not
+# suffixed twice; no units are set on the custom instruments); the otelhttp histogram
+# `http.server.request.duration` (unit s) becomes `http_server_request_duration_seconds_{bucket,count,sum}`
+# with dotted attribute names underscored. deploy/observability/exposition_test.go scrapes the REAL exposition
+# and asserts these names.
 #
-# Drift guard: deploy/observability/rules_parity_test.go fails the build if any metric or label used
-# here is not emitted by the code (custom instruments are found in the source, the otelhttp series
-# is proven by running the real handler). Signals the platform does NOT emit as metrics (ledger drift,
-# kill switch, DB pool saturation, reconciliation staleness) are in log-event-alert-rules.yml and
-# pending-signals.yml, never invented here.
+# Drift guard: deploy/observability/rules_parity_test.go fails the build if any metric or label used here is not
+# emitted by the code (custom instruments are found in the source, the otelhttp series is proven by running the
+# real handler). Signals the platform still does NOT emit as metrics are in pending-signals.yml, never invented
+# here; log-derived signals are in log-event-alert-rules.yml.
 #
 # Thresholds are starting points, not tuned SLOs (docs/runbooks/observability-and-alerting.md section 2).
 # severity: page = would page an on-call if one existed; ticket = work-hours ticket; info = dashboard.
@@ -167,6 +170,55 @@ groups:
           summary: "Alert dispatcher loop has completed no passes in 10 minutes"
           runbook: docs/runbooks/incident-response-and-oncall.md
 
+      - alert: AlertUndeliveredP1Old
+        # A9 backlog signal: an open, unacknowledged P1 that nobody has been notified of. Today (no human route) this
+        # is expected to be firing whenever a P1 exists; it must not be silenced to hide ALERT-DELIVERY-1.
+        expr: alert_undelivered_oldest_age_seconds{severity="p1"} > 900
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "A P1 durable alert has been open for over 15 minutes with nobody notified"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: AlertUndeliveredP2Old
+        expr: alert_undelivered_oldest_age_seconds{severity="p2"} > 7200
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A P2 durable alert has been open for over 2 hours with nobody notified"
+          runbook: docs/runbooks/incident-response-and-oncall.md
+
+      - alert: AlertDeliveryFailing
+        # A delivery failure is itself observable: the alert is NOT dropped (the dispatcher retries with backoff and
+        # finally records dead), but a failing channel means people are not being told.
+        expr: sum by (channel_kind, error_class) (increase(alert_delivery_attempts_total{result="failed"}[15m])) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Alert delivery attempts are failing on a channel"
+          description: "error_class=misconfigured/rejected is permanent (fix the channel configuration or the receiver); unavailable/timeout is retried."
+          runbook: docs/runbooks/observability-and-alerting.md
+
+      - alert: AlertRetentionFailing
+        expr: increase(alert_retention_runs_total{result!="ok"}[1d]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "The alert history retention purge failed"
+          runbook: docs/runbooks/observability-and-alerting.md
+
+      - alert: AlertRetentionStale
+        # Only present when ALERT_RETENTION_DAYS is set (the series is absent otherwise).
+        expr: time() - alert_retention_last_run_unix_seconds > 2 * 86400
+        labels:
+          severity: ticket
+        annotations:
+          summary: "The alert history retention purge has not succeeded for over 2 days"
+          runbook: docs/runbooks/observability-and-alerting.md
+
   - name: platform-api-background-workers
     rules:
       - alert: KycOutboxStalled
@@ -271,3 +323,82 @@ groups:
           summary: "Many staff requests refused by the liveness check"
           description: "Look at the reason label and the staff_liveness_refused log lines (request_id, reason; never a token)."
           runbook: docs/runbooks/incident-response-and-oncall.md
+
+  - name: platform-api-database
+    rules:
+      - alert: DbPoolSaturated
+        # pending-signals DbPoolSaturation (promoted by A9). One pool per process, so no label match is needed.
+        expr: db_pool_acquired_connections / db_pool_max_connections > 0.9
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "The application database pool has been over 90% checked out for 5 minutes"
+          description: "Requests queue for a connection; the 5xx ratio and request latency follow. Check for a slow query, a leaked transaction or a load spike."
+          runbook: docs/runbooks/load-and-soak-test-plan.md
+
+      - alert: DbPoolAcquireWaiting
+        # Cumulative time callers spent waiting for a connection, as a rate: callers are queueing even if the pool
+        # is not pinned at max at the sampling instant.
+        expr: rate(db_pool_acquire_wait_seconds_total[5m]) > 0.5
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Callers spent more than half a second per second waiting for a database connection"
+          runbook: docs/runbooks/load-and-soak-test-plan.md
+
+  - name: platform-api-reconciliation
+    rules:
+      - alert: ReconciliationStale
+        # pending-signals ReconciliationStale (promoted by A9). The value is the OLDEST per-tenant last success of
+        # the stream (0 = a tenant has never succeeded in this process), so one stale tenant fires it. Assumes the
+        # default hourly cadence (RECONCILIATION_INTERVAL_SECONDS); 2 hours = two missed sweeps.
+        expr: time() - reconciliation_last_success_unix_seconds > 2 * 3600
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "A reconciliation stream has a tenant with no successful run for over 2 hours"
+          description: "Check reconciliation_runs_total{result=failed} and the reconciliation.run_failed durable alerts for the failing stream. The money-drift check is not running for that tenant."
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: ReconciliationSweepStalled
+        expr: time() - reconciliation_last_sweep_unix_seconds > 2 * 3600
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "No complete reconciliation sweep for over 2 hours"
+          description: "The scheduler stalled, panicked, or the tenant listing keeps failing (see ReconciliationListingFailed and the reconciliation.sweep_failed durable alert)."
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: ReconciliationMismatchesOpen
+        # pending-signals LedgerDriftAsMetric (promoted by A9). CLAUDE.md: any non-zero drift is a P1 incident.
+        expr: sum by (stream) (reconciliation_mismatches_open) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "A reconciliation stream's latest completed run reported mismatches"
+          description: "Non-zero ledger/provider drift is a P1. The gauge clears only when a later run is clean."
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: ReconciliationRunFailures
+        expr: sum by (stream) (increase(reconciliation_runs_total{result="failed"}[2h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A reconciliation stream run failed for at least one tenant"
+          description: "Each failed run also raises a reconciliation.run_failed durable alert (P1) naming the stream and phase."
+          runbook: docs/runbooks/operational-runbooks.md
+
+      - alert: ReconciliationListingFailed
+        # R3-LISTING-FAILURE-LOG-ONLY-1 (A9): a tenant listing failed, so nothing (or not every tenant) was reconciled.
+        expr: increase(reconciliation_sweeps_total{result="listing_failed"}[30m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "The reconciliation sweep could not list tenants"
+          description: "Also raised as the reconciliation.sweep_failed durable alert (P1). Closed-tenant observation silently switches off while this persists."
+          runbook: docs/runbooks/operational-runbooks.md

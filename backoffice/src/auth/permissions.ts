@@ -34,8 +34,10 @@ export interface NavPermissions {
   tenantWrite: boolean
   /** PermBrandWrite - create a brand (POST /v1/admin/tenants/{tid}/brands). */
   brandWrite: boolean
-  /** PermStaffManage - create staff / link a staff person (POST /v1/admin/tenants/{tid}/staff...). */
+  /** PermStaffManage - invite staff / link a staff person (POST /v1/admin/tenants/{tid}/staff/invitations, .../person-link). */
   staffAdmin: boolean
+  /** PermStaffRead - the read-only staff directory (GET /v1/admin/tenants/{tid}/staff): platform_admin, tenant_admin, compliance. */
+  staffRead: boolean
   /** PermProviderConfigWrite - payment provider capability (tenant-scoped). */
   providerConfig: boolean
   /** PermCasinoConfigWrite - casino provider capability + game availability (tenant-scoped). */
@@ -119,6 +121,31 @@ export interface NavPermissions {
    * re-checks every call and a tenant caller may name only its own tenant.
    */
   killSwitch: boolean
+  /**
+   * ADR 0116 s6 (A7): the STATIC half of the AML officer gates (aml_case:read / :work / :close_approve, aml_hold:manage),
+   * held by compliance and platform_admin only (internal/auth/permission.go). UI convenience only: the authority is the
+   * in-force aml_officer capability grant, a signed proof and the officer quorum, all checked by the server.
+   */
+  amlRead: boolean
+  amlWork: boolean
+  amlApprove: boolean
+  amlHolds: boolean
+  /**
+   * ADR 0114 S5: at least one reconciliation read permission (payment_statement / ledger_vs_projection:
+   * platform_admin, compliance, finance; sportsbook_settlement and the casino streams: tenant_admin, compliance,
+   * finance). Which STREAMS a role may open is `reconciliationStreams`. UI convenience only; the server checks
+   * the permission of the requested stream before any query.
+   */
+  reconciliation: boolean
+  /**
+   * ADR 0114 S7 (K1, internal/auth/permission.go): capability_grant:read (platform_admin, tenant_admin,
+   * compliance), :request (platform_admin, tenant_admin), :approve (platform_admin ONLY), :revoke (platform_admin,
+   * tenant_admin). UI convenience only; the database decides R-7 and the distinct-person rules.
+   */
+  capabilityGrants: boolean
+  capabilityGrantRequest: boolean
+  capabilityGrantApprove: boolean
+  capabilityGrantRevoke: boolean
 }
 
 const NONE: NavPermissions = {
@@ -136,6 +163,7 @@ const NONE: NavPermissions = {
   tenantWrite: false,
   brandWrite: false,
   staffAdmin: false,
+  staffRead: false,
   providerConfig: false,
   casinoConfig: false,
   catalogue: false,
@@ -155,6 +183,15 @@ const NONE: NavPermissions = {
   launchSuspend: false,
   launchQueue: false,
   killSwitch: false,
+  amlRead: false,
+  amlWork: false,
+  amlApprove: false,
+  amlHolds: false,
+  reconciliation: false,
+  capabilityGrants: false,
+  capabilityGrantRequest: false,
+  capabilityGrantApprove: false,
+  capabilityGrantRevoke: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -165,10 +202,10 @@ const NONE: NavPermissions = {
 //   PermProviderConfigWrite   -> tenant_admin (route also RequireTenantScope)
 //   PermCasinoConfigWrite     -> tenant_admin (route also RequireTenantScope)
 //   PermCasinoCatalogueManage -> platform_admin
-// Which staff ROLES a staffAdmin caller may create is a separate,
-// handler-level rule (finance/risk_manager/promotions_manager/
-// bonus_operations need a platform-scoped caller) - see
-// api/tenants.ts's TENANT_CREATABLE_STAFF_ROLES.
+// Which staff ROLES a staffAdmin caller may invite is a separate,
+// service-level rule (finance/risk_manager/promotions_manager/
+// bonus_operations need a platform admin; 403 role_not_grantable) - see
+// api/tenants.ts's TENANT_GRANTABLE_STAFF_ROLES.
 //
 // Stage 6's sportsbook flag mirrors exactly which roles the backend grants
 // PermSportsbookBetRead to (internal/auth/permission.go): tenant_admin,
@@ -187,6 +224,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     tenantWrite: true,
     brandWrite: true,
     staffAdmin: true,
+    staffRead: true,
     catalogue: true,
     manualAdjustments: true,
     manualAdjustmentAct: true,
@@ -203,6 +241,15 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     launchSuspend: true,
     launchQueue: true,
     killSwitch: true,
+    amlRead: true,
+    amlWork: true,
+    amlApprove: true,
+    amlHolds: true,
+    reconciliation: true,
+    capabilityGrants: true,
+    capabilityGrantRequest: true,
+    capabilityGrantApprove: true,
+    capabilityGrantRevoke: true,
   },
   tenant_admin: {
     ...NONE,
@@ -216,15 +263,20 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     casino: true,
     brandWrite: true,
     staffAdmin: true,
+    staffRead: true,
     providerConfig: true,
     casinoConfig: true,
     launchRead: true,
     launchRequest: true,
     launchSuspend: true,
     killSwitch: true,
+    reconciliation: true,
+    capabilityGrants: true,
+    capabilityGrantRequest: true,
+    capabilityGrantRevoke: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
+  compliance: { ...NONE, ownTenant: true, staffRead: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, amlRead: true, amlWork: true, amlApprove: true, amlHolds: true, reconciliation: true, capabilityGrants: true },
   finance: {
     ...NONE,
     withdrawals: true,
@@ -235,6 +287,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     paymentForceResolutions: true,
     paymentForceResolutionAct: true,
     payoutInstruments: true,
+    reconciliation: true,
   },
   risk_manager: { ...NONE },
   promotions_manager: { ...NONE, bonus: true },
@@ -244,4 +297,18 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
 export function getNavPermissions(role: string | undefined): NavPermissions {
   if (!role) return NONE
   return ROLE_NAV_PERMISSIONS[role] ?? NONE
+}
+
+export type ReconciliationStreamId = 'payment_statement' | 'ledger_vs_projection' | 'sportsbook_settlement' | 'casino_consistency' | 'casino_statement'
+
+/**
+ * Streams a role is expected to be allowed to read (ADR 0114 section 3 and 5, D-OPS-2). A static hint that only
+ * decides which tabs to show; the server re-checks the stream permission on every call and a refusal is rendered.
+ * Casino streams are tenant-scoped routes (no tenant in the path), so a platform principal gets none.
+ */
+export function reconciliationStreams(role: string | undefined, platform: boolean): ReconciliationStreamId[] {
+  if (role === 'platform_admin') return platform ? ['payment_statement', 'ledger_vs_projection'] : []
+  if (role === 'compliance' || role === 'finance') return ['payment_statement', 'ledger_vs_projection', 'sportsbook_settlement', 'casino_consistency', 'casino_statement']
+  if (role === 'tenant_admin') return ['sportsbook_settlement', 'casino_consistency', 'casino_statement']
+  return []
 }

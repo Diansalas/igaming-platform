@@ -95,6 +95,20 @@ is either a secret or noise).
 | `OTelServiceName` | `OTEL_SERVICE_NAME` | No | `platform-api` | Not a secret. Keep distinct per logical service if this binary is ever split (see `docs/architecture/38-deployment-architecture.md` §4's note on scheduler loops potentially moving to a dedicated worker process later). |
 | `OTelExporter` | `OTEL_EXPORTER` | No | `stdout` | Not a secret. `stdout` is the Stage 1 foundation choice (human-readable, no external collector) — production should point this at a real OTLP exporter once a concrete observability backend exists; introducing that backend and its own endpoint/credential is a separate operational decision, not covered by this checklist since none is contracted yet (PROVIDER DEPENDENT, same category as the KYC/casino/payment mock providers). |
 
+### Metrics, alert channels and alert retention (A9; `alert-delivery-channels.md`)
+
+| Field | Env var | Required | Dev default | Production action |
+|---|---|---|---|---|
+| `MetricsAddr` | `METRICS_ADDR` | No | unset (no listener) | Not a secret. Prometheus text on a DEDICATED listener, no authentication. Production: bind `127.0.0.1:<port>` (agent/sidecar scrape) or a private interface restricted to the collector at the network layer; a non-loopback bind is refused in every environment except an explicit `APP_ENV=development` (staging included) unless `METRICS_ALLOW_NON_LOOPBACK=true`. Must differ from `HTTP_ADDR`'s port; never behind the public load balancer. |
+| `MetricsAllowNonLoopback` | `METRICS_ALLOW_NON_LOOPBACK` | No | `false` | Set `true` only after the security group / network policy limits the metrics port to the collector. |
+| `AlertEmailRecipients` | `ALERT_EMAIL_RECIPIENTS` | No | none | Bare addresses, at most 10. Production refuses the MOCK email provider (MOCK-ADAPTER-PROD-1), so this works in production only once a real email provider adapter exists (PROVIDER DEPENDENT). Interim owner recipient: `alert-delivery-channels.md` section 1. |
+| `AlertWebhookURL` | `ALERT_WEBHOOK_URL` | No | none | `https` only, public destination only (SSRF guard). Takes effect only with an enabled route (SR-7 four-eyes). The payload carries pseudonymous staff/withdrawal/attempt identifiers: a DPA with the receiver's vendor is required before production use (`alert-delivery-channels.md` section 4). |
+| `AlertWebhookAllowHosts` | `ALERT_WEBHOOK_ALLOW_HOSTS` | No | none | Comma-separated single-label host names the webhook URL may use (for example an in-cluster service). Leave unset: a dot-less host such as `metadata` is refused. |
+| `AlertWebhookAllowNAT64` | `ALERT_WEBHOOK_ALLOW_NAT64` | No | `false` | `true` only on an IPv6-only network whose webhook receiver is addressed through `64:ff9b::/96`; the embedded IPv4 must still be public. |
+| `AlertWebhookSecretRef` | `ALERT_WEBHOOK_SECRET_REF` | With the URL | none | A secret-store REFERENCE (`awssm://...`; `devfile://` is development-only), never the secret; the secret is at least 32 bytes, provisioned by a human in the secret store. |
+| `AlertRetention` | `ALERT_RETENTION_DAYS` | No | unset (no purge) | Minimum 7. Set only after the per-jurisdiction audit-retention horizon is decided (legal); unset leaves ALERT-RETENTION-1 open and logs a startup warning. |
+| `AlertRetentionInterval` | `ALERT_RETENTION_INTERVAL_HOURS` | No | `24` | Not a secret. |
+
 ## Scheduled jobs
 
 All four cadence groups below default to values already matching the
@@ -267,3 +281,11 @@ deploy order, the staff-session cutover and the break-glass path until S6).
 
 The published `.env.example` values of the two families are development placeholders and are refused unless
 `APP_ENV` is explicitly `development`.
+
+## Back-office static host: do not log query strings (A10a, SR-A10a-5)
+
+Emailed staff links carry the one-time token in the URL FRAGMENT (`/#/enrol?token=...&invite=1`), which never reaches
+the server. The SPA discards any token in a query string (`/accept-invitation?token=...`), but by then the request has
+already reached the host. Deployment checklist item: the static host / CDN / reverse proxy serving the back office
+must NOT write query strings to access logs (or must redact `token=`) for `/enrol` and `/accept-invitation`, and must
+send no `Referer` containing them. Status: deployment configuration, `NOT IMPLEMENTED` in this repository.

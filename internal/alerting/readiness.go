@@ -209,6 +209,7 @@ func (t *readinessTracker) effective() []SeverityReadiness {
 // evaluates readiness over configuration only, updates the cache and logs a
 // transition. A read failure leaves the cache untouched (so it goes stale).
 func (d *Dispatcher) EvaluateReadiness(ctx context.Context) error {
+	d.started.Store(true) // the sink map is read from here on: AddSinks is closed
 	now := d.config.Clock.Now()
 	routes, err := d.loadRouteConfigs(ctx, now)
 	if err != nil {

@@ -362,7 +362,7 @@ func TestPost_BonusSetPostingsAcceptedOnceMirrorGeneratorExists(t *testing.T) {
 		{"player_locked_bonus", lockedBonusID, 500, -500},
 	} {
 		key := "hr9-satisfied-" + c.name
-		res := mustPost(t, pool, f, TransactionInput{
+		res := mustPostFixture(t, pool, f, TransactionInput{
 			TenantID:        f.tenantID,
 			TransactionType: TxManualAdjustment,
 			IdempotencyKey:  key,
@@ -406,7 +406,7 @@ func TestPost_BonusSetPostingsAcceptedOnceMirrorGeneratorExists(t *testing.T) {
 
 	// player_bonus, promoted from recommended to required at Stage
 	// 4H-B0-R7, is likewise now postable with a valid BonusCost.
-	res := mustPost(t, pool, f, TransactionInput{
+	res := mustPostFixture(t, pool, f, TransactionInput{
 		TenantID:        f.tenantID,
 		TransactionType: TxManualAdjustment,
 		IdempotencyKey:  "hr9-satisfied-player_bonus",
@@ -444,7 +444,7 @@ func TestPost_BonusSetPostingsAcceptedOnceMirrorGeneratorExists(t *testing.T) {
 	// The cash-origin half of the same family never needed BonusCost and
 	// still does not - the generator (like HR-9 before it) is exactly as
 	// wide as BONUS_SET and no wider.
-	mustPost(t, pool, f, TransactionInput{
+	mustPostFixture(t, pool, f, TransactionInput{
 		TenantID:        f.tenantID,
 		TransactionType: TxManualAdjustment,
 		IdempotencyKey:  "hr9-satisfied-control-cash-lock",
@@ -519,7 +519,7 @@ func TestPost_CashOriginLockPostsAndRebuildsAtEveryExponent(t *testing.T) {
 		}
 
 		mustPost(t, pool, f, assetDepositInput(f, "lock-dep-"+c.asset, clearingID, cashID, deposit))
-		mustPost(t, pool, f, TransactionInput{
+		mustPostFixture(t, pool, f, TransactionInput{
 			TenantID:        f.tenantID,
 			TransactionType: TxManualAdjustment,
 			IdempotencyKey:  "lock-move-" + c.asset,

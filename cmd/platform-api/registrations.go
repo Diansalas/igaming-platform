@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/alerting/channels"
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -56,6 +60,10 @@ type providerBundle struct {
 	// reports UNKNOWN (the gate refuses) unless MOCK_GEOLOCATION_COUNTRY is
 	// set in a non-production, test-support deployment (mockWiring).
 	Geolocation *geolocation.StaticLocator
+	// AMLScreening is the MOCK sanctions / PEP screening provider (ADR 0116 s4, A7): Synthetic, no external I/O, registered
+	// with the synthetic guard so production refuses to start with it, and the component the R-AML-SCREENING launch
+	// readiness check looks for (domain "aml", name "screening_provider"). NOT wired into any enforcement point yet.
+	AMLScreening *aml.MockScreeningProvider
 
 	// The MOCK webhook credential resolvers (Stage 10.3 gate-W1 fix round,
 	// security S-4 / code review #2). They are built HERE - not in
@@ -199,6 +207,7 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		Email:           email.NewMockProvider(),
 		PayoutVerifier:  payoutinstrument.NewMockVerifier(),
 		Geolocation:     geolocation.NewStaticLocator(wiring.GeolocationCountry),
+		AMLScreening:    aml.NewMockScreeningProvider(),
 	}
 	// PROV-OUTBOUND-CRED-1 phase 2 code review C2: this is the one
 	// DELIBERATE hard-wired MockCredentialResolver{} in this file, never
@@ -400,6 +409,7 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		// gate requires evidence for every decision, so a Synthetic Locator
 		// must never run in production (MOCK-ADAPTER-PROD-1).
 		{Domain: "geolocation", Name: "locator", Component: b.Geolocation},
+		{Domain: "aml", Name: "screening_provider", Component: b.AMLScreening},
 	}
 	if b.KYC != nil {
 		regs = append(regs, providerkind.Registration{Domain: "kyc", Name: "provider", Component: b.KYC})
@@ -516,4 +526,33 @@ func buildKYCOutboxWorker(pool *db.Pool, orch *kyc.Orchestrator, outbound kyc.Ou
 		return nil
 	}
 	return kyc.NewOutboxWorker(pool, orch, outbound)
+}
+
+// alertWebhookSecretFunc (A9) resolves ALERT_WEBHOOK_SECRET_REF through the same environment-gated secret-store
+// router the provider-credential subsystem uses. The reference must parse and name a backend that is
+// configured in this process (startup error otherwise). Store errors are mapped to channel error classes:
+// unavailability is retryable, every other class (missing, denied, invalid) is a permanent misconfiguration.
+// The secret value is returned to the sink only; this function never logs it or the reference.
+func alertWebhookSecretFunc(cfg config.Config, backends []secretstore.Store) (channels.SecretFunc, error) {
+	ref, err := secretstore.ParseRef(cfg.AlertWebhookSecretRef)
+	if err != nil {
+		return nil, errors.New("ALERT_WEBHOOK_SECRET_REF is not a valid secret-store reference")
+	}
+	router, err := secretstore.NewRouter(cfg, backends...)
+	if err != nil {
+		return nil, fmt.Errorf("secret store: %w", err)
+	}
+	if _, ok := router.Backend(ref.Scheme()); !ok {
+		return nil, fmt.Errorf("ALERT_WEBHOOK_SECRET_REF uses the %q backend, which is not configured in SECRETSTORE_BACKENDS", ref.Scheme())
+	}
+	return func(ctx context.Context) ([]byte, alerting.ErrorClass) {
+		sec, err := router.GetDirect(ctx, ref)
+		if err != nil {
+			if secretstore.ClassOf(err).CountsTowardBreaker() {
+				return nil, alerting.ErrorClassUnavailable
+			}
+			return nil, alerting.ErrorClassMisconfigured
+		}
+		return sec.Bytes(), alerting.ErrorClassNone
+	}, nil
 }

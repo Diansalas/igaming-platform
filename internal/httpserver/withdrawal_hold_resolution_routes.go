@@ -212,6 +212,7 @@ type holdResolutionDTO struct {
 	Kind                string   `json:"kind"`
 	AmountMinorUnits    string   `json:"amount_minor_units"`
 	AssetCode           string   `json:"asset_code"`
+	Exponent            *int16   `json:"exponent"` // asset registry decimal exponent (ADR 0007); null when it could not be resolved
 	ReasonCode          string   `json:"reason_code"`
 	EvidenceRefHash     string   `json:"evidence_ref_hash"`
 	PayloadHash         string   `json:"payload_hash"`
@@ -227,10 +228,10 @@ type holdResolutionDTO struct {
 	ExpiresAt           string   `json:"expires_at"`
 }
 
-func toHoldResolutionDTO(v staffViewer, r payments.HoldResolution) holdResolutionDTO {
+func toHoldResolutionDTO(v staffViewer, r payments.HoldResolution, exps map[string]int16) holdResolutionDTO {
 	dto := holdResolutionDTO{
 		ID: r.ID.String(), TenantID: r.TenantID.String(), WithdrawalRequestID: r.WithdrawalRequestID.String(), Kind: string(r.Kind),
-		AmountMinorUnits: strconv.FormatInt(r.Amount, 10), AssetCode: r.AssetCode, ReasonCode: r.ReasonCode,
+		AmountMinorUnits: strconv.FormatInt(r.Amount, 10), AssetCode: r.AssetCode, Exponent: exponentRef(exps, r.AssetCode), ReasonCode: r.ReasonCode,
 		EvidenceRefHash: r.EvidenceRefHash, PayloadHash: r.PayloadHash, RequestedBy: v.ref(r.RequestedByScope, r.RequestedBy), RequestedByScope: r.RequestedByScope,
 		RequiredAtSubmit: r.RequiredAtSubmission, TenantStatusSubmit: r.TenantStatusAtSubmission, BrandStatusSubmit: r.BrandStatusAtSubmission,
 		State: string(r.State), RefusalCode: r.RefusalCode,
@@ -273,7 +274,8 @@ func newRequestHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldReso
 			writeHoldResolutionError(r.Context(), deps, w, c, "request", err, "", wrID.String())
 			return
 		}
-		writeJSON(w, http.StatusCreated, toHoldResolutionDTO(staffViewerOf(c.tc), res))
+		exps := resolutionExponentsBestEffort(r.Context(), deps, c.logger, res.AssetCode)
+		writeJSON(w, http.StatusCreated, toHoldResolutionDTO(staffViewerOf(c.tc), res, exps))
 	}
 }
 
@@ -292,9 +294,17 @@ func newListHoldResolutionsHandler(deps Deps, svc *payments.WithdrawalHoldResolu
 			writeHoldResolutionError(r.Context(), deps, w, c, "list", err)
 			return
 		}
+		codes := make([]string, 0, len(rs))
+		for _, x := range rs {
+			codes = append(codes, x.AssetCode)
+		}
+		exps, ok := resolutionExponentsOrFail(r.Context(), deps, w, c.logger, c.requestID, codes...)
+		if !ok {
+			return
+		}
 		out := make([]holdResolutionDTO, 0, len(rs))
 		for _, x := range rs {
-			out = append(out, toHoldResolutionDTO(staffViewerOf(c.tc), x))
+			out = append(out, toHoldResolutionDTO(staffViewerOf(c.tc), x, exps))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
@@ -320,7 +330,11 @@ func newGetHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldResoluti
 			writeHoldResolutionError(r.Context(), deps, w, c, "get", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toHoldResolutionDTO(staffViewerOf(c.tc), res))
+		exps, ok := resolutionExponentsOrFail(r.Context(), deps, w, c.logger, c.requestID, res.AssetCode)
+		if !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, toHoldResolutionDTO(staffViewerOf(c.tc), res, exps))
 	}
 }
 
@@ -364,7 +378,8 @@ func newDecideHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldResol
 			writeHoldResolutionError(r.Context(), deps, w, c, op, err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, holdResolutionDecisionResponse{Resolution: toHoldResolutionDTO(staffViewerOf(c.tc), out.Resolution), Executed: out.Executed,
+		exps := resolutionExponentsBestEffort(r.Context(), deps, c.logger, out.Resolution.AssetCode)
+		writeJSON(w, http.StatusOK, holdResolutionDecisionResponse{Resolution: toHoldResolutionDTO(staffViewerOf(c.tc), out.Resolution, exps), Executed: out.Executed,
 			Refused: out.Refused, Counted: out.Counted, Required: out.Required})
 	}
 }
@@ -389,6 +404,7 @@ func newCancelHoldResolutionHandler(deps Deps, svc *payments.WithdrawalHoldResol
 			writeHoldResolutionError(r.Context(), deps, w, c, "cancel", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toHoldResolutionDTO(staffViewerOf(c.tc), res))
+		exps := resolutionExponentsBestEffort(r.Context(), deps, c.logger, res.AssetCode)
+		writeJSON(w, http.StatusOK, toHoldResolutionDTO(staffViewerOf(c.tc), res, exps))
 	}
 }

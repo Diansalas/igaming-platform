@@ -214,7 +214,11 @@ BEGIN
         'aml_case_transition(uuid, uuid, integer, text, text)', 'aml_case_add_note(uuid, uuid, integer, text, text)',
         'aml_case_flag_sar(uuid, uuid, integer, text)', 'aml_case_propose(uuid, uuid, integer, text, uuid, text, text)',
         'aml_case_approve(uuid, uuid, integer, text, text)', 'aml_case_read(uuid, uuid)', 'aml_case_events_list(uuid, uuid)',
-        'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)'
+        'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)',
+        -- Migration 0154 (A7): screening policy / record / list and the launch readiness reader.
+        'aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)', 'aml_screening_policy_effective(uuid, uuid)',
+        'aml_screening_record(uuid, uuid, text, text, text, text, text, text[], text, text[], text, timestamptz, text, text)',
+        'aml_screening_list(uuid, uuid)', 'aml_readiness(uuid, uuid[])'
     ] LOOP
         IF to_regprocedure('public.' || f) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);

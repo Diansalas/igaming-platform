@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/amlfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 )
 
 // Security review F1 / F3: a grant in force is not enough. The grantee's LIVE staff row must be active, hold the eligible role now,
@@ -28,7 +29,15 @@ func (c *caseWorld) setStaff(t *testing.T, staff uuid.UUID, set string) {
 	if c.Scope == "tenant" {
 		err = c.Owner.WithTenant(bg, c.Tenant, func(ctx context.Context, tx pgx.Tx) error { _, e := tx.Exec(ctx, q, staff); return e })
 	} else {
-		err = c.Owner.WithPlatformAdmin(bg, launchfix.Operators().Requester, func(ctx context.Context, tx pgx.Tx) error { _, e := tx.Exec(ctx, q, staff); return e })
+		err = c.Owner.WithPlatformAdmin(bg, launchfix.Operators().Requester, func(ctx context.Context, tx pgx.Tx) error {
+			// SF020 (0139) refuses removing the last ACTIVE, ENROLLED platform admin; a fresh database has none besides the officers (who have
+			// no factor). Plant our own spare (no aml_officer grant, so no quorum count changes) instead of relying on other tests' rows.
+			if _, e := staffsv.PlantEnrolledPlatformAdmin(ctx, tx); e != nil {
+				return e
+			}
+			_, e := tx.Exec(ctx, q, staff)
+			return e
+		})
 	}
 	if err != nil {
 		t.Fatalf("update staff: %v", err)

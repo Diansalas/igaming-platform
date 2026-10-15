@@ -187,4 +187,5 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerPayoutInstrumentRoutes(mux, deps)
 	// ADR 0112 slice 4: launch authorisation (tenant and brand status governance).
 	registerLaunchAuthorisationRoutes(mux, deps)
+	registerAMLRoutes(mux, deps)
 }

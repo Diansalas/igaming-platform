@@ -7,8 +7,10 @@ package alerting
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,19 +21,25 @@ import (
 )
 
 // ChannelKind is the provider-neutral delivery channel a route selects
-// (ADR §6.2). Only "log" and "mock" exist in PRH-2 - a real channel is
-// PROVIDER DEPENDENT and gated by HD-PRH2-4-OPS (§6.2 preconditions).
+// (ADR §6.2). "log" and "mock" reach no person. "email" (over the internal/email provider interface) and
+// "webhook" (one HTTPS endpoint, HMAC-signed, SSRF-guarded) are the A9 provider-neutral human-notification
+// channels; each is only as real as its provider (a MOCK email provider is NOT a human notification, see
+// EmailSink.HumanNotification).
 type ChannelKind string
 
 const (
-	ChannelLog  ChannelKind = "log"
-	ChannelMock ChannelKind = "mock"
+	ChannelLog     ChannelKind = "log"
+	ChannelMock    ChannelKind = "mock"
+	ChannelEmail   ChannelKind = "email"
+	ChannelWebhook ChannelKind = "webhook"
 )
 
 // AllChannelKinds is the closed channel vocabulary of the code: every kind that has a constant
 // above. A new kind is added here with its constant (internal/launchgov R-ALERTS derives its
 // result from this list and KnownHumanChannelKind instead of naming kinds itself).
-func AllChannelKinds() []ChannelKind { return []ChannelKind{ChannelLog, ChannelMock} }
+func AllChannelKinds() []ChannelKind {
+	return []ChannelKind{ChannelLog, ChannelMock, ChannelEmail, ChannelWebhook}
+}
 
 // Outcome is what Sink.Deliver reports.
 type Outcome string
@@ -328,6 +336,10 @@ type Dispatcher struct {
 	sinks  map[ChannelKind]Sink
 	config DispatcherConfig
 
+	// started is set by the first RunOnce; AddSinks is refused afterwards, so the sink map is immutable while
+	// passes (and the readiness evaluator) read it concurrently.
+	started atomic.Bool
+
 	readiness readinessTracker
 }
 
@@ -358,6 +370,29 @@ func NewDispatcher(pool *db.Pool, config DispatcherConfig, sinks ...Sink) *Dispa
 	d.readiness.staleAfter = config.ReadinessStaleAfter
 	registerReadinessSource(&d.readiness)
 	return d
+}
+
+// AddSinks registers additional delivery channels (the A9 email and webhook channels, built from configuration
+// in cmd/platform-api). It must be called before the first pass; a kind that already has a sink, a nil sink, and
+// any call after the dispatcher started are refused. Registration is what makes a route for the kind deliverable
+// (an enabled route for an unwired kind is recorded unrouted/no_sink, never black-holed) and what lets routing
+// readiness count it.
+func (d *Dispatcher) AddSinks(sinks ...Sink) error {
+	if d.started.Load() {
+		return errors.New("alerting: AddSinks after the dispatcher started")
+	}
+	for _, s := range sinks {
+		if s == nil {
+			return errors.New("alerting: AddSinks: nil sink")
+		}
+		if _, dup := d.sinks[s.ChannelKind()]; dup {
+			return fmt.Errorf("alerting: AddSinks: a sink for channel %q is already registered", s.ChannelKind())
+		}
+	}
+	for _, s := range sinks {
+		d.sinks[s.ChannelKind()] = s
+	}
+	return nil
 }
 
 func (d *Dispatcher) logger() *slog.Logger {
@@ -409,6 +444,7 @@ type dueAlert struct {
 // read-only transaction), deliver with no transaction open (AL-5), then
 // record the outcome (a fresh short transaction) - ADR §6.1 steps 1-3.
 func (d *Dispatcher) RunOnce(ctx context.Context) error {
+	d.started.Store(true)
 	now := d.config.Clock.Now()
 
 	var due []dueAlert
@@ -493,10 +529,11 @@ func (d *Dispatcher) readDueWork(ctx context.Context, tx pgx.Tx, now time.Time) 
 	// test/fake clock set in the past could pick the wrong "latest" row.
 	rows, err := tx.Query(ctx, `
 		SELECT a.id, a.kind, a.severity, a.simulation, a.subject_tenant_id, a.discriminator, a.attributes, a.state,
-		       ld.escalation_step, ld.attempt_no, ld.event, ld.next_attempt_at, ld.next_escalation_at, ld.recorded_at
+		       ld.escalation_step, ld.attempt_no, ld.event, ld.next_attempt_at, ld.next_escalation_at, ld.recorded_at,
+		       a.first_seen_at, ld.channel_kind
 		FROM alerts a
 		LEFT JOIN LATERAL (
-			SELECT d.escalation_step, d.attempt_no, d.event, d.next_attempt_at, d.next_escalation_at, d.recorded_at
+			SELECT d.escalation_step, d.attempt_no, d.event, d.next_attempt_at, d.next_escalation_at, d.recorded_at, d.channel_kind
 			FROM alert_deliveries d
 			WHERE d.alert_id = a.id
 			ORDER BY d.recorded_at DESC, d.id DESC
@@ -510,6 +547,7 @@ func (d *Dispatcher) readDueWork(ctx context.Context, tx pgx.Tx, now time.Time) 
 	defer rows.Close()
 
 	var out []dueAlert
+	var backlog backlogTally
 	for rows.Next() {
 		var (
 			w                               dueAlert
@@ -520,10 +558,15 @@ func (d *Dispatcher) readDueWork(ctx context.Context, tx pgx.Tx, now time.Time) 
 			event                           *string
 			nextAttemptAt, nextEscalationAt *time.Time
 			recordedAt                      *time.Time
+			firstSeenAt                     time.Time
+			lastChannelKind                 *string
 		)
 		if err := rows.Scan(&w.id, &w.kind, &w.severity, &w.simulation, &subjectTenantID, &w.discriminator, &attrsJSON, &state,
-			&step, &attemptNo, &event, &nextAttemptAt, &nextEscalationAt, &recordedAt); err != nil {
+			&step, &attemptNo, &event, &nextAttemptAt, &nextEscalationAt, &recordedAt, &firstSeenAt, &lastChannelKind); err != nil {
 			return nil, err
+		}
+		if !w.simulation && state == "open" && d.undelivered(event, lastChannelKind) {
+			backlog.add(w.severity, now.Sub(firstSeenAt))
 		}
 		if subjectTenantID != nil {
 			w.subjectTenantID = *subjectTenantID
@@ -587,7 +630,11 @@ func (d *Dispatcher) readDueWork(ctx context.Context, tx pgx.Tx, now time.Time) 
 			out = append(out, w)
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	publishBacklog(backlog)
+	return out, nil
 }
 
 func decodeAttributes(raw []byte) map[string]AttrValue {
@@ -697,4 +744,19 @@ func (d *Dispatcher) processOne(ctx context.Context, w dueAlert, now time.Time, 
 		return
 	}
 	d.recordFailedOrDead(ctx, w, route, errClass, now)
+}
+
+// PurgeResolved runs the ALERT-RETENTION-1 purge (migration 0157's alerting_purge_resolved) under the
+// alert_dispatcher identity: it removes RESOLVED alerts resolved more than olderThan ago (at least 7 days,
+// enforced again by the function) together with their occurrences and deliveries, at most batch alerts per
+// call, and audits the run in alert_retention_runs. Open and acknowledged alerts are never removed. This lives
+// in dispatcher.go because the identity is confined to this file and fallback.go.
+func (d *Dispatcher) PurgeResolved(ctx context.Context, olderThan time.Duration, batch int) (PurgeResult, error) {
+	var r PurgeResult
+	err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT alerts_deleted, occurrences_deleted, deliveries_deleted, capped FROM alerting_purge_resolved(make_interval(secs => $1::float8), $2::int)`,
+			olderThan.Seconds(), batch).Scan(&r.Alerts, &r.Occurrences, &r.Deliveries, &r.Capped)
+	})
+	return r, err
 }
