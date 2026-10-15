@@ -197,6 +197,14 @@ type OperationManifest struct {
 	// acceptance criterion A7) - a MOCK/Synthetic adapter is exempt (there is
 	// no real vendor contract to check yet).
 	CallbackEchoesMerchantReference bool
+	// StatusQuerySuccessCarriesAmountAndAsset (PAY-DEPOSIT-ESCALATION-1, LF E3, ADR 0095 36.2/41.5) is the adapter
+	// contract clause that a QueryStatus SUCCESS always carries the provider's amount and asset. A success without
+	// them can never be compared (CompareProviderAmount = Missing), so the attempt would stay live, escalate (T16) and
+	// audit forever instead of posting. Registration (validateManifest) refuses a PRODUCTION-ELIGIBLE (non-Synthetic)
+	// adapter that supports deposit or withdrawal unless this is true; a MOCK/Synthetic adapter is exempt. This is a
+	// DECLARATION: the vendor-specific conformance test that proves it against the real wire format stays
+	// PROVIDER DEPENDENT (the escalation path remains as the defence in depth for a declaration that turns out false).
+	StatusQuerySuccessCarriesAmountAndAsset bool
 }
 
 // DefaultCallTimeout/DefaultSettlementWindow are §7.3's referenced

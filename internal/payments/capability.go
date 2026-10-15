@@ -382,6 +382,12 @@ func validateManifest(provider PaymentProvider, declared AdapterCapability) erro
 			return fmt.Errorf("%w: production-eligible adapter %s supports deposit or withdrawal but does not echo merchant_reference on callback (LF95-C5; StatusQuery by_provider_or_merchant_reference is not accepted while no merchant-reference status method exists)",
 				ErrManifestRegistrationRefused, declared.ProviderID)
 		}
+		// PAY-DEPOSIT-ESCALATION-1 (LF E3): a QueryStatus success must carry amount and asset, or the attempt can
+		// never be compared and posted.
+		if (declared.SupportsDeposit || declared.SupportsWithdrawal) && !m.StatusQuerySuccessCarriesAmountAndAsset {
+			return fmt.Errorf("%w: production-eligible adapter %s supports deposit or withdrawal but does not declare that a QueryStatus success carries amount and asset (LF E3, ADR 0095 41.5)",
+				ErrManifestRegistrationRefused, declared.ProviderID)
+		}
 	}
 
 	return nil

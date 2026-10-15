@@ -434,11 +434,16 @@ func parkDepositAttempt(
 	// bindRef (non-empty only for a validated, binding-checked reference, i.e.
 	// the sync_amount_mismatch park) is bound while the attempt is still live,
 	// so reconciliation can match the provider's record to this attempt.
+	//
+	// PAY-PARK-BIND-RACE-1 (A11): the bind goes through bindParkReference, the same
+	// savepoint-scoped, audited bind every other park uses. A concurrent, uncommitted
+	// bind of the same reference by another attempt (invisible to the caller's
+	// foreignReferenceBinding pre-check) used to surface here as an unrecovered unique
+	// violation that rolled the whole phase-C transaction back; it now leaves the park
+	// reference-less ("lost_race", audited) and the transaction commits.
 	if bindRef != "" {
-		if _, err := tx.Exec(ctx,
-			`UPDATE payment_attempts SET provider_reference = COALESCE(provider_reference, $2) WHERE id = $1 AND state IN ('submitting','pending','ambiguous')`,
-			attempt.ID, bindRef); err != nil {
-			return intent, fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+		if err := bindParkReference(ctx, tx, attempt, providerID, bindRef); err != nil {
+			return intent, err
 		}
 	}
 	if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
