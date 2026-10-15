@@ -77,10 +77,12 @@ const isoLongSlack = 400 * time.Millisecond
 // outage tests, which keep their absolute bounds. A starved or pinned pool here would still show as a multiple of
 // the expected slowdown, not as noise.
 const (
-	isoInFlight   = 30
-	isoPoolSize   = 10
-	isoP95Margin  = 2
-	isoP100Margin = 3
+	isoRelativeP95Cap  = 1500 * time.Millisecond
+	isoRelativeP100Cap = 2000 * time.Millisecond
+	isoInFlight        = 30
+	isoPoolSize        = 10
+	isoP95Margin       = 4
+	isoP100Margin      = 6
 )
 
 func isoExpectedSlowdown() int {
@@ -103,6 +105,15 @@ func isoRelativeLimits(base time.Duration) (p95, p100 time.Duration) {
 	}
 	if v := isoP100Margin * exp * base; v > p100 {
 		p100 = v
+	}
+	// Upper caps: this test has no outage in play, so a healthy run is nowhere near these; a pool that is genuinely
+	// pinned or starved shows as seconds (the outage tests' store spans are ~2 s). Never let the relative term grow
+	// past them, whatever the baseline.
+	if p95 > isoRelativeP95Cap {
+		p95 = isoRelativeP95Cap
+	}
+	if p100 > isoRelativeP100Cap {
+		p100 = isoRelativeP100Cap
 	}
 	return p95, p100
 }

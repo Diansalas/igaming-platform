@@ -288,8 +288,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: core
-            pkgs: "core"
+          - name: core-alerting
+            pkgs: "core:./internal/alerting/..."
+            run: ""
+          - name: core-jurisdiction-kyc
+            pkgs: "core:./internal/jurisdiction ./internal/kyc"
+            run: ""
+          - name: core-rg-recon-aml
+            pkgs: "core:./internal/rg ./internal/reconciliation/... ./internal/aml ./internal/launchgov ./internal/tenant"
+            run: ""
+          - name: core-rest
+            pkgs: "core-rest"
             run: ""
           - name: http-ab
             pkgs: "./internal/httpserver"
@@ -377,14 +386,24 @@ jobs:
           set -o pipefail
           # Wall-clock security bounds (CI-342-STOREOUTAGE / ADR 0094) are measured in the timing-lane job, alone.
           TIMING_LANE_TESTS='TestStoreOutage_DoesNotPinPool|TestStoreOutage_DoesNotPinPool_ProductionPoolSize|TestResolutionIsolation_NormalOperation|TestResolutionIsolation_OneTenantStoreOutage|TestResolutionIsolation_MultipleTenantsOutage|TestResolutionIsolation_SimultaneousOnset_Bounded|TestResolutionIsolation_ConnectionExhaustion|TestResolutionIsolation_FinancialDuringOutage'
-          if [ "$SHARD_PKGS" = "core" ]; then
-            PKGS="$(go list ./... | grep -v -e '/internal/httpserver$' -e '/internal/payments$')"
-          else
-            PKGS="$SHARD_PKGS"
-          fi
+          # Core shards run their packages ONE AT A TIME (-p 1): several tests take short table-level locks on shared
+          # tables (trigger-disable fixtures, TRUNCATE-class probes) or assert on timing, so running packages in
+          # parallel against one database made them interfere with each other (hosted CI #836-#842). Each shard still
+          # has its own postgres service.
+          PFLAG=()
+          case "$SHARD_PKGS" in
+            core-rest)
+              PKGS="$(go list ./... | grep -v -e '/internal/httpserver$' -e '/internal/payments$' -e '/internal/alerting' -e '/internal/jurisdiction$' -e '/internal/kyc$' -e '/internal/rg$' -e '/internal/reconciliation' -e '/internal/aml$' -e '/internal/launchgov$' -e '/internal/tenant$')"
+              PFLAG=(-p 1) ;;
+            core:*)
+              PKGS="${SHARD_PKGS#core:}"
+              PFLAG=(-p 1) ;;
+            *)
+              PKGS="$SHARD_PKGS" ;;
+          esac
           RUNARG=()
           if [ -n "$SHARD_RUN" ]; then RUNARG=(-run "$SHARD_RUN"); fi
-          go test -race -tags=integration -v -timeout 170m "${RUNARG[@]}" -skip "^(${TIMING_LANE_TESTS})\$" $PKGS 2>&1 | tee "integration-${SHARD_NAME}.log"
+          go test -race -tags=integration -v -timeout 170m "${PFLAG[@]}" "${RUNARG[@]}" -skip "^(${TIMING_LANE_TESTS})\$" $PKGS 2>&1 | tee "integration-${SHARD_NAME}.log"
 
       - name: Failure excerpts (annotations; job logs are not downloadable from every environment)
         if: failure()
