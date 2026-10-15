@@ -175,6 +175,11 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.9.0
+          # `golangci-lint config verify` downloads its JSON schema from golangci-lint.run on every run; that
+          # host timed out from hosted runners on three consecutive runs (#823, #826 and an earlier attempt), failing
+          # the job with no code finding. The config is schema-verified locally (`golangci-lint config verify`)
+          # whenever .golangci.yml changes; the lint itself still runs in full here.
+          verify: false
 
       - name: Dependency drift (go.mod/go.sum, QA condition)
         # `go mod tidy` must be a no-op: a diff here means go.mod/go.sum
@@ -472,6 +477,19 @@ jobs:
             TestResolutionIsolation_ConnectionExhaustion TestResolutionIsolation_FinancialDuringOutage; do
             grep -q -- "--- PASS: ${name} " timing-tests.log || { echo "::error title=timing lane::${name} did not PASS"; exit 1; }
           done
+
+      - name: Failure excerpts (annotations)
+        if: failure()
+        run: |
+          f=integration-timing.log
+          test -f "$f" || exit 0
+          enc() { sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g'; }
+          grep -n -- '--- FAIL' "$f" | head -8 | while IFS=: read -r ln rest; do
+            start=$((ln-40)); [ "$start" -lt 1 ] && start=1
+            ex="$(sed -n "${start},$((ln+4))p" "$f" | head -c 6000 | enc)"
+            echo "::error title=timing ${rest}::${ex}"
+          done
+          grep -c -- '--- PASS' "$f" | sed 's/^/::notice title=timing lane passes::/'
 
       - name: Upload timing log
         if: always()
