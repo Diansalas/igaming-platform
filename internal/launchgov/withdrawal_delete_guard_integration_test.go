@@ -13,6 +13,23 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
+// runtimeCanDelete reports whether the runtime role holds DELETE on withdrawal_requests. The deployed posture
+// (deploy/init-app-role.sql, mirrored by CI) REVOKEs it - then a runtime DELETE is refused 42501 BEFORE the WD012
+// trigger can fire, and only a role that still holds the privilege (the table owner) can exercise the trigger. A
+// developer database without the REVOKE has the privilege, and there the trigger is the only control. The tests
+// below require the strongest refusal available in whichever posture they run: WD012 when the privilege exists,
+// 42501 when it has been revoked (and WD012 through the owner either way).
+func (w *world) runtimeCanDelete() bool {
+	w.t.Helper()
+	var ok bool
+	if err := w.owner.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT has_table_privilege('igaming_runtime', 'public.withdrawal_requests', 'DELETE')`).Scan(&ok)
+	}); err != nil {
+		w.t.Fatal(err)
+	}
+	return ok
+}
+
 // Security C1 (live exploit of the first 0131 draft) and residual 14(b2): a withdrawal request can
 // be neither DELETEd nor TRUNCATEd by ANY role (WD012), so "delete the existing row in an open
 // transaction, then raw-INSERT the same key on a suspended brand" is impossible. Both roles.
@@ -37,6 +54,7 @@ func TestWithdrawalDeleteGuard_NoRoleCanDeleteOrTruncate(t *testing.T) {
 		}
 		return err
 	}
+	canDelete := w.runtimeCanDelete()
 	for name, run := range map[string]func() error{
 		"runtime DELETE":   func() error { return w.rt.WithTenant(ctx, f.tid, del) },
 		"owner DELETE":     func() error { return w.owner.WithTenant(ctx, f.tid, del) },
@@ -45,9 +63,15 @@ func TestWithdrawalDeleteGuard_NoRoleCanDeleteOrTruncate(t *testing.T) {
 	} {
 		err := run()
 		code := pgCode(err)
-		// The runtime role has no TRUNCATE privilege on a default grant set; either refusal is a refusal.
-		if code != "WD012" && (name != "runtime TRUNCATE" || code != "42501") {
-			t.Errorf("%s must be refused WD012 (or lack the privilege), got %v", name, err)
+		switch {
+		case code == "WD012":
+			// the binding control fired
+		case name == "runtime TRUNCATE" && code == "42501":
+			// the runtime role has no TRUNCATE privilege on a default grant set
+		case name == "runtime DELETE" && !canDelete && code == "42501":
+			// deployed posture: DELETE revoked from the runtime role (the owner cases above prove WD012 binds)
+		default:
+			t.Errorf("%s must be refused WD012 (or lack the privilege), got %v (runtime holds DELETE: %v)", name, err, canDelete)
 		}
 	}
 	if n := w.withdrawalCount(f.tid); n != 1 {
@@ -69,10 +93,16 @@ func TestWithdrawalDeleteGuard_ReviewExploitSequence_IsRefused(t *testing.T) {
 	if err := launchfix.TrySetBrandStatus(ctx, f.tid, f.brand, "suspended"); err != nil {
 		t.Fatal(err)
 	}
+	// B must be a role that can reach the trigger: the runtime role when it still holds DELETE, otherwise the owner
+	// (the runtime role is then refused 42501 at the privilege check, asserted in the first test).
+	bPool := w.rt
+	if !w.runtimeCanDelete() {
+		bPool = w.owner
+	}
 	bErr := make(chan error, 1)
 	bStarted, bRelease := make(chan struct{}), make(chan struct{})
 	go func() {
-		bErr <- w.rt.WithTenant(ctx, f.tid, func(ctx context.Context, tx pgx.Tx) error {
+		bErr <- bPool.WithTenant(ctx, f.tid, func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, `DELETE FROM withdrawal_requests WHERE tenant_id = $1 AND idempotency_key = $2`, f.tid, key); err != nil {
 				close(bStarted)
 				return err
