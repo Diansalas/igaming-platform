@@ -29,6 +29,8 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 		"rg_limit_config:request": stepup.Critical, "rg_limit_config:approve": stepup.Critical, "rg_limit_config:apply": stepup.Critical,
 		// ADR 0119 S5 + S6 (S4b-R11 closed).
 		"staff_lifecycle:request": stepup.Critical, "staff_lifecycle:approve": stepup.Critical,
+		// ADR 0116 A7: AML hold lift and the proposal / approval halves of an AML four-eyes action.
+		"aml_hold:lift": stepup.Critical, "aml_case:propose": stepup.Critical, "aml_case:approve": stepup.Critical,
 	}
 	if len(StepUpOperations) != len(want) {
 		t.Fatalf("registry has %d operations, ADR 0119 section 9.1 pins %d", len(StepUpOperations), len(want))
