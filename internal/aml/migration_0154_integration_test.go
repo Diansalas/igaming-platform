@@ -24,7 +24,7 @@ import (
 func TestMigration0154_UpDownUp_WholeSchema(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := scratch(t, "m0154s_")
-	if _, err := pool.MigrateUp(ctx, migDir(t, 151)); err != nil {
+	if _, err := pool.MigrateUp(ctx, migDir(t, versionBefore(t, 154))); err != nil {
 		t.Fatal(err)
 	}
 	base := snapshot(t, pool)
@@ -54,7 +54,7 @@ func TestMigration0154_UpDownUp_WholeSchema(t *testing.T) {
 func TestMigration0154_Preflight(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := scratch(t, "m0154p_")
-	if _, err := pool.MigrateUp(ctx, migDir(t, 151)); err != nil {
+	if _, err := pool.MigrateUp(ctx, migDir(t, versionBefore(t, 154))); err != nil {
 		t.Fatal(err)
 	}
 	f := "0154_aml_screening_and_readiness.up.sql"
