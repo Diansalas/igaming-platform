@@ -133,9 +133,19 @@ while IFS= read -r -d '' e; do
   case "$n" in SHA256SUMS|SHA256SUMS.sig) continue ;; esac
   [ -n "${LISTED[$n]:-}" ] || bk_die "UNLISTED file '${n}' in the backup directory: it is not covered by the signed manifest; refusing (nothing was restored)"
 done < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -print0)
+# DRILL-ONLY fault: turn an artefact into a symlink to attacker content AFTER the scan above (SR12R2-1). The copy below is by CONTENT, so the private copy is a regular
+# file holding whatever was read, and that is what the checksum verifies.
+if [ "${RESTORE_TEST_FAULT:-}" = "symlink_after_scan" ]; then
+  [ "$BK_TARGET_LOCAL" -eq 1 ] || bk_die "RESTORE_TEST_FAULT is honoured only for a throwaway drill target"
+  printf 'attacker content\n' >"${WORK}/attacker.json"
+  rm -f -- "${BACKUP_DIR}/manifest.json"; ln -s "${WORK}/attacker.json" "${BACKUP_DIR}/manifest.json"
+fi
+# Copy by CONTENT (never a link: a copy that is a symlink back into the shared storage would be re-read from the attacker's file after verification, SR12R2-1).
+# Each file is read once through a single open; the bytes that were read are what is checksummed and used.
 for n in "${!LISTED[@]}"; do
-  cp --no-dereference -- "${BACKUP_DIR}/${n}" "${SETDIR}/${n}" 2>/dev/null || bk_die "CHECKSUM MISMATCH or missing file: ${n} listed in the signed manifest cannot be read from ${BACKUP_DIR}"
+  cat -- "${BACKUP_DIR}/${n}" >"${SETDIR}/${n}" 2>/dev/null || bk_die "CHECKSUM MISMATCH or missing file: ${n} listed in the signed manifest cannot be read from ${BACKUP_DIR}"
 done
+[ -z "$(find "$SETDIR" ! -type f ! -type d 2>/dev/null)" ] && [ -z "$(find "$SETDIR" -mindepth 1 -type d 2>/dev/null)" ] || bk_die "the private copy holds something other than regular files; refusing"
 if ! ( cd "$SETDIR" && sha256sum --check --strict --quiet SHA256SUMS ) >"${WORK}/sum.out" 2>&1; then
   bk_die "CHECKSUM MISMATCH or missing file in ${BACKUP_DIR} - the backup is corrupted or tampered with; nothing was restored. $(head -3 "${WORK}/sum.out" | tr '\n' ' ')"
 fi

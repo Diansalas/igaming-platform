@@ -78,10 +78,24 @@ export BACKUP_TMPDIR=<tmpfs or encrypted scratch directory>      # working mater
 deploy/backup/backup.sh --out-dir <backup volume> --label <reason>
 ```
 
+`backup.sh` prints `RUN_DIR=...` and, after signing, **`SET_SHA256=<hex>`** (the SHA-256 of `SHA256SUMS`). **The runner records that value out of band** (the backup job's
+log / the ticket for the run, in a store the backup storage's writers cannot edit); at restore time it is supplied as `RESTORE_EXPECT_SET_SHA256` and pins WHICH signed
+set may be restored (rollback / substitution protection). Without a recorded value a non-drill restore is refused.
+
 The recipient and the signing key are **validated before anything is dumped** (a probe encryption and a probe signature): a mistyped recipient, an unknown
 gpg key or an unusable signing key stops the run with nothing written. The dump is streamed through the encryptor, so no plaintext archive is ever on the
 backup volume; if anything fails (including a killed encryptor, SIGTERM/SIGINT, a closed stdout) the whole run directory is removed. The next run also sweeps
 stale temp directories and orphaned `.incomplete` run directories of killed (SIGKILL/OOM) runs.
+
+Operational notes (re-review informational items):
+- `BACKUP_IAM_TOKEN_COMMAND` is executed with `bash -c`: it is **trusted operator configuration** and must never be taken from a backup set, a ticket field or any
+  other input an outsider can influence.
+- `BACKUP_ROLE_IAM_ONLY=1` creates a role with **no password and no expiry**. On RDS that is the intended state (login needs an IAM token). On any other server it is safe
+  only where `pg_hba.conf` has **no `trust` (or `peer`/`ident` mapping) rule** that admits that role; do not use it on non-RDS targets without checking `pg_hba`.
+- `verify.sh` passes the `VERIFY_*_DATABASE_URL` values to the driver, and an explicit `sslmode=` in a URL overrides the environment: use `sslmode=verify-full` with
+  `sslrootcert=<CA bundle>` in those URLs for a remote target (the local drill uses `sslmode=disable` on loopback only).
+- Backup-directory entries are copied into the private work directory **by content** and checksummed there; a symlink swapped in after the scan only yields bytes that
+  must still match the signed hash (drilled).
 
 ### 3a. Production: dump from a clone, and detect a long snapshot (M7)
 

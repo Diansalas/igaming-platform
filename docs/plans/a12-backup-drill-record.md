@@ -746,3 +746,11 @@ Fix:
 2. Fix SR12R2-2.
 
 Everything else from round 1 and round 2 is accepted. This review records what was checked at `4f8ea4b`; it is not a certification.
+
+## 10. Fix round 3 (after re-review 2, section 9 above)
+
+- **SR12R2-1 (HIGH) fixed.** `restore.sh` now copies each listed artefact into the private directory by CONTENT (`cat`, one open per file), refuses if the private copy holds anything but regular files, and checksums/uses only those copies. The static test no longer pins `cp --no-dereference` and now forbids it. New drill assertion `restore_refuses_artefact_swapped_to_symlink_after_scan` (hook `RESTORE_TEST_FAULT=symlink_after_scan`, drill targets only): refused with a checksum mismatch and 0 database connections.
+- **SR12R2-2 fixed.** `backup.sh` prints `SET_SHA256=<hex>` after signing (drill assertion `backup_prints_set_sha256_for_out_of_band_record`); the runbook (section 3) names the runner's out-of-band log as the record and the source of `RESTORE_EXPECT_SET_SHA256`.
+- **Informational items** (IAM token command trust, `BACKUP_ROLE_IAM_ONLY` and `pg_hba` on non-RDS, explicit `sslmode` in verify URLs, content-copy note) are in the runbook section 3.
+- Full-scale `deploy/backup/drill.sh`, merged tree head 0157: **118 PASS / 0 FAIL** (was 116). `go test -count=1 ./deploy/...` PASS.
+- An intermediate full run showed 115 PASS / 3 FAIL: the new assertion counted its own `db_exists` connection (test bug, fixed by reading the connection count first), and the two PITR verifies failed with an empty psql error while `/tmp` had 1.5 GB free (97% used by other agents' files). The re-run with the diagnostic added to the PITR failure detail was clean; treat the PITR failure as disk exhaustion by the environment, not a tooling defect, but note the full drill needs >= ~2 GB free in `/tmp`.

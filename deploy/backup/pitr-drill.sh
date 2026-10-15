@@ -200,7 +200,7 @@ verify_recovered() { # label  expected-baseline
        "${SCRIPT_DIR}/verify.sh" --baseline "$2" --seq-mode ge --anchor-mode preserved --expect-anchor "${PITR_EXPECT_ANCHOR:-development}" ) >"${WORK}/verify-${label}.txt" 2>&1; then
     res "${label}_verify_against_expected_at_target" PASS "$(tail -1 "${WORK}/verify-${label}.txt")"
   else
-    res "${label}_verify_against_expected_at_target" FAIL "$(grep -E 'FAIL' "${WORK}/verify-${label}.txt" | head -3 | cut -c1-240 | tr '\n' ' ')"
+    res "${label}_verify_against_expected_at_target" FAIL "$(grep -E 'FAIL' "${WORK}/verify-${label}.txt" | head -3 | cut -c1-240 | tr '\n' ' ') :: $(head -5 "${WORK}/verify-${label}.txt" | cut -c1-200 | tr '\n' ' ')"
   fi
 }
 

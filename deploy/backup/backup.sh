@@ -298,6 +298,8 @@ bk_sign_set "$RUN_DIR"
 chmod 600 "${RUN_DIR}"/*
 bk_log "backup written: ${RUN_DIR}"
 echo "RUN_DIR=${RUN_DIR}"
+# the rollback pin: the runner records this out of band (its backup log / ticket); restore.sh requires it as RESTORE_EXPECT_SET_SHA256 off the drill
+echo "SET_SHA256=$(sha256sum <"${RUN_DIR}/SHA256SUMS" | cut -d' ' -f1)"
 echo "TIMING|backup_total_seconds|$(elapsed_s "$T0" "$(now_s)")"
 echo "TIMING|backup_baseline_seconds|$(elapsed_s "$T0" "$T_BASE")"
 echo "TIMING|backup_pg_dump_seconds|$(elapsed_s "$T_BASE" "$T_DUMP")"

@@ -237,6 +237,8 @@ export BACKUP_ALLOW_UNENCRYPTED=synthetic-data-only
 BOUT="$("${SCRIPT_DIR}/backup.sh" --out-dir "$BKUP" --label plain 2>&1)" || { echo "$BOUT" >&2; bk_die "plain backup failed"; }; echo "$BOUT" | grep -E '^(TIMING|SIZE)' | tee -a "$OUT"
 PLAIN_DIR="$(printf '%s\n' "$BOUT" | sed -n 's/^RUN_DIR=//p')"
 [ -d "$PLAIN_DIR" ] || { echo "$BOUT" >&2; bk_die "backup failed"; }
+SETLINE="$(printf '%s\n' "$BOUT" | sed -n 's/^SET_SHA256=//p')"
+if [ "$SETLINE" = "$(sha256sum <"${PLAIN_DIR}/SHA256SUMS" | cut -d' ' -f1)" ]; then res backup_prints_set_sha256_for_out_of_band_record PASS "SET_SHA256=${SETLINE} printed after signing; it is the value restore.sh requires as RESTORE_EXPECT_SET_SHA256"; else res backup_prints_set_sha256_for_out_of_band_record FAIL "printed '${SETLINE}'"; fi
 meas "SIZE|backup_directory_bytes|$(du -sb "$PLAIN_DIR" | cut -f1)"
 res logical_backup_written PASS "$(basename "$PLAIN_DIR"): $(ls "$PLAIN_DIR" | tr '\n' ' ')"
 # the baseline (and therefore verify.sh) must cover the tables, FORCE RLS, triggers and SECURITY DEFINER functions of the latest migrations (AML screening 0154/0155, alert retention 0157)
@@ -604,6 +606,13 @@ rm -rf "${BKUP}/sr1"
 h3_case restore_refuses_set_not_matching_pinned_set_hash "$PLAIN_DIR" "does not equal RESTORE_EXPECT_SET_SHA256" RESTORE_EXPECT_SET_SHA256=0000000000000000000000000000000000000000000000000000000000000000
 h3_case restore_refuses_other_target_environment "$PLAIN_DIR" "only allowed between the same environment" RESTORE_TARGET_ENVIRONMENT=production
 h3_case restore_requires_target_environment "$PLAIN_DIR" "RESTORE_TARGET_ENVIRONMENT" -RESTORE_TARGET_ENVIRONMENT
+# SR12R2-1: an artefact turned into a SYMLINK after the scan must not be followed after verification: the copy is by content and checksummed
+rm -rf "${BKUP}/sr1"; cp -a "$PLAIN_DIR" "${BKUP}/sr1"
+c0="$(auth_count)"
+OUTP="$(RESTORE_TEST_FAULT=symlink_after_scan restore_run "${BKUP}/sr1" symlink_db)" && RC=0 || RC=$?
+c1="$(auth_count)"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUTP" | grep -q 'CHECKSUM MISMATCH' && [ "$c1" = "$c0" ] && [ "$(db_exists symlink_db)" = 0 ]; then res restore_refuses_artefact_swapped_to_symlink_after_scan PASS "manifest.json replaced by a symlink to attacker content after the scan: copied by content, checksum mismatch, refused with 0 database connections (a link in the private copy would have been re-read from the attacker's file)"; else res restore_refuses_artefact_swapped_to_symlink_after_scan FAIL "rc=${RC} $OUTP"; fi
+rm -rf "${BKUP}/sr1"
 # TOCTOU: the originals are overwritten AFTER verification; only the verified private copies may be used
 rm -rf "${BKUP}/sr1"; cp -a "$PLAIN_DIR" "${BKUP}/sr1"
 OUTP="$(RESTORE_TEST_FAULT=swap_after_verify restore_run "${BKUP}/sr1" toctou_db)" && RC=0 || RC=$?

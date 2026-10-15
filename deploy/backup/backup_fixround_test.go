@@ -234,7 +234,7 @@ func TestSignatureAndEncryptionOrdering(t *testing.T) {
 			t.Errorf("restore.sh must verify the signature (%d) before %q (%d)", sig, later, i)
 		}
 	}
-	for _, want := range []string{"RESTORE_OWNER_ROLE_OVERRIDE", "--phase", "refusing to run the archive as", "TABLE DATA public database_environment", "RESTORE_EXPECT_SOURCE_ENVIRONMENT", "RESTORE_TARGET_ENVIRONMENT", "RESTORE_EXPECT_SET_SHA256", "UNLISTED file", "cp --no-dereference", "plaintext_dump_sha256", "ROLE CHANGE DETECTED", "CREDENTIAL CHANGE DETECTED", "member-of-", `--role="$OWNER_ROLE"`, "pg_restore --single-transaction --exit-on-error --no-owner"} {
+	for _, want := range []string{"RESTORE_OWNER_ROLE_OVERRIDE", "--phase", "refusing to run the archive as", "TABLE DATA public database_environment", "RESTORE_EXPECT_SOURCE_ENVIRONMENT", "RESTORE_TARGET_ENVIRONMENT", "RESTORE_EXPECT_SET_SHA256", "UNLISTED file", "cat -- \"${BACKUP_DIR}/${n}\"", "find \"$SETDIR\" ! -type f", "plaintext_dump_sha256", "ROLE CHANGE DETECTED", "CREDENTIAL CHANGE DETECTED", "member-of-", `--role="$OWNER_ROLE"`, "pg_restore --single-transaction --exit-on-error --no-owner"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("restore.sh lost %q", want)
 		}
@@ -300,6 +300,9 @@ func TestRestoreUsesOnlyVerifiedCopies(t *testing.T) {
 		if strings.Contains(r, bad) {
 			t.Errorf("restore.sh reads %q straight from the backup directory", bad)
 		}
+	}
+	if strings.Contains(r, "cp --no-dereference") || strings.Contains(r, "cp -P") || strings.Contains(r, "cp -a") {
+		t.Error("restore.sh must copy artefacts by content (a copied symlink would be re-read from the shared storage)")
 	}
 	if n := strings.Count(r, "SHA256SUMS"); n < 5 {
 		t.Errorf("restore.sh no longer handles SHA256SUMS in the expected places (%d)", n)
