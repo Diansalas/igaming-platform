@@ -15,6 +15,7 @@ package kyc
 import (
 	"context"
 	"errors"
+	neturl "net/url"
 	"os"
 	"strings"
 	"sync"
@@ -31,9 +32,27 @@ import (
 // BYPASSRLS (a bypassing role would make every RLS assertion vacuous).
 func rtPool(t *testing.T, maxConns int32) *db.Pool {
 	t.Helper()
+	return rtPoolNamed(t, maxConns, "")
+}
+
+// rtPoolNamed is rtPool with a PostgreSQL application_name on every connection, so a test can scope a
+// pg_stat_activity probe to its OWN sessions. The shared CI database is used by every package at once
+// (and `datname = current_database()` sees all of them), so an unscoped session count is a cross-package race.
+func rtPoolNamed(t *testing.T, maxConns int32, applicationName string) *db.Pool {
+	t.Helper()
 	url := os.Getenv("TEST_RUNTIME_DATABASE_URL")
 	if url == "" {
 		t.Skip("TEST_RUNTIME_DATABASE_URL not set; skipping runtime-role outbox test")
+	}
+	if applicationName != "" {
+		u, err := neturl.Parse(url)
+		if err != nil {
+			t.Fatalf("parse TEST_RUNTIME_DATABASE_URL: %v", err)
+		}
+		q := u.Query()
+		q.Set("application_name", applicationName)
+		u.RawQuery = q.Encode()
+		url = u.String()
 	}
 	pool, err := db.Connect(context.Background(), url, maxConns, 5*time.Second)
 	if err != nil {

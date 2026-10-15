@@ -98,13 +98,17 @@ func TestOutboxState_43_TI_StaffDerivedState(t *testing.T) {
 // path: no `idle in transaction` session exists during the call, with a positive
 // control proving the probe can see one.
 func TestOutboxState_59_NoIdleInTransactionDuringVendorCall(t *testing.T) {
-	r := newRig(t)
+	// The probe counts only THIS test's sessions (application_name tag): CI runs every package against one
+	// database, so an unscoped count would also see other packages' open transactions (hosted run #823).
+	tag := "kyc59-" + uuid.NewString()
+	r := newRigOn(t, rtPoolNamed(t, 10, tag), testPool(t))
 	probe := rtPool(t, 2)
 	idle := func(p *db.Pool) int {
 		var n int
 		if err := p.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
-			                          WHERE datname = current_database() AND state = 'idle in transaction' AND pid <> pg_backend_pid()`).Scan(&n)
+			                          WHERE datname = current_database() AND application_name = $1
+			                            AND state = 'idle in transaction' AND pid <> pg_backend_pid()`, tag).Scan(&n)
 		}); err != nil {
 			t.Fatalf("probe pg_stat_activity: %v", err)
 		}
@@ -113,7 +117,7 @@ func TestOutboxState_59_NoIdleInTransactionDuringVendorCall(t *testing.T) {
 
 	// Positive control: with a transaction deliberately held open elsewhere the
 	// probe sees it.
-	holder := rtPool(t, 2)
+	holder := rtPoolNamed(t, 2, tag)
 	var seen int
 	if err := holder.WithTenant(context.Background(), r.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT 1`); err != nil {
