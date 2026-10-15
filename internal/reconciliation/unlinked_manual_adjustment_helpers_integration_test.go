@@ -16,11 +16,14 @@ import (
 // their worlds with a manual_adjustment posted DIRECTLY through
 // ledger.Post, outside any ledger_adjustment_requests row. After migration
 // 0113's governed_since cutover the ledger_vs_projection run now - correctly
-// - raises ledger_unlinked_manual_adjustment for each of them. Moving those
-// fixtures to request-backed helpers is LEDGER-MANUAL-ADJ-LINK-1's
-// deliverable (ADR 0100 §12, "the 19 test files"), not K2's; until then the
-// "ledger_vs_projection must be clean" assertions below accept EXACTLY that
-// kind and nothing else, so a real balance drift still fails them.
+// - raises ledger_unlinked_manual_adjustment for each of them. Since
+// migration 0153 (LEDGER-MANUAL-ADJ-LINK-1, ADR 0100 s21) the database
+// refuses such a posting for every session; these fixtures now plant it
+// through the owner-only fixture exemption (internal/testsupport/adjlinkpost:
+// the ADR 0110 s9.4 owner residual, inventoried in internal/adjustment), so
+// the postings are still unlinked and the "ledger_vs_projection must be
+// clean" assertions below still accept EXACTLY that kind and nothing else -
+// a real balance drift still fails them.
 
 // ignoringUnlinkedFixtureAdjustments drops ledger_unlinked_manual_adjustment
 // mismatches (fixture funding) and returns the rest.

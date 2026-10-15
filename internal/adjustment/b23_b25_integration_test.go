@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkfix"
 )
 
 // openExposure seeds the ledger-side form of the reconciliation
@@ -258,21 +259,40 @@ func TestB25_B18_UnlinkedManualAdjustmentDetectorAndZeroDrift(t *testing.T) {
 	}
 	// A fixture posting outside any request (the 19-file pattern).
 	var rogue uuid.UUID
-	if err := w.pool.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
-		wallet := w.Wallet
-		ids, err := ledger.GetOrCreateAccounts(ctx, tx, w.Tenant,
-			ledger.AccountSpec{WalletID: &wallet, AccountType: ledger.AccountPlayerCash, AssetCode: w.Asset},
-			ledger.AccountSpec{AccountType: ledger.AccountManualAdjustment, AssetCode: w.Asset})
-		if err != nil {
-			return err
-		}
-		reason := "fixture"
-		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxManualAdjustment,
-			IdempotencyKey: "fixture:" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
-			Entries: []ledger.EntryInput{{LedgerAccountID: ids[1], Direction: ledger.Debit, Amount: 9}, {LedgerAccountID: ids[0], Direction: ledger.Credit, Amount: 9}}})
-		rogue = res.TransactionID
-		return err
-	}); err != nil {
+	postRogue := func(exempt bool) error {
+		return w.pool.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+			wallet := w.Wallet
+			ids, err := ledger.GetOrCreateAccounts(ctx, tx, w.Tenant,
+				ledger.AccountSpec{WalletID: &wallet, AccountType: ledger.AccountPlayerCash, AssetCode: w.Asset},
+				ledger.AccountSpec{AccountType: ledger.AccountManualAdjustment, AssetCode: w.Asset})
+			if err != nil {
+				return err
+			}
+			reason := "fixture"
+			post := func() error {
+				res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxManualAdjustment,
+					IdempotencyKey: "fixture:" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
+					Entries: []ledger.EntryInput{{LedgerAccountID: ids[1], Direction: ledger.Debit, Amount: 9}, {LedgerAccountID: ids[0], Direction: ledger.Credit, Amount: 9}}})
+				rogue = res.TransactionID
+				return err
+			}
+			if exempt {
+				return adjlinkfix.Without(ctx, tx, post)
+			}
+			return post()
+		})
+	}
+	// MANUAL-ADJ-LINK-1 (migration 0153): the database now refuses that posting outright, for this non-acting
+	// (system-tenant) session.
+	if err := postRogue(false); pgCode(err) != "MA050" {
+		t.Fatalf("an unlinked manual_adjustment must be refused by the 0153 fence (MA050), got %v", err)
+	}
+	if ms := runRecon(); len(ms) != 0 {
+		t.Fatalf("a refused rogue posting left a trace: %+v", ms)
+	}
+	// The detector is kept as the backstop for what the fence cannot see: a rogue posting planted with the fence
+	// disabled (the owner-only DISABLE TRIGGER residual, ADR 0110 s9.4) is still raised on every run.
+	if err := postRogue(true); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ { // standing: raised again on every run

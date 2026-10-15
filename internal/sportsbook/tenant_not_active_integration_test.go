@@ -386,10 +386,39 @@ func TestTenantNotActive_DatabaseBackstopRefusesGameplayTypesOnly(t *testing.T) 
 		t.Fatalf("backstop let a row through: %d -> %d", txs0, txs1)
 	}
 
-	// A staff manual adjustment (non-gameplay type) still posts on a closed
-	// tenant: the gate is scoped to gameplay types only.
-	reason := "closed tenant staff correction"
+	// A non-gameplay posting still posts on a closed tenant: the gate is scoped
+	// to gameplay types only. (This used to be an UNGOVERNED staff
+	// manual_adjustment posted by the runtime role; since migration 0153,
+	// MANUAL-ADJ-LINK-1, the database refuses any manual_adjustment that is not
+	// a governed request's posting, so the non-gameplay probe is now a deposit,
+	// the same runtime role and the same closed tenant.)
+	providerID, providerTx := "closed-psp", "closed-dep-"+uuid.NewString()
 	err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		cash, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &f.walletID, ledger.AccountPlayerCash, "EUR")
+		if err != nil {
+			return err
+		}
+		clearing, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+		if err != nil {
+			return err
+		}
+		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: providerID + ":" + providerTx,
+			ProviderID: &providerID, ProviderTxID: &providerTx, CorrelationID: uuid.New(),
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: clearing, Direction: ledger.Debit, Amount: 5},
+				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 5},
+			},
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("non-gameplay posting on a closed tenant must be unaffected: %v", err)
+	}
+	// An ungoverned manual_adjustment from the same runtime session is refused
+	// by the 0153 link fence (MA050) - never by the gameplay gate (GP010).
+	reason := "closed tenant staff correction"
+	err = rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		cash, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &f.walletID, ledger.AccountPlayerCash, "EUR")
 		if err != nil {
 			return err
@@ -408,8 +437,9 @@ func TestTenantNotActive_DatabaseBackstopRefusesGameplayTypesOnly(t *testing.T) 
 		})
 		return err
 	})
-	if err != nil {
-		t.Fatalf("non-gameplay posting on a closed tenant must be unaffected: %v", err)
+	var maErr *pgconn.PgError
+	if !errors.As(err, &maErr) || maErr.Code != "MA050" {
+		t.Fatalf("an ungoverned manual_adjustment on a closed tenant must be refused by the 0153 fence (MA050), got %v", err)
 	}
 }
 

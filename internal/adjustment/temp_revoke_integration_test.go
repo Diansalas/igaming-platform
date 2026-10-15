@@ -258,12 +258,40 @@ func TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack(t *testing.T) {
 			t.Fatalf("scratch DB: disable the proof trigger on %s: %v", tbl, err)
 		}
 	}
+	// MANUAL-ADJ-LINK-1 (migration 0153) is a further, independent layer: its link fence re-counts the approvals
+	// with ledger_adjustment_execution_status() from a search_path-pinned function, so the count is taken against the
+	// real public tables, not the TEMP shadows - with TEMP granted back AND the proof triggers disabled, the forged
+	// posting is still refused (MA050) and nothing moves.
 	rt2, err := db.Connect(ctx, ru.String(), 1, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(rt2.Close)
-	if err := forgeOnSessionPool(t, rt2, w, X, Y, causation); err != nil {
+	if err := forgeOnSessionPool(t, rt2, w, X, Y, causation); pgCode(err) != "MA050" || !strings.Contains(err.Error(), "forged Decide") {
+		t.Fatalf("with the proof triggers disabled, the 0153 link fence must refuse the forged posting (MA050), got %v", err)
+	}
+	if got := w.adjustmentLedgerTxCount(); got != 0 {
+		t.Fatalf("the refused forgery posted %d manual_adjustment transaction(s)", got)
+	}
+	if got := w.playerCash(); got != 10_000 {
+		t.Fatalf("the refused forgery moved player_cash to %d", got)
+	}
+	// The non-vacuity of 0116 itself, unchanged: with the (scratch-only) 0153 triggers disabled by the owner as
+	// well, TEMP re-granted lets the forgery execute.
+	for _, q := range []string{
+		`ALTER TABLE ledger_transactions DISABLE TRIGGER ledger_transactions_manual_adjustment_link`,
+		`ALTER TABLE ledger_entries DISABLE TRIGGER ledger_entries_manual_adjustment_link`,
+	} {
+		if _, err := owner.Raw().Exec(ctx, q); err != nil {
+			t.Fatalf("scratch DB: %s: %v", q, err)
+		}
+	}
+	rt3, err := db.Connect(ctx, ru.String(), 1, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt3.Close)
+	if err := forgeOnSessionPool(t, rt3, w, X, Y, causation); err != nil {
 		t.Fatal(err)
 	}
 	if got := w.adjustmentLedgerTxCount(); got != 1 {

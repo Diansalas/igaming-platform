@@ -392,7 +392,7 @@ func TestBonusMirror_WorkedPostingShapes(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			res := mustPost(t, pool, f, TransactionInput{
+			res := mustPostFixture(t, pool, f, TransactionInput{
 				TenantID:        f.tenantID,
 				TransactionType: c.txType,
 				IdempotencyKey:  "bonus-shape-" + c.name,

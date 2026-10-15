@@ -14,6 +14,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkfix"
 )
 
 // This file proves this package's composed occurrence keys behave
@@ -184,6 +185,28 @@ func mustPost(t *testing.T, pool *db.Pool, tenantID uuid.UUID, in ledger.Transac
 		var err error
 		res, err = ledger.Post(ctx, tx, in)
 		return err
+	})
+	if err != nil {
+		t.Fatalf("Post failed: %v", err)
+	}
+	return res
+}
+
+// mustPostFixture posts the FIRST occurrence of an in-house vehicle (a manual_adjustment-shaped generic posting, not a
+// governed adjustment). Since migration 0153 (MANUAL-ADJ-LINK-1, ADR 0100 s21) the database refuses every ungoverned
+// manual_adjustment, so the first post runs under the owner-only fixture exemption (adjlinkfix.Without: the ADR 0110
+// s9.4 owner residual). Every REPLAY in this file still goes through plain mustPost with the fence ENABLED: a replay
+// conflicts on the (tenant_id, idempotency_key) index before the 0153 AFTER-INSERT fence could fire, so these tests
+// also show the fence leaves the idempotency contract untouched.
+func mustPostFixture(t *testing.T, pool *db.Pool, tenantID uuid.UUID, in ledger.TransactionInput) ledger.PostResult {
+	t.Helper()
+	var res ledger.PostResult
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return adjlinkfix.Without(ctx, tx, func() error {
+			var err error
+			res, err = ledger.Post(ctx, tx, in)
+			return err
+		})
 	})
 	if err != nil {
 		t.Fatalf("Post failed: %v", err)
@@ -427,7 +450,7 @@ func TestIntegration_CallbackAndSettlementRedelivery(t *testing.T) {
 		t.Fatal("placement (callback) redelivery must be idempotent")
 	}
 
-	settlement1 := mustPost(t, pool, f.tenantID, inHouseVehicleInput(f, f.tenantID, f.cashAccountID, settlementComposed, corr, 200))
+	settlement1 := mustPostFixture(t, pool, f.tenantID, inHouseVehicleInput(f, f.tenantID, f.cashAccountID, settlementComposed, corr, 200))
 	settlement2 := mustPost(t, pool, f.tenantID, inHouseVehicleInput(f, f.tenantID, f.cashAccountID, settlementComposed, corr, 200))
 	if !settlement2.AlreadyPosted || settlement2.TransactionID != settlement1.TransactionID {
 		t.Fatal("settlement redelivery must be idempotent")
@@ -466,7 +489,7 @@ func TestIntegration_RollbackRedeliveryCorrectionAndReversal(t *testing.T) {
 		{LedgerAccountID: f.adjustmentAcctID, Direction: ledger.Credit, Amount: 400},
 	}
 
-	rollback1 := mustPost(t, pool, f.tenantID, rollbackInput)
+	rollback1 := mustPostFixture(t, pool, f.tenantID, rollbackInput)
 	if rollback1.AlreadyPosted {
 		t.Fatal("first rollback should not be AlreadyPosted")
 	}
@@ -492,7 +515,7 @@ func TestIntegration_RollbackRedeliveryCorrectionAndReversal(t *testing.T) {
 	}
 	correctionInput := inHouseVehicleInput(f, f.tenantID, f.cashAccountID, correctionComposed, corr, 50)
 	correctionInput.ReversesTransactionID = &origID
-	correction := mustPost(t, pool, f.tenantID, correctionInput)
+	correction := mustPostFixture(t, pool, f.tenantID, correctionInput)
 	if correction.TransactionID == original.TransactionID || correction.TransactionID == rollback1.TransactionID {
 		t.Fatal("a correction must be its own distinct transaction, never a mutation of an existing one")
 	}
@@ -537,7 +560,7 @@ func TestIntegration_InHouseModeDuplicateDoesNotDoubleDebit(t *testing.T) {
 		t.Fatalf("compose: %v", err)
 	}
 
-	first := mustPost(t, pool, f.tenantID, inHouseVehicleInput(f, f.tenantID, f.cashAccountID, composed, corr, 700))
+	first := mustPostFixture(t, pool, f.tenantID, inHouseVehicleInput(f, f.tenantID, f.cashAccountID, composed, corr, 700))
 	if first.AlreadyPosted {
 		t.Fatal("first in-house posting should not be AlreadyPosted")
 	}

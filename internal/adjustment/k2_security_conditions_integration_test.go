@@ -12,6 +12,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkfix"
 )
 
 // Security K2 review pre-merge conditions K2-C1, K2-C2 and K2-C3
@@ -329,13 +330,17 @@ func TestK2C3_DBRecountOnExecuting(t *testing.T) {
 }
 
 // Code review R-1 (with K2-C1 (i)), B-12 style, in a TENANT (non-acting)
-// session - which has no ledger fence at all (LEDGER-MANUAL-ADJ-LINK-1 is
-// deferred), so the request guard is the only control: once a ledger
-// transaction carries the request's governed key, no non-executed exit is
-// accepted (MA040).
+// session: once a ledger transaction carries the request's governed key, no
+// non-executed exit is accepted (MA040). Since migration 0153
+// (MANUAL-ADJ-LINK-1) the tenant session also has a ledger fence: a
+// governed-key posting for a request that is NOT executing in this
+// transaction is refused outright (MA050, asserted first below). The MA040
+// assertions for the two pending cases therefore plant that posting with
+// the 0153 fence disabled (the owner-only residual, ADR 0110 s9.4), to keep
+// proving the request guard as the backstop behind the fence.
 func TestK2R1_TenantSessionNonExecutedExitRefusedAfterGovernedPosting(t *testing.T) {
 	w := newWorld(t, worldOpts{base: 1})
-	post := func(ctx context.Context, tx pgx.Tx, r Request) {
+	post := func(ctx context.Context, tx pgx.Tx, r Request, exempt bool) {
 		t.Helper()
 		wallet := r.WalletID
 		ids, err := ledger.GetOrCreateAccounts(ctx, tx, w.Tenant,
@@ -344,9 +349,18 @@ func TestK2R1_TenantSessionNonExecutedExitRefusedAfterGovernedPosting(t *testing
 		if err != nil {
 			t.Fatalf("setup: accounts: %v", err)
 		}
-		if _, err := governedPost(ctx, tx, w, r,
-			ledger.EntryInput{LedgerAccountID: ids[1], Direction: ledger.Debit, Amount: r.Amount},
-			ledger.EntryInput{LedgerAccountID: ids[0], Direction: ledger.Credit, Amount: r.Amount}); err != nil {
+		postIt := func() error {
+			_, err := governedPost(ctx, tx, w, r,
+				ledger.EntryInput{LedgerAccountID: ids[1], Direction: ledger.Debit, Amount: r.Amount},
+				ledger.EntryInput{LedgerAccountID: ids[0], Direction: ledger.Credit, Amount: r.Amount})
+			return err
+		}
+		if exempt {
+			err = adjlinkfix.Without(ctx, tx, postIt)
+		} else {
+			err = postIt()
+		}
+		if err != nil {
 			t.Fatalf("setup: governed posting in a tenant session: %v", err)
 		}
 	}
@@ -360,6 +374,37 @@ func TestK2R1_TenantSessionNonExecutedExitRefusedAfterGovernedPosting(t *testing
 			t.Fatalf("setup: approval: %v", err)
 		}
 	}
+	// MANUAL-ADJ-LINK-1 (0153): the governed-key posting itself is refused while the request is pending - with and
+	// without a same-transaction approval - for this non-acting tenant session.
+	for _, approve := range []bool{false, true} {
+		r, err := w.submit(w.F1, w.credit(400, ReasonOperationalErrorCorrection))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var postErr error
+		_ = w.tenantTx(w.F2, func(ctx context.Context, tx pgx.Tx) error {
+			if approve {
+				approveRaw(ctx, tx, r)
+			}
+			wallet := r.WalletID
+			ids, err := ledger.GetOrCreateAccounts(ctx, tx, w.Tenant,
+				ledger.AccountSpec{WalletID: &wallet, AccountType: ledger.AccountPlayerCash, AssetCode: r.AssetCode},
+				ledger.AccountSpec{AccountType: ledger.AccountManualAdjustment, AssetCode: r.AssetCode})
+			if err != nil {
+				t.Fatalf("setup: accounts: %v", err)
+			}
+			_, postErr = governedPost(ctx, tx, w, r,
+				ledger.EntryInput{LedgerAccountID: ids[1], Direction: ledger.Debit, Amount: r.Amount},
+				ledger.EntryInput{LedgerAccountID: ids[0], Direction: ledger.Credit, Amount: r.Amount})
+			return postErr
+		})
+		if pgCode(postErr) != "MA050" {
+			t.Fatalf("governed-key posting for a pending request (approval in tx: %v): expected MA050, got %v", approve, postErr)
+		}
+		if got := w.request(r.ID); got.State != StatePending {
+			t.Fatalf("state committed: %s", got.State)
+		}
+	}
 	for _, c := range []struct {
 		name  string
 		actor staffMember
@@ -370,18 +415,18 @@ func TestK2R1_TenantSessionNonExecutedExitRefusedAfterGovernedPosting(t *testing
 			if _, err := tx.Exec(ctx, `UPDATE ledger_adjustment_requests SET state = 'executing' WHERE id = $1`, r.ID); err != nil {
 				t.Fatalf("setup: -> executing: %v", err)
 			}
-			post(ctx, tx, r)
+			post(ctx, tx, r, false) // executing in this transaction: the 0153 fence admits the approved shape
 			_, err := tx.Exec(ctx, `UPDATE ledger_adjustment_requests SET state = 'refused_insufficient_funds' WHERE id = $1`, r.ID)
 			return err
 		}},
 		{"pending -> refused_at_execution", w.F2, func(ctx context.Context, tx pgx.Tx, r Request) error {
 			approveRaw(ctx, tx, r)
-			post(ctx, tx, r)
+			post(ctx, tx, r, true)
 			_, err := tx.Exec(ctx, `UPDATE ledger_adjustment_requests SET state = 'refused_at_execution', refusal_code = 'x' WHERE id = $1`, r.ID)
 			return err
 		}},
 		{"pending -> cancelled (initiator)", w.F1, func(ctx context.Context, tx pgx.Tx, r Request) error {
-			post(ctx, tx, r)
+			post(ctx, tx, r, true)
 			_, err := tx.Exec(ctx, `UPDATE ledger_adjustment_requests SET state = 'cancelled' WHERE id = $1`, r.ID)
 			return err
 		}},

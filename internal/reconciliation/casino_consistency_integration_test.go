@@ -37,6 +37,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkpost"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/noeffect"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
@@ -528,7 +529,10 @@ func TestCasinoConsistency_C2_PostingShapeMismatch(t *testing.T) {
 		w := newCasWorld(t, testPool(t))
 		w.mustRunClean(t)
 		cash, house := w.accounts(t, w.f.walletID)
-		other := w.acct(t, nil, ledger.AccountManualAdjustment)
+		// Any non-player, non-house_gaming account. (Was manual_adjustment; since migration 0153's MA052 no
+		// non-manual_adjustment transaction may touch that account, so psp_clearing stands in. The rule under test,
+		// "the stake/payout must be on house_gaming", is unchanged.)
+		other := w.acct(t, nil, ledger.AccountPSPClearing)
 		w.bindRound(t, round)
 		entries := []ledger.EntryInput{{LedgerAccountID: cash, Direction: ledger.Debit, Amount: houseAmt + otherAmt},
 			{LedgerAccountID: other, Direction: ledger.Credit, Amount: otherAmt}}
@@ -551,7 +555,10 @@ func TestCasinoConsistency_C2_PostingShapeMismatch(t *testing.T) {
 		w.mustDeliver(t, casino.CallbackEventBet, round+"-bet", "", round, 1000)
 		w.mustRunClean(t)
 		cash, house := w.accounts(t, w.f.walletID)
-		other := w.acct(t, nil, ledger.AccountManualAdjustment)
+		// Any non-player, non-house_gaming account. (Was manual_adjustment; since migration 0153's MA052 no
+		// non-manual_adjustment transaction may touch that account, so psp_clearing stands in. The rule under test,
+		// "the stake/payout must be on house_gaming", is unchanged.)
+		other := w.acct(t, nil, ledger.AccountPSPClearing)
 		entries := []ledger.EntryInput{{LedgerAccountID: other, Direction: ledger.Debit, Amount: otherAmt},
 			{LedgerAccountID: cash, Direction: ledger.Credit, Amount: houseAmt + otherAmt}}
 		if houseAmt > 0 {
@@ -638,7 +645,7 @@ func sbFundAccount(t *testing.T, w *casWorld, cash uuid.UUID, amount int64) {
 		if err != nil {
 			return err
 		}
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+		_, err = adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: w.f.tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "fund-" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{{LedgerAccountID: adj, Direction: ledger.Debit, Amount: amount}, {LedgerAccountID: cash, Direction: ledger.Credit, Amount: amount}},

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkfix"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -113,6 +114,31 @@ func mustPost(t *testing.T, pool *db.Pool, f fixture, in TransactionInput) PostR
 		var err error
 		res, err = Post(ctx, tx, in)
 		return err
+	})
+	if err != nil {
+		t.Fatalf("Post failed: %v", err)
+	}
+	return res
+}
+
+// mustPostFixture is mustPost for the tests in this package that use manual_adjustment as a GENERIC posting type
+// (an arbitrary balanced shape, e.g. Rule B2 bonus legs or a cash lock), not as a governed adjustment. Since
+// migration 0153 (MANUAL-ADJ-LINK-1, ADR 0100 s21) the database refuses every ungoverned manual_adjustment; for
+// such a posting this helper applies the owner-only fixture exemption (adjlinkfix.Without: the ADR 0110 s9.4 owner
+// residual, the two 0153 triggers disabled for this one Post inside its own owner transaction). Any other type is
+// posted exactly like mustPost. The fence itself is tested in internal/adjustment.
+func mustPostFixture(t *testing.T, pool *db.Pool, f fixture, in TransactionInput) PostResult {
+	t.Helper()
+	if in.TransactionType != TxManualAdjustment {
+		return mustPost(t, pool, f, in)
+	}
+	var res PostResult
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return adjlinkfix.Without(ctx, tx, func() error {
+			var err error
+			res, err = Post(ctx, tx, in)
+			return err
+		})
 	})
 	if err != nil {
 		t.Fatalf("Post failed: %v", err)

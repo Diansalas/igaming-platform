@@ -118,6 +118,16 @@ func loReason(s string) *string { return &s }
 // determinism, because a row lock on a live tuple IS granted in queue
 // order: A is guaranteed to win accSeeded, and B is guaranteed to already
 // hold accNew.
+// loRacerType is the transaction type of the two racers below. It was manual_adjustment, used as a GENERIC
+// balanced posting (lock order is type-agnostic: Post locks the projections of the entry set, ADR 0082 R5). Since
+// migration 0153 (MANUAL-ADJ-LINK-1) an ungoverned manual_adjustment is refused for every session, and the owner-only
+// fixture exemption (adjlinkfix) cannot be used inside a race: its ALTER TABLE lock would serialize the racers and
+// destroy the ABBA interleaving this test depends on. bonus_forfeiture is the other type that carries a reason code
+// (ledger_transactions_check1), so the racers' inputs are otherwise byte-identical; it has no type-specific trigger
+// and no advisory lock (unlike the gameplay types), and these entries touch no BONUS_SET account (no Rule B2 legs),
+// so the locks the racers take are exactly those they took as manual_adjustment.
+const loRacerType = TxBonusForfeiture
+
 func TestLockOrder_ConcurrentFirstPostingsCreateSameAccounts_NoDeadlock(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
@@ -153,7 +163,7 @@ func TestLockOrder_ConcurrentFirstPostingsCreateSameAccounts_NoDeadlock(t *testi
 	startA := func() *loRacer {
 		return loStartRacer(t, pool, f.tenantID, "posting(seeded,new)", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := Post(ctx, tx, TransactionInput{
-				TenantID: f.tenantID, TransactionType: TxManualAdjustment,
+				TenantID: f.tenantID, TransactionType: loRacerType,
 				IdempotencyKey: "lockorder-newacct-a", CorrelationID: uuid.New(),
 				ReasonCode: loReason("lock_order_test"),
 				Entries: []EntryInput{
@@ -170,7 +180,7 @@ func TestLockOrder_ConcurrentFirstPostingsCreateSameAccounts_NoDeadlock(t *testi
 	startB := func() *loRacer {
 		return loStartRacer(t, pool, f.tenantID, "posting(new,seeded)", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := Post(ctx, tx, TransactionInput{
-				TenantID: f.tenantID, TransactionType: TxManualAdjustment,
+				TenantID: f.tenantID, TransactionType: loRacerType,
 				IdempotencyKey: "lockorder-newacct-b", CorrelationID: uuid.New(),
 				ReasonCode: loReason("lock_order_test"),
 				Entries: []EntryInput{
