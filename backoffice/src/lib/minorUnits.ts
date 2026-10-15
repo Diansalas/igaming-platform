@@ -19,6 +19,13 @@ export function formatMinorUnits(amount: string | null | undefined, exponent: nu
   return `${neg ? '-' : ''}${whole}.${frac} ${asset}`
 }
 
+/** "123.45 EUR (12345 minor units)": the major-unit form AND the exact minor units, so a reviewer sees both. */
+export function formatAmountBoth(amount: string | null | undefined, exponent: number | null | undefined, assetCode: string | null | undefined): string {
+  const major = formatMinorUnits(amount, exponent, assetCode)
+  if (amount === null || amount === undefined || exponent === null || exponent === undefined || major.includes('exponent unknown') || !/^-?\d+$/.test(amount)) return major
+  return `${major} (${amount} minor units)`
+}
+
 /** Whole-unit age such as "3d 4h" or "12m", from an ISO timestamp and a reference instant (default now). */
 export function formatAge(iso: string | null | undefined, now: number = Date.now()): string {
   if (!iso) return 'Not available'

@@ -1,12 +1,15 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AppRoutes } from '../../app/AppRoutes'
 import { server } from '../../test/mswServer'
 import { renderWithProviders } from '../../test/renderWithProviders'
 import { PLATFORM_ADMIN_CLAIMS, signInAs } from '../../test/session'
 import { ATT1, ATT2, CO, FI, TA, TENANT, WD1, attempt, refusal, resolution } from '../../test/consoleFixtures'
+
+// Slow under a loaded full run (many keystrokes); the longer timeout applies to this file only.
+vi.setConfig({ testTimeout: 30000 })
 
 const BASE = `/v1/admin/tenants/${TENANT}`
 

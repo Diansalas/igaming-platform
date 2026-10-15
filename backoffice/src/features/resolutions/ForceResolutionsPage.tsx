@@ -7,7 +7,8 @@ import { Badge, type BadgeTone } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { PageHeader } from '../../components/PageHeader'
-import { formatMinorUnits } from '../../lib/minorUnits'
+import { formatAmountBoth } from '../../lib/minorUnits'
+import { reasonByteLength } from '../../api/killSwitch'
 import { ConsoleErrorAlert, Hint, MockPaymentsBanner, Notice, actorText, isUuid, shortId, useConsoleTenant } from '../consoles/ConsoleBits'
 import { describeRefusalCode } from '../consoles/errors'
 import { EnumText } from '../killswitch/KillSwitchBits'
@@ -40,7 +41,7 @@ type Dialog = { op: 'request' } | { op: 'approve' | 'reject' | 'cancel'; snap: P
  * refusal is rendered through the closed code map.
  */
 export function ForceResolutionsPage() {
-  const { claims, platform, tenantId, picker, searchParams, setSearchParams } = useConsoleTenant()
+  const { claims, platform, tenantId, tenantLabel, picker, searchParams, setSearchParams } = useConsoleTenant()
   const perms = getNavPermissions(claims?.role)
   const qc = useQueryClient()
   const [dialog, setDialog] = useState<Dialog | null>(null)
@@ -91,7 +92,7 @@ export function ForceResolutionsPage() {
                         <td className="px-3 py-2">{new Date(r.created_at).toLocaleString()}</td>
                         <td className="px-3 py-2"><EnumText view={describeKind(r.kind)} /></td>
                         <td className="px-3 py-2"><Badge tone={s.tone}><EnumText view={s} /></Badge></td>
-                        <td className="px-3 py-2 whitespace-nowrap">{formatMinorUnits(r.amount_minor_units, null, r.asset_code)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">{formatAmountBoth(r.amount_minor_units, r.exponent, r.asset_code)}</td>
                         <td className="px-3 py-2">{actorText(r.requested_by, r.requested_by_scope)}</td>
                         <td className="px-3 py-2">{r.required_at_submission}</td>
                         <td className="px-3 py-2">{new Date(r.expires_at).toLocaleString()}</td>
@@ -119,6 +120,7 @@ export function ForceResolutionsPage() {
       {dialog?.op === 'request' && (
         <ForceRequestDialog
           tenantId={tenantId}
+          tenantLabel={tenantLabel}
           prefillAttempt={prefill}
           onClose={() => setDialog(null)}
           onRefresh={refresh}
@@ -130,13 +132,22 @@ export function ForceResolutionsPage() {
           op={dialog.op}
           title={dialog.op === 'approve' ? 'Approve force-resolution' : 'Reject force-resolution'}
           family="k3"
+          tenantId={tenantId}
+          tenantLabel={tenantLabel}
           frozenHash={dialog.snap.payload_hash}
           liveHash={rows.find((x) => x.id === dialog.snap.id)?.payload_hash}
-          reasonPattern={/^\S[\s\S]{0,63}$/}
-          reasonHelp="1 to 64 characters, recorded in the audit log."
+          reasonOk={(s) => s.trim() !== '' && reasonByteLength(s) <= 64}
+          reasonHelp="1 to 64 BYTES (the server counts bytes; non-ASCII characters take more than one), recorded in the audit log."
           summary={[
+            ['Attempt id', <span key="a" className="font-mono text-xs">{dialog.snap.attempt_id}</span>],
+            ['Operation', safeCode(dialog.snap.operation)],
             ['Kind', <EnumText key="k" view={describeKind(dialog.snap.kind)} />],
-            ['Amount', formatMinorUnits(dialog.snap.amount_minor_units, null, dialog.snap.asset_code)],
+            ['Finding', dialog.snap.finding_code ? safeCode(dialog.snap.finding_code) : 'Not applicable'],
+            ['Basis', dialog.snap.basis_code ? safeCode(dialog.snap.basis_code) : 'Not applicable'],
+            ['Context', dialog.snap.context_code ? safeCode(dialog.snap.context_code) : 'Not applicable'],
+            ['Evidence reference hash', <span key="e" className="break-all font-mono text-xs">{dialog.snap.evidence_ref_hash ?? 'None'}</span>],
+            ['Reason code on the request', <span key="r" className="font-mono text-xs">{dialog.snap.reason_code}</span>],
+            ['Amount', formatAmountBoth(dialog.snap.amount_minor_units, dialog.snap.exponent, dialog.snap.asset_code)],
             ['Target state', dialog.snap.target_state ? safeCode(dialog.snap.target_state) : 'Not applicable'],
             ['Requested by', actorText(dialog.snap.requested_by, dialog.snap.requested_by_scope)],
             ['Approvals needed', String(dialog.snap.required_at_submission)],
@@ -157,6 +168,8 @@ export function ForceResolutionsPage() {
         <CancelDialog
           title="Cancel force-resolution request"
           family="k3"
+          tenantId={tenantId}
+          tenantLabel={tenantLabel}
           detail="Cancelling closes this pending request. Nothing was executed. Only the person who filed it can cancel it."
           send={(key) => cancelForceResolution(tenantId, dialog.snap.id, key)}
           onClose={() => setDialog(null)}
@@ -185,7 +198,7 @@ function Detail({ r, viewerId, canAct, onClose, onOpen }: { r: PaymentForceResol
         <dt className="text-slate-500">Kind</dt><dd><EnumText view={describeKind(r.kind)} /></dd>
         <dt className="text-slate-500">State</dt><dd><Badge tone={s.tone}><EnumText view={s} /></Badge></dd>
         {r.refusal_code && (<><dt className="text-slate-500">Refusal</dt><dd>{describeRefusalCode(r.refusal_code)}</dd></>)}
-        <dt className="text-slate-500">Amount</dt><dd>{formatMinorUnits(r.amount_minor_units, null, r.asset_code)}</dd>
+        <dt className="text-slate-500">Amount</dt><dd>{formatAmountBoth(r.amount_minor_units, r.exponent, r.asset_code)}</dd>
         <dt className="text-slate-500">Target state</dt><dd>{r.target_state ? safeCode(r.target_state) : 'Not applicable'}</dd>
         {r.finding_code && (<><dt className="text-slate-500">Finding</dt><dd className="font-mono text-xs">{safeCode(r.finding_code)}</dd></>)}
         {r.basis_code && (<><dt className="text-slate-500">Basis</dt><dd className="font-mono text-xs">{safeCode(r.basis_code)}</dd></>)}

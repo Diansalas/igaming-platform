@@ -19,8 +19,8 @@ import { Checkbox, TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Modal } from '../../components/Modal'
 import { PageHeader } from '../../components/PageHeader'
-import { formatMinorUnits } from '../../lib/minorUnits'
-import { ConsoleErrorAlert, Hint, MockPaymentsBanner, Notice, PII_WARNING, actorText, isUuid, shortId, useConsoleTenant } from '../consoles/ConsoleBits'
+import { formatAmountBoth } from '../../lib/minorUnits'
+import { ActingOn, ConsoleErrorAlert, Hint, MockPaymentsBanner, Notice, PII_WARNING, actorText, isUuid, shortId, useConsoleTenant } from '../consoles/ConsoleBits'
 import { describeRefusalCode, refusalIsStale } from '../consoles/errors'
 import { EnumText } from '../killswitch/KillSwitchBits'
 import { safeCode } from '../killswitch/labels'
@@ -61,7 +61,7 @@ const CONSEQUENCE =
  * identified by an id the operator types; this screen cannot look a withdrawal up.
  */
 export function HoldResolutionsPage() {
-  const { claims, platform, tenantId, picker, searchParams, setSearchParams } = useConsoleTenant()
+  const { claims, platform, tenantId, tenantLabel, picker, searchParams, setSearchParams } = useConsoleTenant()
   const perms = getNavPermissions(claims?.role)
   const qc = useQueryClient()
   const [dialog, setDialog] = useState<Dialog | null>(null)
@@ -112,7 +112,7 @@ export function HoldResolutionsPage() {
                         <td className="px-3 py-2">{new Date(r.created_at).toLocaleString()}</td>
                         <td className="px-3 py-2 font-mono text-xs">{shortId(r.withdrawal_request_id)}</td>
                         <td className="px-3 py-2"><Badge tone={s.tone}><EnumText view={s} /></Badge></td>
-                        <td className="px-3 py-2 whitespace-nowrap">{formatMinorUnits(r.amount_minor_units, null, r.asset_code)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">{formatAmountBoth(r.amount_minor_units, r.exponent, r.asset_code)}</td>
                         <td className="px-3 py-2">{actorText(r.requested_by, r.requested_by_scope)}</td>
                         <td className="px-3 py-2">{r.required_at_submission}</td>
                         <td className="px-3 py-2">{new Date(r.expires_at).toLocaleString()}</td>
@@ -135,7 +135,7 @@ export function HoldResolutionsPage() {
                 <dt className="text-slate-500">Withdrawal</dt><dd className="font-mono text-xs">{selected.withdrawal_request_id}</dd>
                 <dt className="text-slate-500">State</dt><dd><EnumText view={describeResolutionState(selected.state)} /></dd>
                 {selected.refusal_code && (<><dt className="text-slate-500">Refusal</dt><dd>{describeRefusalCode(selected.refusal_code)}</dd></>)}
-                <dt className="text-slate-500">Amount</dt><dd>{formatMinorUnits(selected.amount_minor_units, null, selected.asset_code)}</dd>
+                <dt className="text-slate-500">Amount</dt><dd>{formatAmountBoth(selected.amount_minor_units, selected.exponent, selected.asset_code)}</dd>
                 <dt className="text-slate-500">Reason code</dt><dd className="font-mono text-xs">{selected.reason_code}</dd>
                 <dt className="text-slate-500">Evidence reference hash</dt><dd className="break-all font-mono text-xs">{selected.evidence_ref_hash}</dd>
                 <dt className="text-slate-500">Tenant / brand status when filed</dt><dd className="font-mono text-xs">{safeCode(selected.tenant_status_at_submission)} / {safeCode(selected.brand_status_at_submission)}</dd>
@@ -161,20 +161,24 @@ export function HoldResolutionsPage() {
         </>
       )}
       {dialog?.op === 'request' && (
-        <HoldRequestDialog tenantId={tenantId} onClose={() => setDialog(null)} onRefresh={refresh} onDone={(r) => { setDialog(null); setNotice('Hold release requested. Nothing was released; a different platform administrator must approve.'); select(r.id) }} />
+        <HoldRequestDialog tenantId={tenantId} tenantLabel={tenantLabel} onClose={() => setDialog(null)} onRefresh={refresh} onDone={(r) => { setDialog(null); setNotice('Hold release requested. Nothing was released; a different platform administrator must approve.'); select(r.id) }} />
       )}
       {(dialog?.op === 'approve' || dialog?.op === 'reject') && (
         <DecisionDialog
           op={dialog.op}
           title={dialog.op === 'approve' ? 'Approve hold release' : 'Reject hold release'}
           family="hsec"
+          tenantId={tenantId}
+          tenantLabel={tenantLabel}
           frozenHash={dialog.snap.payload_hash}
           liveHash={rows.find((x) => x.id === dialog.snap.id)?.payload_hash}
-          reasonPattern={HOLD_REASON_RE}
+          reasonOk={(s) => HOLD_REASON_RE.test(s)}
           reasonHelp="A lowercase token: a letter, then letters, digits or underscores, up to 64 characters."
           summary={[
             ['Withdrawal', <span key="w" className="font-mono text-xs">{dialog.snap.withdrawal_request_id}</span>],
-            ['Amount returned to the player', formatMinorUnits(dialog.snap.amount_minor_units, null, dialog.snap.asset_code)],
+            ['Reason code on the request', <span key="r" className="font-mono text-xs">{dialog.snap.reason_code}</span>],
+            ['Evidence reference hash', <span key="e" className="break-all font-mono text-xs">{dialog.snap.evidence_ref_hash}</span>],
+            ['Amount returned to the player', formatAmountBoth(dialog.snap.amount_minor_units, dialog.snap.exponent, dialog.snap.asset_code)],
             ['Requested by', actorText(dialog.snap.requested_by, dialog.snap.requested_by_scope)],
             ['Approvals needed', String(dialog.snap.required_at_submission)],
             ['Expires', new Date(dialog.snap.expires_at).toLocaleString()],
@@ -190,6 +194,8 @@ export function HoldResolutionsPage() {
         <CancelDialog
           title="Cancel hold-release request"
           family="hsec"
+          tenantId={tenantId}
+          tenantLabel={tenantLabel}
           detail="Cancelling closes this pending request. The hold stays as it is. Only the person who filed it can cancel it."
           send={(key) => cancelHoldResolution(tenantId, dialog.snap.id, key)}
           onClose={() => setDialog(null)}
@@ -201,16 +207,20 @@ export function HoldResolutionsPage() {
   )
 }
 
-function HoldRequestDialog({ tenantId, onClose, onDone, onRefresh }: { tenantId: string; onClose: () => void; onDone: (r: WithdrawalHoldResolution) => void; onRefresh: () => void }) {
+function HoldRequestDialog({ tenantId, tenantLabel, onClose, onDone, onRefresh }: { tenantId: string; tenantLabel: string | undefined; onClose: () => void; onDone: (r: WithdrawalHoldResolution) => void; onRefresh: () => void }) {
   const [f, setF] = useState<HoldForm>({ withdrawalId: '', reason: '', evidenceHash: '', note: '' })
   const [ack, setAck] = useState(false)
   const [typed, setTyped] = useState('')
   const [key] = useState(newIdempotencyKey)
+  const [sent, setSent] = useState(0)
   const busy = useRef(false)
   const [created, setCreated] = useState<WithdrawalHoldResolution | null>(null)
   const set = <K extends keyof HoldForm>(k: K, v: HoldForm[K]) => setF((x) => ({ ...x, [k]: v }))
   const m = useMutation({
-    mutationFn: () => requestHoldResolution(tenantId, buildHoldRequest(f), key),
+    mutationFn: () => {
+      setSent((n) => n + 1)
+      return requestHoldResolution(tenantId, buildHoldRequest(f), key)
+    },
     onSuccess: (r) => {
       setCreated(r)
       onRefresh()
@@ -223,7 +233,7 @@ function HoldRequestDialog({ tenantId, onClose, onDone, onRefresh }: { tenantId:
     },
   })
   const problems = validateHoldRequest(f)
-  const need = f.withdrawalId.slice(0, 8)
+  const need = f.withdrawalId.slice(-6)
   const valid = problems.length === 0 && ack && typed === need
   if (created) {
     return (
@@ -239,6 +249,7 @@ function HoldRequestDialog({ tenantId, onClose, onDone, onRefresh }: { tenantId:
     <Modal title="Request a hold release" onClose={onClose} size="lg">
       <div className="flex flex-col gap-4">
         <p className="text-sm font-bold text-red-800">MOCK stack - software capability only, not a regulatory approval.</p>
+        <ActingOn tenantId={tenantId} label={tenantLabel} />
         <p className="text-sm text-slate-700">{CONSEQUENCE} This only files a request; nothing is released until the required approvals are recorded.</p>
         <TextInput label="Withdrawal id" value={f.withdrawalId} onChange={(e) => set('withdrawalId', e.target.value.trim())} autoComplete="off" spellCheck={false} aria-invalid={f.withdrawalId !== '' && !isUuid(f.withdrawalId)} help="The API has no candidate list; enter the id of the approved withdrawal." />
         <TextInput label="Reason code (required)" value={f.reason} onChange={(e) => set('reason', e.target.value)} autoComplete="off" help="Lowercase token, for example tenant_closed." />
@@ -249,9 +260,9 @@ function HoldRequestDialog({ tenantId, onClose, onDone, onRefresh }: { tenantId:
           <span className="text-xs text-slate-500">{PII_WARNING}</span>
         </label>
         <Checkbox label="I understand this proposes returning a held amount to a player and that it will be audited" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-        <TextInput label={`Type the first 8 characters of the withdrawal id to confirm${need ? ` (${need})` : ''}`} value={typed} onChange={(e) => setTyped(e.target.value.trim())} autoComplete="off" spellCheck={false} />
+        <TextInput label="Type the LAST 6 characters of the withdrawal id above to confirm" value={typed} onChange={(e) => setTyped(e.target.value.trim())} autoComplete="off" spellCheck={false} />
         {problems.length > 0 && f.withdrawalId !== '' && <ul className="list-disc pl-5 text-xs text-slate-600" aria-label="Form problems">{problems.map((x) => <li key={x}>{x}</li>)}</ul>}
-        <ConsoleErrorAlert error={m.error} family="hsec" op="request" />
+        <ConsoleErrorAlert error={m.error} family="hsec" op="request" retried={sent > 1} />
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={m.isPending}>Cancel</Button>
           <Button variant="danger" disabled={!valid} isLoading={m.isPending} onClick={() => { if (busy.current) return; busy.current = true; m.mutate() }}>File request</Button>

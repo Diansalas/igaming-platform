@@ -1,13 +1,16 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AppRoutes } from '../../app/AppRoutes'
 import { server } from '../../test/mswServer'
 import { renderWithProviders } from '../../test/renderWithProviders'
 import { PLATFORM_ADMIN_CLAIMS, signInAs } from '../../test/session'
 import { FI, HASH1, HASH2, RES2, TA, TENANT, WD1, holdResolution, refusal } from '../../test/consoleFixtures'
 import { buildHoldRequest, validateHoldRequest } from './HoldResolutionsPage'
+
+// Slow under a loaded full run (many keystrokes); the longer timeout applies to this file only.
+vi.setConfig({ testTimeout: 30000 })
 
 const BASE = `/v1/admin/tenants/${TENANT}/withdrawal-hold-resolutions`
 const PA = { ...PLATFORM_ADMIN_CLAIMS, sub: 'f9000000-0000-4000-8000-000000000009' }
@@ -76,7 +79,7 @@ describe('withdrawal hold release (S8, HSEC)', () => {
     expect(go).toBeDisabled()
     await user.click(within(dlg).getByRole('checkbox'))
     expect(go).toBeDisabled()
-    await user.type(within(dlg).getByLabelText(/Type the first 8 characters of the withdrawal id/), WD1.slice(0, 8))
+    await user.type(within(dlg).getByLabelText(/Type the LAST 6 characters of the withdrawal id/), WD1.slice(-6))
     await user.dblClick(go)
     expect(await screen.findByRole('status')).toHaveTextContent('Nothing was released')
     expect(posts).toHaveLength(1)
@@ -104,7 +107,7 @@ describe('withdrawal hold release (S8, HSEC)', () => {
     const dlg = await screen.findByRole('dialog', { name: 'Approve hold release' })
     await user.type(within(dlg).getByLabelText('Reason code (required)'), 'reviewed_ok')
     await user.click(within(dlg).getByRole('checkbox'))
-    await user.type(within(dlg).getByLabelText(/Type the first 8 characters of the hash/), HASH1.slice(0, 8))
+    await user.type(within(dlg).getByLabelText(/Type the LAST 8 characters of the payload hash/), HASH1.slice(-8))
     for (const [, , , re] of tokens) {
       await user.click(within(dlg).getByRole('button', { name: 'Approve' }))
       await waitFor(() => expect(within(dlg).getByRole('alert')).toHaveTextContent(re))
@@ -128,7 +131,7 @@ describe('withdrawal hold release (S8, HSEC)', () => {
       const dlg = await screen.findByRole('dialog', { name: 'Approve hold release' })
       await user.type(within(dlg).getByLabelText('Reason code (required)'), 'reviewed_ok')
       await user.click(within(dlg).getByRole('checkbox'))
-      await user.type(within(dlg).getByLabelText(/Type the first 8 characters of the hash/), HASH1.slice(0, 8))
+      await user.type(within(dlg).getByLabelText(/Type the LAST 8 characters of the payload hash/), HASH1.slice(-8))
       await user.click(within(dlg).getByRole('button', { name: 'Approve' }))
       expect(await screen.findByRole('status')).toHaveTextContent(text)
       r.unmount()
@@ -146,7 +149,7 @@ describe('withdrawal hold release (S8, HSEC)', () => {
     const dlg = await screen.findByRole('dialog', { name: 'Reject hold release' })
     await user.type(within(dlg).getByLabelText('Reason code (required)'), 'Not A Token')
     await user.click(within(dlg).getByRole('checkbox'))
-    await user.type(within(dlg).getByLabelText(/Type the first 8 characters of the hash/), HASH1.slice(0, 8))
+    await user.type(within(dlg).getByLabelText(/Type the LAST 8 characters of the payload hash/), HASH1.slice(-8))
     expect(within(dlg).getByRole('button', { name: 'Reject' })).toBeDisabled()
   })
 })

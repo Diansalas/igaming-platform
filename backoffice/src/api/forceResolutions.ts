@@ -50,6 +50,8 @@ export interface PaymentForceResolution {
   evidence_ref_hash?: string
   amount_minor_units: string
   asset_code: string
+  /** Asset registry decimal exponent (ADR 0007), server-side lookup; null only if that lookup failed. Never guessed. */
+  exponent: number | null
   reason_code: string
   /** The hash an approver must pin on approve or reject. */
   payload_hash: string

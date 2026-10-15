@@ -22,7 +22,7 @@ import { Checkbox, SelectField, TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Modal } from '../../components/Modal'
 import { PageHeader } from '../../components/PageHeader'
-import { ConsoleErrorAlert, Hint, Notice, PII_WARNING, actorText, isUuid, shortId, useConsoleTenant } from '../consoles/ConsoleBits'
+import { ActingOn, ConsoleErrorAlert, Hint, Notice, PII_WARNING, actorText, isUuid, shortId, useConsoleTenant } from '../consoles/ConsoleBits'
 import { refusalIsStale } from '../consoles/errors'
 import { safeCode } from '../killswitch/labels'
 import { CancelDialog } from '../resolutions/DecisionDialogs'
@@ -69,7 +69,7 @@ type Dialog =
  * the decision dialog shows the request's frozen content instead.
  */
 export function CapabilityGrantsPage() {
-  const { claims, platform, tenantId, picker } = useConsoleTenant()
+  const { claims, platform, tenantId, tenantLabel, picker } = useConsoleTenant()
   const perms = getNavPermissions(claims?.role)
   const qc = useQueryClient()
   const [dialog, setDialog] = useState<Dialog | null>(null)
@@ -178,19 +178,19 @@ export function CapabilityGrantsPage() {
         </>
       )}
 
-      {dialog?.op === 'request' && <GrantRequestDialog tenantId={tenantId} platform={platform} onClose={() => setDialog(null)} onRefresh={refresh} onDone={() => { setDialog(null); setNotice('Request filed. Nothing is granted until a platform administrator approves it.'); refresh() }} />}
+      {dialog?.op === 'request' && <GrantRequestDialog tenantId={tenantId} tenantLabel={tenantLabel} platform={platform} onClose={() => setDialog(null)} onRefresh={refresh} onDone={() => { setDialog(null); setNotice('Request filed. Nothing is granted until a platform administrator approves it.'); refresh() }} />}
       {(dialog?.op === 'approve' || dialog?.op === 'reject') && (
-        <GrantDecisionDialog tenantId={tenantId} op={dialog.op} req={dialog.req} onClose={() => setDialog(null)} onRefresh={refresh} onDone={(msg) => { setDialog(null); setNotice(msg); refresh() }} />
+        <GrantDecisionDialog tenantId={tenantId} tenantLabel={tenantLabel} op={dialog.op} req={dialog.req} onClose={() => setDialog(null)} onRefresh={refresh} onDone={(msg) => { setDialog(null); setNotice(msg); refresh() }} />
       )}
       {dialog?.op === 'cancel' && (
-        <CancelDialog title="Cancel grant request" family="k1" detail="Cancelling closes this pending request; nothing was granted. Only the person who filed it can cancel it." send={(key) => cancelGrantRequest(tenantId, dialog.req.id, key)} onClose={() => setDialog(null)} onDone={() => { setDialog(null); setNotice('Request cancelled.'); refresh() }} onRefused={refresh} />
+        <CancelDialog title="Cancel grant request" family="k1" tenantId={tenantId} tenantLabel={tenantLabel} detail="Cancelling closes this pending request; nothing was granted. Only the person who filed it can cancel it." send={(key) => cancelGrantRequest(tenantId, dialog.req.id, key)} onClose={() => setDialog(null)} onDone={() => { setDialog(null); setNotice('Request cancelled.'); refresh() }} onRefused={refresh} />
       )}
-      {dialog?.op === 'revoke' && <RevokeDialog tenantId={tenantId} grant={dialog.grant} onClose={() => setDialog(null)} onRefresh={refresh} onDone={() => { setDialog(null); setNotice('Grant revoked. Revoking is immediate and cannot be undone; a new request is needed to grant it again.'); refresh() }} />}
+      {dialog?.op === 'revoke' && <RevokeDialog tenantId={tenantId} tenantLabel={tenantLabel} grant={dialog.grant} onClose={() => setDialog(null)} onRefresh={refresh} onDone={() => { setDialog(null); setNotice('Grant revoked. Revoking is immediate and cannot be undone; a new request is needed to grant it again.'); refresh() }} />}
     </div>
   )
 }
 
-function GrantRequestDialog({ tenantId, platform, onClose, onDone, onRefresh }: { tenantId: string; platform: boolean; onClose: () => void; onDone: () => void; onRefresh: () => void }) {
+function GrantRequestDialog({ tenantId, tenantLabel, platform, onClose, onDone, onRefresh }: { tenantId: string; tenantLabel: string | undefined; platform: boolean; onClose: () => void; onDone: () => void; onRefresh: () => void }) {
   const [grantee, setGrantee] = useState('')
   const [manual, setManual] = useState('')
   const [capability, setCapability] = useState<GrantCapability>('payment_force_resolve:request')
@@ -198,12 +198,18 @@ function GrantRequestDialog({ tenantId, platform, onClose, onDone, onRefresh }: 
   const [reason, setReason] = useState('')
   const [ack, setAck] = useState(false)
   const [key] = useState(newIdempotencyKey)
+  const [sent, setSent] = useState(0)
   const busy = useRef(false)
   const staff = useQuery({ queryKey: ['k1', 'staff', tenantId], queryFn: () => listTenantStaff(tenantId, { status: 'active' }), retry: false })
+  // F1: the dropdown and the typed id are MUTUALLY EXCLUSIVE (one source, never a silent override): while one has a
+  // value the other is disabled, and the request sends exactly the one that is filled.
   const granteeId = manual !== '' ? manual : grantee
   const untilIso = until ? new Date(until).toISOString() : undefined
   const m = useMutation({
-    mutationFn: () => createGrantRequest(tenantId, { grantee_staff_id: granteeId, capability, reason_code: reason, ...(untilIso ? { valid_until: untilIso } : {}) }, key),
+    mutationFn: () => {
+      setSent((n) => n + 1)
+      return createGrantRequest(tenantId, { grantee_staff_id: granteeId, capability, reason_code: reason, ...(untilIso ? { valid_until: untilIso } : {}) }, key)
+    },
     onSuccess: onDone,
     onError: (e) => {
       if (refusalIsStale(e, 'k1', 'request')) onRefresh()
@@ -217,18 +223,19 @@ function GrantRequestDialog({ tenantId, platform, onClose, onDone, onRefresh }: 
   return (
     <Modal title="Request a capability grant" onClose={onClose} size="lg">
       <div className="flex flex-col gap-4">
+        <ActingOn tenantId={tenantId} label={tenantLabel} />
         <p className="text-sm text-slate-700">This files a request. Nothing is granted until a platform administrator approves it, and the grantee can never be the approver of their own grant.</p>
         {platform && <Hint>A platform session cannot request a grant for a tenant staff member (the server refuses it); the tenant administrator files those. Use this form for platform staff by entering their staff id.</Hint>}
-        <SelectField label="Grantee (tenant staff)" value={grantee} onChange={(e) => setGrantee(e.target.value)} options={[{ value: '', label: staff.isLoading ? 'Loading staff...' : 'Choose a staff member' }, ...(staff.data?.staff ?? []).map((s) => ({ value: s.id, label: `${s.display_name ?? 'Unnamed'} - ${safeCode(s.role)} (${shortId(s.id)})` }))]} />
+        <SelectField label="Grantee (tenant staff)" value={grantee} disabled={manual !== ''} help={manual !== '' ? 'Disabled while a staff id is typed below. Clear that field to choose from the list.' : undefined} onChange={(e) => setGrantee(e.target.value)} options={[{ value: '', label: staff.isLoading ? 'Loading staff...' : 'Choose a staff member' }, ...(staff.data?.staff ?? []).map((s) => ({ value: s.id, label: `${s.display_name ?? 'Unnamed'} - ${safeCode(s.role)} (${shortId(s.id)})` }))]} />
         {staff.error && <ConsoleErrorAlert error={staff.error} family="staff" op="list" />}
         {staff.data?.truncated && <p className="text-xs text-slate-500">The staff list was truncated by the server; enter the staff id directly if the person is not listed.</p>}
-        <TextInput label="Or enter a staff id" value={manual} onChange={(e) => setManual(e.target.value.trim())} autoComplete="off" spellCheck={false} aria-invalid={manual !== '' && !isUuid(manual)} help="If filled, this id is used instead of the selection." />
+        <TextInput label="Or enter a staff id" value={manual} disabled={grantee !== ''} onChange={(e) => setManual(e.target.value.trim())} autoComplete="off" spellCheck={false} aria-invalid={manual !== '' && !isUuid(manual)} help={grantee !== '' ? 'Disabled while a staff member is selected above. Choose "Choose a staff member" to clear the selection.' : 'Use this only for a person who is not in the list (for example platform staff).'} />
         <SelectField label="Capability" value={capability} onChange={(e) => setCapability(e.target.value as GrantCapability)} options={GRANT_CAPABILITIES.map((c) => ({ value: c, label: CAP_LABEL[c] }))} />
         <TextInput label="Valid until (optional)" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} aria-invalid={untilBad} help={untilBad ? 'Must be a future time.' : undefined} />
         {until === '' && <Hint>No expiry: the grant stays in force until it is revoked. The server may require an expiry for some grants.</Hint>}
         <TextInput label="Reason code (required)" value={reason} onChange={(e) => setReason(e.target.value)} autoComplete="off" help={`Recorded in the audit log. ${PII_WARNING}`} />
         <Checkbox label="I understand this proposes giving a person the authority to act on money-moving flows for this tenant" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-        <ConsoleErrorAlert error={m.error} family="k1" op="request" />
+        <ConsoleErrorAlert error={m.error} family="k1" op="request" retried={sent > 1} />
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={m.isPending}>Cancel</Button>
           <Button disabled={!valid} isLoading={m.isPending} onClick={() => { if (busy.current) return; busy.current = true; m.mutate() }}>File request</Button>
@@ -238,13 +245,19 @@ function GrantRequestDialog({ tenantId, platform, onClose, onDone, onRefresh }: 
   )
 }
 
-function GrantDecisionDialog({ tenantId, op, req, onClose, onDone, onRefresh }: { tenantId: string; op: 'approve' | 'reject'; req: CapabilityGrantRequest; onClose: () => void; onDone: (msg: string) => void; onRefresh: () => void }) {
+function GrantDecisionDialog({ tenantId, tenantLabel, op, req, onClose, onDone, onRefresh }: { tenantId: string; tenantLabel: string | undefined; op: 'approve' | 'reject'; req: CapabilityGrantRequest; onClose: () => void; onDone: (msg: string) => void; onRefresh: () => void }) {
   const [reason, setReason] = useState('')
   const [ack, setAck] = useState(false)
   const [key] = useState(newIdempotencyKey)
+  const [sent, setSent] = useState(0)
   const busy = useRef(false)
+  // F1: who receives the authority. The directory gives the display name and role for a tenant staff id; a platform
+  // grantee (or an id not listed) is shown as exactly that, never as a guess.
+  const dir = useQuery({ queryKey: ['k1', 'staff-all', tenantId], queryFn: () => listTenantStaff(tenantId), retry: false })
+  const person = req.grantee_staff_id ? dir.data?.staff.find((s) => s.id === req.grantee_staff_id) : undefined
   const m = useMutation({
     mutationFn: async () => {
+      setSent((n) => n + 1)
       if (op === 'approve') await approveGrantRequest(tenantId, req.id, reason, key)
       else await rejectGrantRequest(tenantId, req.id, reason, key)
     },
@@ -260,9 +273,22 @@ function GrantDecisionDialog({ tenantId, op, req, onClose, onDone, onRefresh }: 
   return (
     <Modal title={op === 'approve' ? 'Approve capability grant' : 'Reject capability grant'} onClose={onClose} size="lg">
       <div className="flex flex-col gap-4">
+        <ActingOn tenantId={tenantId} label={tenantLabel} />
         <dl className="grid grid-cols-[12rem_1fr] gap-y-1 text-sm">
           <dt className="text-slate-500">Capability</dt><dd>{capLabel(req.capability)}</dd>
-          <dt className="text-slate-500">Grantee</dt><dd>{actorText(req.grantee_staff_id, req.grantee_scope)}</dd>
+          <dt className="text-slate-500">Grantee (receives the authority)</dt>
+          <dd data-testid="grantee">
+            <span className="break-all font-mono text-xs">{req.grantee_staff_id ?? 'Id not shown to you'}</span>
+            <span className="block">
+              {person
+                ? `${person.display_name ?? 'Unnamed'} - ${safeCode(person.role)} (${safeCode(person.status)})`
+                : dir.isLoading
+                  ? 'Looking up the staff directory...'
+                  : dir.error
+                    ? 'The staff directory could not be read, so the name and role are unknown.'
+                    : `${req.grantee_scope === 'tenant' ? 'Not in this tenant staff directory (it may be truncated)' : 'Platform staff (not listed in a tenant directory)'}`}
+            </span>
+          </dd>
           <dt className="text-slate-500">Valid from</dt><dd>{when(req.valid_from)}</dd>
           <dt className="text-slate-500">Valid until</dt><dd>{req.valid_until ? when(req.valid_until) : 'No expiry'}</dd>
           <dt className="text-slate-500">Requested by</dt><dd>{actorText(req.requested_by, req.requested_by_scope)}</dd>
@@ -276,7 +302,7 @@ function GrantDecisionDialog({ tenantId, op, req, onClose, onDone, onRefresh }: 
         </p>
         <TextInput label="Reason code (required)" value={reason} onChange={(e) => setReason(e.target.value)} autoComplete="off" help={`Recorded in the audit log. ${PII_WARNING}`} />
         <Checkbox label="I reviewed the request above" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-        <ConsoleErrorAlert error={m.error} family="k1" op={op} />
+        <ConsoleErrorAlert error={m.error} family="k1" op={op} retried={sent > 1} />
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={m.isPending}>Back</Button>
           <Button variant={op === 'approve' ? 'danger' : 'primary'} disabled={!valid} isLoading={m.isPending} onClick={() => { if (busy.current) return; busy.current = true; m.mutate() }}>{op === 'approve' ? 'Approve' : 'Reject'}</Button>
@@ -286,13 +312,17 @@ function GrantDecisionDialog({ tenantId, op, req, onClose, onDone, onRefresh }: 
   )
 }
 
-function RevokeDialog({ tenantId, grant, onClose, onDone, onRefresh }: { tenantId: string; grant: CapabilityGrant; onClose: () => void; onDone: () => void; onRefresh: () => void }) {
+function RevokeDialog({ tenantId, tenantLabel, grant, onClose, onDone, onRefresh }: { tenantId: string; tenantLabel: string | undefined; grant: CapabilityGrant; onClose: () => void; onDone: () => void; onRefresh: () => void }) {
   const [reason, setReason] = useState('')
   const [ack, setAck] = useState(false)
   const [key] = useState(newIdempotencyKey)
+  const [sent, setSent] = useState(0)
   const busy = useRef(false)
   const m = useMutation({
-    mutationFn: () => revokeGrant(tenantId, grant.id, reason, key),
+    mutationFn: () => {
+      setSent((n) => n + 1)
+      return revokeGrant(tenantId, grant.id, reason, key)
+    },
     onSuccess: onDone,
     onError: (e) => {
       if (refusalIsStale(e, 'k1', 'revoke')) onRefresh()
@@ -304,11 +334,12 @@ function RevokeDialog({ tenantId, grant, onClose, onDone, onRefresh }: { tenantI
   return (
     <Modal title="Revoke capability grant" onClose={onClose}>
       <div className="flex flex-col gap-4">
+        <ActingOn tenantId={tenantId} label={tenantLabel} />
         <p className="text-sm text-slate-700">Revoking takes effect immediately, needs no second person, and cannot be undone: a new request and approval are needed to grant it again.</p>
         <p className="text-sm">{capLabel(grant.capability)} for {actorText(grant.grantee_staff_id, grant.grantee_scope)}</p>
         <TextInput label="Reason code (required)" value={reason} onChange={(e) => setReason(e.target.value)} autoComplete="off" help={`Recorded in the audit log. ${PII_WARNING}`} />
         <Checkbox label="I understand the revocation is immediate and permanent" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-        <ConsoleErrorAlert error={m.error} family="k1" op="revoke" />
+        <ConsoleErrorAlert error={m.error} family="k1" op="revoke" retried={sent > 1} />
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={m.isPending}>Back</Button>
           <Button variant="danger" disabled={reason.trim() === '' || !ack} isLoading={m.isPending} onClick={() => { if (busy.current) return; busy.current = true; m.mutate() }}>Revoke grant</Button>

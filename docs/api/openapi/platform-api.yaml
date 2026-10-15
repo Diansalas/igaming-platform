@@ -10853,6 +10853,8 @@ components:
         - missing_projection
         - balance_mismatch
         - ledger_unlinked_manual_adjustment
+        - withdrawal_hold_open_mismatch
+        - withdrawal_request_ledger_link_invalid
         - pay_missing_platform_record
         - pay_missing_provider_record
         - pay_amount_mismatch
@@ -11152,6 +11154,7 @@ components:
         evidence_ref_hash: { type: string }
         amount_minor_units: { type: string, description: Integer minor units as a decimal string. }
         asset_code: { type: string }
+        exponent: { type: integer, nullable: true, description: "The asset registry decimal exponent of asset_code (ADR 0007), looked up server-side. Null only when the lookup failed after the change was committed; a client must then not format the amount." }
         reason_code: { type: string }
         payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
         requested_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant-scoped caller when the requester is platform staff, i.e. requested_by_scope is platform_acting (ADR 0114 S0 H1)." }
@@ -11170,7 +11173,7 @@ components:
         evidence_reference_present: { type: boolean, description: "M4 only. True when a provider line reference is pinned on the resolution. The reference text itself is never returned to any caller (ADR 0114 S0, blind entry: each approver types it independently) and is not written to audit metadata; the server compares it from the database." }
         evidence_verdict: { type: string, description: M4 only. }
         evidence_import_ids: { type: array, items: { type: string, format: uuid }, description: M4 only. }
-      required: [id, tenant_id, attempt_id, operation, kind, amount_minor_units, asset_code, reason_code, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, state, created_at, expires_at]
+      required: [id, tenant_id, attempt_id, operation, kind, amount_minor_units, asset_code, exponent, reason_code, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, state, created_at, expires_at]
     ResolutionDecisionRequest:
       type: object
       description: tenant_id is accepted and ignored. Unknown fields are rejected (400).
@@ -11216,6 +11219,7 @@ components:
         kind: { type: string, enum: [release_hold_to_player] }
         amount_minor_units: { type: string, description: Integer minor units as a decimal string. }
         asset_code: { type: string }
+        exponent: { type: integer, nullable: true, description: "The asset registry decimal exponent of asset_code (ADR 0007), looked up server-side. Null only when the lookup failed after the change was committed; a client must then not format the amount." }
         reason_code: { type: string }
         evidence_ref_hash: { type: string }
         payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
@@ -11234,7 +11238,7 @@ components:
         ledger_transaction_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
-      required: [id, tenant_id, withdrawal_request_id, kind, amount_minor_units, asset_code, reason_code, evidence_ref_hash, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, brand_status_at_submission, state, created_at, expires_at]
+      required: [id, tenant_id, withdrawal_request_id, kind, amount_minor_units, asset_code, exponent, reason_code, evidence_ref_hash, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, brand_status_at_submission, state, created_at, expires_at]
     WithdrawalHoldResolutionDecision:
       type: object
       properties:

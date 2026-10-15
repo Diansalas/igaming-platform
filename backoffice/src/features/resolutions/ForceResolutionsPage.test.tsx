@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse, delay } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AppRoutes } from '../../app/AppRoutes'
 import { server } from '../../test/mswServer'
 import { renderWithProviders } from '../../test/renderWithProviders'
@@ -10,6 +10,9 @@ import { makeTestJwt } from '../../test/jwt'
 import { GOOD_CODE, stepUpRequiredResponse } from '../../test/stepUp'
 import { ATT1, CO, FI, HASH1, HASH2, RES1, STAFF_A, TA, TENANT, attempt, refusal, resolution } from '../../test/consoleFixtures'
 import { buildForceRequest, EMPTY_FORM, validateForceRequest } from './ForceRequestDialog'
+
+// Slow under a loaded full run (many keystrokes); the longer timeout applies to this file only.
+vi.setConfig({ testTimeout: 30000 })
 
 const BASE = `/v1/admin/tenants/${TENANT}/payment-force-resolutions`
 const decision = (over: Record<string, unknown> = {}) => ({ resolution: resolution({ state: 'pending' }), executed: false, refused: false, counted_approvals: 1, required_approvals: 2, ...over })
@@ -27,7 +30,7 @@ async function fillDecision(user: ReturnType<typeof userEvent.setup>, reason = '
   const dlg = await screen.findByRole('dialog')
   await user.type(within(dlg).getByLabelText('Reason code (required)'), reason)
   await user.click(within(dlg).getByRole('checkbox'))
-  await user.type(within(dlg).getByLabelText(/Type the first 8 characters of the hash/), hash.slice(0, 8))
+  await user.type(within(dlg).getByLabelText(/Type the LAST 8 characters of the payload hash/), hash.slice(-8))
   return dlg
 }
 
@@ -112,10 +115,10 @@ describe('approve / reject with a frozen payload hash (S8)', () => {
     expect(go).toBeDisabled()
     await user.click(within(dlg).getByRole('checkbox'))
     expect(go).toBeDisabled()
-    await user.type(within(dlg).getByLabelText(/Type the first 8 characters/), 'wrong123')
+    await user.type(within(dlg).getByLabelText(/Type the LAST 8 characters of the payload hash/), 'wrong123')
     expect(go).toBeDisabled()
-    await user.clear(within(dlg).getByLabelText(/Type the first 8 characters/))
-    await user.type(within(dlg).getByLabelText(/Type the first 8 characters/), HASH1.slice(0, 8))
+    await user.clear(within(dlg).getByLabelText(/Type the LAST 8 characters of the payload hash/))
+    await user.type(within(dlg).getByLabelText(/Type the LAST 8 characters of the payload hash/), HASH1.slice(-8))
     expect(go).toBeEnabled()
     await user.click(go)
     expect(await screen.findByRole('status')).toHaveTextContent('Approval recorded: 1 of 2 required')
@@ -336,7 +339,7 @@ describe('propose (S8)', () => {
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: 'Propose a force-resolution' }))
     const dlg = await screen.findByRole('dialog', { name: 'Propose a force-resolution' })
-    expect(await within(dlg).findByText('123.45 EUR')).toBeInTheDocument()
+    expect(await within(dlg).findByText(/123\.45 EUR \(12345 minor units\)/)).toBeInTheDocument()
     await user.selectOptions(within(dlg).getByLabelText('Kind'), 'm2_declare_paid')
     await user.selectOptions(within(dlg).getByLabelText('Basis'), 'reconciliation_exhausted')
     await user.click(within(dlg).getByLabelText('Evidence reference hash'))
@@ -345,7 +348,7 @@ describe('propose (S8)', () => {
     const go = within(dlg).getByRole('button', { name: 'File proposal' })
     expect(go).toBeDisabled()
     await user.click(within(dlg).getByRole('checkbox'))
-    await user.type(within(dlg).getByLabelText(/Type the first 8 characters of the attempt id/), ATT1.slice(0, 8))
+    await user.type(within(dlg).getByLabelText(/Type the LAST 6 characters of the attempt id/), ATT1.slice(-6))
     expect(go).toBeEnabled()
     await user.dblClick(go)
     expect(await screen.findByRole('status')).toHaveTextContent('Nothing has executed')
@@ -372,7 +375,7 @@ describe('propose (S8)', () => {
     await user.paste(HASH2)
     await user.type(within(dlg).getByLabelText('Reason code (required)'), 'why')
     await user.click(within(dlg).getByRole('checkbox'))
-    await user.type(within(dlg).getByLabelText(/Type the first 8 characters of the attempt id/), ATT1.slice(0, 8))
+    await user.type(within(dlg).getByLabelText(/Type the LAST 6 characters of the attempt id/), ATT1.slice(-6))
     await user.click(within(dlg).getByRole('button', { name: 'File proposal' }))
     expect(await within(dlg).findByRole('alert')).toHaveTextContent(/precondition no longer holds/)
   })

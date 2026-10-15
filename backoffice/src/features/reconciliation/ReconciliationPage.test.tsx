@@ -1,13 +1,16 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { reconciliationStreams } from '../../auth/permissions'
 import { AppRoutes } from '../../app/AppRoutes'
 import { server } from '../../test/mswServer'
 import { renderWithProviders } from '../../test/renderWithProviders'
 import { PLATFORM_ADMIN_CLAIMS, signInAs } from '../../test/session'
 import { ATT1, CO, FI, TA, TENANT, refusal } from '../../test/consoleFixtures'
+
+// Slow under a loaded full run (many keystrokes); the longer timeout applies to this file only.
+vi.setConfig({ testTimeout: 30000 })
 
 const BASE = `/v1/admin/tenants/${TENANT}/reconciliation`
 const RUN = '71000000-0000-4000-8000-000000000001'
@@ -114,6 +117,19 @@ describe('reconciliation views (S5)', () => {
     const d = await screen.findByRole('region', { name: 'Finding detail' })
     expect(within(d).getByText('The API names no subject for this finding')).toBeInTheDocument()
     expect(within(d).getAllByText('Not available').length).toBe(2)
+  })
+
+  it('check D (withdrawal hold) kinds are first-class on the ledger stream, not "other"', async () => {
+    signInAs(FI)
+    staff({ mismatches: [mm({ stream: 'ledger_vs_projection', kind: 'withdrawal_hold_open_mismatch', subject_ref: null, expected_minor_units: null, actual_minor_units: null, asset_code: null, exponent: null })] })
+    renderWithProviders(<AppRoutes />, { route: '/reconciliation' })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('tab', { name: 'Ledger vs projection' }))
+    const t = (await screen.findAllByRole('table'))[1]
+    expect(await within(t).findByText('withdrawal hold open mismatch')).toBeInTheDocument()
+    expect(t).not.toHaveTextContent('Other (not in the closed vocabulary)')
+    const kinds = Array.from((screen.getByLabelText('Kind') as HTMLSelectElement).options).map((o) => o.value)
+    expect(kinds).toEqual(expect.arrayContaining(['withdrawal_hold_open_mismatch', 'withdrawal_request_ledger_link_invalid']))
   })
 
   it('casino streams use the tenant-scoped casino routes, show P1, and render stored diagnostic text as plain text', async () => {

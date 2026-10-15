@@ -82,7 +82,19 @@ function stepUp(err: ApiError): string | null {
   return null
 }
 
-export function describeConsoleError(err: unknown, family: ConsoleFamily, op: ConsoleOp): ConsoleErrorView {
+/** Replaces the "nothing was changed" assurance, which is NOT true after a re-send whose first send may have committed. */
+const RETRIED = 'This dialog already sent this action once. The first send may have reached the server and may already be recorded, so check the list before trying again.'
+
+export function describeConsoleError(err: unknown, family: ConsoleFamily, op: ConsoleOp, opts: { retried?: boolean } = {}): ConsoleErrorView {
+  const v = describeConsoleErrorBase(err, family, op)
+  if (!opts.retried || !(err instanceof ApiError) || err.status < 400) return v
+  // A network failure or a 5xx on a re-send says nothing was confirmed already; a definite refusal after a first
+  // send is exactly the case where the first send may have committed.
+  const message = v.message.split(NOTHING).join(RETRIED)
+  return { ...v, message: message === v.message ? `${v.message} ${RETRIED}` : message, stale: true }
+}
+
+function describeConsoleErrorBase(err: unknown, family: ConsoleFamily, op: ConsoleOp): ConsoleErrorView {
   if (!(err instanceof ApiError)) return { message: 'Something went wrong. Nothing was confirmed. Please try again.', stale: false }
   const base = { requestId: err.requestId, status: err.status, code: SAFE_CODE.test(err.code) ? err.code : undefined, stale: false }
   if (err.code === 'network_error') return { ...base, message: 'Could not reach the server. Nothing was confirmed. Check your connection and try again.' }

@@ -26,9 +26,9 @@ export function MockPaymentsBanner() {
   )
 }
 
-export function ConsoleErrorAlert({ error, family, op }: { error: unknown; family: ConsoleFamily; op: ConsoleOp }) {
+export function ConsoleErrorAlert({ error, family, op, retried }: { error: unknown; family: ConsoleFamily; op: ConsoleOp; retried?: boolean }) {
   if (!error) return null
-  const v = describeConsoleError(error, family, op)
+  const v = describeConsoleError(error, family, op, { retried })
   return (
     <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
       <p className="font-medium">{v.message}</p>
@@ -41,6 +41,15 @@ export function ConsoleErrorAlert({ error, family, op }: { error: unknown; famil
       )}
       {v.requestId && <p className="mt-1 text-xs text-red-600">Request ID: {safeCode(v.requestId) === 'unprintable' ? 'unprintable' : v.requestId}</p>}
     </div>
+  )
+}
+
+/** Names the tenant an action is applied to (F6): a platform principal acts on a tenant it picked, so every dialog says which. */
+export function ActingOn({ tenantId, label }: { tenantId: string; label?: string }) {
+  return (
+    <p className="rounded-md border border-border bg-surface-alt px-3 py-2 text-sm" aria-label="Acting on tenant">
+      Acting on tenant: <span className="font-semibold">{label ?? 'Tenant'}</span> <span className="font-mono text-xs">{tenantId}</span>
+    </p>
   )
 }
 
@@ -100,7 +109,8 @@ export function useConsoleTenant() {
   ) : (
     <p className="text-sm text-slate-600">Showing data for your own tenant.</p>
   )
-  return { claims, platform, tenantId, picker, setTenant, searchParams: sp, setSearchParams: setSp }
+  const tenantLabel = platform ? options.find((o) => o.value === tenantId)?.label : 'Your tenant'
+  return { claims, platform, tenantId, tenantLabel, picker, setTenant, searchParams: sp, setSearchParams: setSp }
 }
 
 /** A short, printable form of an id (never the server's text). */

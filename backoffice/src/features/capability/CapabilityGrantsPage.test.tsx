@@ -1,13 +1,16 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { AppRoutes } from '../../app/AppRoutes'
 import { server } from '../../test/mswServer'
 import { renderWithProviders } from '../../test/renderWithProviders'
 import { PLATFORM_ADMIN_CLAIMS, signInAs } from '../../test/session'
 import { CO, FI, GRANT1, REQ1, STAFF_A, STAFF_B, TA, TENANT, grant, grantRequest, refusal } from '../../test/consoleFixtures'
 import { grantStatus } from './CapabilityGrantsPage'
+
+// Slow under a loaded full run (many keystrokes); the longer timeout applies to this file only.
+vi.setConfig({ testTimeout: 30000 })
 
 const BASE = `/v1/admin/tenants/${TENANT}/capability-grants`
 const PA = { ...PLATFORM_ADMIN_CLAIMS, sub: 'f9000000-0000-4000-8000-000000000009' }

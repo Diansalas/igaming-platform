@@ -6,8 +6,9 @@ import { getPaymentAttempt } from '../../api/paymentAttempts'
 import { Button } from '../../components/Button'
 import { Checkbox, SelectField, TextInput } from '../../components/FormField'
 import { Modal } from '../../components/Modal'
-import { formatMinorUnits } from '../../lib/minorUnits'
-import { ConsoleErrorAlert, Hint, PII_WARNING, isUuid } from '../consoles/ConsoleBits'
+import { formatAmountBoth } from '../../lib/minorUnits'
+import { reasonByteLength } from '../../api/killSwitch'
+import { ActingOn, ConsoleErrorAlert, Hint, PII_WARNING, isUuid } from '../consoles/ConsoleBits'
 import { refusalIsStale } from '../consoles/errors'
 import { CONSOLE_KINDS, KIND_LABELS, describeKind, describeOperation, describeReason } from '../payments/labels'
 
@@ -42,7 +43,7 @@ export function buildForceRequest(f: RequestForm): ForceResolutionRequest {
 export function validateForceRequest(f: RequestForm): string[] {
   const p: string[] = []
   if (!isUuid(f.attemptId)) p.push('Attempt id must be a UUID.')
-  if (f.reason.trim() === '' || f.reason.length > 64) p.push('Reason code must be 1 to 64 characters.')
+  if (f.reason.trim() === '' || reasonByteLength(f.reason) > 64) p.push('Reason code must be 1 to 64 bytes (non-ASCII characters take more than one).')
   if (f.kind === 'm1_deposit_evidence') {
     if (!(FINDING_CODES as readonly string[]).includes(f.findingCode)) p.push('Choose a finding.')
   } else {
@@ -53,11 +54,12 @@ export function validateForceRequest(f: RequestForm): string[] {
   return p
 }
 
-export function ForceRequestDialog({ tenantId, prefillAttempt, onClose, onDone, onRefresh }: { tenantId: string; prefillAttempt: string; onClose: () => void; onDone: (r: PaymentForceResolution) => void; onRefresh: () => void }) {
+export function ForceRequestDialog({ tenantId, tenantLabel, prefillAttempt, onClose, onDone, onRefresh }: { tenantId: string; tenantLabel: string | undefined; prefillAttempt: string; onClose: () => void; onDone: (r: PaymentForceResolution) => void; onRefresh: () => void }) {
   const [f, setF] = useState<RequestForm>({ ...EMPTY_FORM, attemptId: isUuid(prefillAttempt) ? prefillAttempt : '' })
   const [ack, setAck] = useState(false)
   const [typed, setTyped] = useState('')
   const [key] = useState(newIdempotencyKey)
+  const [sent, setSent] = useState(0)
   const busy = useRef(false)
   const [created, setCreated] = useState<PaymentForceResolution | null>(null)
   const set = <K extends keyof RequestForm>(k: K, v: RequestForm[K]) => setF((x) => ({ ...x, [k]: v }))
@@ -69,7 +71,10 @@ export function ForceRequestDialog({ tenantId, prefillAttempt, onClose, onDone, 
     retry: false,
   })
   const m = useMutation({
-    mutationFn: () => requestForceResolution(tenantId, buildForceRequest(f), key),
+    mutationFn: () => {
+      setSent((n) => n + 1)
+      return requestForceResolution(tenantId, buildForceRequest(f), key)
+    },
     onSuccess: (r) => {
       setCreated(r)
       onRefresh()
@@ -82,7 +87,9 @@ export function ForceRequestDialog({ tenantId, prefillAttempt, onClose, onDone, 
     },
   })
   const problems = validateForceRequest(f)
-  const need = f.attemptId.slice(0, 8)
+  // F4: the confirmation is the LAST 6 characters of the attempt id as shown in the preview, never printed in the label
+  // and never satisfied by the ?attempt= pre-fill alone (the operator still has to read and type it).
+  const need = f.attemptId.slice(-6)
   const a = attempt.data
   const notAdmitted = a && !a.admissible_kinds.includes(f.kind)
   const valid = problems.length === 0 && ack && typed === need
@@ -103,15 +110,17 @@ export function ForceRequestDialog({ tenantId, prefillAttempt, onClose, onDone, 
     <Modal title="Propose a force-resolution" onClose={onClose} size="lg">
       <div className="flex flex-col gap-4">
         <p className="text-sm font-bold text-red-800">MOCK stack - software capability only, not a regulatory approval.</p>
+        <ActingOn tenantId={tenantId} label={tenantLabel} />
         <p className="text-sm text-slate-700">
           This files a request only. Nothing executes now: the money moves only when the last required approval, from a different person, is recorded. Amount and asset are copied from the attempt by the database.
         </p>
         <TextInput label="Attempt id" value={f.attemptId} onChange={(e) => set('attemptId', e.target.value.trim())} autoComplete="off" spellCheck={false} aria-invalid={f.attemptId !== '' && !isUuid(f.attemptId)} />
         {a && (
           <dl className="grid grid-cols-[10rem_1fr] gap-y-1 rounded-md border border-border bg-surface-alt p-3 text-sm" aria-label="Attempt preview">
+            <dt className="text-slate-500">Attempt id</dt><dd className="break-all font-mono text-xs">{a.id}</dd>
             <dt className="text-slate-500">Operation</dt><dd>{describeOperation(a.operation).label}</dd>
             <dt className="text-slate-500">Park reason</dt><dd>{describeReason(a.terminal_reason).label}</dd>
-            <dt className="text-slate-500">Amount</dt><dd>{formatMinorUnits(a.amount_minor_units, a.exponent, a.asset_code)}</dd>
+            <dt className="text-slate-500">Amount</dt><dd>{formatAmountBoth(a.amount_minor_units, a.exponent, a.asset_code)}</dd>
           </dl>
         )}
         {attempt.error && <ConsoleErrorAlert error={attempt.error} family="attempts" op="get" />}
@@ -140,9 +149,9 @@ export function ForceRequestDialog({ tenantId, prefillAttempt, onClose, onDone, 
           <span className="text-xs text-slate-500">{PII_WARNING}</span>
         </label>
         <Checkbox label="I understand this proposes a resolution of a parked payment on this tenant and that it will be audited" checked={ack} onChange={(e) => setAck(e.target.checked)} />
-        <TextInput label={`Type the first 8 characters of the attempt id to confirm${need ? ` (${need})` : ''}`} value={typed} onChange={(e) => setTyped(e.target.value.trim())} autoComplete="off" spellCheck={false} />
+        <TextInput label="Type the LAST 6 characters of the attempt id above to confirm" value={typed} onChange={(e) => setTyped(e.target.value.trim())} autoComplete="off" spellCheck={false} />
         {problems.length > 0 && f.attemptId !== '' && <ul className="list-disc pl-5 text-xs text-slate-600" aria-label="Form problems">{problems.map((x) => <li key={x}>{x}</li>)}</ul>}
-        <ConsoleErrorAlert error={m.error} family="k3" op="request" />
+        <ConsoleErrorAlert error={m.error} family="k3" op="request" retried={sent > 1} />
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={m.isPending}>Cancel</Button>
           <Button variant="danger" disabled={!valid} isLoading={m.isPending} onClick={() => { if (busy.current) return; busy.current = true; m.mutate() }}>File proposal</Button>

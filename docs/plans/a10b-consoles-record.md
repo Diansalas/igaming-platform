@@ -100,3 +100,28 @@ Pagination of reconciliation / K3 / K1 lists follows the API (offset for R2 and 
 at 100). The K3 / HSEC amounts lack an exponent (G7). The MOCK banner is hardcoded (no server field). `Idempotency-Key` is
 client-only (G10). Accessibility is basics only (labels, roles, captions, keyboard dialogs via the shared Modal); no audit
 with assistive technology was done. Approver-side display of the statement evidence line (S11) is not built.
+
+## Fix round (after the A10b security review, accept with conditions)
+
+Merged `a10a-staff-invite` (shared `test/openapiContract.ts`, `api/openapiContract.test.ts`, `staffRead`), kept both sides in
+`permissions.ts`. The five A10b api modules are now scanned by the shared static contract test; they were restructured to the
+extractor's style (inline `apiFetch` options, `${base(tenantId)}` paths, `buildQuery`) and `idempotency.ts` was added to its
+`NO_CALL_MODULES`. `test/openapiLite.ts` no longer parses YAML: it is a thin layer over the shared `loadOpenApi()` and keeps only
+what the static check cannot do (checking an OBSERVED request, schema enum / property pins).
+
+| Finding | Treatment |
+|---|---|
+| F1 | K1 approve/reject dialog shows the FULL grantee staff id plus display name, role and status from the `/staff` directory (or says "not in the directory" / "platform staff" / "directory could not be read"). Request dialog: dropdown and typed id are mutually exclusive (each disables the other; the body carries exactly the filled one) |
+| F2 | Go: additive `exponent` (nullable integer, always present) on the K3 `resolutionDTO` and HSEC `holdResolutionDTO` from `assetregistry.GetAsset` (`resolution_exponents.go`). Read routes (list, get) fail with 500 if an asset cannot be resolved; routes that already committed (request, decide, cancel) return `exponent:null` instead of hiding a committed decision. OpenAPI schemas + `required` updated; the drift tests pass. UI renders major units AND minor units; `null` shows "exponent unknown". Tests: DB-free DTO serialisation for 2/8/18/0 and null, integration lookup against the real registry (USD 2, BTC 8, USDT 6; unknown fails closed), end-to-end `"exponent":2` on K3 and HSEC request/list/get/decision |
+| G5 (minimal) | ADR 0113 s4.4 check D kinds `withdrawal_hold_open_mismatch`, `withdrawal_request_ledger_link_invalid` added to `LedgerVsProjectionMismatchKinds` (Go), the `StaffReconciliationKind` enum (OpenAPI, pinned equal by the existing drift test), the UI vocabulary. Amounts for them stay null (only pay_amount/asset kinds expose amounts) and no subject is derived. New unit pin `read_checkd_kinds_test.go` |
+| F3 | Decision dialogs list every field the hash covers: K3 attempt id, operation, kind, finding / basis / context, evidence hash, reason code, amount, target state; HSEC withdrawal, reason code, evidence hash, amount |
+| F4 | Decision confirmation = LAST 8 characters of the payload hash; request confirmation = LAST 6 of the attempt / withdrawal id; none is printed in its label, the preview shows the id, and a `?attempt=` pre-fill never satisfies it |
+| F5 | After a re-send, a definite refusal says the first send "may already be recorded" instead of "Nothing was changed" (all K1/K3/HSEC dialogs) |
+| F6 | Every dialog names the tenant acted on (name + full id) |
+| F9 | K3 reason is checked in BYTES (<= 64) in the request form and the decision dialogs |
+| F7, F8 | Recorded. Raised the per-test timeout (30 s) only in this round's own test files (`vi.setConfig`) |
+
+### A10c follow-up list (recorded, not done)
+G1 attempts list provider/age filters; G2 attempt event history route; G4 platform `open_resolution_id` always null; G6 K1 paging /
+filters / platform staff in the directory (and no payload hash on K1); G8 `evidence_ref_hash` semantics / blind entry (owner
+decision); G9 hold-candidate list (R3); G10 server-side Idempotency-Key on K1/K3/HSEC.
