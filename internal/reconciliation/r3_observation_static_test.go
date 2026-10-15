@@ -469,6 +469,7 @@ func TestR3_Static_PaymentStreamsHelperCallsOnlyTheStreamAndRecorders(t *testing
 	allowed := map[string]bool{
 		"len": true, "make": true, "append": true, "string": true,
 		"ReconcilePaymentStatementForTenant": true, "resolvePaymentTargets": true, "reconcilePaymentNotReconciled": true,
+		"discPart": true, // pure charset sanitiser for the error text (SR11-3)
 	}
 	var fn *ast.FuncDecl
 	for _, f := range r3ProductionFiles(t) {
