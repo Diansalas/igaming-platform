@@ -94,7 +94,7 @@ export function normaliseRecoveryCode(input: string): string | null {
 export const MIN_INVITATION_PASSWORD_LENGTH = 12
 
 export const INVITATION_DEAD =
-  'This invitation link is invalid, has expired or was already used, or the person who issued it is no longer active. Ask your administrator to send a new invitation.'
+  'This invitation link is invalid, has expired or was already used, or the person who issued it is no longer active. If you reloaded this page, open the link from your email again; otherwise ask your administrator to send a new invitation.'
 
 /** Failure of POST /v1/staff/invitations/accept. `dead` = the token is spent or unusable: drop it, nothing to retry. */
 export function describeInvitationAcceptError(err: unknown): { message: string; dead: boolean } {

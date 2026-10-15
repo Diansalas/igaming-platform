@@ -265,3 +265,11 @@ deploy order, the staff-session cutover and the break-glass path until S6).
 
 The published `.env.example` values of the two families are development placeholders and are refused unless
 `APP_ENV` is explicitly `development`.
+
+## Back-office static host: do not log query strings (A10a, SR-A10a-5)
+
+Emailed staff links carry the one-time token in the URL FRAGMENT (`/#/enrol?token=...&invite=1`), which never reaches
+the server. The SPA discards any token in a query string (`/accept-invitation?token=...`), but by then the request has
+already reached the host. Deployment checklist item: the static host / CDN / reverse proxy serving the back office
+must NOT write query strings to access logs (or must redact `token=`) for `/enrol` and `/accept-invitation`, and must
+send no `Referer` containing them. Status: deployment configuration, `NOT IMPLEMENTED` in this repository.

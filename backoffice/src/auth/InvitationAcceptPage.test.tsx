@@ -256,6 +256,7 @@ describe('InvitationAcceptPage - refusals', () => {
 
 describe('error boundary', () => {
   it('shows a fixed message and never the thrown text', () => {
+    // React itself logs a caught render error via console.error; this component adds no logging of its own.
     vi.spyOn(console, 'error').mockImplementation(() => {})
     function Boom(): never {
       throw new Error('LEAK-secret-token-123')
@@ -267,6 +268,7 @@ describe('error boundary', () => {
     )
     expect(screen.getByRole('alert')).toHaveTextContent('Something went wrong on this screen')
     expect(document.body.textContent).not.toContain('LEAK-secret-token-123')
+    expect(document.body.innerHTML).not.toContain('LEAK-secret-token-123')
   })
 })
 

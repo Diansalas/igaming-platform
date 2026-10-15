@@ -370,6 +370,17 @@ describe('Staff directory: read-only lifecycle fields', () => {
     expect(screen.getByText('<script>alert(2)</script>')).toBeInTheDocument()
   })
 
+  it('isolates the displayed email and name in <bdi> so bidi controls cannot reorder surrounding text (SR-A10a-6)', async () => {
+    signInAs({ role: 'tenant_admin' })
+    const email = `admin${String.fromCharCode(0x202e)}moc.live@x.com`
+    baseHandlers([entry({ email, display_name: 'Ann' })])
+    renderDetail()
+    await screen.findByRole('table')
+    const bdis = Array.from(document.querySelectorAll('table bdi')).map((n) => n.textContent)
+    expect(bdis).toContain(email)
+    expect(bdis).toContain('Ann')
+  })
+
   it('shows the truncation notice', async () => {
     signInAs({ role: 'tenant_admin' })
     baseHandlers([entry()], true)

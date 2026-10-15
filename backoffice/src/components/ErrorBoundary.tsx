@@ -12,10 +12,11 @@ interface State {
 }
 
 /**
- * Last-resort render-error boundary. It shows a FIXED message: the thrown error's text and stack are never rendered
- * (they may contain data from a response) and never logged from here, so a render failure cannot leak a token, a
- * password or server text. Per-request failures are still handled where they happen; this only keeps one broken screen
- * from blanking the whole console.
+ * Last-resort render-error boundary. It shows a FIXED message: the thrown error's text and stack are never rendered,
+ * and this component does not log or report them. NOTE: React itself calls console.error with the caught error (dev
+ * and production builds), so the real control is that no Error message may embed a token, password or response body.
+ * Per-request failures are still handled where they happen; this only keeps one broken screen from blanking the
+ * whole console. A future error reporter must redact before sending.
  */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { failed: false, resetKey: this.props.resetKey }
@@ -30,7 +31,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(_error: Error, _info: ErrorInfo): void {
-    // Deliberately empty: see the class comment. A real error-reporting hook would redact before sending.
+    // Deliberately empty (no logging or reporting from here): see the class comment.
   }
 
   render() {

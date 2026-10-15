@@ -9363,6 +9363,16 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: >
+            The change is refused because it needs four-eyes approval (a jurisdiction_blocklist code removal, or a
+            disabled-to-active transition, without an approved change request) or conflicts with an existing change
+            request. Nothing was written; use the change-request routes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /v1/admin/casino/providers/{providerID}/capability:
     put:
@@ -9390,7 +9400,16 @@ paths:
                   id: { type: string }
         "400": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/StepUpRequired" }
+        "403":
+          description: >
+            Either `step_up_required` (fresh second factor needed: see the StepUpRequired response; re-send once) or plain
+            `forbidden` (the caller lacks the permission, or the token is not tenant-scoped). The `code` field tells them
+            apart; nothing was written in either case.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /v1/admin/casino/games/{gameID}/availability:
     put:
@@ -9410,8 +9429,12 @@ paths:
               type: object
               additionalProperties: false
               properties:
-                enabled: { type: boolean }
-              required: [enabled]
+                enabled:
+                  type: boolean
+                  default: false
+                  description: >
+                    The server decodes into a plain boolean, so an omitted `enabled` is treated as false (the game is
+                    DISABLED for the tenant). Clients should always send it explicitly.
       responses:
         "200":
           description: The resulting availability
@@ -9426,6 +9449,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /v1/admin/providers/{providerID}/capability:
     put:
@@ -9453,7 +9477,16 @@ paths:
                   id: { type: string }
         "400": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/StepUpRequired" }
+        "403":
+          description: >
+            Either `step_up_required` (fresh second factor needed: see the StepUpRequired response; re-send once) or plain
+            `forbidden` (the caller lacks the permission, or the token is not tenant-scoped). The `code` field tells them
+            apart; nothing was written in either case.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
 components:
@@ -9591,10 +9624,11 @@ components:
           type: array
           items:
             type: object
+            additionalProperties: false
             properties:
               asset_code: { type: string }
-              min_amount: { type: integer, description: Integer minor units }
-              max_amount: { type: integer, description: Integer minor units }
+              min_amount: { type: integer, format: int64, description: Integer minor units }
+              max_amount: { type: integer, format: int64, description: Integer minor units }
         priority: { type: integer }
         status: { type: string, enum: [active, disabled] }
       required: [status]

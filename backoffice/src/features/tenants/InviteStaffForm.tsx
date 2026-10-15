@@ -130,7 +130,7 @@ export function InviteStaffForm({ tenantId }: { tenantId: string }) {
             <dl className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div>
                 <dt className="text-green-700">Email</dt>
-                <dd>{invited.staff.email}</dd>
+                <dd><bdi>{invited.staff.email}</bdi></dd>
               </div>
               <div>
                 <dt className="text-green-700">Role / status</dt>

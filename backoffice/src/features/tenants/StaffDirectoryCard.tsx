@@ -41,8 +41,8 @@ export function StaffDirectoryCard({ tenantId }: { tenantId: string }) {
       header: 'Email',
       render: (s) => (
         <span>
-          <span className="font-medium text-slate-900">{s.email}</span>
-          {s.display_name && <span className="ml-2 text-slate-500">{s.display_name}</span>}
+          <span className="font-medium text-slate-900"><bdi>{s.email}</bdi></span>
+          {s.display_name && <span className="ml-2 text-slate-500"><bdi>{s.display_name}</bdi></span>}
         </span>
       ),
     },

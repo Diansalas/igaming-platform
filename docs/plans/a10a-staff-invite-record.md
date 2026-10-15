@@ -65,7 +65,7 @@ and launch folders pass when run alone with these changes, and `src/features/lau
 > invitation-accept page + link routing, read-only staff directory, error boundaries, generic UI-to-OpenAPI contract
 > test for every backoffice api module, 4 missing PUT operations documented). NOT IMPLEMENTED: platform_invite +
 > four-eyes request console and suspend/offboard/role/MFA-reset/resend/revoke (ADR 0119 S8), b2c contract test (10
-> probe findings recorded). Email delivery MOCK / PROVIDER DEPENDENT. Security review pending.
+> probe findings recorded). Email delivery MOCK / PROVIDER DEPENDENT. Security review: APPROVE (a10a-security-review.md); Low items fixed in the follow-up commit.
 
 ## Probes for the security review
 
@@ -85,6 +85,19 @@ and launch folders pass when run alone with these changes, and `src/features/lau
 6. Authorization is server-side: forcing a role the UI did not offer, or opening the page as `support`, still gets the
    server's 403 and the UI degrades with a fixed message; `staffRead` / `staffAdmin` are display flags only.
 7. Double-submit: one invitation per click burst (`useOnceGuard`); the staff directory refetches after success.
-8. Error boundary: a throwing child shows only the fixed text; the message/stack is neither rendered nor logged.
+8. Error boundary: a throwing child shows only the fixed text; the message/stack is not rendered and the component does not log it; React itself logs caught errors to console.error (SR-A10a-1), so no Error message may embed a secret.
 9. Spec edit: confirm the four added PUT operations match the Go handlers and permissions (`casino_catalogue:manage`,
    `casino_config:write`, `provider_config:write`) and step-up classes (`stepUpNone`, `stepUpCritical`).
+
+## Security-review follow-up (SR-A10a-1..6)
+
+- SR-A10a-1 fixed (comment + test wording; `console.error` by React acknowledged). SR-A10a-2 fixed: invitation-accept
+  and `cmd/seed-admin` floors count runes. No other staff password-setting entry point exists (`enrol/redeem` sets no
+  password). Player flows (`auth_routes.go`, `credential_handlers.go`, floor 8) still count bytes: NOT changed here
+  (player surface, out of this slice); follow-up. SR-A10a-3 fixed (spec only). SR-A10a-4 fixed (wording).
+  SR-A10a-6 fixed: `validEmail` rejects Cc/Cf and invalid UTF-8; `<bdi>` in the directory and invite banner.
+  Display names are not validated server-side (only wrapped in `<bdi>`).
+- RECORDED, not changed: SR-A10a-5 - an unspent invitation link is a bearer credential like a password until accepted;
+  S8 should consider notifying the inviter on acceptance. A query-string token reaches host access logs: the static host
+  must not log query strings for `/enrol` and `/accept-invitation` (added to
+  `docs/runbooks/production-configuration-checklist.md`).
