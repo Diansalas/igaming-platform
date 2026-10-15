@@ -91,6 +91,11 @@ func (in RecordScreeningInput) Validate() error {
 	for _, l := range in.MatchLists {
 		hasSanctions = hasSanctions || l == ListSanctions
 	}
+	// SR7-2: all-value-movement is the decision of a confirmed outcome or a sanctions-list match and of nothing else; an
+	// error or a PEP-only match can never be recorded with it (and so never reaches the confirmed_sanctions hold class).
+	if in.Decision == HoldAllValueMovement && in.Outcome != OutcomeConfirmed && !hasSanctions {
+		return fmt.Errorf("%w: all-value-movement is the decision of a confirmed outcome or a sanctions-list match only", ErrInvalidInput)
+	}
 	switch in.Outcome {
 	case OutcomeClear:
 		if in.Decision != HoldNone || len(in.MatchLists) != 0 || in.ErrorCode != "" {
@@ -111,6 +116,22 @@ func (in RecordScreeningInput) Validate() error {
 		return fmt.Errorf("%w: outcome %q", ErrInvalidInput, in.Outcome)
 	}
 	return nil
+}
+
+// HoldReasonClassFor is the hold class a screening record places, derived STRICTLY from the outcome and the list (SR7-2,
+// SR7-8): the four-eyes class ReasonConfirmedSanctions only for a CONFIRMED outcome that names the sanctions list; a potential
+// match, a PEP-only match and an error are ReasonManual (a potential sanctions match still gates all value movement by SCOPE).
+// It mirrors aml_screening_record and the aml_screening_results CHECK; the database is the authority.
+func HoldReasonClassFor(outcome ScreeningOutcome, matches []ListType) ReasonClass {
+	if outcome != OutcomeConfirmed {
+		return ReasonManual
+	}
+	for _, l := range matches {
+		if l == ListSanctions {
+			return ReasonConfirmedSanctions
+		}
+	}
+	return ReasonManual
 }
 
 // ScreeningRecorded is the result of RecordScreening.
@@ -138,6 +159,12 @@ func (s *Service) RecordScreening(ctx context.Context, a Actor, in RecordScreeni
 	if err := in.Validate(); err != nil {
 		return ScreeningRecorded{}, err
 	}
+	return s.recordScreening(ctx, a, in)
+}
+
+// recordScreening is the database call behind RecordScreening. Split out so a test can present the database with an input that
+// Validate would refuse and prove the function and the table CHECKs refuse it independently (export_test.go).
+func (s *Service) recordScreening(ctx context.Context, a Actor, in RecordScreeningInput) (ScreeningRecorded, error) {
 	var out ScreeningRecorded
 	screened := in.ScreenedAt.UTC().Truncate(time.Microsecond)
 	err := s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {

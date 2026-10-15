@@ -21,7 +21,8 @@ import (
 // hold in one transaction, idempotency, scope and tenant isolation, the fail-closed table CHECKs and the readiness reader.
 // All values are TEST FIXTURE VALUES - NOT LEGAL THRESHOLDS.
 
-func (w *amlWorld) jurisdiction() uuid.UUID {
+// bareJurisdiction seeds a jurisdiction the tenant is NOT configured to operate in.
+func (w *amlWorld) bareJurisdiction() uuid.UUID {
 	w.t.Helper()
 	jid := uuid.New()
 	if err := w.Owner.WithPlatformAdmin(context.Background(), launchfix.Operators().Requester, func(ctx context.Context, tx pgx.Tx) error {
@@ -30,6 +31,26 @@ func (w *amlWorld) jurisdiction() uuid.UUID {
 	}); err != nil {
 		w.t.Fatalf("seed jurisdiction: %v", err)
 	}
+	return jid
+}
+
+// configure makes the tenant operate in jid (an active tenant_jurisdiction_configs row; effectiveTo nil = open ended).
+func (w *amlWorld) configure(tenant, jid uuid.UUID, effectiveTo *time.Time) {
+	w.t.Helper()
+	if err := w.Owner.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, effective_from, effective_to)
+			VALUES ($1, $2, 'kyc1', 'aml1', 'rg1', now() - interval '2 hours', $3)`, tenant, jid, effectiveTo)
+		return err
+	}); err != nil {
+		w.t.Fatalf("seed jurisdiction config: %v", err)
+	}
+}
+
+// jurisdiction seeds a jurisdiction the tenant operates in (SR7-3: a policy jurisdiction must be one the tenant is configured for).
+func (w *amlWorld) jurisdiction() uuid.UUID {
+	w.t.Helper()
+	jid := w.bareJurisdiction()
+	w.configure(w.Tenant, jid, nil)
 	return jid
 }
 
@@ -175,8 +196,13 @@ func TestScreening_EndToEnd_OutcomesPlaceTheRequiredHolds(t *testing.T) {
 			t.Errorf("sanctions match must gate %s: held=%v err=%v", op, held, err)
 		}
 	}
-	if _, err := svc.LiftHold(ctx, a, *out.Recorded.HoldID, "single_officer"); !errors.Is(err, aml.ErrHoldRefused) {
-		t.Fatalf("a sanctions-list hold must not be lifted by a single officer: %v", err)
+	// SR7-2 / SR7-8 (CHANGED assertion): a POTENTIAL sanctions match gates all value movement by SCOPE but is a MANUAL-class
+	// hold (the four-eyes class is reserved for a CONFIRMED sanctions outcome), so one officer can lift it as a false positive.
+	if hs, err := svc.ListHolds(ctx, a, ps.PersonID); err != nil || len(hs) != 1 || hs[0].ReasonClass != aml.ReasonManual || hs[0].Scope != aml.ScopeAllValueMovement {
+		t.Fatalf("a potential sanctions match must be manual-class with the all-value scope: %+v %v", hs, err)
+	}
+	if _, err := svc.LiftHold(ctx, a, *out.Recorded.HoldID, "false_positive_sanctions"); err != nil {
+		t.Fatalf("a potential-match hold is liftable by one officer: %v", err)
 	}
 
 	// PEP potential match: withdrawal and payout only.
@@ -203,6 +229,13 @@ func TestScreening_EndToEnd_OutcomesPlaceTheRequiredHolds(t *testing.T) {
 	out, err = o.Screen(ctx, a, w.screeningReq(pf, j, aml.MockMarkerConfirmed+"1"))
 	if err != nil || out.Outcome != aml.OutcomeConfirmed || out.Decision.Action != aml.HoldAllValueMovement {
 		t.Fatalf("confirmed: %+v %v", out, err)
+	}
+	// The four-eyes class: a CONFIRMED sanctions outcome cannot be lifted by a single officer.
+	if hs, err := svc.ListHolds(ctx, a, pf.PersonID); err != nil || len(hs) != 1 || hs[0].ReasonClass != aml.ReasonConfirmedSanctions {
+		t.Fatalf("a confirmed sanctions outcome must be the four-eyes class: %+v %v", hs, err)
+	}
+	if _, err := svc.LiftHold(ctx, a, *out.Recorded.HoldID, "single_officer"); !errors.Is(err, aml.ErrHoldRefused) {
+		t.Fatalf("a confirmed-sanctions hold must not be lifted by a single officer: %v", err)
 	}
 
 	// Unavailable vendor, person registered AFTER the policy took effect: held for withdrawal/payout, outcome error (never
@@ -243,25 +276,127 @@ func TestScreening_EndToEnd_OutcomesPlaceTheRequiredHolds(t *testing.T) {
 	}
 }
 
-// The screening hold does not wait for the officer quorum (ADR 0116 s6), while a MANUAL hold still does.
-func TestScreening_HoldIsNotBlockedByAMissingQuorum(t *testing.T) {
+// SR7-2 (CHANGED from "the screening hold does not wait for the officer quorum"): recording a screening result that places a
+// hold needs the officer quorum of the owner scope, like any other hold. With a single officer nothing is placed and the
+// orchestrator reports the outcome as NOT ENFORCED (fail loud, retry), never as recorded. The ADR 0116 s6 exemption for holds
+// placed automatically returns with the F1 system-actor path.
+func TestScreening_HoldNeedsTheOfficerQuorum(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t, "under_platform_licence")
 	svc := amlfix.Service(t, w.RT)
 	q := amlfix.Bootstrap(t, w.Owner, w.Tenant, 1)
 	a := q.Officers[0].Actor
 	p := w.player()
-	if _, err := svc.PlaceHold(ctx, a, aml.PlaceHoldInput{PersonID: p.PersonID, Scope: aml.ScopeAllValueMovement, ReasonClass: aml.ReasonManual, ReasonCode: "t"}); !errors.Is(err, aml.ErrQuorum) {
-		t.Fatalf("control: a manual hold needs the quorum: %v", err)
-	}
 	r := w.screeningReq(p, w.jurisdiction(), aml.MockMarkerSanction+"1")
 	r.Lists = []aml.ListType{aml.ListSanctions}
 	out, err := orchestrator(t, svc).Screen(ctx, a, r)
-	if err != nil || out.Recorded.HoldID == nil {
-		t.Fatalf("a screening match must hold without a quorum: %+v %v", out, err)
+	var ne *aml.NotEnforcedError
+	if !errors.As(err, &ne) || !errors.Is(err, aml.ErrQuorum) {
+		t.Fatalf("a hold-placing record without the quorum must be reported NOT ENFORCED (quorum): %+v %v", out, err)
+	}
+	if held, _ := w.holdActive(p.PersonID, p.AccountID, aml.OpCasinoStake); held {
+		t.Fatal("nothing may have been placed without the quorum")
+	}
+	if rows, err := svc.ListScreenings(ctx, a, p.PersonID); err != nil || len(rows) != 0 {
+		t.Fatalf("no result may be stored without its hold: %+v %v", rows, err)
+	}
+	// A record that places NO hold (a clear) needs no quorum.
+	rc := w.screeningReq(p, w.jurisdiction(), "clean-subject")
+	rc.Lists = []aml.ListType{aml.ListSanctions}
+	if out, err := orchestrator(t, svc).Screen(ctx, a, rc); err != nil || out.Recorded.ResultID == uuid.Nil {
+		t.Fatalf("a clear needs no quorum: %+v %v", out, err)
+	}
+	// With the quorum the same screening holds and gates.
+	q2 := amlfix.Bootstrap(t, w.Owner, w.Tenant, 2)
+	r2 := w.screeningReq(p, w.jurisdiction(), aml.MockMarkerSanction+"1")
+	r2.Lists = []aml.ListType{aml.ListSanctions}
+	if out, err := orchestrator(t, svc).Screen(ctx, q2.Officers[0].Actor, r2); err != nil || out.Recorded.HoldID == nil {
+		t.Fatalf("with the quorum the match must hold: %+v %v", out, err)
 	}
 	if held, _ := w.holdActive(p.PersonID, p.AccountID, aml.OpCasinoStake); !held {
 		t.Fatal("the screening hold must gate")
+	}
+}
+
+// SR7-2 repro: the database (function AND table CHECKs), not only the Go mirror, refuses to derive the four-eyes hold class from
+// anything but a CONFIRMED sanctions-list outcome. The inputs below are ones Validate refuses, presented to the database directly.
+func TestScreening_ClassDerivationIsStrict_InTheDatabase(t *testing.T) {
+	ctx := context.Background()
+	w, q, svc := platformWorld(t) // a two-officer quorum: the quorum is NOT what refuses these
+	a := q.Officers[0].Actor
+	p := w.player()
+	ref := strings.Repeat("e", 64)
+	rec := func(key string, f func(in *aml.RecordScreeningInput)) error {
+		in := aml.RecordScreeningInput{PersonID: p.PersonID, IdempotencyKey: key, Trigger: aml.TriggerManual, ProviderID: aml.MockProviderID, SubjectRef: ref,
+			Lists: []aml.ListType{aml.ListSanctions, aml.ListPEP}, ScreenedAt: time.Now(), Decision: aml.HoldAllValueMovement, HoldReasonCode: "repro"}
+		f(&in)
+		if err := in.Validate(); err == nil {
+			t.Errorf("%s: the Go mirror must refuse this input as well", key)
+		}
+		_, err := svc.RecordScreeningSkippingValidation(ctx, a, in)
+		return err
+	}
+	cases := map[string]func(in *aml.RecordScreeningInput){
+		// single officer, outcome error + an all-value decision: used to place a confirmed_sanctions hold
+		"error with an all-value decision": func(in *aml.RecordScreeningInput) {
+			in.Outcome, in.ErrorCode = aml.OutcomeError, aml.ErrCodeTimeout
+		},
+		// PEP-only potential match with an all-value decision
+		"pep-only potential match with an all-value decision": func(in *aml.RecordScreeningInput) {
+			in.Outcome, in.MatchLists = aml.OutcomePotentialMatch, []aml.ListType{aml.ListPEP}
+		},
+		// a clear with a hold
+		"clear with an all-value decision": func(in *aml.RecordScreeningInput) { in.Outcome = aml.OutcomeClear },
+	}
+	for name, f := range cases {
+		// The FUNCTION refuses it first (AM004 -> ErrInvalidInput); the table CHECK (23514) is the independent second line, proven
+		// by TestScreeningResults_ChecksFailClosedInTheDatabase.
+		if err := rec("sr72-"+uuid.NewString(), f); !errors.Is(err, aml.ErrInvalidInput) {
+			t.Errorf("%s: the database function must refuse it (AM004), got %v", name, err)
+		}
+	}
+	if hs, err := svc.ListHolds(ctx, a, p.PersonID); err != nil || len(hs) != 0 {
+		t.Fatalf("none of the refused records may have left a hold: %+v %v", hs, err)
+	}
+	if rows, err := svc.ListScreenings(ctx, a, p.PersonID); err != nil || len(rows) != 0 {
+		t.Fatalf("none of the refused records may have left a result: %+v %v", rows, err)
+	}
+	// The lawful derivations, and the class each one places.
+	for name, c := range map[string]struct {
+		outcome aml.ScreeningOutcome
+		match   []aml.ListType
+		want    aml.ReasonClass
+		scope   aml.HoldScope
+	}{
+		"confirmed sanctions":         {aml.OutcomeConfirmed, []aml.ListType{aml.ListSanctions}, aml.ReasonConfirmedSanctions, aml.ScopeAllValueMovement},
+		"potential sanctions":         {aml.OutcomePotentialMatch, []aml.ListType{aml.ListSanctions}, aml.ReasonManual, aml.ScopeAllValueMovement},
+		"confirmed naming only a pep": {aml.OutcomeConfirmed, []aml.ListType{aml.ListPEP}, aml.ReasonManual, aml.ScopeAllValueMovement},
+	} {
+		pp := w.player()
+		in := aml.RecordScreeningInput{PersonID: pp.PersonID, IdempotencyKey: "sr72-ok-" + uuid.NewString(), Trigger: aml.TriggerManual, ProviderID: aml.MockProviderID,
+			SubjectRef: ref, Lists: []aml.ListType{aml.ListSanctions, aml.ListPEP}, Outcome: c.outcome, MatchLists: c.match, ScreenedAt: time.Now(),
+			Decision: aml.HoldAllValueMovement, HoldReasonCode: "repro_ok"}
+		if got := aml.HoldReasonClassFor(c.outcome, c.match); got != c.want {
+			t.Errorf("%s: Go class %s, want %s", name, got, c.want)
+		}
+		if _, err := svc.RecordScreening(ctx, a, in); err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		hs, err := svc.ListHolds(ctx, a, pp.PersonID)
+		if err != nil || len(hs) != 1 || hs[0].ReasonClass != c.want || hs[0].Scope != c.scope {
+			t.Errorf("%s: placed %+v %v, want class %s scope %s", name, hs, err, c.want, c.scope)
+		}
+	}
+	// PEP-only / unavailable: the manual class with the NARROWER scope.
+	pp := w.player()
+	if _, err := svc.RecordScreening(ctx, a, aml.RecordScreeningInput{PersonID: pp.PersonID, IdempotencyKey: "sr72-pep-" + uuid.NewString(), Trigger: aml.TriggerManual,
+		ProviderID: aml.MockProviderID, SubjectRef: ref, Lists: []aml.ListType{aml.ListPEP}, Outcome: aml.OutcomePotentialMatch, MatchLists: []aml.ListType{aml.ListPEP},
+		ScreenedAt: time.Now(), Decision: aml.HoldWithdrawalPayout, HoldReasonCode: aml.ReasonPEPMatch}); err != nil {
+		t.Fatal(err)
+	}
+	if hs, err := svc.ListHolds(ctx, a, pp.PersonID); err != nil || len(hs) != 1 || hs[0].ReasonClass != aml.ReasonManual || hs[0].Scope != aml.ScopeWithdrawalAndPayout {
+		t.Fatalf("pep-only hold: %+v %v", hs, err)
 	}
 }
 
@@ -404,7 +539,8 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 	// A valid hold to point decisions at.
 	hold := q.PlaceHold(t, svc, p.PersonID, nil, aml.ScopeWithdrawalAndPayout, aml.ReasonManual)
 	errRollback := errors.New("rolled back on purpose")
-	insert := func(outcome string, match, errCode, decision *string, holdID *uuid.UUID) error {
+	// cls overrides the derived hold class (SR7-2) when a test needs to forge one; "" means "derive it as the function does".
+	insertCls := func(cls string, outcome string, match, errCode, decision *string, holdID *uuid.UUID) error {
 		err := w.Owner.WithTenant(ctx, w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
 			// The BEFORE INSERT guard compares the actor columns with a PROVEN session actor, which an owner-level fixture
 			// insert does not have; it is disabled for this transaction only so that the CHECK constraints are what is tested.
@@ -412,9 +548,13 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO aml_screening_results (tenant_id, owner_scope, person_id, idempotency_key, trigger, provider_id, subject_ref, lists,
-					outcome, match_lists, error_code, screened_at, decision, hold_id, recorded_by, recorded_by_person_id, recorded_by_scope)
-				VALUES ($1, 'platform', $2, $3, 'manual', 'mock-screening', $4, ARRAY['sanctions','pep'], $5, $6::text[], $7, now(), $8, $9, $10, $11, 'platform_acting')`,
-				w.Tenant, p.PersonID, "chk-"+uuid.NewString(), strings.Repeat("a", 64), outcome, match, errCode, *decision, holdID, q.Officers[0].StaffID, q.Officers[0].PersonID); err != nil {
+					outcome, match_lists, error_code, screened_at, decision, hold_id, hold_reason_class, payload_hash, recorded_by, recorded_by_person_id, recorded_by_scope)
+				VALUES ($1, 'platform', $2, $3, 'manual', 'mock-screening', $4, ARRAY['sanctions','pep'], $5, $6::text[], $7, now(), $8, $9,
+					CASE WHEN $12::text <> '' THEN $12::text WHEN $8::text = 'none' THEN NULL
+					     WHEN $5::text = 'confirmed' AND COALESCE('sanctions' = ANY ($6::text[]), false) THEN 'confirmed_sanctions' ELSE 'manual' END,
+					$13, $10, $11, 'platform_acting')`,
+				w.Tenant, p.PersonID, "chk-"+uuid.NewString(), strings.Repeat("a", 64), outcome, match, errCode, *decision, holdID, q.Officers[0].StaffID, q.Officers[0].PersonID,
+				cls, strings.Repeat("b", 64)); err != nil {
 				return err
 			}
 			return errRollback // the insert PASSED every constraint; never commit a fixture row
@@ -423,6 +563,9 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 			return nil
 		}
 		return err
+	}
+	insert := func(outcome string, match, errCode, decision *string, holdID *uuid.UUID) error {
+		return insertCls("", outcome, match, errCode, decision, holdID)
 	}
 	s := func(v string) *string { return &v }
 	m := func(v string) *string { return &v }
@@ -448,10 +591,33 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 		"a no-action decision naming a hold":                            {"error", nil, s("timeout"), none, &hold},
 		"an outcome outside the vocabulary":                             {"approved", nil, nil, none, nil},
 		"an error code outside the vocabulary":                          {"error", nil, s("weird"), none, nil},
-		"a list outside the vocabulary":                                 {"potential_match", m("{watch}"), nil, hall, &hold},
+		"a match list outside the vocabulary":                           {"potential_match", m("{watch}"), nil, hwp, &hold}, // hwp: no other CHECK may refuse it
+		// SR7-2: all-value-movement is for a confirmed outcome or a sanctions-list match only.
+		"an error under the all-value scope":                   {"error", nil, s("timeout"), hall, &hold},
+		"a PEP-only potential match under the all-value scope": {"potential_match", m("{pep}"), nil, hall, &hold},
 	} {
 		err := insert(c.outcome, c.match, c.errCode, c.decision, c.hold)
 		if pgCode(err) != "23514" {
+			t.Errorf("%s: want a CHECK violation, got %v", name, err)
+		}
+	}
+	// SR7-2 / SR7-8: the stored hold class is derived strictly from outcome and list. A forged class is a CHECK violation: the
+	// four-eyes class for a potential match / a PEP-only confirmed outcome / an error, and the manual class for a confirmed
+	// sanctions outcome, and a class without a hold or a hold without a class.
+	for name, c := range map[string]struct {
+		cls, outcome   string
+		match, errCode *string
+		decision       *string
+		hold           *uuid.UUID
+	}{
+		"four-eyes class on a potential sanctions match": {"confirmed_sanctions", "potential_match", m("{sanctions}"), nil, hall, &hold},
+		"four-eyes class on a PEP-only confirmed":        {"confirmed_sanctions", "confirmed", m("{pep}"), nil, hall, &hold},
+		"four-eyes class on an error":                    {"confirmed_sanctions", "error", nil, s("timeout"), hwp, &hold},
+		"manual class on a confirmed sanctions outcome":  {"manual", "confirmed", m("{sanctions}"), nil, hall, &hold},
+		"a class on a no-action decision":                {"manual", "error", nil, s("timeout"), none, nil},
+		"an unknown class":                               {"quorum", "error", nil, s("timeout"), hwp, &hold},
+	} {
+		if err := insertCls(c.cls, c.outcome, c.match, c.errCode, c.decision, c.hold); pgCode(err) != "23514" {
 			t.Errorf("%s: want a CHECK violation, got %v", name, err)
 		}
 	}
@@ -465,6 +631,9 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 		"error with no action (grace)": {"error", nil, s("timeout"), none, nil},
 		"clear":                        {"clear", nil, nil, none, nil},
 		"pep match":                    {"potential_match", m("{pep}"), nil, hwp, &hold},
+		"potential sanctions (manual)": {"potential_match", m("{sanctions}"), nil, hall, &hold},
+		"confirmed sanctions (4-eyes)": {"confirmed", m("{sanctions}"), nil, hall, &hold},
+		"confirmed pep only (manual)":  {"confirmed", m("{pep}"), nil, hall, &hold},
 	} {
 		if err := insert(c.outcome, c.match, c.errCode, c.decision, c.hold); err != nil {
 			t.Errorf("%s: a lawful shape was refused: %v", name, err)
@@ -474,17 +643,17 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 	// out-of-vocabulary list, an owner scope that disagrees with the recording scope.
 	raw := func(col, val string) error {
 		cols := map[string]string{"trigger": "manual", "idempotency_key": "shape-" + uuid.NewString(), "provider_id": "mock-screening",
-			"provider_reference": "ok-1", "subject_ref": strings.Repeat("a", 64), "owner_scope": "platform", "recorded_by_scope": "platform_acting", "lists": "{sanctions}"}
+			"provider_reference": "ok-1", "subject_ref": strings.Repeat("a", 64), "owner_scope": "platform", "recorded_by_scope": "platform_acting", "lists": "{sanctions}", "payload_hash": strings.Repeat("b", 64)}
 		cols[col] = val
 		err := w.Owner.WithTenant(ctx, w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, `ALTER TABLE aml_screening_results DISABLE TRIGGER aml_screening_results_10_guard`); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO aml_screening_results (tenant_id, owner_scope, person_id, idempotency_key, trigger, provider_id, provider_reference, subject_ref, lists,
-					outcome, screened_at, decision, recorded_by, recorded_by_person_id, recorded_by_scope)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $12::text[], 'clear', now(), 'none', $9, $10, $11)`,
+					outcome, screened_at, decision, payload_hash, recorded_by, recorded_by_person_id, recorded_by_scope)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $12::text[], 'clear', now(), 'none', $13, $9, $10, $11)`,
 				w.Tenant, cols["owner_scope"], p.PersonID, cols["idempotency_key"], cols["trigger"], cols["provider_id"], cols["provider_reference"], cols["subject_ref"],
-				q.Officers[0].StaffID, q.Officers[0].PersonID, cols["recorded_by_scope"], cols["lists"]); err != nil {
+				q.Officers[0].StaffID, q.Officers[0].PersonID, cols["recorded_by_scope"], cols["lists"], cols["payload_hash"]); err != nil {
 				return err
 			}
 			return errRollback
@@ -510,6 +679,8 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 		"scope disagreeing with owner":    {"recorded_by_scope", "tenant"},
 		"recording scope outside the set": {"recorded_by_scope", "everyone"},
 		"a list outside the vocabulary":   {"lists", "{watch}"},
+		"a short payload digest":          {"payload_hash", "abc"},
+		"an uppercase payload digest":     {"payload_hash", strings.ToUpper(strings.Repeat("b", 64))},
 		"three lists":                     {"lists", "{sanctions,pep,adverse}"},
 		"no list":                         {"lists", "{}"},
 	} {
@@ -627,5 +798,38 @@ func TestAMLReadiness_OwnerScopeDecidesWhichOfficersCount(t *testing.T) {
 	amlfix.NewOfficer(t, ow.Owner, ow.Tenant)
 	if !quorum(ow) {
 		t.Fatal("two tenant officers are a tenant quorum")
+	}
+}
+
+// SR7-3: the policy jurisdiction must be one the tenant operates in. An existing jurisdiction the tenant has no ACTIVE
+// configuration for (never configured, configuration ended, configured for ANOTHER tenant) is refused and nothing is stored;
+// the configured one is accepted.
+func TestScreeningPolicy_JurisdictionMustBeOneTheTenantOperatesIn(t *testing.T) {
+	ctx := context.Background()
+	w, q, svc := platformWorld(t)
+	a := q.Officers[0].Actor
+	other := newWorld(t, "under_platform_licence")
+	past := time.Now().Add(-time.Hour)
+
+	never := w.bareJurisdiction()
+	ended := w.bareJurisdiction()
+	w.configure(w.Tenant, ended, &past)
+	foreign := w.bareJurisdiction()
+	w.configure(other.Tenant, foreign, nil)
+	for name, j := range map[string]uuid.UUID{"never configured": never, "configuration ended": ended, "configured for another tenant": foreign} {
+		if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); !errors.Is(err, aml.ErrInvalidInput) {
+			t.Errorf("%s: want ErrInvalidInput, got %v", name, err)
+		}
+		if p, err := svc.EffectiveScreeningPolicy(ctx, a, j); err != nil || p != nil {
+			t.Errorf("%s: nothing may be stored: %+v %v", name, p, err)
+		}
+	}
+	// The session tenant setting of the caller is restored around the check: the configured jurisdiction is accepted afterwards.
+	ok := w.jurisdiction()
+	if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(ok, time.Now().Add(-time.Hour))); err != nil {
+		t.Fatalf("a configured jurisdiction must be accepted: %v", err)
+	}
+	if p, err := svc.EffectiveScreeningPolicy(ctx, a, ok); err != nil || p == nil {
+		t.Fatalf("the accepted policy must be readable: %+v %v", p, err)
 	}
 }

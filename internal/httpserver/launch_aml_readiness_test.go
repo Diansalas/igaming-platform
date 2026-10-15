@@ -21,6 +21,10 @@ func TestCoarsenForTenant_AMLChecks(t *testing.T) {
 		{launchgov.CheckAMLScreening, "no_jurisdiction_referenced", "no_jurisdiction_referenced"},
 		{launchgov.CheckAMLScreening, "ok", "ok"},
 		{launchgov.CheckAMLQuorum, "quorum_not_met", "quorum_not_met"},
+		{launchgov.CheckAMLQuorum, "ok", "ok"},
+		// SR7-6: the PLATFORM officer quorum of a platform-licensed tenant is platform process detail.
+		{launchgov.CheckAMLQuorum, "quorum_not_met" + launchgov.AMLPlatformScopeSuffix, "see_platform"},
+		{launchgov.CheckAMLQuorum, "ok" + launchgov.AMLPlatformScopeSuffix, "see_platform"},
 		{launchgov.CheckAMLMonitoring, "monitoring_not_implemented", "monitoring_not_implemented"},
 	} {
 		d := launchReadinessDTO{Environment: "production", Checks: []launchCheckDTO{{Code: c.code, Result: "fail", DetailCode: c.in}}}

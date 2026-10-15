@@ -483,9 +483,45 @@ func TestRecordScreeningInput_Validate_MirrorsTheChecks(t *testing.T) {
 		"zero screened time":      with(func(in *aml.RecordScreeningInput) { in.ScreenedAt = time.Time{} }),
 		"nil person":              with(func(in *aml.RecordScreeningInput) { in.PersonID = uuid.Nil }),
 		"unknown decision":        with(func(in *aml.RecordScreeningInput) { in.Decision = "freeze" }),
+		// SR7-2: all-value-movement belongs to a confirmed outcome or a sanctions-list match only.
+		"error with an all-value decision": with(func(in *aml.RecordScreeningInput) {
+			in.Outcome, in.ErrorCode, in.Decision, in.HoldReasonCode = aml.OutcomeError, aml.ErrCodeTimeout, aml.HoldAllValueMovement, "x"
+		}),
+		"pep-only potential match with an all-value decision": with(func(in *aml.RecordScreeningInput) {
+			in.Outcome, in.MatchLists, in.Decision, in.HoldReasonCode = aml.OutcomePotentialMatch, []aml.ListType{aml.ListPEP}, aml.HoldAllValueMovement, "x"
+		}),
+		"clear with an all-value decision": with(func(in *aml.RecordScreeningInput) { in.Decision, in.HoldReasonCode = aml.HoldAllValueMovement, "x" }),
 	} {
 		if err := in.Validate(); !errors.Is(err, aml.ErrInvalidInput) {
 			t.Errorf("%s: want ErrInvalidInput, got %v", name, err)
+		}
+	}
+}
+
+// SR7-2 / SR7-8: the hold class is derived strictly from the outcome and the list. Only a CONFIRMED outcome naming the sanctions
+// list yields the four-eyes class; a potential match (whatever the list), a PEP-only confirmed outcome, an error and a clear
+// are manual.
+func TestHoldReasonClassFor_OnlyAConfirmedSanctionsOutcomeIsTheFourEyesClass(t *testing.T) {
+	s, p := []aml.ListType{aml.ListSanctions}, []aml.ListType{aml.ListPEP}
+	both := []aml.ListType{aml.ListPEP, aml.ListSanctions}
+	for name, c := range map[string]struct {
+		o    aml.ScreeningOutcome
+		m    []aml.ListType
+		want aml.ReasonClass
+	}{
+		"confirmed sanctions":          {aml.OutcomeConfirmed, s, aml.ReasonConfirmedSanctions},
+		"confirmed sanctions and pep":  {aml.OutcomeConfirmed, both, aml.ReasonConfirmedSanctions},
+		"confirmed pep only":           {aml.OutcomeConfirmed, p, aml.ReasonManual},
+		"confirmed without a list":     {aml.OutcomeConfirmed, nil, aml.ReasonManual},
+		"potential sanctions":          {aml.OutcomePotentialMatch, s, aml.ReasonManual},
+		"potential pep":                {aml.OutcomePotentialMatch, p, aml.ReasonManual},
+		"error":                        {aml.OutcomeError, nil, aml.ReasonManual},
+		"error with a (bogus) match":   {aml.OutcomeError, s, aml.ReasonManual},
+		"clear":                        {aml.OutcomeClear, nil, aml.ReasonManual},
+		"unknown outcome with a match": {"approved", s, aml.ReasonManual},
+	} {
+		if got := aml.HoldReasonClassFor(c.o, c.m); got != c.want {
+			t.Errorf("%s: %s, want %s", name, got, c.want)
 		}
 	}
 }

@@ -20,10 +20,11 @@
 --      Back Office shows it read-only to tenants, ADR 0116 s6). It discloses no screening result.
 --   4. aml_screening_record (officer, proof-bound, idempotent per (tenant, key)): records a screening result and, in the SAME
 --      transaction, places the hold the outcome requires (ADR 0116 s4.3: a sanctions match gates all value movement, a PEP
---      match or an unavailable result gates withdrawal and payout). Screening-mandated holds do not wait for the officer
---      quorum (ADR 0116 s6: "holds placed automatically by screening still apply; they fail closed regardless"); a
---      sanctions-list hold is created with reason_class confirmed_sanctions so it can only be lifted by the proof-bound
---      four-eyes approval (it is a potential match, not a legal determination: the result row says potential_match).
+--      match or an unavailable result gates withdrawal and payout). SR7-2: the hold class is DERIVED from the outcome and the
+--      list: reason_class confirmed_sanctions (lifted only by the proof-bound four-eyes approval) ONLY for a CONFIRMED outcome
+--      naming the sanctions list; a potential match, a PEP-only match and an error are manual-class (a potential sanctions
+--      match keeps the all_value_movement SCOPE). Recording a hold needs the officer quorum of the owner scope; the ADR 0116 s6
+--      "automatic screening hold" exemption returns with the F1 system-actor path. SR7-7: replay compares a digest of every field.
 --   5. aml_screening_list (officer, proof-bound read) of a person's results.
 --   6. aml_readiness (S7): the session-tenant-bound readiness read used by internal/launchgov: owner scope, whether the officer
 --      quorum is met (a boolean, never the count or the officers) and how many of the referenced jurisdictions have an
@@ -95,6 +96,13 @@ CREATE TABLE aml_screening_results (
     screened_at            TIMESTAMPTZ NOT NULL,
     decision               TEXT NOT NULL CHECK (decision IN ('none', 'hold_withdrawal_and_payout', 'hold_all_value_movement')),
     hold_id                UUID NULL,
+    -- SR7-2 / SR7-8: the class of the hold this result placed, DERIVED strictly from the outcome and the list (never from the
+    -- caller's say-so): `confirmed_sanctions` (the four-eyes-lift class) ONLY for a CONFIRMED outcome that names the sanctions
+    -- list. A potential match, a PEP-only match and an error are `manual` (their SCOPE can still be all_value_movement for a
+    -- potential sanctions match). The word "confirmed" in the class name therefore always means a confirmed outcome.
+    hold_reason_class      TEXT NULL CHECK (hold_reason_class IN ('manual', 'confirmed_sanctions')),
+    -- SR7-7: the digest of the full proof payload (every input field). An idempotent replay must present the same digest.
+    payload_hash           TEXT NOT NULL CHECK (payload_hash ~ '^[0-9a-f]{64}$'),
     recorded_by            UUID NOT NULL,
     recorded_by_person_id  UUID NOT NULL,
     recorded_by_scope      TEXT NOT NULL CHECK (recorded_by_scope IN ('tenant', 'platform_acting')),
@@ -112,7 +120,13 @@ CREATE TABLE aml_screening_results (
     CHECK (outcome NOT IN ('potential_match', 'confirmed') OR (match_lists IS NOT NULL AND error_code IS NULL AND decision <> 'none')),
     CHECK (outcome <> 'confirmed' OR decision = 'hold_all_value_movement'),
     CHECK (NOT ('sanctions' = ANY (match_lists)) OR decision = 'hold_all_value_movement'),
-    CHECK ((decision = 'none') = (hold_id IS NULL))
+    CHECK ((decision = 'none') = (hold_id IS NULL)),
+    CHECK ((decision = 'none') = (hold_reason_class IS NULL)),
+    -- SR7-2: all-value-movement is the scope of a CONFIRMED outcome or of a sanctions-list match, and of nothing else (an error
+    -- or a PEP-only match is never recorded with it); the four-eyes class is exactly "confirmed outcome naming sanctions".
+    CHECK (decision <> 'hold_all_value_movement' OR outcome = 'confirmed' OR COALESCE('sanctions' = ANY (match_lists), false)),
+    CHECK (hold_reason_class IS NULL
+           OR ((hold_reason_class = 'confirmed_sanctions') = (outcome = 'confirmed' AND COALESCE('sanctions' = ANY (match_lists), false))))
 );
 CREATE INDEX aml_screening_results_person ON aml_screening_results (tenant_id, person_id, recorded_at DESC);
 
@@ -170,8 +184,10 @@ BEGIN
         RAISE EXCEPTION 'aml: the person has no account in this tenant' USING ERRCODE = 'AM007';
     END IF;
     IF NEW.hold_id IS NOT NULL AND NOT EXISTS (
-        SELECT 1 FROM public.aml_holds h WHERE h.id = NEW.hold_id AND h.tenant_id = NEW.tenant_id AND h.person_id = NEW.person_id) THEN
-        RAISE EXCEPTION 'aml: the named hold is not a hold of this person' USING ERRCODE = 'AM007';
+        SELECT 1 FROM public.aml_holds h WHERE h.id = NEW.hold_id AND h.tenant_id = NEW.tenant_id AND h.person_id = NEW.person_id
+           AND h.reason_class = NEW.hold_reason_class
+           AND h.hold_scope = CASE NEW.decision WHEN 'hold_all_value_movement' THEN 'all_value_movement' ELSE 'withdrawal_and_payout' END) THEN
+        RAISE EXCEPTION 'aml: the named hold is not a hold of this person with this class and scope' USING ERRCODE = 'AM007';
     END IF;
     SELECT * INTO v_actor FROM public.financial_actor_session();
     IF NEW.recorded_by IS DISTINCT FROM v_actor.actor OR NEW.recorded_by_scope IS DISTINCT FROM v_actor.scope
@@ -198,9 +214,11 @@ CREATE FUNCTION aml_screening_policy_set(
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
-    a       record;
-    v_id    uuid;
-    v_lists text;
+    a        record;
+    v_id     uuid;
+    v_lists  text;
+    v_tenant text;
+    v_cfg    boolean;
 BEGIN
     IF p_lists IS NULL OR cardinality(p_lists) NOT BETWEEN 1 AND 2 THEN
         RAISE EXCEPTION 'aml: a screening policy names one or two lists' USING ERRCODE = 'AM004';
@@ -213,6 +231,20 @@ BEGIN
         RAISE EXCEPTION 'aml: screening configuration is authored by a platform officer' USING ERRCODE = 'AM002';
     END IF;
     PERFORM public.aml_assert_quorum(p_tenant, public.aml_owner_scope_of_tenant(p_tenant));
+    -- SR7-3: the policy jurisdiction must be one the tenant is configured to operate in (an active tenant_jurisdiction_configs row);
+    -- a policy for a jurisdiction the tenant does not operate in is refused, not stored. tenant_jurisdiction_configs is FORCE RLS
+    -- bound to app.tenant_id (an acting session does not carry it), so the tenant setting is set and restored by hand around the
+    -- ONE read (the pattern of aml_readiness); the read can only reach rows of p_tenant, which aml_authorize already proved the
+    -- caller may act on.
+    v_tenant := pg_catalog.current_setting('app.tenant_id', true);
+    PERFORM pg_catalog.set_config('app.tenant_id', p_tenant::text, true);
+    SELECT EXISTS (SELECT 1 FROM public.tenant_jurisdiction_configs c
+                    WHERE c.tenant_id = p_tenant AND c.jurisdiction_id = p_jurisdiction
+                      AND (c.effective_to IS NULL OR c.effective_to > pg_catalog.clock_timestamp())) INTO v_cfg;
+    PERFORM pg_catalog.set_config('app.tenant_id', COALESCE(v_tenant, ''), true);
+    IF NOT v_cfg THEN
+        RAISE EXCEPTION 'aml: the tenant is not configured to operate in this jurisdiction' USING ERRCODE = 'AM004';
+    END IF;
     INSERT INTO public.aml_screening_policies (tenant_id, licensing_jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds,
                                                effective_from, legal_review_reference, reason_code, created_by, created_by_person_id, created_by_scope)
     VALUES (p_tenant, p_jurisdiction, p_lists, p_rescreen_seconds, p_grace_seconds, p_effective_from, p_legal_ref, p_reason_code,
@@ -263,13 +295,15 @@ DECLARE
     v_prior  record;
     v_hold   uuid;
     v_result uuid;
+    v_hash   text;
+    v_class  text;
 BEGIN
     SELECT string_agg(x, ',' ORDER BY x) INTO v_lists FROM unnest(p_lists) AS x;
     SELECT string_agg(x, ',' ORDER BY x) INTO v_match FROM unnest(p_match_lists) AS x;
-    SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_screening:record', 'new',
-        public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_person::text, p_idempotency_key, p_trigger, p_provider_id, p_provider_reference,
+    v_hash := public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_person::text, p_idempotency_key, p_trigger, p_provider_id, p_provider_reference,
             p_subject_ref, v_lists, p_outcome, v_match, p_error_code,
-            to_char(p_screened_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), p_decision, p_hold_reason_code)));
+            to_char(p_screened_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), p_decision, p_hold_reason_code));
+    SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_screening:record', 'new', v_hash);
     v_owner := public.aml_owner_scope_of_tenant(p_tenant);
     IF public.aml_actor_owner_scope(a.o_scope) IS DISTINCT FROM v_owner THEN
         RAISE EXCEPTION 'aml: the actor does not own this tenant''s AML scope' USING ERRCODE = 'AM002';
@@ -278,10 +312,11 @@ BEGIN
     PERFORM public.aml_person_lock(p_tenant, p_person);
     -- Idempotent replay: the same key with the same content returns the original result and places nothing; the same key with
     -- different content is refused (a key never silently re-binds).
-    SELECT r.id, r.person_id, r.outcome, r.decision, r.hold_id, r.subject_ref INTO v_prior
+    -- SR7-7: the comparison is over the digest of EVERY input field, not a subset.
+    SELECT r.id, r.hold_id, r.payload_hash INTO v_prior
       FROM public.aml_screening_results r WHERE r.tenant_id = p_tenant AND r.idempotency_key = p_idempotency_key;
     IF FOUND THEN
-        IF v_prior.person_id <> p_person OR v_prior.outcome <> p_outcome OR v_prior.decision <> p_decision OR v_prior.subject_ref <> p_subject_ref THEN
+        IF v_prior.payload_hash <> v_hash THEN
             RAISE EXCEPTION 'aml: the idempotency key was used with different content' USING ERRCODE = 'AM004';
         END IF;
         RETURN QUERY SELECT v_prior.id, v_prior.hold_id, true;
@@ -291,21 +326,31 @@ BEGIN
         IF p_hold_reason_code IS NULL OR p_hold_reason_code !~ '^[a-z0-9_]{1,64}$' THEN
             RAISE EXCEPTION 'aml: a hold decision needs a reason code' USING ERRCODE = 'AM004';
         END IF;
-        -- Screening-mandated hold: NO quorum assertion (it fails closed regardless). A sanctions-list hold can be lifted only by
-        -- the proof-bound four-eyes approval (class confirmed_sanctions); a PEP / unavailable hold is a plain manual-class hold.
+        -- SR7-2: the scope and the class are DERIVED from the outcome and the list, never taken from the caller. All-value-movement
+        -- belongs to a confirmed outcome or a sanctions-list match; the four-eyes class (confirmed_sanctions) to a CONFIRMED outcome
+        -- that names the sanctions list only. An error, a PEP-only match and a potential match are manual-class.
+        IF p_decision = 'hold_all_value_movement' AND NOT (p_outcome = 'confirmed' OR COALESCE('sanctions' = ANY (p_match_lists), false)) THEN
+            RAISE EXCEPTION 'aml: all-value-movement is the decision of a confirmed outcome or a sanctions-list match only' USING ERRCODE = 'AM004';
+        END IF;
+        v_class := CASE WHEN p_outcome = 'confirmed' AND COALESCE('sanctions' = ANY (p_match_lists), false) THEN 'confirmed_sanctions' ELSE 'manual' END;
+        -- SR7-2: a hold recorded through an officer needs the officer quorum of the owner scope (no single officer can place a
+        -- hold, in particular none of the four-eyes class, by recording a result). The ADR 0116 s6 exemption for holds placed by
+        -- the screening ORCHESTRATOR returns with the F1 system-actor path (a separate, non-officer principal); until then every
+        -- record is an officer-proved record, and the orchestrator's record is one of them.
+        PERFORM public.aml_assert_quorum(p_tenant, v_owner);
         INSERT INTO public.aml_holds (tenant_id, owner_scope, person_id, player_account_id, hold_scope, reason_class, reason_code,
                                       placed_by, placed_by_person_id, placed_by_scope)
         VALUES (p_tenant, v_owner, p_person, NULL,
                 CASE p_decision WHEN 'hold_all_value_movement' THEN 'all_value_movement' ELSE 'withdrawal_and_payout' END,
-                CASE p_decision WHEN 'hold_all_value_movement' THEN 'confirmed_sanctions' ELSE 'manual' END,
+                v_class,
                 p_hold_reason_code, a.o_actor, a.o_person_id, a.o_scope)
         RETURNING id INTO v_hold;
     END IF;
     INSERT INTO public.aml_screening_results (tenant_id, owner_scope, person_id, idempotency_key, trigger, provider_id, provider_reference,
                                               subject_ref, lists, outcome, match_lists, error_code, screened_at, decision, hold_id,
-                                              recorded_by, recorded_by_person_id, recorded_by_scope)
+                                              hold_reason_class, payload_hash, recorded_by, recorded_by_person_id, recorded_by_scope)
     VALUES (p_tenant, v_owner, p_person, p_idempotency_key, p_trigger, p_provider_id, p_provider_reference, p_subject_ref, p_lists,
-            p_outcome, p_match_lists, p_error_code, p_screened_at, p_decision, v_hold, a.o_actor, a.o_person_id, a.o_scope)
+            p_outcome, p_match_lists, p_error_code, p_screened_at, p_decision, v_hold, v_class, v_hash, a.o_actor, a.o_person_id, a.o_scope)
     RETURNING id INTO v_result;
     RETURN QUERY SELECT v_result, v_hold, false;
 END

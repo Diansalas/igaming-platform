@@ -332,6 +332,28 @@ func TestAMLHTTP_StepUpClasses(t *testing.T) {
 	}
 	seq = w.lastSeq(stale, cid.CaseID)
 
+	// SR7-1: a confirmed_sanctions hold (gates all value movement; lifted only by four-eyes) needs the fresh factor, a manual hold does not.
+	sanc := map[string]any{"person_id": person, "scope": "all_value_movement", "reason_class": "confirmed_sanctions", "reason_code": "stepup"}
+	if r := w.api.do("POST", w.base()+"/holds", stale, sanc); r.status != http.StatusForbidden || !strings.Contains(string(r.body), `"step_up_required"`) {
+		t.Errorf("sanctions hold with a stale factor: %d %s, want 403 step_up_required", r.status, r.body)
+	}
+	if hs := w.api.do("GET", w.base()+"/persons/"+person.String()+"/holds", fresh, nil); strings.Contains(string(hs.body), "confirmed_sanctions") {
+		t.Fatalf("a refused sanctions hold must write nothing: %s", hs.body)
+	}
+	if r := w.api.do("POST", w.base()+"/holds", fresh, sanc); r.status != http.StatusCreated {
+		t.Errorf("sanctions hold with a fresh factor: %d %s", r.status, r.body)
+	}
+	// SR7-5: closing as no action needs the fresh factor; moving to other states does not (the in_review move above passed).
+	if r := w.api.do("POST", w.base()+"/cases/"+cid.CaseID+"/transition", stale, map[string]any{"expected_seq": seq, "to": "closed_no_action", "reason_code": "stepup"}); r.status != http.StatusForbidden || !strings.Contains(string(r.body), `"step_up_required"`) {
+		t.Errorf("closed_no_action with a stale factor: %d %s, want 403 step_up_required", r.status, r.body)
+	}
+	if got := w.lastSeq(fresh, cid.CaseID); got != seq {
+		t.Fatalf("a refused closure must write nothing: last_seq %d, was %d", got, seq)
+	}
+	if r := w.api.do("POST", w.base()+"/cases/"+cid.CaseID+"/transition", fresh, map[string]any{"expected_seq": seq, "to": "closed_no_action", "reason_code": "stepup"}); r.status != http.StatusOK {
+		t.Errorf("closed_no_action with a fresh factor: %d %s", r.status, r.body)
+	}
+	seq = w.lastSeq(fresh, cid.CaseID)
 	// Critical routes refuse, with the step-up envelope, and write nothing.
 	for _, x := range []struct {
 		name, path string

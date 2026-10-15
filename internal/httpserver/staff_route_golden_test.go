@@ -15,17 +15,19 @@ var staffRouteGolden = map[string]string{
 	"GET /v1/admin/alerts/{alertID}":          "none",
 	"POST /v1/admin/alerts/{alertID}/ack":     "none",
 	"POST /v1/admin/alerts/{alertID}/resolve": "classifier:alertResolveClass",
-	// ADR 0116 s6 (A7, S6 minimal): the AML officer routes. Reads none. Placing a hold, opening a case, a transition, a
+	// ADR 0116 s6 (A7, S6 minimal; security SR7-1 / SR7-5): the AML officer routes. Place-hold is the classifier amlHoldPlaceClass
+	// (critical for a confirmed_sanctions hold, none for a manual one) and transition is amlTransitionClass (critical for
+	// closed_no_action). Reads none. Placing a hold, opening a case, a transition, a
 	// note and a SAR flag only tighten or record (protective, rule 8.1) so none. A hold LIFT loosens a control (8.1 (e)) and
 	// the proposal and approval halves of a four-eyes action are 8.1 (d): critical. The signer backstop
 	// (actorproof.StepUpOperations) pins exactly the same three operations. There is no reject route (the service has none).
 	"GET /v1/admin/tenants/{tenantID}/aml/cases":                                                  "none",
 	"GET /v1/admin/tenants/{tenantID}/aml/cases/{caseID}":                                         "none",
 	"GET /v1/admin/tenants/{tenantID}/aml/persons/{personID}/holds":                               "none",
-	"POST /v1/admin/tenants/{tenantID}/aml/holds":                                                 "none",
+	"POST /v1/admin/tenants/{tenantID}/aml/holds":                                                 "classifier:amlHoldPlaceClass",
 	"POST /v1/admin/tenants/{tenantID}/aml/holds/{holdID}/lift":                                   "critical",
 	"POST /v1/admin/tenants/{tenantID}/aml/cases":                                                 "none",
-	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/transition":                             "none",
+	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/transition":                             "classifier:amlTransitionClass",
 	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/notes":                                  "none",
 	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/sar-flag":                               "none",
 	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/proposals":                              "critical",

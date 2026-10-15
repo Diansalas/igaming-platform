@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -371,8 +373,22 @@ func TestAMLRoutes_StepUpClassMatchesSignerBackstop(t *testing.T) {
 			if !inRegistry || reg != stepup.Critical {
 				t.Errorf("%s: route class critical but %s is registered as %q (in registry %v)", pat, op, reg, inRegistry)
 			}
+		case "classifier:amlHoldPlaceClass", "classifier:amlTransitionClass":
+			// State-dependent classes (a confirmed_sanctions hold; a move to closed_no_action): the operation alone cannot say, so it is
+			// NOT in the signer registry (which is keyed by operation); the HTTP gate is the control, pinned by the classifier tests.
+			if inRegistry {
+				t.Errorf("%s: a classifier route's operation %s must not be in the operation-keyed registry", pat, op)
+			}
 		default:
 			t.Errorf("%s: unexpected class %q", pat, class)
+		}
+	}
+	for pat, want := range map[string]string{
+		"POST /v1/admin/tenants/{tenantID}/aml/holds":                     "classifier:amlHoldPlaceClass",
+		"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/transition": "classifier:amlTransitionClass",
+	} {
+		if staffRouteGolden[pat] != want {
+			t.Errorf("%s: class %q, want %q", pat, staffRouteGolden[pat], want)
 		}
 	}
 	if n != len(ops) || n != 11 {
@@ -517,5 +533,49 @@ func TestAMLRoutes_EachRouteHasItsPermission(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("%s guarded by %q, want %q", k, got[k], v)
 		}
+	}
+}
+
+// SR7-3 (HARD PRE-ROUTE CONDITION, pinned): aml.Service.SetScreeningPolicy is NOT exposed on any route, command or other
+// production caller yet. Policy authoring can LOOSEN screening (remove a list, lengthen the grace period, move effective_from
+// earlier) and has no four-eyes step at service level; any route that exposes it MUST be step-up CRITICAL and MUST add a
+// four-eyes (propose / approve) path for loosening BEFORE it is wired. This test fails the moment a production file outside
+// internal/aml references the method or the AMLOfficerAPI interface gains it; whoever wires the route must replace this pin
+// with the route's own class pin and the four-eyes test (docs/plans/a7-aml-record.md SR7-3).
+func TestSetScreeningPolicy_IsNotRoutedYet_SR7_3(t *testing.T) {
+	if _, ok := reflect.TypeOf((*AMLOfficerAPI)(nil)).Elem().MethodByName("SetScreeningPolicy"); ok {
+		t.Fatal("SR7-3: AMLOfficerAPI must not expose SetScreeningPolicy until the route is step-up critical with four-eyes for loosening")
+	}
+	var offenders []string
+	err := filepath.WalkDir("../..", func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", ".git", "aml", "backoffice", ".claude":
+				if d.Name() != "aml" || strings.HasSuffix(filepath.ToSlash(p), "internal/aml") {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(b), "SetScreeningPolicy") {
+			offenders = append(offenders, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offenders) != 0 {
+		t.Fatalf("SR7-3: SetScreeningPolicy is referenced outside internal/aml (a route needs step-up critical + four-eyes for loosening first): %v", offenders)
 	}
 }

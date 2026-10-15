@@ -1,10 +1,10 @@
 # AML confidentiality duty for manual-adjustment approvers (D-AML-TIP-1, option (c))
 
-Status: DRAFT OPERATING TEXT, written by engineering to implement the recorded recommendation for D-AML-TIP-1 (ADR 0116
-section 12.4: "(c) accept the visible signal, with a documented AML confidentiality duty for adjustment approvers, plus (a)
-later"). The wording is **not legal advice and not approved by counsel**; the owner and legal/compliance must approve or
-replace it before any `under_platform_licence` tenant is launched. Software capability only: nothing here is a regulatory
-approval.
+Status: **owner-approved duty (option c), legal wording pending (E-class).** The owner decided D-AML-TIP-1 on 2026-10-15: option (c)
+now (accept the visible signal, with a documented AML confidentiality duty for adjustment approvers), option (a) (a deliberately
+shared token) later; option (b) (generic `conflict` wording) stays as built. The duty is approved as a duty; the WORDING below was
+written by engineering, is **not legal advice and not approved by counsel**, and counsel must approve or replace it before any
+`under_platform_licence` tenant is launched. Software capability only: nothing here is a regulatory approval.
 
 ## Why this exists
 
@@ -53,8 +53,8 @@ puts the protection on people rather than on a hidden status code.
 | Item | Label |
 |---|---|
 | Generic `conflict` cover (F4 option (b)) | IMPLEMENTED (unchanged; reversible) |
-| Documented duty (this text) | DRAFT, pending owner/legal approval of the wording |
+| Documented duty (this text) | Owner-approved duty (option c, 2026-10-15); legal wording pending (E-class) |
 | Acknowledgement recording | NOT IMPLEMENTED (owner decision) |
 | In-product reminder | NOT IMPLEMENTED (needs security + ux-design) |
 | Option (a), shared token | NOT IMPLEMENTED (later) |
-| Owner approval of (c) | The register row D-AML-TIP-1 still reads OPEN at the time of writing; see `docs/plans/a7-aml-record.md` |
+| Owner decision | DECIDED 2026-10-15: (c) now, (a) later, (b) as built (the register row is updated by the orchestrator; see `docs/plans/a7-aml-record.md`) |

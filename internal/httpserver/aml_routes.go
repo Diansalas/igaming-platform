@@ -69,13 +69,13 @@ func registerAMLRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/aml/persons/{personID}/holds",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseRead)(amlHandler(deps, "hold_list", amlHoldList))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/aml/holds",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLHoldManage)(amlHandler(deps, "hold_place", amlHoldPlace))))
+		staffRoute(deps, stepUpByAMLHoldPlace, auth.RequirePermission(auth.PermAMLHoldManage)(amlHandler(deps, "hold_place", amlHoldPlace))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/aml/holds/{holdID}/lift",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAMLHoldManage)(amlHandler(deps, "hold_lift", amlHoldLift))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/aml/cases",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseWork)(amlHandler(deps, "case_open", amlCaseOpen))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/transition",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseWork)(amlHandler(deps, "case_transition", amlCaseTransition))))
+		staffRoute(deps, stepUpByAMLTransition, auth.RequirePermission(auth.PermAMLCaseWork)(amlHandler(deps, "case_transition", amlCaseTransition))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/notes",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseWork)(amlHandler(deps, "case_note", amlCaseNote))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/sar-flag",

@@ -1,7 +1,7 @@
 # A7 AML operability: implementation record and proposed registry text
 
 Status: IMPLEMENTATION RECORD of branch `a7-aml-operability` (base `f9a31e7`), `identity-compliance`, 2026-10-15. **Not merged, not pushed.
-`security` review (mandatory, live) PENDING.** Software capability only: nothing here is a regulatory approval, a licence statement or a
+`security` review (mandatory, live): CONDITIONAL (`docs/plans/prh2-hardening-round/a7-security-review.md`); the conditions were applied in round 2 (section 12), re-review pending.** Software capability only: nothing here is a regulatory approval, a licence statement or a
 filing capability. Every provider is a MOCK. This file proposes registry text; it does not edit the task registry, HANDOVER, progress,
 active-stage or the human decision register (the orchestrator applies what it accepts).
 
@@ -53,9 +53,10 @@ tenant/actor. Responses are `Cache-Control: no-store`; error bodies are fixed se
 | Route | Permission | Step-up | Why |
 |---|---|---|---|
 | GET `aml/cases`, GET `aml/cases/{caseID}`, GET `aml/persons/{personID}/holds` | `aml_case:read` | none | reads |
-| POST `aml/holds` | `aml_hold:manage` | none | protective (it only restricts) |
+| POST `aml/holds` | `aml_hold:manage` | **classifier `amlHoldPlaceClass`**: none for `reason_class = manual`, critical for `confirmed_sanctions` (and for anything unknown or malformed) | SR7-1: a `confirmed_sanctions` hold freezes all value movement and lifts only by four-eyes |
 | POST `aml/holds/{holdID}/lift` | `aml_hold:manage` | critical | loosens a control (8.1 (e)) |
-| POST `aml/cases`, `.../transition`, `.../notes`, `.../sar-flag` | `aml_case:work` | none | record or restrict only |
+| POST `aml/cases`, `.../notes`, `.../sar-flag` | `aml_case:work` | none | record or restrict only |
+| POST `.../transition` | `aml_case:work` | **classifier `amlTransitionClass`**: critical for `closed_no_action` (and unknown / malformed), none for `in_review`, `escalated`, `sar_decision_pending` | SR7-5: closing without action is not undoable |
 | POST `.../proposals` | `aml_case:work` | critical | initiates a four-eyes action (8.1 (d)) |
 | POST `.../approvals` | `aml_case:close_approve` | critical | approves a four-eyes action (8.1 (d)) |
 
@@ -65,8 +66,8 @@ test pins each route's class against the registry.
 ## 4. Design points to review (also ADR 0116 section 13)
 
 1. Outcome vocabulary `clear | potential_match | confirmed | error` (ADR text: `unavailable`); `confirmed` is vendor-reported, we hold, we do not determine.
-2. Sanctions-list holds (even for a `potential_match`) use `reason_class = confirmed_sanctions` so they gate all value movement and lift only by the proof-bound four-eyes approval; PEP-only and unavailable-result holds are `manual` / withdrawal+payout.
-3. Screening-mandated holds do not wait for the officer quorum (ADR 0116 s6); manual holds still do.
+2. **(REVISED in round 2, SR7-2 / SR7-8)** `reason_class = confirmed_sanctions` (all value movement, four-eyes lift) only for a CONFIRMED outcome naming the sanctions list; a potential sanctions match is `manual` class with the all-value SCOPE; PEP-only and unavailable-result holds are `manual` / withdrawal+payout.
+3. **(REVISED in round 2, SR7-2)** Recording a result that places a hold needs the officer quorum, like a manual hold (the ADR 0116 s6 exemption returns with the F1 system-actor path).
 4. A match acts with or without a policy; the policy governs lists and the "no completed result" rule (C1).
 5. Ambiguity resolves to the stricter reading (a match naming no list is a match on every requested list; any inconsistent, unknown, panicking or timed-out provider answer is an `error`, never a clear).
 6. `aml_readiness` counts grants under a placeholder `app.principal_id` set and restored around one count (FORCE-RLS grant tables admit only principal-bound sessions; launch readiness is a plain tenant read run for a tenant by platform staff). Boolean output only.
@@ -84,6 +85,10 @@ test pins each route's class against the registry.
 - **F7 In-product adjustment-approver reminder** (D-AML-TIP-1 (c)) needs `security` + `ux-design` wording sign-off.
 
 ## 6. D-AML-TIP-1
+
+**UPDATE 2026-10-15 (round 2): DECIDED by the owner: option (c) now, option (a) later, (b) generic conflict wording stays as built.** The
+text below is the round-1 question, kept for history. The runbook status now reads "owner-approved duty (option c), legal wording pending
+(E-class)"; ADR 0116 12.4 / 13 say DECIDED (c). No code change. The register row is the orchestrator's to update (proposed text in section 9).
 
 The brief says to implement the "owner-approved option (c) as recorded". What is recorded: ADR 0116 12.4 and the decision register row
 D-AML-TIP-1 say **OPEN**, "(b) as built is a reversible orchestrator default, NOT owner-approved. Recommended: (c) with a documented AML
@@ -120,9 +125,10 @@ See the final report of the run; the exact commands and results are copied into 
 - New open rows: `AML-SCREEN-TRIGGERS-1` (F1), `AML-SCREEN-GATES-1` (F2), `AML-CONFIG-ROUTES-1` (F3), `AML-REJECT-PROPOSAL-1` (F4), `AML-LAUNCH-CRITERION-1` (Q1 blocking), `AML-TIP-REMINDER-1` (F7).
 - Migrations: 0154 used; 0155 unused (add to the reserved list with 0152/0153 if those are also unused).
 
-**human-decision-register D-AML-TIP-1:** keep OPEN until the owner confirms. Proposed text: "Engineering has implemented option (c)'s documented duty
-(`docs/runbooks/aml-adjustment-approver-confidentiality.md`, DRAFT wording) and kept the generic cover (b) unchanged. Owner/legal still to: approve (c), approve the wording, decide where the
-acknowledgement is recorded, and decide whether to add (a) later. Launch-blocking for `under_platform_licence` tenants whose finance staff approve adjustments."
+**human-decision-register D-AML-TIP-1 (round 2 text; supersedes the round-1 "keep OPEN"):** DECIDED 2026-10-15 by the owner: (c) now (accept the visible signal,
+documented AML confidentiality duty for adjustment approvers), (a) later, (b) generic conflict wording as built. Engineering has the duty text in
+`docs/runbooks/aml-adjustment-approver-confidentiality.md` ("owner-approved duty (option c), legal wording pending (E-class)"). Still open: legal approval of the
+wording (E-class), where the acknowledgement is recorded, and the in-product reminder (F7). Launch-blocking for `under_platform_licence` tenants whose finance staff approve adjustments until the wording is approved.
 
 **HD-AML-1 (launch gating):** engineering now shows R-AML-QUORUM / R-AML-SCREENING / R-AML-MONITORING in the readiness panel; monitoring is a standing failing item; enforcement of Q1 (blocking) is not built.
 
@@ -141,7 +147,7 @@ acknowledgement is recorded, and decide whether to add (a) later. Launch-blockin
 | migration 0154 up / down / up whole-schema snapshot, pre-flight AM098, down refusal AM099 | PASS (`internal/aml/migration_0154_integration_test.go`) |
 | `go run ./cmd/migrate verify` on the migrated private DB | FAILS only with `GAP 152, 153` (those numbers are other work's; `0155` is unused). Add them to `reservedUnusedVersions` at merge as appropriate |
 
-Environment-dependent, not caused by this branch: `TestEligibility_PlatformOfficers_SuspendedOrDemotedAreNoOfficersAndNoQuorum` and `TestEligibility_SanctionsLiftNeedsTwoLiveOfficers` fail on a FRESH database with `SF020` (the last enrolled platform admin cannot be suspended) and pass once any other enrolled platform admin exists (hosted CI's shared database has them; any httpserver staff-token test creates one). Observed here by running them alone, then after `TestAMLHTTP_OfficerFlow`.
+(ROUND 2: FIXED in the test fixture, see 12.3; the text below is the round-1 observation.) Environment-dependent, not caused by this branch: `TestEligibility_PlatformOfficers_SuspendedOrDemotedAreNoOfficersAndNoQuorum` and `TestEligibility_SanctionsLiftNeedsTwoLiveOfficers` fail on a FRESH database with `SF020` (the last enrolled platform admin cannot be suspended) and pass once any other enrolled platform admin exists (hosted CI's shared database has them; any httpserver staff-token test creates one). Observed here by running them alone, then after `TestAMLHTTP_OfficerFlow`.
 
 ### Mutation pass (kill or justify; harness files in the session scratchpad, not committed)
 
@@ -155,8 +161,67 @@ Environment-dependent, not caused by this branch: `TestEligibility_PlatformOffic
 1. **Route layer:** a `compliance` token WITHOUT an `aml_officer` grant on every route (expect 403, nothing written); a tenant-A token naming tenant B in the path (404 everywhere, including the platform-owned case ids); a platform token with no acting grant for the named tenant; a token with `role` altered or `tenant_id` forged; a body or query carrying `tenant_id` / `actor_id` (must be 400); replay of the same propose / approve (CAS and single-use proof); `?tenant=` on the Back Office case link for a tenant officer (ignored: claims win).
 2. **Step-up:** lift, propose, approve with a 6-minute-old second factor (403 `step_up_required`, nothing written); place hold / transition / note / flag with the same token (allowed by design: protective). Probe whether a hold placement should be critical (a compromised officer session can freeze players; no `aml.hold_placement_rate` alert exists).
 3. **`aml_readiness`:** the placeholder `app.principal_id` set/restore; call it from a plain tenant session with a forged `app.tenant_id`, an acting session and a read-only transaction; try to make it return another tenant's data or the officer count; check the restore on the error path.
-4. **`aml_screening_record`:** no quorum by design (confirm this reading of ADR 0116 s6); an officer screening a person of ANOTHER owner scope / tenant; idempotency-key reuse across tenants and with changed content; a recorded `clear` for a person never sent to a provider (results are OFFICER-ATTESTED today; nothing consumes them, but F1/F2 would); the `confirmed_sanctions` class on a `potential_match`; hold placed with `player_account_id` NULL for a person with several accounts.
+4. **`aml_screening_record`:** (round 2: the quorum is now required for a hold-placing record, class derived strictly, see 12); an officer screening a person of ANOTHER owner scope / tenant; idempotency-key reuse across tenants and with changed content; a recorded `clear` for a person never sent to a provider (results are OFFICER-ATTESTED today; nothing consumes them, but F1/F2 would); the `confirmed_sanctions` class on a `potential_match`; hold placed with `player_account_id` NULL for a person with several accounts.
 5. **Tipping-off:** error bodies and logs (no person, case, hold or match text); `Cache-Control`; no `audit_log` row (a test pins this); staff-identity redaction of actors and note authors for tenant viewers; the readiness coarsening of provider-derived details; the generic `conflict` cover (D-AML-TIP-1) is unchanged but its deterministic signal and timing difference remain.
 6. **Definer-only posture:** the catalogue tests cover the two new tables and five functions (runtime has no table privilege; one owner-only policy; append-only triggers; search_path pinned). Confirm `deploy/init-app-role.sql` re-assertion and that no GUC grants anything (the policy-table read is proof-less by design: tenants may read their policy, never a result).
+
+## 12. Round 2: security review conditions (verdict CONDITIONAL, `docs/plans/prh2-hardening-round/a7-security-review.md`) and D-AML-TIP-1 decided
+
+Software capability only; every provider is still a MOCK. Migration 0154 was edited IN PLACE (it is merged nowhere); `0155` stays unused.
+
+### 12.1 Disposition of each finding
+
+| Finding | Disposition | Label |
+|---|---|---|
+| **SR7-1 (MUST)** hold placement step-up | State-dependent classifier `amlHoldPlaceClass`: `reason_class = manual` is `none`, `confirmed_sanctions` is `critical`; anything unknown, missing, malformed, unreadable or with an unknown field is `critical` (body read via `bufferedBody` + `decodeLikeHandler`: duplicate keys last-wins, case-folded keys). Pinned: golden row, static route test, classifier tables, a read-error test, OpenAPI text, and an integration test with an 8-minute-old second factor (sanctions hold: 403 `step_up_required`, nothing written; manual hold allowed; fresh factor: 201). Files: `internal/httpserver/staff_stepup.go`, `aml_routes.go`, `staff_route_golden_test.go`, `aml_routes_integration_test.go`. | IMPLEMENTED |
+| **F4 `aml.hold_placement_rate` alert** | NOT built. **PRE-LAUNCH CONDITION (recorded):** a compromised officer session with a fresh second factor can still place `manual` holds with no alert. The alert (and alert delivery, ALERT-DELIVERY-1) must exist before any `under_platform_licence` tenant launches. Proposed row `AML-HOLD-RATE-ALERT-1`. | NOT IMPLEMENTED |
+| **SR7-2** class derivation and quorum | `aml_screening_record` derives the class STRICTLY: `confirmed_sanctions` only for a `confirmed` outcome that names the sanctions list; a potential match, a PEP-only match, an error and a confirmed outcome naming only PEP are `manual`. A potential sanctions match keeps the all-value SCOPE (manual class). Decision `hold_all_value_movement` is refused (AM004) unless the outcome is confirmed or the sanctions list matched. New `aml_screening_results` column `hold_reason_class` and CHECKs (all-value only for confirmed-or-sanctions; the class equals "confirmed AND sanctions"); the results guard also checks the named hold's class AND scope. Mirrored in `RecordScreeningInput.Validate` and `HoldReasonClassFor`. Recording any result that places a hold needs the officer quorum. Repro tests: single officer, outcome `error` + all-value decision; PEP-only potential match + all-value decision; a clear + all-value decision (database function and CHECK, presented past `Validate` through a test-only seam `export_test.go`). | IMPLEMENTED |
+| **SR7-8** naming | Not renamed (`confirmed_sanctions` is a merged 0141 value). Documented in the migration, ADR 0116 section 13 point 2 and here: the class name now always means a confirmed outcome. | IMPLEMENTED (documented) |
+| **SR7-3** policy jurisdiction, loosening | (a) `aml_screening_policy_set` refuses a jurisdiction for which the tenant has no ACTIVE `tenant_jurisdiction_configs` row (never configured, ended, or another tenant's): AM004. That table is FORCE RLS on `app.tenant_id`, which an acting session does not carry, so the function sets and restores it around the ONE read (the `aml_readiness` pattern). (b) Four-eyes for loosening is NOT built: **HARD PRE-ROUTE CONDITION:** any route exposing `SetScreeningPolicy` MUST be step-up `critical` AND must first add propose/approve for loosening (remove a list, longer grace, earlier `effective_from`). Pinned by `TestSetScreeningPolicy_IsNotRoutedYet_SR7_3` (fails if a production file outside `internal/aml` references the method, or `AMLOfficerAPI` gains it). | (a) IMPLEMENTED; (b) NOT IMPLEMENTED, pinned |
+| **SR7-5** close-without-action step-up | State-dependent classifier `amlTransitionClass`: `closed_no_action` (and unknown, missing, malformed) `critical`; `in_review`, `escalated`, `sar_decision_pending` `none`. Pinned like SR7-1 (integration: stale factor 403, fresh factor 200). | IMPLEMENTED |
+| **SR7-6** quorum detail for tenant viewers | For a PLATFORM-owned scope `R-AML-QUORUM` carries `ok_platform_scope` / `quorum_not_met_platform_scope`; `coarsenForTenant` maps those to `see_platform`. The RESULT (pass/fail) is unchanged so a tenant can still request: RESIDUAL, the pass/fail flip itself stays visible to a tenant viewer (hiding it would change the acknowledged set). A tenant-owned scope's quorum stays readable to that tenant. | IMPLEMENTED (detail code only) |
+| **SR7-7** replay compares everything | `payload_hash` (digest of the full proof payload) is stored and compared on replay, so trigger, provider, provider reference, lists, match lists, error code, screened time, hold reason code, person, outcome, decision and pseudonym are all compared. Tests vary each field alone. | IMPLEMENTED |
+| **SR7-4** reject operation and proposal-invalidation alert | Recorded follow-up (extends `AML-REJECT-PROPOSAL-1`, section 5 F4): a new event type in 0142's state machine plus an alert when a proposal is invalidated by a hold change. Not trivial. | NOT IMPLEMENTED |
+| **SR7-9** | Skipped by instruction. | |
+
+### 12.2 Deviation to confirm
+
+The review asked for the quorum on officer-attested records ("`manual` trigger"). The `trigger` column is caller-supplied and every record is officer-proved today, so a trigger test would be bypassed by passing `scheduled`. The quorum is required for EVERY record that places a hold (a clear places none and needs none). Consequences: the ADR 0116 section 6 "automatic screening holds fail closed regardless" is unavailable until the F1 system-actor path exists; with a single officer the orchestrator now reports `NotEnforcedError` (retry), never "recorded". For the owner: a potential-sanctions hold is `manual` class, so one officer can lift it (the lift is still `critical` step-up and audited).
+
+### 12.3 Test isolation fix
+
+`TestEligibility_PlatformOfficers_SuspendedOrDemotedAreNoOfficersAndNoQuorum` and `TestEligibility_SanctionsLiftNeedsTwoLiveOfficers` failed on a FRESH database with SF020 (the last enrolled platform admin). `caseWorld.setStaff`'s platform branch now calls `staffsv.PlantEnrolledPlatformAdmin(ctx, tx)` before the UPDATE. Verified on a database rebuilt from scratch with `internal/aml` run ALONE: PASS.
+
+### 12.4 Changed assertions in round 2 (none deleted; every one is listed)
+
+- `TestScreening_HoldIsNotBlockedByAMissingQuorum` (asserted: a screening match holds WITHOUT a quorum) is REPLACED by `TestScreening_HoldNeedsTheOfficerQuorum`, which asserts the opposite (NotEnforced and nothing stored without a quorum; a clear needs none; with a quorum it holds). This is the SR7-2 policy change, not a weakening.
+- `TestScreening_EndToEnd_OutcomesPlaceTheRequiredHolds`: "a sanctions-list POTENTIAL match cannot be lifted by a single officer" is changed to "a potential sanctions match is manual class with the all-value scope and one officer can lift it"; the old assertion moves to the CONFIRMED outcome ("a confirmed-sanctions hold cannot be lifted by a single officer", plus the class check).
+- `TestScreening_Replay_EveryFieldIsCompared`: `ScreenedAt` is now fixed (it was `time.Now()` per call, which the full-field replay rightly refuses); added single-field variants for trigger, provider id, provider reference, requested lists, screened time, hold reason code, match lists, error code.
+- `TestScreeningResults_ChecksFailClosedInTheDatabase`: fixture INSERTs gain `hold_reason_class` / `payload_hash`; added negative cases (error or PEP-only under the all-value scope, six forged-class cases, short and uppercase digest) and lawful controls. The case "a list outside the vocabulary" for MATCH lists was renamed and moved to the withdrawal scope so that no other CHECK can refuse it (it stopped isolating its constraint once the new all-value CHECK existed; found by the CHECK mutation pass).
+- `TestScreening_Guards_AreIndependentOfTheDefinerFunctions`: fixture columns; added class and scope mismatch cases (AM007).
+- Fixtures: `amlWorld.jurisdiction()` now also inserts the tenant's `tenant_jurisdiction_configs` row (SR7-3), as does the migration 0154 down test. `internal/launchgov/readiness_aml_integration_test.go`: the platform-owned tenant's quorum detail is `quorum_not_met_platform_scope` (was `quorum_not_met`).
+- Step-up pins: golden rows for place-hold and transition changed from `none` to `classifier:amlHoldPlaceClass` / `classifier:amlTransitionClass`; the static test's classifier names 5 to 7; the parity count 5 to 7; the integration coverage pin `none` mutating 44 to 42 plus one route in each classifier bucket (critical stays 62); `aml_routes_test.go` accepts the two classifier classes and requires their operations to be absent from the operation-keyed registry.
+- OpenAPI: the "Step-up class: none" text of place-hold and transition is replaced by the classifier descriptions.
+- Docs: the runbook status and ADR 0116 12.4 / 13 say D-AML-TIP-1 is DECIDED (c); ADR 13 points 2, 3, 7 are revised as above.
+
+### 12.5 Verification, round 2 (private database rebuilt from this worktree; `-tags integration -count=1`)
+
+| Command | Result |
+|---|---|
+| fresh DB rebuild, then `internal/aml` ALONE | PASS (including the two Eligibility tests that failed with SF020 before) |
+| `internal/aml` with `-race` | PASS |
+| `internal/launchgov`, `internal/actorproof`, `internal/auth`, `internal/db` (migration pins) | PASS |
+| `internal/kyc`, `internal/tenant`, `internal/config`, `internal/alerting/...`, `internal/adjustment`, `cmd/...` (before the last test-only edits) | PASS |
+| `internal/httpserver -run 'StaffRoute\|Golden\|OpenAPI\|AML\|Aml\|Launch\|StaffIdentity\|StepUp\|StaffLiveness\|F4\|ManualAdjustment\|SetScreeningPolicy\|Coarsen\|Classifier'` | PASS (the full httpserver and payments packages were NOT run, per the brief) |
+| `go test ./... -count=1` (unit) | PASS, 62 packages ok |
+| `gofmt -l`, `go vet ./...`, `go vet -tags integration ./...`, `golangci-lint run ./...` (2.9.0) | clean / PASS / PASS / 0 issues |
+| `backoffice`: `npx vitest run`, `npm run build` | 37 files, 431 tests PASS / build OK (one `AlertsPage` test timed out once while Go suites ran concurrently and passed alone and on the rerun) |
+
+### 12.6 Mutation pass for the new logic
+
+- **Go: 22 mutants, 22 KILLED:** the two classifiers (manual vs sanctions, unreadable, malformed, unknown target, each transition target, route wiring), `HoldReasonClassFor` (3), the `Validate` all-value rule (2), quorum scope tagging (2), coarsening (2). One real gap found and closed: a body that fails mid-read after delivering a lawful prefix (`TestAMLClassifiers_ReadErrorIsTheCeiling`). One harness run was disturbed by a full disk (repeated after `go clean -cache`).
+- **SQL functions and guards: 15 mutants, 14 KILLED, 1 EQUIVALENT:** `aml_screening_policy_set` without the `tenant_id = p_tenant` predicate on the configuration read; `tenant_jurisdiction_configs` is FORCE RLS on `app.tenant_id`, which the function sets to `p_tenant`, so the row policy is the same predicate (defence in depth, not a second observable). One genuine survivor (the guard's hold-class check) was killed by a new case (a manual all-value hold behind a confirmed-sanctions result: the scope matches, the class does not).
+- **CHECKs: 31 of 31 killed** (results and policies; two needed test strengthening: the match-list vocabulary case and a payload-digest shape case).
+- The SR7-3 pin was mutation-checked by planting a production file that references `SetScreeningPolicy` (the test fails) and removing it (the test passes).
 7. **Mock labelling:** `MockScreeningProvider` / `MockSubjectKeys` are `Synthetic`; the former is registered under `aml/screening_provider` so production startup is refused while it is wired; `MockSubjectKeys` is wired nowhere (the orchestrator is unwired); confirm no production code path constructs the orchestrator.
 8. **Back Office:** note bodies rendered as text; no server message rendered; the proposal an approver sees is the server's last event with its server content hash (never typed); an approver cannot approve their own proposal in the UI (the server also refuses).

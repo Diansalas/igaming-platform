@@ -8110,7 +8110,7 @@ paths:
       summary: Place an AML hold on a person (officer)
       description: >
         aml_hold:manage. Protective (it only restricts), so no step-up. Needs the officer quorum of the tenant's owner
-        scope (409 quorum_not_met). Not idempotent: two calls place two holds. Step-up class: none. Staff principals
+        scope (409 quorum_not_met). Not idempotent: two calls place two holds. Step-up class: classifier amlHoldPlaceClass (ADR 0116 A7, SR7-1): critical when reason_class is confirmed_sanctions (an irreversible-by-one-person hold on all value movement; a stale second factor gets 403 step_up_required and nothing is written), none for a manual hold. Staff principals
         only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database; screening and monitoring inputs are
         MOCK or NOT IMPLEMENTED; software capability only, not a regulatory approval. The permission is only the static
         route gate: the authority is the caller's in-force aml_officer capability grant, a signed actor proof and the
@@ -8204,7 +8204,7 @@ paths:
       summary: Move an AML case along the plain state machine (officer)
       description: >
         aml_case:work. SAR closures are not reachable here (propose / approve). expected_seq is the case's last_seq as
-        the caller read it; a case that moved on is 409 stale. Step-up class: none. Staff principals only. ADR 0116 (A7,
+        the caller read it; a case that moved on is 409 stale. Step-up class: classifier amlTransitionClass (SR7-5): critical for to=closed_no_action (it loosens a regulatory control), none for every other move. Staff principals only. ADR 0116 (A7,
         S6 minimal): IMPLEMENTED against the local database; screening and monitoring inputs are MOCK or NOT
         IMPLEMENTED; software capability only, not a regulatory approval. The permission is only the static route gate:
         the authority is the caller's in-force aml_officer capability grant, a signed actor proof and the officer

@@ -113,6 +113,13 @@ func TestMigration0154Down_RefusesWhileScreeningHistoryExists(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := pool.WithTenant(ctx, tenant, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, effective_from)
+			VALUES ($1, $2, 'k', 'a', 'r', now() - interval '1 hour')`, tenant, jid)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
 	q := amlfix.Bootstrap(t, pool, tenant, 2)
 	svc := amlfix.Service(t, pool)
 	refused := func(what string) {

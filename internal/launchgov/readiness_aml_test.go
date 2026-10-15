@@ -64,6 +64,22 @@ func TestAMLChecks_Quorum(t *testing.T) {
 			t.Errorf("quorum met=%v: %+v", c.met, got)
 		}
 	}
+	// SR7-6: a PLATFORM-owned scope carries the scope in the detail code (so a tenant viewer can be shown see_platform); the
+	// RESULT is unchanged, and a tenant-owned scope keeps the plain codes.
+	for _, c := range []struct {
+		scope  string
+		met    bool
+		result string
+		detail string
+	}{
+		{"platform", true, ResultPass, "ok_platform_scope"}, {"platform", false, ResultFail, "quorum_not_met_platform_scope"},
+		{"tenant", true, ResultPass, "ok"}, {"tenant", false, ResultFail, "quorum_not_met"},
+	} {
+		got := byCode(amlChecksFrom(amlData{OwnerScope: c.scope, QuorumMet: c.met, Total: 1, WithPolicy: 1}, nil, 1, reg(eligibleScreening{}), "production"))[CheckAMLQuorum]
+		if got.Result != c.result || got.DetailCode != c.detail {
+			t.Errorf("scope %s met=%v: %+v", c.scope, c.met, got)
+		}
+	}
 	// A read failure is never a pass.
 	got := byCode(amlChecksFrom(amlData{QuorumMet: true}, errors.New("boom"), 1, reg(eligibleScreening{}), "test"))
 	if got[CheckAMLQuorum].Result != ResultNotEvaluable || got[CheckAMLScreening].Result != ResultNotEvaluable {

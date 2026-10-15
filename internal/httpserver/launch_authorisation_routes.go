@@ -750,6 +750,12 @@ func coarsenForTenant(d *launchReadinessDTO) {
 		switch d.Checks[i].Code {
 		case launchgov.CheckProviderTier, launchgov.CheckAlerts:
 			d.Checks[i].DetailCode = "see_platform"
+		case launchgov.CheckAMLQuorum:
+			// SR7-6: the platform officer quorum of a platform-licensed tenant is platform process detail (a weak "platform AML is
+			// active on you" signal); a tenant-owned scope's quorum stays readable to that tenant.
+			if strings.HasSuffix(d.Checks[i].DetailCode, launchgov.AMLPlatformScopeSuffix) {
+				d.Checks[i].DetailCode = "see_platform"
+			}
 		case launchgov.CheckAMLScreening:
 			// ADR 0116 A7: the provider half of this check describes the PROCESS; the tenant-visible half (the policy per
 			// jurisdiction) stays readable.

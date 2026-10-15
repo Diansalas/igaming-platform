@@ -520,6 +520,9 @@ func (s *Service) amlChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []Chec
 	return amlChecksFrom(d, err, len(in.JurisdictionIDs), s.cfg.Components, s.cfg.Environment)
 }
 
+// AMLPlatformScopeSuffix is appended to the R-AML-QUORUM detail codes when the tenant's AML owner scope is the platform.
+const AMLPlatformScopeSuffix = "_platform_scope"
+
 // The registration the screening check looks for in the process component list (the same list the synthetic-component
 // startup guard checked).
 const (
@@ -541,10 +544,16 @@ func amlChecksFrom(d amlData, readErr error, referenced int, comps []providerkin
 	if readErr != nil {
 		return append(out, ck(CheckAMLQuorum, ResultNotEvaluable, "read_error"), ck(CheckAMLScreening, ResultNotEvaluable, "read_error"))
 	}
+	// SR7-6: for a PLATFORM-owned scope the detail code carries the scope (a tenant-scoped viewer is shown "see_platform" for it,
+	// see httpserver coarsenForTenant: the platform officer quorum is platform process detail, not the tenant's).
+	suffix := ""
+	if d.OwnerScope == "platform" {
+		suffix = AMLPlatformScopeSuffix
+	}
 	if d.QuorumMet {
-		out = append(out, ck(CheckAMLQuorum, ResultPass, "ok"))
+		out = append(out, ck(CheckAMLQuorum, ResultPass, "ok"+suffix))
 	} else {
-		out = append(out, ck(CheckAMLQuorum, ResultFail, "quorum_not_met"))
+		out = append(out, ck(CheckAMLQuorum, ResultFail, "quorum_not_met"+suffix))
 	}
 	return append(out, amlScreeningCheck(d, referenced, comps, env))
 }

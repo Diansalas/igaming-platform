@@ -73,7 +73,7 @@ func TestReadiness_AML_FollowsQuorumPolicyAndProvider(t *testing.T) {
 
 	// Nothing configured: quorum fails, screening fails (no policy), monitoring fails.
 	m := eval("test", comps)
-	if m[launchgov.CheckAMLQuorum].DetailCode != "quorum_not_met" || m[launchgov.CheckAMLScreening].DetailCode != "policy_missing_for_jurisdiction" ||
+	if m[launchgov.CheckAMLQuorum].DetailCode != "quorum_not_met"+launchgov.AMLPlatformScopeSuffix || m[launchgov.CheckAMLScreening].DetailCode != "policy_missing_for_jurisdiction" ||
 		m[launchgov.CheckAMLMonitoring].Result != launchgov.ResultFail {
 		t.Fatalf("unconfigured: %+v", m)
 	}

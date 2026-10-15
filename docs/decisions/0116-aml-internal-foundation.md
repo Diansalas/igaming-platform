@@ -728,6 +728,8 @@ coupling, not one slice: the work was done together on one branch because a hold
   adjustments** (register row D-AML-TIP-1, non-blocking for engineering): choose (a) one deliberately shared token also produced by
   genuine non-AML causes, (b) as built, or (c) accept the visible signal. Recommended answer: **(c)** with a documented AML
   confidentiality duty for adjustment approvers, plus (a) later. Until decided, option (b) stays as the reversible orchestrator default.
+  **DECIDED by the owner on 2026-10-15: option (c) now, option (a) later; (b) (the generic `conflict` wording) stays as built.** The
+  legal wording of the duty (`docs/runbooks/aml-adjustment-approver-confidentiality.md`) is still pending counsel (E-class). No code change.
   Tests: `TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict` (byte-identical status / headers / body and
   audit shape, submission and execution; it does NOT assert the state/approval-row or timing signal) and `TestAMLHold_*` in
   `internal/adjustment`.
@@ -818,7 +820,7 @@ cadence (4-hour bound) as an operations task; whether `review` rows should keep 
 
 ## 13. Implementation record: A7 AML operability (2026-10-15, `identity-compliance`)
 
-Branch `a7-aml-operability`, **not merged, not pushed, security review PENDING**. Software capability only: nothing here is a
+Branch `a7-aml-operability`, **not merged, not pushed; security review CONDITIONAL (2026-10-15), conditions applied in round 2 (below) and awaiting re-review**. Software capability only: nothing here is a
 regulatory approval, a filing capability, or a statement that any licence condition is met. Every provider is a MOCK. The full
 record, the changed assertions, the mutation results and the proposed registry rows are in `docs/plans/a7-aml-record.md`.
 
@@ -840,12 +842,22 @@ record, the changed assertions, the mutation results and the proposed registry r
 1. **Outcome vocabulary.** The ADR lists `clear | potential_match | unavailable`. The built vocabulary is `clear | potential_match |
    confirmed | error` (A7 task); `error` is the ADR's `unavailable` with a closed `error_code`. `confirmed` is a vendor-reported
    outcome: this system records it and holds; it makes no legal determination.
-2. **Sanctions-list holds use `reason_class = confirmed_sanctions`** even for a `potential_match`, because that class is the one
-   that gates all value movement and can be lifted only by the proof-bound four-eyes approval (ADR 0116 D6: a sanctions-hold lift is
-   four-eyes). The result row says `potential_match`; the class name must not be read as a legal confirmation. PEP-only matches and
-   an unavailable result use `manual` / `withdrawal_and_payout` (Q7 default).
-3. **Screening-mandated holds do not wait for the officer quorum** (section 6: "holds placed automatically by screening still apply;
-   they fail closed regardless"). A manual hold still does.
+2. **Hold class is derived strictly from outcome and list (security review SR7-2 / SR7-8; REPLACES the first-round reading).**
+   `reason_class = confirmed_sanctions` (all value movement; lifted only by the proof-bound four-eyes approval, ADR 0116 D6) is placed
+   ONLY for a `confirmed` outcome that names the sanctions list. A `potential_match` on the sanctions list still gates ALL value
+   movement by SCOPE (`all_value_movement`) but is `manual` class, so one officer can lift it as a false positive; a PEP-only match
+   and an unavailable result are `manual` / `withdrawal_and_payout` (Q7 default). So the word "confirmed" in the class name always
+   means a confirmed outcome (the class is NOT renamed: it is a merged 0141 value). The derivation is in `aml_screening_record`, in
+   the CHECKs of `aml_screening_results` (`hold_reason_class`, all-value-movement only for a confirmed outcome or a sanctions-list
+   match) and mirrored in `RecordScreeningInput.Validate` / `HoldReasonClassFor`. Consequence recorded for the owner: lifting a
+   potential-sanctions hold is a single-officer act (the hold-lift step-up and the audit trail still apply).
+3. **Recording a hold needs the officer quorum (SR7-2; REPLACES "screening-mandated holds do not wait for the officer quorum").**
+   Every record is an officer-proved record today, so a single officer could otherwise place an all-value hold by recording a
+   result. `aml_screening_record` therefore asserts the quorum of the owner scope for any record that places a hold (a clear places
+   none and needs none). The ADR 0116 section 6 exemption for holds placed AUTOMATICALLY by the screening orchestrator returns with
+   the F1 system-actor path (a non-officer principal); the orchestrator reports a record the quorum refused as NOT ENFORCED
+   (`NotEnforcedError`, retry), never as recorded. This is stricter than the review's wording ("quorum for manual-trigger records")
+   because the `trigger` column is caller-supplied and cannot distinguish an automatic record today.
 4. **A match always acts, with or without a policy.** The policy governs the lists and the "no completed result" rule (C1: held when
    registered at or after `effective_from`, or an existing person once `backfill_grace` has elapsed), not whether a match is
    enforced.
@@ -855,11 +867,24 @@ record, the changed assertions, the mutation results and the proposed registry r
 6. **Readiness reads grants under a placeholder principal** (`aml_readiness`, migration 0154): the grant tables admit only a
    principal-bound tenant session and the launch readiness read is a plain tenant read evaluated for a tenant by platform staff. The
    function sets and restores `app.principal_id` around ONE count and returns a boolean, never the count or the officers.
-7. **Step-up classes** (ADR 0119 8.1): hold lift, proposal and approval are `critical` (and in `actorproof.StepUpOperations`);
-   placing a hold, opening a case, a transition, a note and a SAR flag only restrict or record and are `none`; reads are `none`.
+7. **Step-up classes** (ADR 0119 8.1): hold lift, proposal and approval are `critical` (and in `actorproof.StepUpOperations`).
+   Two STATE-DEPENDENT classifiers (body-read, the pattern of ADR 0119 8.1): placing a hold is `critical` unless
+   `reason_class == manual` (SR7-1: a `confirmed_sanctions` hold freezes all value movement and is liftable only by four-eyes, so a
+   stale second factor must not place it); a case transition is `critical` when it targets `closed_no_action` (SR7-5: a close
+   without action is not undoable by the platform), `none` for `in_review`, `escalated`, `sar_decision_pending`; an unknown, missing
+   or malformed body is `critical`. Opening a case, a note and a SAR flag only record and stay `none`; reads are `none`. Both
+   classifiers are pinned in the golden table, the static route test and the OpenAPI text.
+   **Pre-launch condition (SR7-1 / F4):** the `aml.hold_placement_rate` alert is NOT built. A compromised officer session with a
+   fresh second factor can still place manual holds without an alert; that alert is required before launch.
 8. **Migration numbering.** `0154` only; `0155` unused (to be added to the reserved list with `0152` and `0153` if those are also
    not used).
 
-**D-AML-TIP-1.** Option (b) stays as built. Option (c) is implemented as its documented duty
-(`docs/runbooks/aml-adjustment-approver-confidentiality.md`, DRAFT wording pending owner/legal). At the time of writing the
-decision register row still reads OPEN; see the record for the question this raises.
+**D-AML-TIP-1 — DECIDED (c), 2026-10-15.** The owner decided option (c) now (accept the visible signal, plus a documented AML
+confidentiality duty for adjustment approvers) and option (a) later; option (b) (the generic `conflict` wording) stays as built.
+The duty text (`docs/runbooks/aml-adjustment-approver-confidentiality.md`) is "owner-approved duty (option c), legal wording
+pending (E-class)". No code change.
+
+**Security review round (SR7-1 .. SR7-9).** Applied in a second commit on the same branch: SR7-1, SR7-2 (+SR7-8), SR7-3 (jurisdiction
+validated in the database; four-eyes for loosening is a HARD PRE-ROUTE condition, pinned by a test that no production code calls
+`SetScreeningPolicy`), SR7-5, SR7-6, SR7-7; SR7-4 (reject operation plus proposal-invalidation alert) is a recorded follow-up;
+SR7-9 skipped by instruction. Details in `docs/plans/a7-aml-record.md` section 12.
