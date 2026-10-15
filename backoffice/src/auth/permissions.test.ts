@@ -174,6 +174,11 @@ describe('getNavPermissions own-tenant read (ADR 0112 slice 6 (b))', () => {
     expect([c.tenantWrite, c.brandWrite, c.staffAdmin, c.launchApprove, c.launchQueue, c.tenants]).toEqual([false, false, false, false, false, false])
     expect([c.launchRead, c.launchRequest, c.launchSuspend]).toEqual([true, true, true])
   })
+  it('staff:read is platform_admin, tenant_admin and compliance; staff:manage only platform_admin and tenant_admin (ADR 0119 S5)', () => {
+    const roles = ['platform_admin', 'tenant_admin', 'compliance', 'support', 'finance', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]
+    expect(roles.filter((r) => getNavPermissions(r as string).staffRead)).toEqual(['platform_admin', 'tenant_admin', 'compliance'])
+    expect(roles.filter((r) => getNavPermissions(r as string).staffAdmin)).toEqual(['platform_admin', 'tenant_admin'])
+  })
   it('no other role gets own-tenant access', () => {
     for (const role of ['platform_admin', 'support', 'finance', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]) {
       expect(getNavPermissions(role as string).ownTenant).toBe(false)

@@ -14,7 +14,8 @@ import { getNavPermissions } from '../../auth/permissions'
 import { LaunchPanel } from '../launch/LaunchPanel'
 import { LaunchStatusBadge, LegacyBaselineBadge } from '../launch/LaunchBits'
 import { CreateBrandForm } from './CreateBrandForm'
-import { CreateStaffForm } from './CreateStaffForm'
+import { InviteStaffForm } from './InviteStaffForm'
+import { StaffDirectoryCard } from './StaffDirectoryCard'
 import { LinkStaffPersonForm } from './LinkStaffPersonForm'
 
 export function TenantDetailPage() {
@@ -107,7 +108,8 @@ export function TenantDetailPage() {
       </Card>
 
       {perms.brandWrite && <CreateBrandForm tenantId={tenantId} />}
-      {perms.staffAdmin && <CreateStaffForm tenantId={tenantId} />}
+      {perms.staffRead && <StaffDirectoryCard tenantId={tenantId} />}
+      {perms.staffAdmin && <InviteStaffForm tenantId={tenantId} />}
       {perms.staffAdmin && <LinkStaffPersonForm tenantId={tenantId} />}
 
       <Link to={isPlatformAdmin(claims) ? '/tenants' : '/'} className="text-sm text-brand-700 hover:underline">

@@ -89,6 +89,16 @@ export async function staffEnrolRedeem(params: {
   return res.challenge
 }
 
+/**
+ * POST /v1/staff/invitations/accept (anonymous, token-authenticated, x-sensitive body: `token` and `password` are secrets
+ * and are never logged or kept). The tenant and identity come from the token row. Success yields an `enrol` challenge:
+ * continue with staffEnrolStart / staffEnrolConfirm. Every token failure is one `401 invalid_enrolment_token`.
+ */
+export async function acceptStaffInvitation(token: string, password: string): Promise<StaffAuthChallenge> {
+  const res = await postAnonymous<{ challenge: StaffAuthChallenge }>('/v1/staff/invitations/accept', { token, password })
+  return res.challenge
+}
+
 export function staffEnrolStart(challengeToken: string): Promise<EnrolStartResponse> {
   return postAnonymous('/v1/staff/auth/enrol/start', { challenge_token: challengeToken })
 }

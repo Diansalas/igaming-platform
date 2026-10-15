@@ -89,3 +89,31 @@ export function normaliseRecoveryCode(input: string): string | null {
   if (!/^[0-9A-Z]{10}$/.test(compact)) return null
   return `${compact.slice(0, 5)}-${compact.slice(5)}`
 }
+
+/** Minimum password length for an invitation (OpenAPI InvitationAcceptRequest.minLength; the server enforces it too). */
+export const MIN_INVITATION_PASSWORD_LENGTH = 12
+
+export const INVITATION_DEAD =
+  'This invitation link is invalid, has expired or was already used, or the person who issued it is no longer active. Ask your administrator to send a new invitation.'
+
+/** Failure of POST /v1/staff/invitations/accept. `dead` = the token is spent or unusable: drop it, nothing to retry. */
+export function describeInvitationAcceptError(err: unknown): { message: string; dead: boolean } {
+  if (!(err instanceof ApiError)) return { message: GENERIC_FAILURE, dead: false }
+  switch (err.code) {
+    case 'invalid_enrolment_token':
+      return { message: INVITATION_DEAD, dead: true }
+    case 'validation_error':
+      return { message: `Choose a password of at least ${MIN_INVITATION_PASSWORD_LENGTH} characters.`, dead: false }
+    case 'rate_limited':
+      return {
+        message: err.retryAfterSeconds ? `Too many attempts. Wait ${err.retryAfterSeconds} seconds and try again.` : 'Too many attempts. Wait a minute and try again.',
+        dead: false,
+      }
+    case 'network_error':
+      return { message: 'Could not reach the server. Check your connection and try again.', dead: false }
+    case 'service_unavailable':
+      return { message: 'Accepting invitations is temporarily unavailable. Try again shortly.', dead: false }
+    default:
+      return { message: 'The invitation could not be accepted. Try again.', dead: false }
+  }
+}

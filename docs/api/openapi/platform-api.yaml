@@ -9337,6 +9337,125 @@ paths:
         "409": { description: The alert is already resolved }
         "500": { description: Internal error }
 
+  # --- A10a: four existing admin configuration routes that the back office already calls but this document did not
+  # list (found by backoffice/src/api/openapiContract.test.ts). Documentation only: the routes and handlers exist
+  # (internal/httpserver/casino_routes.go, financial_routes.go). Shapes mirror the handler request structs. ---
+  /v1/admin/casino/games:
+    put:
+      summary: Upsert a platform casino catalogue game (platform_admin)
+      description: >
+        Requires casino_catalogue:manage (platform_admin only; not tenant-scoped). Step-up none. Creates or updates one
+        game in the platform-wide catalogue. Adding a jurisdiction_blocklist code or disabling a game is single-actor;
+        the two widening transitions go through the four-eyes change-request routes. Status defaults to active.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertCasinoGameRequest" }
+      responses:
+        "200":
+          description: The game after the upsert
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/casino/providers/{providerID}/capability:
+    put:
+      summary: Write the tenant's casino provider routing capability (narrowing only)
+      description: >
+        Requires casino_config:write on a tenant-scoped token (tenant_admin). Step-up critical. The configuration can only
+        narrow what the provider adapter declares; a widening attempt is 400. The tenant comes from the token.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: providerID, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WriteCasinoCapabilityRequest" }
+      responses:
+        "200":
+          description: The capability row id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/StepUpRequired" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/casino/games/{gameID}/availability:
+    put:
+      summary: Opt the tenant in or out of one platform catalogue game
+      description: >
+        Requires casino_config:write on a tenant-scoped token (tenant_admin). Step-up none. Toggles enablement of a title
+        the platform catalogue already contains; never registers a game or widens a platform-level block.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: gameID, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                enabled: { type: boolean }
+              required: [enabled]
+      responses:
+        "200":
+          description: The resulting availability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  game_id: { type: string }
+                  enabled: { type: boolean }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/providers/{providerID}/capability:
+    put:
+      summary: Write the tenant's payment provider routing capability (narrowing only)
+      description: >
+        Requires provider_config:write on a tenant-scoped token (tenant_admin). Step-up critical. The configuration can
+        only narrow what the adapter declares; a widening attempt is 400. Amounts are integer minor units.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: providerID, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WriteProviderCapabilityRequest" }
+      responses:
+        "200":
+          description: The capability row id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/StepUpRequired" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
 components:
   parameters:
     IdempotencyKey:
@@ -9425,6 +9544,60 @@ components:
         This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
         see docs/architecture/05-identity-architecture.md.
   schemas:
+    UpsertCasinoGameRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        provider_id: { type: string }
+        provider_game_id: { type: string }
+        name: { type: string }
+        game_type: { type: string }
+        rtp_variant: { type: string }
+        volatility: { type: string }
+        feature_flags: { type: array, items: { type: string } }
+        supported_assets: { type: array, items: { type: string } }
+        mobile_supported: { type: boolean }
+        demo_supported: { type: boolean }
+        jurisdiction_blocklist: { type: array, items: { type: string } }
+        status: { type: string, enum: [active, disabled], description: Defaults to active }
+      required: [provider_id, provider_game_id, name, game_type]
+    WriteCasinoCapabilityRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        supports_catalogue: { type: boolean }
+        supports_launch: { type: boolean }
+        supports_balance: { type: boolean }
+        supports_bet: { type: boolean }
+        supports_win: { type: boolean }
+        supports_rollback: { type: boolean }
+        supported_assets: { type: array, items: { type: string } }
+        supported_game_types: { type: array, items: { type: string } }
+        priority: { type: integer }
+        status: { type: string, enum: [active, disabled] }
+      required: [status]
+    WriteProviderCapabilityRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        supported_fiat_currencies: { type: array, items: { type: string } }
+        supported_crypto_assets: { type: array, items: { type: string } }
+        supported_payment_methods: { type: array, items: { type: string } }
+        supported_countries: { type: array, items: { type: string } }
+        supports_deposit: { type: boolean }
+        supports_withdrawal: { type: boolean }
+        supports_refund_reversal: { type: boolean }
+        amount_limits:
+          type: array
+          items:
+            type: object
+            properties:
+              asset_code: { type: string }
+              min_amount: { type: integer, description: Integer minor units }
+              max_amount: { type: integer, description: Integer minor units }
+        priority: { type: integer }
+        status: { type: string, enum: [active, disabled] }
+      required: [status]
     PlatformAlert:
       type: object
       description: >
