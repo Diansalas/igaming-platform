@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,6 +67,80 @@ const isoBound = 500 * time.Millisecond
 // around the reviewed 250 ms): no pooled transaction of the pool under
 // test may stay open longer than this while callers wait on the store.
 const isoLongSlack = 400 * time.Millisecond
+
+// Relative-p95 criterion of the timing lane's normal-operation test. 30 callbacks are in flight against a
+// 10-connection pool, so the expected slowdown versus one call in flight is in-flight / effective parallelism, where
+// the effective parallelism is min(pool, CPUs). p95 may be at most isoP95Margin x that expectation x the sequential
+// baseline p95, and p100 at most isoP100Margin x - but NEVER below the reviewed absolute isoBound (security review
+// section 5: the bound is not widened on a fast host; the relative term only stops a slow, small CI host from
+// failing for being slow). This test has no outage in play: the isolation property itself is asserted by the
+// outage tests, which keep their absolute bounds. A starved or pinned pool here would still show as a multiple of
+// the expected slowdown, not as noise.
+const (
+	isoInFlight   = 30
+	isoPoolSize   = 10
+	isoP95Margin  = 2
+	isoP100Margin = 3
+)
+
+func isoExpectedSlowdown() int {
+	par := runtime.NumCPU()
+	if par > isoPoolSize {
+		par = isoPoolSize
+	}
+	if par < 1 {
+		par = 1
+	}
+	return (isoInFlight + par - 1) / par
+}
+
+// isoRelativeLimits returns the effective (p95, p100) limits for a measured sequential baseline p95.
+func isoRelativeLimits(base time.Duration) (p95, p100 time.Duration) {
+	p95, p100 = isoBound, isoBound
+	exp := time.Duration(isoExpectedSlowdown())
+	if v := isoP95Margin * exp * base; v > p95 {
+		p95 = v
+	}
+	if v := isoP100Margin * exp * base; v > p100 {
+		p100 = v
+	}
+	return p95, p100
+}
+
+// isoRelativeBound checks the concurrent-phase latencies against the relative limits.
+func isoRelativeBound(lats []time.Duration, base time.Duration) error {
+	if len(lats) == 0 {
+		return fmt.Errorf("no latencies recorded")
+	}
+	sorted := append([]time.Duration(nil), lats...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	p95 := sorted[(len(sorted)*95+99)/100-1]
+	p100 := sorted[len(sorted)-1]
+	lim95, lim100 := isoRelativeLimits(base)
+	if p95 >= lim95 || p100 >= lim100 {
+		return fmt.Errorf("normal-operation latency p95 %s (limit %s) p100 %s (limit %s) with sequential baseline p95 %s", p95, lim95, p100, lim100, base)
+	}
+	return nil
+}
+
+// isoBaselineP95 measures the sequential, one-in-flight p95 of cold payment-deposit callbacks on a throw-away tenant.
+func (w *isoWorld) isoBaselineP95(t *testing.T) time.Duration {
+	t.Helper()
+	it := w.newTenant(100_000)
+	var lats []time.Duration
+	for i := 0; i < 12; i++ {
+		p := w.extraPlayer(it, 1_000)
+		r := w.post("payments", it, "mock-psp", w.depositFor(it, p, 100))
+		if r.err != nil || !okStatus(r.status) {
+			t.Fatalf("baseline deposit %d: %d %v", i, r.status, r.err)
+		}
+		lats = append(lats, r.latency)
+	}
+	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	p95 := lats[(len(lats)*95+99)/100-1]
+	t.Logf("sequential baseline deposit p95: %s", p95)
+	return p95
+}
 
 // isoClock is an optionally frozen clock for the Fetcher (Recovery test).
 type isoClock struct {
@@ -510,6 +585,11 @@ func allRejected(t *testing.T, what string, rs []isoResult) {
 func TestResolutionIsolation_NormalOperation(t *testing.T) {
 	w := newIsoWorld(t)
 	tenants := []*isoTenant{w.newTenant(100_000), w.newTenant(100_000), w.newTenant(100_000)}
+	// Relative-p95 criterion (owner decision 2026-10-15; hosted run #827 measured deposits at 536-583 ms against the
+	// absolute 500 ms p100 bound on a 2-core -race runner with NO outage in play, i.e. pool throughput, not an
+	// isolation failure). The environment's own speed is measured HERE: twelve sequential (one in flight) cold
+	// deposits on a throw-away tenant. The concurrent phase below is then judged against it.
+	base := w.isoBaselineP95(t)
 	calls := w.mem.Calls()
 	// Each (tenant, i) uses its own player and wallet: this test measures
 	// pool admission, not the (intended) serialization of postings on one
@@ -526,11 +606,13 @@ func TestResolutionIsolation_NormalOperation(t *testing.T) {
 	var mu sync.Mutex
 	var failures []string
 	var worst time.Duration
+	var lats []time.Duration
 	note := func(r isoResult) {
 		mu.Lock()
 		if r.latency > worst {
 			worst = r.latency
 		}
+		lats = append(lats, r.latency)
 		mu.Unlock()
 	}
 	// 30 callbacks per tenant (10 bet->win pairs + 10 deposits), at most
@@ -557,7 +639,7 @@ func TestResolutionIsolation_NormalOperation(t *testing.T) {
 						fmt.Sprintf("n-win-%s-%d", it.tenant.Slug, i), "", "round-"+betRef, 20))
 					note(r)
 				}
-				if r.err != nil || !okStatus(r.status) || r.latency >= isoBound {
+				if r.err != nil || !okStatus(r.status) {
 					mu.Lock()
 					failures = append(failures, fmt.Sprintf("casino %s %d: %d %v %s", it.tenant.Slug, i, r.status, r.err, r.latency))
 					mu.Unlock()
@@ -569,7 +651,7 @@ func TestResolutionIsolation_NormalOperation(t *testing.T) {
 				defer func() { <-inflight }()
 				r := w.post("payments", it, "mock-psp", deposits[it][i])
 				note(r)
-				if r.err != nil || !okStatus(r.status) || r.latency >= isoBound {
+				if r.err != nil || !okStatus(r.status) {
 					mu.Lock()
 					failures = append(failures, fmt.Sprintf("deposit %s %d: %d %v %s", it.tenant.Slug, i, r.status, r.err, r.latency))
 					mu.Unlock()
@@ -582,6 +664,9 @@ func TestResolutionIsolation_NormalOperation(t *testing.T) {
 		t.Fatalf("normal operation failures: %v", failures)
 	}
 	t.Logf("worst callback latency under normal operation: %s", worst)
+	if err := isoRelativeBound(lats, base); err != nil {
+		t.Fatal(err)
+	}
 	// Redeliveries (warm, after the timed concurrent phase): idempotent.
 	for _, it := range tenants {
 		for i := 0; i < 10; i++ {
