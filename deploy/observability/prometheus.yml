@@ -1,0 +1,31 @@
+# EXAMPLE Prometheus configuration for local development and staging (A9). NOT DEPLOYED anywhere: no Prometheus
+# or Alertmanager runs in any real environment (see the header of prometheus-alert-rules.yml). Pair it with
+# docker-compose.observability.yml in this directory.
+#
+# platform-api exposes metrics on a DEDICATED listener, never on the public API port:
+#   METRICS_ADDR=0.0.0.0:9464   (development only: reachable from the compose network)
+#   METRICS_ADDR=127.0.0.1:9464 (staging/production default posture: scraped by an agent or sidecar on the host)
+# The endpoint has no authentication; exposure is controlled by the bind address and the network (security group
+# / network policy to the collector only). Production refuses a non-loopback bind unless
+# METRICS_ALLOW_NON_LOOPBACK=true acknowledges it. This file holds no credential of any kind.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+# Alertmanager is deliberately not configured: no receiver, recipient or route exists (ALERT-DELIVERY-1 OPEN).
+# Rules are evaluated and visible in the Prometheus UI (alerts tab) only.
+rule_files:
+  - /etc/prometheus/rules/prometheus-alert-rules.yml
+
+scrape_configs:
+  - job_name: platform-api
+    metrics_path: /metrics
+    scheme: http
+    scrape_timeout: 10s
+    static_configs:
+      # platform-api runs on the host in development; host.docker.internal is mapped in the compose file.
+      - targets: ["host.docker.internal:9464"]
+        labels:
+          service: platform-api
+          environment: development

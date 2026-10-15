@@ -158,6 +158,14 @@ func staffKind(k Kind, sev Severity, platform bool, allowed ...string) KindDef {
 // (ALERT-DELIVERY-1 OPEN: nobody is paged).
 const KindAMLHoldEvalFailed Kind = "aml.hold_eval_failed"
 
+// KindReconciliationSweepFailed is the A9 (migration 0156) platform, subjectless P1 Kind: the reconciliation
+// scheduler could not LIST tenants (phase list_active or list_non_active; R3-LISTING-FAILURE-LOG-ONLY-1) or a
+// whole sweep panicked (phase panic), so no tenant was (fully) reconciled in that sweep. Per-tenant failures
+// are reconciliation.run_failed. It is raised ONLY by RaiseSweepFailed (fallback.go) under the
+// alert_dispatcher platform-service identity, because the scheduler has no tenant and no platform-admin
+// principal. Attributes: phase (closed set) and sqlstate_class. Never the error text.
+const KindReconciliationSweepFailed Kind = "reconciliation.sweep_failed"
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -267,6 +275,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindAMLHoldEvalFailed, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("operation"),
+	},
+	KindReconciliationSweepFailed: {
+		Kind: KindReconciliationSweepFailed, Severity: SeverityP1, Scope: ScopeKindPlatform,
+		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,
+		AllowedKeys: keys("phase", "sqlstate_class"),
 	},
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,

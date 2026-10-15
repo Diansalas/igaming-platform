@@ -133,7 +133,15 @@ func run() error {
 		}
 	}()
 
-	_, shutdownMetrics, err := observability.InitMetrics(ctx, cfg.OTelServiceName, cfg.OTelExporter)
+	// A9: with METRICS_ADDR set the meter provider also feeds a Prometheus scrape handler, served on its OWN
+	// listener below (never on the public API mux). Unset, nothing is exposed.
+	var metricsHandler http.Handler
+	var shutdownMetrics observability.Shutdown
+	if cfg.MetricsAddr != "" {
+		_, metricsHandler, shutdownMetrics, err = observability.InitMetricsExposed(ctx, cfg.OTelServiceName, cfg.OTelExporter)
+	} else {
+		_, shutdownMetrics, err = observability.InitMetrics(ctx, cfg.OTelServiceName, cfg.OTelExporter)
+	}
 	if err != nil {
 		return fmt.Errorf("init metrics: %w", err)
 	}
@@ -142,6 +150,17 @@ func run() error {
 		defer cancel()
 		if err := shutdownMetrics(shutdownCtx); err != nil {
 			logger.Error("metrics shutdown failed", "error", err)
+		}
+	}()
+	stopMetricsServer, err := startMetricsServer(cfg, metricsHandler, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := stopMetricsServer(shutdownCtx); err != nil {
+			logger.Error("metrics server shutdown failed", "error", err)
 		}
 	}()
 
@@ -158,6 +177,9 @@ func run() error {
 	}
 	defer pool.Close()
 	logger.Info("database connected")
+	if err := registerDBPoolMetrics(pool); err != nil {
+		return err
+	}
 
 	// PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md):
 	// fail-closed production safety check. Refuses to start if the
@@ -371,9 +393,21 @@ func run() error {
 
 	// ALERT-DELIVERY-1 (ADR 0102 section 18): the dispatcher is constructed
 	// here so the platform status endpoint can report its routing readiness.
-	// It is STARTED further below (PRH-2 I-wire). LogSink only: a log line is
-	// not a notification to any person, so readiness stays NOT READY.
+	// It is STARTED further below (PRH-2 I-wire). The constructor sink is the
+	// LogSink: a log line is not a notification to any person. The A9 email and
+	// webhook channels are registered below ONLY when configured (AddSinks), and
+	// readiness is READY only once a human route is enabled (SR-7 four-eyes) for
+	// a channel whose sink reports a human notification.
 	alertDispatcher := alerting.NewDispatcher(pool, alerting.DefaultDispatcherConfig(), alerting.LogSink{Logger: logger})
+	// A9: the configured email/webhook channels (observability_wiring.go). Neither exists unless configured, and
+	// a route for one cannot be ENABLED without SR-7 four-eyes (migration 0156).
+	alertSinks, err := buildAlertSinks(cfg, providers, logger)
+	if err != nil {
+		return err
+	}
+	if err := alertDispatcher.AddSinks(alertSinks...); err != nil {
+		return fmt.Errorf("alert sinks: %w", err)
+	}
 
 	// ADR 0112 slice 4: the launch authorisation service (the only governed writer of
 	// tenants.status / brands.status). It signs with the process actor-proof issuer set above
@@ -610,11 +644,12 @@ func run() error {
 	// ---- PRH-2 H: payments sweeper process (end) -----------------------------
 
 	// ---- PRH-2 I-wire (ALERT-DELIVERY-1): durable alert dispatcher (begin) ----
-	// ADR 0102 6.1/17.6. LogSink only: real channels are PROVIDER DEPENDENT and
-	// HD-PRH2-4-OPS is open, and the MOCK sink is never wired into a binary. No
-	// alert_routes row is seeded, so after this starts every alert is 'unrouted'
-	// until a human configures routes; nothing is delivered to a person. The loop
-	// recovers a panic per pass and drains the pass in flight on shutdown.
+	// ADR 0102 6.1/17.6. The log sink, plus the A9 email/webhook channels when
+	// configured; the MOCK sink is never wired into a binary. No alert_routes row
+	// is seeded, so after this starts every alert is 'unrouted' until a human
+	// configures routes (and a second admin enables a human-notification one);
+	// nothing is delivered to a person before that. The loop recovers a panic per
+	// pass and drains the pass in flight on shutdown.
 	var alertDispatcherWG sync.WaitGroup
 	alertDispatcherWG.Add(1)
 	go func() {
@@ -622,6 +657,12 @@ func run() error {
 		alerting.RunDispatcherLoop(ctx, alertDispatcher, alerting.DefaultLoopInterval)
 	}()
 	// ---- PRH-2 I-wire: durable alert dispatcher (end) -------------------------
+
+	// ALERT-RETENTION-1 (A9): bounded purge of resolved alert history, only when ALERT_RETENTION_DAYS is set.
+	alertRetentionWG, err := startAlertRetention(ctx, cfg, alertDispatcher, logger)
+	if err != nil {
+		return fmt.Errorf("alert retention: %w", err)
+	}
 
 	// ---- PRH-2 E1 (KYC-SUBMIT-OUTBOX-1): KYC submission outbox worker (begin) ----
 	// ADR 0106 7.4. The worker is built from the SAME orchestrator and outbound
@@ -779,6 +820,20 @@ func run() error {
 		logger.Error("alert dispatcher did not stop within the shutdown timeout")
 	}
 	// ---- PRH-2 I-wire: alert dispatcher shutdown drain (end) ------------------
+
+	// The retention loop starts no new purge on ctx cancel; a purge call in flight is bounded by its own
+	// CallTimeout (2 minutes), so this wait is bounded shorter and a straggler is simply abandoned (the purge
+	// is one transaction: it either commits or rolls back whole).
+	retentionDone := make(chan struct{})
+	go func() {
+		alertRetentionWG.Wait()
+		close(retentionDone)
+	}()
+	select {
+	case <-retentionDone:
+	case <-time.After(15 * time.Second):
+		logger.Error("alert retention loop did not stop within the shutdown timeout")
+	}
 
 	// ---- PRH-2 E1: KYC outbox worker shutdown drain (begin) ----
 	// RunOutboxWorkerLoop claims no new row on ctx cancel and lets the item in

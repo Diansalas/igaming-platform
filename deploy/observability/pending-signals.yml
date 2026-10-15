@@ -3,31 +3,35 @@
 # STATUS: NOT WIRED, NOT IMPLEMENTED. These are gaps, recorded so they are not mistaken for coverage.
 # ALERT-DELIVERY-1 is OPEN regardless: nobody is paged by anything in deploy/observability/.
 #
-# Each entry names the metric a future instrumentation change would have to add. The parity test
-# requires that the proposed name is STILL ABSENT from the code: when someone adds the metric, the test
-# fails and tells them to promote the entry into prometheus-alert-rules.yml (so this file cannot rot
-# into a list of things that already exist). Adding the instrumentation is a code change in
-# internal/ (owned by the domain specialists), deliberately not done by the ops-readiness task.
+# A9 history: DbPoolSaturation, ReconciliationStale and LedgerDriftAsMetric were promoted out of this file when
+# their metrics were implemented (db_pool_*, reconciliation_last_success_unix_seconds,
+# reconciliation_mismatches_open); their rules are in prometheus-alert-rules.yml. The alert dispatcher
+# backlog/age signal (alert_undelivered_*) was added in the same change and was never listed here.
+#
+# Each entry names the metric a future instrumentation change would have to add. The parity test requires that
+# the proposed name is STILL ABSENT from the code: when someone adds the metric, the test fails and tells them to
+# promote the entry into prometheus-alert-rules.yml (so this file cannot rot into a list of things that already
+# exist). Adding the instrumentation is a code change in internal/ (owned by the domain specialists).
 
 pending:
-  - id: DbPoolSaturation
+  - id: PaymentKillSwitchState
     severity: page
-    proposed_metric: db_pool_acquired_connections
-    also_needed: [db_pool_max_connections, db_pool_acquire_wait_seconds_total]
-    proposed_expr: "db_pool_acquired_connections / db_pool_max_connections > 0.9 for 5m"
-    why_missing: "internal/db wraps pgxpool but exports no pool statistics (pgxpool.Stat) to OpenTelemetry."
-    interim: "No automated signal. Operators can only infer saturation from a rising http_server_request_duration_seconds and a rising 5xx ratio (Http5xxRatioHigh). See docs/runbooks/load-and-soak-test-plan.md for the local measurement."
+    proposed_metric: payment_kill_switch_engaged_scopes
+    proposed_expr: "payment_kill_switch_engaged_scopes > 0 (gauge: number of currently engaged kill-switch scopes)"
+    why_missing: "payment_kill_switches is tenant-scoped under FORCE RLS and the platform has no cross-tenant read identity for it (only the alert_dispatcher service identity exists, and it must not gain a second job). A per-process gauge of 'engaged in this process' would be false for every other instance."
+    interim: "Engaging a kill switch raises the durable alert payment.kill_switch_engaged (P2, post-commit) and the log event PaymentKillSwitchEngaged (log-event-alert-rules.yml); the release/recovery procedure is docs/runbooks/payment-kill-switch-release-recovery.md. The engaged STATE has no metric: read it in the back office."
 
-  - id: ReconciliationStale
-    severity: page
-    proposed_metric: reconciliation_last_success_unix_seconds
-    proposed_expr: "time() - reconciliation_last_success_unix_seconds > 2 * 3600 (default interval is 1h)"
-    why_missing: "The reconciliation scheduler logs and persists run rows (reconciliation_runs) but exports no last-success heartbeat; absence of a log line is not alertable."
-    interim: "SQL check an operator can run by hand: SELECT stream, max(run_at) FROM reconciliation_runs GROUP BY stream, per tenant, under that tenant's scope (FORCE RLS: set app.tenant_id) (docs/runbooks/incident-response-and-oncall.md)."
+  - id: ProviderCallLatency
+    severity: ticket
+    proposed_metric: provider_call_duration_seconds
+    also_needed: [provider_call_total]
+    proposed_expr: "histogram_quantile(0.99, sum by (le, provider_kind, operation) (rate(provider_call_duration_seconds_bucket[10m]))) > <SLO>"
+    why_missing: "Blueprint section 7 asks for per-provider latency SLOs, but the provider-call gate (internal/payments, internal/casino, internal/kyc outbound calls) records no duration or result metric, and every adapter is a MOCK, so there is no real latency to measure yet. The SLO values are an owner/provider decision (PROVIDER DEPENDENT)."
+    interim: "None. The otelhttp histogram covers the platform's own API only, not outbound provider calls."
 
-  - id: LedgerDriftAsMetric
-    severity: page
-    proposed_metric: reconciliation_mismatches_open
-    proposed_expr: "reconciliation_mismatches_open > 0"
-    why_missing: "Drift is visible as the log event in log-event-alert-rules.yml (LedgerDriftP1) and as a durable alert row, not as a metric."
-    interim: "Log-event rule LedgerDriftP1."
+  - id: PerTenantRequestSlo
+    severity: ticket
+    proposed_metric: tenant_http_request_errors_total
+    proposed_expr: "per-tenant error-budget burn over tenant_http_request_errors_total / tenant_http_requests_total"
+    why_missing: "Blueprint section 7 asks for per-tenant error budgets. A raw tenant_id label is unbounded cardinality as B2B tenants grow, so a bounded labelling policy (for example tenant class, or a top-N allowlist) is a decision first; no per-tenant request metric exists, by design, today."
+    interim: "The 5xx ratio and latency rules are platform-wide. Per-tenant investigation uses the audit log and the request_id in logs."

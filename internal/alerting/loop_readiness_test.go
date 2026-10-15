@@ -121,9 +121,15 @@ func TestEvaluateReadiness_TieOnEffectiveFromIsDeterministic(t *testing.T) {
 
 // Code review #10: an unknown or unclassified kind never reads as delivered.
 func TestDeliveryState_UnknownKindsNeverReadAsDelivered(t *testing.T) {
-	for _, k := range []ChannelKind{"pager", "", "webhook", ChannelLog, ChannelMock} {
+	for _, k := range []ChannelKind{"pager", "", "sms", ChannelLog, ChannelMock} {
 		if got := DeliveryState("sent", k); got == DeliveryStateDelivered {
 			t.Errorf("DeliveryState(sent,%q) = delivered with no known human kind", k)
+		}
+	}
+	// A9: email and webhook ARE the known human kinds (their sinks still report HumanNotification per process).
+	for _, k := range []ChannelKind{ChannelEmail, ChannelWebhook} {
+		if got := DeliveryState("sent", k); got != DeliveryStateDelivered {
+			t.Errorf("DeliveryState(sent,%q) = %s, want delivered", k, got)
 		}
 	}
 	knownHumanChannelKinds["pager_test_only"] = true
