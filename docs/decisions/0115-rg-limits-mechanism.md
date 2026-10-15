@@ -2,10 +2,10 @@
 
 ## Status
 
-**ACCEPTED, pending implementation** (architect, 2026-10-12). Revision 2 adds the
+**Status as of 2026-10-15: `PARTIALLY IMPLEMENTED`. S1 (migration 0135: limit schema, indexes, `database_environment` anchor; merge `3145fb3`/`41e09b4`), S2 (write APIs: player limits, time-out, staff decreases, operator config, floor four-eyes; merge `4a728fa`) and S3 (usage measurement, read side, no migration; merge `c9c4e80`) are `IMPLEMENTED` and MERGED against the local DB. S4 (enforcement: `rg.EvaluateAction`, deposit/bet-transaction limit checks), S5 (UI) and S6 (QA suite, onboarding runbook) are `NOT IMPLEMENTED`: verified 2026-10-15 that `internal/rg` has only `EvaluateEligibility` (self-exclusion) and no caller enforces a recorded limit or time-out, so limits and time-outs are RECORDED BUT NOT ENFORCED (completion audit A6). Staff increases/removals: the step-up prerequisite (ADR 0119 S4b) is now merged; the classifier route `rgLimitChangeClass` exists. Jurisdiction values (OQ-2) remain `BLOCKED` on compliance.** Original status: **ACCEPTED, pending implementation** (architect, 2026-10-12). Revision 2 adds the
 ledger-finance and security design reviews (both APPROVE WITH CONDITIONS, ledger-finance
 with 2 blockers). Every condition is applied below as ADR text. The review
-disposition table is at the end. Design only: **nothing here is implemented.**
+disposition table is at the end. Design only when written: **nothing here was implemented** (see the 2026-10-15 status above).
 The labels are `NOT IMPLEMENTED` until slices S1–S6 (§8) merge.
 
 **Pointer (2026-10-13):** ADR 0119 (`0119-staff-mfa-stepup-and-lifecycle.md`) replaces ADR 0017 as the step-up

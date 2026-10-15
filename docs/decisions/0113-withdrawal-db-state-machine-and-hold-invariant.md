@@ -1,12 +1,12 @@
 # ADR 0113 - Withdrawal database state machine and the hold invariant (#12)
 
-Status: **ACCEPTED - pending implementation** (design only; no code or SQL exists for it). Author: `architect`. Base:
+Status as of 2026-10-15: **slices 1-3 IMPLEMENTED against the local database / MOCK and MERGED** (slice 1 migration `0132` via `c2cfcd3`; slices 2-3 migrations `0133` and `0134` via `493a372`, section 12); **slice 4 (docs) NOT IMPLEMENTED**. Withdrawal reversal (WITHDRAWAL-REVERSAL-1) and amount-dispute (PAYOUT-AMOUNT-DISPUTE-1) paths are `NOT IMPLEMENTED` (completion audit A5). The residual in section 9.2 stays open pending an owner decision. Original status text follows as history. Status (original): **ACCEPTED - pending implementation** (design only; no code or SQL exists for it). Author: `architect`. Base:
 `86b1a0d`. Rev 2 applies both independent reviews in full (§11): `ledger-finance` (REJECT as written -> APPROVE WITH
 CONDITIONS once B1/B2 are applied) and `security` (APPROVE WITH CONDITIONS). Reviewers of every slice: `ledger-finance`
 (money path; owns invariant #12), `security` (live runtime-credential re-run), `code-reviewer`, `qa`; `payments` owns
 the fixture migration. Closes, when built: ADR 0112 §12 item 14(a) (ledger closure arm), the open part of 14(b2)
 (state-transition guard, LAUNCH-BLOCKING) and `withdrawal-state-machine.md` §3's invariant-#12 `NOT IMPLEMENTED`.
-Everything below is `NOT IMPLEMENTED` until its slice lands.
+Everything below was `NOT IMPLEMENTED` when written; see the 2026-10-15 status line above for what has since landed.
 
 ## 1. Context (verified at `86b1a0d`)
 

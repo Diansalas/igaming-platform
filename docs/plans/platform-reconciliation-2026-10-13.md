@@ -1,3 +1,5 @@
+> **SUPERSEDED by `docs/plans/platform-completion-audit-2026-10-14.md` (2026-10-15).** This document is kept as history. Its status claims are stale: staff MFA/step-up/lifecycle (ADR 0119 S1-S7), AML S1/S3 (ADR 0116), RG S1-S3 (ADR 0115), brand binding (migration 0136), alert S1b and the withdrawal state machine are all merged, and migration head is 0151 (0143-0150 intentionally unused), not 0135. Do not plan from this file.
+
 # Platform reconciliation: what is still required for technical production readiness and provider-integration readiness
 
 - Author: `architect`. READ-ONLY review of `/home/user/igaming-platform`, branch `claude/focused-wright-jw88w9` @ `3145fb3` (migration head 0135, 270 files, gap-free by name).

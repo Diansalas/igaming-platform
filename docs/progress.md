@@ -1,5 +1,20 @@
 # Project Progress
 
+**Current-state entry 2026-10-15 (supersedes every older status note and stage header in this file where they differ; history below is not rewritten).**
+Authoritative detail: `docs/HANDOVER.md` section "Current state (2026-10-15)" and `docs/plans/platform-completion-audit-2026-10-14.md`.
+Branch `claude/focused-wright-jw88w9`, tip `73b2836`; migration head **0151** (0143-0150 intentionally unused, `internal/db/migrate.go` `reservedUnusedVersions`);
+hosted GitHub CI run **#828 on `56006ba` is green on every job** (16 integration shards, timing lane, evidence gate, frontends, images, infrastructure), so
+the older "CI blocked by billing" statements are false. All providers are MOCK; AWS is OFF; no brand is activated. The four states: technical readiness
+`NOT YET MET`; provider-integration readiness `PARTIALLY IMPLEMENTED`; real provider integration `NONE`; brand activation `NONE`.
+Merged since the older notes: ADR 0112 slices 1-6, ADR 0113 slices 1-3, ADR 0114 S0/S1/S1b/S2/S4/S6/S6b, ADR 0115 S1-S3, ADR 0116 S1+S3, ADR 0118 (migration 0136),
+ADR 0119 S1-S6 + S7a/S7b (staff MFA/step-up/lifecycle is `IMPLEMENTED`, not "NOT IMPLEMENTED"). Bonus uses DB/ledger sweeps, not an event bus (ADR 0121).
+Completion-audit class-A items: **A1 hosted CI green: DONE. A2 truth in docs: DONE (this entry; registry rows proposed in `docs/plans/a2-proposed-registry-rows.md`, applied by the orchestrator).
+A3 casino pre-adapter fixes: open. A4 MANUAL-ADJ-LINK-1: open. A5 WITHDRAWAL-REVERSAL-1 / PAYOUT-AMOUNT-DISPUTE-1: open. A6 RG enforcement minimum: open.
+A7 AML operability minimum: open. A8 market-blocking wiring: open. A9 observability + alerting plumbing: open. A10 operator console minimum: open.
+A11 payments engineering halves: open. A12 backup/restore local drill: open. A13 release-gate hygiene: partly done (`migrate verify` fixed; TEST-HYGIENE-1 open).**
+Test evidence as recorded in the registry: `FULL-VERIFY-HEAD16b0c40-2026-10-14` (unit PASS=1490 FAIL=0 SKIP=5; payments 26 shards PASS; other integration PASS=2189 FAIL=1 SKIP=1, the FAIL a fixed fixture defect;
+race 522 + 659 PASS) and `A1-HOSTED-CI-GREEN-2026-10-15` (hosted run #828 green). Stage gate: no new stage is authorised by this entry; continue only inside the audit's A-list with explicit owner authorisation.
+
 Last updated: 2026-09-27; see the 2026-10-05 PRH-2 status note below (Stage 10.3 accepted; post-acceptance close-out done; awaiting human authorization)
 
 **Status note 2026-10-05 (blocker-clearing round, latest).** H-W1 decided and merged (suspended/closed tenants observed by ledger_vs_projection and payment_statement reconciliation, evidence only, no migration); ADR 0094 environment qualification recorded (500 ms bound unchanged); HQ-E1-2 p2 confirmed; authorized cleanup executed (821 obsolete scratch databases, 1 superseded worktree archived by tag); payment follow-ups classified (class A empty); NULL-ARM-WRITE-1 reviewed (hardening item; arbitrary-SQL threat model is an OWNER decision); PLAT-ROLESPLIT-1 staging procedure prepared (not executed, AWS off); Mac self-hosted runner prepared (not active, CI-BILLING-1 open). Migrations 0001..0117. Real providers MOCK; AWS OFF; no GitHub CI evidence. Report: docs/plans/prh2-hardening-round/blocker-clearing-report.md. Nothing here is an approval; the next stage needs explicit owner authorization.

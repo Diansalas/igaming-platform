@@ -1,6 +1,8 @@
 # ADR 0018 — Production Authentication Signing Architecture
 
-Status: Architecture recommendation - `NOT IMPLEMENTED` this pass.
+**Status as of 2026-10-15:** still `NOT IMPLEMENTED`, and unaffected by ADR 0119 (which implemented staff MFA/step-up, not the signing model). Verified in `internal/auth/jwt.go`: tokens are still signed and verified with HS256 and environment-supplied `KeyRegistry` secrets (`jwt.SigningMethodHS256`, `jwt.WithValidMethods([]string{"HS256"})`). ADR 0119 only added staff session-assurance claims (`sid`, `aal`, `amr`, `auth_time`, `mfa_at`, `sv`) on top of the same HS256 mechanism. Production signing-key provisioning (asymmetric/KMS-backed) remains `PROVIDER DEPENDENT` on the deployment.
+
+Status (original, 2026-09): Architecture recommendation - `NOT IMPLEMENTED` this pass.
 Development/test environments continue using the current
 `internal/auth.KeyRegistry` (HS256, environment-supplied secrets)
 unchanged, per the hardening-pass instructions. This ADR documents the

@@ -1,6 +1,7 @@
 # ADR 0112 - Brand and tenant launch authorisation (manual, four-eyes, audited)
 
-- **Status:** ACCEPTED pending implementation reviews (`architect`, 2026-10-10). Revision 2. DESIGN ONLY: no Go, SQL
+- **Status as of 2026-10-15:** `IMPLEMENTED` against MOCK providers and the local database, slices 1-6 MERGED to the branch tip (merge commits `d86141f` S1 migration 0128, `972d841` S2 brand gameplay gate migration 0129, `8acbedf` S3 launchgov executor + signed-proof guard migration 0130, `7fa26ea` S4 HTTP routes + migration 0131, `33e733e` S5 Back Office launch UI + B2C site-unavailable state, `8b544b9` S6 launch API completions); ADR 0113 slice 2 later added the `LA025` ledger-based closure arm (migration 0133). The "DESIGN ONLY" and "every item is `NOT IMPLEMENTED`" wording below is the original 2026-10-10 text, kept as history. This is a software control only: `NOT` a legal or licensing approval, and no brand has been activated (activation is a manual four-eyes act per brand; there is no universal licence flag). Evidence is LOCAL plus hosted CI run #828 (see `docs/HANDOVER.md`, Current state).
+- **Status (original 2026-10-10):** ACCEPTED pending implementation reviews (`architect`, 2026-10-10). Revision 2. DESIGN ONLY: no Go, SQL
   or migration is part of this document and every item is `NOT IMPLEMENTED` until a later change says otherwise.
   Implementation slices still need the reviews named in section 13.
 - **Revision history:** rev 1 PROPOSED (2026-10-10). Rev 2 applies the `security` review (S1-S15), the
