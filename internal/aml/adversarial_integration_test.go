@@ -249,6 +249,15 @@ func TestAppendOnly_BindsTheOwner(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Migration 0154 (A7): a screening policy version and a screening result exist too, so the row-level append-only trigger is
+	// exercised for them (an UPDATE / DELETE that matches no row never fires a row trigger).
+	if _, err := c.Svc.SetScreeningPolicy(bg, c.A(), policyInput(c.jurisdiction(), time.Now().Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Svc.RecordScreening(bg, c.A(), aml.RecordScreeningInput{PersonID: c.P.PersonID, IdempotencyKey: "append-only-1", Trigger: aml.TriggerManual,
+		ProviderID: aml.MockProviderID, SubjectRef: strings.Repeat("a", 64), Lists: []aml.ListType{aml.ListSanctions}, Outcome: aml.OutcomeClear, ScreenedAt: time.Now(), Decision: aml.HoldNone}); err != nil {
+		t.Fatal(err)
+	}
 	for _, tbl := range amlTables {
 		for _, stmt := range []string{`UPDATE ` + tbl + ` SET tenant_id = tenant_id`, `DELETE FROM ` + tbl} {
 			err := c.Owner.WithTenant(bg, c.Tenant, func(ctx context.Context, tx pgx.Tx) error {

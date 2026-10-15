@@ -160,9 +160,10 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// Non-vacuity: the classified set is the golden table's (S4a + S4b + S5/S6).
 	// 125 mutating routes: 59 critical, 22 financial, 5 classifier routes, 39 none; 79 reads (S1b adds GET /v1/admin/alerts/{alertID}). ADR 0119 S5 + S6: +14
 	// critical lifecycle routes, -1 (the legacy critical create route), +2 none (four-eyes reject / cancel), +8 reads.
-	if counts["critical"] != 59 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// ADR 0116 A7: +11 AML routes: +3 critical (lift, propose, approve), +5 none-mutating (place hold, open case, transition, note, SAR flag), +3 reads.
+	if counts["critical"] != 62 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 39 || counts["read"] != 79 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 44 || counts["read"] != 82 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

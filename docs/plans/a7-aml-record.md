@@ -103,6 +103,8 @@ See the final report of the run; the exact commands and results are copied into 
 
 - `internal/actorproof/stepup_test.go` `TestStepUpOperations_RegistryPinned`: the pinned map gains the three AML operations (18 to 21).
 - `internal/httpserver/staff_route_static_test.go`: route pin 204/125 to 215/133 (11 routes, 8 mutating); `staff_route_golden_test.go`: +11 rows, the "classified on arrival" AML entry replaced by a pointer.
+- `internal/httpserver/staff_stepup_integration_test.go` `TestStepUp_GoldenTable_EveryClassifiedRoute`: coverage pin critical 59 to 62, none-mutating 39 to 44, reads 79 to 82 (the 11 AML routes).
+- `internal/httpserver/staff_identity_static_test.go`: ADR 0114 H1 allowlist gains four entries (`amlCaseDTO.PersonID`, `amlQueueItemDTO.PersonID` and the two request-body `PersonID` fields: a Person is not a staff identity), each justified; the actor / author ids go through `staffViewer.ref`.
 - `internal/aml/static_test.go`: SQLSTATE class `AM` also allowed in `0154_*` (an AML migration).
 - `internal/aml/adversarial_integration_test.go`: `amlTables` gains the two screening tables (every catalogue, privilege, policy, trigger and FK check now also covers them).
 - `internal/aml/catalog_integration_test.go`: `apiRuntime` +5 functions; `noProof` +2 (the two session-tenant-bound proof-less readers).
@@ -124,6 +126,37 @@ acknowledgement is recorded, and decide whether to add (a) later. Launch-blockin
 
 **HD-AML-1 (launch gating):** engineering now shows R-AML-QUORUM / R-AML-SCREENING / R-AML-MONITORING in the readiness panel; monitoring is a standing failing item; enforcement of Q1 (blocking) is not built.
 
-## 10. Verification log
+## 10. Verification log (private database `a7_*`, rebuilt from this worktree's migrations; local CI role grants; all `-tags integration -count=1 -p 1`)
 
-(filled in at the end of the run)
+| Command | Result |
+|---|---|
+| `gofmt -l cmd internal` | clean |
+| `go vet ./...` and `go vet -tags integration ./...` | PASS |
+| `golangci-lint run ./...` (2.9.0) | 0 issues. `--build-tags integration` shows 667 PRE-EXISTING issues (integration-tagged files are not linted in CI); none in a file of this branch |
+| `go test ./... -count=1` (unit) | PASS: 62 packages ok, 1525 test functions PASS, 0 FAIL, 5 SKIP (the 5 skips are the pre-existing ones) |
+| `internal/aml/...` integration | PASS (also with `-race`, 176 s) |
+| `internal/launchgov`, `internal/kyc`, `internal/tenant`, `internal/auth/...`, `internal/config`, `internal/alerting/...`, `internal/db`, `internal/actorproof/...`, `internal/adjustment`, `cmd/...` integration | all PASS |
+| `internal/httpserver -run 'StaffRoute\|Golden\|OpenAPI\|AML\|Aml\|Launch\|StaffIdentity'`, `-run 'TestStepUp\|StaffLiveness\|StaffRoute\|Golden'`, `-run 'F4\|ManualAdjustment'` | PASS (the full httpserver / payments packages were NOT run, per the brief: hosted CI shards them) |
+| `backoffice`: `npx vitest run` / `npm run build` | 37 files, 431 tests PASS / build OK |
+| migration 0154 up / down / up whole-schema snapshot, pre-flight AM098, down refusal AM099 | PASS (`internal/aml/migration_0154_integration_test.go`) |
+| `go run ./cmd/migrate verify` on the migrated private DB | FAILS only with `GAP 152, 153` (those numbers are other work's; `0155` is unused). Add them to `reservedUnusedVersions` at merge as appropriate |
+
+Environment-dependent, not caused by this branch: `TestEligibility_PlatformOfficers_SuspendedOrDemotedAreNoOfficersAndNoQuorum` and `TestEligibility_SanctionsLiftNeedsTwoLiveOfficers` fail on a FRESH database with `SF020` (the last enrolled platform admin cannot be suspended) and pass once any other enrolled platform admin exists (hosted CI's shared database has them; any httpserver staff-token test creates one). Observed here by running them alone, then after `TestAMLHTTP_OfficerFlow`.
+
+### Mutation pass (kill or justify; harness files in the session scratchpad, not committed)
+
+- **Go enforcement / fail-closed logic: 53 mutants, 53 KILLED.** Decide boundaries and rules (9), provider-answer normalisation, timeout, panic, replay and case rules in the orchestrator (13), record validation mirroring the CHECKs (5), the mock provider (2), route tenant scoping / platform scoping / no-store / fail-closed availability / error table / step-up class / permission-per-route / limit bound (12), readiness checks (9), step-up registry (3). Two harness defects were found and fixed along the way (a mutant that did not compile; a Go build-cache race with another session: the run was repeated with a private `GOCACHE`).
+- **SQL functions and guards: 29 mutants, 27 KILLED, 2 SURVIVORS, both EQUIVALENT:** `aml_screening_record` "hold decision without a reason code accepted" and `aml_screening_policy_set` "list count unchecked". In both the guard is a second check behind the Go validation AND a table constraint (`aml_holds.reason_code` NOT NULL + regex; `aml_screening_policies.lists` NOT NULL + CHECK), so the write is refused either way; only the SQLSTATE differs. Not killable through the officer API without bypassing the Go validation.
+- **26 table CHECK constraints (results + policies): every one dropped in turn, 26 of 26 KILLED** after tests were added for the survivors (confirmed-with-PEP-scope, decision vocabulary, list vocabulary and count, recording-scope vocabulary, every policy-table CHECK).
+- Not mutation-testable in a single session (recorded, not claimed): the per-person advisory lock in `aml_screening_record` (a concurrency property), the sub-millisecond timing parity, and the browser rendering of the Back Office beyond the vitest cases.
+
+## 11. What `security` should probe (live)
+
+1. **Route layer:** a `compliance` token WITHOUT an `aml_officer` grant on every route (expect 403, nothing written); a tenant-A token naming tenant B in the path (404 everywhere, including the platform-owned case ids); a platform token with no acting grant for the named tenant; a token with `role` altered or `tenant_id` forged; a body or query carrying `tenant_id` / `actor_id` (must be 400); replay of the same propose / approve (CAS and single-use proof); `?tenant=` on the Back Office case link for a tenant officer (ignored: claims win).
+2. **Step-up:** lift, propose, approve with a 6-minute-old second factor (403 `step_up_required`, nothing written); place hold / transition / note / flag with the same token (allowed by design: protective). Probe whether a hold placement should be critical (a compromised officer session can freeze players; no `aml.hold_placement_rate` alert exists).
+3. **`aml_readiness`:** the placeholder `app.principal_id` set/restore; call it from a plain tenant session with a forged `app.tenant_id`, an acting session and a read-only transaction; try to make it return another tenant's data or the officer count; check the restore on the error path.
+4. **`aml_screening_record`:** no quorum by design (confirm this reading of ADR 0116 s6); an officer screening a person of ANOTHER owner scope / tenant; idempotency-key reuse across tenants and with changed content; a recorded `clear` for a person never sent to a provider (results are OFFICER-ATTESTED today; nothing consumes them, but F1/F2 would); the `confirmed_sanctions` class on a `potential_match`; hold placed with `player_account_id` NULL for a person with several accounts.
+5. **Tipping-off:** error bodies and logs (no person, case, hold or match text); `Cache-Control`; no `audit_log` row (a test pins this); staff-identity redaction of actors and note authors for tenant viewers; the readiness coarsening of provider-derived details; the generic `conflict` cover (D-AML-TIP-1) is unchanged but its deterministic signal and timing difference remain.
+6. **Definer-only posture:** the catalogue tests cover the two new tables and five functions (runtime has no table privilege; one owner-only policy; append-only triggers; search_path pinned). Confirm `deploy/init-app-role.sql` re-assertion and that no GUC grants anything (the policy-table read is proof-less by design: tenants may read their policy, never a result).
+7. **Mock labelling:** `MockScreeningProvider` / `MockSubjectKeys` are `Synthetic`; the former is registered under `aml/screening_provider` so production startup is refused while it is wired; `MockSubjectKeys` is wired nowhere (the orchestrator is unwired); confirm no production code path constructs the orchestrator.
+8. **Back Office:** note bodies rendered as text; no server message rendered; the proposal an approver sees is the server's last event with its server content hash (never typed); an approver cannot approve their own proposal in the UI (the server also refuses).
