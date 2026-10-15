@@ -1,6 +1,7 @@
 # ADR 0116 — AML Internal Foundation: transaction monitoring, screening, case workflow, SAR export (AML-INTERNAL-FOUNDATION)
 
-- **Status:** **ACCEPTED — slices S1 and S3 IMPLEMENTED on branch (2026-10-13, see §12); S2, S4, S5, S6, S7 NOT
+- **Status as of 2026-10-15:** slices S1 and S3 are `IMPLEMENTED` against the local DB and MERGED (merge `034cc1d`, migrations 0140-0142, with the one-round-trip hold probe via pgconn ExecBatch merged in `789e27c`). S2 (screening interface + deterministic mock + fail-closed policy), S4 (monitoring rule engine), S5 (SAR export), S6 (officer routes/permissions/queue UI) and S7 (readiness items) are `NOT IMPLEMENTED`: there are no AML HTTP routes and no Back Office AML screens, so AML holds and cases are not operable by humans (completion audit A7). Hold probe/enforcement gates and the case four-eyes are DB-level. No legal value is set.
+- **Status (original text, 2026-10-13):** **ACCEPTED — slices S1 and S3 IMPLEMENTED on branch (2026-10-13, see §12); S2, S4, S5, S6, S7 NOT
   IMPLEMENTED** (revision 2, 2026-10-12, `architect` with the orchestrator). Q1–Q8 are recorded as
   **orchestrator defaults that the owner or legal can reverse** (§10). They decide mechanism only. **No legal
   value is set here.** Migration numbers: the original text said "after head `0132`"; that is stale. The head at

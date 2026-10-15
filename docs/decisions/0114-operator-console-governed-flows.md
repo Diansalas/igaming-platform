@@ -1,7 +1,8 @@
 # ADR 0114 - Operator console for the governed financial/operational flows
 
-- **Status:** ACCEPTED - PENDING IMPLEMENTATION (2026-10-11; drafted by `architect` at `6bda8ac`; `security` design
-  review APPROVE WITH CONDITIONS, conditions written into this text, section 9). Nothing in this ADR is implemented.
+- **Status as of 2026-10-15:** `PARTIALLY IMPLEMENTED` (against the local DB / MOCK). MERGED: S0 (staff-identity redaction helper, evidence-reference removal, OpenAPI for six route families; merge `9e8b0f6`), S1 (Back Office alerts console; `679515b`), S1b (alert API completions: keyset cursor, ack/resolve fields, single-alert GET, kind filter, `PlatformAlert` schema; `0d5eb8f`), S2 + S4 (read routes R1/R1b/R2: payment attempts, payout attempt, reconciliation runs/mismatches; `9d2a4ee`), S6 + S6b (payment kill switch console and release-flow fix; `f16aaba`). NOT IMPLEMENTED (no Back Office screen exists in `backoffice/src/features/`): S3 (parked payments queue and attempt detail), S5 (reconciliation views), S7 (K1 capability-grant console), S8 (K3 M1/M2 force-resolution console), S9 (K2 manual-adjustment console and financial policy view), S10 (HSEC console), S11 (M4 screens); the S1b SHOULD item "closed codes for /alerting/status reason" is deferred. Whether S3/S5/S7/S8 are built is class A in `docs/plans/platform-completion-audit-2026-10-14.md` (A10); S9-S11 are class B/D. Alert delivery remains `STUB` (log/mock channels). The wording below is the original 2026-10-11 text, kept as history.
+- **Status (original):** ACCEPTED - PENDING IMPLEMENTATION (2026-10-11; drafted by `architect` at `6bda8ac`; `security` design
+  review APPROVE WITH CONDITIONS, conditions written into this text, section 9). (When written, nothing in this ADR was implemented; see the 2026-10-15 status line above.)
   Every UI and route below is `NOT IMPLEMENTED` until its slice lands; every governed flow it fronts is `MOCK` (no real
   provider). D-OPS-1 and D-OPS-2 are recorded as **orchestrator defaults, reversible by the owner** (section 5).
 - **Trigger:** owner directive 2026-10-11: important governed financial/operational functionality must not stay

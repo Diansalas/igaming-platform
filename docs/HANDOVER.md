@@ -1,6 +1,136 @@
 # iGaming Platform — Live Developer Handover
 
-> **Snapshot date: 2026-10-06 (state-corrected after the merges, the environment diagnosis and the Class-B B5-B8 round). Code HEAD: `60f58ed` (code merged through B6+B7; the 0120/0121 merge commit remains `639a2f0`) on branch `claude/focused-wright-jw88w9` (= origin).** This file is the PRIMARY entry point for any engineer taking the project over from the Git repository alone. It is a *live* document: whoever merges a material change updates the affected section in the same change (registry: `HANDOVER-1`, `HANDOVER-LIVE-2026-10-06`). **State correction:** the signed-actor-proof (migration 0120) and stake-return/closure (migration 0121) branches are now MERGED; migrations on HEAD are 0001..0121 (`migrate verify` clean). See [section 25a](#25a-merged-tree-race-verification-state) for the verification state: the merged-tree `-race` sweep is INCOMPLETE because the execution environment repeatedly restarts (environment limitation, no application failure).
+## Current state (2026-10-15)
+
+> **This section is authoritative and supersedes every older status statement below it.** The long body of this file was written
+> between 2026-10-06 and 2026-10-13 and is kept as history; where it disagrees with this section, this section wins. Evidence
+> sources: the branch history (merge commits), the code and migrations (read 2026-10-15), `docs/plans/platform-completion-audit-2026-10-14.md`
+> (the audit; its section 3 lists the remaining work A1-A13) and the task-registry rows `FULL-VERIFY-HEAD16b0c40-2026-10-14` and
+> `A1-HOSTED-CI-GREEN-2026-10-15`. Nothing here is a legal, regulatory or licensing approval.
+
+**Branch and commit.** `claude/focused-wright-jw88w9`, tip `73b2836` ("Record A1 complete (hosted CI green, run 828)"); the code
+under hosted CI run #828 is `56006ba` (`73b2836` adds only registry text). Go toolchain pin 1.26.9.
+
+### The four separate states (never conflate)
+
+| # | State | Status 2026-10-15 |
+|---|---|---|
+| 1 | Technical readiness (platform code, controls, ops complete and verified with every provider MOCK) | `NOT YET MET`. A1 (hosted CI) and the A2 status-doc refresh are done; A3-A13 are open (table below). |
+| 2 | Provider-integration readiness (interfaces, mocks, conformance suites so a real vendor can be plugged in) | `PARTIALLY IMPLEMENTED`. Interfaces + mocks exist for payments (PSP), casino, sportsbook (singles) and KYC. Missing: AML-screening interface, sports-data feed abstraction (ADR 0117 Part C), crypto custody interface. |
+| 3 | Real provider integration | `NONE`. Every external provider is a MOCK (see Provider state). |
+| 4 | Brand activation | `NONE`. The governance mechanism (ADR 0112) is `IMPLEMENTED`; no brand has been authorised, and there is no universal licence flag. Activation is a manual four-eyes act per brand and needs licence/legal inputs (class E). |
+
+### Migrations
+
+- Head is **0151** (`migrations/0151_staff_step_up`). There are 143 up/down pairs: 0001-0142 (142) plus 0151.
+- **0143-0150 are intentionally unused.** They were reserved by in-flight work that was renumbered before merge. The range is
+  declared in `internal/db/migrate.go` (`reservedUnusedVersions`); `go run ./cmd/migrate verify` tolerates a gap only for those
+  eight versions, and any other missing version still fails it. So the numbering is **not gap-free**; it is "gap-free except the
+  declared reserved range".
+- 0151 is the ADR 0119 S4b step-up column grants (not a new table set). Do not allocate 0143-0150; the next new migration is 0152 unless the orchestrator says otherwise.
+
+### What is merged (verified against merge commits and code)
+
+| Area | Merged | Label |
+|---|---|---|
+| ADR 0112 brand/tenant launch authorisation | slices 1-6: migrations 0128-0131 (`d86141f`, `972d841`, `8acbedf`, `7fa26ea`), Back Office launch UI (`33e733e`), launch API completions (`8b544b9`) | `IMPLEMENTED` (MOCK/local DB). Not a licence approval. |
+| ADR 0113 withdrawal DB state machine + hold invariant | slice 1 migration 0132 (`c2cfcd3`); slices 2-3 migrations 0133, 0134 (`493a372`) | `IMPLEMENTED`. Slice 4 (docs) `NOT IMPLEMENTED`. Reversal and amount-dispute paths `NOT IMPLEMENTED` (A5). |
+| ADR 0114 operator console | S0 redaction (`9e8b0f6`), S1 alerts console (`679515b`), S1b alert API (`0d5eb8f`), S2+S4 read routes (`9d2a4ee`), S6+S6b kill-switch console (`f16aaba`) | `PARTIALLY IMPLEMENTED`. S3, S5, S7, S8 (A10) and S9-S11 have no screens. |
+| ADR 0115 RG limits | S1 migration 0135 (`3145fb3`, `41e09b4`), S2 write APIs (`4a728fa`), S3 usage measurement (`c9c4e80`) | `PARTIALLY IMPLEMENTED`. S4 enforcement, S5 UI, S6 QA `NOT IMPLEMENTED`. |
+| ADR 0116 AML | S1+S3 migrations 0140-0142 (`034cc1d`, `789e27c`) | `PARTIALLY IMPLEMENTED`. S2 screening, S4 monitoring, S5 SAR, S6 routes/UI, S7 readiness `NOT IMPLEMENTED`; no AML HTTP routes. |
+| ADR 0118 player brand binding immutable | migration 0136 (`a3e56dd`) | `IMPLEMENTED` (BRAND-REHOME-HOLD-1 closed by it). |
+| ADR 0119 staff MFA, step-up, lifecycle | S1-S6, S7a, S7b: migrations 0137, 0138, 0139, 0151 (`8d87554`, `d2cad31`, `3f1b269`, `daad80f`, `70a6697`, `16b0c40`) | `IMPLEMENTED` (email delivery `MOCK`). S8 staff directory UI, S9 runbooks, S-H1, staff password reset `NOT IMPLEMENTED`. |
+| Payments sweeper process (CP-W1) | `cmd/platform-api/main.go` builds `buildPaymentsSweeper` and runs `payments.RunSweeperLoop` | `IMPLEMENTED` (wired; verified in `main.go`). |
+| Bonus engine waves 1-3 | sweeps wired in `main.go` (deposit, cashback, expiry) | `IMPLEMENTED`; sweeps instead of an event bus is a recorded deviation, ADR 0121. |
+| Staff route pins | `staff_route_static_test.go` pins 204 staff routes / 125 mutating | `IMPLEMENTED` |
+
+### CI state
+
+- **Hosted GitHub Actions is NOT billing-blocked any more.** Billing blocked runs only #365 to about #593. From #600 every run
+  failed early at the "Guard - test admin URL" step (alertworld, integration-tagged), so there was no hosted evidence for about
+  200 commits. That and eight further defects were fixed under task A1.
+- **Hosted run #828 on `56006ba` is green on every job**: build-test-lint, 16 integration shards, timing-lane,
+  integration-evidence, frontend (b2c, backoffice), frontend-image x2, infrastructure. Registry row `A1-HOSTED-CI-GREEN-2026-10-15`.
+  (Run result is taken from that registry row; this session did not re-query GitHub.)
+- The integration suite is **sharded** (`.github/workflows/ci.yml`, job `integration`, 16 matrix entries counted: `core`, 8
+  `internal/httpserver` shards, 7 `internal/payments` shards), each shard with its own postgres service and `-timeout 170m`; a
+  separate timing-lane job and an `integration-evidence` job (re-applies the Stage 10 W0 evidence gate to the merged logs).
+- The timing-lane test `TestResolutionIsolation_NormalOperation` now uses a relative-p95 criterion (owner decision 9); outage
+  tests keep their absolute bounds. A security acknowledgement of that test change is owed (class B).
+- Branch protection on `main` is still not enabled (class B / D-CI). The Mac self-hosted runner remains prepared, not active, and the audit recommends dropping it.
+
+### Test counts (as recorded in the registry; LOCAL evidence unless stated)
+
+- `FULL-VERIFY-HEAD16b0c40-2026-10-14` (local, MOCK providers): unit PASS=1490 FAIL=0 SKIP=5; payments integration 26 per-letter
+  shards all PASS; other integration PASS=2189 FAIL=1 SKIP=1 (the FAIL, `TestCreateStaff_TenantAdminCannotCreateFinanceRole`, was a real
+  fixture defect, fixed in `48c5014`); race payments PASS=522, race other PASS=659; gofmt/vet/vet-integration/lint clean. Frontends
+  were not re-run in that row.
+- Audit section 1 (local, at/after `48c5014`): full `internal/httpserver` integration PASS=933 FAIL=0 (1968 s); b2c build + 91 tests;
+  backoffice build + 393 tests; `migrate verify` clean after `888de6d`.
+- `A1-HOSTED-CI-GREEN-2026-10-15` (hosted run #828 green; plus a local full core run under CI grants): PASS=3459 FAIL=3 SKIP=7. The 3
+  FAILs (aml x2 PlatformOfficers quorum tests; reconciliation `CasinoStatement_NilOrErroringSource`) did not reproduce alone or in
+  two further parallel runs and the hosted core shard passed; recorded as an unreproduced cross-package interference suspect
+  (TEST-ISOLATION-WATCH-1, class B), to be re-checked at final verification.
+- **Not yet done:** full local verification on the final commit (finish line, audit section 6 item 3). These counts were not re-run in this documentation change.
+
+### Provider state: ALL MOCK
+
+`cmd/platform-api/registrations.go` wires only `payments.MockProvider`, `casino.MockCasinoProvider`, `kyc.MockKYCProvider`,
+`sportsbook.MockSportsbookProvider` and mock statement sources. No real PSP, KYC/AML vendor, casino aggregator, sportsbook feed,
+FX source, email provider or alert-delivery channel exists. Labels: PSP `MOCK` (real = `PROVIDER DEPENDENT`); casino `MOCK`;
+sportsbook `MOCK` (feed-driven settlement `NOT IMPLEMENTED`, scope decision D-S1); KYC `MOCK`; AML screening `NOT IMPLEMENTED`;
+sports-data abstraction (ADR 0117) `NOT IMPLEMENTED`; alert delivery `STUB` (log/mock channels); staff and player email `MOCK`.
+AWS is OFF; nothing is deployed; there is no real money. Retail is design only (`NOT IMPLEMENTED`, owner-deferred).
+
+### Corrections to statements further down in this file
+
+| Older statement | Correct as of 2026-10-15 |
+|---|---|
+| "migration head 0135" / "0001..0121" / "0001..0119" | Head is **0151**; 0143-0150 intentionally unused (`reservedUnusedVersions`). |
+| "gap-free" migrations | Gap-free **except** the declared reserved range 0143-0150. |
+| "staff MFA is NOT IMPLEMENTED"; "ADR 0017/0018 (MFA and signing, NOT IMPLEMENTED)" | Staff MFA, step-up and lifecycle are `IMPLEMENTED` (ADR 0119 S1-S6, S7a, S7b; email `MOCK`). ADR 0018 (asymmetric signing) is still `NOT IMPLEMENTED`: tokens remain HS256. |
+| "GitHub CI is blocked by billing (CI-BILLING-1)"; "no GitHub CI evidence" | Wrong since run #828. Billing blocked only about #365-#593; hosted CI is green. CI-BILLING-1 is superseded by `A1-HOSTED-CI-GREEN-2026-10-15`. |
+| "Crypto custody ... interface only (ADR 0008)" | No Go interface exists: a search for `CryptoCustodyProvider` finds one comment in `internal/payments/types.go`. Crypto custody is `NOT IMPLEMENTED` (ADR 0008 is design only). Fiat first; crypto is not in the first launch unless D-CRYPTO says so. |
+| HR-9 (bonus posting guard) as live | `REMOVED`. `internal/ledger/bonus_mirror.go` generates the bonus mirror inside `ledger.Post`. |
+| ADR 0112/0113/0114/0115/0116/0119 "pending implementation / NOT IMPLEMENTED" | See each ADR's "Status as of 2026-10-15" line and the table above. |
+| CP-W1 "no binary constructs a Sweeper" | Fixed: `main.go` constructs and runs the payments sweeper. |
+| "BRAND-REHOME-HOLD-1 not merged" | Merged with ADR 0118 (migration 0136). |
+| Bonus engine "subscribes to events" | It does not: three DB/ledger-tailing sweeps; `internal/eventbus` is a `STUB` with no importer. ADR 0121. |
+
+### Open work (completion audit section 3, class A, dependency order)
+
+| # | Item | Status |
+|---|---|---|
+| A1 | Hosted CI green | **DONE** (run #828, `56006ba`) |
+| A2 | Truth in docs | **DONE** by this change (HANDOVER, progress, active-stage, ADR headers, ADR 0121, superseded banner, proposed registry rows in `docs/plans/a2-proposed-registry-rows.md`). The orchestrator still has to apply the registry rows. |
+| A3 | Casino pre-adapter fixes (CAS-GAME-KILL-BET-1, CAS-WIN-IDEMP-1, CAS-BET-REQUIRES-BOOTSTRAP-1, CAS-STMT-IO-1, CAS-PLAYER-REF-1) | open |
+| A4 | MANUAL-ADJ-LINK-1 DB fence | open |
+| A5 | WITHDRAWAL-REVERSAL-1 + PAYOUT-AMOUNT-DISPUTE-1 | open |
+| A6 | RG enforcement minimum (time-out predicate, deposit/loss limit checks, minimal B2C RG UI) | open; a live `POST /v1/me/rg/time-out` currently has no enforcement |
+| A7 | AML operability minimum | open |
+| A8 | Market blocking wiring (`operatingmarket`, geo interface) | open |
+| A9 | Observability and alerting plumbing | open |
+| A10 | Operator console minimum (fix `CreateStaffForm`, invite/accept page, ADR 0114 S3/S5/S7/S8, UI-to-route contract test) | open; verified: the Back Office staff-create form posts `POST /v1/admin/tenants/{id}/staff`, and only `GET` is mounted on that path |
+| A11 | Payments engineering halves | open |
+| A12 | Backup/restore local drill | open |
+| A13 | Release-gate hygiene (`migrate verify` done in `888de6d`; TEST-HYGIENE-1 open) | partly done |
+
+Owner decisions still to record: D-S1, D-CRYPTO, D-RG, D-ALERT, D-BACKUP, D-CI and the rest of audit section 3 D. Class E
+(legal, licensing, brand-activation) items never block technical readiness and are manual.
+
+New open risk found while writing ADR 0121 (read in code, not reproduced): the bonus deposit sweep advances its `(posted_at, id)`
+watermark with no trailing margin while `posted_at` is the transaction start time, so a slow-committing deposit could be skipped
+by the bonus sweep (no ledger effect). Proposed row `BONUS-SWEEP-WATERMARK-SKEW-1`, class B.
+
+### What to do next
+
+Follow audit section 8: A3 + A4, then A6 + A8, then A5, then A7 and A9-A13. Read `docs/plans/platform-completion-audit-2026-10-14.md`
+first. The registry (`docs/governance/task-registry.md`) is still authoritative for row-level status, but its older "NOT MERGED"
+rows are superseded by `docs/plans/a2-proposed-registry-rows.md` until the orchestrator applies them.
+
+---
+
+> **[SUPERSEDED by "Current state (2026-10-15)" above wherever they differ.]** **Snapshot date: 2026-10-06 (state-corrected after the merges, the environment diagnosis and the Class-B B5-B8 round). Code HEAD: `60f58ed` (code merged through B6+B7; the 0120/0121 merge commit remains `639a2f0`) on branch `claude/focused-wright-jw88w9` (= origin).** This file is the PRIMARY entry point for any engineer taking the project over from the Git repository alone. It is a *live* document: whoever merges a material change updates the affected section in the same change (registry: `HANDOVER-1`, `HANDOVER-LIVE-2026-10-06`). **State correction:** the signed-actor-proof (migration 0120) and stake-return/closure (migration 0121) branches are now MERGED; migrations on HEAD are 0001..0121 (`migrate verify` clean). See [section 25a](#25a-merged-tree-race-verification-state) for the verification state: the merged-tree `-race` sweep is INCOMPLETE because the execution environment repeatedly restarts (environment limitation, no application failure).
 >
 > Companions: hands-on commands in [`runbooks/developer-handover.md`](runbooks/developer-handover.md); dated snapshot with SHAs, residual register and evidence index in [`plans/prh2-hardening-round/developer-handover-2026-10-06.md`](plans/prh2-hardening-round/developer-handover-2026-10-06.md); human-decision register in [`governance/human-decision-register.md`](governance/human-decision-register.md).
 >
@@ -12,7 +142,7 @@
 
 **What has been built.** Stages 0 to 10.3 are accepted by the human owner (2026-09-26): identity, tenancy with database-enforced row-level security, an append-only double-entry ledger, multi-wallet, payments and withdrawals, casino and sportsbook integration slices, bonus engine (waves 1-3), KYC/AML/responsible-gaming enforcement, a risk engine, jurisdiction model, back office, B2C frontend, and a staging AWS design. After that, the "PRH" blocks hardened payments without any real provider.
 
-**Where it stands.** Everything external is a **MOCK**: no real payment provider (PSP), KYC vendor, casino aggregator or sportsbook feed, no production credentials, no real money. AWS is **OFF** (nothing deployed). GitHub Actions CI is **blocked by billing**, so all test evidence is local. Migrations `0001..0121` are on HEAD `639a2f0` (the signed-actor-proof `0120` and stake-return/closure `0121` branches are merged); merged-tree `-race` verification is INCOMPLETE because the sandbox restarts (section 25a).
+**Where it stands.** Everything external is a **MOCK**: no real payment provider (PSP), KYC vendor, casino aggregator or sportsbook feed, no production credentials, no real money. AWS is **OFF** (nothing deployed). GitHub Actions CI is **blocked by billing**, so all test evidence is local. **[CORRECTED 2026-10-15: false since run #828; hosted CI is green, see Current state.]** Migrations `0001..0121` are on HEAD `639a2f0` (the signed-actor-proof `0120` and stake-return/closure `0121` branches are merged); merged-tree `-race` verification is INCOMPLETE because the sandbox restarts (section 25a).
 
 **What is being worked on.** PRH-2 ("payment readiness and provider-independent hardening, round 2") is **not complete**. The two ready branches are merged (0120, 0121). Open: finish merged-tree `-race` verification (INCOMPLETE, environment-limited; see 25a - run it in controlled batches or on a stable CI/self-hosted runner), some remaining "Class-B" payment hardening items, threat-register residuals (T3/T4/T5/T8) and several owner decisions. A sandbox PSP adapter is **not yet authorized**.
 
@@ -50,7 +180,7 @@ Multi-tenancy, tenant configuration and partner/back-office foundations exist; s
 Retail/POS is architecture-only (`NOT IMPLEMENTED`). No work without owner authorization.
 
 ### FUTURE
-AI/agent features (ADR 0089, architecture only), crypto custody (ADR 0008, interface only), tenant isolation tightening (schema/database per tenant), analytics (CDC to ClickHouse, deferred).
+AI/agent features (ADR 0089, architecture only), crypto custody (ADR 0008; no Go interface exists, `NOT IMPLEMENTED`), tenant isolation tightening (schema/database per tenant), analytics (CDC to ClickHouse, deferred).
 
 **Work that can start immediately with no human decision:** the IMMEDIATE list above, test-only hardening that does not change financial semantics, documentation fixes, and read-only analysis. **Everything touching real providers, real money, AWS, Terraform/IAM, billing, legal interpretation, or ADR semantics needs a human decision first.**
 
@@ -88,7 +218,7 @@ Commercial objective (`MASTER-BUILD-PROMPT.md`): (1) launch our own B2C casino b
 ## 2. BUSINESS / PRODUCT MODEL
 
 - **Tenants and brands.** Tenant = legal/operational customer; brand is a distinct entity (ADR 0012). Hybrid licensing: some tenants run under the platform licence, some bring their own (ADR 0006). Markets: Europe and LATAM, each modelled as distinct jurisdictions with their own rule configuration, never one rule set per region.
-- **Money.** Crypto and fiat simultaneously: a player has a distinct wallet per asset (ADR 0007). Crypto key custody is delegated to an institutional custodian (ADR 0008; `NOT IMPLEMENTED`, interface only).
+- **Money.** Crypto and fiat simultaneously: a player has a distinct wallet per asset (ADR 0007). Crypto key custody is delegated to an institutional custodian (ADR 0008; `NOT IMPLEMENTED`; no Go interface exists yet).
 - **Hosting.** A major hyperscale cloud (ADR 0009); AWS staging was designed and exercised once, then torn down. Written gambling-AUP confirmation is required before production (open).
 - **First tenant licence.** Anjouan. Any other jurisdiction is a human decision.
 - Business decisions history: ADR 0005 (resolved at the Stage 0 to 1 gate).
@@ -119,11 +249,11 @@ Stage position: Stages 0-10.3 accepted; PRH (payment readiness) block and PRH-2 
 ## 4. CURRENT GIT STATE
 
 - Remote: `origin` = `github.com/Diansalas/igaming-platform`. Branch `claude/focused-wright-jw88w9`, HEAD = origin = `d149a64` at snapshot time. Docs-only commits since `6a7b5f5`.
-- Migrations on HEAD: `0001..0119`, 119 up/down pairs (238 files), gap-free.
+- Migrations on HEAD: `0001..0119`, 119 up/down pairs (238 files), gap-free. **[STALE 2026-10-15: head is 0151, 0143-0150 intentionally unused.]**
 - **MERGED at `639a2f0`** (previously 'ready, merge pending'):
   - `prh2-r5-signed-actor-proof` (final `8863e31`): migration 0120, ADR 0110 (HMAC signed actor proof for governed four-eyes writes). THREAT-MODEL-ARBITRARY-SQL-1 stays PARTIALLY MITIGATED (T3/H1, T4, T5, T8, T6, T7, s9.5).
   - `prh2-r5-stake-return-closure` (final `35cd2fb`): migration 0121 (Q-GP-5 terminal stake returns on non-active tenants; Q-GP-1 closure refused while open sportsbook bets, `GP020`; once-only casino rollback unique index). Casino open rounds are not representable (Q-GP-6 OPEN).
-  - Migrations on HEAD `639a2f0`: 0001..0121, gap-free (`migrate verify` on `igaming_orch_local`: 121 applied).
+  - Migrations on HEAD `639a2f0`: 0001..0121, gap-free (`migrate verify` on `igaming_orch_local`: 121 applied). **[STALE 2026-10-15: head is 0151.]**
 - 52 agent worktrees exist under `.claude/worktrees/` (plus this one). **Preserve them; never auto-delete.** 44 UNKNOWN literal-named scratch databases were intentionally preserved; databases `igaming_orch_local` and `igaming_platform_ci_local` must be kept.
 - Many feature branches (`prh2-*`) are merged-and-retained; do not delete without classification.
 
@@ -278,7 +408,7 @@ production credential exists.
 | Sportsbook provider | MOCK / in-house mock mode (ADR 0087/0088) | Catalogue fetch is outside any transaction (SB-CATALOGUE-IO-1, done). A bounded fetch timeout is needed before a real adapter. The bet-placement contract is unknown. |
 | Payment force resolution (K3) | MOCK. Staff-initiated, four-eyes, DB-enforced M1 (deposit evidence-only) and M2 (payout declared paid / not paid via `withdrawal.Complete`/`Fail`), migration 0115, ADR 0101. Statement source is NOT wired (`m2_declare_not_paid` refused), alert delivery NOT IMPLEMENTED, closed-tenant funds DESIGN ONLY (ADR 0107). Local evidence only. Real-money preconditions: PAY-K3-STATEMENT-SOURCE-WIRING-1, TRIGGER-SEARCH-PATH-1 (HIGH launch blocker), ALERT-DELIVERY-1, PAY-K3-FOLLOWUPS-1. | PAY-K3-STATEMENT-SOURCE-WIRING-1, PAY-K3-MR020-HTTP-MAPPING-1, PAY-K3-FOLLOWUPS-1 |
 | KYC vendor | MOCK. Player KYC create/submit is asynchronous through the `kyc_submission_outbox` (migration 0114, ADR 0106; dedicated least-privilege `kyc_submission_worker` identity; terminal failure raises the dedicated alert kind `kyc.submission_failed_terminal`, durable only, no delivery channel; local evidence only; HQ-E1-1..4 open). A KYC-store outage fails closed: the decision and audit are recorded (savepoint), and withdrawal returns 503 (PRH-2 F-kyc). (Sweeper: `PAYMENTS_SWEEP_INTERVAL_SECONDS`, default 15s, ADR 0095 §37, MOCK only, non-active tenants resolution-only; nothing pages a human or a stalled sweeper while ALERT-DELIVERY-1 is OPEN.) Payout and deposit KYC gates treat unavailable as retryable with a recorded decision row, never as deny (PRH-2 F-pay, ADR 0096 §24); payout adapter error-path references are validated before persistence. | KYC-OUTBOX-REQUEUE-1, KYC-E1-FOLLOWUPS-1, HQ-E1-1..4; LF-I3-5 `RecordDecision`-error half; KYC-ENFORCE-1; HD-KYC-1..8 thresholds |
-| Crypto custody | NOT IMPLEMENTED (interface only, ADR 0008) | Custodian selection (human) |
+| Crypto custody | NOT IMPLEMENTED (design only, ADR 0008; no Go interface exists) | Custodian selection (human) |
 | Email | MOCK (`internal/email` mock provider) | Vendor selection |
 | Geolocation | MOCK (`internal/geolocation/mock_provider.go`) | Vendor selection |
 | FX / rate source | NOT IMPLEMENTED (none exists; KYC-FX-AGG-1) | Human input / design |
@@ -302,7 +432,7 @@ ADR 0089: architecture boundary only (Bonus/Gamification/Reward). **Nothing is i
 
 ## 23. SECURITY MODEL
 
-Docs: [`security/security-architecture.md`](security/security-architecture.md), [`security/runtime-role-separation.md`](security/runtime-role-separation.md), ADR 0016, 0017/0018 (MFA and signing, `NOT IMPLEMENTED`), 0093, 0094, 0097 (webhook admission), 0108.
+Docs: [`security/security-architecture.md`](security/security-architecture.md), [`security/runtime-role-separation.md`](security/runtime-role-separation.md), ADR 0016, 0017/0018 (MFA: `IMPLEMENTED` via ADR 0119 as of 2026-10-15; asymmetric signing, ADR 0018: still `NOT IMPLEMENTED`), 0093, 0094, 0097 (webhook admission), 0108.
 
 **Accepted threat model (owner decision THREAT-MODEL-ARBITRARY-SQL-1 = YES, 2026-10-05).** A compromised or stolen `igaming_runtime` database credential, or arbitrary SQL executed as that role (SQL injection, compromised application process), is **INSIDE the production threat model** for DATABASE-enforced controls (four-eyes, actor checks, tenant isolation). Consequence: RLS and triggers alone do not suffice where a session can set `app.*` settings; the signed actor proof (below) is the authorized mitigation.
 
@@ -395,7 +525,7 @@ AWS is **OFF**. Nothing is deployed; no deployment is authorized. Staging archit
 ## 27. CI/CD
 
 - `.github/workflows/ci.yml` (GitHub-hosted, jobs `build-test-lint`, `frontend`, `frontend-image`, `infrastructure`): gofmt, vet, golangci-lint **v2.9.0** via `golangci-lint-action@v9` (pinned; the binary must be built with Go >= the `go.mod` Go 1.26), dependency drift, `govulncheck`, build, migrations up and `verify`, unit `-race`, integration `-race` with the timing lane skipped by name, then the timing lane alone, migration reversibility.
-- **GitHub Actions is BLOCKED by billing (CI-BILLING-1).** Runs from #365 on never started; last green evidence W0 runs #239-#243. **Do not modify billing or the plan** (owner decision). Local evidence only; never describe a local run as CI. BRANCH-PROTECTION-1: `main` unprotected, CODEOWNERS unenforced.
+- **[STALE 2026-10-15: hosted CI is green (run #828); billing blocked only runs #365 to about #593.]** **GitHub Actions is BLOCKED by billing (CI-BILLING-1).** Runs from #365 on never started; last green evidence W0 runs #239-#243. **Do not modify billing or the plan** (owner decision). Local evidence only; never describe a local run as CI. BRANCH-PROTECTION-1: `main` unprotected, CODEOWNERS unenforced.
 - Self-hosted Mac runner: **PREPARED, NOT installed/registered** - [`runbooks/self-hosted-runner.md`](runbooks/self-hosted-runner.md) and `.github/workflows/ci-selfhosted.yml` (`workflow_dispatch` only). Setup needs separate owner authorization. Its output would be labeled SELF-HOSTED CI EVIDENCE, distinct from LOCAL and GITHUB-HOSTED CI; whether it satisfies F-POOL-1 K1 / PRH-FPOOL1 is a ruling for architect + security + owner.
 - Deployment: `deploy/aws/scripts/deploy.sh` (interactive, never `-auto-approve`), lifecycle in [`runbooks/stage-9-4-staging-lifecycle-runbook.md`](runbooks/stage-9-4-staging-lifecycle-runbook.md).
 
@@ -675,7 +805,7 @@ Unit: `go test ./...`. Integration: `-tags=integration` with `TEST_DATABASE_URL`
 
 ## 36o. 2026-10-13 STATE (supersedes older migration counts in this file)
 
-Branch `claude/focused-wright-jw88w9`; migration head **0135**. Merged since §36n: ADR 0113 slices 2-3 (0133 LA025 ledger-based closure arm, 0134 reconciliation check D + WD042), ADR 0114 S2/S4 read routes (R1/R1b/R2, `sportsbook_reconciliation:read`), ADR 0115 S1 schema (0135, `database_environment` anchor, indexes). Verification: registry row FULL-VERIFY-HEAD135-2026-10-13 (local only). Reconciliation and class-A pipeline: `docs/plans/platform-reconciliation-2026-10-13.md`. Corrections to older claims: staff MFA is NOT IMPLEMENTED; the HR-9 bonus guard was removed; ADR 0112/0113/0114 status headers understate what is merged. Operator action: persistent databases must be rebuilt from migrations before 0132 applies (WD098); pre-build the 0135 `ledger_entries` index per runbook 5.1 on any non-trivial database. Open tracked item: BRAND-REHOME-HOLD-1.
+Branch `claude/focused-wright-jw88w9`; migration head **0135**. Merged since §36n: ADR 0113 slices 2-3 (0133 LA025 ledger-based closure arm, 0134 reconciliation check D + WD042), ADR 0114 S2/S4 read routes (R1/R1b/R2, `sportsbook_reconciliation:read`), ADR 0115 S1 schema (0135, `database_environment` anchor, indexes). Verification: registry row FULL-VERIFY-HEAD135-2026-10-13 (local only). Reconciliation and class-A pipeline: `docs/plans/platform-reconciliation-2026-10-13.md`. Corrections to older claims: staff MFA is NOT IMPLEMENTED **[WRONG as of 2026-10-15: IMPLEMENTED by ADR 0119 S1-S7b, head 0151]**; the HR-9 bonus guard was removed; ADR 0112/0113/0114 status headers understate what is merged. Operator action: persistent databases must be rebuilt from migrations before 0132 applies (WD098); pre-build the 0135 `ledger_entries` index per runbook 5.1 on any non-trivial database. Open tracked item: BRAND-REHOME-HOLD-1.
 
 ## 45. AWS STAGING PROCEDURE
 
@@ -743,7 +873,7 @@ All ADRs: [`decisions/`](decisions/). Key ones (title and status as in the file 
 | [0004](decisions/0004-provider-abstraction-pattern.md) | Integrations are subsystems | Accepted |
 | [0006](decisions/0006-hybrid-licensing-and-jurisdiction-model.md) | Hybrid licensing, jurisdiction as config | Accepted (human) |
 | [0007](decisions/0007-multi-wallet-per-player-model.md) | Multi-wallet per player | Accepted (human) |
-| [0008](decisions/0008-crypto-custody-provider-abstraction.md) | Institutional custody abstraction | Accepted; NOT IMPLEMENTED |
+| [0008](decisions/0008-crypto-custody-provider-abstraction.md) | Institutional custody abstraction | Accepted; NOT IMPLEMENTED (no Go interface exists) |
 | [0009](decisions/0009-hosting-hyperscale-cloud.md) | Hyperscale cloud hosting | Accepted (human) |
 | [0019](decisions/0019-authoritative-ledger-and-balance-projection-architecture.md), [0020](decisions/0020-financial-idempotency-and-concurrency-control.md) | Ledger projection, idempotency | Accepted / implemented |
 | [0031](decisions/0031-risk-and-limits-engine.md) | Risk & limits | Accepted |
