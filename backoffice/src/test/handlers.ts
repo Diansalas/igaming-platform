@@ -4,6 +4,8 @@ import { makeTestJwt } from './jwt'
 export const MFA_CHALLENGE_TOKEN = 'mfa-challenge-token-SENTINEL'
 export const ENROL_CHALLENGE_TOKEN = 'enrol-challenge-token-SENTINEL'
 export const ENROL_LINK_TOKEN = 'enrol-link-token-SENTINEL'
+export const INVITE_LINK_TOKEN = 'invite-link-token-SENTINEL'
+export const INVITE_PASSWORD = 'invite-password-SENTINEL-12'
 export const VALID_TOTP = '123456'
 export const VALID_RECOVERY_CODE = 'ABCDE-12345'
 export const FACTOR_ID = '00000000-0000-4000-8000-0000000000f1'
@@ -56,6 +58,18 @@ export const handlers = [
         challenge: { type: 'enrol', token: ENROL_CHALLENGE_TOKEN, expires_in: 300, methods: ['totp'] },
       })
     }
+    return HttpResponse.json({ code: 'invalid_enrolment_token', message: 'bad' }, { status: 401 })
+  }),
+
+  // ADR 0119 S6: invitation acceptance (token-authenticated) yields an `enrol` challenge.
+  http.post('/v1/staff/invitations/accept', async ({ request }) => {
+    const body = (await request.json()) as { token: string; password: string }
+    if (body.token === INVITE_LINK_TOKEN && body.password.length >= 12) {
+      return HttpResponse.json({
+        challenge: { type: 'enrol', token: ENROL_CHALLENGE_TOKEN, expires_in: 300, methods: ['totp'] },
+      })
+    }
+    if (body.password.length < 12) return HttpResponse.json({ code: 'validation_error', message: 'bad' }, { status: 400 })
     return HttpResponse.json({ code: 'invalid_enrolment_token', message: 'bad' }, { status: 401 })
   }),
 

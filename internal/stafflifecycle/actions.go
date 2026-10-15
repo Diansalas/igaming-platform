@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"fmt"
 	"sort"
@@ -124,6 +126,14 @@ func (s *Service) Invite(ctx context.Context, actor Actor, targetTenant uuid.UUI
 func validEmail(e string) bool {
 	if len(e) < 3 || len(e) > 320 || strings.ContainsAny(e, " \t\r\n") {
 		return false
+	}
+	// Security review SR-A10a-6: no control (Cc) or format (Cf, which includes the bidi overrides U+202A-202E and
+	// isolates U+2066-2069, zero-width U+200B-200F, U+FEFF) characters, and no invalid UTF-8: they let a staff email
+	// display as a different address.
+	for _, r := range e {
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
 	}
 	at := strings.IndexByte(e, '@')
 	return at > 0 && at < len(e)-1 && strings.Count(e, "@") == 1

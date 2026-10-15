@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { LoginPage } from '../auth/LoginPage'
 import { EnrolPage } from '../auth/EnrolPage'
+import { InvitationAcceptPage } from '../auth/InvitationAcceptPage'
 import { RequireAuth } from '../auth/RequireAuth'
 import { RequireNavPermission } from '../auth/RequireNavPermission'
 import { AppLayout } from '../layout/AppLayout'
@@ -35,6 +36,8 @@ export function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/enrol" element={<EnrolPage />} />
+      {/* Outside the authenticated shell: the invitee has no session yet (token from the URL fragment only). */}
+      <Route path="/accept-invitation" element={<InvitationAcceptPage />} />
 
       <Route
         element={
