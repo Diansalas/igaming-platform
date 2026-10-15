@@ -1,0 +1,43 @@
+name: ci-db
+description: >-
+  Creates the CI application roles (igaming owner, igaming_runtime, igaming_test_admin), runs migrations and applies
+  the same grant narrowing as the build-test-lint job, against the job's postgres service (superuser password
+  igaming_ci_superuser_password, database igaming_platform_test). Used by every integration shard so each shard has
+  its OWN database server - shards never share state.
+runs:
+  using: composite
+  steps:
+    - name: Create roles
+      shell: bash
+      env:
+        PGPASSWORD: igaming_ci_superuser_password
+      run: |
+        psql -h localhost -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
+        CREATE ROLE igaming LOGIN PASSWORD 'igaming_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+        ALTER DATABASE igaming_platform_test OWNER TO igaming;
+        ALTER SCHEMA public OWNER TO igaming;
+        CREATE ROLE igaming_runtime LOGIN PASSWORD 'igaming_runtime_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+        GRANT CONNECT ON DATABASE igaming_platform_test TO igaming_runtime;
+        GRANT USAGE ON SCHEMA public TO igaming_runtime;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO igaming_runtime;
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_runtime;
+        ALTER DEFAULT PRIVILEGES FOR ROLE igaming IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO igaming_runtime;
+        ALTER DEFAULT PRIVILEGES FOR ROLE igaming IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO igaming_runtime;
+        CREATE ROLE igaming_test_admin LOGIN PASSWORD 'igaming_test_admin_ci_password' NOSUPERUSER CREATEDB NOCREATEROLE NOBYPASSRLS;
+        GRANT igaming TO igaming_test_admin;
+        SQL
+    - name: Run migrations and verify
+      shell: bash
+      run: |
+        go run ./cmd/migrate up
+        go run ./cmd/migrate verify
+    - name: Narrow runtime grants (schema_migrations, settlements, withdrawal_requests)
+      shell: bash
+      env:
+        PGPASSWORD: igaming_ci_superuser_password
+      run: |
+        psql -h localhost -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
+        REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;
+        REVOKE UPDATE, DELETE, TRUNCATE ON sportsbook_bet_settlements FROM igaming_runtime;
+        REVOKE DELETE, TRUNCATE ON withdrawal_requests FROM igaming_runtime;
+        SQL
