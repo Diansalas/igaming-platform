@@ -27,6 +27,11 @@ import { CasinoCataloguePage } from '../features/catalogue/CasinoCataloguePage'
 import { AlertsPage } from '../features/alerts/AlertsPage'
 import { KillSwitchPage } from '../features/killswitch/KillSwitchPage'
 import { LaunchQueuePage } from '../features/launch/LaunchQueuePage'
+import { ParkedPaymentsPage } from '../features/payments/ParkedPaymentsPage'
+import { ReconciliationPage } from '../features/reconciliation/ReconciliationPage'
+import { CapabilityGrantsPage } from '../features/capability/CapabilityGrantsPage'
+import { ForceResolutionsPage } from '../features/resolutions/ForceResolutionsPage'
+import { HoldResolutionsPage } from '../features/resolutions/HoldResolutionsPage'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
 
@@ -91,6 +96,46 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission="killSwitch">
               <KillSwitchPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="parked-payments"
+          element={
+            <RequireNavPermission permission="paymentForceResolutions">
+              <ParkedPaymentsPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="force-resolutions"
+          element={
+            <RequireNavPermission permission="paymentForceResolutions">
+              <ForceResolutionsPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="hold-resolutions"
+          element={
+            <RequireNavPermission permission="withdrawalHoldResolutions">
+              <HoldResolutionsPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="reconciliation"
+          element={
+            <RequireNavPermission permission="reconciliation">
+              <ReconciliationPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="capability-grants"
+          element={
+            <RequireNavPermission permission="capabilityGrants">
+              <CapabilityGrantsPage />
             </RequireNavPermission>
           }
         />

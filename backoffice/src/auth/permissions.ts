@@ -119,6 +119,22 @@ export interface NavPermissions {
    * re-checks every call and a tenant caller may name only its own tenant.
    */
   killSwitch: boolean
+  /**
+   * ADR 0114 S5: at least one reconciliation read permission (payment_statement / ledger_vs_projection:
+   * platform_admin, compliance, finance; sportsbook_settlement and the casino streams: tenant_admin, compliance,
+   * finance). Which STREAMS a role may open is `reconciliationStreams`. UI convenience only; the server checks
+   * the permission of the requested stream before any query.
+   */
+  reconciliation: boolean
+  /**
+   * ADR 0114 S7 (K1, internal/auth/permission.go): capability_grant:read (platform_admin, tenant_admin,
+   * compliance), :request (platform_admin, tenant_admin), :approve (platform_admin ONLY), :revoke (platform_admin,
+   * tenant_admin). UI convenience only; the database decides R-7 and the distinct-person rules.
+   */
+  capabilityGrants: boolean
+  capabilityGrantRequest: boolean
+  capabilityGrantApprove: boolean
+  capabilityGrantRevoke: boolean
 }
 
 const NONE: NavPermissions = {
@@ -155,6 +171,11 @@ const NONE: NavPermissions = {
   launchSuspend: false,
   launchQueue: false,
   killSwitch: false,
+  reconciliation: false,
+  capabilityGrants: false,
+  capabilityGrantRequest: false,
+  capabilityGrantApprove: false,
+  capabilityGrantRevoke: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -203,6 +224,11 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     launchSuspend: true,
     launchQueue: true,
     killSwitch: true,
+    reconciliation: true,
+    capabilityGrants: true,
+    capabilityGrantRequest: true,
+    capabilityGrantApprove: true,
+    capabilityGrantRevoke: true,
   },
   tenant_admin: {
     ...NONE,
@@ -222,9 +248,13 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     launchRequest: true,
     launchSuspend: true,
     killSwitch: true,
+    reconciliation: true,
+    capabilityGrants: true,
+    capabilityGrantRequest: true,
+    capabilityGrantRevoke: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
+  compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, reconciliation: true, capabilityGrants: true },
   finance: {
     ...NONE,
     withdrawals: true,
@@ -235,6 +265,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     paymentForceResolutions: true,
     paymentForceResolutionAct: true,
     payoutInstruments: true,
+    reconciliation: true,
   },
   risk_manager: { ...NONE },
   promotions_manager: { ...NONE, bonus: true },
@@ -244,4 +275,18 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
 export function getNavPermissions(role: string | undefined): NavPermissions {
   if (!role) return NONE
   return ROLE_NAV_PERMISSIONS[role] ?? NONE
+}
+
+export type ReconciliationStreamId = 'payment_statement' | 'ledger_vs_projection' | 'sportsbook_settlement' | 'casino_consistency' | 'casino_statement'
+
+/**
+ * Streams a role is expected to be allowed to read (ADR 0114 section 3 and 5, D-OPS-2). A static hint that only
+ * decides which tabs to show; the server re-checks the stream permission on every call and a refusal is rendered.
+ * Casino streams are tenant-scoped routes (no tenant in the path), so a platform principal gets none.
+ */
+export function reconciliationStreams(role: string | undefined, platform: boolean): ReconciliationStreamId[] {
+  if (role === 'platform_admin') return platform ? ['payment_statement', 'ledger_vs_projection'] : []
+  if (role === 'compliance' || role === 'finance') return ['payment_statement', 'ledger_vs_projection', 'sportsbook_settlement', 'casino_consistency', 'casino_statement']
+  if (role === 'tenant_admin') return ['sportsbook_settlement', 'casino_consistency', 'casino_statement']
+  return []
 }
