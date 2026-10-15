@@ -51,7 +51,8 @@ describe('buildNavItems', () => {
     // Launch Queue mirrors launch_authorisation:read for platform scope (ADR 0112).
     // Casino Catalogue mirrors PermCasinoCatalogueManage (platform_admin only).
     // Alerts mirrors alert:manage (platform_admin only; ADR 0114 S1).
-    expect(items).toEqual(['Tenants', 'Launch Queue', 'Alerts', 'Payment Kill Switch', 'Casino Catalogue', 'Platform Audit Log'])
+    // AML mirrors aml_case:read (ADR 0116 A7).
+    expect(items).toEqual(['Tenants', 'Launch Queue', 'Alerts', 'Payment Kill Switch', 'AML', 'Casino Catalogue', 'Platform Audit Log'])
   })
 
   it('gives tenant_admin the Providers & Games configuration page but never the platform catalogue', () => {
@@ -64,7 +65,8 @@ describe('buildNavItems', () => {
   it('gives compliance its review sections but no configuration, catalogue, or withdrawals', () => {
     const items = buildNavItems({ ...baseClaims, role: 'compliance' }).map((i) => i.label)
     // 'My Tenant': own-tenant read since ADR 0112 slice 6 (b) (brand discovery for the launch panel).
-    expect(items).toEqual(['My Tenant', 'Players', 'KYC', 'Responsible Gaming', 'Bonus', 'Sportsbook', 'Casino', 'Audit Log'])
+    // 'AML' mirrors aml_case:read (compliance and platform_admin only; ADR 0116 A7).
+    expect(items).toEqual(['My Tenant', 'Players', 'KYC', 'AML', 'Responsible Gaming', 'Bonus', 'Sportsbook', 'Casino', 'Audit Log'])
   })
 
   it('never gives finance configuration or catalogue pages', () => {

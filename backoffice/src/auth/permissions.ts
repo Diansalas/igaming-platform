@@ -119,6 +119,15 @@ export interface NavPermissions {
    * re-checks every call and a tenant caller may name only its own tenant.
    */
   killSwitch: boolean
+  /**
+   * ADR 0116 s6 (A7): the STATIC half of the AML officer gates (aml_case:read / :work / :close_approve, aml_hold:manage),
+   * held by compliance and platform_admin only (internal/auth/permission.go). UI convenience only: the authority is the
+   * in-force aml_officer capability grant, a signed proof and the officer quorum, all checked by the server.
+   */
+  amlRead: boolean
+  amlWork: boolean
+  amlApprove: boolean
+  amlHolds: boolean
 }
 
 const NONE: NavPermissions = {
@@ -155,6 +164,10 @@ const NONE: NavPermissions = {
   launchSuspend: false,
   launchQueue: false,
   killSwitch: false,
+  amlRead: false,
+  amlWork: false,
+  amlApprove: false,
+  amlHolds: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -203,6 +216,10 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     launchSuspend: true,
     launchQueue: true,
     killSwitch: true,
+    amlRead: true,
+    amlWork: true,
+    amlApprove: true,
+    amlHolds: true,
   },
   tenant_admin: {
     ...NONE,
@@ -224,7 +241,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     killSwitch: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
+  compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, amlRead: true, amlWork: true, amlApprove: true, amlHolds: true },
   finance: {
     ...NONE,
     withdrawals: true,
