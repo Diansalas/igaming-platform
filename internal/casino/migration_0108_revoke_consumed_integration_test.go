@@ -352,9 +352,9 @@ func TestRevokeLaunchSession_PreRevokeBetsStillSettle(t *testing.T) {
 	enableGameForTenant(t, pool, f, game.ID)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -557,8 +557,8 @@ func TestLaunchGame_FailedLaunchOnExpiredSession_RevokeNoOpStillAudits(t *testin
 		return LaunchResult{}, errors.New("simulated transport failure after the session's token TTL lapsed")
 	}
 
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
-	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base)).WithUngatedMarketOpenForTests()
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})

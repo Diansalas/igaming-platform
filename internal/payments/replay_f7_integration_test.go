@@ -55,7 +55,7 @@ func (e f7PaymentsEnv) succeededDeposit(t *testing.T, key string, amount int64) 
 	var intent DepositIntent
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, e.orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, e.orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: e.f.tenantID, BrandID: e.f.brandID, PlayerAccountID: e.f.playerAccountID, WalletID: e.f.walletID},
 			AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: key,
 		})

@@ -70,7 +70,7 @@ func TestInitiateDepositAttempt_PoolThreadedToResolver(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-a": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-a": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	resolver := &poolRecordingResolver{}
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "pool-thread-deposit",
 	})
@@ -100,7 +100,7 @@ func TestDriveCreatedAttemptCascade_PoolThreadedToResolver(t *testing.T) {
 	).WithPayoutDestinations(pitest.Shared())
 
 	resolver := &poolRecordingResolver{}
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "pool-thread-cascade",
 	})
@@ -203,7 +203,7 @@ func TestSweeperProcessViaQueryStatus_PoolThreadedToResolver(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-e": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-e": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	resolver := &poolRecordingResolver{}
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "pool-thread-sweep",
 	})

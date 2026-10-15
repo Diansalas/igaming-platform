@@ -97,7 +97,7 @@ func newGateWorld(t *testing.T, owner, rt *db.Pool) gateWorld {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, owner, f, provider, 100)
 	sessionID := mintSession(t, owner, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 	return gateWorld{owner: owner, rt: rt, f: f, provider: provider, orch: orch, sessionID: sessionID}
 }
 

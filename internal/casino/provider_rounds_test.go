@@ -95,7 +95,7 @@ func TestPostBet_BindsProviderRound_IdempotentAcrossTwoBetsOnSameRound(t *testin
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const roundID = "round-idempotent-bind"
 
@@ -173,7 +173,7 @@ func TestPostBet_SecondPlayerSameProviderRound_RejectedAndNoLedgerEffect(t *test
 	registerCasinoCapability(t, pool, fA, provider, 100)
 	sessionA := mintSession(t, pool, fA, "mock-casino", "EUR")
 	sessionB := mintSession(t, pool, fB, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const sharedRoundID = "round-cross-player-collision"
 
@@ -252,7 +252,7 @@ func TestPostBet_SameProviderRoundIDDifferentTenant_IndependentRows(t *testing.T
 	registerCasinoCapability(t, pool, fB, provider, 100)
 	sessionA := mintSession(t, pool, fA, "mock-casino", "EUR")
 	sessionB := mintSession(t, pool, fB, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const sharedRoundID = "round-shared-literal-across-tenants"
 
@@ -311,7 +311,7 @@ func TestPostBet_DifferentBrandSameTenant_RejectedAndNoLedgerEffect(t *testing.T
 	registerCasinoCapability(t, pool, fA, provider, 100)
 	sessionA := mintSession(t, pool, fA, "mock-casino", "EUR")
 	sessionSibling := mintSession(t, pool, sibling, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const sharedRoundID = "round-cross-brand-collision"
 
@@ -368,7 +368,7 @@ func TestPostBet_DeclinedByRG_BindsNoProviderRound(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 	selfExclude(t, pool, f)
 
 	const roundID = "round-rg-blocked-no-bind"

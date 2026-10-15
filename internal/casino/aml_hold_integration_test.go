@@ -66,7 +66,7 @@ func TestAMLHold_CasinoStake_HeldAndKYCPending_SameDeclineReason(t *testing.T) {
 		provider := NewMockCasinoProvider("mock-casino", "EUR")
 		registerCasinoCapability(t, pool, f, provider, 100)
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-aml-"+name, "", "round-aml-"+name, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 		var result ReceiveCallbackResult
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -99,7 +99,7 @@ func TestAMLHold_CasinoTombstoneRollbackWithNoOriginal_IsNeverGated(t *testing.T
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 	holdCasinoPlayer(t, pool, f, aml.ScopeAllValueMovement)
 	before := cashBalance(t, pool, f)
 	r := callback(t, pool, f, orch, provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-unseen", "bet-never-seen", "round-x", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil))
@@ -119,7 +119,7 @@ func TestAMLHold_CasinoWinAndRollback_AreNeverGated(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	post := func(p webhookauth.Inbound) ReceiveCallbackResult { return callback(t, pool, f, orch, p) }
 	// Two stakes BEFORE the hold exists.

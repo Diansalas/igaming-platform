@@ -104,7 +104,7 @@ func newCGAPI(t *testing.T) *cgAPI {
 		ServiceName:     "cg-test",
 		AccessTokenTTL:  time.Hour,
 		RefreshTokenTTL: time.Hour,
-		PersonResolver:  identityresolution.NewMockPersonResolver(),
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		// PAY-K3-STATEMENT-SOURCE-WIRING-1: nil (refuse every M2) unless a test sets it.
 		StatementSources: cgAPIStatementSources,
 		// PAY-PAYOUT-UNBOUND-RESOLVE-1: nil unless a test sets it.

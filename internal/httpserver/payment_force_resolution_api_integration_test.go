@@ -123,7 +123,7 @@ func (w *frWorld) authorPolicy() {
 func (w *frWorld) disputedDeposit() uuid.UUID {
 	t := w.a.t
 	t.Helper()
-	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.a.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.a.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     payments.DepositScope{TenantID: w.tenant, BrandID: w.brand, PlayerAccountID: w.player, WalletID: w.wallet},
 		AssetCode: "USD", Amount: 5000, PaymentMethod: "card", IdempotencyKey: uuid.NewString(),
 	})

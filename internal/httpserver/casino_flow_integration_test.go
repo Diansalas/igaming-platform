@@ -71,7 +71,7 @@ func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orche
 		CasinoOrchestrator:          orchestrator,
 		CasinoOutboundCredentials:   casino.NewMockOutboundResolver(),
 		CasinoPlaySimulationEnabled: true,
-		PersonResolver:              identityresolution.NewMockPersonResolver(),
+		PersonResolver:              identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -79,7 +79,7 @@ func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orche
 
 func newMockCasinoOrchestrator() (*casino.Orchestrator, *casino.MockCasinoProvider) {
 	mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
-	return casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)), mock
+	return casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests(), mock
 }
 
 func putJSON(t *testing.T, srv *httptest.Server, path, bearerToken string, body any) *http.Response {

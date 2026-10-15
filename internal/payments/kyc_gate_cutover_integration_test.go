@@ -43,7 +43,7 @@ func TestInitiateDepositAttempt_NonPositiveAmount_RejectedBeforeKYCEvaluation(t 
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-nonpositive": provider}, MultiWebhookCredentialResolver{"mock-psp-nonpositive": NewMockWebhookCredentials(provider)})
 
 	for _, amount := range []int64{0, -1, -1_000_000} {
-		_, err := orch.InitiateDepositAttempt(context.Background(), pool, spyKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		_, err := orch.InitiateDepositAttempt(context.Background(), pool, spyKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "nonpositive-" + uuid.New().String(),
 		})
@@ -145,7 +145,7 @@ func TestInitiateDepositAttempt_RealKYCEnforcementGate_DeniesOverThreshold(t *te
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-kyc-real": provider}, MultiWebhookCredentialResolver{"mock-psp-kyc-real": NewMockWebhookCredentials(provider)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "real-kyc-deny",
 	})
@@ -187,7 +187,7 @@ func TestInitiateDepositAttempt_RealKYCEnforcementGate_AllowsUnderThreshold(t *t
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-kyc-real-b": provider}, MultiWebhookCredentialResolver{"mock-psp-kyc-real-b": NewMockWebhookCredentials(provider)})
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "real-kyc-allow",
 	})

@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
@@ -218,6 +219,17 @@ type Deps struct {
 	// construction is expected to set this - internal/identityresolution.
 	// NewMockPersonResolver() until a real vendor is contracted (ADR 0027).
 	PersonResolver identityresolution.PersonResolver
+
+	// MarketGate is the A8 operating-market gate (internal/marketgate),
+	// consulted by the register, initiate-deposit and launch-casino-game
+	// handlers. Like PersonResolver it is NOT "nil means the feature is
+	// disabled": a nil MarketGate makes those three handlers fail closed
+	// (503 before anything is read or written), never fall through
+	// ungated. Every production and test Deps construction that reaches
+	// those routes sets it - cmd/platform-api wires marketgate.New over
+	// the bundle's Locator (MOCK, refused in production by the synthetic
+	// guard until a real geolocation vendor exists).
+	MarketGate marketgate.Checker
 
 	// KYCOrchestrator/DocumentStorage/MalwareScanner are Stage 4F's
 	// verification/document boundary. Nil disables every route that

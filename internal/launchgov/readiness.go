@@ -14,6 +14,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 )
 
@@ -25,6 +26,7 @@ const (
 	CheckCurrencies         = "R-CURRENCIES"
 	CheckPaymentMethods     = "R-PAY-METHODS"
 	CheckCatalogue          = "R-CATALOGUE"
+	CheckMarketConfig       = "R-MARKET-CONFIG"
 	CheckProviderTier       = "R-PROVIDER-TIER"
 	CheckAlerts             = "R-ALERTS"
 	CheckPlayerFunds        = "R-PLAYER-FUNDS"
@@ -38,8 +40,8 @@ const (
 	ResultFail         = "fail"
 	ResultNotEvaluable = "not_evaluable"
 
-	// SnapshotVersion is bumped when the check set or the canonical form changes. 2: the three R-AML-* checks (A7).
-	SnapshotVersion = 2
+	// SnapshotVersion is bumped when the check set or the canonical form changes. 2: the three R-AML-* checks (A7). 3: R-MARKET-CONFIG (A8).
+	SnapshotVersion = 3
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -344,8 +346,38 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	default:
 		out = append(out, ck(CheckCatalogue, ResultPass, "ok"))
 	}
+
+	// R-MARKET-CONFIG (A8)
+	out = append(out, s.marketConfigCheck(ctx, tx, in, now))
 	out = append(out, s.amlChecks(ctx, tx, in)...)
 	return out
+}
+
+// marketConfigCheck is R-MARKET-CONFIG (A8): the operating-market gate (internal/marketgate)
+// refuses every registration, deposit and casino launch of a brand whose operating market is not
+// configured (ADR 0045: a tenant must opt in; an unconfigured brand is not_configured, a DENY).
+// Launching such a brand would open a brand that can serve nobody, so the approver must see it.
+// The check passes when at least one country has an enabled tenant-rung policy AND resolves
+// PERMITTED, at the evaluation time, for all three gated actions (registration; deposit; wagering
+// on casino) - through operatingmarket.ResolveOperatingCountryPolicy itself (licence ceiling,
+// tenant, brand and operation rungs), never a re-implementation. Detail codes: ok,
+// no_market_configured (no enabled tenant-rung country), no_country_permits_all_operations
+// (configured, but no country is open for all three), read_error (not_evaluable).
+// It reads configuration only: no player evidence, and it cannot say which rung blocks.
+func (s *Service) marketConfigCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) Check {
+	// The resolver logic lives in marketgate.AnyCountryPermits, shared with the
+	// enforcement points (SR8-2): one definition of "the market is open".
+	configured, open, err := marketgate.AnyCountryPermits(ctx, tx, in.Subject.TenantID, in.Subject.BrandID, now,
+		marketgate.OpRegistration, marketgate.OpDeposit, marketgate.OpCasinoBet)
+	switch {
+	case err != nil:
+		return ck(CheckMarketConfig, ResultNotEvaluable, "read_error")
+	case !configured:
+		return ck(CheckMarketConfig, ResultFail, "no_market_configured")
+	case !open:
+		return ck(CheckMarketConfig, ResultFail, "no_country_permits_all_operations")
+	}
+	return ck(CheckMarketConfig, ResultPass, "ok")
 }
 
 // licenceCheck is R-LIC-VALID: licence-backed basis => EvaluateLicenceValidity at the evaluation time.

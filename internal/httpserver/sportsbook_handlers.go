@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
@@ -343,6 +344,13 @@ func newPlaceBetHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "sportsbook is not enabled on this deployment")
 			return
 		}
+		// A8 / SR8-1: the operating-market gate is mandatory for bet placement; a
+		// deployment without one fails closed (nothing is read or written).
+		if deps.MarketGate == nil {
+			logger.Error("place_bet_market_gate_not_configured")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "sportsbook is not enabled on this deployment")
+			return
+		}
 
 		tc, err := tenant.FromContext(r.Context())
 		if err != nil {
@@ -380,11 +388,32 @@ func newPlaceBetHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// A8 / SR8-1: country evidence is gathered ONCE, outside the transaction,
+		// from server-side context only. The gate is evaluated twice inside the
+		// placement transaction: here BEFORE the wallet get-or-create (a refused
+		// request writes nothing but the gate's audit row), and again as the first
+		// statement of sportsbook.PlaceBet (the enforcement point the orchestrator
+		// owns). A refusal is a result, so the transaction commits the audit row.
+		evidence := deps.MarketGate.Locate(r.Context(), marketgate.LocateRequest{
+			TenantID: tc.TenantID, PlayerAccountID: playerAccountID, RequestID: requestID, IPAddress: clientIP(r),
+		})
 		var result sportsbook.PlaceBetResult
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
 				return err
+			}
+			marketGuard := deps.MarketGate.Guard(marketgate.Request{
+				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID,
+				Operation: marketgate.OpSportsbookWager, RequestID: requestID,
+			}, evidence)
+			decision, gerr := marketGuard(ctx, tx)
+			if gerr != nil {
+				return fmt.Errorf("place bet: operating-market gate: %w", gerr)
+			}
+			if !decision.Allowed {
+				result = sportsbook.PlaceBetResult{MarketDenied: true}
+				return nil
 			}
 			wl, err := wallet.GetOrCreate(ctx, tx, tc.TenantID, account.BrandID, playerAccountID, req.AssetCode)
 			if err != nil {
@@ -394,10 +423,15 @@ func newPlaceBetHandler(deps Deps) http.HandlerFunc {
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, WalletID: wl.ID,
 				SelectionID: selectionID, AssetCode: req.AssetCode, StakeAmount: req.StakeAmount,
 				ExpectedOddsNumerator: req.ExpectedOddsNumerator, ExpectedOddsDenominator: req.ExpectedOddsDenominator,
-				IdempotencyKey: req.IdempotencyKey,
+				IdempotencyKey: req.IdempotencyKey, MarketGuard: marketGuard,
 			})
 			return err
 		})
+		if err == nil && result.MarketDenied {
+			logger.Warn("place_bet_refused_market_not_available")
+			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+			return
+		}
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
 			return

@@ -12,6 +12,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/email"
+	"github.com/Diansalas/igaming-platform/internal/geolocation"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -53,6 +54,12 @@ type providerBundle struct {
 	// 2.5): Synthetic, no external I/O, registered with the synthetic guard.
 	PayoutVerifier *payoutinstrument.MockVerifier
 
+	// Geolocation is the MOCK static Locator behind the operating-market gate
+	// (A8, internal/marketgate): Synthetic, no external I/O, registered with
+	// the synthetic guard so a production process cannot start on it. It
+	// reports UNKNOWN (the gate refuses) unless MOCK_GEOLOCATION_COUNTRY is
+	// set in a non-production, test-support deployment (mockWiring).
+	Geolocation *geolocation.StaticLocator
 	// AMLScreening is the MOCK sanctions / PEP screening provider (ADR 0116 s4, A7): Synthetic, no external I/O, registered
 	// with the synthetic guard so production refuses to start with it, and the component the R-AML-SCREENING launch
 	// readiness check looks for (domain "aml", name "screening_provider"). NOT wired into any enforcement point yet.
@@ -199,6 +206,7 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
 		Email:           email.NewMockProvider(),
 		PayoutVerifier:  payoutinstrument.NewMockVerifier(),
+		Geolocation:     geolocation.NewStaticLocator(wiring.GeolocationCountry),
 		AMLScreening:    aml.NewMockScreeningProvider(),
 	}
 	// PROV-OUTBOUND-CRED-1 phase 2 code review C2: this is the one
@@ -397,6 +405,10 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		{Domain: "kyc", Name: "malware_scanner", Component: b.MalwareScanner},
 		{Domain: "email", Name: "provider", Component: b.Email},
 		{Domain: "payout_instrument", Name: "verifier", Component: b.PayoutVerifier},
+		// A8: the operating-market gate's location-evidence source. The
+		// gate requires evidence for every decision, so a Synthetic Locator
+		// must never run in production (MOCK-ADAPTER-PROD-1).
+		{Domain: "geolocation", Name: "locator", Component: b.Geolocation},
 		{Domain: "aml", Name: "screening_provider", Component: b.AMLScreening},
 	}
 	if b.KYC != nil {

@@ -41,10 +41,10 @@ func TestNewOrchestrator_BadWebhookSchemeFailsStartup(t *testing.T) {
 					t.Fatal("NewOrchestrator must refuse (panic) so startup fails")
 				}
 			}()
-			NewOrchestrator(providers, nil)
+			NewOrchestrator(providers, nil).WithUngatedMarketOpenForTests()
 		})
 	}
-	if _, ok := NewOrchestrator(map[string]CasinoProvider{"mock-casino": NewMockCasinoProvider("mock-casino", "EUR")}, nil).WebhookScheme("mock-casino"); !ok {
+	if _, ok := NewOrchestrator(map[string]CasinoProvider{"mock-casino": NewMockCasinoProvider("mock-casino", "EUR")}, nil).WithUngatedMarketOpenForTests().WebhookScheme("mock-casino"); !ok {
 		t.Fatal("the registered adapter's scheme must be selectable by provider id")
 	}
 }
@@ -92,7 +92,7 @@ func TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter(t *testing.T) {
 					t.Fatal("NewOrchestrator must refuse (panic) so startup fails")
 				}
 			}()
-			NewOrchestrator(providers, nil)
+			NewOrchestrator(providers, nil).WithUngatedMarketOpenForTests()
 		})
 	}
 }

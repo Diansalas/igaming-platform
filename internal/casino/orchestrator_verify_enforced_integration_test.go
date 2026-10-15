@@ -44,7 +44,7 @@ func TestOrchestratorVerify_Casino_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 	adapter := &verificationSkippingCasinoProvider{MockCasinoProvider: mock}
 	registerCasinoCapability(t, pool, f, adapter, 100)
 	resolver := NewMockWebhookCredentials(mock)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": adapter}, resolver)
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": adapter}, resolver).WithUngatedMarketOpenForTests()
 
 	payload := func() webhookauth.Inbound {
 		return mock.CallbackPayload(f.tenantID, CallbackEventRollback, "w1a-forged-rb-1", "w1a-never-seen-original", "round-w1a", "game-1",

@@ -36,6 +36,9 @@ export type ApiErrorCode =
   | 'TENANT_OR_BRAND_NOT_ACTIVE'
   // ADR 0112 7.3: a suspended or closed brand/tenant accepts no new registration (409).
   | 'BRAND_NOT_ACCEPTING_REGISTRATIONS'
+  // A8: the operating-market gate refused registration, a deposit or a game launch (403). One code
+  // for every cause; see lib/marketRefusal.ts.
+  | 'MARKET_NOT_AVAILABLE'
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode

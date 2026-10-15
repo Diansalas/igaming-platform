@@ -342,7 +342,7 @@ func TestWebhook_DisabledCapability_StillAccepted(t *testing.T) {
 	var intent DepositIntent
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4321, PaymentMethod: "card", IdempotencyKey: "t10-disabled",
 		})

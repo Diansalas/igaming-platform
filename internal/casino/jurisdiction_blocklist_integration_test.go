@@ -75,9 +75,9 @@ func TestLaunchGame_EmptyBlocklist_NonRegression(t *testing.T) {
 	game := seedGame(t, pool, "mock-casino", "EUR") // no blocklist (seedGame's default)
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -106,9 +106,9 @@ func TestLaunchGame_ArmedBlocklist_DeniesOnUnresolvedJurisdiction(t *testing.T) 
 	game := seedGameWithBlocklist(t, pool, "mock-casino", []string{"ANY-CODE"}, "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -133,9 +133,9 @@ func TestLaunchGame_ArmedBlocklist_DeniesInDemoModeToo(t *testing.T) {
 	game := seedGameWithBlocklist(t, pool, "mock-casino", []string{"ANY-CODE"}, "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
-	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeDemo,
 	})

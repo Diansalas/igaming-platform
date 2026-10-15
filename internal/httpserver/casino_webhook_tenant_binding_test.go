@@ -164,7 +164,7 @@ func TestCasinoWebhook_EqualSecretResolver_StillTenantBound(t *testing.T) {
 	mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
 	secret := []byte("equal-secret-shared-by-every-casino-tenant-32b!")
 	resolver := equalSecretCasinoResolver{secret: secret, providerID: "mock-casino"}
-	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, resolver)
+	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, resolver).WithUngatedMarketOpenForTests()
 	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
 
 	tenantA := mustCreateTenant(t, pool)
@@ -429,7 +429,7 @@ func TestCasinoPlay_BrokenResolver_Returns503Misconfigured(t *testing.T) {
 	// as broken WHILE the play-simulation routes are (incorrectly, for
 	// this test's purposes) still registered - proving the handler layer
 	// itself never assumes a working resolver.
-	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, nil)
+	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, nil).WithUngatedMarketOpenForTests()
 	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
 
 	tenant := mustCreateTenant(t, pool)

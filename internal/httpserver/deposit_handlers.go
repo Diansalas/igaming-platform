@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -12,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -114,6 +116,13 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "deposits are not enabled on this deployment")
 			return
 		}
+		// A8: the operating-market gate is mandatory for deposit initiation;
+		// a deployment without one fails closed (nothing is read or written).
+		if deps.MarketGate == nil {
+			logger.Error("initiate_deposit_market_gate_not_configured")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "deposits are not enabled on this deployment")
+			return
+		}
 
 		tc, err := tenant.FromContext(r.Context())
 		if err != nil {
@@ -161,11 +170,37 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 		// boundaries (phase A commits before any provider call; phase B
 		// runs with no transaction held), so it is no longer called from
 		// inside a WithTenant callback.
+		//
+		// A8: country evidence is gathered ONCE, here, outside every
+		// transaction, from server-side context only (never the body). The
+		// gate is then evaluated in BOTH transactions that follow: first
+		// in this handler's identity/wallet transaction, BEFORE the wallet
+		// get-or-create, so a refused request writes nothing but the
+		// gate's audit row; and again inside InitiateDepositAttempt's
+		// phase A transaction (the enforcement point the orchestrator
+		// owns), which closes the window between the two.
+		evidence := deps.MarketGate.Locate(r.Context(), marketgate.LocateRequest{
+			TenantID: tc.TenantID, PlayerAccountID: playerAccountID, RequestID: requestID, IPAddress: clientIP(r),
+		})
 		var brandID, walletID uuid.UUID
+		var marketGuard marketgate.Guard
+		marketDenied := false
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
 				return err
+			}
+			marketGuard = deps.MarketGate.Guard(marketgate.Request{
+				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID,
+				Operation: marketgate.OpDeposit, RequestID: requestID,
+			}, evidence)
+			decision, gerr := marketGuard(ctx, tx)
+			if gerr != nil {
+				return fmt.Errorf("deposit: operating-market gate: %w", gerr)
+			}
+			if !decision.Allowed {
+				marketDenied = true // commit the gate's audit row; create nothing
+				return nil
 			}
 			wl, err := wallet.GetOrCreate(ctx, tx, tc.TenantID, account.BrandID, playerAccountID, req.AssetCode)
 			if err != nil {
@@ -174,6 +209,11 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 			brandID, walletID = account.BrandID, wl.ID
 			return nil
 		})
+		if err == nil && marketDenied {
+			logger.Warn("initiate_deposit_refused_market_not_available")
+			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+			return
+		}
 		var result payments.InitiateDepositAttemptResult
 		if err == nil {
 			result, err = deps.PaymentOrchestrator.InitiateDepositAttempt(
@@ -183,8 +223,14 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 						TenantID: tc.TenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
 					},
 					AssetCode: req.AssetCode, Amount: req.Amount, PaymentMethod: req.PaymentMethod, IdempotencyKey: req.IdempotencyKey,
+					MarketGuard: marketGuard,
 				},
 			)
+		}
+		if err == nil && result.MarketDenied {
+			logger.Warn("initiate_deposit_refused_market_not_available")
+			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+			return
 		}
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")

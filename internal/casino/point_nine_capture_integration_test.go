@@ -57,7 +57,7 @@ func TestPointNineCapture_Casino_AllowsExactlyOneHandleRead(t *testing.T) {
 	_, secret := providercredtest.Register(t, pool, sub, mem.Put, principals, providercredtest.Spec{
 		TenantID: f.tenantID, Domain: "casino", ProviderID: "mock-casino", Purpose: providercred.PurposeWebhookVerify, KeyID: webhookauth.MockKeyID,
 	})
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, sub.Resolver("casino"))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 
 	signed := func(keyID string, key []byte) webhookauth.Inbound {
 		in := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-p9-"+uuid.NewString()[:8], "", "round-p9", "game-1",
@@ -142,7 +142,7 @@ func TestReceiveCallback_RealResolver_RevocationImmediate(t *testing.T) {
 	h, secret := providercredtest.Register(t, pool, sub, mem.Put, principals, providercredtest.Spec{
 		TenantID: f.tenantID, Domain: "casino", ProviderID: "mock-casino", Purpose: providercred.PurposeWebhookVerify, KeyID: webhookauth.MockKeyID,
 	})
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, sub.Resolver("casino"))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 	call := func() error {
 		in := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-rev-"+uuid.NewString()[:8], "", "round-rev", "game-1",
 			1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())

@@ -35,7 +35,7 @@ func newAdmissionTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, pa
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: paymentOrch, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
 		CasinoOrchestrator: casinoOrch, CasinoOutboundCredentials: casino.NewMockOutboundResolver(),
-		PersonResolver:   identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		WebhookAdmission: settings,
 	})
 	if !skipDirectoryLoad {

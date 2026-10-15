@@ -60,7 +60,7 @@ func newRecheckWorld(t *testing.T) *recheckWorld {
 	w.handle, w.secret = providercredtest.Register(t, pool, sub, mem.Put, w.principals, providercredtest.Spec{
 		TenantID: w.f.tenantID, Domain: "casino", ProviderID: "mock-casino", Purpose: providercred.PurposeWebhookVerify, KeyID: webhookauth.MockKeyID,
 	})
-	w.orch = NewOrchestrator(map[string]CasinoProvider{"mock-casino": w.provider}, sub.Resolver("casino"))
+	w.orch = NewOrchestrator(map[string]CasinoProvider{"mock-casino": w.provider}, sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 	w.logs, w.logMu = &bytes.Buffer{}, &sync.Mutex{}
 	w.orch.SetWebhookLogger(slog.New(slog.NewJSONHandler(lockedBuf{w.logMu, w.logs}, nil)))
 	return w

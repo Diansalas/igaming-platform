@@ -119,7 +119,7 @@ func sbPlace(t *testing.T, pool *db.Pool, f fixture, sel sportsbook.Selection) s
 	var res sportsbook.PlaceBetResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		res, err = sportsbook.PlaceBet(ctx, tx, sportsbook.PlaceBetParams{
+		res, err = sportsbook.PlaceBet(ctx, tx, sportsbook.PlaceBetParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: sbStake,
 			ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,

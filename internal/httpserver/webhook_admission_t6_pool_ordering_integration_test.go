@@ -222,7 +222,7 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		handler, rt := NewWithAdmission(Deps{
 			DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
 			AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
-			PersonResolver:         identityresolution.NewMockPersonResolver(),
+			PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 			KYCOrchestrator:        orchestrator,
 			KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
 			KYCWebhookEnabled:      true, WebhookAdmission: settings,
