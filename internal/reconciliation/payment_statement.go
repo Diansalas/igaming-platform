@@ -326,6 +326,23 @@ type PaymentStatementOptions struct {
 	// recorded in the run's audit metadata only, so staff can see the run was
 	// made for a tenant that was not active.
 	ObservationOnlyStatus string
+	// RunLineBound (R3-OBS-BOUND-1, A11) is the per-run line bound handed to the source as
+	// PaymentFetchRequest.MaxLines: the source returns at most this many lines and, when the window holds
+	// more, a Truncated statement. 0 = no per-run bound. It is NOT MaxLines: exceeding MaxLines refuses the
+	// import (a P1, nothing stored), whereas hitting RunLineBound is a controlled partial run - recorded,
+	// counted and alerted as truncated, with the next run continuing from the stored cursor. A source that
+	// returns more than RunLineBound lines is refused like an over-cap statement.
+	RunLineBound int
+	// Continuation turns on the persisted per-(tenant, provider) cursor (reconciliation_runs.coverage_end of
+	// the last committed payment_statement run, migration 0160): the fetch continues exactly from it
+	// (PaymentFetchRequest.ContinueFrom = PeriodStart = cursor) and the statement must start exactly there -
+	// a gap would skip a window, an overlap would count lines twice, and either is refused as invalid.
+	Continuation bool
+
+	// cursor and truncated are internal to ReconcilePaymentStatementForTenant (the cursor it read, and
+	// whether the validated statement was truncated).
+	cursor    time.Time
+	truncated bool
 }
 
 func (o PaymentStatementOptions) maxLines() int {
@@ -349,6 +366,13 @@ var (
 	ErrPaymentStatementTooLarge   = errors.New("reconciliation: payment statement refused: line count above the per-import cap (S95-C11)")
 	ErrPaymentStatementInvalid    = errors.New("reconciliation: payment statement refused: invalid content")
 	ErrPaymentStatementSourceNone = errors.New("reconciliation: payment_statement requires a statement source")
+	// ErrPaymentStatementSourceMissing: a provider is configured for the tenant but no production-eligible
+	// statement source is registered for it (PAY-K3-STATEMENT-SOURCE-WIRING-1). The tenant's provider is
+	// NOT reconciled; the sweep records a failed run and a durable alert, never a clean one.
+	ErrPaymentStatementSourceMissing = errors.New("reconciliation: payment_statement has no eligible statement source for a configured provider")
+	// ErrPaymentStatementCoverageGap: a continuation statement did not start exactly at the cursor, or a
+	// truncated statement broke its own contract (R3-OBS-BOUND-1). Refused with nothing stored.
+	ErrPaymentStatementCoverageGap = errors.New("reconciliation: payment statement refused: coverage is not contiguous with the continuation cursor")
 )
 
 // syntheticComponent is providerkind.Synthetic, restated structurally so
@@ -397,9 +421,14 @@ func FetchPaymentStatement(ctx context.Context, source statement.PaymentStatemen
 		return statement.PaymentStatement{}, err
 	}
 	providerID := source.ProviderID()
-	stmt, err := source.Fetch(ctx, statement.PaymentFetchRequest{
+	req := statement.PaymentFetchRequest{
 		TenantID: tenantID, ProviderID: providerID, PeriodStart: periodStart, PeriodEnd: periodEnd,
-	})
+		MaxLines: opts.RunLineBound,
+	}
+	if !opts.cursor.IsZero() {
+		req.ContinueFrom, req.PeriodStart = opts.cursor, opts.cursor
+	}
+	stmt, err := source.Fetch(ctx, req)
 	if errors.Is(err, statement.ErrPaymentStatementBodyTooLarge) || errors.Is(err, statement.ErrPaymentStatementTooManyLines) {
 		// Security C1: the source hit a streaming cap; same refusal as the
 		// stream's own line cap (nothing stored, P1).
@@ -426,7 +455,53 @@ func FetchPaymentStatement(ctx context.Context, source statement.PaymentStatemen
 			return statement.PaymentStatement{}, fmt.Errorf("%w: line %d: %w", ErrPaymentStatementInvalid, i, err)
 		}
 	}
+	if err := validateBoundedWindow(stmt, req, opts); err != nil {
+		return statement.PaymentStatement{}, err
+	}
 	return stmt, nil
+}
+
+// validateBoundedWindow enforces the R3-OBS-BOUND-1 contract on a fetched, otherwise valid statement:
+//
+//   - a source never returns more lines than the per-run bound it was given;
+//   - with a continuation cursor the statement starts EXACTLY at the cursor (no gap = nothing skipped, no
+//     overlap = nothing counted twice) and carries no line before it;
+//   - a truncated statement ends strictly after it starts, strictly after the cursor (it must make progress),
+//     no later than the requested end, and every line lies before its CoverageEnd (the window it vouches for
+//     is complete: no line of [CoverageStart, CoverageEnd) is missing).
+//
+// A violation is refused with nothing stored (a P1 through the sweep), never repaired.
+func validateBoundedWindow(stmt statement.PaymentStatement, req statement.PaymentFetchRequest, opts PaymentStatementOptions) error {
+	if opts.RunLineBound > 0 && len(stmt.Lines) > opts.RunLineBound {
+		return fmt.Errorf("%w: source returned %d lines, above the per-run bound %d", ErrPaymentStatementTooLarge, len(stmt.Lines), opts.RunLineBound)
+	}
+	if !req.ContinueFrom.IsZero() {
+		cursor := req.ContinueFrom.UTC().Truncate(time.Microsecond)
+		if !stmt.CoverageStart.Equal(cursor) {
+			return fmt.Errorf("%w: statement starts at %s, the cursor is %s", ErrPaymentStatementCoverageGap,
+				stmt.CoverageStart.Format(time.RFC3339Nano), cursor.Format(time.RFC3339Nano))
+		}
+		for i, l := range stmt.Lines {
+			if l.OccurredAt.Before(cursor) {
+				return fmt.Errorf("%w: line %d is dated before the cursor (already covered by the previous run)", ErrPaymentStatementCoverageGap, i)
+			}
+		}
+	}
+	if !stmt.Truncated {
+		return nil
+	}
+	if !req.ContinueFrom.IsZero() && !stmt.CoverageEnd.After(req.ContinueFrom.UTC().Truncate(time.Microsecond)) {
+		return fmt.Errorf("%w: a truncated statement made no progress past the cursor", ErrPaymentStatementCoverageGap)
+	}
+	if !req.PeriodEnd.IsZero() && stmt.CoverageEnd.After(req.PeriodEnd.UTC().Truncate(time.Microsecond)) {
+		return fmt.Errorf("%w: a truncated statement ends after the requested window", ErrPaymentStatementCoverageGap)
+	}
+	for i, l := range stmt.Lines {
+		if !l.OccurredAt.Before(stmt.CoverageEnd) {
+			return fmt.Errorf("%w: line %d is dated at or after the truncated coverage end", ErrPaymentStatementCoverageGap, i)
+		}
+	}
+	return nil
 }
 
 func validatePaymentLine(providerID string, l statement.PaymentStatementLine) error {
@@ -702,6 +777,18 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: load payment statement import %s: %w", importID, err)
 	}
 
+	if opts.Continuation {
+		// A11 / R3-OBS-BOUND-1: under the advisory lock the cursor must still be the one the statement was
+		// fetched from; otherwise another instance already covered this window (see errPaymentCursorStale).
+		cur, err := queryPaymentCursor(ctx, tx, tenantID, info.ProviderID)
+		if err != nil {
+			return Run{}, nil, PaymentStatementInfo{}, err
+		}
+		if !cur.Equal(opts.cursor) {
+			return Run{}, nil, PaymentStatementInfo{}, errPaymentCursorStale
+		}
+	}
+
 	m := &payMatcher{
 		tenantID: tenantID, provider: info.ProviderID,
 		label: "[" + info.SourceLabel + "] ",
@@ -745,6 +832,9 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 		ID: uuid.New(), TenantID: tenantID, Stream: StreamPaymentStatement,
 		PeriodStart: info.CoverageStart, PeriodEnd: info.CoverageEnd, RunAt: time.Now().UTC(),
 		Status: StatusClean,
+		// The continuation cursor (migration 0160): written in the run's own insert, so it advances if and
+		// only if this match committed.
+		CoverageEnd: info.CoverageEnd, ProviderID: info.ProviderID, WindowTruncated: opts.truncated,
 	}
 	mismatches := m.r.mismatches
 	if len(mismatches) > 0 {

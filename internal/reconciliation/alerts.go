@@ -147,3 +147,26 @@ func raiseRunFailed(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, stre
 		Attributes: map[string]alerting.AttrValue{"stream": stream, "phase": phase, "sqlstate_class": sqlstateClassOf(runErr)},
 	})
 }
+
+// raiseRunNotReconciled is the durable alert for a (tenant, provider) payment_statement pair that was NOT
+// reconciled although it is configured (A11, PAY-K3-STATEMENT-SOURCE-WIRING-1: phase no_statement_source /
+// source_not_eligible / scope) or that was reconciled only up to a bound (R3-OBS-BOUND-1: phase truncated). It
+// reuses the registered reconciliation.run_failed Kind (no migration): the Kind's meaning is "a reconciliation
+// that was due did not complete as intended", the phase attribute names why, and the discriminator
+// "stream:<stream>[:provider:<id>]:<phase>" keeps ONE open alert per (tenant, provider, phase) with growing
+// occurrences. providerID is empty for a scope failure. Like raiseRunFailed it raises nothing when the sweep's
+// own context was cancelled (graceful shutdown).
+func raiseRunNotReconciled(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, stream, providerID, phase string) {
+	if ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	disc := "stream:" + stream
+	if providerID != "" {
+		disc += ":provider:" + discPart(providerID)
+	}
+	disc += ":" + phase
+	_ = alerting.RaiseDetached(ctx, alerting.NewTenantRunner(pool, tenantID), alerting.Alert{
+		Kind: alerting.KindReconciliationRunFailed, SubjectTenantID: tenantID, Discriminator: disc,
+		Attributes: map[string]alerting.AttrValue{"stream": stream, "phase": phase, "sqlstate_class": "58"},
+	})
+}

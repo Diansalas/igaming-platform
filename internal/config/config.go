@@ -237,6 +237,13 @@ type Config struct {
 	// the default.
 	ReconciliationInterval time.Duration
 
+	// ReconciliationPaymentStatementMaxLines is the per-run, per-(tenant, provider) line bound of the
+	// payment_statement reconciliation stream (R3-OBS-BOUND-1, A11): a source returns at most this many
+	// statement lines per run and, when a window holds more, the run is recorded TRUNCATED (durable alert,
+	// reconciliation_payment_unreconciled{reason="truncated"}) and the next run continues from the persisted
+	// cursor. Default 50000; 1..1000000 (the hard per-import cap). Not a secret.
+	ReconciliationPaymentStatementMaxLines int
+
 	// RGEnumerationSweepInterval is the cadence of the self-exclusion
 	// enumeration-run reconciliation sweep
 	// (internal/rg.RunEnumerationReconciliationSchedulerLoop, Stage
@@ -649,43 +656,44 @@ func (c Config) validatePayoutInstrumentKeys() error {
 func Load() (Config, error) {
 	_, appEnvPresent := os.LookupEnv("APP_ENV")
 	cfg := Config{
-		Environment:                      resolveAppEnv(),
-		EnvironmentExplicit:              appEnvPresent,
-		HTTPAddr:                         getEnvDefault("HTTP_ADDR", ":8080"),
-		DatabaseURL:                      os.Getenv("DATABASE_URL"),
-		DatabaseMaxConns:                 DefaultDatabaseMaxConns,
-		DatabaseConnTimeout:              5 * time.Second,
-		DatabaseIdleInTxTimeout:          DefaultDatabaseIdleInTxTimeout,
-		JWTActiveKID:                     getEnvDefault("JWT_ACTIVE_KID", "k1"),
-		JWTSigningSecret:                 os.Getenv("JWT_SIGNING_SECRET"),
-		JWTPreviousKID:                   getEnvDefault("JWT_PREVIOUS_KID", "k0"),
-		JWTPreviousSecret:                os.Getenv("JWT_PREVIOUS_SECRET"),
-		JWTIssuer:                        getEnvDefault("JWT_ISSUER", "igaming-platform"),
-		JWTAudience:                      getEnvDefault("JWT_AUDIENCE", "platform-api"),
-		AccessTokenTTL:                   15 * time.Minute,
-		RefreshTokenTTL:                  30 * 24 * time.Hour,
-		OTelServiceName:                  getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
-		OTelExporter:                     getEnvDefault("OTEL_EXPORTER", "stdout"),
-		ReconciliationInterval:           time.Hour,
-		RGEnumerationSweepInterval:       15 * time.Minute,
-		RGEnumerationStalledThreshold:    15 * time.Minute,
-		PaymentsSweepInterval:            15 * time.Second,
-		KYCOutboxInterval:                5 * time.Second,
-		BonusDepositSweepInterval:        5 * time.Minute,
-		BonusCashbackSweepInterval:       time.Hour,
-		BonusExpirySweepInterval:         time.Hour,
-		AuthRateLimitPerMinute:           0,
-		TrustedProxyCount:                0,
-		TestSupportEndpointsEnabled:      false,
-		ProviderCredentialFingerprintKey: NewSecretValue(os.Getenv("PROVIDER_CREDENTIAL_FINGERPRINT_KEY")),
-		ActorProofKeys:                   NewSecretValue(os.Getenv("ACTOR_PROOF_KEYS")),
-		ActorProofActiveKID:              os.Getenv("ACTOR_PROOF_ACTIVE_KID"),
-		PayoutInstrumentKeys:             NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_KEYS")),
-		PayoutInstrumentActiveKID:        os.Getenv("PAYOUT_INSTRUMENT_ACTIVE_KID"),
-		PayoutInstrumentFPKeys:           NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_FP_KEYS")),
-		PayoutInstrumentFPActiveKID:      os.Getenv("PAYOUT_INSTRUMENT_FP_ACTIVE_KID"),
-		SecretStoreDevFileRoot:           getEnvDefault("SECRETSTORE_DEVFILE_ROOT", "./.secrets/dev"),
-		SecretStoreAWSRegion:             getEnvDefault("AWS_SECRETSMANAGER_REGION", os.Getenv("AWS_REGION")),
+		Environment:                            resolveAppEnv(),
+		EnvironmentExplicit:                    appEnvPresent,
+		HTTPAddr:                               getEnvDefault("HTTP_ADDR", ":8080"),
+		DatabaseURL:                            os.Getenv("DATABASE_URL"),
+		DatabaseMaxConns:                       DefaultDatabaseMaxConns,
+		DatabaseConnTimeout:                    5 * time.Second,
+		DatabaseIdleInTxTimeout:                DefaultDatabaseIdleInTxTimeout,
+		JWTActiveKID:                           getEnvDefault("JWT_ACTIVE_KID", "k1"),
+		JWTSigningSecret:                       os.Getenv("JWT_SIGNING_SECRET"),
+		JWTPreviousKID:                         getEnvDefault("JWT_PREVIOUS_KID", "k0"),
+		JWTPreviousSecret:                      os.Getenv("JWT_PREVIOUS_SECRET"),
+		JWTIssuer:                              getEnvDefault("JWT_ISSUER", "igaming-platform"),
+		JWTAudience:                            getEnvDefault("JWT_AUDIENCE", "platform-api"),
+		AccessTokenTTL:                         15 * time.Minute,
+		RefreshTokenTTL:                        30 * 24 * time.Hour,
+		OTelServiceName:                        getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
+		OTelExporter:                           getEnvDefault("OTEL_EXPORTER", "stdout"),
+		ReconciliationInterval:                 time.Hour,
+		ReconciliationPaymentStatementMaxLines: 50_000,
+		RGEnumerationSweepInterval:             15 * time.Minute,
+		RGEnumerationStalledThreshold:          15 * time.Minute,
+		PaymentsSweepInterval:                  15 * time.Second,
+		KYCOutboxInterval:                      5 * time.Second,
+		BonusDepositSweepInterval:              5 * time.Minute,
+		BonusCashbackSweepInterval:             time.Hour,
+		BonusExpirySweepInterval:               time.Hour,
+		AuthRateLimitPerMinute:                 0,
+		TrustedProxyCount:                      0,
+		TestSupportEndpointsEnabled:            false,
+		ProviderCredentialFingerprintKey:       NewSecretValue(os.Getenv("PROVIDER_CREDENTIAL_FINGERPRINT_KEY")),
+		ActorProofKeys:                         NewSecretValue(os.Getenv("ACTOR_PROOF_KEYS")),
+		ActorProofActiveKID:                    os.Getenv("ACTOR_PROOF_ACTIVE_KID"),
+		PayoutInstrumentKeys:                   NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_KEYS")),
+		PayoutInstrumentActiveKID:              os.Getenv("PAYOUT_INSTRUMENT_ACTIVE_KID"),
+		PayoutInstrumentFPKeys:                 NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_FP_KEYS")),
+		PayoutInstrumentFPActiveKID:            os.Getenv("PAYOUT_INSTRUMENT_FP_ACTIVE_KID"),
+		SecretStoreDevFileRoot:                 getEnvDefault("SECRETSTORE_DEVFILE_ROOT", "./.secrets/dev"),
+		SecretStoreAWSRegion:                   getEnvDefault("AWS_SECRETSMANAGER_REGION", os.Getenv("AWS_REGION")),
 	}
 	if v := os.Getenv("SECRETSTORE_BACKENDS"); v != "" {
 		seen := map[string]bool{}
@@ -741,6 +749,18 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: RECONCILIATION_INTERVAL_SECONDS must be positive")
 		}
 		cfg.ReconciliationInterval = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES: %w", err)
+		}
+		// 1_000_000 is statement.MaxPaymentStatementLines (migration 0102's line_count CHECK); this package
+		// does not import the statement leaf, a test pins the two equal.
+		if n <= 0 || n > 1_000_000 {
+			return Config{}, fmt.Errorf("config: RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES must be between 1 and 1000000")
+		}
+		cfg.ReconciliationPaymentStatementMaxLines = n
 	}
 	if v := os.Getenv("PAYMENTS_SWEEP_INTERVAL_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)

@@ -7,6 +7,7 @@ package reconciliation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -133,6 +134,9 @@ func TryRunPaymentStatementForTenant(ctx context.Context, tx pgx.Tx, tenantID, i
 		return Run{}, nil, PaymentStatementInfo{}, false, nil
 	}
 	run, mismatches, info, err = RunPaymentStatement(ctx, tx, tenantID, importID, opts)
+	if errors.Is(err, errPaymentCursorStale) {
+		return Run{}, nil, PaymentStatementInfo{}, false, nil // skipped: another instance covered this window
+	}
 	return run, mismatches, info, true, err
 }
 
@@ -185,6 +189,17 @@ type StreamOutcome struct {
 	// Mismatches is the number of mismatches the run reported (0 when it did not complete). It feeds
 	// the reconciliation_mismatches_open gauge only; the durable record is reconciliation_mismatches.
 	Mismatches int
+	// ProviderID is set on a payment_statement outcome: the provider it reconciled (or failed to). It keys the
+	// run tracker per (tenant, provider).
+	ProviderID string
+	// Truncated is true when the run completed but stopped at the per-run bound (R3-OBS-BOUND-1): it matched
+	// only the window the source vouched for, and the next run continues from the persisted cursor.
+	Truncated bool
+	// NotReconciled is non-empty when this outcome does NOT mean "the provider was reconciled up to now":
+	// NotReconciledNoSource (a configured provider has no eligible source) or NotReconciledTruncated (the
+	// run stopped at the per-run bound and the next run continues). It feeds
+	// reconciliation_payment_unreconciled{reason}; a clean claim is never made for such an outcome.
+	NotReconciled string
 }
 
 // allTenantIDs reads every ACTIVE tenant id via a platform-scoped
@@ -264,19 +279,32 @@ func activeTenantIDs(ctx context.Context, pool *db.Pool, only []uuid.UUID) ([]uu
 // CAS-RECON-SCALE-1 (docs/governance/task-registry.md); not redesigned
 // here. RunSweepTenants runs the same body for named tenants only.
 func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, paySources ...statement.PaymentStatementSource) ([]SweepOutcome, error) {
+	return runSweepAll(ctx, pool, logger, periodStart, periodEnd, sbSource, casSource, legacyPaymentPlan(paySources))
+}
+
+// RunSweepScoped is RunSweep with the payment_statement stream driven by a PaymentSweepConfig (A11,
+// PAY-K3-STATEMENT-SOURCE-WIRING-1, R3-OBS-BOUND-1) instead of a flat source list: per tenant it reconciles
+// exactly the providers that tenant has configured (or has attempts for), with the source the resolver
+// returns for each; a configured provider with no eligible source is a failed run plus a durable alert, and
+// the per-run line bound and persisted cursor apply. See payment_sources.go.
+func RunSweepScoped(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, cfg PaymentSweepConfig) ([]SweepOutcome, error) {
+	return runSweepAll(ctx, pool, logger, periodStart, periodEnd, sbSource, casSource, scopedPaymentPlan(cfg))
+}
+
+func runSweepAll(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, plan paymentPlan) ([]SweepOutcome, error) {
 	gen := defaultTracker.beginSweep()
 	tenantIDs, err := allTenantIDs(ctx, pool)
 	if err != nil {
 		defaultTracker.endSweep(gen, false)
 		return nil, fmt.Errorf("%w: %w", ErrListActiveTenants, err)
 	}
-	outcomes := sweepTenants(ctx, pool, logger, tenantIDs, periodStart, periodEnd, sbSource, casSource, paySources)
+	outcomes := sweepTenants(ctx, pool, logger, tenantIDs, periodStart, periodEnd, sbSource, casSource, plan)
 	// PRH-2 R3 (H-W1): non-active tenants are observed (ledger_vs_projection and
 	// payment_statement only). A failure to list them is returned, never
 	// swallowed; the active outcomes are still returned with it.
-	observed, obsErr := observeNonActiveTenants(ctx, pool, logger, nil, outcomes, periodStart, periodEnd, paySources)
+	observed, obsErr := observeNonActiveTenants(ctx, pool, logger, nil, outcomes, periodStart, periodEnd, plan)
 	all := append(outcomes, observed...)
-	defaultTracker.recordOutcomes(gen, all, paySources)
+	defaultTracker.recordOutcomes(gen, all, plan.legacy)
 	if obsErr != nil {
 		defaultTracker.endSweep(gen, false)
 		return all, fmt.Errorf("%w: %w", ErrListNonActiveTenants, obsErr)
@@ -299,6 +327,15 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 // never taken from a client request. A nil or empty tenantIDs sweeps
 // nothing (it never means "all"; that is RunSweep).
 func RunSweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantIDs []uuid.UUID, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, paySources ...statement.PaymentStatementSource) ([]SweepOutcome, error) {
+	return runSweepNamed(ctx, pool, logger, tenantIDs, periodStart, periodEnd, sbSource, casSource, legacyPaymentPlan(paySources))
+}
+
+// RunSweepTenantsScoped is RunSweepTenants with the scoped payment_statement stream (see RunSweepScoped).
+func RunSweepTenantsScoped(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantIDs []uuid.UUID, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, cfg PaymentSweepConfig) ([]SweepOutcome, error) {
+	return runSweepNamed(ctx, pool, logger, tenantIDs, periodStart, periodEnd, sbSource, casSource, scopedPaymentPlan(cfg))
+}
+
+func runSweepNamed(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantIDs []uuid.UUID, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, plan paymentPlan) ([]SweepOutcome, error) {
 	if len(tenantIDs) == 0 {
 		return []SweepOutcome{}, nil
 	}
@@ -308,10 +345,10 @@ func RunSweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, te
 	}
 	// A scoped sweep records runs (so an on-demand re-run is visible) but never prunes state or advances the
 	// sweep heartbeat: only a full RunSweep may declare which tenants exist.
-	outcomes := sweepTenants(ctx, pool, logger, ids, periodStart, periodEnd, sbSource, casSource, paySources)
-	observed, obsErr := observeNonActiveTenants(ctx, pool, logger, tenantIDs, outcomes, periodStart, periodEnd, paySources)
+	outcomes := sweepTenants(ctx, pool, logger, ids, periodStart, periodEnd, sbSource, casSource, plan)
+	observed, obsErr := observeNonActiveTenants(ctx, pool, logger, tenantIDs, outcomes, periodStart, periodEnd, plan)
 	all := append(outcomes, observed...)
-	defaultTracker.recordOutcomes(defaultTracker.currentGen(), all, paySources)
+	defaultTracker.recordOutcomes(defaultTracker.currentGen(), all, plan.legacy)
 	if obsErr != nil {
 		return all, fmt.Errorf("%w: %w", ErrListNonActiveTenants, obsErr)
 	}
@@ -405,7 +442,7 @@ var listNonActiveTenants = nonActiveTenants
 // sportsbook_settlement and casino_consistency (internal reads) in observation
 // mode for non-active tenants. One tenant's failure is
 // recorded on its own outcome and never stops the others.
-func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, only []uuid.UUID, alreadySwept []SweepOutcome, periodStart, periodEnd time.Time, paySources []statement.PaymentStatementSource) ([]SweepOutcome, error) {
+func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, only []uuid.UUID, alreadySwept []SweepOutcome, periodStart, periodEnd time.Time, plan paymentPlan) ([]SweepOutcome, error) {
 	tenants, err := listNonActiveTenants(ctx, pool, only)
 	if err != nil {
 		return nil, err
@@ -425,11 +462,7 @@ func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Lo
 		outcome := SweepOutcome{TenantID: t.ID, ObservationOnly: true, TenantStatus: t.Status}
 		ls := runLedgerStreamForTenant(ctx, pool, logger, t.ID, periodStart, periodEnd, t.Status)
 		outcome.Run, outcome.Skipped, outcome.Err, outcome.Mismatches = ls.Run, ls.Skipped, ls.Err, ls.Mismatches
-		for _, src := range paySources {
-			outcome.PaymentStatement = append(outcome.PaymentStatement,
-				ReconcilePaymentStatementForTenant(ctx, pool, logger, t.ID, periodStart, periodEnd, src,
-					PaymentStatementOptions{ObservationOnlyStatus: t.Status}))
-		}
+		outcome.PaymentStatement = reconcilePaymentStreamsForTenant(ctx, pool, logger, t.ID, periodStart, periodEnd, plan, t.Status)
 		outcomes = append(outcomes, outcome)
 	}
 	return outcomes, nil
@@ -448,7 +481,7 @@ func observationMetadata(status string, m map[string]any) map[string]any {
 
 // sweepTenants is the per-tenant body shared by RunSweep and
 // RunSweepTenants.
-func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantIDs []uuid.UUID, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, paySources []statement.PaymentStatementSource) []SweepOutcome {
+func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantIDs []uuid.UUID, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, plan paymentPlan) []SweepOutcome {
 	outcomes := make([]SweepOutcome, 0, len(tenantIDs))
 	for _, tenantID := range tenantIDs {
 		outcome := SweepOutcome{TenantID: tenantID}
@@ -467,10 +500,7 @@ func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenan
 		outcome.CasinoStatement = runCasinoStatementStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, casSource)
 		// PRH-I5 (ADR 0095 §12): payment_statement, once per registered
 		// source, regardless of any earlier outcome.
-		for _, src := range paySources {
-			outcome.PaymentStatement = append(outcome.PaymentStatement,
-				ReconcilePaymentStatementForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, src, PaymentStatementOptions{}))
-		}
+		outcome.PaymentStatement = reconcilePaymentStreamsForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, plan, "")
 		outcomes = append(outcomes, outcome)
 	}
 	return outcomes
@@ -809,10 +839,25 @@ func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logge
 // crash this loop or the calling process - reconciliation failing must
 // never take down the platform it exists to protect.
 func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, paySources ...statement.PaymentStatementSource) {
+	runSchedulerLoop(ctx, pool, logger, interval, func(now time.Time) error {
+		_, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource, casSource, paySources...)
+		return err
+	})
+}
+
+// RunSchedulerLoopScoped is RunSchedulerLoop with the scoped payment_statement stream (RunSweepScoped): the
+// production loop since A11.
+func RunSchedulerLoopScoped(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, cfg PaymentSweepConfig) {
+	runSchedulerLoop(ctx, pool, logger, interval, func(now time.Time) error {
+		_, err := RunSweepScoped(ctx, pool, logger, now.Add(-interval), now, sbSource, casSource, cfg)
+		return err
+	})
+}
+
+func runSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration, sweep func(now time.Time) error) {
 	runOnce := func() {
 		defer recoverSweepPanic(ctx, pool, logger)
-		now := time.Now().UTC()
-		_, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource, casSource, paySources...)
+		err := sweep(time.Now().UTC())
 		// A listing failure is a durable alert (reconciliation.sweep_failed), not only a log line
 		// (R3-LISTING-FAILURE-LOG-ONLY-1); see handleSweepError.
 		handleSweepError(ctx, pool, logger, err)
@@ -855,6 +900,7 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 	label, provider := "<none>", "<none>"
 	if source != nil {
 		label, provider = source.Label(), source.ProviderID()
+		out.ProviderID = provider
 	}
 	fail := func(phase string, err error) StreamOutcome {
 		out.Err = fmt.Errorf("reconciliation: payment_statement %s phase: %w", phase, err)
@@ -876,11 +922,22 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 		return out
 	}
 
+	// Phase 0 (R3-OBS-BOUND-1, scoped sweep only): the persisted continuation cursor, read in its own short
+	// read transaction BEFORE the provider I/O (nothing is held across the fetch).
+	if opts.Continuation && source != nil {
+		cursor, err := readPaymentCursor(ctx, pool, tenantID, provider)
+		if err != nil {
+			return fail("cursor", err)
+		}
+		opts.cursor = cursor
+	}
+
 	// Phase 1: fetch, no transaction held.
 	stmt, err := FetchPaymentStatement(ctx, source, tenantID, periodStart, periodEnd, opts)
 	if err != nil {
 		return fail("fetch", err)
 	}
+	opts.truncated = stmt.Truncated
 	fetchedAt := time.Now().UTC()
 
 	// Phase 2: ingest.
@@ -918,6 +975,12 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 			for k, v := range info.AuditMetadata() {
 				metadata[k] = v
 			}
+			if opts.truncated {
+				metadata["window_truncated"] = true
+			}
+			if !opts.cursor.IsZero() {
+				metadata["continued_from"] = opts.cursor.UTC().Format(time.RFC3339Nano)
+			}
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
@@ -927,6 +990,18 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 	}); err != nil {
 		out.Run = Run{}
 		return fail("match", err)
+	}
+
+	// R3-OBS-BOUND-1: a run that stopped at the per-run bound matched only the window the source vouched
+	// for. It is never a clean claim: the outcome says so (the tracker counts it as truncated, not as a
+	// success), a durable alert is raised, and the next run continues from this run's coverage_end.
+	if out.Run.ID != uuid.Nil && opts.truncated {
+		out.Truncated, out.NotReconciled = true, NotReconciledTruncated
+		if logger != nil {
+			logger.Warn("reconciliation sweep: payment statement run TRUNCATED at the per-run bound (alert raised; the next run continues from the cursor)",
+				"tenant_id", tenantID, "stream", stream, "provider_id", provider, "run_id", out.Run.ID, "lines", len(stmt.Lines))
+		}
+		raiseRunNotReconciled(ctx, pool, tenantID, stream, provider, "truncated")
 	}
 
 	switch {

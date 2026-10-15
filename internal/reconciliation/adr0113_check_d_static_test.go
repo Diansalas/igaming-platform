@@ -90,9 +90,16 @@ func TestADR0113D_Static_WiredIntoTheHourlyLedgerStream(t *testing.T) {
 	need("runLedgerStreamForTenant", "raiseLedgerRunAlerts")
 	need("sweepTenants", "runLedgerStreamForTenant")
 	need("observeNonActiveTenants", "runLedgerStreamForTenant")
-	need("RunSweep", "sweepTenants")
-	need("RunSweep", "observeNonActiveTenants")
+	// A11: RunSweep / RunSweepScoped share one body (runSweepAll); the wiring is pinned on that body and the two
+	// entry points are pinned to reach it, so the ledger stream is still reachable from both loops.
+	need("runSweepAll", "sweepTenants")
+	need("runSweepAll", "observeNonActiveTenants")
+	need("RunSweep", "runSweepAll")
+	need("RunSweepScoped", "runSweepAll")
 	need("RunSchedulerLoop", "RunSweep")
+	need("RunSchedulerLoopScoped", "RunSweepScoped")
+	need("RunSchedulerLoop", "runSchedulerLoop")
+	need("RunSchedulerLoopScoped", "runSchedulerLoop")
 
 	// The D raise uses its own discriminator.
 	found := false

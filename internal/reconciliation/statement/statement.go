@@ -234,18 +234,54 @@ type PaymentStatementLine struct {
 // PaymentStatement is one fetched statement. [CoverageStart, CoverageEnd)
 // is the window the provider vouches for: platform records outside it are
 // never flagged as missing (ADR 0095 §12.3 "Coverage window").
+//
+// Truncated (R3-OBS-BOUND-1, A11): true when the source stopped at the
+// request's MaxLines bound. A truncated statement vouches for
+// [CoverageStart, CoverageEnd) only, where CoverageEnd is the exclusive
+// instant of the first line NOT returned: every returned line has
+// OccurredAt < CoverageEnd and no line of that window is missing (a source
+// never splits a group of lines sharing one instant; PagePaymentLines does
+// this). The next run continues from CoverageEnd, so no line is skipped and
+// none is counted twice. A truncated statement is never a "clean" claim for
+// the requested window: the stream records, counts and alerts it.
 type PaymentStatement struct {
 	CoverageStart, CoverageEnd time.Time
 	Lines                      []PaymentStatementLine
+	Truncated                  bool
 }
 
 // PaymentFetchRequest is what the payment_statement stream hands a source.
 // TenantID and ProviderID come from the server-side sweep (the tenant
 // being reconciled and the source's own provider), never from a statement.
+//
+// MaxLines (R3-OBS-BOUND-1) is the per-run line bound: when positive, a source
+// must return at most that many lines and, if the window holds more, a
+// Truncated statement (see PaymentStatement). Zero means no per-run bound
+// (the import cap MaxPaymentStatementLines still applies). ContinueFrom, when
+// non-zero, is the persisted cursor: the exclusive end of the last committed
+// run for this tenant and provider. The source's statement must start at or
+// before it (CoverageStart <= ContinueFrom, no gap) and must contain no line
+// before it that the previous run already covered (OccurredAt >= ContinueFrom);
+// PeriodStart equals ContinueFrom in that case.
 type PaymentFetchRequest struct {
 	TenantID               uuid.UUID
 	ProviderID             string
 	PeriodStart, PeriodEnd time.Time
+	MaxLines               int
+	ContinueFrom           time.Time
+}
+
+// ReadOnlyAttested is implemented by every NON-Synthetic payment statement source and must return true: the
+// source's credential at the provider is read-only (statements / reports scope only; it cannot initiate,
+// capture, refund or pay out) and the source's code only reads. It is an attestation in code (like
+// PayoutLinesCarryMerchantReference), refused by the cmd/platform-api registry when absent or false, and it is
+// the only thing the platform can check about the real credential: PROVIDER DEPENDENT. A real PSP source MUST
+// be provisioned with a separate read-only credential at the vendor (never the payment/payout credential), and
+// that provisioning is a launch checklist item (docs/plans/a11-payments-wiring-record.md). The interface
+// itself gives a source no database transaction and no payment-provider handle: see
+// TestPaymentStatementSource_TypeLevelReadOnly.
+type ReadOnlyAttested interface {
+	ReadOnlyStatementCredential() bool
 }
 
 // PaymentStatementSource supplies one provider's statement for one tenant
