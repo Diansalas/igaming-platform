@@ -754,3 +754,44 @@ Everything else from round 1 and round 2 is accepted. This review records what w
 - **Informational items** (IAM token command trust, `BACKUP_ROLE_IAM_ONLY` and `pg_hba` on non-RDS, explicit `sslmode` in verify URLs, content-copy note) are in the runbook section 3.
 - Full-scale `deploy/backup/drill.sh`, merged tree head 0157: **118 PASS / 0 FAIL** (was 116). `go test -count=1 ./deploy/...` PASS.
 - An intermediate full run showed 115 PASS / 3 FAIL: the new assertion counted its own `db_exists` connection (test bug, fixed by reading the connection count first), and the two PITR verifies failed with an empty psql error while `/tmp` had 1.5 GB free (97% used by other agents' files). The re-run with the diagnostic added to the PITR failure detail was clean; treat the PITR failure as disk exhaustion by the environment, not a tooling defect, but note the full drill needs >= ~2 GB free in `/tmp`.
+
+## 10. Security re-review 3 (`security`, 2026-10-15; fix commit 5c765a0)
+
+**Scope and method.** A focused code review of how `restore.sh` copies and uses the backup set, plus `backup.sh`'s `SET_SHA256` output.
+- `go test ./deploy/...`: all ok.
+- No cluster was started.
+- The author's drill was not re-run.
+- Shared infrastructure was not touched.
+
+### Verdict: APPROVED for the logical backup/restore tooling
+
+SR12R2-1 and SR12R2-2 are closed. Together with sections 8 and 9, H1-H3, SR12R-1..10 and SR12R2-1..2 are closed or accepted as recorded.
+
+This approves the code. It does not authorise any real-data or AWS operation. Those remain gated by:
+- the staging deploy plan, including the RDS behaviours that have not been verified;
+- the owner's authorisation.
+
+### Verified-bytes == used-bytes check
+
+Every read after verification was traced. None reaches the backup directory.
+
+| Step | What is now done | Result |
+|---|---|---|
+| Signed list (`SHA256SUMS`, `.sig`) | Copied with `cp` after a no-symlink check. `cp` dereferences, so even a symlink swapped in during the check becomes a regular private file. The signature is verified on that copy, and the listed names are parsed from that copy. | OK |
+| Verification key | Copied into `$WORK`. Both the fingerprint pin and the signature verification use the copy. | OK |
+| Listed artefacts | Copied by content (`cat src > $SETDIR/n`). `$SETDIR` is a fresh 0700 directory. Names are validated with no slashes, and exactly 4 are allowed, so no listed name can overwrite the verified `SHA256SUMS`. After copying, `find` refuses any non-regular entry or subdirectory. Checksums are then verified on the copies. | OK |
+| Manifest (`created_utc`, `plaintext_dump_sha256`, `environment_anchor`) | Read only from `$SETDIR/manifest.json`. | OK |
+| Decrypt input and output | Input is `$SETDIR/*.age` or `*.gpg`. Output goes to `$WORK`. The plaintext form of a set is used from `$SETDIR`. The decrypted dump is checked against the signed `plaintext_dump_sha256`. | OK |
+| Anchor | Taken from the signed manifest and cross-checked against the decrypted baseline in `$WORK`. | OK |
+| Post-verify tampering | Covered by the drill hooks `swap_after_verify` and `symlink_after_scan`, which are honoured only on local drill targets. | OK |
+| `SET_SHA256` | Printed by `backup.sh` after signing. The runbook says to record it out of band in a store that backup-storage writers cannot edit. The drill checks it against the set. | OK |
+
+### Informational (not blocking)
+- `SET_SHA256` hashes `SHA256SUMS` by re-reading the run directory after signing. If someone alters that file in between, the hash will not match the signed file. The restore then fails closed, which is a safe failure, not a bypass.
+- `drill.sh` derives `RESTORE_EXPECT_SET_SHA256` from the set itself. That is acceptable in the drill only. The production procedure must take the value from the runner's record, as the runbook says.
+- The residuals from sections 8 and 9 still stand:
+  - nothing has been verified on RDS (IAM authentication, `rds_iam`, `pg_catalog` REVOKEs, a non-`rds_superuser` owner);
+  - signing with an asymmetric KMS key is not built;
+  - the architect's decision on `actor_proof_keys.secret` is still open.
+
+This review records what was checked at `5c765a0`. It is not a certification.
