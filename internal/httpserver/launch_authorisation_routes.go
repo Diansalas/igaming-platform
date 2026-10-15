@@ -750,6 +750,13 @@ func coarsenForTenant(d *launchReadinessDTO) {
 		switch d.Checks[i].Code {
 		case launchgov.CheckProviderTier, launchgov.CheckAlerts:
 			d.Checks[i].DetailCode = "see_platform"
+		case launchgov.CheckAMLScreening:
+			// ADR 0116 A7: the provider half of this check describes the PROCESS; the tenant-visible half (the policy per
+			// jurisdiction) stays readable.
+			switch d.Checks[i].DetailCode {
+			case "no_screening_provider", "synthetic_provider_in_production", "ok_mock_provider", "no_component_registry":
+				d.Checks[i].DetailCode = "see_platform"
+			}
 		}
 	}
 }
