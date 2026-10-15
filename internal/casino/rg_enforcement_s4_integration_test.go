@@ -47,7 +47,7 @@ func newRGCasinoWorld(t *testing.T, enforce bool, over map[string]rgfix.Spec) *r
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	w := &rgCasinoWorld{t: t, pool: pool, f: f, provider: provider,
-		orch:    NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)),
+		orch:    NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests(),
 		session: mintSession(t, pool, f, "mock-casino", "EUR")}
 	if enforce {
 		w.staff = rgfix.Provision(t, launchfix.OwnerFor(t, pool), f.tenantID, nil, "EUR", over).Staff
@@ -143,7 +143,7 @@ func (w *rgCasinoWorld) launch(mode GameMode) (LaunchGameResult, error) {
 	enableGameForTenant(w.t, w.pool, w.f, game.ID)
 	return w.orch.LaunchGame(context.Background(), w.pool, NewMockOutboundResolver(), LaunchGameParams{
 		TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, WalletID: w.f.walletID,
-		GameID: game.ID, AssetCode: "EUR", Mode: mode,
+		GameID: game.ID, AssetCode: "EUR", Mode: mode, MarketGuard: testUngatedGuard,
 	})
 }
 

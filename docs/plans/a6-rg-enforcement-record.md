@@ -122,6 +122,14 @@ Survivors, justified as equivalent:
 - OpenAPI prose: the time-out description no longer says that nothing blocks; the S2 comment says limits are enforced when the switch is on.
 - Readiness snapshot version 1 to 2 (an added check changes the hash).
 
+## 7b. Merge with origin/claude/focused-wright-jw88w9 (tip ce37d15) and verification
+
+Merged into a6-rg-enforcement. Conflict resolutions: readiness check sets and labels keep both (A7 R-AML-*, A8 R-MARKET-CONFIG, A6 R-RG-CONFIG); `SnapshotVersion` is now 4 (the A7/A8 test `readiness_aml_test.go` pinned 3 and was updated to 4: a CHANGED ASSERTION); route pins 217/134 and step-up counts none-mutating 43, read 83 (+2 A6 routes on top of upstream 215/133, 42/82); test helper `wantCheck` in the A6 readiness test renamed `wantRGCheck` (name clash). A8 market guards required `MarketGuard`/`WithUngatedMarketOpenForTests` in the A6 casino, sportsbook and payments tests (fixture change). Migration 0158 follows upstream 0157; the reserved-gap entries I had added for 153-157 were removed again.
+
+Commands (private scratch DB, `-p 1`): integration `-tags integration` PASS for rg, casino, sportsbook, bonus, withdrawal, risk, launchgov, tenant, kyc, db, wallet, reconciliation, identity, withdrawalgate, httpserver subset (Withdraw|Deposit|RG|Golden|OpenAPI|Staff|Route|HSEC|KYC|Submit|Stage3C|Financial|Launch|StepUp); `-race` PASS for rg (RGEnforceS4|RGLimits|Eligib), casino (RGEnforceS4), withdrawal (whole). `go test ./...` PASS; `go vet` plain and `-tags integration` PASS; gofmt clean; golangci-lint 2.9.0 0 issues; b2c `npm run build` and `npm test` (127 tests) PASS; backoffice `tsc --noEmit` clean. The mutation pass and the heavy run were executed before the merge on the same enforcement files (unchanged by the merge).
+
+`TestResolutionIsolation_FinancialDuringOutage` (INV-POOL, 400 ms bound on the oldest pooled transaction) failed twice and passed twice on a machine at load average 20+, and passed in the post-merge subset run; it measures wall-clock transaction age and is load-sensitive. Not proven independent of the A6 change on an idle box: ledger-finance may re-run it alone.
+
 ## 8. Residuals and merge friction
 
 1. Session-duration and reality-check enforcement not built (PROVIDER DEPENDENT / F).

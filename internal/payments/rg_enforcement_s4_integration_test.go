@@ -79,7 +79,7 @@ func rgDepositWorld(t *testing.T, enforce bool) (*db.Pool, orchFixture, *Orchest
 
 func rgDeposit(t *testing.T, pool *db.Pool, orch *Orchestrator, f orchFixture, amount int64, key string) InitiateDepositAttemptResult {
 	t.Helper()
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: key,
 	})
@@ -179,7 +179,7 @@ func TestRGEnforceS4_Deposit_ConcurrentInitiationsRacingTheLimit_InFlightIntents
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+			res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 				Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 				AssetCode: "EUR", Amount: 200, PaymentMethod: "card", IdempotencyKey: fmt.Sprintf("race-%d-%s", i, uuid.NewString()),
 			})
@@ -217,7 +217,7 @@ func TestRGEnforceS4_Deposit_T2CascadeRecheckDeclinesUnderALoweredLimit(t *testi
 	rgfix.Provision(t, launchfix.OwnerFor(t, pool), f.tenantID, nil, "EUR", nil)
 	rgSetDepositLimit(t, pool, f, "1000")
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 600, PaymentMethod: "card", IdempotencyKey: "rg-t2-a-" + uuid.NewString(),
 	})
@@ -226,7 +226,7 @@ func TestRGEnforceS4_Deposit_T2CascadeRecheckDeclinesUnderALoweredLimit(t *testi
 	}
 	// A second pending deposit of 300 is in flight too (600 + 300 <= 1000 at its T1).
 	rgDeposit2 := func(amount int64, key string) {
-		r, e := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		r, e := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: key,
 		})

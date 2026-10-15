@@ -141,7 +141,7 @@ func TestRGEnforceS4_Sportsbook_EvaluationFailure_AbortsPlacement(t *testing.T) 
 	if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, f.tenantID.String()); err != nil {
 		t.Fatal(err)
 	}
-	_, perr := PlaceBet(ctx, tx, PlaceBetParams{
+	_, perr := PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 10,
 		ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator, IdempotencyKey: "rr-" + uuid.NewString(),
