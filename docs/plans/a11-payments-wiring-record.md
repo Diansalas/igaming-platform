@@ -175,7 +175,7 @@ Security (credential/PCI/RLS boundaries; none of this touches PAN or hosted fiel
    forged value within 5 minutes of now skips at most that window; a forged low value re-matches. Is that acceptable for a real PSP?
    (`TestBound_ForgedCursorsAreIgnored`)
 4. A hostile provider id (from a capability/attempt row) in alert discriminators/audit/logs: `discPart` keeps the discriminator charset safe; the
-   audit/log value is the raw id (bounded by the table CHECKs).
+   the audit/log value is sanitised the same way (`invalid_provider_id` for an unsafe id).
 5. S-L1: submit/resolve refuse the beneficiary before claim/poll (`TestSL1_*`); S-L4(2): capability re-read inside the claim tx
    (`TestSL4_*`, test-only hook `payoutClaimAfterRoutingHook`, nil in production).
 6. PAY-PARK-BIND-RACE-1: bind via the audited, savepoint-scoped helper; lost race leaves the park unbound (`TestParkBindRace_*`).
@@ -193,3 +193,11 @@ Ledger-finance (no ledger path was added or changed; the stream is read plus fin
 5. E3 declaration: registration-time only; the T16 escalation remains the fail-safe for a false declaration.
 6. `ClaimForDispatch` S-L4(2) adds a refusal only (no new posting); H(12) moves an existing phase C onto a detached bounded context (no new
    path; it can post through the existing T6 drain exactly as before).
+
+## 8. Mutation pass (wiring and bound logic; script in the session scratchpad)
+
+47 mutants over the registry, source resolution, window validation, cursor query/persistence, stale-cursor skip, truncation alert/flag,
+tracker, pager, MOCK source, S-L1, S-L4(2), PAY-PARK-BIND-RACE-1, H(12) and the E3 declaration: all KILLED except where noted. First pass
+found one SURVIVOR (P6, the "providers known only from attempts" union): killed after adding
+`TestScoped_ProviderKnownOnlyFromAttemptsIsStillInScope`. `B2` (drop the whole S-L4(2) re-read) could not be built as a valid mutant
+(unused variable); its two halves B3 (status ignored) and B4 (withdrawal capability ignored) are both killed.
