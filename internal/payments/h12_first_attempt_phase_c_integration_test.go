@@ -28,7 +28,7 @@ func TestH12_FirstAttemptPhaseC_RecordsThePhaseBResultAfterTheRequestContextIsCa
 
 	// The returned error is irrelevant (the request is gone and post-commit reads on the dead context may fail);
 	// what matters is what committed.
-	_, _ = orch.InitiateDepositAttempt(ctx, pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	_, _ = orch.InitiateDepositAttempt(ctx, pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "h12-first-attempt",
 	})
