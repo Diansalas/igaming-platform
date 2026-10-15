@@ -24,7 +24,7 @@ func TestReceipt_ResolveByProviderReference_AppliesSuccess_LedgerBalanced(t *tes
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-a": provider}, MultiWebhookCredentialResolver{"mock-psp-rc-a": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "rc-success",
 	})
@@ -97,7 +97,7 @@ func TestReceipt_MerchantReferenceCrossProvider_IsAnomaly_NoStateChange(t *testi
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-b1": providerA, "mock-psp-rc-b2": providerB},
 		MultiWebhookCredentialResolver{"mock-psp-rc-b1": NewMockWebhookCredentials(providerA), "mock-psp-rc-b2": NewMockWebhookCredentials(providerB)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "rc-cross-provider",
 	})
@@ -144,7 +144,7 @@ func TestReceipt_Unresolved_DeferredThenAppliedOnceReferenceKnown(t *testing.T) 
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-c": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"mock-psp-rc-c": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "rc-deferred",
 	})
@@ -320,7 +320,7 @@ func TestReceipt_DeferredReceipt_PredatesSubmission_NeverApplied(t *testing.T) {
 		t.Fatalf("seed predating receipt: %v", err)
 	}
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "rc-predates",
 	})

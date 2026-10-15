@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkpost"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
 
@@ -40,7 +41,7 @@ func (w *world) creditAsset(tenantID, walletID uuid.UUID, asset string, amount i
 		if amount < 0 {
 			amount, cashDir, adjDir = -amount, ledger.Debit, ledger.Credit
 		}
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+		_, err = adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "lgov-fund-" + uuid.NewString(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{

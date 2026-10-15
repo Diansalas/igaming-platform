@@ -35,6 +35,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkpost"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
@@ -138,7 +139,7 @@ func seedSBRiskFixture(t *testing.T, pool *db.Pool, threshold int64) sbRiskFixtu
 		if err != nil {
 			return err
 		}
-		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		if _, err := adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "fund-" + uuid.New().String(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{
@@ -213,7 +214,7 @@ func placeSBBet(t *testing.T, pool *db.Pool, f sbRiskFixture, stake int64) sport
 	var res sportsbook.PlaceBetResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		res, err = sportsbook.PlaceBet(ctx, tx, sportsbook.PlaceBetParams{
+		res, err = sportsbook.PlaceBet(ctx, tx, sportsbook.PlaceBetParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, WalletID: f.walletID,
 			SelectionID: f.sel.id, AssetCode: sbAsset, StakeAmount: stake,
 			ExpectedOddsNumerator: f.sel.oddsNum, ExpectedOddsDenominator: f.sel.oddsDen,

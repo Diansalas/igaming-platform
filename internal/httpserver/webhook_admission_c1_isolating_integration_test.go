@@ -160,7 +160,7 @@ func TestAdmission_C1a_CasinoCredentialResolutionGateRejection_Isolated(t *testi
 	pool, issuer := testEnv(t)
 	sub := c1IsolatingRealSubsystem(t)
 	mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
-	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, sub.Resolver("casino"))
+	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 
 	tenant := mustCreateTenant(t, pool)
 	mustCreateBrand(t, pool, tenant)
@@ -212,7 +212,7 @@ func TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated(t *testing.
 	handler, rt := NewWithAdmission(Deps{
 		DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
 		AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
-		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:        orchestrator,
 		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
 		KYCWebhookEnabled:      true, WebhookAdmission: settings,

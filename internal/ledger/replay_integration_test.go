@@ -274,7 +274,9 @@ func TestReplay_DifferentReasonCodeRejected(t *testing.T) {
 			},
 		}
 	}
-	first := mustPost(t, pool, f, adj("goodwill"))
+	// The original is a generic fixture posting (MANUAL-ADJ-LINK-1 owner-only exemption, mustPostFixture); the
+	// replays below conflict on the key before the 0153 AFTER-INSERT fence could fire, so they run unexempted.
+	first := mustPostFixture(t, pool, f, adj("goodwill"))
 	expectAlreadyPosted(t, pool, f, adj("goodwill"), first.TransactionID)
 	expectMismatch(t, pool, f, adj("error_correction"), replayFieldReasonCode, f.cashAccountID)
 }

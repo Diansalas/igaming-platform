@@ -71,7 +71,7 @@ func setupBootstrapFixture(t *testing.T) (*db.Pool, casinoFixture, Game, *MockCa
 	enableGameForTenant(t, pool, f, game.ID)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 	return pool, f, game, provider, orch
 }
 
@@ -195,7 +195,7 @@ func TestBootstrapLaunch_ADV_CrossProvider(t *testing.T) {
 
 	other := NewMockCasinoProvider("mock-casino-2", "EUR")
 	registerCasinoCapability(t, pool, f, other, 100)
-	orch2 := NewOrchestrator(map[string]CasinoProvider{"mock-casino-2": other}, NewMockWebhookCredentials(other))
+	orch2 := NewOrchestrator(map[string]CasinoProvider{"mock-casino-2": other}, NewMockWebhookCredentials(other)).WithUngatedMarketOpenForTests()
 
 	// Same token, but bootstrapped as if it were mock-casino-2's own -
 	// resolves the session (token_hash is globally unique, no provider
@@ -666,7 +666,7 @@ func TestBootstrapLaunch_PlayerRefDiffersAcrossProviders(t *testing.T) {
 	gameB := seedGame(t, pool, "mock-casino-b", "EUR")
 	enableGameForTenant(t, pool, f, gameB.ID)
 	registerCasinoCapability(t, pool, f, providerB, 100)
-	orchB := NewOrchestrator(map[string]CasinoProvider{"mock-casino-b": providerB}, NewMockWebhookCredentials(providerB))
+	orchB := NewOrchestrator(map[string]CasinoProvider{"mock-casino-b": providerB}, NewMockWebhookCredentials(providerB)).WithUngatedMarketOpenForTests()
 	_, tokenB := mintSessionForBootstrap(t, pool, f, gameB, ModeReal, "EUR", DefaultLaunchTokenTTL)
 
 	inA := providerA.BootstrapPayload(f.tenantID, tokenA, "req-ti-a", game.ProviderGameID, "EUR", "real")

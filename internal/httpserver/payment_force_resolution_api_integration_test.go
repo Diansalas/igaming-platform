@@ -123,7 +123,7 @@ func (w *frWorld) authorPolicy() {
 func (w *frWorld) disputedDeposit() uuid.UUID {
 	t := w.a.t
 	t.Helper()
-	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.a.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.a.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     payments.DepositScope{TenantID: w.tenant, BrandID: w.brand, PlayerAccountID: w.player, WalletID: w.wallet},
 		AssetCode: "USD", Amount: 5000, PaymentMethod: "card", IdempotencyKey: uuid.NewString(),
 	})
@@ -290,6 +290,16 @@ func TestForceResolutionAPI_T14_FlowTokensAndAudit(t *testing.T) {
 	if st != http.StatusCreated || d.TenantID != w.tenant.String() {
 		t.Fatalf("request: %d %s (tenant %q)", st, body, d.TenantID)
 	}
+	// F2 (A10b): the asset registry exponent (USD = 2) is on every K3 response.
+	if !strings.Contains(string(body), `"exponent":2`) {
+		t.Fatalf("request response lacks the asset exponent: %s", body)
+	}
+	if lr := w.a.do("GET", w.base(), w.tok(w.f1), nil); lr.status != http.StatusOK || !strings.Contains(string(lr.body), `"exponent":2`) {
+		t.Fatalf("list lacks the asset exponent: %d %s", lr.status, lr.body)
+	}
+	if gr := w.a.do("GET", w.base()+"/"+d.ID, w.tok(w.f1), nil); gr.status != http.StatusOK || !strings.Contains(string(gr.body), `"exponent":2`) {
+		t.Fatalf("get lacks the asset exponent: %d %s", gr.status, gr.body)
+	}
 
 	// A closed-set refusal for each of: unknown attempt, self-approval, stale hash.
 	st, body, _ = w.request(w.f1, uuid.New(), nil)
@@ -318,6 +328,9 @@ func TestForceResolutionAPI_T14_FlowTokensAndAudit(t *testing.T) {
 	res = w.a.do("POST", w.base()+"/"+d.ID+"/approve", w.tok(w.f2), map[string]any{"payload_hash": d.PayloadHash, "reason_code": "x"})
 	if res.status != http.StatusOK {
 		t.Fatalf("approve: %d %s", res.status, res.body)
+	}
+	if !strings.Contains(string(res.body), `"exponent":2`) {
+		t.Fatalf("decision response lacks the asset exponent: %s", res.body)
 	}
 	var dec struct {
 		Resolution frDTO `json:"resolution"`

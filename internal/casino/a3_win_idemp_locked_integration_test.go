@@ -55,7 +55,7 @@ func TestA3_LockedCashWinRedelivery_ReturnsOriginal(t *testing.T) {
 	fundWallet(t, pool, f, 1_000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	postLockedCashBet(t, pool, f, "mock-casino", "a3-lc-bet", "a3-lc-round", 400)
 	first, err := a3Win(t, pool, f, orch, provider, "a3-lc-win", "a3-lc-round", 100, "EUR")
@@ -100,7 +100,7 @@ func TestA3_LockedBonusWinRedelivery_ReturnsOriginal_NonTerminalAndTerminalGrant
 			f := seedCasinoFixture(t, pool)
 			provider := NewMockCasinoProvider("mock-casino", "EUR")
 			registerCasinoCapability(t, pool, f, provider, 100)
-			orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+			orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 			co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 			grantID := seedActivatedGrant(t, pool, f, co, "a3-lb-"+tc.name)

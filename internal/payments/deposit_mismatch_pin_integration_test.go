@@ -33,7 +33,7 @@ func TestDepositMismatchedSuccess_OnSucceededAndDeclined_AuditOnly_NoAlert_NoSta
 			provider := NewMockProvider(pid, "EUR")
 			registerCapability(t, pool, f, provider, 100)
 			orch := NewOrchestrator(map[string]PaymentProvider{pid: provider}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
-			res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+			res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 				Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 				AssetCode: "EUR", Amount: c.amount, PaymentMethod: "card", IdempotencyKey: "dm-" + c.name,
 			})

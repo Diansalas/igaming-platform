@@ -46,6 +46,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkpost"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
@@ -74,7 +75,7 @@ func seedWalletFor(t *testing.T, pool *db.Pool, f fixture, assetCode string, fun
 		if err != nil {
 			return err
 		}
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+		_, err = adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "fund-" + uuid.New().String(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{

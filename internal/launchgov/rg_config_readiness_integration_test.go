@@ -55,7 +55,7 @@ func (w *world) floorFor(code, kind string, over rgfix.Spec) {
 	}
 }
 
-func wantCheck(t *testing.T, what string, c launchgov.Check, result, detail string) {
+func wantRGCheck(t *testing.T, what string, c launchgov.Check, result, detail string) {
 	t.Helper()
 	if c.Result != result || c.DetailCode != detail {
 		t.Fatalf("%s: want %s/%s, got %s/%s", what, result, detail, c.Result, c.DetailCode)
@@ -71,7 +71,7 @@ func TestReadiness_RGConfig_FailsClosedUntilEnforcementIsOnAndEveryFloorIsInForc
 	tenantSub := launchgov.Subject{TenantID: tid}
 	brandSub := launchgov.Subject{TenantID: tid, BrandID: &brand}
 
-	wantCheck(t, "nothing configured", w.rgCheck(brandSub, jid), launchgov.ResultFail, "enforcement_not_enabled")
+	wantRGCheck(t, "nothing configured", w.rgCheck(brandSub, jid), launchgov.ResultFail, "enforcement_not_enabled")
 
 	// a subject referencing no jurisdiction cannot be evaluated as passing
 	r, err := w.svc.EvaluateReadiness(context.Background(), launchgov.EvalInput{Subject: brandSub, Action: launchgov.ActionActivate})
@@ -80,32 +80,32 @@ func TestReadiness_RGConfig_FailsClosedUntilEnforcementIsOnAndEveryFloorIsInForc
 	}
 	for _, c := range r.Checks {
 		if c.Code == launchgov.CheckRGConfig {
-			wantCheck(t, "no jurisdiction referenced", c, launchgov.ResultFail, "no_jurisdiction_referenced")
+			wantRGCheck(t, "no jurisdiction referenced", c, launchgov.ResultFail, "no_jurisdiction_referenced")
 		}
 	}
 
 	// enforcement ON for the BRAND only: the brand subject now misses floors; the tenant subject is still off
 	staff := rgfix.Staff(t, w.owner, tid)
 	rgfix.Activate(t, w.owner, tid, &brand, staff)
-	wantCheck(t, "on, no floors", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_deposit")
-	wantCheck(t, "a brand-only activation does not satisfy a tenant subject", w.rgCheck(tenantSub, jid), launchgov.ResultFail, "enforcement_not_enabled")
+	wantRGCheck(t, "on, no floors", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_deposit")
+	wantRGCheck(t, "a brand-only activation does not satisfy a tenant subject", w.rgCheck(tenantSub, jid), launchgov.ResultFail, "enforcement_not_enabled")
 
 	w.floorFor(code, "deposit", nil)
-	wantCheck(t, "deposit floor only", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_loss")
+	wantRGCheck(t, "deposit floor only", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_loss")
 	w.floorFor(code, "loss", nil)
-	wantCheck(t, "deposit + loss", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_wager")
+	wantRGCheck(t, "deposit + loss", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_wager")
 	w.floorFor(code, "wager", nil)
-	wantCheck(t, "every floor in force", w.rgCheck(brandSub, jid), launchgov.ResultPass, "ok")
+	wantRGCheck(t, "every floor in force", w.rgCheck(brandSub, jid), launchgov.ResultPass, "ok")
 
 	// the tenant subject passes once a tenant-wide activation exists
 	rgfix.Activate(t, w.owner, tid, nil, staff)
-	wantCheck(t, "tenant-wide activation", w.rgCheck(tenantSub, jid), launchgov.ResultPass, "ok")
+	wantRGCheck(t, "tenant-wide activation", w.rgCheck(tenantSub, jid), launchgov.ResultPass, "ok")
 
 	// a session-duration control is NOT enforced by the platform: enabled or mandatory fails the check (honest, not a pass)
 	w.floorFor(code, "session_duration", nil) // EnforcedFloor sets enabled=true
-	wantCheck(t, "an enabled session control that is not enforced", w.rgCheck(brandSub, jid), launchgov.ResultFail, "session_limit_not_enforced")
+	wantRGCheck(t, "an enabled session control that is not enforced", w.rgCheck(brandSub, jid), launchgov.ResultFail, "session_limit_not_enforced")
 	w.floorFor(code, "session_duration", rgfix.Spec{"scope": "tenant_person", "concurrent_chain_aggregation": true, "concurrent_chain_aggregation_none": false})
-	wantCheck(t, "Person-scope chain aggregation cannot be measured", w.rgCheck(brandSub, jid), launchgov.ResultFail, "session_aggregation_unsupported")
+	wantRGCheck(t, "Person-scope chain aggregation cannot be measured", w.rgCheck(brandSub, jid), launchgov.ResultFail, "session_aggregation_unsupported")
 }
 
 // A currency the brand offers without a floor fails the check even when the other currency is fully configured.
@@ -134,5 +134,5 @@ func TestReadiness_RGConfig_EveryAllowedCurrencyNeedsFloors(t *testing.T) {
 	for _, k := range []string{"deposit", "loss", "wager"} {
 		w.floorFor(code, k, nil) // EUR only
 	}
-	wantCheck(t, "USD has no floors", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_deposit")
+	wantRGCheck(t, "USD has no floors", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_deposit")
 }

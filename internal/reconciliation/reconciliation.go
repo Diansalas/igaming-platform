@@ -369,8 +369,10 @@ func ledgerAccountIDsForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 // ResolveMismatch marks a mismatch investigated/resolved with a note and
 // resolver, per reconciliation-model.md §5 - it never itself mutates
 // ledger data; a resolution that requires a ledger correction does so via
-// a separate, ordinary compensating ledger.Post call (a manual_adjustment
-// transaction), whose id the caller then records via
+// a separate compensating posting - a GOVERNED manual adjustment
+// (internal/adjustment; since migration 0153 the database refuses any
+// manual_adjustment that is not a governed request's posting) - whose
+// ledger transaction id the caller then records via
 // correctionLedgerTransactionID.
 func ResolveMismatch(ctx context.Context, tx pgx.Tx, mismatchID uuid.UUID, resolvedBy uuid.UUID, note string, correctionLedgerTransactionID *uuid.UUID) error {
 	tag, err := tx.Exec(ctx,

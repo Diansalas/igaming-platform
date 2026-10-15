@@ -10,7 +10,9 @@ package launchgov_test
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 type world struct {
@@ -66,6 +69,65 @@ func newWorld(t *testing.T) *world {
 	}
 	prooftest.Install(t, ou)
 	launchfix.SeedOperators(t)
+	w.ops = launchfix.Operators()
+	plat := func(id uuid.UUID) launchgov.Actor {
+		return launchgov.Actor{StaffID: id, Scope: launchgov.ScopePlatform, Role: auth.RolePlatformAdmin, RequestID: "it-" + id.String()[:8]}
+	}
+	w.req, w.ap1, w.ap2 = plat(w.ops.Requester), plat(w.ops.Approver1), plat(w.ops.Approver2)
+	w.svc = w.service(launchgov.Config{})
+	return w
+}
+
+// newScratchWorld is newWorld over a PRIVATE, freshly migrated scratch database. It exists for tests that take
+// table-wide locks (TRUNCATE ... CASCADE takes ACCESS EXCLUSIVE locks on every table referencing the target): on the
+// shared CI database those locks block, or deadlock with, other packages' concurrent withdrawal tests, and the other
+// packages' open transactions block the TRUNCATE (hosted CI run #841). The runtime role keeps its default table
+// privileges here (no deployed-posture REVOKE), so a runtime DELETE/TRUNCATE reaches the WD012 trigger itself.
+func newScratchWorld(t *testing.T) *world {
+	t.Helper()
+	rtBase := os.Getenv("TEST_RUNTIME_DATABASE_URL")
+	if rtBase == "" {
+		t.Skip("TEST_RUNTIME_DATABASE_URL is required (a skip is not evidence)")
+	}
+	ctx := context.Background()
+	scratch := scratchdb.New(t, "lgdel_")
+	owner := connect(t, scratch)
+	su, err := url.Parse(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbName := strings.TrimPrefix(su.Path, "/")
+	for _, stmt := range []string{
+		`GRANT CONNECT ON DATABASE ` + pgx.Identifier{dbName}.Sanitize() + ` TO igaming_runtime`,
+		`GRANT USAGE ON SCHEMA public TO igaming_runtime`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO igaming_runtime`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO igaming_runtime`,
+	} {
+		if _, err := owner.Raw().Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if _, err := owner.MigrateUp(ctx, "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch: %v", err)
+	}
+	ru, err := url.Parse(rtBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ru.Path = su.Path
+	w := &world{t: t, ownerURL: scratch, runtimeURL: ru.String(), owner: owner, rt: connect(t, ru.String())}
+	var who string
+	var super, bypass bool
+	if err := w.rt.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT current_user::text, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&who, &super, &bypass)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if who != "igaming_runtime" || super || bypass {
+		t.Fatalf("the runtime pool must be igaming_runtime, non-superuser, non-BYPASSRLS; got %q super=%v bypass=%v", who, super, bypass)
+	}
+	prooftest.InstallVia(t, owner.Raw(), "lgdel-"+dbName)
+	launchfix.SeedOperatorsAt(t, scratch)
 	w.ops = launchfix.Operators()
 	plat := func(id uuid.UUID) launchgov.Actor {
 		return launchgov.Actor{StaffID: id, Scope: launchgov.ScopePlatform, Role: auth.RolePlatformAdmin, RequestID: "it-" + id.String()[:8]}

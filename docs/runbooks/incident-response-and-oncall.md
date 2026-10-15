@@ -3,8 +3,8 @@
 Status: **TEMPLATE. No on-call rota, no recipient, no paging channel and no escalation contact exists.** ALERT-DELIVERY-1 is
 OPEN and HD-PRH2-4-OPS (who is on call) is an unanswered human decision. Every `<...>` below is a blank for a human to
 fill; this document invents no name, address, phone number, tool or SLA. Until the blanks are filled, an incident is
-discovered by a person looking, not by a page (`observability-and-alerting.md`, `deploy/observability/`: rules exist, none
-is wired).
+discovered by a person looking, not by a page (`observability-and-alerting.md`, `deploy/observability/`: the metric rules are
+backed by a real exposition since A9 but no Prometheus or pager is deployed; the log-event rules are not wired).
 
 ## 1. Fill-in section (owner / operations; HUMAN)
 
@@ -53,7 +53,8 @@ One person may hold several roles in a small team; the IC and the operator shoul
    `tenant_id`. Count `status >= 500` over the last minutes; look for `panic_recovered`.
 4. **Money check (always, for P1/P2 on payments, ledger, settlement):** look for `reconciliation sweep: MISMATCH FOUND`
    in logs; platform admins list durable alerts via `GET /v1/admin/alerts` and routing state via
-   `GET /v1/admin/alerting/status`. Staleness of reconciliation has no metric yet: per tenant, with the tenant scope set,
+   `GET /v1/admin/alerting/status`. Reconciliation staleness has a metric since A9 (`reconciliation_last_success_unix_seconds{stream}`, oldest tenant; read it at
+   `METRICS_ADDR`). The SQL check still works without it: per tenant, with the tenant scope set,
    `SELECT stream, max(run_at) FROM reconciliation_runs GROUP BY stream` (default cadence is hourly; older than two hours
    is a stalled scheduler).
 5. **Background loops** (payments sweeper, KYC outbox, alert dispatcher, reconciliation) run inside `platform-api`; their
@@ -76,7 +77,9 @@ One person may hold several roles in a small team; the IC and the operator shoul
 | `WebhookAdmission*` | `operational-runbooks.md` section 4/5 and `docs/decisions/0097-*.md`; `directory_unloaded` means failing closed on every webhook route |
 | `KycOutbox*` | `operational-runbooks.md` section 13 |
 | `AlertRoutingNotReady`, `AlertUnrouted`, `AlertDeliveryDead` | this is ALERT-DELIVERY-1: nobody was or will be notified; escalate to the owner (human decision), do not silence |
-| DB pool saturation (no signal exists) | symptoms: rising request duration then 5xx; check connection counts in `pg_stat_activity`; `operational-runbooks.md` section 7 step 3; `load-and-soak-test-plan.md` |
+| `DbPoolSaturated`, `DbPoolAcquireWaiting` (metric exists since A9, not wired to a pager) | `observability-and-alerting.md` section 4; symptoms: rising request duration then 5xx; connection counts in `pg_stat_activity`; `operational-runbooks.md` section 7 step 3; `load-and-soak-test-plan.md` |
+| `ReconciliationStale`, `ReconciliationSweepStalled`, `ReconciliationMismatchesOpen`, `ReconciliationListingFailed`, durable alert `reconciliation.sweep_failed` | `observability-and-alerting.md` section 4 (runbooks for `reconciliation.sweep_failed` and `run_failed`); `operational-runbooks.md` section 3 |
+| `AlertUndeliveredP1Old`, `AlertDeliveryFailing`, `AlertRetention*` | `alert-delivery-channels.md`; undelivered P1 = nobody was told: ALERT-DELIVERY-1, do not silence |
 | Provider outage | `operational-runbooks.md` sections 4 and 5 |
 | Suspected compromise / secret exposure | `operational-runbooks.md` section 9 and 15 (actor proof keys); rotate, do not paste secrets anywhere |
 | Need to restore | `restore-from-backup.md` (human decision; section 6 there) |

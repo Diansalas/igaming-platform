@@ -284,10 +284,17 @@ persisted as a `*_resolutions` table (unlike `jurisdiction_resolutions`,
 which records a player-affecting determination regulators require be
 reconstructible; an operating-market answer's own inputs already are
 reconstructible, so storing the answer would be a second, driftable
-copy). It has **zero production callers** as of Phase E: no HTTP route,
-no OpenAPI change, and no consuming domain (`casino`/`bonus`/`risk`/
-`payments`/`sportsbook`/registration/withdrawal) has been wired to call
-it. Full design, the five-step algorithm, the eleven-outcome result type,
+copy). It had **zero production callers** as of Phase E. **A8 wired it**
+(see `docs/plans/a8-market-blocking-record.md`) into exactly three
+player-request points - registration, deposit initiation and casino
+launch (+ launch-token mint) - through ONE gate, `internal/marketgate`,
+which composes this package with the narrow `geolocation.Locator`
+evidence seam (the composition lives in its own package precisely so
+`operatingmarket` keeps INV-M-1). Unknown or unavailable location
+evidence, an unconfigured brand and every non-`permitted` outcome REFUSE
+with one `403 MARKET_NOT_AVAILABLE`; the country is never client-supplied.
+Every other consuming domain (`bonus`/`risk`/`sportsbook`/withdrawal,
+deposit credit, per-bet wagering) remains unwired. Full design, the five-step algorithm, the eleven-outcome result type,
 and the permission model are ADR 0045's own subject matter, including
 ADR 0045 §3.5-A AMENDMENT-1's correction of the operation rung to a SET
 evaluated with first-disabled-wins (not most-specific-wins), AMENDMENT-2's

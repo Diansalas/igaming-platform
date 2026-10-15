@@ -222,18 +222,21 @@ type requestResolutionBody struct {
 }
 
 type resolutionDTO struct {
-	ID                  string   `json:"id"`
-	TenantID            string   `json:"tenant_id"`
-	AttemptID           string   `json:"attempt_id"`
-	Operation           string   `json:"operation"`
-	Kind                string   `json:"kind"`
-	TargetState         *string  `json:"target_state,omitempty"`
-	FindingCode         *string  `json:"finding_code,omitempty"`
-	BasisCode           *string  `json:"basis_code,omitempty"`
-	ContextCode         *string  `json:"context_code,omitempty"`
-	EvidenceRefHash     *string  `json:"evidence_ref_hash,omitempty"`
-	AmountMinorUnits    string   `json:"amount_minor_units"`
-	AssetCode           string   `json:"asset_code"`
+	ID               string  `json:"id"`
+	TenantID         string  `json:"tenant_id"`
+	AttemptID        string  `json:"attempt_id"`
+	Operation        string  `json:"operation"`
+	Kind             string  `json:"kind"`
+	TargetState      *string `json:"target_state,omitempty"`
+	FindingCode      *string `json:"finding_code,omitempty"`
+	BasisCode        *string `json:"basis_code,omitempty"`
+	ContextCode      *string `json:"context_code,omitempty"`
+	EvidenceRefHash  *string `json:"evidence_ref_hash,omitempty"`
+	AmountMinorUnits string  `json:"amount_minor_units"`
+	AssetCode        string  `json:"asset_code"`
+	// Exponent is the asset registry decimal exponent (ADR 0007); null when it could not be resolved. A client must
+	// not format the amount without it.
+	Exponent            *int16   `json:"exponent"`
 	ReasonCode          string   `json:"reason_code"`
 	PayloadHash         string   `json:"payload_hash"`
 	RequestedBy         staffRef `json:"requested_by"` // null for a tenant caller when the requester is platform staff (ADR 0114 H1)
@@ -256,12 +259,12 @@ type resolutionDTO struct {
 	EvidenceImportIDs        []string `json:"evidence_import_ids,omitempty"`
 }
 
-func toResolutionDTO(v staffViewer, r payments.ManualResolution) resolutionDTO {
+func toResolutionDTO(v staffViewer, r payments.ManualResolution, exps map[string]int16) resolutionDTO {
 	dto := resolutionDTO{
 		ID: r.ID.String(), TenantID: r.TenantID.String(), AttemptID: r.AttemptID.String(), Operation: r.Operation,
 		Kind: string(r.Kind), TargetState: r.TargetState, FindingCode: r.FindingCode, BasisCode: r.BasisCode,
 		ContextCode: r.ContextCode, EvidenceRefHash: r.EvidenceRefHash, AmountMinorUnits: strconv.FormatInt(r.Amount, 10),
-		AssetCode: r.AssetCode, ReasonCode: r.ReasonCode, PayloadHash: r.PayloadHash, RequestedBy: v.ref(r.RequestedByScope, r.RequestedBy),
+		AssetCode: r.AssetCode, Exponent: exponentRef(exps, r.AssetCode), ReasonCode: r.ReasonCode, PayloadHash: r.PayloadHash, RequestedBy: v.ref(r.RequestedByScope, r.RequestedBy),
 		RequestedByScope: r.RequestedByScope, RequiredAtSubmit: r.RequiredAtSubmission, TenantStatus: r.TenantStatusAtSubmission,
 		State: string(r.State), RefusalCode: r.RefusalCode,
 		CreatedAt: r.CreatedAt.Format(time.RFC3339), ExpiresAt: r.ExpiresAt.Format(time.RFC3339),
@@ -323,7 +326,8 @@ func newRequestResolutionHandler(deps Deps, svc *payments.ManualResolutionServic
 			writeResolutionError(r.Context(), deps, w, c, "request", err, "", attemptID.String())
 			return
 		}
-		writeJSON(w, http.StatusCreated, toResolutionDTO(staffViewerOf(c.tc), res))
+		exps := resolutionExponentsBestEffort(r.Context(), deps, c.logger, res.AssetCode)
+		writeJSON(w, http.StatusCreated, toResolutionDTO(staffViewerOf(c.tc), res, exps))
 	}
 }
 
@@ -342,9 +346,17 @@ func newListResolutionsHandler(deps Deps, svc *payments.ManualResolutionService)
 			writeResolutionError(r.Context(), deps, w, c, "list", err)
 			return
 		}
+		codes := make([]string, 0, len(rs))
+		for _, x := range rs {
+			codes = append(codes, x.AssetCode)
+		}
+		exps, ok := resolutionExponentsOrFail(r.Context(), deps, w, c.logger, c.requestID, codes...)
+		if !ok {
+			return
+		}
 		out := make([]resolutionDTO, 0, len(rs))
 		for _, x := range rs {
-			out = append(out, toResolutionDTO(staffViewerOf(c.tc), x))
+			out = append(out, toResolutionDTO(staffViewerOf(c.tc), x, exps))
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": out})
 	}
@@ -370,7 +382,11 @@ func newGetResolutionHandler(deps Deps, svc *payments.ManualResolutionService) h
 			writeResolutionError(r.Context(), deps, w, c, "get", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toResolutionDTO(staffViewerOf(c.tc), res))
+		exps, ok := resolutionExponentsOrFail(r.Context(), deps, w, c.logger, c.requestID, res.AssetCode)
+		if !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, toResolutionDTO(staffViewerOf(c.tc), res, exps))
 	}
 }
 
@@ -414,7 +430,8 @@ func newDecideResolutionHandler(deps Deps, svc *payments.ManualResolutionService
 			writeResolutionError(r.Context(), deps, w, c, op, err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, resolutionDecisionResponse{Resolution: toResolutionDTO(staffViewerOf(c.tc), out.Resolution), Executed: out.Executed,
+		exps := resolutionExponentsBestEffort(r.Context(), deps, c.logger, out.Resolution.AssetCode)
+		writeJSON(w, http.StatusOK, resolutionDecisionResponse{Resolution: toResolutionDTO(staffViewerOf(c.tc), out.Resolution, exps), Executed: out.Executed,
 			Refused: out.Refused, Counted: out.Counted, Required: out.Required})
 	}
 }
@@ -439,6 +456,7 @@ func newCancelResolutionHandler(deps Deps, svc *payments.ManualResolutionService
 			writeResolutionError(r.Context(), deps, w, c, "cancel", err, id.String())
 			return
 		}
-		writeJSON(w, http.StatusOK, toResolutionDTO(staffViewerOf(c.tc), res))
+		exps := resolutionExponentsBestEffort(r.Context(), deps, c.logger, res.AssetCode)
+		writeJSON(w, http.StatusOK, toResolutionDTO(staffViewerOf(c.tc), res, exps))
 	}
 }

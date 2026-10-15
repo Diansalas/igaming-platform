@@ -428,6 +428,19 @@ and is the fail-closed direction.
 
 ### 5.3.3 Rung 2 — licence ceiling / operating-market policy (SPECIFIED, NOT IMPLEMENTED — BLOCKED on HDR-J-7)
 
+> **AMENDMENT (A8 round 2, SR8-1, 2026-10-15) - DEVIATION, recorded.** Rung 2 is now IMPLEMENTED for sportsbook bet
+> placement, ahead of the HDR-J-7 answer, by an explicit owner/orchestrator decision made after the A8 security review
+> showed a sportsbook bet returning 201 in a market where a deposit returned 403. It is wired through
+> `internal/marketgate` (operation `wagering`, product `sportsbook`, `marketgate.OpSportsbookWager`), not as the
+> `evaluateOperatingMarket` shape specified below, and it uses the evidence rule this section's own text asks for
+> (country from a server-side `geolocation.Locator`, never a client, never `jurisdictions.country_code`): UNKNOWN
+> evidence REFUSES, exactly like casino launch, so the "`armed` is false when no country is determinable" branch below
+> is deliberately NOT taken. `PlaceBet` evaluates `PlaceBetParams.MarketGuard` first (before the idempotency lookup,
+> before any ledger lock), a refusal is `403 MARKET_NOT_AVAILABLE` with the one generic body, and nothing is locked or
+> written. The prohibition on an arming switch stands. HDR-J-7 (which evidence is authoritative) remains OPEN; this
+> only fails closed while it is. See `docs/plans/a8-market-blocking-record.md` (round 2).
+
+
 This is a **sharper reason than ADR 0047 gave**, and it is not "there is
 no country policy configured yet".
 

@@ -112,6 +112,14 @@ const (
 	OpStaffLifecycleApprove = "staff_lifecycle:approve"
 	OpStaffLifecycleReject  = "staff_lifecycle:reject"
 	OpStaffLifecycleCancel  = "staff_lifecycle:cancel"
+
+	// ADR 0116 (migrations 0140-0142, A7 route registration): the AML officer operations whose HTTP routes are step-up
+	// classified. Only the step-up-classified ones are named here (internal/aml owns the full closed set and aliases these
+	// three, so there is ONE spelling): a lift of a hold (loosens a control, rule 8.1 (e)) and the proposal and approval
+	// halves of a four-eyes action (rule 8.1 (d)). Scope tenant or platform_acting only (aml_authorize).
+	OpAMLHoldLift    = "aml_hold:lift"
+	OpAMLCasePropose = "aml_case:propose"
+	OpAMLCaseApprove = "aml_case:approve"
 )
 
 // Scopes the database admits.

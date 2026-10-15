@@ -61,7 +61,7 @@ func TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"a7-1a-p1": providerA, "a7-1a-p2": providerB},
 		MultiWebhookCredentialResolver{"a7-1a-p1": NewMockWebhookCredentials(providerA), "a7-1a-p2": NewMockWebhookCredentials(providerB)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "a7-1a",
 	})

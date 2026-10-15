@@ -14,6 +14,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 )
 
@@ -25,6 +26,7 @@ const (
 	CheckCurrencies         = "R-CURRENCIES"
 	CheckPaymentMethods     = "R-PAY-METHODS"
 	CheckCatalogue          = "R-CATALOGUE"
+	CheckMarketConfig       = "R-MARKET-CONFIG"
 	CheckProviderTier       = "R-PROVIDER-TIER"
 	CheckAlerts             = "R-ALERTS"
 	CheckPlayerFunds        = "R-PLAYER-FUNDS"
@@ -33,15 +35,20 @@ const (
 	// currency. Without it a brand would either run with no deposit / loss / wager limits (switch off) or be
 	// unable to take a deposit or a wager (switch on, no floor: rg_config_missing).
 	CheckRGConfig = "R-RG-CONFIG"
+	// ADR 0116 s6 / S7 (A7): the AML readiness checks. Informational like every readiness check (they prove configuration
+	// presence, not a legal or regulatory position) and, like every non-passing check, they must be acknowledged by a request.
+	CheckAMLQuorum     = "R-AML-QUORUM"
+	CheckAMLScreening  = "R-AML-SCREENING"
+	CheckAMLMonitoring = "R-AML-MONITORING"
 
 	ResultPass         = "pass"
 	ResultFail         = "fail"
 	ResultNotEvaluable = "not_evaluable"
 
-	// SnapshotVersion is bumped when the check set or the canonical form changes. Version 2 (ADR 0115 S4-min):
-	// R-RG-CONFIG joined the check set, so a request bound to a version-1 readiness hash is stale and must be
-	// re-requested (the hash is recomputed over the current set at decision and at execution).
-	SnapshotVersion = 2
+	// SnapshotVersion is bumped when the check set or the canonical form changes. 2: R-RG-CONFIG (A6, ADR 0115 S4-min). 2 (upstream numbering):
+	// the three R-AML-* checks (A7). 3: R-MARKET-CONFIG (A8). 4 after this merge: the combined set. A request bound to an older
+	// readiness hash is stale and must be re-requested (the hash is recomputed over the current set at decision and at execution).
+	SnapshotVersion = 4
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -353,7 +360,38 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	default:
 		out = append(out, ck(CheckCatalogue, ResultPass, "ok"))
 	}
+
+	// R-MARKET-CONFIG (A8)
+	out = append(out, s.marketConfigCheck(ctx, tx, in, now))
+	out = append(out, s.amlChecks(ctx, tx, in)...)
 	return out
+}
+
+// marketConfigCheck is R-MARKET-CONFIG (A8): the operating-market gate (internal/marketgate)
+// refuses every registration, deposit and casino launch of a brand whose operating market is not
+// configured (ADR 0045: a tenant must opt in; an unconfigured brand is not_configured, a DENY).
+// Launching such a brand would open a brand that can serve nobody, so the approver must see it.
+// The check passes when at least one country has an enabled tenant-rung policy AND resolves
+// PERMITTED, at the evaluation time, for all three gated actions (registration; deposit; wagering
+// on casino) - through operatingmarket.ResolveOperatingCountryPolicy itself (licence ceiling,
+// tenant, brand and operation rungs), never a re-implementation. Detail codes: ok,
+// no_market_configured (no enabled tenant-rung country), no_country_permits_all_operations
+// (configured, but no country is open for all three), read_error (not_evaluable).
+// It reads configuration only: no player evidence, and it cannot say which rung blocks.
+func (s *Service) marketConfigCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) Check {
+	// The resolver logic lives in marketgate.AnyCountryPermits, shared with the
+	// enforcement points (SR8-2): one definition of "the market is open".
+	configured, open, err := marketgate.AnyCountryPermits(ctx, tx, in.Subject.TenantID, in.Subject.BrandID, now,
+		marketgate.OpRegistration, marketgate.OpDeposit, marketgate.OpCasinoBet)
+	switch {
+	case err != nil:
+		return ck(CheckMarketConfig, ResultNotEvaluable, "read_error")
+	case !configured:
+		return ck(CheckMarketConfig, ResultFail, "no_market_configured")
+	case !open:
+		return ck(CheckMarketConfig, ResultFail, "no_country_permits_all_operations")
+	}
+	return ck(CheckMarketConfig, ResultPass, "ok")
 }
 
 // licenceCheck is R-LIC-VALID: licence-backed basis => EvaluateLicenceValidity at the evaluation time.
@@ -617,4 +655,102 @@ func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []s
 		}
 	}
 	return ck(CheckRGConfig, ResultPass, "ok")
+}
+
+// ---- AML readiness (ADR 0116 s6 / S7, A7) ------------------------------------------------------------------------------
+
+// amlData is what the AML readiness reader (migration 0154 aml_readiness) returned for the subject's tenant.
+type amlData struct {
+	OwnerScope string
+	QuorumMet  bool
+	// Total is the number of DISTINCT referenced jurisdictions; WithPolicy those with an effective screening policy.
+	Total, WithPolicy int
+}
+
+// amlChecks evaluates R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING inside the caller's read-only tenant transaction.
+// A read failure degrades the DATABASE-derived checks to not_evaluable (never pass). R-AML-MONITORING needs no read.
+func (s *Service) amlChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []Check {
+	var d amlData
+	// A SAVEPOINT, so a failing read (the function missing, a fault) degrades only the AML items and never aborts the
+	// caller's transaction (the readiness commit must survive it).
+	sp, err := tx.Begin(ctx)
+	if err == nil {
+		err = sp.QueryRow(ctx, `SELECT o_owner_scope, o_quorum_met, o_jurisdictions_total, o_jurisdictions_with_policy FROM aml_readiness($1, $2)`,
+			in.Subject.TenantID, in.JurisdictionIDs).Scan(&d.OwnerScope, &d.QuorumMet, &d.Total, &d.WithPolicy)
+		if err != nil {
+			_ = sp.Rollback(ctx)
+		} else if cerr := sp.Commit(ctx); cerr != nil {
+			err = cerr
+		}
+	}
+	return amlChecksFrom(d, err, len(in.JurisdictionIDs), s.cfg.Components, s.cfg.Environment)
+}
+
+// AMLPlatformScopeSuffix is appended to the R-AML-QUORUM detail codes when the tenant's AML owner scope is the platform.
+const AMLPlatformScopeSuffix = "_platform_scope"
+
+// The registration the screening check looks for in the process component list (the same list the synthetic-component
+// startup guard checked).
+const (
+	amlComponentDomain = "aml"
+	amlComponentName   = "screening_provider"
+)
+
+// amlChecksFrom is the pure part of amlChecks (unit-tested without a database).
+//
+//   - R-AML-QUORUM: pass only when at least two distinct live officer Persons of the tenant's owner scope hold an in-force
+//     aml_officer grant. The reader returns a boolean only.
+//   - R-AML-SCREENING: pass only when (a) a screening provider is registered and, in production, is production-eligible (a
+//     MOCK counts as configured ONLY where a mock is allowed: any non-production environment), and (b) every referenced
+//     jurisdiction has an effective screening policy. Unconfigured is never a pass.
+//   - R-AML-MONITORING: ALWAYS fail. Transaction monitoring (ADR 0116 S4) is NOT IMPLEMENTED; this makes the gap an explicit,
+//     acknowledged item so a brand activation cannot silently ignore it. It becomes evaluable only with the S4 slice.
+func amlChecksFrom(d amlData, readErr error, referenced int, comps []providerkind.Registration, env string) []Check {
+	out := []Check{ck(CheckAMLMonitoring, ResultFail, "monitoring_not_implemented")}
+	if readErr != nil {
+		return append(out, ck(CheckAMLQuorum, ResultNotEvaluable, "read_error"), ck(CheckAMLScreening, ResultNotEvaluable, "read_error"))
+	}
+	// SR7-6: for a PLATFORM-owned scope the detail code carries the scope (a tenant-scoped viewer is shown "see_platform" for it,
+	// see httpserver coarsenForTenant: the platform officer quorum is platform process detail, not the tenant's).
+	suffix := ""
+	if d.OwnerScope == "platform" {
+		suffix = AMLPlatformScopeSuffix
+	}
+	if d.QuorumMet {
+		out = append(out, ck(CheckAMLQuorum, ResultPass, "ok"+suffix))
+	} else {
+		out = append(out, ck(CheckAMLQuorum, ResultFail, "quorum_not_met"+suffix))
+	}
+	return append(out, amlScreeningCheck(d, referenced, comps, env))
+}
+
+func amlScreeningCheck(d amlData, referenced int, comps []providerkind.Registration, env string) Check {
+	if len(comps) == 0 {
+		return ck(CheckAMLScreening, ResultNotEvaluable, "no_component_registry")
+	}
+	var reg *providerkind.Registration
+	for i := range comps {
+		if comps[i].Domain == amlComponentDomain && comps[i].Name == amlComponentName && comps[i].Component != nil {
+			reg = &comps[i]
+			break
+		}
+	}
+	if reg == nil {
+		return ck(CheckAMLScreening, ResultFail, "no_screening_provider")
+	}
+	// The guard decides eligibility; an unmarked component is as ineligible as a synthetic one.
+	eligible := providerkind.RefuseSyntheticInProduction("production", []providerkind.Registration{*reg}) == nil
+	if !eligible && env == "production" {
+		return ck(CheckAMLScreening, ResultFail, "synthetic_provider_in_production")
+	}
+	if referenced == 0 || d.Total == 0 {
+		return ck(CheckAMLScreening, ResultFail, "no_jurisdiction_referenced")
+	}
+	if d.WithPolicy < d.Total {
+		return ck(CheckAMLScreening, ResultFail, "policy_missing_for_jurisdiction")
+	}
+	if !eligible {
+		return ck(CheckAMLScreening, ResultPass, "ok_mock_provider")
+	}
+	return ck(CheckAMLScreening, ResultPass, "ok")
 }

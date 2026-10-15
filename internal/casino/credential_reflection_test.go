@@ -20,7 +20,7 @@ func TestCredentialReflection_NoConstructedAdapterHoldsACredential(t *testing.T)
 	orchestrator := NewOrchestrator(
 		map[string]CasinoProvider{"credscan-mock": mock},
 		NewMockWebhookCredentials(mock),
-	)
+	).WithUngatedMarketOpenForTests()
 
 	for name, v := range map[string]any{
 		"MockCasinoProvider":        mock,

@@ -110,7 +110,7 @@ func newPCAPI(t *testing.T, withSubsystem bool) *pcAPI {
 	a.srv = httptest.NewServer(New(Deps{
 		Logger: logger, DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: a.issuer, ServiceName: "pc-test",
 		AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
-		PersonResolver:      identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		ProviderCredentials: sub,
 	}))
 	t.Cleanup(a.srv.Close)

@@ -7,6 +7,8 @@
   **Implementation (2026-09-28): see §20 - IMPLEMENTED on the unmerged K2 branch
   (`prh2-k2-manual-adjustments`, migration 0113), NOT YET REVIEWED by `security` /
   `code-reviewer` / `qa`.**
+  **Amendment 2026-10-15 (A4): §21 - MANUAL-ADJ-LINK-1, the session-independent link fence
+  (migration 0153). IMPLEMENTED on the A4 branch; reviews pending.**
 - **Revision history:** PROPOSED — **revision 2** (`architect`, 2026-09-28). Revision 1
   (`d83a71c`) was reviewed ACCEPT WITH CONDITIONS by `product-owner-proxy`, `security` and
   `ledger-finance`. This revision applies every condition (§17). **`security` and `ledger-finance`
@@ -618,7 +620,11 @@ Touches addition). It raises a **P1** mismatch for every `ledger_transactions` r
 It is standing and unwindowed. It routes as a P1 via ADR 0102 once I-wire lands.
 
 **The preventive rule is deferred to LEDGER-MANUAL-ADJ-LINK-1** (= MANUAL-ADJ-LINK-1;
-launch-blocking for the first real-money tenant):
+launch-blocking for the first real-money tenant). *Amended 2026-10-15: implemented as §21 (migration 0153),
+with AFTER INSERT constraint triggers instead of the BEFORE trigger sketched below - see §21.2 for why.
+The detector stays, as the backstop for the owner-DDL residual (§21.5). **Accepted deviation (security A4
+C-1):** the fixture files did NOT move to request-backed helpers as the second bullet below says; they use an
+owner-only trigger-disable fixture exemption (§21.4). No test-bypass GUC exists in the production schema.*
 - a BEFORE INSERT trigger for **all** sessions, requiring an executing request;
 - the **19** test files that post `TxManualAdjustment` directly move to request-backed helpers
   first. Revision 1 said 24; worktree copies inflated that count (LF F8);
@@ -715,7 +721,7 @@ drop the deferred check; drop S-2(iii) for approvers.
    - The A8 L2 addition is CONFIRMED (§8).
    - Security C-2 binds K2: B-3's K1-1 negatives, and A-19 via B-22, run in K2's real acting executor transaction.
 4. **LEDGER-MANUAL-ADJ-LINK-1** (preventive link, 19 fixtures): launch-blocking for the first
-   real-money tenant.
+   real-money tenant. *2026-10-15: implemented, §21; reviews pending.*
 5. **Touches additions (orchestrator, Rule 1):** `internal/reconciliation` (the §12 check). Its
    scheduler registration conflicts with I-wire's `scheduler.go` ownership, so the orchestrator
    sequences them.
@@ -913,7 +919,8 @@ file is the only authoritative count.
 - **K3's Step-B causation arm** (§5.4 RESOLVED, ADOPTED): NOT IMPLEMENTED
   here by design - ruling 1 ships literally; K3 (0115) adds it.
 - **LEDGER-MANUAL-ADJ-LINK-1** (preventive link trigger for all sessions,
-  19 fixture files): NOT IMPLEMENTED (deferred; launch-blocking).
+  19 fixture files): NOT IMPLEMENTED (deferred; launch-blocking). *Superseded 2026-10-15
+  by §21 (migration 0153): IMPLEMENTED on the A4 branch, reviews pending.*
 - **HD-PRH2-8**: OPEN (human). Interim (b) enforced (`base >= 1` trigger +
   `GREATEST(1, …)`).
 - **P1 routing** of `ledger_unlinked_manual_adjustment`: I-wire (ADR 0102).
@@ -971,3 +978,238 @@ and code review (`k2-code-review.md`), both ACCEPT WITH CONDITIONS.
   file states it must run in a single transaction.
 - **F1** (drop the fence's `executed_txid` arm) is EQUIVALENT, as security
   accepted; it is listed in the evidence file.
+
+## 21. MANUAL-ADJ-LINK-1: the session-independent link fence (migration 0153)
+
+- **Status:** IMPLEMENTED on the A4 worktree branch (not merged, not CI-run), `ledger-finance`, 2026-10-15.
+  **Pending:** `security` review, independent `ledger-finance` / `code-reviewer` review, hosted CI.
+- **Registry:** MANUAL-ADJ-LINK-1 (= LEDGER-MANUAL-ADJ-LINK-1). Proposed registry text:
+  `docs/plans/a4-adjustment-fence-record.md` (the orchestrator is the single registry writer).
+- **Numbering note.** The A4 task text says "ADR 0113"; the acting-GUC fences it names
+  (`ledger_transactions_governed_fence`, `ledger_entries_governed_fence`) are migration 0113's and are
+  specified by this ADR (ADR 0113 is the withdrawal state machine). This section is therefore the amendment.
+
+### 21.1 The gap
+
+Migration 0113's ledger fences (§10.7, ADR 0099 §6.6) fire only when an acting GUC is present
+(`financial_acting_gucs_present()`). A session without acting GUCs - the runtime role with no GUCs, the
+system-tenant shape, a tenant-principal shape, or the table owner - could insert a `manual_adjustment`
+transaction and its entries with no governed request behind it. B-21 (a Go static test) and the §12
+detective kind were the only guards. Under ADR 0110's accepted R1 class (arbitrary SQL as the runtime
+role), that is a direct, ungoverned money path.
+
+### 21.2 The mechanism (migration 0153)
+
+Two `NOT DEFERRABLE` AFTER INSERT row **constraint triggers**, for **every** session (no GUC, role or
+environment condition anywhere in them), no SECURITY DEFINER, `search_path` pinned:
+
+1. `ledger_transactions_manual_adjustment_link`, `WHEN (NEW.transaction_type = 'manual_adjustment')`,
+   function `ledger_manual_adjustment_link_check()`. The row must be the posting of a request that is
+   (a) visible to the posting session in the row's tenant, with `id = correlation_id` and
+   `idempotency_key = 'manual_adjustment:' || id`; (b) `state = 'executing'` with
+   `executed_txid = txid_current()`; (c) `payload_hash = ledger_adjustment_payload_hash(request)`;
+   (d) still approved: `ledger_adjustment_execution_status()` - the single 0113 implementation of the
+   four-eyes / threshold count - reports `enabled`, `initiator_valid` and `counted >= required`,
+   re-evaluated at the posting; (e) keyed exactly: `reason_code` and `causation_id` equal the request's,
+   `provider_id`, `provider_tx_id`, `reverses_transaction_id` NULL. Refusal `MA050`.
+2. `ledger_entries_manual_adjustment_link`, function `ledger_manual_adjustment_entry_check()`. For an entry
+   whose parent (looked up in the entry's own tenant; an invisible parent fails closed) is a
+   `manual_adjustment`: the parent's request must be executing in this transaction (so nothing can ever be
+   appended to a committed adjustment), and the entry must be one leg of the closed §4 shape - the request
+   wallet's `player_cash` in the player direction, or the tenant's `manual_adjustment` house account
+   (`wallet_id IS NULL`) in the opposite direction - in the request's asset and amount, at most one leg per
+   direction. Refusal `MA051`.
+3. In the same entry function (security A4 F1): an entry whose parent is **not** a `manual_adjustment` may not
+   post to any account of type `manual_adjustment`. Refusal `MA052`. Evidence that no legitimate type uses that
+   account: no production code or migration other than the governed executor posts to it (the only
+   `AccountManualAdjustment` reference outside `internal/ledger` is `internal/adjustment/execute.go`; the
+   migrations mention `manual_adjustment` only in type/CHECK lists), and with MA052 in force the full
+   integration suites hit it in exactly three places, all ADVERSARIAL test injections that picked the account as
+   an arbitrary "wrong" account: the casino C2 posting-shape detector tests (stake/payout on a non-house account,
+   4 subtests) and the RG S3 "undeclared player-side leg" tests (2). Those injections now use `psp_clearing`
+   (house-level, resp. wallet-scoped); every assertion is unchanged. No legitimate posting path uses the
+   account for another type. The account is visible whenever an entry may be
+   inserted on it (the 0048 populate trigger refuses an invisible account first), so the check cannot be
+   evaded by visibility.
+
+**Why "executing in this transaction" is "approved and not yet executed".** 0113's request guard admits
+`pending -> executing` only in the transaction of a same-transaction final APPROVE decision (itself bound to
+a signed actor proof by 0120), after re-verifying the count and the payload rules; `executing` can never
+commit (MA041); every non-executed exit refuses once a posting with the key exists (MA040); `executed`
+runs `verify_link`. The fence adds the binding at the ledger itself, independent of the session's GUCs,
+and re-checks (c) and (d) rather than trusting the state flag. **The recount (d) is as of the deciding
+transaction's `now()`** - the same time-versioned evaluation as the 0113 guard (policies with
+`effective_from <= now()`, grants in force at `now()`; the executor also holds the staff and grant rows
+`FOR SHARE`). A policy tightening or grant revocation committed by another session while the decision is in
+flight is therefore NOT caught - the same semantics as 0113 and its "tightened after submission" tests
+(ledger-finance A4 review L2, reproduced by a probe). Only non-time-versioned inputs (tenant/brand status,
+licence-derived jurisdiction, the player's Person link) can differ between the guard's and the fence's
+evaluation; any divergence fails closed (MA050, the whole decision rolls back, the request stays pending).
+
+**Why AFTER (constraint) triggers, not the BEFORE trigger §12 sketched.** An AFTER ROW trigger fires only
+for a row actually inserted. A replay of an already-posted key fails on the `(tenant_id, idempotency_key)`
+index first, so ADR 0020's idempotency contract (AlreadyPosted, ErrIdempotencyKeyReused,
+ErrIdempotencyPayloadMismatch) is unchanged - a BEFORE trigger would turn every replay of a committed
+adjustment into a fence error (mutant T19 below pins this). `NOT DEFERRABLE`: `SET CONSTRAINTS` cannot
+postpone the check to a commit at which the request is no longer executing (mutants T18/E21).
+
+**Why no SECURITY DEFINER.** The functions run with the caller's rights and RLS. A session that cannot
+see the request (no GUCs, the system-tenant shape, a foreign tenant) is refused. `FORCE ROW LEVEL SECURITY`
+binds the owner too, so a definer would gain nothing and would widen the attack surface. The pinned
+`search_path` also means `ledger_adjustment_execution_status()` is evaluated against the real `public`
+tables: the 0116 TEMP-shadow forgery is refused by the fence even with the proof triggers disabled
+(`TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack`, new assertion).
+
+**Lock order (ADR 0082 A8) unchanged.** The fence only reads: the request row the executor already holds
+(L1, FOR UPDATE) and immutable ledger rows. No new lock, no new lock class.
+
+**Cost.** The entry trigger runs for every ledger entry of every type: one primary-key lookup of the parent
+transaction. Everything else (the request, the count, the shape) runs only for `manual_adjustment`.
+
+**Unchanged.** The acting fences (CG030) still fire first for acting sessions with their K3/HSEC/M4 branches;
+the MA020 rule and its 0115 Step B exemption stay in `ledger_adjustment_payload_refusal()`, run by the
+`-> executing` guard in the same transaction; B-21 and the §12 detector stay (the detector is the
+backstop for what the fence cannot see, below).
+
+### 21.3 Owner-only exemptions: inventory (none added)
+
+| Existing exemption | Where defined | Used by 0153's tests |
+|---|---|---|
+| The table owner (and a superuser) can `ALTER TABLE ... DISABLE TRIGGER` | ADR 0110 §9 item 4 ("the migration role is already outside the threat model (it owns every table and can disable any trigger)"); the 0131/0136 owner-residual notes | Yes: `internal/testsupport/adjlinkfix` disables exactly the two 0153 triggers inside the caller's own owner transaction and re-enables them in the same transaction |
+| Seed rows inserted before FORCE RLS in a migration | 0112/0113 reference tables | No |
+| `launch_is_table_owner()` owner paths (0128) | launch governance | No (not ledger) |
+| `database_environment` owner-only write (0135) | RG synthetic config | No (not ledger) |
+
+0153 adds **no** owner, GUC or environment bypass (a static test greps the up SQL for `current_user`,
+`session_user`, `pg_has_role`, `current_setting`, `SECURITY DEFINER`, `rg_database_environment`). There is
+no test-bypass GUC in the production schema (LF ruling 4).
+
+### 21.4 The fixtures (the "19 files")
+
+**Accepted deviation (security A4 C-1; ledger-finance, owner of ruling 4, accepts it; the orchestrator to
+confirm).** §12 and the registry row said the fixture files move to *request-backed helpers*. They did not:
+they use an owner-only fixture exemption (`adjlinkfix`: the two 0153 triggers disabled by the table owner inside
+the fixture's own transaction, re-enabled in it). The cost is that those fixtures never exercise the fence; the
+fence's own tests (§21.6) cover it. A request-backed helper would be the stronger design (each fixture would also
+exercise the governed path), and remains a possible later improvement; it was not built because most fixtures
+need shapes §4 cannot express (bonus legs, cash locks, arbitrary counter accounts) and the governed path needs
+policies, grants, Persons and actor-proof keys in every package's world. The exemption is not a production-schema
+bypass (no GUC, role or environment switch), is integration-build only, is invisible to other sessions (ALTER
+TABLE is transactional and blocks their writers until the fixture commits), and every caller - including any raw
+`DISABLE TRIGGER` of a fence trigger in a test (L3) - is pinned by `TestLinkFence0153_ExemptionCallersInventoried`.
+
+The pre-0153 tests that posted an ungoverned `manual_adjustment` were inventoried at 32 `TxManualAdjustment`
+references in 20 files outside `internal/adjustment` (plus 3 adjustment test files that post it deliberately,
+and `migration_0113_integration_test`, whose scratch schema stops below 0153). None of them tests a manual adjustment:
+they fund a wallet or post an arbitrary balanced shape. Disposition (every caller is pinned by
+`TestLinkFence0153_ExemptionCallersInventoried`, which fails on any new or stale caller):
+
+- **Owner-only fixture exemption** (`adjlinkfix.Without` / `adjlinkpost.Post` / per-package
+  `mustPostFixture`): casino (2 files), idempotency (first posts only; every replay now runs with the
+  fence enabled), launchgov, ledger (bonus_mirror, locked_origin_split, replay L7), reconciliation (2),
+  risk (2), sportsbook (orchestrator, settlement_assertions), wallet. Integration-build only; listed in
+  `TestNoTriggerDisableOutsideTests`'s allowlist with launchfix / staffsv / pitest.
+- **Different non-governed type** where a trigger disable is impossible: the two lock-order racers
+  (`TestLockOrder_ConcurrentFirstPostingsCreateSameAccounts_NoDeadlock`) now post `bonus_forfeiture`
+  (the ALTER TABLE lock would serialize the racers and destroy the ABBA interleaving); the runtime-role
+  closed-tenant probe (`TestTenantNotActive_DatabaseBackstopRefusesGameplayTypesOnly`) now proves
+  "non-gameplay postings are unaffected" with a `deposit`, and additionally asserts an ungoverned
+  `manual_adjustment` there is refused by MA050, never by GP010.
+- **MA052 (final round):** the casino C2 detector tests and the RG S3 undeclared-leg tests used a
+  `manual_adjustment` account as an arbitrary wrong account inside deliberately malformed casino / deposit
+  postings; the injected account is now `psp_clearing` (house-level in C2, wallet-scoped in RG). Assertions
+  unchanged.
+- **Unaffected:** `internal/tenant/migration_0136` (scratch schema below 0153), `ledger_integration_test`
+  L247 and the `lockorder_multipost` / `canonical_order` cases (conflict or pre-insert paths).
+- **Deliberate adversarial tests in `internal/adjustment`** keep every original assertion and gain the
+  fence assertion: B-12 (each forged shape now MA051/MA050; the original MA040 still proven with the
+  fence absent), B-25 (the rogue posting is now MA050; the detector still raises the owner-planted one),
+  K2-R1 (the pending-state postings are now MA050; the MA040 exits still proven with the posting planted
+  through the owner residual), TempRevoke (the fence refuses the TEMP forgery; 0116's own non-vacuity
+  still proven with the fence disabled on the scratch DB).
+
+### 21.5 Threat model and residuals (what remains OUT of scope)
+
+The fence holds against: a runtime-role session with no GUCs; any non-acting session shape; the table owner
+without trigger DDL; forged tenant or acting GUCs without a matching approved request (no actor proof ->
+no same-transaction approval -> no `executing` request); wrong amount / asset / direction / wallet /
+counter account / extra leg / keys; an already-executed request; another tenant.
+
+Out of scope, stated honestly:
+
+1. **Owner / superuser DDL** (`DISABLE TRIGGER`, `DROP TRIGGER`, editing the function): ADR 0110 §9 item 4.
+   `session_replication_role = replica` is a **superuser** residual only (security A4 C-2): on PostgreSQL 16 the
+   non-superuser owner and the runtime role both get 42501, and `pg_parameter_acl` grants SET on it to no
+   application role; a superuser with `replica` would skip both (`tgenabled = 'O'`) triggers. The §12 detector
+   (P1 via I-wire) is the backstop and is kept; after 0153 any new finding means one of these happened
+   (runbook: `docs/runbooks/operational-runbooks.md` §11, "Applying migration 0153").
+2. **A genuine proof-backed final approval in the attacker's own transaction** is the governed path itself;
+   compromised approver credentials / identity-store integrity are ADR 0110 §9 item 2 (T3/T4).
+3. **Non-governed posting types** (deposits, withdrawals, casino, sportsbook, bonus) are ADR 0110 T5:
+   0153 fences `manual_adjustment` transactions, their entries, and (MA052, security A4 F1) any other type's
+   use of a `manual_adjustment` account. What stays open under T5: a runtime session can still mint with a
+   non-governed type against any OTHER house account (e.g. a `deposit` against `psp_clearing`), and can append
+   balanced entries to an already committed non-adjustment transaction (security A4 F5; a generic "entries only
+   in the inserting transaction" seal is a ledger-finance follow-up under T5, not built here).
+4. **Rows posted before 0153** are not re-validated (the §12 detector covers them from `governed_since`).
+   Before 0153 is applied to an environment with real ledger data, the runbook step (ledger-finance A4 I2,
+   `docs/runbooks/operational-runbooks.md` §11) requires zero or individually classified findings.
+5. **Down** removes the fence (no data change); it must ship with a code rollback and the detector live.
+
+### 21.6 Tests and mutation pass
+
+Tests (`internal/adjustment`, `-tags integration`): `link_fence_0153_integration_test.go` (governed credit
+and debit post, posting keys, audit, clean reconciliation; idempotent replay and payload-mismatch replay of
+the governed key; concurrent final approvals post once; partial failure before the posting rolls back and
+the retry posts once; compensating entry reverses an executed credit, over-compensation MA022; unlinked
+insert refused for the runtime role AND the owner in every non-acting shape, via `ledger.Post` and raw SQL;
+forged tenant / acting GUCs without an approved request; every wrong shape inside the executing
+transaction; the fence's state / payload / count re-checks with the 0113 guard disabled; an executed request
+cannot post again; tenant isolation; MA052 - the security review's `bonus_forfeiture` repro and a `deposit`
+on the `manual_adjustment` account refused for runtime and owner, governed path unaffected; catalog pins),
+`migration_0153_integration_test.go` (up adds exactly
+6 objects; down restores the schema byte-for-byte and changes no ledger row; up/down/up twice; the fence
+is enforced after each up and absent after each down - MA050 and MA052 both), `link_fence_static_test.go`
+(exemption inventory including raw `DISABLE TRIGGER` of a fence trigger,
+trigger-name agreement with the migration, no bypass tokens in the SQL). SUM(debits) = SUM(credits) and
+projection = recomputation are asserted at the end of every money test (`assertInvariants`).
+
+Mutation pass (kill-or-justify; private DB; each mutant applied to the live
+schema as the owner, the behavioural fence tests run - catalog/static pin tests excluded so every kill is
+behavioural - then 0153 re-applied). Driver: `docs/plans/prh2-hardening-round/a4-mutation-driver.py`.
+
+- **Final pass, on the 0153 that will merge (with MA052): 47 mutants, 41 killed, 6 survived, all 6
+  equivalent** (T06, T07, E01, E08, E09, E18). Complete log: `docs/plans/prh2-hardening-round/a4-mutation-kill.txt`.
+- First pass (before MA052): 44 mutants, 38 killed, 6 survived (the same six). *Correction (ledger-finance A4 L1):
+  this section first said "39 killed, 5 survived"; the table always listed six survivors.* Log:
+  `docs/plans/prh2-hardening-round/a4-mutation-log-round1.txt` (T06b, run separately, appended).
+
+| Id | Mutant | Result |
+|---|---|---|
+| T01 | tx: visible-request (not found) arm off | killed (UnlinkedInsert, message pin) |
+| T02 | tx: key arm off | killed (B-12, ExecutingTx) |
+| T03 | tx: state arm off | killed (ExecutingTx: posting after a refused exit in the same tx) |
+| T04 | tx: txid arm off | killed (ChecksHoldWithoutTheRequestGuard) |
+| T05 | tx: payload_hash arm off | killed (ChecksHold...: tampered payload) |
+| T06 | tx: provider_id arm off | **survived - equivalent**: `ledger_transactions_check` forces `provider_id` and `provider_tx_id` NULL together, so the provider_tx_id arm refuses the same rows |
+| T07 | tx: provider_tx_id arm off | **survived - equivalent** (same CHECK, mirror of T06) |
+| T06b | tx: both provider arms off | killed (ExecutingTx: provider reference set) |
+| T08 / T09 / T10 | tx: reverses / reason_code / causation arm off | killed (ExecutingTx) |
+| T11 / T12 / T13 | tx: enabled / initiator_valid / count arm off | killed (ChecksHold...: policy disabled after submission; initiator's grant revoked; no approvals) |
+| T14 / T15 | tx: count `<` -> `<=`; `< required - 1` | killed (every governed execution; ChecksHold...) |
+| T16 / T17 | tx trigger: WHEN removed; WHEN on another type | killed |
+| T18 | tx trigger: DEFERRABLE INITIALLY DEFERRED | killed (every governed execution: at commit the request is no longer executing) |
+| T19 | tx trigger: BEFORE INSERT | killed (idempotent replay of the governed key; ExecutedRequestCannotPostAgain) |
+| T20 | tx trigger: not created | killed |
+| E01 | entry: parent not-found arm off | **survived - equivalent and unreachable**: the composite FK `(ledger_transaction_id, tenant_id)` forces the parent into the entry's tenant, and the INSERT and SELECT policies of both ledger tables are identical, so a session that may insert the entry sees the parent; were it ever invisible, the NULL-filled record skips the type gate and the request lookup fails closed (MA051) anyway |
+| E02 / E03 | entry: type gate always / never returns | killed |
+| E04 / E05 / E06 / E07 | entry: request key / state / txid condition off; request not-found arm off | killed (ExecutingTx entry-fence-alone probes; ChecksHold...) |
+| E08 | entry: request tenant condition off | **survived - equivalent**: request ids are unique and RLS only shows a session requests of the tenant whose entries it may insert |
+| E09 | entry: account not-found arm off | **survived - equivalent**: a NULL account makes the shape test refuse anyway; unreachable (composite account FK + the 0048 populate trigger) |
+| E10..E17 | entry: asset / amount / player wallet / player direction / house wallet NULL / house direction / house type / player type arm off | killed (ExecutingTx, one probe each) |
+| E18 | entry: COALESCE(..., false) removed | **survived - equivalent**: the shape expression is never NULL (account type NOT NULL, `player_cash` has a wallet by CHECK, `IS NULL` is never NULL, every request field NOT NULL) |
+| E19 / E20 | entry: duplicate-leg arm off; counts both directions | killed |
+| E21 / E22 / E23 | entry trigger deferred; direction mapping swapped; trigger not created | killed |
+| E24 / E25 / E26 | MA052 arm off; MA052 on another account type; MA052 without the account-id condition | killed (OtherTypesCannotUseTheManualAdjustmentAccount; every governed and casino posting) |
+
+The six survivors are kept as fail-closed defence in depth (they cost one comparison each).

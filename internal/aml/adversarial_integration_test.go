@@ -21,7 +21,8 @@ import (
 // must reach no AML row, and must reach no AML write path without a valid, single-use, correctly bound proof, even when it
 // forges the exact GUC shape of a real officer.
 
-var amlTables = []string{"aml_holds", "aml_hold_lifts", "aml_enforcement_decisions", "aml_alerts", "aml_cases", "aml_case_alerts", "aml_case_notes", "aml_case_events"}
+var amlTables = []string{"aml_holds", "aml_hold_lifts", "aml_enforcement_decisions", "aml_alerts", "aml_cases", "aml_case_alerts", "aml_case_notes", "aml_case_events",
+	"aml_screening_policies", "aml_screening_results"} // migration 0154 (A7) added the last two
 
 func TestRuntime_NoAccessToAMLTables_EvenWithForgedOfficerGUCs(t *testing.T) {
 	w := newWorld(t, "own_licence")
@@ -246,6 +247,15 @@ func TestAppendOnly_BindsTheOwner(t *testing.T) {
 		return tx.QueryRow(ctx, `SELECT aml_record_enforcement_decision($1,$2,$3,'deposit','passed','eval_error','review',false,NULL,$4)`,
 			c.Tenant, c.P.AccountID, c.P.PersonID, uuid.New()).Scan(&x)
 	}); err != nil {
+		t.Fatal(err)
+	}
+	// Migration 0154 (A7): a screening policy version and a screening result exist too, so the row-level append-only trigger is
+	// exercised for them (an UPDATE / DELETE that matches no row never fires a row trigger).
+	if _, err := c.Svc.SetScreeningPolicy(bg, c.A(), policyInput(c.jurisdiction(), time.Now().Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Svc.RecordScreening(bg, c.A(), aml.RecordScreeningInput{PersonID: c.P.PersonID, IdempotencyKey: "append-only-1", Trigger: aml.TriggerManual,
+		ProviderID: aml.MockProviderID, SubjectRef: strings.Repeat("a", 64), Lists: []aml.ListType{aml.ListSanctions}, Outcome: aml.OutcomeClear, ScreenedAt: time.Now(), Decision: aml.HoldNone}); err != nil {
 		t.Fatal(err)
 	}
 	for _, tbl := range amlTables {

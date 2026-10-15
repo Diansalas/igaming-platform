@@ -39,7 +39,7 @@ func newSportsbookTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) *
 		AccessTokenTTL:    5 * time.Minute,
 		RefreshTokenTTL:   time.Hour,
 		SportsbookEnabled: true,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		PersonResolver:    identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	return srv

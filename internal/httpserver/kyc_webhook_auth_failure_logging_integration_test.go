@@ -38,14 +38,14 @@ var kycWebhookAllowedLogKeys = map[string]bool{
 func newKYCTestServerWithLogger(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *kyc.Orchestrator, logger *slog.Logger) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(New(Deps{
-		Logger:            logger,
-		DB:                pool,
-		AuthIssuer:        issuer,
-		StaffMFA:          testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:       "platform-api-test",
-		AccessTokenTTL:    5 * time.Minute,
-		RefreshTokenTTL:   time.Hour,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		Logger:          logger,
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:   orchestrator,
 		KYCWebhookEnabled: true,
 	}))

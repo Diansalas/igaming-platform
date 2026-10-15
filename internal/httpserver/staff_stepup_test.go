@@ -41,8 +41,8 @@ func TestStepUpClassifiers_ParityWithRouteClassifiers(t *testing.T) {
 	}
 	sort.Strings(a)
 	sort.Strings(b)
-	if strings.Join(a, ",") != strings.Join(b, ",") || len(a) != 5 {
-		t.Fatalf("routeClassifiers %v vs stepUpClassifiers %v (ADR 0119 section 8.2: four classifiers + alertRouteManageClass)", a, b)
+	if strings.Join(a, ",") != strings.Join(b, ",") || len(a) != 7 {
+		t.Fatalf("routeClassifiers %v vs stepUpClassifiers %v (ADR 0119 section 8.2: four classifiers + alertRouteManageClass + the two AML classifiers of ADR 0116 A7)", a, b)
 	}
 }
 
@@ -83,6 +83,24 @@ func TestClassifiers_DecisionsAndBodyDiscipline(t *testing.T) {
 		{"rg duplicate value, last wins", rgLimitChangeClass, auth.RoleSupport, `{"kind":"deposit","value":"5","value":null}`, auth.StepUpCritical},
 		{"rg malformed", rgLimitChangeClass, auth.RoleSupport, `nope`, auth.StepUpCritical},
 		{"alert tenant caller (handler refuses)", alertResolveClass, auth.RoleTenantAdmin, `{}`, auth.StepUpNone},
+		// ADR 0116 A7 / security SR7-1, SR7-5.
+		{"aml hold, manual", amlHoldPlaceClass, auth.RoleCompliance, `{"person_id":"p","scope":"withdrawal_and_payout","reason_class":"manual","reason_code":"x"}`, auth.StepUpNone},
+		{"aml hold, confirmed_sanctions", amlHoldPlaceClass, auth.RoleCompliance, `{"person_id":"p","scope":"all_value_movement","reason_class":"confirmed_sanctions","reason_code":"x"}`, auth.StepUpCritical},
+		{"aml hold, duplicate key last wins", amlHoldPlaceClass, auth.RoleCompliance, `{"reason_class":"manual","reason_class":"confirmed_sanctions"}`, auth.StepUpCritical},
+		{"aml hold, case-folded key", amlHoldPlaceClass, auth.RoleCompliance, `{"reason_class":"manual","Reason_Class":"confirmed_sanctions"}`, auth.StepUpCritical},
+		{"aml hold, unknown class", amlHoldPlaceClass, auth.RoleCompliance, `{"reason_class":"other"}`, auth.StepUpCritical},
+		{"aml hold, class missing", amlHoldPlaceClass, auth.RoleCompliance, `{"scope":"all_value_movement"}`, auth.StepUpCritical},
+		{"aml hold, unknown field", amlHoldPlaceClass, auth.RoleCompliance, `{"reason_class":"manual","tenant_id":"x"}`, auth.StepUpCritical},
+		{"aml hold, malformed", amlHoldPlaceClass, auth.RoleCompliance, `{`, auth.StepUpCritical},
+		{"aml hold, empty", amlHoldPlaceClass, auth.RoleCompliance, ``, auth.StepUpCritical},
+		{"aml transition to no action", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":2,"to":"closed_no_action","reason_code":"x"}`, auth.StepUpCritical},
+		{"aml transition to review", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":2,"to":"in_review","reason_code":"x"}`, auth.StepUpNone},
+		{"aml transition to escalated", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":2,"to":"escalated","reason_code":"x"}`, auth.StepUpNone},
+		{"aml transition to sar pending", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":2,"to":"sar_decision_pending","reason_code":"x"}`, auth.StepUpNone},
+		{"aml transition, duplicate key last wins", amlTransitionClass, auth.RoleCompliance, `{"to":"in_review","to":"closed_no_action"}`, auth.StepUpCritical},
+		{"aml transition, unknown target", amlTransitionClass, auth.RoleCompliance, `{"to":"closed_sar_filed"}`, auth.StepUpCritical},
+		{"aml transition, missing target", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":1}`, auth.StepUpCritical},
+		{"aml transition, malformed", amlTransitionClass, auth.RoleCompliance, `nope`, auth.StepUpCritical},
 		{"alert route platform admin", alertRouteManageClass, auth.RolePlatformAdmin, `{"severity":"p1"}`, auth.StepUpCritical},
 		{"alert route tenant admin (handler refuses)", alertRouteManageClass, auth.RoleTenantAdmin, `{"severity":"p1"}`, auth.StepUpNone},
 		{"alert route support (handler refuses)", alertRouteManageClass, auth.RoleSupport, `{}`, auth.StepUpNone},

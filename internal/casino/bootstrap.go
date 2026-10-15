@@ -309,7 +309,7 @@ func upsertProviderPlayerRef(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 // ACCEPTED) - postBet is what re-checks risk with the session's own
 // frozen jurisdiction on every bet. Returns ("", nil) when every gate
 // passes.
-func bootstrapGateDenialReason(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, session LaunchSession) (string, error) {
+func (o *Orchestrator) bootstrapGateDenialReason(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, session LaunchSession) (string, error) {
 	game, err := GetGameByID(ctx, tx, session.GameID)
 	if err != nil {
 		return "", err
@@ -327,6 +327,15 @@ func bootstrapGateDenialReason(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 	if session.Mode == ModeReal && !capability.SupportsBet {
 		return "capability_denied", nil
+	}
+
+	// SR8-2 (c): a token minted before the market closed must not be consumed
+	// after it. The brand-level check (no player evidence exists on this
+	// vendor-facing call) is a definitive denial: revoke, audit, commit.
+	if open, err := o.brandMarketOpen(ctx, tx, tenantID, session.BrandID); err != nil {
+		return "", fmt.Errorf("casino: bootstrap market-open check: %w", err)
+	} else if !open {
+		return "market_closed", nil
 	}
 
 	decision, err := evaluateAndAuditEligibility(ctx, tx, tenantID, session.BrandID, session.PlayerAccountID, session.WalletID, "casino.launch_bootstrap_denied_by_rg")
@@ -463,7 +472,7 @@ func (o *Orchestrator) BootstrapLaunch(ctx context.Context, pool providercred.Te
 
 		// Step 4: re-check the gates. A definitive denial revokes and
 		// audits, then COMMITS (ADR 0103 §3.3) - never a Go error.
-		reason, err := bootstrapGateDenialReason(ctx, tx, tenantID, session)
+		reason, err := o.bootstrapGateDenialReason(ctx, tx, tenantID, session)
 		if err != nil {
 			return err
 		}

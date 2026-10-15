@@ -107,12 +107,9 @@ func findVersionGaps(migrations []migration) []string {
 // renumbered before merge: 0143-0150 sit between the AML migrations and the staff step-up migration). A gap
 // is tolerated ONLY for a version listed here; any other missing version still fails `migrate verify`.
 //
-// 0153-0157 are held by other in-flight work (completion audit round A, 2026-10-15) and are not present on
-// the A6 branch; the entries are inert once those files land. 0159 is reserved by A6 and unused (above the
-// head, so it needs no entry).
+// 0159 is reserved by A6 and unused (above the head, so it needs no entry).
 var reservedUnusedVersions = map[int64]struct{}{
 	143: {}, 144: {}, 145: {}, 146: {}, 147: {}, 148: {}, 149: {}, 150: {},
-	153: {}, 154: {}, 155: {}, 156: {}, 157: {},
 }
 
 func findVersionGapsExcluding(migrations []migration, reserved map[int64]struct{}) []string {

@@ -1,5 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
+import { ErrorBoundary } from '../components/ErrorBoundary'
 import { AuthProvider } from '../auth/AuthContext'
 import { StepUpProvider } from '../auth/StepUpProvider'
 import { AppRoutes } from './AppRoutes'
@@ -11,7 +12,9 @@ export function App() {
       <AuthProvider>
         <BrowserRouter>
           <StepUpProvider>
-            <AppRoutes />
+            <ErrorBoundary>
+              <AppRoutes />
+            </ErrorBoundary>
           </StepUpProvider>
         </BrowserRouter>
       </AuthProvider>

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
 // Config is the full set of configuration platform-api needs to start.
@@ -213,6 +214,21 @@ type Config struct {
 	// observability backend to send to.
 	OTelExporter string
 
+	// A9 observability and alert delivery (internal/config/observability.go). All default to
+	// disabled/empty. MetricsAddr is the DEDICATED Prometheus listener (never the public API mux).
+	// AlertEmailRecipients / AlertWebhookURL are platform-level alert targets (config, not code); the
+	// webhook signing secret is only a secret-store REFERENCE (AlertWebhookSecretRef).
+	// AlertRetention == 0 means no purge job.
+	MetricsAddr             string
+	MetricsAllowNonLoopback bool
+	AlertEmailRecipients    []string
+	AlertWebhookURL         string
+	AlertWebhookSecretRef   string
+	AlertWebhookAllowHosts  []string // single-label host names the webhook URL may use (SR9-A9-9)
+	AlertWebhookAllowNAT64  bool     // admit a NAT64 literal embedding a public IPv4 (SR9-A9-2)
+	AlertRetention          time.Duration
+	AlertRetentionInterval  time.Duration
+
 	// ReconciliationInterval is the cadence of the ledger-vs-projection
 	// reconciliation sweep (internal/reconciliation.RunSchedulerLoop,
 	// Stage 3C directive item 4). Defaults to the Blueprint's target
@@ -343,6 +359,28 @@ type Config struct {
 	// true at the same time Environment == "production" - see Environment's
 	// own doc comment.
 	TestSupportEndpointsEnabled bool
+
+	// MockGeolocationCountry (MOCK_GEOLOCATION_COUNTRY, A8) is the ISO-3166-1
+	// alpha-2 country the MOCK static Locator (geolocation.StaticLocator)
+	// reports for EVERY request, so a local/development or staging stack can
+	// pass the operating-market gate (internal/marketgate) without a
+	// geolocation vendor. Empty (the default) means the static Locator reports
+	// UNKNOWN, which the gate treats as no evidence and refuses (fail
+	// closed). It is a process-level value an operator sets, never derived
+	// from a request. It is honoured only when mockProviderWiring enables
+	// mock components (TEST_SUPPORT_ENDPOINTS_ENABLED in a non-production
+	// environment) and Load() REFUSES it under APP_ENV=production, exactly
+	// like TestSupportEndpointsEnabled.
+	MockGeolocationCountry string
+
+	// CasinoSessionMaxLifetime (CASINO_SESSION_MAX_LIFETIME, SR8-2, a Go
+	// duration such as "4h") is the absolute maximum age of a CONSUMED casino
+	// launch session that may still take NEW bets; past it a bet is refused and
+	// the player must pass the evidence-gated launch again. Default 4h; must be
+	// between 1m and 72h (a bound, not a hint: a zero or huge value would
+	// silently disable the control). Settlement of existing exposure (win,
+	// rollback) is never blocked by it.
+	CasinoSessionMaxLifetime time.Duration
 
 	// ProviderCredentialFingerprintKey is the platform fingerprint HMAC
 	// key (ADR 0093 §2 and its Stage 10.3 W2a amendment A3; security review
@@ -862,6 +900,30 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: TEST_SUPPORT_ENDPOINTS_ENABLED must not be true when APP_ENV=production - test-support endpoints (mock casino play/payment settlement/account-activation) are never permitted in production")
 	}
 
+	// A8: the mock geolocation country is a development/test seam only.
+	if v := os.Getenv("MOCK_GEOLOCATION_COUNTRY"); v != "" {
+		if !validation.IsISO3166Alpha2(v) {
+			return Config{}, fmt.Errorf("config: invalid MOCK_GEOLOCATION_COUNTRY: must be an uppercase ISO-3166-1 alpha-2 country code")
+		}
+		if cfg.Environment == "production" {
+			return Config{}, fmt.Errorf("config: MOCK_GEOLOCATION_COUNTRY must not be set when APP_ENV=production - a static country is never permitted as location evidence in production")
+		}
+		cfg.MockGeolocationCountry = v
+	}
+
+	// SR8-2: absolute maximum lifetime of a consumed casino launch session.
+	cfg.CasinoSessionMaxLifetime = 4 * time.Hour
+	if v := os.Getenv("CASINO_SESSION_MAX_LIFETIME"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid CASINO_SESSION_MAX_LIFETIME: %w", err)
+		}
+		if d < time.Minute || d > 72*time.Hour {
+			return Config{}, fmt.Errorf("config: CASINO_SESSION_MAX_LIFETIME must be between 1m and 72h, got %s", d)
+		}
+		cfg.CasinoSessionMaxLifetime = d
+	}
+
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: DATABASE_URL is required")
 	}
@@ -900,6 +962,13 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if err := cfg.validatePlatformKeyFamilies(); err != nil {
+		return Config{}, err
+	}
+	// A9: metrics listener, alert recipients/webhook, alert retention.
+	if err := loadObservability(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validateObservability(); err != nil {
 		return Config{}, err
 	}
 

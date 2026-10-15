@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -25,6 +26,12 @@ import (
 // minStaffPasswordLen is the staff password floor at invitation acceptance (review fix SR-9: the cmd/seed-admin
 // platform_admin floor, for every staff role).
 const minStaffPasswordLen = 12
+
+// staffPasswordLongEnough counts CHARACTERS (runes), not bytes: the OpenAPI schema (minLength) and the UI both promise
+// characters, so a four-character CJK password (12 bytes) must be refused (security review SR-A10a-2).
+func staffPasswordLongEnough(password string) bool {
+	return utf8.RuneCountInString(password) >= minStaffPasswordLen
+}
 
 type invitationAcceptRequest struct {
 	Token    redacted[string] `json:"token"`
@@ -48,7 +55,7 @@ func newInvitationAcceptHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
-		if req.Token.reveal() == "" || len(req.Password.reveal()) < minStaffPasswordLen {
+		if req.Token.reveal() == "" || !staffPasswordLongEnough(req.Password.reveal()) {
 			apierror.Write(w, requestID, apierror.CodeValidation, "token and a password of at least 12 characters are required")
 			return
 		}

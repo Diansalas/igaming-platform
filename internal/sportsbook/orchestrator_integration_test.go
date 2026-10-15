@@ -27,6 +27,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkpost"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -155,7 +156,7 @@ func fundWallet(t *testing.T, pool *db.Pool, f sbFixture, amount int64) {
 		if err != nil {
 			return err
 		}
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+		_, err = adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: ledger.TxManualAdjustment,
 			IdempotencyKey: "fund-" + uuid.New().String(), CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{
@@ -251,7 +252,7 @@ func placeBet(t *testing.T, pool *db.Pool, f sbFixture, sel Selection, stake int
 	var result PlaceBetResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = PlaceBet(ctx, tx, PlaceBetParams{
+		result, err = PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: stake,
 			ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,
@@ -421,7 +422,7 @@ func TestPlaceBet_OddsChangedRejected(t *testing.T) {
 	var result PlaceBetResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = PlaceBet(ctx, tx, PlaceBetParams{
+		result, err = PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 1_000,
 			// Stale odds the client believes are still current.

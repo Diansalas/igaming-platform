@@ -162,7 +162,7 @@ func TestPostBet_CashFundedWageringContribution_CrossAssetGrantIsNeverCredited(t
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// 1x multiplier over a 1000-satoshi granted amount: target = 1000
 	// satoshi. The EUR bet below is 1000 EUR minor units - numerically
@@ -225,7 +225,7 @@ func TestPostBet_CashFundedWageringContribution_UnmeasurableTargetNeverCompletes
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 350000, nil) // 35x
 	// Reproduce the pre-migration-0067 state exactly: an activated Grant
@@ -284,7 +284,7 @@ func TestPostBet_CashFundedWageringContribution_RecordsAndCompletesGrant(t *test
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// 1x multiplier (10000bp), unweighted (full) contribution: a single
 	// 1000-unit bet exactly satisfies a 1000-granted-amount Grant.
@@ -342,7 +342,7 @@ func TestPostBet_CashFundedWageringContribution_ExcludedGameTypeContributesNothi
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR") // seedGame always registers GameType "slot"
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 10000, []byte(`{"excluded_game_types":["slot"]}`))
 	grantID := seedActivatedWageringGrant(t, pool, f, co, "wagering-excluded", 1000)
@@ -392,7 +392,7 @@ func TestPostBet_CashFundedWageringContribution_AmbiguousMultiGrantSkipsBoth(t *
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 10000, nil)
 	grantA := seedActivatedWageringGrant(t, pool, f, co, "wagering-a", 1000)
@@ -438,7 +438,7 @@ func TestPostBet_CashFundedWageringContribution_RedeliveredBetIsIdempotent(t *te
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 100000, nil) // 10x multiplier, target 10000 - one 1000-unit bet must not complete it
 	grantID := seedActivatedWageringGrant(t, pool, f, co, "wagering-redeliver", 1000)
@@ -508,7 +508,7 @@ func TestConcurrentStress_DuplicateBetDeliveryWithActiveWageringGrantIsIdempoten
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// 10x multiplier, target 10000 - a single 1000-unit bet (even
 	// double-counted) must not complete the grant outright, so a defect

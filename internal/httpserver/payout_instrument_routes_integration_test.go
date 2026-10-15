@@ -71,7 +71,7 @@ func newPIEnv(t *testing.T, withService bool) *piEnv {
 	deps := Deps{
 		Logger: slog.New(slog.NewTextHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		DB:     rt, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
-		PersonResolver:                  identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		PayoutInstrumentRegisterLimiter: NewPayoutInstrumentRegisterLimiter(e.clock),
 	}
 	if withService {

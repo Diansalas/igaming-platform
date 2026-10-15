@@ -11,6 +11,7 @@ import { ErrorState } from '../../components/ErrorState'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { PageHeader } from '../../components/PageHeader'
 import { brandConfig } from '../../config/brand'
+import { marketRefusalOr } from '../../lib/marketRefusal'
 
 function GameCard({
   game,
@@ -66,7 +67,7 @@ export function CasinoLobbyPage() {
       const result = await launchCasinoGame(game.id, { assetCode: brandConfig.defaultAssetCode, mode: 'real' })
       navigate(`/casino/sessions/${result.session_id}`, { state: { launch: result, game } })
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : 'Could not launch this game. Please try again.'
+      const message = marketRefusalOr(err, (e) => (e instanceof ApiError ? e.message : 'Could not launch this game. Please try again.'))
       setLaunchErrors((prev) => ({ ...prev, [game.id]: message }))
     } finally {
       setLaunchingId(null)

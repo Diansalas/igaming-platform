@@ -35,6 +35,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
@@ -56,6 +57,8 @@ var stepUpClassifiers = map[string]stepUpClassifier{
 	"alertResolveClass":          alertResolveClass,
 	"rgLimitChangeClass":         rgLimitChangeClass,
 	"alertRouteManageClass":      alertRouteManageClass,
+	"amlHoldPlaceClass":          amlHoldPlaceClass,
+	"amlTransitionClass":         amlTransitionClass,
 }
 
 // requireStepUp enforces class. It must run after requireLiveStaffSession (it
@@ -170,6 +173,15 @@ func decodeLikeHandler(b []byte, dst any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	return dec.Decode(dst)
+}
+
+// decodeLikeHandlerStrict is decodeLikeHandler for the AML routes: it decodes with decodeJSONStrict's exact rules (one JSON value,
+// nothing after it), through the same decodeSingleValue.
+func decodeLikeHandlerStrict(b []byte, dst any) error {
+	if int64(len(b)) > maxRequestBodyBytes {
+		return errors.New("body too large")
+	}
+	return decodeSingleValue(json.NewDecoder(bytes.NewReader(b)), dst)
 }
 
 // launchActionClass: none for action = suspend (ADR 0112 section 6.3
@@ -306,4 +318,43 @@ func rgLimitChangeClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
 		return auth.StepUpCritical, nil
 	}
 	return auth.StepUpNone, nil
+}
+
+// amlHoldPlaceClass (ADR 0116 A7, security SR7-1): a `confirmed_sanctions` hold gates ALL value movement and only the four-eyes
+// case workflow can lift it, so placing one from a stale or stolen session is a denial-of-service lever (ADR 0119 section 8.1:
+// a protective action that is irreversible by one person is not exempt). critical for it; none for a `manual` hold (the
+// officer's own single-officer lift exists). Anything else, including a body the handler will refuse, is classified at the
+// ceiling. The handler decodes the SAME buffered bytes.
+func amlHoldPlaceClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
+	b, err := bufferedBody(r)
+	if err != nil {
+		return auth.StepUpCritical, nil
+	}
+	var body amlHoldPlaceRequest
+	if err := decodeLikeHandlerStrict(b, &body); err != nil {
+		return auth.StepUpCritical, nil
+	}
+	if aml.ReasonClass(body.ReasonClass) == aml.ReasonManual {
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpCritical, nil
+}
+
+// amlTransitionClass (ADR 0116 A7, security SR7-5): closing an investigation with no action loosens a regulatory control (rule
+// 8.1 (e)), so a move to closed_no_action is critical; the other moves only progress or reopen a case (none). An unknown or
+// missing target, or a body the handler will refuse, is classified at the ceiling.
+func amlTransitionClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
+	b, err := bufferedBody(r)
+	if err != nil {
+		return auth.StepUpCritical, nil
+	}
+	var body amlTransitionRequest
+	if err := decodeLikeHandlerStrict(b, &body); err != nil {
+		return auth.StepUpCritical, nil
+	}
+	switch aml.CaseStatus(body.To) {
+	case aml.StatusInReview, aml.StatusEscalated, aml.StatusSARDecisionPending:
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpCritical, nil
 }

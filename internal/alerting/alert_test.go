@@ -162,12 +162,15 @@ func TestKinds_ScopeSubjectConsistency(t *testing.T) {
 		subjectless := map[Kind]bool{KindStaffPlatformMFAIntegrity: true, KindStaffPlatformSessionIntegrity: true,
 			KindStaffPlatformMFAHardLocked: true, KindStaffPlatformMFARecoveryUsed: true, KindStaffPlatformMFAFailurePattern: true,
 			// ADR 0119 S6 (migration 0139): the break-glass Kind.
-			KindStaffPlatformBreakGlassUsed: true}
+			KindStaffPlatformBreakGlassUsed: true,
+			// A9 (migration 0156): the reconciliation scheduler's sweep-failure Kind (no tenant, no platform-admin
+			// principal; raised only under the alert_dispatcher identity by RaiseSweepFailed).
+			KindReconciliationSweepFailed: true}
 		if def.Scope == ScopeKindPlatform && !def.RequiresSubject && !subjectless[k] {
 			t.Errorf("platform kind %q (non-meta) must RequireSubject", k)
 		}
 		if subjectless[k] && (def.RequiresSubject || def.InTxRaisableByTenant) {
-			t.Errorf("platform staff kind %q must have RequiresSubject=false and InTxRaisableByTenant=false", k)
+			t.Errorf("platform subjectless kind %q must have RequiresSubject=false and InTxRaisableByTenant=false", k)
 		}
 		if def.Simulation && def.Severity != SeverityP3 {
 			t.Errorf("simulation kind %q must be p3, got %s", k, def.Severity)

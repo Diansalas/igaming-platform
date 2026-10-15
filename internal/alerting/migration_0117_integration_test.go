@@ -153,7 +153,7 @@ func TestMigration0117_NoRouteCanBeEnabledForAHumanNotificationKind(t *testing.T
 		return err
 	}
 	err = ins(true)
-	if pgCode(err) != "AR001" || !strings.Contains(err.Error(), "SR-7: four-eyes approval required; not built") {
+	if pgCode(err) != "AR001" || !strings.Contains(err.Error(), "SR-7: four-eyes approval required") {
 		t.Fatalf("enabling a route for a human-notification kind must be refused (AR001), got %v", err)
 	}
 	if err := ins(false); err != nil {
@@ -258,10 +258,13 @@ func TestMigration0117_RLS_TenantsAndUnvalidatedSessionsSeeNoRoutingConfiguratio
 	}
 }
 
+// A9 (migration 0157, ALERT-RETENTION-1) added alert_retention_delete_guard, alert_retention_runs_guard and
+// alerting_purge_resolved. The list is compared against the SORTED catalogue.
 var expectedPinnedAlertFunctions = []string{
-	"alert_deliveries_guard", "alert_kinds_deny_write", "alert_occurrences_guard", "alert_routes_guard",
+	"alert_deliveries_guard", "alert_kinds_deny_write", "alert_occurrences_guard",
+	"alert_retention_delete_guard", "alert_retention_runs_guard", "alert_routes_guard",
 	"alerting_attributes_are_flat_scalars", "alerting_channel_kind_is_human_notification",
-	"alerting_session_scope", "alerting_validated_platform_admin", "alerts_guard",
+	"alerting_purge_resolved", "alerting_session_scope", "alerting_validated_platform_admin", "alerts_guard",
 }
 
 // Security H-1 catalogue: EXACTLY these alert functions exist and every one pins search_path with pg_temp last.

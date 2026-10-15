@@ -14,11 +14,14 @@ const (
 )
 
 // knownHumanChannelKinds lists the channel kinds KNOWN to notify a person.
-// It is empty: no human-notification channel is implemented. Display (the
-// derived delivery state and `human_notification`/`notified_a_person`) follows
-// THIS list, so an unknown or unclassified kind can never read as "delivered".
-// A real kind adds itself here together with its adapter and four-eyes.
-var knownHumanChannelKinds = map[ChannelKind]bool{}
+// Display (the derived delivery state and `human_notification`/`notified_a_person`)
+// follows THIS list, so an unknown or unclassified kind can never read as
+// "delivered". email and webhook are listed because a real provider/endpoint behind
+// them reaches a person; whether THIS process's sink actually does is
+// Sink.HumanNotification() (false for an email channel over the MOCK provider), which
+// is what readiness and the delivery metric use. A real kind adds itself here together
+// with its adapter and four-eyes route approval (SR-7, migration 0156).
+var knownHumanChannelKinds = map[ChannelKind]bool{ChannelEmail: true, ChannelWebhook: true}
 
 // KnownHumanChannelKind reports whether k is KNOWN to notify a person (display
 // only; enforcement uses the fail-closed ChannelKindIsHumanNotification and the

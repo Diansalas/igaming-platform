@@ -66,6 +66,8 @@ var classifierCriticalBody = map[string]any{
 	"classifier:alertResolveClass":          map[string]any{"reason_code": "x"},
 	"classifier:alertRouteManageClass":      map[string]any{},
 	"classifier:rgLimitChangeClass":         map[string]any{"kind": "deposit", "value": nil},
+	"classifier:amlHoldPlaceClass":          map[string]any{"reason_class": "confirmed_sanctions"},
+	"classifier:amlTransitionClass":         map[string]any{"to": "closed_no_action"},
 }
 
 // stepUpRefused asserts r is the step-up refusal for maxAge seconds (body code and max_age; RFC 9470 header).
@@ -160,10 +162,11 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// Non-vacuity: the classified set is the golden table's (S4a + S4b + S5/S6).
 	// 125 mutating routes: 59 critical, 22 financial, 5 classifier routes, 39 none; 79 reads (S1b adds GET /v1/admin/alerts/{alertID}). ADR 0119 S5 + S6: +14
 	// critical lifecycle routes, -1 (the legacy critical create route), +2 none (four-eyes reject / cancel), +8 reads.
-	// A6 (ADR 0115 S4-min): +1 none-mutating (POST /v1/admin/rg/enforcement) and +1 read (GET /v1/admin/rg/enforcement): 126 mutating+read pin in staff_route_static_test.go.
-	if counts["critical"] != 59 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// ADR 0116 A7: +11 AML routes: +3 critical (lift, propose, approve), +3 reads; place hold and transition are the classifiers amlHoldPlaceClass / amlTransitionClass (SR7-1, SR7-5), so 3 static none-mutating (open case, note, SAR flag) + 2 classifiers.
+	// none-mutating 39 -> 42. A6 (ADR 0115 S4-min): +1 none-mutating (POST /v1/admin/rg/enforcement) and +1 read (GET): 43 and 83.
+	if counts["critical"] != 62 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["none-mutating"] != 40 || counts["read"] != 80 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["none-mutating"] != 43 || counts["read"] != 83 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

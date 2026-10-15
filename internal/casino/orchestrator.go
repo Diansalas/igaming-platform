@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -60,6 +61,9 @@ type Orchestrator struct {
 	// failed line - the one operator-facing log point this package wires,
 	// reused rather than duplicated. Nil means slog.Default().
 	webhookLogger *slog.Logger
+	// sessionMaxLifetime / marketOpenUngated: SR8-2 (market_exposure.go).
+	sessionMaxLifetime time.Duration
+	marketOpenUngated  bool
 }
 
 // phaseCTimeout bounds LaunchGame's own phase-C transactions (revoke +
@@ -188,6 +192,18 @@ type LaunchGameParams struct {
 	GameID          uuid.UUID
 	AssetCode       string
 	Mode            GameMode
+	// MarketGuard is the A8 operating-market gate (internal/marketgate),
+	// built by the HTTP handler from server-derived identifiers and
+	// request-evidenced country and evaluated by LaunchGame as the FIRST
+	// statement of phase A's transaction - before any catalogue read, so
+	// a blocked market learns nothing about game ids - and therefore
+	// before CreateLaunchSession can mint a session/token. A refusal is
+	// returned as LaunchGameResult{Denied, DenialCodeMarketNotAvailable},
+	// with its audit row committed; an error from the guard fails the
+	// launch closed. REQUIRED (SR8-3): an empty guard makes LaunchGame return
+	// marketgate.ErrGuardRequired; tests and tooling pass
+	// marketgate.UngatedForTests explicitly.
+	MarketGuard marketgate.Guard
 	// Jurisdiction is no longer a caller-supplied field (K-3 remediation,
 	// docs/governance/stage-4i-canonical-model.md §9): LaunchGame resolves
 	// it itself, server-side, via internal/jurisdiction.Resolve, using
@@ -287,6 +303,9 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 	if pool == nil {
 		return LaunchGameResult{}, fmt.Errorf("%w: casino launch has no transaction runner configured", ErrProviderUnavailable)
 	}
+	if params.MarketGuard == nil {
+		return LaunchGameResult{}, marketgate.ErrGuardRequired
+	}
 
 	// Phase A: one committed transaction for every check plus the session
 	// mint plus its own audit record. denied captures a policy decision
@@ -304,6 +323,14 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		denied         *LaunchGameResult
 	)
 	txErr := pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		mdecision, gerr := params.MarketGuard(ctx, tx)
+		if gerr != nil {
+			return fmt.Errorf("casino: operating-market gate: %w", gerr)
+		}
+		if !mdecision.Allowed {
+			denied = &LaunchGameResult{Denied: true, DenialCode: DenialCodeMarketNotAvailable}
+			return nil
+		}
 		game, err := GetGameByID(ctx, tx, params.GameID)
 		if err != nil {
 			return err
@@ -1740,6 +1767,14 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if session.Mode != ModeReal {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session is demo-mode, cannot post a real financial effect", ErrLaunchSessionRequired)
 	}
+	// SR8-2 (a): an absolute maximum lifetime for a consumed session bounds NEW
+	// exposure by the evidence-gated launch. Fail closed on any error. Nothing has
+	// been written; settlement (postWin/postRollback) never reaches this line.
+	if tooOld, err := sessionPastMaxLifetime(ctx, tx, session.ID, o.maxSessionLifetime()); err != nil {
+		return ReceiveCallbackResult{}, err
+	} else if tooOld {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: %v", ErrLaunchSessionRequired, errSessionTooOld)
+	}
 	if session.AssetCode != event.AssetCode {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the launch session", ErrInvalidInput)
 	}
@@ -1754,6 +1789,29 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// terminal stake returns are not brand-gated. Nothing has been written yet.
 	if err := requireActiveBrandForNewStake(ctx, tx, tenantID, session.BrandID); err != nil {
 		return ReceiveCallbackResult{}, err
+	}
+
+	// SR8-2 (b): the brand-level "market still open" check, on NEW exposure only
+	// (replay, tombstone, win and rollback never reach this line). A callback has
+	// no player evidence, so the question is whether the operating-market
+	// configuration permits casino wagering in ANY country for this brand now. A
+	// closed market is a DECLINE (the audit row commits; the provider sees a final
+	// "stake not taken"); an error to decide fails closed. No ledger write has
+	// happened yet.
+	if open, err := o.brandMarketOpen(ctx, tx, tenantID, session.BrandID); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: market-open check: %w", err)
+	} else if !open {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.denied_market_closed",
+			TargetType: "casino_launch_session", TargetID: session.ID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"brand_id": session.BrandID.String(), "reason_code": marketgate.ReasonNotPermitted,
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet denied market closed: %w", err)
+		}
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: DeclineReasonMarketUnavailable}, nil
 	}
 
 	// Stage 10.3 CAS-CAP-ROLLBACK-1 (§1.3/§1.4 step 2.5): the ONLY capability

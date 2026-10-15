@@ -281,6 +281,10 @@ func TestHSECRoutes_EndToEnd_Release(t *testing.T) {
 	if st != http.StatusCreated || r.State != "pending" {
 		t.Fatalf("request: %d %s", st, body)
 	}
+	// F2 (A10b): the response carries the asset registry exponent (USD = 2), never a guess.
+	if !strings.Contains(string(body), `"exponent":2`) {
+		t.Fatalf("request response lacks the asset exponent: %s", body)
+	}
 	// The requester cannot approve (four-eyes) ...
 	if st, body := w.decide(w.p1, r.ID, "approve", r.PayloadHash); st != http.StatusForbidden && st != http.StatusConflict || !hrHasClosedToken(body) {
 		t.Fatalf("self-approval: %d %s", st, body)
@@ -301,6 +305,9 @@ func TestHSECRoutes_EndToEnd_Release(t *testing.T) {
 	if st != http.StatusOK || !strings.Contains(string(body), `"executed":true`) {
 		t.Fatalf("final approval: %d %s", st, body)
 	}
+	if !strings.Contains(string(body), `"exponent":2`) {
+		t.Fatalf("decision response lacks the asset exponent: %s", body)
+	}
 	if got := w.state(wr); got != "rejected" {
 		t.Fatalf("withdrawal state after the release: %s", got)
 	}
@@ -311,7 +318,10 @@ func TestHSECRoutes_EndToEnd_Release(t *testing.T) {
 	if res.status != http.StatusOK || got.State != "executed" || got.LedgerTx == nil {
 		t.Fatalf("get: %d %s", res.status, res.body)
 	}
-	if res := w.a.do("GET", w.base(), w.tokenFor(w.p2), nil); res.status != http.StatusOK || !strings.Contains(string(res.body), r.ID) {
+	if !strings.Contains(string(res.body), `"exponent":2`) {
+		t.Fatalf("get lacks the asset exponent: %s", res.body)
+	}
+	if res := w.a.do("GET", w.base(), w.tokenFor(w.p2), nil); res.status != http.StatusOK || !strings.Contains(string(res.body), r.ID) || !strings.Contains(string(res.body), `"exponent":2`) {
 		t.Fatalf("list: %d %s", res.status, res.body)
 	}
 	// A replay is a clean conflict and posts nothing.

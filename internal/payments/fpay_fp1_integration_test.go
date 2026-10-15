@@ -17,7 +17,7 @@ func TestDepositGate_AllowThenNoRoutableProvider_LeavesOneRowAndMovesNoMoney(t *
 	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{})
 	ledgerBefore := fpCount(t, pool, f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id=$1`, f.tenantID)
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "fpay-dep-noroute",
 	})

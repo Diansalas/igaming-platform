@@ -4,6 +4,7 @@ import { Button } from '../components/Button'
 import { TextInput } from '../components/TextInput'
 import { ApiError } from '../api/types'
 import { SiteUnavailable, isSiteUnavailableError } from '../components/SiteUnavailable'
+import { MARKET_NOT_AVAILABLE_MESSAGE } from '../lib/marketRefusal'
 import { useAuth } from './AuthContext'
 
 function errorMessageFor(err: unknown): string {
@@ -15,6 +16,8 @@ function errorMessageFor(err: unknown): string {
         return err.message || 'Please check the form and try again.'
       case 'network_error':
         return err.message
+      case 'MARKET_NOT_AVAILABLE':
+        return MARKET_NOT_AVAILABLE_MESSAGE
       default:
         return 'Registration failed. Please try again.'
     }

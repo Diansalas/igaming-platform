@@ -117,8 +117,8 @@ func newSettlementTestServerWithLogger(t *testing.T, pool *db.Pool, issuer *auth
 		RefreshTokenTTL:                       time.Hour,
 		SportsbookEnabled:                     true,
 		SportsbookSettlementSimulationEnabled: true,
-		PersonResolver:                        identityresolution.NewMockPersonResolver(),
-		TrustedProxyCount:                     trustedProxyCount,
+		PersonResolver:                        identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
+		TrustedProxyCount: trustedProxyCount,
 	}))
 	t.Cleanup(srv.Close)
 	return srv
