@@ -56,6 +56,40 @@ func TestRegisterHandler_MarketPreCheckPrecedesThePasswordHash(t *testing.T) {
 	if !refusesEarly {
 		t.Error("a pre-check refusal must return before auth.HashPassword (an `if preDenied { ...; return }` block)")
 	}
+	// SR8R-3: the authoritative check sits in the SAME transaction function literal as
+	// RegisterPlayerWithResolution, and runs before it.
+	inTx := false
+	ast.Inspect(fd, func(n ast.Node) bool {
+		lit, ok := n.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		var guardPos, registerPos = token.NoPos, token.NoPos
+		ast.Inspect(lit.Body, func(m ast.Node) bool {
+			call, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fn := call.Fun.(type) {
+			case *ast.Ident:
+				if fn.Name == "marketGuard" && guardPos == token.NoPos {
+					guardPos = call.Pos()
+				}
+			case *ast.SelectorExpr:
+				if fn.Sel.Name == "RegisterPlayerWithResolution" {
+					registerPos = call.Pos()
+				}
+			}
+			return true
+		})
+		if registerPos != token.NoPos && guardPos != token.NoPos && guardPos < registerPos {
+			inTx = true
+		}
+		return true
+	})
+	if !inTx {
+		t.Error("a marketGuard call must precede RegisterPlayerWithResolution inside the same transaction function (SR8R-3)")
+	}
 	if guardCalls < 2 {
 		t.Errorf("the guard must run twice (pre-check and the authoritative in-transaction check), found %d calls", guardCalls)
 	}

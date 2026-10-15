@@ -3,6 +3,7 @@ package marketgate
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -60,6 +61,24 @@ func AnyCountryPermits(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brand
 	if len(countries) == 0 {
 		return false, false, nil
 	}
+	// SR8R-1: bound the resolver work. (1) One set-based query drops every
+	// candidate that has no in-force, active, ENABLED licence ceiling - the
+	// resolver denies those unconditionally (its step 1), so skipping them cannot
+	// change an answer. (A failed statement aborts the transaction, so the next
+	// resolver query errors and the call returns an error - treated as CLOSED by
+	// every caller; ErrNoRows does not abort and keeps the full list.) (2) The country that last permitted this (tenant, brand,
+	// operations) is tried FIRST: a hint only, the resolver still decides, so a
+	// stale hint costs one extra resolve and never changes a verdict.
+	countries = prefilterByCeiling(ctx, tx, tenantID, asOf, countries)
+	hintKey := openHintKey(tenantID, brandID, ops)
+	if hint, ok := openHints.get(hintKey); ok {
+		for i, cc := range countries {
+			if cc == hint {
+				countries[0], countries[i] = countries[i], countries[0]
+				break
+			}
+		}
+	}
 	for _, cc := range countries {
 		all := true
 		for _, sp := range specs {
@@ -76,6 +95,7 @@ func AnyCountryPermits(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brand
 			}
 		}
 		if all {
+			openHints.put(hintKey, cc)
 			return true, true, nil
 		}
 	}
@@ -95,4 +115,83 @@ func BrandOpen(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, ops 
 	}
 	_, open, err := AnyCountryPermits(ctx, tx, tenantID, &brandID, asOf, ops...)
 	return open, err
+}
+
+// openHints remembers, per (tenant, brand, operation set), the country that last
+// permitted it. Process-local and advisory only; bounded at openHintsMax entries
+// (cleared wholesale when full - losing it only costs latency).
+var openHints = &hintCache{m: map[string]string{}}
+
+const openHintsMax = 20000
+
+type hintCache struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func (h *hintCache) get(k string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	v, ok := h.m[k]
+	return v, ok
+}
+
+func (h *hintCache) put(k, v string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.m[k]; !ok && len(h.m) >= openHintsMax {
+		h.m = map[string]string{}
+	}
+	h.m[k] = v
+}
+
+func openHintKey(tenantID uuid.UUID, brandID *uuid.UUID, ops []Operation) string {
+	k := tenantID.String() + "|"
+	if brandID != nil {
+		k += brandID.String()
+	}
+	for _, o := range ops {
+		k += "|" + string(o)
+	}
+	return k
+}
+
+// prefilterByCeiling keeps only the candidates that have an in-force, active,
+// enabled ceiling for the tenant's licence. On any error it returns the input
+// unchanged; note that a failed statement aborts the surrounding transaction, so
+// the resolver's next query then errors and the caller treats the brand as CLOSED.
+func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf time.Time, in []string) []string {
+	// Two plain reads (the licence binding, then its ceilings) so no single statement
+	// both joins tenants and names a status column (tenant/status_readers_static_test).
+	var licenceID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil || licenceID == nil {
+		return in
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT country_code
+		  FROM licence_country_ceilings
+		 WHERE licence_id = $1 AND state = 'enabled' AND status = 'active'
+		   AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)`, *licenceID, asOf)
+	if err != nil {
+		return in
+	}
+	defer rows.Close()
+	ok := map[string]bool{}
+	for rows.Next() {
+		var cc string
+		if rows.Scan(&cc) != nil {
+			return in
+		}
+		ok[cc] = true
+	}
+	if rows.Err() != nil {
+		return in
+	}
+	out := make([]string, 0, len(in))
+	for _, cc := range in {
+		if ok[cc] {
+			out = append(out, cc)
+		}
+	}
+	return out
 }

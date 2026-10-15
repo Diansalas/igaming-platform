@@ -61,6 +61,7 @@ func TestLocate_AbandonedLookupsAreBounded(t *testing.T) {
 			t.Fatal("unexpected evidence")
 		}
 	}
+	exhaustedBefore := LocateSlotsExhausted.Load()
 	l.mu.Lock()
 	callsBefore := l.calls
 	l.mu.Unlock()
@@ -70,6 +71,9 @@ func TestLocate_AbandonedLookupsAreBounded(t *testing.T) {
 	}
 	if time.Since(start) > 4*time.Millisecond {
 		t.Fatalf("over-bound lookup should refuse immediately, took %v", time.Since(start))
+	}
+	if LocateSlotsExhausted.Load() != exhaustedBefore+1 {
+		t.Fatal("the exhaustion metric must count the refused lookup")
 	}
 	time.Sleep(20 * time.Millisecond)
 	l.mu.Lock()
@@ -131,16 +135,6 @@ func TestRefusalSampler_KeysAreIndependent(t *testing.T) {
 	c.reason = ReasonEvidenceUnavailable
 	if w, _ := s.take(c); !w {
 		t.Fatal("a different reason has its own bucket")
-	}
-}
-
-func TestRefusalSampler_MapIsBounded(t *testing.T) {
-	s := newRefusalSampler()
-	for i := 0; i < refusalAuditMaxKeys+10; i++ {
-		s.take(refusalKey{tenant: uuid.New(), op: OpLaunch})
-	}
-	if len(s.buckets) > refusalAuditMaxKeys {
-		t.Fatalf("bucket map grew past its bound: %d", len(s.buckets))
 	}
 }
 
