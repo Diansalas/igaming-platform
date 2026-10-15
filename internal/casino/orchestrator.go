@@ -1735,7 +1735,19 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if tooOld, err := sessionPastMaxLifetime(ctx, tx, session.ID, o.maxSessionLifetime()); err != nil {
 		return ReceiveCallbackResult{}, err
 	} else if tooOld {
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: %v", ErrLaunchSessionRequired, errSessionTooOld)
+		// SR8R-7: a DECLINE with a durable audit row (committed with the decline), not a Go
+		// error: an error would roll the transaction back and leave no trace but the HTTP log.
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.denied_session_lifetime",
+			TargetType: "casino_launch_session", TargetID: session.ID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"brand_id": session.BrandID.String(), "reason_code": "SESSION_MAX_LIFETIME",
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet denied session lifetime: %w", err)
+		}
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: DeclineReasonSessionExpired}, nil
 	}
 	if session.AssetCode != event.AssetCode {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the launch session", ErrInvalidInput)

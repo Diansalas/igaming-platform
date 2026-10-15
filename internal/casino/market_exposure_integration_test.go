@@ -219,9 +219,15 @@ func TestPostBet_ConsumedSessionPastMaxLifetimeRefusesNewBetButSettles(t *testin
 	time.Sleep(150 * time.Millisecond)
 
 	debits0, credits0 := sumDebitsCredits(t, m.pool, m.f.tenantID)
-	_, err := m.receive(m.orch, CallbackEventBet, "life-bet-2", "", "life-round-2", 1000, session)
-	if !errors.Is(err, ErrLaunchSessionRequired) {
-		t.Fatalf("a new bet past the maximum lifetime must be refused with ErrLaunchSessionRequired, got %v", err)
+	res, err := m.receive(m.orch, CallbackEventBet, "life-bet-2", "", "life-round-2", 1000, session)
+	if err != nil || res.Outcome != OutcomeDeclined || res.DeclineReason != DeclineReasonSessionExpired {
+		t.Fatalf("a new bet past the maximum lifetime must be DECLINED (session_expired), got %+v err=%v", res, err)
+	}
+	if !auditActionExists(t, m.pool, m.f.tenantID, "casino_bet.denied_session_lifetime") {
+		t.Fatal("SR8R-7: the lifetime refusal must leave a durable audit row")
+	}
+	if n := m.ledgerRows(t, "life-bet-2"); n != 0 {
+		t.Fatalf("a declined bet left %d ledger transactions", n)
 	}
 	if d, c := sumDebitsCredits(t, m.pool, m.f.tenantID); d != debits0 || c != credits0 {
 		t.Fatal("a refused bet changed the ledger")
