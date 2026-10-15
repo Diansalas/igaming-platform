@@ -498,10 +498,10 @@ func TestRecordScreeningInput_Validate_MirrorsTheChecks(t *testing.T) {
 	}
 }
 
-// SR7-2 / SR7-8: the hold class is derived strictly from the outcome and the list. Only a CONFIRMED outcome naming the sanctions
-// list yields the four-eyes class; a potential match (whatever the list), a PEP-only confirmed outcome, an error and a clear
-// are manual.
-func TestHoldReasonClassFor_OnlyAConfirmedSanctionsOutcomeIsTheFourEyesClass(t *testing.T) {
+// SR7-2 / SR7-8 / SR7-10: the hold class is derived strictly from the outcome and the list. ANY sanctions-list match is a
+// four-eyes-lift class (confirmed_sanctions for a confirmed outcome, sanctions_potential otherwise); a PEP-only match, an error
+// and a clear are manual.
+func TestHoldReasonClassFor_AnySanctionsMatchIsAFourEyesClass(t *testing.T) {
 	s, p := []aml.ListType{aml.ListSanctions}, []aml.ListType{aml.ListPEP}
 	both := []aml.ListType{aml.ListPEP, aml.ListSanctions}
 	for name, c := range map[string]struct {
@@ -513,12 +513,13 @@ func TestHoldReasonClassFor_OnlyAConfirmedSanctionsOutcomeIsTheFourEyesClass(t *
 		"confirmed sanctions and pep":  {aml.OutcomeConfirmed, both, aml.ReasonConfirmedSanctions},
 		"confirmed pep only":           {aml.OutcomeConfirmed, p, aml.ReasonManual},
 		"confirmed without a list":     {aml.OutcomeConfirmed, nil, aml.ReasonManual},
-		"potential sanctions":          {aml.OutcomePotentialMatch, s, aml.ReasonManual},
+		"potential sanctions":          {aml.OutcomePotentialMatch, s, aml.ReasonSanctionsPotential},
+		"potential sanctions and pep":  {aml.OutcomePotentialMatch, both, aml.ReasonSanctionsPotential},
 		"potential pep":                {aml.OutcomePotentialMatch, p, aml.ReasonManual},
 		"error":                        {aml.OutcomeError, nil, aml.ReasonManual},
-		"error with a (bogus) match":   {aml.OutcomeError, s, aml.ReasonManual},
+		"error with a (bogus) match":   {aml.OutcomeError, s, aml.ReasonSanctionsPotential},
 		"clear":                        {aml.OutcomeClear, nil, aml.ReasonManual},
-		"unknown outcome with a match": {"approved", s, aml.ReasonManual},
+		"unknown outcome with a match": {"approved", s, aml.ReasonSanctionsPotential},
 	} {
 		if got := aml.HoldReasonClassFor(c.o, c.m); got != c.want {
 			t.Errorf("%s: %s, want %s", name, got, c.want)

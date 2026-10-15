@@ -175,6 +175,15 @@ func decodeLikeHandler(b []byte, dst any) error {
 	return dec.Decode(dst)
 }
 
+// decodeLikeHandlerStrict is decodeLikeHandler for the AML routes: it decodes with decodeJSONStrict's exact rules (one JSON value,
+// nothing after it), through the same decodeSingleValue.
+func decodeLikeHandlerStrict(b []byte, dst any) error {
+	if int64(len(b)) > maxRequestBodyBytes {
+		return errors.New("body too large")
+	}
+	return decodeSingleValue(json.NewDecoder(bytes.NewReader(b)), dst)
+}
+
 // launchActionClass: none for action = suspend (ADR 0112 section 6.3
 // asymmetry; this route then refuses it with 400, suspensions have their own
 // routes), critical for every other action and for a body the handler will
@@ -322,7 +331,7 @@ func amlHoldPlaceClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
 		return auth.StepUpCritical, nil
 	}
 	var body amlHoldPlaceRequest
-	if err := decodeLikeHandler(b, &body); err != nil {
+	if err := decodeLikeHandlerStrict(b, &body); err != nil {
 		return auth.StepUpCritical, nil
 	}
 	if aml.ReasonClass(body.ReasonClass) == aml.ReasonManual {
@@ -340,7 +349,7 @@ func amlTransitionClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
 		return auth.StepUpCritical, nil
 	}
 	var body amlTransitionRequest
-	if err := decodeLikeHandler(b, &body); err != nil {
+	if err := decodeLikeHandlerStrict(b, &body); err != nil {
 		return auth.StepUpCritical, nil
 	}
 	switch aml.CaseStatus(body.To) {

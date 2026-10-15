@@ -205,7 +205,7 @@ func TestStatic_AMClassOnlyInAMLMigrations(t *testing.T) {
 			t.Fatal(err)
 		}
 		isAML := strings.HasPrefix(e.Name(), "0140_") || strings.HasPrefix(e.Name(), "0141_") || strings.HasPrefix(e.Name(), "0142_") ||
-			strings.HasPrefix(e.Name(), "0154_") // A7: the screening + readiness migration is an AML migration
+			strings.HasPrefix(e.Name(), "0154_") || strings.HasPrefix(e.Name(), "0155_") // A7: the screening + readiness migration (0154) and its sanctions_potential follow-up (0155) are AML migrations
 		if re.Match(b) {
 			if !isAML {
 				t.Errorf("%s uses SQLSTATE class AM, which belongs to the AML migrations", e.Name())

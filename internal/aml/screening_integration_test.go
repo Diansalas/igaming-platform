@@ -196,13 +196,14 @@ func TestScreening_EndToEnd_OutcomesPlaceTheRequiredHolds(t *testing.T) {
 			t.Errorf("sanctions match must gate %s: held=%v err=%v", op, held, err)
 		}
 	}
-	// SR7-2 / SR7-8 (CHANGED assertion): a POTENTIAL sanctions match gates all value movement by SCOPE but is a MANUAL-class
-	// hold (the four-eyes class is reserved for a CONFIRMED sanctions outcome), so one officer can lift it as a false positive.
-	if hs, err := svc.ListHolds(ctx, a, ps.PersonID); err != nil || len(hs) != 1 || hs[0].ReasonClass != aml.ReasonManual || hs[0].Scope != aml.ScopeAllValueMovement {
-		t.Fatalf("a potential sanctions match must be manual-class with the all-value scope: %+v %v", hs, err)
+	// SR7-10 (CHANGED assertion, reverses the SR7-2 round-2 reading): a POTENTIAL sanctions match gates all value movement by
+	// SCOPE and is the sanctions_potential class, which has the SAME four-eyes lift rule as confirmed_sanctions (ADR 0116 D6 /
+	// s4.3); a single officer's plain lift is refused. The lift lifecycle itself is proven in TestSanctionsPotential_*.
+	if hs, err := svc.ListHolds(ctx, a, ps.PersonID); err != nil || len(hs) != 1 || hs[0].ReasonClass != aml.ReasonSanctionsPotential || hs[0].Scope != aml.ScopeAllValueMovement {
+		t.Fatalf("a potential sanctions match must be sanctions_potential with the all-value scope: %+v %v", hs, err)
 	}
-	if _, err := svc.LiftHold(ctx, a, *out.Recorded.HoldID, "false_positive_sanctions"); err != nil {
-		t.Fatalf("a potential-match hold is liftable by one officer: %v", err)
+	if _, err := svc.LiftHold(ctx, a, *out.Recorded.HoldID, "false_positive_sanctions"); !errors.Is(err, aml.ErrHoldRefused) {
+		t.Fatalf("a potential-sanctions hold must not be lifted by a single officer: %v", err)
 	}
 
 	// PEP potential match: withdrawal and payout only.
@@ -216,8 +217,9 @@ func TestScreening_EndToEnd_OutcomesPlaceTheRequiredHolds(t *testing.T) {
 			t.Errorf("pep match %s: held=%v err=%v want %v", op, held, err, want)
 		}
 	}
-	// A manual-class screening hold CAN be lifted by one officer (plain officer lift), and then nothing is gated.
-	if _, err := svc.LiftHold(ctx, a, *out.Recorded.HoldID, "false_positive"); err != nil {
+	// A manual-class screening hold CAN be lifted by one officer (plain officer lift) other than the one who recorded the result
+	// (SR7-10, CHANGED: the recorder is refused, see TestScreeningHold_RecorderCannotLiftItWhateverTheClass), and then nothing is gated.
+	if _, err := svc.LiftHold(ctx, q.Officers[1].Actor, *out.Recorded.HoldID, "false_positive"); err != nil {
 		t.Fatalf("lift pep hold: %v", err)
 	}
 	if held, _ := w.holdActive(pp.PersonID, pp.AccountID, aml.OpWithdrawal); held {
@@ -369,7 +371,7 @@ func TestScreening_ClassDerivationIsStrict_InTheDatabase(t *testing.T) {
 		scope   aml.HoldScope
 	}{
 		"confirmed sanctions":         {aml.OutcomeConfirmed, []aml.ListType{aml.ListSanctions}, aml.ReasonConfirmedSanctions, aml.ScopeAllValueMovement},
-		"potential sanctions":         {aml.OutcomePotentialMatch, []aml.ListType{aml.ListSanctions}, aml.ReasonManual, aml.ScopeAllValueMovement},
+		"potential sanctions":         {aml.OutcomePotentialMatch, []aml.ListType{aml.ListSanctions}, aml.ReasonSanctionsPotential, aml.ScopeAllValueMovement},
 		"confirmed naming only a pep": {aml.OutcomeConfirmed, []aml.ListType{aml.ListPEP}, aml.ReasonManual, aml.ScopeAllValueMovement},
 	} {
 		pp := w.player()
@@ -551,7 +553,8 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 					outcome, match_lists, error_code, screened_at, decision, hold_id, hold_reason_class, payload_hash, recorded_by, recorded_by_person_id, recorded_by_scope)
 				VALUES ($1, 'platform', $2, $3, 'manual', 'mock-screening', $4, ARRAY['sanctions','pep'], $5, $6::text[], $7, now(), $8, $9,
 					CASE WHEN $12::text <> '' THEN $12::text WHEN $8::text = 'none' THEN NULL
-					     WHEN $5::text = 'confirmed' AND COALESCE('sanctions' = ANY ($6::text[]), false) THEN 'confirmed_sanctions' ELSE 'manual' END,
+					     WHEN COALESCE('sanctions' = ANY ($6::text[]), false) THEN CASE WHEN $5::text = 'confirmed' THEN 'confirmed_sanctions' ELSE 'sanctions_potential' END
+					     ELSE 'manual' END,
 					$13, $10, $11, 'platform_acting')`,
 				w.Tenant, p.PersonID, "chk-"+uuid.NewString(), strings.Repeat("a", 64), outcome, match, errCode, *decision, holdID, q.Officers[0].StaffID, q.Officers[0].PersonID,
 				cls, strings.Repeat("b", 64)); err != nil {
@@ -610,7 +613,11 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 		decision       *string
 		hold           *uuid.UUID
 	}{
-		"four-eyes class on a potential sanctions match": {"confirmed_sanctions", "potential_match", m("{sanctions}"), nil, hall, &hold},
+		"confirmed class on a potential sanctions match": {"confirmed_sanctions", "potential_match", m("{sanctions}"), nil, hall, &hold},
+		"manual class on a potential sanctions match":    {"manual", "potential_match", m("{sanctions}"), nil, hall, &hold},
+		"potential class on a confirmed sanctions":       {"sanctions_potential", "confirmed", m("{sanctions}"), nil, hall, &hold},
+		"potential class on a PEP-only potential match":  {"sanctions_potential", "potential_match", m("{pep}"), nil, hwp, &hold},
+		"potential class on an error":                    {"sanctions_potential", "error", nil, s("timeout"), hwp, &hold},
 		"four-eyes class on a PEP-only confirmed":        {"confirmed_sanctions", "confirmed", m("{pep}"), nil, hall, &hold},
 		"four-eyes class on an error":                    {"confirmed_sanctions", "error", nil, s("timeout"), hwp, &hold},
 		"manual class on a confirmed sanctions outcome":  {"manual", "confirmed", m("{sanctions}"), nil, hall, &hold},
@@ -631,7 +638,7 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 		"error with no action (grace)": {"error", nil, s("timeout"), none, nil},
 		"clear":                        {"clear", nil, nil, none, nil},
 		"pep match":                    {"potential_match", m("{pep}"), nil, hwp, &hold},
-		"potential sanctions (manual)": {"potential_match", m("{sanctions}"), nil, hall, &hold},
+		"potential sanctions (4-eyes)": {"potential_match", m("{sanctions}"), nil, hall, &hold},
 		"confirmed sanctions (4-eyes)": {"confirmed", m("{sanctions}"), nil, hall, &hold},
 		"confirmed pep only (manual)":  {"confirmed", m("{pep}"), nil, hall, &hold},
 	} {

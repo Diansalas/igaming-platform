@@ -6,7 +6,7 @@
 import { apiFetch, buildQuery } from './client'
 
 export type HoldScope = 'all_value_movement' | 'withdrawal_and_payout'
-export type HoldReasonClass = 'manual' | 'confirmed_sanctions'
+export type HoldReasonClass = 'manual' | 'confirmed_sanctions' | 'sanctions_potential'
 export type CaseKind = 'manual' | 'alert'
 export type CaseStatus =
   | 'open'
@@ -124,7 +124,7 @@ export interface PlaceHoldBody {
   person_id: string
   player_account_id?: string | null
   scope: HoldScope
-  reason_class: HoldReasonClass
+  reason_class: Exclude<HoldReasonClass, 'sanctions_potential'> // sanctions_potential is derived from a screening record, never placed by hand
   reason_code: string
 }
 

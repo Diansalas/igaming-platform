@@ -92,7 +92,7 @@ func (in RecordScreeningInput) Validate() error {
 		hasSanctions = hasSanctions || l == ListSanctions
 	}
 	// SR7-2: all-value-movement is the decision of a confirmed outcome or a sanctions-list match and of nothing else; an
-	// error or a PEP-only match can never be recorded with it (and so never reaches the confirmed_sanctions hold class).
+	// error or a PEP-only match can never be recorded with it (and so never reaches a sanctions hold class).
 	if in.Decision == HoldAllValueMovement && in.Outcome != OutcomeConfirmed && !hasSanctions {
 		return fmt.Errorf("%w: all-value-movement is the decision of a confirmed outcome or a sanctions-list match only", ErrInvalidInput)
 	}
@@ -119,16 +119,16 @@ func (in RecordScreeningInput) Validate() error {
 }
 
 // HoldReasonClassFor is the hold class a screening record places, derived STRICTLY from the outcome and the list (SR7-2,
-// SR7-8): the four-eyes class ReasonConfirmedSanctions only for a CONFIRMED outcome that names the sanctions list; a potential
-// match, a PEP-only match and an error are ReasonManual (a potential sanctions match still gates all value movement by SCOPE).
-// It mirrors aml_screening_record and the aml_screening_results CHECK; the database is the authority.
+// SR7-8, SR7-10): ANY sanctions-list match is a four-eyes-lift class, ReasonConfirmedSanctions for a CONFIRMED outcome and
+// ReasonSanctionsPotential otherwise; a PEP-only match and an error are ReasonManual. It mirrors aml_screening_record and the
+// aml_screening_results CHECK (migration 0155); the database is the authority.
 func HoldReasonClassFor(outcome ScreeningOutcome, matches []ListType) ReasonClass {
-	if outcome != OutcomeConfirmed {
-		return ReasonManual
-	}
 	for _, l := range matches {
 		if l == ListSanctions {
-			return ReasonConfirmedSanctions
+			if outcome == OutcomeConfirmed {
+				return ReasonConfirmedSanctions
+			}
+			return ReasonSanctionsPotential
 		}
 	}
 	return ReasonManual

@@ -165,9 +165,11 @@ describe('holds', () => {
   })
 
   it('lists holds; a manual hold can be lifted, a sanctions-list hold points to the four-eyes route and has no Lift button', async () => {
-    await openHolds([hold(), hold({ id: HOLD2, scope: 'all_value_movement', reason_class: 'confirmed_sanctions' }), hold({ id: '88888888-8888-4888-8888-888888888888', lifted: true, lifted_at: '2026-10-11T10:00:00Z' })])
+    await openHolds([hold(), hold({ id: HOLD2, scope: 'all_value_movement', reason_class: 'confirmed_sanctions' }), hold({ id: '99999999-9999-4999-8999-999999999999', scope: 'all_value_movement', reason_class: 'sanctions_potential' }), hold({ id: '88888888-8888-4888-8888-888888888888', lifted: true, lifted_at: '2026-10-11T10:00:00Z' })])
     expect((await screen.findAllByText('Withdrawal and payout')).length).toBeGreaterThan(0)
-    expect(screen.getByText('Lift via a case proposal and approval')).toBeInTheDocument()
+    // SR7-10: BOTH sanctions classes (confirmed and potential match) point to the four-eyes route and carry no Lift button.
+    expect(screen.getAllByText('Lift via a case proposal and approval')).toHaveLength(2)
+    expect(screen.getByText('Sanctions list, potential match (four-eyes lift)')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Lift' })).toHaveLength(1)
     expect(screen.getByText('Lifted')).toBeInTheDocument()
   })
