@@ -296,3 +296,50 @@ Merged the tip again first (A7r3, caller-scan skip, payments pin): clean, no con
 | SR8R-4, 5 | Recorded only. SR8R-4 (INFO): the caller scan matches `sportsbook.PlaceBet` by package identifier and a call by its literal composite type, so it would miss an aliased import, a function value or a non-nil always-allow inline guard; it is a review aid, the runtime empty-guard refusal is the control, and its "no production caller found" assertion is kept. SR8R-5 needs a PRODUCT ACKNOWLEDGEMENT: a replay of an idempotency key for an EXISTING bet from refused evidence answers 403 (the gate precedes the idempotency lookup by design), so a client retrying a timed-out request after the player moved out of the market sees a refusal, not the original bet; the bet itself stands and is visible in bet history. |
 | SR8R-6 | Recorded; cheap metric added: `marketgate.LocateSlotsExhausted` counts lookups refused because the 128 abandoned-lookup slots were all held. Size the cap against vendor latency x gated request rate when a vendor exists. |
 | Note | `R-MARKET-CONFIG` evaluates registration, deposit and casino wagering only; it does not evaluate sportsbook wagering (a brand that only offers sportsbook is judged on the casino operation). Recorded, not changed. |
+
+## 12. Round 3 security re-review (`security`, 2026-10-15): SR8R3-1..8
+
+Scope: commits `bc3636b`, `20ffd31`, `822d3d2` (merge), `e177714`, diffed against `ce37d15`. I verified from the code, not from §11. Not in scope: the `operatingmarket` resolver internals (I only checked its step 1 against the new prefilter), any real vendor, and penetration testing. Passing this review does not make the feature "secure".
+
+**What was run.** `go build ./...`. `go vet` on `marketgate` and `casino`, with and without `-tags integration`, plus `httpserver` with the tag. `gofmt -l internal/` was clean. `go test -race -count=1 ./internal/marketgate/` (unit) PASSED. I also ran temporary sampler probes and a benchmark, then deleted them; they are not committed.
+
+**What was NOT run, and why.** No integration test was run. The documented local credentials for both `igaming_test_admin` and `igaming` failed password authentication, so I could not create a private database. Per CLAUDE.md I stopped there. I did not look for other credentials, change any role or password, or use any shared database. As a result, the following are UNVERIFIED BY ME: the SR8R-1 cold/warm latency figures, `TestMarketGate_HTTP_RegistrationInTransactionCheckRefusesWhenConfigurationFlipsAfterThePreCheck`, and the changed `TestPostBet_ConsumedSessionPastMaxLifetimeRefusesNewBetButSettles`. Someone with working DB access must run them.
+
+**Verified from code:**
+- **SR8R-1 (closed).** `prefilterByCeiling` can only REMOVE candidates, so it can never open a closed market. Its predicate matches resolver step 1 (`resolve.go`): same licence lookup (`tenants.licence_id`) and the same in-force window. The resolver denies on zero rows, on `withdrawn` and on `disabled`, and `parseStatus`/`parseState` admit no other values. Two in-force rows are kept and the resolver reports a conflict. The hint only reorders an already-filtered slice that the function built itself, so there is no aliasing. The hint key carries the tenant and is never used across tenants. The cache is bounded (20k entries, wholesale reset), and its keys come from server configuration, not client input.
+- **SR8R-2 (memory and isolation closed; reporting see SR8R3-1).**
+  - Per-tenant cap is 500 and the global cap is 10k.
+  - Evicted tallies stay on the tenant's own `tenantBuckets` and only ever ride on that tenant's rows.
+  - A probe with 30 tenants filling their caps (global pressure, 10k buckets) left a quiet tenant's bucket in place and its 7 suppressed refusals reported intact.
+  - Measured cost per `take` under full global pressure: ~49 µs (non-race), under the global mutex.
+- **SR8R-3 (closed, subject to the integration run).** The in-transaction `marketGuard` is the first statement of the `WithTenant` closure that calls `RegisterPlayerWithResolution`. A refusal commits only the gate's audit row.
+- **SR8R-7 (closed, subject to the integration run).**
+  - The decline is returned before any write. `postBet` writes nothing before it: only the advisory lock and reads. No ledger row, no rejection row.
+  - The audit metadata contains only provider_id, provider_tx_id, round_id (both bounded by `providerref`), brand_id and a closed reason code. The target is the session id. There is no player id, IP or email.
+  - The decline cannot bypass anything. `tooOld` has exactly one exit, the decline. It sits after the consumed/real-mode checks and before the market-open check, which still runs on every bet that is not too old. Settlement (`postWin`/`postRollback`) never reaches it.
+  - A redelivery of the same provider_tx_id re-evaluates the lifetime, which only grows, so it is declined again.
+- **Fail-closed paths:**
+  - nil locator, exhausted slots, timeout or invalid country: unknown evidence, which is refused.
+  - `deps.MarketGate == nil`: 503 in the register, deposit, launch and sportsbook handlers.
+  - Nothing configured: `AnyCountryPermits` returns closed, so the casino bet is declined.
+  - No licence: the resolver returns `LicensingUnknown`, which is closed.
+  - Any DB error: an error, which is treated as closed.
+  - The ungated test sentinels are unchanged and still pinned.
+- **Tenant isolation.** Sampler state, evicted tallies and hint keys are all per tenant. Both prefilter reads are bound to `tenantID` inside the tenant-scoped transaction, and the resolver asserts the transaction scope.
+
+| ID | Severity | Finding | Required action |
+|---|---|---|---|
+| SR8R3-1 | LOW (fix before complete) | §11 and the `sampler.go` comment say evicted tallies are carried as a separate `suppressed_evicted` field. The code instead adds `tb.evicted` into `suppressed_since_last_row` of WHICHEVER key next gets a token (`take`: `suppressed = b.suppressed + tb.evicted`; `refuse` writes one field). Failure scenario: player A's 9 suppressed deposit refusals are evicted. The next written row is player B's launch refusal on another brand. That row has `actor_type=player, actor_id=B` and claims B's key suppressed those refusals. A compliance reader of B's audit history sees refused attempts B never made. My probe reproduced this: the evicted 9 rode on an unrelated filler key's first row. The tenant-level total is not lost, only misattributed. | Return the evicted tally separately and write it as its own field (e.g. `suppressed_evicted_tenant_wide`), not added to the per-key count. Fix the §11 text. Add a test asserting the per-key count excludes other keys' evictions. |
+| SR8R3-2 | INFO | `prefilterByCeiling`'s "on error the full list is kept, the resolver decides" is not what happens. A failed statement aborts the Postgres transaction, so the next resolver query errors and `AnyCountryPermits` returns an error, which is treated as closed. The behaviour is fail-closed; only the comment is wrong. (`ErrNoRows` does not abort the transaction and is handled correctly.) | Correct the comment. |
+| SR8R-1 residual, SR8R3-3 | INFO | The hint only helps when the market is OPEN. On a fully closed brand, every new-bet callback and bootstrap resolves every ceiling-enabled candidate (up to 250 x ops). This happens inside the transaction that holds the delivery lock, and nothing is cached. Callers are authenticated vendors, plus the MOCK B2C play route. Bounded, not an amplification by anonymous clients. | Measure when a vendor exists; consider a short negative-result cache keyed like the hint. |
+| SR8R3-4 | INFO | The test `TestRefusalSampler_AnotherTenantsCountsSurviveAFlood` never reaches GLOBAL pressure. Each flood is one tenant, capped at 500, so the "evict from the largest tenant" branch is untested. My 30-tenant probe passed. | Add a multi-tenant global-pressure test. |
+| SR8R3-5 | INFO | `take` zeroes `b.suppressed` and `tb.evicted` BEFORE the audit row commits. If that insert or the caller's transaction fails, the tally is lost; only the `EvictedSuppressed` counter keeps the evicted part. This was already true for the per-key count and now extends to evicted tallies. | Record it; acceptable for sampling. |
+| SR8R3-6 | INFO | `casino_bet.denied_session_lifetime` rows are per-attempt and unsampled. That is the same class as `denied_market_closed` and `rejected_tombstoned`. They can be triggered by an authenticated vendor and, on the MOCK B2C play route, by a player holding an expired session. | Record; revisit with audit-volume controls. |
+| SR8R3-7 | INFO | Gaps in the changed test: the audit row CONTENT is not asserted (reason_code, target id, no player id or IP). A redelivery of `life-bet-2` is not asserted to stay declined with no ledger row. The trailing "rollback likewise" comment has no code. | Add these assertions. |
+| SR8R3-8 | INFO | The SR8R-3 static test would also pass if `marketGuard` sat in a nested closure, or if its result were ignored. The behavioural flip test is the real control (see SR8R-4's note on scans). | Record. |
+
+**Verdict: NOT APPROVED yet.** No finding lets a player or vendor past the gate. Fail-closed behaviour and tenant isolation hold in code. Two things stand between this and approval:
+1. SR8R3-1 must be fixed. It is a small change, but it is an audit-integrity defect, and §11 currently misdescribes it.
+2. The integration tests named above must be run green on a private database by someone with working access, with results recorded here.
+
+Once both are done, a delta check of the SR8R3-1 fix is enough; this is not launch-blocking. The launch notes from round 2 are unchanged: the fail-closed state with no geolocation vendor, and the SR8-2 residual bounded only by `CASINO_SESSION_MAX_LIFETIME`, which is an owner acceptance.
