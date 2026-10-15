@@ -201,3 +201,77 @@ tracker, pager, MOCK source, S-L1, S-L4(2), PAY-PARK-BIND-RACE-1, H(12) and the 
 found one SURVIVOR (P6, the "providers known only from attempts" union): killed after adding
 `TestScoped_ProviderKnownOnlyFromAttemptsIsStillInScope`. `B2` (drop the whole S-L4(2) re-read) could not be built as a valid mutant
 (unused variable); its two halves B3 (status ignored) and B4 (withdrawal capability ignored) are both killed.
+
+## 9. Ledger-finance independent review (2026-10-15, head `e2f0206`)
+
+Reviewer: `ledger-finance`. Scope: the three-dot diff `origin/claude/focused-wright-jw88w9...a11-payments-wiring`, against the probes in
+section 7.
+
+**Verification limits.** DB access FAILED: the documented dev roles (`igaming`, `igaming_test_admin`) are rejected with
+`password authentication failed`, and the session has no DB settings of its own. Per CLAUDE.md I stopped there. No scratch DB was created
+and no role, password or process was touched. So NO integration test (`-tags=integration`) was run by this reviewer: none of `TestBound_*`,
+`TestScoped_*`, `TestParkBindRace_*`, `TestSL1_*`, `TestSL4_*` or `TestH12_*`. What did run: `go build ./...`, `go vet` and the non-DB
+unit tests for `internal/reconciliation/...`, `internal/payments`, `cmd/platform-api` (all pass, including `TestValidateBoundedWindow_Table`,
+`TestPagePaymentLines_*`, `TestPaymentStatementSource_TypeLevelReadOnly`, `TestRegistry_*`). Everything else below is static review.
+
+### 9.1 Confirmed from the code (static)
+
+- **Migration 0160**: additive (two nullable columns, two CHECKs, one partial index). RLS, the append-only triggers and the grants are
+  unchanged. The down migration refuses while cursor evidence exists. The index matches the cursor query's predicate.
+- **Cursor atomicity**: `persistRun` writes `coverage_end`/`provider_id`/`window_truncated` in the run's own INSERT, inside the REPEATABLE READ
+  match transaction, together with the mismatches and the `reconciliation.sweep_run` audit row. A failed fetch, ingest or match returns
+  before `persistRun` and writes no run row, so the cursor cannot advance past an unmatched window.
+- **Contiguity**: `validateBoundedWindow` requires `CoverageStart == cursor` exactly and no line before the cursor. A truncated statement
+  must make strict progress, end at or before `PeriodEnd`, and hold only lines before `CoverageEnd`.
+- **Stale cursor**: the pair's cursor is re-read under `pg_try_advisory_xact_lock`. If it moved, the run is skipped with no row. The
+  documented residual is accurate: `set_config` is the transaction's first statement and fixes the snapshot, and the try-lock is the next
+  statement, so the gap really is tiny. The worst case is a re-matched window (a duplicate run, mismatch rows and alert occurrences); it
+  is never a skipped one, because both racers started from the same cursor and the cursor is a `max()`.
+- **Paging**: `PagePaymentLines` sorts at microsecond precision, steps back to the start of the instant group straddling the bound, and
+  returns `cutoff = first excluded instant`. Every page line is `< cutoff` and every excluded line is `>= cutoff`, so no line is skipped or
+  counted twice. An unsplittable first group is refused.
+- **Missing or ineligible source**: the outcome carries `Err` (tracker `failed`), with no run row, an audited `sweep_run_failed`, a durable
+  `run_failed` and the gauge. A nil or typed-nil source, a provider-id mismatch, Synthetic without `AllowSynthetic`, a nil resolver and a
+  listing failure all fail closed. In production the registry refuses Synthetic and non-`ProductionEligible` sources at startup.
+- **Truncated freshness**: `runTracker.record` handles `resultTruncated` in its own branch, which never sets `lastSuccessUnix`.
+- **No new ledger write path**: the only new INSERT in non-test code is `reconciliation_runs`. No posting, balance or ledger table is
+  touched. Ingest idempotency (content-addressed import reuse) and the `(provider_id, provider_tx_id)` uniqueness are unchanged.
+- **PAY-PARK-BIND-RACE-1**: `parkDepositAttempt` now binds through `bindParkReference`. That path uses a savepoint, treats only
+  `payment_attempts_tenant_provider_ref` 23505 as `lost_race`, and writes an audit row. A lost race leaves the park reference-less, and
+  reconciliation classes it `unboundPark` (reported in-run, cleared on the line's reference). No posting is involved.
+- **H(12)**: phase C runs on `context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)`, the same as `drive.go:272`.
+  `Pending.Flush` detaches internally. The phase C logic and its T6 drain are unchanged.
+- **S-L4(2)**: the capability is re-read inside the claim transaction. A refusal only rolls back; nothing is posted. See LF-A11-3 for the
+  locking caveat.
+
+### 9.2 Findings
+
+| id | severity | finding | required action |
+|---|---|---|---|
+| LF-A11-1 | MEDIUM; binding before the first non-MOCK statement source | **Matcher windowing vs line dating (answers probe 2: it does NOT behave as in unbounded mode).** In bounded mode, lines are dated by their last status change. The "missing provider record" rule, however, windows platform attempts by `sentAt`. In a TRUNCATED run, every `succeeded` attempt with `sentAt < CoverageEnd` whose provider line is dated `>= CoverageEnd` (it settled after the cut) is reported as `pay_missing_provider_record` (a P1). The next run's coverage starts at the cut, so the line is matched there by reference, but the false finding stays. In unbounded mode lines were dated by creation (about `sentAt`), so this needed a fetch-to-match race. Under truncation the exposure is the attempt's whole settlement lag, and it peaks during a backlog. It is fail-safe (a false positive, not a false negative), but it is untested and floods P1 at the worst moment. Simply suppressing the rule in truncated runs would create a false negative: no later run has that `sentAt` in its coverage. | Payments + ledger-finance: window the rule by the platform attempt's last state change (consistent with line dating), or defer it for attempts whose settlement window crosses `CoverageEnd`, with a test that keeps "never silently missing". Register as its own row. Correct the probe-2 text above. |
+| LF-A11-2 | MEDIUM; PROVIDER DEPENDENT, binding before the first non-MOCK statement source | **The cursor turns `CoverageEnd` into a permanent completeness claim.** Section 3 lacks two contract clauses: (a) `CoverageEnd` must never exceed the provider's own completeness or reporting-lag horizon; (b) `OccurredAt` must be the provider's record time of the change and never a backdatable value or effective date. Breaking either loses data. A line that becomes visible later with `OccurredAt < cursor` is never requested again, because the request starts at the cursor (a silent false negative). If the source returns it anyway, every later statement is refused with `ErrPaymentStatementCoverageGap`: stuck, P1 each run, no runbook. Separately, a non-truncated statement's `CoverageEnd` is checked only against `now + 5 min`, not against `PeriodEnd`. The MOCK legitimately returns its fetch time. | Add clauses (a) and (b) to section 3 and the launch checklist. Add a per-provider settle lag (`PeriodEnd = now - lag`) before a real source is wired. Add a runbook entry for a stuck cursor. |
+| LF-A11-3 | LOW | **S-L4(2) narrows the window but does not close it.** `LoadCapability` is a plain SELECT. A disable that commits after the re-read and before the claim commits still dispatches. `reassertSubmitter` (S-L4(1)) uses `FOR SHARE`; this re-read does not. The proposed registry text "S-L4 CLOSED" therefore overstates it. | Either lock the capability row `FOR SHARE` (check the lock order against the capability writers) or reword to "narrowed (A11); kill switch remains the stop". |
+| LF-A11-4 | MEDIUM (registry integrity) | **The recheck table is incomplete.** Five OPEN registry rows labelled binding or "before the first real PSP" are absent from it: PAY-RECEIPT-T4-DRAIN-TEST-1, PAY-POLL-DECLINED-ALERT-RECON-1 (payments + ledger-finance), PAY-PAYOUT-REFBIND-1 (binding before any real payout provider; a money-binding issue), PAY-FPAY-HARDENING-1 and PAY-RECON-D2-HARDENING-1 (ledger-finance). None is mis-closed; they are untouched. But "What was NOT closed" reads as exhaustive. | Add the five rows to the recheck table with their honest class (b-open or c), and to the not-closed summary, before the orchestrator applies section 6. |
+| LF-A11-5 | LOW | `statement.PaymentFetchRequest` doc says "CoverageStart <= ContinueFrom", but the validator requires equality (`CoverageStart == ContinueFrom`; an earlier start is refused as an overlap). A real-source author following the type doc would be refused. | Fix the doc comment to "exactly ContinueFrom". |
+| LF-A11-6 | LOW | Paging contract: a real source that collects the whole window and pages afterwards (as the MOCK does through `PaymentLineCollector`) hits the 1M streaming or body cap on a large backlog. It is then refused every run and the cursor is stuck. | Section 3: require provider-side ordered paging (by `OccurredAt`, with the tie group kept whole), not collect-then-page. |
+| LF-A11-7 | LOW | Migration 0160 does not tie `provider_id IS NOT NULL` to `stream = 'payment_statement'` and `coverage_end IS NOT NULL`. The cursor query filters on both, so this is harmless today. | Optional CHECK in a later migration; no action needed for A11. |
+| LF-A11-8 | INFO | Section 6 closes PAY-K3-STATEMENT-SOURCE-WIRING-1 and leaves H-W1's second half (gate M2 on "last run for (tenant, provider) succeeded") as a residual sentence only. It is a real-money blocker (registry H-W1, 2026-10-05). R-S1 scope note: a provider known only from legacy ledger postings (no capability row, no attempt) is outside the scoped sweep, which is acceptable for the pre-cutover path only. | Keep H-W1 second half as its own OPEN real-money row; do not fold it into the closure. |
+
+Answers to the other section 7 probes: (1) confirmed statically. (3) persisted-line evidence dedupes on content that includes
+`occurred_at` (`payment_statement_k3.go`), so a stale-cursor loser's duplicate lines collapse. Change-dated lines for the same reference
+with different statuses already occurred in legacy overlapping imports, so this is not a new ambiguity class. (4) confirmed: the K3/M4
+loaders read across all imports. (5) confirmed: the E3 declaration is registration-time only, and T16 stays. (6) confirmed: no new
+posting.
+
+### 9.3 Verdict
+
+**NOT APPROVED (BLOCKED on verification), with no blocking defect found in static review.** The ledger invariants hold by construction:
+no ledger write, the cursor is atomic with its run, failed and missing paths never read as clean, and truncated runs do not advance
+freshness. Approval needs:
+
+1. The integration suites named in 9.1 run green on a private scratch DB once DB access is restored by the orchestrator/human.
+2. Doc fixes LF-A11-3 (wording or lock), LF-A11-4 and LF-A11-5 before the section 6 registry text is applied.
+3. LF-A11-1, LF-A11-2 and LF-A11-6 registered as OPEN rows binding before the first non-MOCK statement source. LF-A11-8 kept as its own
+   row.
+
+None of this is a blocker for a MOCK-only merge once items 1 and 2 are done.
