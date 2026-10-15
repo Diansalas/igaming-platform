@@ -13,7 +13,9 @@ package casino
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -236,7 +238,48 @@ func TestPostBet_ConsumedSessionPastMaxLifetimeRefusesNewBetButSettles(t *testin
 	if res, err := m.receive(m.orch, CallbackEventWin, "life-win-1", "", "life-round-1", 3000, uuid.Nil); err != nil || res.Outcome != OutcomeSucceeded {
 		t.Fatalf("win past the lifetime must settle, got %+v err=%v", res, err)
 	}
-	// A rollback of that exposure likewise (reversal of the win is a separate flow; use a fresh pair).
+
+	// SR8R3-7: the audit row's CONTENT (ids and the closed code only; no player id, IP or email).
+	var meta []byte
+	var target string
+	if err := m.pool.WithTenant(context.Background(), m.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT target_id, metadata FROM audit_log WHERE tenant_id = $1 AND action = 'casino_bet.denied_session_lifetime' ORDER BY created_at DESC LIMIT 1`,
+			m.f.tenantID).Scan(&target, &meta)
+	}); err != nil {
+		t.Fatalf("read lifetime audit row: %v", err)
+	}
+	if target != session.String() {
+		t.Fatalf("audit target %q, want the session id %s", target, session)
+	}
+	var md map[string]any
+	if err := json.Unmarshal(meta, &md); err != nil {
+		t.Fatal(err)
+	}
+	if md["reason_code"] != "SESSION_MAX_LIFETIME" || md["provider_tx_id"] != "life-bet-2" || md["brand_id"] != m.f.brandID.String() {
+		t.Fatalf("unexpected audit metadata: %s", meta)
+	}
+	allowed := map[string]bool{"provider_id": true, "provider_tx_id": true, "round_id": true, "brand_id": true, "reason_code": true}
+	for k := range md {
+		if !allowed[k] {
+			t.Fatalf("unexpected audit metadata key %q in %s (ids and the closed code only)", k, meta)
+		}
+	}
+	if strings.Contains(string(meta), m.f.playerAccountID.String()) {
+		t.Fatalf("the audit row must not carry the player id: %s", meta)
+	}
+
+	// A redelivery of the same bet stays declined, writes no ledger row, and is audited per attempt.
+	rows0 := countAuditRows(t, m.pool, m.f.tenantID, "casino_bet.denied_session_lifetime")
+	res, err = m.receive(m.orch, CallbackEventBet, "life-bet-2", "", "life-round-2", 1000, session)
+	if err != nil || res.Outcome != OutcomeDeclined || res.DeclineReason != DeclineReasonSessionExpired {
+		t.Fatalf("a redelivery must stay declined, got %+v err=%v", res, err)
+	}
+	if n := m.ledgerRows(t, "life-bet-2"); n != 0 {
+		t.Fatalf("a redelivered declined bet left %d ledger transactions", n)
+	}
+	if got := countAuditRows(t, m.pool, m.f.tenantID, "casino_bet.denied_session_lifetime"); got != rows0+1 {
+		t.Fatalf("each refused attempt is audited: want %d rows, got %d", rows0+1, got)
+	}
 }
 
 func TestPostBet_DefaultMaxLifetimeIsFourHours(t *testing.T) {

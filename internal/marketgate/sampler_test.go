@@ -61,8 +61,8 @@ func TestRefusalSampler_EvictedSuppressedCountsAreReportedOnTheNextRow(t *testin
 		now = now.Add(time.Millisecond)
 		k := refusalKey{tenant: tenant, brand: uuid.New(), op: OpLaunch, reason: ReasonNotPermitted}
 		for j := 0; j < refusalAuditBurst+1; j++ {
-			_, sup := s.take(k)
-			reported += sup
+			_, _, ev := s.takeDetailed(k)
+			reported += ev
 		}
 	}
 	if _, still := s.tenants[tenant].m[hot]; still {
@@ -74,8 +74,8 @@ func TestRefusalSampler_EvictedSuppressedCountsAreReportedOnTheNextRow(t *testin
 	// The evicted tally rides on the next audit row(s) written for this tenant, exactly once in total.
 	now = now.Add(refusalAuditRefill)
 	for i := 0; i < 5; i++ {
-		_, sup := s.take(refusalKey{tenant: tenant, brand: uuid.New(), op: OpLaunch, reason: ReasonNotPermitted})
-		reported += sup
+		_, _, ev := s.takeDetailed(refusalKey{tenant: tenant, brand: uuid.New(), op: OpLaunch, reason: ReasonNotPermitted})
+		reported += ev
 	}
 	if reported < 9 {
 		t.Fatalf("the evicted count must be reported on subsequent rows, reported %d", reported)
@@ -112,5 +112,73 @@ func TestRefusalSampler_IdleBucketsAreEvictedBeforeBusyOnes(t *testing.T) {
 	}
 	if EvictedSuppressed.Load() != before {
 		t.Fatal("idle evictions must not lose any tally")
+	}
+}
+
+// SR8R3-1: player A's evicted tally must never ride on player B's suppressed_since_last_row.
+func TestRefusalSampler_EvictedTallyIsSeparateFromAnotherKeysOwnCount(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := newRefusalSampler()
+	s.now = func() time.Time { return now }
+	tenant, brand := uuid.New(), uuid.New()
+	a := refusalKey{tenant: tenant, brand: brand, player: uuid.New(), op: OpDeposit, reason: ReasonNotPermitted}
+	for i := 0; i < refusalAuditBurst+9; i++ { // A: 9 suppressed
+		s.take(a)
+	}
+	// Evict A by filling the tenant's table with fresher non-idle buckets (their own counts stay 0).
+	for i := 0; i < refusalAuditMaxKeysPerTenant+5; i++ {
+		now = now.Add(time.Millisecond)
+		k := refusalKey{tenant: tenant, brand: brand, player: uuid.New(), op: OpDeposit, reason: ReasonNotPermitted}
+		for j := 0; j < refusalAuditBurst; j++ {
+			s.take(k)
+		}
+	}
+	if _, still := s.tenants[tenant].m[a]; still {
+		t.Fatal("setup: A should have been evicted")
+	}
+	// Player B: a brand-new key, first row. Its OWN suppressed count is 0; A's 9 are in the evicted field.
+	b := refusalKey{tenant: tenant, brand: brand, player: uuid.New(), op: OpDeposit, reason: ReasonNotPermitted}
+	w, own, ev := s.takeDetailed(b)
+	if !w {
+		t.Fatal("B's first refusal must write a row")
+	}
+	if own != 0 {
+		t.Fatalf("B's suppressed_since_last_row must be B's own count (0), got %d: A's tally leaked into it", own)
+	}
+	if ev != 0 && ev < 9 {
+		t.Fatalf("evicted tally must be reported whole in its own field, got %d", ev)
+	}
+}
+
+// SR8R3-4: GLOBAL pressure from many tenants (no tenant reaches its own cap) evicts from the largest tenants
+// and leaves a quiet tenant's pending count intact.
+func TestRefusalSampler_GlobalCapWithManyTenants(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := newRefusalSampler()
+	s.now = func() time.Time { return now }
+	quiet := refusalKey{tenant: uuid.New(), brand: uuid.New(), op: OpRegistration, reason: ReasonNotPermitted}
+	for i := 0; i < refusalAuditBurst+4; i++ { // 4 suppressed
+		s.take(quiet)
+	}
+	// 60 tenants x 400 buckets = 24k > 10k global cap, each below the 500 per-tenant cap.
+	for ti := 0; ti < 60; ti++ {
+		tenant := uuid.New()
+		for i := 0; i < 400; i++ {
+			now = now.Add(time.Millisecond)
+			k := refusalKey{tenant: tenant, brand: uuid.New(), op: OpDeposit, reason: ReasonNotPermitted, player: uuid.New()}
+			for j := 0; j < refusalAuditBurst+1; j++ { // non-idle: holds a suppressed count
+				s.take(k)
+			}
+		}
+	}
+	if s.size() > refusalAuditMaxKeys {
+		t.Fatalf("global size %d exceeds the cap %d", s.size(), refusalAuditMaxKeys)
+	}
+	if got := EvictedSuppressed.Load(); got == 0 {
+		t.Fatal("global eviction of non-idle buckets must be counted")
+	}
+	now = now.Add(refusalAuditRefill)
+	if _, sup := s.take(quiet); sup != 4 {
+		t.Fatalf("the quiet tenant's pending count must survive other tenants' pressure, got %d", sup)
 	}
 }

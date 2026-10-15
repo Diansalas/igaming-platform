@@ -335,7 +335,7 @@ func Check(ctx context.Context, tx pgx.Tx, req Request, ev Evidence) (Decision, 
 }
 
 func refuse(ctx context.Context, tx pgx.Tx, req Request, reason, evidence, marketOutcome string) (Decision, error) {
-	write, suppressed := refusalAudit.take(refusalKey{
+	write, suppressed, evicted := refusalAudit.takeDetailed(refusalKey{
 		tenant: req.TenantID, brand: req.BrandID, player: req.PlayerAccountID, op: req.Operation, reason: reason,
 	})
 	if !write {
@@ -350,6 +350,9 @@ func refuse(ctx context.Context, tx pgx.Tx, req Request, reason, evidence, marke
 	}
 	if suppressed > 0 {
 		meta["suppressed_since_last_row"] = suppressed
+	}
+	if evicted > 0 {
+		meta["suppressed_evicted"] = evicted // tenant-wide, from buckets evicted for memory (SR8R3-1)
 	}
 	if marketOutcome != "" {
 		meta["market_outcome"] = marketOutcome

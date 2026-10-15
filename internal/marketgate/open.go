@@ -64,8 +64,9 @@ func AnyCountryPermits(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brand
 	// SR8R-1: bound the resolver work. (1) One set-based query drops every
 	// candidate that has no in-force, active, ENABLED licence ceiling - the
 	// resolver denies those unconditionally (its step 1), so skipping them cannot
-	// change an answer; if the query fails the full list is kept (the resolver
-	// decides). (2) The country that last permitted this (tenant, brand,
+	// change an answer. (A failed statement aborts the transaction, so the next
+	// resolver query errors and the call returns an error - treated as CLOSED by
+	// every caller; ErrNoRows does not abort and keeps the full list.) (2) The country that last permitted this (tenant, brand,
 	// operations) is tried FIRST: a hint only, the resolver still decides, so a
 	// stale hint costs one extra resolve and never changes a verdict.
 	countries = prefilterByCeiling(ctx, tx, tenantID, asOf, countries)
@@ -157,7 +158,8 @@ func openHintKey(tenantID uuid.UUID, brandID *uuid.UUID, ops []Operation) string
 
 // prefilterByCeiling keeps only the candidates that have an in-force, active,
 // enabled ceiling for the tenant's licence. On any error it returns the input
-// unchanged (fail-safe: the resolver then decides every candidate).
+// unchanged; note that a failed statement aborts the surrounding transaction, so
+// the resolver's next query then errors and the caller treats the brand as CLOSED.
 func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf time.Time, in []string) []string {
 	// Two plain reads (the licence binding, then its ceilings) so no single statement
 	// both joins tenants and names a status column (tenant/status_readers_static_test).

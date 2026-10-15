@@ -33,9 +33,13 @@ import (
 //     the most buckets (the noisy one);
 //   - a bucket evicted while it still holds suppressed refusals is NOT lost
 //     silently: its count is added to the tenant's pending evicted total, which
-//     the next audit row written for that tenant carries as
-//     suppressed_evicted, and a structured log line plus the EvictedSuppressed
-//     counter record the eviction at once.
+//     the next audit row written for that tenant carries in its OWN field,
+//     suppressed_evicted (tenant-wide, never mixed into another key's
+//     suppressed_since_last_row, which stays that key's own tally), and a
+//     structured log line plus the EvictedSuppressed counter record the
+//     eviction at once. The tally is cleared when handed out, before the row
+//     commits, so a failed insert loses it (the counter keeps the evicted part);
+//     acceptable for sampling.
 //
 // The state is process-local (N instances = N x the caps; still bounded).
 const (
@@ -115,10 +119,16 @@ func (s *refusalSampler) evictLocked(tenant uuid.UUID, tb *tenantBuckets, now ti
 	s.total--
 }
 
-// take reports whether an audit row may be written for k now and, if so, how
-// many refusals were suppressed or evicted since the last written row of k's
-// tenant/bucket.
+// take is takeDetailed without the tenant-wide evicted tally (tests of the per-key tally).
 func (s *refusalSampler) take(k refusalKey) (write bool, suppressed int) {
+	write, suppressed, _ = s.takeDetailed(k)
+	return write, suppressed
+}
+
+// takeDetailed reports whether an audit row may be written for k now and, if so,
+// how many refusals of THIS key were suppressed since its last written row, and
+// separately how many refusals of the tenant's evicted buckets are still unreported.
+func (s *refusalSampler) takeDetailed(k refusalKey) (write bool, suppressed, evicted int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -160,12 +170,12 @@ func (s *refusalSampler) take(k refusalKey) (write bool, suppressed int) {
 	}
 	if b.tokens < 1 {
 		b.suppressed++
-		return false, 0
+		return false, 0, 0
 	}
 	b.tokens--
-	suppressed = b.suppressed + tb.evicted
+	suppressed, evicted = b.suppressed, tb.evicted
 	b.suppressed, tb.evicted = 0, 0
-	return true, suppressed
+	return true, suppressed, evicted
 }
 
 // size is the number of live buckets (tests).
