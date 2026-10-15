@@ -930,6 +930,16 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 			return fail("cursor", err)
 		}
 		opts.cursor = cursor
+		// SR11-1: a run row above the backed cursor that no import backs is ignored by the cursor read; say so loudly.
+		if n, aerr := countUnbackedCursorRuns(ctx, pool, tenantID, provider, cursor); aerr != nil {
+			return fail("cursor", aerr)
+		} else if n > 0 {
+			if logger != nil {
+				logger.Error("reconciliation sweep: payment statement cursor ANOMALY (P1): run rows with no backing import were ignored",
+					"tenant_id", tenantID, "stream", stream, "provider_id", provider, "rows", n)
+			}
+			raiseRunNotReconciled(ctx, pool, tenantID, stream, provider, "cursor_anomaly")
+		}
 	}
 
 	// Phase 1: fetch, no transaction held.

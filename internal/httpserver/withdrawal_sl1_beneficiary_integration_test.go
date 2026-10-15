@@ -115,3 +115,27 @@ func TestSL1_Submit_StaffWithADifferentPersonIsNotRefused(t *testing.T) {
 		t.Fatalf("state %q", submitted.State)
 	}
 }
+
+// SR11-4: a refused beneficiary action is durable (Denied audit row), not log-only; likewise the existing self-approval refusal.
+func TestSL1_RefusalsAreAuditedDenied(t *testing.T) {
+	f := setupStage3CResolutionFixture(t, 10000)
+	staff, token := sl1BeneficiaryStaff(t, f)
+	count := func(action string) int {
+		return countRows(t, f.pool, f.tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = $2 AND actor_id = $3 AND target_id = $4 AND outcome = 'denied' AND metadata->>'reason' = 'staff_is_beneficiary'`,
+			f.tenant.ID, action, staff.ID, f.withdrawalID)
+	}
+	if code, _ := sl1Status(t, postJSON(t, f.srv, "/v1/admin/withdrawals/"+f.withdrawalID+"/submit", token.AccessToken, map[string]string{"payment_method": "bank_transfer"})); code != http.StatusForbidden {
+		t.Fatalf("submit: %d", code)
+	}
+	if n := count("withdrawal.submit.http"); n != 1 {
+		t.Fatalf("want one denied submit audit row, got %d", n)
+	}
+	submitted := mustSubmitWithdrawal(t, f.srv, f.financeToken.AccessToken, f.withdrawalID)
+	_ = submitted
+	if code, _ := sl1Status(t, postJSON(t, f.srv, "/v1/admin/withdrawals/"+f.withdrawalID+"/resolve", token.AccessToken, nil)); code != http.StatusForbidden {
+		t.Fatalf("resolve: %d", code)
+	}
+	if n := count("withdrawal.resolve.http"); n != 1 {
+		t.Fatalf("want one denied resolve audit row, got %d", n)
+	}
+}

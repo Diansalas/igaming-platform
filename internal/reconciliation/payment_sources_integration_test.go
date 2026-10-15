@@ -5,6 +5,7 @@ package reconciliation
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -607,7 +608,7 @@ func TestBound_FailedFetchDoesNotMoveTheCursor_NextRunRetriesTheSameWindow(t *te
 // match (under the advisory lock) sees a moved cursor and SKIPS rather than covering the window twice.
 func TestBound_StaleCursorUnderTheLock_IsSkippedNotDoubleCovered(t *testing.T) {
 	w := newPayWorld(t)
-	inner := payFixedSource{provider: payProvA, stmt: wideCoverage()}
+	inner := payFixedSource{provider: payProvA, stmt: statement.PaymentStatement{CoverageStart: time.Now().Add(-time.Hour).UTC(), CoverageEnd: time.Now().UTC()}}
 	src := &recSource{provider: payProvA}
 	src.fn = func(n int, req statement.PaymentFetchRequest) (statement.PaymentStatement, error) {
 		if n == 1 {
@@ -741,5 +742,88 @@ func TestBound_StatusChangeAfterTheCursorIsReReported(t *testing.T) {
 	got := outcomeFor(t, o, payProvA)
 	if got.Err != nil || got.Run.Status != StatusMismatchesFound {
 		t.Fatalf("the settled-but-unposted deposit must surface as a mismatch in the later window: %+v", got)
+	}
+}
+
+// SR11-1: a forged cursor row (the runtime role may INSERT reconciliation_runs) used to SELECT what is fetched, so one
+// in-skew row silently blinded the stream while every run read clean. A run row that no stored import backs is now
+// ignored by the cursor read and reported by a durable alert; the deposit created after the forgery is still imported.
+func TestBound_SR11_ForgedInSkewCursorDoesNotBlindTheStream_AndIsReportedLoudly(t *testing.T) {
+	w := newPayWorld(t)
+	cfg := PaymentSweepConfig{Resolver: mapResolver{payProvA: w.srcA, payProvB: w.srcB}, AllowSynthetic: true, RunLineBound: 100}
+	scopedSweep(t, w.pool, w.f, cfg)
+	real := mustCursor(t, w.pool, w.f.tenantID, payProvA)
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, status, coverage_end, provider_id, window_truncated)
+			VALUES ($1, 'payment_statement', now() - interval '1 hour', now(), 'clean', now(), $2, false)`, w.f.tenantID, payProvA)
+		return err
+	}); err != nil {
+		t.Fatalf("seed forged run: %v", err)
+	}
+	w.deposit(t, 900) // created AFTER the genuine cursor and BEFORE the forged "coverage_end"
+	if got := mustCursor(t, w.pool, w.f.tenantID, payProvA); !got.Equal(real) {
+		t.Fatalf("an unbacked run row must not move the cursor: %s vs %s", got, real)
+	}
+	o := scopedSweep(t, w.pool, w.f, cfg)
+	if a := outcomeFor(t, o, payProvA); a.Err != nil {
+		t.Fatalf("the sweep still runs: %+v", a)
+	}
+	if refs := importedRefs(t, w.pool, w.f.tenantID, payProvA); len(refs) != 1 {
+		t.Fatalf("the deposit made after the forgery must still be imported, got %v", refs)
+	}
+	found := false
+	for _, r := range alertinject.Find(alertinject.WaitForKind(t, w.pool, w.f.tenantID, "reconciliation.run_failed", 1), "reconciliation.run_failed") {
+		if r.Discriminator == "stream:payment_statement:provider:"+payProvA+":cursor_anomaly" && r.Severity == "p1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a cursor anomaly must raise a durable P1 (phase cursor_anomaly)")
+	}
+}
+
+// SR11-2: in continuation mode a statement whose CoverageEnd is in the future of the server clock is refused (it would
+// become a cursor ahead of the lines the provider has yet to report).
+func TestBound_SR11_FutureCoverageEndIsRefusedInContinuationMode(t *testing.T) {
+	w := newPayWorld(t)
+	src := &recSource{provider: payProvA, fn: func(_ int, req statement.PaymentFetchRequest) (statement.PaymentStatement, error) {
+		start := req.ContinueFrom
+		if start.IsZero() {
+			start = time.Now().Add(-time.Hour).UTC()
+		}
+		return statement.PaymentStatement{CoverageStart: start, CoverageEnd: time.Now().Add(2 * time.Minute).UTC()}, nil
+	}}
+	o := scopedSweep(t, w.pool, w.f, PaymentSweepConfig{Resolver: mapResolver{payProvA: src, payProvB: w.srcB}, AllowSynthetic: true})
+	if a := outcomeFor(t, o, payProvA); !errors.Is(a.Err, ErrPaymentStatementCoverageGap) {
+		t.Fatalf("a future coverage end must be refused: %+v", a)
+	}
+	if runs := paymentRuns(t, w.pool, w.f.tenantID, payProvA); len(runs) != 0 {
+		t.Fatalf("nothing may be recorded: %+v", runs)
+	}
+}
+
+// SR11-3: the not-reconciled audit and log carry only the sanitised provider id, never a raw one from a database row.
+func TestScoped_SR11_HostileProviderIDNeverReachesTheAuditError(t *testing.T) {
+	w := newPayWorld(t)
+	hostile := "evil\x1b[2J-" + strings.Repeat("x", 300)
+	orig := listConfiguredPaymentProviders
+	listConfiguredPaymentProviders = func(context.Context, *db.Pool, uuid.UUID) ([]string, error) { return []string{hostile}, nil }
+	t.Cleanup(func() { listConfiguredPaymentProviders = orig })
+	o := scopedSweep(t, w.pool, w.f, PaymentSweepConfig{Resolver: mapResolver{}, AllowSynthetic: true})
+	if len(o.PaymentStatement) != 1 || o.PaymentStatement[0].NotReconciled != NotReconciledNoSource {
+		t.Fatalf("unexpected outcome: %+v", o.PaymentStatement)
+	}
+	var errText, prov string
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata->>'error', metadata->>'provider_id' FROM audit_log WHERE tenant_id = $1 AND action = 'reconciliation.sweep_run_failed' ORDER BY created_at DESC LIMIT 1`,
+			w.f.tenantID).Scan(&errText, &prov)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(errText, "evil") || strings.Contains(errText, "\x1b") || strings.Contains(errText, "xxxxxxxx") || len(errText) > 400 {
+		t.Fatalf("the audit error must carry the sanitised id only: %q", errText)
+	}
+	if prov != "invalid_provider_id" {
+		t.Fatalf("provider_id = %q", prov)
 	}
 }

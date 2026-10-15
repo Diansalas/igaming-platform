@@ -192,7 +192,7 @@ func reconcilePaymentStreamsForTenant(ctx context.Context, pool *db.Pool, logger
 	for _, tg := range targets {
 		if tg.src == nil {
 			outs = append(outs, reconcilePaymentNotReconciled(ctx, pool, logger, tenantID, tg.providerID, tg.reason, obsStatus,
-				fmt.Errorf("%w: provider %q (%s)", ErrPaymentStatementSourceMissing, tg.providerID, tg.reason)))
+				fmt.Errorf("%w: provider %q (%s)", ErrPaymentStatementSourceMissing, discPart(tg.providerID), tg.reason)))
 			continue
 		}
 		outs = append(outs, ReconcilePaymentStatementForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, tg.src,
@@ -224,17 +224,43 @@ func readPaymentCursor(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, p
 func queryPaymentCursor(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string) (time.Time, error) {
 	var prev *time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT max(coverage_end) FROM reconciliation_runs
-		  WHERE tenant_id = $1 AND stream = $2 AND provider_id = $3 AND coverage_end IS NOT NULL
-		    AND run_at <= now() AND coverage_end <= now() + $4::interval`,
-		tenantID, string(StreamPaymentStatement), providerID,
-		fmt.Sprintf("%d seconds", int(PaymentCoverageMaxClockSkew.Seconds()))).Scan(&prev); err != nil {
+		`SELECT max(r.coverage_end) FROM reconciliation_runs r
+		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL
+		    AND r.run_at <= now() AND r.coverage_end <= now()
+		    AND EXISTS (SELECT 1 FROM payment_statement_imports i
+		                 WHERE i.tenant_id = r.tenant_id AND i.provider_id = r.provider_id AND i.coverage_end = r.coverage_end)`,
+		tenantID, string(StreamPaymentStatement), providerID).Scan(&prev); err != nil {
 		return time.Time{}, fmt.Errorf("reconciliation: read payment statement cursor: %w", err)
 	}
 	if prev == nil {
 		return time.Time{}, nil
 	}
 	return prev.UTC().Truncate(time.Microsecond), nil
+}
+
+// countUnbackedCursorRuns counts payment_statement run rows of the pair, above the backed cursor, that no stored
+// import backs (SR11-1). A genuine run's coverage_end always equals its import's (the import is committed in the
+// ingest transaction before the match writes the run), so such a row is a forgery or corruption: it is IGNORED by the
+// cursor read and reported by a durable alert (phase cursor_anomaly), never trusted.
+func countUnbackedCursorRuns(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, providerID string, cursor time.Time) (int, error) {
+	var n int
+	var floor *time.Time
+	if !cursor.IsZero() {
+		floor = &cursor
+	}
+	err := pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM reconciliation_runs r
+			  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL
+			    AND ($4::timestamptz IS NULL OR r.coverage_end > $4)
+			    AND NOT EXISTS (SELECT 1 FROM payment_statement_imports i
+			                     WHERE i.tenant_id = r.tenant_id AND i.provider_id = r.provider_id AND i.coverage_end = r.coverage_end)`,
+			tenantID, string(StreamPaymentStatement), providerID, floor).Scan(&n)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("reconciliation: count unbacked payment statement cursor rows: %w", err)
+	}
+	return n, nil
 }
 
 // errPaymentCursorStale means that, under the stream's advisory lock, the cursor is no longer the one this

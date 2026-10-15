@@ -458,6 +458,12 @@ func FetchPaymentStatement(ctx context.Context, source statement.PaymentStatemen
 	if err := validateBoundedWindow(stmt, req, opts); err != nil {
 		return statement.PaymentStatement{}, err
 	}
+	// SR11-2: in continuation mode CoverageEnd becomes the next cursor, so it must not lie in the future of the
+	// server's own clock: lines the provider reports later with an OccurredAt between now and a future cursor
+	// would never be requested again. (The cursor read also ignores a future coverage_end.)
+	if opts.Continuation && stmt.CoverageEnd.After(time.Now().UTC()) {
+		return statement.PaymentStatement{}, fmt.Errorf("%w: coverage end %s is in the future of the server clock", ErrPaymentStatementCoverageGap, stmt.CoverageEnd.Format(time.RFC3339Nano))
+	}
 	return stmt, nil
 }
 

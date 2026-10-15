@@ -735,6 +735,22 @@ type approveWithdrawalResponse struct {
 	Approved bool `json:"approved"`
 }
 
+// auditBeneficiaryRefusal writes the durable Denied audit row of a refused beneficiary action (SR11-4): an insider-fraud
+// signal must not be log-only. It runs in its own transaction because the refused request's transaction rolled back;
+// a failure to write it is logged and never changes the refusal.
+func auditBeneficiaryRefusal(r *http.Request, deps Deps, logger *slog.Logger, tenantID, staffID, withdrawalID uuid.UUID, action, requestID string) {
+	if err := deps.DB.WithTenant(r.Context(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: staffID,
+			Action: action, TargetType: "withdrawal_request", TargetID: withdrawalID.String(),
+			Outcome: audit.OutcomeDenied, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+			Metadata: map[string]any{"reason": "staff_is_beneficiary"},
+		})
+	}); err != nil {
+		logger.Error("beneficiary_refusal_audit_failed", "error", err)
+	}
+}
+
 // staffIsWithdrawalBeneficiary reports whether the staff member resolves to the SAME Person as the withdrawing player
 // of withdrawalID (withdrawal-state-machine.md section 5 bypass #2). found is false when the withdrawal is not
 // visible in this tenant scope. Shared by approve, submit and /resolve (PAY-SEC-LAUNCH-1 / S-L1: a beneficiary
@@ -853,6 +869,7 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if errors.Is(err, withdrawal.ErrSelfApproval) {
+			auditBeneficiaryRefusal(r, deps, logger, tc.TenantID, approverID, id, "withdrawal.approve.http", requestID)
 			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot approve your own withdrawal")
 			return
 		}
@@ -1090,6 +1107,7 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		})
 		if errors.Is(err, withdrawal.ErrStaffIsBeneficiary) {
 			logger.Warn("submit_withdrawal_refused_beneficiary_staff", "request_id", requestID, "tenant_id", tc.TenantID)
+			auditBeneficiaryRefusal(r, deps, logger, tc.TenantID, submitterID, id, "withdrawal.submit.http", requestID)
 			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is linked to the withdrawing player's own Person and cannot submit the withdrawal")
 			return
 		}
@@ -1399,6 +1417,7 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrStaffIsBeneficiary) {
 			logger.Warn("resolve_withdrawal_refused_beneficiary_staff", "request_id", requestID, "tenant_id", tc.TenantID)
+			auditBeneficiaryRefusal(r, deps, logger, tc.TenantID, resolverID, id, "withdrawal.resolve.http", requestID)
 			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is linked to the withdrawing player's own Person and cannot resolve the withdrawal")
 			return
 		}
