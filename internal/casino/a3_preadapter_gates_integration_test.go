@@ -83,11 +83,6 @@ func a3Session(t *testing.T, e *a3Env, consume bool) uuid.UUID {
 	return id
 }
 
-func (e *a3Env) deliver(t *testing.T, payloadFn func() (ReceiveCallbackResult, error)) (ReceiveCallbackResult, error) {
-	t.Helper()
-	return payloadFn()
-}
-
 func (e *a3Env) receive(t *testing.T, eventType CallbackEventType, txID, origTxID, round string, amount int64, sessionID uuid.UUID) (ReceiveCallbackResult, error) {
 	t.Helper()
 	outcome := OutcomeSucceeded
