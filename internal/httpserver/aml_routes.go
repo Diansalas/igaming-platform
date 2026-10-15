@@ -92,6 +92,7 @@ type amlCall struct {
 	logger    observabilityLogger
 	actor     aml.Actor
 	svc       AMLOfficerAPI
+	viewer    staffViewer // ADR 0114 H1: who is looking, for staff-identity redaction
 	r         *http.Request
 	w         http.ResponseWriter
 }
@@ -133,7 +134,7 @@ func amlHandler(deps Deps, op string, fn amlFunc) http.Handler {
 		if tc.TenantID == uuid.Nil {
 			actor.Scope, actor.TenantID = aml.ScopePlatformActing, target
 		}
-		fn(amlCall{requestID: requestID, logger: logger, actor: actor, svc: deps.AML, r: r, w: w})
+		fn(amlCall{requestID: requestID, logger: logger, actor: actor, svc: deps.AML, viewer: staffViewerOf(tc), r: r, w: w})
 	})
 }
 
@@ -296,15 +297,16 @@ type amlEventDTO struct {
 	NoteID                  *string `json:"note_id,omitempty"`
 	ExternalFilingReference *string `json:"external_filing_reference,omitempty"`
 	ReasonCode              string  `json:"reason_code"`
-	ActorID                 string  `json:"actor_id"`
-	ActorScope              string  `json:"actor_scope"`
-	CreatedAt               string  `json:"created_at"`
+	// ActorID is the acting officer's staff id, redacted by the ADR 0114 H1 helper: a tenant viewer sees only tenant-scope actors.
+	ActorID    staffRef `json:"actor_id"`
+	ActorScope string   `json:"actor_scope"`
+	CreatedAt  string   `json:"created_at"`
 }
 
-func toAMLEventDTO(e aml.CaseEvent) amlEventDTO {
+func toAMLEventDTO(v staffViewer, e aml.CaseEvent) amlEventDTO {
 	d := amlEventDTO{Seq: e.Seq, Type: e.Type, FromStatus: e.FromStatus, ToStatus: e.ToStatus, ProposalKind: e.ProposalKind,
 		ProposalSeq: e.ProposalSeq, ContentHash: e.ContentHash, ExternalFilingReference: e.ExternalFilingReference,
-		ReasonCode: e.ReasonCode, ActorID: e.ActorID.String(), ActorScope: e.ActorScope, CreatedAt: amlTime(e.CreatedAt)}
+		ReasonCode: e.ReasonCode, ActorID: v.ref(e.ActorScope, e.ActorID), ActorScope: e.ActorScope, CreatedAt: amlTime(e.CreatedAt)}
 	if e.SubjectHoldID != nil {
 		s := e.SubjectHoldID.String()
 		d.SubjectHoldID = &s
@@ -320,8 +322,9 @@ type amlNoteDTO struct {
 	ID          string `json:"id"`
 	Body        string `json:"body"`
 	LintVersion string `json:"lint_version"`
-	CreatedBy   string `json:"created_by"`
-	CreatedAt   string `json:"created_at"`
+	// CreatedBy is redacted like the events' actor (ADR 0114 H1).
+	CreatedBy staffRef `json:"created_by"`
+	CreatedAt string   `json:"created_at"`
 }
 
 // ---- handlers ------------------------------------------------------------------------------------------------------------
@@ -373,11 +376,22 @@ func amlCaseRead(c amlCall) {
 	}
 	events := make([]amlEventDTO, 0, len(evs))
 	for _, e := range evs {
-		events = append(events, toAMLEventDTO(e))
+		events = append(events, toAMLEventDTO(c.viewer, e))
 	}
 	ns := make([]amlNoteDTO, 0, len(notes))
 	for _, n := range notes {
-		ns = append(ns, amlNoteDTO{ID: n.ID.String(), Body: n.Body, LintVersion: n.LintVersion, CreatedBy: n.CreatedBy.String(), CreatedAt: amlTime(n.CreatedAt)})
+		// A note row carries no scope column; its author's scope is the actor_scope of the case event that recorded it (the event
+		// names the note id). No matching event means the scope is unknown, and unknown is hidden from a tenant viewer.
+		noteScope := ""
+		for _, e := range evs {
+			if e.NoteID != nil && *e.NoteID == n.ID {
+				noteScope = e.ActorScope
+				if noteScope == aml.ScopePlatformActing {
+					noteScope = staffScopePlatform
+				}
+			}
+		}
+		ns = append(ns, amlNoteDTO{ID: n.ID.String(), Body: n.Body, LintVersion: n.LintVersion, CreatedBy: c.viewer.ref(noteScope, n.CreatedBy), CreatedAt: amlTime(n.CreatedAt)})
 	}
 	writeJSON(c.w, http.StatusOK, map[string]any{"case": toAMLCaseDTO(cs), "events": events, "notes": ns})
 }

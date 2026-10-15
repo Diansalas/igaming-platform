@@ -12538,7 +12538,7 @@ components:
         note_id: { type: string, format: uuid }
         external_filing_reference: { type: string }
         reason_code: { type: string }
-        actor_id: { type: string, format: uuid }
+        actor_id: { type: string, format: uuid, nullable: true, description: "Staff identity redaction (ADR 0114 H1): null for a tenant-scoped caller when the actor is platform staff or of unknown scope" }
         actor_scope: { type: string, enum: [tenant, platform_acting] }
         created_at: { type: string, format: date-time }
     AmlCaseNote:
@@ -12548,7 +12548,7 @@ components:
         id: { type: string, format: uuid }
         body: { type: string }
         lint_version: { type: string }
-        created_by: { type: string, format: uuid }
+        created_by: { type: string, format: uuid, nullable: true, description: "Staff identity redaction (ADR 0114 H1): null for a tenant-scoped caller unless the recording event shows a tenant-scope actor" }
         created_at: { type: string, format: date-time }
     AmlCaseDetail:
       type: object

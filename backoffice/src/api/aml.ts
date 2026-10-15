@@ -65,7 +65,8 @@ export interface AmlCaseEvent {
   note_id?: string
   external_filing_reference?: string
   reason_code: string
-  actor_id: string
+  /** Null when redacted (ADR 0114 H1): a tenant-scoped caller does not see platform staff ids. */
+  actor_id: string | null
   actor_scope: 'tenant' | 'platform_acting'
   created_at: string
 }
@@ -74,7 +75,8 @@ export interface AmlCaseNote {
   id: string
   body: string
   lint_version: string
-  created_by: string
+  /** Null when redacted (ADR 0114 H1). */
+  created_by: string | null
   created_at: string
 }
 

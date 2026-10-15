@@ -482,3 +482,40 @@ func TestAMLRoutes_StaticSafetyPins(t *testing.T) {
 		t.Errorf("aml.Actor literal appears %d times, want 2", n)
 	}
 }
+
+// Each route is guarded by exactly the permission the ADR 0116 s6 table names for it. Today the four permissions are held by the
+// same two roles, so a swapped permission would be invisible to behaviour tests; this pin keeps the routes honest if the
+// holder sets ever diverge (e.g. a read-only analyst role).
+func TestAMLRoutes_EachRouteHasItsPermission(t *testing.T) {
+	b, err := os.ReadFile("aml_routes.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`mux\.Handle\("([A-Z]+ /v1/[^"]+)",\n\s+staffRoute\(deps, \w+, auth\.RequirePermission\(auth\.(PermAML\w+)\)`)
+	got := map[string]string{}
+	for _, m := range re.FindAllStringSubmatch(string(b), -1) {
+		got[m[1]] = m[2]
+	}
+	const base = " /v1/admin/tenants/{tenantID}/aml"
+	want := map[string]string{
+		"GET" + base + "/cases":                      "PermAMLCaseRead",
+		"GET" + base + "/cases/{caseID}":             "PermAMLCaseRead",
+		"GET" + base + "/persons/{personID}/holds":   "PermAMLCaseRead",
+		"POST" + base + "/holds":                     "PermAMLHoldManage",
+		"POST" + base + "/holds/{holdID}/lift":       "PermAMLHoldManage",
+		"POST" + base + "/cases":                     "PermAMLCaseWork",
+		"POST" + base + "/cases/{caseID}/transition": "PermAMLCaseWork",
+		"POST" + base + "/cases/{caseID}/notes":      "PermAMLCaseWork",
+		"POST" + base + "/cases/{caseID}/sar-flag":   "PermAMLCaseWork",
+		"POST" + base + "/cases/{caseID}/proposals":  "PermAMLCaseWork",
+		"POST" + base + "/cases/{caseID}/approvals":  "PermAMLCaseCloseApprove",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("found %d guarded registrations, want %d: %v", len(got), len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s guarded by %q, want %q", k, got[k], v)
+		}
+	}
+}

@@ -387,6 +387,16 @@ describe('case detail actions follow the case state (the server still decides)',
     expect(path).toBe(`${BASE}/cases/${CASE}`)
   })
 
+  it('a redacted (null) actor or author id is shown as a fixed word and never guessed or compared with the viewer', async () => {
+    const d = detail('in_review', { events: [{ seq: 1, type: 'opened', reason_code: 'r', actor_id: null, actor_scope: 'platform_acting', created_at: '2026-10-10T10:00:00Z' }] })
+    d.notes[0].created_by = null
+    await openCase(d)
+    const events = screen.getByRole('region', { name: 'Events' })
+    expect(events).toHaveTextContent('by hidden (platform_acting)')
+    expect(screen.getByRole('region', { name: 'Notes' })).toHaveTextContent('hidden')
+    expect(document.body).not.toHaveTextContent('null')
+  })
+
   it('renders note bodies as text, never as markup', async () => {
     const d = detail('in_review')
     d.notes[0].body = '<img src=x onerror=alert(1)> <b>bold</b>'

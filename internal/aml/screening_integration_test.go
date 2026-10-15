@@ -304,6 +304,46 @@ func TestScreening_OfficerCannotScreenOwnPerson(t *testing.T) {
 	if !errors.Is(err, aml.ErrFourEyes) {
 		t.Fatalf("own person: %v", err)
 	}
+	// ... nor read the screening history of their own person.
+	if _, err := svc.ListScreenings(ctx, q.Officers[0].Actor, q.Officers[0].PersonID); !errors.Is(err, aml.ErrFourEyes) {
+		t.Fatalf("own person (read): %v", err)
+	}
+}
+
+// The readiness reader sets a placeholder principal around ONE count; it must restore the session setting exactly (a changed
+// setting would leak into the rest of the caller's transaction).
+func TestAMLReadiness_RestoresTheSessionSettings(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t, "under_platform_licence")
+	amlfix.Bootstrap(t, w.Owner, w.Tenant, 2)
+	if err := w.RT.WithTenantReadOnly(ctx, w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+		var before, after *string
+		if err := tx.QueryRow(ctx, `SELECT current_setting('app.principal_id', true)`).Scan(&before); err != nil {
+			return err
+		}
+		var met bool
+		if err := tx.QueryRow(ctx, `SELECT o_quorum_met FROM aml_readiness($1, NULL)`, w.Tenant).Scan(&met); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT current_setting('app.principal_id', true)`).Scan(&after); err != nil {
+			return err
+		}
+		if !met {
+			t.Error("the quorum must be seen")
+		}
+		norm := func(s *string) string { // an unset setting and an empty one are the same to every policy (NULLIF(..., ''))
+			if s == nil {
+				return ""
+			}
+			return *s
+		}
+		if norm(before) != norm(after) {
+			t.Errorf("app.principal_id before %q, after %q: the setting must be restored", norm(before), norm(after))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Scope and tenant isolation: another tenant's officer cannot read or write; a tenant-scope officer of a platform-licensed
@@ -393,20 +433,22 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 		decision       *string
 		hold           *uuid.UUID
 	}{
-		"potential match recorded as no action":  {"potential_match", m("{pep}"), nil, none, nil},
-		"confirmed under the withdrawal scope":   {"confirmed", m("{sanctions}"), nil, hwp, &hold},
-		"sanctions match under the weaker scope": {"potential_match", m("{sanctions}"), nil, hwp, &hold},
-		"a match without a list":                 {"potential_match", nil, nil, hall, &hold},
-		"an error without its code":              {"error", nil, nil, none, nil},
-		"a clear carrying an error code":         {"clear", nil, s("timeout"), none, nil},
-		"a clear carrying a match":               {"clear", m("{pep}"), nil, none, nil},
-		"a clear carrying a hold":                {"clear", nil, nil, hwp, &hold},
-		"an error with a match":                  {"error", m("{pep}"), s("timeout"), none, nil},
-		"a hold decision without the hold":       {"error", nil, s("timeout"), hwp, nil},
-		"a no-action decision naming a hold":     {"error", nil, s("timeout"), none, &hold},
-		"an outcome outside the vocabulary":      {"approved", nil, nil, none, nil},
-		"an error code outside the vocabulary":   {"error", nil, s("weird"), none, nil},
-		"a list outside the vocabulary":          {"potential_match", m("{watch}"), nil, hall, &hold},
+		"potential match recorded as no action":                         {"potential_match", m("{pep}"), nil, none, nil},
+		"confirmed under the withdrawal scope":                          {"confirmed", m("{sanctions}"), nil, hwp, &hold},
+		"sanctions match under the weaker scope":                        {"potential_match", m("{sanctions}"), nil, hwp, &hold},
+		"confirmed naming only the PEP list under the withdrawal scope": {"confirmed", m("{pep}"), nil, hwp, &hold},
+		"a decision outside the vocabulary":                             {"error", nil, s("timeout"), s("freeze"), &hold},
+		"a match without a list":                                        {"potential_match", nil, nil, hall, &hold},
+		"an error without its code":                                     {"error", nil, nil, none, nil},
+		"a clear carrying an error code":                                {"clear", nil, s("timeout"), none, nil},
+		"a clear carrying a match":                                      {"clear", m("{pep}"), nil, none, nil},
+		"a clear carrying a hold":                                       {"clear", nil, nil, hwp, &hold},
+		"an error with a match":                                         {"error", m("{pep}"), s("timeout"), none, nil},
+		"a hold decision without the hold":                              {"error", nil, s("timeout"), hwp, nil},
+		"a no-action decision naming a hold":                            {"error", nil, s("timeout"), none, &hold},
+		"an outcome outside the vocabulary":                             {"approved", nil, nil, none, nil},
+		"an error code outside the vocabulary":                          {"error", nil, s("weird"), none, nil},
+		"a list outside the vocabulary":                                 {"potential_match", m("{watch}"), nil, hall, &hold},
 	} {
 		err := insert(c.outcome, c.match, c.errCode, c.decision, c.hold)
 		if pgCode(err) != "23514" {
@@ -426,6 +468,53 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 	} {
 		if err := insert(c.outcome, c.match, c.errCode, c.decision, c.hold); err != nil {
 			t.Errorf("%s: a lawful shape was refused: %v", name, err)
+		}
+	}
+	// Shape CHECKs of the identifying columns: a platform-id-shaped pseudonym, a malformed key / provider / reference / trigger, an
+	// out-of-vocabulary list, an owner scope that disagrees with the recording scope.
+	raw := func(col, val string) error {
+		cols := map[string]string{"trigger": "manual", "idempotency_key": "shape-" + uuid.NewString(), "provider_id": "mock-screening",
+			"provider_reference": "ok-1", "subject_ref": strings.Repeat("a", 64), "owner_scope": "platform", "recorded_by_scope": "platform_acting", "lists": "{sanctions}"}
+		cols[col] = val
+		err := w.Owner.WithTenant(ctx, w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `ALTER TABLE aml_screening_results DISABLE TRIGGER aml_screening_results_10_guard`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO aml_screening_results (tenant_id, owner_scope, person_id, idempotency_key, trigger, provider_id, provider_reference, subject_ref, lists,
+					outcome, screened_at, decision, recorded_by, recorded_by_person_id, recorded_by_scope)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $12::text[], 'clear', now(), 'none', $9, $10, $11)`,
+				w.Tenant, cols["owner_scope"], p.PersonID, cols["idempotency_key"], cols["trigger"], cols["provider_id"], cols["provider_reference"], cols["subject_ref"],
+				q.Officers[0].StaffID, q.Officers[0].PersonID, cols["recorded_by_scope"], cols["lists"]); err != nil {
+				return err
+			}
+			return errRollback
+		})
+		if errors.Is(err, errRollback) {
+			return nil
+		}
+		return err
+	}
+	if err := raw("trigger", "manual"); err != nil {
+		t.Fatalf("control (lawful shape): %v", err)
+	}
+	for name, c := range map[string][2]string{
+		"unknown trigger":                 {"trigger", "cron"},
+		"key with a space":                {"idempotency_key", "has space"},
+		"empty key":                       {"idempotency_key", ""},
+		"uuid-shaped pseudonym":           {"subject_ref", uuid.NewString()},
+		"uppercase pseudonym":             {"subject_ref", strings.ToUpper(strings.Repeat("a", 64))},
+		"short pseudonym":                 {"subject_ref", "abc"},
+		"provider id with a space":        {"provider_id", "Mock Screening"},
+		"provider reference with a space": {"provider_reference", "a b"},
+		"owner scope outside the set":     {"owner_scope", "everyone"},
+		"scope disagreeing with owner":    {"recorded_by_scope", "tenant"},
+		"recording scope outside the set": {"recorded_by_scope", "everyone"},
+		"a list outside the vocabulary":   {"lists", "{watch}"},
+		"three lists":                     {"lists", "{sanctions,pep,adverse}"},
+		"no list":                         {"lists", "{}"},
+	} {
+		if err := raw(c[0], c[1]); pgCode(err) != "23514" {
+			t.Errorf("%s: want a CHECK violation, got %v", name, err)
 		}
 	}
 	// Append-only, even for the owner.

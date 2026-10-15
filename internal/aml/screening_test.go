@@ -321,7 +321,9 @@ func TestOrchestrator_NoPolicy_MatchStillActsAndErrorDoesNotHold(t *testing.T) {
 func TestOrchestrator_PolicyReadFailure_RefusesBeforeTheProvider(t *testing.T) {
 	p := &scripted{res: aml.ScreeningResult{Outcome: aml.OutcomeClear}}
 	st := &fakeStore{policyErr: errors.New("db down")}
-	if _, err := newOrch(t, p, st, effFrom).Screen(context.Background(), actor(), req(uuid.New(), effFrom)); err == nil || p.calls != 0 || len(st.recorded) != 0 {
+	r := req(uuid.New(), effFrom)
+	r.Lists = []aml.ListType{aml.ListSanctions} // a complete request: only the unreadable policy may stop it
+	if _, err := newOrch(t, p, st, effFrom).Screen(context.Background(), actor(), r); err == nil || p.calls != 0 || len(st.recorded) != 0 {
 		t.Fatalf("policy failure: err=%v calls=%d recorded=%d", err, p.calls, len(st.recorded))
 	}
 }
@@ -517,7 +519,7 @@ func TestSetScreeningPolicyInput_NoDefaultsAndLegalReferenceRequired(t *testing.
 		"no legal ref":     func(in *aml.SetScreeningPolicyInput) { in.LegalReviewReference = "" },
 		"blank legal ref":  func(in *aml.SetScreeningPolicyInput) { in.LegalReviewReference = "   " },
 		"padded legal ref": func(in *aml.SetScreeningPolicyInput) { in.LegalReviewReference = " ref" },
-		"control char ref": func(in *aml.SetScreeningPolicyInput) { in.LegalReviewReference = "a‮b" },
+		"control char ref": func(in *aml.SetScreeningPolicyInput) { in.LegalReviewReference = "a\u202eb" },
 		"no effective":     func(in *aml.SetScreeningPolicyInput) { in.EffectiveFrom = time.Time{} },
 		"bad reason":       func(in *aml.SetScreeningPolicyInput) { in.ReasonCode = "Not A Token" },
 		"no jurisdiction":  func(in *aml.SetScreeningPolicyInput) { in.JurisdictionID = uuid.Nil },

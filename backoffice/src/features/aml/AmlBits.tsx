@@ -128,6 +128,8 @@ export function ReasonDialog({
   )
 }
 
-export function shortId(id: string): string {
+/** A shortened id; a redacted (null) id is shown as a fixed word, never guessed. */
+export function shortId(id: string | null | undefined): string {
+  if (!id) return 'hidden'
   return id.length > 8 ? `${id.slice(0, 8)}…` : id
 }
