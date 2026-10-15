@@ -69,6 +69,10 @@ type MockCasinoProvider struct {
 // deriveKey computes this instance's per-(tenantID, providerID) webhook
 // signing key: HMAC-SHA256(masterSecret, casino mock label 0x00 tenant_id
 // 0x00 provider_id) - delegated to webhookauth.DeriveMockKey.
+// ProviderID is the provider id this mock was constructed for. It is the only
+// provider id a mock-play session consume may touch (SR3B-1).
+func (m *MockCasinoProvider) ProviderID() string { return m.providerID }
+
 func (m *MockCasinoProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
 	return webhookauth.DeriveMockKey(m.masterSecret, webhookauth.CasinoMockKeyLabel, tenantID, providerID)
 }

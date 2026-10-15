@@ -356,3 +356,89 @@ func TestCasinoStatementCoverage_SweepRecordsCoverageAndRefusesRegression(t *tes
 		t.Fatalf("a later coverage must proceed: %+v", again)
 	}
 }
+
+// A3 SR3B-3: the monotonicity anchor is read from the stream's own run rows
+// (reconciliation_runs.coverage_end), never from forgeable audit rows, and a
+// forged run row cannot lock the stream out or lower the anchor.
+func TestCasinoStatementCoverage_AnchorForgeriesAreIneffective(t *testing.T) {
+	pool := testPool(t)
+	w := newCasWorld(t, pool)
+	w.buildCleanWorld(t)
+	sweep := func(src statement.CasinoStatementSource) StreamOutcome {
+		now := time.Now()
+		outs, err := RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{w.f.tenantID}, now.Add(-time.Hour), now,
+			sportsbook.MockSettlementStatementSource{}, src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return findOutcome(t, outs, w.f).CasinoStatement
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if err := pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, q, args...)
+			return err
+		}); err != nil {
+			t.Fatalf("forge: %v", err)
+		}
+	}
+	forgeAudit := func(created time.Time, coverage string) {
+		exec(`INSERT INTO audit_log (tenant_id, actor_type, action, outcome, metadata, created_at)
+			VALUES ($1, 'system', 'reconciliation.sweep_run', 'success', $2::jsonb, $3)`,
+			w.f.tenantID, `{"stream":"casino_statement","coverage_end":"`+coverage+`"}`, created)
+	}
+	forgeRun := func(runAt, coverage time.Time) {
+		exec(`INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, run_at, status, coverage_end)
+			VALUES ($1, 'casino_statement', $2, $2, $3, 'clean', $4)`, w.f.tenantID, runAt, runAt, coverage)
+	}
+	far := time.Now().AddDate(100, 0, 0)
+
+	// Forged audit rows (future-dated 2999, later-created 1970, malformed): none is read.
+	forgeAudit(far, "2999-01-01T00:00:00Z")
+	forgeAudit(far.Add(time.Hour), "1970-01-01T00:00:00Z")
+	forgeAudit(far.Add(2*time.Hour), "not-a-timestamp")
+	if o := sweep(casFetcher{pool: pool, withCoverage: true}); o.Err != nil || o.Run.Status != StatusClean {
+		t.Fatalf("forged audit rows must not affect the stream: %+v", o)
+	}
+	// The legitimate anchor (the run row just written) still refuses a regression,
+	// although the forged 1970 audit row is "later".
+	if o := sweep(casFetcher{pool: pool, coverage: time.Now().Add(-30 * time.Minute)}); !errors.Is(o.Err, ErrCasinoStatementCoverage) {
+		t.Fatalf("a regression must still be refused despite forged audit rows: %+v", o)
+	}
+
+	// Forged run rows: a future-dated run (run_at and coverage 2999) cannot lock the stream out ...
+	forgeRun(far, far)
+	if o := sweep(casFetcher{pool: pool, withCoverage: true}); o.Err != nil || o.Run.Status != StatusClean {
+		t.Fatalf("a future-dated forged run row must not lock the stream out: %+v", o)
+	}
+	// ... a plausible run_at with an implausible coverage (2999) is ignored too ...
+	forgeRun(time.Now().Add(-time.Minute), far)
+	if o := sweep(casFetcher{pool: pool, withCoverage: true}); o.Err != nil || o.Run.Status != StatusClean {
+		t.Fatalf("an implausible forged coverage must be ignored: %+v", o)
+	}
+	// ... a future-dated run row with a plausible-looking coverage is ignored (run_at > now()) ...
+	forgeRun(far, time.Now().Add(CasinoCoverageMaxClockSkew-time.Minute))
+	if o := sweep(casFetcher{pool: pool, withCoverage: true}); o.Err != nil || o.Run.Status != StatusClean {
+		t.Fatalf("a future-dated run row must not become the anchor: %+v", o)
+	}
+	// ... and a later-created run row with a 1970 coverage cannot lower the anchor.
+	forgeRun(time.Now().Add(-time.Second), time.Unix(0, 0))
+	if o := sweep(casFetcher{pool: pool, coverage: time.Now().Add(-30 * time.Minute)}); !errors.Is(o.Err, ErrCasinoStatementCoverage) {
+		t.Fatalf("a forged 1970 run row must not lower the anchor: %+v", o)
+	}
+}
+
+// SR3B-8: a Synthetic Fetch-shaped source needs no CoverageEnd, but a non-zero
+// one it states is validated like a provider's.
+type syntheticFetcher struct {
+	casFetcher
+}
+
+func (syntheticFetcher) SyntheticComponent() {}
+
+func TestCasinoStatementCoverage_SyntheticFetcherNonZeroCoverageIsValidated(t *testing.T) {
+	w := newCasWorld(t, testPool(t))
+	w.buildCleanWorld(t)
+	w.mustStmtClean(t, syntheticFetcher{casFetcher{pool: w.pool}}) // zero: allowed
+	w.requireCoverageRefusal(t, "synthetic 1970", syntheticFetcher{casFetcher{pool: w.pool, emptyStatement: true, coverage: time.Unix(0, 0)}})
+}

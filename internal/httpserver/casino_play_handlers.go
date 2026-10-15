@@ -735,7 +735,7 @@ func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAcc
 		if !ok {
 			return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
 		}
-		err = casino.ConsumeLaunchSessionForMockPlay(ctx, tx, session.ID, mock, providerID)
+		err = casino.ConsumeLaunchSessionForMockPlay(ctx, tx, session.ID, mock)
 		switch {
 		case err == nil:
 			recordCasinoPlaySimulationAudit(ctx, tx, tenantID, playerAccountID, session.ID,

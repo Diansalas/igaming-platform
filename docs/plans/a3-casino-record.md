@@ -326,14 +326,14 @@ Tests first; no assertion weakened except the two explicitly inverted (section 9
   validated in `RunCasinoStatement` (`ErrCasinoStatementCoverage`): zero refused; earlier than
   `periodEnd - CasinoCoverageMaxLag` (1 h, PROVIDER DEPENDENT) refused; later than now +
   `CasinoCoverageMaxClockSkew` (5 min, as payments) refused; earlier than the previous run's recorded
-  coverage refused (read from the audit metadata of the latest `reconciliation.sweep_run` of the stream,
-  under the stream's advisory lock). `coverage_end` is recorded in the run's audit metadata. The 1970 +
+  coverage refused (anchor now read from `reconciliation_runs.coverage_end`, migration 0152: see section 13;
+  the first cut read forgeable audit rows). `coverage_end` is recorded in the run's audit metadata. The 1970 +
   empty statement repro is a failing run, never clean. Synthetic sources are exempt (no provider to vouch).
   Changed test configuration (assertions identical): `casFetcher` sources now state a coverage; the
   CoverageEnd "no bound" kill control uses the loosest accepted bound (now + 4 min) instead of none.
-- **SR3-4 - IMPLEMENTED (MOCK).** `ConsumeLaunchSessionForMockPlay(ctx, tx, id, *MockCasinoProvider,
-  providerID)`: needs the mock value and the UPDATE carries `provider_id = $2`; static test
-  `TestA3_MockConsumeIsOnlyCalledFromThePlaySimulationHandlers` (with planted control).
+- **SR3-4 - IMPLEMENTED (MOCK), after SR3B-1 (section 13).** `ConsumeLaunchSessionForMockPlay(ctx, tx, id,
+  *MockCasinoProvider)`: the provider predicate is taken from the mock itself; static test
+  `TestA3_MockConsumeIsOnlyCalledFromThePlaySimulationHandlers` flags ANY reference (with planted control).
 - **LF-A3-2 - IMPLEMENTED (MOCK).** The simulation consumes the session in its OWN transaction, committed
   before the callback transaction opens, so no session-row lock precedes the L0.1 delivery lock (option
   b). Test `TestA3_HTTP_SimulationConsumeCommitsBeforeTheDeliveryLockIsTaken` holds the wager's L0.1 lock
@@ -348,10 +348,10 @@ Tests first; no assertion weakened except the two explicitly inverted (section 9
   EXTRA win in a round that already has a bet and a statement win line is invisible to the key/total
   match against the MOCK (it compares the ledger with itself); only a real provider statement can expose
   it. PROVIDER DEPENDENT.
-- **SR3-6 - IMPLEMENTED.** The static IO-in-tx scan now also walks named functions/methods that take a
+- **SR3-6 - IMPLEMENTED, after SR3B-2 (section 13).** The static IO-in-tx scan now also walks named functions/methods that take a
   `pgx.Tx` (planted controls: Balance and FetchCasinoStatement in named tx functions flagged; non-tx
   function, metadata-only call and a nested closure (reported once) not). Receivers named `tx`, `sp`,
-  `locked` are exempt (pgx `Rollback`, ledger `locked.Balance` are not adapters; lexical limit, stated).
+  `locked` were exempt in the first cut; narrowed to exact pairs in section 13 (SR3B-2).
 - **RECORD ONLY (not changed):**
   - **SR3-5 (Low)** `postBet` reads the session with `GetLaunchSessionByID` (no row lock), so a bet
     that read `consumed` before a revoke committed can commit after it; same class as R-3 and the
@@ -393,3 +393,64 @@ No assertion was deleted or loosened.
 | `./internal/payments/ -run TestR3_` | PASS (163 s) |
 | `./internal/httpserver/...` (full, 25 min) | all PASS except `TestResolutionIsolation_MultipleTenantsOutage`, `_ConnectionExhaustion`, `_FinancialDuringOutage` (INV-POOL timing-lane probes; also fail on the unmodified base on this loaded machine) |
 | Mutation pass (fix round) | 20 mutants M31-M48 + M36b: all killed except M40 (zero-coverage check is redundant with the floor check, since a zero time is far before the floor; kept as the explicit, clearer error). The LF-A3-2 lock-order test was not mutated: the old single-transaction shape fails it by construction. |
+
+## 13. Security re-review round (SR3B-*) - second set of new commits
+
+- **SR3B-1 - IMPLEMENTED (MOCK).** The provider id is no longer a parameter: it is read from the mock
+  (`MockCasinoProvider.ProviderID()`), so a mock for `mock-casino` cannot consume a `real-vendor-x` session
+  (repro now a test in `TestA3_MockPlayConsume_IsBoundToTheMockProvider`). The earlier doc/record claim
+  "a misrouted call can never consume another provider's session / mock-only by construction" was an
+  overstatement and is withdrawn: the guard is (a) the concrete mock parameter, (b) the id read from it,
+  (c) the static test. A caller can still construct a mock for a real vendor's id; (c) is what stops any
+  other code from doing so. The static test now flags ANY reference to the identifier outside
+  `runCasinoPlaySimulation` (call, alias, argument, package-level var), planted-controlled.
+- **SR3B-2 - IMPLEMENTED.** The scan exemption is now two exact (receiver, method) pairs, the only false
+  positives the production tree produced (`sp.Rollback`: kyc outbox, payments; `locked.Balance`: casino,
+  sportsbook), applied ONLY in the named-function walk; closures are strict again. Negative controls:
+  `sp.FetchCatalogue`, `locked.Launch`, `locked.Bet`, `sp.Withdraw`, `sp.Balance`, `tx.Deposit` flagged in
+  named functions and closures; the exempt pairs flagged inside closures
+  (`TestINV_IO_1c_ExemptionIsExactAndNamedFunctionOnly`). Remains lexical by variable name.
+- **SR3B-3 - IMPLEMENTED (MOCK); migration 0152 USED.** `0152_reconciliation_run_coverage_end`: one
+  nullable `reconciliation_runs.coverage_end timestamptz`. FORCE RLS, the policy, the total append-only
+  trigger pair (0082) and the runtime role's table-level grants are untouched (a table-level grant covers
+  the new column; the whole-schema snapshot diff adds exactly one column line). Down refuses while any
+  run holds a coverage_end (RLS disabled transactionally for the check, re-enabled and re-forced after,
+  like 0100), else drops the column and restores the 0151 schema exactly
+  (`TestMigration0152_*`). `Run.CoverageEnd` is written by `persistRun` for a casino_statement run. The
+  anchor is `max(coverage_end)` over the stream's own run rows with `run_at <= now()` and
+  `coverage_end <= now() + skew`; NULL = no anchor (the floor still applies, the stream does not fail).
+  The `coverage_end` audit metadata is kept for humans but is never read. Tests
+  (`TestCasinoStatementCoverage_AnchorForgeriesAreIneffective`): forged audit rows (2999 future-dated,
+  1970 later-created, malformed value) are ignored; forged run rows (future-dated 2999, implausible
+  2999 coverage, later 1970) neither lock the stream out nor lower the anchor. The orchestrator note:
+  version 152 is now a real file, so `reservedUnusedVersions` (143-150) needs no 152 entry - none was
+  added and none should be removed.
+  Residual R-10: the runtime role can still INSERT run rows, so a forged plausible high value
+  (<= now + 5 min) can fail-close the stream for at most five minutes; and a forged row cannot lower the
+  max. Closing it fully needs the run write path to be a definer function (pre-real-source condition).
+- **SR3B-6 - accepted.** A simulation call consumes the active session even when its callback is then
+  refused or declined (LF-A3-2 committed the consume first). Mock provider, caller's own session,
+  non-production routes, moves no money; the `session_consumed` audit row records it; a later vendor
+  bootstrap of that session is refused.
+- **SR3B-7 - fixed** (header of `a3_sr3_integration_test.go`). **SR3B-8 - IMPLEMENTED:** a non-zero
+  CoverageEnd from a Synthetic Fetch-shaped source is validated like a provider's
+  (`TestCasinoStatementCoverage_SyntheticFetcherNonZeroCoverageIsValidated`).
+- SR3B-4 / SR3B-5: accepted as Info (oracle differences need the vendor credential; the audit row carries
+  no player id by design).
+
+### Changed assertions in this round
+None changed or removed. Test code changed only where the API changed
+(`ConsumeLaunchSessionForMockPlay` lost its string parameter in `TestA3_MockPlayConsume_*`, which gained the
+repro assertions) and the static-scan control test was extended (the previous planted control for named
+functions and the `exempt` sub-case still pass unchanged).
+
+### Verification of the SR3B round (local, private database, not hosted CI)
+
+gofmt, `go vet` (plain and integration), golangci-lint (plain and `--new-from-rev=67e9baf`), unit tests: clean/PASS.
+Integration, `-p 1`: casino PASS (138 s) and `-race` PASS (228 s); `./internal/db/...` PASS (80 s);
+reconciliation PASS (265 s, after a fix: `persistRun` writes `coverage_end` only when the run has one, because
+the 0097/0098/0134 migration round-trip scratch schemas sit below 0152); txscope + cmd PASS; alerting PASS;
+payments `TestR3_` PASS; full httpserver: all PASS except `TestResolutionIsolation_OneTenantStoreOutage` and
+`_MultipleTenantsOutage` (timing-lane probes, known to fail on the unmodified base under load). Mutants
+M50-M57 (anchor filters, max->min, persistence, synthetic validation, id from the mock, exemption scope and
+width): all killed.

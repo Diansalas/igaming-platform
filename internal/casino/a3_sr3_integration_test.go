@@ -1,13 +1,15 @@
 //go:build integration
 
-// A3 security fix round (SR3-1, SR3-2): the opaque player reference is a
+// A3 security fix round (SR3-1, SR3-2, SR3-4): the opaque player reference is a
 // second binding factor and is enforced fail-closed everywhere it can appear -
 // bet, bet replay, win, win replay and rollback. A valid reference of ANOTHER
 // player is refused (ErrPlayerRefMismatch, same 400 as an unresolvable value),
 // audited (casino_callback.player_ref_mismatch, written by the separately
-// committed rejection record) and posts nothing; a rollback with an
-// unresolvable reference is refused and never writes a tombstone; a rollback
-// with no reference stays allowed.
+// committed rejection record) and posts nothing. A rollback carrying a
+// reference is refused (nothing written) only on the path that would reverse an
+// already POSTED bet/win; for a never-seen or already tombstoned original the
+// tombstone is still written (ledger-finance LF-A3-3) and the bad reference is
+// kept as an audit-only evidence row. A rollback with no reference stays allowed.
 package casino
 
 import (
@@ -234,24 +236,38 @@ func TestA3_MockPlayConsume_IsBoundToTheMockProvider(t *testing.T) {
 		}
 		return s.Status
 	}
-	consume := func(m *MockCasinoProvider, providerID string) error {
+	consume := func(m *MockCasinoProvider) error {
 		return pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			return ConsumeLaunchSessionForMockPlay(ctx, tx, sessionID, m, providerID)
+			return ConsumeLaunchSessionForMockPlay(ctx, tx, sessionID, m)
 		})
 	}
-	if err := consume(nil, "mock-casino"); !errors.Is(err, ErrInvalidInput) {
+	if err := consume(nil); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("no mock provider value must be refused, got %v", err)
 	}
-	if err := consume(mock, ""); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("no provider id must be refused, got %v", err)
-	}
-	if err := consume(mock, "some-real-vendor"); !errors.Is(err, ErrLaunchSessionNotActive) {
-		t.Fatalf("a session of another provider must not be consumable, got %v", err)
+	// SR3B-1 repro: a mock built for ANOTHER provider id must not consume this
+	// mock-casino session, and the mock must not consume a real vendor's session.
+	if err := consume(NewMockCasinoProvider("some-other-provider", "EUR")); !errors.Is(err, ErrLaunchSessionNotActive) {
+		t.Fatalf("a mock of a different provider id must not consume this session, got %v", err)
 	}
 	if got := status(); got != LaunchSessionActive {
 		t.Fatalf("the refused consume must leave the session active, got %s", got)
 	}
-	if err := consume(mock, "mock-casino"); err != nil {
+	vendorSession := mintActiveSession(t, pool, f, "real-vendor-x", "EUR")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return ConsumeLaunchSessionForMockPlay(ctx, tx, vendorSession, mock)
+	}); !errors.Is(err, ErrLaunchSessionNotActive) {
+		t.Fatalf("the mock-casino mock must not consume a 'real-vendor-x' session, got %v", err)
+	}
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		s, err := GetLaunchSessionByID(ctx, tx, vendorSession)
+		if err == nil && s.Status != LaunchSessionActive {
+			t.Fatalf("the real vendor's session must stay active, got %s", s.Status)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := consume(mock); err != nil {
 		t.Fatalf("the mock provider's own session must be consumable: %v", err)
 	}
 	if got := status(); got != LaunchSessionConsumed {

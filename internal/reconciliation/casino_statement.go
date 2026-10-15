@@ -272,10 +272,13 @@ func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, peri
 		c := fetched.CoverageEnd
 		cutoff = &c
 	}
-	if !fetched.synthetic {
+	// A provider source must state a valid CoverageEnd; a Synthetic source needs
+	// none, but any non-zero value it does state is validated too (SR3B-8).
+	if !fetched.synthetic || !fetched.CoverageEnd.IsZero() {
 		if err := validateCasinoCoverage(ctx, tx, tenantID, periodEnd, fetched.CoverageEnd); err != nil {
 			return Run{}, nil, CasinoStatementInfo{}, err
 		}
+		run.CoverageEnd = fetched.CoverageEnd
 	}
 	info := CasinoStatementInfo{Lines: len(lines), Totals: len(totals), TotalsProvided: len(totals) > 0, CoverageEnd: fetched.CoverageEnd}
 
@@ -313,7 +316,7 @@ func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, peri
 // statement and reports clean. Refused: zero, earlier than periodEnd minus
 // CasinoCoverageMaxLag, later than now plus CasinoCoverageMaxClockSkew, or
 // earlier than the coverage the previous successful run of this stream
-// recorded (read from its audit metadata under the stream's advisory lock).
+// recorded (the maximum plausible coverage_end of the stream's own run rows).
 func validateCasinoCoverage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodEnd, coverageEnd time.Time) error {
 	if coverageEnd.IsZero() {
 		return fmt.Errorf("%w: a provider (non-Synthetic) statement must state its coverage_end", ErrCasinoStatementCoverage)
@@ -326,12 +329,20 @@ func validateCasinoCoverage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, 
 		return fmt.Errorf("%w: %s is later than now plus %s", ErrCasinoStatementCoverage,
 			coverageEnd.UTC().Format(time.RFC3339), CasinoCoverageMaxClockSkew)
 	}
+	// The anchor comes from the run records this stream itself writes under its
+	// advisory lock (reconciliation_runs.coverage_end, migration 0152), never
+	// from audit rows (forgeable by the runtime role, SR3B-3). The MAXIMUM over
+	// plausible rows is used, so a forged LOWER value cannot lower it; a row
+	// dated in the future (run_at > now()) or claiming a coverage beyond
+	// now + skew is ignored, so a forged HIGH value cannot lock the stream out.
+	// The column is typed, so a malformed value cannot exist; NULL means no
+	// anchor and the absolute floor above still applies.
 	var prev *time.Time
 	err := tx.QueryRow(ctx,
-		`SELECT (metadata->>'coverage_end')::timestamptz FROM audit_log
-		  WHERE tenant_id = $1 AND action = 'reconciliation.sweep_run'
-		    AND metadata->>'stream' = $2 AND metadata ? 'coverage_end'
-		  ORDER BY created_at DESC LIMIT 1`, tenantID, string(StreamCasinoStatement)).Scan(&prev)
+		`SELECT max(coverage_end) FROM reconciliation_runs
+		  WHERE tenant_id = $1 AND stream = $2 AND coverage_end IS NOT NULL
+		    AND run_at <= now() AND coverage_end <= now() + $3::interval`,
+		tenantID, string(StreamCasinoStatement), fmt.Sprintf("%d seconds", int(CasinoCoverageMaxClockSkew.Seconds()))).Scan(&prev)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("reconciliation: read previous casino statement coverage: %w", err)
 	}

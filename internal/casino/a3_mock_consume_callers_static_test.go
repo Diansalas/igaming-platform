@@ -26,32 +26,32 @@ var allowedMockConsumeCallers = map[string]map[string]bool{
 	"internal/httpserver/casino_play_handlers.go": {"runCasinoPlaySimulation": true},
 }
 
-// mockConsumeCalls returns "file:func" for every call of the guarded function
-// in src (a parsed file), treating both pkg.F(...) and F(...) as calls.
-func mockConsumeCalls(fset *token.FileSet, f *ast.File) []string {
+// mockConsumeRefs returns the enclosing function name (or "<package level>")
+// of EVERY reference to the guarded identifier in f - calls, and also any other
+// use such as assigning the function to a variable or passing it as a value
+// (SR3B-1). The function's own declaration is not a reference.
+func mockConsumeRefs(fset *token.FileSet, f *ast.File) []string {
 	var out []string
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Body == nil {
-			continue
-		}
-		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			switch fn := call.Fun.(type) {
-			case *ast.SelectorExpr:
-				if fn.Sel.Name == mockConsumeFn {
-					out = append(out, fd.Name.Name)
-				}
-			case *ast.Ident:
-				if fn.Name == mockConsumeFn {
-					out = append(out, fd.Name.Name)
-				}
+	scan := func(root ast.Node, enclosing string) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == mockConsumeFn {
+				out = append(out, enclosing)
 			}
 			return true
 		})
+	}
+	for _, d := range f.Decls {
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			if d.Name.Name == mockConsumeFn {
+				continue // the definition itself
+			}
+			if d.Body != nil {
+				scan(d.Body, d.Name.Name)
+			}
+		default:
+			scan(d, "<package level>")
+		}
 	}
 	return out
 }
@@ -86,9 +86,9 @@ func TestA3_MockConsumeIsOnlyCalledFromThePlaySimulationHandlers(t *testing.T) {
 		}
 		rel, _ := filepath.Rel(root, path)
 		rel = filepath.ToSlash(rel)
-		for _, fn := range mockConsumeCalls(fset, f) {
+		for _, fn := range mockConsumeRefs(fset, f) {
 			if !allowedMockConsumeCallers[rel][fn] {
-				t.Errorf("%s calls %s from %s: only the play-simulation handlers may (SR3-4)", rel, mockConsumeFn, fn)
+				t.Errorf("%s references %s from %s: only the play-simulation handlers may (SR3-4/SR3B-1)", rel, mockConsumeFn, fn)
 			}
 			seen[rel+":"+fn]++
 		}
@@ -103,20 +103,32 @@ func TestA3_MockConsumeIsOnlyCalledFromThePlaySimulationHandlers(t *testing.T) {
 	}
 }
 
-// Planted control: the scan flags a call from any other function.
-func TestA3_MockConsumeScanFlagsAPlantedCaller(t *testing.T) {
+// Planted control: the scan flags a call, a selector call, and a function-value
+// reference (assignment, argument, package-level var) from any other place, and
+// does not flag the definition or unrelated code.
+func TestA3_MockConsumeScanFlagsAPlantedReference(t *testing.T) {
 	const src = `package x
-func handler() { _ = casino.ConsumeLaunchSessionForMockPlay(ctx, tx, id, m, "p") }
-func bare()    { _ = ConsumeLaunchSessionForMockPlay(ctx, tx, id, m, "p") }
+var pkgLevel = casino.ConsumeLaunchSessionForMockPlay
+func handler() { _ = casino.ConsumeLaunchSessionForMockPlay(ctx, tx, id, m) }
+func bare()    { _ = ConsumeLaunchSessionForMockPlay(ctx, tx, id, m) }
+func alias()   { f := casino.ConsumeLaunchSessionForMockPlay; _ = f }
+func passed()  { use(ConsumeLaunchSessionForMockPlay) }
 func clean()   { _ = other() }
+func ConsumeLaunchSessionForMockPlay(ctx context.Context) error { return nil }
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "x.go", src, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := mockConsumeCalls(fset, f)
-	if len(got) != 2 || got[0] != "handler" || got[1] != "bare" {
-		t.Fatalf("expected the selector and bare calls flagged, got %v", got)
+	got := mockConsumeRefs(fset, f)
+	want := []string{"<package level>", "handler", "bare", "alias", "passed"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected %v, got %v", want, got)
+		}
 	}
 }

@@ -387,21 +387,23 @@ func LaunchSessionVendorBootstrapped(ctx context.Context, tx pgx.Tx, sessionID u
 // capability, RG, risk and session on every bet). ErrLaunchSessionNotActive
 // when the CAS matched nothing.
 //
-// A3 SR3-4 (security review): the function is MOCK-only by construction, not
-// by its caller's discipline. It requires the MockCasinoProvider value (a
-// real adapter cannot be passed) and the UPDATE carries a positive predicate,
-// provider_id = the id that mock is registered under, so even a misrouted call
-// can never consume a session that belongs to any other provider. A static
-// test pins that the only callers are the play-simulation handlers.
-func ConsumeLaunchSessionForMockPlay(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, mock *MockCasinoProvider, mockProviderID string) error {
-	if mock == nil || mockProviderID == "" {
-		return fmt.Errorf("%w: the mock play consume requires the mock provider and its id", ErrInvalidInput)
+// A3 SR3-4 / SR3B-1 (security review): the function consumes ONLY a session
+// whose provider_id equals the id of the MockCasinoProvider value passed in -
+// the id is read from the mock itself (ProviderID()), never supplied
+// separately, so a caller cannot pair a mock with another provider's session.
+// A real adapter cannot be passed (the parameter is the concrete mock type). It
+// is still a convention-level guard in one respect: nothing stops a caller from
+// constructing a mock for a real vendor's id, which is why a static test pins
+// that the only code referencing this function is the play-simulation handlers.
+func ConsumeLaunchSessionForMockPlay(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, mock *MockCasinoProvider) error {
+	if mock == nil || mock.ProviderID() == "" {
+		return fmt.Errorf("%w: the mock play consume requires the mock provider", ErrInvalidInput)
 	}
 	tag, err := tx.Exec(ctx,
 		`UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now()
 		  WHERE id = $1 AND status = 'active' AND mode = 'real' AND expires_at > now()
 		    AND provider_id = $2`,
-		sessionID, mockProviderID,
+		sessionID, mock.ProviderID(),
 	)
 	if err != nil {
 		return fmt.Errorf("casino: consume launch session for mock play: %w", err)

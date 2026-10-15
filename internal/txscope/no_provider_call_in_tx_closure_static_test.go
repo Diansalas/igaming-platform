@@ -103,15 +103,21 @@ var ioc1FlaggedBareFuncs = map[string]bool{
 	"FetchCasinoStatement": true,
 }
 
-// ioc1TxLocalReceivers are receiver identifiers whose Balance/Rollback methods
-// are NOT provider adapters: a pgx transaction or savepoint (tx, sp:
-// Rollback/Commit) and the ledger's locked-projection set (locked: Balance).
-// They are exempt because the NAMED-function scan (A3 SR3-6) walks functions
-// that take a pgx.Tx and therefore legitimately handle exactly these values.
-// Lexical, by variable name: a provider value must not be given one of these
-// names (a code-reviewer checklist item, the same limit as the rest of this
+// ioc1NamedFuncExemptCalls are the EXACT (receiver identifier, method) pairs
+// that the NAMED-function scan (A3 SR3-6) exempts, and nothing else: they are
+// the only false positives the scan produced on the production tree - a pgx
+// savepoint's Rollback (kyc outbox, payments orchestrator) and the ledger's
+// locked-projection set's Balance (casino and sportsbook orchestrators). They
+// are not provider adapters. The exemption applies ONLY in the named-function
+// walk; closures keep the strict, exemption-free behaviour they always had.
+// Lexical, by variable name (SR3B-2): any other method on those receivers, and
+// any other receiver, is still flagged; a provider value must not be named sp
+// or locked (a code-reviewer checklist item, the same limit as the rest of this
 // guard).
-var ioc1TxLocalReceivers = map[string]bool{"tx": true, "sp": true, "locked": true}
+var ioc1NamedFuncExemptCalls = map[[2]string]bool{
+	{"sp", "Rollback"}:    true,
+	{"locked", "Balance"}: true,
+}
 
 // ioc1TxClosureViolation is one adapter-method call found lexically inside
 // a database-transaction closure.
@@ -181,7 +187,7 @@ func ioc1ScanFile(path string, src []byte) ([]ioc1TxClosureViolation, int, error
 	var violations []ioc1TxClosureViolation
 	closuresSeen := 0
 	reported := map[token.Pos]bool{} // a call nested in a tx scope inside another is one finding
-	scanBody := func(body *ast.BlockStmt) {
+	scanBody := func(body *ast.BlockStmt, namedFunc bool) {
 		if body == nil {
 			return
 		}
@@ -194,8 +200,8 @@ func ioc1ScanFile(path string, src []byte) ([]ioc1TxClosureViolation, int, error
 			if id, ok := call.Fun.(*ast.Ident); ok && ioc1FlaggedBareFuncs[id.Name] {
 				name = id.Name
 			}
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if recv, ok := sel.X.(*ast.Ident); ok && ioc1TxLocalReceivers[recv.Name] {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && namedFunc {
+				if recv, ok := sel.X.(*ast.Ident); ok && ioc1NamedFuncExemptCalls[[2]string{recv.Name, sel.Sel.Name}] {
 					return true
 				}
 			}
@@ -211,7 +217,7 @@ func ioc1ScanFile(path string, src []byte) ([]ioc1TxClosureViolation, int, error
 		case *ast.FuncLit:
 			if ioc1IsTxClosureParam(fn) {
 				closuresSeen++
-				scanBody(fn.Body)
+				scanBody(fn.Body, false)
 			}
 		case *ast.FuncDecl:
 			// A3 SR3-6 (security review): a NAMED function (or method) that takes
@@ -220,7 +226,7 @@ func ioc1ScanFile(path string, src []byte) ([]ioc1TxClosureViolation, int, error
 			// closure - the closure-only scan missed it.
 			if ioc1HasPgxTxParam(fn.Type) {
 				closuresSeen++
-				scanBody(fn.Body)
+				scanBody(fn.Body, true)
 			}
 		}
 		return true
@@ -530,7 +536,7 @@ func (o *Orchestrator) meta(ctx context.Context, tx pgx.Tx, provider CasinoProvi
 		t.Fatalf("a function without a pgx.Tx and a metadata-only tx function must not be flagged (txFuncs=%d violations=%v)", n, v)
 	}
 
-	// A pgx transaction/savepoint and the locked-projection set are not adapters.
+	// The two exact pairs the production tree needs are exempt in a named function.
 	exempt := `package x
 
 func (o *Orchestrator) lockAndRollback(ctx context.Context, tx pgx.Tx, sp pgx.Tx) error {
@@ -566,5 +572,37 @@ func (o *Orchestrator) outer(ctx context.Context, tx pgx.Tx, provider CasinoProv
 	}
 	if len(v) != 1 || v[0].method != "Launch" {
 		t.Fatalf("a call nested in a closure inside a named tx function must be reported once, got %v", v)
+	}
+}
+
+// SR3B-2 negative controls: the exemption is exact (receiver, method) pairs,
+// named-function walk only. Every other method on sp/locked/tx - including ones
+// that are provider adapter methods - is flagged inside a named tx function AND
+// inside a closure, and even the exempt pairs are flagged inside a closure.
+func TestINV_IO_1c_ExemptionIsExactAndNamedFunctionOnly(t *testing.T) {
+	for _, call := range []string{"sp.FetchCatalogue(ctx)", "locked.Launch(ctx, r)", "locked.Bet(ctx, r)", "sp.Withdraw(ctx, r)", "sp.Balance(ctx, r)", "tx.Deposit(ctx, r)"} {
+		named := "package x\n\nfunc f(ctx context.Context, tx pgx.Tx, sp pgx.Tx, locked X) {\n\t_ = " + call + "\n}\n"
+		v, _, err := ioc1ScanFile("named.go", []byte(named))
+		if err != nil || len(v) != 1 {
+			t.Errorf("%s in a named tx function must be flagged once, got %v %v", call, v, err)
+		}
+		closure := "package x\n\nfunc g(pool P) {\n\tpool.W(func(ctx context.Context, tx pgx.Tx) error {\n\t\t_ = " + call + "\n\t\treturn nil\n\t})\n}\n"
+		v, _, err = ioc1ScanFile("closure.go", []byte(closure))
+		if err != nil || len(v) != 1 {
+			t.Errorf("%s in a tx closure must be flagged once, got %v %v", call, v, err)
+		}
+	}
+	// The exempt pairs are exempt ONLY in a named function, never in a closure.
+	for _, call := range []string{"sp.Rollback(ctx)", "locked.Balance(id)"} {
+		closure := "package x\n\nfunc g(pool P) {\n\tpool.W(func(ctx context.Context, tx pgx.Tx) error {\n\t\t_ = " + call + "\n\t\treturn nil\n\t})\n}\n"
+		v, _, err := ioc1ScanFile("closure_exempt.go", []byte(closure))
+		if err != nil || len(v) != 1 {
+			t.Errorf("%s inside a tx closure must be flagged (no exemption there), got %v %v", call, v, err)
+		}
+		named := "package x\n\nfunc f(ctx context.Context, tx pgx.Tx, sp pgx.Tx, locked X) {\n\t_ = " + call + "\n}\n"
+		v, _, err = ioc1ScanFile("named_exempt.go", []byte(named))
+		if err != nil || len(v) != 0 {
+			t.Errorf("%s in a named tx function is the exempt pair, got %v %v", call, v, err)
+		}
 	}
 }

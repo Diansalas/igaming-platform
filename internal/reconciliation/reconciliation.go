@@ -75,6 +75,10 @@ type Run struct {
 	PeriodEnd   time.Time
 	RunAt       time.Time
 	Status      Status
+	// CoverageEnd is the validated CoverageEnd of the provider statement a
+	// casino_statement run compared (migration 0152); zero (stored NULL) for
+	// every other stream and for sources that state none.
+	CoverageEnd time.Time
 }
 
 // Mismatch is one discrepancy a Run found, per
@@ -265,12 +269,23 @@ func unlinkedManualAdjustments(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 // persistRun inserts run and its mismatches (setting each mismatch's
 // RunID) inside tx - the only writes any reconciliation stream makes.
 func persistRun(ctx context.Context, tx pgx.Tx, run Run, mismatches []Mismatch) error {
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status,
-	); err != nil {
-		return fmt.Errorf("reconciliation: insert run: %w", err)
+	// coverage_end (migration 0152) is written only when the run has one, so every
+	// other stream keeps the exact pre-0152 INSERT (and works against a schema
+	// below 0152, e.g. the migration round-trip scratch databases).
+	var insertErr error
+	if run.CoverageEnd.IsZero() {
+		_, insertErr = tx.Exec(ctx,
+			`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status)
+	} else {
+		_, insertErr = tx.Exec(ctx,
+			`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status, coverage_end)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status, run.CoverageEnd)
+	}
+	if insertErr != nil {
+		return fmt.Errorf("reconciliation: insert run: %w", insertErr)
 	}
 
 	for i := range mismatches {
