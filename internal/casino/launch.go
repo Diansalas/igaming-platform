@@ -191,6 +191,10 @@ type LaunchSession struct {
 	JurisdictionCode string
 	Status           LaunchSessionStatus
 	ExpiresAt        time.Time
+	// PlayerRef is the opaque provider-scoped player reference
+	// (CAS-PLAYER-REF-1) for PlayerAccountID at ProviderID. Populated by
+	// CreateLaunchSession only; the readers below do not load it.
+	PlayerRef uuid.UUID
 }
 
 // CreateLaunchSessionParams is CreateLaunchSession's input. All identity
@@ -238,6 +242,14 @@ func CreateLaunchSession(ctx context.Context, tx pgx.Tx, params CreateLaunchSess
 	if err != nil {
 		return LaunchSession{}, "", err
 	}
+	// CAS-PLAYER-REF-1: the opaque provider-scoped player reference the
+	// vendor will be handed instead of the player account id. Created here,
+	// in the session's own transaction, so a session never exists without
+	// one (get-or-create: stable per tenant/provider/player, concurrency-safe).
+	playerRef, err := GetOrCreateProviderPlayerRef(ctx, tx, params.TenantID, params.ProviderID, params.PlayerAccountID)
+	if err != nil {
+		return LaunchSession{}, "", err
+	}
 	id := uuid.New()
 	expiresAt := time.Now().UTC().Add(ttl)
 	_, err = tx.Exec(ctx,
@@ -257,7 +269,7 @@ func CreateLaunchSession(ctx context.Context, tx pgx.Tx, params CreateLaunchSess
 		ID: id, TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
 		WalletID: params.WalletID, GameID: params.GameID, ProviderID: params.ProviderID, ProviderGameID: params.ProviderGameID,
 		AssetCode: params.AssetCode, Mode: params.Mode, JurisdictionCode: params.JurisdictionCode,
-		Status: LaunchSessionActive, ExpiresAt: expiresAt,
+		Status: LaunchSessionActive, ExpiresAt: expiresAt, PlayerRef: playerRef,
 	}, token, nil
 }
 
@@ -347,6 +359,59 @@ func ResolveLaunchToken(ctx context.Context, tx pgx.Tx, rawToken string) (Launch
 
 	s.Status = LaunchSessionConsumed
 	return s, nil
+}
+
+// LaunchSessionVendorBootstrapped reports whether a real vendor bootstrap
+// (BootstrapLaunch, ADR 0103) recorded a casino_launch_bootstraps row for the
+// session. Used by the MOCK play-simulation routes to tell a session they
+// consumed themselves from one a vendor owns (ADR 0048, CAS-BET-REQUIRES-
+// BOOTSTRAP-1). A plain read; tx must be tenant-scoped.
+func LaunchSessionVendorBootstrapped(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) (bool, error) {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM casino_launch_bootstraps WHERE launch_session_id = $1)`, sessionID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("casino: check vendor bootstrap record: %w", err)
+	}
+	return exists, nil
+}
+
+// ConsumeLaunchSessionForMockPlay is the MOCK vendor's stand-in for the
+// bootstrap CAS (CAS-BET-REQUIRES-BOOTSTRAP-1, A3; ADR 0048): it moves one
+// 'active', unexpired, real-mode session to 'consumed' by id, atomically (the
+// UPDATE's WHERE is the compare-and-swap; two concurrent callers cannot both
+// succeed). It exists ONLY for the player-driven play-simulation routes
+// (registered only outside production, MOCK provider only) - a real vendor
+// goes through BootstrapLaunch, which this does not replace: no token check,
+// no idempotency record, no gate re-evaluation (postBet re-evaluates the game,
+// capability, RG, risk and session on every bet). ErrLaunchSessionNotActive
+// when the CAS matched nothing.
+//
+// A3 SR3-4 / SR3B-1 (security review): the function consumes ONLY a session
+// whose provider_id equals the id of the MockCasinoProvider value passed in -
+// the id is read from the mock itself (ProviderID()), never supplied
+// separately, so a caller cannot pair a mock with another provider's session.
+// A real adapter cannot be passed (the parameter is the concrete mock type). It
+// is still a convention-level guard in one respect: nothing stops a caller from
+// constructing a mock for a real vendor's id, which is why a static test pins
+// that the only code referencing this function is the play-simulation handlers.
+func ConsumeLaunchSessionForMockPlay(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, mock *MockCasinoProvider) error {
+	if mock == nil || mock.ProviderID() == "" {
+		return fmt.Errorf("%w: the mock play consume requires the mock provider", ErrInvalidInput)
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now()
+		  WHERE id = $1 AND status = 'active' AND mode = 'real' AND expires_at > now()
+		    AND provider_id = $2`,
+		sessionID, mock.ProviderID(),
+	)
+	if err != nil {
+		return fmt.Errorf("casino: consume launch session for mock play: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrLaunchSessionNotActive
+	}
+	return nil
 }
 
 // GetLaunchSessionByID reads a casino_launch_sessions row by its platform

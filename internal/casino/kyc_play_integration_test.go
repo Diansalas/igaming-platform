@@ -126,7 +126,7 @@ func TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-kyc-play-1", "", "round-kyc-play-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-kyc-play-1", "", "round-kyc-play-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -180,7 +180,7 @@ func TestReceiveCallback_BetAllowedByKYCPlayPolicy_WhenApproved(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-kyc-play-2", "", "round-kyc-play-2", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-kyc-play-2", "", "round-kyc-play-2", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error

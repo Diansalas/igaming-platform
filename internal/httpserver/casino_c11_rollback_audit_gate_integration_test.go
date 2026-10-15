@@ -47,13 +47,13 @@ func TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurren
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const betTxID = "cas-c11-generic-rb-bet-1"
 	const roundID = "round-c11-generic-rb"
 	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betTxID, "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	if betResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 posting the bet, got %d", betResp.StatusCode)
@@ -62,7 +62,7 @@ func TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurren
 
 	const rollbackTxID = "cas-c11-generic-rb-rollback-1"
 	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackTxID, betTxID, roundID, game.ProviderGameID,
-		0, "EUR", "", "", player.ID, uuid.Nil)
+		0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 
 	postRollbackOnce := func() (status int, ledgerTxID string) {
 		resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)

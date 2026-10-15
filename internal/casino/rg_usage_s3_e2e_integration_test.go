@@ -29,7 +29,7 @@ func TestRGUsageS3_RealCasinoPostings(t *testing.T) {
 		if ev == CallbackEventRollback {
 			outcome = ""
 		}
-		payload := provider.CallbackPayload(f.tenantID, ev, txID, orig, round, "game-1", amount, "EUR", outcome, "", f.playerAccountID, session)
+		payload := provider.CallbackPayload(f.tenantID, ev, txID, orig, round, "game-1", amount, "EUR", outcome, "", f.playerRef, session)
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 			return err

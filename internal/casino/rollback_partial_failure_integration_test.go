@@ -37,7 +37,7 @@ func TestPostRollback_C5_FailureBetweenTombstoneAndAudit_FullRollbackThenOneTomb
 	const originalTxID = "cas-c5-partial-original"
 	const rollbackTxID = "cas-c5-partial-rollback"
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, rollbackTxID, originalTxID, "round-c5-partial", "game-1",
-		0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+		0, "EUR", "", "", f.playerRef, uuid.Nil)
 
 	// Simulate a platform failure landing SOMEWHERE inside this delivery's
 	// transaction (the tombstone write has already happened by the time

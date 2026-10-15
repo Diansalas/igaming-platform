@@ -88,7 +88,7 @@ func TestCasinoWebhook_OversizeProviderReference_400_LogBounded_NothingWritten(t
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, pool, tenant)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	countRows := func() (ledgerTx, rejections int) {
@@ -106,7 +106,7 @@ func TestCasinoWebhook_OversizeProviderReference_400_LogBounded_NothingWritten(t
 
 	ref := oversizeRef()
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, ref, "", "round-prhref", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -140,7 +140,7 @@ func TestCasinoPlayRollback_OversizeOriginalReference_400(t *testing.T) {
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, pool, tenant)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 
 	ref := oversizeRef()
 	resp := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/rollback", player.Tokens.AccessToken,

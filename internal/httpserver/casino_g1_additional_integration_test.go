@@ -37,14 +37,14 @@ func TestCasMultiBetWin_G1_Replay(t *testing.T) {
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const roundID = "round-g1-replay"
 	bet1 := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-g1-replay-bet-1", "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	bet2 := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-g1-replay-bet-2", "", roundID, game.ProviderGameID,
-		500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	resp1 := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", bet1)
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for bet1, got %d", resp1.StatusCode)
@@ -58,7 +58,7 @@ func TestCasMultiBetWin_G1_Replay(t *testing.T) {
 
 	const winTxID = "cas-g1-replay-win"
 	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
-		2500, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+		2500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 
 	firstResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
 	if firstResp.StatusCode != http.StatusOK {
@@ -107,14 +107,14 @@ func TestCasMultiBetWin_G1_ConcurrentWins(t *testing.T) {
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const roundID = "round-g1-concurrent-wins"
 	bet1 := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-g1-cw-bet-1", "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	bet2 := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-g1-cw-bet-2", "", roundID, game.ProviderGameID,
-		500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	resp1 := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", bet1)
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for bet1, got %d", resp1.StatusCode)
@@ -128,7 +128,7 @@ func TestCasMultiBetWin_G1_ConcurrentWins(t *testing.T) {
 
 	const winTxID = "cas-g1-cw-win"
 	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
-		2500, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+		2500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -178,16 +178,16 @@ func TestCasMultiBetWin_G1_RollbackOneThenWin(t *testing.T) {
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const roundID = "round-g1-rollback-then-win"
 	const bet1TxID = "cas-g1-rtw-bet-1"
 	const bet2TxID = "cas-g1-rtw-bet-2"
 	bet1 := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, bet1TxID, "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	bet2 := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, bet2TxID, "", roundID, game.ProviderGameID,
-		500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	resp1 := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", bet1)
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for bet1, got %d", resp1.StatusCode)
@@ -200,7 +200,7 @@ func TestCasMultiBetWin_G1_RollbackOneThenWin(t *testing.T) {
 	resp2.Body.Close()
 
 	rollbackOfBet2 := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, "cas-g1-rtw-rollback-bet2", bet2TxID, roundID, "game-1",
-		0, "EUR", "", "", player.ID, uuid.Nil)
+		0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	rbResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackOfBet2)
 	if rbResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 rolling back bet2, got %d", rbResp.StatusCode)
@@ -214,7 +214,7 @@ func TestCasMultiBetWin_G1_RollbackOneThenWin(t *testing.T) {
 
 	const winTxID = "cas-g1-rtw-win"
 	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
-		1800, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+		1800, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	winResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
 	defer winResp.Body.Close()
 	if winResp.StatusCode != http.StatusOK {

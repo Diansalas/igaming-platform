@@ -123,24 +123,42 @@ func resolvePlayerOwnedSession(ctx context.Context, tx pgx.Tx, sessionID, player
 	return session, nil
 }
 
-// requireActiveUnexpiredSession is security review finding P2-2: postBet
-// itself only rejects a revoked session, never an expired one, and
-// postWin/postRollback resolve their accounts via correlation_id, never
-// consulting session status/expiry at all. That is a reasonable design
-// for postBet/postWin/postRollback's own intended caller (a real
-// provider, whose own session/round bookkeeping is authoritative for
-// itself), but this file's callers are a player driving the platform's
-// OWN session record directly, so this handler layer is the only place
-// that can still say "no" to a stale or revoked session before minting a
-// financial effect against it.
-func requireActiveUnexpiredSession(session casino.LaunchSession) error {
-	if session.Status != casino.LaunchSessionActive {
+// requireSimulationDrivableSession is security review finding P2-2, updated
+// for CAS-BET-REQUIRES-BOOTSTRAP-1 (A3): postBet itself only rejects a revoked
+// session, never an expired one, and postWin/postRollback resolve their
+// accounts via correlation_id, never consulting session status/expiry at all.
+// That is a reasonable design for postBet/postWin/postRollback's own intended
+// caller (a real provider, whose own session/round bookkeeping is
+// authoritative for itself), but this file's callers are a player driving the
+// platform's OWN session record directly, so this handler layer is the only
+// place that can still say "no" to a stale or revoked session before minting
+// a financial effect against it.
+//
+// A new bet now requires a 'consumed' (bootstrapped) session, so this MOCK
+// vendor stands in for the bootstrap too: an 'active', unexpired session is
+// drivable (runCasinoPlaySimulation consumes it, as the mock vendor opening
+// its game client would), and a 'consumed' session is drivable ONLY when it was
+// consumed by this mock path - never one a vendor really bootstrapped through
+// POST .../launch-bootstrap (it has a casino_launch_bootstraps row,
+// vendorBootstrapped). That keeps the P2-2 invariant intact: the simulation
+// routes are never a second, unsigned driver for a session a real vendor
+// owns. Anything else (revoked, expired, an expired never-consumed token) is
+// refused exactly as before.
+func requireSimulationDrivableSession(session casino.LaunchSession, vendorBootstrapped bool) error {
+	switch session.Status {
+	case casino.LaunchSessionActive:
+		if time.Now().UTC().After(session.ExpiresAt) {
+			return &apierror.Error{Code: apierror.CodeValidation, Message: "session has expired"}
+		}
+		return nil
+	case casino.LaunchSessionConsumed:
+		if vendorBootstrapped {
+			return &apierror.Error{Code: apierror.CodeValidation, Message: "session is not active"}
+		}
+		return nil
+	default:
 		return &apierror.Error{Code: apierror.CodeValidation, Message: "session is not active"}
 	}
-	if time.Now().UTC().After(session.ExpiresAt) {
-		return &apierror.Error{Code: apierror.CodeValidation, Message: "session has expired"}
-	}
-	return nil
 }
 
 // requireRealMode rejects a demo-mode session before any financial
@@ -375,10 +393,10 @@ func newWagerCasinoRoundHandler(deps Deps) http.HandlerFunc {
 		}
 
 		result, providerTxID, err := runCasinoPlaySimulation(r.Context(), deps, tc.TenantID, playerAccountID, sessionID, nil,
-			func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound) {
+			func(session casino.LaunchSession, playerRef uuid.UUID, mock casinoSimulationMock) (string, webhookauth.Inbound) {
 				providerTxID := deterministicSimulatedProviderTxID(session.ID, "wager", req.IdempotencyKey)
 				return providerTxID, mock.CallbackPayload(tc.TenantID, casino.CallbackEventBet, providerTxID, "", session.ID.String(), session.ProviderGameID,
-					req.StakeAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, session.ID)
+					req.StakeAmount, session.AssetCode, casino.OutcomeSucceeded, "", playerRef, session.ID)
 			}, "casino_play_simulation.wager")
 		if errors.Is(err, casino.ErrLaunchSessionNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "session not found")
@@ -451,10 +469,10 @@ func newWinCasinoRoundHandler(deps Deps) http.HandlerFunc {
 		}
 
 		result, providerTxID, err := runCasinoPlaySimulation(r.Context(), deps, tc.TenantID, playerAccountID, sessionID, nil,
-			func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound) {
+			func(session casino.LaunchSession, playerRef uuid.UUID, mock casinoSimulationMock) (string, webhookauth.Inbound) {
 				providerTxID := deterministicSimulatedProviderTxID(session.ID, "win", req.IdempotencyKey)
 				return providerTxID, mock.CallbackPayload(tc.TenantID, casino.CallbackEventWin, providerTxID, "", session.ID.String(), session.ProviderGameID,
-					req.WinAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, uuid.Nil)
+					req.WinAmount, session.AssetCode, casino.OutcomeSucceeded, "", playerRef, uuid.Nil)
 			}, "casino_play_simulation.win")
 		if errors.Is(err, casino.ErrLaunchSessionNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "session not found")
@@ -580,10 +598,10 @@ func newRollbackCasinoRoundHandler(deps Deps) http.HandlerFunc {
 			func(ctx context.Context, tx pgx.Tx, session casino.LaunchSession) error {
 				return requireRollbackTargetOwnedByRound(ctx, tx, tc.TenantID, session, req.OriginalProviderTxID)
 			},
-			func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound) {
+			func(session casino.LaunchSession, playerRef uuid.UUID, mock casinoSimulationMock) (string, webhookauth.Inbound) {
 				providerTxID := mock.NextProviderTxID()
 				return providerTxID, mock.CallbackPayload(tc.TenantID, casino.CallbackEventRollback, providerTxID, req.OriginalProviderTxID, session.ID.String(),
-					session.ProviderGameID, 0, session.AssetCode, "", "", session.PlayerAccountID, uuid.Nil)
+					session.ProviderGameID, 0, session.AssetCode, "", "", playerRef, uuid.Nil)
 			}, "casino_play_simulation.rollback")
 		if errors.Is(err, casino.ErrLaunchSessionNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "session not found")
@@ -622,7 +640,8 @@ type casinoSimulationMock = *casino.MockCasinoProvider
 // connection:
 //
 //  1. a READ ONLY transaction validates the caller's own session (real
-//     mode, active, unexpired, plus extra) and builds the signed payload;
+//     mode, drivable per requireSimulationDrivableSession, plus extra) and
+//     builds the signed payload;
 //  2. VerifyCallback runs with NO transaction held;
 //  3. the domain transaction RE-VALIDATES the session with the same checks
 //     (without it a session ending between steps 1 and 3 would be a TOCTOU
@@ -630,7 +649,7 @@ type casinoSimulationMock = *casino.MockCasinoProvider
 //     audit record in the same transaction.
 func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAccountID, sessionID uuid.UUID,
 	extra func(ctx context.Context, tx pgx.Tx, session casino.LaunchSession) error,
-	build func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound),
+	build func(session casino.LaunchSession, playerRef uuid.UUID, mock casinoSimulationMock) (string, webhookauth.Inbound),
 	auditAction string,
 ) (casino.ReceiveCallbackResult, string, error) {
 	validate := func(ctx context.Context, tx pgx.Tx) (casino.LaunchSession, error) {
@@ -641,7 +660,11 @@ func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAcc
 		if err := requireRealMode(session); err != nil {
 			return casino.LaunchSession{}, err
 		}
-		if err := requireActiveUnexpiredSession(session); err != nil {
+		vendorBootstrapped, err := casino.LaunchSessionVendorBootstrapped(ctx, tx, session.ID)
+		if err != nil {
+			return casino.LaunchSession{}, err
+		}
+		if err := requireSimulationDrivableSession(session, vendorBootstrapped); err != nil {
 			return casino.LaunchSession{}, err
 		}
 		if extra != nil {
@@ -667,7 +690,16 @@ func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAcc
 			return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
 		}
 		providerID = session.ProviderID
-		providerTxID, payload = build(session, mock)
+		// CAS-PLAYER-REF-1: the mock vendor identifies the player by the
+		// opaque reference issued with the session, never the account id.
+		playerRef, found, err := casino.LookupProviderPlayerRef(ctx, tx, tenantID, session.ProviderID, session.PlayerAccountID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return &apierror.Error{Code: apierror.CodeValidation, Message: "session has no player reference; launch the game again"}
+		}
+		providerTxID, payload = build(session, playerRef, mock)
 		return nil
 	})
 	if err != nil {
@@ -680,6 +712,53 @@ func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAcc
 	if simulationBetweenPhasesHook != nil {
 		simulationBetweenPhasesHook(sessionID)
 	}
+	// LF-A3-2 (ledger-finance review, ADR 0082): the MOCK vendor's session
+	// consume runs in its OWN transaction, committed BEFORE the callback's
+	// transaction opens. Holding the session-row update inside the callback's
+	// transaction would put a row lock ahead of the L0.1 delivery lock that
+	// postBet/postWin/postRollback must take as their first statement.
+	err = deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		session, err := validate(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if session.ProviderID != providerID {
+			return &apierror.Error{Code: apierror.CodeConflict, Message: "session changed during simulation"}
+		}
+		// CAS-BET-REQUIRES-BOOTSTRAP-1: a bet needs a 'consumed' session. The
+		// MOCK vendor's bootstrap is this CAS (active -> consumed, single
+		// use); a session already consumed by this path is left as is.
+		if session.Status != casino.LaunchSessionActive {
+			return nil
+		}
+		mock, ok := requireMockCasinoProvider(deps, providerID)
+		if !ok {
+			return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
+		}
+		err = casino.ConsumeLaunchSessionForMockPlay(ctx, tx, session.ID, mock)
+		switch {
+		case err == nil:
+			recordCasinoPlaySimulationAudit(ctx, tx, tenantID, playerAccountID, session.ID,
+				"casino_play_simulation.session_consumed", providerTxID, casino.ReceiveCallbackResult{Outcome: casino.OutcomeSucceeded})
+			return nil
+		case errors.Is(err, casino.ErrLaunchSessionNotActive):
+			// Lost the CAS. The only benign loser is a concurrent
+			// simulation request that consumed the same session first;
+			// anything else (revoked, vendor-bootstrapped) is refused.
+			current, gerr := casino.GetLaunchSessionByID(ctx, tx, session.ID)
+			bootstrapped, berr := casino.LaunchSessionVendorBootstrapped(ctx, tx, session.ID)
+			if gerr != nil || berr != nil || current.Status != casino.LaunchSessionConsumed || bootstrapped {
+				return &apierror.Error{Code: apierror.CodeConflict, Message: "session changed during simulation"}
+			}
+			return nil
+		default:
+			return err
+		}
+	})
+	if err != nil {
+		return casino.ReceiveCallbackResult{}, providerTxID, err
+	}
+
 	var result casino.ReceiveCallbackResult
 	err = deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		session, err := validate(ctx, tx)

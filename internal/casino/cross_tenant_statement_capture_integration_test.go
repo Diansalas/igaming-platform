@@ -30,7 +30,7 @@ func TestCasinoWebhook_CrossTenantSignature_NoStatementBeforeVerification(t *tes
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	signedForA := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "cas-c7-cross-tenant", "", "round-c7-xt", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", fA.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", fA.playerRef, uuid.New())
 
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {

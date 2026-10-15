@@ -72,7 +72,7 @@ func TestCallContext_NeverRendersSecret(t *testing.T) {
 		IdempotencyKey: "cas:test-session", Deadline: time.Now().Add(time.Minute),
 	}
 	req := LaunchRequest{
-		ProviderGameID: "game-1", PlayerAccountID: uuid.New(), AssetCode: "EUR", Mode: ModeReal,
+		ProviderGameID: "game-1", PlayerRef: uuid.New(), AssetCode: "EUR", Mode: ModeReal,
 		LaunchToken: "tok", SessionID: uuid.New(), Call: call,
 	}
 

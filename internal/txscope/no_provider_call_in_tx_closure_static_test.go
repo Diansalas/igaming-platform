@@ -84,6 +84,39 @@ var ioc1FlaggedMethods = map[string]bool{
 	// same way flagging Deposit/Launch/CreateVerification does for their
 	// own packages.
 	"FetchCatalogue": true,
+	// CAS-STMT-IO-1 (A3): the statement sources of the reconciliation
+	// streams. CasinoStatementSource.Fetch and PaymentStatementSource.Fetch
+	// are provider I/O for a real source (a statement API or file read), and
+	// FetchCasinoStatement is the stream's single sanctioned caller of the
+	// casino one; flagging both names keeps a statement fetch out of the
+	// reconciliation match transaction - the original CAS-STMT-IO-1 defect,
+	// where the casino statement was read inside the REPEATABLE READ tx.
+	"Fetch": true, "FetchCasinoStatement": true,
+}
+
+// ioc1FlaggedBareFuncs are package-level helpers that perform provider I/O
+// and are called BARE (an *ast.Ident callee, from inside their own package),
+// which ioc1CalleeName's selector-only matching would not see. Kept to the
+// helpers that need it; a bare-call name list for every adapter method would
+// flag unrelated local helpers.
+var ioc1FlaggedBareFuncs = map[string]bool{
+	"FetchCasinoStatement": true,
+}
+
+// ioc1NamedFuncExemptCalls are the EXACT (receiver identifier, method) pairs
+// that the NAMED-function scan (A3 SR3-6) exempts, and nothing else: they are
+// the only false positives the scan produced on the production tree - a pgx
+// savepoint's Rollback (kyc outbox, payments orchestrator) and the ledger's
+// locked-projection set's Balance (casino and sportsbook orchestrators). They
+// are not provider adapters. The exemption applies ONLY in the named-function
+// walk; closures keep the strict, exemption-free behaviour they always had.
+// Lexical, by variable name (SR3B-2): any other method on those receivers, and
+// any other receiver, is still flagged; a provider value must not be named sp
+// or locked (a code-reviewer checklist item, the same limit as the rest of this
+// guard).
+var ioc1NamedFuncExemptCalls = map[[2]string]bool{
+	{"sp", "Rollback"}:    true,
+	{"locked", "Balance"}: true,
 }
 
 // ioc1TxClosureViolation is one adapter-method call found lexically inside
@@ -107,10 +140,16 @@ func (v ioc1TxClosureViolation) String() string {
 // internal/providerkind/completeness_scan.go's identical "no go/types"
 // note) and keeping it independent of module resolution/build tags.
 func ioc1IsTxClosureParam(f *ast.FuncLit) bool {
-	if f.Type.Params == nil {
+	return ioc1HasPgxTxParam(f.Type)
+}
+
+// ioc1HasPgxTxParam reports whether a function type (a literal's or a named
+// declaration's) declares a pgx.Tx parameter.
+func ioc1HasPgxTxParam(ft *ast.FuncType) bool {
+	if ft == nil || ft.Params == nil {
 		return false
 	}
-	for _, field := range f.Type.Params.List {
+	for _, field := range ft.Params.List {
 		sel, ok := field.Type.(*ast.SelectorExpr)
 		if !ok {
 			continue
@@ -147,23 +186,49 @@ func ioc1ScanFile(path string, src []byte) ([]ioc1TxClosureViolation, int, error
 	}
 	var violations []ioc1TxClosureViolation
 	closuresSeen := 0
-	ast.Inspect(file, func(n ast.Node) bool {
-		lit, ok := n.(*ast.FuncLit)
-		if !ok || !ioc1IsTxClosureParam(lit) {
-			return true
+	reported := map[token.Pos]bool{} // a call nested in a tx scope inside another is one finding
+	scanBody := func(body *ast.BlockStmt, namedFunc bool) {
+		if body == nil {
+			return
 		}
-		closuresSeen++
-		ast.Inspect(lit.Body, func(n ast.Node) bool {
+		ast.Inspect(body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
 			name := ioc1CalleeName(call.Fun)
-			if name != "" && ioc1FlaggedMethods[name] {
+			if id, ok := call.Fun.(*ast.Ident); ok && ioc1FlaggedBareFuncs[id.Name] {
+				name = id.Name
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && namedFunc {
+				if recv, ok := sel.X.(*ast.Ident); ok && ioc1NamedFuncExemptCalls[[2]string{recv.Name, sel.Sel.Name}] {
+					return true
+				}
+			}
+			if name != "" && (ioc1FlaggedMethods[name] || ioc1FlaggedBareFuncs[name]) && !reported[call.Pos()] {
+				reported[call.Pos()] = true
 				violations = append(violations, ioc1TxClosureViolation{pos: fset.Position(call.Pos()), method: name})
 			}
 			return true
 		})
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch fn := n.(type) {
+		case *ast.FuncLit:
+			if ioc1IsTxClosureParam(fn) {
+				closuresSeen++
+				scanBody(fn.Body, false)
+			}
+		case *ast.FuncDecl:
+			// A3 SR3-6 (security review): a NAMED function (or method) that takes
+			// a pgx.Tx is, by construction, called with a transaction held, so a
+			// provider call in its body is the same defect as one inside a
+			// closure - the closure-only scan missed it.
+			if ioc1HasPgxTxParam(fn.Type) {
+				closuresSeen++
+				scanBody(fn.Body, true)
+			}
+		}
 		return true
 	})
 	return violations, closuresSeen, nil
@@ -233,6 +298,10 @@ func TestINV_IO_1c_NoAdapterCallInsideTxClosure(t *testing.T) {
 		// file.
 		filepath.Join(root, "internal", "sportsbook"),
 		filepath.Join(root, "cmd", "platform-api"),
+		// CAS-STMT-IO-1 (A3): the reconciliation streams fetch provider
+		// statements (casino and payment); their match transactions must
+		// never contain the fetch.
+		filepath.Join(root, "internal", "reconciliation"),
 	}
 
 	var violations []ioc1TxClosureViolation
@@ -334,6 +403,61 @@ func (o *Orchestrator) readCapabilities(ctx context.Context, pool *db.Pool, tena
 	}
 }
 
+// TestINV_IO_1c_GuardCatchesStatementFetchInsideTx is CAS-STMT-IO-1's
+// negative control: the original defect shape - a casino statement source
+// called from inside the reconciliation REPEATABLE READ closure - and the
+// FetchCasinoStatement helper called from one are both flagged, while the
+// production order (fetch first, then open the transaction) is not.
+func TestINV_IO_1c_GuardCatchesStatementFetchInsideTx(t *testing.T) {
+	planted := `package x
+
+func run(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, source CasinoStatementSource) error {
+	return pool.WithTenantSnapshot(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		stmt, err := source.Fetch(ctx, CasinoFetchRequest{TenantID: tenantID})
+		_, _ = stmt, err
+		fetched, err := FetchCasinoStatement(ctx, source, tenantID, start, end)
+		_, _ = fetched, err
+		return nil
+	})
+}
+`
+	v, closures, err := ioc1ScanFile("planted_stmt.go", []byte(planted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closures != 1 {
+		t.Fatalf("expected the planted snapshot closure to be recognized, got %d", closures)
+	}
+	got := map[string]bool{}
+	for _, x := range v {
+		got[x.method] = true
+	}
+	if len(v) != 2 || !got["Fetch"] || !got["FetchCasinoStatement"] {
+		t.Fatalf("expected a Fetch and a FetchCasinoStatement violation, got %v", v)
+	}
+
+	safe := `package x
+
+func run(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, source CasinoStatementSource) error {
+	fetched, err := FetchCasinoStatement(ctx, source, tenantID, start, end)
+	if err != nil {
+		return err
+	}
+	return pool.WithTenantSnapshot(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, _, err := RunCasinoStatement(ctx, tx, tenantID, start, end, fetched)
+		return err
+	})
+}
+`
+	v, closures, err = ioc1ScanFile("safe_stmt.go", []byte(safe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closures != 1 || len(v) != 0 {
+		t.Fatalf("fetch-then-match must not be flagged (closures=%d violations=%v)", closures, v)
+	}
+}
+
 // TestINV_IO_1c_DetectsTxClosureRegardlessOfCallerName proves the
 // structural (parameter-shape) detection: a hand-written closure literal
 // with a pgx.Tx parameter is recognized as a transaction closure even when
@@ -360,5 +484,125 @@ func f(pool *db.Pool, ctx context.Context, tenantID uuid.UUID, provider CasinoPr
 	}
 	if len(v) != 1 || v[0].method != "Launch" {
 		t.Fatalf("expected exactly one Launch violation, got %v", v)
+	}
+}
+
+// TestINV_IO_1c_GuardCatchesProviderCallInNamedTxFunction is SR3-6's negative
+// control: a NAMED function or method taking a pgx.Tx that calls a provider
+// adapter method is flagged (the closure-only scan missed this shape), while a
+// named function WITHOUT a pgx.Tx parameter, and a tx-taking function that
+// calls only non-flagged methods, are not.
+func TestINV_IO_1c_GuardCatchesProviderCallInNamedTxFunction(t *testing.T) {
+	planted := `package x
+
+func (o *Orchestrator) settle(ctx context.Context, tx pgx.Tx, provider CasinoProvider) error {
+	_, err := provider.Balance(ctx, BalanceRequest{})
+	return err
+}
+
+func fetchInHelper(ctx context.Context, tx pgx.Tx, source CasinoStatementSource) error {
+	_, err := FetchCasinoStatement(ctx, source, id, a, b)
+	return err
+}
+`
+	v, n, err := ioc1ScanFile("named.go", []byte(planted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, x := range v {
+		got[x.method] = true
+	}
+	if n != 2 || len(v) != 2 || !got["Balance"] || !got["FetchCasinoStatement"] {
+		t.Fatalf("expected the Balance and FetchCasinoStatement calls in named tx functions flagged (named=%d), got %v", n, v)
+	}
+
+	safe := `package x
+
+func (o *Orchestrator) outside(ctx context.Context, provider CasinoProvider) error {
+	_, err := provider.Balance(ctx, BalanceRequest{})
+	return err
+}
+
+func (o *Orchestrator) meta(ctx context.Context, tx pgx.Tx, provider CasinoProvider) {
+	_ = provider.Capabilities()
+}
+`
+	v, n, err = ioc1ScanFile("named_safe.go", []byte(safe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || len(v) != 0 {
+		t.Fatalf("a function without a pgx.Tx and a metadata-only tx function must not be flagged (txFuncs=%d violations=%v)", n, v)
+	}
+
+	// The two exact pairs the production tree needs are exempt in a named function.
+	exempt := `package x
+
+func (o *Orchestrator) lockAndRollback(ctx context.Context, tx pgx.Tx, sp pgx.Tx) error {
+	locked, err := ledger.LockProjectionsForPosting(ctx, tx, in)
+	_, _ = locked.Balance(id)
+	if err != nil {
+		return sp.Rollback(ctx)
+	}
+	return nil
+}
+`
+	v, _, err = ioc1ScanFile("exempt.go", []byte(exempt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 0 {
+		t.Fatalf("tx/savepoint Rollback and locked.Balance must not be flagged, got %v", v)
+	}
+
+	// A closure nested inside a named tx function is one finding, not two.
+	nested := `package x
+
+func (o *Orchestrator) outer(ctx context.Context, tx pgx.Tx, provider CasinoProvider) error {
+	return run(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := provider.Launch(ctx, LaunchRequest{})
+		return err
+	})
+}
+`
+	v, _, err = ioc1ScanFile("nested.go", []byte(nested))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 1 || v[0].method != "Launch" {
+		t.Fatalf("a call nested in a closure inside a named tx function must be reported once, got %v", v)
+	}
+}
+
+// SR3B-2 negative controls: the exemption is exact (receiver, method) pairs,
+// named-function walk only. Every other method on sp/locked/tx - including ones
+// that are provider adapter methods - is flagged inside a named tx function AND
+// inside a closure, and even the exempt pairs are flagged inside a closure.
+func TestINV_IO_1c_ExemptionIsExactAndNamedFunctionOnly(t *testing.T) {
+	for _, call := range []string{"sp.FetchCatalogue(ctx)", "locked.Launch(ctx, r)", "locked.Bet(ctx, r)", "sp.Withdraw(ctx, r)", "sp.Balance(ctx, r)", "tx.Deposit(ctx, r)"} {
+		named := "package x\n\nfunc f(ctx context.Context, tx pgx.Tx, sp pgx.Tx, locked X) {\n\t_ = " + call + "\n}\n"
+		v, _, err := ioc1ScanFile("named.go", []byte(named))
+		if err != nil || len(v) != 1 {
+			t.Errorf("%s in a named tx function must be flagged once, got %v %v", call, v, err)
+		}
+		closure := "package x\n\nfunc g(pool P) {\n\tpool.W(func(ctx context.Context, tx pgx.Tx) error {\n\t\t_ = " + call + "\n\t\treturn nil\n\t})\n}\n"
+		v, _, err = ioc1ScanFile("closure.go", []byte(closure))
+		if err != nil || len(v) != 1 {
+			t.Errorf("%s in a tx closure must be flagged once, got %v %v", call, v, err)
+		}
+	}
+	// The exempt pairs are exempt ONLY in a named function, never in a closure.
+	for _, call := range []string{"sp.Rollback(ctx)", "locked.Balance(id)"} {
+		closure := "package x\n\nfunc g(pool P) {\n\tpool.W(func(ctx context.Context, tx pgx.Tx) error {\n\t\t_ = " + call + "\n\t\treturn nil\n\t})\n}\n"
+		v, _, err := ioc1ScanFile("closure_exempt.go", []byte(closure))
+		if err != nil || len(v) != 1 {
+			t.Errorf("%s inside a tx closure must be flagged (no exemption there), got %v %v", call, v, err)
+		}
+		named := "package x\n\nfunc f(ctx context.Context, tx pgx.Tx, sp pgx.Tx, locked X) {\n\t_ = " + call + "\n}\n"
+		v, _, err = ioc1ScanFile("named_exempt.go", []byte(named))
+		if err != nil || len(v) != 0 {
+			t.Errorf("%s in a named tx function is the exempt pair, got %v %v", call, v, err)
+		}
 	}
 }

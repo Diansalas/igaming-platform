@@ -58,6 +58,7 @@ func createCasinoRiskRule(t *testing.T, pool *db.Pool, f casinoFixture, params r
 func mintSessionWithJurisdiction(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode, jurisdictionCode string) uuid.UUID {
 	t.Helper()
 	game := seedGame(t, pool, providerID, assetCode)
+	enableGameForTenant(t, pool, f, game.ID)
 	var sessionID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		session, _, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
@@ -74,6 +75,7 @@ func mintSessionWithJurisdiction(t *testing.T, pool *db.Pool, f casinoFixture, p
 	if err != nil {
 		t.Fatalf("mint launch session with jurisdiction: %v", err)
 	}
+	consumeSessionDirect(t, pool, f.tenantID, sessionID)
 	return sessionID
 }
 
@@ -123,7 +125,7 @@ func TestReceiveCallback_BetDeniedByJurisdictionScopedRiskRuleViaLaunchSession(t
 		LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 50, RuleKind: risk.RuleHardLimit,
 	})
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -195,7 +197,7 @@ func TestReceiveCallback_BetDeniedByRiskMaxAmountHardLimit(t *testing.T) {
 		Threshold: 500, RuleKind: risk.RuleHardLimit,
 	})
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-over-limit", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-over-limit", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -241,7 +243,7 @@ func TestReceiveCallback_PlayerRiskOverrideBeatsBrandDefault(t *testing.T) {
 		PlayerAccountID: &f.playerAccountID, Operation: risk.OperationCasinoBet, LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 50,
 	})
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-75", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-75", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -278,8 +280,8 @@ func TestReceiveCallback_ConcurrentBetsRespectCumulativeLimit(t *testing.T) {
 		Threshold: 100, RuleKind: risk.RuleHardLimit,
 	})
 
-	payloadA := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-a", "", "round-a", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionA)
-	payloadB := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-b", "", "round-b", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionB)
+	payloadA := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-a", "", "round-a", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerRef, sessionA)
+	payloadB := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-b", "", "round-b", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerRef, sessionB)
 
 	results := make([]ReceiveCallbackResult, 2)
 	errs := make([]error, 2)

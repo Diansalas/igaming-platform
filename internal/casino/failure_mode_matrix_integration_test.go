@@ -241,7 +241,7 @@ func TestFailureModeMatrix_A_PlatformAbortsAfterProviderAccepted_NoPartialLedger
 	const providerTxID = "bet-fm-a-abort"
 	const roundID = "round-fm-a-abort"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", roundID, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", roundID, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 	// The callback itself succeeds - the provider has "accepted" the bet
 	// and the platform has posted it - and only THEN does the platform
@@ -347,7 +347,7 @@ func TestFailureModeMatrix_A_ContextCancelledMidCallback_NoPartialLedgerWrite(t 
 	const providerTxID = "bet-fm-a-cancel"
 	const roundID = "round-fm-a-cancel"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", roundID, "game-1", 1200, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", roundID, "game-1", 1200, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 	// Delivery 1: posted but deliberately left uncommitted, so it holds
 	// postBet's own per-(tenant, provider, tx) advisory lock.
@@ -470,7 +470,7 @@ func TestFailureModeMatrix_B_RetryAfterCommittedCrashReturnsPriorOutcome(t *test
 		return result
 	}
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-b", "", roundID, "game-1", 800, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-b", "", roundID, "game-1", 800, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	first := deliver(betPayload)
 	if first.Outcome != OutcomeSucceeded || first.LedgerTransactionID == nil {
 		t.Fatalf("expected the first bet delivery to post, got %+v", first)
@@ -488,7 +488,7 @@ func TestFailureModeMatrix_B_RetryAfterCommittedCrashReturnsPriorOutcome(t *test
 		t.Fatalf("expected exactly one bet transaction after the retry, got %d", count)
 	}
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-b", "", roundID, "game-1", 2000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-b", "", roundID, "game-1", 2000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	firstWin := deliver(winPayload)
 	secondWin := deliver(winPayload)
 	if firstWin.LedgerTransactionID == nil || secondWin.LedgerTransactionID == nil {
@@ -561,9 +561,9 @@ func TestFailureModeMatrix_C_DuplicateWebhookDeliveryOfFullRound(t *testing.T) {
 		}
 	}
 
-	deliverTwice("bet", provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-c", "", roundID, "game-1", 600, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID))
-	deliverTwice("win", provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-c", "", roundID, "game-1", 1500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil))
-	deliverTwice("rollback", provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-fm-c", "win-fm-c", roundID, "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil))
+	deliverTwice("bet", provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-c", "", roundID, "game-1", 600, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID))
+	deliverTwice("win", provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-c", "", roundID, "game-1", 1500, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil))
+	deliverTwice("rollback", provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-fm-c", "win-fm-c", roundID, "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil))
 
 	for _, ref := range []string{"bet-fm-c", "win-fm-c", "rollback-fm-c"} {
 		if count := fmCountLedgerTx(t, pool, f.tenantID, "mock-casino", ref); count != 1 {
@@ -621,7 +621,7 @@ func TestFailureModeMatrix_D_WinBeforeBetIsRejectedAndTheRoundStillRecovers(t *t
 
 	const roundID = "round-fm-d"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-d", "", roundID, "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-d", "", roundID, "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
@@ -642,7 +642,7 @@ func TestFailureModeMatrix_D_WinBeforeBetIsRejectedAndTheRoundStillRecovers(t *t
 	}
 
 	// The delayed bet finally arrives...
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-d", "", roundID, "game-1", 900, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-d", "", roundID, "game-1", 900, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -705,7 +705,7 @@ func TestFailureModeMatrix_D_LateOriginalAfterTombstoneIsRejectedWithNoLedgerEff
 	const roundID = "round-fm-d-tombstone"
 	const betRef = "bet-fm-d-late"
 
-	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-fm-d-early", betRef, roundID, "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-fm-d-early", betRef, roundID, "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	var rollbackResult ReceiveCallbackResult
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -718,7 +718,7 @@ func TestFailureModeMatrix_D_LateOriginalAfterTombstoneIsRejectedWithNoLedgerEff
 		t.Fatalf("expected a tombstone for a rollback of a never-seen original, got %+v", rollbackResult)
 	}
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, betRef, "", roundID, "game-1", 700, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, betRef, "", roundID, "game-1", 700, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var lateResult ReceiveCallbackResult
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -805,7 +805,7 @@ func TestFailureModeMatrix_E_MalformedAmountsAndUnknownAssetRejectedCleanly(t *t
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, tc.providerTxID, "", tc.roundID, "game-1", tc.amount, tc.assetCode, OutcomeSucceeded, "", f.playerAccountID, sessionID)
+			payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, tc.providerTxID, "", tc.roundID, "game-1", tc.amount, tc.assetCode, OutcomeSucceeded, "", f.playerRef, sessionID)
 			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
@@ -831,7 +831,7 @@ func TestFailureModeMatrix_E_MalformedAmountsAndUnknownAssetRejectedCleanly(t *t
 	// same class of cross-check (postWin compares the event's asset to the
 	// WALLET the round's bet actually debited).
 	t.Run("win in a mismatched asset", func(t *testing.T) {
-		betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-e-winasset", "", "round-fm-e-winasset", "game-1", 400, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-e-winasset", "", "round-fm-e-winasset", "game-1", 400, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 			return err
@@ -840,7 +840,7 @@ func TestFailureModeMatrix_E_MalformedAmountsAndUnknownAssetRejectedCleanly(t *t
 		}
 		before := cashBalance(t, pool, f)
 
-		winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-e-asset", "", "round-fm-e-winasset", "game-1", 900, "ZZZ", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+		winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-fm-e-asset", "", "round-fm-e-winasset", "game-1", 900, "ZZZ", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 			return err
@@ -975,7 +975,7 @@ func TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchRevokesSessionNoTra
 	if debitsBefore != creditsBefore {
 		t.Fatalf("ledger invariant violated before the rejected bet: debits=%d credits=%d", debitsBefore, creditsBefore)
 	}
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-orphan", "", "round-1", "game-1", 100, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-orphan", "", "round-1", "game-1", 100, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -1042,7 +1042,7 @@ func TestFailureModeMatrix_H_BetNamingAnUnknownSessionRejectedCleanly(t *testing
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-h", "", "round-fm-h", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-h", "", "round-fm-h", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -1074,6 +1074,14 @@ func TestFailureModeMatrix_H_BetNamingAnUnknownSessionRejectedCleanly(t *testing
 // (TestCasinoPlay_CrossPlayerSessionDenied and friends), which test the
 // HTTP boundary's own player-scope check rather than postBet's resolution.
 func TestFailureModeMatrix_I_BetPayloadNamingAnotherPlayerDebitsOnlyTheSessionOwner(t *testing.T) {
+	// A3 SR3-1 (owner decision: fail closed) INVERTS this test's outcome. It
+	// used to assert that a bet naming another player's (valid) reference was
+	// accepted and debited only the session owner. The property it protects -
+	// the payload-named player is financially untouched, and only the session
+	// owner's wallet can ever be debited - is now enforced more strongly: the
+	// disagreement between the vendor's player and the platform's session
+	// binding is REFUSED (same 400 as an unresolvable reference), nothing is
+	// posted, neither wallet moves, and exactly one mismatch audit row is kept.
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
 	fundWallet(t, pool, f, 5000)
@@ -1086,32 +1094,39 @@ func TestFailureModeMatrix_I_BetPayloadNamingAnotherPlayerDebitsOnlyTheSessionOw
 	const roundID = "round-fm-i"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
 	// Signed correctly, but naming the OTHER player in the payload.
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-i", "", roundID, "game-1", 1100, "EUR", OutcomeSucceeded, "", otherPlayerID, sessionID)
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-i", "", roundID, "game-1", 1100, "EUR", OutcomeSucceeded, "", playerRefFor(t, pool, f.tenantID, "mock-casino", otherPlayerID), sessionID)
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
-	}); err != nil {
-		t.Fatalf("bet naming another player: %v", err)
+	})
+	if !errors.Is(err, ErrPlayerRefMismatch) || !errors.Is(err, ErrPlayerRefUnresolved) {
+		t.Fatalf("a bet naming another player must be refused with ErrPlayerRefMismatch (an ErrPlayerRefUnresolved, same 400), got %v", err)
+	}
+	a3RecordRejection(t, pool, f.tenantID, "mock-casino", err)
+	if n := a3AuditCount(t, pool, f.tenantID, AuditActionCallbackPlayerRefMismatch); n != 1 {
+		t.Fatalf("expected exactly one %s audit row, got %d", AuditActionCallbackPlayerRefMismatch, n)
 	}
 
-	if balance := cashBalance(t, pool, f); balance != 3900 {
-		t.Fatalf("expected the SESSION OWNER debited (5000-1100=3900), got %d", balance)
+	if balance := cashBalance(t, pool, f); balance != 5000 {
+		t.Fatalf("expected the SESSION OWNER untouched (5000), got %d", balance)
 	}
 	if balance := fmWalletCashBalance(t, pool, f.tenantID, otherWalletID); balance != 0 {
 		t.Fatalf("the payload-named player must be financially untouched, got balance %d", balance)
 	}
-	// And the entries themselves name the session owner's wallet only.
-	var otherEntryCount int
+	var betTxs, otherEntryCount int
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND provider_tx_id = 'bet-fm-i'`, f.tenantID).Scan(&betTxs); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx,
 			`SELECT count(*) FROM ledger_entries e
 			   JOIN ledger_accounts la ON la.id = e.ledger_account_id
 			  WHERE e.tenant_id = $1 AND la.wallet_id = $2`, f.tenantID, otherWalletID).Scan(&otherEntryCount)
 	}); err != nil {
-		t.Fatalf("count entries against the other player's wallet: %v", err)
+		t.Fatalf("count: %v", err)
 	}
-	if otherEntryCount != 0 {
-		t.Fatalf("expected zero ledger entries against the payload-named player's wallet, got %d", otherEntryCount)
+	if betTxs != 0 || otherEntryCount != 0 {
+		t.Fatalf("nothing may post: bet txs=%d, entries against the other wallet=%d", betTxs, otherEntryCount)
 	}
 	fmAssertCorrelationBalanced(t, pool, f.tenantID, correlationID)
 }
@@ -1154,7 +1169,7 @@ func TestFailureModeMatrix_JK_CrossTenantRollbackCannotReachAnotherTenantsTransa
 
 	const betRef = "bet-fm-jk"
 	const roundID = "round-fm-jk"
-	betPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, betRef, "", roundID, "game-1", 1300, "EUR", OutcomeSucceeded, "", fA.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, betRef, "", roundID, "game-1", 1300, "EUR", OutcomeSucceeded, "", fA.playerRef, sessionID)
 	if err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betPayload)
 		return err
@@ -1167,7 +1182,7 @@ func TestFailureModeMatrix_JK_CrossTenantRollbackCannotReachAnotherTenantsTransa
 	}
 
 	// Tenant B's callback names tenant A's provider_tx_id.
-	rollbackPayload := provider.CallbackPayload(fB.tenantID, CallbackEventRollback, "rollback-fm-jk", betRef, roundID, "game-1", 0, "EUR", "", "", fB.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(fB.tenantID, CallbackEventRollback, "rollback-fm-jk", betRef, roundID, "game-1", 0, "EUR", "", "", fB.playerRef, uuid.Nil)
 	var result ReceiveCallbackResult
 	if err := pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error

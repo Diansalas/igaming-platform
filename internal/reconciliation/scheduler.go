@@ -98,8 +98,10 @@ func TryRunCasinoConsistencyForTenant(ctx context.Context, tx pgx.Tx, tenantID u
 // the SAME stream for the same tenant serializes (the loser is skipped and
 // records nothing but its audited "skipped" attempt), while the other
 // streams never contend with it. tx must be REPEATABLE READ
-// (db.Pool.WithTenantSnapshot); RunCasinoStatement enforces it.
-func TryRunCasinoStatementForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.CasinoStatementSource) (run Run, mismatches []Mismatch, info CasinoStatementInfo, acquired bool, err error) {
+// (db.Pool.WithTenantSnapshot); RunCasinoStatement enforces it. The statement
+// is fetched BEFORE tx opens (FetchCasinoStatement; CAS-STMT-IO-1) and arrives
+// here as a value: this function performs no provider I/O.
+func TryRunCasinoStatementForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time, fetched FetchedCasinoStatement) (run Run, mismatches []Mismatch, info CasinoStatementInfo, acquired bool, err error) {
 	if err := tx.QueryRow(ctx,
 		`SELECT pg_try_advisory_xact_lock(hashtextextended('reconciliation:casino_statement:' || $1::text, 0))`,
 		tenantID,
@@ -109,7 +111,7 @@ func TryRunCasinoStatementForTenant(ctx context.Context, tx pgx.Tx, tenantID uui
 	if !acquired {
 		return Run{}, nil, CasinoStatementInfo{}, false, nil
 	}
-	run, mismatches, info, err = RunCasinoStatement(ctx, tx, tenantID, periodStart, periodEnd, source)
+	run, mismatches, info, err = RunCasinoStatement(ctx, tx, tenantID, periodStart, periodEnd, fetched)
 	return run, mismatches, info, true, err
 }
 
@@ -690,10 +692,12 @@ func runCasinoStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.L
 // lock-skipped) is audited with the statement source label (which says
 // MOCK today) and the statement's shape; a failure (including a nil
 // source) is audited in a fresh transaction; a mismatch is logged at Error
-// level ("MISMATCH FOUND", P1) with the label. Its transaction is opened
-// with WithTenantSnapshot (REPEATABLE READ) because the statement and the
-// ledger are read in separate statements. It never corrects anything and
-// never touches a balance.
+// level ("MISMATCH FOUND", P1) with the label. The statement is fetched
+// first, with NO transaction held (CAS-STMT-IO-1); the match transaction is
+// opened with WithTenantSnapshot (REPEATABLE READ) because the ledger is read
+// in several statements. A fetch failure is a failed run, audited and
+// alerted like any other run failure. It never corrects anything and never
+// touches a balance.
 func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.CasinoStatementSource) StreamOutcome {
 	var out StreamOutcome
 	stream := string(StreamCasinoStatement)
@@ -703,32 +707,39 @@ func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logge
 	}
 	var mismatchCount int
 
-	txErr := pool.WithTenantSnapshot(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		run, mismatches, info, acquired, err := TryRunCasinoStatementForTenant(ctx, tx, tenantID, periodStart, periodEnd, source)
-		out.Run, out.Skipped = run, !acquired
-		mismatchCount = len(mismatches)
-		if err != nil {
-			return err
-		}
-		status := string(run.Status)
-		if !acquired {
-			status = "skipped"
-		}
-		metadata := map[string]any{
-			"stream": stream, "skipped_lock_contention": !acquired, "status": status,
-			"mismatches": len(mismatches), "statement_source": label,
-		}
-		if acquired {
-			for k, v := range info.AuditMetadata() {
-				metadata[k] = v
+	// Fetch OUTSIDE any transaction (CAS-STMT-IO-1): the source may be
+	// provider I/O. A failure skips the match and takes the same failure path
+	// as a failed match transaction.
+	fetched, txErr := FetchCasinoStatement(ctx, source, tenantID, periodStart, periodEnd)
+
+	if txErr == nil {
+		txErr = pool.WithTenantSnapshot(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			run, mismatches, info, acquired, err := TryRunCasinoStatementForTenant(ctx, tx, tenantID, periodStart, periodEnd, fetched)
+			out.Run, out.Skipped = run, !acquired
+			mismatchCount = len(mismatches)
+			if err != nil {
+				return err
 			}
-		}
-		return audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
-			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
-			Metadata: metadata,
+			status := string(run.Status)
+			if !acquired {
+				status = "skipped"
+			}
+			metadata := map[string]any{
+				"stream": stream, "skipped_lock_contention": !acquired, "status": status,
+				"mismatches": len(mismatches), "statement_source": label,
+			}
+			if acquired {
+				for k, v := range info.AuditMetadata() {
+					metadata[k] = v
+				}
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
+				TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
+				Metadata: metadata,
+			})
 		})
-	})
+	}
 	out.Err = txErr
 
 	switch {

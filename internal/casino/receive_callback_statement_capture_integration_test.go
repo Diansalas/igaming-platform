@@ -127,7 +127,7 @@ func TestCasinoWebhook_BadSignature_NoStatementBeforeVerification(t *testing.T) 
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-bad-sig", "", "round-c7", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 	sig := payload.Header.Get(webhookauth.CasinoSignatureHeader)
 	// Flip the last hex digit only (the header is ^v1=[0-9a-f]{64}$): the old
 	// "first 0, else first 1" rewrite hit the "v1=" prefix when the hex had no
@@ -162,7 +162,7 @@ func TestCasinoWebhook_MissingCredential_NoStatementBeforeVerification(t *testin
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-missing-cred", "", "round-c7", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 	payload.Header = payload.Header.Clone()
 	payload.Header.Set(webhookauth.CasinoKeyIDHeader, "mock-v2") // never resolvable: the mock resolver only ever knows "mock-v1".
 
@@ -193,7 +193,7 @@ func TestCasinoWebhook_ForeignCredential_NoStatementBeforeVerification(t *testin
 	})
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-foreign-cred", "", "round-c7", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -217,7 +217,7 @@ func TestCasinoWebhook_NilResolver_NoStatementBeforeVerification(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, nil)
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-nil-resolver", "", "round-c7", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -242,7 +242,7 @@ func TestCasinoWebhook_VerifiedCallback_AdvisoryLockIsFirstStatement(t *testing.
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-verified", "", "round-c7-verified", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

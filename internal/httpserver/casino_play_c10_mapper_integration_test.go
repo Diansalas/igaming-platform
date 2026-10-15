@@ -46,7 +46,7 @@ func TestCasinoPlaySimulation_C10_OriginalTombstoned_MapsTo409(t *testing.T) {
 	// Tombstone the win's own future reference FIRST, via the real provider
 	// webhook (a genuine rollback of a never-seen original).
 	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, "c10-rb-of-future-win", winProviderTxID,
-		"round-c10-tombstone", game.ProviderGameID, 0, "EUR", "", "", player.ID, uuid.Nil)
+		"round-c10-tombstone", game.ProviderGameID, 0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	rbResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	if rbResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 tombstoning the never-seen win reference, got %d", rbResp.StatusCode)

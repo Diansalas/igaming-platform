@@ -29,8 +29,12 @@ type ghostLineSource struct{}
 
 func (ghostLineSource) Label() string { return "MOCK test statement with one injected ghost line" }
 
-func (ghostLineSource) Statement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, ps, pe time.Time) ([]statement.CasinoStatementLine, []statement.CasinoStatementTotal, error) {
-	lines, totals, err := casino.MockStatementSource{}.Statement(ctx, tx, tenantID, ps, pe)
+// SyntheticComponent marks it providerkind.Synthetic (CAS-STMT-IO-1: the
+// stream accepts a ledger-rendering source only from a Synthetic component).
+func (ghostLineSource) SyntheticComponent() {}
+
+func (ghostLineSource) RenderFromLedger(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]statement.CasinoStatementLine, []statement.CasinoStatementTotal, error) {
+	lines, totals, err := casino.MockStatementSource{}.RenderFromLedger(ctx, tx, tenantID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -49,8 +53,13 @@ func TestCasinoReconciliationAdmin_SurfacesCasinoStatementStream(t *testing.T) {
 	}
 	runCasinoConsistencyForTest(t, a.pool, a.tenant.ID)
 	for _, src := range []statement.CasinoStatementSource{casino.MockStatementSource{}, ghostLineSource{}} {
+		ps, pe := time.Now().Add(-time.Hour), time.Now()
+		fetched, err := reconciliation.FetchCasinoStatement(context.Background(), src, a.tenant.ID, ps, pe)
+		if err != nil {
+			t.Fatalf("fetch casino statement: %v", err)
+		}
 		if err := a.pool.WithTenantSnapshot(context.Background(), a.tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-			_, _, _, err := reconciliation.RunCasinoStatement(ctx, tx, a.tenant.ID, time.Now().Add(-time.Hour), time.Now(), src)
+			_, _, _, err := reconciliation.RunCasinoStatement(ctx, tx, a.tenant.ID, ps, pe, fetched)
 			return err
 		}); err != nil {
 			t.Fatalf("run casino_statement: %v", err)

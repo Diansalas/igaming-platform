@@ -113,7 +113,7 @@ func (w gateWorld) deliver(t *testing.T, ev CallbackEventType, ref, original, ro
 	if ev == CallbackEventRollback {
 		outcome = ""
 	}
-	payload := w.provider.CallbackPayload(w.f.tenantID, ev, ref, original, round, "game-1", amount, "EUR", outcome, "", w.f.playerAccountID, sess)
+	payload := w.provider.CallbackPayload(w.f.tenantID, ev, ref, original, round, "game-1", amount, "EUR", outcome, "", w.f.playerRef, sess)
 	var res ReceiveCallbackResult
 	err := w.rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -280,7 +280,7 @@ func TestTenantNotActive_CasinoCrossTenantIsolation(t *testing.T) {
 		t.Fatalf("tenant B must be unaffected: %v", err)
 	}
 	// B's payload (B tenant id and session) delivered into A's route.
-	payload := b.provider.CallbackPayload(b.f.tenantID, CallbackEventBet, "iso-cross", "", "round-iso-cross", "game-1", 100, "EUR", OutcomeSucceeded, "", b.f.playerAccountID, b.sessionID)
+	payload := b.provider.CallbackPayload(b.f.tenantID, CallbackEventBet, "iso-cross", "", "round-iso-cross", "game-1", 100, "EUR", OutcomeSucceeded, "", b.f.playerRef, b.sessionID)
 	txsB0, _ := ledgerCountsForGate(t, owner, b.f.tenantID)
 	err := rt.WithTenant(context.Background(), a.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := a.orch.receiveCallbackInTx(ctx, tx, a.f.tenantID, "mock-casino", payload)
@@ -365,7 +365,7 @@ func TestTenantNotActive_CasinoStatusChangeVsPostingRace(t *testing.T) {
 		var releaseOnceGuard sync.Once
 		releaseOnce := func() { releaseOnceGuard.Do(func() { close(release) }) }
 		t.Cleanup(releaseOnce) // never leave a held transaction behind on a failed assertion
-		payload := w.provider.CallbackPayload(w.f.tenantID, CallbackEventBet, "race-2", "", "round-race-2", "game-1", 100, "EUR", OutcomeSucceeded, "", w.f.playerAccountID, w.sessionID)
+		payload := w.provider.CallbackPayload(w.f.tenantID, CallbackEventBet, "race-2", "", "round-race-2", "game-1", 100, "EUR", OutcomeSucceeded, "", w.f.playerRef, w.sessionID)
 		posted := make(chan error, 1)
 		go func() {
 			posted <- rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

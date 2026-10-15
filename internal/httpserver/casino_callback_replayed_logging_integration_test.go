@@ -47,14 +47,14 @@ func TestCasinoWebhook_ReplayedLogging_AbsentOnFirstDeliveryPresentOnRedelivery(
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, pool, tenant)
 
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const roundID = "round-replayed-log"
 	const providerTxID = "bet-replayed-log-1"
 
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, providerTxID, "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 
 	// First delivery: succeeds, posts the bet, must NOT be logged as
 	// replayed.

@@ -61,6 +61,24 @@ func markSessionExpired(t *testing.T, pool *db.Pool, tenantID, sessionID uuid.UU
 	}
 }
 
+// endConsumedSessionByRevoke moves a consumed session to revoked
+// (RevokeLaunchSession, migration 0108's consumed -> revoked transition).
+func endConsumedSessionByRevoke(t *testing.T, pool *db.Pool, tenantID, sessionID uuid.UUID) {
+	t.Helper()
+	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		prior, revoked, err := RevokeLaunchSession(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if !revoked || prior != LaunchSessionConsumed {
+			t.Fatalf("expected to revoke a consumed session, prior=%s revoked=%v", prior, revoked)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("revoke consumed session: %v", err)
+	}
+}
+
 // mintSessionWithTTL is mintSession with an explicit, short TTL - used to
 // prove the time-based (expires_at) rejection specifically, for a session
 // whose status was NEVER flipped away from 'active' (the genuine "crash
@@ -69,6 +87,7 @@ func markSessionExpired(t *testing.T, pool *db.Pool, tenantID, sessionID uuid.UU
 func mintSessionWithTTL(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode string, ttl time.Duration) uuid.UUID {
 	t.Helper()
 	game := seedGame(t, pool, providerID, assetCode)
+	enableGameForTenant(t, pool, f, game.ID)
 	var sessionID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		session, _, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
@@ -97,6 +116,7 @@ func mintSessionWithTTL(t *testing.T, pool *db.Pool, f casinoFixture, providerID
 func mintAndConsumeSessionWithTTL(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode string, ttl time.Duration) uuid.UUID {
 	t.Helper()
 	game := seedGame(t, pool, providerID, assetCode)
+	enableGameForTenant(t, pool, f, game.ID)
 	var sessionID uuid.UUID
 	var token string
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -161,7 +181,7 @@ func TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires(t *testin
 		t.Fatalf("test setup: expected the session to still be 'consumed', got %q", status)
 	}
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-consumed-past-ttl", "", "round-consumed-past-ttl", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-consumed-past-ttl", "", "round-consumed-past-ttl", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -183,14 +203,17 @@ func TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced(t *testing
 	fundWallet(t, pool, f, 5000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
+	// A3 (CAS-BET-REQUIRES-BOOTSTRAP-1): markSessionExpired flips a never-
+	// consumed session (consumed rows are immutable except consumed -> revoked,
+	// migration 0108), so this test needs the ACTIVE variant of the fixture.
+	sessionID := mintActiveSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	markSessionExpired(t, pool, f.tenantID, sessionID)
 
 	debitsBefore, creditsBefore := sumDebitsCredits(t, pool, f.tenantID)
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-expiry", "", "round-after-expiry", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-expiry", "", "round-after-expiry", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -228,6 +251,13 @@ func TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced(t *testing
 // flipped away from 'active' (the exact "a crash/phase-C failure left it
 // active forever" scenario ADR 0095 §15.1 must bound) is still rejected
 // once wall-clock time passes its own expires_at.
+//
+// A3 (CAS-BET-REQUIRES-BOOTSTRAP-1) note: the assertion is unchanged and
+// still holds, but its mechanism is now stricter - an 'active' (never
+// consumed) session is refused on status alone, whether or not expires_at
+// has passed - so this test no longer isolates a time check (that branch of
+// postBet was removed as unreachable). TestA3_BetRequiresConsumedSession is
+// the test that pins the current rule.
 func TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
@@ -249,7 +279,7 @@ func TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive(t *testing
 		t.Fatalf("test setup: expected the session to still be 'active' (never lazily flipped), got %q", status)
 	}
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-past-expires-at", "", "round-past-expires-at", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-past-expires-at", "", "round-past-expires-at", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -277,7 +307,7 @@ func TestReceiveCallback_WinSettlesForPreExpiryBetAfterSessionExpires(t *testing
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	// The bet posts BEFORE expiry, while the session is still eligible.
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-pre-expiry", "", "round-pre-expiry", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-pre-expiry", "", "round-pre-expiry", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -289,12 +319,15 @@ func TestReceiveCallback_WinSettlesForPreExpiryBetAfterSessionExpires(t *testing
 		t.Fatalf("expected 4000 after the 1000 bet, got %d", balance)
 	}
 
-	// The session expires - postBet would now reject a NEW bet against it
-	// (the sibling tests above), but this WIN settles the round the bet
-	// above already opened.
-	markSessionExpired(t, pool, f.tenantID, sessionID)
+	// The session ends - postBet would now reject a NEW bet against it (the
+	// sibling tests above), but this WIN settles the round the bet above
+	// already opened. A3 (CAS-BET-REQUIRES-BOOTSTRAP-1): the bet's session is
+	// 'consumed' now, and a consumed row can only be ended by consumed ->
+	// revoked (migration 0108), not flipped to 'expired'; revoke is the
+	// "session no longer eligible" transition this test uses.
+	endConsumedSessionByRevoke(t, pool, f.tenantID, sessionID)
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-post-expiry", "", "round-pre-expiry", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-post-expiry", "", "round-pre-expiry", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error

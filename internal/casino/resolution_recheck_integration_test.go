@@ -85,7 +85,7 @@ func (w *recheckWorld) logText() string {
 
 func (w *recheckWorld) bet(ref string) webhookauth.Inbound {
 	in := w.provider.CallbackPayload(w.f.tenantID, CallbackEventBet, ref, "", "round-"+ref, "game-1",
-		1000, "EUR", OutcomeSucceeded, "", w.f.playerAccountID, w.session)
+		1000, "EUR", OutcomeSucceeded, "", w.f.playerRef, w.session)
 	in.Header = in.Header.Clone()
 	webhookauth.CasinoScheme().SetHeaders(in.Header, webhookauth.MockKeyID,
 		webhookauth.CasinoScheme().Sign(w.secret, w.f.tenantID, "mock-casino", webhookauth.MockKeyID, in.Body))
@@ -366,7 +366,7 @@ func TestReceiveVerified_RevokedThenRestoredRedeliveryPostsOnce(t *testing.T) {
 	redeliver := func() {
 		t.Helper()
 		in := w.provider.CallbackPayload(w.f.tenantID, CallbackEventBet, "lf-r1", "", "round-lf-r1", "game-1",
-			1000, "EUR", OutcomeSucceeded, "", w.f.playerAccountID, w.session)
+			1000, "EUR", OutcomeSucceeded, "", w.f.playerRef, w.session)
 		in.Header = in.Header.Clone()
 		webhookauth.CasinoScheme().SetHeaders(in.Header, "mock-v2",
 			webhookauth.CasinoScheme().Sign(secret2, w.f.tenantID, "mock-casino", "mock-v2", in.Body))

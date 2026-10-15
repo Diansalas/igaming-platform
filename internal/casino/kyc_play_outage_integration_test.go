@@ -89,7 +89,7 @@ func TestReceiveCallback_KYCStoreOutage_DeclinesUnavailableWithOneDecisionRow(t 
 	release := lockKYCVerificationsTable(t, pool)
 	defer release()
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-kyc-outage-1", "", "round-kyc-outage-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-kyc-outage-1", "", "round-kyc-outage-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '300ms'`); err != nil {

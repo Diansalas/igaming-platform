@@ -95,7 +95,19 @@ const (
 	// reason_class (same reasoning); it is written as an append-only
 	// audit_log row (action casino_callback.rejected_brand_not_active).
 	RejectionBrandNotActive RejectionClass = "brand_not_active"
+
+	// RejectionPlayerRefMismatch (A3 SR3-1): a verified callback whose player
+	// reference is VALID for this tenant and provider but names a different
+	// player than the one the platform's own state binds the movement to. Like
+	// the two classes above it is audit-only (no casino_callback_rejections
+	// reason_class, no CHECK/migration change): action
+	// casino_callback.player_ref_mismatch.
+	RejectionPlayerRefMismatch RejectionClass = "player_ref_mismatch"
 )
+
+// AuditActionCallbackPlayerRefMismatch is the audit_log action that carries a
+// RejectionPlayerRefMismatch record.
+const AuditActionCallbackPlayerRefMismatch = "casino_callback.player_ref_mismatch"
 
 // AuditActionCallbackRejectedTenantNotActive is the audit_log action that
 // carries a RejectionTenantNotActive record.
@@ -122,6 +134,8 @@ func rejectionClassFor(err error) (RejectionClass, bool) {
 		return "", false
 	case errors.Is(err, ErrTenantNotActive):
 		return RejectionTenantNotActive, true
+	case errors.Is(err, ErrPlayerRefMismatch):
+		return RejectionPlayerRefMismatch, true
 	case errors.Is(err, ErrBrandNotActive):
 		return RejectionBrandNotActive, true
 	case errors.Is(err, ErrProviderTxPayloadMismatch):
@@ -226,13 +240,16 @@ func RecordCallbackRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 	if tenantID == uuid.Nil || providerID == "" || rej.ProviderTxID == "" || rej.Class == "" {
 		return false, fmt.Errorf("%w: a callback rejection requires tenant, provider, provider_tx_id and class", ErrInvalidInput)
 	}
-	if rej.Class == RejectionTenantNotActive || rej.Class == RejectionBrandNotActive {
+	if rej.Class == RejectionTenantNotActive || rej.Class == RejectionBrandNotActive || rej.Class == RejectionPlayerRefMismatch {
 		// Durable evidence for staff and reconciliation, in the append-only
 		// audit store (no casino_callback_rejections row; see the class doc).
-		// The tenant and brand refusals keep distinct actions and reasons.
+		// The tenant, brand and player-ref refusals keep distinct actions and reasons.
 		action, reason, what := AuditActionCallbackRejectedTenantNotActive, "tenant_not_active", "tenant"
-		if rej.Class == RejectionBrandNotActive {
+		switch rej.Class {
+		case RejectionBrandNotActive:
 			action, reason, what = AuditActionCallbackRejectedBrandNotActive, "brand_not_active", "brand"
+		case RejectionPlayerRefMismatch:
+			action, reason, what = AuditActionCallbackPlayerRefMismatch, "player_ref_mismatch", "player reference"
 		}
 		md := map[string]any{
 			"provider_id": providerID, "event_type": string(rej.EventType), "provider_tx_id": rej.ProviderTxID,

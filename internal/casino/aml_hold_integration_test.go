@@ -67,7 +67,7 @@ func TestAMLHold_CasinoStake_HeldAndKYCPending_SameDeclineReason(t *testing.T) {
 		registerCasinoCapability(t, pool, f, provider, 100)
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
-		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-aml-"+name, "", "round-aml-"+name, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-aml-"+name, "", "round-aml-"+name, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 		var result ReceiveCallbackResult
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
@@ -102,7 +102,7 @@ func TestAMLHold_CasinoTombstoneRollbackWithNoOriginal_IsNeverGated(t *testing.T
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	holdCasinoPlayer(t, pool, f, aml.ScopeAllValueMovement)
 	before := cashBalance(t, pool, f)
-	r := callback(t, pool, f, orch, provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-unseen", "bet-never-seen", "round-x", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil))
+	r := callback(t, pool, f, orch, provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-unseen", "bet-never-seen", "round-x", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil))
 	if !r.Tombstoned || r.DeclineReason != "" {
 		t.Fatalf("a tombstone rollback must not be refused by a hold: %+v", r)
 	}
@@ -123,10 +123,10 @@ func TestAMLHold_CasinoWinAndRollback_AreNeverGated(t *testing.T) {
 
 	post := func(p webhookauth.Inbound) ReceiveCallbackResult { return callback(t, pool, f, orch, p) }
 	// Two stakes BEFORE the hold exists.
-	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-a", "", "round-a", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)); r.Outcome != OutcomeSucceeded {
+	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-a", "", "round-a", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)); r.Outcome != OutcomeSucceeded {
 		t.Fatalf("pre-hold stake a: %+v", r)
 	}
-	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-b", "", "round-b", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)); r.Outcome != OutcomeSucceeded {
+	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-b", "", "round-b", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)); r.Outcome != OutcomeSucceeded {
 		t.Fatalf("pre-hold stake b: %+v", r)
 	}
 	if bal := cashBalance(t, pool, f); bal != 3500 {
@@ -135,14 +135,14 @@ func TestAMLHold_CasinoWinAndRollback_AreNeverGated(t *testing.T) {
 	holdCasinoPlayer(t, pool, f, aml.ScopeAllValueMovement)
 
 	// A NEW stake is refused...
-	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-c", "", "round-c", "game-1", 100, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)); r.Outcome != OutcomeDeclined {
+	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-c", "", "round-c", "game-1", 100, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)); r.Outcome != OutcomeDeclined {
 		t.Fatalf("a new stake on a held player must be declined: %+v", r)
 	}
 	// ...but the win of round a and the rollback of bet b go through.
-	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-a", "", "round-a", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)); r.Outcome != OutcomeSucceeded {
+	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-a", "", "round-a", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)); r.Outcome != OutcomeSucceeded {
 		t.Fatalf("a win must not be gated by a hold: %+v", r)
 	}
-	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-b", "bet-b", "round-b", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)); r.Outcome != OutcomeSucceeded {
+	if r := post(provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-b", "bet-b", "round-b", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)); r.Outcome != OutcomeSucceeded {
 		t.Fatalf("a rollback (terminal stake return) must not be gated by a hold: %+v", r)
 	}
 	if bal := cashBalance(t, pool, f); bal != 3500+2500+500 {

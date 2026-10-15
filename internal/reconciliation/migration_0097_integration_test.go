@@ -295,4 +295,21 @@ func applyGameplayGateMigration(t *testing.T, pool *db.Pool) {
 	}); err != nil {
 		t.Fatalf("apply 0129 on scratch: %v", err)
 	}
+	// CAS-PLAYER-REF-1 (A3): the casino launch-session mint and the callback
+	// path now issue and resolve the opaque player reference
+	// (casino_provider_player_refs, migration 0111), so the current casino
+	// code needs that table on this pre-0111 scratch schema. 0111 depends only
+	// on tables that exist by 0097 (tenants, player_accounts, the
+	// casino_launch_sessions (id, tenant_id) unique key) and
+	// ledger_deny_mutation().
+	b, err = os.ReadFile(filepath.Join("..", "..", "migrations", "0111_casino_launch_bootstrap.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, string(b))
+		return err
+	}); err != nil {
+		t.Fatalf("apply 0111 on scratch: %v", err)
+	}
 }

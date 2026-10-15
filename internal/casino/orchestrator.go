@@ -632,7 +632,10 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		return launchFailed(LaunchFailureTxHeld, ErrProviderCallRefused)
 	}
 	result, err := provider.Launch(ctx, LaunchRequest{
-		ProviderGameID: providerGameID, PlayerAccountID: params.PlayerAccountID,
+		// CAS-PLAYER-REF-1: the vendor gets the opaque provider-scoped player
+		// reference minted with the session in phase A, never the platform's
+		// player account id.
+		ProviderGameID: providerGameID, PlayerRef: session.PlayerRef,
 		AssetCode: params.AssetCode, Mode: params.Mode, LaunchToken: token, SessionID: session.ID,
 		Call: call,
 	})
@@ -996,6 +999,40 @@ func requireActiveBrandForNewStake(ctx context.Context, tx pgx.Tx, tenantID, bra
 	return fmt.Errorf("%w: %w", ErrBrandNotActive, err)
 }
 
+// DeclineReasonGameUnavailable is the provider-visible decline reason for a
+// new bet refused by the game gate (CAS-GAME-KILL-BET-1): the platform kill
+// switch and the tenant/brand availability opt-out are reported identically.
+const DeclineReasonGameUnavailable = "game_unavailable"
+
+// gameBlockReasonForNewBet decides whether session's game may take NEW
+// exposure, with exactly LaunchGame's gating (so a title the launch would
+// refuse cannot be bet on through a session launched earlier):
+//
+//	casino_games.status != 'active'  -> "game_disabled"       (platform kill switch)
+//	IsGameAvailable == false         -> "game_not_available"  (tenant/brand opt-out,
+//	                                    or no availability row at all: fail closed)
+//
+// Any status other than 'active' blocks, including a value this package does
+// not know yet. A missing game row is an error (nothing posts), never an
+// allow. Returns "" when the game may take the bet.
+func gameBlockReasonForNewBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, session LaunchSession) (string, error) {
+	game, err := GetGameByID(ctx, tx, session.GameID)
+	if err != nil {
+		return "", fmt.Errorf("casino: resolve game for new-bet gate: %w", err)
+	}
+	if game.Status != GameStatusActive {
+		return "game_disabled", nil
+	}
+	available, err := IsGameAvailable(ctx, tx, tenantID, session.BrandID, session.GameID)
+	if err != nil {
+		return "", err
+	}
+	if !available {
+		return "game_not_available", nil
+	}
+	return "", nil
+}
+
 // ReceiveCallbackResult is what ReceiveCallback returns for a caller
 // (an HTTP handler) that needs to know the outcome without exposing the
 // full ledger internals - mirrors internal/payments.ReceiveCallbackResult.
@@ -1213,8 +1250,15 @@ func mapReplayPayloadMismatch(result ReceiveCallbackResult, err error) (ReceiveC
 // event.SessionID resolves to). Anything else is
 // ErrProviderTxPayloadMismatch, naming only the differing field classes.
 // Plain SELECTs; takes no lock.
-func verifyPostedBetMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent) error {
+func verifyPostedBetMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent, refPlayer uuid.UUID) error {
 	var diffs []string
+
+	// A3 SR3-1: the resolved player reference must be the posted bet's owner.
+	if owned, err := postedTxOwnedBy(ctx, tx, tenantID, postedID, refPlayer); err != nil {
+		return err
+	} else if !owned {
+		diffs = append(diffs, "player")
+	}
 
 	var correlationID uuid.UUID
 	if err := tx.QueryRow(ctx,
@@ -1298,8 +1342,8 @@ func validateCallbackEvent(event CallbackEvent) error {
 	if event.ProviderTxID == "" {
 		return fmt.Errorf("%w: provider_tx_id is required", ErrInvalidInput)
 	}
-	if event.PlayerAccountID == uuid.Nil {
-		return fmt.Errorf("%w: player_account_id is required", ErrInvalidInput)
+	if event.PlayerRef == uuid.Nil {
+		return fmt.Errorf("%w: player_ref is required", ErrInvalidInput)
 	}
 	if event.AssetCode == "" {
 		return fmt.Errorf("%w: asset_code is required", ErrInvalidInput)
@@ -1342,6 +1386,99 @@ func findPostedBetTransaction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID
 	return id, true, nil
 }
 
+// findPostedWinTransaction is findPostedBetTransaction for a casino_win:
+// whether a win transaction is already posted for (providerID,
+// providerTxID) under tenantID. Restricted to transaction_type casino_win, so
+// a reference held by a different posting kind (a bet, a rollback, a
+// tombstone) is not mistaken for a replay of a win - that case keeps flowing
+// into the existing checks and ledger.Post's own payload comparison.
+func findPostedWinTransaction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, providerTxID string) (id uuid.UUID, found bool, err error) {
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = $2 AND provider_id = $3 AND provider_tx_id = $4`,
+		tenantID, ledger.TxCasinoWin, providerID, providerTxID,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("casino: check existing win transaction: %w", err)
+	}
+	return id, true, nil
+}
+
+// verifyPostedWinMatchesEvent is postWin's caller-level replay comparison
+// (the postBet F-7 counterpart): the idempotency short-circuit never reaches
+// ledger.Post, so ledger.Post's own payload comparison cannot protect it. A
+// redelivery is accepted as a replay only if it describes the posted win: the
+// same payout (the sum of the posting's house_gaming debits - the amount the
+// provider asserted; a locked-cash/locked-bonus win also carries lock-release
+// legs on the player side, which are not the provider's amount), the same
+// asset on every leg and the same round (correlation_id). Anything else is
+// ErrProviderTxPayloadMismatch naming only the differing field classes.
+// Plain SELECTs; takes no lock.
+func verifyPostedWinMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent, refPlayer uuid.UUID) error {
+	var diffs []string
+
+	// A3 SR3-1: the resolved player reference must be the posted win's owner.
+	if owned, err := postedTxOwnedBy(ctx, tx, tenantID, postedID, refPlayer); err != nil {
+		return err
+	} else if !owned {
+		diffs = append(diffs, "player")
+	}
+
+	var correlationID uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT correlation_id FROM ledger_transactions WHERE tenant_id = $1 AND id = $2`, tenantID, postedID,
+	).Scan(&correlationID); err != nil {
+		return fmt.Errorf("casino: load posted win for replay comparison: %w", err)
+	}
+	if correlationID != roundCorrelationID(tenantID, providerID, event.RoundID) {
+		diffs = append(diffs, "round")
+	}
+
+	rows, err := tx.Query(ctx,
+		`SELECT la.account_type, la.asset_code, le.direction, le.amount::text
+		   FROM ledger_entries le JOIN ledger_accounts la ON la.id = le.ledger_account_id
+		  WHERE le.ledger_transaction_id = $1`, postedID)
+	if err != nil {
+		return fmt.Errorf("casino: load posted win entries for replay comparison: %w", err)
+	}
+	defer rows.Close()
+	payout := new(big.Int)
+	assetMatches := true
+	for rows.Next() {
+		var accountType, asset, amountText string
+		var direction ledger.Direction
+		if err := rows.Scan(&accountType, &asset, &direction, &amountText); err != nil {
+			return fmt.Errorf("casino: scan posted win entry for replay comparison: %w", err)
+		}
+		if asset != event.AssetCode {
+			assetMatches = false
+		}
+		if direction == ledger.Debit && accountType == string(ledger.AccountHouseGaming) {
+			amount, ok := new(big.Int).SetString(amountText, 10)
+			if !ok {
+				return fmt.Errorf("casino: unparseable posted win amount for replay comparison")
+			}
+			payout.Add(payout, amount)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("casino: read posted win entries for replay comparison: %w", err)
+	}
+	if payout.Cmp(big.NewInt(event.Amount)) != 0 {
+		diffs = append(diffs, "amount")
+	}
+	if !assetMatches {
+		diffs = append(diffs, "asset")
+	}
+
+	if len(diffs) > 0 {
+		return fmt.Errorf("%w: posted win %s differs in [%s]", ErrProviderTxPayloadMismatch, postedID, strings.Join(diffs, ","))
+	}
+	return nil
+}
+
 // postBet implements Flow 5 (financial-transaction-flows.md §5): debit
 // player_cash, credit house_gaming. Player_bonus-funded stakes are
 // explicitly out of scope this stage (ADR 0025 §6) - every bet here is
@@ -1349,7 +1486,7 @@ func findPostedBetTransaction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID
 //
 // The wallet a bet debits is resolved from the platform's OWN
 // casino_launch_sessions row (event.SessionID), never from
-// event.PlayerAccountID directly - specialist review finding (security/
+// the callback's player reference directly - specialist review finding (security/
 // multi-tenancy/architect, independently): a payload-supplied player id
 // with no session binding lets a validly-signed provider debit an
 // arbitrary player in the tenant with no record a launch ever happened,
@@ -1409,6 +1546,24 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, err
 	}
 
+	// CAS-PLAYER-REF-1: the callback's opaque player reference must resolve,
+	// for THIS tenant and provider (taken from the authenticated route, never
+	// the payload), to a platform player. A raw player_account_id, an unknown
+	// reference, or another tenant's/provider's reference is refused here,
+	// before any read of money state or write. Taken AFTER the L0.1 delivery
+	// lock, which stays this function's first statement (ADR 0082 A6).
+	// The wallet a bet debits is still derived from the platform's own launch
+	// session below, never from the player this reference names; the reference
+	// is a second binding factor that must AGREE with the session.
+	//
+	// A3 SR3-1 (owner decision: fail closed): a VALID reference of a different
+	// player than the session's owner is now REFUSED (checked below once the
+	// session is loaded; on a replay, as a "player" payload mismatch).
+	refPlayer, err := ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef)
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
 	// Idempotency short-circuit, BEFORE session/RG/balance evaluation:
 	// financial-transaction-flows.md §5 requires an exact retry (same
 	// provider_tx_id) of an ALREADY-POSTED bet to be "an idempotent no-op
@@ -1433,7 +1588,7 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		// Stage 10 F-7 (audit site #6): a redelivery is only a replay if
 		// it describes the bet already posted - see
 		// verifyPostedBetMatchesEvent.
-		if err := verifyPostedBetMatchesEvent(ctx, tx, tenantID, providerID, existingID, event); err != nil {
+		if err := verifyPostedBetMatchesEvent(ctx, tx, tenantID, providerID, existingID, event, refPlayer); err != nil {
 			return ReceiveCallbackResult{}, err
 		}
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID, Replayed: true}, nil
@@ -1514,43 +1669,35 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if session.ProviderID != providerID {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session belongs to a different provider", ErrLaunchSessionRequired)
 	}
-	// Security review RV-PRH-I2 (I3/item 2, casino/ledger-finance
-	// follow-up on ADR 0095 §15.1's "expires, harmless" argument), CORRECTED
-	// per code-reviewer FH-7 re-review (CAS-SESSION-EXPIRY-1, 2026-09-28):
-	// a NEW bet is only ever accepted against a session that is 'active' or
-	// 'consumed' (the two states a normal, in-progress round can be in -
-	// 'consumed' is the ordinary post-token-bootstrap state, not an edge
-	// case). An allow-list (rather than "reject only 'revoked'") fails
-	// closed on 'expired' and on any future status this package doesn't
-	// know about yet, not just the ones named today.
-	//
-	// `expires_at` bounds only the UN-CONSUMED launch TOKEN's own
-	// resolvability window (DefaultLaunchTokenTTL, launch.go) - it is set
-	// once at mint and is immutable (migration 0036/0042). It was never
-	// meant to bound how long an in-play (consumed) round may keep
-	// betting: the original item-2 fix applied it to BOTH statuses, which
-	// meant every real-money round stopped accepting bets ~
-	// DefaultLaunchTokenTTL (2 minutes) after launch, regardless of actual
-	// play. Fixed: the expiry check applies ONLY to a session that was
-	// NEVER consumed - this is what makes §15.1's "an orphaned/never-
-	// resolved active session is harmless" claim actually true, without
-	// also time-boxing genuine in-play sessions. A 'consumed' session
-	// remains bet-eligible for as long as it stays 'consumed': it is NOT
-	// time-bounded, and RevokeLaunchSession (launchFailed below) matches only
-	// status='active', so a failed launch does not revoke a consumed session
-	// either - that gap is CAS-REVOKE-CONSUMED-1 (blocked by the 0036/0042
-	// immutability trigger). The status allow-list still rejects 'revoked'
-	// and 'expired'.
-	//
-	// postWin/postRollback are UNAFFECTED either way - they resolve their
-	// accounts from the ledger's own prior entries (correlation_id), never
-	// from this session lookup, so a bet placed BEFORE expiry still
-	// settles (win/rollback) after the session has since expired.
-	if session.Status != LaunchSessionActive && session.Status != LaunchSessionConsumed {
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: session is not eligible to accept a new bet (status=%s)", ErrLaunchSessionRequired, session.Status)
+	// A3 SR3-1: the reference must name the session's own player. Before the
+	// brand gate and any other read of money state; nothing has been written.
+	if refPlayer != session.PlayerAccountID {
+		return ReceiveCallbackResult{}, ErrPlayerRefMismatch
 	}
-	if session.Status == LaunchSessionActive && time.Now().UTC().After(session.ExpiresAt) {
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: session has expired", ErrLaunchSessionRequired)
+	// CAS-BET-REQUIRES-BOOTSTRAP-1 (security SB-5, ADR 0103 section 11 item 2;
+	// A3): a NEW bet is accepted ONLY against a session in the 'consumed'
+	// state, the state the vendor launch-token bootstrap (BootstrapLaunch,
+	// ADR 0103) moves a session into after its step-4 gates passed. 'active'
+	// (never bootstrapped: the vendor has not proven it holds the single-use
+	// token), 'expired', 'revoked' and any status this package does not know
+	// yet are all refused - an allow-list of exactly one status fails closed
+	// on everything else.
+	//
+	// This supersedes the earlier CAS-SESSION-EXPIRY-1 shape that also
+	// accepted 'active' sessions within their token TTL: with 'active'
+	// refused outright, the old time-based branch (a never-consumed session
+	// past expires_at) is unreachable and was removed rather than left as dead
+	// code. expires_at still bounds only the UN-consumed launch TOKEN's own
+	// resolvability window (migration 0036/0042); a 'consumed' session is not
+	// time-bounded (CAS-SESSION-EXPIRY-1 stands: the in-play round keeps
+	// betting for as long as it stays 'consumed'), and RevokeLaunchSession
+	// (consumed -> revoked, migration 0108) is what ends it.
+	//
+	// New exposure only. postWin/postRollback resolve their accounts from the
+	// ledger's own prior entries (correlation_id), never from this session
+	// lookup, so a bet placed BEFORE the session ended still settles.
+	if session.Status != LaunchSessionConsumed {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: session is not eligible to accept a new bet (status=%s; a bet requires a bootstrapped, consumed session)", ErrLaunchSessionRequired, session.Status)
 	}
 	if session.Mode != ModeReal {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session is demo-mode, cannot post a real financial effect", ErrLaunchSessionRequired)
@@ -1609,6 +1756,46 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 	if !found || capability.Status != CapabilityActive || !capability.SupportsBet || !containsString(capability.SupportedAssets, event.AssetCode) {
 		return ReceiveCallbackResult{}, ErrProviderUnavailable
+	}
+
+	// CAS-GAME-KILL-BET-1 (security SB-4, ADR 0103 section 11 item 3; A3): the
+	// game's own platform status and tenant/brand availability gate NEW
+	// exposure exactly as they gate a launch (LaunchGame: ErrGameDisabled /
+	// ErrGameNotAvailable), so a title whose licence is pulled (platform
+	// kill: casino_games.status != 'active') or that a tenant/brand opted out
+	// of (most-specific-wins casino_game_availability, no row = not
+	// available) cannot take a new stake on a session that was launched
+	// earlier. Reported as a DECLINE ("game_unavailable"), never a Go error,
+	// like every other deterministic business refusal on this path (RG, risk,
+	// tombstone): the provider sees a final, non-retryable "stake not taken"
+	// and the denial audit commits in this transaction. The two refusals are
+	// deliberately NOT told apart to the provider (the audit metadata keeps
+	// the internal distinction). Ordered AFTER the capability gate above (a
+	// disabled/absent provider capability is still the retryable 503, whatever
+	// the game's state) and before the L0.2 player lock below, so a refused bet
+	// never takes it.
+	//
+	// New exposure ONLY, by construction: the replay (E2) and tombstone (E3)
+	// short-circuits above, and every path of postWin/postRollback, never
+	// reach this line, so settling, reversing or replaying exposure that
+	// already exists is never blocked by a game kill. Plain reads, no lock: a
+	// kill committed concurrently with an in-flight bet is ordered by READ
+	// COMMITTED like the capability gate above (a bet whose transaction read
+	// 'active' before the kill commits is exposure taken before the kill).
+	if reason, err := gameBlockReasonForNewBet(ctx, tx, tenantID, session); err != nil {
+		return ReceiveCallbackResult{}, err
+	} else if reason != "" {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.denied_game_unavailable",
+			TargetType: "casino_launch_session", TargetID: session.ID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"game_id": session.GameID.String(), "reason": reason,
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet denied game unavailable: %w", err)
+		}
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: DeclineReasonGameUnavailable}, nil
 	}
 
 	// ADR 0082 §3.3/§4.2, class L0.2 - closes finding LOCK-1d. This bet
@@ -1938,7 +2125,7 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 // which maps ErrBetNotFound distinctly from an ordinary not-found.
 //
 // The wallet a win credits is resolved from the round's OWN bet
-// transaction's own ledger entries - never from event.PlayerAccountID
+// transaction's own ledger entries - never from event.PlayerRef
 // (specialist review finding, empirically reproduced during review: a
 // win naming a DIFFERENT player_account_id than the one who placed the
 // round's bet was previously credited to that different player in full).
@@ -1986,6 +2173,55 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// site sharing the identical key format (acquireProviderTxDeliveryLock).
 	if err := acquireProviderTxDeliveryLock(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
 		return ReceiveCallbackResult{}, err
+	}
+
+	// CAS-PLAYER-REF-1: the opaque player reference must resolve for this
+	// tenant and provider (a raw player_account_id never does). Identification
+	// only: which wallet the win credits remains derived from the round's own
+	// bet in the ledger (below), never from the player this reference names -
+	// A3 SR3-1 (owner decision: fail closed): a VALID reference of a player
+	// other than the round's bettor is refused (ErrPlayerRefMismatch), below
+	// once the bettor is known; on a replay as a "player" payload mismatch.
+	refPlayer, err := ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef)
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
+	// CAS-WIN-IDEMP-1 (F-9; A3): idempotency short-circuit, the postBet E2
+	// counterpart. A redelivery of a win that ALREADY posted returns the
+	// ORIGINAL result - the same ledger transaction, Replayed=true - before any
+	// round resolution, so it no longer depends on the round's bet still being
+	// resolvable. Without it a win redelivered after a rollback of its bet fell
+	// into resolveWinOrigin and came back as ErrBetNotFound (400, direct cash)
+	// or ErrLockAlreadyReleased (409, locked branches) instead of the recorded
+	// outcome (it never paid twice - ledger.Post's key held - but a provider
+	// that retries until it sees success was told the win failed).
+	//
+	// Intended outcome for "win redelivered after a rollback of its bet"
+	// (ledger-finance semantics, CLAUDE.md): the win is an already-recorded,
+	// append-only fact; a rollback of the BET is a separate compensating entry
+	// that does not rewrite it, so the redelivery is answered with the original
+	// win posting and writes nothing. The same holds after a rollback of the
+	// win itself. A FIRST delivery of a win whose bet was already rolled back is
+	// unchanged: nothing is posted for it, so it still goes through
+	// resolveWinOrigin and is refused (ErrBetNotFound / ErrLockAlreadyReleased)
+	// - the short-circuit only ever answers a reference the ledger already holds
+	// as a casino_win.
+	//
+	// Idempotency stays DB-enforced: the unique (tenant_id, provider_id,
+	// provider_tx_id) index and ledger.Post's own key remain the authority and
+	// the backstop (a delivery that races past this read still collides there);
+	// this read only decides which answer to give. L0.1 above makes the read
+	// race-free against a concurrent first delivery of the same reference. Like
+	// postBet's, it is a replay only if it describes the posted win
+	// (verifyPostedWinMatchesEvent), else ErrProviderTxPayloadMismatch.
+	if existingID, found, err := findPostedWinTransaction(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
+	} else if found {
+		if err := verifyPostedWinMatchesEvent(ctx, tx, tenantID, providerID, existingID, event, refPlayer); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
+		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID, Replayed: true}, nil
 	}
 
 	// Stage 10.3 CAS-CAP-ROLLBACK-1, E10 (§1.3 table): a rollback for THIS
@@ -2065,6 +2301,11 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve wallet: %w", err)
 	}
+	// A3 SR3-1: the reference must name the round's own bettor. Nothing has
+	// been written (the round-bet row lock above is not a write).
+	if wl.PlayerAccountID != refPlayer {
+		return ReceiveCallbackResult{}, ErrPlayerRefMismatch
+	}
 	if wl.AssetCode != event.AssetCode {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the round's own bet", ErrInvalidInput)
 	}
@@ -2124,6 +2365,39 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		return ReceiveCallbackResult{}, err
 	}
 
+	// A3 SR3-2 (as corrected by ledger-finance LF-A3-3): a PRESENT player_ref is
+	// resolved like on a bet or win, for this tenant and provider, but it is
+	// refused (ErrPlayerRefUnresolved 400, or ErrPlayerRefMismatch when it
+	// names another player) ONLY on the path that would reverse an already
+	// POSTED bet/win - nothing is written there. For an original the ledger has
+	// NEVER seen (or one already tombstoned) the tombstone is still written (a
+	// late original must be rejected, CLAUDE.md) and the bad reference is kept
+	// as an audit-only player_ref_mismatch record in the same committing
+	// transaction. A MISSING reference stays allowed (a rollback must always be
+	// possible; the original is named by original_provider_tx_id, not by the
+	// player). Resolution happens at the three points that need it; for a
+	// bet/win original it is AFTER the non-active-tenant gate, so the gate's
+	// own durable-evidence behaviour for a bad reference is preserved.
+	hasRef := event.PlayerRef != uuid.Nil
+	resolveRef := func() (uuid.UUID, error) {
+		if !hasRef {
+			return uuid.Nil, nil
+		}
+		return ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef)
+	}
+	// recordBadRefAlongsideTombstone keeps an unresolvable reference on a
+	// tombstoning rollback as durable evidence without refusing the rollback.
+	recordBadRefAlongsideTombstone := func() error {
+		if _, rerr := resolveRef(); rerr != nil {
+			rej := newCallbackRejection(RejectionPlayerRefMismatch, event)
+			rej.SubReason = "player_ref_unresolved_on_tombstone"
+			if _, err := RecordCallbackRejection(ctx, tx, tenantID, providerID, rej, observability.RequestIDFromContext(ctx)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	// FOR UPDATE: two concurrent rollback requests naming the SAME
 	// original must serialize on this row, not both observe "not yet
 	// reversed" and both post a reversal (specialist review finding,
@@ -2141,7 +2415,11 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		// R3-GAME-POSTINGS-NONACTIVE-1 (ledger-finance C1): a tombstone moves
 		// no money and is the protection against a late-arriving original, so
 		// it is ALWAYS written, also for a suspended/closed tenant. It is
-		// deliberately NOT gated.
+		// deliberately NOT gated. LF-A3-3: an unresolvable reference does not
+		// suppress it; it is recorded as evidence next to it.
+		if err := recordBadRefAlongsideTombstone(); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 		txID, tombErr := postRollbackTombstone(ctx, tx, tenantID, providerID, event)
 		if tombErr != nil {
 			return ReceiveCallbackResult{}, tombErr
@@ -2184,7 +2462,12 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		// tombstone). If that row is not visible the reference cannot be
 		// proven equal, and the delivery is recorded rather than silently
 		// dropped (fail toward evidence; a human resolves it). A
-		// same-reference redelivery records nothing.
+		// same-reference redelivery records nothing. LF-A3-3: an unresolvable
+		// reference is recorded as evidence; the idempotent tombstone
+		// acknowledgement is unchanged.
+		if err := recordBadRefAlongsideTombstone(); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 		firstRef, known, err := firstTombstoningRollbackReference(ctx, tx, tenantID, originalID)
 		if err != nil {
 			return ReceiveCallbackResult{}, err
@@ -2219,6 +2502,21 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		}
 	} else if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
 		return ReceiveCallbackResult{}, err
+	}
+
+	// A3 SR3-2: a present reference must name the original's own player.
+	if hasRef {
+		refPlayer, rerr := resolveRef()
+		if rerr != nil {
+			return ReceiveCallbackResult{}, rerr
+		}
+		owned, oerr := postedTxOwnedBy(ctx, tx, tenantID, originalID, refPlayer)
+		if oerr != nil {
+			return ReceiveCallbackResult{}, oerr
+		}
+		if !owned {
+			return ReceiveCallbackResult{}, ErrPlayerRefMismatch
+		}
 	}
 
 	// A prior reversal against originalID is only a conflict if it was

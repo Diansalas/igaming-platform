@@ -76,7 +76,7 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		provider := factory()
 		ctx := context.Background()
 
-		ok, err := provider.Launch(ctx, LaunchRequest{ProviderGameID: "any-game", PlayerAccountID: uuid.New(), AssetCode: "EUR", Mode: ModeReal, LaunchToken: "tok"})
+		ok, err := provider.Launch(ctx, LaunchRequest{ProviderGameID: "any-game", PlayerRef: uuid.New(), AssetCode: "EUR", Mode: ModeReal, LaunchToken: "tok"})
 		if err != nil {
 			t.Fatalf("Launch: %v", err)
 		}
@@ -84,7 +84,7 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 			t.Fatalf("expected a successful launch with a non-empty URL, got %+v", ok)
 		}
 
-		declined, err := provider.Launch(ctx, LaunchRequest{ProviderGameID: MockGameIDDeclineLaunch, PlayerAccountID: uuid.New(), AssetCode: "EUR", Mode: ModeReal, LaunchToken: "tok"})
+		declined, err := provider.Launch(ctx, LaunchRequest{ProviderGameID: MockGameIDDeclineLaunch, PlayerRef: uuid.New(), AssetCode: "EUR", Mode: ModeReal, LaunchToken: "tok"})
 		if err != nil {
 			t.Fatalf("Launch (decline): %v", err)
 		}
@@ -92,8 +92,19 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 			t.Fatalf("expected OutcomeDeclined, got %v", declined.Outcome)
 		}
 
-		if _, err := provider.Launch(ctx, LaunchRequest{ProviderGameID: "any-game", PlayerAccountID: uuid.New(), AssetCode: "EUR", Mode: ModeReal}); err == nil {
+		if _, err := provider.Launch(ctx, LaunchRequest{ProviderGameID: "any-game", PlayerRef: uuid.New(), AssetCode: "EUR", Mode: ModeReal}); err == nil {
 			t.Fatal("expected Launch to reject a request with no launch token - a provider must never be handed the player's own JWT instead")
+		}
+	})
+
+	// CAS-PLAYER-REF-1 (A3): the vendor identifies the player by the opaque,
+	// provider-scoped reference only. An adapter must refuse a launch that
+	// carries none - there is no field on the request through which a raw
+	// platform account id could be supplied instead.
+	t.Run("Launch requires the opaque player reference", func(t *testing.T) {
+		provider := factory()
+		if _, err := provider.Launch(context.Background(), LaunchRequest{ProviderGameID: "any-game", AssetCode: "EUR", Mode: ModeReal, LaunchToken: "tok"}); err == nil {
+			t.Fatal("expected Launch to reject a request with no opaque player reference")
 		}
 	})
 
@@ -311,6 +322,36 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		}
 		if first != second {
 			t.Fatalf("redelivered callback parsed differently: %+v vs %+v", first, second)
+		}
+	})
+
+	// CAS-PLAYER-REF-1 (A3): the wire carries the opaque player_ref only. A
+	// verified callback echoes the reference the platform issued (parsed into
+	// CallbackEvent.PlayerRef), and one that names a raw player_account_id is
+	// refused as malformed - never silently ignored, so the pre-A3 shape fails
+	// loudly and a raw account id can never be mistaken for the reference.
+	t.Run("HandleCallback carries the opaque player_ref and refuses a raw player_account_id", func(t *testing.T) {
+		provider := factory()
+		mock, ok := provider.(*MockCasinoProvider)
+		if !ok {
+			t.Fatalf("callback conformance is mandatory (ADR 0025 §8): %T must supply its own signed-callback fixture hook for this case; a real adapter cannot skip it", provider)
+		}
+		ctx := context.Background()
+		tenantID := uuid.New()
+		cred := mockCredentialFor(t, mock, tenantID)
+
+		ref := uuid.New()
+		event, err := provider.HandleCallback(ctx, mock.CallbackPayload(tenantID, CallbackEventBet, "bet-ref-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", ref, uuid.New()), cred)
+		if err != nil {
+			t.Fatalf("HandleCallback: %v", err)
+		}
+		if event.PlayerRef != ref {
+			t.Fatalf("expected the echoed opaque player_ref %s, got %s", ref, event.PlayerRef)
+		}
+
+		raw := mock.SignRawBody(tenantID, []byte(`{"event_type":"bet","provider_tx_id":"bet-raw-1","round_id":"r","amount":100,"asset_code":"EUR","outcome":"succeeded","player_account_id":"`+uuid.NewString()+`","player_ref":"`+ref.String()+`"}`))
+		if _, err := provider.HandleCallback(ctx, raw, cred); !errors.Is(err, ErrCallbackMalformedBody) {
+			t.Fatalf("expected ErrCallbackMalformedBody for a body naming a raw player_account_id, got %v", err)
 		}
 	})
 

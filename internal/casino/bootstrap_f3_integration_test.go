@@ -220,7 +220,7 @@ func TestBootstrapLaunch_GateDenialThenPostBetRefused(t *testing.T) {
 	assertGateDenied(t, pool, f, session.ID, "rg_ineligible")
 
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "req-f3-gate-then-bet-round", "", "round-f3-gate-then-bet", game.ProviderGameID,
-		500, "EUR", OutcomeSucceeded, "", f.playerAccountID, session.ID)
+		500, "EUR", OutcomeSucceeded, "", f.playerRef, session.ID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err

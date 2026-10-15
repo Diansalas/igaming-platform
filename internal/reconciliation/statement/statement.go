@@ -92,6 +92,35 @@ type CasinoStatementTotal struct {
 	GGR        *big.Int
 }
 
+// CasinoFetchRequest is what the casino_statement stream hands a source.
+// TenantID comes from the server-side sweep (the tenant being reconciled),
+// never from a statement.
+type CasinoFetchRequest struct {
+	TenantID               uuid.UUID
+	PeriodStart, PeriodEnd time.Time
+}
+
+// CasinoStatement is one fetched casino statement: a SNAPSHOT value, fetched
+// before any database transaction opens and compared later inside the run's
+// own REPEATABLE READ transaction (CAS-STMT-IO-1).
+//
+// CoverageEnd, when non-zero, is the instant the statement vouches for:
+// the stream compares only ledger transactions created at or before it, so
+// a posting that commits between the fetch and the match is out of scope
+// instead of surfacing as a false "no statement line" P1 (the fetch and the
+// match no longer share one snapshot). Zero means the source gives no bound
+// and the whole ledger is compared (the pre-CAS-STMT-IO-1 behaviour; a test
+// source that wants it leaves it zero). A real source MUST set it to the
+// end of the window its provider vouches for (PROVIDER DEPENDENT).
+//
+// Totals may be empty: the totals match is then skipped and the run's
+// audit records that.
+type CasinoStatement struct {
+	CoverageEnd time.Time
+	Lines       []CasinoStatementLine
+	Totals      []CasinoStatementTotal
+}
+
 // CasinoStatementSource supplies a tenant's casino statement to the
 // casino_statement reconciliation stream (Stage 10.3 W3a,
 // CAS-RECON-STMT-1). It is an interface so the source is injectable: a
@@ -100,17 +129,56 @@ type CasinoStatementTotal struct {
 // statement ingestion and matching are PROVIDER DEPENDENT and NOT
 // IMPLEMENTED; the only source wired today is casino.MockStatementSource
 // (MOCK, tautological by construction).
+//
+// CAS-STMT-IO-1: a source is one of exactly two shapes, and the stream
+// refuses anything else:
+//
+//   - CasinoStatementFetcher - the provider shape, and the ONLY shape a real
+//     source may have. Fetch takes NO transaction: it is provider I/O and the
+//     stream calls it with no database transaction held (ADR 0095 INV-IO-1;
+//     the stream refuses to call it under txscope.Held, and a source must
+//     also refuse). The fetched value is then matched inside the run's
+//     REPEATABLE READ transaction, which performs no I/O.
+//   - CasinoLedgerRenderer - the synthetic shape: a source that derives its
+//     statement from the platform's OWN ledger tables (the MOCK in-house
+//     source). It reads the database, not a provider, so it renders inside
+//     the match transaction (the same snapshot as the ledger side, which is
+//     what makes it tautological by construction and race-free). The stream
+//     accepts it only from a component that marks itself
+//     providerkind.Synthetic - a real source can never take this shape, and
+//     the production startup guard refuses a binary that wires a Synthetic
+//     component.
 type CasinoStatementSource interface {
 	// Label names the source in reconciliation records, audit metadata and
 	// logs. A mock source's label must contain "MOCK".
 	Label() string
-	// Statement returns the tenant's statement lines and, optionally,
-	// per-(provider, asset) totals for [periodStart, periodEnd), read
-	// inside tx (the run's own tenant-scoped REPEATABLE READ transaction).
-	// A nil or empty totals slice means "this source reports no
-	// aggregate": the totals match is then skipped and the run's audit
-	// records that. It must not write.
-	Statement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time) ([]CasinoStatementLine, []CasinoStatementTotal, error)
+}
+
+// CasinoStatementFetcher is the provider shape of CasinoStatementSource.
+type CasinoStatementFetcher interface {
+	CasinoStatementSource
+	// Fetch returns the tenant's statement for [req.PeriodStart,
+	// req.PeriodEnd). It must not write, and must refuse while a database
+	// transaction is held.
+	Fetch(ctx context.Context, req CasinoFetchRequest) (CasinoStatement, error)
+}
+
+// SyntheticSource is the structural twin of providerkind.Synthetic (same
+// marker method, so a component satisfies both without this leaf package, or
+// internal/reconciliation, importing internal/providerkind - the R3 read-only
+// import guard forbids that). The casino_statement stream accepts a
+// CasinoLedgerRenderer only from a SyntheticSource.
+type SyntheticSource interface {
+	SyntheticComponent()
+}
+
+// CasinoLedgerRenderer is the synthetic (in-house, database-derived) shape of
+// CasinoStatementSource. It must not write.
+type CasinoLedgerRenderer interface {
+	CasinoStatementSource
+	// RenderFromLedger renders the tenant's statement from the platform's own
+	// casino ledger rows, inside tx (the run's REPEATABLE READ transaction).
+	RenderFromLedger(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]CasinoStatementLine, []CasinoStatementTotal, error)
 }
 
 // Payment statement line kinds (PaymentStatementLine.Kind) and statuses

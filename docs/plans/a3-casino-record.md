@@ -1,0 +1,456 @@
+# A3 record - casino pre-adapter security/correctness fixes (2026-10-15)
+
+Branch `a3-casino-preadapter` (base `73b2836`, hosted-CI-green A1 tip). Author: Casino Integration
+specialist. **Everything here is MOCK**: no real provider adapter was written or wired. This file is
+the proposed registry/progress text for the orchestrator (single writer of `task-registry.md`,
+`HANDOVER`, `progress`, `active-stage`, human-decision register); none of those was edited.
+
+Scope: CAS-GAME-KILL-BET-1, CAS-WIN-IDEMP-1, CAS-BET-REQUIRES-BOOTSTRAP-1, CAS-STMT-IO-1,
+CAS-PLAYER-REF-1. CAS-RECON-SCALE-1 was named in the brief but is a design/ADR item (see below).
+
+## 0. Summary and labels
+
+| Row | Label | One line |
+|---|---|---|
+| CAS-GAME-KILL-BET-1 | IMPLEMENTED (MOCK) | `postBet` re-checks `casino_games.status` and tenant/brand availability exactly as launch does; a refused new bet is a decline `game_unavailable`; win/rollback/replay never blocked |
+| CAS-WIN-IDEMP-1 | IMPLEMENTED | `postWin` returns the original result for a redelivered, already-posted win (also after a rollback of its bet or of the win, and on the locked branches), verified against payout/asset/round; DB uniqueness unchanged |
+| CAS-BET-REQUIRES-BOOTSTRAP-1 | IMPLEMENTED (MOCK) | a new bet requires a `consumed` session; the B2C play-simulation routes now play the MOCK vendor's bootstrap part |
+| CAS-STMT-IO-1 | PARTIALLY IMPLEMENTED | provider statement sources are fetched outside the reconciliation tx and only compared inside it, guarded statically and at runtime; storing the fetched statement append-only is NOT IMPLEMENTED (needs a real source + migration); a real source stays PROVIDER DEPENDENT |
+| CAS-PLAYER-REF-1 | IMPLEMENTED (MOCK) | vendor gets only the opaque per-(tenant, provider) reference at launch, echoes it on callbacks, resolved tenant+provider scoped; a raw account id does not resolve. **No migration** (see 6) |
+| CAS-RECON-SCALE-1 | NOT IMPLEMENTED (unchanged) | still a design + ADR item; this change adds no per-tenant cost beyond one statement fetch per tick |
+
+A real vendor remains PROVIDER DEPENDENT for all of the above; none of this is a licensing or
+approval claim.
+
+## 1. CAS-GAME-KILL-BET-1
+
+Which statuses block a NEW bet (all other paths unaffected), pinned by `TestA3_GameKill_*`:
+
+| Condition | Effect on a new bet |
+|---|---|
+| `casino_games.status != 'active'` (today `disabled`; any value not known yet also blocks) | decline `game_unavailable`, audit `casino_bet.denied_game_unavailable` (`reason=game_disabled`) |
+| no `casino_game_availability` row for the session's brand (tenant-wide or brand) | same decline (`reason=game_not_available`), fail closed |
+| most-specific row (brand row replaces tenant-wide row) has `enabled=false` | same decline |
+| game row missing | Go error (nothing posts), never an allow |
+
+Placement (`internal/casino/orchestrator.go`, `gameBlockReasonForNewBet`): after the replay (E2) and
+tombstone (E3) short-circuits, the tenant gate, the session/brand checks and the capability gate
+(a disabled provider capability is still the retryable 503 whatever the game's state), before the
+L0.2 player lock. So replaying an already-posted bet, any win, any rollback and the stake return of a
+non-active tenant are never blocked. Plain reads, no lock: a kill committed concurrently with an
+in-flight bet is ordered by READ COMMITTED like the capability gate (residual R-3).
+
+## 2. CAS-WIN-IDEMP-1
+
+`postWin` takes L0.1 (unchanged first statement), resolves the player reference, then looks for a
+`casino_win` already posted under `(tenant, provider, provider_tx_id)`. Found: it verifies
+`verifyPostedWinMatchesEvent` (payout = sum of `house_gaming` debits, every leg's asset, correlation
+= the round) and returns the original ledger transaction with `Replayed=true`; any difference is
+`ErrProviderTxPayloadMismatch` (409). Not found: unchanged, including a FIRST delivery of a win whose
+bet was already rolled back (still `ErrBetNotFound` / `ErrLockAlreadyReleased`, never pays).
+
+Intended outcome for "win redelivered after a rollback of its bet" (ledger-finance semantics, CLAUDE.md
+append-only/compensating rules): the win is an already-recorded fact; the rollback of the BET is a
+separate compensating entry that does not rewrite it; the redelivery gets the original result, writes
+nothing (no ledger row, no entry, no audit row, no balance move) and is neither 400 nor 409. Same
+after a rollback of the win itself. A rollback for a never-seen transaction still writes a tombstone
+(unchanged); a tombstoned reference still rejects the late original (E10, unchanged, and a
+`casino_win` can never coexist with a tombstone under the same unique key).
+
+Idempotency stays DB-enforced: the unique `(tenant_id, provider_id, provider_tx_id)` index and
+`ledger.Post`'s key are the authority and the backstop; the new read only chooses the answer. It runs
+under L0.1, so it cannot race a concurrent first delivery (`TestA3_WinRedelivery_Concurrent_PostsOnce`,
+12 parallel deliveries: exactly one posting, 11 replays).
+
+Side defect closed: before this change even a plain sequential redelivery of a LOCKED-cash or
+LOCKED-bonus win came back `ErrLockAlreadyReleased` (409) because the redelivery re-entered
+`resolveWinOrigin` after the first win had released the lock
+(`TestA3_LockedCashWinRedelivery_*`, `TestA3_LockedBonusWinRedelivery_*` incl. terminal-grant
+hold-capture).
+
+## 3. CAS-BET-REQUIRES-BOOTSTRAP-1
+
+`postBet` accepts only `session.Status == 'consumed'` (an allow-list of one). `active` (never
+bootstrapped), `expired`, `revoked`, unknown: `ErrLaunchSessionRequired` (400). The old time-based
+branch for `active` sessions became unreachable and was removed. Win/rollback never consult the
+session (a bet placed before the session ended still settles).
+
+Interaction with the B2C play-simulation routes (decision made here, within the A3 scope; ADR 0048
+and `docs/integrations/casino-launch-bootstrap.md` updated): those routes are the MOCK vendor, so
+they stand in for its bootstrap. `requireSimulationDrivableSession` accepts an `active` unexpired
+session (consumed by one CAS `ConsumeLaunchSessionForMockPlay`, audited
+`casino_play_simulation.session_consumed`) and a `consumed` session ONLY if no
+`casino_launch_bootstraps` row exists (i.e. the simulation consumed it). A session a real vendor
+bootstrapped is still refused to the simulation (security P2-2 invariant;
+`TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute` unchanged and green).
+Security should confirm this reading of the P2-2 ruling (see 8).
+
+## 4. CAS-STMT-IO-1
+
+`statement.CasinoStatementSource` is now a label-only base with exactly two accepted shapes:
+`CasinoStatementFetcher.Fetch(ctx, req)` (NO transaction; the only shape a real source may have) and
+`CasinoLedgerRenderer.RenderFromLedger(ctx, tx, tenant)` (the in-house MOCK, accepted only from a
+component that is `SyntheticSource`, the structural twin of `providerkind.Synthetic`). The stream
+(`FetchCasinoStatement` then `RunCasinoStatement`) obtains the statement BEFORE opening the
+REPEATABLE READ transaction; `FetchCasinoStatement` refuses under `txscope.Held`; the match takes the
+already-fetched value (plus an optional `CoverageEnd`: ledger transactions created after it are not
+compared, so a posting between fetch and match is not a false P1). `requireSnapshotIsolation` is
+unchanged. A fetch failure is a failed, audited run (`reconciliation.sweep_run_failed`, row-14 alert
+path) with no partial rows.
+
+Why the MOCK renders in-tx rather than being fetched like a provider: it reads the platform's own
+ledger, not a provider, and rendering at the SAME snapshot as the ledger side is what keeps it
+free of false mismatches from the fetch/match gap (it compares the ledger with itself, so it detects only the structural cases listed in the stream's file comment, e.g. a win whose round has no bet; it is not an independent check) and race-free (a first attempt that fetched the MOCK separately failed
+`TestCasinoStatement_LiveTrafficProducesNoFalseMismatch`: a posting transaction that STARTED before
+the coverage instant and committed after the MOCK's snapshot appears on the ledger side only,
+because `created_at` is the transaction start time).
+
+Static guard (`internal/txscope`): `Fetch` and `FetchCasinoStatement` are now flagged names and
+`internal/reconciliation` is now scanned, so a statement fetch lexically inside a `pgx.Tx` closure
+fails the build-time test (planted-violation control added).
+
+NOT implemented (residual R-5): storing the fetched statement append-only before matching (the
+payments-style import table) - needs a real source's format and a migration; the registry fix text
+"fetch outside the tx, store, then match" is therefore split.
+
+## 5. CAS-PLAYER-REF-1
+
+`LaunchRequest`, `BalanceRequest` and `CallbackEvent` carry `PlayerRef` (opaque UUID); the field
+`PlayerAccountID` no longer exists on any vendor-facing type (`TestProviderFacingTypesCarryNoRawPlayerAccountID`).
+`CreateLaunchSession` issues the reference in the session's own transaction
+(`GetOrCreateProviderPlayerRef`: `INSERT .. ON CONFLICT DO NOTHING` then SELECT; never an UPDATE), so
+a session never exists without one, bootstrap returns the same value, and the vendor is handed it at
+launch. The mock wire field is `player_ref`; a body naming `player_account_id` is refused as
+malformed. `postBet`/`postWin` resolve it with `ResolveProviderPlayerRef` scoped to the route's
+tenant and provider, after the L0.1 lock (still the first statement) and before any money read;
+unknown / foreign-tenant / foreign-provider / raw-account-id values are all `ErrPlayerRefUnresolved`
+(an `ErrInvalidInput`, HTTP 400), nothing posted. A rollback may carry a reference; on the
+non-active-tenant stake-return path an unresolvable one is a mismatch.
+
+Properties pinned (`a3_player_ref_integration_test.go`): random v4, unrelated to the account id,
+stable per player+provider, distinct across tenants/providers; concurrent get-or-create converges on
+one row; cross-tenant isolation (other tenant's reference does not resolve, other tenant cannot read
+or insert, FORCE RLS on, both UNIQUE constraints, append-only, runtime role SELECT+INSERT only).
+
+The reference identifies; it does not authorise: the wallet a bet debits is the session's, the wallet
+a win credits is the round's own bet's. **Superseded by the security fix round (section 12, SR3-1):**
+the first A3 cut accepted and ignored a valid reference of ANOTHER player (residual R-1); the owner
+decided fail-closed, so such a reference is now refused (see section 12).
+
+## 6. Migration
+
+**0152 was not needed and was not used.** `casino_provider_player_refs` (migration 0111, ADR 0103
+section 3.5) already has exactly the requested shape: `tenant_id`, FORCE RLS in the tenant family,
+`UNIQUE (tenant_id, provider_id, player_ref)`, primary key `(tenant_id, provider_id,
+player_account_id)`, `player_ref DEFAULT gen_random_uuid()`, append-only triggers, runtime role
+SELECT+INSERT only (also `deploy/init-app-role.sql`). A second table would duplicate it. The change
+is purely in code (issue at session mint, send at launch, resolve on callbacks). 0152 is returned
+unused.
+
+## 7. Proposed registry text
+
+- **CAS-GAME-KILL-BET-1** -> **CLOSED (IMPLEMENTED, MOCK) 2026-10-15 (A3).** `postBet` refuses new
+  exposure for `casino_games.status != 'active'` and for a game with no/disabled tenant or brand
+  availability (decline `game_unavailable`, audited), after the capability gate, before the player
+  lock; replays, wins and rollbacks are never blocked. Tests `TestA3_GameKill_*`,
+  `TestA3_HTTP_KilledGameDeclinesNewBetsButSettlesExistingRounds`; mutants M1/M2/M28/M29 killed.
+  Residual R-3 (kill/in-flight-bet ordering is READ COMMITTED, no lock; same as the capability gate).
+- **CAS-WIN-IDEMP-1** -> **CLOSED (IMPLEMENTED) 2026-10-15 (A3).** Redelivered posted win returns the
+  original (also after bet rollback / win rollback / on locked-cash and locked-bonus branches), payload
+  mismatch 409, concurrency-tested, DB key unchanged. `TestA3_WinRedeliver*`, `TestA3_Locked*`. For
+  ledger-finance re-verification (ADR 0025 amendment item 9).
+- **CAS-BET-REQUIRES-BOOTSTRAP-1** -> **CLOSED (IMPLEMENTED, MOCK) 2026-10-15 (A3).** Bet requires
+  `consumed`. The simulation routes consume an `active` session as the MOCK vendor (new audit action,
+  new CAS `ConsumeLaunchSessionForMockPlay`) and still refuse a vendor-bootstrapped session. For
+  security confirmation of the P2-2 reading. CAS-PLAY-BOOTSTRAP-1's "still OPEN (functional, MOCK
+  play)" clause is resolved by this.
+- **CAS-STMT-IO-1** -> **PARTIALLY IMPLEMENTED (MOCK) 2026-10-15 (A3).** Fetch-outside / match-inside
+  split, runtime refusal under a held tx, static guard extended to `internal/reconciliation` and the
+  `Fetch`/`FetchCasinoStatement` names. Remaining (before the first real casino statement source,
+  PROVIDER DEPENDENT): append-only stored copy + a defined coverage window (R-5).
+- **CAS-PLAYER-REF-1** -> **CLOSED (IMPLEMENTED, MOCK) 2026-10-15 (A3).** No migration; ADR 0103 section
+  14. A real vendor stays PROVIDER DEPENDENT.
+- **CAS-RECON-SCALE-1** -> unchanged (NOT IMPLEMENTED, Medium, design + ADR).
+- New rows to register: ~~**CAS-PLAYER-REF-MISMATCH-1** (Low, R-1)~~ (closed by SR3-1, section 12),
+  **CAS-GAME-KILL-RACE-1** (Low, R-3),
+  **CAS-STMT-STORE-1** (Low, R-5), **CAS-BET-JURISDICTION-RECHECK-1** (R-4, pre-existing SB-3: the
+  game's jurisdiction blocklist is still not re-run per bet).
+
+## 8. What reviewers should probe
+
+**security**
+1. Launch surface: nothing vendor-facing carries the account id (`LaunchRequest`, `BalanceRequest`,
+   `CallbackEvent`, mock wire body, launch URL, `CallContext.IdempotencyKey = cas:<sessionID>`); the
+   reference is stable per player+provider (linkable within one provider across sessions, by design).
+2. Resolution: scoped by route-derived tenant/provider (never the payload); explicit `tenant_id`
+   predicate is redundant with FORCE RLS (mutant M11 survives, justified); all failures indistinguishable.
+3. R-1 (closed by SR3-1, section 12): a valid reference of ANOTHER player is refused on bet, win,
+   their replays and rollback; the two tests that encoded the lenient reading were inverted (section 9).
+4. The simulation consume path is a new unsigned consume: only registered outside production, MOCK
+   provider only, own session only, `active`+`real`+unexpired only, one CAS, audited, never for a
+   session with a vendor bootstrap row. Confirm it respects the P2-2 intent.
+5. Game gate ordering/TOCTOU (R-3); decline vs 503 choice; audit content.
+6. `ResolveLaunchToken` is still test-only-callable and now also a fixture helper in tests.
+
+**ledger-finance**
+1. `verifyPostedWinMatchesEvent`: payout = sum of `house_gaming` debits (equals the win for the three
+   posting shapes: direct cash, locked cash, locked bonus incl. terminal hold-capture); asset on every
+   leg; round via correlation id. Anything it does not compare (player, wallet) is covered by the
+   original posting being the same `(provider, tx id)`.
+2. Short-circuit position: after L0.1 and the player-reference resolution, BEFORE the tombstone check,
+   the tenant-status gate and `resolveWinOrigin`; it only answers a `casino_win` row. A tombstone and a
+   `casino_win` cannot coexist under the key.
+3. The semantic choice "redelivery after bet rollback = original result" (not a compensating entry, not
+   an error). A FIRST delivery after a bet rollback is still refused.
+4. No new lock, no new write path, no change to `ledger.Post`; audit written once per fact.
+5. Reconciliation: the MOCK renders at the ledger snapshot (it compares the ledger with its own rendering, so it is NOT an independent check; the earlier "tautological" wording was too strong because the stream does flag a win whose round has no bet); `CoverageEnd` is now REQUIRED and validated for
+   external-shaped sources (SR3-3); tombstones deliberately not coverage-bounded.
+
+## 9. Changed existing assertions / expectations (none deleted or weakened)
+
+Mechanical (argument kind only, assertions identical): ~200 `CallbackPayload(..., playerAccountID,
+...)` call sites now pass the player's opaque reference; bet-posting fixtures (`mintSession`,
+`mintSessionWithJurisdiction`, `mustMintCasinoLaunchSessionDirect`, `mustSeedRealCasinoLaunchSession`,
+reconciliation `casWorld`) now enable the game for the tenant and consume the session; HTTP tests that
+post webhook bets use `mustLaunchAndConsumeCasinoGame`; `casinoFixture` gained `playerRef`;
+`seedCasinoFixture` tolerates the pre-0111 scratch schemas of the 0099/0108 round-trip tests; the 0097
+scratch helper also applies migration 0111; the 0108 trigger-matrix seed uses a direct INSERT (it runs
+below 0111).
+
+Non-mechanical, each with its justification:
+1. `bootstrap_l2_denial_lockorder_integration_test.go` `TestLockOrder_BootstrapGateDenialAndFirstBetOfRound_NoDeadlock`:
+   the staged interleaving (a bet blocked on RG while bootstrap holds the session row) can no longer
+   occur - a bet on an unconsumed session is refused at the session check, before RG or the FK share.
+   Old: `betErr == nil` ("never an error"). New: the bet returns promptly (10 s bound, no lock wait)
+   with `ErrLaunchSessionRequired`, bootstrap still finishes its denial, neither deadlocks, session
+   revoked. Strictly the cycle is removed, not hidden.
+2. `postbet_session_expiry_integration_test.go`: `TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced`
+   uses `mintActiveSession` (consumed rows are immutable except consumed->revoked, migration 0108);
+   `TestReceiveCallback_WinSettlesForPreExpiryBetAfterSessionExpires` ends the consumed session with
+   `RevokeLaunchSession` instead of flipping it to `expired`; same assertions.
+   `TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive` is unchanged but no longer
+   isolates a time check (the branch is gone); a comment says so and points at the new test.
+3. `stake_return_integration_test.go`: the `amount_mismatch` / `wrong_round` / final matching cases
+   pass the valid reference (they used the raw account id, which would now also mismatch on "player"
+   and mask the case under test); `wrong_player` still passes a non-resolving value.
+4. `TestFailureModeMatrix_I_BetPayloadNamingAnotherPlayerDebitsOnlyTheSessionOwner` and
+   `TestReceiveCallback_WinCreditsBettorsWalletNeverPayloadPlayer`: in the first A3 cut the "other
+   player" was named through that player's own valid reference and the outcome assertions were
+   unchanged. **INVERTED in the security fix round (SR3-1, owner decision: fail closed) - the only two
+   assertions deliberately changed.** Old: the callback is accepted and the session owner / bettor is
+   debited / credited, the named player untouched. New: the callback is REFUSED
+   (`ErrPlayerRefMismatch`, which `errors.Is` `ErrPlayerRefUnresolved`: same 400), nothing is posted
+   (no transaction under that `provider_tx_id`), neither wallet moves (session owner / bettor
+   balance unchanged: 5000 / 4000; the other player has no entries and no wallet), correlation stays
+   balanced, and exactly one `casino_callback.player_ref_mismatch` audit row exists. Justification:
+   a strengthening - the property the tests protect (the payload-named player is never touched, only
+   the session owner / bettor can ever move) is kept and now holds by refusal instead of by
+   redirection; no state that was previously refused is now accepted.
+5. `TestCasinoStatement_SnapshotPreventsFalseMismatchUnderInterleaving`: unchanged semantics; the MOCK
+   source implements `RenderFromLedger` (renamed from `Statement`), sources are fetched first.
+6. `webhook_admission_t6_pool_ordering_integration_test.go`: the reference lookup is resolved before the
+   measured pool-acquisition window (the lookup itself acquires a connection); expected counts
+   unchanged. `resolution_isolation_integration_test.go`: the per-player reference is resolved at seed
+   time (a lookup per callback inside the outage window tripped the INV-POOL probe under load).
+7. `casino_webhook_tenant_binding_test.go` / `casino_flow_integration_test.go`: raw JSON bodies carry
+   `player_ref` instead of `player_account_id` (the latter is now refused as malformed); `casino_rejection_record...`
+   cross-tenant payload uses an arbitrary uuid for the (irrelevant, 401) reference.
+8. `TestSimulationHandlers_SessionRevalidatedInDomainTx` keeps `mustLaunchCasinoGame` (active session)
+   because it expires the session between phases.
+
+## 10. Residuals / deviations
+
+- R-1 CLOSED by SR3-1/SR3-2 (section 12): a valid reference of another player is now refused.
+- R-2 `Balance` is still part of `CasinoProvider` but has no production caller; its request type now
+  carries `PlayerRef`.
+- R-3 Kill vs in-flight bet: READ COMMITTED plain read, no lock (as the capability gate).
+- R-4 Jurisdiction blocklist still not re-evaluated per bet (pre-existing SB-3).
+- R-5 No stored/append-only copy of a fetched casino statement; no defined coverage window for a real
+  source; the MOCK is Synthetic in-DB by design.
+- R-6 The simulation `session_consumed` audit reuses `recordCasinoPlaySimulationAudit` (best effort,
+  like the other simulation audit rows).
+- Deviation D-1: migration 0152 unused (section 6).
+- Deviation D-2: the worktree was created on an unrelated root commit; branch `a3-casino-preadapter`
+  was cut at `73b2836` (`git reset --hard` was refused by the permission layer; `git switch -c` used).
+- Deviation D-3: the full `internal/payments` and `internal/httpserver` integration packages exceed
+  Go's default 10 min test timeout on this shared machine (CI shards them); they were run with an
+  explicit timeout, payments restricted to the touched file's tests.
+
+## 11. Verification (local, private database `a3_47213`, mirrors CI role grants; not hosted CI)
+
+| Check | Result |
+|---|---|
+| `gofmt -l .` | clean |
+| `go vet ./...` and `go vet -tags integration ./...` | PASS |
+| `golangci-lint run ./...` (2.9.0) and `--build-tags integration --new-from-rev=HEAD~1` | 0 issues |
+| `go test -count=1 ./...` (unit) | PASS |
+| `-tags integration -p 1 ./internal/casino/...` | PASS (101.7 s) |
+| same with `-race` | PASS (122.1 s) |
+| `-tags integration -p 1 ./internal/reconciliation/...` | PASS (197.8 s) |
+| `./internal/txscope/... ./cmd/...` (static IO-in-tx guard incl. new controls) | PASS |
+| `./internal/alerting/...` | PASS (252.8 s) |
+| `./internal/payments/ -run TestR3_` (the file touched) | PASS (94.8 s); the full package exceeds 60 min on the shared machine and was not completed |
+| `./internal/httpserver/...` (full, 21 min) | all PASS except the 3-4 timing-lane tests (`TestResolutionIsolation_*` INV-POOL probes), which also fail on the unmodified base `73b2836` on this loaded machine (CI runs them in the isolated timing lane, `-skip` in the main suite); they pass when run alone on a quiet machine |
+| Mutation pass | 30 mutants over the money/state logic: 29 killed (M19 only after adding the revoked-session win/rollback assertions), 1 survivor justified (M11: the explicit `tenant_id` predicate in the reference resolver is redundant with FORCE RLS, kept as defence in depth) |
+
+New tests: `internal/casino/a3_preadapter_gates_integration_test.go`,
+`a3_player_ref_integration_test.go`, `a3_win_idemp_locked_integration_test.go`,
+`player_ref_shape_test.go` (+ two conformance sub-tests in `conformance_test.go`);
+`internal/reconciliation/casino_statement_fetch_integration_test.go`;
+`internal/httpserver/casino_a3_preadapter_integration_test.go`; planted-violation control in
+`internal/txscope/no_provider_call_in_tx_closure_static_test.go`.
+
+## 12. Security / ledger-finance fix round (SR3-*, LF-A3-*) - new commits on top of 2bf9791
+
+Tests first; no assertion weakened except the two explicitly inverted (section 9 item 4).
+
+- **SR3-1 (MUST) - IMPLEMENTED (MOCK).** `ErrPlayerRefMismatch` (type `playerRefMismatchError`,
+  `errors.Is` `ErrPlayerRefUnresolved`, identical text: same 400, no oracle). `postBet` compares the
+  resolved player with `session.PlayerAccountID` right after the session load and provider check, before
+  the status/brand gates; `postWin` compares with the owner of the wallet `resolveWinOrigin` derives from
+  the round's posted entries (never the payload). Both replay verifiers gained a `player` diff computed
+  from the POSTED entries' wallet owners (`postedTxOwnedBy`) -> 409. New rejection class
+  `player_ref_mismatch` is audit-only (`casino_callback.player_ref_mismatch`, written by
+  `RecordCallbackRejection`; no CHECK/migration change). Tests: `a3_sr3_integration_test.go`, the two
+  inverted tests.
+- **SR3-2 + LF-A3-3 (correction) - IMPLEMENTED (MOCK).** `postRollback` resolves a PRESENT `player_ref`.
+  Refusal (400 unresolvable / `ErrPlayerRefMismatch` for another player, nothing written) applies ONLY on
+  the path that reverses an already POSTED bet/win (after the non-active-tenant gate, which keeps its own
+  evidence behaviour). For a never-seen original, or one already tombstoned, the tombstone is STILL written
+  (a late original must be rejected) and the bad reference is kept as an audit-only
+  `player_ref_mismatch` record (sub-reason `player_ref_unresolved_on_tombstone`) in the same committing
+  transaction. A missing reference stays allowed. The earlier test expectation "refused, NO tombstone"
+  (written in this same round, never committed) was replaced accordingly. The same-tenant other-provider
+  case was added to `TestA3_Callbacks_RawAccountIDAndForeignRefsDoNotResolve`.
+- **SR3-3 / LF-A3-1 - IMPLEMENTED (MOCK).** A provider (non-Synthetic) statement's `CoverageEnd` is
+  validated in `RunCasinoStatement` (`ErrCasinoStatementCoverage`): zero refused; earlier than
+  `periodEnd - CasinoCoverageMaxLag` (1 h, PROVIDER DEPENDENT) refused; later than now +
+  `CasinoCoverageMaxClockSkew` (5 min, as payments) refused; earlier than the previous run's recorded
+  coverage refused (anchor now read from `reconciliation_runs.coverage_end`, migration 0152: see section 13;
+  the first cut read forgeable audit rows). `coverage_end` is recorded in the run's audit metadata. The 1970 +
+  empty statement repro is a failing run, never clean. Synthetic sources are exempt (no provider to vouch).
+  Changed test configuration (assertions identical): `casFetcher` sources now state a coverage; the
+  CoverageEnd "no bound" kill control uses the loosest accepted bound (now + 4 min) instead of none.
+- **SR3-4 - IMPLEMENTED (MOCK), after SR3B-1 (section 13).** `ConsumeLaunchSessionForMockPlay(ctx, tx, id,
+  *MockCasinoProvider)`: the provider predicate is taken from the mock itself; static test
+  `TestA3_MockConsumeIsOnlyCalledFromThePlaySimulationHandlers` flags ANY reference (with planted control).
+- **LF-A3-2 - IMPLEMENTED (MOCK).** The simulation consumes the session in its OWN transaction, committed
+  before the callback transaction opens, so no session-row lock precedes the L0.1 delivery lock (option
+  b). Test `TestA3_HTTP_SimulationConsumeCommitsBeforeTheDeliveryLockIsTaken` holds the wager's L0.1 lock
+  from another connection and asserts the consume is already committed and the session row is not locked
+  while the callback waits. The P2-2 race tests (both orders) stay green. Note: the new test fails by
+  construction under the old single-transaction shape (status stays `active` until the callback commits).
+- **LF-A3-4 - IMPLEMENTED.** `TestA3_WinRedelivery_SameReferenceDifferentKindIsNotAReplay` now asserts the
+  exact `ledger.ErrIdempotencyKeyReused`; new `TestA3_WinAfterTombstone_IsOriginalTombstonedNotAReplay`
+  asserts exactly `ErrOriginalTombstoned`. Removing the `casino_win` type filter of
+  `findPostedWinTransaction` is killed by both (mutant M48).
+- **LF-A3-5 - recorded.** "MOCK tautological" wording corrected (sections 4 and 8). Residual R-7: an
+  EXTRA win in a round that already has a bet and a statement win line is invisible to the key/total
+  match against the MOCK (it compares the ledger with itself); only a real provider statement can expose
+  it. PROVIDER DEPENDENT.
+- **SR3-6 - IMPLEMENTED, after SR3B-2 (section 13).** The static IO-in-tx scan now also walks named functions/methods that take a
+  `pgx.Tx` (planted controls: Balance and FetchCasinoStatement in named tx functions flagged; non-tx
+  function, metadata-only call and a nested closure (reported once) not). Receivers named `tx`, `sp`,
+  `locked` were exempt in the first cut; narrowed to exact pairs in section 13 (SR3B-2).
+- **RECORD ONLY (not changed):**
+  - **SR3-5 (Low)** `postBet` reads the session with `GetLaunchSessionByID` (no row lock), so a bet
+    that read `consumed` before a revoke committed can commit after it; same class as R-3 and the
+    capability gate (READ COMMITTED, "exposure taken before the revoke"). Closing it needs a lock on
+    the session row, which interacts with the L0.1/L0.2 order: needs an ADR 0082 review before any change.
+  - **SR3-7 (Info, pre-existing)** `TestSupportRoutesEnabled` uses `Environment`, not
+    `GuardEnvironment`; the simulation routes are not reachable in production only because the synthetic
+    startup guard refuses the binary (two layers, not one). Plus the other info items in
+    `docs/plans/prh2-hardening-round/a3-security-review.md`.
+- Residuals added: R-7 above; R-8 the `CasinoCoverageMaxLag` value is a placeholder until the first real
+  source (PROVIDER DEPENDENT); R-9 the previous-coverage anchor is the audit row, so a purged audit
+  history resets monotonicity (audit_log is append-only; no purge exists).
+
+### Changed assertions in this round (complete list)
+
+1. `TestFailureModeMatrix_I_BetPayloadNamingAnotherPlayerDebitsOnlyTheSessionOwner` - INVERTED
+   (explicitly directed): accepted-and-redirected -> refused, nothing posted, one audit row, balances
+   untouched. Strengthening.
+2. `TestReceiveCallback_WinCreditsBettorsWalletNeverPayloadPlayer` - INVERTED (explicitly directed): same.
+3. `TestCasinoStatementFetch_CoverageEndKeepsLaterPostingsOutOfTheComparison`: the kill control's
+   source changed from "no CoverageEnd" (now an error for a provider source) to the loosest accepted
+   CoverageEnd; the asserted findings (2 key + 1 total) are identical.
+4. `TestCasinoStatementFetch_SweepHoldsNoConnectionDuringFetch`: the source states a CoverageEnd; assertions
+   unchanged.
+5. `TestA3_WinRedelivery_SameReferenceDifferentKindIsNotAReplay`: an assertion ADDED (exact error); none removed.
+No assertion was deleted or loosened.
+
+### Verification of the fix round (local, private database, not hosted CI)
+
+| Check | Result |
+|---|---|
+| `gofmt -l .`; `go vet ./...` and `-tags integration` | clean / PASS |
+| `golangci-lint run ./...` and `--build-tags integration --new-from-rev=75e19de` (2.6.2) | 0 issues |
+| `go test -count=1 ./...` (unit) | PASS |
+| `-tags integration -p 1 ./internal/casino/...` | PASS (129 s); with `-race` PASS (154 s) |
+| `./internal/reconciliation/...` | PASS (241 s) |
+| `./internal/txscope/... ./cmd/...` | PASS (70 s) |
+| `./internal/alerting/...` | PASS (321 s) |
+| `./internal/payments/ -run TestR3_` | PASS (163 s) |
+| `./internal/httpserver/...` (full, 25 min) | all PASS except `TestResolutionIsolation_MultipleTenantsOutage`, `_ConnectionExhaustion`, `_FinancialDuringOutage` (INV-POOL timing-lane probes; also fail on the unmodified base on this loaded machine) |
+| Mutation pass (fix round) | 20 mutants M31-M48 + M36b: all killed except M40 (zero-coverage check is redundant with the floor check, since a zero time is far before the floor; kept as the explicit, clearer error). The LF-A3-2 lock-order test was not mutated: the old single-transaction shape fails it by construction. |
+
+## 13. Security re-review round (SR3B-*) - second set of new commits
+
+- **SR3B-1 - IMPLEMENTED (MOCK).** The provider id is no longer a parameter: it is read from the mock
+  (`MockCasinoProvider.ProviderID()`), so a mock for `mock-casino` cannot consume a `real-vendor-x` session
+  (repro now a test in `TestA3_MockPlayConsume_IsBoundToTheMockProvider`). The earlier doc/record claim
+  "a misrouted call can never consume another provider's session / mock-only by construction" was an
+  overstatement and is withdrawn: the guard is (a) the concrete mock parameter, (b) the id read from it,
+  (c) the static test. A caller can still construct a mock for a real vendor's id; (c) is what stops any
+  other code from doing so. The static test now flags ANY reference to the identifier outside
+  `runCasinoPlaySimulation` (call, alias, argument, package-level var), planted-controlled.
+- **SR3B-2 - IMPLEMENTED.** The scan exemption is now two exact (receiver, method) pairs, the only false
+  positives the production tree produced (`sp.Rollback`: kyc outbox, payments; `locked.Balance`: casino,
+  sportsbook), applied ONLY in the named-function walk; closures are strict again. Negative controls:
+  `sp.FetchCatalogue`, `locked.Launch`, `locked.Bet`, `sp.Withdraw`, `sp.Balance`, `tx.Deposit` flagged in
+  named functions and closures; the exempt pairs flagged inside closures
+  (`TestINV_IO_1c_ExemptionIsExactAndNamedFunctionOnly`). Remains lexical by variable name.
+- **SR3B-3 - IMPLEMENTED (MOCK); migration 0152 USED.** `0152_reconciliation_run_coverage_end`: one
+  nullable `reconciliation_runs.coverage_end timestamptz`. FORCE RLS, the policy, the total append-only
+  trigger pair (0082) and the runtime role's table-level grants are untouched (a table-level grant covers
+  the new column; the whole-schema snapshot diff adds exactly one column line). Down refuses while any
+  run holds a coverage_end (RLS disabled transactionally for the check, re-enabled and re-forced after,
+  like 0100), else drops the column and restores the 0151 schema exactly
+  (`TestMigration0152_*`). `Run.CoverageEnd` is written by `persistRun` for a casino_statement run. The
+  anchor is `max(coverage_end)` over the stream's own run rows with `run_at <= now()` and
+  `coverage_end <= now() + skew`; NULL = no anchor (the floor still applies, the stream does not fail).
+  The `coverage_end` audit metadata is kept for humans but is never read. Tests
+  (`TestCasinoStatementCoverage_AnchorForgeriesAreIneffective`): forged audit rows (2999 future-dated,
+  1970 later-created, malformed value) are ignored; forged run rows (future-dated 2999, implausible
+  2999 coverage, later 1970) neither lock the stream out nor lower the anchor. The orchestrator note:
+  version 152 is now a real file, so `reservedUnusedVersions` (143-150) needs no 152 entry - none was
+  added and none should be removed.
+  Residual R-10: the runtime role can still INSERT run rows, so a forged plausible high value
+  (<= now + 5 min) can fail-close the stream for at most five minutes; and a forged row cannot lower the
+  max. Closing it fully needs the run write path to be a definer function (pre-real-source condition).
+- **SR3B-6 - accepted.** A simulation call consumes the active session even when its callback is then
+  refused or declined (LF-A3-2 committed the consume first). Mock provider, caller's own session,
+  non-production routes, moves no money; the `session_consumed` audit row records it; a later vendor
+  bootstrap of that session is refused.
+- **SR3B-7 - fixed** (header of `a3_sr3_integration_test.go`). **SR3B-8 - IMPLEMENTED:** a non-zero
+  CoverageEnd from a Synthetic Fetch-shaped source is validated like a provider's
+  (`TestCasinoStatementCoverage_SyntheticFetcherNonZeroCoverageIsValidated`).
+- SR3B-4 / SR3B-5: accepted as Info (oracle differences need the vendor credential; the audit row carries
+  no player id by design).
+
+### Changed assertions in this round
+None changed or removed. Test code changed only where the API changed
+(`ConsumeLaunchSessionForMockPlay` lost its string parameter in `TestA3_MockPlayConsume_*`, which gained the
+repro assertions) and the static-scan control test was extended (the previous planted control for named
+functions and the `exempt` sub-case still pass unchanged).
+
+### Verification of the SR3B round (local, private database, not hosted CI)
+
+gofmt, `go vet` (plain and integration), golangci-lint (plain and `--new-from-rev=67e9baf`), unit tests: clean/PASS.
+Integration, `-p 1`: casino PASS (138 s) and `-race` PASS (228 s); `./internal/db/...` PASS (80 s);
+reconciliation PASS (265 s, after a fix: `persistRun` writes `coverage_end` only when the run has one, because
+the 0097/0098/0134 migration round-trip scratch schemas sit below 0152); txscope + cmd PASS; alerting PASS;
+payments `TestR3_` PASS; full httpserver: all PASS except `TestResolutionIsolation_OneTenantStoreOutage` and
+`_MultipleTenantsOutage` (timing-lane probes, known to fail on the unmodified base under load). Mutants
+M50-M57 (anchor filters, max->min, persistence, synthetic validation, id from the mock, exemption scope and
+width): all killed.

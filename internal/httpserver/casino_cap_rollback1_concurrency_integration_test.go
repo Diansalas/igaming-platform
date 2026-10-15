@@ -41,12 +41,12 @@ func TestPostBet_G1_ConcurrentIdenticalBetCallbacks_PostsExactlyOnce(t *testing.
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const betTxID = "cas-conc-bet-identical-1"
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betTxID, "", "round-conc-bet", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -112,12 +112,12 @@ func TestPostWin_ConcurrentIdenticalWinCallbacks_PostsExactlyOnce(t *testing.T) 
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const roundID = "round-conc-win"
 	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-conc-win-bet-1", "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	if betResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 posting the bet, got %d", betResp.StatusCode)
@@ -126,7 +126,7 @@ func TestPostWin_ConcurrentIdenticalWinCallbacks_PostsExactlyOnce(t *testing.T) 
 
 	const winTxID = "cas-conc-win-identical-1"
 	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
-		2500, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+		2500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -260,7 +260,7 @@ func TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1(t *testing.T) {
 	// per ADR 0082 A6/QA's requirement.
 	const iterations = 50
 	for iter := 0; iter < iterations; iter++ {
-		launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+		launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 		sessionID := uuid.MustParse(launched.SessionID)
 
 		originalTxID := "cas-race-original-" + uuid.NewString()
@@ -268,9 +268,9 @@ func TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1(t *testing.T) {
 		roundID := "round-race-" + uuid.NewString()
 
 		betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, originalTxID, "", roundID, game.ProviderGameID,
-			500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+			500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 		rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackTxID, originalTxID, roundID, "game-1",
-			0, "EUR", "", "", player.ID, uuid.Nil)
+			0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 
 		// gate 10.3-W1 condition C1: on the FIRST iteration only, prove
 		// WHERE the loser of this race blocks - the L0.1
@@ -400,7 +400,7 @@ func TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1(t *testing.T) {
 	// gate 10.3-W1 ledger-finance condition C1: 50 iterations (was 20).
 	const iterations = 50
 	for iter := 0; iter < iterations; iter++ {
-		launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+		launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 		sessionID := uuid.MustParse(launched.SessionID)
 
 		betTxID := "cas-e10-bet-" + uuid.NewString()
@@ -409,7 +409,7 @@ func TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1(t *testing.T) {
 		roundID := "round-e10-" + uuid.NewString()
 
 		betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betTxID, "", roundID, game.ProviderGameID,
-			500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+			500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 		betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 		if betResp.StatusCode != http.StatusOK {
 			t.Fatalf("iteration %d: expected 200 posting the bet, got %d", iter, betResp.StatusCode)
@@ -417,9 +417,9 @@ func TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1(t *testing.T) {
 		betResp.Body.Close()
 
 		winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
-			900, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+			900, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 		rollbackOfWinPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackOfWinTxID, winTxID, roundID, "game-1",
-			0, "EUR", "", "", player.ID, uuid.Nil)
+			0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 
 		// gate 10.3-W1 condition C1: on the FIRST iteration, prove the E10
 		// waiter blocks on the L0.1 advisory lock itself (keyed on winTxID,

@@ -212,7 +212,7 @@ func TestCasinoBootstrap_RealProviderBetWorksAfterBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse session id: %v", err)
 	}
-	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-after-bootstrap-1", "", "round-after-bootstrap-1", game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-after-bootstrap-1", "", "round-after-bootstrap-1", game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	defer func() { _ = betResp.Body.Close() }()
 	if betResp.StatusCode != http.StatusOK {

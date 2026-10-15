@@ -104,7 +104,7 @@ func TestGamePostingsNonActive_CasinoPlayRoutesRefuseAndRecord(t *testing.T) {
 			game := mustSeedCasinoGame(t, owner, "mock-casino", "EUR")
 			mustEnableCasinoGameForTenant(t, owner, tenant.ID, game.ID)
 			mustEnableCasinoCapability(t, srv, owner, tenant)
-			launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+			launched := mustLaunchAndConsumeCasinoGame(t, srv, owner, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 
 			// One bet posted while ACTIVE (an open round at closure).
 			wagerResp := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/wager", player.Tokens.AccessToken, wagerBody(1_000))
@@ -233,9 +233,9 @@ func TestGamePostingsNonActive_WebhookRaceWithClosure(t *testing.T) {
 	game := mustSeedCasinoGame(t, owner, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, owner, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, owner, tenant)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, owner, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-webhook-race", "", "round-webhook-race", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.MustParse(launched.SessionID))
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, owner, tenant.ID, player.ID), uuid.MustParse(launched.SessionID))
 
 	updated, release, closerDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	var once sync.Once

@@ -91,9 +91,9 @@ func newRejEnv(t *testing.T) rejEnv {
 
 func (e rejEnv) deliver(t *testing.T, eventType CallbackEventType, ref, original, round string, amount int64) (ReceiveCallbackResult, error) {
 	t.Helper()
-	payload := e.provider.CallbackPayload(e.f.tenantID, eventType, ref, original, round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, e.sessionID)
+	payload := e.provider.CallbackPayload(e.f.tenantID, eventType, ref, original, round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerRef, e.sessionID)
 	if eventType == CallbackEventRollback {
-		payload = e.provider.CallbackPayload(e.f.tenantID, eventType, ref, original, round, "game-1", amount, "EUR", "", "", e.f.playerAccountID, uuid.Nil)
+		payload = e.provider.CallbackPayload(e.f.tenantID, eventType, ref, original, round, "game-1", amount, "EUR", "", "", e.f.playerRef, uuid.Nil)
 	}
 	var result ReceiveCallbackResult
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -357,7 +357,7 @@ func TestCallbackRejection_UnverifiedCallbackNeverWrappedNorRecorded(t *testing.
 		t.Fatal(err)
 	}
 	// A win that WOULD be E10 if verified - tampered after signing.
-	payload := e.provider.CallbackPayload(e.f.tenantID, CallbackEventWin, "win-i1", "", "round-i1", "game-1", 500, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, uuid.Nil)
+	payload := e.provider.CallbackPayload(e.f.tenantID, CallbackEventWin, "win-i1", "", "round-i1", "game-1", 500, "EUR", OutcomeSucceeded, "", e.f.playerRef, uuid.Nil)
 	tampered := webhookauth.Inbound{Header: payload.Header, Body: append([]byte(nil), payload.Body...)}
 	tampered.Body[len(tampered.Body)-2] ^= 0x01
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

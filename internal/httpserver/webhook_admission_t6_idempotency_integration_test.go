@@ -336,19 +336,19 @@ func TestAdmission_T6c_CasinoBetLimitedThenRollbackReorder(t *testing.T) {
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, pool, tenant)
 
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	session := uuid.MustParse(launched.SessionID)
 
 	const betRef = "t6c-bet"
 	const round = "t6c-round"
 
 	// Consume B1's single burst token with an unrelated bet first.
-	warmup := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "t6c-warmup", "", "t6c-warmup-round", game.ProviderGameID, 100, "EUR", casino.OutcomeSucceeded, "", player.ID, session)
+	warmup := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "t6c-warmup", "", "t6c-warmup-round", game.ProviderGameID, 100, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), session)
 	rw := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", warmup)
 	rw.Body.Close()
 
 	// The real bet is now B1-limited.
-	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betRef, "", round, game.ProviderGameID, 1000, "EUR", casino.OutcomeSucceeded, "", player.ID, session)
+	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betRef, "", round, game.ProviderGameID, 1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), session)
 	rb := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	rb.Body.Close()
 	if rb.StatusCode == http.StatusOK {
@@ -364,7 +364,7 @@ func TestAdmission_T6c_CasinoBetLimitedThenRollbackReorder(t *testing.T) {
 	// FakeClock deterministically crosses one emission interval
 	// (TEST-ADMISSION-FLAKE-1), independent of real wall-clock time.
 	clock.Advance(b1ReplenishWait)
-	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, "t6c-rollback", betRef, round, game.ProviderGameID, 1000, "EUR", casino.OutcomeSucceeded, "", player.ID, session)
+	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, "t6c-rollback", betRef, round, game.ProviderGameID, 1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), session)
 	rr := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	rr.Body.Close()
 	if rr.StatusCode != http.StatusOK {
@@ -412,14 +412,14 @@ func TestAdmission_T6d_CasinoWinBeforeBet(t *testing.T) {
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, pool, tenant)
 
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	session := uuid.MustParse(launched.SessionID)
 
 	const betRef = "t6d-bet"
 	const winRef = "t6d-win"
 	const round = "t6d-round"
 
-	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winRef, "", round, game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", player.ID, session)
+	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winRef, "", round, game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), session)
 	winFirst := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
 	winFirst.Body.Close()
 	if winFirst.StatusCode == http.StatusOK {
@@ -429,7 +429,7 @@ func TestAdmission_T6d_CasinoWinBeforeBet(t *testing.T) {
 		t.Fatalf("a win-before-bet must post ZERO rows: got %d", got)
 	}
 
-	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betRef, "", round, game.ProviderGameID, 1000, "EUR", casino.OutcomeSucceeded, "", player.ID, session)
+	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betRef, "", round, game.ProviderGameID, 1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), session)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	betResp.Body.Close()
 	if betResp.StatusCode != http.StatusOK {

@@ -1167,8 +1167,8 @@ func (payNopSportsbookSource) StatementLines(context.Context, pgx.Tx, uuid.UUID)
 type payNopCasinoSource struct{}
 
 func (payNopCasinoSource) Label() string { return "MOCK nop casino (test-only)" }
-func (payNopCasinoSource) Statement(context.Context, pgx.Tx, uuid.UUID, time.Time, time.Time) ([]statement.CasinoStatementLine, []statement.CasinoStatementTotal, error) {
-	return nil, nil, nil
+func (payNopCasinoSource) Fetch(context.Context, statement.CasinoFetchRequest) (statement.CasinoStatement, error) {
+	return statement.CasinoStatement{}, nil
 }
 
 // ---------------------------------------------------------------------
