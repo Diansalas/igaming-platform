@@ -13,6 +13,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
@@ -323,6 +324,22 @@ type InitiateDepositParams struct {
 	Amount         int64
 	PaymentMethod  string
 	IdempotencyKey string
+	// MarketGuard is the A8 operating-market gate (internal/marketgate),
+	// built by the HTTP handler from server-derived identifiers and
+	// request-evidenced country. InitiateDepositAttempt evaluates it as
+	// the FIRST statement of phase A's transaction, for a replay as well
+	// as a first request: a refused request creates NO intent, NO attempt
+	// and no provider call, leaves the idempotency key unconsumed, and
+	// commits only the gate's own refusal audit row
+	// (InitiateDepositAttemptResult.MarketDenied). An error from the guard
+	// fails the request closed. nil means "no market gate": legal only for
+	// library and test callers - the deposit handler, the only player-
+	// request entry point, always sets it and refuses to run without a
+	// configured gate. Deliberately NOT consulted on the sweeper's cascade
+	// drive or on provider callbacks/credit (no request evidence exists
+	// there, and refusing to credit an already-captured deposit would
+	// strand player funds: see docs/plans/a8-market-blocking-record.md).
+	MarketGuard marketgate.Guard
 }
 
 // DepositIntentStatus mirrors deposit_intents.status (migration 0025).

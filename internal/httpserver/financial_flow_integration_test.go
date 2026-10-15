@@ -85,7 +85,7 @@ func financialTestDeps(pool *db.Pool, issuer *auth.Issuer, orchestrator *payment
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		PayoutInstruments: pitest.Shared(), // B13-B: a withdrawal request binds a verified payout instrument
 	}
 }

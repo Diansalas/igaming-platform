@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
 // Config is the full set of configuration platform-api needs to start.
@@ -343,6 +344,19 @@ type Config struct {
 	// true at the same time Environment == "production" - see Environment's
 	// own doc comment.
 	TestSupportEndpointsEnabled bool
+
+	// MockGeolocationCountry (MOCK_GEOLOCATION_COUNTRY, A8) is the ISO-3166-1
+	// alpha-2 country the MOCK static Locator (geolocation.StaticLocator)
+	// reports for EVERY request, so a local/development or staging stack can
+	// pass the operating-market gate (internal/marketgate) without a
+	// geolocation vendor. Empty (the default) means the static Locator reports
+	// UNKNOWN, which the gate treats as no evidence and refuses (fail
+	// closed). It is a process-level value an operator sets, never derived
+	// from a request. It is honoured only when mockProviderWiring enables
+	// mock components (TEST_SUPPORT_ENDPOINTS_ENABLED in a non-production
+	// environment) and Load() REFUSES it under APP_ENV=production, exactly
+	// like TestSupportEndpointsEnabled.
+	MockGeolocationCountry string
 
 	// ProviderCredentialFingerprintKey is the platform fingerprint HMAC
 	// key (ADR 0093 §2 and its Stage 10.3 W2a amendment A3; security review
@@ -860,6 +874,17 @@ func Load() (Config, error) {
 	// silently ignoring TestSupportEndpointsEnabled in that case.
 	if cfg.Environment == "production" && cfg.TestSupportEndpointsEnabled {
 		return Config{}, fmt.Errorf("config: TEST_SUPPORT_ENDPOINTS_ENABLED must not be true when APP_ENV=production - test-support endpoints (mock casino play/payment settlement/account-activation) are never permitted in production")
+	}
+
+	// A8: the mock geolocation country is a development/test seam only.
+	if v := os.Getenv("MOCK_GEOLOCATION_COUNTRY"); v != "" {
+		if !validation.IsISO3166Alpha2(v) {
+			return Config{}, fmt.Errorf("config: invalid MOCK_GEOLOCATION_COUNTRY: must be an uppercase ISO-3166-1 alpha-2 country code")
+		}
+		if cfg.Environment == "production" {
+			return Config{}, fmt.Errorf("config: MOCK_GEOLOCATION_COUNTRY must not be set when APP_ENV=production - a static country is never permitted as location evidence in production")
+		}
+		cfg.MockGeolocationCountry = v
 	}
 
 	if cfg.DatabaseURL == "" {

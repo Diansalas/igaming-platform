@@ -71,7 +71,7 @@ func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orche
 		CasinoOrchestrator:          orchestrator,
 		CasinoOutboundCredentials:   casino.NewMockOutboundResolver(),
 		CasinoPlaySimulationEnabled: true,
-		PersonResolver:              identityresolution.NewMockPersonResolver(),
+		PersonResolver:              identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	return srv

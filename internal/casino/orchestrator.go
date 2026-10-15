@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -188,6 +189,18 @@ type LaunchGameParams struct {
 	GameID          uuid.UUID
 	AssetCode       string
 	Mode            GameMode
+	// MarketGuard is the A8 operating-market gate (internal/marketgate),
+	// built by the HTTP handler from server-derived identifiers and
+	// request-evidenced country and evaluated by LaunchGame as the FIRST
+	// statement of phase A's transaction - before any catalogue read, so
+	// a blocked market learns nothing about game ids - and therefore
+	// before CreateLaunchSession can mint a session/token. A refusal is
+	// returned as LaunchGameResult{Denied, DenialCodeMarketNotAvailable},
+	// with its audit row committed; an error from the guard fails the
+	// launch closed. nil means "no market gate": legal only for library
+	// and test callers - every production entry point (the launch
+	// handler) sets it and refuses to run without a configured gate.
+	MarketGuard marketgate.Guard
 	// Jurisdiction is no longer a caller-supplied field (K-3 remediation,
 	// docs/governance/stage-4i-canonical-model.md §9): LaunchGame resolves
 	// it itself, server-side, via internal/jurisdiction.Resolve, using
@@ -304,6 +317,16 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		denied         *LaunchGameResult
 	)
 	txErr := pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if params.MarketGuard != nil {
+			decision, gerr := params.MarketGuard(ctx, tx)
+			if gerr != nil {
+				return fmt.Errorf("casino: operating-market gate: %w", gerr)
+			}
+			if !decision.Allowed {
+				denied = &LaunchGameResult{Denied: true, DenialCode: DenialCodeMarketNotAvailable}
+				return nil
+			}
+		}
 		game, err := GetGameByID(ctx, tx, params.GameID)
 		if err != nil {
 			return err

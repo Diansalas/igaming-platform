@@ -45,14 +45,14 @@ func newKYCTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*httpte
 	mockProvider := kyc.NewMockKYCProvider()
 	mockEmail := email.NewMockProvider()
 	srv := httptest.NewServer(New(Deps{
-		Logger:                 slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                     pool,
-		AuthIssuer:             issuer,
-		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:            "platform-api-test",
-		AccessTokenTTL:         5 * time.Minute,
-		RefreshTokenTTL:        time.Hour,
-		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:        newKYCOrchestratorWithWorker(t, pool, map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),

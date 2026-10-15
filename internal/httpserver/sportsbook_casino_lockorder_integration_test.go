@@ -62,7 +62,7 @@ func sportsbookCasinoLockOrderServer(t *testing.T, pool *db.Pool, orchestrator *
 		CasinoOrchestrator:          orchestrator,
 		CasinoOutboundCredentials:   casino.NewMockOutboundResolver(),
 		CasinoPlaySimulationEnabled: true,
-		PersonResolver:              identityresolution.NewMockPersonResolver(),
+		PersonResolver:              identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	return srv, issuer

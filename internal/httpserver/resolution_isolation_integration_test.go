@@ -245,7 +245,7 @@ func newIsoWorld(t *testing.T) *isoWorld {
 		Logger: logger, DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: auth.NewIssuer(keys, "platform-api-test", "platform-api-test"),
 		ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 		CasinoOrchestrator: casinoOrch, PaymentOrchestrator: w.payOrch, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		PersonResolver: identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(w.srv.Close)
 	t.Cleanup(w.client.CloseIdleConnections)

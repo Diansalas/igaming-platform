@@ -52,14 +52,14 @@ func newRawReasonKYCServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*h
 	t.Helper()
 	adapter := httpRawReasonKYCAdapter{kyc.NewMockKYCProvider()}
 	srv := httptest.NewServer(New(Deps{
-		Logger:                 slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                     pool,
-		AuthIssuer:             issuer,
-		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:            "platform-api-test",
-		AccessTokenTTL:         5 * time.Minute,
-		RefreshTokenTTL:        time.Hour,
-		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:        newKYCOrchestratorWithWorker(t, pool, map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(adapter.MockKYCProvider)),
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),

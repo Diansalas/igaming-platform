@@ -29,6 +29,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
@@ -463,6 +464,15 @@ func run() error {
 		// registration behavior while ensuring every registration now
 		// goes through the resolution boundary, never bypassing it.
 		PersonResolver: providers.PersonResolver,
+
+		// A8: the operating-market gate for registration, deposit
+		// initiation and casino launch (internal/marketgate), over the
+		// bundle's MOCK static Locator. That Locator is registered with the
+		// synthetic guard (buildRegistrations), so production cannot start
+		// on it; until a real geolocation vendor exists the gate refuses
+		// every request in any deployment that does not set
+		// MOCK_GEOLOCATION_COUNTRY (fail closed on unknown evidence).
+		MarketGate: marketgate.New(providers.Geolocation),
 
 		// Stage 4F: no real KYC/identity-verification vendor is contracted
 		// yet (docs/decisions/0028 §1) - MockKYCProvider is the only

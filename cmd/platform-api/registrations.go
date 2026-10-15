@@ -8,6 +8,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/email"
+	"github.com/Diansalas/igaming-platform/internal/geolocation"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -48,6 +49,13 @@ type providerBundle struct {
 	// PayoutVerifier is the MOCK payout-instrument verifier (B13, ADR 0111
 	// 2.5): Synthetic, no external I/O, registered with the synthetic guard.
 	PayoutVerifier *payoutinstrument.MockVerifier
+
+	// Geolocation is the MOCK static Locator behind the operating-market gate
+	// (A8, internal/marketgate): Synthetic, no external I/O, registered with
+	// the synthetic guard so a production process cannot start on it. It
+	// reports UNKNOWN (the gate refuses) unless MOCK_GEOLOCATION_COUNTRY is
+	// set in a non-production, test-support deployment (mockWiring).
+	Geolocation *geolocation.StaticLocator
 
 	// The MOCK webhook credential resolvers (Stage 10.3 gate-W1 fix round,
 	// security S-4 / code review #2). They are built HERE - not in
@@ -190,6 +198,7 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
 		Email:           email.NewMockProvider(),
 		PayoutVerifier:  payoutinstrument.NewMockVerifier(),
+		Geolocation:     geolocation.NewStaticLocator(wiring.GeolocationCountry),
 	}
 	// PROV-OUTBOUND-CRED-1 phase 2 code review C2: this is the one
 	// DELIBERATE hard-wired MockCredentialResolver{} in this file, never
@@ -387,6 +396,10 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		{Domain: "kyc", Name: "malware_scanner", Component: b.MalwareScanner},
 		{Domain: "email", Name: "provider", Component: b.Email},
 		{Domain: "payout_instrument", Name: "verifier", Component: b.PayoutVerifier},
+		// A8: the operating-market gate's location-evidence source. The
+		// gate requires evidence for every decision, so a Synthetic Locator
+		// must never run in production (MOCK-ADAPTER-PROD-1).
+		{Domain: "geolocation", Name: "locator", Component: b.Geolocation},
 	}
 	if b.KYC != nil {
 		regs = append(regs, providerkind.Registration{Domain: "kyc", Name: "provider", Component: b.KYC})

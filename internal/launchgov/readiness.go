@@ -14,6 +14,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 )
 
@@ -25,6 +26,7 @@ const (
 	CheckCurrencies         = "R-CURRENCIES"
 	CheckPaymentMethods     = "R-PAY-METHODS"
 	CheckCatalogue          = "R-CATALOGUE"
+	CheckMarketConfig       = "R-MARKET-CONFIG"
 	CheckProviderTier       = "R-PROVIDER-TIER"
 	CheckAlerts             = "R-ALERTS"
 	CheckPlayerFunds        = "R-PLAYER-FUNDS"
@@ -339,7 +341,63 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	default:
 		out = append(out, ck(CheckCatalogue, ResultPass, "ok"))
 	}
+
+	// R-MARKET-CONFIG (A8)
+	out = append(out, s.marketConfigCheck(ctx, tx, in, now))
 	return out
+}
+
+// marketConfigCheck is R-MARKET-CONFIG (A8): the operating-market gate (internal/marketgate)
+// refuses every registration, deposit and casino launch of a brand whose operating market is not
+// configured (ADR 0045: a tenant must opt in; an unconfigured brand is not_configured, a DENY).
+// Launching such a brand would open a brand that can serve nobody, so the approver must see it.
+// The check passes when at least one country has an enabled tenant-rung policy AND resolves
+// PERMITTED, at the evaluation time, for all three gated actions (registration; deposit; wagering
+// on casino) - through operatingmarket.ResolveOperatingCountryPolicy itself (licence ceiling,
+// tenant, brand and operation rungs), never a re-implementation. Detail codes: ok,
+// no_market_configured (no enabled tenant-rung country), no_country_permits_all_operations
+// (configured, but no country is open for all three), read_error (not_evaluable).
+// It reads configuration only: no player evidence, and it cannot say which rung blocks.
+func (s *Service) marketConfigCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) Check {
+	policies, err := operatingmarket.ListCurrentOperatingCountryPolicies(ctx, tx, in.Subject.TenantID, now)
+	if err != nil {
+		return ck(CheckMarketConfig, ResultNotEvaluable, "read_error")
+	}
+	seen := map[string]bool{}
+	var countries []string
+	for _, p := range policies {
+		if p.Scope == operatingmarket.ScopeTenant && p.Status == operatingmarket.StatusActive && p.State == operatingmarket.StateEnabled && !seen[p.CountryCode] {
+			seen[p.CountryCode] = true
+			countries = append(countries, p.CountryCode)
+		}
+	}
+	if len(countries) == 0 {
+		return ck(CheckMarketConfig, ResultFail, "no_market_configured")
+	}
+	casino := "casino"
+	for _, cc := range countries {
+		allPermitted := true
+		for _, q := range []struct {
+			op      string
+			product *string
+		}{{"registration", nil}, {"deposit", nil}, {"wagering", &casino}} {
+			res, err := operatingmarket.ResolveOperatingCountryPolicy(ctx, tx, operatingmarket.Query{
+				TenantID: in.Subject.TenantID, BrandID: in.Subject.BrandID, CountryCode: cc,
+				OperationCode: q.op, ProductCode: q.product, AsOf: now,
+			})
+			if err != nil {
+				return ck(CheckMarketConfig, ResultNotEvaluable, "read_error")
+			}
+			if !res.Permitted() {
+				allPermitted = false
+				break
+			}
+		}
+		if allPermitted {
+			return ck(CheckMarketConfig, ResultPass, "ok")
+		}
+	}
+	return ck(CheckMarketConfig, ResultFail, "no_country_permits_all_operations")
 }
 
 // licenceCheck is R-LIC-VALID: licence-backed basis => EvaluateLicenceValidity at the evaluation time.

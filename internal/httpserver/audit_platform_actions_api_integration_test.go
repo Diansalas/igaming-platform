@@ -46,14 +46,14 @@ func newAuditAPI(t *testing.T, resolver audit.PresentationResolver) *ksAPI {
 		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}).WithPayoutDestinations(pitest.Shared())
 	logBuf := &syncBuffer{}
 	srv := httptest.NewServer(New(Deps{
-		Logger:                    slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logBuf), &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                        pool,
-		AuthIssuer:                issuer,
-		StaffMFA:                  testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:               "audit-test",
-		AccessTokenTTL:            time.Hour,
-		RefreshTokenTTL:           time.Hour,
-		PersonResolver:            identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logBuf), &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "audit-test",
+		AccessTokenTTL:  time.Hour,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		PaymentOrchestrator:       orchestrator,
 		AuditPresentationResolver: resolver,
 	}))

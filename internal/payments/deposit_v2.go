@@ -79,6 +79,11 @@ type InitiateDepositAttemptResult struct {
 	// in-memory-only fields ([deleted by E2] - both are gone).
 	RedirectURL      string
 	HostedFieldToken string
+	// MarketDenied is true when the A8 operating-market gate refused the
+	// request (InitiateDepositParams.MarketGuard): nothing was created
+	// (Intent and Attempt are the zero values) and the idempotency key was
+	// not consumed. Callers must check it before using Intent.
+	MarketDenied bool
 }
 
 // InitiateDepositAttempt runs phase A (commit-intent), phase B
@@ -126,8 +131,23 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		capability     ProviderCapability
 		manifest       OperationManifest
 		claimToken     uuid.UUID
+		marketDenied   bool
 	)
 	err := pool.WithTenant(ctx, params.Scope.TenantID, func(actx context.Context, tx pgx.Tx) error {
+		// A8: the operating-market gate runs FIRST, before the replay lookup
+		// and before any row exists - a refused request (replay included)
+		// creates nothing. The refusal is a result, not an error, so this
+		// transaction commits the gate's audit row.
+		if params.MarketGuard != nil {
+			decision, gerr := params.MarketGuard(actx, tx)
+			if gerr != nil {
+				return fmt.Errorf("payments: operating-market gate: %w", gerr)
+			}
+			if !decision.Allowed {
+				marketDenied = true
+				return nil
+			}
+		}
 		// H-SEC-5: a NEW deposit intent/attempt for a tenant or brand that is
 		// not 'active' is refused, in THIS tx, before the first insert (no
 		// intent row, so the idempotency key is NOT consumed and a retry after
@@ -298,6 +318,9 @@ func (o *Orchestrator) InitiateDepositAttempt(
 	})
 	if err != nil {
 		return InitiateDepositAttemptResult{}, err
+	}
+	if marketDenied {
+		return InitiateDepositAttemptResult{MarketDenied: true}, nil
 	}
 	if !attemptCreated {
 		return InitiateDepositAttemptResult{Intent: intent, Attempt: attempt, AttemptCreated: false}, nil

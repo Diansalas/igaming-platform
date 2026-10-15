@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -13,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -156,6 +158,13 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "casino is not enabled on this deployment")
 			return
 		}
+		// A8: the operating-market gate is mandatory for launch; a
+		// deployment without one fails closed (nothing is read or written).
+		if deps.MarketGate == nil {
+			logger.Error("launch_casino_game_market_gate_not_configured")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "casino is not enabled on this deployment")
+			return
+		}
 
 		tc, err := tenant.FromContext(r.Context())
 		if err != nil {
@@ -192,11 +201,37 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 		// identity/wallet resolution below still needs its own short
 		// tenant-scoped transaction (a cheap, no-vendor-I/O read/get-or-
 		// create).
+		//
+		// A8: country evidence is gathered ONCE, here, outside every
+		// transaction, from server-side context only (never the body). The
+		// operating-market gate is then evaluated in BOTH transactions that
+		// follow: first in this handler's identity/wallet transaction,
+		// BEFORE the wallet get-or-create (a refused request writes only
+		// the gate's audit row), and again as the first statement of
+		// LaunchGame's phase A transaction, before any launch session or
+		// token can be minted.
+		evidence := deps.MarketGate.Locate(r.Context(), marketgate.LocateRequest{
+			TenantID: tc.TenantID, PlayerAccountID: playerAccountID, RequestID: requestID, IPAddress: clientIP(r),
+		})
 		var brandID, walletID uuid.UUID
+		var marketGuard marketgate.Guard
+		marketDenied := false
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
 				return err
+			}
+			marketGuard = deps.MarketGate.Guard(marketgate.Request{
+				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID,
+				Operation: marketgate.OpLaunch, RequestID: requestID,
+			}, evidence)
+			decision, gerr := marketGuard(ctx, tx)
+			if gerr != nil {
+				return fmt.Errorf("launch: operating-market gate: %w", gerr)
+			}
+			if !decision.Allowed {
+				marketDenied = true // commit the gate's audit row; create nothing
+				return nil
 			}
 			wl, err := wallet.GetOrCreate(ctx, tx, tc.TenantID, account.BrandID, playerAccountID, req.AssetCode)
 			if err != nil {
@@ -205,11 +240,17 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			brandID, walletID = account.BrandID, wl.ID
 			return nil
 		})
+		if err == nil && marketDenied {
+			logger.Warn("casino_launch_refused_market_not_available")
+			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+			return
+		}
 		var result casino.LaunchGameResult
 		if err == nil {
 			result, err = deps.CasinoOrchestrator.LaunchGame(r.Context(), deps.DB, deps.CasinoOutboundCredentials, casino.LaunchGameParams{
 				TenantID: tc.TenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
 				GameID: gameID, AssetCode: req.AssetCode, Mode: casino.GameMode(req.Mode),
+				MarketGuard: marketGuard,
 			})
 		}
 		if errors.Is(err, identity.ErrNotFound) {
@@ -264,7 +305,8 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			// is a catalogue/geo-blocking concern, not the RG/Risk policy
 			// category this event exists to make alertable - see
 			// docs/runbooks/observability-and-alerting.md.
-			if result.DenialCode != casino.DenialCodeJurisdictionUnresolved && result.DenialCode != casino.DenialCodeJurisdictionBlocked {
+			if result.DenialCode != casino.DenialCodeJurisdictionUnresolved && result.DenialCode != casino.DenialCodeJurisdictionBlocked &&
+				result.DenialCode != casino.DenialCodeMarketNotAvailable {
 				logger.Warn("casino_launch_policy_blocked", "reason_code", result.DenialCode)
 			}
 			writeCasinoLaunchDenial(w, requestID, result)
@@ -304,6 +346,13 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 // their own account status is legitimately owed that specific reason,
 // unlike a jurisdiction determination).
 func writeCasinoLaunchDenial(w http.ResponseWriter, requestID string, result casino.LaunchGameResult) {
+	// A8: the in-LaunchGame operating-market refusal (the second evaluation
+	// of the gate; the handler's own earlier evaluation answers the same
+	// way) shares the handler's ONE generic response, byte for byte.
+	if result.DenialCode == casino.DenialCodeMarketNotAvailable {
+		apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+		return
+	}
 	if result.DenialCode == casino.DenialCodeJurisdictionUnresolved || result.DenialCode == casino.DenialCodeJurisdictionBlocked {
 		apierror.Write(w, requestID, apierror.CodeForbidden, "game is not available in your jurisdiction")
 		return
