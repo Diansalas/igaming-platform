@@ -259,10 +259,11 @@ type PaymentStatement struct {
 // Truncated statement (see PaymentStatement). Zero means no per-run bound
 // (the import cap MaxPaymentStatementLines still applies). ContinueFrom, when
 // non-zero, is the persisted cursor: the exclusive end of the last committed
-// run for this tenant and provider. The source's statement must start at or
-// before it (CoverageStart <= ContinueFrom, no gap) and must contain no line
-// before it that the previous run already covered (OccurredAt >= ContinueFrom);
-// PeriodStart equals ContinueFrom in that case.
+// run for this tenant and provider. The source's statement must start EXACTLY
+// at it (CoverageStart == ContinueFrom: a later start is a gap that skips a
+// window, an earlier start an overlap that counts lines twice, and the stream
+// refuses both) and must contain no line before it (OccurredAt >=
+// ContinueFrom); PeriodStart equals ContinueFrom in that case.
 type PaymentFetchRequest struct {
 	TenantID               uuid.UUID
 	ProviderID             string

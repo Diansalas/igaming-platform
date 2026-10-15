@@ -112,6 +112,17 @@ Open (not decided here):
 4. Date every line by the time its status last changed; carry `merchant_reference` on payout lines (R-S3) and declare
    `PayoutLinesCarryMerchantReference` honestly.
 5. Never write; never return a `PaymentProvider`, a tx, a callback or a credential through the statement.
+6. **Completeness horizon (LF-A11-2a).** The cursor turns `CoverageEnd` into a permanent completeness claim: the next request starts there and
+   a line that only becomes visible later with `OccurredAt < cursor` is never requested again (a silent false negative), and if a source returns
+   it anyway every later statement is refused with `ErrPaymentStatementCoverageGap` (stuck cursor, see the runbook). So `CoverageEnd` MUST never
+   exceed the provider's own completeness / reporting-lag horizon. Before a real source is wired the sweep must request
+   `PeriodEnd = now - <per-provider settle lag>` (NOT IMPLEMENTED; the MOCK returns its fetch time and a non-truncated `CoverageEnd` is checked
+   only against `now + 5 min`, not against `PeriodEnd`).
+7. **Line time is the provider's record time (LF-A11-2b).** `OccurredAt` MUST be the time the provider recorded the change (monotonic with its
+   reporting), never a value date, effective date or other backdatable field. A backdated line lands before the cursor and is lost (6).
+8. **Time-ordered provider-side paging (LF-A11-6).** A source MUST page by `OccurredAt` on the provider side (ascending, the tie group kept whole)
+   and stop at `MaxLines`. Collecting the whole window and paging afterwards (as the MOCK does through `PaymentLineCollector`) hits the 1M
+   line / body cap on a large backlog, is refused on every run, and sticks the cursor.
 
 ## 4. Migration numbers
 
@@ -138,6 +149,13 @@ Open (not decided here):
 
 ## 6. Proposed registry text (for the orchestrator to apply)
 
+OPEN rows to register (ledger-finance review, section 9): **LF-A11-1** (matcher windowing vs bounded line dating; MEDIUM; MUST CLOSE BEFORE
+THE FIRST NON-MOCK STATEMENT SOURCE; see 9.4), **LF-A11-2** (completeness horizon, record-time `OccurredAt`, per-provider settle lag, stuck-cursor
+handling; PROVIDER DEPENDENT; binding before the first non-MOCK source), **LF-A11-6** (provider-side time-ordered paging; same binding),
+**H-W1 second half** (gate M2 on "the last run for (tenant, provider) succeeded"; OWN OPEN real-money row, LF-A11-8; do not fold it into the
+closure of PAY-K3-STATEMENT-SOURCE-WIRING-1).
+
+
 - **PAY-K3-STATEMENT-SOURCE-WIRING-1** -> `CLOSED as an engineering item (IMPLEMENTED against MOCK; PROVIDER DEPENDENT for a real source)`.
   A11: provider-id source registry in `cmd/platform-api`; production refuses Synthetic/ineligible/unattested sources; the scheduler runs the scoped
   per-(tenant, provider) stream; a configured provider with no eligible source is a failed run + durable `reconciliation.run_failed` + gauge,
@@ -148,8 +166,11 @@ Open (not decided here):
 - **R3-FIRST-REAL-SOURCE-READONLY-1** -> engineering half done (type-level read-only pin, `ReadOnlyAttested`, registry refusals, real-source
   configuration in the coverage tests); OPEN: vendor read-scoped credential + the first real Fetch's own security review.
 - **R3-LISTING-FAILURE-LOG-ONLY-1** -> `CLOSED (A9, migration 0156)`.
-- **PAY-SEC-LAUNCH-1** -> destination binding `IMPLEMENTED against MOCK` (B13-A/B); S-L1 `CLOSED` (A11); S-L4 `CLOSED` (ADR 0119 s9.5 + A11 capability
-  re-read); S-L3 OPEN.
+- **PAY-SEC-LAUNCH-1** -> destination binding `IMPLEMENTED against MOCK` (B13-A/B); S-L1 `CLOSED` (A11); S-L4(1) `CLOSED` (ADR 0119 s9.5); S-L4(2)
+  `CLOSED (A11)`: the in-claim capability re-read now locks the row FOR SHARE (`LoadCapabilityForShare`; a concurrent disable waits for the claim and
+  is then seen; `TestSL4_CapabilityRereadIsLockedForShare_*`, mutant without the lock killed). The lock is a leaf (capability writers take no
+  request/attempt/ledger lock after it), so ADR 0082 order is unaffected. Residual: a brand-specific override inserted concurrently over a tenant-wide
+  row is not locked (no predicate lock); the kill switch remains the emergency stop. S-L3 OPEN.
 - **PAY-DEPOSIT-ESCALATION-1** -> `CLOSED as an engineering item (B6/B7, ADR 0095 s41)`; adapter-contract clause enforced as a registration-time
   declaration (A11); vendor conformance PROVIDER DEPENDENT.
 - **PAY-RECON-POLL-REF-CLEAR-1**, **PAY-RECON-PARKED-CAPTURE-STANDING-1**, **PAY-CALLBACK-MISMATCH-BIND-1**, **PAY-PAYOUT-UNBOUND-HOLD-1**,
@@ -184,9 +205,9 @@ Ledger-finance (no ledger path was added or changed; the stream is read plus fin
 
 1. Cursor advance is atomic with the match: the run row (with `coverage_end`/`provider_id`) is inserted in the same transaction as the
    mismatches and the audit; a failed phase writes none (`TestBound_FailedFetchDoesNotMoveTheCursor_*`).
-2. Window semantics vs the matcher: platform attempts are windowed by `sentAt` against the statement coverage; a truncated statement narrows
-   coverage so lines beyond the cut cannot cause "missing provider record" for attempts outside it. Please confirm the boundary case (an attempt
-   sent just before a window end whose line is dated just after) behaves as in the unbounded mode (the same race exists there).
+2. Window semantics vs the matcher: **answered by LF-A11-1 (section 9): bounded mode does NOT behave as the unbounded mode.** Lines are dated by
+   last status change but the "missing provider record" rule windows attempts by `sentAt`, so in a truncated run every succeeded attempt with
+   `sentAt < CoverageEnd` whose line settled after the cut raises a false (fail-safe) `pay_missing_provider_record` P1. OPEN row, see 9.4.
 3. Stale-cursor skip leaves an unmatched content-addressed import (plain evidence); duplicate lines across imports already occur on every
    MOCK run (each run re-imports its window). Confirm no K3/M4 evidence rule treats the loser's duplicate lines as ambiguity.
 4. `window_truncated` runs: standing M2/M4 evidence loaders read persisted lines across all imports, so truncation does not hide evidence.
@@ -275,6 +296,22 @@ freshness. Approval needs:
    row.
 
 None of this is a blocker for a MOCK-only merge once items 1 and 2 are done.
+
+### 9.4 Responses to the review (A11 follow-up)
+
+- **LF-A11-1: OPEN, not changed. MUST CLOSE BEFORE THE FIRST NON-MOCK STATEMENT SOURCE.** No minimal, safe matcher change exists: windowing the
+  rule by the attempt's last state change touches the legacy (creation-dated) mode that the whole existing suite pins, and suppressing the rule in
+  truncated runs creates the false negative the reviewer describes (no later run has that `sentAt` in its coverage). Needed: window the rule by the
+  platform attempt's last state change (matching the line dating) or defer attempts whose settlement window crosses `CoverageEnd`, keeping "never
+  silently missing", with a test; payments + ledger-finance. Exposure today: MOCK only, fail-safe (false positive), and the default 50000-line bound
+  makes a truncated run rare.
+- **LF-A11-2 / LF-A11-6: contract rules added to section 3 (items 6 to 8); settle lag and stuck-cursor automation NOT IMPLEMENTED (PROVIDER DEPENDENT).**
+  Runbook entry for a stuck cursor: `docs/runbooks/observability-and-alerting.md`, "payment_statement stuck cursor".
+- **LF-A11-3: closed with `FOR SHARE`** (see section 6, PAY-SEC-LAUNCH-1).
+- **LF-A11-4: the five missing rows were added to the recheck table.**
+- **LF-A11-5: `PaymentFetchRequest` doc corrected to "exactly ContinueFrom".**
+- **LF-A11-7: no action** (optional CHECK in a later migration).
+- **LF-A11-8: kept as its own OPEN row** (section 6).
 
 ## 10. Security independent review (2026-10-15, head `e2f0206`)
 

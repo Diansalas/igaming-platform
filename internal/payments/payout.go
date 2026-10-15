@@ -447,10 +447,10 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		}
 
 		// PAY-SEC-LAUNCH-1 / S-L4 (2), ADR 0095 5.2 step (4): the capability the A0 routing chose is re-read INSIDE this
-		// transaction. A capability disabled, removed or no longer withdrawal-capable between routing and this commit
+		// transaction, FOR SHARE (a concurrent disable waits for this claim; LF-A11-3). A capability disabled, removed or no longer withdrawal-capable between routing and this commit
 		// is not claimed: the request stays `approved` (the whole claim rolls back, nothing written), retriable once
 		// routing succeeds. The kill switch above stays the emergency stop; this closes the window it cannot.
-		if cur, found, cerr := LoadCapability(actx, tx, tenantID, wr.BrandID, routedCapability.ProviderID); cerr != nil {
+		if cur, found, cerr := LoadCapabilityForShare(actx, tx, tenantID, wr.BrandID, routedCapability.ProviderID); cerr != nil {
 			return cerr
 		} else if !found || cur.Status != CapabilityActive || !cur.SupportsWithdrawal {
 			return fmt.Errorf("payments: payout claim refused: capability for %q changed since routing: %w", routedCapability.ProviderID, ErrNoRoutableProvider)

@@ -19,6 +19,19 @@ import (
 // tenant-owned, RLS-protected table with no platform-global fallback
 // (docs/decisions/0022 §2.2).
 func LoadCapability(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, providerID string) (ProviderCapability, bool, error) {
+	return loadCapability(ctx, tx, tenantID, brandID, providerID, "")
+}
+
+// LoadCapabilityForShare is LoadCapability that also locks the effective capability row FOR SHARE until the caller's
+// transaction ends (PAY-SEC-LAUNCH-1 / S-L4(2)): a concurrent disable (WriteCapability's upsert takes the row lock)
+// waits for the claim, so the claim cannot commit on a capability that was disabled after it was re-read. The row
+// is a leaf in the lock order: capability writers take no request, attempt or ledger lock after it. Residual: a
+// brand-specific row inserted concurrently over a tenant-wide one is not locked (no predicate lock).
+func LoadCapabilityForShare(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, providerID string) (ProviderCapability, bool, error) {
+	return loadCapability(ctx, tx, tenantID, brandID, providerID, " FOR SHARE")
+}
+
+func loadCapability(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, providerID, lockClause string) (ProviderCapability, bool, error) {
 	row := tx.QueryRow(ctx,
 		`SELECT id, tenant_id, brand_id, provider_id, provider_kind,
 			supported_fiat_currencies, supported_crypto_assets, supported_payment_methods, supported_countries,
@@ -27,7 +40,7 @@ func LoadCapability(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID,
 		 FROM provider_capabilities
 		 WHERE tenant_id = $1 AND provider_id = $2 AND (brand_id = $3 OR brand_id IS NULL)
 		 ORDER BY (brand_id IS NULL) ASC
-		 LIMIT 1`,
+		 LIMIT 1`+lockClause,
 		tenantID, providerID, brandID,
 	)
 	pc, err := scanCapabilityRow(row)

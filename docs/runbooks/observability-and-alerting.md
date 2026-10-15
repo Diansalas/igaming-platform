@@ -839,6 +839,21 @@ Discriminator `stream:payment_statement:provider:<id>:<phase>` (ONE open alert p
   cursor (`reconciliation_runs.coverage_end` of the provider's last committed run). It is not a failure and not a clean claim; it clears
   when a later run completes the window. A backlog that never drains means the bound is below the provider's volume.
 
+#### Runbook: payment_statement stuck cursor (A11)
+
+Symptom: `reconciliation.run_failed` (phase `fetch`, for one (tenant, provider)) on EVERY run, the audit row's `error` mentions
+`coverage is not contiguous with the continuation cursor` or `above the per-run bound` / `made no progress`, and
+`reconciliation_payment_unreconciled{reason="run_failed"}` stays at 1 for that pair.
+
+1. Read the pair's cursor: `SELECT max(coverage_end) FROM reconciliation_runs WHERE tenant_id=$1 AND stream='payment_statement' AND provider_id=$2`.
+2. Gap or overlap error: the source returned a statement that does not start exactly at the cursor, or contains a line dated before it (a
+   backdated / late-visible line, or a collect-then-page source). That is a SOURCE contract violation (`docs/plans/a11-payments-wiring-record.md`
+   section 3, items 6 to 8): fix or pause the source; do not edit `reconciliation_runs` (append-only).
+3. Bound error: the source returned more lines than `RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`, or an unsplittable group of lines shares one
+   microsecond (`ErrPaymentStatementUnpageable`): fix the source's paging or raise the bound (<= 1000000).
+4. There is no automatic skip-forward: moving a cursor past unmatched lines would be a silent false negative. A deliberate skip is a governed
+   decision (owner + ledger-finance) executed as a new, audited run row, not a SQL edit.
+
 ### Runbook: undelivered alerts (`AlertUndeliveredP1Old`, `alert_undelivered_*`)
 
 An open P1 older than 15 minutes that nobody was told about. Today (no human route) this fires whenever a P1 exists; that is the
