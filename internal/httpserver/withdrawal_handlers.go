@@ -26,6 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/validation"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 type requestWithdrawalRequest struct {
@@ -143,6 +144,9 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 		// nil so WithTenant COMMITS rather than rolling back. Every OTHER
 		// error still propagates and rolls back normally.
 		var kycDenied *withdrawal.KYCDeniedError
+		// WD-RG-1: the RG / RISK gate denial is committed the same way (its denial audit is written in the
+		// transaction by RequestWithdrawal; this closure returns nil so it commits, and nothing else was written).
+		var gateDenied *withdrawal.GateDeniedError
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
@@ -155,13 +159,25 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: wl.ID,
 				AssetCode: req.AssetCode, Amount: req.Amount, IdempotencyKey: req.IdempotencyKey,
-				PayoutInstrumentID: instrumentID, Destinations: destinations,
+				PayoutInstrumentID: instrumentID, Destinations: destinations, Gate: standard.New(),
 			})
-			if errors.As(err, &kycDenied) {
+			if errors.As(err, &kycDenied) || errors.As(err, &gateDenied) {
 				return nil
 			}
 			return err
 		})
+		if gateDenied != nil {
+			// Player-facing surface: one generic sentence for both gates. The gate code and the reason
+			// stay in the audit record and the server log (no risk-rule oracle, no account-state oracle).
+			logger.Warn("request_withdrawal_refused_by_gate", "gate_code", gateDenied.GateCode, "reason", gateDenied.Reason)
+			apierror.Write(w, requestID, apierror.CodeForbidden, "withdrawals are not available for this account right now")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrGateUnavailable) {
+			logger.Error("request_withdrawal_gate_unavailable", "error", err)
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "withdrawals are temporarily unavailable, please retry")
+			return
+		}
 		if kycDenied != nil {
 			// B1 (code review rv-prh-i3-code-review.md): OutcomeUnavailable
 			// means EvaluateEnforcement itself could not determine an

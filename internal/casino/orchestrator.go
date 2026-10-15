@@ -396,7 +396,21 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		// anywhere on the platform via their cross-brand Person, or holding a
 		// non-active wallet) must never obtain a usable session, regardless of
 		// what any provider does or does not enforce on its own end.
-		decision, err := evaluateAndAuditEligibility(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID, "casino.launch_denied")
+		//
+		// ADR 0115 S4-min (completion audit A6): a REAL launch goes through rg.EvaluateAction, which is
+		// EvaluateEligibility plus the time-out and, where limit enforcement is switched on for the brand,
+		// the configuration / mandatory-limit answers (rg_config_missing, rg_limit_required). A demo launch
+		// has no money at stake and keeps the plain eligibility check (self-exclusion and time-out still
+		// refuse it, as before for self-exclusion).
+		var decision rg.Decision
+		if params.Mode == ModeReal {
+			decision, err = evaluateAndAuditAction(ctx, tx, rg.ActionParams{
+				TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID, WalletID: params.WalletID,
+				Action: rg.ActionCasinoLaunch, AssetCode: params.AssetCode,
+			}, "casino.launch_denied")
+		} else {
+			decision, err = evaluateAndAuditEligibility(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID, "casino.launch_denied")
+		}
 		if err != nil {
 			return err
 		}
@@ -724,6 +738,30 @@ func evaluateAndAuditEligibility(ctx context.Context, tx pgx.Tx, tenantID, brand
 		Metadata: map[string]any{
 			"reason_code": decision.Code, "person_id": decision.PersonID.String(), "brand_id": brandID.String(),
 		},
+	}); err != nil {
+		return rg.Decision{}, fmt.Errorf("casino: audit rg denial: %w", err)
+	}
+	return decision, nil
+}
+
+// evaluateAndAuditAction is evaluateAndAuditEligibility for the ADR 0115 enforcement boundary
+// (rg.EvaluateAction): the same audit-before-return contract, with the computed limit figures of a limit
+// denial added to the audit record (ADR 0115 section 4). A Go error from EvaluateAction (including
+// rg.ErrEvaluationUnavailable) is returned unchanged for the caller to abort on: it is never a decision.
+func evaluateAndAuditAction(ctx context.Context, tx pgx.Tx, p rg.ActionParams, auditAction string) (rg.Decision, error) {
+	decision, err := rg.EvaluateAction(ctx, tx, p)
+	if err != nil {
+		return rg.Decision{}, fmt.Errorf("casino: evaluate rg action: %w", err)
+	}
+	if decision.Allowed {
+		return decision, nil
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: p.TenantID, ActorType: audit.ActorSystem, Action: auditAction,
+		TargetType: "player_account", TargetID: p.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: decision.AuditMetadata(map[string]any{
+			"reason_code": decision.Code, "person_id": decision.PersonID.String(), "brand_id": p.BrandID.String(),
+		}),
 	}); err != nil {
 		return rg.Decision{}, fmt.Errorf("casino: audit rg denial: %w", err)
 	}
@@ -1831,7 +1869,17 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// gambling... checked BEFORE the financial debit is committed"). No
 	// ledger entry has been touched yet at this point - a denial here
 	// produces zero financial effect, never a partial one.
-	decision, err := evaluateAndAuditEligibility(ctx, tx, tenantID, session.BrandID, session.PlayerAccountID, wl.ID, "casino_bet.denied_by_rg_policy")
+	//
+	// ADR 0115 S4-min: rg.EvaluateAction adds the time-out and, where limit enforcement is switched on for
+	// the brand, the deposit-independent wager and loss limits (usage + stake <= limit, measured from the
+	// ledger inside THIS transaction after the L0.4 lock). A denial returns here, before any ledger
+	// effect, with its computed figures in the denial audit record. An error (the evaluation could not
+	// decide) aborts the callback with no effect: fail closed. Wins, rollbacks and settlements never reach
+	// this call.
+	decision, err := evaluateAndAuditAction(ctx, tx, rg.ActionParams{
+		TenantID: tenantID, BrandID: session.BrandID, PlayerAccountID: session.PlayerAccountID, WalletID: wl.ID,
+		Action: rg.ActionCasinoWager, AssetCode: event.AssetCode, Amount: event.Amount,
+	}, "casino_bet.denied_by_rg_policy")
 	if err != nil {
 		return ReceiveCallbackResult{}, err
 	}

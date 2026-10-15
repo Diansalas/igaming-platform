@@ -309,6 +309,12 @@ type ComposedConfig struct {
 }
 
 func (l *Limits) compose(ctx context.Context, tx pgx.Tx, jur *string, tenantID, brandID uuid.UUID, kind ControlKind, asset *string) (ComposedConfig, error) {
+	return composeConfig(ctx, tx, jur, tenantID, brandID, kind, asset)
+}
+
+// composeConfig is compose without the receiver (it uses no service state); the read-only options of the player's
+// RG screen (options.go) call it too.
+func composeConfig(ctx context.Context, tx pgx.Tx, jur *string, tenantID, brandID uuid.UUID, kind ControlKind, asset *string) (ComposedConfig, error) {
 	if jur == nil {
 		return ComposedConfig{}, nil
 	}

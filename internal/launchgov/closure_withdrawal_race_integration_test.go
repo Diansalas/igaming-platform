@@ -11,12 +11,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // NOTE (ledger-finance review): the Go-path race tests below drive withdrawal.RequestWithdrawal through
@@ -36,9 +38,12 @@ func (w *world) withdrawalFixture(tenantID, brandID uuid.UUID) func(ctx context.
 		if err := tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, player).Scan(&person); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
-			VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`, uuid.New(), tenantID, brandID, player, person)
-		return err
+		if _, err := tx.Exec(ctx, `INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`, uuid.New(), tenantID, brandID, player, person); err != nil {
+			return err
+		}
+		// WD-RG-1 (A6): a withdrawal request needs an ACTIVE account (RegisterPlayer creates 'pending_verification').
+		return identity.SetPlayerAccountStatus(ctx, tx, player, identity.PlayerStatusActive)
 	}); err != nil {
 		w.t.Fatalf("kyc fixture: %v", err)
 	}
@@ -46,7 +51,7 @@ func (w *world) withdrawalFixture(tenantID, brandID uuid.UUID) func(ctx context.
 	return func(ctx context.Context, tx pgx.Tx) (withdrawal.WithdrawalRequest, error) {
 		return withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: tenantID, BrandID: brandID, PlayerAccountID: player, PersonID: person, WalletID: wl, AssetCode: "EUR",
-			Amount: 5000, IdempotencyKey: uuid.NewString(), PayoutInstrumentID: instrument, Destinations: pitest.Shared(),
+			Amount: 5000, IdempotencyKey: uuid.NewString(), PayoutInstrumentID: instrument, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 	}
 }

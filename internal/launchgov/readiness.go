@@ -28,13 +28,20 @@ const (
 	CheckProviderTier       = "R-PROVIDER-TIER"
 	CheckAlerts             = "R-ALERTS"
 	CheckPlayerFunds        = "R-PLAYER-FUNDS"
+	// CheckRGConfig (ADR 0115 section 6, completion audit A6): the subject's players are protected by RG limit
+	// enforcement that is SWITCHED ON and has a compliance floor in force for every kind and every allowed
+	// currency. Without it a brand would either run with no deposit / loss / wager limits (switch off) or be
+	// unable to take a deposit or a wager (switch on, no floor: rg_config_missing).
+	CheckRGConfig = "R-RG-CONFIG"
 
 	ResultPass         = "pass"
 	ResultFail         = "fail"
 	ResultNotEvaluable = "not_evaluable"
 
-	// SnapshotVersion is bumped when the check set or the canonical form changes.
-	SnapshotVersion = 1
+	// SnapshotVersion is bumped when the check set or the canonical form changes. Version 2 (ADR 0115 S4-min):
+	// R-RG-CONFIG joined the check set, so a request bound to a version-1 readiness hash is stale and must be
+	// re-requested (the hash is recomputed over the current set at decision and at execution).
+	SnapshotVersion = 2
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -319,6 +326,13 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 		}
 	}
 
+	// R-RG-CONFIG
+	var curRaw [][]byte
+	for _, c := range cfgs {
+		curRaw = append(curRaw, c.currencies)
+	}
+	out = append(out, s.rgConfigCheck(ctx, tx, in, cfgs2currencies(curRaw), cfgErr, now))
+
 	// R-CATALOGUE: at least one enabled casino game for the brand (or tenant-wide). The
 	// sportsbook catalogue is platform-wide, not brand-scoped, so it is not a brand derivation.
 	var games int
@@ -483,4 +497,124 @@ func nonZeroWithdrawalHolds(ctx context.Context, tx pgx.Tx, sub Subject) (int64,
 		         FROM ledger_entries e WHERE e.ledger_account_id = la.id AND e.tenant_id = la.tenant_id) <> 0`,
 		sub.TenantID, sub.BrandID).Scan(&n)
 	return n, err
+}
+
+// cfgs2currencies flattens the allowed_currencies JSON arrays of the in-effect jurisdiction configs into one
+// sorted, de-duplicated list; a malformed array yields a nil list (the check then reports not_evaluable).
+func cfgs2currencies(raw [][]byte) []string {
+	seen := map[string]bool{}
+	for _, b := range raw {
+		var l []string
+		if err := json.Unmarshal(b, &l); err != nil {
+			return nil
+		}
+		for _, c := range l {
+			seen[c] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for c := range seen {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// rgConfigCheck is R-RG-CONFIG. It passes only when ALL of these hold for the subject:
+//
+//   - RG limit enforcement is switched ON for it (a tenant-wide activation row, or for a brand subject a row
+//     of that brand): rg_enforcement_activations, migration 0158;
+//   - for EVERY allowed currency of the referenced jurisdictions, a compliance floor is in force (not absent,
+//     not a synthetic row outside dev/test) for the deposit, loss and wager kinds, composed for the subject's
+//     tenant and brand; and
+//   - no session-duration control is enabled or mandatory (session enforcement is NOT BUILT: a
+//     control the platform cannot enforce must not be presented as in force), and none aggregates the Person's
+//     concurrent session chains (it cannot be measured and fails closed at runtime).
+//
+// Detail codes are closed words. A read failure is not_evaluable, never a pass. The check reads the
+// subject tenant's own scope only.
+func (s *Service) rgConfigCheck(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []string, cfgErr error, now time.Time) Check {
+	if cfgErr != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	// A savepoint, so a failing read (for example a schema older than migration 0158) degrades THIS check to
+	// not_evaluable instead of poisoning the readiness transaction for the checks that follow and for its commit.
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	c := rgConfigChecks(ctx, sp, in, currencies, now)
+	if c.Result == ResultNotEvaluable {
+		_ = sp.Rollback(ctx)
+		return c
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	return c
+}
+
+func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []string, now time.Time) Check {
+	if len(in.JurisdictionIDs) == 0 {
+		return ck(CheckRGConfig, ResultFail, "no_jurisdiction_referenced")
+	}
+	if len(currencies) == 0 {
+		return ck(CheckRGConfig, ResultFail, "no_currency")
+	}
+	var activated bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rg_enforcement_activations
+			WHERE tenant_id = $1 AND (brand_id IS NULL OR ($2::uuid IS NOT NULL AND brand_id = $2)))`,
+		in.Subject.TenantID, in.Subject.BrandID).Scan(&activated); err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	if !activated {
+		return ck(CheckRGConfig, ResultFail, "enforcement_not_enabled")
+	}
+	rows, err := tx.Query(ctx, `SELECT code FROM jurisdictions WHERE id = ANY($1) ORDER BY code`, in.JurisdictionIDs)
+	if err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	var jurs []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			rows.Close()
+			return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+		}
+		jurs = append(jurs, c)
+	}
+	rows.Close()
+	if rows.Err() != nil || len(jurs) != len(in.JurisdictionIDs) {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	for _, jur := range jurs {
+		for _, cur := range currencies {
+			for _, kind := range []string{"deposit", "loss", "wager"} {
+				var found bool
+				if err := tx.QueryRow(ctx, `SELECT found FROM rg_limit_config_compose($1, $2, $3, $4, $5, $6)`,
+					jur, in.Subject.TenantID, in.Subject.BrandID, kind, cur, now).Scan(&found); err != nil {
+					return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+				}
+				if !found {
+					return ck(CheckRGConfig, ResultFail, "floor_missing_"+kind)
+				}
+			}
+		}
+		var sessFound, sessEnabled, sessMandatory, agg *bool
+		var sessScope *string
+		if err := tx.QueryRow(ctx, `SELECT found, enabled, mandatory, concurrent_chain_aggregation, scope
+				FROM rg_limit_config_compose($1, $2, $3, 'session_duration', NULL, $4)`,
+			jur, in.Subject.TenantID, in.Subject.BrandID, now).Scan(&sessFound, &sessEnabled, &sessMandatory, &agg, &sessScope); err != nil {
+			return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+		}
+		if sessFound != nil && *sessFound {
+			if agg != nil && *agg && sessScope != nil && *sessScope == "tenant_person" {
+				return ck(CheckRGConfig, ResultFail, "session_aggregation_unsupported")
+			}
+			if (sessEnabled != nil && *sessEnabled) || (sessMandatory != nil && *sessMandatory) {
+				return ck(CheckRGConfig, ResultFail, "session_limit_not_enforced")
+			}
+		}
+	}
+	return ck(CheckRGConfig, ResultPass, "ok")
 }

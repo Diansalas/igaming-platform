@@ -33,6 +33,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/stepup"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
 
 // State is one of the nine values in withdrawal_requests' CHECK
@@ -388,6 +389,9 @@ type RequestParams struct {
 	PayoutInstrumentID uuid.UUID
 	// Destinations applies the gate rule. REQUIRED (nil refuses: fail closed).
 	Destinations DestinationGate
+	// Gate is the WD-RG-1 RG + risk gate (rggate.go). REQUIRED: nil is a fail-closed refusal
+	// (ErrGateUnavailable), evaluated before any write. Production: standard.New().
+	Gate withdrawalgate.Gate
 }
 
 // translateInsertError classifies a failed withdrawal_requests INSERT. Migration 0131: the database
@@ -473,6 +477,16 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	// idempotency key is not consumed (it lives only on the request row).
 	if err := tenant.RequireActiveForPaymentInitiation(ctx, tx, params.TenantID, params.BrandID); err != nil {
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: request refused: %w", err)
+	}
+
+	// WD-RG-1 (owner decision 2026-10-15): the RG + RISK gate on a NEW request. It takes the L0.4 person
+	// lock, so it runs here - after the status gate, BEFORE the payout-instrument gate's FOR SHARE lock
+	// and every ledger lock (ADR 0082 R8, rv-prh-architect 4.1 forward note). A refusal writes its denial
+	// audit in this transaction and returns *GateDeniedError (the caller commits the audit and nothing
+	// else, like the KYC denial); the key is not consumed. See rggate.go for exactly what is gated.
+	restrictionInForce, gateErr := evaluateRGRiskGate(ctx, tx, params)
+	if gateErr != nil {
+		return WithdrawalRequest{}, gateErr
 	}
 
 	// B13-B (ADR 0111 2.4, owner decisions 2 and 4): BINDING happens here. After the
@@ -627,6 +641,17 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: record hold transaction id: %w", err)
 	}
 
+	requestedMeta := map[string]any{
+		"amount":     params.Amount,
+		"asset_code": params.AssetCode,
+		"wallet_id":  params.WalletID.String(),
+		// B13-B: the instrument id only. Never the fingerprint, mask or detail.
+		"payout_instrument_id": gate.Instrument.ID.String(),
+	}
+	if restrictionInForce != "" {
+		// WD-RG-1: a withdrawal is allowed during a self-exclusion / time-out (ADR 0115); the audit says so.
+		requestedMeta["rg_restriction_in_force"] = restrictionInForce
+	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID:   params.TenantID,
 		ActorType:  audit.ActorPlayer,
@@ -635,13 +660,7 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		TargetType: "withdrawal_request",
 		TargetID:   requestID.String(),
 		Outcome:    audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"amount":     params.Amount,
-			"asset_code": params.AssetCode,
-			"wallet_id":  params.WalletID.String(),
-			// B13-B: the instrument id only. Never the fingerprint, mask or detail.
-			"payout_instrument_id": gate.Instrument.ID.String(),
-		},
+		Metadata:   requestedMeta,
 	}); err != nil {
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: audit: %w", err)
 	}

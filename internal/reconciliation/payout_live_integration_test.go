@@ -20,6 +20,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 func TestPaymentStatement_LivePayoutPath_AgainstWiredMockSource_NoMismatches(t *testing.T) {
@@ -63,7 +64,7 @@ func TestPaymentStatement_LivePayoutPath_AgainstWiredMockSource_NoMismatches(t *
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, PersonID: personID,
 			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 700, IdempotencyKey: "live-payout-" + uuid.NewString(),
-			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 		if err != nil {
 			return err

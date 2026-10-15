@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // loRequestState reads a request's current state - used to prove the
@@ -132,7 +133,7 @@ func TestLockOrder_ConcurrentWithdrawalRequestAndRejection_NoDeadlock(t *testing
 					_, err := RequestWithdrawal(ctx, tx, RequestParams{
 						TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID, WalletID: f.walletID,
 						AssetCode: "EUR", Amount: 500, IdempotencyKey: "lockorder-new-" + tc.name,
-						PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
+						PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 					})
 					return err
 				})

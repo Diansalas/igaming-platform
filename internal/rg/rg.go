@@ -530,6 +530,31 @@ type Decision struct {
 	Code     string
 	Message  string
 	PersonID uuid.UUID
+	// Figures are the COMPUTED figures of a limit denial (ADR 0115 section 4 denial audit; S3 condition
+	// (e): the usage SQL inputs alone are not an exact replay, because a deposit intent's status is a
+	// mutable projection): code, kind, period, scope, limit, usage, attempted amount, window start,
+	// statement instant, configuration versions and the usage query inputs. Nil for every denial that is
+	// not a limit/configuration denial. Decimal strings only, never a float. Callers put them into the
+	// denial audit record with AuditMetadata.
+	Figures map[string]any
+	// RestrictionInForce names a Person-level restriction ("self_exclusion" or "time_out") that is in force
+	// but did NOT block the decision. Only EvaluateWithdrawalEligibility sets it (a withdrawal is allowed
+	// during a self-exclusion or a time-out: ADR 0115 2.3 / 3.2 / 6, owner-reversible); it exists so the
+	// withdrawal audit record can state the fact. Empty otherwise.
+	RestrictionInForce string
+}
+
+// AuditMetadata returns base extended with the denial figures (base is not modified). The keys of base
+// win over a figure key of the same name, so a caller's own fields can never be shadowed.
+func (d Decision) AuditMetadata(base map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(d.Figures))
+	for k, v := range d.Figures {
+		out[k] = v
+	}
+	for k, v := range base {
+		out[k] = v
+	}
+	return out
 }
 
 const (
@@ -537,6 +562,9 @@ const (
 	CodePlayerAccountNotActive = "player_account_not_active"
 	CodeSelfExcluded           = "self_excluded"
 	CodeWalletNotActive        = "wallet_not_active"
+	// CodeTimedOut: the Person is inside an active time-out (ADR 0115 2.3; completion audit A6). Same
+	// shape and the same L0.4 lock as self-exclusion; it never changes wallet status.
+	CodeTimedOut = "timed_out"
 )
 
 // EligibilityParams is EvaluateEligibility's input. TenantID/BrandID/
@@ -585,6 +613,23 @@ type EligibilityParams struct {
 // query's own correctness never depends on which scope helper a future
 // caller happens to choose.
 func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams) (Decision, error) {
+	return evaluateEligibility(ctx, tx, params, true)
+}
+
+// EvaluateWithdrawalEligibility is the RG half of the WD-RG-1 withdrawal gate (owner decision
+// 2026-10-15). It is EvaluateEligibility with ONE deliberate difference: an active self-exclusion or
+// time-out does NOT refuse the withdrawal. ADR 0115 2.3 ("a time-out never changes wallet status, so
+// withdrawals keep working"), 3.1 (an excluded or timed-out player "can still withdraw"), 3.2 ("Withdrawals:
+// never blocked by limits, time-out or rg_config_missing") and 6 ("still allowed: withdrawals") all keep a
+// player's own funds reachable while a protective restriction is in force; the restriction is reported in
+// Decision.RestrictionInForce for the audit record. The same L0.4 person lock, the same Person re-read
+// after the lock and the same account-status and wallet-status refusals apply. Takes the person lock, so it
+// must run BEFORE any L1+ lock (ADR 0082 R8).
+func EvaluateWithdrawalEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams) (Decision, error) {
+	return evaluateEligibility(ctx, tx, params, false)
+}
+
+func evaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams, restrictionsBlock bool) (Decision, error) {
 	// BrandID is required, not merely recommended: the self-exclusion
 	// query below treats brand_id IS NULL in a STORED restriction row as
 	// "applies platform/tenant-wide", but if params.BrandID itself were
@@ -609,6 +654,21 @@ func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 	// (ADR 0026 §8/directive §8), not merely a best-effort snapshot read.
 	if err := lockPerson(ctx, tx, account.PersonID); err != nil {
 		return Decision{}, err
+	}
+	// ADR 0115 S3 condition (d) (PERSON-RELINK-PIN-1 stays open): the account's Person is re-read in a NEW
+	// statement AFTER the lock. A re-link (migration 0158 trigger) takes the L0.4 locks of the old and the
+	// new Person, so it either committed before this read (and is seen here) or waits for this transaction.
+	// If the account moved between the first read and the lock, the new Person is locked too and is the one
+	// every check below uses - never the stale one.
+	var currentPerson uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, params.PlayerAccountID).Scan(&currentPerson); err != nil {
+		return Decision{}, fmt.Errorf("rg: re-read person after lock: %w", err)
+	}
+	if currentPerson != account.PersonID {
+		if err := lockPerson(ctx, tx, currentPerson); err != nil {
+			return Decision{}, err
+		}
+		account.PersonID = currentPerson
 	}
 
 	if account.Status != identity.PlayerStatusActive {
@@ -638,27 +698,41 @@ func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 	// point - a genuine, real self-exclusion enforcement gap, not a test
 	// artifact. clock_timestamp() re-evaluates the true current instant
 	// on every call, closing it.
-	var excluded bool
+	//
+	// ONE query for both Person-level restrictions (self-exclusion first: it is the stricter, and its
+	// code is what existing callers and tests expect). A time-out (ADR 0115 2.3) is read with exactly
+	// the same predicate and scope rule as a self-exclusion: active at the database clock, a platform
+	// row (tenant_id NULL) or this tenant's row, brand NULL or this brand. ends_at is exclusive, so a
+	// time-out is over AT its ends_at instant (boundary test: limits_s4_timeout_integration_test.go).
+	var activeType string
 	err = tx.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM player_restrictions
-			WHERE person_id = $1
-			  AND restriction_type = $2
-			  AND starts_at <= clock_timestamp()
-			  AND (ends_at IS NULL OR ends_at > clock_timestamp())
-			  AND (brand_id IS NULL OR brand_id = $3)
-			  AND (tenant_id IS NULL OR tenant_id = $4)
-		)`,
-		account.PersonID, RestrictionSelfExclusion, params.BrandID, params.TenantID,
-	).Scan(&excluded)
-	if err != nil {
-		return Decision{}, fmt.Errorf("rg: check self-exclusion: %w", err)
+		`SELECT restriction_type FROM player_restrictions
+		  WHERE person_id = $1
+		    AND restriction_type IN ($2, $3)
+		    AND starts_at <= clock_timestamp()
+		    AND (ends_at IS NULL OR ends_at > clock_timestamp())
+		    AND (brand_id IS NULL OR brand_id = $4)
+		    AND (tenant_id IS NULL OR tenant_id = $5)
+		  ORDER BY (restriction_type = $2) DESC
+		  LIMIT 1`,
+		account.PersonID, RestrictionSelfExclusion, RestrictionTimeOut, params.BrandID, params.TenantID,
+	).Scan(&activeType)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return Decision{}, fmt.Errorf("rg: check restrictions: %w", err)
 	}
-	if excluded {
-		return Decision{
-			Allowed: false, Code: CodeSelfExcluded, PersonID: account.PersonID,
-			Message: "person is currently self-excluded",
-		}, nil
+	if restrictionsBlock {
+		switch RestrictionType(activeType) {
+		case RestrictionSelfExclusion:
+			return Decision{
+				Allowed: false, Code: CodeSelfExcluded, PersonID: account.PersonID,
+				Message: "person is currently self-excluded",
+			}, nil
+		case RestrictionTimeOut:
+			return Decision{
+				Allowed: false, Code: CodeTimedOut, PersonID: account.PersonID,
+				Message: "person is currently in a time-out",
+			}, nil
+		}
 	}
 
 	if params.WalletID != uuid.Nil {
@@ -674,5 +748,9 @@ func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 		}
 	}
 
-	return Decision{Allowed: true, Code: CodeAllowed, PersonID: account.PersonID}, nil
+	d := Decision{Allowed: true, Code: CodeAllowed, PersonID: account.PersonID}
+	if !restrictionsBlock {
+		d.RestrictionInForce = activeType
+	}
+	return d, nil
 }

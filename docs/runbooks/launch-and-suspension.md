@@ -87,6 +87,7 @@ itself: it must be explicitly acknowledged and the approvers see it. Only the ha
 | `R-CATALOGUE` | the brand has at least one enabled casino game or sportsbook product | empty catalogue | brand operator |
 | `R-PROVIDER-TIER` | the running process uses production-eligible components | `synthetic_environment`: today every provider is a MOCK, so this fails everywhere | provider contracts (human) |
 | `R-ALERTS` | alert routing has a real recipient for P1 kinds | **always `fail` today**: ALERT-DELIVERY-1 is OPEN, nobody is paged | owner / on-call decision (HD-PRH2-4-OPS) |
+| `R-RG-CONFIG` | RG limit enforcement is switched ON for the subject (`rg_enforcement_activations`), a compliance floor is in force for deposit, loss and wager in EVERY allowed currency, and no session-duration control is enabled or mandatory (session enforcement is not built) | `enforcement_not_enabled`, `floor_missing_<kind>`, `session_limit_not_enforced`, `session_aggregation_unsupported`, `no_currency` | compliance (floor values, OQ-2) then a tenant compliance staff member (the switch) |
 | `R-PLAYER-FUNDS` | (close and suspend) shows balances and exposure; requires acknowledgement | n/a: it is a position, not a pass/fail | approver reads the notice (section 5) |
 
 An approver who sees `R-PROVIDER-TIER` and `R-ALERTS` failing is looking at the true state of the platform. Acknowledging

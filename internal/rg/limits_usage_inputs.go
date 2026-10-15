@@ -72,10 +72,17 @@ func ReadUsageConfig(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID
 	if err != nil {
 		return UsageConfig{}, err
 	}
+	return readUsageConfigFor(ctx, tx, jur, tenantID, brandID, kind, asset, at)
+}
+
+// readUsageConfigFor is ReadUsageConfig after the scope guard and the jurisdiction lookup: EvaluateAction
+// does both once per action and composes several kinds with the one result (no behavioural difference).
+func readUsageConfigFor(ctx context.Context, tx pgx.Tx, jur *string, tenantID, brandID uuid.UUID, kind ControlKind, asset *string, at *time.Time) (UsageConfig, error) {
 	cfg := UsageConfig{Kind: kind, AssetCode: asset}
 	if jur == nil {
 		return cfg, nil
 	}
+	var err error
 	var enabled, mandatory, none, lossNeg, conc, ttlNone *bool
 	var scope *string
 	var periods []string

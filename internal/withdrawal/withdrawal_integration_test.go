@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -205,7 +206,7 @@ func requestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, ide
 			AssetCode:          "EUR",
 			Amount:             amount,
 			IdempotencyKey:     idemKey,
-			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 		if errors.As(err, &kycDenied) {
 			return nil

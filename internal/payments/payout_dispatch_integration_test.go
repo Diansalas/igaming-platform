@@ -26,6 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // payoutFixture funds a wallet and (optionally) records a passed KYC
@@ -135,7 +136,7 @@ func approvedWithdrawal(t *testing.T, pool *db.Pool, f payoutFixture, amount int
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID,
 			WalletID: f.walletID, AssetCode: "EUR", Amount: amount, IdempotencyKey: idemKey,
-			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 		return err
 	})

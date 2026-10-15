@@ -1065,3 +1065,19 @@ by `BonusLegsCountedWhenFlagged_WithoutLockLegs`).
 
 **Verification evidence:** mutation results `docs/plans/prh2-hardening-round/adr0115-s3-mutation-kill.txt` (driver
 `adr0115-s3-mutation-driver.py`); EXPLAIN and latency `docs/plans/prh2-hardening-round/adr0115-s3-explain-evidence.txt`.
+
+## S4-min implementation record (A6, 2026-10-15)
+
+Status of this slice: `IMPLEMENTED` for deposit, loss and wager limit enforcement and time-out enforcement, DEFAULT OFF behind a per-brand or
+tenant-wide switch (`rg_enforcement_activations`, migration 0158, OQ-2 values still `BLOCKED` on compliance). `NOT IMPLEMENTED`: session-duration and
+reality-check enforcement (PROVIDER DEPENDENT / F), the ledger-derived rollup, the TTL sweep, the post-facto late-credit alert. Full record, S4 hard-condition
+disposition, evidence figures and the mutation pass: `docs/plans/a6-rg-enforcement-record.md` (`a6-mutation-results.tsv`).
+
+- `rg.EvaluateAction` is the enforcement boundary for casino launch and bet, sportsbook placement and deposit T1 and T2; the usage reads run after the L0.4
+  Person lock, READ COMMITTED, with transaction-local lock and statement timeouts (restored afterwards). Any error is `rg_evaluation_unavailable` (fail closed).
+- Time-out is enforced like self-exclusion (not behind the switch). Withdrawals are ALLOWED during a time-out or self-exclusion (WD-RG-1); the restriction in force
+  is recorded in the request audit.
+- A numeric ceiling is a hard cap on every allowed period; account and tenant_person values are combined by MIN; `rg_config_missing`, `rg_limit_required`,
+  `rg_deposit_limit_reached`, `rg_loss_limit_reached`, `rg_wager_limit_reached` are the stable codes.
+- Heavy player: 300,000 ledger rows in 30 days measures 3.3-4.1 s against the 4 s default statement timeout (fail closed). The rollup decision and the
+  recommended launch configuration are in the record, section 5.

@@ -95,6 +95,8 @@ var staffRouteGolden = map[string]string{
 	"POST /v1/admin/players/{id}/suspend":                                                         "none",
 	"GET /v1/admin/players/{playerID}/payout-instruments":                                         "none",
 	"PUT /v1/admin/providers/{providerID}/capability":                                             "critical",
+	"GET /v1/admin/rg/enforcement":                                                                "none",
+	"POST /v1/admin/rg/enforcement":                                                               "none", // ADR 0115 S4-min: a one-way, protective (tightening) switch, rule 8.1
 	"GET /v1/admin/rg/limit-configs":                                                              "none",
 	"POST /v1/admin/rg/limit-configs":                                                             "critical",
 	"GET /v1/admin/rg/restrictions":                                                               "none",

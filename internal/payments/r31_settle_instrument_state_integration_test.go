@@ -39,6 +39,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // ---- world -----------------------------------------------------------------------------------------------------
@@ -471,7 +472,7 @@ func TestR31_B_NewRequestWithUnusableInstrumentIsRefused(t *testing.T) {
 		t.Helper()
 		p := withdrawal.RequestParams{
 			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, PersonID: w.f.personID,
-			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 400, IdempotencyKey: "r31-b-key", PayoutInstrumentID: id, Destinations: w.svc,
+			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 400, IdempotencyKey: "r31-b-key", PayoutInstrumentID: id, Destinations: w.svc, Gate: standard.New(),
 		}
 		rows0 := w.count(`SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, w.f.tenantID)
 		err := w.rt.WithTenant(w.ctx(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -533,7 +534,7 @@ func TestR31_B_NewRequestWithUnusableInstrumentIsRefused(t *testing.T) {
 	err := w.rt.WithTenant(w.ctx(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, PersonID: w.f.personID,
-			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 400, IdempotencyKey: "r31-b-key", PayoutInstrumentID: good, Destinations: w.svc,
+			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 400, IdempotencyKey: "r31-b-key", PayoutInstrumentID: good, Destinations: w.svc, Gate: standard.New(),
 		})
 		return err
 	})
@@ -754,7 +755,7 @@ func TestR31_E_NoCrossPlayerInstrumentSubstitution(t *testing.T) {
 	err := w.rt.WithTenant(w.ctx(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, PersonID: w.f.personID,
-			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 400, IdempotencyKey: "r31-e-x", PayoutInstrumentID: instB, Destinations: w.svc,
+			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 400, IdempotencyKey: "r31-e-x", PayoutInstrumentID: instB, Destinations: w.svc, Gate: standard.New(),
 		})
 		return err
 	})

@@ -10,6 +10,26 @@ export const handlers = [
   // KYC / RG status and withdrawals: empty by default, overridden per test.
   http.get('/v1/me/kyc/verifications', () => HttpResponse.json([])),
   http.get('/v1/me/rg/status', () => HttpResponse.json([])),
+  // Responsible-gaming screen (ADR 0115): no limits, brand-default options.
+  http.get('/v1/me/rg/limits', () => HttpResponse.json({ limits: [], history: [] })),
+  http.get('/v1/me/rg/options', ({ request }) =>
+    HttpResponse.json({
+      asset_code: new URL(request.url).searchParams.get('asset_code') ?? 'USD',
+      limit_enforcement_enabled: true,
+      limits: ['deposit', 'loss', 'wager'].map((kind) => ({
+        kind,
+        config_in_force: true,
+        mandatory: false,
+        allowed_periods: ['rolling_24h', 'calendar_week', 'calendar_month'],
+        ceiling: null,
+        scope: 'account',
+        increase_cooldown_seconds: 86400,
+      })),
+      time_out_hours: [24, 72, 168],
+      self_exclusion_days: [30, 90],
+      self_exclusion_indefinite_allowed: true,
+    }),
+  ),
   http.get('/v1/me/withdrawals', () => HttpResponse.json([])),
   // Masked payout instruments (B13): none by default, overridden per test.
   http.get('/v1/me/payout-instruments', () => HttpResponse.json([])),

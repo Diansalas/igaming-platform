@@ -35,4 +35,7 @@ func registerRGRoutes(mux *http.ServeMux, deps Deps) {
 
 	// ADR 0115 slice S2: RG limit, time-out and configuration write APIs.
 	registerRGLimitRoutes(mux, deps)
+
+	// ADR 0115 S4-min: the staff switch of limit enforcement (OFF by default, one-way).
+	registerRGEnforcementRoutes(mux, deps)
 }

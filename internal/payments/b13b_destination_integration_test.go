@@ -29,6 +29,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // b13bProvider is a MOCK PaymentProvider with scripted Withdraw / QueryStatus results, a recorded request
@@ -520,7 +521,7 @@ func TestB13B_T1p_NonSyntheticAdapter_TieringMatrix(t *testing.T) {
 		var err error
 		wr2, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{TenantID: w.f.tenantID, BrandID: w.f.brandID,
 			PlayerAccountID: w.f.playerAccountID, PersonID: w.f.personID, WalletID: w.f.walletID, AssetCode: "EUR", Amount: 700,
-			IdempotencyKey: "b13b-tier-real", PayoutInstrumentID: inst.ID, Destinations: sandbox})
+			IdempotencyKey: "b13b-tier-real", PayoutInstrumentID: inst.ID, Destinations: sandbox, Gate: standard.New()})
 		if err != nil {
 			return err
 		}

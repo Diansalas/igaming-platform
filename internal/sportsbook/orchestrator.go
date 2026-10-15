@@ -276,7 +276,14 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	// Stage 4D-RG: the single authoritative "may this player gamble right
 	// now" policy boundary, consulted before any ledger effect - identical
 	// call and audit shape to internal/casino.evaluateAndAuditEligibility.
-	rgDecision, err := evaluateAndAuditEligibility(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID)
+	//
+	// ADR 0115 S4-min: rg.EvaluateAction adds the time-out and, where limit enforcement is switched on for
+	// the brand, the wager and loss limits (the stake of a sportsbook bet is its potential loss) and the
+	// configuration / mandatory-limit answers. Settlement, void and rollback never reach this call.
+	rgDecision, err := evaluateAndAuditAction(ctx, tx, rg.ActionParams{
+		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID, WalletID: params.WalletID,
+		Action: rg.ActionSportsbookWager, AssetCode: params.AssetCode, Amount: params.StakeAmount,
+	})
 	if err != nil {
 		return PlaceBetResult{}, err
 	}
@@ -663,30 +670,24 @@ func computePotentialReturn(ctx context.Context, tx pgx.Tx, stakeAmount, oddsNum
 	return money.ToInt64(rounded)
 }
 
-// evaluateAndAuditEligibility mirrors internal/casino's identical helper
-// verbatim (rg.EvaluateEligibility, audit the denial before returning) -
-// duplicated rather than imported because internal/casino does not export
-// it and this package must not import internal/casino (a product-adapter
-// package importing a sibling product-adapter package would be exactly
-// the cross-domain coupling this codebase's package-boundary discipline
-// forbids - docs/architecture/09-sportsbook-architecture.md §3.1's
-// "package/module boundaries, not merely conceptual layers" rule, applied
-// here between casino and sportsbook rather than within sportsbook's own
-// layers).
-func evaluateAndAuditEligibility(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID, walletID uuid.UUID) (rg.Decision, error) {
-	decision, err := rg.EvaluateEligibility(ctx, tx, rg.EligibilityParams{
-		TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
-	})
+// evaluateAndAuditAction consults the ADR 0115 enforcement boundary (rg.EvaluateAction, which includes
+// rg.EvaluateEligibility) and, on denial, writes the audit record BEFORE returning, with the computed
+// figures of a limit denial added. It mirrors internal/casino's identical helper, duplicated rather than
+// imported because this package must not import internal/casino (docs/architecture/09-sportsbook-
+// architecture.md 3.1 package boundaries). An error (the evaluation could not decide, rg.ErrEvaluationUnavailable
+// included) is returned for the caller to abort on; it is never a decision.
+func evaluateAndAuditAction(ctx context.Context, tx pgx.Tx, p rg.ActionParams) (rg.Decision, error) {
+	decision, err := rg.EvaluateAction(ctx, tx, p)
 	if err != nil {
-		return rg.Decision{}, fmt.Errorf("sportsbook: evaluate rg eligibility: %w", err)
+		return rg.Decision{}, fmt.Errorf("sportsbook: evaluate rg action: %w", err)
 	}
 	if decision.Allowed {
 		return decision, nil
 	}
 	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.denied_by_rg_policy",
-		TargetType: "player_account", TargetID: playerAccountID.String(), Outcome: audit.OutcomeDenied,
-		Metadata: map[string]any{"reason_code": decision.Code, "person_id": decision.PersonID.String(), "brand_id": brandID.String()},
+		TenantID: p.TenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.denied_by_rg_policy",
+		TargetType: "player_account", TargetID: p.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: decision.AuditMetadata(map[string]any{"reason_code": decision.Code, "person_id": decision.PersonID.String(), "brand_id": p.BrandID.String()}),
 	}); err != nil {
 		return rg.Decision{}, fmt.Errorf("sportsbook: audit rg denial: %w", err)
 	}

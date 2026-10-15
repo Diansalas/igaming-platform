@@ -939,3 +939,7 @@ legal authorisation.
   chain of a launch decision in the tenant projection is still deferred.)*
 - Scheduled effective time (`not_before`) for an approved activation; per-tenant provider tiering; brand-level
   jurisdiction configuration.
+
+**R-RG-CONFIG pointer (A6, 2026-10-15):** a new readiness check `R-RG-CONFIG` fails while RG limit enforcement is not switched on for the subject, or while a
+deposit, loss or wager floor is missing for a currency the brand offers, or while an enabled session control (not enforced by the platform) is present.
+`SnapshotVersion` is now 2, so readiness hashes and stored acknowledgements change. See `docs/plans/a6-rg-enforcement-record.md`.

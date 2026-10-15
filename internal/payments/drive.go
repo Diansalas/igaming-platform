@@ -85,17 +85,22 @@ func (o *Orchestrator) driveCreatedAttempt(
 		// RG + KYC deposit gate re-run BEFORE the parent lock (RV-0095
 		// ledger N1: deposit gates run before L1, since they take no row
 		// lock themselves, only rg's own L0.4 advisory lock).
-		eligibility, err := rg.EvaluateEligibility(actx, tx, rg.EligibilityParams{
+		//
+		// ADR 0115 S4-min: the T2 re-check is the same rg.EvaluateAction as T1 (deposit limit re-measured
+		// with the candidate intent excluded and added once); a denial declines the intent in THIS
+		// transaction (RejectCreated + finalizeDeclined below).
+		eligibility, err := rg.EvaluateAction(actx, tx, rg.ActionParams{
 			TenantID: intent.TenantID, BrandID: intent.BrandID, PlayerAccountID: intent.PlayerAccountID, WalletID: intent.WalletID,
+			Action: rg.ActionDeposit, AssetCode: intent.AssetCode, Amount: intent.Amount, CandidateRef: &intent.ID,
 		})
 		if err != nil {
-			return fmt.Errorf("payments: evaluate rg eligibility (cascade T2): %w", err)
+			return fmt.Errorf("payments: evaluate rg action (cascade T2): %w", err)
 		}
 		if !eligibility.Allowed {
 			if err := audit.Record(actx, tx, audit.Entry{
 				TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "payments.deposit_denied_by_rg",
 				TargetType: "player_account", TargetID: intent.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
-				Metadata: map[string]any{"reason_code": eligibility.Code, "deposit_intent_id": intent.ID.String(), "attempt_id": created.ID.String()},
+				Metadata: eligibility.AuditMetadata(map[string]any{"reason_code": eligibility.Code, "deposit_intent_id": intent.ID.String(), "attempt_id": created.ID.String()}),
 			}); err != nil {
 				return err
 			}
