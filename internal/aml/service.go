@@ -101,7 +101,7 @@ func (s *Service) attachProof(ctx context.Context, tx pgx.Tx, a Actor, op, targe
 // The closed AML operation names a proof can bind (ADR 0116 s3.1). Scope tenant | platform_acting only.
 const (
 	OpProofHoldPlace      = "aml_hold:place"
-	OpProofHoldLift       = "aml_hold:lift"
+	OpProofHoldLift       = actorproof.OpAMLHoldLift
 	OpProofHoldRead       = "aml_hold:read"
 	OpProofAlertRaise     = "aml_alert:raise"
 	OpProofCaseOpen       = "aml_case:open"
@@ -109,15 +109,18 @@ const (
 	OpProofCaseTransition = "aml_case:transition"
 	OpProofCaseNote       = "aml_case:note"
 	OpProofCaseFlagSAR    = "aml_case:flag_sar"
-	OpProofCasePropose    = "aml_case:propose"
-	OpProofCaseApprove    = "aml_case:approve"
+	OpProofCasePropose    = actorproof.OpAMLCasePropose
+	OpProofCaseApprove    = actorproof.OpAMLCaseApprove
 )
+
+// (migration 0154 adds OpProofScreeningRecord, OpProofScreeningRead and OpProofScreeningPolicySet in screening_service.go.)
 
 // proofOperations is the closed set, exported to the actorproof scope mirror test.
 var proofOperations = map[string]bool{
 	OpProofHoldPlace: true, OpProofHoldLift: true, OpProofHoldRead: true,
 	OpProofAlertRaise: true, OpProofCaseOpen: true, OpProofCaseRead: true, OpProofCaseTransition: true, OpProofCaseNote: true,
 	OpProofCaseFlagSAR: true, OpProofCasePropose: true, OpProofCaseApprove: true,
+	OpProofScreeningRecord: true, OpProofScreeningRead: true, OpProofScreeningPolicySet: true,
 }
 
 // ProofOperations lists the AML proof operation names (for tests that mirror the verifier's admission rule).

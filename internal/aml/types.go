@@ -56,12 +56,15 @@ const (
 	ScopeWithdrawalAndPayout HoldScope = "withdrawal_and_payout"
 )
 
-// ReasonClass is why a hold exists. S1 ships the officer-placed classes; S2 (screening) is NOT IMPLEMENTED.
+// ReasonClass is why a hold exists. manual and confirmed_sanctions are officer-placeable; sanctions_potential is placed ONLY by
+// a screening record (SR7-10, migration 0155) and is refused by PlaceHold. Both sanctions classes are lifted only by the
+// proof-bound four-eyes approval.
 type ReasonClass string
 
 const (
 	ReasonManual             ReasonClass = "manual"
 	ReasonConfirmedSanctions ReasonClass = "confirmed_sanctions"
+	ReasonSanctionsPotential ReasonClass = "sanctions_potential"
 )
 
 // Scopes of the acting officer, as the actor proof and the database name them.

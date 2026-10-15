@@ -185,3 +185,24 @@ describe('getNavPermissions own-tenant read (ADR 0112 slice 6 (b))', () => {
     }
   })
 })
+
+describe('getNavPermissions A10b flags (ADR 0114 S5, S7)', () => {
+  const roles = ['platform_admin', 'tenant_admin', 'compliance', 'finance', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations']
+  const holders = (flag: keyof ReturnType<typeof getNavPermissions>) => roles.filter((r) => getNavPermissions(r)[flag])
+
+  it('reconciliation: platform_admin, tenant_admin, compliance, finance only', () => {
+    expect(holders('reconciliation')).toEqual(['platform_admin', 'tenant_admin', 'compliance', 'finance'])
+  })
+  it('K1 read: platform_admin, tenant_admin, compliance; request and revoke: platform_admin, tenant_admin; approve: platform_admin ONLY', () => {
+    expect(holders('capabilityGrants')).toEqual(['platform_admin', 'tenant_admin', 'compliance'])
+    expect(holders('capabilityGrantRequest')).toEqual(['platform_admin', 'tenant_admin'])
+    expect(holders('capabilityGrantRevoke')).toEqual(['platform_admin', 'tenant_admin'])
+    expect(holders('capabilityGrantApprove')).toEqual(['platform_admin'])
+  })
+  it('unknown role or none gets nothing', () => {
+    for (const f of ['reconciliation', 'capabilityGrants', 'capabilityGrantRequest', 'capabilityGrantApprove', 'capabilityGrantRevoke'] as const) {
+      expect(getNavPermissions('nobody')[f]).toBe(false)
+      expect(getNavPermissions(undefined)[f]).toBe(false)
+    }
+  })
+})

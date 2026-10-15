@@ -7933,6 +7933,518 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/LaunchUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/cases:
+    get:
+      summary: List the AML case queue (officer)
+      description: >
+        aml_case:read. Cases of the actor's owner scope, newest first, at most `limit` (default 50, 1..100). The queue
+        omits the officer's own subject (conflict of interest). A caller without an in-force aml_officer grant is 403.
+        Step-up class: none. Staff principals only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database;
+        screening and monitoring inputs are MOCK or NOT IMPLEMENTED; software capability only, not a regulatory
+        approval. The permission is only the static route gate: the authority is the caller's in-force aml_officer
+        capability grant, a signed actor proof and the officer quorum, all re-checked in SQL. The tenant is the
+        {tenantID} path value only (a body tenant id does not exist; a tenant-scoped caller naming another tenant is
+        404); a platform caller acts in that tenant through an acting session the database refuses without an in-force
+        grant. Responses carry Cache-Control: no-store (no-store). Error bodies are fixed sentences plus one closed
+        check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: The queue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlCaseQueue" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+    post:
+      summary: Open an AML case on a person (officer)
+      description: >
+        aml_case:work. Opens a manual case, or an alert case naming at least one alert of the same person. Step-up
+        class: none. Staff principals only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database; screening
+        and monitoring inputs are MOCK or NOT IMPLEMENTED; software capability only, not a regulatory approval. The
+        permission is only the static route gate: the authority is the caller's in-force aml_officer capability grant, a
+        signed actor proof and the officer quorum, all re-checked in SQL. The tenant is the {tenantID} path value only
+        (a body tenant id does not exist; a tenant-scoped caller naming another tenant is 404); a platform caller acts
+        in that tenant through an acting session the database refuses without an in-force grant. Responses carry Cache-
+        Control: no-store (no-store). Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlOpenCaseRequest" }
+      responses:
+        "201":
+          description: The new case id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlCaseId" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/cases/{caseID}:
+    get:
+      summary: Read an AML case with its append-only events and notes (officer)
+      description: >
+        aml_case:read. Returns the projected case (last_seq is the value every state-changing call must present as
+        expected_seq), its event trail and its notes. A case outside the actor's scope is indistinguishable from a
+        missing one (404). Step-up class: none. Staff principals only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against
+        the local database; screening and monitoring inputs are MOCK or NOT IMPLEMENTED; software capability only, not a
+        regulatory approval. The permission is only the static route gate: the authority is the caller's in-force
+        aml_officer capability grant, a signed actor proof and the officer quorum, all re-checked in SQL. The tenant is
+        the {tenantID} path value only (a body tenant id does not exist; a tenant-scoped caller naming another tenant is
+        404); a platform caller acts in that tenant through an acting session the database refuses without an in-force
+        grant. Responses carry Cache-Control: no-store (no-store). Error bodies are fixed sentences plus one closed
+        check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: caseID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The case
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlCaseDetail" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/persons/{personID}/holds:
+    get:
+      summary: List the AML holds of one person (officer)
+      description: >
+        aml_case:read. Holds the actor's scope may read, including lifted ones. There is no tenant-wide hold list and no
+        tenant-readable hold table: a held operation looks identical to KYC pending to players and non-officer staff.
+        Step-up class: none. Staff principals only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database;
+        screening and monitoring inputs are MOCK or NOT IMPLEMENTED; software capability only, not a regulatory
+        approval. The permission is only the static route gate: the authority is the caller's in-force aml_officer
+        capability grant, a signed actor proof and the officer quorum, all re-checked in SQL. The tenant is the
+        {tenantID} path value only (a body tenant id does not exist; a tenant-scoped caller naming another tenant is
+        404); a platform caller acts in that tenant through an acting session the database refuses without an in-force
+        grant. Responses carry Cache-Control: no-store (no-store). Error bodies are fixed sentences plus one closed
+        check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: personID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The holds
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlHoldList" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/holds:
+    post:
+      summary: Place an AML hold on a person (officer)
+      description: >
+        aml_hold:manage. Protective (it only restricts), so no step-up. Needs the officer quorum of the tenant's owner
+        scope (409 quorum_not_met). Not idempotent: two calls place two holds. Step-up class: classifier amlHoldPlaceClass (ADR 0116 A7, SR7-1): critical when reason_class is confirmed_sanctions (an irreversible-by-one-person hold on all value movement; a stale second factor gets 403 step_up_required and nothing is written), none for a manual hold. Staff principals
+        only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database; screening and monitoring inputs are
+        MOCK or NOT IMPLEMENTED; software capability only, not a regulatory approval. The permission is only the static
+        route gate: the authority is the caller's in-force aml_officer capability grant, a signed actor proof and the
+        officer quorum, all re-checked in SQL. The tenant is the {tenantID} path value only (a body tenant id does not
+        exist; a tenant-scoped caller naming another tenant is 404); a platform caller acts in that tenant through an
+        acting session the database refuses without an in-force grant. Responses carry Cache-Control: no-store (no-
+        store). Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlPlaceHoldRequest" }
+      responses:
+        "201":
+          description: The new hold id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlHoldId" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/holds/{holdID}/lift:
+    post:
+      summary: Lift a manual AML hold (officer)
+      description: >
+        aml_hold:manage. Loosens a control. A confirmed-sanctions hold is refused here (409 hold_refused): it is lifted
+        only by the proof-bound four-eyes approval of a case proposal of kind lift_hold. Step-up class: critical. Staff
+        principals only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database; screening and monitoring
+        inputs are MOCK or NOT IMPLEMENTED; software capability only, not a regulatory approval. The permission is only
+        the static route gate: the authority is the caller's in-force aml_officer capability grant, a signed actor proof
+        and the officer quorum, all re-checked in SQL. The tenant is the {tenantID} path value only (a body tenant id
+        does not exist; a tenant-scoped caller naming another tenant is 404); a platform caller acts in that tenant
+        through an acting session the database refuses without an in-force grant. Responses carry Cache-Control: no-
+        store (no-store). Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: holdID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlReasonRequest" }
+      responses:
+        "200":
+          description: The lift id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlLiftId" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StepUpRequired"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/transition:
+    post:
+      summary: Move an AML case along the plain state machine (officer)
+      description: >
+        aml_case:work. SAR closures are not reachable here (propose / approve). expected_seq is the case's last_seq as
+        the caller read it; a case that moved on is 409 stale. Step-up class: classifier amlTransitionClass (SR7-5): critical for to=closed_no_action (it loosens a regulatory control), none for every other move. Staff principals only. ADR 0116 (A7,
+        S6 minimal): IMPLEMENTED against the local database; screening and monitoring inputs are MOCK or NOT
+        IMPLEMENTED; software capability only, not a regulatory approval. The permission is only the static route gate:
+        the authority is the caller's in-force aml_officer capability grant, a signed actor proof and the officer
+        quorum, all re-checked in SQL. The tenant is the {tenantID} path value only (a body tenant id does not exist; a
+        tenant-scoped caller naming another tenant is 404); a platform caller acts in that tenant through an acting
+        session the database refuses without an in-force grant. Responses carry Cache-Control: no-store (no-store).
+        Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: caseID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlTransitionRequest" }
+      responses:
+        "200":
+          description: The new last_seq
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlLastSeq" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/notes:
+    post:
+      summary: Add a note to an AML case (officer)
+      description: >
+        aml_case:work. The body is linted server-side before the proof is signed (aml-note-lint-v1: a guard, not a
+        guarantee); a refused note is 400 with check code note_refused. Step-up class: none. Staff principals only. ADR
+        0116 (A7, S6 minimal): IMPLEMENTED against the local database; screening and monitoring inputs are MOCK or NOT
+        IMPLEMENTED; software capability only, not a regulatory approval. The permission is only the static route gate:
+        the authority is the caller's in-force aml_officer capability grant, a signed actor proof and the officer
+        quorum, all re-checked in SQL. The tenant is the {tenantID} path value only (a body tenant id does not exist; a
+        tenant-scoped caller naming another tenant is 404); a platform caller acts in that tenant through an acting
+        session the database refuses without an in-force grant. Responses carry Cache-Control: no-store (no-store).
+        Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: caseID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlNoteRequest" }
+      responses:
+        "201":
+          description: The new last_seq
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlLastSeq" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/sar-flag:
+    post:
+      summary: Flag an AML case as SAR-related (officer)
+      description: >
+        aml_case:work. Irreversible; it forbids closing the case as no action. Restrictive, so no step-up. Step-up
+        class: none. Staff principals only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database; screening
+        and monitoring inputs are MOCK or NOT IMPLEMENTED; software capability only, not a regulatory approval. The
+        permission is only the static route gate: the authority is the caller's in-force aml_officer capability grant, a
+        signed actor proof and the officer quorum, all re-checked in SQL. The tenant is the {tenantID} path value only
+        (a body tenant id does not exist; a tenant-scoped caller naming another tenant is 404); a platform caller acts
+        in that tenant through an acting session the database refuses without an in-force grant. Responses carry Cache-
+        Control: no-store (no-store). Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: caseID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlSeqReasonRequest" }
+      responses:
+        "200":
+          description: The new last_seq
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlLastSeq" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AmlForbidden"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/proposals:
+    post:
+      summary: Propose a four-eyes action on an AML case (officer)
+      description: >
+        aml_case:work. The proposal half of a SAR closure or a confirmed-sanctions hold lift. The response content_hash
+        is what the approver must bind. Any later case event or hold change invalidates the proposal. There is no reject
+        operation (NOT IMPLEMENTED): a proposal is withdrawn by any later event. Step-up class: critical. Staff
+        principals only. ADR 0116 (A7, S6 minimal): IMPLEMENTED against the local database; screening and monitoring
+        inputs are MOCK or NOT IMPLEMENTED; software capability only, not a regulatory approval. The permission is only
+        the static route gate: the authority is the caller's in-force aml_officer capability grant, a signed actor proof
+        and the officer quorum, all re-checked in SQL. The tenant is the {tenantID} path value only (a body tenant id
+        does not exist; a tenant-scoped caller naming another tenant is 404); a platform caller acts in that tenant
+        through an acting session the database refuses without an in-force grant. Responses carry Cache-Control: no-
+        store (no-store). Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: caseID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlProposeRequest" }
+      responses:
+        "201":
+          description: The proposal sequence and content hash
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlProposal" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StepUpRequired"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
+  /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/approvals:
+    post:
+      summary: Approve a four-eyes proposal on an AML case (officer)
+      description: >
+        aml_case:close_approve. The approval half. proposal_seq must be the case's last event and content_hash the hash
+        the approver reviewed. The database refuses the proposer, the proposer's Person and the case subject (409
+        four_eyes_refused), and a stale proposal (409 stale). Step-up class: critical. Staff principals only. ADR 0116
+        (A7, S6 minimal): IMPLEMENTED against the local database; screening and monitoring inputs are MOCK or NOT
+        IMPLEMENTED; software capability only, not a regulatory approval. The permission is only the static route gate:
+        the authority is the caller's in-force aml_officer capability grant, a signed actor proof and the officer
+        quorum, all re-checked in SQL. The tenant is the {tenantID} path value only (a body tenant id does not exist; a
+        tenant-scoped caller naming another tenant is 404); a platform caller acts in that tenant through an acting
+        session the database refuses without an in-force grant. Responses carry Cache-Control: no-store (no-store).
+        Error bodies are fixed sentences plus one closed check code, never database text.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: caseID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AmlApproveRequest" }
+      responses:
+        "200":
+          description: The new last_seq
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AmlLastSeq" }
+        "400":
+          $ref: "#/components/responses/AmlBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/StepUpRequired"
+        "404":
+          $ref: "#/components/responses/AmlNotFound"
+        "409":
+          $ref: "#/components/responses/AmlConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AmlUnavailable"
   /v1/admin/launch-authorisations:
     get:
       summary: Platform-wide launch authorisation queue (platform staff only)
@@ -9118,12 +9630,20 @@ paths:
               properties:
                 severity: { type: string, enum: [p1, p2, p3] }
                 escalation_step: { type: integer, minimum: 0, maximum: 9, default: 0 }
-                channel_kind: { type: string, enum: [log, mock] }
+                channel_kind: { type: string, enum: [log, mock, email, webhook] }
                 recipient_ref: { type: string, nullable: true }
                 escalate_after_seconds: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 604800 }
                 enabled: { type: boolean, default: false }
                 reason_code: { type: string, enum: [initial_setup, on_call_change, escalation_change, correction, decommission, drill] }
                 supersedes_id: { type: string, format: uuid, nullable: true }
+                stage_for_enable:
+                  type: boolean
+                  default: false
+                  description: >
+                    SR-7 staging intent (migration 0156). Valid only with `enabled=false` on an email or webhook
+                    route: marks the version as the staging record a DIFFERENT platform admin may approve by
+                    superseding it with `enabled=true`. A route disabled for another reason (a decommission)
+                    leaves it false and can never be used as an approval.
       responses:
         "201":
           description: The new route version
@@ -10853,6 +11373,8 @@ components:
         - missing_projection
         - balance_mismatch
         - ledger_unlinked_manual_adjustment
+        - withdrawal_hold_open_mismatch
+        - withdrawal_request_ledger_link_invalid
         - pay_missing_platform_record
         - pay_missing_provider_record
         - pay_amount_mismatch
@@ -11152,6 +11674,7 @@ components:
         evidence_ref_hash: { type: string }
         amount_minor_units: { type: string, description: Integer minor units as a decimal string. }
         asset_code: { type: string }
+        exponent: { type: integer, nullable: true, description: "The asset registry decimal exponent of asset_code (ADR 0007), looked up server-side. Null only when the lookup failed after the change was committed; a client must then not format the amount." }
         reason_code: { type: string }
         payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
         requested_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant-scoped caller when the requester is platform staff, i.e. requested_by_scope is platform_acting (ADR 0114 S0 H1)." }
@@ -11170,7 +11693,7 @@ components:
         evidence_reference_present: { type: boolean, description: "M4 only. True when a provider line reference is pinned on the resolution. The reference text itself is never returned to any caller (ADR 0114 S0, blind entry: each approver types it independently) and is not written to audit metadata; the server compares it from the database." }
         evidence_verdict: { type: string, description: M4 only. }
         evidence_import_ids: { type: array, items: { type: string, format: uuid }, description: M4 only. }
-      required: [id, tenant_id, attempt_id, operation, kind, amount_minor_units, asset_code, reason_code, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, state, created_at, expires_at]
+      required: [id, tenant_id, attempt_id, operation, kind, amount_minor_units, asset_code, exponent, reason_code, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, state, created_at, expires_at]
     ResolutionDecisionRequest:
       type: object
       description: tenant_id is accepted and ignored. Unknown fields are rejected (400).
@@ -11216,6 +11739,7 @@ components:
         kind: { type: string, enum: [release_hold_to_player] }
         amount_minor_units: { type: string, description: Integer minor units as a decimal string. }
         asset_code: { type: string }
+        exponent: { type: integer, nullable: true, description: "The asset registry decimal exponent of asset_code (ADR 0007), looked up server-side. Null only when the lookup failed after the change was committed; a client must then not format the amount." }
         reason_code: { type: string }
         evidence_ref_hash: { type: string }
         payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
@@ -11234,7 +11758,7 @@ components:
         ledger_transaction_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
-      required: [id, tenant_id, withdrawal_request_id, kind, amount_minor_units, asset_code, reason_code, evidence_ref_hash, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, brand_status_at_submission, state, created_at, expires_at]
+      required: [id, tenant_id, withdrawal_request_id, kind, amount_minor_units, asset_code, exponent, reason_code, evidence_ref_hash, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, brand_status_at_submission, state, created_at, expires_at]
     WithdrawalHoldResolutionDecision:
       type: object
       properties:
@@ -11947,7 +12471,7 @@ components:
     LaunchCheck:
       type: object
       properties:
-        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-PROVIDER-TIER, R-ALERTS or R-PLAYER-FUNDS" }
+        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
         result: { type: string, enum: [pass, fail, not_evaluable], description: "not_evaluable is not pass" }
         detail_code: { type: string, description: "A closed detail code, never free text." }
       required: [code, result, detail_code]
@@ -12145,6 +12669,178 @@ components:
         actor_type: { type: string, enum: [system, platform, tenant] }
         created_at: { type: string, format: date-time }
       required: [id, subject_kind, kind, to_status, approver_ids, actor_type, created_at]
+    AmlHold:
+      type: object
+      required: [id, owner_scope, scope, reason_class, reason_code, placed_at, lifted]
+      properties:
+        id: { type: string, format: uuid }
+        owner_scope: { type: string, enum: [platform, tenant] }
+        player_account_id: { type: string, format: uuid }
+        scope: { type: string, enum: [all_value_movement, withdrawal_and_payout] }
+        reason_class: { type: string, enum: [manual, confirmed_sanctions, sanctions_potential], description: "sanctions_potential is placed only by a screening record (a potential sanctions-list match); like confirmed_sanctions it is lifted only by the proof-bound four-eyes approval, and a hold placed by a screening result is never lifted by the officer who recorded that result" }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
+        placed_at: { type: string, format: date-time }
+        lifted: { type: boolean }
+        lifted_at: { type: string, format: date-time }
+    AmlHoldList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AmlHold" } }
+    AmlHoldId:
+      type: object
+      required: [hold_id]
+      properties:
+        hold_id: { type: string, format: uuid }
+    AmlLiftId:
+      type: object
+      required: [lift_id]
+      properties:
+        lift_id: { type: string, format: uuid }
+    AmlCaseId:
+      type: object
+      required: [case_id]
+      properties:
+        case_id: { type: string, format: uuid }
+    AmlLastSeq:
+      type: object
+      required: [last_seq]
+      properties:
+        last_seq: { type: integer, minimum: 1 }
+    AmlProposal:
+      type: object
+      required: [proposal_seq, content_hash]
+      properties:
+        proposal_seq: { type: integer, minimum: 2 }
+        content_hash: { type: string, description: "SHA-256 hex of the proposal content; the approver must bind it" }
+    AmlCase:
+      type: object
+      required: [id, owner_scope, person_id, kind, status, sar_flagged, last_seq, opened_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_scope: { type: string, enum: [platform, tenant] }
+        person_id: { type: string, format: uuid }
+        kind: { type: string, enum: [manual, alert] }
+        status: { type: string, enum: [open, in_review, escalated, sar_decision_pending, closed_no_action, closed_sar_not_filed, closed_sar_filed] }
+        sar_flagged: { type: boolean }
+        last_seq: { type: integer, minimum: 1, description: "The value every state-changing call must present as expected_seq" }
+        opened_at: { type: string, format: date-time }
+    AmlCaseQueue:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [case_id, owner_scope, person_id, status, sar_flagged, last_seq, opened_at]
+            properties:
+              case_id: { type: string, format: uuid }
+              owner_scope: { type: string, enum: [platform, tenant] }
+              person_id: { type: string, format: uuid }
+              status: { type: string }
+              sar_flagged: { type: boolean }
+              last_seq: { type: integer }
+              opened_at: { type: string, format: date-time }
+    AmlCaseEvent:
+      type: object
+      required: [seq, type, reason_code, actor_id, actor_scope, created_at]
+      properties:
+        seq: { type: integer }
+        type: { type: string }
+        from_status: { type: string }
+        to_status: { type: string }
+        proposal_kind: { type: string }
+        proposal_seq: { type: integer }
+        content_hash: { type: string }
+        subject_hold_id: { type: string, format: uuid }
+        note_id: { type: string, format: uuid }
+        external_filing_reference: { type: string }
+        reason_code: { type: string }
+        actor_id: { type: string, format: uuid, nullable: true, description: "Staff identity redaction (ADR 0114 H1): null for a tenant-scoped caller when the actor is platform staff or of unknown scope" }
+        actor_scope: { type: string, enum: [tenant, platform_acting] }
+        created_at: { type: string, format: date-time }
+    AmlCaseNote:
+      type: object
+      required: [id, body, lint_version, created_by, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        body: { type: string }
+        lint_version: { type: string }
+        created_by: { type: string, format: uuid, nullable: true, description: "Staff identity redaction (ADR 0114 H1): null for a tenant-scoped caller unless the recording event shows a tenant-scope actor" }
+        created_at: { type: string, format: date-time }
+    AmlCaseDetail:
+      type: object
+      required: [case, events, notes]
+      properties:
+        case: { $ref: "#/components/schemas/AmlCase" }
+        events: { type: array, items: { $ref: "#/components/schemas/AmlCaseEvent" } }
+        notes: { type: array, items: { $ref: "#/components/schemas/AmlCaseNote" } }
+    AmlReasonRequest:
+      type: object
+      additionalProperties: false
+      required: [reason_code]
+      properties:
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
+    AmlSeqReasonRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_seq, reason_code]
+      properties:
+        expected_seq: { type: integer, minimum: 1 }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
+    AmlPlaceHoldRequest:
+      type: object
+      additionalProperties: false
+      required: [person_id, scope, reason_class, reason_code]
+      properties:
+        person_id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid, nullable: true }
+        scope: { type: string, enum: [all_value_movement, withdrawal_and_payout] }
+        reason_class: { type: string, enum: [manual, confirmed_sanctions], description: "confirmed_sanctions requires scope all_value_movement" }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
+    AmlOpenCaseRequest:
+      type: object
+      additionalProperties: false
+      required: [person_id, kind, reason_code]
+      properties:
+        person_id: { type: string, format: uuid }
+        kind: { type: string, enum: [manual, alert] }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
+        alert_ids: { type: array, maxItems: 100, items: { type: string, format: uuid } }
+    AmlTransitionRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_seq, to, reason_code]
+      properties:
+        expected_seq: { type: integer, minimum: 1 }
+        to: { type: string, enum: [in_review, escalated, sar_decision_pending, closed_no_action] }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
+    AmlNoteRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_seq, body]
+      properties:
+        expected_seq: { type: integer, minimum: 1 }
+        body: { type: string, description: "Linted server-side; no card numbers, IBANs, e-mail, phone numbers or document-shaped tokens" }
+    AmlProposeRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_seq, kind, reason_code]
+      properties:
+        expected_seq: { type: integer, minimum: 1 }
+        kind: { type: string, enum: [close_sar_not_filed, close_sar_filed, lift_hold] }
+        hold_id: { type: string, format: uuid, description: "Required for lift_hold, absent otherwise" }
+        external_filing_reference: { type: string, description: "Required for close_sar_filed (human-entered, linted), absent otherwise" }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
+    AmlApproveRequest:
+      type: object
+      additionalProperties: false
+      required: [proposal_seq, content_hash, reason_code]
+      properties:
+        proposal_seq: { type: integer, minimum: 2 }
+        content_hash: { type: string, minLength: 64, maxLength: 64 }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$" }
     LaunchTransitionList:
       type: object
       properties:
@@ -12489,6 +13185,38 @@ components:
               type: array
               items: { $ref: "#/components/schemas/RGFloorRequest" }
   responses:
+    AmlBadRequest:
+      description: 400 validation_error - a malformed id, body, limit, reason code or note (fixed sentence; check code note_refused for a refused note). Nothing was written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AmlForbidden:
+      description: 403 forbidden - no in-force aml_officer grant for the tenant, a proof refusal, or an acting session the database refused. Fixed sentence, no detail.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AmlNotFound:
+      description: 404 not_found - unknown, outside the actor's owner scope, or another tenant (indistinguishable by design).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AmlConflict:
+      description: >
+        409 conflict with exactly one closed check code: quorum_not_met, hold_refused, four_eyes_refused, stale,
+        illegal_transition or guard_refused. Nothing was written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    AmlUnavailable:
+      description: 503 service_unavailable - AML officer functions are not wired in this process, or no actor-proof issuer is configured. Fail closed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     StepUpRequired:
       description: >
         403 step_up_required (ADR 0119 S4b): the caller's last second-factor verification is older than the route's

@@ -139,6 +139,8 @@ func TryRunPaymentStatementForTenant(ctx context.Context, tx pgx.Tx, tenantID, i
 // SweepOutcome is one tenant's result from a single RunSweep tick.
 type SweepOutcome struct {
 	TenantID uuid.UUID
+	// Mismatches is the ledger_vs_projection run's mismatch count (feeds the reconciliation_mismatches_open gauge).
+	Mismatches int
 	// Skipped is true when another sweep already held this tenant's
 	// advisory lock - not a failure, just lock contention.
 	Skipped bool
@@ -180,6 +182,9 @@ type StreamOutcome struct {
 	Skipped bool
 	Run     Run
 	Err     error
+	// Mismatches is the number of mismatches the run reported (0 when it did not complete). It feeds
+	// the reconciliation_mismatches_open gauge only; the durable record is reconciliation_mismatches.
+	Mismatches int
 }
 
 // allTenantIDs reads every ACTIVE tenant id via a platform-scoped
@@ -259,19 +264,25 @@ func activeTenantIDs(ctx context.Context, pool *db.Pool, only []uuid.UUID) ([]uu
 // CAS-RECON-SCALE-1 (docs/governance/task-registry.md); not redesigned
 // here. RunSweepTenants runs the same body for named tenants only.
 func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, paySources ...statement.PaymentStatementSource) ([]SweepOutcome, error) {
+	gen := defaultTracker.beginSweep()
 	tenantIDs, err := allTenantIDs(ctx, pool)
 	if err != nil {
-		return nil, fmt.Errorf("reconciliation: list tenants for sweep: %w", err)
+		defaultTracker.endSweep(gen, false)
+		return nil, fmt.Errorf("%w: %w", ErrListActiveTenants, err)
 	}
 	outcomes := sweepTenants(ctx, pool, logger, tenantIDs, periodStart, periodEnd, sbSource, casSource, paySources)
 	// PRH-2 R3 (H-W1): non-active tenants are observed (ledger_vs_projection and
 	// payment_statement only). A failure to list them is returned, never
 	// swallowed; the active outcomes are still returned with it.
 	observed, obsErr := observeNonActiveTenants(ctx, pool, logger, nil, outcomes, periodStart, periodEnd, paySources)
+	all := append(outcomes, observed...)
+	defaultTracker.recordOutcomes(gen, all, paySources)
 	if obsErr != nil {
-		return append(outcomes, observed...), fmt.Errorf("reconciliation: list non-active tenants for observation: %w", obsErr)
+		defaultTracker.endSweep(gen, false)
+		return all, fmt.Errorf("%w: %w", ErrListNonActiveTenants, obsErr)
 	}
-	return append(outcomes, observed...), nil
+	defaultTracker.endSweep(gen, true)
+	return all, nil
 }
 
 // RunSweepTenants is RunSweep restricted to the named tenants: exactly the
@@ -293,14 +304,18 @@ func RunSweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, te
 	}
 	ids, err := activeTenantIDs(ctx, pool, tenantIDs)
 	if err != nil {
-		return nil, fmt.Errorf("reconciliation: list tenants for scoped sweep: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrListActiveTenants, err)
 	}
+	// A scoped sweep records runs (so an on-demand re-run is visible) but never prunes state or advances the
+	// sweep heartbeat: only a full RunSweep may declare which tenants exist.
 	outcomes := sweepTenants(ctx, pool, logger, ids, periodStart, periodEnd, sbSource, casSource, paySources)
 	observed, obsErr := observeNonActiveTenants(ctx, pool, logger, tenantIDs, outcomes, periodStart, periodEnd, paySources)
+	all := append(outcomes, observed...)
+	defaultTracker.recordOutcomes(defaultTracker.currentGen(), all, paySources)
 	if obsErr != nil {
-		return append(outcomes, observed...), fmt.Errorf("reconciliation: list non-active tenants for scoped observation: %w", obsErr)
+		return all, fmt.Errorf("%w: %w", ErrListNonActiveTenants, obsErr)
 	}
-	return append(outcomes, observed...), nil
+	return all, nil
 }
 
 // nonActiveTenant is one tenant whose status is anything but 'active'.
@@ -409,7 +424,7 @@ func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Lo
 		}
 		outcome := SweepOutcome{TenantID: t.ID, ObservationOnly: true, TenantStatus: t.Status}
 		ls := runLedgerStreamForTenant(ctx, pool, logger, t.ID, periodStart, periodEnd, t.Status)
-		outcome.Run, outcome.Skipped, outcome.Err = ls.Run, ls.Skipped, ls.Err
+		outcome.Run, outcome.Skipped, outcome.Err, outcome.Mismatches = ls.Run, ls.Skipped, ls.Err, ls.Mismatches
 		for _, src := range paySources {
 			outcome.PaymentStatement = append(outcome.PaymentStatement,
 				ReconcilePaymentStatementForTenant(ctx, pool, logger, t.ID, periodStart, periodEnd, src,
@@ -439,7 +454,7 @@ func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenan
 		outcome := SweepOutcome{TenantID: tenantID}
 
 		ls := runLedgerStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, "")
-		outcome.Run, outcome.Skipped, outcome.Err = ls.Run, ls.Skipped, ls.Err
+		outcome.Run, outcome.Skipped, outcome.Err, outcome.Mismatches = ls.Run, ls.Skipped, ls.Err, ls.Mismatches
 
 		// ADR 0088 §8: the sportsbook stream runs after
 		// ledger_vs_projection, regardless of its outcome.
@@ -474,6 +489,7 @@ func runLedgerStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.L
 	pending, txErr := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
 		run, ledgerMismatches, acquired, err := TryRunLedgerVsProjectionForTenant(ctx, tx, tenantID, periodStart, periodEnd)
 		out.Run, out.Skipped = run, !acquired
+		out.Mismatches = len(ledgerMismatches)
 		if err != nil {
 			return err
 		}
@@ -561,6 +577,7 @@ func runSportsbookStreamForTenant(ctx context.Context, pool *db.Pool, logger *sl
 	pending, txErr := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
 		run, sbMismatches, acquired, err := TryRunSportsbookSettlementForTenant(ctx, tx, tenantID, periodStart, periodEnd, source)
 		out.Run, out.Skipped = run, !acquired
+		out.Mismatches = len(sbMismatches)
 		if err != nil {
 			return err
 		}
@@ -628,6 +645,7 @@ func runCasinoStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.L
 		run, mismatches, metrics, acquired, err := TryRunCasinoConsistencyForTenant(ctx, tx, tenantID, periodStart, periodEnd)
 		out.Run, out.Skipped = run, !acquired
 		mismatchCount = len(mismatches)
+		out.Mismatches = mismatchCount
 		if err != nil {
 			return err
 		}
@@ -717,6 +735,7 @@ func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logge
 			run, mismatches, info, acquired, err := TryRunCasinoStatementForTenant(ctx, tx, tenantID, periodStart, periodEnd, fetched)
 			out.Run, out.Skipped = run, !acquired
 			mismatchCount = len(mismatches)
+			out.Mismatches = mismatchCount
 			if err != nil {
 				return err
 			}
@@ -791,23 +810,12 @@ func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logge
 // never take down the platform it exists to protect.
 func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource, paySources ...statement.PaymentStatementSource) {
 	runOnce := func() {
-		// Specialist review (backend, P0): this loop runs in a bare `go`
-		// statement (cmd/platform-api/main.go) with no equivalent of the
-		// HTTP path's recoverMiddleware. Without this recover, a panic
-		// anywhere in RunSweep - a future refactor's nil-pointer, a
-		// driver-level panic - would crash the ENTIRE platform-api
-		// process, not just reconciliation, defeating the very
-		// "reconciliation failing must never take down the platform it
-		// exists to protect" guarantee this package documents elsewhere.
-		defer func() {
-			if r := recover(); r != nil && logger != nil {
-				logger.Error("reconciliation sweep: recovered from panic", "panic", r)
-			}
-		}()
+		defer recoverSweepPanic(ctx, pool, logger)
 		now := time.Now().UTC()
-		if _, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource, casSource, paySources...); err != nil && logger != nil {
-			logger.Error("reconciliation sweep: tenant listing failed (active or non-active; LOG-ONLY: no audit record or alert is written - known gap, ADR 0095 40.4)", "error", err)
-		}
+		_, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource, casSource, paySources...)
+		// A listing failure is a durable alert (reconciliation.sweep_failed), not only a log line
+		// (R3-LISTING-FAILURE-LOG-ONLY-1); see handleSweepError.
+		handleSweepError(ctx, pool, logger, err)
 	}
 
 	runOnce()
@@ -892,6 +900,7 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 		run, mismatches, info, acquired, err := TryRunPaymentStatementForTenant(ctx, tx, tenantID, importID, opts)
 		out.Run, out.Skipped = run, !acquired
 		mismatchCount = len(mismatches)
+		out.Mismatches = mismatchCount
 		if err != nil {
 			return err
 		}

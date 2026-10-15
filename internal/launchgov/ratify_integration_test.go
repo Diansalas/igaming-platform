@@ -142,6 +142,13 @@ func TestRatify_LegacyBaselineSubject_RecordsDecisionWithoutStatusChange(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Migration 0154 note (A7): this scratch schema is below migration 0154, so the AML reader does not exist. The AML items
+		// degrade to not_evaluable (never pass) and the readiness transaction still commits (the read is behind a savepoint).
+		for _, c := range r.Checks {
+			if (c.Code == launchgov.CheckAMLQuorum || c.Code == launchgov.CheckAMLScreening) && (c.Result != launchgov.ResultNotEvaluable || c.DetailCode != "read_error") {
+				t.Fatalf("%s without the reader must be not_evaluable/read_error: %+v", c.Code, c)
+			}
+		}
 		in.AcknowledgedCheckCodes = r.NonPassing()
 		return in
 	}

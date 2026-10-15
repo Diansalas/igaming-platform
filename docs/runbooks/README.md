@@ -23,8 +23,11 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `incident-response-and-oncall.md` — TEMPLATE: no rota or recipient exists (ALERT-DELIVERY-1 open).
 - `expand-contract-migrations.md` — forward-fix versus restore policy, pre-flight refusals, write-quiet window.
 - `load-and-soak-test-plan.md` — load/soak/chaos plan plus one small local smoke (`deploy/loadtest/`).
-- `observability-and-alerting.md` — minimum alert-rule inventory; rule files (NOT wired) in
-  `deploy/observability/`.
+- `observability-and-alerting.md` — minimum alert-rule inventory; section 4 the A9 signals and the response for
+  `reconciliation.sweep_failed`; rule files and a local Prometheus scrape example in `deploy/observability/`
+  (metric rules: emitted and scrapeable, NOT DEPLOYED; log-event rules NOT wired).
+- `alert-delivery-channels.md` — A9: email + one webhook alert channel (provider-neutral), the interim recipient and its
+  configuration, SR-7 four-eyes route procedure, the webhook contract, metrics exposure (`METRICS_ADDR`), alert retention.
 - `production-configuration-checklist.md` — field-by-field production
   config audit.
 - `staff-mfa-keys.md` — ADR 0119 S1: provisioning and rotation of the

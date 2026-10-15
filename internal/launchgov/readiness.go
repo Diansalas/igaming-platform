@@ -28,13 +28,18 @@ const (
 	CheckProviderTier       = "R-PROVIDER-TIER"
 	CheckAlerts             = "R-ALERTS"
 	CheckPlayerFunds        = "R-PLAYER-FUNDS"
+	// ADR 0116 s6 / S7 (A7): the AML readiness checks. Informational like every readiness check (they prove configuration
+	// presence, not a legal or regulatory position) and, like every non-passing check, they must be acknowledged by a request.
+	CheckAMLQuorum     = "R-AML-QUORUM"
+	CheckAMLScreening  = "R-AML-SCREENING"
+	CheckAMLMonitoring = "R-AML-MONITORING"
 
 	ResultPass         = "pass"
 	ResultFail         = "fail"
 	ResultNotEvaluable = "not_evaluable"
 
-	// SnapshotVersion is bumped when the check set or the canonical form changes.
-	SnapshotVersion = 1
+	// SnapshotVersion is bumped when the check set or the canonical form changes. 2: the three R-AML-* checks (A7).
+	SnapshotVersion = 2
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -339,6 +344,7 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	default:
 		out = append(out, ck(CheckCatalogue, ResultPass, "ok"))
 	}
+	out = append(out, s.amlChecks(ctx, tx, in)...)
 	return out
 }
 
@@ -483,4 +489,102 @@ func nonZeroWithdrawalHolds(ctx context.Context, tx pgx.Tx, sub Subject) (int64,
 		         FROM ledger_entries e WHERE e.ledger_account_id = la.id AND e.tenant_id = la.tenant_id) <> 0`,
 		sub.TenantID, sub.BrandID).Scan(&n)
 	return n, err
+}
+
+// ---- AML readiness (ADR 0116 s6 / S7, A7) ------------------------------------------------------------------------------
+
+// amlData is what the AML readiness reader (migration 0154 aml_readiness) returned for the subject's tenant.
+type amlData struct {
+	OwnerScope string
+	QuorumMet  bool
+	// Total is the number of DISTINCT referenced jurisdictions; WithPolicy those with an effective screening policy.
+	Total, WithPolicy int
+}
+
+// amlChecks evaluates R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING inside the caller's read-only tenant transaction.
+// A read failure degrades the DATABASE-derived checks to not_evaluable (never pass). R-AML-MONITORING needs no read.
+func (s *Service) amlChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []Check {
+	var d amlData
+	// A SAVEPOINT, so a failing read (the function missing, a fault) degrades only the AML items and never aborts the
+	// caller's transaction (the readiness commit must survive it).
+	sp, err := tx.Begin(ctx)
+	if err == nil {
+		err = sp.QueryRow(ctx, `SELECT o_owner_scope, o_quorum_met, o_jurisdictions_total, o_jurisdictions_with_policy FROM aml_readiness($1, $2)`,
+			in.Subject.TenantID, in.JurisdictionIDs).Scan(&d.OwnerScope, &d.QuorumMet, &d.Total, &d.WithPolicy)
+		if err != nil {
+			_ = sp.Rollback(ctx)
+		} else if cerr := sp.Commit(ctx); cerr != nil {
+			err = cerr
+		}
+	}
+	return amlChecksFrom(d, err, len(in.JurisdictionIDs), s.cfg.Components, s.cfg.Environment)
+}
+
+// AMLPlatformScopeSuffix is appended to the R-AML-QUORUM detail codes when the tenant's AML owner scope is the platform.
+const AMLPlatformScopeSuffix = "_platform_scope"
+
+// The registration the screening check looks for in the process component list (the same list the synthetic-component
+// startup guard checked).
+const (
+	amlComponentDomain = "aml"
+	amlComponentName   = "screening_provider"
+)
+
+// amlChecksFrom is the pure part of amlChecks (unit-tested without a database).
+//
+//   - R-AML-QUORUM: pass only when at least two distinct live officer Persons of the tenant's owner scope hold an in-force
+//     aml_officer grant. The reader returns a boolean only.
+//   - R-AML-SCREENING: pass only when (a) a screening provider is registered and, in production, is production-eligible (a
+//     MOCK counts as configured ONLY where a mock is allowed: any non-production environment), and (b) every referenced
+//     jurisdiction has an effective screening policy. Unconfigured is never a pass.
+//   - R-AML-MONITORING: ALWAYS fail. Transaction monitoring (ADR 0116 S4) is NOT IMPLEMENTED; this makes the gap an explicit,
+//     acknowledged item so a brand activation cannot silently ignore it. It becomes evaluable only with the S4 slice.
+func amlChecksFrom(d amlData, readErr error, referenced int, comps []providerkind.Registration, env string) []Check {
+	out := []Check{ck(CheckAMLMonitoring, ResultFail, "monitoring_not_implemented")}
+	if readErr != nil {
+		return append(out, ck(CheckAMLQuorum, ResultNotEvaluable, "read_error"), ck(CheckAMLScreening, ResultNotEvaluable, "read_error"))
+	}
+	// SR7-6: for a PLATFORM-owned scope the detail code carries the scope (a tenant-scoped viewer is shown "see_platform" for it,
+	// see httpserver coarsenForTenant: the platform officer quorum is platform process detail, not the tenant's).
+	suffix := ""
+	if d.OwnerScope == "platform" {
+		suffix = AMLPlatformScopeSuffix
+	}
+	if d.QuorumMet {
+		out = append(out, ck(CheckAMLQuorum, ResultPass, "ok"+suffix))
+	} else {
+		out = append(out, ck(CheckAMLQuorum, ResultFail, "quorum_not_met"+suffix))
+	}
+	return append(out, amlScreeningCheck(d, referenced, comps, env))
+}
+
+func amlScreeningCheck(d amlData, referenced int, comps []providerkind.Registration, env string) Check {
+	if len(comps) == 0 {
+		return ck(CheckAMLScreening, ResultNotEvaluable, "no_component_registry")
+	}
+	var reg *providerkind.Registration
+	for i := range comps {
+		if comps[i].Domain == amlComponentDomain && comps[i].Name == amlComponentName && comps[i].Component != nil {
+			reg = &comps[i]
+			break
+		}
+	}
+	if reg == nil {
+		return ck(CheckAMLScreening, ResultFail, "no_screening_provider")
+	}
+	// The guard decides eligibility; an unmarked component is as ineligible as a synthetic one.
+	eligible := providerkind.RefuseSyntheticInProduction("production", []providerkind.Registration{*reg}) == nil
+	if !eligible && env == "production" {
+		return ck(CheckAMLScreening, ResultFail, "synthetic_provider_in_production")
+	}
+	if referenced == 0 || d.Total == 0 {
+		return ck(CheckAMLScreening, ResultFail, "no_jurisdiction_referenced")
+	}
+	if d.WithPolicy < d.Total {
+		return ck(CheckAMLScreening, ResultFail, "policy_missing_for_jurisdiction")
+	}
+	if !eligible {
+		return ck(CheckAMLScreening, ResultPass, "ok_mock_provider")
+	}
+	return ck(CheckAMLScreening, ResultPass, "ok")
 }

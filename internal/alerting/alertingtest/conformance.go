@@ -33,6 +33,13 @@ type Subject struct {
 	Fail func(class alerting.ErrorClass)
 	// Logs returns everything the channel logged.
 	Logs func() string
+	// DeclaresHuman is true for a channel that DOES notify a person (a real email or webhook channel). It is the
+	// only way past the not_a_human_notification_unless_declared case: a channel must say so explicitly, and a
+	// channel that merely forgot to be non-human still fails the suite.
+	DeclaresHuman bool
+	// FailClasses lists the error classes Fail can script. Nil means all five (the original contract). A
+	// channel that cannot produce a class (a webhook never reports unknown) lists the ones it can.
+	FailClasses []alerting.ErrorClass
 }
 
 // Factory builds a fresh Subject whose logging goes to logger.
@@ -66,8 +73,11 @@ func RunChannelConformance(t *testing.T, factory Factory) {
 
 	t.Run("not_a_human_notification_unless_declared", func(t *testing.T) {
 		s, _ := newSubject(t)
-		if s.Sink.HumanNotification() {
-			t.Fatalf("channel %q claims HumanNotification; no human channel is implemented", s.Sink.ChannelKind())
+		if s.Sink.HumanNotification() && !s.DeclaresHuman {
+			t.Fatalf("channel %q claims HumanNotification without declaring it (Subject.DeclaresHuman)", s.Sink.ChannelKind())
+		}
+		if !s.Sink.HumanNotification() && s.DeclaresHuman {
+			t.Fatalf("channel %q declares a human channel but reports HumanNotification()==false", s.Sink.ChannelKind())
 		}
 	})
 
@@ -131,8 +141,12 @@ func RunChannelConformance(t *testing.T, factory Factory) {
 		if s.Fail == nil {
 			t.Skip("channel never fails")
 		}
-		for _, c := range []alerting.ErrorClass{alerting.ErrorClassTimeout, alerting.ErrorClassUnavailable,
-			alerting.ErrorClassRejected, alerting.ErrorClassMisconfigured, alerting.ErrorClassUnknown} {
+		classes := s.FailClasses
+		if classes == nil {
+			classes = []alerting.ErrorClass{alerting.ErrorClassTimeout, alerting.ErrorClassUnavailable,
+				alerting.ErrorClassRejected, alerting.ErrorClassMisconfigured, alerting.ErrorClassUnknown}
+		}
+		for _, c := range classes {
 			s.Fail(c)
 			out, got := s.Sink.Deliver(context.Background(), delivery(uuid.NewString()+":0", "x", "ops-target"))
 			if out != alerting.OutcomeFailed || got != c {

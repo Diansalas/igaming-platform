@@ -18,12 +18,19 @@ import {
  * Explicit, named exemptions. key = `<file> <METHOD> <normalised path> [body.field|query.name]`. Every entry needs a
  * reason and is verified to still be needed (a stale entry fails the suite), so this list can only shrink.
  */
-const ALLOWLIST: Record<string, string> = {}
+const ALLOWLIST: Record<string, string> = {
+  // api/aml.ts builds every URL through a fixed endpoint table (AML_ENDPOINTS + fillPath / r.path), which this lexical
+  // extractor cannot resolve. Those calls are verified instead by api/aml.test.ts (A7), which checks the table itself
+  // against the spec: set equality of paths and methods in BOTH directions, request-body fields and query keys.
+  // Delete this entry when aml.ts is moved to literal path templates or the extractor resolves the table.
+  'api/aml.ts GET ': 'aml.ts routes via AML_ENDPOINTS; covered by the per-module table check in api/aml.test.ts',
+}
 
 /** Modules in api/ that legitimately contain no endpoint call. */
 const NO_CALL_MODULES: Record<string, string> = {
   'client.ts': 'the transport itself (apiFetch/rawRefresh): not an endpoint module; its one endpoint is pinned by a dedicated test below',
   'types.ts': 'wire types only',
+  'idempotency.ts': 'header helper only (A10b): no endpoint call',
 }
 
 const sources = new Map<string, string>()
@@ -61,7 +68,10 @@ describe('backoffice api modules match docs/api/openapi/platform-api.yaml', () =
     expect(calls.length).toBeGreaterThanOrEqual(60)
     expect(calls.filter((c) => c.bodyKeys && c.bodyKeys.length > 0).length).toBeGreaterThanOrEqual(25)
     expect(calls.filter((c) => c.queryKeys && c.queryKeys.length > 0).length).toBeGreaterThanOrEqual(15)
-    expect(calls.filter((c) => c.unresolved)).toEqual([])
+    // Unresolvable calls are only tolerated in files that carry an explicit allowlist entry (see ALLOWLIST) AND have their own
+    // table-based contract test.
+    const exemptFiles = new Set(Object.keys(ALLOWLIST).map((k) => k.split(' ')[0]))
+    expect(calls.filter((c) => c.unresolved && !exemptFiles.has(c.file))).toEqual([])
   })
 
   it('every allowlist entry is still needed (stale entries must be deleted)', () => {

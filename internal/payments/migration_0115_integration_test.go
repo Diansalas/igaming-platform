@@ -499,6 +499,7 @@ func TestK3_C9c_ReservedPrefixCatalogue(t *testing.T) {
 		"casino_callback_rejections.provider_tx_id":          "casino rejection log of a refused provider value; never a ledger key (covered by the all-sessions ledger trigger for postings)",
 		"casino_callback_rejections.original_provider_tx_id": "same: casino rejection log",
 		"kyc_verifications.provider_reference":               "a KYC vendor reference, not a payment reference",
+		"aml_screening_results.provider_reference":           "a sanctions/PEP screening vendor reference (ADR 0116 S2, migration 0154), never a payment or ledger key",
 	}
 	byName := []string{"payment_attempt_reference_evidence.reference"}
 	var cols []string

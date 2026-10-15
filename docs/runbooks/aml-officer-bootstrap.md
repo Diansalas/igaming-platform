@@ -65,4 +65,24 @@ in force.
 - Case notes are plaintext; the lint is an accident guard only.
 - Erasure of a person with AML records fails closed (`aml_person_has_records`); the erasure job itself (HD-RET-1) is NOT
   IMPLEMENTED.
-- Screening, monitoring rules and SAR export are NOT IMPLEMENTED (S2, S4, S5).
+- Transaction monitoring rules (S4) and SAR export (S5) are NOT IMPLEMENTED. Screening (S2) is a MOCK provider with an
+  officer-initiated orchestrator; there is no screening vendor, no automatic trigger and no Back Office screen for policies.
+
+## Working the queue (A7: routes and Back Office, ADR 0116 section 13)
+
+Once an officer holds an in-force `aml_officer` grant, the Back Office shows an **AML** item (roles `compliance`, and
+`platform_admin` acting in a chosen tenant) with the case queue, a person's holds and the case detail. The same operations are the
+11 routes under `/v1/admin/tenants/{tenantID}/aml/` (OpenAPI). Things an operator needs to know:
+
+- The route permission (`aml_case:read|work|close_approve`, `aml_hold:manage`) is only the static gate. A `compliance` user
+  **without** the grant is refused 403 by the database; the screen then shows the "no in-force AML officer grant" message.
+- Lifting a hold, proposing and approving a four-eyes action ask for a fresh second-factor check (step-up, `critical`).
+- A `confirmed_sanctions`-class hold (including every sanctions-list screening hold) has no Lift button: propose
+  "Lift a sanctions hold" on a case, and a different officer approves exactly that proposal.
+- Any later event on a case (a note, a move, a hold change) withdraws a pending proposal; there is no reject button
+  because the service has no reject operation. Withdraw by adding a note, then re-propose if still wanted.
+- A platform officer chooses the tenant first; the database refuses unless that officer holds an in-force platform
+  `aml_officer` grant and an acting grant for exactly that tenant.
+- Launch readiness (`GET .../launch-readiness`) now carries `R-AML-QUORUM`, `R-AML-SCREENING` and `R-AML-MONITORING`.
+  `R-AML-MONITORING` always fails until S4 exists; acknowledge it knowingly. A MOCK screening provider counts as configured
+  only outside production.
