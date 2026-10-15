@@ -259,11 +259,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     capabilityGrantRevoke: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-<<<<<<< HEAD
-  compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, reconciliation: true, capabilityGrants: true },
-=======
-  compliance: { ...NONE, ownTenant: true, staffRead: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
->>>>>>> a10a-staff-invite
+  compliance: { ...NONE, ownTenant: true, staffRead: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, reconciliation: true, capabilityGrants: true },
   finance: {
     ...NONE,
     withdrawals: true,

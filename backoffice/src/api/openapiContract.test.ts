@@ -24,6 +24,7 @@ const ALLOWLIST: Record<string, string> = {}
 const NO_CALL_MODULES: Record<string, string> = {
   'client.ts': 'the transport itself (apiFetch/rawRefresh): not an endpoint module; its one endpoint is pinned by a dedicated test below',
   'types.ts': 'wire types only',
+  'idempotency.ts': 'header helper only (A10b): no endpoint call',
 }
 
 const sources = new Map<string, string>()

@@ -7,7 +7,7 @@
 //  - step-up: request, approve and revoke are `critical` (the apiFetch interceptor prompts and re-sends once);
 //    reject and cancel are `none`;
 //  - requested_by / grantee_staff_id are null for a tenant viewer when the actor is platform staff (ADR 0114 H1).
-import { apiFetch } from './client'
+import { apiFetch, buildQuery } from './client'
 import { idempotencyHeaders } from './idempotency'
 
 export const GRANT_CAPABILITIES = [
@@ -59,7 +59,6 @@ export interface CapabilityGrant {
 }
 
 const base = (tenantId: string) => `/v1/admin/tenants/${encodeURIComponent(tenantId)}/capability-grants`
-const json = (body: unknown, key?: string): RequestInit => ({ method: 'POST', body: JSON.stringify(body), headers: idempotencyHeaders(key) })
 
 export function listGrantRequests(tenantId: string): Promise<CapabilityGrantRequest[]> {
   return apiFetch(`${base(tenantId)}/requests`)
@@ -70,16 +69,16 @@ export function listGrants(tenantId: string): Promise<CapabilityGrant[]> {
 }
 
 export function createGrantRequest(tenantId: string, body: GrantRequestBody, key?: string): Promise<CapabilityGrantRequest> {
-  return apiFetch(`${base(tenantId)}/requests`, json(body, key))
+  return apiFetch(`${base(tenantId)}/requests`, { method: 'POST', body: JSON.stringify(body), headers: idempotencyHeaders(key) })
 }
 
 export function approveGrantRequest(tenantId: string, requestId: string, reasonCode: string, key?: string): Promise<CapabilityGrant> {
-  return apiFetch(`${base(tenantId)}/requests/${encodeURIComponent(requestId)}/approve`, json({ reason_code: reasonCode }, key))
+  return apiFetch(`${base(tenantId)}/requests/${encodeURIComponent(requestId)}/approve`, { method: 'POST', body: JSON.stringify({ reason_code: reasonCode }), headers: idempotencyHeaders(key) })
 }
 
 /** 204 on success. */
 export function rejectGrantRequest(tenantId: string, requestId: string, reasonCode: string, key?: string): Promise<void> {
-  return apiFetch(`${base(tenantId)}/requests/${encodeURIComponent(requestId)}/reject`, json({ reason_code: reasonCode }, key))
+  return apiFetch(`${base(tenantId)}/requests/${encodeURIComponent(requestId)}/reject`, { method: 'POST', body: JSON.stringify({ reason_code: reasonCode }), headers: idempotencyHeaders(key) })
 }
 
 /** 204 on success; no body. */
@@ -89,7 +88,7 @@ export function cancelGrantRequest(tenantId: string, requestId: string, key?: st
 
 /** 204 on success. The emergency stop: a single actor, no second approver. */
 export function revokeGrant(tenantId: string, grantId: string, reasonCode: string, key?: string): Promise<void> {
-  return apiFetch(`${base(tenantId)}/${encodeURIComponent(grantId)}/revoke`, json({ reason_code: reasonCode }, key))
+  return apiFetch(`${base(tenantId)}/${encodeURIComponent(grantId)}/revoke`, { method: 'POST', body: JSON.stringify({ reason_code: reasonCode }), headers: idempotencyHeaders(key) })
 }
 
 // --- staff directory (grantee picker). ADR 0119 section 14.2: staff:read; never lists platform staff. ---
@@ -102,9 +101,5 @@ export interface StaffDirectoryEntry {
 }
 
 export function listTenantStaff(tenantId: string, params: { status?: string; role?: string } = {}): Promise<{ staff: StaffDirectoryEntry[]; truncated: boolean }> {
-  const search = new URLSearchParams()
-  if (params.status) search.set('status', params.status)
-  if (params.role) search.set('role', params.role)
-  const qs = search.toString()
-  return apiFetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/staff${qs ? `?${qs}` : ''}`)
+  return apiFetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/staff${buildQuery(params)}`)
 }

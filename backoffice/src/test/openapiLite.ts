@@ -1,154 +1,52 @@
-// Minimal, dependency-free reader of docs/api/openapi/platform-api.yaml for the per-module UI-to-OpenAPI contract
-// tests (A10b). It is NOT a YAML parser: it understands exactly the layout this repository's spec uses (2-space
-// indented paths, 4-space operations, 4-space component schemas, flow or block `enum`, flow `required`). It is
-// deliberately independent of any shared helper; the orchestrator reconciles at merge.
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+// Thin runtime-request and schema-pin helpers over the shared parsed spec (test/openapiContract.ts loadOpenApi).
+// The static, per-module call check is api/openapiContract.test.ts (A10a); this file adds only what that cannot do:
+// checking an OBSERVED request, and reading schema enums / properties for pins. No YAML parsing lives here.
+import { loadOpenApi } from './openapiContract'
 
-const SPEC = readFileSync(resolve(process.cwd(), '../docs/api/openapi/platform-api.yaml'), 'utf8').split('\n')
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type J = any
+const spec = () => loadOpenApi() as J
+const schemas = () => spec().components.schemas as Record<string, J>
 
-const indentOf = (l: string) => l.length - l.trimStart().length
-
-function blockAfter(start: number, indent: number): string[] {
-  const out: string[] = []
-  for (let i = start + 1; i < SPEC.length; i++) {
-    const l = SPEC[i]
-    if (l.trim() === '') {
-      out.push(l)
-      continue
-    }
-    if (indentOf(l) <= indent) break
-    out.push(l)
-  }
-  return out
-}
-
-/** Every `  /v1/...:` path template in the spec. */
 export function specPaths(): string[] {
-  return SPEC.filter((l) => /^ {2}\/\S+:\s*$/.test(l)).map((l) => l.trim().slice(0, -1))
-}
-
-function pathBlock(path: string): string[] {
-  const i = SPEC.findIndex((l) => l === `  ${path}:`)
-  return i < 0 ? [] : blockAfter(i, 2)
-}
-
-function opBlock(path: string, method: string): string[] {
-  const block = pathBlock(path)
-  const i = block.findIndex((l) => l === `    ${method.toLowerCase()}:`)
-  return i < 0 ? [] : blockAfter0(block, i, 4)
-}
-
-function blockAfter0(lines: string[], start: number, indent: number): string[] {
-  const out: string[] = []
-  for (let i = start + 1; i < lines.length; i++) {
-    const l = lines[i]
-    if (l.trim() !== '' && indentOf(l) <= indent) break
-    out.push(l)
-  }
-  return out
+  return Object.keys(spec().paths)
 }
 
 export function hasOperation(path: string, method: string): boolean {
-  return opBlock(path, method).length > 0
+  return !!spec().paths[path]?.[method.toLowerCase()]
 }
 
-/** Query parameter names the operation declares. */
+function op(path: string, method: string): J {
+  return spec().paths[path]?.[method.toLowerCase()]
+}
+
 export function queryParams(path: string, method: string): string[] {
-  const op = opBlock(path, method)
-  const names: string[] = []
-  op.forEach((l, i) => {
-    const flow = /^\s*- \{ name: (\w+), in: (\w+)/.exec(l)
-    if (flow) {
-      if (flow[2] === 'query') names.push(flow[1])
-      return
-    }
-    const m = /^\s*- name: (\w+)\s*$/.exec(l)
-    if (m && /^\s*in: query\s*$/.test(op[i + 1] ?? '')) names.push(m[1])
-  })
-  return names
+  return ((op(path, method)?.parameters ?? []) as J[]).filter((p) => p.in === 'query').map((p) => p.name as string)
 }
 
-/** The schema name the operation's JSON request body references, or null when it has none. */
+function resolve(s: J): J {
+  const m = typeof s?.$ref === 'string' ? /#\/components\/schemas\/(\w+)/.exec(s.$ref) : null
+  return m ? schemas()[m[1]] : s
+}
+
 export function requestBodySchema(path: string, method: string): string | null {
-  const op = opBlock(path, method)
-  const i = op.findIndex((l) => /^\s*requestBody:/.test(l))
-  if (i < 0) return null
-  for (let j = i + 1; j < op.length; j++) {
-    const m = /\$ref: "#\/components\/schemas\/(\w+)"/.exec(op[j])
-    if (m) return m[1]
-    if (/^\s*responses:/.test(op[j])) break
-  }
-  return null
-}
-
-function schemaBlock(name: string): string[] {
-  const root = SPEC.findIndex((l) => l === '  schemas:')
-  for (let i = root + 1; i < SPEC.length; i++) {
-    if (SPEC[i] === `    ${name}:`) return blockAfter(i, 4)
-    if (/^ {2}\S/.test(SPEC[i]) && i > root) break
-  }
-  return []
+  const ref = op(path, method)?.requestBody?.content?.['application/json']?.schema?.$ref
+  const m = typeof ref === 'string' ? /#\/components\/schemas\/(\w+)/.exec(ref) : null
+  return m ? m[1] : null
 }
 
 export function schemaProps(name: string): string[] {
-  const b = schemaBlock(name)
-  const i = b.findIndex((l) => l === '      properties:')
-  if (i < 0) return []
-  return blockAfter0(b, i, 6)
-    .filter((l) => indentOf(l) === 8 && /^\s+\w+:/.test(l))
-    .map((l) => l.trim().split(':')[0])
+  return Object.keys(schemas()[name]?.properties ?? {})
 }
 
 export function schemaRequired(name: string): string[] {
-  const b = schemaBlock(name)
-  const flow = b.find((l) => /^ {6}required: \[/.test(l))
-  if (flow) {
-    return flow
-      .slice(flow.indexOf('[') + 1, flow.lastIndexOf(']'))
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  }
-  return []
+  return (schemas()[name]?.required ?? []) as string[]
 }
 
-export function schemaForbidsExtra(name: string): boolean {
-  return schemaBlock(name).some((l) => /^ {6}additionalProperties: false/.test(l))
-}
-
-/** Enum values of a named schema (flow or block list) or of one property of it. */
 export function schemaEnum(name: string, prop?: string): string[] {
-  let b = schemaBlock(name)
-  if (prop) {
-    const i = b.findIndex((l) => l === `        ${prop}:`)
-    if (i >= 0) b = blockAfter0(b, i, 8)
-    else {
-      // single-line property: `prop: { type: string, enum: [a, b] }`
-      const one = b.find((l) => new RegExp(`^ {8}${prop}:.*enum: \\[`).test(l))
-      return one ? flowList(one) : []
-    }
-  }
-  const flow = b.find((l) => /enum: \[/.test(l))
-  if (flow) return flowList(flow)
-  const i = b.findIndex((l) => /^\s*enum:\s*$/.test(l))
-  if (i < 0) return []
-  const out: string[] = []
-  for (let j = i + 1; j < b.length; j++) {
-    const m = /^\s*- "?([^"\s]+)"?\s*$/.exec(b[j])
-    if (!m) break
-    out.push(m[1])
-  }
-  return out
-}
-
-function flowList(line: string): string[] {
-  const s = line.slice(line.indexOf('enum: [') + 7)
-  return s
-    .slice(0, s.indexOf(']'))
-    .split(',')
-    .map((x) => x.trim().replace(/^"|"$/g, ''))
-    .filter(Boolean)
+  const s = schemas()[name]
+  const t = resolve(prop ? s?.properties?.[prop] : s)
+  return (t?.enum ?? []) as string[]
 }
 
 function templateToRegex(t: string): RegExp {
@@ -157,7 +55,6 @@ function templateToRegex(t: string): RegExp {
 
 export function findTemplate(pathname: string): string | null {
   const hits = specPaths().filter((t) => templateToRegex(t).test(pathname))
-  // Prefer the template with the most literal segments (a literal route beats a parameter route).
   hits.sort((a, b) => b.replace(/\{[^}]+\}/g, '').length - a.replace(/\{[^}]+\}/g, '').length)
   return hits[0] ?? null
 }
@@ -169,11 +66,7 @@ export interface SeenRequest {
   body: unknown
 }
 
-/**
- * Asserts one observed UI request is expressible in the spec: the path+method is documented, every query
- * parameter is declared, and a JSON body only uses documented properties and carries every required one.
- * Returns the matched template for further assertions.
- */
+/** Asserts one OBSERVED UI request is expressible in the spec (path, method, declared query keys, body fields, required fields). */
 export function checkAgainstSpec(seen: SeenRequest): string[] {
   const problems: string[] = []
   const tpl = findTemplate(seen.pathname)

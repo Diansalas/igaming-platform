@@ -79,10 +79,9 @@ export interface ForceResolutionDecision {
 }
 
 const base = (tenantId: string) => `/v1/admin/tenants/${encodeURIComponent(tenantId)}/payment-force-resolutions`
-const post = (body: unknown, key?: string): RequestInit => ({ method: 'POST', body: JSON.stringify(body), headers: idempotencyHeaders(key) })
 
 export function listForceResolutions(tenantId: string): Promise<{ items: PaymentForceResolution[] }> {
-  return apiFetch(base(tenantId))
+  return apiFetch(`${base(tenantId)}`)
 }
 
 export function getForceResolution(tenantId: string, id: string): Promise<PaymentForceResolution> {
@@ -90,15 +89,15 @@ export function getForceResolution(tenantId: string, id: string): Promise<Paymen
 }
 
 export function requestForceResolution(tenantId: string, body: ForceResolutionRequest, key?: string): Promise<PaymentForceResolution> {
-  return apiFetch(base(tenantId), post(body, key))
+  return apiFetch(`${base(tenantId)}`, { method: 'POST', body: JSON.stringify(body), headers: idempotencyHeaders(key) })
 }
 
 export function approveForceResolution(tenantId: string, id: string, payloadHash: string, reasonCode: string, key?: string): Promise<ForceResolutionDecision> {
-  return apiFetch(`${base(tenantId)}/${encodeURIComponent(id)}/approve`, post({ payload_hash: payloadHash, reason_code: reasonCode }, key))
+  return apiFetch(`${base(tenantId)}/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify({ payload_hash: payloadHash, reason_code: reasonCode }), headers: idempotencyHeaders(key) })
 }
 
 export function rejectForceResolution(tenantId: string, id: string, payloadHash: string, reasonCode: string, key?: string): Promise<ForceResolutionDecision> {
-  return apiFetch(`${base(tenantId)}/${encodeURIComponent(id)}/reject`, post({ payload_hash: payloadHash, reason_code: reasonCode }, key))
+  return apiFetch(`${base(tenantId)}/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ payload_hash: payloadHash, reason_code: reasonCode }), headers: idempotencyHeaders(key) })
 }
 
 /** No body. Only the original requester, only while pending (database-enforced). */
