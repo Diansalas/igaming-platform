@@ -21,7 +21,8 @@ import (
 // must reach no AML row, and must reach no AML write path without a valid, single-use, correctly bound proof, even when it
 // forges the exact GUC shape of a real officer.
 
-var amlTables = []string{"aml_holds", "aml_hold_lifts", "aml_enforcement_decisions", "aml_alerts", "aml_cases", "aml_case_alerts", "aml_case_notes", "aml_case_events"}
+var amlTables = []string{"aml_holds", "aml_hold_lifts", "aml_enforcement_decisions", "aml_alerts", "aml_cases", "aml_case_alerts", "aml_case_notes", "aml_case_events",
+	"aml_screening_policies", "aml_screening_results"} // migration 0154 (A7) added the last two
 
 func TestRuntime_NoAccessToAMLTables_EvenWithForgedOfficerGUCs(t *testing.T) {
 	w := newWorld(t, "own_licence")

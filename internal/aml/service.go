@@ -113,11 +113,14 @@ const (
 	OpProofCaseApprove    = actorproof.OpAMLCaseApprove
 )
 
+// (migration 0154 adds OpProofScreeningRecord, OpProofScreeningRead and OpProofScreeningPolicySet in screening_service.go.)
+
 // proofOperations is the closed set, exported to the actorproof scope mirror test.
 var proofOperations = map[string]bool{
 	OpProofHoldPlace: true, OpProofHoldLift: true, OpProofHoldRead: true,
 	OpProofAlertRaise: true, OpProofCaseOpen: true, OpProofCaseRead: true, OpProofCaseTransition: true, OpProofCaseNote: true,
 	OpProofCaseFlagSAR: true, OpProofCasePropose: true, OpProofCaseApprove: true,
+	OpProofScreeningRecord: true, OpProofScreeningRead: true, OpProofScreeningPolicySet: true,
 }
 
 // ProofOperations lists the AML proof operation names (for tests that mirror the verifier's admission rule).
