@@ -820,7 +820,7 @@ cadence (4-hour bound) as an operations task; whether `review` rows should keep 
 
 ## 13. Implementation record: A7 AML operability (2026-10-15, `identity-compliance`)
 
-Branch `a7-aml-operability`, **not merged, not pushed; security review CONDITIONAL (2026-10-15), conditions applied in round 2 (below) and awaiting re-review**. Software capability only: nothing here is a
+Branch `a7-aml-operability` (MERGED to the integration branch); round 3 on `a7-round3` (security re-review SR7-10 and follow-ups, below; **not merged, not pushed**). Software capability only: nothing here is a
 regulatory approval, a filing capability, or a statement that any licence condition is met. Every provider is a MOCK. The full
 record, the changed assertions, the mutation results and the proposed registry rows are in `docs/plans/a7-aml-record.md`.
 
@@ -842,15 +842,17 @@ record, the changed assertions, the mutation results and the proposed registry r
 1. **Outcome vocabulary.** The ADR lists `clear | potential_match | unavailable`. The built vocabulary is `clear | potential_match |
    confirmed | error` (A7 task); `error` is the ADR's `unavailable` with a closed `error_code`. `confirmed` is a vendor-reported
    outcome: this system records it and holds; it makes no legal determination.
-2. **Hold class is derived strictly from outcome and list (security review SR7-2 / SR7-8; REPLACES the first-round reading).**
-   `reason_class = confirmed_sanctions` (all value movement; lifted only by the proof-bound four-eyes approval, ADR 0116 D6) is placed
-   ONLY for a `confirmed` outcome that names the sanctions list. A `potential_match` on the sanctions list still gates ALL value
-   movement by SCOPE (`all_value_movement`) but is `manual` class, so one officer can lift it as a false positive; a PEP-only match
-   and an unavailable result are `manual` / `withdrawal_and_payout` (Q7 default). So the word "confirmed" in the class name always
-   means a confirmed outcome (the class is NOT renamed: it is a merged 0141 value). The derivation is in `aml_screening_record`, in
-   the CHECKs of `aml_screening_results` (`hold_reason_class`, all-value-movement only for a confirmed outcome or a sanctions-list
-   match) and mirrored in `RecordScreeningInput.Validate` / `HoldReasonClassFor`. Consequence recorded for the owner: lifting a
-   potential-sanctions hold is a single-officer act (the hold-lift step-up and the audit trail still apply).
+2. **Hold class is derived strictly from outcome and list (SR7-2 / SR7-8; REVISED by SR7-10, migration 0155).** ANY sanctions-list
+   match is a four-eyes-lift class (ADR 0116 D6 and section 4.3 are UNCHANGED: a sanctions-hold lift is four-eyes): a `confirmed`
+   outcome naming the sanctions list is `confirmed_sanctions`, a `potential_match` naming it is the NEW class `sanctions_potential`
+   (same lift rule, a distinct label; the SCOPE of both is `all_value_movement`). A PEP-only match and an unavailable result are
+   `manual` / `withdrawal_and_payout` (Q7 default). The round-2 reading ("a potential sanctions match is manual class, one officer
+   can lift it") was WRONG against D6 and is withdrawn. `sanctions_potential` is derived from a screening record only (`PlaceHold`
+   refuses it); `confirmed_sanctions` keeps its merged 0141 name (the class is not renamed). The derivation is in
+   `aml_screening_record`, in the CHECKs of `aml_screening_results` and `aml_holds`, in the results guard (class and scope of the
+   named hold) and mirrored in `RecordScreeningInput.Validate` / `HoldReasonClassFor`. NEW rule (any screening-derived hold, any
+   class): the Person who RECORDED the screening result may not lift the hold it placed (AM011, enforced in `aml_hold_lifts_guard`
+   for the single-officer lift and for the approval path alike). **Decision (owner/orchestrator, 2026-10-15), SR7-10.**
 3. **Recording a hold needs the officer quorum (SR7-2; REPLACES "screening-mandated holds do not wait for the officer quorum").**
    Every record is an officer-proved record today, so a single officer could otherwise place an all-value hold by recording a
    result. `aml_screening_record` therefore asserts the quorum of the owner scope for any record that places a hold (a clear places
@@ -876,8 +878,8 @@ record, the changed assertions, the mutation results and the proposed registry r
    classifiers are pinned in the golden table, the static route test and the OpenAPI text.
    **Pre-launch condition (SR7-1 / F4):** the `aml.hold_placement_rate` alert is NOT built. A compromised officer session with a
    fresh second factor can still place manual holds without an alert; that alert is required before launch.
-8. **Migration numbering.** `0154` only; `0155` unused (to be added to the reserved list with `0152` and `0153` if those are also
-   not used).
+8. **Migration numbering.** `0154` (frozen once merged) and, from round 3, `0155_aml_sanctions_potential_class` (SR7-10; removed
+   from the reserved-unused list in `internal/db/migrate.go`).
 
 **D-AML-TIP-1 — DECIDED (c), 2026-10-15.** The owner decided option (c) now (accept the visible signal, plus a documented AML
 confidentiality duty for adjustment approvers) and option (a) later; option (b) (the generic `conflict` wording) stays as built.
@@ -888,3 +890,12 @@ pending (E-class)". No code change.
 validated in the database; four-eyes for loosening is a HARD PRE-ROUTE condition, pinned by a test that no production code calls
 `SetScreeningPolicy`), SR7-5, SR7-6, SR7-7; SR7-4 (reject operation plus proposal-invalidation alert) is a recorded follow-up;
 SR7-9 skipped by instruction. Details in `docs/plans/a7-aml-record.md` section 12.
+
+**Round 3 (security re-review, 2026-10-15).** SR7-10 (MEDIUM, latent): the new class `sanctions_potential` and the distinct-Person
+lift rule above (migration 0155; `aml_hold_lift`, `aml_hold_lifts_guard`, `aml_screening_record`, the CHECKs). SR7-6 is an
+**ACCEPTED RESIDUAL**, not fixed: only the quorum DETAIL code is hidden from tenant viewers; the pass/fail flip is still visible.
+SR7-11: screening holds depend on the officer quorum, and platform officer grants lapse after 4 hours; the F1 system actor must be
+quorum-exempt, the F2 "no completed result" hold must not go through the quorum, and `NotEnforcedError` must raise an alert. The
+alert is NOT built (a new alert kind needs a migration, the registry row and the derived-raise-set pin; not small): a **PRE-F1
+CONDITION**. AML request bodies are decoded as exactly one JSON value (trailing content refused) by the handler and by the step-up
+classifiers through one shared helper (AML routes only). Details: `docs/plans/a7-aml-record.md` section 13.

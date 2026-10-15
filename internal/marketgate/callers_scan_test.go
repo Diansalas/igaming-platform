@@ -32,7 +32,7 @@ func productionGoFiles(t *testing.T) map[string]*ast.File {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case "node_modules", ".git", "vendor", "dist":
+			case "node_modules", ".git", ".claude", "vendor", "dist":
 				return filepath.SkipDir
 			}
 			return nil

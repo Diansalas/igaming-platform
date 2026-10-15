@@ -467,3 +467,31 @@ func TestMigration0140Down_RefusesWhileOfficerGrantsExist(t *testing.T) {
 	}
 	wantSame(t, "refused down changes nothing", before, snapshot(t, pool))
 }
+
+// versionBefore is the highest migration version on disk strictly below v: the baseline of an up/down/up test is "the migration
+// immediately before the one under test", never a constant (a later number landing in between must not break the test).
+func versionBefore(t *testing.T, v int64) int64 {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var best int64
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".up.sql") || len(name) < 4 {
+			continue
+		}
+		n, err := strconv.Atoi(name[:4])
+		if err != nil {
+			continue
+		}
+		if int64(n) < v && int64(n) > best {
+			best = int64(n)
+		}
+	}
+	if best == 0 {
+		t.Fatalf("no migration below %d", v)
+	}
+	return best
+}

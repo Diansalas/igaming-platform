@@ -172,13 +172,17 @@ func TestScreening_Guards_AreIndependentOfTheDefinerFunctions(t *testing.T) {
 	if err := claim(ownHold, "confirmed", "{sanctions}", "hold_all_value_movement", "confirmed_sanctions"); pgCode(err) != "AM007" {
 		t.Errorf("a hold of the wrong class and scope behind a confirmed result: %v", err)
 	}
-	if err := claim(ownHold, "potential_match", "{sanctions}", "hold_all_value_movement", "manual"); pgCode(err) != "AM007" {
+	if err := claim(ownHold, "potential_match", "{sanctions}", "hold_all_value_movement", "sanctions_potential"); pgCode(err) != "AM007" {
 		t.Errorf("a withdrawal-scope hold behind an all-value decision: %v", err)
 	}
 	// The SCOPE matches (all value movement) but the CLASS does not: a manual all-value hold behind a confirmed-sanctions result.
 	manualAll := q.PlaceHold(t, svc, p.PersonID, nil, aml.ScopeAllValueMovement, aml.ReasonManual)
 	if err := claim(manualAll, "confirmed", "{sanctions}", "hold_all_value_movement", "confirmed_sanctions"); pgCode(err) != "AM007" {
 		t.Errorf("a manual-class hold behind a confirmed-sanctions result (same scope): %v", err)
+	}
+	// SR7-10: a potential sanctions result behind a manual all-value hold (right scope, wrong class) is refused too.
+	if err := claim(manualAll, "potential_match", "{sanctions}", "hold_all_value_movement", "sanctions_potential"); pgCode(err) != "AM007" {
+		t.Errorf("a manual-class hold behind a sanctions_potential result (same scope): %v", err)
 	}
 	// With everything lawful but no PROVEN session actor at all the insert is refused.
 	if err := ins("platform", p.PersonID, nil); err == nil {

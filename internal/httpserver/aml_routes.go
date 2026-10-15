@@ -221,7 +221,7 @@ func (c amlCall) pathUUID(name string) (uuid.UUID, bool) {
 }
 
 func (c amlCall) decode(dst any) bool {
-	if err := decodeJSON(c.r, dst); err != nil {
+	if err := decodeJSONStrict(c.r, dst); err != nil {
 		c.badRequest()
 		return false
 	}

@@ -28,7 +28,11 @@ import { isClosed, statusLabel } from './rules'
 type Tab = 'cases' | 'holds'
 
 const SCOPE_LABEL: Record<string, string> = { all_value_movement: 'All value movement', withdrawal_and_payout: 'Withdrawal and payout' }
-const CLASS_LABEL: Record<string, string> = { manual: 'Manual', confirmed_sanctions: 'Sanctions list (four-eyes lift)' }
+const CLASS_LABEL: Record<string, string> = {
+  manual: 'Manual',
+  confirmed_sanctions: 'Sanctions list, confirmed (four-eyes lift)',
+  sanctions_potential: 'Sanctions list, potential match (four-eyes lift)',
+}
 
 /**
  * AML officer console (ADR 0116 S6, minimal): the case queue and a person's holds. Route-gated by the `amlRead` nav flag as a
@@ -124,6 +128,9 @@ function CasesTab({ tenantId, canWork }: { tenantId: string; canWork: boolean })
   )
 }
 
+// sanctions_potential is derived from a screening record, never chosen by hand (SR7-10).
+type PlaceableClass = Exclude<HoldReasonClass, 'sanctions_potential'>
+
 function HoldsTab({ tenantId, canManage }: { tenantId: string; canManage: boolean }) {
   const qc = useQueryClient()
   const [personInput, setPersonInput] = useState('')
@@ -131,7 +138,7 @@ function HoldsTab({ tenantId, canManage }: { tenantId: string; canManage: boolea
   const [placing, setPlacing] = useState(false)
   const [lifting, setLifting] = useState<AmlHold | null>(null)
   const [scope, setScope] = useState<HoldScope>('withdrawal_and_payout')
-  const [cls, setCls] = useState<HoldReasonClass>('manual')
+  const [cls, setCls] = useState<PlaceableClass>('manual')
   const [notice, setNotice] = useState('')
   const holds = useQuery({
     queryKey: ['aml', 'holds', tenantId, person],
@@ -174,7 +181,7 @@ function HoldsTab({ tenantId, canManage }: { tenantId: string; canManage: boolea
       header: '',
       render: (h) => {
         if (h.lifted || !canManage) return null
-        if (h.reason_class === 'confirmed_sanctions') return <span className="text-xs text-slate-500">Lift via a case proposal and approval</span>
+        if (h.reason_class === 'confirmed_sanctions' || h.reason_class === 'sanctions_potential') return <span className="text-xs text-slate-500">Lift via a case proposal and approval</span>
         return <Button variant="secondary" onClick={() => { setNotice(''); lift.reset(); setLifting(h) }}>Lift</Button>
       },
     },
@@ -223,7 +230,7 @@ function HoldsTab({ tenantId, canManage }: { tenantId: string; canManage: boolea
                 label="Class"
                 value={cls}
                 disabled={scope !== 'all_value_movement'}
-                onChange={(e) => setCls(e.target.value as HoldReasonClass)}
+                onChange={(e) => setCls(e.target.value as PlaceableClass)}
                 options={[
                   { value: 'manual', label: CLASS_LABEL.manual },
                   { value: 'confirmed_sanctions', label: CLASS_LABEL.confirmed_sanctions },
