@@ -34,7 +34,9 @@ func (w *world) runtimeCanDelete() bool {
 // be neither DELETEd nor TRUNCATEd by ANY role (WD012), so "delete the existing row in an open
 // transaction, then raw-INSERT the same key on a suspended brand" is impossible. Both roles.
 func TestWithdrawalDeleteGuard_NoRoleCanDeleteOrTruncate(t *testing.T) {
-	w := newWorld(t)
+	// A scratch database: TRUNCATE ... CASCADE locks every table referencing withdrawal_requests, which on the shared
+	// database blocks or deadlocks with other packages' concurrent withdrawal tests (and fails them: hosted CI #841).
+	w := newScratchWorld(t)
 	ctx := context.Background()
 	f := w.wdFixture()
 	if err := w.rawInsertRT(f, "del-"+uuid.NewString()); err != nil {
