@@ -62,11 +62,17 @@ type casDivergentSource struct {
 
 func (casDivergentSource) Label() string { return casDivergentLabel }
 
-func (d casDivergentSource) Statement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, ps, pe time.Time) ([]statement.CasinoStatementLine, []statement.CasinoStatementTotal, error) {
+// SyntheticComponent marks it providerkind.Synthetic: the stream accepts a
+// ledger-rendering source only from a Synthetic component (CAS-STMT-IO-1).
+func (casDivergentSource) SyntheticComponent() {}
+
+// RenderFromLedger implements statement.CasinoLedgerRenderer: it renders the
+// MOCK statement in the run's transaction, then applies mutate.
+func (d casDivergentSource) RenderFromLedger(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]statement.CasinoStatementLine, []statement.CasinoStatementTotal, error) {
 	if d.err != nil {
 		return nil, nil, d.err
 	}
-	lines, totals, err := casino.MockStatementSource{}.Statement(ctx, tx, tenantID, ps, pe)
+	lines, totals, err := casino.MockStatementSource{}.RenderFromLedger(ctx, tx, tenantID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -107,12 +113,29 @@ func (w *casWorld) runStmtErr(t *testing.T, src statement.CasinoStatementSource)
 	var run Run
 	var ms []Mismatch
 	var info CasinoStatementInfo
-	err := w.pool.WithTenantSnapshot(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// CAS-STMT-IO-1: obtain the statement first, with no transaction held;
+	// match inside the REPEATABLE READ transaction.
+	fetched, err := FetchCasinoStatement(context.Background(), src, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
+	if err != nil {
+		return Run{}, nil, CasinoStatementInfo{}, err
+	}
+	err = w.pool.WithTenantSnapshot(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		run, ms, info, err = RunCasinoStatement(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), src)
+		run, ms, info, err = RunCasinoStatement(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), fetched)
 		return err
 	})
 	return run, ms, info, err
+}
+
+// fetchStmt obtains src's statement for the world's tenant with no
+// transaction held (the production order).
+func (w *casWorld) fetchStmt(t *testing.T, src statement.CasinoStatementSource) FetchedCasinoStatement {
+	t.Helper()
+	fetched, err := FetchCasinoStatement(context.Background(), src, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
+	if err != nil {
+		t.Fatalf("FetchCasinoStatement: %v", err)
+	}
+	return fetched
 }
 
 func (w *casWorld) runStmt(t *testing.T, src statement.CasinoStatementSource) (Run, []Mismatch, CasinoStatementInfo) {
@@ -189,7 +212,7 @@ func TestCasinoStatement_MockRendersLedgerFaithfully(t *testing.T) {
 	var totals []statement.CasinoStatementTotal
 	if err := w.pool.WithTenantSnapshot(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		lines, totals, err = casino.MockStatementSource{}.Statement(ctx, tx, w.f.tenantID, time.Time{}, time.Time{})
+		lines, totals, err = casino.MockStatementSource{}.RenderFromLedger(ctx, tx, w.f.tenantID)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -356,7 +379,7 @@ func TestCasinoStatement_TotalsDetectLedgerSideDrift(t *testing.T) {
 	var capturedTotals []statement.CasinoStatementTotal
 	if err := w.pool.WithTenantSnapshot(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		captured, capturedTotals, err = casino.MockStatementSource{}.Statement(ctx, tx, w.f.tenantID, time.Time{}, time.Time{})
+		captured, capturedTotals, err = casino.MockStatementSource{}.RenderFromLedger(ctx, tx, w.f.tenantID)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -504,8 +527,9 @@ func TestCasinoStatement_NilOrErroringSourceFailsClosed(t *testing.T) {
 func TestCasinoStatement_ReadCommittedTransactionIsRefused(t *testing.T) {
 	w := newCasWorld(t, testPool(t))
 	w.buildCleanWorld(t)
+	fetched := w.fetchStmt(t, casino.MockStatementSource{})
 	err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, _, err := RunCasinoStatement(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), casino.MockStatementSource{})
+		_, _, _, err := RunCasinoStatement(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), fetched)
 		return err
 	})
 	if err == nil || !strings.Contains(err.Error(), "REPEATABLE READ") {
@@ -582,12 +606,13 @@ func TestCasinoStatement_ConcurrentRunsSerializedByAdvisoryLock(t *testing.T) {
 	w := newCasWorld(t, testPool(t))
 	w.buildCleanWorld(t)
 	hold, firstIn := make(chan struct{}), make(chan bool, 1)
+	fetchedForLock := w.fetchStmt(t, casino.MockStatementSource{})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		_ = w.pool.WithTenantSnapshot(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, _, _, acquired, err := TryRunCasinoStatementForTenant(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), casino.MockStatementSource{})
+			_, _, _, acquired, err := TryRunCasinoStatementForTenant(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), fetchedForLock)
 			firstIn <- acquired
 			<-hold
 			return err
@@ -601,7 +626,7 @@ func TestCasinoStatement_ConcurrentRunsSerializedByAdvisoryLock(t *testing.T) {
 	var second bool
 	err := w.pool.WithTenantSnapshot(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		_, _, _, second, err = TryRunCasinoStatementForTenant(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), casino.MockStatementSource{})
+		_, _, _, second, err = TryRunCasinoStatementForTenant(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now(), fetchedForLock)
 		return err
 	})
 	// The casino_consistency stream's lock is a different key: it is free
@@ -646,12 +671,12 @@ func TestCasinoStatement_SnapshotPreventsFalseMismatchUnderInterleaving(t *testi
 	// isolation guard): the same interleaving produces false findings.
 	var falseFindings []Mismatch
 	err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		lines, _, err := casDivergentSource{after: interleave}.Statement(ctx, tx, w.f.tenantID, time.Time{}, time.Time{})
+		lines, _, err := casDivergentSource{after: interleave}.RenderFromLedger(ctx, tx, w.f.tenantID)
 		if err != nil {
 			return err
 		}
 		r := &sbRecorder{tenantID: w.f.tenantID}
-		if _, err := casStmtMatchKeys(ctx, tx, w.f.tenantID, "[control] ", lines, r); err != nil {
+		if _, err := casStmtMatchKeys(ctx, tx, w.f.tenantID, nil, "[control] ", lines, r); err != nil {
 			return err
 		}
 		falseFindings = r.mismatches

@@ -82,7 +82,12 @@ func seedSecondBrandFixture(t *testing.T, pool *db.Pool, f casinoFixture) casino
 	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		w, err := wallet.GetOrCreate(ctx, tx, f.tenantID, second.brandID, second.playerAccountID, "EUR")
+		if err != nil {
+			return err
+		}
 		second.walletID = w.ID
+		ref, err := GetOrCreateProviderPlayerRef(ctx, tx, f.tenantID, "mock-casino", second.playerAccountID)
+		second.playerRef = ref
 		return err
 	})
 	if err != nil {
@@ -187,7 +192,7 @@ func TestReceiveCallback_BetDeclinedWhenSelfExcluded_NoLedgerEffect(t *testing.T
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	selfExclude(t, pool, f)
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rg-1", "", "round-rg-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rg-1", "", "round-rg-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -228,7 +233,7 @@ func TestReceiveCallback_BetDeclinedWhenWalletFrozen_NoLedgerEffect(t *testing.T
 		t.Fatalf("freeze wallet: %v", err)
 	}
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rg-frozen", "", "round-rg-frozen", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rg-frozen", "", "round-rg-frozen", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -264,7 +269,7 @@ func TestReceiveCallback_RedeliveredBetAfterSelfExclusionStillReportsOriginalSuc
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-redeliver-after-exclusion", "", "round-redeliver-after-exclusion", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-redeliver-after-exclusion", "", "round-redeliver-after-exclusion", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 	var first ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -403,7 +408,7 @@ func TestConcurrent_SelfExclusionDuringBet_Deterministic(t *testing.T) {
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, uuid.New().String(), "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, uuid.New().String(), "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 		var wg sync.WaitGroup
 		var betErr, exclusionErr error
@@ -467,7 +472,7 @@ func TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion(t *testing.T) {
 		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 		providerTxID := uuid.New().String()
-		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 		var wg sync.WaitGroup
 		var err1, err2, exclusionErr error

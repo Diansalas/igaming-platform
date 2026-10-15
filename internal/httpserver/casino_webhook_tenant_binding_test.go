@@ -47,7 +47,10 @@ func mustMintCasinoLaunchSessionDirect(t *testing.T, pool *db.Pool, tenant ident
 			return err
 		}
 		sessionID = session.ID
-		return nil
+		// A3 (CAS-BET-REQUIRES-BOOTSTRAP-1): a bet needs a 'consumed' session;
+		// this fixture stands in for a launched AND bootstrapped session.
+		_, err = tx.Exec(ctx, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1 AND status = 'active'`, sessionID)
+		return err
 	})
 	if err != nil {
 		t.Fatalf("mint casino launch session directly: %v", err)
@@ -76,12 +79,12 @@ func TestCasinoWebhook_CrossTenantBet_Rejected(t *testing.T) {
 	fundWallet(t, pool, tenantB.ID, brandB.ID, playerB.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenantB.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, playerB.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenantB.ID, playerB.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionB := uuid.MustParse(launched.SessionID)
 
 	// Signed FOR tenant A, but naming tenant B's own genuine session id.
 	payload := mock.CallbackPayload(tenantA.ID, casino.CallbackEventBet, "cas-c3-bet-1", "", "round-c3", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", playerB.ID, sessionB)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenantB.ID, playerB.ID), sessionB)
 
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenantA.ID, tenantB.ID})
 	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenantB.Slug+"/mock-casino", payload)
@@ -175,11 +178,11 @@ func TestCasinoWebhook_EqualSecretResolver_StillTenantBound(t *testing.T) {
 	fundWallet(t, pool, tenantA.ID, brandA.ID, playerA.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenantA.ID, game.ID)
-	launchedA := mustLaunchCasinoGame(t, srv, playerA.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launchedA := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenantA.ID, playerA.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionA := uuid.MustParse(launchedA.SessionID)
 
 	scheme := webhookauth.CasinoScheme()
-	body := []byte(`{"event_type":"bet","provider_tx_id":"cas-c4-bet-1","round_id":"round-c4","provider_game_id":"` + game.ProviderGameID + `","amount":1000,"asset_code":"EUR","outcome":"succeeded","player_account_id":"` + playerA.ID.String() + `","session_id":"` + sessionA.String() + `"}`)
+	body := []byte(`{"event_type":"bet","provider_tx_id":"cas-c4-bet-1","round_id":"round-c4","provider_game_id":"` + game.ProviderGameID + `","amount":1000,"asset_code":"EUR","outcome":"succeeded","player_ref":"` + mustCasinoPlayerRef(t, pool, tenantA.ID, playerA.ID).String() + `","session_id":"` + sessionA.String() + `"}`)
 	sigForA := scheme.Sign(secret, tenantA.ID, "mock-casino", webhookauth.MockKeyID, body)
 	header := make(http.Header)
 	scheme.SetHeaders(header, webhookauth.MockKeyID, sigForA)
@@ -391,7 +394,7 @@ func TestCasinoWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T
 	// folded into it.
 	t.Run("unconfigured_tenant_gets_503_not_401", func(t *testing.T) {
 		payload := mock.CallbackPayload(unconfiguredTenant.ID, casino.CallbackEventBet, "enum-unconfigured-1", "", "round-x", unconfiguredGame.ProviderGameID,
-			1000, "EUR", casino.OutcomeSucceeded, "", unconfiguredPlayer.ID, unconfiguredSessionID)
+			1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, unconfiguredTenant.ID, unconfiguredPlayer.ID), unconfiguredSessionID)
 		resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+unconfiguredTenant.Slug+"/mock-casino", payload)
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusServiceUnavailable {
@@ -494,7 +497,7 @@ func TestCasinoWebhook_DisabledCapability_ValidSignatureGets503(t *testing.T) {
 	sessionID := mustMintCasinoLaunchSessionDirect(t, pool, tenant, brand.ID, player.ID, wl.ID, game.ID, "mock-casino", game.ProviderGameID, "EUR")
 
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-c9-bet-1", "", "round-c9", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 	callbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 	defer callbackResp.Body.Close()
@@ -552,12 +555,12 @@ func TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityStillAllowsRollbackO
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const originalTxID = "cas-caprb1-original-bet"
 	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, originalTxID, "", "round-caprb1", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	if betResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 posting the original bet while the capability is enabled, got %d", betResp.StatusCode)
@@ -584,7 +587,7 @@ func TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityStillAllowsRollbackO
 	disableResp.Body.Close()
 
 	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, "cas-caprb1-rollback", originalTxID, "", "",
-		0, "EUR", "", "", player.ID, uuid.Nil)
+		0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	rollbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	defer rollbackResp.Body.Close()
 	// REQUIREMENT (Stage 10.3 CAS-CAP-ROLLBACK-1): a rollback of an

@@ -560,13 +560,19 @@ type CatalogueEntry struct {
 // LaunchRequest is the canonical, adapter-agnostic shape for asking a
 // CasinoProvider to produce a launch URL. Per ADR 0025 §1, no free-form
 // passthrough field exists - every field is explicitly enumerated.
-// PlayerAccountID is the platform's own opaque id, never an email/name/
-// PII (ADR 0025 §3: "minimizing exposed player data").
+//
+// PlayerRef is the provider-scoped OPAQUE player reference (CAS-PLAYER-REF-1,
+// ADR 0103 §3.5): a random UUID the platform maps to the player account in
+// casino_provider_player_refs, per (tenant, provider). The vendor NEVER
+// receives the platform's player_account_id - not on launch, not on balance,
+// and not echoed on callbacks - and no email/name/PII either (ADR 0025 §3:
+// "minimizing exposed player data"). It is unguessable, stable per player and
+// provider, and unlinkable across tenants and providers.
 type LaunchRequest struct {
-	ProviderGameID  string
-	PlayerAccountID uuid.UUID
-	AssetCode       string
-	Mode            GameMode
+	ProviderGameID string
+	PlayerRef      uuid.UUID
+	AssetCode      string
+	Mode           GameMode
 	// LaunchToken is the platform's own opaque, single-use launch
 	// credential (ADR 0025 §3) - passed through so the adapter can embed
 	// it in the provider's own launch URL for the provider to present
@@ -603,10 +609,13 @@ type LaunchResult struct {
 // query the platform-resolved balance for a game session - read-only,
 // posts nothing. AssetCode/Amount are int64 minor units, matching
 // internal/ledger's convention - never floating point.
+//
+// PlayerRef is the provider-scoped opaque player reference (CAS-PLAYER-REF-1),
+// never the platform's player_account_id.
 type BalanceRequest struct {
-	ProviderGameID  string
-	PlayerAccountID uuid.UUID
-	AssetCode       string
+	ProviderGameID string
+	PlayerRef      uuid.UUID
+	AssetCode      string
 }
 
 type BalanceResult struct {
@@ -692,18 +701,25 @@ type CallbackEvent struct {
 	// context to trace... provider transaction ID") - never used to
 	// resolve amounts/accounts, which always come from the event's own
 	// fields.
-	RoundID         string
-	ProviderGameID  string
-	Amount          int64
-	AssetCode       string
-	Outcome         Outcome
-	DeclineReason   string
-	PlayerAccountID uuid.UUID
+	RoundID        string
+	ProviderGameID string
+	Amount         int64
+	AssetCode      string
+	Outcome        Outcome
+	DeclineReason  string
+	// PlayerRef is the opaque provider-scoped player reference the platform
+	// handed the provider at launch (LaunchRequest.PlayerRef), echoed back
+	// (CAS-PLAYER-REF-1). A bet or win must carry one that resolves, for the
+	// callback's own tenant and provider, to a player of the platform
+	// (ResolveProviderPlayerRef); a raw player_account_id never resolves.
+	// Payload-supplied, so identification only - never authoritative for a
+	// financial write (see SessionID below and postWin).
+	PlayerRef uuid.UUID
 	// SessionID is the LaunchRequest.SessionID the platform handed this
 	// provider at launch time, echoed back on this callback - required
 	// for CallbackEventBet (postBet resolves the actual wallet/player/
 	// mode from the platform's own casino_launch_sessions row this names,
-	// never from PlayerAccountID above, which is payload-supplied and
+	// never from PlayerRef above, which is payload-supplied and
 	// therefore never authoritative for a financial write). Win/Rollback
 	// derive their own accounts from the ledger's own prior entries
 	// instead (see postWin/postRollback), so this field is not consulted

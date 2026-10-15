@@ -93,7 +93,7 @@ func TestPostBet_CodeReview3_SupportedAssetsNarrowedAfterLaunchRejectsBet(t *tes
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR", "USD")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	narrowedBody := validCasinoCapabilityBody()
@@ -105,7 +105,7 @@ func TestPostBet_CodeReview3_SupportedAssetsNarrowedAfterLaunchRejectsBet(t *tes
 	narrowResp.Body.Close()
 
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-cr3-narrow-bet", "", "round-cr3-narrow", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {

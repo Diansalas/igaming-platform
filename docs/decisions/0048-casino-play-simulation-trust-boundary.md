@@ -143,6 +143,37 @@ scope); a future stage may choose to have the Back Office/history views
 prefer `casino_provider_rounds` when a binding exists, falling back to the
 recompute path otherwise.
 
+**Update (A3, CAS-BET-REQUIRES-BOOTSTRAP-1 / CAS-PLAYER-REF-1, 2026-10-15):**
+`postBet` now accepts a NEW bet only against a session in the `consumed`
+(vendor-bootstrapped, ADR 0103) state, so a simulated wager can no longer
+post against a merely launched (`active`) session. These routes are the
+MOCK vendor, so they stand in for the bootstrap too, with the P2-2
+invariant preserved:
+
+- `requireSimulationDrivableSession` (replacing `requireActiveUnexpiredSession`)
+  accepts an `active`, unexpired session (the simulation consumes it) and a
+  `consumed` session ONLY when no `casino_launch_bootstraps` row exists for it,
+  i.e. the simulation itself consumed it. A session a real vendor bootstrapped
+  through `POST .../launch-bootstrap` still has such a row and is still refused
+  (`TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute`, unchanged):
+  the simulation is never a second, unsigned driver for a vendor-owned session.
+  Revoked and expired sessions are refused exactly as before.
+- In the domain transaction, before the verified callback is redeemed, an
+  `active` session is moved to `consumed` by one compare-and-swap
+  (`casino.ConsumeLaunchSessionForMockPlay`: `status = 'active' AND mode =
+  'real' AND expires_at > now()`), audited as the player-attributed
+  `casino_play_simulation.session_consumed`. A concurrent first wager that
+  loses the CAS re-reads the session and proceeds only if it is now
+  `consumed` without a vendor bootstrap row. It writes no bootstrap record,
+  performs no token check and re-evaluates no gate (`postBet` re-evaluates
+  game status/availability, capability, RG, risk and the session on every bet).
+- The simulation signs its callbacks with the player's opaque provider-scoped
+  reference (looked up read-only; `CreateLaunchSession` issues it), never the
+  account id.
+
+This does not change the registration gate (`CasinoPlaySimulationEnabled`),
+the amount cap, the rollback-target ownership check or the removal condition.
+
 ## Removal condition
 
 The moment a real `CasinoProvider` adapter is registered for any tenant,

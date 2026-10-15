@@ -122,13 +122,13 @@ func TestCasCapRollback1_DisabledCapabilityStillSettlesWinForPostedBet(t *testin
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const originalBetTxID = "cas-e1-original-bet"
 	const roundID = "round-e1"
 	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, originalBetTxID, "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	if betResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 posting the original bet while the capability is enabled, got %d", betResp.StatusCode)
@@ -153,7 +153,7 @@ func TestCasCapRollback1_DisabledCapabilityStillSettlesWinForPostedBet(t *testin
 
 	const winTxID = "cas-e1-win"
 	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
-		2500, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+		2500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	winResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
 	defer winResp.Body.Close()
 	if winResp.StatusCode != http.StatusOK {
@@ -239,7 +239,7 @@ func TestCasCapRollback1_LateOriginalAfterTombstoneIsNamedRejectionNot500(t *tes
 	const lateOriginalTxID = "cas-e3-late-original"
 	const rollbackTxID = "cas-e3-early-rollback"
 	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackTxID, lateOriginalTxID, "round-e3", "game-1",
-		0, "EUR", "", "", player.ID, uuid.Nil)
+		0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	rollbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	if rollbackResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for the early rollback of an unseen original (writes a tombstone), got %d", rollbackResp.StatusCode)
@@ -250,10 +250,10 @@ func TestCasCapRollback1_LateOriginalAfterTombstoneIsNamedRejectionNot500(t *tes
 		t.Fatalf("expected exactly 1 tombstone for %s, got %d", lateOriginalTxID, got)
 	}
 
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 	lateOriginalPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, lateOriginalTxID, "", "round-e3", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	lateResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", lateOriginalPayload)
 	defer lateResp.Body.Close()
 
@@ -338,11 +338,11 @@ func TestCasCapRollback1_BrandOnlyCapabilityNowResolvesAndAcceptsCallbacks(t *te
 	player := mustRegisterPlayer(t, srv, brand.Slug)
 	mustActivatePlayer(t, pool, tenant.ID, player.ID)
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-e4-bet-1", "", "round-e4", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -375,7 +375,7 @@ func TestCasCapRollback1_NoBrandNoTenantCapabilityRow_StillRejectsNewBets(t *tes
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	// Remove the capability row ENTIRELY (S-none), not merely disable it
@@ -390,7 +390,7 @@ func TestCasCapRollback1_NoBrandNoTenantCapabilityRow_StillRejectsNewBets(t *tes
 
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-snone-bet-1", "", "round-snone", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {

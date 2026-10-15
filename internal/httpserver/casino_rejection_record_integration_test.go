@@ -81,7 +81,7 @@ func (e *rejEnvHTTP) send(t *testing.T, ev casino.CallbackEventType, ref, origin
 	if ev == casino.CallbackEventRollback {
 		outcome = ""
 	}
-	payload := e.mock.CallbackPayload(e.tenant.ID, ev, ref, original, round, e.game.ProviderGameID, amount, "EUR", outcome, "", e.player.ID, session)
+	payload := e.mock.CallbackPayload(e.tenant.ID, ev, ref, original, round, e.game.ProviderGameID, amount, "EUR", outcome, "", mustCasinoPlayerRef(t, e.pool, e.tenant.ID, e.player.ID), session)
 	resp := rawPostCasinoCallback(t, e.srv, "/v1/webhooks/casino/"+e.tenant.Slug+"/mock-casino", payload)
 	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode
@@ -286,7 +286,7 @@ func TestCasinoRejectionRecord_EveryClassViaWebhook(t *testing.T) {
 				mustActivatePlayer(t, e.pool, e.tenant.ID, p2.ID)
 				w2 := fundWallet(t, e.pool, e.tenant.ID, e.brand.ID, p2.ID, "EUR", 10_000)
 				s2 := mustMintCasinoLaunchSessionDirect(t, e.pool, e.tenant, e.brand.ID, p2.ID, w2.ID, e.game.ID, "mock-casino", e.game.ProviderGameID, "EUR")
-				payload := e.mock.CallbackPayload(e.tenant.ID, casino.CallbackEventBet, "own-p2", "", "own-r", e.game.ProviderGameID, 100, "EUR", casino.OutcomeSucceeded, "", p2.ID, s2)
+				payload := e.mock.CallbackPayload(e.tenant.ID, casino.CallbackEventBet, "own-p2", "", "own-r", e.game.ProviderGameID, 100, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, e.pool, e.tenant.ID, p2.ID), s2)
 				resp := rawPostCasinoCallback(t, e.srv, "/v1/webhooks/casino/"+e.tenant.Slug+"/mock-casino", payload)
 				_ = resp.Body.Close()
 				if resp.StatusCode != http.StatusOK {
@@ -354,7 +354,7 @@ func TestCasinoRejectionRecord_UnverifiedCallbackWritesZeroRows(t *testing.T) {
 	if s := e.send(t, casino.CallbackEventRollback, "i1-rb", "i1-win", "i1-r", 0, uuid.Nil); s != http.StatusOK {
 		t.Fatalf("tombstoning rollback: %d", s)
 	}
-	payload := e.mock.CallbackPayload(e.tenant.ID, casino.CallbackEventWin, "i1-win", "", "i1-r", e.game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", e.player.ID, uuid.Nil)
+	payload := e.mock.CallbackPayload(e.tenant.ID, casino.CallbackEventWin, "i1-win", "", "i1-r", e.game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, e.pool, e.tenant.ID, e.player.ID), uuid.Nil)
 	tampered := webhookauth.Inbound{Header: payload.Header, Body: bytes.Replace(payload.Body, []byte(`"amount":500`), []byte(`"amount":501`), 1)}
 	if bytes.Equal(tampered.Body, payload.Body) {
 		t.Fatal("fixture: tamper did not change the body")
@@ -366,7 +366,7 @@ func TestCasinoRejectionRecord_UnverifiedCallbackWritesZeroRows(t *testing.T) {
 	}
 	// Signed for another tenant, delivered to this one: also 401, no row.
 	other := mustCreateTenant(t, e.pool)
-	foreign := e.mock.CallbackPayload(other.ID, casino.CallbackEventWin, "i1-win", "", "i1-r", e.game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", e.player.ID, uuid.Nil)
+	foreign := e.mock.CallbackPayload(other.ID, casino.CallbackEventWin, "i1-win", "", "i1-r", e.game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.Nil)
 	resp = rawPostCasinoCallback(t, e.srv, "/v1/webhooks/casino/"+e.tenant.Slug+"/mock-casino", foreign)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {

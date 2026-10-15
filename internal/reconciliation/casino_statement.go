@@ -2,6 +2,7 @@ package reconciliation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // Casino statement reconciliation stream (Stage 10.3 W3a, CAS-RECON-STMT-1;
@@ -96,12 +98,22 @@ import (
 // by posting to match the provider). Findings are state-type: re-detected
 // every run until the underlying condition is resolved (ADR 0023 §4).
 //
-// Snapshot: the statement source and the ledger are read in separate
-// statements, so the run MUST see one snapshot - otherwise a casino
-// posting committed between the two reads would surface as a false P1.
-// RunCasinoStatement therefore refuses (fails closed) unless its
-// transaction is REPEATABLE READ or SERIALIZABLE; the sweep opens it with
-// db.Pool.WithTenantSnapshot.
+// Snapshot and I/O (CAS-STMT-IO-1): a PROVIDER statement is FETCHED before
+// the run's transaction opens (FetchCasinoStatement; the source may be
+// provider I/O and is never called with a database transaction held - ADR
+// 0095 INV-IO-1) and only COMPARED inside it. The ledger side is read in
+// several statements, so the match MUST see one snapshot: RunCasinoStatement
+// refuses (fails closed) unless its transaction is REPEATABLE READ or
+// SERIALIZABLE; the sweep opens it with db.Pool.WithTenantSnapshot. A fetched
+// statement and the match no longer share a snapshot, so a casino posting that
+// commits between them is kept out of the comparison by the statement's
+// CoverageEnd (ledger transactions created after it are not compared), not
+// reported as a false P1; a source that gives no CoverageEnd is compared
+// against the whole ledger. The one other source shape is the SYNTHETIC
+// in-house ledger renderer (the MOCK): it reads the platform's own database,
+// not a provider, so it renders inside the match transaction at the very
+// snapshot of the ledger side (no coverage bound needed) - and only a source
+// marked providerkind.Synthetic is accepted in that shape.
 //
 // Deviation from paper 02 §2.5, recorded by its author (ledger-finance):
 // the win amount is the house_gaming debit of the win transaction (the
@@ -139,14 +151,69 @@ func (i CasinoStatementInfo) AuditMetadata() map[string]any {
 	}
 }
 
+// ErrCasinoStatementFetchUnderTx is returned when a casino statement fetch is
+// attempted while a pooled database transaction is held (CAS-STMT-IO-1,
+// ADR 0095 INV-IO-1).
+var ErrCasinoStatementFetchUnderTx = errors.New("reconciliation: casino statement fetch refused: a database transaction is held")
+
+// ErrCasinoStatementSourceShape is returned for a statement source that is
+// neither a fetcher nor a (Synthetic) ledger renderer.
+var ErrCasinoStatementSourceShape = errors.New("reconciliation: casino statement source must be a statement.CasinoStatementFetcher, or a Synthetic (statement.SyntheticSource) statement.CasinoLedgerRenderer")
+
+// FetchedCasinoStatement is a casino statement obtained for one run, with the
+// label of the source it came from. For a provider source it is a plain value
+// fetched OUTSIDE any database transaction: matching it performs no I/O. For
+// a Synthetic in-house ledger renderer the rendering is DEFERRED into the
+// match transaction (renderer != nil), where it reads the platform's own
+// database at the same snapshot as the ledger side - it is not provider I/O.
+type FetchedCasinoStatement struct {
+	Label string
+	statement.CasinoStatement
+	renderer statement.CasinoLedgerRenderer
+}
+
+// FetchCasinoStatement fetches tenantID's statement from source. It must be
+// called with NO database transaction held: it refuses under txscope.Held
+// (every db.Pool.With* callback context is marked) before calling the source,
+// so provider I/O can never run inside a transaction (CAS-STMT-IO-1). A nil
+// source fails closed rather than skipping the match.
+func FetchCasinoStatement(ctx context.Context, source statement.CasinoStatementSource, tenantID uuid.UUID, periodStart, periodEnd time.Time) (FetchedCasinoStatement, error) {
+	if source == nil {
+		return FetchedCasinoStatement{}, fmt.Errorf("reconciliation: %s requires a casino statement source", StreamCasinoStatement)
+	}
+	if txscope.Held(ctx) {
+		return FetchedCasinoStatement{Label: source.Label()}, ErrCasinoStatementFetchUnderTx
+	}
+	switch src := source.(type) {
+	case statement.CasinoStatementFetcher:
+		stmt, err := src.Fetch(ctx, statement.CasinoFetchRequest{TenantID: tenantID, PeriodStart: periodStart, PeriodEnd: periodEnd})
+		if err != nil {
+			return FetchedCasinoStatement{Label: source.Label()}, fmt.Errorf("reconciliation: casino statement source %q: %w", source.Label(), err)
+		}
+		return FetchedCasinoStatement{Label: source.Label(), CasinoStatement: stmt}, nil
+	case statement.CasinoLedgerRenderer:
+		// Only a component that marks itself Synthetic may render inside the
+		// match transaction; anything else would be a provider source reading
+		// (possibly over the network) under a held transaction.
+		if _, ok := source.(statement.SyntheticSource); !ok {
+			return FetchedCasinoStatement{Label: source.Label()}, fmt.Errorf("%w: %q is not Synthetic", ErrCasinoStatementSourceShape, source.Label())
+		}
+		return FetchedCasinoStatement{Label: source.Label(), renderer: src}, nil
+	default:
+		return FetchedCasinoStatement{Label: source.Label()}, fmt.Errorf("%w: %q", ErrCasinoStatementSourceShape, source.Label())
+	}
+}
+
 // RunCasinoStatement runs the casino_statement stream for tenantID inside
 // tx (db.Pool.WithTenantSnapshot(tenantID) - REPEATABLE READ is required
-// and enforced), recording exactly one Run and its mismatches, atomically -
-// the RunLedgerVsProjection contract. A nil source fails the run closed
-// rather than skipping the match.
-func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.CasinoStatementSource) (Run, []Mismatch, CasinoStatementInfo, error) {
-	if source == nil {
-		return Run{}, nil, CasinoStatementInfo{}, fmt.Errorf("reconciliation: %s requires a casino statement source", StreamCasinoStatement)
+// and enforced), matching the ALREADY-FETCHED statement against the ledger
+// and recording exactly one Run and its mismatches, atomically - the
+// RunLedgerVsProjection contract. It performs no provider I/O: the
+// statement arrives as a value (FetchCasinoStatement, called before tx
+// opened).
+func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time, fetched FetchedCasinoStatement) (Run, []Mismatch, CasinoStatementInfo, error) {
+	if fetched.Label == "" {
+		return Run{}, nil, CasinoStatementInfo{}, fmt.Errorf("reconciliation: %s requires a fetched casino statement", StreamCasinoStatement)
 	}
 	if err := requireSnapshotIsolation(ctx, tx); err != nil {
 		return Run{}, nil, CasinoStatementInfo{}, err
@@ -157,9 +224,20 @@ func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, peri
 	}
 	r := &sbRecorder{tenantID: tenantID}
 
-	lines, totals, err := source.Statement(ctx, tx, tenantID, periodStart, periodEnd)
-	if err != nil {
-		return Run{}, nil, CasinoStatementInfo{}, fmt.Errorf("reconciliation: casino statement source %q: %w", source.Label(), err)
+	lines, totals := fetched.Lines, fetched.Totals
+	if fetched.renderer != nil {
+		// Synthetic in-house source: rendered here, in the match transaction,
+		// from the platform's own ledger (database reads only).
+		var err error
+		lines, totals, err = fetched.renderer.RenderFromLedger(ctx, tx, tenantID)
+		if err != nil {
+			return Run{}, nil, CasinoStatementInfo{}, fmt.Errorf("reconciliation: casino statement source %q: %w", fetched.Label, err)
+		}
+	}
+	var cutoff *time.Time
+	if !fetched.CoverageEnd.IsZero() {
+		c := fetched.CoverageEnd
+		cutoff = &c
 	}
 	info := CasinoStatementInfo{Lines: len(lines), Totals: len(totals), TotalsProvided: len(totals) > 0}
 
@@ -168,12 +246,12 @@ func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, peri
 		return Run{}, nil, CasinoStatementInfo{}, fmt.Errorf("reconciliation: casino footprint: %w", err)
 	}
 	if footprint || len(lines) > 0 || len(totals) > 0 {
-		label := "[" + source.Label() + "] "
-		if info.TombstonePairings, err = casStmtMatchKeys(ctx, tx, tenantID, label, lines, r); err != nil {
+		label := "[" + fetched.Label + "] "
+		if info.TombstonePairings, err = casStmtMatchKeys(ctx, tx, tenantID, cutoff, label, lines, r); err != nil {
 			return Run{}, nil, CasinoStatementInfo{}, fmt.Errorf("reconciliation: casino statement key match: %w", err)
 		}
 		if info.TotalsProvided {
-			if err := casStmtMatchTotals(ctx, tx, tenantID, label, totals, r); err != nil {
+			if err := casStmtMatchTotals(ctx, tx, tenantID, cutoff, label, totals, r); err != nil {
 				return Run{}, nil, CasinoStatementInfo{}, fmt.Errorf("reconciliation: casino statement totals match: %w", err)
 			}
 		}
@@ -241,7 +319,7 @@ func casStmtKey(provider, ref string) string {
 // stake (debits on the player's spendable accounts), a win's payout (its
 // house_gaming debit), a rollback's original's amount; an unlinked
 // rollback's amount is left nil so it never matches.
-func casStmtLedgerView(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r *sbRecorder) (map[string]casStmtLedgerRow, error) {
+func casStmtLedgerView(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, cutoff *time.Time, r *sbRecorder) (map[string]casStmtLedgerRow, error) {
 	rows, err := tx.Query(ctx, `
 		WITH t AS (
 		    SELECT t.id, t.provider_id, t.provider_tx_id, t.transaction_type, t.correlation_id, t.reverses_transaction_id,
@@ -257,14 +335,15 @@ func casStmtLedgerView(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r *sb
 		             WHERE e.ledger_transaction_id = t.id) AS asset
 		      FROM ledger_transactions t
 		     WHERE t.tenant_id = $1 AND t.transaction_type = ANY($2)
-		       AND t.provider_id IS NOT NULL AND t.provider_tx_id IS NOT NULL)
+		       AND t.provider_id IS NOT NULL AND t.provider_tx_id IS NOT NULL
+		       AND ($3::timestamptz IS NULL OR t.created_at <= $3))
 		SELECT t.provider_id, t.provider_tx_id, t.transaction_type, t.correlation_id, t.asset,
 		       t.stake::text, t.payout::text,
 		       COALESCE(o.provider_tx_id, ''), COALESCE(o.transaction_type, ''),
 		       COALESCE(o.stake, 0)::text, COALESCE(o.payout, 0)::text
 		  FROM t
 		  LEFT JOIN t o ON o.id = t.reverses_transaction_id
-		 ORDER BY t.provider_id, t.provider_tx_id, t.id`, tenantID, casinoTxTypes)
+		 ORDER BY t.provider_id, t.provider_tx_id, t.id`, tenantID, casinoTxTypes, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +400,10 @@ func casStmtLedgerView(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r *sb
 
 // casStmtTombstones is the set of (provider_id, provider_tx_id) keys the
 // ledger holds as a CASINO tombstone (casinoProvidersCTE: the key format
-// alone cannot tell a casino tombstone from a payments one, G-4).
+// alone cannot tell a casino tombstone from a payments one, G-4). It is
+// deliberately NOT bounded by the statement's CoverageEnd: a tombstone only
+// ever pairs a statement rollback line that already names its original, so a
+// late one can excuse a listed rollback but never create a finding.
 func casStmtTombstones(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (map[string]bool, error) {
 	rows, err := tx.Query(ctx, `
 		WITH `+casinoProvidersCTE+`
@@ -345,8 +427,8 @@ func casStmtTombstones(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (map[
 	return out, rows.Err()
 }
 
-func casStmtMatchKeys(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, label string, lines []statement.CasinoStatementLine, r *sbRecorder) (int, error) {
-	ledgerView, err := casStmtLedgerView(ctx, tx, tenantID, r)
+func casStmtMatchKeys(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, cutoff *time.Time, label string, lines []statement.CasinoStatementLine, r *sbRecorder) (int, error) {
+	ledgerView, err := casStmtLedgerView(ctx, tx, tenantID, cutoff, r)
 	if err != nil {
 		return 0, err
 	}
@@ -439,7 +521,7 @@ func casStmtTotalKey(provider, asset string) string {
 
 // casStmtMatchTotals: per (provider, asset), the net house_gaming movement
 // of the provider's casino transactions equals the statement's GGR.
-func casStmtMatchTotals(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, label string, totals []statement.CasinoStatementTotal, r *sbRecorder) error {
+func casStmtMatchTotals(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, cutoff *time.Time, label string, totals []statement.CasinoStatementTotal, r *sbRecorder) error {
 	rows, err := tx.Query(ctx, `
 		SELECT t.provider_id, la.asset_code,
 		       SUM(CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)::text
@@ -448,7 +530,8 @@ func casStmtMatchTotals(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, labe
 		  JOIN ledger_accounts la ON la.id = e.ledger_account_id
 		 WHERE t.tenant_id = $1 AND t.transaction_type = ANY($2)
 		   AND t.provider_id IS NOT NULL AND la.account_type = 'house_gaming'
-		 GROUP BY t.provider_id, la.asset_code`, tenantID, casinoTxTypes)
+		   AND ($3::timestamptz IS NULL OR t.created_at <= $3)
+		 GROUP BY t.provider_id, la.asset_code`, tenantID, casinoTxTypes, cutoff)
 	if err != nil {
 		return err
 	}

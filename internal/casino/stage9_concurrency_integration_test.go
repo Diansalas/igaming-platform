@@ -214,7 +214,7 @@ func TestStage9_ConcurrentDistinctBetsOneWallet_ExactlyOneAccepted(t *testing.T)
 			defer wg.Done()
 			payload := provider.CallbackPayload(f.tenantID, CallbackEventBet,
 				"s9-bet-race-"+string(rune('a'+i)), "", "s9-round-race-"+string(rune('a'+i)), "game-1",
-				1_000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+				1_000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
 				results[i], err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
@@ -293,7 +293,7 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 		stake = int64(400)
 		win   = int64(500)
 	)
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "s9-bet-wvr", "", round, "game-1", stake, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "s9-bet-wvr", "", round, "game-1", stake, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -301,8 +301,8 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 		t.Fatalf("seed bet: %v", err)
 	}
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "s9-win-wvr", "", round, "game-1", win, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
-	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "s9-rb-wvr", "s9-bet-wvr", round, "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "s9-win-wvr", "", round, "game-1", win, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "s9-rb-wvr", "s9-bet-wvr", round, "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 
 	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
@@ -414,7 +414,7 @@ func TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactlyOnce(t *t
 			defer wg.Done()
 			payload := provider.CallbackPayload(f.tenantID, CallbackEventWin,
 				"s9-win-locked-"+string(rune('a'+i)), "", round, "game-1",
-				win, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+				win, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
@@ -523,7 +523,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 	go func() {
 		defer wg.Done()
 		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "s9-bet-vs-wd", "", "s9-round-bet-vs-wd", "game-1",
-			amount, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+			amount, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 		betErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			betResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)

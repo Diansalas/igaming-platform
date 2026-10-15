@@ -61,7 +61,7 @@ func TestPointNineCapture_Casino_AllowsExactlyOneHandleRead(t *testing.T) {
 
 	signed := func(keyID string, key []byte) webhookauth.Inbound {
 		in := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-p9-"+uuid.NewString()[:8], "", "round-p9", "game-1",
-			1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+			1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 		in.Header = in.Header.Clone()
 		webhookauth.CasinoScheme().SetHeaders(in.Header, keyID, webhookauth.CasinoScheme().Sign(key, f.tenantID, "mock-casino", keyID, in.Body))
 		return in
@@ -145,7 +145,7 @@ func TestReceiveCallback_RealResolver_RevocationImmediate(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, sub.Resolver("casino"))
 	call := func() error {
 		in := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-rev-"+uuid.NewString()[:8], "", "round-rev", "game-1",
-			1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+			1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 		in.Header = in.Header.Clone()
 		webhookauth.CasinoScheme().SetHeaders(in.Header, webhookauth.MockKeyID,
 			webhookauth.CasinoScheme().Sign(secret, f.tenantID, "mock-casino", webhookauth.MockKeyID, in.Body))

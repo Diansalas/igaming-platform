@@ -50,6 +50,9 @@ type casWorld struct {
 	orch      *casino.Orchestrator
 	game      casino.Game
 	sessionID uuid.UUID
+	// playerRef is the opaque provider-scoped reference of the world's
+	// player (CAS-PLAYER-REF-1): what its callbacks carry.
+	playerRef uuid.UUID
 }
 
 func casSeedPlatformAdmin(t *testing.T, pool *db.Pool) uuid.UUID {
@@ -88,7 +91,14 @@ func newCasWorld(t *testing.T, pool *db.Pool) *casWorld {
 		t.Fatalf("seed game: %v", err)
 	}
 	declared := w.mock.Capabilities()
-	w.sessionID = w.mintSession(t, w.f.playerAccountID, w.f.walletID)
+	// A3: a bet needs an enabled game and a 'consumed' session.
+	if err := pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := casino.SetGameAvailability(ctx, tx, w.f.tenantID, nil, w.game.ID, true)
+		return err
+	}); err != nil {
+		t.Fatalf("enable game: %v", err)
+	}
+	w.sessionID, w.playerRef = w.mintConsumedSession(t, w.f.playerAccountID, w.f.walletID)
 	err = pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := casino.WriteCapability(ctx, tx, w.mock, w.f.tenantID, nil, casino.CapabilityConfig{
 			SupportsCatalogue: declared.SupportsCatalogue, SupportsLaunch: declared.SupportsLaunch, SupportsBalance: declared.SupportsBalance,
@@ -102,6 +112,31 @@ func newCasWorld(t *testing.T, pool *db.Pool) *casWorld {
 		t.Fatalf("write capability: %v", err)
 	}
 	return w
+}
+
+// mintConsumedSession mints a session and consumes it through the single-use
+// token CAS (the test-only stand-in for the vendor bootstrap), returning the
+// session id and the player's opaque reference.
+func (w *casWorld) mintConsumedSession(t *testing.T, playerID, walletID uuid.UUID) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	var id, ref uuid.UUID
+	err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		s, token, err := casino.CreateLaunchSession(ctx, tx, casino.CreateLaunchSessionParams{
+			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: playerID, WalletID: walletID,
+			GameID: w.game.ID, ProviderID: casProvider, ProviderGameID: w.game.ProviderGameID,
+			AssetCode: "EUR", Mode: casino.ModeReal,
+		})
+		if err != nil {
+			return err
+		}
+		id, ref = s.ID, s.PlayerRef
+		_, err = casino.ResolveLaunchToken(ctx, tx, token)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("mint consumed session: %v", err)
+	}
+	return id, ref
 }
 
 func (w *casWorld) mintSession(t *testing.T, playerID, walletID uuid.UUID) uuid.UUID {
@@ -131,7 +166,7 @@ func (w *casWorld) deliver(t *testing.T, ev casino.CallbackEventType, ref, origi
 	if ev == casino.CallbackEventRollback {
 		outcome = ""
 	}
-	payload := w.mock.CallbackPayload(w.f.tenantID, ev, ref, original, round, w.game.ProviderGameID, amount, "EUR", outcome, "", w.f.playerAccountID, w.sessionID)
+	payload := w.mock.CallbackPayload(w.f.tenantID, ev, ref, original, round, w.game.ProviderGameID, amount, "EUR", outcome, "", w.playerRef, w.sessionID)
 	var res casino.ReceiveCallbackResult
 	// ADR 0094 §4.1 two-phase shape: verify with no transaction held, then
 	// the domain transaction.

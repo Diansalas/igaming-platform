@@ -358,7 +358,7 @@ func TestCasinoWebhook_UnsignedPayloadRejected(t *testing.T) {
 	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
 	tenant := mustCreateTenant(t, pool)
 
-	unsigned := []byte(`{"event_type":"bet","provider_tx_id":"http-unsigned-1","amount":1000,"asset_code":"EUR","outcome":"succeeded","player_account_id":"` + uuid.NewString() + `"}`)
+	unsigned := []byte(`{"event_type":"bet","provider_tx_id":"http-unsigned-1","amount":1000,"asset_code":"EUR","outcome":"succeeded","player_ref":"` + uuid.NewString() + `"}`)
 	resp := rawPostJSON(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", unsigned)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -399,15 +399,15 @@ func TestCasinoWebhook_ProviderRoundOwnershipConflict_Returns409WithoutLeakingId
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, pool, tenant)
 
-	launchedA := mustLaunchCasinoGame(t, srv, playerA.Tokens.AccessToken, game.ID.String(), "EUR", "real")
-	launchedB := mustLaunchCasinoGame(t, srv, playerB.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launchedA := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, playerA.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launchedB := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, playerB.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionA := uuid.MustParse(launchedA.SessionID)
 	sessionB := uuid.MustParse(launchedB.SessionID)
 
 	const conflictRoundID = "round-http-ownership-conflict"
 
 	payloadA := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-http-conflict-a", "", conflictRoundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", playerA.ID, sessionA)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, playerA.ID), sessionA)
 	respA := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadA)
 	defer respA.Body.Close()
 	if respA.StatusCode != http.StatusOK {
@@ -415,7 +415,7 @@ func TestCasinoWebhook_ProviderRoundOwnershipConflict_Returns409WithoutLeakingId
 	}
 
 	payloadB := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-http-conflict-b", "", conflictRoundID, game.ProviderGameID,
-		750, "EUR", casino.OutcomeSucceeded, "", playerB.ID, sessionB)
+		750, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, playerB.ID), sessionB)
 	respB := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadB)
 	defer respB.Body.Close()
 	if respB.StatusCode != http.StatusConflict {

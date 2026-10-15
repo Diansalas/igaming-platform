@@ -84,6 +84,23 @@ var ioc1FlaggedMethods = map[string]bool{
 	// same way flagging Deposit/Launch/CreateVerification does for their
 	// own packages.
 	"FetchCatalogue": true,
+	// CAS-STMT-IO-1 (A3): the statement sources of the reconciliation
+	// streams. CasinoStatementSource.Fetch and PaymentStatementSource.Fetch
+	// are provider I/O for a real source (a statement API or file read), and
+	// FetchCasinoStatement is the stream's single sanctioned caller of the
+	// casino one; flagging both names keeps a statement fetch out of the
+	// reconciliation match transaction - the original CAS-STMT-IO-1 defect,
+	// where the casino statement was read inside the REPEATABLE READ tx.
+	"Fetch": true, "FetchCasinoStatement": true,
+}
+
+// ioc1FlaggedBareFuncs are package-level helpers that perform provider I/O
+// and are called BARE (an *ast.Ident callee, from inside their own package),
+// which ioc1CalleeName's selector-only matching would not see. Kept to the
+// helpers that need it; a bare-call name list for every adapter method would
+// flag unrelated local helpers.
+var ioc1FlaggedBareFuncs = map[string]bool{
+	"FetchCasinoStatement": true,
 }
 
 // ioc1TxClosureViolation is one adapter-method call found lexically inside
@@ -159,7 +176,10 @@ func ioc1ScanFile(path string, src []byte) ([]ioc1TxClosureViolation, int, error
 				return true
 			}
 			name := ioc1CalleeName(call.Fun)
-			if name != "" && ioc1FlaggedMethods[name] {
+			if id, ok := call.Fun.(*ast.Ident); ok && ioc1FlaggedBareFuncs[id.Name] {
+				name = id.Name
+			}
+			if name != "" && (ioc1FlaggedMethods[name] || ioc1FlaggedBareFuncs[name]) {
 				violations = append(violations, ioc1TxClosureViolation{pos: fset.Position(call.Pos()), method: name})
 			}
 			return true
@@ -233,6 +253,10 @@ func TestINV_IO_1c_NoAdapterCallInsideTxClosure(t *testing.T) {
 		// file.
 		filepath.Join(root, "internal", "sportsbook"),
 		filepath.Join(root, "cmd", "platform-api"),
+		// CAS-STMT-IO-1 (A3): the reconciliation streams fetch provider
+		// statements (casino and payment); their match transactions must
+		// never contain the fetch.
+		filepath.Join(root, "internal", "reconciliation"),
 	}
 
 	var violations []ioc1TxClosureViolation
@@ -331,6 +355,61 @@ func (o *Orchestrator) readCapabilities(ctx context.Context, pool *db.Pool, tena
 	}
 	if len(v) != 0 {
 		t.Fatalf("expected no violations for a non-flagged metadata call (Capabilities) inside a tx closure, got %v", v)
+	}
+}
+
+// TestINV_IO_1c_GuardCatchesStatementFetchInsideTx is CAS-STMT-IO-1's
+// negative control: the original defect shape - a casino statement source
+// called from inside the reconciliation REPEATABLE READ closure - and the
+// FetchCasinoStatement helper called from one are both flagged, while the
+// production order (fetch first, then open the transaction) is not.
+func TestINV_IO_1c_GuardCatchesStatementFetchInsideTx(t *testing.T) {
+	planted := `package x
+
+func run(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, source CasinoStatementSource) error {
+	return pool.WithTenantSnapshot(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		stmt, err := source.Fetch(ctx, CasinoFetchRequest{TenantID: tenantID})
+		_, _ = stmt, err
+		fetched, err := FetchCasinoStatement(ctx, source, tenantID, start, end)
+		_, _ = fetched, err
+		return nil
+	})
+}
+`
+	v, closures, err := ioc1ScanFile("planted_stmt.go", []byte(planted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closures != 1 {
+		t.Fatalf("expected the planted snapshot closure to be recognized, got %d", closures)
+	}
+	got := map[string]bool{}
+	for _, x := range v {
+		got[x.method] = true
+	}
+	if len(v) != 2 || !got["Fetch"] || !got["FetchCasinoStatement"] {
+		t.Fatalf("expected a Fetch and a FetchCasinoStatement violation, got %v", v)
+	}
+
+	safe := `package x
+
+func run(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, source CasinoStatementSource) error {
+	fetched, err := FetchCasinoStatement(ctx, source, tenantID, start, end)
+	if err != nil {
+		return err
+	}
+	return pool.WithTenantSnapshot(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, _, err := RunCasinoStatement(ctx, tx, tenantID, start, end, fetched)
+		return err
+	})
+}
+`
+	v, closures, err = ioc1ScanFile("safe_stmt.go", []byte(safe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closures != 1 || len(v) != 0 {
+		t.Fatalf("fetch-then-match must not be flagged (closures=%d violations=%v)", closures, v)
 	}
 }
 

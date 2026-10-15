@@ -11,8 +11,9 @@ verified implementation status).
 **A real vendor speaking this contract does not exist.** Everything below is exercised only by
 `internal/casino.MockCasinoProvider`'s own bootstrap client (`BootstrapPayload`), which signs a
 request with the same per-tenant derived key `CallbackPayload` uses and sends it over a real
-`net/http` call in tests — never an in-process shortcut. **CAS-PLAYER-REF-1 must close before this
-contract is offered to any real vendor** (see "Known limitation" below).
+`net/http` call in tests — never an in-process shortcut. CAS-PLAYER-REF-1, which had to close before
+this contract could be offered to any real vendor, is closed for the platform side (A3,
+2026-10-15; see "Player reference" below); a real vendor remains PROVIDER DEPENDENT.
 
 ## Endpoint
 
@@ -92,13 +93,18 @@ failing). The session is left exactly as it was; nothing is written.
 
 ## Player reference
 
-`player_ref` is a random UUID, unique per `(tenant, provider, player_account_id)`, created on first
-bootstrap and stable thereafter. It is unlinkable across tenants and providers, and never derived
-from a secret. **Known limitation (CAS-PLAYER-REF-1, registered, must close before any real
-vendor):** the platform's own `LaunchRequest` (the earlier, still-unchanged phase-B call to
-`CasinoProvider.Launch`) still passes the player's raw `player_account_id`, not `player_ref` — so
-the opacity this contract introduces holds only against a vendor that does not also receive the
-`Launch` call with the raw id. This bootstrap contract does not by itself close that gap.
+`player_ref` is a random UUID, unique per `(tenant, provider, player_account_id)` and per
+`(tenant, provider, player_ref)`, stable thereafter, unlinkable across tenants and providers, and
+never derived from a secret. **CAS-PLAYER-REF-1 (closed, A3):** it is issued when the launch
+session is minted (so it exists before the vendor's first contact), `CasinoProvider.Launch` /
+`Balance` receive it as `PlayerRef` (the platform's `player_account_id` is no longer a field of any
+vendor-facing type), and the vendor echoes it on every bet/win callback as `player_ref`. The
+platform resolves it scoped to the callback's own authenticated tenant and provider; a raw account
+id, an unknown reference, or another tenant's or provider's reference is refused (400,
+`ErrPlayerRefUnresolved`) before any ledger read or write, and a callback body that names
+`player_account_id` at all is refused as malformed. The reference identifies the player to the
+vendor; it never authorises: the wallet a bet debits is the launch session's, the wallet a win
+credits is the round's own bet's.
 
 ## What this endpoint does NOT do
 
@@ -106,21 +112,22 @@ the opacity this contract introduces holds only against a vendor that does not a
   `LaunchGame`'s own job at mint time (frozen onto the session) and `postBet`'s own job on every
   bet. It re-checks only: the game's own platform status, the provider capability
   (active/supports_launch/supports_bet for real-money/asset support), and RG eligibility.
-- It does not decide whether a real-money bet should require a bootstrapped (`consumed`) session —
-  that is a separate, still-open decision (CAS-BET-REQUIRES-BOOTSTRAP-1, registered; `postBet`
-  currently accepts both `active` and `consumed`).
+- It is no longer optional for betting (CAS-BET-REQUIRES-BOOTSTRAP-1, closed, A3): `postBet`
+  accepts a new bet only against a `consumed` session, so a vendor must have completed this
+  bootstrap before its first bet; a bet on a merely launched (`active`), expired or revoked session
+  is refused with 400. Win/rollback of exposure that already exists never consult the session.
 - It does not widen the pre-existing B2C "play simulation" routes
-  (`POST /v1/me/casino/sessions/{id}/wager` and siblings, `casino_play_handlers.go`), which retain
-  their own, separately-reviewed `'active'`-only precondition (security finding P2-2) and are
-  therefore **not** usable against a session this endpoint has consumed. **This is intended, not a
-  gap:** the simulation routes are a player-driven stand-in for a vendor call, reachable only
-  outside production; a `consumed` session is owned by the vendor's signed webhook path, and
-  widening the simulation precondition would create a second, unsigned driver for the same round's
-  money. Security's final ruling (`docs/plans/prh2-hardening-round/reviews/b-security.md`) is to
-  keep `requireActiveUnexpiredSession` `active`-only. Pinned by
+  (`POST /v1/me/casino/sessions/{id}/wager` and siblings, `casino_play_handlers.go`) to a session
+  this endpoint has consumed. **This is intended, not a gap:** the simulation routes are a
+  player-driven stand-in for a vendor call, reachable only outside production; a session a real
+  vendor bootstrapped (it has a `casino_launch_bootstraps` row) is owned by the vendor's signed
+  webhook path, and driving it from the simulation would create a second, unsigned driver for the
+  same round's money (security finding P2-2). Pinned by
   `TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute`
-  (`internal/httpserver/casino_bootstrap_integration_test.go`). The real provider path (a
-  genuinely-signed bet callback through `postBet`) is unaffected.
+  (`internal/httpserver/casino_bootstrap_integration_test.go`). Since a bet now needs a consumed
+  session, the simulation plays the MOCK vendor's part itself for a session it owns (ADR 0048, A3
+  update). The real provider path (a genuinely-signed bet callback through `postBet`) is
+  unaffected.
 
 ## Reference implementation
 
@@ -149,8 +156,8 @@ vendor being forced to emit exactly the MOCK's own wire shape.
 
 ## Path to a real vendor
 
-1. Close CAS-PLAYER-REF-1 (switch the `Launch` call to `player_ref`).
-2. Decide CAS-BET-REQUIRES-BOOTSTRAP-1 (whether a real-money bet requires a bootstrapped session).
+1. ~~Close CAS-PLAYER-REF-1~~ (done, A3: the `Launch` call carries `player_ref`).
+2. ~~Decide CAS-BET-REQUIRES-BOOTSTRAP-1~~ (done, A3: a real-money bet requires a `consumed` session).
 3. Confirm a real commercial/technical relationship exists (CLAUDE.md: never build against real
    vendor credentials without one).
 4. Build the real adapter behind `casino.CasinoProvider`, composing

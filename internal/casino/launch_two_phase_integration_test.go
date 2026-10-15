@@ -475,7 +475,7 @@ func TestLaunchGame_CtxCancelledDuringLaunch_StillRevokesAndAudits(t *testing.T)
 		t.Fatalf("read session id: %v", err)
 	}
 	debitsBefore, creditsBefore := sumDebitsCredits(t, pool, f.tenantID)
-	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ctx-cancel", "", "round-ctx-cancel", "game-1", 100, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ctx-cancel", "", "round-ctx-cancel", "game-1", 100, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -538,8 +538,12 @@ func TestLaunchGame_CtxCancelledAfterVendorAccept_StillAuditsLaunched(t *testing
 		t.Fatal("expected a casino.launched audit record even though the request ctx was cancelled right after Launch returned")
 	}
 
-	// The session is genuinely usable - the vendor really did accept it.
-	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-vendor-accept", "", "round-after-vendor-accept", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerAccountID, result.SessionID)
+	// The session is genuinely usable - the vendor really did accept it. A3
+	// (CAS-BET-REQUIRES-BOOTSTRAP-1): "accepted" now includes the vendor's
+	// bootstrap, which moves the session to 'consumed'; a bet on the merely
+	// launched ('active') session is refused.
+	consumeSessionDirect(t, pool, f.tenantID, result.SessionID)
+	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-vendor-accept", "", "round-after-vendor-accept", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerRef, result.SessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -794,7 +798,7 @@ func TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet(t *testin
 
 	// The gap is closed: a bet against this now-'revoked' session is
 	// refused with ErrLaunchSessionRequired.
-	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-failed-launch", "", "round-after-failed-launch", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-failed-launch", "", "round-after-failed-launch", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err

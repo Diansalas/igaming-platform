@@ -50,7 +50,8 @@ type MockCasinoProvider struct {
 	health   ProviderHealth
 	seq      int
 	games    []CatalogueEntry
-	balances map[string]BalanceResult // keyed by playerAccountID+assetCode
+	balances map[string]BalanceResult // keyed by playerRef+assetCode (CAS-PLAYER-REF-1)
+	launches []LaunchRequest          // every LaunchRequest received (LaunchRequests)
 	failNext bool
 
 	// masterSecret is this adapter INSTANCE's own process-local, per-
@@ -217,15 +218,28 @@ func (m *MockCasinoProvider) consumeFailure() bool {
 }
 
 // SetBalance lets a test seed the value MockCasinoProvider.Balance returns
-// for a given (playerAccountID, assetCode) pair - the mock has no access
+// for a given (playerRef, assetCode) pair - the mock has no access
 // to the platform's own wallet/ledger tables, so this is a purely synthetic
 // stand-in for a provider's own game-round balance (never authoritative -
 // see ADR 0025 §8: "never trust provider-supplied balance as financial
-// truth").
-func (m *MockCasinoProvider) SetBalance(playerAccountID uuid.UUID, assetCode string, amount int64) {
+// truth"). Keyed by the opaque provider-scoped player reference
+// (CAS-PLAYER-REF-1): the mock, like any vendor, knows no platform account id.
+func (m *MockCasinoProvider) SetBalance(playerRef uuid.UUID, assetCode string, amount int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.balances[playerAccountID.String()+":"+assetCode] = BalanceResult{Amount: amount, AssetCode: assetCode}
+	m.balances[playerRef.String()+":"+assetCode] = BalanceResult{Amount: amount, AssetCode: assetCode}
+}
+
+// LaunchRequests returns a copy of every LaunchRequest this mock has
+// received, oldest first - what a vendor would have seen. A test uses it to
+// prove the vendor was handed only the opaque player reference
+// (CAS-PLAYER-REF-1), never a platform account id.
+func (m *MockCasinoProvider) LaunchRequests() []LaunchRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]LaunchRequest, len(m.launches))
+	copy(out, m.launches)
+	return out
 }
 
 // Catalogue implements CasinoProvider.
@@ -244,9 +258,17 @@ func (m *MockCasinoProvider) Launch(_ context.Context, req LaunchRequest) (Launc
 	if req.LaunchToken == "" {
 		return LaunchResult{}, fmt.Errorf("%w: launch token is required", ErrInvalidInput)
 	}
+	// CAS-PLAYER-REF-1: a vendor identifies the player by the opaque
+	// reference only; a launch without one is malformed.
+	if req.PlayerRef == uuid.Nil {
+		return LaunchResult{}, fmt.Errorf("%w: player reference is required", ErrInvalidInput)
+	}
 	if m.consumeFailure() {
 		return LaunchResult{}, fmt.Errorf("casino/mock: simulated provider transport failure")
 	}
+	m.mu.Lock()
+	m.launches = append(m.launches, req)
+	m.mu.Unlock()
 	if req.ProviderGameID == MockGameIDDeclineLaunch {
 		return LaunchResult{Outcome: OutcomeDeclined, DeclineReason: "mock_provider_declined"}, nil
 	}
@@ -261,7 +283,7 @@ func (m *MockCasinoProvider) Launch(_ context.Context, req LaunchRequest) (Launc
 func (m *MockCasinoProvider) Balance(_ context.Context, req BalanceRequest) (BalanceResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if b, ok := m.balances[req.PlayerAccountID.String()+":"+req.AssetCode]; ok {
+	if b, ok := m.balances[req.PlayerRef.String()+":"+req.AssetCode]; ok {
 		return b, nil
 	}
 	return BalanceResult{Amount: 0, AssetCode: req.AssetCode}, nil
@@ -356,7 +378,10 @@ type mockCasinoCallbackBody struct {
 	AssetCode            string `json:"asset_code"`
 	Outcome              string `json:"outcome"`
 	DeclineReason        string `json:"decline_reason,omitempty"`
-	PlayerAccountID      string `json:"player_account_id"`
+	// PlayerRef echoes the opaque provider-scoped player reference the
+	// platform handed the provider at launch (CAS-PLAYER-REF-1). There is no
+	// player_account_id on the wire: a body carrying one is refused.
+	PlayerRef string `json:"player_ref,omitempty"`
 	// SessionID echoes back the LaunchRequest.SessionID the platform
 	// handed this provider at launch time - required on a bet callback so
 	// ReceiveCallback can resolve player/wallet/asset/mode from the
@@ -379,6 +404,17 @@ func hasLegacySignatureField(generic any) bool {
 	return present
 }
 
+// hasRawPlayerAccountField reports whether the top-level JSON object carries
+// a "player_account_id" field (the pre-A3 wire shape, CAS-PLAYER-REF-1).
+func hasRawPlayerAccountField(generic any) bool {
+	obj, ok := generic.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, present := obj["player_account_id"]
+	return present
+}
+
 // callbackBodyHasNULByte reports whether any string field of body contains
 // a literal NUL byte (a JSON string may legally decode one via a unicode
 // escape). Kept as a post-verification structural validation (design §C2
@@ -388,7 +424,7 @@ func hasLegacySignatureField(generic any) bool {
 func callbackBodyHasNULByte(body mockCasinoCallbackBody) bool {
 	for _, s := range []string{
 		body.EventType, body.ProviderTxID, body.OriginalProviderTxID, body.RoundID, body.ProviderGameID,
-		body.AssetCode, body.Outcome, body.DeclineReason, body.PlayerAccountID, body.SessionID,
+		body.AssetCode, body.Outcome, body.DeclineReason, body.PlayerRef, body.SessionID,
 	} {
 		if strings.ContainsRune(s, 0) {
 			return true
@@ -413,11 +449,14 @@ func callbackBodyHasNULByte(body mockCasinoCallbackBody) bool {
 // sessionID is required for a bet event (ReceiveCallback's postBet rejects
 // a bet with no session binding) and ignored by win/rollback; pass
 // uuid.Nil for those.
-func (m *MockCasinoProvider) CallbackPayload(tenantID uuid.UUID, eventType CallbackEventType, providerTxID, originalProviderTxID, roundID, providerGameID string, amount int64, assetCode string, outcome Outcome, declineReason string, playerAccountID, sessionID uuid.UUID) webhookauth.Inbound {
+func (m *MockCasinoProvider) CallbackPayload(tenantID uuid.UUID, eventType CallbackEventType, providerTxID, originalProviderTxID, roundID, providerGameID string, amount int64, assetCode string, outcome Outcome, declineReason string, playerRef, sessionID uuid.UUID) webhookauth.Inbound {
 	body := mockCasinoCallbackBody{
 		EventType: string(eventType), ProviderTxID: providerTxID, OriginalProviderTxID: originalProviderTxID,
 		RoundID: roundID, ProviderGameID: providerGameID, Amount: amount, AssetCode: assetCode,
-		Outcome: string(outcome), DeclineReason: declineReason, PlayerAccountID: playerAccountID.String(),
+		Outcome: string(outcome), DeclineReason: declineReason,
+	}
+	if playerRef != uuid.Nil {
+		body.PlayerRef = playerRef.String()
 	}
 	if sessionID != uuid.Nil {
 		body.SessionID = sessionID.String()
@@ -501,6 +540,13 @@ func (m *MockCasinoProvider) HandleCallback(_ context.Context, in webhookauth.In
 	if hasLegacySignatureField(generic) {
 		return CallbackEvent{}, ErrCallbackSignatureInvalid
 	}
+	// CAS-PLAYER-REF-1: the wire carries the opaque player_ref only. A body
+	// naming a raw player_account_id is refused outright rather than silently
+	// ignored, so a caller still sending the pre-A3 shape fails loudly and a
+	// raw account id can never reach (or be mistaken for) the reference.
+	if hasRawPlayerAccountField(generic) {
+		return CallbackEvent{}, fmt.Errorf("%w: player_account_id is not accepted; use the opaque player_ref", ErrCallbackMalformedBody)
+	}
 
 	var body mockCasinoCallbackBody
 	if err := json.Unmarshal(in.Body, &body); err != nil {
@@ -542,13 +588,13 @@ func (m *MockCasinoProvider) HandleCallback(_ context.Context, in webhookauth.In
 		return CallbackEvent{}, fmt.Errorf("%w: unknown callback outcome %q", ErrCallbackMalformedBody, body.Outcome)
 	}
 
-	var playerAccountID uuid.UUID
-	if body.PlayerAccountID != "" {
-		parsed, err := uuid.Parse(body.PlayerAccountID)
+	var playerRef uuid.UUID
+	if body.PlayerRef != "" {
+		parsed, err := uuid.Parse(body.PlayerRef)
 		if err != nil {
-			return CallbackEvent{}, fmt.Errorf("%w: invalid player_account_id: %v", ErrCallbackMalformedBody, err)
+			return CallbackEvent{}, fmt.Errorf("%w: invalid player_ref: %v", ErrCallbackMalformedBody, err)
 		}
-		playerAccountID = parsed
+		playerRef = parsed
 	}
 	var sessionID uuid.UUID
 	if body.SessionID != "" {
@@ -562,7 +608,7 @@ func (m *MockCasinoProvider) HandleCallback(_ context.Context, in webhookauth.In
 	return CallbackEvent{
 		EventType: eventType, ProviderTxID: body.ProviderTxID, OriginalProviderTxID: body.OriginalProviderTxID,
 		RoundID: body.RoundID, ProviderGameID: body.ProviderGameID, Amount: body.Amount, AssetCode: body.AssetCode,
-		Outcome: outcome, DeclineReason: body.DeclineReason, PlayerAccountID: playerAccountID, SessionID: sessionID,
+		Outcome: outcome, DeclineReason: body.DeclineReason, PlayerRef: playerRef, SessionID: sessionID,
 	}, nil
 }
 

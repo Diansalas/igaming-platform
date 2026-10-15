@@ -292,28 +292,14 @@ func casConsumeSessionForBootstrap(ctx context.Context, tx pgx.Tx, id, tenantID 
 	return consumedID, nil
 }
 
-// upsertProviderPlayerRef is ADR 0103 §3.5: created on first bootstrap,
-// stable thereafter. INSERT ... ON CONFLICT DO NOTHING, then always SELECT
-// - never an UPDATE (casino_provider_player_refs is append-only, migration
-// 0111; an ON CONFLICT DO UPDATE arm would fire the table's own deny-
-// mutation trigger).
+// upsertProviderPlayerRef is ADR 0103 §3.5: stable per (tenant, provider,
+// player). Since CAS-PLAYER-REF-1 (A3) the reference is ALSO created when the
+// launch session is minted (CreateLaunchSession), so by bootstrap time it
+// normally already exists and this is a read; it stays a get-or-create so a
+// bootstrap of any session still converges on the one row. See
+// GetOrCreateProviderPlayerRef (player_ref.go) for the concurrency argument.
 func upsertProviderPlayerRef(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, playerAccountID uuid.UUID) (uuid.UUID, error) {
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO casino_provider_player_refs (tenant_id, provider_id, player_account_id)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (tenant_id, provider_id, player_account_id) DO NOTHING`,
-		tenantID, providerID, playerAccountID,
-	); err != nil {
-		return uuid.Nil, fmt.Errorf("casino: upsert provider player ref: %w", err)
-	}
-	var ref uuid.UUID
-	if err := tx.QueryRow(ctx,
-		`SELECT player_ref FROM casino_provider_player_refs WHERE tenant_id = $1 AND provider_id = $2 AND player_account_id = $3`,
-		tenantID, providerID, playerAccountID,
-	).Scan(&ref); err != nil {
-		return uuid.Nil, fmt.Errorf("casino: read provider player ref: %w", err)
-	}
-	return ref, nil
+	return GetOrCreateProviderPlayerRef(ctx, tx, tenantID, providerID, playerAccountID)
 }
 
 // bootstrapGateDenialReason re-checks ADR 0103 §3.2 step 4's three gates,

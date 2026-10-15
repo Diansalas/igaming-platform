@@ -61,7 +61,7 @@ func TestCasinoWebhook_UnknownVerifiedEventType_MalformedBody(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(mock))
 
 	in := mock.CallbackPayload(f.tenantID, CallbackEventBet, "cas-k10-unknown-event-1", "", "round-k10", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{f.tenantID})
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

@@ -14,6 +14,7 @@ package casino
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -99,7 +100,7 @@ func TestLockOrder_BootstrapGateDenialAndFirstBetOfRound_NoDeadlock(t *testing.T
 	v := bootstrapVerified(t, orch, pool, f.tenantID, "mock-casino", in)
 
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "req-l2-denial-bet", "", "round-l2-denial", game.ProviderGameID,
-		500, "EUR", OutcomeSucceeded, "", f.playerAccountID, session.ID)
+		500, "EUR", OutcomeSucceeded, "", f.playerRef, session.ID)
 
 	blockerSession := loHoldWith(t, pool, f.tenantID, "session row (FOR UPDATE)", func(ctx context.Context, tx pgx.Tx) error {
 		var discard uuid.UUID
@@ -116,29 +117,50 @@ func TestLockOrder_BootstrapGateDenialAndFirstBetOfRound_NoDeadlock(t *testing.T
 		return err
 	})
 
+	// A3 (CAS-BET-REQUIRES-BOOTSTRAP-1): the original interleaving here had
+	// the first bet of the round reach the RG advisory lock while bootstrap
+	// held the session row - racing on an 'active' session. A bet now needs a
+	// 'consumed' session and refuses an 'active' one at the session check,
+	// BEFORE it takes the RG advisory lock or the session-row FK share, so the
+	// cycle this test staged can no longer be constructed. What stays
+	// guaranteed, and is asserted instead: with bootstrap holding the session
+	// row (FOR NO KEY UPDATE, queued on RG) the bet returns PROMPTLY -
+	// ErrLaunchSessionRequired, no lock wait, no deadlock - and bootstrap
+	// still finishes its gate denial once released.
 	var wg sync.WaitGroup
 	var bootstrapErr error
 	var bootstrapResult BootstrapResult
-	var betErr error
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		bootstrapResult, bootstrapErr = orch.BootstrapLaunch(context.Background(), pool, f.tenantID, "mock-casino", v)
 	}()
+
+	// Bootstrap queues on the session row first; release it so it takes the
+	// row lock and then queues on the RG advisory lock still held by blockerRG.
+	waitForBackendsBlockedOnBoth(t, pool,
+		"%casino_launch_sessions%FOR NO KEY UPDATE%",
+		"%casino_launch_sessions%FOR NO KEY UPDATE%",
+		loLockWaitTimeout)
+	blockerSession.release()
+	waitForBackendsBlockedOnBoth(t, pool,
+		"%pg_advisory_xact_lock%",
+		"%pg_advisory_xact_lock%",
+		loLockWaitTimeout)
+
+	betDone := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		betErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		betDone <- pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 			return err
 		})
 	}()
-
-	waitForBackendsBlockedOnBoth(t, pool,
-		"%casino_launch_sessions%FOR NO KEY UPDATE%",
-		"%pg_advisory_xact_lock%",
-		loLockWaitTimeout)
-
-	blockerSession.release()
+	var betErr error
+	select {
+	case betErr = <-betDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the bet on an unconsumed session blocked while bootstrap held the session row: it must be refused without waiting on any lock")
+	}
 	blockerRG.release()
 	wg.Wait()
 
@@ -154,8 +176,8 @@ func TestLockOrder_BootstrapGateDenialAndFirstBetOfRound_NoDeadlock(t *testing.T
 	if !bootstrapResult.Denied || bootstrapResult.DeniedReason != "rg_ineligible" {
 		t.Fatalf("expected Denied=true reason=rg_ineligible, got %+v", bootstrapResult)
 	}
-	if betErr != nil {
-		t.Fatalf("the bet must resolve to an outcome, never an error: %v", betErr)
+	if !errors.Is(betErr, ErrLaunchSessionRequired) {
+		t.Fatalf("the bet on a session bootstrap has not completed must be refused with ErrLaunchSessionRequired, got %v", betErr)
 	}
 
 	var status LaunchSessionStatus

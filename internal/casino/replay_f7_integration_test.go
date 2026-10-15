@@ -64,15 +64,15 @@ func (e f7CasinoEnv) mustDeliver(t *testing.T, payload webhookauth.Inbound) Rece
 }
 
 func (e f7CasinoEnv) bet(ref, round string, amount int64, session uuid.UUID) webhookauth.Inbound {
-	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventBet, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, session)
+	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventBet, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerRef, session)
 }
 
 func (e f7CasinoEnv) win(ref, round string, amount int64) webhookauth.Inbound {
-	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventWin, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, uuid.Nil)
+	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventWin, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerRef, uuid.Nil)
 }
 
 func (e f7CasinoEnv) rollback(ref, original, round string) webhookauth.Inbound {
-	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventRollback, ref, original, round, "game-1", 0, "EUR", "", "", e.f.playerAccountID, uuid.Nil)
+	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventRollback, ref, original, round, "game-1", 0, "EUR", "", "", e.f.playerRef, uuid.Nil)
 }
 
 func (e f7CasinoEnv) ledgerTxCount(t *testing.T) int {

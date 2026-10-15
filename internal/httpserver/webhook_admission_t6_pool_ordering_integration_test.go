@@ -166,12 +166,15 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 		mustEnableCasinoCapability(t, srv, pool, tenant)
 
-		launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+		launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 		session := uuid.MustParse(launched.SessionID)
 
+		// Resolved BEFORE the measured window: the lookup itself acquires a
+		// pooled connection and must not count toward the callback's delta.
+		playerRef := mustCasinoPlayerRef(t, pool, tenant.ID, player.ID)
 		measure := func(ref, round string, wantStatus int) int64 {
 			before := pool.Raw().Stat().AcquireCount()
-			payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, ref, "", round, game.ProviderGameID, 100, "EUR", casino.OutcomeSucceeded, "", player.ID, session)
+			payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, ref, "", round, game.ProviderGameID, 100, "EUR", casino.OutcomeSucceeded, "", playerRef, session)
 			resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 			resp.Body.Close()
 			if resp.StatusCode != wantStatus {

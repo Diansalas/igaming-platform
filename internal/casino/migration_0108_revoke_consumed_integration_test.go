@@ -84,15 +84,26 @@ func seedLaunchSessionAtStatus(t *testing.T, pool *db.Pool, f casinoFixture, gam
 	t.Helper()
 	var sessionID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		s, _, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, ProviderID: game.ProviderID, ProviderGameID: game.ProviderGameID,
-			AssetCode: "EUR", Mode: ModeReal,
-		})
+		// A direct INSERT, not CreateLaunchSession: TestMigration0108_UpDownUp
+		// seeds sessions on a scratch database migrated only through 0108,
+		// where casino_provider_player_refs (0111) does not exist yet and
+		// CreateLaunchSession (which issues the opaque player reference,
+		// CAS-PLAYER-REF-1) would fail. The columns are exactly the ones
+		// CreateLaunchSession writes.
+		token, err := generateLaunchToken()
 		if err != nil {
 			return err
 		}
-		sessionID = s.ID
+		sessionID = uuid.New()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO casino_launch_sessions
+				(id, tenant_id, brand_id, player_account_id, wallet_id, game_id, provider_id, provider_game_id,
+				 asset_code, mode, token_hash, status, expires_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'EUR', 'real', $9, 'active', now() + interval '2 minutes')`,
+			sessionID, f.tenantID, f.brandID, f.playerAccountID, f.walletID, game.ID, game.ProviderID, game.ProviderGameID,
+			hashLaunchToken(token)); err != nil {
+			return err
+		}
 		switch status {
 		case LaunchSessionActive:
 			return nil
@@ -364,8 +375,8 @@ func TestRevokeLaunchSession_PreRevokeBetsStillSettle(t *testing.T) {
 
 	// Two bets placed while the session is still 'consumed', BEFORE any
 	// revoke - one will be won, the other rolled back.
-	betWin := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-settle-win", "", "round-settle-win", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, result.SessionID)
-	betRollback := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-settle-rb", "", "round-settle-rb", "game-1", 700, "EUR", OutcomeSucceeded, "", f.playerAccountID, result.SessionID)
+	betWin := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-settle-win", "", "round-settle-win", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, result.SessionID)
+	betRollback := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-settle-rb", "", "round-settle-rb", "game-1", 700, "EUR", OutcomeSucceeded, "", f.playerRef, result.SessionID)
 
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betWin)
@@ -396,7 +407,7 @@ func TestRevokeLaunchSession_PreRevokeBetsStillSettle(t *testing.T) {
 	}
 
 	// The win settles the first bet, after the revoke.
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-settle-win", "", "round-settle-win", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-settle-win", "", "round-settle-win", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
@@ -405,7 +416,7 @@ func TestRevokeLaunchSession_PreRevokeBetsStillSettle(t *testing.T) {
 	}
 
 	// The rollback reverses the second bet, also after the revoke.
-	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-settle-rb", "bet-settle-rb", "round-settle-rb", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-settle-rb", "bet-settle-rb", "round-settle-rb", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err

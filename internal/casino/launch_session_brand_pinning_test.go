@@ -61,6 +61,11 @@ func seedSiblingBrand(t *testing.T, pool *db.Pool, tenantID uuid.UUID) casinoFix
 			return err
 		}
 		f.walletID = w.ID
+		ref, err := GetOrCreateProviderPlayerRef(ctx, tx, tenantID, "mock-casino", f.playerAccountID)
+		if err != nil {
+			return err
+		}
+		f.playerRef = ref
 		return nil
 	})
 	if err != nil {

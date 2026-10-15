@@ -65,7 +65,7 @@ func TestBrandGate_HTTP_CasinoWebhookAndPlayRoute_409(t *testing.T) {
 	game := mustSeedCasinoGame(t, owner, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, owner, tenant.ID, game.ID)
 	mustEnableCasinoCapability(t, srv, owner, tenant)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, owner, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 
 	if err := launchfix.TrySetBrandStatus(context.Background(), tenant.ID, brand.ID, "suspended"); err != nil {
 		t.Fatalf("suspend brand: %v", err)
@@ -80,7 +80,7 @@ func TestBrandGate_HTTP_CasinoWebhookAndPlayRoute_409(t *testing.T) {
 
 	t.Run("webhook", func(t *testing.T) {
 		payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bg-webhook-"+uuid.NewString(), "", "round-bg-webhook", game.ProviderGameID,
-			1000, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.MustParse(launched.SessionID))
+			1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, owner, tenant.ID, player.ID), uuid.MustParse(launched.SessionID))
 		assertGenericConflict(t, rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload), "callback rejected")
 		if got := auditBrand(); got != 1 {
 			t.Fatalf("expected exactly one %s row, got %d", casino.AuditActionCallbackRejectedBrandNotActive, got)

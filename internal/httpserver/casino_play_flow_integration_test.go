@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
@@ -65,6 +66,56 @@ func mustLaunchCasinoGame(t *testing.T, srv *httptest.Server, bearerToken, gameI
 	}
 	var launched launchCasinoGameResponse
 	decodeBody(t, resp, &launched)
+	return launched
+}
+
+// mustCasinoPlayerRef returns the opaque provider-scoped player reference
+// ("mock-casino") for a player account, creating it if no launch has yet -
+// what the vendor echoes on callbacks (CAS-PLAYER-REF-1). A callback carries
+// this, never the account id.
+func mustCasinoPlayerRef(t testing.TB, pool *db.Pool, tenantID, playerAccountID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var ref uuid.UUID
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		ref, err = casino.GetOrCreateProviderPlayerRef(ctx, tx, tenantID, "mock-casino", playerAccountID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get-or-create casino player ref: %v", err)
+	}
+	return ref
+}
+
+// mustConsumeCasinoSession moves a launched ('active') session to 'consumed',
+// the single transition the vendor bootstrap CAS performs
+// (CAS-BET-REQUIRES-BOOTSTRAP-1: a bet needs a consumed session). Tests of the
+// signed webhook path use it in place of driving the whole bootstrap route;
+// casino_bootstrap_integration_test.go drives the real route end to end.
+func mustConsumeCasinoSession(t testing.TB, pool *db.Pool, tenantID uuid.UUID, sessionID string) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1 AND status = 'active'`, sessionID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to consume exactly one active session, affected %d", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("consume casino session: %v", err)
+	}
+}
+
+// mustLaunchAndConsumeCasinoGame is mustLaunchCasinoGame followed by the
+// bootstrap transition, for callers that go on to post bets through the
+// signed webhook.
+func mustLaunchAndConsumeCasinoGame(t *testing.T, srv *httptest.Server, pool *db.Pool, tenantID uuid.UUID, bearerToken, gameID, assetCode, mode string) launchCasinoGameResponse {
+	t.Helper()
+	launched := mustLaunchCasinoGame(t, srv, bearerToken, gameID, assetCode, mode)
+	mustConsumeCasinoSession(t, pool, tenantID, launched.SessionID)
 	return launched
 }
 

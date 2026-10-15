@@ -630,3 +630,37 @@ onto this branch: K1 0112, K2 0113, E1 0114, K3 0115).
   `docs/plans/payment-readiness/evidence/prh2-casino-b-mutation-kill.txt`.
 - **Registry:** proposed text reported to the orchestrator, not written directly to
   `docs/governance/task-registry.md` per this workstream's own instruction.
+
+## 14. A3 update (2026-10-15): the three open items of section 11 close
+
+Status of section 11 after the A3 pre-adapter fixes (labels: **MOCK**; a real vendor stays
+PROVIDER DEPENDENT; each is registered in `docs/plans/a3-casino-record.md`):
+
+1. **CAS-PLAYER-REF-1 - closed.** The opaque, provider-scoped `player_ref` (section 3.5) is now
+   issued when the launch session is minted (`CreateLaunchSession` calls
+   `GetOrCreateProviderPlayerRef`, the same table and the same get-or-create bootstrap uses), so a
+   session never exists without one. Phase-B `LaunchRequest` (and `BalanceRequest`) carry
+   `PlayerRef`; the field `PlayerAccountID` no longer exists on any vendor-facing type
+   (`TestProviderFacingTypesCarryNoRawPlayerAccountID`). The reference is echoed on every callback
+   (wire field `player_ref`; a body carrying `player_account_id` is refused as malformed) and
+   resolved by `ResolveProviderPlayerRef`, scoped to the callback's own authenticated tenant and
+   provider; a raw account id, an unknown reference and another tenant's or provider's reference
+   all fail with the same `ErrPlayerRefUnresolved` (400), before any lock or write after the L0.1
+   delivery lock. No new migration: `casino_provider_player_refs` (migration 0111) already has the
+   required shape (tenant-scoped, FORCE RLS, append-only, UNIQUE on both
+   `(tenant, provider, player_account_id)` and `(tenant, provider, player_ref)`, runtime role
+   SELECT + INSERT only). The reference identifies; it does not authorise: the wallet a bet debits
+   is still the launch session's, and the wallet a win credits is still the round's own bet's.
+2. **CAS-BET-REQUIRES-BOOTSTRAP-1 - closed.** `postBet` accepts a new bet only against a
+   `consumed` session. `active` (never bootstrapped), `expired`, `revoked` and any unknown status
+   are refused with `ErrLaunchSessionRequired`; the former time-based branch for `active` sessions
+   is removed as unreachable. Win/rollback of existing exposure never consult the session.
+3. **CAS-GAME-KILL-BET-1 - closed.** `postBet` re-checks the game exactly as `LaunchGame` does:
+   `casino_games.status` must be `active` and the most-specific `casino_game_availability` row for
+   the session's brand must be enabled (no row = unavailable). A refused bet is a decline
+   (`game_unavailable`, audited `casino_bet.denied_game_unavailable`), never a Go error, placed
+   after the capability gate and before the player lock. Replays of an already-posted bet, wins and
+   rollbacks never reach it.
+
+Interaction with the B2C play-simulation routes: see ADR 0048's A3 update (the MOCK vendor
+stands in for the bootstrap; a vendor-bootstrapped session is still refused to the simulation).

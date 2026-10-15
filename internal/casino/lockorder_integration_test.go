@@ -73,7 +73,7 @@ func TestLockOrder_ConcurrentBetAndWinOnSameWallet_NoDeadlock(t *testing.T) {
 	// TYPE from that bet's own ledger entries, never from the payload.
 	const settledRound = "lockorder-settled-round"
 	seedBet := provider.CallbackPayload(f.tenantID, CallbackEventBet, "lockorder-seed-bet", "", settledRound, "game-1",
-		1_000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		1_000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", seedBet)
 		return err
@@ -88,9 +88,9 @@ func TestLockOrder_ConcurrentBetAndWinOnSameWallet_NoDeadlock(t *testing.T) {
 	blockerHouse := loHoldProjectionRow(t, pool, f.tenantID, houseID, "house_gaming")
 
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "lockorder-race-bet", "", "lockorder-race-round", "game-1",
-		500, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		500, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "lockorder-race-win", "", settledRound, "game-1",
-		700, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+		700, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 
 	var betResult ReceiveCallbackResult
 	startBet := func() *loRacer {
@@ -214,7 +214,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		})
 
 		betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "lockorder-1d-bet", "", "lockorder-1d-round", "game-1",
-			400, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+			400, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 		// A: the bet. Holds player_cash + house_gaming, then wants the
 		// grant advisory lock for its wagering contribution.
@@ -282,7 +282,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		// A seed bet, so house_gaming has a projection row to hold (this
 		// sub-test isolates the ordering cycle, not the absent-row case).
 		seedBet := provider.CallbackPayload(f.tenantID, CallbackEventBet, "lockorder-1d-prod-seed", "", "lockorder-1d-prod-seed-round",
-			"game-1", 100, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+			"game-1", 100, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", seedBet)
 			return err
@@ -311,7 +311,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		blockerHouse := loHoldProjectionRow(t, pool, f.tenantID, houseID, "house_gaming")
 
 		betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "lockorder-1d-prod-bet", "", "lockorder-1d-prod-round", "game-1",
-			400, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+			400, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 		startBet := func() *loRacer {
 			return loStartRacer(t, pool, f.tenantID, "postBet", func(ctx context.Context, tx pgx.Tx) error {

@@ -48,7 +48,7 @@ func TestOrchestratorVerify_Casino_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 
 	payload := func() webhookauth.Inbound {
 		return mock.CallbackPayload(f.tenantID, CallbackEventRollback, "w1a-forged-rb-1", "w1a-never-seen-original", "round-w1a", "game-1",
-			1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+			1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 	}
 	forged := payload()
 	forged.Header = http.Header{}

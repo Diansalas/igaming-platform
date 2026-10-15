@@ -187,7 +187,7 @@ func TestBrandGate_Casino_RaceBetFirst(t *testing.T) {
 			var once sync.Once
 			releaseOnce := func() { once.Do(func() { close(release) }) }
 			t.Cleanup(releaseOnce)
-			payload := w.provider.CallbackPayload(w.f.tenantID, CallbackEventBet, "first-b", "", "round-first", "game-1", 100, "EUR", OutcomeSucceeded, "", w.f.playerAccountID, w.sessionID)
+			payload := w.provider.CallbackPayload(w.f.tenantID, CallbackEventBet, "first-b", "", "round-first", "game-1", 100, "EUR", OutcomeSucceeded, "", w.f.playerRef, w.sessionID)
 			posted := make(chan error, 1)
 			go func() {
 				posted <- rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

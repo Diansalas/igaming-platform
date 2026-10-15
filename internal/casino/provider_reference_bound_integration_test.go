@@ -76,7 +76,7 @@ func TestProviderRefBound_OversizeReferencesRejectedWithNothingWritten(t *testin
 
 	// A real bet to roll back / win against, so the win and rollback cases
 	// would otherwise succeed and write.
-	okBet := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ref-ok", "", "round-ref-ok", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	okBet := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ref-ok", "", "round-ref-ok", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	if _, err := doReceiveCallback(t, pool, f.tenantID, orch, okBet); err != nil {
 		t.Fatalf("seed bet: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestProviderRefBound_OversizeReferencesRejectedWithNothingWritten(t *testin
 			if ev == CallbackEventRollback {
 				amount, outcome = 0, ""
 			}
-			payload := provider.CallbackPayload(f.tenantID, ev, txID, orig, round, game, amount, asset, outcome, "", f.playerAccountID, sess)
+			payload := provider.CallbackPayload(f.tenantID, ev, txID, orig, round, game, amount, asset, outcome, "", f.playerRef, sess)
 			// Deterministic: the same rejection on every redelivery.
 			for i := 0; i < 2; i++ {
 				_, err := doReceiveCallback(t, pool, f.tenantID, orch, payload)
@@ -164,7 +164,7 @@ func TestProviderRefBound_ExactMaxAcceptedAndIdempotent(t *testing.T) {
 	if len(betRef) != 255 || len(roundRef) != 255 {
 		t.Fatalf("fixture lengths %d/%d", len(betRef), len(roundRef))
 	}
-	bet := provider.CallbackPayload(f.tenantID, CallbackEventBet, betRef, "", roundRef, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	bet := provider.CallbackPayload(f.tenantID, CallbackEventBet, betRef, "", roundRef, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	first, err := doReceiveCallback(t, pool, f.tenantID, orch, bet)
 	if err != nil || first.Outcome != OutcomeSucceeded || first.Replayed {
 		t.Fatalf("exact-max bet must post: %+v %v", first, err)
@@ -179,14 +179,14 @@ func TestProviderRefBound_ExactMaxAcceptedAndIdempotent(t *testing.T) {
 	}
 
 	winRef := strings.Repeat("w", 252) + "€" // 255 bytes
-	win := provider.CallbackPayload(f.tenantID, CallbackEventWin, winRef, "", roundRef, "game-1", 3000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	win := provider.CallbackPayload(f.tenantID, CallbackEventWin, winRef, "", roundRef, "game-1", 3000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	for i := 0; i < 2; i++ {
 		if _, err := doReceiveCallback(t, pool, f.tenantID, orch, win); err != nil {
 			t.Fatalf("exact-max win delivery %d: %v", i, err)
 		}
 	}
 	rbRef := strings.Repeat("r", providerref.MaxBytes)
-	rb := provider.CallbackPayload(f.tenantID, CallbackEventRollback, rbRef, winRef, roundRef, "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rb := provider.CallbackPayload(f.tenantID, CallbackEventRollback, rbRef, winRef, roundRef, "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	for i := 0; i < 2; i++ {
 		if _, err := doReceiveCallback(t, pool, f.tenantID, orch, rb); err != nil {
 			t.Fatalf("exact-max rollback delivery %d: %v", i, err)
@@ -245,12 +245,12 @@ func TestProviderRefBound_TombstoneForExactMaxOriginal(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	orig := strings.Repeat("o", providerref.MaxBytes)
-	rb := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rb-tomb", orig, "round-tomb", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rb := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rb-tomb", orig, "round-tomb", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	res, err := doReceiveCallback(t, pool, f.tenantID, orch, rb)
 	if err != nil || !res.Tombstoned {
 		t.Fatalf("expected a tombstone for a never-seen exact-max original: %+v %v", res, err)
 	}
-	late := provider.CallbackPayload(f.tenantID, CallbackEventBet, orig, "", "round-tomb", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	late := provider.CallbackPayload(f.tenantID, CallbackEventBet, orig, "", "round-tomb", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	// E3: a late bet after its tombstone is acknowledged as declined, with
 	// its rejection row recorded (the exact-max reference fits the
 	// bounded casino_callback_rejections columns).

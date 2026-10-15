@@ -191,6 +191,10 @@ type isoWorld struct {
 // isoPlayer is one funded player with its own wallet and casino session.
 type isoPlayer struct {
 	id, walletID, sessionID uuid.UUID
+	// ref is the player's opaque provider-scoped reference (CAS-PLAYER-REF-1),
+	// resolved once at seed time so building a callback needs no database call
+	// inside the measured outage window.
+	ref uuid.UUID
 }
 
 type isoTenant struct {
@@ -199,6 +203,7 @@ type isoTenant struct {
 	player    registeredPlayer
 	walletID  uuid.UUID
 	sessionID uuid.UUID
+	playerRef uuid.UUID // the main player's opaque casino reference (CAS-PLAYER-REF-1)
 	game      casino.Game
 	casino    []byte // casino webhook secret
 	pay       []byte // payments webhook secret
@@ -275,6 +280,7 @@ func (w *isoWorld) newTenant(fund int64) *isoTenant {
 	it.game = mustSeedCasinoGame(t, w.pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, w.pool, it.tenant.ID, it.game.ID)
 	it.sessionID = mustMintCasinoLaunchSessionDirect(t, w.pool, it.tenant, it.brandID, it.player.ID, it.walletID, it.game.ID, "mock-casino", it.game.ProviderGameID, "EUR")
+	it.playerRef = mustCasinoPlayerRef(t, w.pool, it.tenant.ID, it.player.ID)
 	_, it.casino = providercredtest.Register(t, w.pool, w.sub, w.mem.Put, w.principals, providercredtest.Spec{
 		TenantID: it.tenant.ID, Domain: "casino", ProviderID: "mock-casino", Purpose: providercred.PurposeWebhookVerify, KeyID: webhookauth.MockKeyID,
 	})
@@ -288,7 +294,7 @@ func (w *isoWorld) ns(it *isoTenant) string { return memstore.Namespace(it.tenan
 
 // main is it's registered player.
 func (it *isoTenant) main() isoPlayer {
-	return isoPlayer{id: it.player.ID, walletID: it.walletID, sessionID: it.sessionID}
+	return isoPlayer{id: it.player.ID, walletID: it.walletID, sessionID: it.sessionID, ref: it.playerRef}
 }
 
 // extraPlayer seeds another active, funded player of it directly in the
@@ -314,6 +320,7 @@ func (w *isoWorld) extraPlayer(it *isoTenant, fund int64) isoPlayer {
 	}
 	p.walletID = fundWallet(t, w.pool, it.tenant.ID, it.brandID, p.id, "EUR", fund).ID
 	p.sessionID = mustMintCasinoLaunchSessionDirect(t, w.pool, it.tenant, it.brandID, p.id, p.walletID, it.game.ID, "mock-casino", it.game.ProviderGameID, "EUR")
+	p.ref = mustCasinoPlayerRef(t, w.pool, it.tenant.ID, p.id)
 	return p
 }
 
@@ -325,7 +332,7 @@ func (w *isoWorld) casinoEvent(it *isoTenant, key []byte, ev casino.CallbackEven
 
 func (w *isoWorld) casinoEventFor(it *isoTenant, p isoPlayer, key []byte, ev casino.CallbackEventType, ref, original, round string, amount int64) webhookauth.Inbound {
 	outcome := casino.OutcomeSucceeded
-	in := w.casinoMock.CallbackPayload(it.tenant.ID, ev, ref, original, round, it.game.ProviderGameID, amount, "EUR", outcome, "", p.id, p.sessionID)
+	in := w.casinoMock.CallbackPayload(it.tenant.ID, ev, ref, original, round, it.game.ProviderGameID, amount, "EUR", outcome, "", p.ref, p.sessionID)
 	in.Header = in.Header.Clone()
 	webhookauth.CasinoScheme().SetHeaders(in.Header, webhookauth.MockKeyID,
 		webhookauth.CasinoScheme().Sign(key, it.tenant.ID, "mock-casino", webhookauth.MockKeyID, in.Body))

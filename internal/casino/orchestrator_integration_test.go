@@ -69,6 +69,11 @@ type casinoFixture struct {
 	personID        uuid.UUID
 	playerAccountID uuid.UUID
 	walletID        uuid.UUID
+	// playerRef is the opaque provider-scoped player reference
+	// (CAS-PLAYER-REF-1) for playerAccountID at the default test provider
+	// "mock-casino": what a vendor echoes on callbacks. Callback payloads in
+	// this suite carry it, never playerAccountID.
+	playerRef uuid.UUID
 }
 
 // seedCasinoFixture mirrors internal/payments/orchestrator_integration_
@@ -126,12 +131,45 @@ func seedCasinoFixture(t *testing.T, pool *db.Pool) casinoFixture {
 			return err
 		}
 		f.walletID = w.ID
+		// The migration-round-trip tests (0099, 0108) seed this fixture on a
+		// scratch database migrated BELOW 0111, where the table does not
+		// exist yet: no reference is issued there (those tests deliver no
+		// callbacks).
+		var hasRefs bool
+		if err := tx.QueryRow(ctx, `SELECT to_regclass('casino_provider_player_refs') IS NOT NULL`).Scan(&hasRefs); err != nil {
+			return err
+		}
+		if !hasRefs {
+			return nil
+		}
+		ref, err := GetOrCreateProviderPlayerRef(ctx, tx, f.tenantID, "mock-casino", f.playerAccountID)
+		if err != nil {
+			return err
+		}
+		f.playerRef = ref
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed tenant rows: %v", err)
 	}
 	return f
+}
+
+// playerRefFor returns the opaque provider-scoped reference for account at
+// providerID within f's tenant, creating it if needed (what a vendor would
+// have been handed at launch).
+func playerRefFor(t *testing.T, pool *db.Pool, tenantID uuid.UUID, providerID string, account uuid.UUID) uuid.UUID {
+	t.Helper()
+	var ref uuid.UUID
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		ref, err = GetOrCreateProviderPlayerRef(ctx, tx, tenantID, providerID, account)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("get-or-create player ref: %v", err)
+	}
+	return ref
 }
 
 // seedPlatformAdminStaffPrincipal inserts a genuine platform-scoped
@@ -250,12 +288,33 @@ func seedGame(t *testing.T, pool *db.Pool, providerID string, assetCodes ...stri
 // rollback posting logic, not catalogue eligibility, which LaunchGame's
 // own dedicated tests already cover) - mints the session directly via
 // CreateLaunchSession rather than the full LaunchGame eligibility chain.
+//
+// CAS-BET-REQUIRES-BOOTSTRAP-1 / CAS-GAME-KILL-BET-1 (A3): a bet needs a
+// 'consumed' (bootstrapped) session and a game that is active and enabled for
+// the tenant, so this fixture enables the game tenant-wide and consumes the
+// session through the single-use token CAS (ResolveLaunchToken, the test-only
+// stand-in for the vendor bootstrap). mintActiveSession returns the never-
+// consumed variant for the tests that pin the refusal.
 func mintSession(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode string) uuid.UUID {
 	t.Helper()
+	return mintSessionConsumed(t, pool, f, providerID, assetCode, true)
+}
+
+// mintActiveSession is mintSession without the consume step: a session in
+// the launched-but-never-bootstrapped state.
+func mintActiveSession(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode string) uuid.UUID {
+	t.Helper()
+	return mintSessionConsumed(t, pool, f, providerID, assetCode, false)
+}
+
+func mintSessionConsumed(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode string, consume bool) uuid.UUID {
+	t.Helper()
 	game := seedGame(t, pool, providerID, assetCode)
+	enableGameForTenant(t, pool, f, game.ID)
 	var sessionID uuid.UUID
+	var token string
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		session, _, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
+		session, tok, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			GameID: game.ID, ProviderID: providerID, ProviderGameID: game.ProviderGameID,
 			AssetCode: assetCode, Mode: ModeReal,
@@ -263,13 +322,43 @@ func mintSession(t *testing.T, pool *db.Pool, f casinoFixture, providerID, asset
 		if err != nil {
 			return err
 		}
-		sessionID = session.ID
+		sessionID, token = session.ID, tok
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("mint launch session: %v", err)
 	}
+	if consume {
+		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ResolveLaunchToken(ctx, tx, token)
+			return err
+		}); err != nil {
+			t.Fatalf("consume launch session: %v", err)
+		}
+	}
 	return sessionID
+}
+
+// consumeSessionDirect moves an 'active' session to 'consumed' with the same
+// single-row transition the vendor bootstrap CAS performs (the immutability
+// trigger permits exactly active -> consumed), for tests whose session came
+// from LaunchGame (no raw token in hand). CAS-BET-REQUIRES-BOOTSTRAP-1: a bet
+// needs a consumed session.
+func consumeSessionDirect(t *testing.T, pool *db.Pool, tenantID, sessionID uuid.UUID) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1 AND status = 'active'`, sessionID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to consume exactly 1 active session, affected %d", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("consume session: %v", err)
+	}
 }
 
 func enableGameForTenant(t *testing.T, pool *db.Pool, f casinoFixture, gameID uuid.UUID) {
@@ -654,7 +743,7 @@ func TestReceiveCallback_BetPostsFlow5AndDebitsPlayerCash(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -692,7 +781,7 @@ func TestReceiveCallback_BetDeclinedOnInsufficientFundsNeverPosts(t *testing.T) 
 	// sufficiency gate, checked inside the same transaction as the
 	// prospective debit (invariant #15) - and must post NOTHING to the
 	// ledger, not even a declined-but-recorded transaction.
-	oversized := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-oversized", "", "round-oversized", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	oversized := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-oversized", "", "round-oversized", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var declineResult ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -725,7 +814,7 @@ func TestReceiveCallback_BetDeclinedOnInsufficientFundsNeverPosts(t *testing.T) 
 
 	// A bet within the funded balance still succeeds afterward - proves
 	// the rejection above is about sufficiency, not a blanket block.
-	within := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-within", "", "round-within", "game-1", 300, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	within := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-within", "", "round-within", "game-1", 300, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	var okResult ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -752,7 +841,7 @@ func TestReceiveCallback_WinPostsFlow6AndCreditsPlayerCash(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-win-1", "", "round-win-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-win-1", "", "round-win-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -761,7 +850,7 @@ func TestReceiveCallback_WinPostsFlow6AndCreditsPlayerCash(t *testing.T) {
 		t.Fatalf("bet: %v", err)
 	}
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-1", "", "round-win-1", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-1", "", "round-win-1", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -795,7 +884,7 @@ func TestReceiveCallback_WinWithNoPriorBetIsIntegrityAlert(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-orphan-1", "", "round-never-bet", "game-1", 5000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-orphan-1", "", "round-never-bet", "game-1", 5000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
@@ -820,7 +909,7 @@ func TestReceiveCallback_RedeliveredBetWinRollbackAreIdempotent(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-idem-1", "", "round-idem-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-idem-1", "", "round-idem-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	for i := 0; i < 2; i++ {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
@@ -834,7 +923,7 @@ func TestReceiveCallback_RedeliveredBetWinRollbackAreIdempotent(t *testing.T) {
 		t.Fatalf("expected exactly one bet's worth (5000-1000=4000) after a redelivered bet callback, got %d", balance)
 	}
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-idem-1", "", "round-idem-1", "game-1", 3000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-idem-1", "", "round-idem-1", "game-1", 3000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	for i := 0; i < 2; i++ {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
@@ -848,7 +937,7 @@ func TestReceiveCallback_RedeliveredBetWinRollbackAreIdempotent(t *testing.T) {
 		t.Fatalf("expected exactly one win's worth applied (4000+3000=7000) after a redelivered win callback, got %d", balance)
 	}
 
-	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-idem-1", "win-idem-1", "round-idem-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-idem-1", "win-idem-1", "round-idem-1", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	for i := 0; i < 2; i++ {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
@@ -877,7 +966,7 @@ func TestReceiveCallback_RollbackReversesFlow5BetExactly(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rollback-1", "", "round-rollback-1", "game-1", 750, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rollback-1", "", "round-rollback-1", "game-1", 750, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -889,7 +978,7 @@ func TestReceiveCallback_RollbackReversesFlow5BetExactly(t *testing.T) {
 		t.Fatalf("expected 250 (1000-750) after bet, got %d", balance)
 	}
 
-	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-1", "bet-rollback-1", "round-rollback-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-1", "bet-rollback-1", "round-rollback-1", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -922,7 +1011,7 @@ func TestReceiveCallback_SecondDistinctRollbackOfSameBetRejected(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-double-rollback", "", "round-double-rollback", "game-1", 400, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-double-rollback", "", "round-double-rollback", "game-1", 400, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -931,7 +1020,7 @@ func TestReceiveCallback_SecondDistinctRollbackOfSameBetRejected(t *testing.T) {
 		t.Fatalf("bet: %v", err)
 	}
 
-	firstRollback := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-first", "bet-double-rollback", "round-double-rollback", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	firstRollback := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-first", "bet-double-rollback", "round-double-rollback", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", firstRollback)
 		return err
@@ -940,7 +1029,7 @@ func TestReceiveCallback_SecondDistinctRollbackOfSameBetRejected(t *testing.T) {
 		t.Fatalf("first rollback: %v", err)
 	}
 
-	secondRollback := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-second-distinct", "bet-double-rollback", "round-double-rollback", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	secondRollback := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-second-distinct", "bet-double-rollback", "round-double-rollback", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", secondRollback)
 		return err
@@ -960,7 +1049,7 @@ func TestReceiveCallback_RollbackOfNeverSeenOriginalWritesTombstone(t *testing.T
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-orphan-1", "bet-never-posted", "round-orphan", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-orphan-1", "bet-never-posted", "round-orphan", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -995,7 +1084,7 @@ func TestReceiveCallback_CrossTenantBetIsInvisible(t *testing.T) {
 	sessionID := mintSession(t, pool, fA, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "bet-cross-tenant", "", "round-cross-tenant", "game-1", 1000, "EUR", OutcomeSucceeded, "", fA.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "bet-cross-tenant", "", "round-cross-tenant", "game-1", 1000, "EUR", OutcomeSucceeded, "", fA.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betPayload)
 		return err
@@ -1008,7 +1097,7 @@ func TestReceiveCallback_CrossTenantBetIsInvisible(t *testing.T) {
 	// provider_id/round_id, must find no matching bet under tenant B - RLS
 	// on ledger_transactions scopes the EXISTS check itself, not just an
 	// explicit WHERE tenant_id clause in application code.
-	winPayload := provider.CallbackPayload(fB.tenantID, CallbackEventWin, "win-cross-tenant", "", "round-cross-tenant", "game-1", 2000, "EUR", OutcomeSucceeded, "", fB.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(fB.tenantID, CallbackEventWin, "win-cross-tenant", "", "round-cross-tenant", "game-1", 2000, "EUR", OutcomeSucceeded, "", fB.playerRef, uuid.Nil)
 	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, fB.tenantID, "mock-casino", winPayload)
 		return err
@@ -1123,7 +1212,7 @@ func TestCasinoFlows_FinancialInvariantsHoldAcrossMixedSequence(t *testing.T) {
 		if e.eventType == CallbackEventBet {
 			sid = sessionID
 		}
-		payload := provider.CallbackPayload(f.tenantID, e.eventType, e.providerTxID, e.original, e.roundID, "game-1", e.amount, "EUR", OutcomeSucceeded, "", f.playerAccountID, sid)
+		payload := provider.CallbackPayload(f.tenantID, e.eventType, e.providerTxID, e.original, e.roundID, "game-1", e.amount, "EUR", OutcomeSucceeded, "", f.playerRef, sid)
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 			return err
@@ -1159,7 +1248,7 @@ func TestReceiveCallback_BetWithNoSessionRejected(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-no-session", "", "round-no-session", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-no-session", "", "round-no-session", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -1196,7 +1285,7 @@ func TestReceiveCallback_BetWithDemoSessionRejected(t *testing.T) {
 	}
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-demo", "", "round-demo", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, demoSessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-demo", "", "round-demo", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, demoSessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -1222,7 +1311,7 @@ func TestReceiveCallback_WinCreditsBettorsWalletNeverPayloadPlayer(t *testing.T)
 	sessionID := mintSession(t, pool, fA, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "bet-misdirect", "", "round-misdirect", "game-1", 1000, "EUR", OutcomeSucceeded, "", fA.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "bet-misdirect", "", "round-misdirect", "game-1", 1000, "EUR", OutcomeSucceeded, "", fA.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betPayload)
 		return err
@@ -1250,7 +1339,7 @@ func TestReceiveCallback_WinCreditsBettorsWalletNeverPayloadPlayer(t *testing.T)
 		t.Fatalf("seed other player: %v", err)
 	}
 
-	winPayload := provider.CallbackPayload(fA.tenantID, CallbackEventWin, "win-misdirect", "", "round-misdirect", "game-1", 4000, "EUR", OutcomeSucceeded, "", otherPlayerID, uuid.Nil)
+	winPayload := provider.CallbackPayload(fA.tenantID, CallbackEventWin, "win-misdirect", "", "round-misdirect", "game-1", 4000, "EUR", OutcomeSucceeded, "", playerRefFor(t, pool, fA.tenantID, "mock-casino", otherPlayerID), uuid.Nil)
 	err = pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", winPayload)
 		return err
@@ -1286,7 +1375,7 @@ func TestReceiveCallback_WinOnRolledBackBetRejected(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-voided", "", "round-voided", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-voided", "", "round-voided", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -1294,7 +1383,7 @@ func TestReceiveCallback_WinOnRolledBackBetRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bet: %v", err)
 	}
-	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-voided", "bet-voided", "round-voided", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-voided", "bet-voided", "round-voided", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err
@@ -1303,7 +1392,7 @@ func TestReceiveCallback_WinOnRolledBackBetRejected(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-voided", "", "round-voided", "game-1", 9000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-voided", "", "round-voided", "game-1", 9000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
@@ -1329,7 +1418,7 @@ func TestReceiveCallback_NonSucceededOutcomeRejected(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	declined := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-declined-outcome", "", "round-declined-outcome", "game-1", 1000, "EUR", OutcomeDeclined, "provider_declined", f.playerAccountID, sessionID)
+	declined := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-declined-outcome", "", "round-declined-outcome", "game-1", 1000, "EUR", OutcomeDeclined, "provider_declined", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", declined)
 		return err
@@ -1338,7 +1427,7 @@ func TestReceiveCallback_NonSucceededOutcomeRejected(t *testing.T) {
 		t.Fatalf("expected ErrOutcomeNotSucceeded, got %v", err)
 	}
 
-	ambiguous := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ambiguous-outcome", "", "round-ambiguous-outcome", "game-1", 1000, "EUR", OutcomeAmbiguous, "", f.playerAccountID, sessionID)
+	ambiguous := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ambiguous-outcome", "", "round-ambiguous-outcome", "game-1", 1000, "EUR", OutcomeAmbiguous, "", f.playerRef, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", ambiguous)
 		return err
@@ -1369,7 +1458,7 @@ func TestReceiveCallback_DisabledCapabilityBlocksNewBetsOnly(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 
 	// S-none: no capability row registered at all - a new bet is rejected.
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-no-capability", "", "round-no-capability", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-no-capability", "", "round-no-capability", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -1420,7 +1509,7 @@ func TestReceiveCallback_DisabledCapabilityStillSettlesExistingExposure(t *testi
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-settles-disabled", "", "round-settles-disabled", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-settles-disabled", "", "round-settles-disabled", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -1440,7 +1529,7 @@ func TestReceiveCallback_DisabledCapabilityStillSettlesExistingExposure(t *testi
 		t.Fatalf("disable capability: %v", err)
 	}
 
-	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-settles-disabled", "", "round-settles-disabled", "game-1", 2000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-settles-disabled", "", "round-settles-disabled", "game-1", 2000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)
 	winResult, err := doReceiveCallback(t, pool, f.tenantID, orch, winPayload)
 	if err != nil {
 		t.Fatalf("expected the win to settle even though the capability is disabled, got %v", err)
@@ -1483,7 +1572,7 @@ func TestReceiveCallback_ConcurrentDistinctRollbacksOnlyOneSucceeds(t *testing.T
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-concurrent-rollback", "", "round-concurrent-rollback", "game-1", 400, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-concurrent-rollback", "", "round-concurrent-rollback", "game-1", 400, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -1492,8 +1581,8 @@ func TestReceiveCallback_ConcurrentDistinctRollbacksOnlyOneSucceeds(t *testing.T
 		t.Fatalf("bet: %v", err)
 	}
 
-	rollbackA := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-concurrent-a", "bet-concurrent-rollback", "round-concurrent-rollback", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
-	rollbackB := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-concurrent-b", "bet-concurrent-rollback", "round-concurrent-rollback", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackA := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-concurrent-a", "bet-concurrent-rollback", "round-concurrent-rollback", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
+	rollbackB := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-concurrent-b", "bet-concurrent-rollback", "round-concurrent-rollback", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)
 
 	var wg sync.WaitGroup
 	results := make([]error, 2)
@@ -1549,7 +1638,7 @@ func TestReceiveCallback_ConcurrentDuplicateBetsOnlyOneEffect(t *testing.T) {
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-concurrent-dup", "", "round-concurrent-dup", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-concurrent-dup", "", "round-concurrent-dup", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
 
 	const n = 5
 	var wg sync.WaitGroup

@@ -35,7 +35,7 @@ func TestCasinoWebhook_TamperMatrix_ExactReason(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	genuine := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c5-reason-bet-1", "", "round-c5-reason", "game-1",
-		1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.New())
+		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 
 	flipHex := func(s string) string {
 		flipped := strings.Replace(s, "0", "f", 1)

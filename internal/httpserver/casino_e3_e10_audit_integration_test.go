@@ -81,19 +81,19 @@ func TestCasCapRollback1_E3_AuditRowAndBoundedEffect(t *testing.T) {
 	const lateOriginalTxID = "cas-e3-audit-late-original"
 	const rollbackTxID = "cas-e3-audit-early-rollback"
 	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackTxID, lateOriginalTxID, "round-e3-audit", "game-1",
-		0, "EUR", "", "", player.ID, uuid.Nil)
+		0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	rollbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	if rollbackResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for the early rollback (tombstones), got %d", rollbackResp.StatusCode)
 	}
 	rollbackResp.Body.Close()
 
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 	lateOriginalPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, lateOriginalTxID, "", "round-e3-audit", game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	lateResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", lateOriginalPayload)
 	defer lateResp.Body.Close()
 	if lateResp.StatusCode != http.StatusOK {
@@ -154,7 +154,7 @@ func TestCasinoWebhook_E10_SequentialWinAfterTombstone(t *testing.T) {
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
-	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launched := mustLaunchAndConsumeCasinoGame(t, srv, pool, tenant.ID, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 	sessionID := uuid.MustParse(launched.SessionID)
 
 	const roundID = "round-e10-sequential"
@@ -163,7 +163,7 @@ func TestCasinoWebhook_E10_SequentialWinAfterTombstone(t *testing.T) {
 	const rollbackOfWinTxID = "cas-e10-seq-rollback"
 
 	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, betTxID, "", roundID, game.ProviderGameID,
-		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+		1000, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), sessionID)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	if betResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 posting the bet, got %d", betResp.StatusCode)
@@ -172,7 +172,7 @@ func TestCasinoWebhook_E10_SequentialWinAfterTombstone(t *testing.T) {
 
 	// Tombstone the win's reference BEFORE the win ever arrives.
 	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackOfWinTxID, winTxID, roundID, game.ProviderGameID,
-		0, "EUR", "", "", player.ID, uuid.Nil)
+		0, "EUR", "", "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	rbResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	if rbResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 tombstoning the never-seen win reference, got %d", rbResp.StatusCode)
@@ -181,7 +181,7 @@ func TestCasinoWebhook_E10_SequentialWinAfterTombstone(t *testing.T) {
 
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
-		2500, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+		2500, "EUR", casino.OutcomeSucceeded, "", mustCasinoPlayerRef(t, pool, tenant.ID, player.ID), uuid.Nil)
 	winResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
 	defer winResp.Body.Close()
 	if winResp.StatusCode != http.StatusConflict {

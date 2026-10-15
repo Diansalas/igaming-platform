@@ -136,9 +136,9 @@ func TestStakeReturn_CasinoRollbackOfBetAllowedOnNonActiveTenant(t *testing.T) {
 				amount int64
 				player uuid.UUID
 			}{
-				{"amount_mismatch", "round-3", 501, w.f.playerAccountID},
+				{"amount_mismatch", "round-3", 501, w.f.playerRef},
 				{"wrong_player", "round-3", 0, uuid.New()},
-				{"wrong_round", "round-other", 0, w.f.playerAccountID},
+				{"wrong_round", "round-other", 0, w.f.playerRef},
 			} {
 				_, err := w.deliverRollbackAs("rb-bad-"+m.name, "b-3", m.round, m.amount, m.player)
 				if !errors.Is(err, ErrTenantNotActive) || !errors.Is(err, ErrStakeReturnMismatch) {
@@ -208,7 +208,7 @@ func TestStakeReturn_CasinoRollbackOfBetAllowedOnNonActiveTenant(t *testing.T) {
 
 			// 6. The correct return of b-3 still works afterwards, with the
 			// matching amount and player stated.
-			ok, err := w.deliverRollbackAs("rb-3", "b-3", "round-3", 500, w.f.playerAccountID)
+			ok, err := w.deliverRollbackAs("rb-3", "b-3", "round-3", 500, w.f.playerRef)
 			if err != nil || ok.Replayed {
 				t.Fatalf("a matching return must post: %+v err=%v", ok, err)
 			}
@@ -370,7 +370,7 @@ func TestStakeReturn_CasinoStatusChangeRace(t *testing.T) {
 		var once sync.Once
 		releaseOnce := func() { once.Do(func() { close(release) }) }
 		t.Cleanup(releaseOnce)
-		payload := w.provider.CallbackPayload(w.f.tenantID, CallbackEventRollback, "rb-r2", "b-r2", "round-r2", "game-1", 0, "EUR", "", "", w.f.playerAccountID, uuid.Nil)
+		payload := w.provider.CallbackPayload(w.f.tenantID, CallbackEventRollback, "rb-r2", "b-r2", "round-r2", "game-1", 0, "EUR", "", "", w.f.playerRef, uuid.Nil)
 		posted := make(chan error, 1)
 		go func() {
 			posted <- rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

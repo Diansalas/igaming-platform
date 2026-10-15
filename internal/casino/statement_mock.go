@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -71,6 +70,11 @@ type MockStatementSource struct{}
 
 var _ StatementSource = MockStatementSource{}
 
+// ledgerRenderer is the shape the stream accepts for a Synthetic in-house
+// source (CAS-STMT-IO-1): the MOCK reads the platform's own ledger tables
+// inside the match transaction, not a provider.
+var _ statement.CasinoLedgerRenderer = MockStatementSource{}
+
 // Label implements StatementSource.
 func (MockStatementSource) Label() string { return MockStatementLabel }
 
@@ -80,8 +84,17 @@ func (MockStatementSource) Label() string { return MockStatementLabel }
 // refuses a binary that wires this source.
 func (MockStatementSource) SyntheticComponent() {}
 
-// Statement implements StatementSource. Read-only.
-func (MockStatementSource) Statement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, _, _ time.Time) ([]StatementLine, []StatementTotal, error) {
+// RenderFromLedger implements statement.CasinoLedgerRenderer: it renders the
+// MOCK statement for tenantID from the platform's own casino ledger rows,
+// over the whole ledger, inside the caller's transaction (the casino_statement
+// run's REPEATABLE READ transaction, at the snapshot of the ledger side). It
+// is a database read, not provider I/O - which is why the MOCK may take this
+// shape and a real source may not (CAS-STMT-IO-1). Read-only.
+func (MockStatementSource) RenderFromLedger(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]StatementLine, []StatementTotal, error) {
+	return renderMockStatement(ctx, tx, tenantID)
+}
+
+func renderMockStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]StatementLine, []StatementTotal, error) {
 	rows, err := tx.Query(ctx, `
 		WITH amounts AS (
 		    SELECT t.id, t.provider_id, t.provider_tx_id, t.transaction_type, t.correlation_id,

@@ -120,8 +120,18 @@ func verifyStakeReturnMatchesBet(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 	if winOutstanding {
 		return ErrStakeReturnWinOutstanding
 	}
-	if event.PlayerAccountID != uuid.Nil && event.PlayerAccountID != playerID {
-		return fmt.Errorf("%w: player", ErrStakeReturnMismatch)
+	// CAS-PLAYER-REF-1: an optional player reference on the rollback is
+	// resolved (scoped to this tenant and provider) and must name the bet's
+	// own player; one that does not resolve at all - a raw account id included
+	// - is a mismatch, not a pass.
+	if event.PlayerRef != uuid.Nil {
+		refPlayer, err := ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef)
+		if errors.Is(err, ErrPlayerRefUnresolved) || (err == nil && refPlayer != playerID) {
+			return fmt.Errorf("%w: player", ErrStakeReturnMismatch)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if event.AssetCode != "" && event.AssetCode != assetCode {
 		return fmt.Errorf("%w: asset", ErrStakeReturnMismatch)

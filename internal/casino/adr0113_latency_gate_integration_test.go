@@ -111,8 +111,8 @@ func TestADR0113_CasinoBetWinLatencyGate(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		for _, enabled := range []bool{true, false} {
 			round := "lat-warm-" + uuid.NewString()
-			run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventBet, "b-"+round, "", round, "game-1", 10, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID))
-			run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventWin, "w-"+round, "", round, "game-1", 5, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil))
+			run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventBet, "b-"+round, "", round, "game-1", 10, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID))
+			run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventWin, "w-"+round, "", round, "game-1", 5, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil))
 		}
 	}
 	for i := 0; i < n; i++ {
@@ -127,9 +127,9 @@ func TestADR0113_CasinoBetWinLatencyGate(t *testing.T) {
 			}
 			round := "lat-" + uuid.NewString()
 			samples["bet/"+mode] = append(samples["bet/"+mode],
-				run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventBet, "b-"+round, "", round, "game-1", 10, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)))
+				run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventBet, "b-"+round, "", round, "game-1", 10, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)))
 			samples["win/"+mode] = append(samples["win/"+mode],
-				run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventWin, "w-"+round, "", round, "game-1", 5, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)))
+				run(enabled, provider.CallbackPayload(f.tenantID, CallbackEventWin, "w-"+round, "", round, "game-1", 5, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.Nil)))
 		}
 	}
 	pct := func(d []time.Duration, p float64) time.Duration {
