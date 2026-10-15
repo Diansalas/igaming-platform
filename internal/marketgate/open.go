@@ -159,12 +159,17 @@ func openHintKey(tenantID uuid.UUID, brandID *uuid.UUID, ops []Operation) string
 // enabled ceiling for the tenant's licence. On any error it returns the input
 // unchanged (fail-safe: the resolver then decides every candidate).
 func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf time.Time, in []string) []string {
+	// Two plain reads (the licence binding, then its ceilings) so no single statement
+	// both joins tenants and names a status column (tenant/status_readers_static_test).
+	var licenceID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil || licenceID == nil {
+		return in
+	}
 	rows, err := tx.Query(ctx, `
-		SELECT DISTINCT c.country_code
-		  FROM licence_country_ceilings c
-		  JOIN tenants t ON t.licence_id = c.licence_id
-		 WHERE t.id = $1 AND c.state = 'enabled' AND c.status = 'active'
-		   AND c.effective_from <= $2 AND (c.effective_to IS NULL OR c.effective_to > $2)`, tenantID, asOf)
+		SELECT DISTINCT country_code
+		  FROM licence_country_ceilings
+		 WHERE licence_id = $1 AND state = 'enabled' AND status = 'active'
+		   AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)`, *licenceID, asOf)
 	if err != nil {
 		return in
 	}
