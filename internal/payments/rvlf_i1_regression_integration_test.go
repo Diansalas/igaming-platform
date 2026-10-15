@@ -28,7 +28,7 @@ import (
 
 func rvInit(t *testing.T, pool *db.Pool, orch *Orchestrator, f orchFixture, amount int64, key string) InitiateDepositAttemptResult {
 	t.Helper()
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: key,
 	})
@@ -766,7 +766,7 @@ func TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch(t *testing.T) {
 	registerCapability(t, pool, f, p, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h3-sweep": p}, MultiWebhookCredentialResolver{"mock-h3-sweep": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "h3-sweep",
 	})
@@ -1016,7 +1016,7 @@ func TestRVLF_L2_BridgeCascadeThenT13SecondCapture(t *testing.T) {
 	var first, second PaymentAttempt
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = legacyShapeInitiateDeposit(ctx, tx, orch, InitiateDepositParams{
+		intent, err = legacyShapeInitiateDeposit(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "l2-cascade-t13",
 		})

@@ -59,7 +59,7 @@ func TestADR0113_CasinoBetWinLatencyGate(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	n := 400
 	if v, err := strconv.Atoi(os.Getenv("ADR0113_LATENCY_SAMPLES")); err == nil && v > 0 {

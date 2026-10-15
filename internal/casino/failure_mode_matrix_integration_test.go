@@ -236,7 +236,7 @@ func TestFailureModeMatrix_A_PlatformAbortsAfterProviderAccepted_NoPartialLedger
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const providerTxID = "bet-fm-a-abort"
 	const roundID = "round-fm-a-abort"
@@ -342,7 +342,7 @@ func TestFailureModeMatrix_A_ContextCancelledMidCallback_NoPartialLedgerWrite(t 
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const providerTxID = "bet-fm-a-cancel"
 	const roundID = "round-fm-a-cancel"
@@ -452,7 +452,7 @@ func TestFailureModeMatrix_B_RetryAfterCommittedCrashReturnsPriorOutcome(t *test
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const roundID = "round-fm-b"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
@@ -534,7 +534,7 @@ func TestFailureModeMatrix_C_DuplicateWebhookDeliveryOfFullRound(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const roundID = "round-fm-c"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
@@ -617,7 +617,7 @@ func TestFailureModeMatrix_D_WinBeforeBetIsRejectedAndTheRoundStillRecovers(t *t
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const roundID = "round-fm-d"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
@@ -700,7 +700,7 @@ func TestFailureModeMatrix_D_LateOriginalAfterTombstoneIsRejectedWithNoLedgerEff
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const roundID = "round-fm-d-tombstone"
 	const betRef = "bet-fm-d-late"
@@ -790,7 +790,7 @@ func TestFailureModeMatrix_E_MalformedAmountsAndUnknownAssetRejectedCleanly(t *t
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	cases := []struct {
 		name         string
@@ -923,10 +923,10 @@ func TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchRevokesSessionNoTra
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	provider.FailNextCall()
-	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -1010,7 +1010,7 @@ func TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchRevokesSessionNoTra
 	// failure above was the injected one and not a broken fixture, and that
 	// a player retry mints a brand-new session/token (existing behaviour -
 	// no automatic retry, no duplicate-token path for the failed attempt).
-	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -1040,7 +1040,7 @@ func TestFailureModeMatrix_H_BetNamingAnUnknownSessionRejectedCleanly(t *testing
 	fundWallet(t, pool, f, 5000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-h", "", "round-fm-h", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -1089,7 +1089,7 @@ func TestFailureModeMatrix_I_BetPayloadNamingAnotherPlayerDebitsOnlyTheSessionOw
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const roundID = "round-fm-i"
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
@@ -1165,7 +1165,7 @@ func TestFailureModeMatrix_JK_CrossTenantRollbackCannotReachAnotherTenantsTransa
 	registerCasinoCapability(t, pool, fA, provider, 100)
 	registerCasinoCapability(t, pool, fB, provider, 100)
 	sessionID := mintSession(t, pool, fA, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const betRef = "bet-fm-jk"
 	const roundID = "round-fm-jk"

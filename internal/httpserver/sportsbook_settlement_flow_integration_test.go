@@ -51,7 +51,7 @@ func newSettlementTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, s
 		RefreshTokenTTL:                       time.Hour,
 		SportsbookEnabled:                     true,
 		SportsbookSettlementSimulationEnabled: simulationEnabled,
-		PersonResolver:                        identityresolution.NewMockPersonResolver(),
+		PersonResolver:                        identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -872,7 +872,7 @@ func TestSettlementSimulate_DeactivatedActor_403AndAuditRecorded(t *testing.T) {
 	// a request admitted just before the suspension committed). Pinned behind the chain with the same claims.
 	deps := Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), DB: pool, AuthIssuer: issuer, StaffMFA: testStaffMFA(),
 		ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour, SportsbookEnabled: true,
-		SportsbookSettlementSimulationEnabled: true, PersonResolver: identityresolution.NewMockPersonResolver()}
+		SportsbookSettlementSimulationEnabled: true, PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{}}
 	rec := behindChain(t, newSimulateSettlementEventHandler(deps), http.MethodPost, simulatePath(bet.ID), map[string]string{"id": bet.ID},
 		tenantctx.Context{TenantID: tenant.ID, Role: string(auth.RoleRiskManager), PrincipalType: string(auth.PrincipalStaff), Subject: staff.ID.String()},
 		map[string]any{"event_type": "void", "void_reason": "market_cancelled"})

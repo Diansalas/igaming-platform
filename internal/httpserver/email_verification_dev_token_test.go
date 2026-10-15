@@ -46,14 +46,14 @@ import (
 func newAccountActivationTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *payments.Orchestrator, activationEnabled bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(New(Deps{
-		Logger:                              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                                  pool,
-		AuthIssuer:                          issuer,
-		StaffMFA:                            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:                         "platform-api-test",
-		AccessTokenTTL:                      5 * time.Minute,
-		RefreshTokenTTL:                     time.Hour,
-		PersonResolver:                      identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		EmailProvider:                       email.NewMockProvider(),
 		AccountActivationTestSupportEnabled: activationEnabled,
 		PaymentOrchestrator:                 orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
@@ -340,14 +340,14 @@ func TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA_ConfirmOnRepli
 	// is the same *db.Pool (the same Postgres, exactly as two real
 	// replica processes would share the same database and nothing else).
 	replicaA := httptest.NewServer(New(Deps{
-		Logger:                              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                                  pool,
-		AuthIssuer:                          issuer,
-		StaffMFA:                            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:                         "platform-api-test-replica-a",
-		AccessTokenTTL:                      5 * time.Minute,
-		RefreshTokenTTL:                     time.Hour,
-		PersonResolver:                      identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test-replica-a",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		EmailProvider:                       email.NewMockProvider(),
 		AccountActivationTestSupportEnabled: true,
 		PaymentOrchestrator:                 orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
@@ -355,14 +355,14 @@ func TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA_ConfirmOnRepli
 	t.Cleanup(replicaA.Close)
 
 	replicaB := httptest.NewServer(New(Deps{
-		Logger:                              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                                  pool,
-		AuthIssuer:                          issuer,
-		StaffMFA:                            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:                         "platform-api-test-replica-b",
-		AccessTokenTTL:                      5 * time.Minute,
-		RefreshTokenTTL:                     time.Hour,
-		PersonResolver:                      identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test-replica-b",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		EmailProvider:                       email.NewMockProvider(),
 		AccountActivationTestSupportEnabled: true,
 		PaymentOrchestrator:                 orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},

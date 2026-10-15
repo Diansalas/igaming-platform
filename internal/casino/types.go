@@ -134,6 +134,15 @@ const (
 	// resolved jurisdiction code appears in the game's own
 	// jurisdiction_blocklist.
 	DenialCodeJurisdictionBlocked = "jurisdiction_blocked"
+	// DenialCodeMarketNotAvailable is reported when the A8 operating-
+	// market gate (internal/marketgate) refuses a launch: the request's
+	// evidenced country is outside the brand's operating market, or the
+	// evidence is unknown (fail closed). ONE code for every operating-
+	// market outcome (ADR 0045 section 6); the specific reason lives only
+	// in the committed audit row. The HTTP boundary collapses it to the
+	// generic "not available in your region" response and never logs it
+	// as an RG/Risk policy block.
+	DenialCodeMarketNotAvailable = "market_not_available"
 )
 
 // Sentinel errors.

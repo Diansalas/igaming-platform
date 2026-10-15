@@ -39,13 +39,16 @@
 //     future caller, not something this package itself does: this package
 //     has no dependency on internal/audit and must not import it.
 //
-// This package is deliberately NOT registered anywhere in
-// cmd/platform-api/main.go, has no Orchestrator/provider-registry type
-// (unlike internal/kyc), and is not reachable from any HTTP route. This is
-// intentional for this phase (canonical-model §12.2 item 1 / §9.4 - a
-// vendor on this signal path would become a hard dependency of whatever
-// future consumer calls it, which needs its own decision, gated on its own
-// vendor-selection decision and its own security review).
+// This package has no Orchestrator/provider-registry type (unlike
+// internal/kyc) and contains no vendor. Its ONE production consumer is the
+// A8 operating-market gate (internal/marketgate), through the narrow Locator
+// interface (locator.go) - and the only Locator wired is StaticLocator, a
+// Synthetic MOCK that reports UNKNOWN by default and that the
+// MOCK-ADAPTER-PROD-1 startup guard refuses in production
+// (cmd/platform-api/registrations.go). A real vendor remains gated on its
+// own vendor-selection decision and its own security review
+// (canonical-model §12.2 item 1 / §9.4 - a vendor on this signal path
+// becomes a hard dependency of every gated request).
 package geolocation
 
 import (

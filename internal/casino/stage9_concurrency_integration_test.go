@@ -200,7 +200,7 @@ func TestStage9_ConcurrentDistinctBetsOneWallet_ExactlyOneAccepted(t *testing.T)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
@@ -286,7 +286,7 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const (
 		round = "s9-round-win-vs-rollback"
@@ -391,7 +391,7 @@ func TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactlyOnce(t *t
 	fundWallet(t, pool, f, 1_000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const (
 		round = "s9-round-locked"
@@ -509,7 +509,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// Both want the whole 1000. Only one can have it.
 	const amount = int64(1_000)

@@ -167,7 +167,7 @@ func TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires(t *testin
 	// lapses, which a loaded -race runner may not manage in 30ms (security
 	// FH-7 N-B).
 	sessionID := mintAndConsumeSessionWithTTL(t, pool, f, "mock-casino", "EUR", time.Second)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	time.Sleep(1200 * time.Millisecond)
 
@@ -207,7 +207,7 @@ func TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced(t *testing
 	// consumed session (consumed rows are immutable except consumed -> revoked,
 	// migration 0108), so this test needs the ACTIVE variant of the fixture.
 	sessionID := mintActiveSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	markSessionExpired(t, pool, f.tenantID, sessionID)
 
@@ -265,7 +265,7 @@ func TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive(t *testing
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSessionWithTTL(t, pool, f, "mock-casino", "EUR", 30*time.Millisecond)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -304,7 +304,7 @@ func TestReceiveCallback_WinSettlesForPreExpiryBetAfterSessionExpires(t *testing
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// The bet posts BEFORE expiry, while the session is still eligible.
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-pre-expiry", "", "round-pre-expiry", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)

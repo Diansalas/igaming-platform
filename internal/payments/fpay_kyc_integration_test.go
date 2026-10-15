@@ -351,7 +351,7 @@ func TestDepositGate_RecordsOneDecisionRowPerEvaluation(t *testing.T) {
 		return fpCount(t, pool, f.tenantID,
 			`SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id=$1 AND player_account_id=$2 AND operation='deposit'`, f.tenantID, f.playerAccountID)
 	}
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "fpay-dep-1",
 	})
@@ -368,7 +368,7 @@ func TestDepositGate_RecordsOneDecisionRowPerEvaluation(t *testing.T) {
 		t.Fatalf("expected the row to be an allow, got %d", n)
 	}
 	// The idempotent replay does not re-run phase A: still exactly one row.
-	if _, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	if _, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "fpay-dep-1",
 	}); err != nil {

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { useAuth } from '../../auth/AuthContext'
 import { getEvent, placeBet, type Bet, type RejectionCategory } from '../../api/sportsbook'
 import { ApiError } from '../../api/types'
+import { marketRefusalOr } from '../../lib/marketRefusal'
 import { Button } from '../../components/Button'
 import { TextInput } from '../../components/TextInput'
 import { brandConfig } from '../../config/brand'
@@ -136,7 +137,7 @@ export function BetSlip() {
         }
       }
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : 'Something went wrong placing this bet. Please try again.'
+      const message = marketRefusalOr(err, (e) => (e instanceof ApiError ? e.message : 'Something went wrong placing this bet. Please try again.'))
       setOutcome({ kind: 'error', message })
     } finally {
       setIsSubmitting(false)

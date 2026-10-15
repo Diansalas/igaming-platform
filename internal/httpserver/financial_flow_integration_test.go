@@ -85,7 +85,7 @@ func financialTestDeps(pool *db.Pool, issuer *auth.Issuer, orchestrator *payment
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		PayoutInstruments: pitest.Shared(), // B13-B: a withdrawal request binds a verified payout instrument
 	}
 }
@@ -224,7 +224,7 @@ func mustRegisterCapability(t *testing.T, pool *db.Pool, tenantID uuid.UUID, pro
 // exactly like every other fixture in this file.
 func mustCreateDepositIntent(t *testing.T, pool *db.Pool, orchestrator *payments.Orchestrator, tenantID, brandID, playerAccountID, walletID uuid.UUID, assetCode string, amount int64) payments.DepositIntent {
 	t.Helper()
-	res, err := orchestrator.InitiateDepositAttempt(context.Background(), pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := orchestrator.InitiateDepositAttempt(context.Background(), pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope: payments.DepositScope{
 			TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
 		},

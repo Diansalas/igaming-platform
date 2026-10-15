@@ -568,7 +568,7 @@ func TestSportsbookCumulative_RollbackOfTheWholeTransactionReleasesEveryLock(t *
 	}
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := PlaceBet(ctx, tx, PlaceBetParams{
+		_, err := PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 1_000,
 			ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,

@@ -70,6 +70,14 @@ const (
 	// brand or tenant is NOT reported this way: it answers 404 like an unknown brand
 	// (security S-5). 409; nothing was created.
 	CodeBrandNotAcceptingRegistrations Code = "BRAND_NOT_ACCEPTING_REGISTRATIONS"
+	// CodeMarketNotAvailable: the A8 operating-market gate (internal/marketgate) refused player
+	// registration, deposit initiation or casino launch. 403. ONE code, ONE status and ONE
+	// fixed message for EVERY cause (country outside the operating market, brand with no
+	// market configuration, unknown/unavailable location evidence, any non-permitted
+	// operating-market outcome): the response must not tell a player which rung blocked or
+	// whether their location could not be determined (ADR 0045 section 6 oracle rule). Nothing
+	// was created.
+	CodeMarketNotAvailable Code = "MARKET_NOT_AVAILABLE"
 	// B13 (ADR 0111 2.4 / 2.9). 409 both. NOT_ACCEPTED is the ONE generic
 	// player-facing registration refusal (invalid detail, a card number, an
 	// unknown kind or rail, a fingerprint owned by another person): the same
@@ -202,7 +210,7 @@ func httpStatus(c Code) int {
 	case CodeUnauthorized, CodeInvalidMFACode, CodeInvalidChallenge, CodeInvalidEnrolmentToken, CodeSessionRevoked:
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson,
-		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused,
+		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused, CodeMarketNotAvailable,
 		CodeMFAEnrolmentRequired, CodeMFALocked, CodeStepUpRequired,
 		CodeSelfTargetForbidden, CodeRoleNotGrantable, CodeFourEyesViolation:
 		return http.StatusForbidden

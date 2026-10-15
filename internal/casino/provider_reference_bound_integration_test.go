@@ -72,7 +72,7 @@ func TestProviderRefBound_OversizeReferencesRejectedWithNothingWritten(t *testin
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// A real bet to roll back / win against, so the win and rollback cases
 	// would otherwise succeed and write.
@@ -157,7 +157,7 @@ func TestProviderRefBound_ExactMaxAcceptedAndIdempotent(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	betRef := strings.Repeat("b", providerref.MaxBytes)
 	roundRef := strings.Repeat("é", 127) + "r" // 255 bytes
@@ -242,7 +242,7 @@ func TestProviderRefBound_TombstoneForExactMaxOriginal(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	orig := strings.Repeat("o", providerref.MaxBytes)
 	rb := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rb-tomb", orig, "round-tomb", "game-1", 0, "EUR", "", "", f.playerRef, uuid.Nil)

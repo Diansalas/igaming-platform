@@ -217,7 +217,7 @@ func TestCasinoLaunchBootstraps_AppendOnly_TriggerLayer(t *testing.T) {
 	fundWallet(t, pool, f, 10000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	_, token := mintSessionForBootstrap(t, pool, f, game, ModeReal, "EUR", DefaultLaunchTokenTTL)
 	in := provider.BootstrapPayload(f.tenantID, token, "req-trigger-layer", game.ProviderGameID, "EUR", "real")
@@ -267,7 +267,7 @@ func TestMigration0111_DownRefusesWhileRowsExist(t *testing.T) {
 	fundWallet(t, pool, f, 10000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	_, token := mintSessionForBootstrap(t, pool, f, game, ModeReal, "EUR", DefaultLaunchTokenTTL)
 	in := provider.BootstrapPayload(f.tenantID, token, "req-scratch-1", game.ProviderGameID, "EUR", "real")

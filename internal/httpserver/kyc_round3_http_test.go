@@ -62,14 +62,14 @@ func newUploadSubmitFailureLogRedactionServer(t *testing.T, pool *db.Pool, issue
 	w := registerKYCOutboxWorker(t, pool, orch, kyc.NewMockOutboundResolver())
 	w.Logger = logger
 	srv := httptest.NewServer(New(Deps{
-		Logger:                 logger,
-		DB:                     pool,
-		AuthIssuer:             issuer,
-		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:            "platform-api-test",
-		AccessTokenTTL:         5 * time.Minute,
-		RefreshTokenTTL:        time.Hour,
-		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		Logger:          logger,
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:        orch,
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
@@ -234,14 +234,14 @@ func TestKYC_UploadOrphanVerification_Returns409NotInternalError(t *testing.T) {
 	orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": base}, kyc.NewMockWebhookCredentials(base))
 	registerKYCOutboxWorker(t, pool, orch, mismatchedKYCResolver{})
 	srv := httptest.NewServer(New(Deps{
-		Logger:                 slog.New(slog.DiscardHandler),
-		DB:                     pool,
-		AuthIssuer:             issuer,
-		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:            "platform-api-test",
-		AccessTokenTTL:         5 * time.Minute,
-		RefreshTokenTTL:        time.Hour,
-		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.DiscardHandler),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:        orch,
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),

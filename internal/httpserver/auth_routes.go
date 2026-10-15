@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -67,6 +68,14 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "registration is temporarily unavailable")
 			return
 		}
+		// A8: the operating-market gate is mandatory for registration. A
+		// deployment without one fails closed, exactly like a missing
+		// PersonResolver - never "ungated".
+		if deps.MarketGate == nil {
+			logger.Error("register_market_gate_not_configured")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "registration is temporarily unavailable")
+			return
+		}
 
 		var req registerRequest
 		if err := decodeJSON(r, &req); err != nil {
@@ -104,6 +113,43 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		ip, ua := clientIP(r), r.UserAgent()
+
+		// A8: server-derived country evidence is gathered OUTSIDE the
+		// transaction (a future vendor lookup is network I/O); the policy
+		// read and the refusal audit happen INSIDE it, as its first
+		// statement. The country is never taken from the request body.
+		marketGuard := deps.MarketGate.Guard(
+			marketgate.Request{TenantID: brand.TenantID, BrandID: brand.ID, Operation: marketgate.OpRegistration, RequestID: requestID},
+			deps.MarketGate.Locate(r.Context(), marketgate.LocateRequest{
+				TenantID: brand.TenantID, BrandID: brand.ID, RequestID: requestID, IPAddress: ip,
+			}),
+		)
+
+		// SR8-5: a cheap pre-check BEFORE the Argon2id hash (~64 MiB, tens of
+		// milliseconds of CPU), so a refused-market registration cannot be used to
+		// amplify CPU/memory. The refusal is already disclosed by the response, so a
+		// faster refusal adds no oracle. The authoritative check is the one inside the
+		// account-creation transaction below; this one only ever refuses early.
+		var preDenied bool
+		if perr := deps.DB.WithTenant(r.Context(), brand.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			d, gerr := marketGuard(ctx, tx)
+			if gerr != nil {
+				return gerr
+			}
+			preDenied = !d.Allowed
+			return nil
+		}); perr != nil {
+			logger.Error("register_market_precheck_failed", "error", perr)
+			apierror.Write(w, requestID, apierror.CodeInternal, "registration failed")
+			return
+		}
+		if preDenied {
+			logger.Warn("register_refused_market_not_available", "brand_id", brand.ID.String())
+			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+			return
+		}
+
 		passwordHash, err := auth.HashPassword(req.Password)
 		if err != nil {
 			logger.Error("register_hash_failed", "error", err)
@@ -111,9 +157,20 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		ip, ua := clientIP(r), r.UserAgent()
 		var tokens tokenPairResponse
+		marketDenied := false
 		err = deps.DB.WithTenant(r.Context(), brand.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			decision, gerr := marketGuard(ctx, tx)
+			if gerr != nil {
+				return fmt.Errorf("register: operating-market gate: %w", gerr)
+			}
+			if !decision.Allowed {
+				// A refusal is a result, not an error: this transaction
+				// commits ONLY the gate's audit row (nothing else has been
+				// written yet).
+				marketDenied = true
+				return nil
+			}
 			account, outcome, err := identityresolution.RegisterPlayerWithResolution(ctx, tx, deps.PersonResolver, identityresolution.RegisterPlayerWithResolutionParams{
 				Brand: brand, Email: req.Email, PasswordHash: passwordHash,
 				// Verified is deliberately left empty - this HTTP request
@@ -141,6 +198,11 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 				Metadata: map[string]any{"registration_outcome": string(outcome)},
 			})
 		})
+		if err == nil && marketDenied {
+			logger.Warn("register_refused_market_not_available", "brand_id", brand.ID.String())
+			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+			return
+		}
 		if errors.Is(err, identity.ErrEmailTaken) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "an account with this email already exists for this brand")
 			return

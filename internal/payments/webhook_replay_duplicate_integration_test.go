@@ -53,7 +53,7 @@ func TestWebhook_Replay_SameSuccess_NoSecondCredit(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "t8a-idem",
 		})
@@ -95,7 +95,7 @@ func TestWebhook_Replay_ReversalReplayed_Conflict(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 6000, PaymentMethod: "card", IdempotencyKey: "t8b-idem",
 		})
@@ -179,7 +179,7 @@ func TestWebhook_ConcurrentDuplicates_ExactlyOnePosting(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 7000, PaymentMethod: "card", IdempotencyKey: "t8c-idem",
 		})
@@ -241,7 +241,7 @@ func TestWebhook_ConcurrentDuplicates_SecondBlocksOnReceiptKey(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 7000, PaymentMethod: "card", IdempotencyKey: "t8c-r0-block",
 		})

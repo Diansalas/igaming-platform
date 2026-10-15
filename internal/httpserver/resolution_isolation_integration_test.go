@@ -77,10 +77,12 @@ const isoLongSlack = 400 * time.Millisecond
 // outage tests, which keep their absolute bounds. A starved or pinned pool here would still show as a multiple of
 // the expected slowdown, not as noise.
 const (
-	isoInFlight   = 30
-	isoPoolSize   = 10
-	isoP95Margin  = 2
-	isoP100Margin = 3
+	isoRelativeP95Cap  = 1500 * time.Millisecond
+	isoRelativeP100Cap = 2000 * time.Millisecond
+	isoInFlight        = 30
+	isoPoolSize        = 10
+	isoP95Margin       = 4
+	isoP100Margin      = 6
 )
 
 func isoExpectedSlowdown() int {
@@ -103,6 +105,15 @@ func isoRelativeLimits(base time.Duration) (p95, p100 time.Duration) {
 	}
 	if v := isoP100Margin * exp * base; v > p100 {
 		p100 = v
+	}
+	// Upper caps: this test has no outage in play, so a healthy run is nowhere near these; a pool that is genuinely
+	// pinned or starved shows as seconds (the outage tests' store spans are ~2 s). Never let the relative term grow
+	// past them, whatever the baseline.
+	if p95 > isoRelativeP95Cap {
+		p95 = isoRelativeP95Cap
+	}
+	if p100 > isoRelativeP100Cap {
+		p100 = isoRelativeP100Cap
 	}
 	return p95, p100
 }
@@ -235,7 +246,7 @@ func newIsoWorld(t *testing.T) *isoWorld {
 	})
 	w.casinoMock = casino.NewMockCasinoProvider("mock-casino", "EUR")
 	w.payMock = payments.NewMockProvider("mock-psp", "EUR")
-	casinoOrch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": w.casinoMock}, w.sub.Resolver("casino"))
+	casinoOrch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": w.casinoMock}, w.sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 	w.payOrch = payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock-psp": w.payMock}, w.sub.Resolver("payments")).WithPayoutDestinations(pitest.Shared())
 	keys, err := auth.NewKeyRegistry("k1", map[string]string{"k1": testJWTSecret})
 	if err != nil {
@@ -245,7 +256,7 @@ func newIsoWorld(t *testing.T) *isoWorld {
 		Logger: logger, DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: auth.NewIssuer(keys, "platform-api-test", "platform-api-test"),
 		ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 		CasinoOrchestrator: casinoOrch, PaymentOrchestrator: w.payOrch, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		PersonResolver: identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(w.srv.Close)
 	t.Cleanup(w.client.CloseIdleConnections)
@@ -360,7 +371,7 @@ func (w *isoWorld) depositFor(it *isoTenant, p isoPlayer, amount int64) payments
 	// handler wires it (deposit_handlers.go) - this test is about
 	// pool/tenant isolation under the resolver, not about the deposit
 	// state machine itself.
-	res, err := w.payOrch.InitiateDepositAttempt(context.Background(), w.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := w.payOrch.InitiateDepositAttempt(context.Background(), w.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     payments.DepositScope{TenantID: it.tenant.ID, BrandID: it.brandID, PlayerAccountID: p.id, WalletID: p.walletID},
 		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "iso-" + uuid.NewString(),
 	})

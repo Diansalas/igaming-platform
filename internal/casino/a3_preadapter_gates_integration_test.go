@@ -50,7 +50,7 @@ func a3SetupConsumed(t *testing.T, funds int64) *a3Env {
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	e := &a3Env{pool: pool, f: f, provider: provider, game: game,
-		orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))}
+		orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()}
 	e.sessionID = a3Session(t, e, true)
 	return e
 }
@@ -242,7 +242,7 @@ func TestA3_GameKill_NoAvailabilityRowFailsClosed(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	game := seedGame(t, pool, "mock-casino", "EUR") // never enabled for the tenant
 	e := &a3Env{pool: pool, f: f, provider: provider, game: game,
-		orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))}
+		orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()}
 	e.sessionID = a3Session(t, e, true)
 	r, err := e.receive(t, CallbackEventBet, "bet-noavail", "", "round-noavail", 100, e.sessionID)
 	if err != nil || r.Outcome != OutcomeDeclined || r.DeclineReason != "game_unavailable" {

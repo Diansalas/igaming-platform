@@ -27,7 +27,7 @@ func TestCasinoWebhook_CrossTenantSignature_NoStatementBeforeVerification(t *tes
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, fA, provider, 100)
 	registerCasinoCapability(t, pool, fB, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	signedForA := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "cas-c7-cross-tenant", "", "round-c7-xt", "game-1",
 		1000, "EUR", OutcomeSucceeded, "", fA.playerRef, uuid.New())

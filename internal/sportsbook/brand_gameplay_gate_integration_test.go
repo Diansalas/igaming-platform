@@ -388,7 +388,7 @@ func TestBrandGate_Sportsbook_RacePlacementFirst(t *testing.T) {
 			posted := make(chan error, 1)
 			go func() {
 				posted <- rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-					r, err := PlaceBet(ctx, tx, PlaceBetParams{
+					r, err := PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 						TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 						SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 100,
 						ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,

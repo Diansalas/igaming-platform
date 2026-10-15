@@ -109,14 +109,14 @@ func (w *lhWorld) service(cfg launchgov.Config) *launchgov.Service {
 func (w *lhWorld) serve(svc *launchgov.Service) {
 	w.t.Helper()
 	srv := httptest.NewServer(New(Deps{
-		Logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                  w.rt,
-		AuthIssuer:          w.issuer,
-		StaffMFA:            testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:         "lh-test",
-		AccessTokenTTL:      time.Hour,
-		RefreshTokenTTL:     time.Hour,
-		PersonResolver:      identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              w.rt,
+		AuthIssuer:      w.issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "lh-test",
+		AccessTokenTTL:  time.Hour,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		LaunchAuthorisation: svc,
 	}))
 	w.t.Cleanup(srv.Close)

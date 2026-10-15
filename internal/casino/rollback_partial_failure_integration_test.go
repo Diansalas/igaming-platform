@@ -32,7 +32,7 @@ func TestPostRollback_C5_FailureBetweenTombstoneAndAudit_FullRollbackThenOneTomb
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	const originalTxID = "cas-c5-partial-original"
 	const rollbackTxID = "cas-c5-partial-rollback"
