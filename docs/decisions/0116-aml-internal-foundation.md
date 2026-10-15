@@ -1,5 +1,9 @@
 # ADR 0116 — AML Internal Foundation: transaction monitoring, screening, case workflow, SAR export (AML-INTERNAL-FOUNDATION)
 
+- **Update 2026-10-15 (A7, branch `a7-aml-operability`, NOT merged, security review pending):** the S6 minimal officer routes, the minimal Back
+  Office queue, the S7 readiness items and the S2 screening foundation (interface, MOCK, fail-closed orchestrator, migration `0154`) are
+  built and recorded in section 13. S4 monitoring and S5 SAR export remain `NOT IMPLEMENTED`. The paragraph below is the status as it stood
+  before that branch.
 - **Status as of 2026-10-15:** slices S1 and S3 are `IMPLEMENTED` against the local DB and MERGED (merge `034cc1d`, migrations 0140-0142, with the one-round-trip hold probe via pgconn ExecBatch merged in `789e27c`). S2 (screening interface + deterministic mock + fail-closed policy), S4 (monitoring rule engine), S5 (SAR export), S6 (officer routes/permissions/queue UI) and S7 (readiness items) are `NOT IMPLEMENTED`: there are no AML HTTP routes and no Back Office AML screens, so AML holds and cases are not operable by humans (completion audit A7). Hold probe/enforcement gates and the case four-eyes are DB-level. No legal value is set.
 - **Status (original text, 2026-10-13):** **ACCEPTED — slices S1 and S3 IMPLEMENTED on branch (2026-10-13, see §12); S2, S4, S5, S6, S7 NOT
   IMPLEMENTED** (revision 2, 2026-10-12, `architect` with the orchestrator). Q1–Q8 are recorded as
@@ -724,6 +728,8 @@ coupling, not one slice: the work was done together on one branch because a hold
   adjustments** (register row D-AML-TIP-1, non-blocking for engineering): choose (a) one deliberately shared token also produced by
   genuine non-AML causes, (b) as built, or (c) accept the visible signal. Recommended answer: **(c)** with a documented AML
   confidentiality duty for adjustment approvers, plus (a) later. Until decided, option (b) stays as the reversible orchestrator default.
+  **DECIDED by the owner on 2026-10-15: option (c) now, option (a) later; (b) (the generic `conflict` wording) stays as built.** The
+  legal wording of the duty (`docs/runbooks/aml-adjustment-approver-confidentiality.md`) is still pending counsel (E-class). No code change.
   Tests: `TestManualAdjustmentAPI_F4_AMLRefusalIsIndistinguishableFromAnOrdinaryConflict` (byte-identical status / headers / body and
   audit shape, submission and execution; it does NOT assert the state/approval-row or timing signal) and `TestAMLHold_*` in
   `internal/adjustment`.
@@ -811,3 +817,74 @@ Migrations 0140-0142 were edited in place (unmerged). Software capability only; 
 
 S2, S4, S5, S6, S7 as labelled above; HD-RET-1 erasure job; ALERT-DELIVERY to officers; Q5 propagation; platform-grant re-issue
 cadence (4-hour bound) as an operations task; whether `review` rows should keep the KYC policy trigger.
+
+## 13. Implementation record: A7 AML operability (2026-10-15, `identity-compliance`)
+
+Branch `a7-aml-operability`, **not merged, not pushed; security review CONDITIONAL (2026-10-15), conditions applied in round 2 (below) and awaiting re-review**. Software capability only: nothing here is a
+regulatory approval, a filing capability, or a statement that any licence condition is met. Every provider is a MOCK. The full
+record, the changed assertions, the mutation results and the proposed registry rows are in `docs/plans/a7-aml-record.md`.
+
+| Item | Label | Note |
+|---|---|---|
+| S6 officer routes (11) with permissions `aml_case:read/work/close_approve`, `aml_hold:manage` | **IMPLEMENTED** | `internal/httpserver/aml_routes.go`; `staffRoute`; golden table; OpenAPI. Reject of a proposal: **NOT IMPLEMENTED** (the service has no reject; a later event withdraws a proposal). No alert-raise route, no rule/screening/retention config route, no SAR route. |
+| S6 Back Office queue (cases, holds, case detail, actions, step-up, nav gating) | **IMPLEMENTED** (minimal) | `backoffice/src/features/aml`. UI-to-OpenAPI contract test for the 11 paths. |
+| S7 readiness `R-AML-QUORUM`, `R-AML-SCREENING`, `R-AML-MONITORING` | **IMPLEMENTED** | `R-AML-MONITORING` always fails (`monitoring_not_implemented`): monitoring (S4) is not built, so the gap is an explicit acknowledged item. The launch criterion itself (Q1 enforcement, retention table) is **NOT IMPLEMENTED**. |
+| S2 `ScreeningProvider` interface, closed outcome vocabulary, pseudonymous subject reference | **IMPLEMENTED** | `internal/aml/screening.go`. |
+| S2 deterministic provider | **MOCK** | `MockScreeningProvider`, `providerkind.Synthetic`, registered in the production guard under `aml/screening_provider`. Real screening vendor: **PROVIDER DEPENDENT**. |
+| S2 fail-closed orchestrator, policy decision, audit trail (`aml_screening_results`) | **IMPLEMENTED** (officer-initiated) | One transaction records the result and places the required hold. |
+| S2 policy configuration (`aml_screening_policies`, `SetScreeningPolicy`) | **IMPLEMENTED** (service + database); **no HTTP route, no Back Office screen** | Platform officer only, quorum-gated, legal review reference required, no default, no seed. |
+| S2 automatic triggers (registration, KYC approval, scheduler), outbox/worker, system actor | **NOT IMPLEMENTED** | Needs a `PlatformService` identity and fence (ADR 0106), a system actor for hold placement, and the Q6 decision. |
+| S2 gate wiring ("screening required, no completed result" enforced at deposit/withdrawal/payout) | **NOT IMPLEMENTED** | A recorded `error` outcome for a new person places a withdrawal+payout hold when the policy says so; there is no gate-side predicate that denies when no result exists. Changing the five gates is out of scope for A7 and needs `ledger-finance` and the call-site owners. |
+| Identity attributes (name, DOB) to the vendor | **BLOCKED** (Q6) | Only a per-tenant pseudonymous reference plus the KYC-vendor subject reference. |
+
+**Design points that differ from, or settle, this ADR's text**
+
+1. **Outcome vocabulary.** The ADR lists `clear | potential_match | unavailable`. The built vocabulary is `clear | potential_match |
+   confirmed | error` (A7 task); `error` is the ADR's `unavailable` with a closed `error_code`. `confirmed` is a vendor-reported
+   outcome: this system records it and holds; it makes no legal determination.
+2. **Hold class is derived strictly from outcome and list (security review SR7-2 / SR7-8; REPLACES the first-round reading).**
+   `reason_class = confirmed_sanctions` (all value movement; lifted only by the proof-bound four-eyes approval, ADR 0116 D6) is placed
+   ONLY for a `confirmed` outcome that names the sanctions list. A `potential_match` on the sanctions list still gates ALL value
+   movement by SCOPE (`all_value_movement`) but is `manual` class, so one officer can lift it as a false positive; a PEP-only match
+   and an unavailable result are `manual` / `withdrawal_and_payout` (Q7 default). So the word "confirmed" in the class name always
+   means a confirmed outcome (the class is NOT renamed: it is a merged 0141 value). The derivation is in `aml_screening_record`, in
+   the CHECKs of `aml_screening_results` (`hold_reason_class`, all-value-movement only for a confirmed outcome or a sanctions-list
+   match) and mirrored in `RecordScreeningInput.Validate` / `HoldReasonClassFor`. Consequence recorded for the owner: lifting a
+   potential-sanctions hold is a single-officer act (the hold-lift step-up and the audit trail still apply).
+3. **Recording a hold needs the officer quorum (SR7-2; REPLACES "screening-mandated holds do not wait for the officer quorum").**
+   Every record is an officer-proved record today, so a single officer could otherwise place an all-value hold by recording a
+   result. `aml_screening_record` therefore asserts the quorum of the owner scope for any record that places a hold (a clear places
+   none and needs none). The ADR 0116 section 6 exemption for holds placed AUTOMATICALLY by the screening orchestrator returns with
+   the F1 system-actor path (a non-officer principal); the orchestrator reports a record the quorum refused as NOT ENFORCED
+   (`NotEnforcedError`, retry), never as recorded. This is stricter than the review's wording ("quorum for manual-trigger records")
+   because the `trigger` column is caller-supplied and cannot distinguish an automatic record today.
+4. **A match always acts, with or without a policy.** The policy governs the lists and the "no completed result" rule (C1: held when
+   registered at or after `effective_from`, or an existing person once `backfill_grace` has elapsed), not whether a match is
+   enforced.
+5. **Ambiguity resolves to the stricter reading.** A `potential_match` that names no list is a match on every requested list; a
+   response that contradicts itself (a clear with a match, a match on an unrequested list, an unknown outcome, a panic, a timeout)
+   is an `error`, never a clear.
+6. **Readiness reads grants under a placeholder principal** (`aml_readiness`, migration 0154): the grant tables admit only a
+   principal-bound tenant session and the launch readiness read is a plain tenant read evaluated for a tenant by platform staff. The
+   function sets and restores `app.principal_id` around ONE count and returns a boolean, never the count or the officers.
+7. **Step-up classes** (ADR 0119 8.1): hold lift, proposal and approval are `critical` (and in `actorproof.StepUpOperations`).
+   Two STATE-DEPENDENT classifiers (body-read, the pattern of ADR 0119 8.1): placing a hold is `critical` unless
+   `reason_class == manual` (SR7-1: a `confirmed_sanctions` hold freezes all value movement and is liftable only by four-eyes, so a
+   stale second factor must not place it); a case transition is `critical` when it targets `closed_no_action` (SR7-5: a close
+   without action is not undoable by the platform), `none` for `in_review`, `escalated`, `sar_decision_pending`; an unknown, missing
+   or malformed body is `critical`. Opening a case, a note and a SAR flag only record and stay `none`; reads are `none`. Both
+   classifiers are pinned in the golden table, the static route test and the OpenAPI text.
+   **Pre-launch condition (SR7-1 / F4):** the `aml.hold_placement_rate` alert is NOT built. A compromised officer session with a
+   fresh second factor can still place manual holds without an alert; that alert is required before launch.
+8. **Migration numbering.** `0154` only; `0155` unused (to be added to the reserved list with `0152` and `0153` if those are also
+   not used).
+
+**D-AML-TIP-1 — DECIDED (c), 2026-10-15.** The owner decided option (c) now (accept the visible signal, plus a documented AML
+confidentiality duty for adjustment approvers) and option (a) later; option (b) (the generic `conflict` wording) stays as built.
+The duty text (`docs/runbooks/aml-adjustment-approver-confidentiality.md`) is "owner-approved duty (option c), legal wording
+pending (E-class)". No code change.
+
+**Security review round (SR7-1 .. SR7-9).** Applied in a second commit on the same branch: SR7-1, SR7-2 (+SR7-8), SR7-3 (jurisdiction
+validated in the database; four-eyes for loosening is a HARD PRE-ROUTE condition, pinned by a test that no production code calls
+`SetScreeningPolicy`), SR7-5, SR7-6, SR7-7; SR7-4 (reject operation plus proposal-invalidation alert) is a recorded follow-up;
+SR7-9 skipped by instruction. Details in `docs/plans/a7-aml-record.md` section 12.

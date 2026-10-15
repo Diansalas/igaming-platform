@@ -8,13 +8,30 @@ package httpserver
 // Values: "none", "financial", "critical", or "classifier:<name>" (a named S4b classifier whose ceiling is critical).
 // GET routes are "none" by rule (reads never step up). S4a records the class only; S4b enforces it.
 var staffRouteGolden = map[string]string{
-	"GET /v1/admin/alerting/routes":                                                               "none",
-	"POST /v1/admin/alerting/routes":                                                              "classifier:alertRouteManageClass",
-	"GET /v1/admin/alerting/status":                                                               "none",
-	"GET /v1/admin/alerts":                                                                        "none",
-	"GET /v1/admin/alerts/{alertID}":                                                              "none",
-	"POST /v1/admin/alerts/{alertID}/ack":                                                         "none",
-	"POST /v1/admin/alerts/{alertID}/resolve":                                                     "classifier:alertResolveClass",
+	"GET /v1/admin/alerting/routes":           "none",
+	"POST /v1/admin/alerting/routes":          "classifier:alertRouteManageClass",
+	"GET /v1/admin/alerting/status":           "none",
+	"GET /v1/admin/alerts":                    "none",
+	"GET /v1/admin/alerts/{alertID}":          "none",
+	"POST /v1/admin/alerts/{alertID}/ack":     "none",
+	"POST /v1/admin/alerts/{alertID}/resolve": "classifier:alertResolveClass",
+	// ADR 0116 s6 (A7, S6 minimal; security SR7-1 / SR7-5): the AML officer routes. Place-hold is the classifier amlHoldPlaceClass
+	// (critical for a confirmed_sanctions hold, none for a manual one) and transition is amlTransitionClass (critical for
+	// closed_no_action). Reads none. Placing a hold, opening a case, a transition, a
+	// note and a SAR flag only tighten or record (protective, rule 8.1) so none. A hold LIFT loosens a control (8.1 (e)) and
+	// the proposal and approval halves of a four-eyes action are 8.1 (d): critical. The signer backstop
+	// (actorproof.StepUpOperations) pins exactly the same three operations. There is no reject route (the service has none).
+	"GET /v1/admin/tenants/{tenantID}/aml/cases":                                                  "none",
+	"GET /v1/admin/tenants/{tenantID}/aml/cases/{caseID}":                                         "none",
+	"GET /v1/admin/tenants/{tenantID}/aml/persons/{personID}/holds":                               "none",
+	"POST /v1/admin/tenants/{tenantID}/aml/holds":                                                 "classifier:amlHoldPlaceClass",
+	"POST /v1/admin/tenants/{tenantID}/aml/holds/{holdID}/lift":                                   "critical",
+	"POST /v1/admin/tenants/{tenantID}/aml/cases":                                                 "none",
+	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/transition":                             "classifier:amlTransitionClass",
+	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/notes":                                  "none",
+	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/sar-flag":                               "none",
+	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/proposals":                              "critical",
+	"POST /v1/admin/tenants/{tenantID}/aml/cases/{caseID}/approvals":                              "critical",
 	"GET /v1/admin/asset-authorizations":                                                          "none",
 	"PUT /v1/admin/asset-authorizations/operation-eligibility/{code}":                             "critical",
 	"PUT /v1/admin/asset-authorizations/{scopeKind}":                                              "critical",
@@ -225,5 +242,5 @@ var staffRoutesClassifiedOnArrival = []string{
 	"staff lifecycle routes of section 14.2 (S6): critical; reads none; platform four-eyes reject/cancel none",
 	"RG restriction clear (ADR 0026 section 12): critical",
 	"jurisdiction evaluation-policy writes, operating-market ceiling/tenant/brand policy writes: critical",
-	"ADR 0114 S1b, ADR 0116 AML case actions, ADR 0107 closed-tenant resolution: rule 8.1",
+	"ADR 0114 S1b, ADR 0107 closed-tenant resolution: rule 8.1 (the ADR 0116 AML officer routes arrived with A7 and are in the table above)",
 }

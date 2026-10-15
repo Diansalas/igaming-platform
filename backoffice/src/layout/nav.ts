@@ -22,6 +22,7 @@ export function buildNavItems(claims: StaffClaims | null): NavItem[] {
     if (perms.launchQueue) items.push({ label: 'Launch Queue', to: '/launch-queue' })
     if (perms.alertManage) items.push({ label: 'Alerts', to: '/alerts' })
     if (perms.killSwitch) items.push({ label: 'Payment Kill Switch', to: '/payment-kill-switch' })
+    if (perms.amlRead) items.push({ label: 'AML', to: '/aml' })
     if (perms.catalogue) items.push({ label: 'Casino Catalogue', to: '/casino-catalogue' })
     if (perms.platformAudit) items.push({ label: 'Platform Audit Log', to: '/platform-audit-log' })
     return items
@@ -31,6 +32,7 @@ export function buildNavItems(claims: StaffClaims | null): NavItem[] {
   if (perms.providerConfig || perms.casinoConfig) items.push({ label: 'Providers & Games', to: '/configuration' })
   if (perms.players) items.push({ label: 'Players', to: '/players' })
   if (perms.kyc) items.push({ label: 'KYC', to: '/kyc' })
+  if (perms.amlRead) items.push({ label: 'AML', to: '/aml' })
   if (perms.rg) items.push({ label: 'Responsible Gaming', to: '/rg' })
   if (perms.bonus) items.push({ label: 'Bonus', to: '/bonus/campaigns' })
   if (perms.withdrawals) items.push({ label: 'Withdrawals', to: '/withdrawals' })

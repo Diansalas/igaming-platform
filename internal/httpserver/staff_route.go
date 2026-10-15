@@ -44,13 +44,15 @@ var (
 	stepUpByAlertKind          = routeClass{classifier: "alertResolveClass"}          // critical for P1 / security kinds; none otherwise
 	stepUpByRGLimitDirection   = routeClass{classifier: "rgLimitChangeClass"}         // critical for an increase or removal; none for a decrease
 	stepUpByAlertRouteManager  = routeClass{classifier: "alertRouteManageClass"}      // critical for a caller the handler admits; none otherwise
+	stepUpByAMLHoldPlace       = routeClass{classifier: "amlHoldPlaceClass"}          // critical for a confirmed_sanctions hold; none for a manual one (ADR 0116 A7, SR7-1)
+	stepUpByAMLTransition      = routeClass{classifier: "amlTransitionClass"}         // critical for closed_no_action; none for every other move (ADR 0116 A7, SR7-5)
 )
 
 // routeClassifiers is the closed set of classifier names (pinned by the static
 // test; stepUpClassifiers holds one Go function per name).
 var routeClassifiers = map[string]bool{
 	"launchActionClass": true, "financialPolicyChangeClass": true, "alertResolveClass": true, "rgLimitChangeClass": true,
-	"alertRouteManageClass": true,
+	"alertRouteManageClass": true, "amlHoldPlaceClass": true, "amlTransitionClass": true,
 }
 
 // valid reports whether c is exactly one of: a valid static class, or a known

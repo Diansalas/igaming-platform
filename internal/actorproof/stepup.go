@@ -56,6 +56,11 @@ var StepUpOperations = map[string]stepup.Class{
 	OpRGConfigApply:         stepup.Critical,
 	OpStaffLifecycleRequest: stepup.Critical,
 	OpStaffLifecycleApprove: stepup.Critical,
+	// ADR 0116 A7: AML hold lift and the two halves of an AML four-eyes action (rule 8.1 (d)/(e)). Placing a hold, opening a
+	// case, a transition, a note and a SAR flag only tighten or record, so they are protective and absent.
+	OpAMLHoldLift:    stepup.Critical,
+	OpAMLCasePropose: stepup.Critical,
+	OpAMLCaseApprove: stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4

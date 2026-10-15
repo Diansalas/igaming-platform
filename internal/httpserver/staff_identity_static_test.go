@@ -52,6 +52,12 @@ var staffIDFieldAllowlist = map[string]string{
 	"enrolStartWire.FactorID":      "wire form of enrolStartResponse.FactorID: the caller's own pending factor id (ADR 0119 S3)",
 
 	// --- request bodies (input from the caller, never a response) ---
+	// --- ADR 0116 A7 AML officer routes: the subject is a PERSON (not a staff identity), shown only to an officer of the row's
+	// owner scope (aml_authorize + aml_assert_row_scope); actor / author ids go through staffViewer.ref ---
+	"amlCaseDTO.PersonID":                             "the AML case subject Person id (not a staff id), shown only to an officer of the row's owner scope",
+	"amlQueueItemDTO.PersonID":                        "the AML case subject Person id (not a staff id), shown only to an officer of the row's owner scope",
+	"amlHoldPlaceRequest.PersonID":                    "request body: the Person to hold, caller-supplied input, not a response field",
+	"amlCaseOpenRequest.PersonID":                     "request body: the Person to open a case on, caller-supplied input, not a response field",
 	"createCapabilityGrantRequestBody.GranteeStaffID": "request body: caller-supplied input, not a response field",
 
 	// --- already redacted inline by ADR 0112 slice 6 (launchCall.dto / history / detail); covered by

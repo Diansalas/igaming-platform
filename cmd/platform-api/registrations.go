@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -48,6 +49,11 @@ type providerBundle struct {
 	// PayoutVerifier is the MOCK payout-instrument verifier (B13, ADR 0111
 	// 2.5): Synthetic, no external I/O, registered with the synthetic guard.
 	PayoutVerifier *payoutinstrument.MockVerifier
+
+	// AMLScreening is the MOCK sanctions / PEP screening provider (ADR 0116 s4, A7): Synthetic, no external I/O, registered
+	// with the synthetic guard so production refuses to start with it, and the component the R-AML-SCREENING launch
+	// readiness check looks for (domain "aml", name "screening_provider"). NOT wired into any enforcement point yet.
+	AMLScreening *aml.MockScreeningProvider
 
 	// The MOCK webhook credential resolvers (Stage 10.3 gate-W1 fix round,
 	// security S-4 / code review #2). They are built HERE - not in
@@ -190,6 +196,7 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
 		Email:           email.NewMockProvider(),
 		PayoutVerifier:  payoutinstrument.NewMockVerifier(),
+		AMLScreening:    aml.NewMockScreeningProvider(),
 	}
 	// PROV-OUTBOUND-CRED-1 phase 2 code review C2: this is the one
 	// DELIBERATE hard-wired MockCredentialResolver{} in this file, never
@@ -387,6 +394,7 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		{Domain: "kyc", Name: "malware_scanner", Component: b.MalwareScanner},
 		{Domain: "email", Name: "provider", Component: b.Email},
 		{Domain: "payout_instrument", Name: "verifier", Component: b.PayoutVerifier},
+		{Domain: "aml", Name: "screening_provider", Component: b.AMLScreening},
 	}
 	if b.KYC != nil {
 		regs = append(regs, providerkind.Registration{Domain: "kyc", Name: "provider", Component: b.KYC})

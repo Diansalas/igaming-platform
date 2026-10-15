@@ -21,6 +21,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/casino"
@@ -389,8 +390,15 @@ func run() error {
 		return fmt.Errorf("launch authorisation: %w", err)
 	}
 
+	// ADR 0116 (A7): the AML officer service behind the AML routes. Same process issuer as the other governed writers.
+	amlService, err := aml.New(aml.Config{Pool: pool, Proofs: actorProofIssuer})
+	if err != nil {
+		return fmt.Errorf("aml: %w", err)
+	}
+
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
 		LaunchAuthorisation:         launchAuthorisation,
+		AML:                         amlService,
 		AlertRouting:                alertDispatcher,
 		PayoutInstruments:           payoutInstruments,
 		AlertRoutingProduction:      cfg.GuardEnvironment() == "production",

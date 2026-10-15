@@ -28,6 +28,8 @@ import { CasinoCataloguePage } from '../features/catalogue/CasinoCataloguePage'
 import { AlertsPage } from '../features/alerts/AlertsPage'
 import { KillSwitchPage } from '../features/killswitch/KillSwitchPage'
 import { LaunchQueuePage } from '../features/launch/LaunchQueuePage'
+import { AmlPage } from '../features/aml/AmlPage'
+import { CaseDetailPage } from '../features/aml/CaseDetailPage'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
 
@@ -94,6 +96,22 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission="killSwitch">
               <KillSwitchPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="aml"
+          element={
+            <RequireNavPermission permission="amlRead">
+              <AmlPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="aml/cases/:caseId"
+          element={
+            <RequireNavPermission permission="amlRead">
+              <CaseDetailPage />
             </RequireNavPermission>
           }
         />
