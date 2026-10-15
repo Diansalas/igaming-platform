@@ -40,8 +40,11 @@ import (
 // clock, and treat a repeated Idempotency-Key as already handled. Delivery is at-least-once.
 //
 // The body is {"schema","alert_id","dedup_key","kind","severity","discriminator","subject_tenant_id"?,
-// "sent_at"}: no attribute values and no PII (the Kinds' attributes include operator-supplied text for some
-// Kinds, so none is forwarded).
+// "sent_at"}: no attribute values (the Kinds' attributes include operator-supplied text for some Kinds, so
+// none is forwarded). The discriminator is a PSEUDONYMOUS identifier (for example staff:<uuid>,
+// withdrawal:<id>), which is personal data once linkable to a person (SR9-A9-6): the receiver's vendor needs a
+// DPA. Receivers must dedupe on the SIGNED dedup_key in the body; the Idempotency-Key and X-Alert-Id headers
+// are NOT covered by the signature (SR9-A9-7) and equal the body's dedup_key and alert_id.
 //
 // Hardening (each independently tested; security review to probe):
 //
@@ -83,8 +86,11 @@ type WebhookConfig struct {
 	// AllowLoopbackDev admits a loopback receiver and plain http to it (development only; the caller derives it
 	// from config.GuardEnvironment() == "development"). A sink built with it never reports HumanNotification.
 	AllowLoopbackDev bool
-	Logger           *slog.Logger
-	Now              func() time.Time // tests only
+	// AllowNAT64 and AllowSingleLabelHosts forward the egressguard options of the same name (default: refused).
+	AllowNAT64            bool
+	AllowSingleLabelHosts []string
+	Logger                *slog.Logger
+	Now                   func() time.Time // tests only
 	// ResponseHeaderTimeout may only SHORTEN the 5s default (tests); 0 keeps the default.
 	ResponseHeaderTimeout time.Duration
 }
@@ -100,7 +106,9 @@ const (
 
 // NewWebhookSink validates the configured URL and builds the hardened client.
 func NewWebhookSink(cfg WebhookConfig) (*WebhookSink, error) {
-	u, err := egressguard.ValidateURL(cfg.URL, egressguard.URLOptions{AllowLoopbackDev: cfg.AllowLoopbackDev})
+	u, err := egressguard.ValidateURL(cfg.URL, egressguard.URLOptions{
+		AllowLoopbackDev: cfg.AllowLoopbackDev, AllowNAT64: cfg.AllowNAT64, AllowSingleLabelHosts: cfg.AllowSingleLabelHosts,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +127,7 @@ func NewWebhookSink(cfg WebhookConfig) (*WebhookSink, error) {
 	if cfg.ResponseHeaderTimeout > 0 && cfg.ResponseHeaderTimeout < headerTimeout {
 		headerTimeout = cfg.ResponseHeaderTimeout
 	}
-	dialer := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second, Control: egressguard.DialControl(cfg.AllowLoopbackDev)}
+	dialer := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second, Control: egressguard.DialControlWith(egressguard.DialOptions{AllowLoopback: cfg.AllowLoopbackDev, AllowNAT64: cfg.AllowNAT64})}
 	transport := &http.Transport{
 		Proxy:                  nil, // never an environment proxy: the dial control must judge the real peer
 		DialContext:            dialer.DialContext,

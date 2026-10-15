@@ -31,67 +31,123 @@ var ErrRefused = errors.New("egressguard: destination refused")
 
 func refuse(reason string) error { return fmt.Errorf("%w: %s", ErrRefused, reason) }
 
-// Prefixes that are not publicly routable unicast destinations beyond what the net/netip predicates
-// already cover (loopback, RFC 1918 / ULA private, link-local, multicast, unspecified).
-var nonPublicPrefixes = func() []netip.Prefix {
-	var out []netip.Prefix
-	for _, s := range []string{
-		"0.0.0.0/8",       // "this network"
-		"100.64.0.0/10",   // carrier-grade NAT
-		"192.0.0.0/24",    // IETF protocol assignments
-		"192.0.2.0/24",    // TEST-NET-1
-		"198.18.0.0/15",   // benchmarking
-		"198.51.100.0/24", // TEST-NET-2
-		"203.0.113.0/24",  // TEST-NET-3
-		"240.0.0.0/4",     // reserved (includes broadcast)
-		"64:ff9b::/96",    // NAT64 (embeds an IPv4 destination)
-		"64:ff9b:1::/48",  // local-use NAT64
-		"100::/64",        // discard-only
-		"2001::/32",       // Teredo
-		"2001:db8::/32",   // documentation
-		"2002::/16",       // 6to4 (embeds an IPv4 destination)
-		"fec0::/10",       // deprecated site-local
-	} {
+// Special-purpose IPv4 ranges that are not publicly routable unicast destinations beyond what the net/netip
+// predicates already cover (loopback, RFC 1918, link-local, multicast, unspecified).
+var nonPublicV4 = mustPrefixes(
+	"0.0.0.0/8",       // "this network"
+	"100.64.0.0/10",   // carrier-grade NAT
+	"192.0.0.0/24",    // IETF protocol assignments
+	"192.0.2.0/24",    // TEST-NET-1
+	"192.88.99.0/24",  // deprecated 6to4 relay anycast
+	"198.18.0.0/15",   // benchmarking
+	"198.51.100.0/24", // TEST-NET-2
+	"203.0.113.0/24",  // TEST-NET-3
+	"240.0.0.0/4",     // reserved (includes broadcast)
+)
+
+// IPv6 is an ALLOW-list: only global unicast 2000::/3 is considered at all (everything else, including ::/96,
+// ::ffff:0:0/96, 64:ff9b::/96, 100::/64, 5f00::/16, fc00::/7, fe80::/10 and ff00::/8, is outside it and
+// therefore refused), minus the special-purpose ranges that sit INSIDE 2000::/3.
+var (
+	globalUnicastV6 = netip.MustParsePrefix("2000::/3")
+	nat64Prefix     = netip.MustParsePrefix("64:ff9b::/96")
+	nonPublicV6     = mustPrefixes(
+		"::/96",          // deprecated IPv4-compatible (outside 2000::/3; listed so the table documents it)
+		"::ffff:0:0/96",  // IPv4-mapped (judged as its IPv4; listed for the same reason)
+		"2001::/23",      // IETF protocol assignments: Teredo, PCP/AMT anycast, benchmarking, ORCHID, ORCHIDv2, drone remote id
+		"2001:2::/48",    // benchmarking
+		"2001:10::/28",   // ORCHID (deprecated)
+		"2001:20::/28",   // ORCHIDv2
+		"2001:db8::/32",  // documentation
+		"2002::/16",      // 6to4 (embeds an IPv4 destination)
+		"3fff::/20",      // documentation
+		"5f00::/16",      // SRv6 SIDs
+		"64:ff9b:1::/48", // local-use NAT64
+	)
+)
+
+func mustPrefixes(ss ...string) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(ss))
+	for _, s := range ss {
 		out = append(out, netip.MustParsePrefix(s))
 	}
 	return out
-}()
+}
+
+// AddrOptions tunes PublicAddrWith.
+type AddrOptions struct {
+	// AllowNAT64 admits 64:ff9b::/96 (RFC 6052 well-known NAT64) for IPv6-only networks, but only when the
+	// embedded IPv4 destination is itself public. The default (false) refuses every NAT64 address.
+	AllowNAT64 bool
+}
 
 // PublicAddr reports whether ip is a globally routable unicast address that is safe to connect to from the
-// platform. It is fail-closed: an invalid address, and anything in a reserved, private, loopback,
-// link-local (including the cloud metadata address), multicast, carrier-grade-NAT, documentation or
-// address-embedding transition range, is not public. An IPv4-mapped IPv6 address is judged as its IPv4.
-func PublicAddr(ip netip.Addr) bool {
+// platform. It is fail-closed: an invalid address is not public; IPv6 is accepted only inside 2000::/3 minus
+// the special-purpose ranges; IPv4 is refused in every reserved, private, loopback, link-local (including the
+// cloud metadata address), multicast, carrier-grade-NAT, documentation or anycast-relay range. An
+// IPv4-mapped IPv6 address is judged as its IPv4. NAT64 is refused (see PublicAddrWith).
+func PublicAddr(ip netip.Addr) bool { return PublicAddrWith(ip, AddrOptions{}) }
+
+// PublicAddrWith is PublicAddr with options.
+func PublicAddrWith(ip netip.Addr, opts AddrOptions) bool {
 	if !ip.IsValid() {
 		return false
 	}
-	ip = ip.Unmap()
+	ip = ip.WithZone("").Unmap()
 	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
 		return false
 	}
-	for _, p := range nonPublicPrefixes {
-		if p.Contains(ip) {
+	if ip.Is4() {
+		return !inAny(nonPublicV4, ip)
+	}
+	if nat64Prefix.Contains(ip) {
+		if !opts.AllowNAT64 {
 			return false
 		}
+		b := ip.As16()
+		return PublicAddrWith(netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), AddrOptions{})
 	}
-	return true
+	if !globalUnicastV6.Contains(ip) {
+		return false
+	}
+	return !inAny(nonPublicV6, ip)
+}
+
+func inAny(ps []netip.Prefix, ip netip.Addr) bool {
+	for _, p := range ps {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // DialControl returns a net.Dialer.Control function that refuses to connect to any non-public address. With
 // allowLoopback (development only) it additionally admits loopback addresses and NOTHING else: the other
 // private, link-local and metadata ranges stay refused. An address it cannot parse is refused.
 func DialControl(allowLoopback bool) func(network, address string, c syscall.RawConn) error {
+	return DialControlWith(DialOptions{AllowLoopback: allowLoopback})
+}
+
+// DialOptions tunes DialControlWith.
+type DialOptions struct {
+	AllowLoopback bool // development only
+	AllowNAT64    bool // see AddrOptions.AllowNAT64
+}
+
+// DialControlWith is DialControl with options.
+func DialControlWith(opts DialOptions) func(network, address string, c syscall.RawConn) error {
 	return func(_ string, address string, _ syscall.RawConn) error {
 		ap, err := netip.ParseAddrPort(address)
 		if err != nil {
 			return refuse("unparsable dial address")
 		}
 		ip := ap.Addr().Unmap()
-		if allowLoopback && ip.IsLoopback() {
+		if opts.AllowLoopback && ip.IsLoopback() {
 			return nil
 		}
-		if !PublicAddr(ip) {
+		if !PublicAddrWith(ip, AddrOptions{AllowNAT64: opts.AllowNAT64}) {
 			return refuse("non-public dial address")
 		}
 		return nil
@@ -109,6 +165,13 @@ type URLOptions struct {
 	// receiver; the caller sets it only for an explicit development environment. It never admits a private,
 	// link-local or metadata destination.
 	AllowLoopbackDev bool
+	// AllowNAT64 admits a 64:ff9b::/96 IP literal whose embedded IPv4 is public (default: refused).
+	AllowNAT64 bool
+	// AllowSingleLabelHosts lists the ONLY dot-less host names (for example an in-cluster service name) that
+	// are accepted. A single-label name resolves through the resolver's search path, so a name such as
+	// "metadata" can reach an internal service; the connect-time check still applies to whatever it resolves
+	// to, but the static check refuses it unless it is explicitly listed. Comparison is case-insensitive.
+	AllowSingleLabelHosts []string
 }
 
 const maxURLBytes = 2048
@@ -150,11 +213,13 @@ func ValidateURL(raw string, opts URLOptions) (*url.URL, error) {
 
 	loopbackHost := false
 	if ip, err := netip.ParseAddr(host); err == nil {
-		ip = ip.Unmap()
+		if ip.Is4In6() {
+			return nil, refuse("v4-mapped ipv6 literal")
+		}
 		switch {
 		case opts.AllowLoopbackDev && ip.IsLoopback():
 			loopbackHost = true
-		case !PublicAddr(ip):
+		case !PublicAddrWith(ip, AddrOptions{AllowNAT64: opts.AllowNAT64}):
 			return nil, refuse("non-public ip literal")
 		}
 	} else {
@@ -171,6 +236,9 @@ func ValidateURL(raw string, opts URLOptions) (*url.URL, error) {
 				if strings.HasSuffix(host, suffix) {
 					return nil, refuse("internal host name")
 				}
+			}
+			if !strings.Contains(host, ".") && !singleLabelAllowed(host, opts.AllowSingleLabelHosts) {
+				return nil, refuse("single-label host name that is not allow-listed")
 			}
 			if len(host) > 253 {
 				return nil, refuse("host too long")
@@ -193,4 +261,13 @@ func ValidateURL(raw string, opts URLOptions) (*url.URL, error) {
 		return nil, refuse("https required")
 	}
 	return u, nil
+}
+
+func singleLabelAllowed(host string, allow []string) bool {
+	for _, a := range allow {
+		if strings.ToLower(strings.TrimSuffix(strings.TrimSpace(a), ".")) == host {
+			return true
+		}
+	}
+	return false
 }

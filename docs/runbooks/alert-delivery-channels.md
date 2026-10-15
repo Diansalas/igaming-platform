@@ -45,10 +45,12 @@ provider adapter exists (PROVIDER DEPENDENT) or the webhook points at a receiver
 | Variable | Meaning | Default |
 |---|---|---|
 | `METRICS_ADDR` | `host:port` of the dedicated Prometheus listener | unset = no listener |
-| `METRICS_ALLOW_NON_LOOPBACK` | `true` acknowledges a non-loopback bind in production | false |
+| `METRICS_ALLOW_NON_LOOPBACK` | `true` acknowledges a non-loopback bind in EVERY environment except an explicit `APP_ENV=development` (staging included) | false |
 | `ALERT_EMAIL_RECIPIENTS` | email channel recipients | none (no email sink is built) |
 | `ALERT_WEBHOOK_URL` | the single webhook endpoint | none (no webhook sink is built) |
 | `ALERT_WEBHOOK_SECRET_REF` | secret-store reference (`awssm://` or `devfile://`) of the HMAC signing secret, at least 32 bytes | required with the URL |
+| `ALERT_WEBHOOK_ALLOW_HOSTS` | comma-separated single-label (dot-less) host names the webhook URL may use, for example an in-cluster service name; a name such as `metadata` is otherwise refused | none |
+| `ALERT_WEBHOOK_ALLOW_NAT64` | `true` admits a `64:ff9b::/96` webhook IP literal whose embedded IPv4 is public (IPv6-only networks); NAT64 is otherwise refused | false |
 | `ALERT_RETENTION_DAYS` | resolved-alert retention window in days (minimum 7) | unset = no purge job |
 | `ALERT_RETENTION_INTERVAL_HOURS` | purge cadence | 24 |
 
@@ -62,19 +64,30 @@ address, URL or credential and the channels never read it as one.
 A route is configuration; the channel configuration above says WHERE, the route says WHEN (severity and step). The database
 refuses to enable a route for `email` or `webhook` alone (`AR001`). Procedure, with two different platform admins A and B:
 
-1. **A stages** the route DISABLED. `POST /v1/admin/alerting/routes` with `{"severity":"p1","escalation_step":0,
-   "channel_kind":"email","recipient_ref":"interim-owner","enabled":false,"reason_code":"initial_setup"}`.
+1. **A stages** the route DISABLED and marks it as a staging record. `POST /v1/admin/alerting/routes` with
+   `{"severity":"p1","escalation_step":0,"channel_kind":"email","recipient_ref":"interim-owner","enabled":false,
+   "stage_for_enable":true,"reason_code":"initial_setup"}`. `stage_for_enable` (database column `staged_for_enable`) is the
+   explicit staging INTENT: it is valid only on a disabled email/webhook version, and only such a row can be approved. A
+   route that was disabled for another reason (a `decommission`, a correction) carries `false` and can never be re-enabled
+   by one admin using someone else's row (SR9-A9-3).
    (If a log/mock route already exists for that severity and step, add `supersedes_id` of it: while the disabled version is
    current, alerts for that step read `unrouted/channel_disabled`.)
 2. **B enables** it: the same body with `"enabled":true`, `"supersedes_id":"<A's route id>"` and a `reason_code`
    (`on_call_change` for a change, `initial_setup` for the first). The database checks that the staged version exists, is
-   current and disabled, is identical in severity, step, channel, recipient and escalation, was created by a **different**
+   current, disabled and staged for enabling, is identical in severity, step, channel, recipient and escalation, was created by a **different**
    validated admin, is at most 7 days old, and has not been consumed before. The audit row records
-   `four_eyes_staged_route_id` and `four_eyes_staged_by`.
+   `four_eyes_staged_route_id` and `four_eyes_staged_by`. The database also forces `effective_from` to `now()` on every route
+   version, so an approved route cannot be back-dated to win route resolution over a newer one.
 3. Check `GET /v1/admin/alerting/status`: the severity is `ready` only if the sink is wired in this process **and** reports
    `HumanNotification` (a MOCK-provider email sink and a development-posture webhook sink do not).
 
 Production also refuses an enabled p1/p2 route on a channel that notifies nobody (log, mock).
+
+**What SR-7 does and does not bind.** It stops a single admin on the application path and in any SQL session that carries a
+validated platform-admin identity. It does not stop arbitrary SQL run as the runtime role (or as the `alert_dispatcher`
+identity): such a session can create `platform_admin` staff rows and then play both admins. That is the pre-existing,
+accepted R1 class registered as NULL-ARM-WRITE-1 (OPEN); do not describe SR-7 as protection against a compromised runtime
+database role.
 
 ## 4. Webhook contract (for the receiver)
 
@@ -84,13 +97,23 @@ Production also refuses an enabled p1/p2 route on a channel that notifies nobody
 |---|---|
 | `X-Alert-Timestamp` | unix seconds when signed |
 | `X-Alert-Signature` | `v1=` + hex `HMAC-SHA256(secret, timestamp + "." + raw body)` |
-| `Idempotency-Key` | `<alert_id>:<escalation_step>`, **stable across retries**: dedupe on it |
-| `X-Alert-Id` | the alert id |
+| `Idempotency-Key` | `<alert_id>:<escalation_step>`, **stable across retries**. NOT covered by the signature |
+| `X-Alert-Id` | the alert id. NOT covered by the signature |
 
 Body: `{"schema":"igaming.alert.v1","alert_id","dedup_key","kind","severity","discriminator","subject_tenant_id"?,"sent_at"}`.
-Identifiers and closed codes only: **no attribute values and no PII** (some kinds record operator-entered text, so no attribute
-is forwarded). Receiver rules: verify the signature in constant time over the raw body; reject a timestamp more than 5 minutes
-from your clock (replay); treat a repeated `Idempotency-Key` as already handled; answer 2xx fast. Delivery is
+Identifiers and closed codes only: **no attribute values** (some kinds record operator-entered text, so no attribute is
+forwarded). **The payload is pseudonymous personal data, not "no PII"** (SR9-A9-6): production discriminators include
+`staff:<staff uuid>`, `break_glass:<staff uuid>`, `withdrawal:<id>`, `payout_instrument:<id>`, `attempt:<id>` and
+`receipt:<id>`, and `subject_tenant_id` is an opaque tenant UUID. Under GDPR an identifier that can be linked to a person is
+personal data, and the email and the webhook leave our infrastructure. **A data processing agreement (DPA) with the
+operator of any real webhook receiver or email provider is a precondition for pointing production alerts at it** (recorded
+as an E-class human item, `docs/plans/a9-observability-record.md`). The interim recipient receiving email today is the
+owner personally, over the MOCK provider (nothing is sent).
+
+Receiver rules: verify the signature in constant time over the raw body; reject a timestamp more than 5 minutes from your
+clock (replay); **dedupe on the SIGNED `dedup_key` (or `alert_id`) inside the body, never on the `Idempotency-Key` or
+`X-Alert-Id` headers**, which are outside the HMAC and can be altered by anything between us and you (they equal the body's
+`alert_id` and `<alert_id>:<step>`; if you use the headers, check them against the signed body first); answer 2xx fast. Delivery is
 **at-least-once**: the dispatcher retries a retryable failure with backoff (p1 8 attempts, p2 5, p3 3) and records every attempt in
 `alert_deliveries`; a duplicate is possible, a silent drop is not (a failure ends as `dead`, visible and counted).
 
@@ -105,9 +128,15 @@ overlap.
 
 The URL is configuration and the only destination; it is never built from an alert, a route or `recipient_ref`.
 `internal/egressguard`: (1) static URL validation (https only; loopback http only under an explicit `APP_ENV=development`;
-no userinfo, fragment, numeric-obfuscated or private IP literal, `localhost`/`.internal`/`.local` names); (2) a dial-time check
-of the actually connected address after DNS (loopback, RFC 1918, link-local including 169.254.169.254, CGNAT, ULA, multicast,
-reserved, NAT64/6to4/Teredo are refused for every connection, defeating DNS rebinding); (3) no redirects; (4) no environment
+no userinfo, fragment, numeric-obfuscated, v4-mapped or private IP literal, `localhost`/`.internal`/`.local` names, and no
+single-label host such as `metadata` unless it is listed in `ALERT_WEBHOOK_ALLOW_HOSTS`); (2) a dial-time check of the
+actually connected address after DNS (defeating DNS rebinding). IPv6 is an allow-list: only global unicast `2000::/3` is
+considered, minus the special-purpose ranges inside it (`2001::/23` which covers Teredo, benchmarking `2001:2::/48`, ORCHID
+`2001:10::/28` and ORCHIDv2 `2001:20::/28`; documentation `2001:db8::/32` and `3fff::/20`; 6to4 `2002::/16`; SRv6 `5f00::/16`).
+`::/96`, `::ffff:0:0/96` (judged as its IPv4), `64:ff9b::/96` and `64:ff9b:1::/48` (NAT64), `100::/64`, ULA, link-local and
+multicast lie outside `2000::/3` and are refused. IPv4 refuses loopback, RFC 1918, link-local including 169.254.169.254,
+CGNAT, `192.0.0.0/24`, the TEST-NETs, `192.88.99.0/24`, benchmarking, multicast and `240.0.0.0/4`. NAT64 is **denied by
+default**; `ALERT_WEBHOOK_ALLOW_NAT64=true` admits `64:ff9b::/96` only when the embedded IPv4 is itself public; (3) no redirects; (4) no environment
 proxy; (5) bounded dial 3 s, TLS 3 s, response header 5 s, total 10 s, TLS 1.2 minimum; (6) response body capped and
 discarded; (7) only a failure CLASS is logged, never the URL (it can carry a token) or the secret. The signing secret is
 fetched from the secret store by reference (minimum 32 bytes, otherwise `misconfigured`, no request sent).
@@ -123,11 +152,19 @@ pins that). Network exposure:
 - Development: `METRICS_ADDR=0.0.0.0:9464` (or loopback) is fine.
 - Staging/production: bind **`127.0.0.1:9464`** and scrape through a sidecar/agent on the same host/task, or bind a private
   interface and allow only the collector's security group/network policy to that port. `config.Load` refuses a non-loopback
-  bind when `APP_ENV` is production or unset unless `METRICS_ALLOW_NON_LOOPBACK=true` acknowledges the network control. The
-  port must differ from `HTTP_ADDR`'s. Never put it behind the public load balancer.
+  bind in **every** environment except an explicit `APP_ENV=development` (staging, production, an unset `APP_ENV` and any
+  other value) unless `METRICS_ALLOW_NON_LOOPBACK=true` acknowledges the network control. The port must differ from
+  `HTTP_ADDR`'s. Never put it behind the public load balancer.
 - The exposition carries series names, closed label values and counts only. It contains no tenant id, no secret and no
-  request data; labels are bounded (stream, severity, result, channel kind...). Process/Go collectors reveal the binary's
-  runtime facts, which is why the endpoint is not public.
+  request data; labels are bounded (stream, severity, result, channel kind...). **This is enforced and tested** (SR9-A9-1):
+  the otelhttp server metrics (`http.server.*`) would otherwise record `server.address` and `server.port` from the
+  client-controlled `Host` header, letting an unauthenticated caller mint series without limit and push the 5xx and `/readyz`
+  series that the alert rules select on into the SDK overflow series (`otel_metric_overflow`), which carries no status or
+  route label. `internal/observability` therefore installs a metric View on `http.server.*` that keeps ONLY
+  `http.request.method`, `http.response.status_code`, `http.route` and `url.scheme` and drops everything else
+  (`TestExposition_HostHeaderFloodIsBoundedAndRuleSeriesSurvive` sends 3000 distinct `Host` values and asserts a bounded
+  exposition and that the `/readyz` 503 and 5xx series survive with their labels). Process/Go collectors reveal the
+  binary's runtime facts, which is why the endpoint is not public.
 
 A local scrape-and-evaluate example: `deploy/observability/prometheus.yml` and `docker-compose.observability.yml` (loopback
 UI only, no Alertmanager, no credentials, rules file mounted read-only). Metric names: see `observability-and-alerting.md`
@@ -143,12 +180,21 @@ section 4 and `deploy/observability/prometheus-alert-rules.yml` (parity-tested a
 - callable only by the `alert_dispatcher` platform-service session; the runtime role has no `DELETE` on any alert table, the
   new DELETE RLS policies need the dispatcher identity AND a transaction-local flag, and the delete triggers refuse anything
   outside the function (flag set, session user is the table owner, row eligible); no SELECT policy was added anywhere;
+- the window must be expressible in days or less: an interval with a month or year component is refused (`AR203`), because
+  `1 mon -23 days` passes a 7-day comparison but is only about 5 days back in February (SR9-A9-8; the per-row delete guard
+  would have aborted the call anyway, nothing could be lost);
 - every run (including an empty one) appends a row to `alert_retention_runs` (counts, window, cutoff, capped flag: no alert
   content). It is readable by platform admins; it is itself append-only;
 - `ALERT_RETENTION_DAYS` unset means **no purge job** and a startup warning: the horizon is a legal/compliance decision per
   jurisdiction, not a code constant. Set it only after that decision. Large backlogs drain over several ticks (5000 alerts per
   call, at most 20 calls per tick);
 - metrics: `alert_retention_purged_total{table}`, `alert_retention_runs_total{result}`, `alert_retention_last_run_unix_seconds`.
+
+Residuals (recorded, not fixed): the table OWNER role can delete eligible rows directly with the flag set, bypassing the
+function and its audit row (SR9-A9-5); the owner role must therefore never be used by the application or by an operator
+outside migrations (an ops rule; the application uses the runtime role only). `alert_retention_runs` records no caller
+identity (no `session_user` or `application_name`), so a forged invocation under a forged dispatcher GUC cannot be told apart
+from a real one (SR9-A9-8); like every alert RLS family the dispatcher identity is asserted by GUC.
 
 Residual: occurrences of a long-lived OPEN alert (an alert storm on one dedup key) are retained until it is resolved.
 Rollback of 0157 is refused while `alert_retention_runs` has rows (it is the audit of what was deleted); purged history cannot be

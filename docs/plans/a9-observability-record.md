@@ -11,7 +11,7 @@ Scope input: audit item A9 (`docs/plans/platform-completion-audit-2026-10-14.md`
 
 | Deliverable | Label | Notes |
 |---|---|---|
-| Prometheus `/metrics` on a separate listener (`METRICS_ADDR`) | IMPLEMENTED | OTel Prometheus exporter v0.68.0 (client_golang v1.24.1), private registry, separate `http.Server`, off unless set, never on the API mux (static pin), production refuses a non-loopback bind without `METRICS_ALLOW_NON_LOOPBACK=true` |
+| Prometheus `/metrics` on a separate listener (`METRICS_ADDR`) | IMPLEMENTED | OTel Prometheus exporter v0.68.0 (client_golang v1.24.1), private registry, separate `http.Server`, off unless set, never on the API mux (static pin), every environment except explicit development refuses a non-loopback bind without `METRICS_ALLOW_NON_LOOPBACK=true`; the `http.server.*` label set is bounded by a metric View (SR9-A9-1) |
 | Pending signals emitted: DB pool saturation, reconciliation staleness (per stream, oldest tenant), reconciliation mismatches gauge, sweep heartbeat, alert dispatcher backlog/age | IMPLEMENTED | in-process state; per-instance series; no tenant label |
 | Payment kill-switch STATE gauge | NOT IMPLEMENTED | needs a cross-tenant read identity for a FORCE-RLS table; engage events already raise the durable alert `payment.kill_switch_engaged`. Still listed in `pending-signals.yml` with the reason |
 | Provider-call latency SLO metric, per-tenant request SLO | NOT IMPLEMENTED | listed in `pending-signals.yml` (PROVIDER DEPENDENT / needs a bounded tenant-label policy decision) |
@@ -19,7 +19,7 @@ Scope input: audit item A9 (`docs/plans/platform-completion-audit-2026-10-14.md`
 | OTLP trace/metric export to a backend | NOT IMPLEMENTED | no backend exists (PROVIDER DEPENDENT); traces still go to the stdout exporter |
 | Webhook alert channel (HMAC-SHA256, timestamp, idempotency key, SSRF guard, no redirects, bounded timeouts, secret by reference) | IMPLEMENTED | `internal/alerting/channels`, `internal/egressguard`; delivers nothing until a route is live and a receiver exists |
 | Email alert channel over `internal/email` | PARTIALLY IMPLEMENTED | sink IMPLEMENTED; the only provider is `email.MockProvider` (MOCK), so it reaches NO person; production refuses MOCK. A real SMTP/API adapter is PROVIDER DEPENDENT |
-| SR-7 four-eyes route approval (migration 0156) | IMPLEMENTED | DB-enforced: stage disabled by admin A, enable by a DIFFERENT admin B within 7 days, once per staging |
+| SR-7 four-eyes route approval (migration 0156) | IMPLEMENTED | DB-enforced: stage disabled WITH explicit intent (`staged_for_enable`) by admin A, enable by a DIFFERENT admin B within 7 days, once per staging; `effective_from` forced to now(). Binds the application path, not arbitrary SQL as the runtime role (NULL-ARM-WRITE-1) |
 | `reconciliation.sweep_failed` alert (R3-LISTING-FAILURE-LOG-ONLY-1) | IMPLEMENTED | new Kind, p1, platform, subjectless; listing failures and sweep panics; raised under the dispatcher identity |
 | `reconciliation.run_failed` (RECON-RUN-FAILED-ALERT-1) | IMPLEMENTED (already; verified and pinned) | raised from all five stream functions since I-wire; the registry row text was stale; A9 adds a static pin |
 | Alert history retention (ALERT-RETENTION-1, migration 0157) | PARTIALLY IMPLEMENTED | mechanism IMPLEMENTED; **off by default**: the retention horizon is a legal/compliance decision (HUMAN). Open alerts' occurrences are retained until resolution |
@@ -86,19 +86,25 @@ New rows proposed:
 2. **Recipients and secrets.** Email recipients and the webhook URL are platform configuration (`ALERT_EMAIL_RECIPIENTS`,
    `ALERT_WEBHOOK_URL`); `recipient_ref` stays an opaque label and is never an address or URL. The webhook signing secret is a
    secret-store reference (`ALERT_WEBHOOK_SECRET_REF`).
-3. **SR-7.** Enabling a route for a human-notification kind requires `staged_route_id`: a current, DISABLED, identical route
-   created by a different validated platform admin at most 7 days earlier, consumable once. Audit records staged route id and
+3. **SR-7.** Enabling a route for a human-notification kind requires `staged_route_id`: a current, DISABLED route that was
+   explicitly staged for enabling (`staged_for_enable`, valid only on a disabled human-notification version), identical, created
+   by a different validated platform admin at most 7 days earlier, consumable once; `effective_from` is forced to now(). Audit records staged route id and
    stager. Replaces "four-eyes not built".
 4. **Kind `reconciliation.sweep_failed`** (p1, platform, subjectless, detached): see R3-LISTING-FAILURE-LOG-ONLY-1.
 5. **Retention.** `alerting_purge_resolved` (not partitioning): see ALERT-RETENTION-1.
 6. **Payload.** Channels carry kind, severity, alert id, dedup key, discriminator and subject tenant id only; never attribute
-   values (some Kinds record operator-entered text).
+   values (some Kinds record operator-entered text). The discriminator and subject are PSEUDONYMOUS personal data (SR9-A9-6), not
+   "no PII": a DPA is required with any real receiver/provider.
+7. **`reconciliation.sweep_failed` write path.** Payload validated in `alerts_guard()` (closed phase vocabulary, 2-character
+   SQLSTATE class, exactly two string keys, discriminator forced); INSERT admitted only to the dispatcher identity by
+   RESTRICTIVE policies on `alerts` and `alert_occurrences` (the platform-admin policy is FOR ALL).
 
 ## 4. Migrations
 
-`0156_alert_channels_and_sweep_failed_kind` and `0157_alert_retention` (up AND down; FORCE RLS unchanged on every table; every
+`0156_alert_channels_and_sweep_failed_kind` and `0157_alert_retention` (edited IN PLACE by the security fix round, section 9; they are merged nowhere; 0152 and 0153 are merged to the integration tip, 0154 is A7's, 0155 is unused; up AND down; FORCE RLS unchanged on every table; every
 new function pins `search_path = pg_catalog, public, pg_temp`). The gap 152-155 (and the older 143-150) is intentional on this
-branch: other branches own those numbers; `cmd/migrate verify` reports the gaps and nothing else (no checksum mismatch).
+branch: other branches own those numbers (`cmd/migrate verify` reports the gaps and nothing else, no checksum mismatch); on the
+integration tip 0152/0153 are merged, so no gap problem arises from 0156/0157.
 Downs refuse (AR099) when data would be lost: email/webhook routes or staging records, `reconciliation.sweep_failed` alerts, and any
 `alert_retention_runs` row.
 
@@ -164,3 +170,53 @@ mutants (migrations 0156/0157 through the real database tests) + 4 policy-redesi
   identity: the existing dispatcher SELECT policies already hide the rows); `S32` (DELETE policy without the flag: the trigger
   refuses instead, no data changes); `S33`/`S34` (trigger owner check / flag check: each is shadowed by another layer, and
   exposing them would need a non-owner role holding DELETE, which a test may not create).
+
+## 9. Security review fix round (A9 review `docs/plans/prh2-hardening-round/a9-security-review.md`, CONDITIONAL)
+
+Tests were written before the fixes. The SR9-A9-1 flood test and the single-label egress test were run red before the fix; the
+migration and config tests are shown to bite by the mutation pass below (each fix removed makes a named test fail). Migrations 0156 and 0157
+were edited in place. Nothing pushed or merged.
+
+| ID | Sev | Resolution | Label |
+|---|---|---|---|
+| SR9-A9-1 | MUST | `internal/observability/metrics.go` `httpServerView()`: a View on `http.server.*` with an allow-key filter keeping ONLY `http.request.method`, `http.response.status_code`, `http.route`, `url.scheme`. `TestExposition_HostHeaderFloodIsBoundedAndRuleSeriesSurvive` (deploy/observability): 3000 distinct `Host` headers, before the fix 106,000 `http_server` lines / 28.8 MB / `otel_metric_overflow`; after: no `server_address`/`server_port`/overflow, <= 200 http lines, < 200 KB, and the `/readyz` 503 series carries its labels with count 1001 (all requests in ONE series) and the 5xx `/boom` series survives. Runbook claim corrected and now true. | IMPLEMENTED |
+| SR9-A9-2 | SHOULD | `internal/egressguard`: IPv6 is an allow-list (`2000::/3`) minus `2001::/23` (covers Teredo, benchmarking `2001:2::/48`, ORCHID `2001:10::/28`, ORCHIDv2 `2001:20::/28`, drone id), `2001:2::/48`, `2001:10::/28`, `2001:20::/28`, `2001:db8::/32`, `2002::/16`, `3fff::/20`, `5f00::/16`; `::/96`, `::ffff:0:0/96` (judged as its IPv4), `64:ff9b::/96`, `64:ff9b:1::/48`, `100::/64` lie outside `2000::/3`. IPv4 adds `192.88.99.0/24`. A v4-mapped IPv6 URL literal is refused outright. NAT64 is denied by default; `AddrOptions.AllowNAT64` / `DialOptions.AllowNAT64` / `URLOptions.AllowNAT64` (config `ALERT_WEBHOOK_ALLOW_NAT64`) admit `64:ff9b::/96` only when the embedded IPv4 is public. Per-range tests in `TestPublicAddr_SpecialPurposeRanges`. | IMPLEMENTED |
+| SR9-A9-3 | SHOULD | Migration 0156: `alert_routes.staged_for_enable` (explicit staging INTENT; valid only on a disabled human-notification version, immutable); approval requires the named row to carry it; `effective_from := now()` on every INSERT. API: request field `stage_for_enable` (only with `enabled=false` on email/webhook; OpenAPI updated, including the previously stale `channel_kind` enum). Tests: the decommission repro (B disables for `decommission`; A alone enables with `effective_from = now() - 365 days`: AR001) at DB and HTTP level; backdated `effective_from` is forced for human and non-human routes. | IMPLEMENTED |
+| SR9-A9-4 | SHOULD | Migration 0156 replaces `alerts_guard()` (0110 body + search_path pin, byte-identical apart from one block) with the `reconciliation.sweep_failed` validation (raise_failed posture); the `alerts_platform_admin` FOR ALL contradiction is resolved by RESTRICTIVE INSERT policies on `alerts` and `alert_occurrences` admitting the Kind only to the dispatcher identity (header corrected to say so). Tests: the free-text repro, 12 malformed payloads, forced discriminator, platform-admin raise refused while reads work. | IMPLEMENTED |
+| SR9-A9-9 | INFO | `validateMetricsAddr`: acknowledgement required unless `GuardEnvironment() == "development"` (staging, production, unset, any other value). Single-label webhook hosts refused unless listed in `ALERT_WEBHOOK_ALLOW_HOSTS` (egressguard + config + sink + wiring). | IMPLEMENTED |
+| SR9-A9-7 | INFO | Documented (runbook s4): dedupe on the SIGNED `dedup_key`/`alert_id` in the body; `Idempotency-Key`/`X-Alert-Id` are unsigned and equal body fields. The signed material was NOT changed (`v1` signature kept; adding headers would break the documented receiver contract for no gain because the signed body already carries both values). | IMPLEMENTED (documented) |
+| SR9-A9-6 | LOW | Runbook s4 and the production checklist now call the payload pseudonymous personal data; webhook.go doc comment corrected. **E-class human item** below. | IMPLEMENTED (documented) |
+| SR9-A9-8 | INFO | The audit's missing caller identity is RECORDED, not changed. The month-interval edge is closed anyway because it is a one-line guard: `alerting_purge_resolved` refuses an interval with a year or month component (AR203; 3 new cases in `TestMigration0157_FunctionRefusesEverySessionButTheDispatcherIdentity`). | caller identity: RECORDED; month edge: IMPLEMENTED |
+| SR9-A9-5 | LOW | RECORDED only: the table OWNER role can delete eligible rows with the flag set, bypassing the function and its audit row. Ops rule: the owner role is used only by migrations; the application runs as the runtime role. Documented in the runbook s7. | RECORDED |
+| NULL-ARM-WRITE-1 | pre-existing | Unchanged, still OPEN (accepted R1 class): an arbitrary-SQL session of the runtime role (or the dispatcher identity) can create `platform_admin` staff rows and defeat SR-7. The 0156 header and the runbook s3 now say so; no new registry row is needed. | OPEN |
+
+Proposed new registry rows:
+
+| ID | Owner | Status | Text |
+|---|---|---|---|
+| ALERT-DPA-1 | owner + compliance | OPEN, HUMAN/LEGAL (E-class) | The webhook and email payloads carry pseudonymous identifiers (staff, break-glass, withdrawal, payout-instrument, attempt and receipt ids, opaque tenant UUID), which are personal data once linkable. A data processing agreement with the operator of ANY real webhook receiver or email provider is required before production alerts are pointed at it. Optional hardening: send a keyed hash of the discriminator on the webhook. |
+| ALERT-OWNER-ROLE-OPS-1 | devops | OPEN, RECORDED (SR9-A9-5) | The table-owner database role can delete eligible resolved alerts directly (bypassing `alerting_purge_resolved` and its audit row). Ops rule: use the owner role only for migrations; consider a transaction-local marker or a command-specific platform-admin policy later. |
+| ALERT-PURGE-AUDIT-IDENTITY-1 | backend | OPEN, LOW (SR9-A9-8) | `alert_retention_runs` records no `session_user` / `application_name`; a forged invocation under a forged dispatcher GUC is indistinguishable from the real one. Add both columns when the audit table is next touched. |
+
+### Changed assertions in this round
+
+| File / test | Change | Why |
+|---|---|---|
+| `internal/config/observability_test.go` `TestValidateMetricsAddr` | `"staging wildcard ok"` (staging accepted `0.0.0.0:9464` without acknowledgement) REPLACED by `"staging wildcard refused"`, plus `"staging private refused"`, `"staging wildcard acknowledged"`, `"staging loopback ok"`, `"unknown env wildcard refused"` | SR9-A9-9: every non-development environment needs the acknowledgement |
+| `internal/alerting/migration_0156_integration_test.go` helper `insertRouteFull` | the staging path now writes `staged_for_enable = true` for a disabled email/webhook version (new helper `insertRouteRaw` exposes the flag and reason) | SR9-A9-3: a staged record needs explicit intent; every existing four-eyes assertion is unchanged |
+| `internal/httpserver/alert_routing_four_eyes_integration_test.go` | the staging request sends `"stage_for_enable": true` | same; the denied-audit count (3) and all other assertions unchanged |
+| `internal/alerting/migration_0157_integration_test.go` | three refusal cases ADDED (month, one month, one year); none removed | SR9-A9-8 |
+| `internal/egressguard/egressguard_test.go` | tests ADDED (special-purpose ranges, NAT64, single-label hosts); no existing case changed. `::ffff:93.184.216.34` stays public in `PublicAddr` (judged as its IPv4) but the URL literal form is refused | SR9-A9-2 |
+| `deploy/observability/exposition_test.go` | test ADDED (Host flood) | SR9-A9-1 |
+
+### Mutation pass for the fix round
+
+29 mutants (12 SQL through the real database tests, 17 Go), one at a time, source restored after each: 28 killed, 1 classified
+equivalent. One survivor revealed a test gap and was fixed: the platform-admin raise of `reconciliation.sweep_failed` was being
+refused by the dedup unique index instead of the new RESTRICTIVE policy, so removing the policy went unnoticed (F9); the test now
+runs the attempt first on an empty table and asserts SQLSTATE 42501 naming `alerts_sweep_failed_dispatcher_only`, and a second
+case covers the `alert_occurrences` policy (F9b). Equivalent: F8 (dropping the `count(*) <> 2` key-count check: the attribute
+allowlist already refuses an extra key and the `?` checks refuse a missing one). Redundant list entries that are provably shadowed by a
+wider entry (`2001:2::/48`, `2001:10::/28`, `2001:20::/28` under `2001::/23`; `5f00::/16`, `::/96`, `::ffff:0:0/96`, `64:ff9b:1::/48`
+outside `2000::/3`) are kept so the table documents every range the review named; mutants that remove only such an entry are
+classified equivalent.

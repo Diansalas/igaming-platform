@@ -101,6 +101,10 @@ type createAlertRouteRequest struct {
 	Enabled              bool     `json:"enabled"`
 	ReasonCode           string   `json:"reason_code"`
 	SupersedesID         *string  `json:"supersedes_id"`
+	// StageForEnable marks a DISABLED human-notification version as the SR-7 staging record that a different
+	// platform admin may later approve (migration 0156 staged_for_enable). A route disabled for any other
+	// reason (for example a decommission) leaves it false and can never be used as an approval.
+	StageForEnable bool `json:"stage_for_enable"`
 }
 
 type alertRouteDTO struct {
@@ -201,6 +205,10 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 				return
 			}
 		}
+		if req.StageForEnable && (req.Enabled || !alerting.ChannelKindIsHumanNotification(kind)) {
+			invalid("stage_for_enable", "stage_for_enable is only valid on a disabled email or webhook route")
+			return
+		}
 		if req.Enabled && req.RecipientRef == nil {
 			invalid("enabled_requires_recipient", "an enabled route requires a recipient_ref")
 			return
@@ -275,10 +283,10 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 				}
 			}
 			var newID uuid.UUID
-			if err := tx.QueryRow(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, escalate_after, enabled, reason_code, staged_route_id)
-				VALUES ('platform', $1, $2, $3, $4, CASE WHEN $5::float8 IS NULL THEN NULL ELSE make_interval(secs => $5::float8) END, $6, $7, $8)
+			if err := tx.QueryRow(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, escalate_after, enabled, reason_code, staged_route_id, staged_for_enable)
+				VALUES ('platform', $1, $2, $3, $4, CASE WHEN $5::float8 IS NULL THEN NULL ELSE make_interval(secs => $5::float8) END, $6, $7, $8, $9)
 				RETURNING id`,
-				req.Severity, req.EscalationStep, req.ChannelKind, req.RecipientRef, req.EscalateAfterSeconds, req.Enabled, req.ReasonCode, stagedRouteID).Scan(&newID); err != nil {
+				req.Severity, req.EscalationStep, req.ChannelKind, req.RecipientRef, req.EscalateAfterSeconds, req.Enabled, req.ReasonCode, stagedRouteID, req.StageForEnable).Scan(&newID); err != nil {
 				return err
 			}
 			if req.SupersedesID != nil {
@@ -331,7 +339,7 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 		case errors.As(err, &pgErr) && pgErr.Code == "AR001":
 			deny.reason = "sr7_four_eyes_required"
 			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeValidation,
-				"SR-7: four-eyes approval required: stage the route disabled, then a different platform admin enables it by superseding that staged version")
+				"SR-7: four-eyes approval required: stage the route disabled with stage_for_enable=true, then a different platform admin enables it by superseding that staged version")
 		case errors.As(err, &pgErr) && pgErr.Code == "23514":
 			deny.reason = "routing_rule_violation"
 			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeValidation, "the route violates a routing rule")

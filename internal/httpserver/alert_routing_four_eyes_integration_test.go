@@ -22,7 +22,7 @@ func TestAlertRoutingAPI_HumanRoute_NeedsStagingByOneAdminAndEnablingByAnother(t
 
 	// Admin A stages the route DISABLED.
 	r := a.do("POST", "/v1/admin/alerting/routes", tokA, routeBody(map[string]any{
-		"severity": "p1", "channel_kind": "email", "recipient_ref": recipient, "enabled": false,
+		"severity": "p1", "channel_kind": "email", "recipient_ref": recipient, "enabled": false, "stage_for_enable": true,
 	}))
 	if r.status != http.StatusCreated {
 		t.Fatalf("stage: %d %s", r.status, r.body)

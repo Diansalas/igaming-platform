@@ -526,8 +526,8 @@ Routes are authored through the audited platform-admin API (permission
   requires a `recipient_ref`. `recipient_ref` is an opaque target id: no
   email, phone, address, URL or key-shaped value is accepted.
 - The database refuses to enable a route for a channel kind that notifies a
-  person (`email`, `webhook`) unless it supersedes a DISABLED version staged by
-  a DIFFERENT platform admin (SR-7 four-eyes, migration 0156; procedure in
+  person (`email`, `webhook`) unless it supersedes a DISABLED version staged
+  (`stage_for_enable: true`) by a DIFFERENT platform admin (SR-7 four-eyes, migration 0156; procedure in
   `alert-delivery-channels.md` section 3). In production, enabling a p1/p2
   route on log/mock is refused too.
 - `GET /v1/admin/alerting/routes[?include_superseded=true]` lists versions;

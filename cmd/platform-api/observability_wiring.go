@@ -65,7 +65,9 @@ func buildAlertSinks(cfg config.Config, providers providerBundle, logger *slog.L
 		}
 		s, err := channels.NewWebhookSink(channels.WebhookConfig{
 			URL: cfg.AlertWebhookURL, Secret: secret, Logger: logger,
-			AllowLoopbackDev: cfg.AlertWebhookURLOptions().AllowLoopbackDev, // one rule, shared with config validation
+			AllowLoopbackDev:      cfg.AlertWebhookURLOptions().AllowLoopbackDev, // one rule, shared with config validation
+			AllowNAT64:            cfg.AlertWebhookURLOptions().AllowNAT64,
+			AllowSingleLabelHosts: cfg.AlertWebhookURLOptions().AllowSingleLabelHosts,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("alert webhook channel: %w", err)

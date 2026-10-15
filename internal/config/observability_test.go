@@ -23,7 +23,12 @@ func TestValidateMetricsAddr(t *testing.T) {
 		{name: "disabled when empty", env: "production", explicit: true, addr: ""},
 		{name: "dev wildcard ok", env: "development", explicit: true, addr: ":9464"},
 		{name: "dev loopback ok", env: "development", explicit: true, addr: "127.0.0.1:9464"},
-		{name: "staging wildcard ok", env: "staging", explicit: true, addr: "0.0.0.0:9464"},
+		// SR9-A9-9 (CHANGED ASSERTION): staging used to accept a non-loopback bind without acknowledgement.
+		{name: "staging wildcard refused", env: "staging", explicit: true, addr: "0.0.0.0:9464", wantErr: "non-loopback"},
+		{name: "staging private refused", env: "staging", explicit: true, addr: "10.0.0.5:9464", wantErr: "non-loopback"},
+		{name: "staging wildcard acknowledged", env: "staging", explicit: true, addr: "0.0.0.0:9464", allow: true},
+		{name: "staging loopback ok", env: "staging", explicit: true, addr: "127.0.0.1:9464"},
+		{name: "unknown env wildcard refused", env: "qa", explicit: true, addr: ":9464", wantErr: "non-loopback"},
 		{name: "prod loopback ok", env: "production", explicit: true, addr: "127.0.0.1:9464"},
 		{name: "prod ipv6 loopback ok", env: "production", explicit: true, addr: "[::1]:9464"},
 		{name: "prod localhost ok", env: "production", explicit: true, addr: "localhost:9464"},
@@ -114,6 +119,34 @@ func TestValidateAlertWebhook(t *testing.T) {
 		t.Fatal("loopback webhook accepted under GuardEnvironment()==production")
 	}
 
+	// SR9-A9-9: a single-label host such as "metadata" is refused unless explicitly allow-listed.
+	meta := prod
+	meta.AlertWebhookURL = "https://metadata/computeMetadata/v1/"
+	if err := meta.validateObservability(); err == nil {
+		t.Error("a single-label webhook host was accepted without an allow-list")
+	}
+	meta.AlertWebhookAllowHosts = []string{"hooks"}
+	if err := meta.validateObservability(); err == nil {
+		t.Error("a single-label host not on the allow-list was accepted")
+	}
+	meta.AlertWebhookURL = "https://hooks/a"
+	if err := meta.validateObservability(); err != nil {
+		t.Errorf("an allow-listed single-label host was refused: %v", err)
+	}
+	opts := meta.AlertWebhookURLOptions()
+	if len(opts.AllowSingleLabelHosts) != 1 || opts.AllowNAT64 || opts.AllowLoopbackDev {
+		t.Errorf("url options = %+v", opts)
+	}
+	nat := prod
+	nat.AlertWebhookURL = "https://[64:ff9b::808:808]/a"
+	if err := nat.validateObservability(); err == nil {
+		t.Error("a NAT64 literal was accepted by default")
+	}
+	nat.AlertWebhookAllowNAT64 = true
+	if err := nat.validateObservability(); err != nil {
+		t.Errorf("a NAT64 literal with a public embedded v4 was refused when allowed: %v", err)
+	}
+
 	// The secret reference must be a syntactically valid store reference, and never a literal secret.
 	bad := prod
 	bad.AlertWebhookSecretRef = "a-literal-shared-secret-value"
@@ -161,9 +194,14 @@ func TestLoadObservabilityFromEnv(t *testing.T) {
 	t.Setenv("ALERT_WEBHOOK_SECRET_REF", "devfile://alert-webhook?version=v1")
 	t.Setenv("ALERT_RETENTION_DAYS", "400")
 	t.Setenv("ALERT_RETENTION_INTERVAL_HOURS", "12")
+	t.Setenv("ALERT_WEBHOOK_ALLOW_HOSTS", " hooks , Pager ")
+	t.Setenv("ALERT_WEBHOOK_ALLOW_NAT64", "true")
 	var cfg Config
 	if err := loadObservability(&cfg); err != nil {
 		t.Fatal(err)
+	}
+	if len(cfg.AlertWebhookAllowHosts) != 2 || cfg.AlertWebhookAllowHosts[0] != "hooks" || cfg.AlertWebhookAllowHosts[1] != "pager" || !cfg.AlertWebhookAllowNAT64 {
+		t.Errorf("webhook egress options: %v %v", cfg.AlertWebhookAllowHosts, cfg.AlertWebhookAllowNAT64)
 	}
 	if cfg.MetricsAddr != "127.0.0.1:9464" || !cfg.MetricsAllowNonLoopback {
 		t.Errorf("metrics: %+v", cfg)
@@ -178,7 +216,7 @@ func TestLoadObservabilityFromEnv(t *testing.T) {
 		t.Errorf("retention = %v every %v", cfg.AlertRetention, cfg.AlertRetentionInterval)
 	}
 
-	for k, v := range map[string]string{"ALERT_RETENTION_DAYS": "x", "ALERT_RETENTION_INTERVAL_HOURS": "-1", "METRICS_ALLOW_NON_LOOPBACK": "maybe"} {
+	for k, v := range map[string]string{"ALERT_RETENTION_DAYS": "x", "ALERT_RETENTION_INTERVAL_HOURS": "-1", "METRICS_ALLOW_NON_LOOPBACK": "maybe", "ALERT_WEBHOOK_ALLOW_NAT64": "maybe"} {
 		t.Run("bad "+k, func(t *testing.T) {
 			t.Setenv(k, v)
 			var c Config

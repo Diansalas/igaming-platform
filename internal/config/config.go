@@ -223,6 +223,8 @@ type Config struct {
 	AlertEmailRecipients    []string
 	AlertWebhookURL         string
 	AlertWebhookSecretRef   string
+	AlertWebhookAllowHosts  []string // single-label host names the webhook URL may use (SR9-A9-9)
+	AlertWebhookAllowNAT64  bool     // admit a NAT64 literal embedding a public IPv4 (SR9-A9-2)
 	AlertRetention          time.Duration
 	AlertRetentionInterval  time.Duration
 

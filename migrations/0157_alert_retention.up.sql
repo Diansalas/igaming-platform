@@ -220,6 +220,12 @@ BEGIN
         RAISE EXCEPTION 'alerting_purge_resolved: the retention window must be at least 7 days'
             USING ERRCODE = 'AR203';
     END IF;
+    -- SR9-A9-8: a month or year component is calendar-dependent ('1 mon -23 days' compares as >= 7 days but is only
+    -- about 5 days back in February). The window must be expressed in days or less.
+    IF date_part('year', p_older_than) <> 0 OR date_part('month', p_older_than) <> 0 THEN
+        RAISE EXCEPTION 'alerting_purge_resolved: the retention window must not have a month or year component; use days'
+            USING ERRCODE = 'AR203';
+    END IF;
     IF p_batch IS NULL OR p_batch < 1 OR p_batch > 50000 THEN
         RAISE EXCEPTION 'alerting_purge_resolved: batch must be between 1 and 50000'
             USING ERRCODE = 'AR203';

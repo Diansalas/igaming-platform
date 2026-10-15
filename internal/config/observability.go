@@ -18,7 +18,9 @@ import (
 // secret is a secret-store REFERENCE (internal/secretstore) and the value is fetched at use.
 //
 //	METRICS_ADDR                      host:port of the dedicated Prometheus listener; unset = no listener
-//	METRICS_ALLOW_NON_LOOPBACK        true acknowledges a non-loopback bind in production (network-protected)
+//	METRICS_ALLOW_NON_LOOPBACK        true acknowledges a non-loopback bind outside development (network-protected)
+//	ALERT_WEBHOOK_ALLOW_HOSTS         comma-separated single-label host names the webhook URL may use (default none)
+//	ALERT_WEBHOOK_ALLOW_NAT64         true admits a 64:ff9b::/96 webhook literal whose embedded IPv4 is public
 //	ALERT_EMAIL_RECIPIENTS            comma-separated bare addresses for the email alert channel
 //	ALERT_WEBHOOK_URL                 https URL of the single webhook alert channel
 //	ALERT_WEBHOOK_SECRET_REF          secret-store reference of the HMAC signing secret (required with the URL)
@@ -53,6 +55,18 @@ func loadObservability(cfg *Config) error {
 	}
 	cfg.AlertWebhookURL = os.Getenv("ALERT_WEBHOOK_URL")
 	cfg.AlertWebhookSecretRef = os.Getenv("ALERT_WEBHOOK_SECRET_REF")
+	if v := os.Getenv("ALERT_WEBHOOK_ALLOW_HOSTS"); strings.TrimSpace(v) != "" {
+		for _, h := range strings.Split(v, ",") {
+			cfg.AlertWebhookAllowHosts = append(cfg.AlertWebhookAllowHosts, strings.ToLower(strings.TrimSpace(h)))
+		}
+	}
+	if v := os.Getenv("ALERT_WEBHOOK_ALLOW_NAT64"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: invalid ALERT_WEBHOOK_ALLOW_NAT64: %w", err)
+		}
+		cfg.AlertWebhookAllowNAT64 = b
+	}
 	cfg.AlertRetentionInterval = DefaultAlertRetentionInterval
 	if v := os.Getenv("ALERT_RETENTION_DAYS"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -106,8 +120,10 @@ func (c Config) validateMetricsAddr() error {
 	if _, apiPort, err := net.SplitHostPort(c.HTTPAddr); err == nil && apiPort == port {
 		return fmt.Errorf("config: METRICS_ADDR must not share a port with HTTP_ADDR: the metrics listener is separate from the public API")
 	}
-	if c.GuardEnvironment() == "production" && !c.MetricsAllowNonLoopback && !isLoopbackHost(host) {
-		return fmt.Errorf("config: METRICS_ADDR binds a non-loopback address in production; bind 127.0.0.1 (scraped by a sidecar/agent) or set METRICS_ALLOW_NON_LOOPBACK=true after restricting the port to the metrics collector at the network layer (docs/runbooks/observability-and-alerting.md)")
+	// SR9-A9-9: every environment except an explicit "development" (staging included, and an unset APP_ENV)
+	// needs the acknowledgement for a non-loopback bind.
+	if c.GuardEnvironment() != "development" && !c.MetricsAllowNonLoopback && !isLoopbackHost(host) {
+		return fmt.Errorf("config: METRICS_ADDR binds a non-loopback address outside development; bind 127.0.0.1 (scraped by a sidecar/agent) or set METRICS_ALLOW_NON_LOOPBACK=true after restricting the port to the metrics collector at the network layer (docs/runbooks/observability-and-alerting.md)")
 	}
 	return nil
 }
@@ -167,5 +183,9 @@ func (c Config) validateAlertWebhook() error {
 // is admitted ONLY under an explicit "development" GuardEnvironment; every other environment, including an
 // unset APP_ENV, is the strict production posture.
 func (c Config) AlertWebhookURLOptions() egressguard.URLOptions {
-	return egressguard.URLOptions{AllowLoopbackDev: c.GuardEnvironment() == "development"}
+	return egressguard.URLOptions{
+		AllowLoopbackDev:      c.GuardEnvironment() == "development",
+		AllowNAT64:            c.AlertWebhookAllowNAT64,
+		AllowSingleLabelHosts: c.AlertWebhookAllowHosts,
+	}
 }

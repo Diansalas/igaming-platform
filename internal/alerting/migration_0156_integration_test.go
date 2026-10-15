@@ -17,10 +17,16 @@ import (
 
 // Migration 0156 (A9): email/webhook channel kinds, SR-7 four-eyes staging, Kind reconciliation.sweep_failed.
 
+// insertRouteFull is the STAGING path as the API drives it: a disabled email/webhook version is inserted with
+// staged_for_enable = true (SR9-A9-3), so it can later be approved. Every other row has the flag false.
 func insertRouteFull(ctx context.Context, tx pgx.Tx, sev string, step int, kind string, recipient string, enabled bool, staged *uuid.UUID) (uuid.UUID, error) {
+	return insertRouteRaw(ctx, tx, sev, step, kind, recipient, enabled, staged, !enabled && (kind == "email" || kind == "webhook"), "initial_setup")
+}
+
+func insertRouteRaw(ctx context.Context, tx pgx.Tx, sev string, step int, kind string, recipient string, enabled bool, staged *uuid.UUID, stageForEnable bool, reason string) (uuid.UUID, error) {
 	var id uuid.UUID
-	err := tx.QueryRow(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, enabled, reason_code, staged_route_id)
-		VALUES ('platform', $1, $2, $3, $4, $5, 'initial_setup', $6) RETURNING id`, sev, step, kind, recipient, enabled, staged).Scan(&id)
+	err := tx.QueryRow(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, enabled, reason_code, staged_route_id, staged_for_enable)
+		VALUES ('platform', $1, $2, $3, $4, $5, $7, $6, $8) RETURNING id`, sev, step, kind, recipient, enabled, staged, reason, stageForEnable).Scan(&id)
 	return id, err
 }
 

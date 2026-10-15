@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,73 @@ func TestExposition_RuleSeriesAreScrapedWithTheNamesAndLabelsTheRulesUse(t *test
 		if strings.Contains(body, bad) {
 			t.Errorf("the exposition mentions %q", bad)
 		}
+	}
+}
+
+// SR9-A9-1: otelhttp records server.address / server.port from the client-controlled Host header. Thousands of
+// distinct Host values must not grow the exposition, and must not push the 5xx and /readyz series (which the
+// rules select on) into the SDK overflow series that carries no status or route label.
+func TestExposition_HostHeaderFloodIsBoundedAndRuleSeriesSurvive(t *testing.T) {
+	_, handler, shutdown, err := observability.InitMetricsExposed(context.Background(), "platform-api", "none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })
+	mux.HandleFunc("GET /boom", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
+	mux.HandleFunc("GET /ok", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	api := otelhttp.NewHandler(mux, "platform-api")
+
+	paths := []string{"/ok", "/readyz", "/boom"}
+	for i := 0; i < 3000; i++ {
+		req := httptest.NewRequest(http.MethodGet, paths[i%len(paths)], nil)
+		req.Host = "h" + strings.Repeat("x", i%7) + "-" + strconv.Itoa(i) + ".attacker.example:" + strconv.Itoa(1024+i%60000)
+		api.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	// One normal request after the flood, as the rules would see it.
+	api.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	body := scrapeText(t, handler)
+	for _, bad := range []string{"server_address", "server_port", "attacker.example", "otel_metric_overflow", "network_protocol", "user_agent"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("the exposition carries %q after a Host flood", bad)
+		}
+	}
+	httpLines := 0
+	for _, l := range strings.Split(body, "\n") {
+		if strings.HasPrefix(l, "http_server") {
+			httpLines++
+		}
+	}
+	// method x status x route x scheme is a handful of series, each with ~15 histogram lines.
+	if httpLines > 200 {
+		t.Errorf("%d http_server lines after 3000 distinct Hosts: the label set is not bounded", httpLines)
+	}
+	if len(body) > 200_000 {
+		t.Errorf("exposition is %d bytes after a Host flood", len(body))
+	}
+	for _, want := range []string{
+		`http_server_request_duration_seconds_count{`,
+		`http_route="/readyz"`,
+		`http_response_status_code="503"`,
+		`http_route="/boom"`,
+		`http_response_status_code="500"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the exposition lacks %q after a Host flood", want)
+		}
+	}
+	// The exact series the rules select on, with the full count (1000 flood + 1 normal readyz 503).
+	re := regexp.MustCompile(`(?m)^http_server_request_duration_seconds_count\{[^}]*http_response_status_code="503"[^}]*http_route="/readyz"[^}]*\} (\d+)`)
+	re2 := regexp.MustCompile(`(?m)^http_server_request_duration_seconds_count\{[^}]*http_route="/readyz"[^}]*http_response_status_code="503"[^}]*\} (\d+)`)
+	m := re.FindStringSubmatch(body)
+	if m == nil {
+		m = re2.FindStringSubmatch(body)
+	}
+	if m == nil || m[1] != "1001" {
+		t.Errorf("the /readyz 503 series count = %v, want 1001 (all requests land in ONE series)", m)
 	}
 }
 

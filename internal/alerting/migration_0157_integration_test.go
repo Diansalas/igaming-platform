@@ -225,6 +225,11 @@ func TestMigration0157_FunctionRefusesEverySessionButTheDispatcherIdentity(t *te
 	}{
 		{"window below the floor", `SELECT * FROM alerting_purge_resolved(INTERVAL '6 days', 10)`},
 		{"null window", `SELECT * FROM alerting_purge_resolved(NULL, 10)`},
+		// SR9-A9-8: a month/year component is calendar-dependent ('1 mon -23 days' passes a 7-day comparison but
+		// is only ~5 days back in February), so the window must be expressed in days or less.
+		{"month component", `SELECT * FROM alerting_purge_resolved(INTERVAL '1 mon -23 days', 10)`},
+		{"one month", `SELECT * FROM alerting_purge_resolved(INTERVAL '1 mon', 10)`},
+		{"one year", `SELECT * FROM alerting_purge_resolved(INTERVAL '1 year', 10)`},
 		{"zero batch", `SELECT * FROM alerting_purge_resolved(INTERVAL '90 days', 0)`},
 		{"huge batch", `SELECT * FROM alerting_purge_resolved(INTERVAL '90 days', 50001)`},
 	} {

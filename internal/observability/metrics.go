@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -20,6 +21,23 @@ func InitMetrics(ctx context.Context, serviceName, exporterKind string) (metric.
 	return meter, shutdown, err
 }
 
+// httpServerView bounds the label set of every otelhttp server metric (SR9-A9-1). otelhttp records
+// server.address and server.port from the client-controlled Host header, so an unauthenticated caller could
+// mint series without limit until the SDK cardinality limit routes everything (including the 5xx and /readyz
+// series the alert rules select on) into an overflow series with no status or route label. Only the four
+// attributes below, all closed sets, are kept; everything else is dropped and aggregated away.
+func httpServerView() sdkmetric.View {
+	return sdkmetric.NewView(
+		sdkmetric.Instrument{Name: "http.server.*"},
+		sdkmetric.Stream{AttributeFilter: attribute.NewAllowKeysFilter(
+			"http.request.method",
+			"http.response.status_code",
+			"http.route",
+			"url.scheme",
+		)},
+	)
+}
+
 // initMetrics builds the meter provider; with expose it also attaches a Prometheus reader and returns
 // the scrape handler (prometheus.go).
 func initMetrics(ctx context.Context, serviceName, exporterKind string, expose bool) (metric.Meter, *scrapeHandler, Shutdown, error) {
@@ -32,7 +50,7 @@ func initMetrics(ctx context.Context, serviceName, exporterKind string, expose b
 		return nil, nil, nil, fmt.Errorf("observability: build resource: %w", err)
 	}
 
-	opts := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	opts := []sdkmetric.Option{sdkmetric.WithResource(res), sdkmetric.WithView(httpServerView())}
 	if exporterKind != "none" {
 		exp, err := stdoutmetric.New()
 		if err != nil {

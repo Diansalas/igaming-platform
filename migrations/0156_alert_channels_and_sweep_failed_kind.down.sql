@@ -2,7 +2,7 @@
 -- `psql --single-transaction -v ON_ERROR_STOP=1 -f <this file>`.
 --
 -- Reverses 0156. REFUSES (AR099) while any route or delivery row uses the email or webhook channel, any route
--- carries a staged_route_id (the four-eyes record would be lost), or any alert / occurrence of the Kind
+-- carries a staged_route_id or staged_for_enable (the four-eyes record would be lost), or any alert / occurrence of the Kind
 -- reconciliation.sweep_failed exists (append-only history is never deleted by a down). Otherwise restores the
 -- 0117 shapes. The search_path pin on alert_routes_guard is kept, as 0117's own down keeps it.
 --
@@ -16,7 +16,7 @@ ALTER TABLE alert_occurrences NO FORCE ROW LEVEL SECURITY;
 
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM alert_routes WHERE channel_kind IN ('email', 'webhook') OR staged_route_id IS NOT NULL) THEN
+    IF EXISTS (SELECT 1 FROM alert_routes WHERE channel_kind IN ('email', 'webhook') OR staged_route_id IS NOT NULL OR staged_for_enable) THEN
         RAISE EXCEPTION '0156 down refused: alert_routes has email/webhook routes or four-eyes staging records' USING ERRCODE = 'AR099';
     END IF;
     IF EXISTS (SELECT 1 FROM alert_deliveries WHERE channel_kind IN ('email', 'webhook')) THEN
@@ -32,6 +32,148 @@ ALTER TABLE alert_routes FORCE ROW LEVEL SECURITY;
 ALTER TABLE alert_deliveries FORCE ROW LEVEL SECURITY;
 ALTER TABLE alerts FORCE ROW LEVEL SECURITY;
 ALTER TABLE alert_occurrences FORCE ROW LEVEL SECURITY;
+
+-- 3b. SR9-A9-4: drop the sweep_failed-only RESTRICTIVE policies and restore the 0110 alerts_guard() body
+-- (search_path pin from 0117 kept).
+DROP POLICY alerts_sweep_failed_dispatcher_only ON alert_occurrences;
+DROP POLICY alerts_sweep_failed_dispatcher_only ON alerts;
+CREATE OR REPLACE FUNCTION alerts_guard() RETURNS TRIGGER AS $$
+DECLARE
+    v_kind RECORD;
+    v_key  TEXT;
+BEGIN
+    IF TG_OP = 'TRUNCATE' THEN
+        RAISE EXCEPTION 'alerts is append-mostly: TRUNCATE is not permitted';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'alerts: DELETE is not permitted; corrections are resolve + a new alert, never a deletion';
+    END IF;
+
+    SELECT * INTO v_kind FROM alert_kinds WHERE kind = NEW.kind;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'alerts: unknown kind %', NEW.kind;
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        -- Forced from alert_kinds, never trusted from the caller (§3.2).
+        NEW.severity := v_kind.severity;
+        NEW.simulation := v_kind.simulation;
+
+        -- Scope/subject consistency trigger (§3.2, C-102-1).
+        IF v_kind.scope = 'platform' THEN
+            IF NEW.tenant_id IS NOT NULL THEN
+                RAISE EXCEPTION 'alerts: kind % is platform-scoped; tenant_id must be NULL', NEW.kind;
+            END IF;
+        ELSE
+            IF NEW.tenant_id IS NULL THEN
+                RAISE EXCEPTION 'alerts: kind % is tenant-scoped; tenant_id is required', NEW.kind;
+            END IF;
+            IF NEW.subject_tenant_id IS NOT NULL THEN
+                RAISE EXCEPTION 'alerts: a tenant-scoped kind never carries a subject_tenant_id';
+            END IF;
+        END IF;
+
+        IF v_kind.requires_subject AND NEW.subject_tenant_id IS NULL THEN
+            RAISE EXCEPTION 'alerts: kind % requires a subject_tenant_id', NEW.kind;
+        END IF;
+        IF NOT v_kind.requires_subject AND NEW.subject_tenant_id IS NOT NULL THEN
+            RAISE EXCEPTION 'alerts: kind % must not carry a subject_tenant_id', NEW.kind;
+        END IF;
+
+        -- Attribute allowlist (§3.2, payload tests). Every key must be in
+        -- the Kind's allowlist.
+        IF EXISTS (
+            SELECT 1 FROM jsonb_object_keys(NEW.attributes) k
+            WHERE NOT (k = ANY(v_kind.allowed_keys))
+        ) THEN
+            RAISE EXCEPTION 'alerts: attribute key not in the allowlist for kind %', NEW.kind;
+        END IF;
+
+        -- §6.3: the raise_failed attribute trigger, this Kind only.
+        IF NEW.kind = 'alerting.raise_failed' THEN
+            IF (SELECT count(*) FROM jsonb_object_keys(NEW.attributes)) <> 2
+                OR NOT (NEW.attributes ? 'kind')
+                OR NOT (NEW.attributes ? 'sqlstate_class')
+            THEN
+                RAISE EXCEPTION 'alerts: alerting.raise_failed requires attributes exactly {kind, sqlstate_class}';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM alert_kinds ak WHERE ak.kind = (NEW.attributes->>'kind')) THEN
+                RAISE EXCEPTION 'alerts: alerting.raise_failed attributes.kind must name an existing alert_kinds.kind';
+            END IF;
+            IF (NEW.attributes->>'sqlstate_class') <> 'go_validation'
+                AND (NEW.attributes->>'sqlstate_class') !~ '^[0-9A-Z]{2}$'
+            THEN
+                RAISE EXCEPTION 'alerts: alerting.raise_failed attributes.sqlstate_class must be go_validation or match ^[0-9A-Z]{2}$';
+            END IF;
+            -- The discriminator is FORCED, never honoured from the
+            -- caller (security Part 1): no free-text channel into a P1.
+            NEW.discriminator := 'kind:' || (NEW.attributes->>'kind');
+        END IF;
+
+        NEW.state := 'open';
+        NEW.acked_by := NULL;
+        NEW.acked_at := NULL;
+        NEW.resolved_by := NULL;
+        NEW.resolved_at := NULL;
+        NEW.resolve_reason_code := NULL;
+        NEW.first_seen_at := now();
+        NEW.created_at := now();
+        RETURN NEW;
+    END IF;
+
+    -- UPDATE from here on: the ack/resolve state guard (§4.2, C-102-7).
+    IF NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+        OR NEW.subject_tenant_id IS DISTINCT FROM OLD.subject_tenant_id
+        OR NEW.kind IS DISTINCT FROM OLD.kind
+        OR NEW.severity IS DISTINCT FROM OLD.severity
+        OR NEW.simulation IS DISTINCT FROM OLD.simulation
+        OR NEW.discriminator IS DISTINCT FROM OLD.discriminator
+        OR NEW.attributes IS DISTINCT FROM OLD.attributes
+        OR NEW.first_seen_at IS DISTINCT FROM OLD.first_seen_at
+        OR NEW.created_at IS DISTINCT FROM OLD.created_at
+    THEN
+        RAISE EXCEPTION 'alerts: identity, payload and dedup columns are immutable';
+    END IF;
+
+    IF OLD.state = 'resolved' THEN
+        RAISE EXCEPTION 'alerts: a resolved alert is terminal and immutable';
+    END IF;
+    IF NOT (
+        (OLD.state = 'open' AND NEW.state IN ('acked', 'resolved'))
+        OR (OLD.state = 'acked' AND NEW.state = 'resolved')
+    ) THEN
+        RAISE EXCEPTION 'alerts: invalid state transition % -> %', OLD.state, NEW.state;
+    END IF;
+
+    -- The actor must resolve to a validated platform admin (C-102-7).
+    -- There is no tenant ack endpoint in PRH-2.
+    DECLARE
+        v_actor UUID := alerting_validated_platform_admin();
+    BEGIN
+        IF NEW.state = 'acked' THEN
+            NEW.acked_by := v_actor;
+            NEW.acked_at := now();
+        ELSIF NEW.state = 'resolved' THEN
+            IF NEW.resolve_reason_code IS NULL THEN
+                RAISE EXCEPTION 'alerts: resolve requires a resolve_reason_code';
+            END IF;
+            IF OLD.state = 'open' THEN
+                NEW.acked_by := v_actor;
+                NEW.acked_at := now();
+            ELSE
+                NEW.acked_by := OLD.acked_by;
+                NEW.acked_at := OLD.acked_at;
+            END IF;
+            NEW.resolved_by := v_actor;
+            NEW.resolved_at := now();
+        END IF;
+    END;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- 3. Kind and dispatcher policies.
 DROP POLICY alerts_platform_service_dispatcher_raise ON alert_occurrences;
@@ -137,6 +279,7 @@ $$ LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp;
 
 DROP INDEX alert_routes_staged_route_once;
+ALTER TABLE alert_routes DROP COLUMN staged_for_enable;
 ALTER TABLE alert_routes DROP COLUMN staged_route_id;
 
 -- 1. Channel vocabulary.
