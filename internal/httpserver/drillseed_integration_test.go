@@ -53,6 +53,20 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
+// drillPort accepts only the throwaway drill ports (BACKUP_DRILL_PORTS, default 5499 5498 5497), the same rule as deploy/backup/lib-common.sh.
+func drillPort(p string) bool {
+	ports := os.Getenv("BACKUP_DRILL_PORTS")
+	if ports == "" {
+		ports = "5499 5498 5497"
+	}
+	for _, x := range strings.Fields(ports) {
+		if x == p && p != "5432" {
+			return true
+		}
+	}
+	return false
+}
+
 func drillEnvInt(name string, def int) int {
 	if v := os.Getenv(name); v != "" {
 		n, err := strconv.Atoi(v)
@@ -153,8 +167,8 @@ func TestDrillSeedWorld(t *testing.T) {
 	}
 	raw := os.Getenv("TEST_DATABASE_URL")
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() != "127.0.0.1" || u.Port() == "" || u.Port() == "5432" || u.Port() == "5433" {
-		t.Fatalf("refusing target %q: the seeder only runs against a throwaway drill cluster on 127.0.0.1 (never :5432)", u.Host)
+	if err != nil || u.Hostname() != "127.0.0.1" || !drillPort(u.Port()) {
+		t.Fatalf("refusing target %q: the seeder only runs against a throwaway drill cluster on 127.0.0.1 (a drill port, never :5432)", u.Host)
 	}
 	cfg := struct{ tenants, players, depositsPerPlayer, rounds, workers int }{
 		tenants: drillEnvInt("DRILL_SEED_TENANTS", 3), players: drillEnvInt("DRILL_SEED_PLAYERS", 8),

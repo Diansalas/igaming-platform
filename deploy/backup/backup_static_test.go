@@ -67,7 +67,7 @@ func base(rel string) string { return filepath.Base(rel) }
 
 func TestGlobCoversTheScripts(t *testing.T) {
 	got := strings.Join(files(t, "deploy/backup/*.sh", "deploy/backup/*.sql"), " ")
-	for _, want := range []string{"backup.sh", "restore.sh", "verify.sh", "pitr-drill.sh", "drill.sh", "seed.sh", "lib-common.sh", "lib-cluster.sh", "lib-provision.sh", "baseline.sql", "init-backup-role.sql", "post-restore-grants.sql"} {
+	for _, want := range []string{"backup.sh", "restore.sh", "verify.sh", "pitr-drill.sh", "drill.sh", "seed.sh", "lib-common.sh", "lib-cluster.sh", "lib-provision.sh", "lib-sign.sh", "lib-globals.sh", "baseline.sql", "init-backup-role.sql", "harden-backup-surface.sql", "post-restore-grants.sql"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("glob does not cover %s (got %s)", want, got)
 		}
@@ -204,7 +204,7 @@ func TestTargetGuard(t *testing.T) {
 		t.Error("pitr-drill.sh must stop its recovery instances on exit")
 	}
 	seed := read(t, "internal/httpserver/drillseed_integration_test.go")
-	for _, want := range []string{"//go:build integration && drillseed", "DRILL_SEED_ALLOW", `u.Port() == "5432"`} {
+	for _, want := range []string{"//go:build integration && drillseed", "DRILL_SEED_ALLOW", "func drillPort(", `p != "5432"`, "!drillPort(u.Port())"} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("the seeder lost %q", want)
 		}
@@ -217,7 +217,7 @@ func TestDropDatabaseOnlyOnValidatedNames(t *testing.T) {
 			if !strings.Contains(strings.ToUpper(line), "DROP DATABASE") {
 				continue
 			}
-			ok := strings.Contains(line, `${CREATED_DB}`) || strings.Contains(line, "igaming_restored") || strings.Contains(line, "${RST_DB}") // restore.sh's own rollback; drill's own copies
+			ok := strings.Contains(line, `${CREATED_DB}`) || strings.Contains(line, "igaming_restored") || strings.Contains(line, "${RST_DB}") || regexp.MustCompile(`DROP DATABASE (IF EXISTS )?(malsrc|mal_db|mal_ctl_db)\b`).MatchString(line) // restore.sh's own rollback; drill's own copies
 			if base(f) == "drill.sh" || base(f) == "restore.sh" {
 				if !ok {
 					t.Errorf("%s: DROP DATABASE on an unvalidated name: %q", f, strings.TrimSpace(line))
@@ -244,10 +244,14 @@ func TestBaselineIsReadOnlyAndCreatesNothing(t *testing.T) {
 func TestBackupRoleDefinition(t *testing.T) {
 	sql := stripComments(read(t, "deploy/backup/init-backup-role.sql"))
 	for _, want := range []string{"NOSUPERUSER", "NOCREATEDB", "NOCREATEROLE", "NOREPLICATION", "BYPASSRLS", "NOINHERIT", "CONNECTION LIMIT 2", "VALID UNTIL",
-		"default_transaction_read_only = on", "log_statement", `\getenv backup_password IGAMING_BACKUP_PASSWORD`, "must not be a member of any role"} {
+		"default_transaction_read_only = on", "log_statement", `\getenv backup_verifier IGAMING_BACKUP_PASSWORD_VERIFIER`, "48 hours", "SCRAM-SHA-256", "must not be a member of any role"} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("init-backup-role.sql lost %q", want)
 		}
+	}
+	// M2: the clear-text password must never be accepted by the SQL (it would be in statement text); only a client-computed verifier
+	if strings.Contains(sql, "backup_password") || strings.Contains(sql, "IGAMING_BACKUP_PASSWORD'") || regexp.MustCompile(`(?i)PASSWORD\s+:'`).MatchString(sql) {
+		t.Error("init-backup-role.sql must not take a clear-text password (use the SCRAM verifier from deploy/backup/scramhash)")
 	}
 	// only SELECT / USAGE / CONNECT may ever be granted to the backup role
 	for _, m := range regexp.MustCompile(`(?is)GRANT\s+(.+?)\s+ON\s+.+?\s+TO\s+igaming_backup`).FindAllStringSubmatch(sql, -1) {
@@ -266,7 +270,7 @@ func TestBackupRoleDefinition(t *testing.T) {
 
 func TestRestoreRoleFilter(t *testing.T) {
 	r := stripComments(read(t, "deploy/backup/restore.sh"))
-	for _, want := range []string{`PROJECT_ROLES="igaming igaming_runtime igaming_backup"`, "--apply-globals", `$0 == "CREATE ROLE " r ";"`, `index($0, "ALTER ROLE " r " ") == 1`, "WITHOUT a password"} {
+	for _, want := range []string{`PROJECT_ROLES="igaming igaming_runtime igaming_backup"`, "--apply-globals", `$0 == "CREATE ROLE " r ";"`, `index($0, "ALTER ROLE " r " WITH ") == 1`, "WITHOUT a password"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("restore.sh lost the globals filter element %q", want)
 		}
@@ -292,7 +296,9 @@ func TestGlobalsAllowList(t *testing.T) {
 		{"igaming_runtime", []string{"CREATE ROLE igaming_runtime;", "ALTER ROLE igaming_runtime WITH " + norm + ";"}, true},
 		{"igaming_backup", []string{"CREATE ROLE igaming_backup;",
 			"ALTER ROLE igaming_backup WITH NOSUPERUSER NOINHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION BYPASSRLS CONNECTION LIMIT 2 VALID UNTIL '2026-10-16 17:11:32.849749+00';",
-			"ALTER ROLE igaming_backup SET default_transaction_read_only TO 'on';", "ALTER ROLE igaming_backup SET log_statement TO 'all';"}, true},
+		}, true},
+		{"igaming_backup", []string{"CREATE ROLE igaming_backup;", "ALTER ROLE igaming_backup SET default_transaction_read_only TO 'on';"}, false},         // SET lines are never replayed any more (L4)
+		{"igaming_backup", []string{"ALTER ROLE igaming_backup WITH NOSUPERUSER NOINHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION BYPASSRLS;"}, false}, // CONNECTION LIMIT 2 is required
 		{"igaming", []string{"ALTER ROLE igaming WITH SUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS;"}, false},
 		{"igaming", []string{"ALTER ROLE igaming WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION BYPASSRLS;"}, false},
 		{"igaming_runtime", []string{"ALTER ROLE igaming_runtime WITH " + norm + " CREATEROLE;"}, false},
@@ -346,14 +352,82 @@ func TestBackupScriptFailClosedProperties(t *testing.T) {
 	}
 }
 
-func TestNoKeyMaterialOrSecretsInTheDirectory(t *testing.T) {
-	bad := regexp.MustCompile(`AGE-SECRET-KEY-|BEGIN (PGP|RSA|EC|OPENSSH) PRIVATE KEY|age1[a-z0-9]{50,}|AKIA[0-9A-Z]{16}`)
-	for _, f := range files(t, "deploy/backup/*", "deploy/backup/*/*", "docs/runbooks/backup-restore-dr.md", "docs/runbooks/aws-staging-deploy-plan.md", "docs/decisions/0122-backup-role-and-pitr.md") {
-		if st, err := os.Stat(filepath.Join(root(t), f)); err != nil || st.IsDir() || strings.HasSuffix(f, "_test.go") {
-			continue
+// secretPatterns: key material and credential shapes that must never appear in the tooling, the runbooks, the decisions or the
+// infrastructure code (A12 security review: the scan covers shell, SQL, Terraform, JSON/YAML and Markdown, not just scripts).
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`AGE-SECRET-KEY-`),
+	regexp.MustCompile(`BEGIN (PGP |RSA |EC |OPENSSH |ENCRYPTED |DSA )?PRIVATE KEY`),
+	regexp.MustCompile(`age1[a-z0-9]{50,}`),
+	regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+/=]{16,}\$[A-Za-z0-9+/=]{20,}:[A-Za-z0-9+/=]{20,}`), // a real stored verifier
+	regexp.MustCompile(`(?i)aws_secret_access_key\s*[=:]\s*['"]?[A-Za-z0-9/+=]{30,}`),
+	regexp.MustCompile(`postgres(ql)?://[A-Za-z0-9_.-]+:[A-Za-z0-9%_.~-]{12,}@`), // a URL with an inline password (placeholders such as <password> or $VAR do not match)
+	regexp.MustCompile(`(?i)\b(password|passwd|secret|token)\b\s*[=:]\s*["'][A-Za-z0-9/+=_.-]{16,}["']`),
+	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{30,}`),
+}
+
+func findSecrets(body string) []string {
+	var out []string
+	for _, re := range secretPatterns {
+		if m := re.FindString(body); m != "" {
+			if len(m) > 24 {
+				m = m[:24] + "..."
+			}
+			out = append(out, m)
 		}
-		if bad.MatchString(read(t, f)) {
-			t.Errorf("%s contains key-like material", f)
+	}
+	return out
+}
+
+func TestNoKeyMaterialOrSecretsInTheDirectory(t *testing.T) {
+	exts := map[string]bool{".sh": true, ".sql": true, ".tf": true, ".tfvars": true, ".md": true, ".json": true, ".yaml": true, ".yml": true, ".go": true, ".txt": true, ".hcl": true, ".env": true, ".conf": true}
+	scanned := 0
+	scanTree := func(rel string) {
+		_ = filepath.WalkDir(filepath.Join(root(t), rel), func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if strings.HasSuffix(path, "_test.go") || !exts[filepath.Ext(path)] {
+				return nil
+			}
+			b, err := os.ReadFile(path)
+			if err != nil || len(b) > 4<<20 || strings.IndexByte(string(b), 0) >= 0 {
+				return nil
+			}
+			scanned++
+			if h := findSecrets(string(b)); len(h) > 0 {
+				r, _ := filepath.Rel(root(t), path)
+				t.Errorf("%s contains key/credential-like material: %v", r, h)
+			}
+			return nil
+		})
+	}
+	scanTree("deploy")
+	scanTree("docs/runbooks")
+	for _, f := range files(t, "docs/decisions/0122*.md", "docs/plans/a12-*.md") {
+		b := read(t, f)
+		scanned++
+		if h := findSecrets(b); len(h) > 0 {
+			t.Errorf("%s contains key/credential-like material: %v", f, h)
+		}
+	}
+	if scanned < 40 {
+		t.Errorf("secret scan covered only %d files; the walk is broken", scanned)
+	}
+	// the scan really bites
+	for _, bad := range []string{
+		"AGE-SECRET-KEY-1ABCDEFGHIJKLMNOPQRSTUVWXYZ", "-----BEGIN PRIVATE KEY-----", "-----BEGIN OPENSSH PRIVATE KEY-----", "AKIAABCDEFGHIJKLMNOP",
+		"export PGURL=postgres://igaming:hunter2hunter2xyz@db.internal:5432/x", `password = "correct-horse-battery-staple"`,
+		"SCRAM-SHA-256$4096:c2FsdHNhbHRzYWx0c2FsdA==$c3RvcmVka2V5c3RvcmVka2V5c3RvcmVka2V5MTIzNDU=:c2VydmVya2V5c2VydmVya2V5c2VydmVya2V5MTIz",
+		"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+	} {
+		if len(findSecrets(bad)) == 0 {
+			t.Errorf("secret scan missed a planted secret: %q", bad)
+		}
+	}
+	for _, ok := range []string{"postgres://igaming@127.0.0.1:5499/db", "postgres://user:<password>@host/db", "postgres://user:${PW}@host/db", `password = var.db_password`, "PGPASSFILE=/run/secrets/x"} {
+		if h := findSecrets(ok); len(h) != 0 {
+			t.Errorf("secret scan false positive on %q: %v", ok, h)
 		}
 	}
 }

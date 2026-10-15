@@ -17,7 +17,8 @@ cluster; during a real incident a human with database authority runs the privile
 | Bad migration / bad deploy | Fix forward (`expand-contract-migrations.md`); restore only for data loss | - | - | policy |
 
 Artefacts: `deploy/backup/` - `backup.sh`, `restore.sh`, `verify.sh`, `pitr-drill.sh`, `drill.sh` (orchestrates everything on throwaway
-clusters), `init-backup-role.sql`, `post-restore-grants.sql`, `baseline.sql`, `seed.sh` (+ the seeder
+clusters), `init-backup-role.sql` (takes a SCRAM verifier, never a password), `harden-backup-surface.sql`, `post-restore-grants.sql`, `baseline.sql`,
+`scramhash/` (Go; computes the verifier on the client), `lib-sign.sh` (Ed25519 signing/verification of the set), `seed.sh` (+ the seeder
 `internal/httpserver/drillseed_integration_test.go`, tags `integration drillseed`), `restorecheck/` (Go; platform reconciliation + startup guards),
 libraries `lib-*.sh`. Static guards: `go test ./deploy/backup/` (no sudo/pkill, no RLS/trigger weakening outside the throwaway-only drill
 scripts, no role DDL outside provisioning, no literal passwords, target guard present, role grants limited to SELECT/USAGE/CONNECT).
@@ -29,31 +30,80 @@ scripts, no role DDL outside provisioning, no literal passwords, target guard pr
 | `igaming` (migration owner) | `cmd/migrate`, owning objects, restore target owner | on RDS the master user; subject to FORCE RLS: **cannot** produce a complete dump |
 | `igaming_runtime` | the application | non-owning; cannot dump (`permission denied for table actor_proof_keys`) |
 | **`igaming_backup`** | the backup runner and `verify.sh` baseline/count queries | NOSUPERUSER, **BYPASSRLS**, SELECT-only, CONNECTION LIMIT 2, no membership, read-only sessions, **VALID UNTIL** (time-boxed), audited; never used by the application |
-| restore role | `restore.sh` | the owner role, or a CREATEDB role that is a member of it (drill: `drill_restore`); on a brand-new cluster a role able to create the project roles (drill: the bootstrap superuser; RDS: the master user - unverified) |
+| restore role | `restore.sh --phase all` or `load` | the **non-superuser** owner role `igaming`, or a CREATEDB role that is a member of it (drill: `drill_restore`). It must NOT be a superuser or `rds_superuser` member: the archive is executable SQL (ADR 0122 section 5a). `--owner-role` is `igaming` unless `RESTORE_OWNER_ROLE_OVERRIDE` names another; postgres / igaming_backup / igaming_runtime / rdsadmin / rds_superuser are always refused |
+| provisioning role | `restore.sh --phase provision` | on a brand-new cluster the bootstrap superuser (RDS: the master - unverified): creates the three project roles WITHOUT passwords and the EMPTY database only; no archive content runs as this role |
 
 Credentials reach the scripts only as a **0600/0400 passfile** (`BACKUP_PGPASSFILE`) materialised by the runner from the secret store
 (`backup_runner_secret_arn`); the scripts take no password in argv, environment or URL, and refuse a missing or too-open passfile.
-An **expired** credential fails the backup closed with a message naming the likely cause (drilled). Re-mint: re-run
-`init-backup-role.sql` with a fresh `IGAMING_BACKUP_PASSWORD` and `BACKUP_ROLE_VALID_UNTIL` from the secret store job.
+An **expired** credential fails the backup closed with a message naming the likely cause (drilled). Re-mint: generate a fresh random
+password, compute its verifier on the runner (`printf '%s' "$pw" | scramhash`) and re-run `init-backup-role.sql` with
+`IGAMING_BACKUP_PASSWORD_VERIFIER` and `BACKUP_ROLE_VALID_UNTIL` (at most now + 48 h; the SQL refuses `infinity`). The password never
+appears in statement text, so statement logging cannot capture it (drilled with `log_statement=all`). **On RDS the credential is IAM
+database authentication, not a password** (ADR 0122 section 3, M8).
 
-Target guard (all scripts): `127.0.0.1:5432` (the shared development/CI cluster) is always refused; loopback targets must be a
-drill port; a remote host (staging RDS, later) is refused unless `BACKUP_ALLOW_REMOTE_TARGET=<exactly that host>` is set for
-that invocation. Production is not authorised.
+Signing and verification keys (by reference, never in git, never in the backup storage): `BACKUP_SIGNING_KEY_FILE` (Ed25519 private key, 0600, on the
+backup runner only) signs every set; the restorer supplies `RESTORE_VERIFY_PUBKEY_FILE` plus `RESTORE_VERIFY_PUBKEY_SHA256` (the SHA-256 of the public
+key's DER encoding, recorded in change control when the key pair is generated). A set that is unsigned, signed by another key, or altered after signing is
+refused **before** any checksum, decryption or database contact; there is no switch to allow it. Generate a pair: `openssl genpkey -algorithm ED25519 -out
+sign.pem; openssl pkey -in sign.pem -pubout -out sign.pub; openssl pkey -pubin -in sign.pub -outform DER | sha256sum`.
+
+### 2a. Who may mint, extend or use the backup credential (break-glass, L6)
+
+- **Routine use**: only the backup runner identity, on its schedule. A human never holds the credential by default.
+- **Minting / extending `VALID UNTIL`**: the secret-store job under the runner's identity, or `devops` with a ticket. Maximum validity 48 h (enforced by the
+  SQL); the routine mint is 24 h.
+- **Break-glass (any human use of `igaming_backup`, any use outside the runner, any extension beyond the routine window)** needs: a requester, a
+  **different** approver (four-eyes: `devops` + `security` or the owner delegate), a ticket stating the reason, a TTL of at most 1 hour, the
+  session recorded (connection/disconnection lines and per-role statement logs/pgaudit), and a **re-mint of the credential straight afterwards**
+  (so the credential used is dead). Human queries may put PII in `WHERE` clauses into the statement logs: keep break-glass sessions to the
+  pre-agreed statements and review the log lines afterwards.
+- On RDS with IAM database authentication the same rule applies to who may obtain a token: the `rds-db:connect` permission on the one database user is
+  the break-glass grant, time-boxed and logged in CloudTrail.
+
+Target guard (all scripts): the host is **canonicalised** (lower-cased, brackets and trailing dots stripped; a comma list, whitespace, userinfo, a slash, a
+backslash or `%` is rejected) and resolved (`getent ahosts`); anything that resolves to this machine (`127.0.0.0/8` including `127.1` and `127.0.0.2`, `0.0.0.0`,
+`::`, `::1`, `::ffff:127.x`, `LOCALHOST`, `localhost.`, `[::1]`, this host's own name) is "local", and local on port 5432 (the shared development/CI cluster) is
+**always refused with no acknowledgement that overrides it**; a local target must be a drill port (`BACKUP_DRILL_PORTS`, default 5499 5498 5497); a remote host
+(staging RDS, later) is refused unless `BACKUP_ALLOW_REMOTE_TARGET=<exactly that host>` is set for that invocation. Production is not authorised.
 
 ## 3. Taking a logical backup (secondary mechanism)
 
 ```sh
 export BACKUP_PGHOST=<host> BACKUP_PGPORT=<port> BACKUP_PGDATABASE=<db> BACKUP_PGUSER=igaming_backup
 export BACKUP_PGPASSFILE=<0600 file from the secret store>
-export BACKUP_ENCRYPT_AGE_RECIPIENT=<age public recipient>      # or BACKUP_ENCRYPT_GPG_RECIPIENT; public references only
+export BACKUP_ENCRYPT_AGE_RECIPIENT=<age public recipient>      # or BACKUP_ENCRYPT_GPG_RECIPIENT=<FULL 40-hex fingerprint>; public references only
+export BACKUP_SIGNING_KEY_FILE=<0600 Ed25519 private key from the secret store>
+export BACKUP_TMPDIR=<tmpfs or encrypted scratch directory>      # working material; 0700 per-run subdirectories, swept at the next start
 deploy/backup/backup.sh --out-dir <backup volume> --label <reason>
 ```
 
+The recipient and the signing key are **validated before anything is dumped** (a probe encryption and a probe signature): a mistyped recipient, an unknown
+gpg key or an unusable signing key stops the run with nothing written. The dump is streamed through the encryptor, so no plaintext archive is ever on the
+backup volume; if anything fails (including a killed encryptor, SIGTERM/SIGINT, a closed stdout) the whole run directory is removed. The next run also sweeps
+stale temp directories and orphaned `.incomplete` run directories of killed (SIGKILL/OOM) runs.
+
+### 3a. Production: dump from a clone, and detect a long snapshot (M7)
+
+A logical dump holds one `REPEATABLE READ` snapshot for its whole duration (about 40 minutes at 50 GB by the extrapolation in section 6), which holds back vacuum on
+the instance it runs on. **In production take the logical dump from a short-lived instance restored from PITR or a snapshot (or from a replica), never from the
+primary**, and destroy the clone afterwards; staging and the local drill dump the instance directly. Detection for any instance where a dump runs:
+
+```sql
+SELECT pid, usename, state, now() - xact_start AS xact_age, age(backend_xmin) AS xmin_age, left(query, 60)
+  FROM pg_stat_activity WHERE usename = 'igaming_backup' ORDER BY xact_start;
+```
+
+Alert/page when `xact_age` exceeds the planned dump time plus a margin, when a session of `igaming_backup` exists outside the backup window, or when it holds a lock
+mode other than AccessShare (`pg_locks`). No metric exports this yet (`OBS-BACKUP-ABUSE-1`, ADR 0122 section 5b); until it does this query is run by hand during a dump.
+The backup keeps its snapshot-holder session alive with a keepalive (`BACKUP_KEEPALIVE_SECONDS`, default 60) and fails loudly if the holder dies.
+
 Output (one 0700 directory): `db.dump[.age|.gpg]`, `globals.sql[.age|.gpg]` (roles and attributes, **no passwords**), `baseline.txt[.age|.gpg]`
 (exact row counts and content hashes of every table, ledger invariants, sequences, roles and ACLs by name, triggers, policies, RLS flags,
-catalog fingerprints, all evaluated in the **same exported snapshot as the dump**, so a live source is fine), `SHA256SUMS`, `manifest.json`.
-It refuses: a non-BYPASSRLS or superuser role, a role that cannot SELECT every table, an unencrypted dump (unless
-`BACKUP_ALLOW_UNENCRYPTED=synthetic-data-only`), insufficient disk, an existing output directory. Exit 4 = written but the source
+catalog fingerprints, all evaluated in the **same exported snapshot as the dump**, so a live source is fine), `manifest.json` (includes the
+**source `environment_anchor`** and an `encryption` field derived from the files actually written), `SHA256SUMS` (lists every artefact including `manifest.json`)
+and `SHA256SUMS.sig` (the Ed25519 signature). It refuses: a non-BYPASSRLS or superuser role, a role that cannot SELECT every table, an unencrypted dump
+(unless `BACKUP_ALLOW_UNENCRYPTED=synthetic-data-only` **and** the target is a local throwaway drill instance), an encryption recipient or signing key that
+does not work, insufficient disk, an existing output directory. Exit 4 = written but the source
 violated a ledger invariant (artefacts kept as evidence; open a P1).
 
 ## 4. Recovery runbooks
@@ -68,16 +118,25 @@ the restored ledger.
 
 1. Stop writers (scale `platform-api` to zero / fence at the load balancer). Do not let a half-restored database take traffic.
 2. Provision the empty PostgreSQL 16 server (same major version; the dump records `server_version_num`).
-3. Fetch the newest backup set that passes the checksum; keep the decryption identity in the restorer's secret store
-   (`RESTORE_AGE_IDENTITY_FILE=<path>` for age; gpg uses the restorer's keyring).
-4. `RESTORE_CONFIRM=<new db> deploy/backup/restore.sh --backup-dir <set> --new-database <new db> --apply-globals` as the restore role.
-   Sequence enforced: checksums -> decrypt -> archive parses -> roles exist (or the three project roles are created **without
-   passwords** from `globals.sql`) -> database must not exist -> `CREATE DATABASE ... OWNER igaming TEMPLATE template0` with the source
-   encoding/collation -> `pg_restore --single-transaction --exit-on-error` (all or nothing) -> `post-restore-grants.sql` (database ACLs, schema
-   ownership) -> `ANALYZE`. On any failure the database this run created is dropped.
+3. Fetch the newest backup set. Keep the decryption identity in the restorer's secret store (`RESTORE_AGE_IDENTITY_FILE=<path>` for age; gpg uses the
+   restorer's keyring), and have the **pinned verification key** and its fingerprint (`RESTORE_VERIFY_PUBKEY_FILE`, `RESTORE_VERIFY_PUBKEY_SHA256`) from change
+   control. State what you believe you are restoring: `RESTORE_EXPECT_SOURCE_ENVIRONMENT=<production|development|test|staging|unrecorded>` (it must equal the set's
+   source anchor; a non-production source is refused for any target that is not a throwaway drill instance).
+4. **Two phases, two identities** (a dump is executable SQL; ADR 0122 section 5a). On the new empty cluster:
+   - `RESTORE_CONFIRM=<new db> deploy/backup/restore.sh --backup-dir <set> --new-database <new db> --apply-globals --phase provision` as the bootstrap
+     superuser: verifies the **signature first** (before checksums, decryption or any database contact), then the checksums, then creates the three project roles
+     **without passwords** from allow-listed statements and an **empty** database owned by `igaming`. No archive content runs as this role.
+   - Re-provision the owner's (and `igaming_runtime`'s) credential from the secret store.
+   - `RESTORE_CONFIRM=<new db> deploy/backup/restore.sh --backup-dir <set> --new-database <new db> --phase load` as **`igaming` (a non-superuser)**:
+     decrypt into a private 0700 temp directory, archive must parse, anchor expectation checked, `pg_restore --single-transaction --exit-on-error --no-owner
+     --role=igaming` (all or nothing), the `database_environment` data is **not** restored, `post-restore-grants.sql`, `ANALYZE`. A superuser or
+     `rds_superuser` member is refused for this phase. On any failure the database this run created is dropped.
+   On a cluster where the roles and an ordinary non-superuser restore role already exist, `--phase all` (the default) does both with that one identity.
 5. **Re-provision what a dump cannot carry**: role passwords (`igaming_runtime`, `igaming`, `igaming_backup`) from the secret store;
-   the complete environment role-provisioning script (`deploy/aws/sql/init-runtime-role.rds.sql`); the **`database_environment` anchor**
-   (section 5); the secret-store material that is not in any database (JWT secrets, staff MFA key families, payout-instrument keys,
+   the complete environment role-provisioning script (`deploy/aws/sql/init-runtime-role.rds.sql`); **`deploy/backup/harden-backup-surface.sql`** (the
+   `pg_catalog` function REVOKEs are dumped but a non-superuser restore cannot apply them: drilled, the backup role could take advisory locks on the restored cluster until it was re-run);
+   the **`database_environment` anchor** (section 5);
+   the secret-store material that is not in any database (JWT secrets, staff MFA key families, payout-instrument keys,
    provider credentials).
 6. `deploy/backup/verify.sh --baseline <baseline.txt>` (after decrypting the baseline) as described in section 5. **Do not open traffic
    until it prints `VERIFY RESULT: PASS`.**
@@ -133,12 +192,30 @@ What must be re-provisioned after a restore (the drill proves each of these is n
 |---|---|---|
 | Role passwords | a dump carries none; restored roles cannot log in (drilled) | secret store -> `ALTER ROLE` by the DB admin; `init-backup-role.sql` for the backup role |
 | Database-level ACL, `public` schema owner | not in a dump (the verifier caught the schema owner on the first run) | `post-restore-grants.sql` (done by `restore.sh`) + the environment's full role-provisioning script |
-| **`database_environment` anchor** | a restore into a new database is **unrecorded** (or carries the source's anchor); a production `platform-api` **refuses to start** on an unrecorded anchor and on a dev/test anchor (drilled: refused, then admitted after the owner records it) | owner, once: `INSERT INTO database_environment (environment) VALUES ('production');` then re-run `restorecheck -expect-anchor production`. Never restore a dev/test backup into production; never record `production` on a scratch copy |
+| **`database_environment` anchor** | a logical restore does **NOT carry the anchor** (its data is excluded from the restore): the restored database is **blank/unrecorded** and a production `platform-api` **refuses to start** until the owner records it (drilled with a development-source backup: `verify.sh` asserts 0 rows and that the production guard refuses; recorded truthfully as `development` the guard still refuses) | **the owner first verifies that the SOURCE environment of the backup was production** (the set's `manifest.json` `environment_anchor`, the value `restore.sh` required in `RESTORE_EXPECT_SOURCE_ENVIRONMENT`, and the ticket for the incident), and only then, once: `INSERT INTO database_environment (environment) VALUES ('production');` then re-run `restorecheck -expect-anchor production`. Never record `production` on a restored development/test/staging copy (that turns the guard into a rubber stamp); never restore such a copy into production (`restore.sh` refuses it). Physical recovery (PITR) keeps the anchor: it is the same database |
+| Backup-surface hardening | pg_catalog function ACLs are dumped but cannot be applied by the non-superuser load | re-run `deploy/backup/harden-backup-surface.sql` as the bootstrap superuser (ADR 0122 section 5b) |
 | Secret-store material | not in any database backup | restore from the secret store: JWT secrets, `STAFF_MFA_*` key families, payout-instrument keys, provider credentials. (`actor_proof_keys` IS in the database: the dump is therefore a signing-key-bearing artefact) |
 | Reconciliation | prove no drift in the running system | run the scheduler once (or `restorecheck -persist`) so a `reconciliation_runs` row exists; require 0 mismatches before traffic |
 | Provider-side state | the restore point is earlier than provider events | reconcile PSP statements and casino rounds since the restore time; do not assume vendors rolled back |
 | Alert routes, credential handles | live in the DB; a restore reverts them to the restore time | check `/v1/admin/alerting/status`, re-apply changes |
 | Communication | | incident channel update at: restore started, restore point chosen, verify PASS, traffic restored; notify affected tenants and compliance if committed financial history was discarded |
+
+### 5a. After ANY suspected exposure of a backup set, a dump or the backup credential: rotate
+
+A logical dump (and so a backup set, a decrypted copy, a restored database) carries `actor_proof_keys.secret` in the clear (inside the encrypted artefact) and every
+password hash. Treat a suspected exposure (lost or unencrypted set, leaked decryption identity or signing key, credential used outside the runner, an
+untrusted restore target) as a security incident and, without waiting for proof:
+
+1. **Rotate the signed-actor-proof keys**: follow `operational-runbooks.md` section 15 (mint a new `actor_proof_keys` row, switch the application to it, retire the
+   old kid); in-flight proofs under the old key stop verifying, by design.
+2. **Rotate the other signing material that was in or protected next to the dump**: JWT signing secrets, the staff MFA key families, the payout-instrument keys, provider
+   credentials and webhook secrets, per their own runbooks; revoke sessions (the dump holds `sessions.refresh_token_hash` and token MACs).
+3. **Reset staff passwords** and force MFA re-enrolment where the staff MFA ciphertext and its key family could both have been reached; player password hashes are
+   offline-crackable: require password resets when the exposure is credible.
+4. Rotate the backup **signing key** and re-pin the verification fingerprint if the signing key may have been exposed; rotate the **age/gpg** recipient and re-encrypt or
+   destroy old sets if the decryption identity may have been exposed; re-mint (or revoke the IAM grant of) the backup credential.
+5. Record the incident, the sets involved and their disposition. Whether logical dumps should exclude `actor_proof_keys.secret` altogether is an open architect
+   decision (ADR 0122 section 10; recommendation: exclude and re-key on restore, with PITR covering physical recovery).
 
 ## 6. Measured RTO / RPO (LOCAL, SYNTHETIC, THIS MACHINE - not production)
 
@@ -193,7 +270,17 @@ beyond a few GB**; the physical path (snapshots / PITR) is the primary, and its 
 | Truncated dump with recomputed checksum | `pg_restore --list` refuses the unreadable archive, nothing created | PASS |
 | Corrupted dump with recomputed checksum (checksum cannot help) | zlib/archive error **part-way through the restore**; single transaction rolls back; the half-created database is dropped, exit 3 | PASS |
 | Injected mid-restore failure (the `pg_restore` client is killed once the new database has grown: an operator Ctrl-C or a lost connection) | same rollback and drop, exit 3 | PASS |
-| Tampered `globals.sql` with a recomputed checksum (`ALTER ROLE igaming WITH SUPERUSER`) | `--apply-globals` refuses it (allow-list `lib-globals.sh`); no role and no database created. The unsigned manifest is the residual (ADR 0122 section 9) | PASS |
+| Tampered `globals.sql`, re-sealed with a VALID signature (`ALTER ROLE igaming WITH SUPERUSER`; a compromised pipeline) | `--apply-globals` refuses it (allow-list `lib-globals.sh`, defence in depth); no role and no database created | PASS |
+| Unsigned set; set re-sealed and signed by an attacker's key; verification key placed inside the backup directory; wrong or missing pinned fingerprint; manifest altered after signing; checksum list altered; garbage signature | refused **before** checksums, decryption or any database contact (the drill counts new connections: 0) | PASS |
+| Archive whose expression-index function runs `COPY ... TO PROGRAM` (validly signed) | fails harmlessly as the non-superuser restore role: transaction rolled back, database dropped, no file created; the superuser is refused outright; **control**: the naive `pg_restore` as a superuser DID run the command | PASS (incl. control) |
+| Mistyped / malformed age recipient, unknown or short gpg id, `=yes` or remote-target unencrypted override | `backup.sh` refuses **before dumping**; no run directory, no plaintext, no temp files | PASS |
+| Encryptor killed mid-stream | backup fails, run directory removed, no plaintext | PASS |
+| Snapshot holder killed, or killed by the server's idle timeout | backup fails loudly and keeps nothing; **with** the keepalive a 3x-timeout delay is survived (control without it fails) | PASS |
+| SIGTERM / SIGINT during the dump with a `.partial` ciphertext present; stdout closed (SIGPIPE) | run directory and temp directory removed, holder session gone, encryptor child terminated, no plaintext | PASS |
+| SIGKILL/OOM leavings (stale temp dir, orphaned `.incomplete` run directory) | swept at the next start | PASS |
+| `--owner-role` postgres / igaming_backup / igaming_runtime / rdsadmin / rds_superuser / an unlisted name | refused (the unlisted name needs `RESTORE_OWNER_ROLE_OVERRIDE`); nothing created | PASS |
+| Restore of a development-source set asserting `production`; dev-source restore then starting as production | refused / anchor blank so the production guard refuses until the owner records it | PASS |
+| Aliases of the shared cluster (`127.0.0.2`, `127.1`, `0.0.0.0`, `::ffff:127.0.0.1`, `LOCALHOST`, `localhost.`, `[::1]`, `a,127.0.0.1`, this host's name) | refused before any connection (24 spellings unit-tested in `go test ./deploy/backup/`) | PASS |
 | Restore as the wrong role (`igaming_runtime`, `igaming_backup`) | refused with an explanation, nothing created | PASS |
 | Restore into an existing (non-empty) database | refused, the existing database is untouched | PASS |
 | Insufficient disk | `backup.sh` / `restore.sh` refuse up front (`BACKUP_MIN_FREE_MB`, `RESTORE_MIN_FREE_MB`). **A real `ENOSPC` part-way through is NOT simulated**: a failed `pg_restore --single-transaction` rolls back, and `restore.sh` drops the database it created; a full disk on the *server* can still stop PostgreSQL itself - provision restore targets with at least the database size plus WAL headroom | check PASS; ENOSPC documented only |
@@ -202,6 +289,8 @@ beyond a few GB**; the physical path (snapshots / PITR) is the primary, and its 
 | Backup credential file missing / too open | refuses, nothing connected | PASS |
 | Backup run as the owner role (or a superuser) | refused before dumping: not BYPASSRLS / superuser | PASS |
 | Wrong target (5432, unknown loopback port, remote host without acknowledgement) | refused without connecting | PASS |
+| The backup role's abuse primitives (advisory locks, `pg_logical_emit_message`, large objects, `NOTIFY`, `CONNECT` to postgres/template1) | denied after `harden-backup-surface.sql`; the platform roles keep their advisory locks; the revokes are **gone after a full-loss restore until the script is re-run** | PASS |
+| Backup credential minted with statement logging on | the password is not in the server log (control: a naive `PASSWORD :'pw'` is) | PASS |
 | Restored data differs from the baseline | `verify.sh` FAILS naming the differing categories; verified by a **negative control** (one ledger amount changed by 7 -> `equal_TABLE` and `invariants_all_zero` fail) and by reverting it (passes again) | PASS |
 | Unencrypted dump requested | refused unless the synthetic-data acknowledgement is set | PASS |
 
@@ -216,8 +305,11 @@ beyond a few GB**; the physical path (snapshots / PITR) is the primary, and its 
 - **Real ENOSPC** mid-restore; **concurrent live traffic** during the dump beyond the snapshot semantics (the seed finished before the backup);
   a **multi-hour** `REPEATABLE READ` dump's effect on vacuum.
 - The **application restarted** against a restored database (the drill exercises the platform's startup guard function and reconciliation, not a full `platform-api` boot).
-- Signed backup manifests; backup-of-the-backup; automatic scheduling and alerting on backup failure or stale `latest_restorable_time`.
-- The security review of ADR 0122 (probes in its section 9) is still to follow.
+- Backup-of-the-backup; automatic scheduling and alerting on backup failure or stale `latest_restorable_time`; the `OBS-BACKUP-ABUSE-1` signal.
+- An asymmetric-**KMS** signing key (the drill signs with an ephemeral Ed25519 key file, the pinned fingerprint is supplied by the operator); gpg end to end (only
+  its refusals are drilled); IAM database authentication and `REVOKE` on `pg_catalog` functions **on RDS**; a restore load as a non-`rds_superuser` owner on RDS.
+- The security review is recorded (`docs/plans/prh2-hardening-round/a12-security-review.md`); its dispositions are in ADR 0122 section 9. Open: the architect
+  decision on excluding `actor_proof_keys.secret` from logical dumps (ADR 0122 section 10).
 
 ## 9. Running the drill
 
@@ -229,7 +321,7 @@ go test ./deploy/backup/                   # static guards (cheap, no database)
 ```
 
 Needs: PostgreSQL 16 server binaries at `/usr/lib/postgresql/16/bin`, `runuser` and the OS user `postgres` (the clusters run as `postgres`
-via `runuser -u postgres`, a privilege **drop**; initdb refuses root), `age`/`age-keygen`, Go, ~1.5 GB free in `/tmp` (the drill checks and aborts
+via `runuser -u postgres`, a privilege **drop**; initdb refuses root), `age`/`age-keygen`, OpenSSL >= 3.0 (Ed25519 signing), `ps`, Go, ~1.5 GB free in `/tmp` (the drill checks and aborts
 cleanly below its thresholds). It creates `/tmp/pgdrill-XXXXXX`, clusters on ports 5499 (source), 5498 (full-loss target), 5497 (PITR recovery),
 stops them with `pg_ctl` and removes the directory on exit, failure, INT or TERM. It never contacts 5432, uses no sudo or pkill, creates roles only
 inside its own clusters, and uses random per-run passwords that live only in 0600 passfiles inside the drill directory.

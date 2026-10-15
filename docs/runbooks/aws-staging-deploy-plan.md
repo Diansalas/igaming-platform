@@ -26,7 +26,7 @@ Read first: `docs/runbooks/stage-9-4-staging-lifecycle-runbook.md`, `stage-9-4-a
 | storage / snapshot / PITR encryption | on; AWS-managed `aws/rds` key unless `db_kms_key_arn` references an existing CMK | `db_kms_key_arn` |
 | CloudWatch log export | `postgresql`, `upgrade`, in pre-created groups with retention | `db_log_exports`, `log_retention_days` |
 | parameter group | `rds.force_ssl`, `log_connections`, `log_disconnections`, `shared_preload_libraries=pgaudit` (reboot) | `db_enable_pgaudit` |
-| backup-runner credential | **reference only**: Secrets Manager ARN, nothing created, no value | `backup_runner_secret_arn` |
+| backup-runner credential | **IAM database authentication is REQUIRED** (`iam_database_authentication_enabled = true` in the module; `GRANT rds_iam TO igaming_backup`, no password; ADR 0122 section 3, review M8). The Secrets Manager ARN below is the fallback reference for a password-based role ONLY if IAM auth is shown unusable (record why; this is then a conscious exception) | `backup_runner_secret_arn` (reference only: nothing created, no value) |
 | deployer IAM (prepared, needs security review and the bootstrap credential to apply) | `rds:CreateDBSnapshot` on `snapshot:igaming-staging-*`; `logs:*` group actions on `/aws/rds/instance/igaming-staging-*` | `deploy/aws/iam/staging-deployer-infra-policy.json` |
 
 Consequences to accept knowingly: `deploy.sh down` is no longer one step (section 14); the final snapshot and the retained
@@ -39,11 +39,30 @@ already exists.
 - [ ] 0.2 `terraform fmt -recursive -check deploy/aws` and `deploy/aws/tests/run-static-checks.sh` (fmt, validate, `terraform test`
       with mock providers, no credentials). Expect green. **First-ever run for this change: fix what it finds, re-run, commit.**
 - [ ] 0.3 `go test ./deploy/backup/ ./deploy/drill/` and the local drill `deploy/backup/drill.sh` green on the same commit.
-- [ ] 0.4 Security review of ADR 0122 (probes in its section 9) recorded as accepted, and of the **IAM policy delta**; then the
+- [ ] 0.4 The security review of ADR 0122 is recorded (`docs/plans/prh2-hardening-round/a12-security-review.md`; dispositions in ADR 0122
+      section 9); the **IAM policy delta** is reviewed with the M6 caveat below; then the
       bootstrap credential applies the policy change (`deploy/aws/iam/`); `python3 deploy/aws/tests/simulate-deployer-policies.py`
       (read-only IAM simulation) shows every expectation held, including the five new A12 cases.
 - [ ] 0.5 Decide `db_kms_key_arn` (null = AWS-managed key is acceptable for staging; a CMK needs a key policy that lets RDS and the
-      restore principal use it: not designed here).
+      restore principal use it: not designed here). **If a CMK is used, the deployer needs `kms:DescribeKey` and `kms:CreateGrant`
+      (RDS creates grants for the instance, snapshots and the PITR restore) on that key, and the restore principal needs
+      `kms:Decrypt`, `kms:GenerateDataKey*`, `kms:ReEncrypt*`, `kms:CreateGrant`, `kms:DescribeKey`; neither is in
+      `staging-deployer-infra-policy.json` today** (functional gap found by the security review, not a security finding). Add them scoped to
+      that one key ARN in the key policy and the deployer policy before the apply; do not use `kms:*` or `Resource: "*"`.
+- [ ] 0.6 **Accepted staging-only risk (review M6), with its production requirement.** The staging deployer role can
+      (a) delete a log group or shorten its retention (`logs:DeleteLogGroup`, `PutRetentionPolicy`, `DeleteRetentionPolicy` on
+      `/aws/rds/instance/igaming-staging-*`) and read the audit lines (`GetLogEvents`, `FilterLogEvents`), and (b) set
+      `BackupRetentionPeriod = 0` or delete the instance with `--skip-final-snapshot --delete-automated-backups`
+      (`rds:ModifyDBInstance`, `rds:DeleteDBInstance` on `db:igaming-staging-*`); the Terraform preconditions bind only Terraform, not
+      the IAM principal. This is **accepted for staging** (synthetic data, disposable). **Production requires**: (i) audit log groups in a
+      separate account, or behind a resource policy the deployer cannot change, with a CloudWatch Logs data-protection policy masking
+      secrets; (ii) immutable recovery points (AWS Backup vault lock with cross-account copy, or an SCP denying `DeleteDBInstance`
+      without a final snapshot and denying retention 0); (iii) a **separate break-glass role** for retention/log changes, with
+      four-eyes approval and CloudTrail alerting, that the routine deployer does not hold; (iv) the deployer has no read access to the
+      audit logs. Do not copy the staging statement into a production policy.
+- [ ] 0.7 `deploy/backup/` prerequisites on the runner: OpenSSL >= 3.0 (Ed25519 signing), `age`, the **signing private key** (secret
+      store, 0600, never in the backup storage) and the **pinned verification fingerprint** held in change control, not next to the
+      backups (ADR 0122 section 5).
 
 ## 1. Plan
 
@@ -75,22 +94,37 @@ already exists.
 
 - [ ] 4.1 The three Terraform-generated secrets exist and none appears in state (`terraform state pull | grep -c secret_string` = 0
       apart from names/ARNs): `db_runtime`, `jwt_signing`, `seed_admin_password`; the RDS-managed master secret exists.
-- [ ] 4.2 **Backup-role secret, out of band** (Terraform never holds it): create a Secrets Manager secret
-      `igaming-staging/db-backup` with JSON `{"username":"igaming_backup","password":"<generated by the secret store>"}` using a
-      generator, not a typed value; pass its ARN as `-var backup_runner_secret_arn=<arn>` on the next apply (reference only).
-      The secret's resource policy allows only the backup runner identity.
+- [ ] 4.2 **Backup-role credential.** Preferred and required: IAM database authentication (no secret exists). Create the runner's IAM policy
+      allowing `rds-db:connect` on `arn:aws:rds-db:eu-central-1:<account>:dbuser:<DbiResourceId>/igaming_backup` ONLY, attach it to the backup
+      runner identity (**gap G1: the runner identity does not exist yet**), and confirm `aws rds generate-db-auth-token` + `psql` works
+      (token valid 15 minutes, `sslmode=require`; the passfile for the scripts is built from the token at run time, never stored).
+      *Exception path only if IAM auth is unusable (record why)*: create a Secrets Manager secret `igaming-staging/db-backup`
+      (`{"username":"igaming_backup","password":"<generated>"}`) with a generator, never a typed value; pass its ARN as
+      `-var backup_runner_secret_arn=<arn>`; resource policy limited to the runner. The password then NEVER goes to the server as text:
+      compute the SCRAM verifier on the runner (`go build ./deploy/backup/scramhash`; `printf '%s' "$pw" | scramhash`) and pass
+      `IGAMING_BACKUP_PASSWORD_VERIFIER` to `init-backup-role.sql`.
 - [ ] 4.3 Nothing secret in logs: CloudWatch `/ecs/igaming-staging/role-init` contains no password (the script never echoes it).
 
 ## 5. Database permissions (the backup role)
 
 - [ ] 5.1 Provision `igaming_backup` with `deploy/backup/init-backup-role.sql` as the master user, from a one-off task or a
       bastion **inside the VPC** (**gap G1: no ECS task definition for this exists yet; building it is part of this deploy's
-      scope or the step is done from an allow-listed operator session, recorded**). `IGAMING_BACKUP_PASSWORD` comes from the secret
-      of 4.2, `BACKUP_ROLE_VALID_UNTIL` = now + 24 h.
+      scope or the step is done from an allow-listed operator session, recorded**). With IAM auth: run the SQL with a throwaway verifier
+      (compute it from a random value you then discard, so nobody knows the password), then `GRANT rds_iam TO igaming_backup;`. The SQL bounds
+      the password validity to 48 h, so after expiry only the IAM token path can log in.
+      `BACKUP_ROLE_VALID_UNTIL` = now + 24 h. **The minting session must not be statement-logged with the password**: the SQL only ever
+      receives a verifier, but still run it from a session whose `log_statement`/pgaudit settings you have checked (the verifier is
+      non-secret but the habit matters), and read the CloudWatch lines for the minting session afterwards (step 4.3).
       **Unverified on RDS: whether the master user may `CREATE ROLE ... BYPASSRLS`.** If RDS refuses, STOP: ADR 0122 section 3 then
       has no logical-backup role on RDS and logical dumps are not available there (PITR remains the primary path).
+      Then apply `deploy/backup/harden-backup-surface.sql` as the master (`REVOKE ... FROM PUBLIC` on the `pg_catalog` advisory-lock /
+      `pg_logical_emit_message` / large-object / `pg_notify` functions; `REVOKE CONNECT` on `postgres` and `template1`).
+      **Unverified on RDS: whether the master may revoke on `pg_catalog` functions; record the result**, and `GRANT CONNECT ON DATABASE postgres`
+      back to the operator roles that need it.
 - [ ] 5.2 Attributes: `SELECT rolname,rolsuper,rolbypassrls,rolcreatedb,rolcreaterole,rolreplication,rolconnlimit,rolvaliduntil FROM pg_roles WHERE rolname='igaming_backup';` = f,t,f,f,f,2,<future>.
-- [ ] 5.3 Probes (all must be denied): as `igaming_backup` run the 15 statements of `drill.sh` phase 2 (`INSERT`, `UPDATE`, `DELETE`,
+- [ ] 5.3 Probes (all must be denied): as `igaming_backup` run the 15 statements of `drill.sh` phase 2 **and the 8 abuse probes after them**
+      (`pg_advisory_lock`, `pg_try_advisory_lock`, `pg_advisory_xact_lock`, `pg_logical_emit_message`, `lo_create`, `pg_notify`, connect to
+      `postgres`, connect to `template1`; any that succeeds is recorded as a residual with its detection, ADR 0122 section 5b) (`INSERT`, `UPDATE`, `DELETE`,
       `TRUNCATE`, `CREATE TABLE`, `CREATE TEMP TABLE`, `DROP TABLE`, `ALTER TABLE ... DISABLE TRIGGER`, `SET ROLE igaming`,
       `SET session_replication_role`, `CREATE ROLE`, `ALTER ROLE ... SUPERUSER`, `COPY ... PROGRAM`, `pg_read_file`, `pg_reload_conf`).
 - [ ] 5.4 Per-role audit: `ALTER ROLE igaming_backup SET pgaudit.log = 'read, write, ddl, role';` (if pgaudit is present), then a dump
@@ -128,10 +162,18 @@ already exists.
 ## 9. Logical backup and restore on RDS
 
 - [ ] 9.1 `deploy/backup/backup.sh` from the runner (inside the VPC; **gap G1: runner placement/schedule undecided**) with
-      `BACKUP_ENCRYPT_*` set; check `manifest.json`, `SHA256SUMS`; time it.
-- [ ] 9.2 `deploy/backup/restore.sh --new-database igaming_restore_check` as the master user (`igaming`) then `verify.sh` PASS, then
-      `DROP DATABASE igaming_restore_check`. **Unverified: `pg_restore` extension creation (`pgcrypto`) and `ALTER SCHEMA public OWNER`
-      as the RDS master.**
+      `BACKUP_ENCRYPT_AGE_RECIPIENT` (public) and `BACKUP_SIGNING_KEY_FILE` set; check `manifest.json` (`"encryption": "age"`, `signed`),
+      `SHA256SUMS` + `SHA256SUMS.sig`, and that no plaintext artefact exists in the output; time it. **Production dumps are taken from a
+      PITR/snapshot clone, not from the primary** (ADR 0122 section 5c); in staging the instance is dumped directly (small data).
+- [ ] 9.2 Restore in the **two-phase** form, never as the master user for the data load: `RESTORE_VERIFY_PUBKEY_FILE`/`RESTORE_VERIFY_PUBKEY_SHA256`
+      pinned, `RESTORE_EXPECT_SOURCE_ENVIRONMENT=<the source anchor>`; `restore.sh --phase provision` as the master (`igaming`, a member of
+      `rds_superuser`: creates only the empty database; roles already exist from step 3/5), set the owner's credential, then `restore.sh --phase load`
+      as a **non-`rds_superuser`** owner login (**unverified on RDS: the master `igaming` IS an `rds_superuser` member, so a separate
+      NOSUPERUSER owner login that is a member of `igaming`, or `igaming` itself without `rds_superuser`, has to exist; the script refuses a
+      privileged data-load role, so if RDS cannot provide one this step is BLOCKED and the finding goes back to the architect**).
+      Then `verify.sh` PASS, then `DROP DATABASE igaming_restore_check`. **Unverified: `pg_restore` extension creation (`pgcrypto`) and
+      `ALTER SCHEMA public OWNER` as a non-superuser owner on RDS.** After the restore the `database_environment` anchor is BLANK by
+      design; do not record `production` on a staging copy.
 
 ## 10. Observability
 

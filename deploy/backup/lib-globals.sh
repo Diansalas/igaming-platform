@@ -12,14 +12,13 @@
 #   ALTER ROLE r WITH <attrs>;   attrs only from: NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION (all four REQUIRED),
 #                                INHERIT NOINHERIT LOGIN NOLOGIN, CONNECTION LIMIT n, VALID UNTIL '<timestamp>', and
 #                                BYPASSRLS if and only if r = igaming_backup (every other role must say NOBYPASSRLS)
-#   ALTER ROLE r SET <p> TO '<v>';   p in the session-default allow-list below, v a plain token
+#   (ALTER ROLE ... SET statements are NOT replayed any more: session defaults come from the repository's own provisioning
+#   scripts, init-backup-role.sql for the backup role; A12 security review L4.)
 
 # shellcheck shell=bash
 
-BK_ROLE_SET_PARAMS="default_transaction_read_only statement_timeout idle_in_transaction_session_timeout lock_timeout log_statement"
-
 bk_validate_role_stmts() {
-  local r="$1" f="$2" stmt rest p tok re_chars re_set
+  local r="$1" f="$2" stmt rest tok re_chars
   while IFS= read -r stmt; do
     [ -n "$stmt" ] || continue
     if [ "$stmt" = "CREATE ROLE ${r};" ]; then continue; fi
@@ -35,6 +34,7 @@ bk_validate_role_stmts() {
           [[ "$words" == *" ${need} "* ]] || { echo "role ${r}: ${need} is required in: ${stmt}" >&2; return 1; }
         done
         if [ "$r" = igaming_backup ]; then
+          [[ "$words" == *" CONNECTION LIMIT 2 "* ]] || { echo "role ${r}: CONNECTION LIMIT 2 is required: ${stmt}" >&2; return 1; }
           [[ "$words" == *" BYPASSRLS "* ]] || { echo "role ${r}: BYPASSRLS expected for the backup role: ${stmt}" >&2; return 1; }
         else
           [[ "$words" == *" NOBYPASSRLS "* && "$words" != *" BYPASSRLS "* ]] || { echo "role ${r}: NOBYPASSRLS required: ${stmt}" >&2; return 1; }
@@ -45,12 +45,6 @@ bk_validate_role_stmts() {
         residue="$(printf '%s' "$residue" | sed -E "s/ CONNECTION LIMIT -?[0-9]+ / /; s/ VALID UNTIL '[0-9][0-9: .+-]*' / /")"
         residue="${residue// /}"
         [ -z "$residue" ] || { echo "role ${r}: unrecognised attribute text '${residue}' in: ${stmt}" >&2; return 1; }
-        ;;
-      "ALTER ROLE ${r} SET "*" TO '"*"';")
-        p="${stmt#"ALTER ROLE ${r} SET "}"; p="${p%% TO *}"
-        [[ " ${BK_ROLE_SET_PARAMS} " == *" ${p} "* ]] || { echo "role ${r}: parameter '${p}' is not in the allow-list: ${stmt}" >&2; return 1; }
-        re_set="^ALTER ROLE [a-z_]+ SET [a-z_]+ TO '[A-Za-z0-9._-]+';\$"
-        [[ "$stmt" =~ $re_set ]] || { echo "role ${r}: unexpected value in: ${stmt}" >&2; return 1; }
         ;;
       *) echo "role ${r}: statement not allowed: ${stmt}" >&2; return 1 ;;
     esac

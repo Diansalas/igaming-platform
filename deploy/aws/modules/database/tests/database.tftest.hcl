@@ -87,6 +87,11 @@ run "pitr_snapshot_and_audit_settings" {
   }
 
   assert {
+    condition     = aws_db_instance.this.iam_database_authentication_enabled == true
+    error_message = "IAM database authentication must be enabled (the backup role's required credential mechanism on RDS, ADR 0122 section 3)."
+  }
+
+  assert {
     condition     = toset(aws_db_instance.this.enabled_cloudwatch_logs_exports) == toset(["postgresql", "upgrade"]) && length(aws_cloudwatch_log_group.rds_export) == 2
     error_message = "postgresql and upgrade logs must be exported to pre-created, retention-managed log groups."
   }

@@ -192,15 +192,12 @@ EOF
 
 verify_recovered() { # label  expected-baseline
   local label="$1"
-  local OPW RPW
-  OPW="$(awk -F: -v p="$REC_PORT" '$2==p && $4=="igaming" {print $5}' "${SECRETS}/pgpass")"
-  RPW="$(awk -F: -v p="$REC_PORT" '$2==p && $4=="igaming_runtime" {print $5}' "${SECRETS}/pgpass")"
   if ( export BACKUP_PGHOST=127.0.0.1 BACKUP_PGPORT="$REC_PORT" BACKUP_PGDATABASE=igaming_platform_dev BACKUP_PGUSER=igaming_backup BACKUP_PGPASSFILE="${SECRETS}/pgpass.backup"
        export VERIFY_OWNER_PGUSER=igaming VERIFY_OWNER_PGPASSFILE="${SECRETS}/pgpass"
-       export VERIFY_OWNER_DATABASE_URL="postgres://igaming:${OPW}@127.0.0.1:${REC_PORT}/igaming_platform_dev?sslmode=disable"
-       export VERIFY_RUNTIME_DATABASE_URL="postgres://igaming_runtime:${RPW}@127.0.0.1:${REC_PORT}/igaming_platform_dev?sslmode=disable"
+       export VERIFY_OWNER_DATABASE_URL="postgres://igaming@127.0.0.1:${REC_PORT}/igaming_platform_dev?sslmode=disable"
+       export VERIFY_RUNTIME_DATABASE_URL="postgres://igaming_runtime@127.0.0.1:${REC_PORT}/igaming_platform_dev?sslmode=disable"
        export MIGRATE_BIN="${WORK}/migrate" RESTORECHECK_BIN="${WORK}/restorecheck"
-       "${SCRIPT_DIR}/verify.sh" --baseline "$2" --seq-mode ge ) >"${WORK}/verify-${label}.txt" 2>&1; then
+       "${SCRIPT_DIR}/verify.sh" --baseline "$2" --seq-mode ge --anchor-mode preserved --expect-anchor "${PITR_EXPECT_ANCHOR:-development}" ) >"${WORK}/verify-${label}.txt" 2>&1; then
     res "${label}_verify_against_expected_at_target" PASS "$(tail -1 "${WORK}/verify-${label}.txt")"
   else
     res "${label}_verify_against_expected_at_target" FAIL "$(grep -E 'FAIL' "${WORK}/verify-${label}.txt" | head -3 | cut -c1-240 | tr '\n' ' ')"

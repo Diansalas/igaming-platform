@@ -124,6 +124,10 @@ resource "aws_db_instance" "this" {
   parameter_group_name   = aws_db_parameter_group.this.name
   publicly_accessible    = false
 
+  # A12 security review M8 / ADR 0122 section 3: IAM database authentication is the REQUIRED credential mechanism for the backup role on
+  # RDS (GRANT rds_iam TO igaming_backup, no password). Enabling it changes no existing login: password users keep working.
+  iam_database_authentication_enabled = true
+
   multi_az                = var.multi_az
   backup_retention_period = var.backup_retention_days
   backup_window           = var.backup_window

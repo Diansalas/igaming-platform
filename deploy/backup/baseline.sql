@@ -18,6 +18,7 @@
 
 SELECT 'META|server_version|' || current_setting('server_version');
 SELECT 'META|database|' || current_database();
+SELECT 'META|environment_anchor|' || COALESCE((SELECT environment FROM database_environment LIMIT 1), 'unrecorded');
 SELECT 'META|dbsettings|encoding=' || pg_encoding_to_char(encoding) || ' collate=' || datcollate || ' ctype=' || datctype || ' owner=' || pg_get_userbyid(datdba)
   FROM pg_database WHERE datname = current_database();
 SELECT 'META|migration_head|' || COALESCE(max(version)::text, 'none') || '|count=' || count(*) FROM schema_migrations;

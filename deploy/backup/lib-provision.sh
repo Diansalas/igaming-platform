@@ -44,14 +44,26 @@ prov_reapply_app_roles() {
   fi
 }
 
-# prov_backup_role name port [valid_until] : create/refresh igaming_backup; its passfile is separate.
+# prov_backup_role name port [valid_until] : create/refresh igaming_backup; its passfile is separate. The server only ever sees a
+# client-computed SCRAM-SHA-256 verifier (deploy/backup/scramhash, SCRAMHASH_BIN), never the password (A12 security review M2).
 prov_backup_role() {
-  local name="$1" port="$2" until="${3:-}" pw
+  local name="$1" port="$2" until="${3:-}" file="${4:-pgpass.backup}" db="${5:-$SRC_DB_NAME}" pw verifier
+  [ -x "${SCRAMHASH_BIN:-}" ] || bk_die "SCRAMHASH_BIN (deploy/backup/scramhash) is required to mint the backup credential"
   pw="$(cl_random_secret)"
-  : >"${DRILL_ROOT}/secrets/pgpass.backup"
-  IGAMING_BACKUP_PASSWORD="$pw" BACKUP_ROLE_VALID_UNTIL="$until" \
-    cl_super "$name" "$port" -d "$SRC_DB_NAME" -f "${BK_DIR}/init-backup-role.sql" >/dev/null
-  cl_write_pass igaming_backup "$pw" "$port" "${DRILL_ROOT}/secrets/pgpass.backup"
+  verifier="$(printf '%s' "$pw" | "$SCRAMHASH_BIN")"
+  : >"${DRILL_ROOT}/secrets/${file}"
+  IGAMING_BACKUP_PASSWORD_VERIFIER="$verifier" BACKUP_ROLE_VALID_UNTIL="$until" \
+    cl_super "$name" "$port" -d "$db" -f "${BK_DIR}/init-backup-role.sql" >/dev/null
+  cl_write_pass igaming_backup "$pw" "$port" "${DRILL_ROOT}/secrets/${file}"
+  BK_LAST_BACKUP_PW="$pw"
+}
+
+# prov_harden name port : harden-backup-surface.sql (advisory locks / WAL messages / large objects / NOTIFY revoked from PUBLIC,
+# maintenance databases not connectable by PUBLIC) as the bootstrap superuser of the throwaway cluster, then CONNECT on postgres for the operators.
+prov_harden() {
+  local name="$1" port="$2"
+  cl_super "$name" "$port" -d "$SRC_DB_NAME" -f "${BK_DIR}/harden-backup-surface.sql" >/dev/null
+  cl_super "$name" "$port" -d postgres -c "GRANT CONNECT ON DATABASE postgres TO drill_restore" >/dev/null 2>&1 || true
 }
 
 # prov_restore_role name port : the restore operator for the drill - CREATEDB, member of the owner role igaming,

@@ -27,12 +27,13 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=deploy/backup/lib-common.sh
 . "${SCRIPT_DIR}/lib-common.sh"
 
-BASELINE=""; SEQ_MODE=exact; EXPECT_ANCHOR=unrecorded
+BASELINE=""; SEQ_MODE=exact; EXPECT_ANCHOR=unrecorded; ANCHOR_MODE=reset
 while [ $# -gt 0 ]; do
   case "$1" in
     --baseline) shift; BASELINE="${1:-}" ;;
     --seq-mode) shift; SEQ_MODE="${1:-}" ;;
     --expect-anchor) shift; EXPECT_ANCHOR="${1:-}" ;;
+    --anchor-mode) shift; ANCHOR_MODE="${1:-}" ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -euo/d'; exit 0 ;;
     *) bk_die "unknown argument: $1" ;;
   esac
@@ -40,10 +41,16 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$BASELINE" ] || bk_die "--baseline must be the plaintext baseline.txt (decrypt an encrypted backup's baseline first)"
 case "$SEQ_MODE" in exact|ge) ;; *) bk_die "--seq-mode must be exact or ge" ;; esac
+case "$ANCHOR_MODE" in reset|preserved) ;; *) bk_die "--anchor-mode must be reset (logical restore: the anchor is blank) or preserved (physical recovery)" ;; esac
 : "${VERIFY_OWNER_PGUSER:?VERIFY_OWNER_PGUSER is required}"
 : "${VERIFY_OWNER_PGPASSFILE:?VERIFY_OWNER_PGPASSFILE is required}"
-: "${VERIFY_OWNER_DATABASE_URL:?VERIFY_OWNER_DATABASE_URL is required (for cmd/migrate verify)}"
-: "${VERIFY_RUNTIME_DATABASE_URL:?VERIFY_RUNTIME_DATABASE_URL is required (for restorecheck)}"
+: "${VERIFY_OWNER_DATABASE_URL:?VERIFY_OWNER_DATABASE_URL is required (for cmd/migrate verify; NO password in it: the passfile is used)}"
+: "${VERIFY_RUNTIME_DATABASE_URL:?VERIFY_RUNTIME_DATABASE_URL is required (for restorecheck; NO password in it: the passfile is used)}"
+VERIFY_RUNTIME_PGPASSFILE="${VERIFY_RUNTIME_PGPASSFILE:-$VERIFY_OWNER_PGPASSFILE}"
+for u in "$VERIFY_OWNER_DATABASE_URL" "$VERIFY_RUNTIME_DATABASE_URL"; do
+  ui="${u#*://}"; ui="${ui%%/*}"
+  case "$ui" in *@*) case "${ui%%@*}" in *:*) bk_die "VERIFY_*_DATABASE_URL must not embed a password (use VERIFY_OWNER_PGPASSFILE / VERIFY_RUNTIME_PGPASSFILE)" ;; esac ;; esac
+done
 : "${MIGRATE_BIN:?MIGRATE_BIN is required}"
 : "${RESTORECHECK_BIN:?RESTORECHECK_BIN is required}"
 [ -x "$MIGRATE_BIN" ] && [ -x "$RESTORECHECK_BIN" ] || bk_die "MIGRATE_BIN / RESTORECHECK_BIN must be executable"
@@ -67,9 +74,19 @@ if ! psql -X -q -At -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/baseline.sql" >"${WORK}
 fi
 chk baseline_queries_run PASS "evaluated in $(elapsed_s "$T0" "$(now_s)") s"
 
+if [ "$ANCHOR_MODE" = reset ]; then
+  # M4: a logical restore must NOT carry the environment anchor: its data is excluded from the comparison and MUST be absent
+  ANCH_ROWS="$(awk -F'|' '$1=="TABLE" && $2=="database_environment" {print $3}' "${WORK}/restored.txt")"
+  if [ "$ANCH_ROWS" = 0 ]; then chk anchor_blank_after_restore PASS "database_environment holds 0 rows: a production start refuses until the owner records the environment deliberately"; else chk anchor_blank_after_restore FAIL "database_environment holds ${ANCH_ROWS:-?} row(s) after a logical restore"; fi
+  grep -v '^TABLE|database_environment|' "$BASELINE" >"${WORK}/baseline.noanchor"; BASELINE_CMP="${WORK}/baseline.noanchor"
+  grep -v '^TABLE|database_environment|' "${WORK}/restored.txt" >"${WORK}/restored.noanchor"; RESTORED_CMP="${WORK}/restored.noanchor"
+else
+  BASELINE_CMP="$BASELINE"; RESTORED_CMP="${WORK}/restored.txt"
+fi
+
 for kind in TABLE ROLE MEMBER DBACL SCHEMAACL ACL COLACL FUNCACL DEFACL TRG POL RLS FP; do
-  grep "^${kind}|" "$BASELINE" | sort >"${WORK}/b.${kind}" || true
-  grep "^${kind}|" "${WORK}/restored.txt" | sort >"${WORK}/r.${kind}" || true
+  grep "^${kind}|" "$BASELINE_CMP" | sort >"${WORK}/b.${kind}" || true
+  grep "^${kind}|" "$RESTORED_CMP" | sort >"${WORK}/r.${kind}" || true
   # MEMBER may legitimately be empty (no platform role is a member of another role: that is the point); every other kind must exist
   if [ ! -s "${WORK}/b.${kind}" ] && [ "$kind" != MEMBER ]; then chk "equal_${kind}" FAIL "baseline has no ${kind} lines (baseline unusable)"; continue; fi
   if diff -q "${WORK}/b.${kind}" "${WORK}/r.${kind}" >/dev/null; then
@@ -105,14 +122,14 @@ else
 fi
 
 # ---- gate 3: applied migration checksums -------------------------------------------------------------------------
-if OUT="$(DATABASE_URL="$VERIFY_OWNER_DATABASE_URL" "$MIGRATE_BIN" -dir "${REPO_ROOT}/migrations" verify 2>&1)"; then
+if OUT="$(PGPASSFILE="$VERIFY_OWNER_PGPASSFILE" DATABASE_URL="$VERIFY_OWNER_DATABASE_URL" "$MIGRATE_BIN" -dir "${REPO_ROOT}/migrations" verify 2>&1)"; then
   chk migrate_verify PASS "$(printf '%s' "$OUT" | tail -1)"
 else
   chk migrate_verify FAIL "$(printf '%s' "$OUT" | tail -2 | tr '\n' ' ')"
 fi
 
 # ---- gate 4: the application's own code against the restored database --------------------------------------------
-if OUT="$(DATABASE_URL="$VERIFY_RUNTIME_DATABASE_URL" "$RESTORECHECK_BIN" -expect-anchor "$EXPECT_ANCHOR" 2>&1)"; then RC=0; else RC=$?; fi
+if OUT="$(PGPASSFILE="$VERIFY_RUNTIME_PGPASSFILE" DATABASE_URL="$VERIFY_RUNTIME_DATABASE_URL" "$RESTORECHECK_BIN" -expect-anchor "$EXPECT_ANCHOR" 2>&1)"; then RC=0; else RC=$?; fi
 printf '%s\n' "$OUT" | grep '^CHK|' | while IFS= read -r line; do echo "$line"; done
 NPASS="$(printf '%s\n' "$OUT" | grep -c '^CHK|.*|PASS|' || true)"; NFAIL="$(printf '%s\n' "$OUT" | grep -c '^CHK|.*|FAIL|' || true)"
 PASSES=$((PASSES + NPASS)); FAILS=$((FAILS + NFAIL))

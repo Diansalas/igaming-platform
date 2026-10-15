@@ -35,3 +35,11 @@ pending:
     proposed_expr: "per-tenant error-budget burn over tenant_http_request_errors_total / tenant_http_requests_total"
     why_missing: "Blueprint section 7 asks for per-tenant error budgets. A raw tenant_id label is unbounded cardinality as B2B tenants grow, so a bounded labelling policy (for example tenant class, or a top-N allowlist) is a decision first; no per-tenant request metric exists, by design, today."
     interim: "The 5xx ratio and latency rules are platform-wide. Per-tenant investigation uses the audit log and the request_id in logs."
+
+  - id: BackupRoleAbuse
+    severity: page
+    proposed_metric: backup_role_oldest_transaction_seconds
+    also_needed: [backup_role_sessions, backup_role_non_accessshare_locks]
+    proposed_expr: "backup_role_oldest_transaction_seconds > <planned dump time + margin> OR backup_role_non_accessshare_locks > 0 OR backup_role_sessions > 0 outside the backup window"
+    why_missing: "A12 security review M1/M7 (ADR 0122 section 5b): a stolen igaming_backup credential can still hold sessions, locks and snapshots open (the database cannot prevent a role from locking tables it can read or from altering its own settings). The signals come from pg_stat_activity / pg_locks for that role, which needs a monitoring identity and a database exporter (postgres_exporter or CloudWatch Database Insights); the platform process does not read them and no such exporter exists yet. Backup-window knowledge belongs to the runner schedule (gap G1)."
+    interim: "docs/runbooks/backup-restore-dr.md section 3a: run the pg_stat_activity query by hand during a dump; connection/disconnection lines and per-role statement logs (pgaudit on RDS) are the detective control."
