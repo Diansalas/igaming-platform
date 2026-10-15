@@ -60,7 +60,42 @@ resource "aws_db_parameter_group" "this" {
     apply_method = "immediate"
   }
 
+  # A12 / ADR 0122 audit trail for the dedicated backup role (and everyone else): who connected, from where, and
+  # when the session ended. Statement-level auditing is pgaudit (below); plain log_statement is not used.
+  parameter {
+    name         = "log_connections"
+    value        = "1"
+    apply_method = "immediate"
+  }
+
+  parameter {
+    name         = "log_disconnections"
+    value        = "1"
+    apply_method = "immediate"
+  }
+
+  # shared_preload_libraries is static: pending-reboot. Only added when enable_pgaudit = true.
+  dynamic "parameter" {
+    for_each = var.enable_pgaudit ? [1] : []
+    content {
+      name         = "shared_preload_libraries"
+      value        = "pgaudit"
+      apply_method = "pending-reboot"
+    }
+  }
+
   tags = merge(var.tags, { Name = "${var.name_prefix}-pg16" })
+}
+
+# Pre-created log groups for the exported RDS logs so that retention is managed (RDS would otherwise create them with
+# no expiry). Names are the ones RDS writes to: /aws/rds/instance/<identifier>/<log type>.
+resource "aws_cloudwatch_log_group" "rds_export" {
+  for_each = toset(var.enabled_cloudwatch_logs_exports)
+
+  name              = "/aws/rds/instance/${var.name_prefix}-db/${each.value}"
+  retention_in_days = var.log_retention_days
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-rds-${each.value}-logs" })
 }
 
 resource "aws_db_instance" "this" {
@@ -72,8 +107,9 @@ resource "aws_db_instance" "this" {
   allocated_storage = var.allocated_storage
   storage_type      = "gp3"
   storage_encrypted = true
-  # null => the AWS-managed aws/rds key (create_kms_key = false).
-  kms_key_id = var.create_kms_key ? aws_kms_key.rds[0].arn : null
+  # precedence: an existing CMK passed by ARN (A12) > the module-created CMK > null (the AWS-managed aws/rds key).
+  # The key also protects automated backups, snapshots and the PITR transaction logs.
+  kms_key_id = var.kms_key_arn != null ? var.kms_key_arn : (var.create_kms_key ? aws_kms_key.rds[0].arn : null)
 
   db_name  = var.db_name
   username = var.master_username
@@ -88,14 +124,24 @@ resource "aws_db_instance" "this" {
   parameter_group_name   = aws_db_parameter_group.this.name
   publicly_accessible    = false
 
+  # A12 security review M8 / ADR 0122 section 3: IAM database authentication is the REQUIRED credential mechanism for the backup role on
+  # RDS (GRANT rds_iam TO igaming_backup, no password). Enabling it changes no existing login: password users keep working.
+  iam_database_authentication_enabled = true
+
   multi_az                = var.multi_az
   backup_retention_period = var.backup_retention_days
+  backup_window           = var.backup_window
+  maintenance_window      = var.maintenance_window
   deletion_protection     = var.deletion_protection
 
-  # Staging is fully disposable: no final snapshot is kept on destroy.
-  # Production must set skip_final_snapshot=false and provide a
-  # final_snapshot_identifier.
-  skip_final_snapshot = true
+  # A12 / ADR 0122: the module default (true) keeps the legacy disposable behaviour; the staging root sets false
+  # and names the final snapshot. Production must set false.
+  skip_final_snapshot       = var.skip_final_snapshot
+  final_snapshot_identifier = var.skip_final_snapshot ? null : var.final_snapshot_identifier
+
+  enabled_cloudwatch_logs_exports = var.enabled_cloudwatch_logs_exports
+
+  depends_on = [aws_cloudwatch_log_group.rds_export]
 
   # With an exact engine_version pin, an AWS-applied minor upgrade would make
   # the next apply attempt a (failing) downgrade; pinned roots set false.
@@ -104,4 +150,15 @@ resource "aws_db_instance" "this" {
   copy_tags_to_snapshot      = true
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-db" })
+
+  lifecycle {
+    precondition {
+      condition     = var.skip_final_snapshot || var.final_snapshot_identifier != null
+      error_message = "skip_final_snapshot = false requires final_snapshot_identifier (unique per destroy, e.g. igaming-staging-db-final-<short-sha>)."
+    }
+    precondition {
+      condition     = var.backup_retention_days >= 1
+      error_message = "backup_retention_days must be >= 1: 0 disables automated backups and point-in-time recovery."
+    }
+  }
 }

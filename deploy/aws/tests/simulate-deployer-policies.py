@@ -57,6 +57,13 @@ CASES = [
     ("Create the staging load balancer", "elasticloadbalancing:CreateLoadBalancer", f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:loadbalancer/app/igaming-staging-alb/abc", None, True),
     ("Modify a non-staging DB", "rds:ModifyDBInstance", f"arn:aws:rds:{REGION}:{ACCOUNT}:db:prod-db", None, False),
     ("Modify the staging DB", "rds:ModifyDBInstance", f"arn:aws:rds:{REGION}:{ACCOUNT}:db:igaming-staging-db", None, True),
+    # A12 / ADR 0122 (PITR config, prepared not applied): the final snapshot taken by DeleteDBInstance and the exported
+    # RDS log groups; nothing outside the staging name space.
+    ("Take the staging final snapshot", "rds:CreateDBSnapshot", f"arn:aws:rds:{REGION}:{ACCOUNT}:snapshot:igaming-staging-db-final-abc1234", None, True),
+    ("Snapshot a non-staging DB", "rds:CreateDBSnapshot", f"arn:aws:rds:{REGION}:{ACCOUNT}:snapshot:prod-db-snap", None, False),
+    ("Create the staging RDS export log group", "logs:CreateLogGroup", f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/aws/rds/instance/igaming-staging-db/postgresql", None, True),
+    ("Create a non-staging RDS log group", "logs:CreateLogGroup", f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/aws/rds/instance/prod-db/postgresql", None, False),
+    ("Restore a DB to a point in time (human only, not the deployer)", "rds:RestoreDBInstanceToPointInTime", f"arn:aws:rds:{REGION}:{ACCOUNT}:db:igaming-staging-db-pitr", None, False),
     ("Delete an untagged security group", "ec2:DeleteSecurityGroup", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", REGION_CTX, False),
     ("Delete a staging-tagged security group", "ec2:DeleteSecurityGroup", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", STAGING_TAGS, True),
     ("Open a foreign security group", "ec2:AuthorizeSecurityGroupIngress", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", REGION_CTX, False),

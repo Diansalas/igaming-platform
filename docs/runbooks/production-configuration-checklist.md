@@ -242,6 +242,29 @@ environment with `APP_ENV=production`:
       AND role IN ('platform_admin', 'tenant_admin', 'finance', 'compliance')
       AND status <> 'offboarded';
    ```
+9. **Backup, restore and PITR are real, not assumed** (A12, ADR 0122; section "Backup, restore and point-in-time recovery" below).
+   Before real money: automated backups with PITR are ON with a recorded retention, `latest_restorable_time` is recent, a PITR
+   restore to a timestamp and a logical restore have each been rehearsed **on the managed topology** with `deploy/backup/verify.sh`
+   PASS, the dedicated `igaming_backup` role exists with the attributes of ADR 0122 section 3, and a restore-time
+   `database_environment` anchor step is in the restore runbook. None of this is proven on AWS yet
+   (`docs/runbooks/aws-staging-deploy-plan.md`).
+
+## Backup, restore and point-in-time recovery (A12, ADR 0122)
+
+Operational detail: `docs/runbooks/backup-restore-dr.md`. Configuration items an operator must set or confirm:
+
+| Item | Where | Production action |
+|---|---|---|
+| Automated backups + PITR | RDS `backup_retention_period` (Terraform `db_backup_retention_days`) | Set to the regulatory retention (staging: 14 days). `0` disables PITR and is rejected by the module. Confirm `latest_restorable_time` is within minutes |
+| Deletion protection, final snapshot | `db_deletion_protection=true`, `db_skip_final_snapshot=false`, unique `db_final_snapshot_identifier` | Required in production; teardown is deliberate and multi-step |
+| Storage / snapshot encryption | `db_kms_key_arn` (reference to an existing CMK) or the AWS-managed key | Production: a CMK with an explicit key policy (not designed yet) |
+| Audit logging | parameter group `log_connections`, `log_disconnections`, pgaudit; `db_log_exports` | On; logs exported to CloudWatch with retention; alert on `igaming_backup` use outside the runner's schedule |
+| `igaming_backup` role | `deploy/backup/init-backup-role.sql`, run once by the master user | `NOSUPERUSER BYPASSRLS`, SELECT-only, `CONNECTION LIMIT 2`, `VALID UNTIL` (time-boxed), no role membership. **Never** reuse `igaming` or `igaming_runtime` for dumps. Unverified on RDS: that the master may create a `BYPASSRLS` role |
+| Backup credential | `backup_runner_secret_arn` (reference only) | The secret holds the `igaming_backup` password; Terraform never sees it; the runner materialises a 0600 passfile (`BACKUP_PGPASSFILE`), never an env password or URL |
+| Backup artefact encryption | `BACKUP_ENCRYPT_AGE_RECIPIENT` / `BACKUP_ENCRYPT_GPG_RECIPIENT` (public references) | Required (the scripts refuse otherwise); private key in the restorer's secret store/KMS; no key material in git |
+| Target guard | `BACKUP_PGHOST`/`BACKUP_PGPORT`, `BACKUP_ALLOW_REMOTE_TARGET=<host>` | Scripts refuse the shared 127.0.0.1:5432 cluster and any remote host not acknowledged per invocation |
+| Restore anchor | `INSERT INTO database_environment (environment) VALUES ('production')` | A restore into a NEW database is **unrecorded** (or carries the source's anchor): re-run the anchor step before starting `platform-api` (see "Database environment anchor" above) |
+| Not in any database backup | JWT secrets, staff MFA keys, payout-instrument keys, provider credentials in the secret store, role passwords | Restored from the secret store, never from a dump; `actor_proof_keys` signing keys ARE in the database and therefore in every dump (encrypt it) |
 
 ## Webhook body-read deadline (ADR 0097 A5, `BodyReadTimeout`)
 

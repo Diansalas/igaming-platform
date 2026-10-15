@@ -226,6 +226,32 @@ run "staging_defaults_are_hardened" {
     condition     = module.database.publicly_accessible == false
     error_message = "RDS must never be publicly accessible."
   }
+
+  # --- A12 / ADR 0122: managed PITR posture (prepared, not applied) ---
+  assert {
+    condition     = var.db_backup_retention_days == 14 && var.db_deletion_protection == true && var.db_skip_final_snapshot == false && var.db_final_snapshot_identifier != null
+    error_message = "Staging DB must default to 14-day PITR retention, deletion protection and a named final snapshot (A12)."
+  }
+
+  assert {
+    condition     = toset(var.db_log_exports) == toset(["postgresql", "upgrade"]) && var.db_enable_pgaudit == true
+    error_message = "Staging DB must export the postgresql and upgrade logs and preload pgaudit (A12)."
+  }
+
+  assert {
+    condition     = var.backup_runner_secret_arn == null
+    error_message = "The backup runner secret is a reference supplied at deploy time; no ARN may be committed as a default."
+  }
+}
+
+run "backup_runner_secret_arn_must_be_a_secret_arn" {
+  command = plan
+
+  variables {
+    backup_runner_secret_arn = "not-an-arn"
+  }
+
+  expect_failures = [var.backup_runner_secret_arn]
 }
 
 run "image_tag_rejects_latest" {
