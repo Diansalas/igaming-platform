@@ -161,7 +161,7 @@ func run() error {
 		if password == "" {
 			return fmt.Errorf("SEED_ADMIN_PASSWORD environment variable is required")
 		}
-		if len(password) < 12 {
+		if !passwordLongEnough(password) {
 			return fmt.Errorf("SEED_ADMIN_PASSWORD must be at least 12 characters for a platform_admin account")
 		}
 		if passwordHash, err = auth.HashPassword(password); err != nil {
@@ -421,4 +421,10 @@ func (o operatorContext) metadata(m map[string]any) map[string]any {
 func printBootstrapToken(tok staffmfa.Token) {
 	fmt.Printf("seed-admin: bootstrap enrolment token (single use, valid %s; shown ONCE, never logged - redeem at POST /v1/staff/auth/enrol/redeem with the account's password):\n%s\n",
 		staffmfa.BootstrapTokenTTL, tok.RevealForDelivery())
+}
+
+// passwordLongEnough counts characters (runes), not bytes: the error text promises "12 characters" (security review
+// SR-A10a-2, same class as the invitation-accept floor).
+func passwordLongEnough(password string) bool {
+	return utf8.RuneCountInString(password) >= 12
 }

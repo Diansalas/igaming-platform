@@ -77,7 +77,7 @@ export function createBrand(tenantId: string, body: CreateBrandRequest): Promise
   return apiFetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/brands`, { method: 'POST', body: JSON.stringify(body) })
 }
 
-/** Every role createStaffRequest accepts (admin_routes.go's RequireOneOf). */
+/** Every role the invitation route accepts (StaffInvitationRequest.role). */
 export const STAFF_ROLES = [
   'tenant_admin',
   'support',
@@ -90,35 +90,67 @@ export const STAFF_ROLES = [
 export type StaffRole = (typeof STAFF_ROLES)[number]
 
 /**
- * The subset a TENANT-scoped caller (tenant_admin) may create. finance,
- * risk_manager, promotions_manager and bonus_operations are refused with a
- * 403 by newCreateStaffHandler unless the caller is platform-scoped.
+ * The subset a TENANT-scoped caller (tenant_admin) may invite (ADR 0119 contract section 1, "Role authority"); every
+ * other role is `403 role_not_grantable` unless the caller is a platform admin. UI convenience only: the server decides.
  */
-export const TENANT_CREATABLE_STAFF_ROLES: readonly StaffRole[] = ['tenant_admin', 'support', 'compliance']
+export const TENANT_GRANTABLE_STAFF_ROLES: readonly StaffRole[] = ['tenant_admin', 'support', 'compliance']
 
-/** Mirrors the backend's minPasswordLen (internal/httpserver/auth_routes.go). */
-export const MIN_STAFF_PASSWORD_LENGTH = 8
+/** Roles that cannot be invited without a linked Person (contract section 2, "Invite"; otherwise `422 person_required`). */
+export const PERSON_REQUIRED_STAFF_ROLES: readonly StaffRole[] = ['tenant_admin', 'finance', 'compliance']
 
-/** createStaffRequest - POST /v1/admin/tenants/{tenantID}/staff (PermStaffManage + canActOnTenant). */
-export interface CreateStaffRequest {
+/** Lifecycle status of a staff member (StaffDirectoryEntry.status). */
+export type StaffStatus = 'invited' | 'active' | 'suspended' | 'offboarded'
+
+/** StaffDirectoryEntry (contract section 6). `role` of a tenant list is always a tenant role. */
+export interface StaffDirectoryEntry {
+  id: string
+  tenant_id?: string
   email: string
-  password: string
+  display_name: string | null
+  role: string
+  status: StaffStatus
+  mfa: { enrolled: boolean; hard_locked: boolean }
+  person_linked: boolean
+  last_login_at: string | null
+  created_at: string
+  status_changed_at: string | null
+}
+
+export interface StaffDirectoryList {
+  staff: StaffDirectoryEntry[]
+  /** True when more than 500 entries exist and the list was cut. */
+  truncated: boolean
+}
+
+export interface ListStaffParams {
+  status?: StaffStatus
+  role?: StaffRole
+}
+
+/** GET /v1/admin/tenants/{tenantID}/staff - staff:read (platform_admin, tenant_admin, compliance). */
+export function listTenantStaff(tenantId: string, params: ListStaffParams = {}): Promise<StaffDirectoryList> {
+  return apiFetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/staff${buildQuery(params)}`)
+}
+
+/** StaffInvitationRequest - POST /v1/admin/tenants/{tenantID}/staff/invitations (staff:manage, step-up critical). */
+export interface StaffInvitationRequest {
+  email: string
   role: StaffRole
   person_id?: string
 }
 
-/** staffResponse. */
-export interface StaffUser {
-  id: string
-  tenant_id?: string
-  email: string
-  role: string
-  status: string
-  person_id?: string
+/** StaffLifecycleResult: never carries a token or credential; `email_delivery` says only whether the email was handed over. */
+export interface StaffLifecycleResult {
+  staff: StaffDirectoryEntry
+  email_delivery?: 'sent' | 'failed'
 }
 
-export function createStaff(tenantId: string, body: CreateStaffRequest): Promise<StaffUser> {
-  return apiFetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/staff`, { method: 'POST', body: JSON.stringify(body) })
+export function inviteStaff(tenantId: string, body: StaffInvitationRequest): Promise<StaffLifecycleResult> {
+  return apiFetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/staff/invitations`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    cache: 'no-store',
+  })
 }
 
 /** linkStaffPersonRequest - POST .../staff/{staffID}/person-link, 204 No Content on success. */

@@ -74,7 +74,15 @@ export type ApiErrorCode =
   | 'session_revoked'
   | 'step_up_required'
   | 'step_up_cancelled'
-  | 'step_up_failed';
+  | 'step_up_failed'
+  // ADR 0119 S5/S6 staff-lifecycle codes (docs/plans/adr0119-s5s6-api-contract.md section 1).
+  | 'self_target_forbidden'
+  | 'role_not_grantable'
+  | 'four_eyes_violation'
+  | 'person_required'
+  | 'lifecycle_transition_invalid'
+  | 'last_admin'
+  | 'lifecycle_busy';
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode;

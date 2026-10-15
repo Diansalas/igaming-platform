@@ -34,8 +34,10 @@ export interface NavPermissions {
   tenantWrite: boolean
   /** PermBrandWrite - create a brand (POST /v1/admin/tenants/{tid}/brands). */
   brandWrite: boolean
-  /** PermStaffManage - create staff / link a staff person (POST /v1/admin/tenants/{tid}/staff...). */
+  /** PermStaffManage - invite staff / link a staff person (POST /v1/admin/tenants/{tid}/staff/invitations, .../person-link). */
   staffAdmin: boolean
+  /** PermStaffRead - the read-only staff directory (GET /v1/admin/tenants/{tid}/staff): platform_admin, tenant_admin, compliance. */
+  staffRead: boolean
   /** PermProviderConfigWrite - payment provider capability (tenant-scoped). */
   providerConfig: boolean
   /** PermCasinoConfigWrite - casino provider capability + game availability (tenant-scoped). */
@@ -152,6 +154,7 @@ const NONE: NavPermissions = {
   tenantWrite: false,
   brandWrite: false,
   staffAdmin: false,
+  staffRead: false,
   providerConfig: false,
   casinoConfig: false,
   catalogue: false,
@@ -186,10 +189,10 @@ const NONE: NavPermissions = {
 //   PermProviderConfigWrite   -> tenant_admin (route also RequireTenantScope)
 //   PermCasinoConfigWrite     -> tenant_admin (route also RequireTenantScope)
 //   PermCasinoCatalogueManage -> platform_admin
-// Which staff ROLES a staffAdmin caller may create is a separate,
-// handler-level rule (finance/risk_manager/promotions_manager/
-// bonus_operations need a platform-scoped caller) - see
-// api/tenants.ts's TENANT_CREATABLE_STAFF_ROLES.
+// Which staff ROLES a staffAdmin caller may invite is a separate,
+// service-level rule (finance/risk_manager/promotions_manager/
+// bonus_operations need a platform admin; 403 role_not_grantable) - see
+// api/tenants.ts's TENANT_GRANTABLE_STAFF_ROLES.
 //
 // Stage 6's sportsbook flag mirrors exactly which roles the backend grants
 // PermSportsbookBetRead to (internal/auth/permission.go): tenant_admin,
@@ -208,6 +211,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     tenantWrite: true,
     brandWrite: true,
     staffAdmin: true,
+    staffRead: true,
     catalogue: true,
     manualAdjustments: true,
     manualAdjustmentAct: true,
@@ -242,6 +246,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     casino: true,
     brandWrite: true,
     staffAdmin: true,
+    staffRead: true,
     providerConfig: true,
     casinoConfig: true,
     launchRead: true,
@@ -254,7 +259,11 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     capabilityGrantRevoke: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
+<<<<<<< HEAD
   compliance: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, reconciliation: true, capabilityGrants: true },
+=======
+  compliance: { ...NONE, ownTenant: true, staffRead: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true },
+>>>>>>> a10a-staff-invite
   finance: {
     ...NONE,
     withdrawals: true,
