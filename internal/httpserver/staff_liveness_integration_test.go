@@ -264,7 +264,7 @@ func TestStaffLiveness_FaultIs503FailClosed(t *testing.T) {
 	logs := &syncBuffer{}
 	srv := httptest.NewServer(New(Deps{Logger: slog.New(slog.NewJSONHandler(logs, nil)), DB: dead, AuthIssuer: w.issuer,
 		ServiceName: "s4a", AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, StaffMFA: w.m,
-		PersonResolver: identityresolution.NewMockPersonResolver(), AuthRateLimitPerMinute: -1}))
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{}, AuthRateLimitPerMinute: -1}))
 	defer srv.Close()
 	for _, path := range []string{"/v1/staff/me/mfa", "/v1/admin/audit-log"} {
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
@@ -295,7 +295,7 @@ func TestStaffLiveness_FaultIs503FailClosed(t *testing.T) {
 		flogs := &syncBuffer{}
 		fsrv := httptest.NewServer(New(Deps{Logger: slog.New(slog.NewJSONHandler(flogs, nil)), DB: fresh, AuthIssuer: w.issuer,
 			ServiceName: "s4a", AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, StaffMFA: w.m,
-			PersonResolver: identityresolution.NewMockPersonResolver(), AuthRateLimitPerMinute: -1}))
+			PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{}, AuthRateLimitPerMinute: -1}))
 		get := func() (int, string, time.Duration) {
 			req, _ := http.NewRequest(http.MethodGet, fsrv.URL+"/v1/staff/me/mfa", nil)
 			req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
@@ -354,7 +354,7 @@ func TestStaffLiveness_ReleasesConnectionBeforeHandler(t *testing.T) {
 	defer one.Close()
 	srv := httptest.NewServer(New(Deps{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), DB: one, AuthIssuer: w.issuer,
 		ServiceName: "s4a", AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, StaffMFA: w.m,
-		PersonResolver: identityresolution.NewMockPersonResolver(), AuthRateLimitPerMinute: -1}))
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{}, AuthRateLimitPerMinute: -1}))
 	defer srv.Close()
 	client := &http.Client{Timeout: 10 * time.Second}
 	for _, tc := range []struct{ method, path, body string }{

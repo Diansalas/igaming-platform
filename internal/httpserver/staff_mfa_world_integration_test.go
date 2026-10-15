@@ -108,14 +108,14 @@ func newMFAW(t *testing.T, mutate ...func(*Deps)) *mfaW {
 	w.issuer = auth.NewIssuer(keys, "platform-api-test", "platform-api-test")
 	w.m = newTestStaffMFA(15*time.Minute, 30*time.Minute, 12*time.Hour)
 	deps := Deps{
-		Logger:                 slog.New(slog.NewJSONHandler(w.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		DB:                     rt,
-		AuthIssuer:             w.issuer,
-		ServiceName:            "s3-mfa-test",
-		AccessTokenTTL:         5 * time.Minute,
-		RefreshTokenTTL:        time.Hour,
-		StaffMFA:               w.m,
-		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewJSONHandler(w.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		DB:              rt,
+		AuthIssuer:      w.issuer,
+		ServiceName:     "s3-mfa-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		StaffMFA:        w.m,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		AuthRateLimitPerMinute: -1,
 	}
 	for _, f := range mutate {

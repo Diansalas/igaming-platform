@@ -132,7 +132,7 @@ func TestInitiateDeposit_SuccessThenCallbackPostsFlow1(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "dep-1",
 		})
@@ -180,7 +180,7 @@ func TestReceiveCallback_RedeliveredSuccessIsIdempotent(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4200, PaymentMethod: "card", IdempotencyKey: "dep-redeliver",
 		})
@@ -255,7 +255,7 @@ func TestInitiateDeposit_CascadeExhaustedEndsDeclined(t *testing.T) {
 	)
 	orch.MaxCascadeDepth = 2 // exactly enough to try a and b, never c
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "dep-exhausted",
 	})
@@ -304,7 +304,7 @@ func TestInitiateDeposit_ClientRetryReturnsOriginalIntent_NoSecondProviderCall(t
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
-	params := InitiateDepositParams{
+	params := InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 3000, PaymentMethod: "card", IdempotencyKey: "dep-retry-key",
 	}
@@ -418,7 +418,7 @@ func TestReceiveCallback_CrossTenantProviderReferenceIsInvisible(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f1.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f1.tenantID, BrandID: f1.brandID, PlayerAccountID: f1.playerAccountID, WalletID: f1.walletID},
 			AssetCode: "EUR", Amount: 2500, PaymentMethod: "card", IdempotencyKey: "dep-cross-tenant",
 		})
@@ -458,7 +458,7 @@ func TestReceiveCallback_DepositReversalPostsFlow2(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 8000, PaymentMethod: "card", IdempotencyKey: "dep-to-reverse",
 		})
@@ -533,7 +533,7 @@ func TestReceiveCallback_ReversalAmountCannotExceedOriginal(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "dep-cap-test",
 		})
@@ -613,7 +613,7 @@ func TestReceiveCallback_SecondReversalOfSameDepositRejected(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4000, PaymentMethod: "card", IdempotencyKey: "dep-double-reversal-test",
 		})
@@ -681,7 +681,7 @@ func TestReceiveCallback_LateDeclineAfterSuccessIsNoOp(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 3000, PaymentMethod: "card", IdempotencyKey: "dep-late-decline-test",
 		})
@@ -761,7 +761,7 @@ func TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone(t *testing.
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 6000, PaymentMethod: "card", IdempotencyKey: "dep-never-posted",
 		})

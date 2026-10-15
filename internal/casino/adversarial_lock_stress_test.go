@@ -40,7 +40,7 @@ func TestConcurrentStress_ManyDuplicateBetDeliveries(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	providerTxID := uuid.New().String()
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)
@@ -143,7 +143,7 @@ func TestConcurrentStress_ManyDuplicateBetDeliveriesDuringSelfExclusion(t *testi
 		provider := NewMockCasinoProvider("mock-casino", "EUR")
 		registerCasinoCapability(t, pool, f, provider, 100)
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 		providerTxID := uuid.New().String()
 		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerRef, sessionID)

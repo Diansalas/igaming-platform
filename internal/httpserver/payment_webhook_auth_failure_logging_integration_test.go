@@ -59,7 +59,7 @@ func newFinancialTestServerWithLogger(t *testing.T, pool *db.Pool, issuer *auth.
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		PersonResolver: identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	return srv

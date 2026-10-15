@@ -54,7 +54,7 @@ func TestReceiveCallback_JurisdictionScopedRiskRuleDoesNotDenyADifferentJurisdic
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSessionWithJurisdiction(t, pool, f, "mock-casino", "EUR", sessionJurisdiction)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		JurisdictionCode: ruleJurisdiction, Operation: risk.OperationCasinoBet,
@@ -109,7 +109,7 @@ func TestReceiveCallback_SessionWithNoJurisdictionFailsClosedAgainstJurisdiction
 	// the orchestrator.go postBet comment names (TODO(jurisdiction) is
 	// still the unfixed root cause - ADR 0031 §9/§34).
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		JurisdictionCode: ruleJurisdiction, Operation: risk.OperationCasinoBet,

@@ -235,7 +235,7 @@ func newIsoWorld(t *testing.T) *isoWorld {
 	})
 	w.casinoMock = casino.NewMockCasinoProvider("mock-casino", "EUR")
 	w.payMock = payments.NewMockProvider("mock-psp", "EUR")
-	casinoOrch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": w.casinoMock}, w.sub.Resolver("casino"))
+	casinoOrch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": w.casinoMock}, w.sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 	w.payOrch = payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock-psp": w.payMock}, w.sub.Resolver("payments")).WithPayoutDestinations(pitest.Shared())
 	keys, err := auth.NewKeyRegistry("k1", map[string]string{"k1": testJWTSecret})
 	if err != nil {
@@ -245,7 +245,7 @@ func newIsoWorld(t *testing.T) *isoWorld {
 		Logger: logger, DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: auth.NewIssuer(keys, "platform-api-test", "platform-api-test"),
 		ServiceName: "platform-api-test", AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
 		CasinoOrchestrator: casinoOrch, PaymentOrchestrator: w.payOrch, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		PersonResolver: identityresolution.NewMockPersonResolver(),
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(w.srv.Close)
 	t.Cleanup(w.client.CloseIdleConnections)
@@ -360,7 +360,7 @@ func (w *isoWorld) depositFor(it *isoTenant, p isoPlayer, amount int64) payments
 	// handler wires it (deposit_handlers.go) - this test is about
 	// pool/tenant isolation under the resolver, not about the deposit
 	// state machine itself.
-	res, err := w.payOrch.InitiateDepositAttempt(context.Background(), w.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := w.payOrch.InitiateDepositAttempt(context.Background(), w.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     payments.DepositScope{TenantID: it.tenant.ID, BrandID: it.brandID, PlayerAccountID: p.id, WalletID: p.walletID},
 		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "iso-" + uuid.NewString(),
 	})

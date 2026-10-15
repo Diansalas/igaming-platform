@@ -174,7 +174,7 @@ func TestLockOrder_SportsbookPlaceBetAcquiresLocksInCanonicalOrder(t *testing.T)
 			}
 			pidCh <- pid
 			var err error
-			result, err = PlaceBet(ctx, tx, PlaceBetParams{
+			result, err = PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 				SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 1_000,
 				ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,

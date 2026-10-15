@@ -229,7 +229,7 @@ func dueNow(t *testing.T, pool *db.Pool, tenantID, attemptID uuid.UUID) {
 // returns it plus its provider reference, due now.
 func pendingDeposit(t *testing.T, pool *db.Pool, orch *Orchestrator, f orchFixture, key string, amount int64) (PaymentAttempt, string) {
 	t.Helper()
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: key,
 	})

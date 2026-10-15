@@ -48,7 +48,7 @@ func TestJurisdictionResolve_ConcurrentCasinoLaunchAndBonusActivate_NoDeadlockIn
 	game := seedGameWithBlocklist(t, pool, "mock-casino-concurrent", []string{"ANY-CODE"}, "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino-concurrent": provider}, nil)
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino-concurrent": provider}, nil).WithUngatedMarketOpenForTests()
 
 	// --- bonus side: a real Grant, issued (RG/Risk only - T.2, AssetAuthorization
 	// is skipped at creation) and sitting in 'issued' status, ready for
@@ -111,7 +111,7 @@ func TestJurisdictionResolve_ConcurrentCasinoLaunchAndBonusActivate_NoDeadlockIn
 	var launchErr error
 	go func() {
 		defer wg.Done()
-		launchResult, launchErr = orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		launchResult, launchErr = orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 		})

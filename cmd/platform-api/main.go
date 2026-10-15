@@ -30,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
@@ -341,6 +342,8 @@ func run() error {
 	// item - not this stage's scope).
 	casinoOrchestrator := casino.NewOrchestrator(providers.casinoAdapters(), providers.casinoOrchestratorResolver())
 	casinoOrchestrator.SetWebhookLogger(logger) // W2A-SEC-2 matched-key_id line
+	// SR8-2: absolute maximum lifetime of a consumed launch session for NEW bets.
+	casinoOrchestrator.SetSessionMaxLifetime(cfg.CasinoSessionMaxLifetime)
 
 	// Stage 6 ships a mock sportsbook provider only (CLAUDE.md's "does not
 	// integrate a real provider without a confirmed commercial
@@ -505,6 +508,15 @@ func run() error {
 		// registration behavior while ensuring every registration now
 		// goes through the resolution boundary, never bypassing it.
 		PersonResolver: providers.PersonResolver,
+
+		// A8: the operating-market gate for registration, deposit
+		// initiation and casino launch (internal/marketgate), over the
+		// bundle's MOCK static Locator. That Locator is registered with the
+		// synthetic guard (buildRegistrations), so production cannot start
+		// on it; until a real geolocation vendor exists the gate refuses
+		// every request in any deployment that does not set
+		// MOCK_GEOLOCATION_COUNTRY (fail closed on unknown evidence).
+		MarketGate: marketgate.New(providers.Geolocation),
 
 		// Stage 4F: no real KYC/identity-verification vendor is contracted
 		// yet (docs/decisions/0028 §1) - MockKYCProvider is the only

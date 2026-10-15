@@ -109,7 +109,7 @@ func countsFor(t *testing.T, pool *db.Pool, tenantID uuid.UUID) hsecCounts {
 }
 
 func initDeposit(orch *Orchestrator, pool *db.Pool, f orchFixture, key string) (InitiateDepositAttemptResult, error) {
-	return orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	return orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: key,
 	})

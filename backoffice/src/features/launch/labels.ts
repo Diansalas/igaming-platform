@@ -179,6 +179,7 @@ export const CHECK_TITLES: Record<string, string> = {
   'R-CURRENCIES': 'Allowed currencies are active assets',
   'R-PAY-METHODS': 'Payment methods and approved provider credential',
   'R-CATALOGUE': 'Casino catalogue available',
+  'R-MARKET-CONFIG': 'Operating market configured',
   'R-PROVIDER-TIER': 'Process components production-eligible',
   'R-ALERTS': 'P1 alert routing has a recipient',
   'R-PLAYER-FUNDS': 'Player funds, open bets and held withdrawals',

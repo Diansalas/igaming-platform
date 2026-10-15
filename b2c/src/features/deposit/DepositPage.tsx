@@ -22,6 +22,7 @@ import { Select } from '../../components/Select'
 import { TextInput } from '../../components/TextInput'
 import { brandConfig } from '../../config/brand'
 import { newIdempotencyKey } from '../../lib/idempotencyKey'
+import { marketRefusalOr } from '../../lib/marketRefusal'
 import { formatMoney, toMinorUnits } from '../../lib/money'
 
 function statusTone(status: DepositStatus): BadgeTone {
@@ -130,7 +131,7 @@ export function DepositPage() {
       setIdempotencyKey(newIdempotencyKey())
       await queryClient.invalidateQueries({ queryKey: ['deposits'] })
     },
-    onError: (err) => setFormError(err instanceof ApiError ? err.message : 'Failed to start this deposit.'),
+    onError: (err) => setFormError(marketRefusalOr(err, (e) => (e instanceof ApiError ? e.message : 'Failed to start this deposit.'))),
   })
 
   const amountMinorUnits = toMinorUnits(amountInput, assetCode)

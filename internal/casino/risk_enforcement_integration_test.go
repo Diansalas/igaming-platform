@@ -118,7 +118,7 @@ func TestReceiveCallback_BetDeniedByJurisdictionScopedRiskRuleViaLaunchSession(t
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSessionWithJurisdiction(t, pool, f, "mock-casino", "EUR", jurisdictionCode)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		JurisdictionCode: jurisdictionCode, Operation: risk.OperationCasinoBet,
@@ -150,7 +150,7 @@ func TestLaunchGame_DeniedByRiskHardLimit(t *testing.T) {
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	// A platform-wide hard limit that always denies casino_launch for
 	// this asset (threshold irrelevant for a launch, which carries no
@@ -174,7 +174,7 @@ func TestLaunchGame_DeniedByRiskHardLimit(t *testing.T) {
 	// casino_launch. This proves the OTHER honest outcome: a hard limit
 	// configured for a dimension casino_launch cannot supply fails
 	// closed (propagates as an error), never silently ALLOW.
-	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{MarketGuard: testUngatedGuard,
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
@@ -190,7 +190,7 @@ func TestReceiveCallback_BetDeniedByRiskMaxAmountHardLimit(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		Operation: risk.OperationCasinoBet, LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction,
@@ -234,7 +234,7 @@ func TestReceiveCallback_PlayerRiskOverrideBeatsBrandDefault(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		BrandID: &f.brandID, Operation: risk.OperationCasinoBet, LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 200,
@@ -273,7 +273,7 @@ func TestReceiveCallback_ConcurrentBetsRespectCumulativeLimit(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionA := mintSession(t, pool, f, "mock-casino", "EUR")
 	sessionB := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		Operation: risk.OperationCasinoBet, LimitKind: risk.LimitCumulativeAmount, TimeWindow: risk.WindowRollingHour,

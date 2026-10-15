@@ -511,7 +511,7 @@ func TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons(t *testing.T) {
 			mp := NewMockProvider(pid, "EUR")
 			registerCapability(t, pool, f, mp, 100)
 			orch := NewOrchestrator(map[string]PaymentProvider{pid: mp}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
-			res, err := orch.InitiateDepositAttempt(context.Background(), pool, fixedDepositGate{tc.deny}, MockCredentialResolver{}, InitiateDepositParams{
+			res, err := orch.InitiateDepositAttempt(context.Background(), pool, fixedDepositGate{tc.deny}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 				Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 				AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "l2a-" + tc.name,
 			})

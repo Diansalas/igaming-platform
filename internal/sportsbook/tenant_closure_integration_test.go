@@ -326,7 +326,7 @@ func TestTenantClosure_RaceWithBetPlacement(t *testing.T) {
 		placed := make(chan error, 1)
 		go func() {
 			placed <- rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				res, err := PlaceBet(ctx, tx, PlaceBetParams{
+				res, err := PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 					TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 					SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 1000,
 					ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,

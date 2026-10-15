@@ -122,7 +122,7 @@ func (w *payWorld) registerCapability(t *testing.T, p payments.PaymentProvider, 
 // deposit runs the real ADR 0095 deposit path (phase A / gate / phase C).
 func (w *payWorld) deposit(t *testing.T, amount int64) payments.PaymentAttempt {
 	t.Helper()
-	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.pool, allowAllKYCGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.pool, allowAllKYCGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     payments.DepositScope{TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, WalletID: w.f.walletID},
 		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "pay-recon-" + uuid.NewString(),
 	})

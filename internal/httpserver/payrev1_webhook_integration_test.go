@@ -36,7 +36,7 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 	srv := httptest.NewServer(New(Deps{
 		Logger: logger, DB: pool, StaffMFA: testStaffMFA(), AuthIssuer: issuer, ServiceName: "platform-api-test",
 		AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
-		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{}, PersonResolver: identityresolution.NewMockPersonResolver(),
+		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{}, PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	tenant := mustCreateTenant(t, pool)

@@ -40,14 +40,14 @@ func TestKYCWebhook_TestSupportOff_404(t *testing.T) {
 	// whether an orchestrator happens to be wired, must gate the route.
 	mockProvider := kyc.NewMockKYCProvider()
 	srv := httptest.NewServer(New(Deps{
-		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                pool,
-		AuthIssuer:        issuer,
-		StaffMFA:          testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:       "platform-api-test",
-		AccessTokenTTL:    5 * time.Minute,
-		RefreshTokenTTL:   time.Hour,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:   kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
 		KYCWebhookEnabled: false, // the fix: test support off means this route does not exist.
 	}))
@@ -88,7 +88,7 @@ func TestKYCWebhook_TestSupportOff_NilOrchestrator_404(t *testing.T) {
 		ServiceName:     "platform-api-test",
 		AccessTokenTTL:  5 * time.Minute,
 		RefreshTokenTTL: time.Hour,
-		PersonResolver:  identityresolution.NewMockPersonResolver(),
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		// KYCOrchestrator and KYCWebhookEnabled both left at their zero
 		// values, exactly like a real production Deps built with test
 		// support off (main.go's kycOrchestrator(wiring, ...) returns nil).

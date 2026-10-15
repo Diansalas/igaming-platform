@@ -291,7 +291,7 @@ func m138Server(t *testing.T, pool *db.Pool) (*httptest.Server, *syncBuffer) {
 	srv := httptest.NewServer(New(Deps{
 		Logger: slog.New(slog.NewJSONHandler(io.MultiWriter(logs), &slog.HandlerOptions{Level: slog.LevelDebug})), DB: pool,
 		AuthIssuer: auth.NewIssuer(keys, "platform-api-test", "platform-api-test"), ServiceName: "m138", AccessTokenTTL: 5 * time.Minute,
-		RefreshTokenTTL: time.Hour, StaffMFA: testStaffMFA(), PersonResolver: identityresolution.NewMockPersonResolver(), AuthRateLimitPerMinute: -1,
+		RefreshTokenTTL: time.Hour, StaffMFA: testStaffMFA(), PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{}, AuthRateLimitPerMinute: -1,
 	}))
 	t.Cleanup(srv.Close)
 	return srv, logs

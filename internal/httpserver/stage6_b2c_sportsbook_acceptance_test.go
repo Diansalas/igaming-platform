@@ -61,7 +61,7 @@ func newStage6B2CTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, or
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
 		SportsbookEnabled: true,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		PersonResolver:    identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 	}))
 	t.Cleanup(srv.Close)
 	return srv

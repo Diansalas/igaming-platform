@@ -28,7 +28,7 @@ func withKillSwitchRoutes(a *cgAPI) *ksAPI {
 	srv := httptest.NewServer(New(Deps{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})), DB: a.pool, StaffMFA: testStaffMFA(), AuthIssuer: a.issuer,
 		ServiceName: "pa-test", AccessTokenTTL: time.Hour, RefreshTokenTTL: time.Hour,
-		PersonResolver: identityresolution.NewMockPersonResolver(), PaymentOrchestrator: orch,
+		PersonResolver: identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{}, PaymentOrchestrator: orch,
 	}))
 	a.t.Cleanup(srv.Close)
 	return &ksAPI{t: a.t, pool: a.pool, issuer: a.issuer, srv: srv}

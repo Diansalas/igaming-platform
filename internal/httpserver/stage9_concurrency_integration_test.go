@@ -129,8 +129,8 @@ func stage9Server(t *testing.T, pool *db.Pool, orchestrator *casino.Orchestrator
 		SportsbookEnabled:         true,
 		CasinoOrchestrator:        orchestrator,
 		CasinoOutboundCredentials: casino.NewMockOutboundResolver(),
-		PersonResolver:            identityresolution.NewMockPersonResolver(),
-		AuthRateLimitPerMinute:    -1,
+		PersonResolver:            identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
+		AuthRateLimitPerMinute: -1,
 	}))
 	t.Cleanup(srv.Close)
 	return srv

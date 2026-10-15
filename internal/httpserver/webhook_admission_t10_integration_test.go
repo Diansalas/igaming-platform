@@ -88,7 +88,7 @@ func TestAdmission_T10_PreAuthRejection_NeverReadsBody(t *testing.T) {
 
 	t.Run("casino", func(t *testing.T) {
 		mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
-		orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock))
+		orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)).WithUngatedMarketOpenForTests()
 		tenant := mustCreateTenant(t, pool)
 		mustCreateBrand(t, pool, tenant)
 		handler, rt := NewWithAdmission(Deps{

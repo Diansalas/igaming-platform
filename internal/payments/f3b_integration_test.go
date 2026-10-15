@@ -39,7 +39,7 @@ func TestINVDEP1_F3b_SweeperEvidenceDecidesFromFreshState_SucceededXSucceededNoO
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f3b-succ": provider}, MultiWebhookCredentialResolver{"mock-f3b-succ": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "f3b-succ-noop",
 	})

@@ -132,7 +132,7 @@ func TestFailureModeMatrix_SB_A_AbortBeforeCommitLeavesNoTraceAndRetryPostsOnce(
 	var placed PlaceBetResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var callErr error
-		placed, callErr = PlaceBet(ctx, tx, PlaceBetParams{
+		placed, callErr = PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 			SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 1_000,
 			ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,
@@ -244,7 +244,7 @@ func TestFailureModeMatrix_SB_A_ContextCancelledMidPlacementLeavesNoPartialWrite
 	placeErr := make(chan error, 1)
 	go func() {
 		placeErr <- pool.WithTenant(cancelCtx, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := PlaceBet(ctx, tx, PlaceBetParams{
+			_, err := PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 				SelectionID: sel.ID, AssetCode: "EUR", StakeAmount: 1_500,
 				ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,
@@ -320,7 +320,7 @@ func TestFailureModeMatrix_SB_E_MalformedStakeAndAssetRejectedCleanly(t *testing
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := PlaceBet(ctx, tx, PlaceBetParams{
+				_, err := PlaceBet(ctx, tx, PlaceBetParams{MarketGuard: testUngatedGuard,
 					TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
 					SelectionID: sel.ID, AssetCode: tc.assetCode, StakeAmount: tc.stake,
 					ExpectedOddsNumerator: sel.OddsNumerator, ExpectedOddsDenominator: sel.OddsDenominator,

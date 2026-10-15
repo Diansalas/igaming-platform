@@ -99,9 +99,9 @@ func newRGW(t *testing.T, opt rgWOpt) *rgW {
 		ServiceName:     "rg-test",
 		AccessTokenTTL:  time.Hour,
 		RefreshTokenTTL: time.Hour,
-		PersonResolver:  identityresolution.NewMockPersonResolver(),
-		RGLimits:        opt.limits,
-		RGWriteLimiter:  limiter,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
+		RGLimits:       opt.limits,
+		RGWriteLimiter: limiter,
 	}))
 	t.Cleanup(w.srv.Close)
 	// A second platform staff account of the requester's Person (four-eyes is by Person, not staff id).

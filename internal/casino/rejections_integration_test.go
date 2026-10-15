@@ -86,7 +86,7 @@ func newRejEnv(t *testing.T) rejEnv {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	return rejEnv{pool: pool, f: f, provider: provider, sessionID: sessionID,
-		orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))}
+		orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()}
 }
 
 func (e rejEnv) deliver(t *testing.T, eventType CallbackEventType, ref, original, round string, amount int64) (ReceiveCallbackResult, error) {

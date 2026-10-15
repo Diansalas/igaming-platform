@@ -107,7 +107,7 @@ func (w *frWorld) disputedDepositInTenantB() uuid.UUID {
 	}
 	orch, mock := newMockOrchestrator()
 	mustRegisterCapability(t, w.a.pool, w.other, mock)
-	res, err := orch.InitiateDepositAttempt(ctx, w.a.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(ctx, w.a.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     payments.DepositScope{TenantID: w.other, BrandID: brand, PlayerAccountID: player, WalletID: wallet},
 		AssetCode: "USD", Amount: 4000, PaymentMethod: "card", IdempotencyKey: uuid.NewString(),
 	})

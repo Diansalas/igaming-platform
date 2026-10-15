@@ -77,7 +77,7 @@ func TestAMLHold_Deposit_HeldAndKYCPending_AreIndistinguishable(t *testing.T) {
 		registerCapability(t, pool, f, provider, 100)
 		orch := NewOrchestrator(map[string]PaymentProvider{"mock-aml-" + name: provider}, MultiWebhookCredentialResolver{"mock-aml-" + name: NewMockWebhookCredentials(provider)})
 		arrange(f)
-		res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		res, err := orch.InitiateDepositAttempt(context.Background(), pool, KYCEnforcementDepositGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "aml-" + name,
 		})
@@ -128,7 +128,7 @@ func TestAMLHold_DepositSettlementCallback_IsNeverGated(t *testing.T) {
 	provider := NewMockProvider("mock-aml-settle", "EUR")
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-aml-settle": provider}, MultiWebhookCredentialResolver{"mock-aml-settle": NewMockWebhookCredentials(provider)})
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{MarketGuard: testUngatedGuard,
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "aml-settle",
 	})

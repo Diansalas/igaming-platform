@@ -136,7 +136,7 @@ func TestAdmission_C1_CasinoCredentialResolutionGateRejection_Maps503(t *testing
 	pool, issuer := testEnv(t)
 	sub := c1RealSubsystem(t)
 	mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
-	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, sub.Resolver("casino"))
+	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, sub.Resolver("casino")).WithUngatedMarketOpenForTests()
 
 	tenant := mustCreateTenant(t, pool)
 	mustCreateBrand(t, pool, tenant)

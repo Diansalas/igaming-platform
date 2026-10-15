@@ -102,6 +102,8 @@ paths:
                 $ref: "#/components/schemas/TokenPair"
         "400":
           $ref: "#/components/responses/ValidationError"
+        "403":
+          $ref: "#/components/responses/MarketNotAvailable"
         "404":
           description: Unknown brand_slug, or a brand (or its tenant) that is still `pending_launch` (indistinguishable by design)
           content:
@@ -2006,6 +2008,12 @@ paths:
         webhook-decline precedent. Full server-authoritative chain:
         validation -> RG eligibility -> risk evaluation -> wallet balance
         authorization -> ledger post + bet row, in one transaction.
+        The A8 operating-market gate (internal/marketgate, SR8-1) runs
+        FIRST, before the wallet is touched and again as the first statement
+        of PlaceBet (a replay of an earlier idempotency key included): a
+        refusal is `403 MARKET_NOT_AVAILABLE` (not the 200 accepted=false
+        shape), locks no stake and writes no ledger row. This applies ADR
+        0083 5.3.3's rung 2 ahead of the HDR-J-7 answer, by owner decision.
       security:
         - bearerAuth: []
       requestBody:
@@ -2015,6 +2023,8 @@ paths:
             schema:
               $ref: "#/components/schemas/PlaceBetRequest"
       responses:
+        "403":
+          $ref: "#/components/responses/MarketNotAvailable"
         "201":
           description: Bet accepted
           content:
@@ -2034,7 +2044,7 @@ paths:
         "404":
           description: Selection not found
         "503":
-          description: Sportsbook is not enabled on this deployment
+          description: Sportsbook is not enabled on this deployment, or no operating-market gate is configured (fail closed)
     get:
       summary: List the caller's own bet history
       description: Player-authenticated, restricted to the caller's own bets (WithPlayerScope).
@@ -2400,12 +2410,63 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   # --- Casino round history / mock-provider play simulation (Stage 7) ---
-  # NOTE: only the Stage 7 endpoints below are documented here. The
-  # pre-existing Stage 4A casino endpoints (GET /v1/me/casino/games,
-  # POST /v1/me/casino/games/{gameID}/launch, the admin catalogue/
+  # NOTE: only the Stage 7 endpoints below, plus A8's launch route, are documented here. The
+  # pre-existing Stage 4A casino endpoints (GET /v1/me/casino/games, the admin catalogue/
   # capability/availability routes, and the provider webhook) predate
   # this OpenAPI file's casino coverage and are tracked as separate,
   # pre-existing documentation debt - not introduced by Stage 7.
+  /v1/me/casino/games/{gameID}/launch:
+    post:
+      summary: Launch a casino game (mints a single-use launch session and token)
+      description: >
+        Player-authenticated. The player's identity, wallet and brand are resolved server-side. The A8
+        operating-market gate (internal/marketgate) is evaluated before the wallet is touched and again as the
+        FIRST statement of LaunchGame's phase A transaction, before any catalogue read and before a launch
+        session or token can be minted, for real AND demo launches: a refusal is `403 MARKET_NOT_AVAILABLE`
+        (the same body for an unknown game id, so a refused market learns nothing about the catalogue) and
+        mints nothing. The RG, risk and jurisdiction-blocklist denials, provider/capability errors and the
+        remaining launch behaviour are pre-existing documentation debt, not introduced by A8.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: gameID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                asset_code: { type: string }
+                mode: { type: string, enum: [real, demo] }
+              required: [asset_code, mode]
+      responses:
+        "201":
+          description: Launch session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  launch_url: { type: string }
+                  session_id: { type: string, format: uuid }
+                  expires_at: { type: string, format: date-time }
+                required: [launch_url, session_id, expires_at]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MarketNotAvailable"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Casino is not enabled on this deployment, the provider is unavailable, or no operating-market gate is configured (fail closed)
   /v1/me/casino/rounds:
     get:
       summary: List the caller's own casino round history
@@ -2567,6 +2628,68 @@ paths:
           description: The original transaction has already been rolled back
         "503":
           description: Casino is not enabled on this deployment, or the session's provider is not the mock adapter
+  /v1/me/deposits:
+    post:
+      summary: Initiate a deposit for the caller's own wallet
+      description: >
+        Player-authenticated. Every identifying field (tenant, brand, player, wallet) is resolved server-side
+        from the session; the body supplies only the asset, amount (integer minor units), payment method and the
+        client's idempotency key. The A8 operating-market gate (internal/marketgate) is evaluated BEFORE any
+        wallet or deposit row is written and again as the first statement of the orchestrator's phase A
+        transaction (a replay of an earlier idempotency key included): a refusal is `403 MARKET_NOT_AVAILABLE`
+        and creates no intent, no attempt, no provider call, and does not consume the idempotency key.
+        Documentation of the remaining deposit behaviour (RG/KYC denial as a `declined` intent, routing, hosted
+        redirect) is pre-existing documentation debt, not introduced by A8.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                asset_code: { type: string }
+                amount: { type: integer, format: int64, minimum: 1, description: Minor units }
+                payment_method: { type: string }
+                idempotency_key: { type: string }
+              required: [asset_code, amount, payment_method, idempotency_key]
+      responses:
+        "201":
+          description: The deposit intent (status `pending`, `declined`, ...)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  asset_code: { type: string }
+                  amount: { type: integer, format: int64 }
+                  payment_method: { type: string }
+                  status: { type: string }
+                  provider_id: { type: string }
+                  redirect_url: { type: string }
+                  hosted_field_token: { type: string }
+                  ledger_transaction_id: { type: string, format: uuid }
+                required: [id, asset_code, amount, payment_method, status]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/MarketNotAvailable"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Idempotency key reused with different parameters, or the tenant/brand is not active (`TENANT_OR_BRAND_NOT_ACTIVE`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Deposits are not enabled on this deployment, or no operating-market gate is configured (fail closed)
   /v1/me/deposits/{id}/simulate-callback:
     post:
       summary: >-
@@ -12471,7 +12594,7 @@ components:
     LaunchCheck:
       type: object
       properties:
-        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
+        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
         result: { type: string, enum: [pass, fail, not_evaluable], description: "not_evaluable is not pass" }
         detail_code: { type: string, description: "A closed detail code, never free text." }
       required: [code, result, detail_code]
@@ -12876,6 +12999,7 @@ components:
             - PAYMENT_METHOD_MISMATCH
             - TENANT_OR_BRAND_NOT_ACTIVE
             - BRAND_NOT_ACCEPTING_REGISTRATIONS
+            - MARKET_NOT_AVAILABLE
             - TENANT_CLOSE_BLOCKED_OPEN_ROUNDS
             - LAUNCH_PRECONDITION_FAILED
             - LAUNCH_UNACKNOWLEDGED_CHECKS
@@ -13185,6 +13309,22 @@ components:
               type: array
               items: { $ref: "#/components/schemas/RGFloorRequest" }
   responses:
+    MarketNotAvailable:
+      description: >
+        403 `MARKET_NOT_AVAILABLE` (A8, operating-market gate, internal/marketgate): the request is refused
+        because this service is not available in the region the request is evidenced to come from. ONE status,
+        ONE code and ONE fixed message (`this service is not available in your region`) for EVERY cause - the
+        evidenced country is outside the brand's operating market, the brand has no operating-market
+        configuration, or location evidence is unknown/unavailable (fail closed) - so the response cannot tell
+        a caller which rung blocked or whether their location could not be determined. The country is NEVER
+        read from the request (body, headers, query); it is derived server-side. Nothing is created (a refused
+        deposit creates no intent, attempt or provider call and does not consume the idempotency key; a refused
+        launch mints no session or token; a refused registration creates no account; a refused sportsbook bet locks no stake and writes no ledger row). A deployment with no
+        market gate configured answers 503 `service_unavailable` instead.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     AmlBadRequest:
       description: 400 validation_error - a malformed id, body, limit, reason code or note (fixed sentence; check code note_refused for a refused note). Nothing was written.
       content:

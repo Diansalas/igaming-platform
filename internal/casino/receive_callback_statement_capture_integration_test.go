@@ -124,7 +124,7 @@ func TestCasinoWebhook_BadSignature_NoStatementBeforeVerification(t *testing.T) 
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-bad-sig", "", "round-c7", "game-1",
 		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
@@ -159,7 +159,7 @@ func TestCasinoWebhook_MissingCredential_NoStatementBeforeVerification(t *testin
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-missing-cred", "", "round-c7", "game-1",
 		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
@@ -190,7 +190,7 @@ func TestCasinoWebhook_ForeignCredential_NoStatementBeforeVerification(t *testin
 	foreignTenantID := uuid.New()
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, foreignCredentialResolver{
 		foreignTenantID: foreignTenantID, providerID: "mock-casino", secret: webhookauth.NewMockMaster(),
-	})
+	}).WithUngatedMarketOpenForTests()
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-foreign-cred", "", "round-c7", "game-1",
 		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
@@ -214,7 +214,7 @@ func TestCasinoWebhook_NilResolver_NoStatementBeforeVerification(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, nil)
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, nil).WithUngatedMarketOpenForTests()
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-nil-resolver", "", "round-c7", "game-1",
 		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())
@@ -239,7 +239,7 @@ func TestCasinoWebhook_VerifiedCallback_AdvisoryLockIsFirstStatement(t *testing.
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "cas-c7-verified", "", "round-c7-verified", "game-1",
 		1000, "EUR", OutcomeSucceeded, "", f.playerRef, uuid.New())

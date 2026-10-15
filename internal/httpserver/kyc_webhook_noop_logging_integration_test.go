@@ -33,14 +33,14 @@ func newKYCNoopTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, logg
 	t.Helper()
 	mockProvider := kyc.NewMockKYCProvider()
 	srv := httptest.NewServer(New(Deps{
-		Logger:                 logger,
-		DB:                     pool,
-		AuthIssuer:             issuer,
-		StaffMFA:               testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
-		ServiceName:            "platform-api-test",
-		AccessTokenTTL:         5 * time.Minute,
-		RefreshTokenTTL:        time.Hour,
-		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		Logger:          logger,
+		DB:              pool,
+		AuthIssuer:      issuer,
+		StaffMFA:        testStaffMFA(), // ADR 0119 S3: staff login is two-step (shared test keys)
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(), MarketGate: allowAllMarketGate{},
 		KYCOrchestrator:        newKYCOrchestratorWithWorker(t, pool, map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),

@@ -49,7 +49,7 @@ func TestPayRev1_TenantIsolation_CannotLockOrObserveAnotherTenantsOriginal(t *te
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), tenantA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orchA, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orchA, InitiateDepositParams{MarketGuard: testUngatedGuard,
 			Scope:     DepositScope{TenantID: tenantA.tenantID, BrandID: tenantA.brandID, PlayerAccountID: tenantA.playerAccountID, WalletID: tenantA.walletID},
 			AssetCode: "EUR", Amount: amountA, PaymentMethod: "card", IdempotencyKey: "payrev1-tenant-iso-dep",
 		})

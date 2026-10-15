@@ -71,6 +71,15 @@ type mockWiring struct {
 	// never a provider call without credentials) rather than falling back
 	// to the real, unconfigured resolver.
 	PaymentsOutboundResolver bool
+
+	// GeolocationCountry is the country the MOCK static Locator
+	// (geolocation.StaticLocator) reports for every request (A8): the
+	// operator-set MOCK_GEOLOCATION_COUNTRY, honoured ONLY when mock
+	// components are enabled (test support on, non-production guard
+	// environment). Empty means the Locator reports UNKNOWN and the
+	// operating-market gate refuses every request (fail closed). It is
+	// never derived from a request.
+	GeolocationCountry string
 }
 
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
@@ -85,7 +94,12 @@ type mockWiring struct {
 // semantics unchanged.
 func mockProviderWiring(cfg config.Config) mockWiring {
 	testSupport := cfg.TestSupportRoutesEnabled() && cfg.GuardEnvironment() != "production"
+	geolocationCountry := ""
+	if testSupport {
+		geolocationCountry = cfg.MockGeolocationCountry
+	}
 	return mockWiring{
+		GeolocationCountry:       geolocationCountry,
 		PaymentsWebhookResolver:  testSupport,
 		KYCWebhookEnabled:        testSupport,
 		CasinoWebhookResolver:    testSupport,
