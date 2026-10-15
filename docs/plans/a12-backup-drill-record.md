@@ -669,3 +669,80 @@ RESULT|wal_gap_detected_by_continuity_check|PASS|continuity check reports missin
 RESULT|wal_gap_recovery_refused|PASS|server did not promote; log: 2026-10-15 21:12:17.769 UTC [11630] FATAL:  recovery ended before configured recovery target was reached
 PITR_TARGET|lsn=0/4700B2F8|segment=000000010000000000000047|time=2026-10-15 21:11:30.247533+00
 ```
+
+## 9. Security re-review 2 (`security`, 2026-10-15; fix commit 4f8ea4b)
+
+**Scope and method**
+- What I did:
+  - Code review of the 4f8ea4b delta: `restore.sh`, `lib-sign.sh`, `lib-common.sh`, `backup.sh`, `init-backup-role.sql`, `verify.sh`, `lib-globals.sh`, and the runbooks.
+  - Ran `go test ./deploy/...`: all ok.
+  - Called the host-guard function directly with IPv6 spellings. No connection was made.
+  - Tested `cp --no-dereference` behaviour in a scratch directory.
+- What I did not do:
+  - The author's 116/116 drill was **not** re-run.
+  - No database cluster was started for this round.
+  - The shared 5432 cluster, roles and passwords were not touched.
+
+### Verdict: NOT APPROVED
+
+**Reason.** SR12R-1 is only partly closed. Its symlink-race variant (SR12R2-1) still lets a storage writer substitute the archive and the signed manifest after verification. Every other finding is closed.
+
+**Launch-blocking flag.** Restoring any non-synthetic logical backup stays BLOCKED until SR12R2-1 is fixed and drilled.
+
+### Closure check
+
+| Finding | Result |
+|---|---|
+| SR12R-1 | **PARTIAL.** These parts are fixed:<br>- The signed list and signature are copied privately and verified there.<br>- Exactly 4 listed names are required, each a single form, and encrypted and plaintext artefacts cannot be mixed.<br>- Unlisted entries, symlinks and directories are refused at scan time.<br>- The decrypted dump is checked against `plaintext_dump_sha256`.<br>- The anchor is taken from the signed manifest and cross-checked against the baseline.<br>- The `swap_after_verify` drill hook exists.<br>Still open: SR12R2-1 below. |
+| SR12R-2 | **CLOSED.** `role_privs` refuses the following, for both the loading role and the owner:<br>- SUPERUSER, CREATEROLE, BYPASSRLS, REPLICATION;<br>- any recursive membership in a `pg_*` role (except `pg_database_owner`), an `rds_*` role or `rdsadmin`.<br>`role_sig` before and after the load detects changes to attributes, settings and memberships, then fails and drops the database. A changed password of the connecting role surfaces as a failed reconnect. Residual: an owner password change made while the loading role is a *member* of the owner cannot be read; the runbook requires credential re-provisioning after every restore. Accepted. |
+| SR12R-3 | **CLOSED.** The real IPv6 parser refuses all 10 loopback spellings from round 1 on 5432, as well as `::127.0.0.1`. Non-loopback literals are still treated as remote, and a scope id (`%`) is refused. |
+| SR12R-4 | **CLOSED.** Remote targets force `verify-full` and require `BACKUP_PGSSLROOTCERT`. The plan no longer says `require`. Note: `verify.sh` passes `DATABASE_URL` to pgx, and an explicit `sslmode=` in that URL would override the environment. Advise refusing `sslmode` in those URLs (informational). |
+| SR12R-5 | **CLOSED.** `RESTORE_TARGET_ENVIRONMENT` is required and must equal the source. |
+| SR12R-6 | **CLOSED.** Only real directories matching the run-name pattern are swept, and only those whose `host:pid` names this host. |
+| SR12R-7 | **CLOSED.** The temp root is never chmod'ed. A non-drill run requires a 0700 `BACKUP_TMPDIR` owned by the invoking user. |
+| SR12R-8 | **CLOSED.** Any `password=` or `passwd=` key is refused. |
+| SR12R-9 | **CLOSED (design).** An IAM-only role path exists (`PASSWORD NULL`, `rds_iam`), and a fresh token passfile is written before every connection. Not verified on RDS. |
+| SR12R-10 | **PARTIAL.** `RESTORE_EXPECT_SET_SHA256` is required off-drill, and the public key is copied before use. However, `backup.sh` never prints the set hash, so the "out-of-band log" has no source for it. See SR12R2-2. |
+
+### New findings
+
+**SR12R2-1. HIGH: the "private copy" can be a symlink back into the backup directory, which re-opens the verify-to-use TOCTOU.**
+
+Mechanism, in `restore.sh`:
+1. The scan for symlinks happens first.
+2. The listed artefacts are copied afterwards with `cp --no-dereference` (line 137).
+3. If an entry is replaced by a symlink between steps 1 and 2, `cp -P` copies **the symlink itself** into `$WORK/set` (verified in scratch: the copy is a link, and reading it returns the target's *current* content).
+4. Every later read of that "copy" goes through the link to storage the attacker controls: `sha256sum --check`, `age -d`, and the `sed` reads of `manifest.json`.
+
+Attack:
+- A writer to the backup directory can watch it with inotify (no race guessing needed).
+- They swap `manifest.json` and `db.dump.age` into links at the copy, keep genuine content during the checksum, then swap the targets.
+- The checks pass. The restored archive, its `plaintext_dump_sha256` and its environment anchor are all the attacker's. Because age recipients are public, no secret is needed.
+
+This is the H3/SR12R-1 threat model with the same impact: arbitrary archive content runs as the owner.
+
+Required fix:
+- Copy by content, not as links: `cat -- "$src" >"$dst"` after an `[ -f ] && [ ! -L ]` check, or `cp --dereference`.
+- After copying, refuse if `find "$SETDIR" ! -type f` returns anything.
+- Make every later read use only `$SETDIR`/`$WORK` regular files.
+- Update the static test, which currently *pins* the string `cp --no-dereference`.
+- Add a drill case that turns an artefact into a symlink after the scan, using a hook such as `RESTORE_TEST_FAULT=symlink_after_scan`.
+
+**SR12R2-2. LOW: the rollback pin has no producer.**
+
+`restore.sh` requires `RESTORE_EXPECT_SET_SHA256` off the drill, but `backup.sh` neither prints nor logs `sha256(SHA256SUMS)`.
+
+Fix:
+- `backup.sh` emits `SET_SHA256=<hex>` after signing.
+- The runner records it out of band.
+- The runbook names that source.
+
+**Informational:**
+- `BACKUP_IAM_TOKEN_COMMAND` runs through `bash -c`. It is trusted operator configuration and acceptable as such, but it must never be taken from a set or a ticket field.
+- On a non-RDS target, `BACKUP_ROLE_IAM_ONLY=1` produces a password-less role that is valid forever. That is safe only where `pg_hba` has no `trust` rule for it. Restrict the flag to RDS targets or document this.
+
+### Required before approval
+1. Fix SR12R2-1 and drill the symlink-after-scan case.
+2. Fix SR12R2-2.
+
+Everything else from round 1 and round 2 is accepted. This review records what was checked at `4f8ea4b`; it is not a certification.
