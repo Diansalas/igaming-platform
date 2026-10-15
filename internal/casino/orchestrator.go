@@ -1250,8 +1250,15 @@ func mapReplayPayloadMismatch(result ReceiveCallbackResult, err error) (ReceiveC
 // event.SessionID resolves to). Anything else is
 // ErrProviderTxPayloadMismatch, naming only the differing field classes.
 // Plain SELECTs; takes no lock.
-func verifyPostedBetMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent) error {
+func verifyPostedBetMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent, refPlayer uuid.UUID) error {
 	var diffs []string
+
+	// A3 SR3-1: the resolved player reference must be the posted bet's owner.
+	if owned, err := postedTxOwnedBy(ctx, tx, tenantID, postedID, refPlayer); err != nil {
+		return err
+	} else if !owned {
+		diffs = append(diffs, "player")
+	}
 
 	var correlationID uuid.UUID
 	if err := tx.QueryRow(ctx,
@@ -1409,8 +1416,15 @@ func findPostedWinTransaction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID
 // asset on every leg and the same round (correlation_id). Anything else is
 // ErrProviderTxPayloadMismatch naming only the differing field classes.
 // Plain SELECTs; takes no lock.
-func verifyPostedWinMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent) error {
+func verifyPostedWinMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent, refPlayer uuid.UUID) error {
 	var diffs []string
+
+	// A3 SR3-1: the resolved player reference must be the posted win's owner.
+	if owned, err := postedTxOwnedBy(ctx, tx, tenantID, postedID, refPlayer); err != nil {
+		return err
+	} else if !owned {
+		diffs = append(diffs, "player")
+	}
 
 	var correlationID uuid.UUID
 	if err := tx.QueryRow(ctx,
@@ -1538,12 +1552,15 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// reference, or another tenant's/provider's reference is refused here,
 	// before any read of money state or write. Taken AFTER the L0.1 delivery
 	// lock, which stays this function's first statement (ADR 0082 A6).
-	// Identification only: the wallet a bet debits is still derived from the
-	// platform's own launch session below, never from the player this
-	// reference names (the existing "a payload naming another player debits
-	// only the session owner" rule is unchanged; a stricter mismatch refusal
-	// is a recorded residual).
-	if _, err := ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef); err != nil {
+	// The wallet a bet debits is still derived from the platform's own launch
+	// session below, never from the player this reference names; the reference
+	// is a second binding factor that must AGREE with the session.
+	//
+	// A3 SR3-1 (owner decision: fail closed): a VALID reference of a different
+	// player than the session's owner is now REFUSED (checked below once the
+	// session is loaded; on a replay, as a "player" payload mismatch).
+	refPlayer, err := ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef)
+	if err != nil {
 		return ReceiveCallbackResult{}, err
 	}
 
@@ -1571,7 +1588,7 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		// Stage 10 F-7 (audit site #6): a redelivery is only a replay if
 		// it describes the bet already posted - see
 		// verifyPostedBetMatchesEvent.
-		if err := verifyPostedBetMatchesEvent(ctx, tx, tenantID, providerID, existingID, event); err != nil {
+		if err := verifyPostedBetMatchesEvent(ctx, tx, tenantID, providerID, existingID, event, refPlayer); err != nil {
 			return ReceiveCallbackResult{}, err
 		}
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID, Replayed: true}, nil
@@ -1651,6 +1668,11 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 	if session.ProviderID != providerID {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session belongs to a different provider", ErrLaunchSessionRequired)
+	}
+	// A3 SR3-1: the reference must name the session's own player. Before the
+	// brand gate and any other read of money state; nothing has been written.
+	if refPlayer != session.PlayerAccountID {
+		return ReceiveCallbackResult{}, ErrPlayerRefMismatch
 	}
 	// CAS-BET-REQUIRES-BOOTSTRAP-1 (security SB-5, ADR 0103 section 11 item 2;
 	// A3): a NEW bet is accepted ONLY against a session in the 'consumed'
@@ -2157,9 +2179,11 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// tenant and provider (a raw player_account_id never does). Identification
 	// only: which wallet the win credits remains derived from the round's own
 	// bet in the ledger (below), never from the player this reference names -
-	// the existing "a win naming another player still credits the bettor" rule
-	// is unchanged (a stricter mismatch refusal is a recorded residual).
-	if _, err := ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef); err != nil {
+	// A3 SR3-1 (owner decision: fail closed): a VALID reference of a player
+	// other than the round's bettor is refused (ErrPlayerRefMismatch), below
+	// once the bettor is known; on a replay as a "player" payload mismatch.
+	refPlayer, err := ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef)
+	if err != nil {
 		return ReceiveCallbackResult{}, err
 	}
 
@@ -2194,7 +2218,7 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if existingID, found, err := findPostedWinTransaction(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
 		return ReceiveCallbackResult{}, err
 	} else if found {
-		if err := verifyPostedWinMatchesEvent(ctx, tx, tenantID, providerID, existingID, event); err != nil {
+		if err := verifyPostedWinMatchesEvent(ctx, tx, tenantID, providerID, existingID, event, refPlayer); err != nil {
 			return ReceiveCallbackResult{}, err
 		}
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID, Replayed: true}, nil
@@ -2277,6 +2301,11 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve wallet: %w", err)
 	}
+	// A3 SR3-1: the reference must name the round's own bettor. Nothing has
+	// been written (the round-bet row lock above is not a write).
+	if wl.PlayerAccountID != refPlayer {
+		return ReceiveCallbackResult{}, ErrPlayerRefMismatch
+	}
 	if wl.AssetCode != event.AssetCode {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the round's own bet", ErrInvalidInput)
 	}
@@ -2336,6 +2365,39 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		return ReceiveCallbackResult{}, err
 	}
 
+	// A3 SR3-2 (as corrected by ledger-finance LF-A3-3): a PRESENT player_ref is
+	// resolved like on a bet or win, for this tenant and provider, but it is
+	// refused (ErrPlayerRefUnresolved 400, or ErrPlayerRefMismatch when it
+	// names another player) ONLY on the path that would reverse an already
+	// POSTED bet/win - nothing is written there. For an original the ledger has
+	// NEVER seen (or one already tombstoned) the tombstone is still written (a
+	// late original must be rejected, CLAUDE.md) and the bad reference is kept
+	// as an audit-only player_ref_mismatch record in the same committing
+	// transaction. A MISSING reference stays allowed (a rollback must always be
+	// possible; the original is named by original_provider_tx_id, not by the
+	// player). Resolution happens at the three points that need it; for a
+	// bet/win original it is AFTER the non-active-tenant gate, so the gate's
+	// own durable-evidence behaviour for a bad reference is preserved.
+	hasRef := event.PlayerRef != uuid.Nil
+	resolveRef := func() (uuid.UUID, error) {
+		if !hasRef {
+			return uuid.Nil, nil
+		}
+		return ResolveProviderPlayerRef(ctx, tx, tenantID, providerID, event.PlayerRef)
+	}
+	// recordBadRefAlongsideTombstone keeps an unresolvable reference on a
+	// tombstoning rollback as durable evidence without refusing the rollback.
+	recordBadRefAlongsideTombstone := func() error {
+		if _, rerr := resolveRef(); rerr != nil {
+			rej := newCallbackRejection(RejectionPlayerRefMismatch, event)
+			rej.SubReason = "player_ref_unresolved_on_tombstone"
+			if _, err := RecordCallbackRejection(ctx, tx, tenantID, providerID, rej, observability.RequestIDFromContext(ctx)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	// FOR UPDATE: two concurrent rollback requests naming the SAME
 	// original must serialize on this row, not both observe "not yet
 	// reversed" and both post a reversal (specialist review finding,
@@ -2353,7 +2415,11 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		// R3-GAME-POSTINGS-NONACTIVE-1 (ledger-finance C1): a tombstone moves
 		// no money and is the protection against a late-arriving original, so
 		// it is ALWAYS written, also for a suspended/closed tenant. It is
-		// deliberately NOT gated.
+		// deliberately NOT gated. LF-A3-3: an unresolvable reference does not
+		// suppress it; it is recorded as evidence next to it.
+		if err := recordBadRefAlongsideTombstone(); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 		txID, tombErr := postRollbackTombstone(ctx, tx, tenantID, providerID, event)
 		if tombErr != nil {
 			return ReceiveCallbackResult{}, tombErr
@@ -2396,7 +2462,12 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		// tombstone). If that row is not visible the reference cannot be
 		// proven equal, and the delivery is recorded rather than silently
 		// dropped (fail toward evidence; a human resolves it). A
-		// same-reference redelivery records nothing.
+		// same-reference redelivery records nothing. LF-A3-3: an unresolvable
+		// reference is recorded as evidence; the idempotent tombstone
+		// acknowledgement is unchanged.
+		if err := recordBadRefAlongsideTombstone(); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 		firstRef, known, err := firstTombstoningRollbackReference(ctx, tx, tenantID, originalID)
 		if err != nil {
 			return ReceiveCallbackResult{}, err
@@ -2431,6 +2502,21 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		}
 	} else if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
 		return ReceiveCallbackResult{}, err
+	}
+
+	// A3 SR3-2: a present reference must name the original's own player.
+	if hasRef {
+		refPlayer, rerr := resolveRef()
+		if rerr != nil {
+			return ReceiveCallbackResult{}, rerr
+		}
+		owned, oerr := postedTxOwnedBy(ctx, tx, tenantID, originalID, refPlayer)
+		if oerr != nil {
+			return ReceiveCallbackResult{}, oerr
+		}
+		if !owned {
+			return ReceiveCallbackResult{}, ErrPlayerRefMismatch
+		}
 	}
 
 	// A prior reversal against originalID is only a conflict if it was

@@ -651,6 +651,16 @@ PROVIDER DEPENDENT; each is registered in `docs/plans/a3-casino-record.md`):
    `(tenant, provider, player_account_id)` and `(tenant, provider, player_ref)`, runtime role
    SELECT + INSERT only). The reference identifies; it does not authorise: the wallet a bet debits
    is still the launch session's, and the wallet a win credits is still the round's own bet's.
+   **Security fix round SR3-1/SR3-2 (owner decision: fail closed).** The reference is also a second
+   binding factor that must AGREE with the platform's own state. A VALID reference of a different
+   player than the session's owner (bet), the round's bettor (win) or the original's owner
+   (rollback of a bet/win) is refused with `ErrPlayerRefMismatch` (an `ErrPlayerRefUnresolved`: same
+   400, same text, so there is no oracle), nothing is posted, and one
+   `casino_callback.player_ref_mismatch` audit row is written by the separately committed rejection
+   record (audit-only class, no CHECK/migration change). On a replay the same disagreement is a
+   `player` payload mismatch (409). A rollback that carries a reference resolves it (unresolvable:
+   400, nothing written, no tombstone); a rollback with no reference stays allowed. Supersedes the
+   earlier "accepted and ignored" reading.
 2. **CAS-BET-REQUIRES-BOOTSTRAP-1 - closed.** `postBet` accepts a new bet only against a
    `consumed` session. `active` (never bootstrapped), `expired`, `revoked` and any unknown status
    are refused with `ErrLaunchSessionRequired`; the former time-based branch for `active` sessions

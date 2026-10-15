@@ -216,6 +216,8 @@ func TestA3_Callbacks_RawAccountIDAndForeignRefsDoNotResolve(t *testing.T) {
 		"the session id as a ref":   e.sessionID,
 		"the wallet id as a ref":    e.f.walletID,
 		"the other tenant's player": other.playerAccountID,
+		// SR3-2: a valid reference of the SAME tenant issued for ANOTHER provider.
+		"the same tenant's other provider's ref": playerRefFor(t, e.pool, e.f.tenantID, "mock-other-provider", e.f.playerAccountID),
 	}
 	for name, ref := range cases {
 		for _, kind := range []CallbackEventType{CallbackEventBet, CallbackEventWin} {

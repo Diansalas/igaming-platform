@@ -712,7 +712,11 @@ func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAcc
 	if simulationBetweenPhasesHook != nil {
 		simulationBetweenPhasesHook(sessionID)
 	}
-	var result casino.ReceiveCallbackResult
+	// LF-A3-2 (ledger-finance review, ADR 0082): the MOCK vendor's session
+	// consume runs in its OWN transaction, committed BEFORE the callback's
+	// transaction opens. Holding the session-row update inside the callback's
+	// transaction would put a row lock ahead of the L0.1 delivery lock that
+	// postBet/postWin/postRollback must take as their first statement.
 	err = deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		session, err := validate(ctx, tx)
 		if err != nil {
@@ -724,24 +728,45 @@ func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAcc
 		// CAS-BET-REQUIRES-BOOTSTRAP-1: a bet needs a 'consumed' session. The
 		// MOCK vendor's bootstrap is this CAS (active -> consumed, single
 		// use); a session already consumed by this path is left as is.
-		if session.Status == casino.LaunchSessionActive {
-			err := casino.ConsumeLaunchSessionForMockPlay(ctx, tx, session.ID)
-			switch {
-			case err == nil:
-				recordCasinoPlaySimulationAudit(ctx, tx, tenantID, playerAccountID, session.ID,
-					"casino_play_simulation.session_consumed", providerTxID, casino.ReceiveCallbackResult{Outcome: casino.OutcomeSucceeded})
-			case errors.Is(err, casino.ErrLaunchSessionNotActive):
-				// Lost the CAS. The only benign loser is a concurrent
-				// simulation request that consumed the same session first;
-				// anything else (revoked, vendor-bootstrapped) is refused.
-				current, gerr := casino.GetLaunchSessionByID(ctx, tx, session.ID)
-				bootstrapped, berr := casino.LaunchSessionVendorBootstrapped(ctx, tx, session.ID)
-				if gerr != nil || berr != nil || current.Status != casino.LaunchSessionConsumed || bootstrapped {
-					return &apierror.Error{Code: apierror.CodeConflict, Message: "session changed during simulation"}
-				}
-			default:
-				return err
+		if session.Status != casino.LaunchSessionActive {
+			return nil
+		}
+		mock, ok := requireMockCasinoProvider(deps, providerID)
+		if !ok {
+			return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
+		}
+		err = casino.ConsumeLaunchSessionForMockPlay(ctx, tx, session.ID, mock, providerID)
+		switch {
+		case err == nil:
+			recordCasinoPlaySimulationAudit(ctx, tx, tenantID, playerAccountID, session.ID,
+				"casino_play_simulation.session_consumed", providerTxID, casino.ReceiveCallbackResult{Outcome: casino.OutcomeSucceeded})
+			return nil
+		case errors.Is(err, casino.ErrLaunchSessionNotActive):
+			// Lost the CAS. The only benign loser is a concurrent
+			// simulation request that consumed the same session first;
+			// anything else (revoked, vendor-bootstrapped) is refused.
+			current, gerr := casino.GetLaunchSessionByID(ctx, tx, session.ID)
+			bootstrapped, berr := casino.LaunchSessionVendorBootstrapped(ctx, tx, session.ID)
+			if gerr != nil || berr != nil || current.Status != casino.LaunchSessionConsumed || bootstrapped {
+				return &apierror.Error{Code: apierror.CodeConflict, Message: "session changed during simulation"}
 			}
+			return nil
+		default:
+			return err
+		}
+	})
+	if err != nil {
+		return casino.ReceiveCallbackResult{}, providerTxID, err
+	}
+
+	var result casino.ReceiveCallbackResult
+	err = deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		session, err := validate(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if session.ProviderID != providerID {
+			return &apierror.Error{Code: apierror.CodeConflict, Message: "session changed during simulation"}
 		}
 		result, err = deps.CasinoOrchestrator.ReceiveVerifiedCallback(ctx, tx, tenantID, providerID, verified)
 		if err != nil {

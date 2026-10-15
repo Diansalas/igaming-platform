@@ -386,11 +386,22 @@ func LaunchSessionVendorBootstrapped(ctx context.Context, tx pgx.Tx, sessionID u
 // no idempotency record, no gate re-evaluation (postBet re-evaluates the game,
 // capability, RG, risk and session on every bet). ErrLaunchSessionNotActive
 // when the CAS matched nothing.
-func ConsumeLaunchSessionForMockPlay(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) error {
+//
+// A3 SR3-4 (security review): the function is MOCK-only by construction, not
+// by its caller's discipline. It requires the MockCasinoProvider value (a
+// real adapter cannot be passed) and the UPDATE carries a positive predicate,
+// provider_id = the id that mock is registered under, so even a misrouted call
+// can never consume a session that belongs to any other provider. A static
+// test pins that the only callers are the play-simulation handlers.
+func ConsumeLaunchSessionForMockPlay(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, mock *MockCasinoProvider, mockProviderID string) error {
+	if mock == nil || mockProviderID == "" {
+		return fmt.Errorf("%w: the mock play consume requires the mock provider and its id", ErrInvalidInput)
+	}
 	tag, err := tx.Exec(ctx,
 		`UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now()
-		  WHERE id = $1 AND status = 'active' AND mode = 'real' AND expires_at > now()`,
-		sessionID,
+		  WHERE id = $1 AND status = 'active' AND mode = 'real' AND expires_at > now()
+		    AND provider_id = $2`,
+		sessionID, mockProviderID,
 	)
 	if err != nil {
 		return fmt.Errorf("casino: consume launch session for mock play: %w", err)

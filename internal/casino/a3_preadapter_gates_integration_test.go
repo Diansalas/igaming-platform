@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
 type a3Env struct {
@@ -411,9 +412,30 @@ func TestA3_WinRedelivery_SameReferenceDifferentKindIsNotAReplay(t *testing.T) {
 	if err == nil && r.Replayed {
 		t.Fatalf("a win must not be answered with a bet posting as 'replayed': %+v", r)
 	}
+	// LF-A3-4: the exact refusal, not merely "not a replay".
+	if !errors.Is(err, ledger.ErrIdempotencyKeyReused) {
+		t.Fatalf("a win reusing a bet's reference must be ledger.ErrIdempotencyKeyReused, got %+v %v", r, err)
+	}
 	if n := e.countTx(t, "shared-ref"); n != 1 {
 		t.Fatalf("expected the one original (bet) posting, got %d", n)
 	}
+}
+
+// LF-A3-4: a tombstone under a reference is not a posted win. A win arriving
+// for a reference a rollback already tombstoned is refused with exactly
+// ErrOriginalTombstoned (E10); the casino_win type filter of
+// findPostedWinTransaction is what keeps the tombstone from being answered as
+// a "replay".
+func TestA3_WinAfterTombstone_IsOriginalTombstonedNotAReplay(t *testing.T) {
+	e := a3SetupConsumed(t, 10000)
+	if r, err := e.receive(t, CallbackEventRollback, "rb-for-tomb", "tomb-win", "round-t", 0, uuid.Nil); err != nil || !r.Tombstoned {
+		t.Fatalf("setup: a rollback of an unseen original must tombstone: %+v %v", r, err)
+	}
+	r, err := e.receive(t, CallbackEventWin, "tomb-win", "", "round-t", 500, uuid.Nil)
+	if !errors.Is(err, ErrOriginalTombstoned) || r.Replayed {
+		t.Fatalf("a win after its tombstone must be ErrOriginalTombstoned (not a replay), got %+v %v", r, err)
+	}
+	e.requireBalance(t, 10000)
 }
 
 // Duplicates verified UNDER CONCURRENCY, not only sequentially: N parallel

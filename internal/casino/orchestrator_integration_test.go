@@ -1344,20 +1344,36 @@ func TestReceiveCallback_WinCreditsBettorsWalletNeverPayloadPlayer(t *testing.T)
 		_, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", winPayload)
 		return err
 	})
-	if err != nil {
-		t.Fatalf("win: %v", err)
+	// A3 SR3-1 (owner decision: fail closed) INVERTS this test's outcome. It
+	// used to assert that the win was accepted and credited the actual bettor.
+	// The protected property - the payload-named player is never credited and
+	// never gets a wallet - now holds because the disagreement is REFUSED:
+	// nothing posts, no wallet moves, one mismatch audit row is kept.
+	if !errors.Is(err, ErrPlayerRefMismatch) || !errors.Is(err, ErrPlayerRefUnresolved) {
+		t.Fatalf("a win naming another player must be refused with ErrPlayerRefMismatch, got %v", err)
+	}
+	a3RecordRejection(t, pool, fA.tenantID, "mock-casino", err)
+	if n := a3AuditCount(t, pool, fA.tenantID, AuditActionCallbackPlayerRefMismatch); n != 1 {
+		t.Fatalf("expected exactly one %s audit row, got %d", AuditActionCallbackPlayerRefMismatch, n)
 	}
 
-	// The ACTUAL bettor (fA) must be the one credited, never otherPlayerID.
-	if balance := cashBalance(t, pool, fA); balance != 8000 {
-		t.Fatalf("expected the actual bettor to be credited (5000-1000+4000=8000), got %d", balance)
+	// The bettor is not credited either: the bet's debit stands, no win posted.
+	if balance := cashBalance(t, pool, fA); balance != 4000 {
+		t.Fatalf("expected the bettor untouched by the refused win (5000-1000=4000), got %d", balance)
 	}
+	var winTxs int
 	var otherPlayerHasWallet bool
 	err = pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND provider_tx_id = 'win-misdirect'`, fA.tenantID).Scan(&winTxs); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM wallets WHERE player_account_id = $1)`, otherPlayerID).Scan(&otherPlayerHasWallet)
 	})
 	if err != nil {
 		t.Fatalf("check other player wallet: %v", err)
+	}
+	if winTxs != 0 {
+		t.Fatalf("the refused win must not post, got %d transactions", winTxs)
 	}
 	if otherPlayerHasWallet {
 		t.Fatal("the payload-named player must never have had a wallet created or credited for this win")

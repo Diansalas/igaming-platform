@@ -161,7 +161,11 @@ invariant preserved:
 - In the domain transaction, before the verified callback is redeemed, an
   `active` session is moved to `consumed` by one compare-and-swap
   (`casino.ConsumeLaunchSessionForMockPlay`: `status = 'active' AND mode =
-  'real' AND expires_at > now()`), audited as the player-attributed
+  'real' AND expires_at > now() AND provider_id = <the mock provider's id>`;
+  SR3-4: the function takes the `*MockCasinoProvider` value, so a real adapter
+  cannot be passed, and a static test (`TestA3_MockConsumeIsOnlyCalledFrom...`)
+  fails the build if any non-test code outside `runCasinoPlaySimulation` calls
+  it), audited as the player-attributed
   `casino_play_simulation.session_consumed`. A concurrent first wager that
   loses the CAS re-reads the session and proceeds only if it is now
   `consumed` without a vendor bootstrap row. It writes no bootstrap record,

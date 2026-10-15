@@ -36,6 +36,66 @@ import (
 // deterministic 400; nothing is posted.
 var ErrPlayerRefUnresolved = fmt.Errorf("%w: player_ref does not resolve for this tenant and provider", ErrInvalidInput)
 
+// playerRefMismatchError is the sentinel type of ErrPlayerRefMismatch. Its text
+// is IDENTICAL to ErrPlayerRefUnresolved's so the HTTP response is no oracle
+// distinguishing "valid reference of another player" from "unknown reference";
+// the distinction exists only internally (rejection class, audit row).
+type playerRefMismatchError struct{}
+
+func (playerRefMismatchError) Error() string { return ErrPlayerRefUnresolved.Error() }
+func (playerRefMismatchError) Unwrap() error { return ErrPlayerRefUnresolved }
+
+// ErrPlayerRefMismatch (A3 SR3-1, owner decision: fail closed): the callback's
+// player reference resolves, for this tenant and provider, to a player OTHER
+// than the one the platform's own state binds the money movement to (the launch
+// session's owner for a bet, the round's bettor for a win, the original's owner
+// for a rollback). It is an ErrPlayerRefUnresolved (same 400, same text) and is
+// additionally a recorded rejection (casino_callback.player_ref_mismatch).
+var ErrPlayerRefMismatch error = playerRefMismatchError{}
+
+// postedTxPlayers returns the distinct player accounts that own the wallets on
+// a posted ledger transaction's player-side legs. A well-formed casino bet/win
+// has exactly one; the caller compares every returned player.
+func postedTxPlayers(ctx context.Context, tx pgx.Tx, tenantID, ledgerTxID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT DISTINCT w.player_account_id
+		   FROM ledger_entries le
+		   JOIN ledger_accounts la ON la.id = le.ledger_account_id
+		   JOIN wallets w ON w.id = la.wallet_id
+		  WHERE le.ledger_transaction_id = $1 AND le.tenant_id = $2`, ledgerTxID, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("casino: load posted transaction's player: %w", err)
+	}
+	defer rows.Close()
+	var out []uuid.UUID
+	for rows.Next() {
+		var p uuid.UUID
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("casino: scan posted transaction's player: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// postedTxOwnedBy reports whether every player-side leg of the posted
+// transaction belongs to player (and at least one exists).
+func postedTxOwnedBy(ctx context.Context, tx pgx.Tx, tenantID, ledgerTxID, player uuid.UUID) (bool, error) {
+	players, err := postedTxPlayers(ctx, tx, tenantID, ledgerTxID)
+	if err != nil {
+		return false, err
+	}
+	if len(players) == 0 {
+		return false, nil
+	}
+	for _, p := range players {
+		if p != player {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // GetOrCreateProviderPlayerRef returns the opaque player reference for
 // (tenantID, providerID, playerAccountID), creating it on first use. Safe
 // under concurrency: the INSERT is ON CONFLICT DO NOTHING on the natural

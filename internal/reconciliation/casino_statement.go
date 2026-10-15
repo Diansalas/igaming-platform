@@ -139,17 +139,45 @@ type CasinoStatementInfo struct {
 	Totals            int
 	TotalsProvided    bool
 	TombstonePairings int
+	// CoverageEnd is the validated instant a provider statement vouched for;
+	// zero for a Synthetic in-house source (no bound).
+	CoverageEnd time.Time
 }
 
 // AuditMetadata renders i for the run's audit record.
 func (i CasinoStatementInfo) AuditMetadata() map[string]any {
-	return map[string]any{
+	md := map[string]any{
 		"statement_lines":             i.Lines,
 		"statement_totals":            i.Totals,
 		"statement_totals_provided":   i.TotalsProvided,
 		"rollback_tombstone_pairings": i.TombstonePairings,
 	}
+	if !i.CoverageEnd.IsZero() {
+		// Also the monotonicity anchor: the next run refuses a statement whose
+		// coverage is earlier than this (A3 SR3-3).
+		md["coverage_end"] = i.CoverageEnd.UTC().Format(time.RFC3339Nano)
+	}
+	return md
 }
+
+// CasinoCoverageMaxLag is how far before the run's period end a provider
+// statement's CoverageEnd may lie. A statement vouching only for an instant
+// long before the period would leave everything after it out of the comparison
+// and report an empty or stale ledger as clean. PROVIDER DEPENDENT: the first
+// real source may need a different bound (record it in its ADR).
+const CasinoCoverageMaxLag = time.Hour
+
+// CasinoCoverageMaxClockSkew bounds how far past the validation time a
+// statement's CoverageEnd may lie (a coverage claim about the future would
+// bring postings the provider cannot have seen into the comparison).
+const CasinoCoverageMaxClockSkew = 5 * time.Minute
+
+// ErrCasinoStatementCoverage is returned when a provider statement's
+// CoverageEnd is unacceptable (A3 SR3-3, security review): missing, too old,
+// in the future, or earlier than the previous run's coverage. The run fails
+// closed: a statement that does not vouch for a credible instant must never
+// produce a clean result.
+var ErrCasinoStatementCoverage = errors.New("reconciliation: casino statement coverage_end is not acceptable")
 
 // ErrCasinoStatementFetchUnderTx is returned when a casino statement fetch is
 // attempted while a pooled database transaction is held (CAS-STMT-IO-1,
@@ -170,6 +198,10 @@ type FetchedCasinoStatement struct {
 	Label string
 	statement.CasinoStatement
 	renderer statement.CasinoLedgerRenderer
+	// synthetic is set by FetchCasinoStatement for a source that marks itself
+	// Synthetic. Only a Synthetic source may omit CoverageEnd; the zero value
+	// (false) is the strict, fail-closed default.
+	synthetic bool
 }
 
 // FetchCasinoStatement fetches tenantID's statement from source. It must be
@@ -190,7 +222,8 @@ func FetchCasinoStatement(ctx context.Context, source statement.CasinoStatementS
 		if err != nil {
 			return FetchedCasinoStatement{Label: source.Label()}, fmt.Errorf("reconciliation: casino statement source %q: %w", source.Label(), err)
 		}
-		return FetchedCasinoStatement{Label: source.Label(), CasinoStatement: stmt}, nil
+		_, synth := source.(statement.SyntheticSource)
+		return FetchedCasinoStatement{Label: source.Label(), CasinoStatement: stmt, synthetic: synth}, nil
 	case statement.CasinoLedgerRenderer:
 		// Only a component that marks itself Synthetic may render inside the
 		// match transaction; anything else would be a provider source reading
@@ -198,7 +231,7 @@ func FetchCasinoStatement(ctx context.Context, source statement.CasinoStatementS
 		if _, ok := source.(statement.SyntheticSource); !ok {
 			return FetchedCasinoStatement{Label: source.Label()}, fmt.Errorf("%w: %q is not Synthetic", ErrCasinoStatementSourceShape, source.Label())
 		}
-		return FetchedCasinoStatement{Label: source.Label(), renderer: src}, nil
+		return FetchedCasinoStatement{Label: source.Label(), renderer: src, synthetic: true}, nil
 	default:
 		return FetchedCasinoStatement{Label: source.Label()}, fmt.Errorf("%w: %q", ErrCasinoStatementSourceShape, source.Label())
 	}
@@ -239,7 +272,12 @@ func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, peri
 		c := fetched.CoverageEnd
 		cutoff = &c
 	}
-	info := CasinoStatementInfo{Lines: len(lines), Totals: len(totals), TotalsProvided: len(totals) > 0}
+	if !fetched.synthetic {
+		if err := validateCasinoCoverage(ctx, tx, tenantID, periodEnd, fetched.CoverageEnd); err != nil {
+			return Run{}, nil, CasinoStatementInfo{}, err
+		}
+	}
+	info := CasinoStatementInfo{Lines: len(lines), Totals: len(totals), TotalsProvided: len(totals) > 0, CoverageEnd: fetched.CoverageEnd}
 
 	footprint, err := casHasFootprint(ctx, tx, tenantID)
 	if err != nil {
@@ -267,6 +305,41 @@ func RunCasinoStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, peri
 		return Run{}, nil, CasinoStatementInfo{}, err
 	}
 	return run, mismatches, info, nil
+}
+
+// validateCasinoCoverage checks a PROVIDER statement's CoverageEnd (A3 SR3-3).
+// The ledger side of the comparison is bounded by it, so an unchecked value is
+// an unchecked scope: a 1970 bound compares an empty ledger to an empty
+// statement and reports clean. Refused: zero, earlier than periodEnd minus
+// CasinoCoverageMaxLag, later than now plus CasinoCoverageMaxClockSkew, or
+// earlier than the coverage the previous successful run of this stream
+// recorded (read from its audit metadata under the stream's advisory lock).
+func validateCasinoCoverage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodEnd, coverageEnd time.Time) error {
+	if coverageEnd.IsZero() {
+		return fmt.Errorf("%w: a provider (non-Synthetic) statement must state its coverage_end", ErrCasinoStatementCoverage)
+	}
+	if floor := periodEnd.Add(-CasinoCoverageMaxLag); coverageEnd.Before(floor) {
+		return fmt.Errorf("%w: %s is earlier than the period end %s minus %s", ErrCasinoStatementCoverage,
+			coverageEnd.UTC().Format(time.RFC3339), periodEnd.UTC().Format(time.RFC3339), CasinoCoverageMaxLag)
+	}
+	if ceil := time.Now().Add(CasinoCoverageMaxClockSkew); coverageEnd.After(ceil) {
+		return fmt.Errorf("%w: %s is later than now plus %s", ErrCasinoStatementCoverage,
+			coverageEnd.UTC().Format(time.RFC3339), CasinoCoverageMaxClockSkew)
+	}
+	var prev *time.Time
+	err := tx.QueryRow(ctx,
+		`SELECT (metadata->>'coverage_end')::timestamptz FROM audit_log
+		  WHERE tenant_id = $1 AND action = 'reconciliation.sweep_run'
+		    AND metadata->>'stream' = $2 AND metadata ? 'coverage_end'
+		  ORDER BY created_at DESC LIMIT 1`, tenantID, string(StreamCasinoStatement)).Scan(&prev)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("reconciliation: read previous casino statement coverage: %w", err)
+	}
+	if prev != nil && coverageEnd.Before(*prev) {
+		return fmt.Errorf("%w: %s is earlier than the previous run's coverage %s", ErrCasinoStatementCoverage,
+			coverageEnd.UTC().Format(time.RFC3339Nano), prev.UTC().Format(time.RFC3339Nano))
+	}
+	return nil
 }
 
 // requireSnapshotIsolation fails closed unless tx reads one snapshot for

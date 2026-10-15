@@ -1074,6 +1074,14 @@ func TestFailureModeMatrix_H_BetNamingAnUnknownSessionRejectedCleanly(t *testing
 // (TestCasinoPlay_CrossPlayerSessionDenied and friends), which test the
 // HTTP boundary's own player-scope check rather than postBet's resolution.
 func TestFailureModeMatrix_I_BetPayloadNamingAnotherPlayerDebitsOnlyTheSessionOwner(t *testing.T) {
+	// A3 SR3-1 (owner decision: fail closed) INVERTS this test's outcome. It
+	// used to assert that a bet naming another player's (valid) reference was
+	// accepted and debited only the session owner. The property it protects -
+	// the payload-named player is financially untouched, and only the session
+	// owner's wallet can ever be debited - is now enforced more strongly: the
+	// disagreement between the vendor's player and the platform's session
+	// binding is REFUSED (same 400 as an unresolvable reference), nothing is
+	// posted, neither wallet moves, and exactly one mismatch audit row is kept.
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
 	fundWallet(t, pool, f, 5000)
@@ -1087,31 +1095,38 @@ func TestFailureModeMatrix_I_BetPayloadNamingAnotherPlayerDebitsOnlyTheSessionOw
 	correlationID := roundCorrelationID(f.tenantID, "mock-casino", roundID)
 	// Signed correctly, but naming the OTHER player in the payload.
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-fm-i", "", roundID, "game-1", 1100, "EUR", OutcomeSucceeded, "", playerRefFor(t, pool, f.tenantID, "mock-casino", otherPlayerID), sessionID)
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
-	}); err != nil {
-		t.Fatalf("bet naming another player: %v", err)
+	})
+	if !errors.Is(err, ErrPlayerRefMismatch) || !errors.Is(err, ErrPlayerRefUnresolved) {
+		t.Fatalf("a bet naming another player must be refused with ErrPlayerRefMismatch (an ErrPlayerRefUnresolved, same 400), got %v", err)
+	}
+	a3RecordRejection(t, pool, f.tenantID, "mock-casino", err)
+	if n := a3AuditCount(t, pool, f.tenantID, AuditActionCallbackPlayerRefMismatch); n != 1 {
+		t.Fatalf("expected exactly one %s audit row, got %d", AuditActionCallbackPlayerRefMismatch, n)
 	}
 
-	if balance := cashBalance(t, pool, f); balance != 3900 {
-		t.Fatalf("expected the SESSION OWNER debited (5000-1100=3900), got %d", balance)
+	if balance := cashBalance(t, pool, f); balance != 5000 {
+		t.Fatalf("expected the SESSION OWNER untouched (5000), got %d", balance)
 	}
 	if balance := fmWalletCashBalance(t, pool, f.tenantID, otherWalletID); balance != 0 {
 		t.Fatalf("the payload-named player must be financially untouched, got balance %d", balance)
 	}
-	// And the entries themselves name the session owner's wallet only.
-	var otherEntryCount int
+	var betTxs, otherEntryCount int
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND provider_tx_id = 'bet-fm-i'`, f.tenantID).Scan(&betTxs); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx,
 			`SELECT count(*) FROM ledger_entries e
 			   JOIN ledger_accounts la ON la.id = e.ledger_account_id
 			  WHERE e.tenant_id = $1 AND la.wallet_id = $2`, f.tenantID, otherWalletID).Scan(&otherEntryCount)
 	}); err != nil {
-		t.Fatalf("count entries against the other player's wallet: %v", err)
+		t.Fatalf("count: %v", err)
 	}
-	if otherEntryCount != 0 {
-		t.Fatalf("expected zero ledger entries against the payload-named player's wallet, got %d", otherEntryCount)
+	if betTxs != 0 || otherEntryCount != 0 {
+		t.Fatalf("nothing may post: bet txs=%d, entries against the other wallet=%d", betTxs, otherEntryCount)
 	}
 	fmAssertCorrelationBalanced(t, pool, f.tenantID, correlationID)
 }

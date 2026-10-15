@@ -104,7 +104,11 @@ id, an unknown reference, or another tenant's or provider's reference is refused
 `ErrPlayerRefUnresolved`) before any ledger read or write, and a callback body that names
 `player_account_id` at all is refused as malformed. The reference identifies the player to the
 vendor; it never authorises: the wallet a bet debits is the launch session's, the wallet a win
-credits is the round's own bet's.
+credits is the round's own bet's. It must also AGREE with them: a valid reference of a different
+player (than the session's owner on a bet, the bettor on a win, the original's owner on a rollback)
+is refused with the same 400 as an unresolvable one, nothing is posted, and the refusal is audited
+(`casino_callback.player_ref_mismatch`); on a replay it is a 409 payload mismatch. A rollback with
+no `player_ref` is still accepted.
 
 ## What this endpoint does NOT do
 
