@@ -1,5 +1,11 @@
 # Restore from backup (matches the local drill)
 
+> **A12 (2026-10-15) update:** the data-bearing logical backup/restore, the dedicated backup role and a real base backup + WAL
+> archive PITR are now implemented and exercised locally on throwaway clusters: `backup-restore-dr.md` (runbooks, measured
+> RTO/RPO), `deploy/backup/`, ADR 0122. This file stays as the record of the schema-focused drill and its findings; where it
+> says "not attempted", "BLOCKED" or "OPEN" for those items, `backup-restore-dr.md` supersedes it. Managed RDS behaviour is still
+> NOT proven.
+
 Status: **drill procedure IMPLEMENTED and exercised LOCALLY against synthetic data. Production restore: NOT MET.**
 This runbook is written to match what `deploy/drill/backup-restore-drill.sh` actually does and verifies, so each step
 here has been run at least once against a scratch database. It is not evidence that any production backup exists:
@@ -47,7 +53,10 @@ It never alters a role or password, never uses `sudo`/`pkill`, refuses non-local
 
 ### What the drill found (findings are part of the evidence)
 
-1. **`BACKUP-ROLE-1` (OPEN; human/ADR decision, AWS-gated).** A full-data `pg_dump` by the migration-owner role `igaming`
+1. **`BACKUP-ROLE-1` (finding of 2026-10-12; DECIDED 2026-10-15 by owner decision 7 and ADR 0122: managed PITR primary plus a
+   dedicated audited `igaming_backup` role for logical dumps, implemented and exercised on a throwaway cluster by
+   `deploy/backup/` - see `backup-restore-dr.md`; the text below is the original finding and security recommendation, kept
+   as the record).** A full-data `pg_dump` by the migration-owner role `igaming`
    is **refused**: `query would be affected by row-level security policy for table "alert_deliveries"`. The tables are
    `FORCE ROW LEVEL SECURITY` and the owner has no RLS-bypass attribute (correctly so). The drill records this refusal on
    every run and does not work around it: lifting FORCE RLS on a scratch database just to dump it was considered while
@@ -95,12 +104,15 @@ Applies to any restored copy once a backup mechanism exists. Steps 1-4 are what 
    (never as the runtime role). Use `--exit-on-error` and `--no-owner`; a restore that logs errors and continues is a
    partial restore.
 
-   **A data-bearing `pg_restore` is not a plain copy.** It `COPY`s into tables with the ledger immutability, balance and
-   projection triggers and FORCE RLS `WITH CHECK` policies in force, so the restoring role must be able to satisfy them
-   (see BACKUP-ROLE-1). The only workarounds, `pg_restore --disable-triggers` or `session_replication_role = replica`,
-   need a superuser and **disable the very guards the platform relies on**: they are **FORBIDDEN** outside a human-run,
-   audited incident with explicit authorisation, and the drill and its static tests never use them. Prefer a physical
-   restore (snapshot / PITR), which brings table contents back without replaying DML through the triggers.
+   **CORRECTION (A12, 2026-10-15, measured):** a full `pg_restore` of a `pg_dump -Fc` archive into an **empty new database** does
+   NOT replay the data through the triggers or RLS policies: the archive is ordered pre-data (tables), data (`COPY`), post-data
+   (indexes, constraints, **triggers**, **RLS enablement and policies**), so the data loads before any guard exists. No
+   superuser, `--disable-triggers` or `session_replication_role` is needed, and none is used (`deploy/backup/restore.sh`,
+   single transaction, all-or-nothing; the restored database was then verified identical to the backup's own baseline, row by
+   row by content hash). The earlier statement here that a data-bearing restore "fires the ledger triggers" applied to a
+   **data-only** restore into an existing schema, which is not a supported path. `--disable-triggers` and
+   `session_replication_role = replica` remain **FORBIDDEN** for restores. The physical path (snapshot / PITR) is still the
+   primary disaster-recovery mechanism.
 3. **Re-apply database-level privileges.** `deploy/drill/post-restore.sql` restores **database-level ACLs only**
    (`CONNECT`, the `TEMPORARY` revoke, schema `USAGE`); it is enough for the scratch drill. **Production must re-run all of
    `deploy/aws/sql/init-runtime-role.rds.sql`** (the environment's complete role-provisioning script), not just the drill

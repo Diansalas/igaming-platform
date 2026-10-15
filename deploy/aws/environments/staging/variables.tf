@@ -94,9 +94,21 @@ variable "db_name" {
   default = "igaming_platform_staging"
 }
 
+# --- A12 / ADR 0122: managed point-in-time recovery, snapshots and audit logging for the staging database.
+#     PREPARED, NOT APPLIED: nothing has been planned against AWS or applied; the single authorised staging deploy
+#     follows docs/runbooks/aws-staging-deploy-plan.md. These defaults replace the previous disposable ones
+#     (7 days, no deletion protection, no final snapshot): a later teardown needs the steps in that runbook.
+
 variable "db_backup_retention_days" {
-  type    = number
-  default = 7
+  description = "Automated backups = the PITR window, in days (1..35). 14 for staging."
+  type        = number
+  default     = 14
+}
+
+variable "db_backup_window" {
+  description = "Daily UTC snapshot window (hh24:mi-hh24:mi); must not overlap the maintenance window."
+  type        = string
+  default     = "01:00-02:00"
 }
 
 variable "db_multi_az" {
@@ -105,8 +117,50 @@ variable "db_multi_az" {
 }
 
 variable "db_deletion_protection" {
-  type    = bool
-  default = false
+  description = "true: terraform destroy / DeleteDBInstance is refused until protection is lifted on purpose (apply with -var db_deletion_protection=false first)."
+  type        = bool
+  default     = true
+}
+
+variable "db_skip_final_snapshot" {
+  description = "false: a final snapshot is taken when the instance is destroyed."
+  type        = bool
+  default     = false
+}
+
+variable "db_final_snapshot_identifier" {
+  description = "Final snapshot name. RDS refuses a name that already exists, so after a teardown either delete the previous snapshot (once it has served its purpose) or set a new name per deploy, e.g. igaming-staging-db-final-<short-sha>."
+  type        = string
+  default     = "igaming-staging-db-final"
+}
+
+variable "db_kms_key_arn" {
+  description = "Reference to an EXISTING customer-managed KMS key ARN for storage/snapshot/PITR encryption. Null = the AWS-managed aws/rds key (still encrypted; ADR 0086 keeps CMKs out of the disposable staging by default). Setting it is a deploy-time decision; no key is created from this variable."
+  type        = string
+  default     = null
+}
+
+variable "db_log_exports" {
+  description = "RDS logs exported to CloudWatch Logs (postgresql, upgrade)."
+  type        = list(string)
+  default     = ["postgresql", "upgrade"]
+}
+
+variable "db_enable_pgaudit" {
+  description = "Add pgaudit to shared_preload_libraries (needs a reboot, then CREATE EXTENSION pgaudit; docs/runbooks/aws-staging-deploy-plan.md). AWS documents pgaudit for RDS PostgreSQL 16; not verified here."
+  type        = bool
+  default     = true
+}
+
+variable "backup_runner_secret_arn" {
+  description = "REFERENCE ONLY: ARN of the Secrets Manager secret that will hold the igaming_backup credential (JSON keys username/password) for the backup runner. Nothing is created from it and no value is ever set by Terraform. Null until the operator creates the secret out of band at deploy time."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.backup_runner_secret_arn == null || can(regex("^arn:aws:secretsmanager:eu-central-1:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$", var.backup_runner_secret_arn))
+    error_message = "backup_runner_secret_arn must be a Secrets Manager secret ARN in eu-central-1."
+  }
 }
 
 # --- Secrets ---

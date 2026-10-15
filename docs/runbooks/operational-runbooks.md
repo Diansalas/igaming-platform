@@ -187,12 +187,17 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 
 ## 8. Restore verification (once a backup mechanism exists)
 
-A local restore drill and a restore procedure now exist: `docs/runbooks/restore-from-backup.md` (script
-`deploy/drill/backup-restore-drill.sh`, verifiers `deploy/drill/verify.sql`). They are rehearsed on scratch databases only.
-No managed backup mechanism exists, so there is still no production restore path; see
-`docs/runbooks/backup-and-disaster-recovery.md`'s "Minimum action plan". Do not attempt an improvised restore against production without
-that groundwork; an untested restore procedure executed for the first time
-during a real incident is itself a major risk.
+**Backup, restore and point-in-time recovery: `docs/runbooks/backup-restore-dr.md`** (A12, ADR 0122). It holds the step-by-step
+recoveries (full loss, logical corruption / operator error -> PITR to a timestamp, single-tenant guidance), the post-restore
+checklist (verify, credentials, `database_environment` anchor, reconciliation, provider reconciliation, approvals,
+communication) and the measured RTO/RPO evidence of the LOCAL drill (`deploy/backup/drill.sh`: a real data-bearing logical
+backup/restore with the dedicated `igaming_backup` role, and a real base backup + WAL archive PITR, on a throwaway cluster).
+The older schema-focused drill and its findings remain in `docs/runbooks/restore-from-backup.md`
+(`deploy/drill/backup-restore-drill.sh`). Both are rehearsed on scratch/throwaway databases only: **no managed (RDS) backup or
+PITR has been exercised** (AWS-gated; `docs/runbooks/aws-staging-deploy-plan.md` is the prepared, unapplied checklist), so there is
+still no proven production restore path. Do not attempt an improvised restore against production; an untested restore procedure
+executed for the first time during a real incident is itself a major risk. A restore is a declared incident with a human
+decision (database authority plus finance/compliance), and "fix forward with compensating entries" remains the default.
 
 ## 9. Security incident (suspected compromise / breach)
 
