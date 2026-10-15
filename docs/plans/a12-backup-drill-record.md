@@ -271,3 +271,216 @@ PITR_TARGET|lsn=0/3E008220|segment=00000001000000000000003E|time=2026-10-15 20:3
 - gpg encryption hook is implemented but only the age path was exercised.
 - The seeder does not exercise live concurrent traffic during the dump (snapshot semantics only) and does not boot the real `platform-api` against the restored database.
 - The extended `go test -tags integration` suite was not run against the new code (the seeder is excluded from normal runs by its build tags).
+
+## 8. Security re-review of the fix round (`security`, 2026-10-15; commits 7e16ad0, 8346ab6, fdab1de)
+
+- Reviewer: `security` specialist. Independent of the author's claims: every closure below was checked in the code, and the new findings marked
+  PoC were reproduced.
+- Method:
+  - code review of `deploy/backup/*` (scripts, libs, SQL, `scramhash`), ADR 0122, both runbooks, and the `deploy/aws/modules/database` delta;
+  - `go test ./deploy/...` (all ok);
+  - guard-function probes (no connection made);
+  - a PoC on my own throwaway cluster (127.0.0.1:5497, `/tmp/pgdrill-SVz7PQ`, OS user `postgres`; stopped and removed afterwards).
+- Not touched: the shared 5432 cluster, any role or password outside that throwaway cluster, sudo, pkill, AWS, terraform. The full drill was not re-run.
+
+### Verdict: NOT APPROVED
+
+**Why: H3 is not closed.** The signature check can be bypassed without breaking any signature (SR12R-1, reproduced end to end). Real-data
+logical restore stays **BLOCKED**.
+
+**What is approved:**
+- Logical **backup** (`backup.sh`) on synthetic data in throwaway clusters.
+- The H1/H2 fixes.
+- The local drill tooling.
+
+**Launch-blocking flags for the orchestrator:**
+- SR12R-1 blocks any restore of a non-synthetic logical backup.
+- SR12R-2 and SR12R-4 block real-data use against a remote target.
+
+### Closure check of the first review (d0d804b)
+
+| Finding | Re-review result |
+|---|---|
+| H1 | **CLOSED.** The recipient is validated with a probe before the dump. The dump is streamed (`pg_dump | tee | age/gpg`) under pipefail. Every artefact is checked by magic bytes. A plaintext or `.partial` artefact is refused. The manifest's `encryption` field is derived from the files. |
+| H2 | **CLOSED** for `backup.sh`. Plaintext never reaches the run dir. SIGPIPE is ignored. INT/TERM/HUP go through cleanup. The keepalive plus the holder monitor work. The startup sweep runs (see SR12R-6/7 for its own defects). The temp dir holds only the baseline (counts and hashes). |
+| H3 | **NOT CLOSED.** The signature verifies `SHA256SUMS`, but the restore does not restore what was signed: SR12R-1. The superuser-load refusal works, but its privilege model is incomplete: SR12R-2. |
+| M1 | Mitigated as stated. The residuals are recorded honestly. Accepted. |
+| M2 | **CLOSED.** Client-side SCRAM verifier; the SQL rejects anything else. |
+| M3 | **PARTIAL.** The name deny-list and the attribute check exist, but the owner role's memberships are not checked: SR12R-2 (PoC). |
+| M4 | **CLOSED in design.** The anchor data is excluded and the expectation is required. However, the source anchor is read from a file SR12R-1 lets an attacker substitute, and staging cannot pass (SR12R-5). |
+| M5 | **PARTIAL.** IPv4 aliases are fixed, but compressed IPv6 spellings of loopback pass as "remote": SR12R-3. |
+| M6/M7 | Recorded. Accepted for staging; requirements apply before production. |
+| M8 | Recorded, and the module enables IAM authentication. The scripts cannot use it yet: SR12R-9. |
+| L1, L2, L4, L5, L6, L7, L9, L10 | **CLOSED.** |
+| L3 | **PARTIAL**: SR12R-8. |
+| L8 | **CLOSED**, with a regression: SR12R-7. |
+
+### Findings
+
+**SR12R-1. HIGH: the signature can be bypassed. An unlisted plaintext file shadows the signed encrypted artefact, and the signed list and artefacts are re-read after verification (TOCTOU). Reproduced.**
+
+The cause is in `restore.sh`:
+- `materialise()` (lines 112-127) first returns `${BACKUP_DIR}/${f}` if a plaintext file of that name exists, and only falls back to `${f}.age`/`.gpg`.
+- `sha256sum --check` checks only the names listed in `SHA256SUMS`.
+- The "exactly one listed artefact" awk check counts `db.dump.age` as the `db.dump` entry.
+
+So a party with write access to backup storage can do the following without touching any signed byte:
+1. Add a plaintext `db.dump` (any archive) and a plaintext `baseline.txt` next to a genuine signed, age-encrypted set.
+2. The signature verifies and the checksums verify.
+3. `pg_restore` then loads the attacker's archive.
+4. The M4 anchor check reads the attacker's `baseline.txt`.
+
+PoC on the throwaway cluster, as the non-superuser restore role `drill_restore` (CREATEDB, member of `igaming`), using `--phase all`:
+- **Control:** the legitimate signed set restores `t = LEGIT`, rc=0.
+- **Attacked:** the same signed set, with only the two unlisted files added, gives "signed checksums still verify", restore rc=0, and
+  `t = EVIL: attacker-chosen balances / staff rows`.
+- The attacker's materialized-view function also ran `ALTER ROLE igaming PASSWORD 'attacker-known-pw-123'`. That committed with the restore:
+  logging in as `igaming` with the attacker's password then succeeded (cluster-wide owner credential).
+
+There is also a separate race, independent of the shadowing:
+- `SHA256SUMS` is read three times: by `openssl` verify, by `sha256sum --check`, and by the awk count.
+- Each artefact is read again from `BACKUP_DIR` by `age -d` / `pg_restore` after it was checksummed.
+- age is recipient-anonymous and the recipient is a published public reference, so a storage writer who swaps `db.dump.age` between the
+  check and the decryption needs no secret at all.
+- The manifest's `plaintext_dump_sha256` is never checked on restore.
+
+Required fix:
+1. Copy `SHA256SUMS` and `SHA256SUMS.sig` into `$WORK`. Verify the copy, and use only the copy from then on.
+2. Refuse a set directory that contains any entry not listed in the signed list, other than `SHA256SUMS` and `SHA256SUMS.sig`. Also refuse symlinks
+   and non-regular files.
+3. Resolve each artefact only by the exact name in the signed list. An encrypted set must never accept a plaintext name.
+4. Copy each artefact into `$WORK` (or stream it), and hash the bytes that are actually decrypted. Then compare the decrypted dump against
+   the signed manifest's `plaintext_dump_sha256`.
+5. Take the source anchor from the signed manifest and require it to equal the decrypted baseline's anchor.
+6. Add drill cases:
+   - an unlisted plaintext `db.dump`, `baseline.txt` and `globals.sql` beside an encrypted set;
+   - `SHA256SUMS` replaced after verification (a test hook);
+   - an artefact replaced after its checksum.
+
+**SR12R-2. MEDIUM: "the archive has no privilege to abuse" is not true. Neither the owner role's nor the restore role's memberships are checked, and the archive can alter roles. Reproduced.**
+
+- **Owner memberships are not checked.** The owner check (`restore.sh` 184-186) tests only `rolsuper`, `rolbypassrls` and `rolcreaterole`.
+  - PoC: with `GRANT pg_execute_server_program TO igaming`, `restore.sh` accepted `igaming` as owner.
+  - A planted `COPY (SELECT 1) TO PROGRAM 'id > /tmp/...'` ran during the load and wrote `uid=102(postgres)`. Restore rc=0.
+- **The restore (connecting) role's check is incomplete.** It tests only `rolsuper` and `rds_superuser` membership, so these are all accepted:
+  - CREATEROLE (on PG16 a planted entry can `CREATE ROLE x LOGIN PASSWORD ...`, a persistent backdoor login; the RDS master user has CREATEROLE);
+  - membership in `pg_execute_server_program`, `pg_write_server_files`, `pg_read_server_files`, `pg_write_all_data`, `pg_read_all_data` and
+    `pg_signal_backend`.
+- **ADR 0122 section 5a says the archive "cannot touch other databases or roles". That is false.** Acting as the owner, it can run
+  `ALTER ROLE <owner> PASSWORD/SET`, which is cluster-global and commits with an otherwise successful restore (PoC in SR12R-1).
+- The runbook's step "re-provision passwords from the secret store" happens to overwrite a planted password, but it does not undo a planted
+  `ALTER ROLE ... SET`.
+
+Fix:
+- For both the connecting role and the owner role, refuse:
+  - CREATEROLE;
+  - any membership (`pg_has_role(..., 'MEMBER')`, recursive) in `rds_superuser`, `pg_execute_server_program`, `pg_read_server_files`,
+    `pg_write_server_files`, `pg_read_all_data`, `pg_write_all_data`, `pg_signal_backend` or `pg_create_subscription`.
+  - Preferably use an allow-list: the restore role is a member only of the owner, and the owner is a member of nothing.
+- After the load, refuse if `pg_db_role_setting` or the role attributes changed during it.
+- Correct the ADR text.
+- Add a drill case with a planted `ALTER ROLE` entry.
+
+**SR12R-3. MEDIUM: the M5 host guard is bypassed by compressed IPv6 spellings of loopback (guard-function probe, no connection made).**
+
+`bk_host_is_local` judges any IPv6 literal with `bk_addr_is_local`. That matches only `::1`, `::`, `::ffff:7f*` and fully written 8-group forms.
+
+These spellings are classified as remote, and are therefore ALLOWED on **port 5432** once `BACKUP_ALLOW_REMOTE_TARGET` equals them:
+- forms of `::1`: `0::1`, `0:0::1`, `::0:1`, `::0001`, `0000::0001`, `[0::1]`;
+- v4-mapped forms of 127.0.0.1: `0:0:0:0:0:ffff:127.0.0.1`, `0::ffff:7f00:1`.
+
+libpq connects all of them to the loopback. That contradicts the documented "no acknowledgement can override" for the shared cluster.
+
+Fix:
+- Refuse IPv6 literals and IP literals in `BACKUP_ALLOW_REMOTE_TARGET` outright (RDS endpoints are DNS names), or normalise them with a real
+  parser.
+- Add these spellings to `TestGuardCanonicalisesAliasesOfTheSharedCluster`.
+
+**SR12R-4. MEDIUM (blocks real-data use on a remote target): remote connections use `sslmode=require`, which does not authenticate the server.**
+
+- `lib-common.sh` defaults non-local targets to `require`, and unsets `PGSSLROOTCERT` with no `BACKUP_*` replacement.
+- `aws-staging-deploy-plan.md` line 100 prescribes `sslmode=require` for the IAM token.
+- Under `require`, an on-path attacker can terminate TLS and capture the IAM token, which is a 15-minute bearer credential for the BYPASSRLS
+  role sent as a cleartext password inside TLS. The attacker can then read the all-tenant dump stream, or inject content during a restore.
+
+Fix:
+- Non-local targets require `verify-full` with `BACKUP_PGSSLROOTCERT` (the RDS CA bundle), and weaker modes are refused.
+- Correct the plan.
+
+**SR12R-5. LOW: the anchor rule refuses the staging restore the deploy plan prescribes, which invites a rubber stamp.**
+
+- `restore.sh` 136-138 refuses every non-`production` source for a non-drill target.
+- `staging` is a valid anchor (migration 0135), so `aws-staging-deploy-plan.md` 9.2 cannot pass unless someone records `production` on
+  staging. That is exactly the misrecording M4 warned about.
+
+Fix: require an explicit `RESTORE_TARGET_ENVIRONMENT`, and allow a restore only when the source equals the target.
+
+**SR12R-6. LOW: the orphan sweep in `--out-dir` follows symlinks and judges liveness on the local host. Reproduced in a scratch directory.**
+
+- `rm -rf "$d"` runs with `d=<out>/<name>/` (trailing slash), so a symlink `out/x -> /some/dir` whose target holds a `.incomplete` file has
+  its target's **contents** deleted. Verified with GNU rm.
+- `kill -0 <pid>` on shared storage, or after PID reuse, can also delete another runner's in-flight set.
+
+Fix:
+- Skip symlinks.
+- Only remove directories matching the run-name pattern.
+- Record host, pid and start time in `.incomplete`.
+
+**SR12R-7. LOW: `bk_mktemp_dir` runs `chmod 700` on the temp ROOT, which defaults to `$TMPDIR` or `/tmp`.**
+
+A root-run runner without `BACKUP_TMPDIR` would set `/tmp` to 0700, dropping the sticky world-writable mode and breaking other services.
+The drill is unaffected because it sets `BACKUP_TMPDIR`.
+
+Fix: never chmod a pre-existing root, and require `BACKUP_TMPDIR` for non-drill targets.
+
+**SR12R-8. LOW: the L3 check in `verify.sh` only inspects URL userinfo.**
+
+A keyword/value DSN (`... password=x`) and a URL query (`postgres://u@h/db?password=x`) both pass.
+
+Fix: refuse any `password` key in either form, case-insensitively.
+
+**SR12R-9. LOW (design gap before staging step 5.1): M8 cannot be used with the current scripts.**
+
+- `init-backup-role.sql` always requires and sets a password verifier; there is no `rds_iam` variant that leaves the role without a password.
+- `backup.sh` opens a **new** connection for `pg_dumpall` after the dump. An IAM token minted at the start expires after 15 minutes, so a
+  production-length dump fails at the globals step, or tempts a long-lived password.
+
+Fix: design the token refresh (mint a token per connection) and an IAM-only role path before step 5.1.
+
+**SR12R-10. LOW: signed sets are not bound to freshness or environment.**
+
+- Any older set signed by the same key verifies, so a storage writer can roll the operator back to an older set.
+- Nothing requires per-environment signing keys.
+- The verification public key is read twice (once for the fingerprint, once for the verify).
+
+Fix:
+- Use per-environment keys (document it).
+- `restore.sh` prints `created_utc` and the SHA-256 of `SHA256SUMS`, and requires `RESTORE_EXPECT_SET_SHA256` to equal the value from the
+  runner's out-of-band backup log.
+- Copy the public key into `$WORK` before fingerprinting and verifying it.
+
+**Informational:**
+- The `lib-globals.sh` header still says "the checksum manifest is unsigned".
+- `RESTORE_OWNER_ROLE_OVERRIDE` is described as "explicit, logged", but `restore.sh` does not log its use.
+
+### Required tests (added to those of the first review)
+
+1. An unlisted plaintext `db.dump` / `baseline.txt` / `globals.sql` placed beside a signed encrypted set is refused, with no database created
+   (SR12R-1).
+2. `SHA256SUMS`, or an artefact, replaced after verification is refused, and the decrypted dump's hash equals the manifest's
+   `plaintext_dump_sha256` (SR12R-1).
+3. An owner or restore role that is a member of `pg_execute_server_program`, `pg_write_server_files` or `rds_superuser`, or that has
+   CREATEROLE, is refused. A planted `ALTER ROLE` in an archive is detected (SR12R-2).
+4. All the SR12R-3 spellings are refused on 5432, with and without the acknowledgement.
+5. A non-local target without `verify-full` and a root certificate is refused (SR12R-4).
+
+### Not in scope / not proven
+
+- RDS behaviour.
+- KMS signing.
+- Terraform validate/test (not installed).
+- gpg end to end.
+- A full drill re-run.
+- Penetration testing.
+
+This re-review records what was checked at `fdab1de`. It does not certify the subsystem as secure.
