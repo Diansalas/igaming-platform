@@ -48,6 +48,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkpost"
 )
 
 // Synthetic asset codes for this package's locked-split tests (the
@@ -229,7 +230,7 @@ func postCashLock(t *testing.T, pool *db.Pool, f fixture, w Wallet, keyPrefix st
 			return err
 		}
 		reason := "locked_origin_split_read_side_test"
-		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+		_, err = adjlinkpost.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: ledger.TxManualAdjustment, IdempotencyKey: keyPrefix + "-lock",
 			CorrelationID: uuid.New(), ReasonCode: &reason,
 			Entries: []ledger.EntryInput{

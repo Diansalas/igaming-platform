@@ -14,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkfix"
 )
 
 // B-11 (R), LF-13: a debit beyond the balance ends refused_insufficient_funds,
@@ -90,6 +91,21 @@ func (w *world) forgeExecution(t *testing.T, r Request, build func(ctx context.C
 	return err
 }
 
+// withoutLinkFence wraps a forged posting step in the owner-only fixture exemption from migration 0153
+// (adjlinkfix.Without: the two link triggers disabled for this step inside the owner transaction), to show what the
+// older controls still refuse when the 0153 fence is absent (the ADR 0110 s9.4 owner residual).
+func withoutLinkFence(build func(ctx context.Context, tx pgx.Tx, pc, house uuid.UUID) (uuid.UUID, error)) func(ctx context.Context, tx pgx.Tx, pc, house uuid.UUID) (uuid.UUID, error) {
+	return func(ctx context.Context, tx pgx.Tx, pc, house uuid.UUID) (uuid.UUID, error) {
+		var id uuid.UUID
+		err := adjlinkfix.Without(ctx, tx, func() error {
+			var err error
+			id, err = build(ctx, tx, pc, house)
+			return err
+		})
+		return id, err
+	}
+}
+
 // B-12 (ADV): every non-§4 shape is unrepresentable and a forged link is
 // refused (LF-10 link trigger, MA040): a wrong amount, a wrong counter
 // account (house_gaming instead of manual_adjustment), a third entry, the
@@ -119,6 +135,7 @@ func TestB12_ShapeAndForgedLinkRefused(t *testing.T) {
 
 	type forge struct {
 		name  string
+		fence string // MANUAL-ADJ-LINK-1: the 0153 SQLSTATE that now refuses the forged posting itself
 		build func(r Request) func(ctx context.Context, tx pgx.Tx, pc, house uuid.UUID) (uuid.UUID, error)
 	}
 	post := func(ctx context.Context, tx pgx.Tx, in ledger.TransactionInput) (uuid.UUID, error) {
@@ -126,14 +143,14 @@ func TestB12_ShapeAndForgedLinkRefused(t *testing.T) {
 		return res.TransactionID, err
 	}
 	forges := []forge{
-		{"wrong amount", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
+		{"wrong amount", "MA051", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
 			return func(ctx context.Context, tx pgx.Tx, pc, house uuid.UUID) (uuid.UUID, error) {
 				return post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxManualAdjustment,
 					IdempotencyKey: "manual_adjustment:" + r.ID.String(), CorrelationID: r.ID, ReasonCode: reason(r),
 					Entries: []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: r.Amount + 1}, {LedgerAccountID: pc, Direction: ledger.Credit, Amount: r.Amount + 1}}})
 			}
 		}},
-		{"wrong counter account", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
+		{"wrong counter account", "MA051", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
 			return func(ctx context.Context, tx pgx.Tx, pc, _ uuid.UUID) (uuid.UUID, error) {
 				hg, err := ledger.GetOrCreateAccount(ctx, tx, w.Tenant, nil, ledger.AccountHouseGaming, r.AssetCode)
 				if err != nil {
@@ -144,7 +161,7 @@ func TestB12_ShapeAndForgedLinkRefused(t *testing.T) {
 					Entries: []ledger.EntryInput{{LedgerAccountID: hg, Direction: ledger.Debit, Amount: r.Amount}, {LedgerAccountID: pc, Direction: ledger.Credit, Amount: r.Amount}}})
 			}
 		}},
-		{"third entry", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
+		{"third entry", "MA051", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
 			return func(ctx context.Context, tx pgx.Tx, pc, house uuid.UUID) (uuid.UUID, error) {
 				return post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxManualAdjustment,
 					IdempotencyKey: "manual_adjustment:" + r.ID.String(), CorrelationID: r.ID, ReasonCode: reason(r),
@@ -152,7 +169,7 @@ func TestB12_ShapeAndForgedLinkRefused(t *testing.T) {
 						{LedgerAccountID: pc, Direction: ledger.Credit, Amount: r.Amount}, {LedgerAccountID: pc, Direction: ledger.Credit, Amount: 5}}})
 			}
 		}},
-		{"wrong keys", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
+		{"wrong keys", "MA050", func(r Request) func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID) (uuid.UUID, error) {
 			return func(ctx context.Context, tx pgx.Tx, pc, house uuid.UUID) (uuid.UUID, error) {
 				return post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxManualAdjustment,
 					IdempotencyKey: "manual_adjustment:forged-" + r.ID.String(), CorrelationID: r.ID, ReasonCode: reason(r),
@@ -162,11 +179,26 @@ func TestB12_ShapeAndForgedLinkRefused(t *testing.T) {
 	}
 	for _, f := range forges {
 		t.Run(f.name, func(t *testing.T) {
+			// MANUAL-ADJ-LINK-1 (migration 0153): the non-acting forged posting is now refused at the posting
+			// itself, before any link is attempted.
+			rf, err := w.submit(w.F1, w.credit(333, ReasonOperationalErrorCorrection))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := w.forgeExecution(t, rf, f.build(rf)); pgCode(err) != f.fence {
+				t.Fatalf("%s: expected the 0153 fence %s, got %v", f.name, f.fence, err)
+			}
+			if got := w.request(rf.ID); got.State != StatePending {
+				t.Fatalf("%s: forged execution committed: %s", f.name, got.State)
+			}
+			// The original LF-10 assertion, unchanged: with the 0153 fence absent (the owner-only DISABLE TRIGGER
+			// residual, ADR 0110 s9.4, applied to the posting only) the 0113 link trigger still refuses the same
+			// forged link (MA040) - defence in depth behind the fence.
 			r, err := w.submit(w.F1, w.credit(333, ReasonOperationalErrorCorrection))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := w.forgeExecution(t, r, f.build(r)); pgCode(err) != "MA040" {
+			if err := w.forgeExecution(t, r, withoutLinkFence(f.build(r))); pgCode(err) != "MA040" {
 				t.Fatalf("%s: expected MA040, got %v", f.name, err)
 			}
 			if got := w.request(r.ID); got.State != StatePending {
