@@ -109,3 +109,17 @@ func TestF3_SR5R1_NoForeignTombstone_BranchStillExecutes(t *testing.T) {
 		t.Fatalf("the branch writes its own request-correlated tombstone, got %d", n)
 	}
 }
+
+// The refusal is per (provider, reference): a tombstone of ANOTHER provider on the same reference string does not
+// block this provider's branch.
+func TestF3_SR5R1_AnotherProvidersTombstoneOnTheSameStringDoesNotBlock(t *testing.T) {
+	e, w := a5K3(t)
+	wr, a := w.payout(500)
+	ref := *a.ProviderReference
+	other := e
+	other.pid = "f3-other-psp"
+	f3ForeignTombstone(t, other, ref)
+	p := e.a5Payload(ref)
+	e.a5MustDecide(t, w.f1.ID, wr.ID, p, PayoutReversalRecorded)
+	e.a5MustDecide(t, w.f2.ID, wr.ID, p, PayoutReversalTombstoned)
+}

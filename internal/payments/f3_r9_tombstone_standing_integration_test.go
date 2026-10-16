@@ -23,6 +23,11 @@ const r9Kind = reconciliation.MismatchKindPayPayoutReversalTombstoneButPaid
 // r9Branch takes a pending payout through the A5 tombstone branch (two grant holders) and returns the request (now
 // failed, hold released) and the original reference.
 func r9Branch(t *testing.T, amount int64) (rbEnv, *k3World, withdrawal.WithdrawalRequest, string) {
+	e, w, wr, ref, _ := r9BranchAttempt(t, amount)
+	return e, w, wr, ref
+}
+
+func r9BranchAttempt(t *testing.T, amount int64) (rbEnv, *k3World, withdrawal.WithdrawalRequest, string, PaymentAttempt) {
 	t.Helper()
 	e, w := a5K3(t)
 	wr, a := w.payout(amount)
@@ -35,7 +40,7 @@ func r9Branch(t *testing.T, amount int64) (rbEnv, *k3World, withdrawal.Withdrawa
 	if got.State != withdrawal.StateFailed || got.ReleaseLedgerTransactionID == nil {
 		t.Fatalf("setup: the branch must fail the request with a release: %s", got.State)
 	}
-	return e, w, got, ref
+	return e, w, got, ref, a
 }
 
 func r9Findings(ms []reconciliation.Mismatch, requestID uuid.UUID) []reconciliation.Mismatch {
@@ -62,7 +67,7 @@ func TestF3_R9_NoSucceededLine_NeverRaised(t *testing.T) {
 // A succeeded line raises; it STANDS on later runs without the line (unwindowed, persisted); a reversed line on the
 // original reference with the same amount and asset, dated no earlier, clears it; a later succeeded line re-raises.
 func TestF3_R9_SucceededLineRaises_StandsUntilPSPReturnEvidence(t *testing.T) {
-	_, w, wr, ref := r9Branch(t, 500)
+	_, w, wr, ref, a := r9BranchAttempt(t, 500)
 	t0 := time.Now().Add(-10 * time.Minute)
 	ms := w.stmtRun(w.source(false, r9Line(w, ref, statement.PaymentStatusSucceeded, 500, t0)))
 	if got := r9Findings(ms, wr.ID); len(got) != 1 {
@@ -78,7 +83,11 @@ func TestF3_R9_SucceededLineRaises_StandsUntilPSPReturnEvidence(t *testing.T) {
 	other := r9Line(w, ref, statement.PaymentStatusReversed, 499, t0.Add(time.Minute))
 	asset := r9Line(w, ref, statement.PaymentStatusReversed, 500, t0.Add(time.Minute))
 	asset.AssetCode = "USD"
-	for name, l := range map[string]statement.PaymentStatementLine{"older": older, "other amount": other, "other asset": asset} {
+	// A reversed line under ANOTHER provider reference that names the attempt's merchant reference is not a return of
+	// THIS payout reference.
+	byMerchant := w.payoutLine("f3-r9-other-"+uuid.NewString()[:8], a.MerchantReference, statement.PaymentStatusReversed, 500)
+	byMerchant.OccurredAt = t0.Add(time.Minute).UTC()
+	for name, l := range map[string]statement.PaymentStatementLine{"older": older, "other amount": other, "other asset": asset, "other reference": byMerchant} {
 		if got := r9Findings(w.stmtRun(w.source(false, l)), wr.ID); len(got) != 1 {
 			t.Fatalf("%s reversed line must not clear", name)
 		}
