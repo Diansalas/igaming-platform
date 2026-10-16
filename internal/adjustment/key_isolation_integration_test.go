@@ -723,6 +723,29 @@ func TestRestoreDDL_MatchesTheMigratedKeySchema(t *testing.T) {
 	if fa != fb || strings.HasSuffix(fa, "|count=0") {
 		t.Fatalf("baseline FP of the key schema: migrated %s, restore DDL %s (must be equal and non-empty)", fa, fb)
 	}
+	// the FP is not blind: each drift of the restored schema (a grant, a column grant, RLS off, a changed CHECK, an extra object) changes it
+	for _, d := range []struct{ do, undo string }{
+		{`GRANT SELECT ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT ON actorproof_private.actor_proof_keys FROM igaming_runtime`},
+		{`GRANT USAGE ON SCHEMA actorproof_private TO igaming_runtime`, `REVOKE USAGE ON SCHEMA actorproof_private FROM igaming_runtime`},
+		{`GRANT SELECT (kid) ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT (kid) ON actorproof_private.actor_proof_keys FROM igaming_runtime`},
+		{`ALTER TABLE actorproof_private.actor_proof_keys DISABLE ROW LEVEL SECURITY`, `ALTER TABLE actorproof_private.actor_proof_keys ENABLE ROW LEVEL SECURITY`},
+		{`ALTER TABLE actorproof_private.actor_proof_keys DROP CONSTRAINT actor_proof_keys_secret_check, ADD CONSTRAINT actor_proof_keys_secret_check CHECK (octet_length(secret) >= 16)`,
+			`ALTER TABLE actorproof_private.actor_proof_keys DROP CONSTRAINT actor_proof_keys_secret_check, ADD CONSTRAINT actor_proof_keys_secret_check CHECK (octet_length(secret) >= 32)`},
+		{`CREATE TABLE actorproof_private.zz_extra (a int)`, `DROP TABLE actorproof_private.zz_extra`},
+	} {
+		kiExec(t, restored, d.do)
+		var fd string
+		if err := restored.Raw().QueryRow(ctx, fp).Scan(&fd); err != nil {
+			t.Fatal(err)
+		}
+		kiExec(t, restored, d.undo)
+		if fd == fa {
+			t.Errorf("the key-schema FP did not change after: %s", d.do)
+		}
+	}
+	if err := restored.Raw().QueryRow(ctx, fp).Scan(&fb); err != nil || fb != fa {
+		t.Fatalf("after undoing the drifts the FP must equal the migrated one again: %s vs %s (%v)", fb, fa, err)
+	}
 	var n int
 	if err := restored.Raw().QueryRow(ctx, `SELECT count(*) FROM actorproof_private.actor_proof_keys`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("the restore DDL must create the key table EMPTY: %d (%v)", n, err)
