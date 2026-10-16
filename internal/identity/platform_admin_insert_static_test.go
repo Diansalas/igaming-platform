@@ -101,6 +101,12 @@ func TestA14b_OnlySeedAdminReferencesPlatformAdminRole(t *testing.T) {
 		// role in the last-admin pre-check query only (no INSERT).
 		filepath.Join(root, "internal", "stafflifecycle", "platform.go"): true,
 		filepath.Join(root, "internal", "stafflifecycle", "actions.go"):  true,
+		// Staging seeding (SA-1, STAGING-PREP-3): the library behind cmd/seed-market and cmd/seed-staging-world REQUIRES an
+		// existing active platform_admin as the audit actor (a SELECT ... role = 'platform_admin' FOR SHARE precondition); it
+		// never creates one (platform_admin is not in its role list). Imported only by those two commands
+		// (internal/stagingseed TestStagingSeedImportedOnlyByItsCommands); security-reviewed in docs/plans/staging-prep-3-record.md.
+		filepath.Join(root, "internal", "stagingseed", "market.go"): true,
+		filepath.Join(root, "internal", "stagingseed", "world.go"):  true,
 	}
 	// internal/testsupport/* and internal/providercred/providercredtest
 	// are allow-listed NON-test packages (ADR 0099 §9) whose helpers may

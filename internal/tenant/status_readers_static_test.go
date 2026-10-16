@@ -197,6 +197,10 @@ var reviewedStatusReaderFiles = []string{
 	"internal/httpserver/withdrawal_hold_candidates_routes.go",
 	"internal/reconciliation/scheduler.go",
 	"internal/rg/enumeration_sweep.go",
+	// STAGING-PREP-3 / SA-1: the staging seeding library reads tenants.status / brands.status only to REFUSE re-seeding a
+	// tenant or brand that is not already 'active' (activation is a governed decision, not the tool's); development/staging only.
+	"internal/stagingseed/market.go",
+	"internal/stagingseed/world.go",
 	"internal/tenant/gameplay_gate.go",
 	"internal/tenant/payment_initiation_gate.go",
 	// ADR 0112 slice 3: the governed launch executor and its hard-precondition read are the Go

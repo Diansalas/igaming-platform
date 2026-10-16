@@ -107,7 +107,13 @@ func TestLaunchFixture_UnreachableFromNonTestBuilds(t *testing.T) {
 
 	// 2. the only non-test INSERTs into tenants / brands.
 	insert := regexp.MustCompile(`(?is)INSERT\s+INTO\s+(public\.)?(tenants|brands)\b`)
-	allowed := map[string]bool{"internal/identity/tenant.go": true, "internal/identity/brand.go": true}
+	allowed := map[string]bool{"internal/identity/tenant.go": true, "internal/identity/brand.go": true,
+		// STAGING-PREP-3 / SA-1: the staging seeding library creates the SYNTHETIC tenant and brand directly as 'active' (an
+		// owner-provisioned launch transition, ADR 0112) behind APP_ENV in {development, staging} AND the database_environment
+		// anchor in {staging, development, test}; it is imported only by cmd/seed-staging-world and cmd/seed-market
+		// (internal/stagingseed TestStagingSeedImportedOnlyByItsCommands) and never by platform-api. Security review:
+		// docs/plans/staging-prep-3-record.md sections 11-15.
+		"internal/stagingseed/world.go": true}
 	for _, dir := range []string{"internal", "cmd"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {

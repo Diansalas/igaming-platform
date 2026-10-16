@@ -42,6 +42,7 @@
 | `internal/kyc/outbox_worker.go` | `SELECT status FROM tenants`, `!= "active"` | defer KYC submission without consuming an attempt | A | deferred |
 | `internal/payments/sweeper_resolution_only.go` | `tenants.status`, `brands.status` (`!= "active"`) | resolution-only sweeper mode | A | resolution-only (a pending tenant has no payments) |
 | `internal/httpserver/withdrawal_hold_candidates_routes.go` | `tenants.status`, `brands.status` (`<> 'active'`), returned as display fields (A10c, ADR 0114 R3) | read-only list of the path tenant's approved withdrawals whose tenant or brand is not active (the only ones the HSEC release can act on); platform_admin only, platform-action audited, decides nothing | A (+ D) | a `pending_launch` tenant or brand counts as not active and would be listed if it held an approved withdrawal (it cannot hold one: no payments); listing authorises nothing, the four-eyes release and its database guards decide |
+| `internal/stagingseed/market.go`, `internal/stagingseed/world.go` | `tenants.status`, `brands.status` (`!= 'active'` refusal) | staging seeding library (STAGING-PREP-3 / SA-1): refuses to seed a tenant or brand whose status is not `active` (activation is a governed launch decision, not this tool's); gated by APP_ENV AND the `database_environment` anchor; imported only by `cmd/seed-market` and `cmd/seed-staging-world` | A | no gameplay or payment effect; staging/development only |
 
 Indirect readers (they use the `Status` field returned by `identity.GetTenantBySlug` / `GetBrandBySlug` /
 `GetBrandByID`, no SQL of their own):
