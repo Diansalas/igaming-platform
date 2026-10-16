@@ -265,7 +265,7 @@ Operational detail: `docs/runbooks/backup-restore-dr.md`. Configuration items an
 | Backup artefact encryption | `BACKUP_ENCRYPT_AGE_RECIPIENT` / `BACKUP_ENCRYPT_GPG_RECIPIENT` (public references) | Required (the scripts refuse otherwise); private key in the restorer's secret store/KMS; no key material in git |
 | Target guard | `BACKUP_PGHOST`/`BACKUP_PGPORT`, `BACKUP_ALLOW_REMOTE_TARGET=<host>` | Scripts refuse the shared 127.0.0.1:5432 cluster and any remote host not acknowledged per invocation |
 | Restore anchor | `INSERT INTO database_environment (environment) VALUES ('production')` | A restore into a NEW database is **unrecorded** (or carries the source's anchor): re-run the anchor step before starting `platform-api` (see "Database environment anchor" above) |
-| Not in any database backup | JWT secrets, staff MFA keys, payout-instrument keys, provider credentials in the secret store, role passwords | Restored from the secret store, never from a dump; `actor_proof_keys` signing keys ARE in the database and therefore in every dump (encrypt it) |
+| Not in any database backup | JWT secrets, staff MFA keys, payout-instrument keys, provider credentials in the secret store, role passwords | Restored from the secret store, never from a dump; `actor_proof_keys` signing keys are NOT in a logical dump (owner decision 5: the table is dumped empty and the restored platform is re-keyed with `deploy/backup/rekey-actor-proof.sh`, `backup-restore-dr.md` section 5b); they ARE in physical backups, snapshots and PITR copies (inside the cloud boundary) |
 
 ## Webhook body-read deadline (ADR 0097 A5, `BodyReadTimeout`)
 

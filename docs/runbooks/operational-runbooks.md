@@ -665,6 +665,10 @@ closed by this control.
 6. Start the application. In production it REFUSES to start unless the key is configured AND the database holds that
    kid as an active key (`actorproof: ... refusing to start`); fix the missing side, do not work around the gate.
 
+**After a logical restore (owner decision 5, ADR 0122 section 10).** Logical dumps never carry `actor_proof_keys.secret`, so a restored database has no key: governed writes
+answer `AP002` and a production `platform-api` refuses to start. Re-key it with `deploy/backup/rekey-actor-proof.sh` (this procedure's step 4, scripted, with a NEW kid; see
+`backup-restore-dr.md` section 5b). Physical recovery (PITR/snapshot) keeps the live key.
+
 **Rotation (no downtime; two keys active during the overlap).**
 1. New secret in the secret store, new kid (for example `ap-2027-01`).
 2. As the owner role, insert the new key exactly as in provisioning step 4 (parameter-bound, `log_statement` checked).

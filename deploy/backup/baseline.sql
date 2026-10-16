@@ -23,12 +23,20 @@ SELECT 'META|dbsettings|encoding=' || pg_encoding_to_char(encoding) || ' collate
   FROM pg_database WHERE datname = current_database();
 SELECT 'META|migration_head|' || COALESCE(max(version)::text, 'none') || '|count=' || count(*) FROM schema_migrations;
 
+-- Owner decision 5 (ADR 0122 section 10): actor_proof_keys.secret is signing material. The baseline must never read it, so no
+-- hash derived from it (even an md5 of a row text) is written into baseline.txt: for that one table the row text covers the NON-SECRET
+-- columns only (kid, status, created_at, retired_at). The count is the number of key rows.
+SELECT 'META|actor_proof_kids|' || COALESCE((SELECT string_agg(kid || ':' || status, ',' ORDER BY kid) FROM public.actor_proof_keys), '');
+
 -- ---------------------------------------------------------------- exact row counts and content hashes
 SELECT 'TABLE|' || c.relname || '|' || COALESCE((xpath('/row/n/text()', x.r))[1]::text, 'ERR') || '|' || COALESCE((xpath('/row/h/text()', x.r))[1]::text, 'empty')
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
  CROSS JOIN LATERAL (
-       SELECT query_to_xml(format('SELECT count(*) AS n, COALESCE(md5(string_agg(t::text, E''\n'' ORDER BY t::text)), '''') AS h FROM public.%I t', c.relname), false, true, '') AS r
+       SELECT query_to_xml(format('SELECT count(*) AS n, COALESCE(md5(string_agg(t::text, E''\n'' ORDER BY t::text)), '''') AS h FROM %s t',
+                                  CASE WHEN c.relname = 'actor_proof_keys'
+                                       THEN '(SELECT kid, status, created_at, retired_at FROM public.actor_proof_keys)'
+                                       ELSE format('public.%I', c.relname) END), false, true, '') AS r
  ) x
  WHERE c.relkind IN ('r', 'p')
  ORDER BY c.relname;

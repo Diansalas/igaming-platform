@@ -175,8 +175,10 @@ All 8 detections passed.
   provisioning is `docs/security/runtime-role-separation.md` section 6).
 - Alert routes, provider credential handles and secrets: these live in the database and the secret store. A restore to
   an earlier time reverts routing and credential-handle state to that time; check them (`/v1/admin/alerting/status`).
-- Signed-actor-proof keys, JWT secrets and payout-instrument keys are environment/secret-store material, not database
-  content; they are not restored from a database backup.
+- JWT secrets and payout-instrument keys are environment/secret-store material, not database content; they are not restored
+  from a database backup. The signed-actor-proof verification key (`actor_proof_keys`) is database content but is deliberately
+  EXCLUDED from logical dumps (owner decision 5): after a logical restore it is empty (governed writes answer `AP002`) until
+  `deploy/backup/rekey-actor-proof.sh` provisions a NEW key (`backup-restore-dr.md` section 5b). Physical recovery (PITR) keeps it.
 
 ## 6. Restore versus fix-forward
 
