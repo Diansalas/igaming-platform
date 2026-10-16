@@ -117,7 +117,18 @@ Environment: private scratch DB `a10c_t1` (built by `priv_db.sh` from this workt
 `gofmt -l cmd internal` clean; `go vet ./...` and `go vet -tags integration ./internal/...` clean;
 `golangci-lint run ./...` 0 issues (integration-tagged lint of the new files: 0 issues; the repo's older integration tests carry 639 pre-existing errcheck findings, untouched).
 
-RESULTS_PLACEHOLDER
+| Command (from the worktree) | Result |
+|---|---|
+| `go test -count=1 ./...` (unit, no DB) | 66 packages ok, 1 FAIL: `deploy/backup` `TestScriptsParse` (shellcheck on `drill.sh` / `lib-common.sh`; `deploy/` is untouched vs the base `6bf9642`, pre-existing) |
+| `PRIV_DB=a10c_t1 PRIV_SRC=<worktree> bash priv_db.sh` then `bash priv_test.sh -tags integration -count=1 -p 1 -timeout 120m ./internal/httpserver ./internal/reconciliation ./internal/capability ./internal/apierror ./internal/tenant ./cmd/...` | all packages ok except ONE httpserver failure, `TestStepUp_GoldenTable_EveryClassifiedRoute` (a coverage pin: reads 83 -> 87); the pin was updated and the test re-run green (next row) |
+| same harness, `-v -run 'TestStepUp_GoldenTable\|TestA10c\|TestStaffLiveness\|TestStaffRead\|TestHSEC\|TestCapabilityAPI\|TestPaymentForce\|TestStaffRoutes\|TestOpenAPI\|TestADR0114\|TestPaymentAttemptRoutes\|TestStaffIdempotent\|TestValidIdempotencyKey' ./internal/httpserver` | 116 top-level tests PASS (+38 subtests), 0 FAIL, 0 SKIP (route freeze, golden table, OpenAPI pins, step-up golden, liveness of every golden route, R1/R2 reads, HSEC, K1, K3, the new A10c tests) |
+| the 8 A10c integration tests alone (`-run TestA10c`) | 8 PASS, 0 FAIL, 0 SKIP: K1 paging + idempotency, in-progress reservation, K3 idempotency, R1 provider/age filters, age-as-time-predicate, event history, R2 single reads + run_id, HSEC candidates + idempotency (+ 2 DB-free unit tests: key validation, the wrap-exactly-13-routes freeze) |
+| migration 0164 down/up round trip on scratch DB `a10c_t2` (`APP_ENV=development migrate down`, then `up`) | rolled back [164], re-applied [164], table present, RLS enabled and forced (`t|t`) |
+| `backoffice`: `npm ci`, `npm run build` (= `tsc -b && vite build`), `npm test` | build ok; 56 files, 641 tests PASS, 0 FAIL, 0 SKIP (the shared `api/openapiContract.test.ts` UI-to-OpenAPI test included, not weakened) |
+| `b2c`: `npm ci`, `npm run build`, `npm test` | build ok; 24 files, 140 tests PASS, 0 FAIL, 0 SKIP (`openapiContract.test.ts`: 21 tests) |
+
+The b2c contract test was probed with the checker's own negative fixtures (wrong path, wrong method, undocumented body field, unresolved path):
+each is detected, so a green run is not vacuous. Scratch DBs `a10c_t1`, `a10c_t2` are dropped at the end of the session.
 
 ## Security probe list (for the security review; auth, sessions, admin permissions)
 
