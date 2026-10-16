@@ -56,7 +56,7 @@ BEGIN
       INTO v_bad
       FROM pg_catalog.pg_class c, LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) a
      WHERE c.oid = v_rel AND a.grantee <> c.relowner
-       AND NOT (a.grantee = v_backup AND a.privilege_type = 'SELECT');
+       AND NOT COALESCE(a.grantee = v_backup AND a.privilege_type = 'SELECT', false);   -- COALESCE: no backup role means no exception
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'migration 0166 refused: public.actor_proof_keys carries unexpected grants (%); the signing key may have been exposed: investigate and revoke first',
             v_bad USING ERRCODE = 'APM01';
