@@ -183,3 +183,45 @@ are recorded residuals.
 Real AWS behaviour (IAM simulation of the deployer and boundary, RDS `\getenv`/psql version, whether Secrets Manager JSON-key injection works on Fargate), the
 A12 Terraform beyond what the static checks cover, the backup runner (G1), the alarms (G2), and penetration testing. This review does not declare the staging
 stack "secure". It covers the configuration and code paths listed in 8.1 at commit `3cd9d97`.
+
+## 9. Security re-review of STAGING-PREP-2 (fixes for SRSP-1, SRSP-2, SRSP-4)
+
+Date: 2026-10-16. Reviewer: `security`. Branch `staging-prep-2`, commit `0da5c36`. **Verdict: APPROVE.** SRSP-1, SRSP-2 and SRSP-4 are closed. SRSP-3 stays
+OPEN: it is accepted for staging and must be fixed before production. The three Low and Info items below do not block.
+
+Checks run: `go test ./deploy/...` passes, including the new `deploy/aws/sql` static test. `deploy/aws/tests/run-static-checks.sh` was re-run offline and all
+checks passed. I read the new script and found no unguarded blanket grant. The author's measurement of 1146 changed rows with the old script and 0 with the new one
+was not re-run here. The reasoning below does not depend on it.
+
+**SRSP-1: the first-install-only guard.** The author's deviation is better than my suggested fix. Copying the REVOKEs into the script could never stay complete,
+whereas the guard keeps the migrations as the single source of truth. Cases checked:
+- **Normal first install** (role-init, then migrate): nothing exists yet, so the guarded grants are a no-op. `ALTER DEFAULT PRIVILEGES FOR ROLE <master>` gives
+  each table the migrations create its DML, and the migration then narrows it. This is unchanged from before.
+- **Partially migrated database:** `cmd/migrate` creates `schema_migrations` before it applies anything. After a failed `up`, the guard therefore skips the
+  blanket grants. Every table that exists was created by a migration that also applied its own narrowing.
+- **Tables added later:** these are covered by the default privileges and then narrowed by their migration. The guard does not interact with them.
+- **Restored database without ACLs:** `schema_migrations` exists, so nothing is granted. The runtime role then lacks privileges and the application fails closed
+  (an outage, not a widening). The restore procedure owns repairing this, and the comment and plan 3.1 say so. The same holds if objects are owned by a role
+  other than the master, because the default privileges are per creating role.
+- **Defeating the guard:** the only way is to drop or rename `schema_migrations`, which needs owner rights. The runtime role cannot do it.
+- **Statements that stay unguarded:** `CONNECT`, schema `USAGE`, the `TEMPORARY` revokes, the `schema_migrations` backstop REVOKE, the `actor_proof_*` REVOKEs,
+  and EXECUTE on the two `actor_proof` functions. Migration 0120 also grants that EXECUTE; no migration revokes it from the runtime role, it only revokes it from
+  PUBLIC. None of these widens a narrowed privilege.
+- **Static test:** the guard regex would mis-parse a nested `IF` inside the guarded block. That is acceptable for a pin.
+
+**SRSP-2: closed.** The command is now `up && REVOKE && verify && status`, so a verify or status failure can no longer skip the revoke. Residual SRSP-9 below:
+a failure of `up` itself still skips it, which was true before this change too.
+
+**Grant-diff STOP step (plan 3.1): sufficient for the SRSP-1 failure mode.** Table, column and routine widening are all caught, which is what a blanket table grant
+would cause. See SRSP-10 for the gaps that remain.
+
+**SRSP-4: adequately handled for staging.** The rule is stated in both variable descriptions and in plan section I. Not marking the variable `sensitive` is a
+reasonable trade-off: a sensitive value inside `jsonencode` would redact the whole container definition from plan review.
+
+| # | Severity | Finding | Suggested action |
+|---|---|---|---|
+| SRSP-9 | Low | When `migrate up` fails part-way on a first install, `&&` skips the `schema_migrations` REVOKE. The runtime role keeps DML on that table through the default privileges until the next role-init, whose backstop REVOKE runs on every invocation, or the next successful migrate. `deploy.sh` stops before it rolls the services. | Optional: `/app/migrate up; rc=$?; psql ... REVOKE ... \|\| exit 1; [ $rc -eq 0 ] && /app/migrate verify && /app/migrate status` |
+| SRSP-10 | Low | The plan 3.1 diff does not cover sequence privileges (`role_table_grants` excludes sequences), `pg_default_acl`, or database and schema ACLs. The guard already prevents a blanket sequence grant, so this is a gap in detection only. | Add `aclexplode` over `pg_class.relacl` (relkind `S`), `pg_default_acl`, `pg_namespace.nspacl` and `pg_database.datacl` for `igaming_runtime` to the diff query |
+| SRSP-11 | Info | `deploy/init-app-role.sql` (dev/CI) still runs its blanket grants unguarded. It hand-maintains re-narrowings for some tables only, so a re-run on a local migrated database widens the rest. This is local only. | Apply the same guard when that script is next touched |
+
+Out of scope, as in section 8.4: real RDS behaviour and AWS IAM simulation.
