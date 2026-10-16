@@ -4308,8 +4308,12 @@ paths:
         written); a review without it needs no step-up. A residence
         recorded in a country the brand currently serves also writes the
         audit action market.residence_into_open_market (ids only, never
-        the country) for alerting. There is no maker-checker for KYC
-        reviews in the permission model.
+        the country) and, in the same transaction, raises the durable
+        platform alert kyc.residence_into_open_market (p2; attributes
+        verification_id, brand_id, request_id; one open alert per
+        verification) - a failure that cannot be swallowed rolls the whole
+        review back. There is no maker-checker for KYC reviews in the
+        permission model.
       security:
         - bearerAuth: []
       parameters:

@@ -444,6 +444,7 @@ remain the day-one signal for everything not listed here.
 | Casino statement / payment statement mismatch (REPEATABLE READ) | `reconciliation.casino_statement_mismatch` / `reconciliation.payment_statement_mismatch` (p1) | `stream:casino_statement` / `stream:payment_statement:provider:<id>` | after the snapshot commits, detached |
 | A reconciliation run transaction failed | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
 | Kill switch engaged (a platform takeover of a tenant-engaged switch is its own alert) | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` / `switch:<kill_switch_id>:takeover`; `reason_code` is a closed token or `nonconforming` | after commit, then status, headers and body bytes are flushed (the chunked body ends only when the handler returns), then the detached raise |
+| A reviewer recorded a KYC-verified residence in a country the brand serves (`market.residence_into_open_market` audit action) | `kyc.residence_into_open_market` (p2) | `verification:<kyc_verification_id>`; attributes `verification_id`, `brand_id`, `request_id`, never the country | in the review transaction (`alerting.InTx` + `RaiseGuarded`), with the audit row; a non-swallowable alert failure rolls the whole review back |
 | Deposit simulation payload mismatch | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<provider_id>` | detached; **never delivered, never paged** |
 
 Not wired yet (listed honestly): casino-play and sportsbook-settlement
@@ -815,6 +816,34 @@ observation (ledger drift, payment statement) is switched off while it persists.
    acknowledge/resolve the alert in the back office (platform admin, reason code). Do not resolve it before a complete sweep.
 4. Because the money-drift check did not run, run the per-tenant check by hand if the gap exceeded two hours
    (`operational-runbooks.md` section 3) before declaring all clear.
+
+### Runbook: `kyc.residence_into_open_market` (P2, per tenant; F5(b))
+
+Raised when a compliance reviewer records a KYC-verified residence (`verified_residence_country` on `POST /v1/admin/kyc/verifications/{id}/review`)
+in a country the brand currently serves for at least one gated operation (deposit, casino wagering, sportsbook wagering). That
+residence is the evidence that admits the player to money and games, and a residence determination has NO maker-checker today (an
+OWNER decision, not built): this alert is the compensating, after-the-fact control. It fires on EVERY such determination, so its
+volume equals the number of residence determinations into served markets; a residence into a country the brand does not serve
+raises nothing. Severity p2 is an engineering default. Attributes carry ids only (`verification_id`, `brand_id`, `request_id`); the
+country is deliberately not in the alert, the audit row or the log. One open alert per verification (`verification:<id>`).
+Nothing pages anyone until a human configures a route (`alert-delivery-channels.md` section 3): until then the alert is only a durable row.
+
+Who reviews: a second person, never the recording reviewer: a different compliance officer, or the tenant admin / platform admin for
+the tenant. The platform admin sees it in `GET /v1/admin/alerts?kind=kyc.residence_into_open_market`; the subject tenant sees it read-only.
+
+What to check, per alert (acknowledge it only after these):
+1. The audit row for the verification: `audit_log` where `action = 'market.residence_into_open_market'` and `target_id` = the
+   `verification_id`: `actor_id` is the recording reviewer, `metadata` has `player_account_id`, `brand_id`, `new_status`. Confirm the reviewer
+   is entitled to review (compliance role) and is not reviewing an account they are connected to.
+2. The evidence behind the decision: the verification's documents (`GET /v1/admin/kyc/documents?player_account_id=...`) support the
+   residence the reviewer recorded. The country is NOT returned by any API (by design); a support query by an authorised operator
+   reads `kyc_verifications.verified_residence_country` for that row when the comparison needs it.
+3. The country is in the brand's intended market set (the market policy the platform admin maintains); a residence into a market the
+   brand should not serve means the market policy, not the reviewer, is wrong: raise it with the platform admin.
+4. Patterns across alerts: many determinations by one reviewer in a short period, many for one brand after a policy change, or
+   a determination followed at once by a deposit are escalation triggers (security / compliance lead), not routine.
+5. If a determination is wrong: the correction is a new review of the verification (`rejected`, or a fresh determination), which
+   withdraws or replaces the evidence immediately (`internal/kyc/market_evidence.go`); never edit `kyc_verifications` by hand.
 
 ### Runbook: `reconciliation.run_failed` (P1, per tenant and stream)
 
