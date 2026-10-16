@@ -221,3 +221,49 @@ Private database `me20261016150610p5345x01` (dropped afterwards), runtime role, 
 Also: `gofmt -l internal cmd` clean; `go vet ./...` and `go vet -tags integration ./...` clean; `golangci-lint run ./...` (v2.9.0) 0 issues;
 `go test ./...` (unit, whole module) all pass, including the static callers scan. The whole `httpserver` and `payments` packages were not run
 (only the named subsets above).
+
+## 10. Security review (independent, `security` specialist, 2026-10-16)
+
+Scope: the branch diff against merge-base `12edec0` (`internal/kyc/market_evidence.go`, `internal/marketgate/{kycresidence,marketgate}.go`,
+`cmd/platform-api/{main,registrations,wiring}.go`, `internal/httpserver/auth_routes.go`, the new and changed tests), plus the call sites in
+`deposit_handlers.go`, `casino_handlers.go`, `sportsbook_handlers.go` and the residence write path (`kyc.ReviewVerification`,
+`POST /v1/admin/kyc/verifications/{id}/review`). Code-level and design-level review only; not a penetration test or certification audit.
+Not in scope: the whole `httpserver` / `payments` packages, the KYC vendor (none exists), and legal interpretation.
+
+Runs (private DB `sm20261016161334p6650x01`, dropped afterwards, `-tags integration -count=1 -p 1`): `./internal/marketgate/` ok,
+`./cmd/platform-api/` ok, `./internal/httpserver/ -run 'MarketGate|Register'` ok, `./internal/kyc/ -run 'Residence|Evidence|Review'` ok,
+`-race ./internal/marketgate/ -run 'KYCResidence|Registration'` ok. Three throwaway probe tests (not committed) confirmed SRME-2 and SRME-3.
+
+**Verdict: APPROVE for merge and staging. Not a production-launch approval**: SRME-1, SRME-2, SRME-4, SRME-5 and SRME-6 need fixes or owner /
+legal decisions before real-money production. No Critical or High finding.
+
+Verified as correct: the evidence rule (latest decided row approved and unexpired; residence only from an approved, unexpired row; orphan
+intent rows excluded; database clock); tenant scope (`WithTenantReadOnly`, `app.tenant_id` assertion, repeated `tenant_id` predicate, RLS);
+tenant and player only from the authenticated token; IP ignored; no client field can supply a country (the strict decoder rejects body
+fields, headers are ignored; tested); fail-closed on unbound locator, nil ids, DB error, closed pool, cancelled context, timeout, panic, slot
+exhaustion; one identical `403 MARKET_NOT_AVAILABLE` body for every cause; audit metadata carries closed codes (`unknown` / `resolved` /
+`brand_level`) and ids only, never a country; refusal sampler unchanged and still bounded; `KYCResidenceLocator` is ProductionEligible and
+not Synthetic; `requireMarketEvidenceInProduction` refuses none / nil / two / wrong-name; `MOCK_GEOLOCATION_COUNTRY` is rejected by
+`config.Load` under `APP_ENV=production` and ignored by `mockProviderWiring` whenever the guard environment is production (including a
+missing `APP_ENV`), and the static Locator is refused by the synthetic guard, so there is no production bypass; `bindMarketEvidence` binds the
+same instance the gate holds and a nil pool fails startup. The five changed assertions are deliberate semantic changes, not weakenings
+(#3 is strictly stronger: exact `403` instead of "not 201", which previously passed on a 400).
+
+| Id | Severity | Finding / concrete failure scenario | Recommendation | Blocks |
+|---|---|---|---|---|
+| SRME-1 | Medium | The residence determination is now money- and game-gating data but is written by ONE staff member with `PermVerificationReview`, `stepUpNone`, no four-eyes and no maker-checker (`kyc_routes.go` review route). A compromised or colluding reviewer sets `verified_residence_country = MT` for a player resident in an excluded market; the gate then admits deposit, launch and placement. The change is audited (no country in metadata) but nothing prevents it. Pre-existing write path whose impact this change raises. | Before production: step-up on any review that records or changes a residence, and either four-eyes on residence determinations or a periodic second-reviewer sample with alerting on residence changes into open markets. | Production launch (not staging, not sandbox provider work) |
+| SRME-2 | Low-Medium | Carry-forward crosses an intervening rejection or expiry. Probe: approved(MT) -> rejected -> approved (no new determination) yields evidence MT. A verification rejected for false address / identity fraud and later re-approved without a fresh determination silently re-uses the earlier residence. The record documents carry-forward across routine re-verification, not across a rejection. | Only carry a determination forward when no non-approved decided row (rejected / expired / review_required) lies between it and the latest approved row, or require a fresh determination after any rejection. Add a test. | Production launch |
+| SRME-3 | Low | TOCTOU between evidence read and action. Evidence is read once in its own read-only transaction; the in-transaction `Guard` re-checks the market POLICY but reuses the stale evidence. Probe: Locate (MT, approved) -> a rejection commits -> `Check(OpLaunch)` in a new transaction ALLOWS. Window = milliseconds between the read and the action transactions; not attacker-controllable (it needs a concurrent reviewer decision). Deposit phase A also re-runs KYC enforcement in-transaction, which narrows it for deposits when thresholds require KYC; launch and placement have no such recheck. | Re-read the evidence inside `Check`'s transaction for player operations (the reader already accepts a `RowQuerier`), keeping the outside read only as a cheap pre-filter. | Nothing (fix opportunistically) |
+| SRME-4 | Medium (compliance) | Residence is not location: a verified resident of an open market can deposit and play from an excluded jurisdiction (travel, VPN); the platform has no physical-location evidence. Whether the Anjouan licence or any later B2B jurisdiction requires location (not residence) blocking is a legal question this review cannot answer. | Owner + legal confirmation that residence-only evidence is acceptable for each licensed jurisdiction before production; otherwise a vendor geolocation Locator (PROVIDER DEPENDENT) is a launch prerequisite. | Production launch decision (human) |
+| SRME-5 | Medium (residual, pre-existing MKT-WIRE-CREDIT-1 / SR8-2) | Not market-gated: deposit credit callbacks / sweeper and casino bet callbacks (brand-level only). Scenario: a player's evidence is withdrawn (rejection, re-verification) after launch; the open game session keeps accepting bets until the session ends, and an in-flight deposit is credited. Exposure is bounded by session lifetime and by deposits initiated while evidence existed. | Decide before real-money production: revoke / refuse game sessions when evidence is withdrawn (or bound session lifetime), and a hold policy for credits whose player lost evidence. | Production launch; not staging; not sandbox provider integration |
+| SRME-6 | Low | PD-MKT-REG-1. Safe in the engineering sense: no country input, no IP, no per-country oracle (201 vs 403 reveals only whether the brand is open for registration somewhere, which is public); a registered unverified account cannot deposit, launch or bet (tested through HTTP). What it allows: anyone, including an excluded-market resident, can create an unverified account (email + password hash stored) and reach KYC submission. Abuse: account-creation flood is bounded by the existing per-IP register rate limiter (distributed attackers could already do this from an allowed country before the change); each new account gets its own refusal-sampler bucket, so audit rows from deliberate deposit attempts grow with the number of accounts (5 per new bucket, then 1/min), bounded by the per-tenant and global bucket caps and the registration rate. | Accept for staging. For production, accept only if the owner / legal confirm that permitting account opening (not play) by excluded-market residents is compatible with the licence terms (some licensors treat account opening itself as "accepting" a restricted-country player); otherwise choose option B (declared country + KYC recheck) or disable registration per brand. | Owner decision before production |
+| SRME-7 | Info | Stale comment at `cmd/platform-api/main.go` (`MarketGate: marketgate.New(providers.Geolocation)`) still says the gate runs "over the bundle's MOCK static Locator" and "refuses every request" without `MOCK_GEOLOCATION_COUNTRY`. Misleading to the next reader of the production wiring. | Update the comment. | Nothing |
+| SRME-8 | Info | `requireMarketEvidenceInProduction` counts a non-nil component; it does not check the type or `Bound()`. A typed-nil or unbound locator would pass the count but fails closed at runtime (inconclusive -> refuse), and `bindMarketEvidence` fails startup on a nil pool. Acceptable; noted so nobody reads the check as "evidence is operational". | Optional: also assert `Bound()` after `bindMarketEvidence` in production. | Nothing |
+
+Probe answers (section 8): (1) none; (2) isolated, mismatch errors; (3) see SRME-1 (staff and player identities are separate tables; a
+reviewer approving "their own" player account was not tested and is not in scope); (4) fail closed everywhere checked; (5) a player can
+withdraw only their own evidence via `POST /v1/me/kyc/verifications` (self-lockout only), acceptable and consistent with deposit KYC
+clearance; (6) no per-country signal; (7) the unknown, resolved and not-permitted player paths all perform the same evidence read, and the
+player already knows their own KYC status, so timing reveals nothing new; (8) see SRME-6; (9) a Synthetic Locator under another name is
+refused by the synthetic guard (any registration), and a missing `geolocation/locator` by the new check; (10) no country or IP in new log
+lines or error strings.
