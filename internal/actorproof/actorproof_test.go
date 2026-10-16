@@ -332,6 +332,11 @@ var staticAllowed = map[string]bool{
 	// canon.go uses only actorproof.TS (timestamp text encoding) for the
 	// payout-instrument seal input; it never signs (B13-A, ADR 0111 s15).
 	filepath.Join("internal", "payoutinstrument"): true,
+	// Owner decision 5 (backup exclusion): the restore-check tool builds an Issuer from a RANDOM in-memory key only to run the
+	// platform's own production startup gate (VerifyConfiguredInProduction) and to present an unsigned/invalid token to the
+	// verifier inside a rolled-back transaction; it holds no real key, never signs a proof that is accepted and is not part of
+	// platform-api (security review: docs/plans/backup-exclude-actor-secret-record.md, restorecheck).
+	filepath.Join("deploy", "backup", "restorecheck"): true,
 }
 
 // The signing capability may be reached only from the packages that own

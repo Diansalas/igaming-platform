@@ -96,10 +96,7 @@ func TestNoToolReadsTheActorProofSecret(t *testing.T) {
 	secretRef := regexp.MustCompile(`(?is)actor_proof_keys\.secret|\bsecret\b[^;\n]{0,80}\bFROM\b[^;\n]{0,40}actor_proof_keys|\b(SELECT|COPY|UPDATE)\b[^;]{0,200}actor_proof_keys[^;]{0,60}\bsecret\b`)
 	for _, f := range []string{"deploy/backup/backup.sh", "deploy/backup/restore.sh", "deploy/backup/verify.sh", "deploy/backup/baseline.sql", "deploy/backup/post-restore-grants.sql",
 		"deploy/backup/lib-common.sh", "deploy/backup/lib-sign.sh", "deploy/backup/lib-globals.sh", "deploy/backup/pitr-drill.sh", "deploy/backup/seed.sh"} {
-		var kept []string
-		for _, l := range strings.Split(stripComments(read(t, f)), "\n") {
-			kept = append(kept, l)
-		}
+		kept := strings.Split(stripComments(read(t, f)), "\n")
 		if m := secretRef.FindString(strings.Join(kept, "\n")); m != "" {
 			t.Errorf("%s refers to actor_proof_keys.secret in code: %q", f, m)
 		}
