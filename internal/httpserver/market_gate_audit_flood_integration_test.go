@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Diansalas/igaming-platform/internal/marketgate"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // SR8-5: an anonymous caller in an excluded market cannot flood the append-only audit_log. Every refusal
@@ -14,7 +15,9 @@ import (
 // (tenant, brand, operation, reason) for registration, and the suppressed count is recorded on a later row.
 func TestMarketGate_HTTP_AnonymousRegistrationRefusalFloodWritesBoundedAuditRows(t *testing.T) {
 	w := newMarketWorld(t)
-	w.locator.SetCountry("DE")
+	// Registration is a brand-level rule (owner decision 3): it is refused only when the brand's
+	// market configuration does not permit registration, never because of a country.
+	w.setTenant(operatingmarket.StateDisabled)
 	const attempts = 12
 	for i := 0; i < attempts; i++ {
 		resp := w.register(t)
@@ -35,7 +38,7 @@ func TestMarketGate_HTTP_AnonymousRegistrationRefusalFloodWritesBoundedAuditRows
 // Another brand/operation is not starved by one flooded bucket.
 func TestMarketGate_HTTP_ARefusalFloodDoesNotSuppressAnotherOperationsAudit(t *testing.T) {
 	w := newMarketWorld(t)
-	w.locator.SetCountry("DE")
+	w.setTenant(operatingmarket.StateDisabled)
 	for i := 0; i < 10; i++ {
 		resp := w.register(t)
 		resp.Body.Close()

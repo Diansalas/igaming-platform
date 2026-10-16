@@ -97,6 +97,11 @@ func run() error {
 	if err := refuseSyntheticInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {
 		return err
 	}
+	// Owner decision 3 (MKT-EVIDENCE-1): production needs the KYC residence
+	// market-evidence source wired (the guard above skips a nil component).
+	if err := requireMarketEvidenceInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {
+		return err
+	}
 	// PAY-K3-STATEMENT-SOURCE-WIRING-1: ONE list of payment statement sources
 	// feeds BOTH the manual-resolution statement-source registry (registered
 	// here, before the HTTP server exists) and the scheduler's payment_statement
@@ -188,6 +193,12 @@ func run() error {
 	logger.Info("database connected")
 	if err := registerDBPoolMetrics(pool); err != nil {
 		return err
+	}
+	// Owner decision 3 (MKT-EVIDENCE-1): the market-evidence Locator is the
+	// KYC-verified residence source; it reads through the tenant session on
+	// this pool. Until bound it reports no evidence (the gate refuses).
+	if err := bindMarketEvidence(providers, pool); err != nil {
+		return fmt.Errorf("bind market evidence source: %w", err)
 	}
 
 	// PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md):
