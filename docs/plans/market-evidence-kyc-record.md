@@ -314,3 +314,42 @@ is EMPTY (no governance row was touched or lost by this branch).
 gofmt clean; `go vet ./...` and `go vet -tags integration ./...` clean; golangci-lint 2.9.0 0 issues; whole-module `go test ./...` (unit) passes.
 Not re-run this round (unchanged by it): sportsbook, casino, payments (round 1 counts above stand; this round touched none of their code).
 `git diff origin/claude/focused-wright-jw88w9 --stat -- docs/governance` is empty.
+
+## 12. Security re-check of round 2 (`security`, 2026-10-16)
+
+Scope: commit `1976744` (round-2 code) and section 11; the integration merges `4dc7919` / `304d7f2` were not re-reviewed. Private DB
+`sm20261016165651p31346x01` (dropped afterwards), `-tags integration -count=1 -p 1`, all ok: `./internal/marketgate/`, `./cmd/platform-api/`,
+`./internal/httpserver/ -run 'MarketGate|Register|StepUp|Classif|StaffRoute|Staff_|KYC|OpenAPI'`, `./internal/kyc/ -run 'Residence|Evidence|Review'`.
+Throwaway probes (not committed) are described below.
+
+**Verdict: APPROVE for merge.** Production conditions from section 10 stand: SRME-4, SRME-5 and SRME-6 are owner / legal decisions. SRME-1's
+maker-checker and alert route are still open, and SRME-R2-1 should be fixed before production.
+
+* **SRME-1: closed for merge.** `kycResidenceReviewClass` is critical exactly when the decoded body carries a non-null
+  `verified_residence_country`, and critical for malformed, unknown-field, empty and oversized bodies. The classifier and the handler read the
+  same buffered bytes with the same decoder settings (`DisallowUnknownFields`, first JSON value only). Probe: the class matched what the
+  handler would write in every case tried: trailing second value (`{...}{"verified_residence_country":"MT"}`: none / not written),
+  `y`-escaped key, upper-cased key and duplicate key (Go's last-wins / case-folding is identical on both sides), and a leading BOM
+  (critical / handler 400). The handler does not check content type, so there is nothing to diverge on. `kyc.ReviewVerification` is the only
+  writer of `verified_residence_country` and this route is its only HTTP caller, so no second route exists. Golden row, classifier sets
+  (7 -> 8), static ident set and coverage pin (none-mutating 42 -> 41, +1 classifier bucket) are consistent. `market.residence_into_open_market`
+  is written in the same transaction, on the server-read `result.BrandID`, with metadata limited to ids and the new status (no country). A
+  market-evaluation or audit error rolls back the whole review (fail closed). Info: approving a `pending` re-verification without a residence
+  is class none and writes no alert, yet it re-admits the carried-forward residence. This is acceptable because that residence was itself
+  recorded under the control.
+* **SRME-2: closed for the reviewed case; one gap.** Approved(MT) -> rejected -> approved now yields no evidence (probe confirmed).
+  **SRME-R2-1 (Low): two cases still carry forward** (probe confirmed): a decided `unverified` row with a provider reference between the
+  determination and the latest approval (enforcement treats `unverified` like `rejected` / `expired`, `enforcement.go`), and an approved row
+  whose `expires_at` lapsed in between (status stays `approved`). Practical impact is small because the determination row must itself be
+  unexpired. Fix: add decided `unverified` (non-orphan) and approved-but-lapsed rows to the breaker set, and add tests. Does not block merge or
+  staging; fix before production.
+* **SRME-3: closed.** `Check` re-reads the evidence on the gated transaction using the request's server-derived player, and the
+  in-transaction answer replaces the pre-read country; not-found or invalid refuses, and an error fails closed. Probe: pre-read evidence ->
+  rejection commits -> deposit, launch and sportsbook all refused (round 1 allowed launch). The re-read is a plain `SELECT` under READ COMMITTED.
+  It takes only `AccessShareLock` and no row locks, and it runs before any guarded write, so the lock order is unchanged. Residual (inherent,
+  accepted): a rejection committing after the in-transaction read but before the action commits is not seen; closing that would need a lock,
+  which is not worth it.
+* **SRME-7: closed.**
+* **SRME-8: closed.** `requireMarketEvidenceBound` refuses production unless the Locator is the `*KYCResidenceLocator` and `Bound()`, and it
+  runs right after `bindMarketEvidence`.
+* Minor record nit: section 11 names the merged integration tip as `00c52d9`, but the later merge `304d7f2` brought it to `7a01546`.
