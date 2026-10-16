@@ -9,6 +9,11 @@
 #   deploy.sh scale <N>          set platform-api's desired count (2 = multi-replica test, then back to 1)
 #   deploy.sh migrate            re-run role-init + migrate, then roll the services (e.g. after a rotation)
 #   deploy.sh seed-admin <email> create the first platform_admin (Back Office login); password in Secrets Manager
+#   deploy.sh runner <mode> [KEY=VALUE...]   run one in-VPC staging-runner task (STAGING-PREP-3), print its log, exit non-zero on a
+#                                FAIL / STOP. Modes: verify-db seed-actor-proof seed-market seed-world record-anchor cleanup backup-restore-drill pitr-verify
+#                                probe-backup-role. Parameters are NON-secret (see docs/plans/staging-prep-3-record.md); no secret ever
+#                                travels on this command line. Env: RUNNER_TIMEOUT_SECONDS (default 3600), RUNNER_LOG_FILE (also write the log there)
+#   deploy.sh runner-image       build and push the staging-runner image for HEAD (also done by `up`)
 #   deploy.sh status             print URLs and service state (read-only)
 #   deploy.sh down               terraform destroy, then run verify-teardown.sh
 #
@@ -210,8 +215,9 @@ cmd_up() {
   registry="${api_repo%%/*}"
   ecr_login "${registry}"
 
-  say "phase 2/5: platform-api image"
+  say "phase 2/5: platform-api image and staging-runner image"
   build_and_push "${api_repo}" - -f "${REPO_ROOT}/deploy/docker/platform-api.Dockerfile"
+  build_and_push "$(tf output -json ecr_repository_urls | jq -r '.["staging-runner"]')" - -f "${REPO_ROOT}/deploy/docker/staging-runner.Dockerfile"
 
   # Phase 3: everything else. CloudFront distributions/VPC origin take
   # several minutes. The frontend services start pulling images that do
@@ -290,6 +296,161 @@ cmd_seed_admin() {
   echo "     aws secretsmanager get-secret-value --region ${AWS_REGION} --secret-id '${secret_arn}' --query SecretString --output text"
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# STAGING-PREP-3: `deploy.sh runner <mode> [KEY=VALUE...]` - one in-VPC task of the staging-runner image (plan gap G1, owner actions B and C).
+# The RDS instance is private, so verification, the actor-proof row, the operating-market rows, the backup/restore drill and the PITR
+# verification all run as ONE-OFF ECS tasks, selected by the single command argument (the mode). Parameters are environment overrides and
+# must be NON-secret: only the names listed per mode below are accepted, values are limited to a conservative character set, and any name
+# that looks like a credential is refused. Passwords and keys reach the task only through the execution role's secret injection.
+# ---------------------------------------------------------------------------------------------------------------------
+runner_mode_params() { # mode -> allowed parameter names
+  case "$1" in
+    verify-db) echo "EXPECT_BACKUP_ROLE GRANT_LISTING REQUIRE_ANCHOR" ;;
+    seed-actor-proof) echo "" ;;
+    seed-market) echo "TENANT_SLUG BRAND_SLUG COUNTRY AUTH_REF OPERATOR REASON ACTOR_ID DRY_RUN" ;;
+    seed-world) echo "TENANT_SLUG BRAND_SLUG SECOND_TENANT_SLUG SECOND_BRAND_SLUG COUNTRY AUTH_REF OPERATOR REASON ACTOR_ID DRY_RUN" ;;
+    record-anchor) echo "ANCHOR_VALUE AUTH_REF OPERATOR REASON" ;;
+    cleanup) echo "CLEANUP_DB" ;;
+    backup-restore-drill) echo "DRILL_RESTORE_DB SKIP_RESTORE PRINT_EXPECTED" ;;
+    pitr-verify) echo "PITR_ENDPOINT EXPECTED_DIGESTS EXPECT_ANCHOR PITR_SHOW_LINES" ;;
+    probe-backup-role) echo "EXPECT_HARDENING" ;;
+    *) return 1 ;;
+  esac
+}
+
+# runner_overrides <mode> [KEY=VALUE...] -> prints the run-task --overrides JSON (refuses anything that is not an allowed, plain parameter)
+runner_overrides() {
+  local mode="$1"; shift
+  local allowed kv key val total=0
+  local -a env_json=()
+  allowed="$(runner_mode_params "${mode}")" || die "unknown runner mode '${mode}' (verify-db seed-actor-proof seed-market seed-world record-anchor cleanup backup-restore-drill pitr-verify probe-backup-role)"
+  local value_re='^[A-Za-z0-9._:/@#=,;+ -]*$'
+  for kv in "$@"; do
+    [[ "${kv}" == *=* ]] || die "parameter '${kv%%=*}' must be KEY=VALUE"
+    key="${kv%%=*}"; val="${kv#*=}"
+    [[ "${key}" =~ ^[A-Z][A-Z0-9_]{1,40}$ ]] || die "parameter name '${key}' is malformed"
+    case "${key}" in *PASS*|*SECRET*|*TOKEN*|*PRIVATE*|*CREDENTIAL*|*KEYS*) die "parameter '${key}' looks like a credential: secrets never travel on this command line (they are injected from Secrets Manager)" ;; esac
+    [[ " ${allowed} " == *" ${key} "* ]] || die "parameter '${key}' is not accepted by mode '${mode}' (accepted: ${allowed:-none})"
+    [[ "${val}" =~ ${value_re} ]] || die "the value of '${key}' contains characters outside [A-Za-z0-9._:/@#=,;+ -]"
+    [[ ${#val} -le 1500 ]] || die "the value of '${key}' is too long"
+    total=$((total + ${#val}))
+    env_json+=("$(jq -n --arg k "${key}" --arg v "${val}" '{name: $k, value: $v}')")
+  done
+  [[ ${total} -le 6000 ]] || die "parameters are too large for a container override (8192 characters in total)"
+  case "${mode}" in
+    seed-market|seed-world|record-anchor)
+      local need
+      for need in AUTH_REF OPERATOR REASON; do
+        [[ " $* " == *" ${need}="* ]] || die "mode '${mode}' writes to the database: ${need}=... is mandatory (who, why and which authorisation are recorded)"
+      done ;;
+  esac
+  jq -n --arg mode "${mode}" --argjson envs "$(printf '%s\n' ${env_json[@]+"${env_json[@]}"} | jq -s '.')" \
+    '{containerOverrides: [{name: "staging-runner", command: [$mode], environment: $envs}]}'
+}
+
+cmd_runner_image() {
+  require_tools terraform docker aws jq git
+  resolve_image_tag
+  local repo registry
+  repo="$(tf output -json ecr_repository_urls | jq -r '.["staging-runner"]')"
+  [[ -n "${repo}" && "${repo}" != "null" ]] || die "no staging-runner repository in the Terraform outputs - run 'deploy.sh up' (or its ECR phase) first"
+  registry="${repo%%/*}"
+  ecr_login "${registry}"
+  say "staging-runner image ${repo}:${IMAGE_TAG}"
+  build_and_push "${repo}" - -f "${REPO_ROOT}/deploy/docker/staging-runner.Dockerfile"
+}
+
+# runner_print_log <log_group> <stream> : print every event of a stream; waits (bounded) for the runner's final RUNNER|END line, because
+# CloudWatch Logs delivery lags the task's stop by a few seconds
+runner_print_log() {
+  local group="$1" stream="$2" token="" next out end_seen=0 printed=0 tmp
+  tmp="$(mktemp)"
+  for _ in $(seq 1 24); do
+    token=""; : >"${tmp}"
+    while :; do
+      if [[ -n "${token}" ]]; then
+        out="$(aws logs get-log-events --region "${AWS_REGION}" --log-group-name "${group}" --log-stream-name "${stream}" --start-from-head --next-token "${token}" --output json 2>/dev/null)" || break
+      else
+        out="$(aws logs get-log-events --region "${AWS_REGION}" --log-group-name "${group}" --log-stream-name "${stream}" --start-from-head --output json 2>/dev/null)" || break
+      fi
+      printf '%s' "${out}" | jq -r '.events[].message' >>"${tmp}"
+      next="$(printf '%s' "${out}" | jq -r '.nextForwardToken')"
+      [[ "${next}" == "${token}" ]] && break
+      token="${next}"
+    done
+    if grep -q '^RUNNER|END|' "${tmp}"; then end_seen=1; break; fi
+    sleep 5
+  done
+  printed="$(grep -c . "${tmp}" || true)"
+  cat "${tmp}"
+  [[ -z "${RUNNER_LOG_FILE:-}" ]] || { (umask 077; cp "${tmp}" "${RUNNER_LOG_FILE}"); echo "   (log also written to ${RUNNER_LOG_FILE})"; }
+  rm -f "${tmp}"
+  [[ "${end_seen}" == 1 ]] || echo "WARNING: the runner's final RUNNER|END line was not found in ${group} ${stream} (${printed} lines printed): trust the exit code, re-read the log group" >&2
+}
+
+cmd_runner() {
+  local mode="${1:-}"
+  [[ -n "${mode}" ]] || die "usage: deploy.sh runner <mode> [KEY=VALUE...]"
+  shift
+  require_tools terraform aws jq
+  local overrides td_output prefix cluster subnets sg assign network_config task_arn task_id
+  overrides="$(runner_overrides "${mode}" "$@")"
+  case "${mode}" in
+    seed-actor-proof) td_output="ecs_staging_runner_actor_proof_task_definition_arn"; prefix="staging-runner-actor-proof" ;;
+    seed-world) td_output="ecs_staging_runner_seed_world_task_definition_arn"; prefix="staging-runner-seed-world" ;;
+    *) td_output="ecs_staging_runner_task_definition_arn"; prefix="staging-runner" ;;
+  esac
+  cluster="$(tf_out ecs_cluster_name)"
+  subnets="$(tf output -json ecs_task_subnet_ids)"
+  sg="$(tf_out ecs_security_group_id)"
+  assign="$(tf_out ecs_assign_public_ip)"
+  network_config="$(jq -n --argjson subnets "${subnets}" --arg sg "${sg}" --arg assign "${assign}" \
+    '{awsvpcConfiguration: {subnets: $subnets, securityGroups: [$sg], assignPublicIp: $assign}}')"
+
+  say "staging-runner mode ${mode} ($(jq -r '.containerOverrides[0].environment | map(.name) | join(",") | if . == "" then "no parameters" else "parameters: " + . end' <<<"${overrides}"))"
+  local run_json
+  run_json="$(aws ecs run-task --region "${AWS_REGION}" --cluster "${cluster}" --task-definition "$(tf_out "${td_output}")" \
+    --launch-type FARGATE --network-configuration "${network_config}" --overrides "${overrides}" --started-by "deploy.sh-runner" --output json)"
+  task_arn="$(jq -r '.tasks[0].taskArn // empty' <<<"${run_json}")"
+  [[ -n "${task_arn}" ]] || die "run-task returned no task: $(jq -r '[.failures[]? | .reason] | join("; ")' <<<"${run_json}")"
+  task_id="${task_arn##*/}"
+  echo "   task ${task_arn}"
+
+  # poll until STOPPED (aws ecs wait gives up after about ten minutes; a restore drill can take longer)
+  local timeout="${RUNNER_TIMEOUT_SECONDS:-3600}" waited=0 status=""
+  while :; do
+    status="$(aws ecs describe-tasks --region "${AWS_REGION}" --cluster "${cluster}" --tasks "${task_arn}" --query 'tasks[0].lastStatus' --output text)"
+    [[ "${status}" == "STOPPED" ]] && break
+    if (( waited >= timeout )); then
+      aws ecs stop-task --region "${AWS_REGION}" --cluster "${cluster}" --task "${task_arn}" --reason "deploy.sh runner timeout" >/dev/null || true
+      die "runner ${mode} did not finish within ${timeout}s; the task was asked to stop (task ${task_id})"
+    fi
+    sleep 15; waited=$((waited + 15))
+    if (( waited % 120 == 0 )); then echo "   ... ${status} after ${waited}s"; fi
+  done
+
+  local desc exit_code reason image digest
+  desc="$(aws ecs describe-tasks --region "${AWS_REGION}" --cluster "${cluster}" --tasks "${task_arn}" --output json)"
+  exit_code="$(jq -r '.tasks[0].containers[0].exitCode // "none"' <<<"${desc}")"
+  reason="$(jq -r '[.tasks[0].stoppedReason // "", .tasks[0].containers[0].reason // ""] | map(select(. != "")) | join(" / ")' <<<"${desc}")"
+  image="$(jq -r '.tasks[0].containers[0].image // "?"' <<<"${desc}")"
+  digest="$(jq -r '.tasks[0].containers[0].imageDigest // "?"' <<<"${desc}")"
+  echo "   image ${image} (${digest}); stopped: ${reason:-n/a}; exit code ${exit_code}"
+
+  say "log ${prefix}/staging-runner/${task_id}"
+  runner_print_log "$(tf output -json log_group_names | jq -r '.["staging-runner"]')" "${prefix}/staging-runner/${task_id}"
+
+  case "${exit_code}" in
+    0) echo "   runner ${mode}: exit 0 (no FAIL; read FINDING / BLOCKED lines above)" ;;
+    none) die "runner ${mode}: the container never ran to an exit code (${reason:-no reason reported}); see the log above" ;;
+    1) die "runner ${mode}: exit 1 - at least one RESULT|...|FAIL (STOP: do not work around it; plan section 11)" ;;
+    2) die "runner ${mode}: exit 2 - refused (bad parameter, wrong environment or missing prerequisite); nothing was changed by the refusal" ;;
+    3) die "runner ${mode}: exit 3 - STOP condition (plan section 11): report to the orchestrator and the owner; nothing was worked around" ;;
+    *) die "runner ${mode}: exit ${exit_code}" ;;
+  esac
+}
+
+
 cmd_status() {
   require_tools terraform aws jq
   say "status"
@@ -318,15 +479,20 @@ cmd_down() {
   "${SCRIPT_DIR}/verify-teardown.sh"
 }
 
+# Sourced (deploy/aws/tests/runner-overrides-test.sh) instead of executed: define the functions and stop.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then return 0; fi
+
 case "${1:-}" in
   up) cmd_up ;;
   scale) shift; cmd_scale "$@" ;;
   migrate) cmd_migrate ;;
   seed-admin) shift; cmd_seed_admin "$@" ;;
+  runner) shift; cmd_runner "$@" ;;
+  runner-image) cmd_runner_image ;;
   status) cmd_status ;;
   down) cmd_down ;;
   *)
-    sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

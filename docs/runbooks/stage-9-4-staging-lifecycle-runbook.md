@@ -56,6 +56,10 @@ read-only, 28/28 — re-run it once the credential exists):
 - `deploy/aws/iam/staging-deployer-infra-policy.json` — RDS / ELB /
   CloudWatch Logs / alarms / SNS scoped to `igaming-staging-*` ARNs, ECS
   region-scoped.
+- `deploy/aws/iam/staging-deployer-runner-roles-policy.json` — STAGING-PREP-3: create/manage/pass-role for the two runner task roles
+  (`igaming-staging-ecs-runner-task-role`, `igaming-staging-ecs-seed-world-task-role`), exact ARNs, same boundary condition and
+  `iam:PassedToService = ecs-tasks.amazonaws.com`; a separate file because the edge policy is near the 6,144-character limit. Created and
+  attached by an IAM administrator (the account owner).
 - `deploy/aws/iam/staging-deployer-edge-iam-state-policy.json` — state
   object + lock file only (the state object cannot be deleted), Secrets
   Manager on `igaming-staging/*` (including `GetSecretValue`, which the AWS

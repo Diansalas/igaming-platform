@@ -90,6 +90,9 @@ var revealAllowlist = map[string]bool{
 	"internal/httpserver/staff_auth_secrets.go:newEnrolStartResponse:RevealForEnrolment": true,
 	"internal/httpserver/staff_auth_secrets.go:newEnrolConfirmResponse:RevealForDisplay": true,
 	"cmd/seed-admin/main.go:printBootstrapToken:RevealForDelivery":                       true,
+	// STAGING-PREP-3 (SA-1): the synthetic staging world's bootstrap tokens go ONLY into a 0600 tmpfs credentials file that becomes a
+	// Secrets Manager secret (never printed or logged).
+	"internal/stagingseed/world.go:deliverToken:RevealForDelivery": true,
 	// ADR 0119 S5 + S6: the invite / MFA-reset email body (delivered post-commit through email.Provider, never logged).
 	"internal/stafflifecycle/service.go:compose:RevealForDelivery": true,
 }
@@ -129,6 +132,7 @@ func TestStatic_StaffMFAKeysSingleConstructor(t *testing.T) {
 	want := []string{
 		"cmd/platform-api/main.go:run:LoadKeys",
 		"cmd/seed-admin/main.go:run:LoadKeys",
+		"cmd/seed-staging-world/main.go:run:LoadKeys",
 		"internal/staffmfa/startup.go:CheckKeyConfig:NewKeysFromConfig",
 		"internal/staffmfa/startup.go:LoadKeys:NewKeysFromConfig",
 		"internal/staffmfa/startup.go:LoadKeys:VerifyStartup",

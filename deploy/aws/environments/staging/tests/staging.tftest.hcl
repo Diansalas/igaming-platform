@@ -30,8 +30,9 @@ mock_provider "aws" {
 
   mock_resource "aws_db_instance" {
     defaults = {
-      address = "igaming-staging-db.abc123.eu-central-1.rds.amazonaws.com"
-      port    = 5432
+      address     = "igaming-staging-db.abc123.eu-central-1.rds.amazonaws.com"
+      port        = 5432
+      resource_id = "db-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       master_user_secret = [{
         secret_arn    = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:rds!db-mock-AbCdEf"
         kms_key_id    = "alias/aws/secretsmanager"
@@ -163,8 +164,8 @@ run "staging_defaults_are_hardened" {
 
   # --- secret ARNs exposed, never values ---
   assert {
-    condition     = length(output.secret_arns) == 8 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
-    error_message = "secret_arns must list exactly the eight secret ARNs (db master, runtime, JWT, seed admin, staff MFA, payout instrument, actor proof, alert webhook HMAC)."
+    condition     = length(output.secret_arns) == 9 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
+    error_message = "secret_arns must list exactly the nine secret ARNs (db master, runtime, JWT, seed admin, staff MFA, payout instrument, actor proof, alert webhook HMAC, seed-world passwords)."
   }
 
   # --- ADR 0086 root-level decisions (QA review: each must fail a test if
@@ -260,6 +261,17 @@ run "staging_defaults_are_hardened" {
   assert {
     condition     = var.backup_runner_secret_arn == null
     error_message = "The backup runner secret is a reference supplied at deploy time; no ARN may be committed as a default."
+  }
+
+  # --- STAGING-PREP-3: the one-off staging runner ---
+  assert {
+    condition     = contains(keys(output.log_group_names), "staging-runner") && output.log_group_names["staging-runner"] == "/ecs/igaming-staging/staging-runner"
+    error_message = "The staging runner needs the log group /ecs/igaming-staging/staging-runner (the boundary and the one-off execution role are scoped to /ecs/igaming-staging/*)."
+  }
+
+  assert {
+    condition     = contains(keys(output.ecr_repository_urls), "staging-runner") && output.key_family_kid == "stg-v1" && output.db_resource_id == "db-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    error_message = "The staging-runner repository, the key family kid and the DbiResourceId must be exposed to deploy.sh."
   }
 }
 

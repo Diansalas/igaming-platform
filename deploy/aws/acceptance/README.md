@@ -96,17 +96,41 @@ missing variable. The first platform admin is the only mandatory identity.
 |---|---|---|
 | Stack deployed, access CIDR allow-listed for the machine running the suite | operator | `health.*` |
 | `APP_ENV=staging`, `TEST_SUPPORT_ENDPOINTS_ENABLED=true`, `MOCK_GEOLOCATION_COUNTRY` set (plan G3, owner action A) | Terraform | `ledger.deposit_settle_via_mock_callback`, `player.activation_seam` SKIP when the routes are absent |
-| Synthetic tenant and brand **active** (launch governance) | owner / two platform admins | `setup.resolve_tenant_brand` |
-| Operating-market rows for the mock country, licence ceiling and tenant opt-in (plan 6.5, owner action C; there is no route) | owner | `platform.readiness_market_config`, `player.register` |
+| Synthetic tenant and brand **active** (launch governance) | `deploy.sh runner seed-world` (owner-provisioned ACTIVE; below), or owner / two platform admins | `setup.resolve_tenant_brand` |
+| Operating-market rows for the mock country, licence ceiling and tenant opt-in (plan 6.5, owner action C; there is no route) | `seed-world` / `seed-market` runner modes | `platform.readiness_market_config`, `player.register` |
 | `actor_proof_keys` row (owner action B) | owner | not needed by this suite's flows; governed writes (launch decisions, K1/K2/K3, RG floors) answer `AP002` without it |
-| Tenant staff accounts: `tenant_admin`, two `finance`, `compliance` (and optionally `risk_manager`) with Persons, each with a bootstrap token | owner | `setup.signin_*`, then the dependent flows SKIP |
+| Tenant staff accounts: `tenant_admin`, two `finance`, `compliance` (and optionally `risk_manager`) with Persons, each with a bootstrap token | operator, with `deploy.sh runner seed-world` (below) | `setup.signin_*`, then the dependent flows SKIP |
 | Alert route authored and approved by two platform admins (plan 10.2) | platform admins | `platform.readiness_alerts_item` (SKIP until then) |
 
-**Tenant staff cannot be created through any supported staging path today** (finding SA-1 in the record): invitations
-are delivered by the MOCK e-mail provider, which keeps the token in process memory, and `cmd/seed-admin` creates
-platform admins only. Until a reviewed owner procedure or tool exists, the withdrawal four-eyes, KYC approval and
-capability-configuration flows cannot run in staging and report `SKIP [prerequisite]`. That is a platform gap, not a
-suite limitation, and it is the largest reason for a non-green staging acceptance.
+**Tenant staff and the synthetic world (SA-1: tooling provided by the runner mode `seed-world`; IMPLEMENTED and tested locally, never run on staging).** The platform has no supported way to create
+tenant staff in staging by hand (invitations go through the MOCK e-mail provider, which keeps the token in process memory, and
+`cmd/seed-admin` creates platform admins only), so the staging runner provides a reviewed one:
+
+```
+deploy.sh runner seed-world TENANT_SLUG=<slug> BRAND_SLUG=<slug> [SECOND_TENANT_SLUG=<slug> SECOND_BRAND_SLUG=<slug>] \
+    COUNTRY=<mock country> AUTH_REF=<ticket> OPERATOR=<name> "REASON=<why>" ACTOR_ID=<platform admin staff uuid>
+```
+
+It needs the `database_environment` anchor recorded first (`deploy.sh runner record-anchor`, plan 6.2) and creates, through the
+platform's own services, an ACTIVE synthetic tenant and brand (owner-provisioning path) with operating-market rows, optionally a
+second ACTIVE tenant (for `SECOND_ACTIVE_TENANT` / `SECOND_ACTIVE_BRAND`), and the tenant staff `tenant_admin`, `finance` x2 (two
+distinct Persons), `compliance` and `risk_manager`, each with a bootstrap MFA enrolment token. Their one-time passwords and tokens
+are written ONLY to the Secrets Manager secret `igaming-staging/seed-world-passwords`, never printed or logged.
+
+**How the suite consumes them:** with the operator's own AWS credential run
+
+```
+deploy/aws/acceptance/fetch-seed-world.sh /secure/acceptance      # absolute path, outside the repository
+. /secure/acceptance/suite.env
+```
+
+It writes `<KEY>.pw` and `<KEY>.token` as 0600 files (`TENANT_ADMIN`, `FINANCE1`, `FINANCE2`, `COMPLIANCE`, `RISK_MANAGER`) and a
+`suite.env` of NON-secret exports: `TENANT`, `BRAND`, `<KEY>_EMAIL`, `<KEY>_PASSWORD_FILE`, `<KEY>_BOOTSTRAP_TOKEN_FILE` and a
+`<KEY>_TOTP_SECRET_FILE` path that does not exist yet (the suite writes the TOTP secret there at first enrolment, section 3, and the
+token file is single use). Set `SECOND_ACTIVE_TENANT` / `SECOND_ACTIVE_BRAND` yourself to the second slugs you passed. The platform
+admins (`ADMIN`, `ADMIN2`) still come from `seed-admin`. A lost bootstrap token is reissued with `seed-admin -issue-bootstrap`;
+re-running `seed-world` is idempotent and never changes stored credentials. Without `seed-world` the dependent flows report
+`SKIP [prerequisite]` as before.
 
 ## 5. Market evidence dependency (KYC-residence evidence)
 

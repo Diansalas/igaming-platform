@@ -31,7 +31,7 @@ locals {
   # needs iam's role ARNs). The ecs module independently creates log
   # groups with names built the identical way from the same name_prefix.
   service_log_keys = ["platform-api", "b2c", "backoffice"]
-  one_off_log_keys = ["migrate", "role-init", "seed-admin"]
+  one_off_log_keys = ["migrate", "role-init", "seed-admin", "staging-runner"]
   log_group_names  = { for k in concat(local.service_log_keys, local.one_off_log_keys) : k => "/ecs/${local.name_prefix}/${k}" }
   log_group_arn    = { for k, name in local.log_group_names : k => "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:${name}:*" }
 
@@ -138,18 +138,28 @@ module "iam" {
   ]
   service_log_group_arns = [for k in local.service_log_keys : local.log_group_arn[k]]
 
-  one_off_ecr_repository_arns = [module.ecr.repository_arns["platform-api"]]
+  # STAGING-PREP-3: the one-off execution role also pulls the staging-runner image and reads the
+  # actor-proof keys secret (injected only into the staging-runner-actor-proof definition). The one-off
+  # role is assumed only by operator-launched one-off tasks; the service role gains nothing.
+  one_off_ecr_repository_arns = [module.ecr.repository_arns["platform-api"], module.ecr.repository_arns["staging-runner"]]
   one_off_secret_arns = [
     module.database.master_user_secret_arn,
     module.secrets.db_runtime_secret_arn,
     module.secrets.seed_admin_password_secret_arn,
     module.secrets.staff_mfa_keys_secret_arn, # seed-admin needs the staff MFA keys (staffmfa.LoadKeys)
+    module.secrets.actor_proof_keys_secret_arn,
   ]
   one_off_log_group_arns = [for k in local.one_off_log_keys : local.log_group_arn[k]]
 
   # The application itself (task role, awssm:// backend) reads the alert
   # webhook HMAC secret; granted only when the webhook channel is configured.
   task_secret_arns = local.alert_webhook_enabled ? [module.secrets.alert_webhook_hmac_secret_arn] : []
+
+  # STAGING-PREP-3: the staging-runner task role (rds-db:connect as igaming_backup on THIS instance only).
+  aws_region            = var.aws_region
+  runner_db_resource_id = module.database.resource_id
+  # SA-1: the seed-world task role (Get/PutSecretValue on the empty seed-world-passwords secret only).
+  seed_world_secret_arn = module.secrets.seed_world_secret_arn
 
   # Created once by deploy/aws/bootstrap; the deployer policy only permits
   # creating/editing roles that carry exactly this boundary (ADR 0086).
@@ -196,6 +206,12 @@ module "ecs" {
   task_role_arn              = module.iam.task_role_arn
   log_retention_days         = var.log_retention_days
   container_port             = 8080
+
+  # STAGING-PREP-3: the one-off staging runner (deploy.sh runner <mode>); never a service.
+  staging_runner_image            = "${module.ecr.repository_urls["staging-runner"]}:${var.image_tag}"
+  runner_task_role_arn            = module.iam.runner_task_role_arn
+  runner_seed_world_task_role_arn = module.iam.runner_seed_world_task_role_arn
+  seed_world_secret_arn           = module.secrets.seed_world_secret_arn
 
   platform_api_image = "${module.ecr.repository_urls["platform-api"]}:${var.image_tag}"
   b2c_image          = "${module.ecr.repository_urls["b2c"]}:${var.image_tag}"

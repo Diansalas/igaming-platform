@@ -68,6 +68,24 @@ for sh in "${AWS_DIR}"/scripts/*.sh "${AWS_DIR}"/tests/*.sh; do
   bash -n "${sh}" || fail "bash -n ${sh}"
 done
 
+step "staging runner: shell syntax and deploy.sh runner parameter handling (STAGING-PREP-3)"
+for sh in "${REPO_ROOT}"/deploy/staging-runner/*.sh "${REPO_ROOT}"/deploy/staging-runner/modes/*.sh "${REPO_ROOT}"/deploy/staging-runner/tests/*.sh; do
+  bash -n "${sh}" || fail "bash -n ${sh}"
+done
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck -x -S warning -e SC1091 "${REPO_ROOT}"/deploy/staging-runner/*.sh "${REPO_ROOT}"/deploy/staging-runner/modes/*.sh "${REPO_ROOT}"/deploy/staging-runner/tests/*.sh "${AWS_DIR}/scripts/deploy.sh" \
+    || fail "shellcheck on the staging runner scripts"
+else
+  echo "shellcheck not installed: skipped"
+fi
+command -v jq >/dev/null 2>&1 || fail "jq is required for the deploy.sh runner parameter test"
+bash "${AWS_DIR}/tests/runner-overrides-test.sh" || fail "deploy.sh runner parameter handling"
+bash "${REPO_ROOT}/deploy/staging-runner/tests/probe-verdict-test.sh" || fail "fail-closed probe classification"
+bash "${AWS_DIR}/tests/fetch-seed-world-test.sh" || fail "fetch-seed-world.sh"
+for pj in "${AWS_DIR}"/iam/*.json; do
+  jq -e . "${pj}" >/dev/null || fail "invalid JSON: ${pj}"
+done
+
 step "repository guards"
 # No Terraform state, plans or local tfvars may ever be tracked.
 tracked="$(git -C "${REPO_ROOT}" ls-files | grep -E '(\.tfstate(\..*)?$|\.tfplan$|(^|/)terraform\.tfvars$|\.auto\.tfvars$|(^|/)\.terraform/)' || true)"

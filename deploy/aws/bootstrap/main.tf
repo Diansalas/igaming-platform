@@ -210,6 +210,29 @@ data "aws_iam_policy_document" "staging_ecs_role_boundary" {
     resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:igaming-staging/*"]
   }
 
+  # STAGING-PREP-3 (IAM DELTA, applied by the bootstrap credential only): the staging-runner task role
+  # (modules/iam, igaming-staging-ecs-runner-task-role) mints IAM database-authentication tokens for the
+  # dedicated backup login. A role can never exceed its boundary, so the boundary must allow the action,
+  # but ONLY for that one database user (the DbiResourceId does not exist yet when this policy is applied
+  # before the first deploy, hence db-*; the role's own inline policy pins the exact instance).
+  statement {
+    sid       = "StagingRunnerBackupRoleIamAuth"
+    actions   = ["rds-db:connect"]
+    resources = ["arn:aws:rds-db:${var.aws_region}:${data.aws_caller_identity.current.account_id}:dbuser:db-*/igaming_backup"]
+  }
+
+  # STAGING-PREP-3 round 2 (SA-1; BOUNDARY STATEMENT ONLY, applied by the bootstrap credential): the seed-world task role
+  # (modules/iam, igaming-staging-ecs-seed-world-task-role) stores the synthetic acceptance staff's one-time credentials in the
+  # secret igaming-staging/seed-world-passwords. The boundary above already allows GetSecretValue on igaming-staging/*; this adds
+  # PutSecretValue for that ONE secret name (the random ARN suffix is why the name ends in -*), nothing else.
+  # The deployer-policy change that lets the deployer create/manage the new role is NOT applied by this credential: it is
+  # the NEW file deploy/aws/iam/staging-deployer-runner-roles-policy.json, created and attached by an IAM administrator (the account owner).
+  statement {
+    sid       = "StagingRunnerSeedWorldSecretWrite"
+    actions   = ["secretsmanager:PutSecretValue"]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:igaming-staging/seed-world-passwords-*"]
+  }
+
   # The RDS-managed master secret ("rds!db-<uuid>"), only for the staging DB.
   statement {
     sid       = "StagingRdsManagedMasterSecret"

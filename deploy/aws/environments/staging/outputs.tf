@@ -74,6 +74,41 @@ output "ecs_seed_admin_task_definition_arn" {
   value = module.ecs.task_definition_arns["seed_admin"]
 }
 
+output "ecs_staging_runner_task_definition_arn" {
+  description = "STAGING-PREP-3: the one-off staging runner (deploy.sh runner <mode>): verify-db, seed-market, backup-restore-drill, pitr-verify, probe-backup-role."
+  value       = module.ecs.task_definition_arns["staging_runner"]
+}
+
+output "ecs_staging_runner_actor_proof_task_definition_arn" {
+  description = "STAGING-PREP-3: the staging-runner definition that carries the actor-proof key material and no task role (mode seed-actor-proof only)."
+  value       = module.ecs.task_definition_arns["staging_runner_actor_proof"]
+}
+
+output "ecs_staging_runner_seed_world_task_definition_arn" {
+  description = "STAGING-PREP-3 round 2 (SA-1): the staging-runner definition for mode seed-world: master password, staff MFA keys and the seed-world task role (Get/PutSecretValue on igaming-staging/seed-world-passwords only)."
+  value       = module.ecs.task_definition_arns["staging_runner_seed_world"]
+}
+
+output "runner_seed_world_task_role_arn" {
+  description = "SA-1: the seed-world task role."
+  value       = module.iam.runner_seed_world_task_role_arn
+}
+
+output "runner_task_role_arn" {
+  description = "STAGING-PREP-3: the staging-runner task role (rds-db:connect as igaming_backup on this instance only)."
+  value       = module.iam.runner_task_role_arn
+}
+
+output "db_resource_id" {
+  description = "DbiResourceId of the staging instance (not secret; names the rds-db:connect ARN)."
+  value       = module.database.resource_id
+}
+
+output "key_family_kid" {
+  description = "Active kid of every key family (staff MFA, payout instrument, actor proof); the seed-actor-proof mode requires it to equal the kid inside the actor-proof secret."
+  value       = module.secrets.key_family_kid
+}
+
 output "ecs_task_subnet_ids" {
   description = "Subnets deploy.sh runs the one-off tasks in (same as the services)."
   value       = var.ecs_public_ip_mode ? module.network.public_subnet_ids : module.network.private_subnet_ids
@@ -103,6 +138,7 @@ output "secret_arns" {
     payout_instrument_keys = module.secrets.payout_instrument_keys_secret_arn
     actor_proof_keys       = module.secrets.actor_proof_keys_secret_arn
     alert_webhook_hmac     = module.secrets.alert_webhook_hmac_secret_arn
+    seed_world_passwords   = module.secrets.seed_world_secret_arn # empty container; written only by the seed-world runner task
   }
 }
 

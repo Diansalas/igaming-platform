@@ -3,8 +3,9 @@ variable "name_prefix" {
 }
 
 variable "repository_names" {
-  type    = list(string)
-  default = ["platform-api", "b2c", "backoffice"]
+  description = "One ECR repository per deployable image. staging-runner (STAGING-PREP-3) is the image of the one-off staging runner task (deploy/docker/staging-runner.Dockerfile)."
+  type        = list(string)
+  default     = ["platform-api", "b2c", "backoffice", "staging-runner"]
 }
 
 variable "untagged_image_expiry_days" {

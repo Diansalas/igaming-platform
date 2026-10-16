@@ -41,6 +41,11 @@ output "alert_webhook_secret_ref" {
   value       = "awssm://${aws_secretsmanager_secret.alert_webhook_hmac.arn}?versionId=${aws_secretsmanager_secret_version.alert_webhook_hmac.version_id}"
 }
 
+output "seed_world_secret_arn" {
+  description = "Empty-container secret igaming-staging/seed-world-passwords: written only by the seed-world runner task (Get/PutSecretValue on this ARN), read by the acceptance-suite operator."
+  value       = aws_secretsmanager_secret.seed_world.arn
+}
+
 # The kid is not secret; it is the same string in every family (kids are per family).
 output "key_family_kid" {
   description = "Active kid for the staff MFA (factor and MAC), payout instrument (master and fingerprint) and actor proof families."

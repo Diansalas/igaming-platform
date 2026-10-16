@@ -1,0 +1,58 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "IamCreateRunnerRolesOnlyWithBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-runner-task-role",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-seed-world-task-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "IamManageRunnerRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:DeleteRole",
+        "iam:UpdateRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-runner-task-role",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-seed-world-task-role"
+      ]
+    },
+    {
+      "Sid": "IamPassRunnerRolesToEcsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-runner-task-role",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-seed-world-task-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

@@ -22,3 +22,12 @@ run "immutable_scanned_repositories" {
     error_message = "force_delete must default to false outside disposable environments."
   }
 }
+
+run "staging_runner_repository_exists" {
+  command = plan
+
+  assert {
+    condition     = contains(keys(aws_ecr_repository.this), "staging-runner") && length(aws_ecr_repository.this) == 4
+    error_message = "STAGING-PREP-3: the staging-runner image needs its own immutable, scanned repository (exactly platform-api, b2c, backoffice, staging-runner)."
+  }
+}

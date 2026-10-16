@@ -44,6 +44,12 @@ variables {
   payout_instrument_active_kid      = "stg-v1"
   actor_proof_keys_secret_arn       = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/actor-proof-keys-AbCdEf"
   actor_proof_active_kid            = "stg-v1"
+
+  staging_runner_image = "765578795051.dkr.ecr.eu-central-1.amazonaws.com/igaming-staging/staging-runner:0123456789abcdef0123456789abcdef01234567"
+  runner_task_role_arn = "arn:aws:iam::765578795051:role/igaming-staging-ecs-runner-task-role"
+
+  runner_seed_world_task_role_arn = "arn:aws:iam::765578795051:role/igaming-staging-ecs-seed-world-task-role"
+  seed_world_secret_arn           = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/seed-world-passwords-AbCdEf"
 }
 
 run "database_url_never_carries_a_password" {
@@ -367,4 +373,194 @@ run "seed_admin_environment_matches_the_mfa_rules" {
     }
     error_message = "seed-admin needs APP_ENV and both staff MFA active kids besides DATABASE_URL."
   }
+}
+
+# --- STAGING-PREP-3: the one-off staging runner (deploy.sh runner <mode>) ---
+
+run "staging_runner_definitions_inject_only_what_each_mode_needs" {
+  command = plan
+
+  assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.staging_runner.container_definitions)[0].secrets : s.name => s.valueFrom
+      } == {
+      DB_MASTER_PASSWORD  = "${var.db_master_secret_arn}:password::"
+      DB_RUNTIME_PASSWORD = "${var.db_runtime_secret_arn}:password::"
+    }
+    error_message = "staging-runner must receive only the master and runtime DB passwords (as DB_*_PASSWORD, never PGPASSWORD: the scripts build 0600 passfiles)."
+  }
+
+  assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.staging_runner_actor_proof.container_definitions)[0].secrets : s.name => s.valueFrom
+      } == {
+      DB_MASTER_PASSWORD = "${var.db_master_secret_arn}:password::"
+      ACTOR_PROOF_KEYS   = var.actor_proof_keys_secret_arn
+    }
+    error_message = "staging-runner-actor-proof must receive only the master password and the actor-proof keys."
+  }
+
+  assert {
+    condition = alltrue([
+      for td in [aws_ecs_task_definition.staging_runner, aws_ecs_task_definition.staging_runner_actor_proof] :
+      !contains([for s in jsondecode(td.container_definitions)[0].secrets : s.name], "PGPASSWORD") &&
+      !contains([for s in jsondecode(td.container_definitions)[0].secrets : s.name], "JWT_SIGNING_SECRET") &&
+      !contains([for e in jsondecode(td.container_definitions)[0].environment : e.name], "DATABASE_URL")
+    ])
+    error_message = "The runner receives no PGPASSWORD, no JWT secret and no DATABASE_URL (it builds its own connection with passfiles)."
+  }
+}
+
+run "staging_runner_definitions_allow_the_exit_trap_the_longest_stop_timeout" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for td in [aws_ecs_task_definition.staging_runner, aws_ecs_task_definition.staging_runner_actor_proof, aws_ecs_task_definition.staging_runner_seed_world] :
+      jsondecode(td.container_definitions)[0].stopTimeout == 120
+    ])
+    error_message = "SRP3-9: every runner definition sets stopTimeout = 120 (the Fargate maximum) so the exit trap can drop the loader role and the restore-check database."
+  }
+}
+
+run "staging_runner_seed_world_definition_has_only_its_own_inputs" {
+  command = plan
+
+  assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].secrets : s.name => s.valueFrom
+      } == {
+      DB_MASTER_PASSWORD    = "${var.db_master_secret_arn}:password::"
+      STAFF_MFA_FACTOR_KEYS = "${var.staff_mfa_keys_secret_arn}:factor_keys::"
+      STAFF_MFA_MAC_KEYS    = "${var.staff_mfa_keys_secret_arn}:mac_keys::"
+    }
+    error_message = "SA-1: staging-runner-seed-world receives only the master password and the staff MFA key families (no runtime password, no actor-proof key, no JWT secret)."
+  }
+
+  assert {
+    condition     = aws_ecs_task_definition.staging_runner_seed_world.task_role_arn == var.runner_seed_world_task_role_arn && var.runner_seed_world_task_role_arn != var.runner_task_role_arn && var.runner_seed_world_task_role_arn != var.task_role_arn
+    error_message = "SA-1: seed-world assumes its own task role, never the backup-login runner role or the shared task role."
+  }
+
+  assert {
+    condition = (
+      aws_ecs_task_definition.staging_runner_seed_world.execution_role_arn == var.one_off_execution_role_arn &&
+      jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].user == "10001" &&
+      jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].command == ["usage"] &&
+      jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].logConfiguration.options["awslogs-stream-prefix"] == "staging-runner-seed-world" &&
+      jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].linuxParameters.capabilities.drop == ["ALL"]
+    )
+    error_message = "SA-1: the seed-world definition uses the one-off execution role, runs as a non-root user with all capabilities dropped, defaults to usage and logs to the runner group with its own stream prefix."
+  }
+
+  assert {
+    condition     = anytrue([for e in jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].environment : e.name == "SEED_WORLD_SECRET_ARN" && e.value == var.seed_world_secret_arn])
+    error_message = "SRP3R-6: the seed-world definition addresses the secret by ARN (SEED_WORLD_SECRET_ARN)."
+  }
+
+  assert {
+    condition = !anytrue([
+      for e in jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].environment :
+      can(regex("(?i)pass|secret|token|private|credential|keys$", e.name)) && !can(regex("ACTIVE_KID$", e.name)) && e.name != "SEED_WORLD_SECRET_ARN" # an ARN (a name), not a value
+    ])
+    error_message = "No environment variable of the seed-world definition may look like a credential."
+  }
+}
+
+run "staging_runner_identity_split" {
+  command = plan
+
+  assert {
+    condition     = aws_ecs_task_definition.staging_runner.task_role_arn == var.runner_task_role_arn && var.runner_task_role_arn != var.task_role_arn
+    error_message = "staging-runner assumes its own task role (rds-db:connect), never the role platform-api shares."
+  }
+
+  assert {
+    condition     = aws_ecs_task_definition.staging_runner_actor_proof.task_role_arn == null || aws_ecs_task_definition.staging_runner_actor_proof.task_role_arn == ""
+    error_message = "The actor-proof definition holds key material and must carry NO task role (no AWS credentials in that container)."
+  }
+
+  assert {
+    condition = alltrue([
+      for td in [aws_ecs_task_definition.staging_runner, aws_ecs_task_definition.staging_runner_actor_proof] :
+      td.execution_role_arn == var.one_off_execution_role_arn
+    ])
+    error_message = "Both runner definitions use the one-off execution role, never the service execution role."
+  }
+}
+
+run "staging_runner_container_hardening_and_logging" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for td in [aws_ecs_task_definition.staging_runner, aws_ecs_task_definition.staging_runner_actor_proof] :
+      jsondecode(td.container_definitions)[0].user == "10001" &&
+      jsondecode(td.container_definitions)[0].command == ["usage"] &&
+      jsondecode(td.container_definitions)[0].linuxParameters.capabilities.drop == ["ALL"] &&
+      jsondecode(td.container_definitions)[0].logConfiguration.options["awslogs-group"] == "/ecs/igaming-staging/staging-runner"
+    ])
+    error_message = "The runner runs as a non-root user with all capabilities dropped, defaults to the harmless usage command and logs to /ecs/igaming-staging/staging-runner."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_log_group.this["staging-runner"].retention_in_days == var.log_retention_days
+    error_message = "The runner log group must have the same retention as the other task log groups."
+  }
+
+  assert {
+    condition = (
+      jsondecode(aws_ecs_task_definition.staging_runner.container_definitions)[0].logConfiguration.options["awslogs-stream-prefix"] == "staging-runner" &&
+      jsondecode(aws_ecs_task_definition.staging_runner_actor_proof.container_definitions)[0].logConfiguration.options["awslogs-stream-prefix"] == "staging-runner-actor-proof"
+    )
+    error_message = "deploy.sh finds a run's log stream by these two stream prefixes."
+  }
+}
+
+run "staging_runner_environment_is_non_secret_and_staging_only" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for e in jsondecode(aws_ecs_task_definition.staging_runner.container_definitions)[0].environment :
+      !can(regex("(?i)(password|secret|token|key_?material)", e.name)) || e.name == "ACTOR_PROOF_ACTIVE_KID"
+    ])
+    error_message = "No environment variable of the runner may look like a credential (credentials are execution-role secrets)."
+  }
+
+  assert {
+    condition = alltrue([
+      for e in jsondecode(aws_ecs_task_definition.staging_runner.container_definitions)[0].environment :
+      e.name != "APP_ENV" || e.value == "staging"
+    ]) && anytrue([for e in jsondecode(aws_ecs_task_definition.staging_runner.container_definitions)[0].environment : e.name == "APP_ENV"])
+    error_message = "The runner is pinned to APP_ENV=staging."
+  }
+
+  assert {
+    condition     = !anytrue([for e in jsondecode(aws_ecs_task_definition.staging_runner.container_definitions)[0].environment : e.name == "MOCK_GEOLOCATION_COUNTRY"])
+    error_message = "MOCK_GEOLOCATION_COUNTRY reaches the runner only when the owner supplies it (seed-market cross-checks it)."
+  }
+}
+
+run "staging_runner_gets_the_owner_country_for_the_seed_market_cross_check" {
+  command = plan
+
+  variables {
+    mock_geolocation_country = "SV"
+  }
+
+  assert {
+    condition     = anytrue([for e in jsondecode(aws_ecs_task_definition.staging_runner.container_definitions)[0].environment : e.name == "MOCK_GEOLOCATION_COUNTRY" && e.value == "SV"])
+    error_message = "seed-market must see the same country the platform-api gate uses."
+  }
+}
+
+run "staging_runner_ca_bundle_url_is_pinned_to_the_rds_truststore" {
+  command = plan
+
+  variables {
+    rds_ca_bundle_url = "https://example.com/bundle.pem"
+  }
+
+  expect_failures = [var.rds_ca_bundle_url]
 }

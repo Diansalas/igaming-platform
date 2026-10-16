@@ -23,6 +23,9 @@ variables {
   one_off_ecr_repository_arns = ["arn:aws:ecr:eu-central-1:765578795051:repository/igaming-staging/platform-api"]
   one_off_secret_arns         = ["arn:aws:secretsmanager:eu-central-1:765578795051:secret:rds!db-master", "arn:aws:secretsmanager:eu-central-1:765578795051:secret:runtime"]
   one_off_log_group_arns      = ["arn:aws:logs:eu-central-1:765578795051:log-group:/ecs/igaming-staging/migrate:*"]
+  aws_region                  = "eu-central-1"
+  runner_db_resource_id       = "db-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  seed_world_secret_arn       = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/seed-world-passwords-AbCdEf"
 }
 
 run "service_role_cannot_read_master_secret" {
@@ -93,5 +96,93 @@ run "task_role_reads_only_named_secrets" {
   assert {
     condition     = length(aws_iam_role_policy.task) == 1 && length(data.aws_iam_policy_document.task) == 1
     error_message = "task_secret_arns must produce exactly one task-role policy."
+  }
+}
+
+run "runner_task_role_connects_as_backup_role_on_this_instance_only" {
+  command = plan
+
+  variables {
+    permissions_boundary_arn = "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+  }
+
+  assert {
+    condition = (
+      length(data.aws_iam_policy_document.runner_task.statement) == 1 &&
+      one(data.aws_iam_policy_document.runner_task.statement).actions == toset(["rds-db:connect"]) &&
+      one(data.aws_iam_policy_document.runner_task.statement).resources == toset(["arn:aws:rds-db:eu-central-1:765578795051:dbuser:db-ABCDEFGHIJKLMNOPQRSTUVWXYZ/igaming_backup"])
+    )
+    error_message = "STAGING-PREP-3: the runner task role may only rds-db:connect as igaming_backup on exactly this DbiResourceId (no wildcard, no other action)."
+  }
+
+  assert {
+    condition     = aws_iam_role.runner_task.permissions_boundary == "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary" && aws_iam_role.runner_task.name == "igaming-staging-ecs-runner-task-role"
+    error_message = "The runner task role must carry the permissions boundary."
+  }
+}
+
+run "runner_task_role_rejects_a_wildcard_instance" {
+  command = plan
+
+  variables {
+    runner_db_resource_id = "*"
+  }
+
+  expect_failures = [var.runner_db_resource_id]
+}
+
+run "runner_task_role_rejects_another_database_user" {
+  command = plan
+
+  variables {
+    runner_db_user = "igaming"
+  }
+
+  expect_failures = [var.runner_db_user]
+}
+
+run "seed_world_task_role_reads_and_writes_one_secret_only" {
+  command = plan
+
+  variables {
+    permissions_boundary_arn = "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+  }
+
+  assert {
+    condition = (
+      length(data.aws_iam_policy_document.runner_seed_world.statement) == 1 &&
+      one(data.aws_iam_policy_document.runner_seed_world.statement).actions == toset(["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]) &&
+      one(data.aws_iam_policy_document.runner_seed_world.statement).resources == toset(["arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/seed-world-passwords-AbCdEf"])
+    )
+    error_message = "SA-1: the seed-world task role may only Get/PutSecretValue on exactly the seed-world-passwords secret (no wildcard, no other action, no rds-db)."
+  }
+
+  assert {
+    condition     = aws_iam_role.runner_seed_world.permissions_boundary == "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary" && aws_iam_role.runner_seed_world.name == "igaming-staging-ecs-seed-world-task-role"
+    error_message = "The seed-world task role must carry the permissions boundary."
+  }
+
+  assert {
+    condition     = aws_iam_role.runner_seed_world.name != aws_iam_role.runner_task.name && aws_iam_role.runner_seed_world.name != aws_iam_role.task.name
+    error_message = "The seed-world task role is its own role: never the backup-login runner role or the shared task role."
+  }
+}
+
+run "seed_world_task_role_rejects_a_wildcard_secret" {
+  command = plan
+
+  variables {
+    seed_world_secret_arn = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:*"
+  }
+
+  expect_failures = [var.seed_world_secret_arn]
+}
+
+run "runner_task_role_is_not_the_shared_task_role" {
+  command = plan
+
+  assert {
+    condition     = aws_iam_role.runner_task.name != aws_iam_role.task.name
+    error_message = "The runner (rds-db:connect) must never share the role platform-api and the other tasks assume."
   }
 }
