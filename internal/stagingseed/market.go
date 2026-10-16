@@ -153,7 +153,9 @@ func EnsureMarket(ctx context.Context, pool *db.Pool, p MarketParams, out io.Wri
 
 // TenantStatusAllowsSeeding: a suspended or closed tenant is never seeded. pending_launch is allowed because the operating-market rows
 // are a prerequisite of the launch readiness check (R-MARKET-CONFIG) that precedes activation.
-func TenantStatusAllowsSeeding(status string) bool { return status == "active" || status == "pending_launch" }
+func TenantStatusAllowsSeeding(status string) bool {
+	return status == "active" || status == "pending_launch"
+}
 
 // RequireActivePlatformAdmin checks, inside tx (a platform-admin scoped transaction), that id is an ACTIVE platform_admin
 // (tenant_id IS NULL) and takes a share lock on the row so it cannot be offboarded between the check and the write.
