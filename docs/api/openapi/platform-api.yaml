@@ -2410,11 +2410,32 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   # --- Casino round history / mock-provider play simulation (Stage 7) ---
-  # NOTE: only the Stage 7 endpoints below, plus A8's launch route, are documented here. The
-  # pre-existing Stage 4A casino endpoints (GET /v1/me/casino/games, the admin catalogue/
-  # capability/availability routes, and the provider webhook) predate
+  # NOTE: the Stage 7 endpoints below, A8's launch route and (A10c) the player game list are documented here. The
+  # pre-existing Stage 4A admin catalogue/capability/availability routes and the provider webhook predate
   # this OpenAPI file's casino coverage and are tracked as separate,
   # pre-existing documentation debt - not introduced by Stage 7.
+  /v1/me/casino/games:
+    get:
+      summary: List the games available to the caller (the tenant catalogue joined to the brand's opt-in layer)
+      description: >
+        A10c. Player-authenticated. A bare JSON array (no envelope). The tenant and brand are resolved server-side from the caller's
+        player account; nothing about the tenant is taken from the request. 503 when casino is not enabled on this deployment.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The available games
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/CasinoGame" } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Casino is not enabled on this deployment
   /v1/me/casino/games/{gameID}/launch:
     post:
       summary: Launch a casino game (mints a single-use launch session and token)
@@ -2533,7 +2554,8 @@ paths:
               type: object
               properties:
                 stake_amount: { type: integer, format: int64, description: "Minor units, must be positive" }
-              required: [stake_amount]
+                idempotency_key: { type: string, minLength: 1, description: "Required. One key per attempt, reused on a retry; it keys the provider transaction id, so the same key with a different amount is refused." }
+              required: [stake_amount, idempotency_key]
       responses:
         "200":
           description: The simulated bet's outcome
@@ -2571,7 +2593,8 @@ paths:
               type: object
               properties:
                 win_amount: { type: integer, format: int64, description: "Minor units, must be positive" }
-              required: [win_amount]
+                idempotency_key: { type: string, minLength: 1, description: "Required. One key per attempt, reused on a retry; it keys the provider transaction id." }
+              required: [win_amount, idempotency_key]
       responses:
         "200":
           description: The simulated win's outcome
@@ -2629,6 +2652,23 @@ paths:
         "503":
           description: Casino is not enabled on this deployment, or the session's provider is not the mock adapter
   /v1/me/deposits:
+    get:
+      summary: List the caller's own deposit intents
+      description: >
+        A10c. Player-authenticated, read under the player's own row-level-security scope. A bare JSON array (no envelope) of the caller's
+        own intents; another player's intent is never returned.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's deposit intents
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/DepositIntent" } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       summary: Initiate a deposit for the caller's own wallet
       description: >
@@ -2690,6 +2730,78 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           description: Deposits are not enabled on this deployment, or no operating-market gate is configured (fail closed)
+  /v1/me/deposits/{id}:
+    get:
+      summary: Get one of the caller's own deposit intents
+      description: >
+        A10c. Player-authenticated. A deposit that does not exist, or belongs to another player, is the same 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The deposit intent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositIntent" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/wallets:
+    get:
+      summary: List the caller's wallets with their balance summary
+      description: >
+        A10c. Player-authenticated, read under the player's own row-level-security scope. A bare JSON array, one entry per asset the player
+        holds a wallet for. Amounts are integer minor units rendered as JSON numbers. The summary is a projection of ledger entries, shown
+        as the server computed it; no client ever derives a balance.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's wallets
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/WalletSummary" } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/wallets/{assetCode}:
+    get:
+      summary: Get the caller's wallet for one asset (created on first access)
+      description: >
+        A10c. Player-authenticated. The wallet is the caller's own for the named asset; the first read of an asset the player has never held
+        creates the (empty) wallet. An asset code that is not in the asset registry is 400.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: assetCode
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: The wallet summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletSummary" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/me/deposits/{id}/simulate-callback:
     post:
       summary: >-
@@ -7729,7 +7841,7 @@ paths:
         - name: provider_id
           in: query
           description: A10c. Exact match on the attempt's provider id (the closed provider-id charset; no pattern or wildcard).
-          schema: { type: string, minLength: 1, maxLength: 64 }
+          schema: { type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9][a-z0-9-]{0,62}$" }
         - name: min_age_seconds
           in: query
           description: A10c. Only attempts created at least this many seconds ago (created_at <= now() - N s). 0..31536000.
@@ -11940,6 +12052,50 @@ components:
           items: { $ref: "#/components/schemas/PaymentAttempt" }
         next_cursor: { type: string, nullable: true, description: Null on the last page. }
       required: [items, next_cursor]
+    CasinoGame:
+      type: object
+      description: A10c. One game of the caller's resolved catalogue (casino_handlers.go casinoGameResponse).
+      properties:
+        id: { type: string, format: uuid }
+        provider_id: { type: string }
+        name: { type: string }
+        game_type: { type: string }
+        rtp_variant: { type: string, description: Omitted when empty. }
+        volatility: { type: string, description: Omitted when empty. }
+        feature_flags: { type: array, items: { type: string } }
+        supported_assets: { type: array, items: { type: string } }
+        mobile_supported: { type: boolean }
+        demo_supported: { type: boolean }
+      required: [id, provider_id, name, game_type, feature_flags, supported_assets, mobile_supported, demo_supported]
+    DepositIntent:
+      type: object
+      description: A10c. A player's deposit intent (deposit_handlers.go depositIntentResponse); optional fields are omitted when empty.
+      properties:
+        id: { type: string, format: uuid }
+        asset_code: { type: string }
+        amount: { type: integer, format: int64, description: Minor units }
+        payment_method: { type: string }
+        status: { type: string }
+        provider_id: { type: string }
+        redirect_url: { type: string }
+        hosted_field_token: { type: string }
+        ledger_transaction_id: { type: string, format: uuid }
+      required: [id, asset_code, amount, payment_method, status]
+    WalletSummary:
+      type: object
+      description: >
+        A10c. The player-facing balance view (wallet_handlers.go walletSummaryResponse). Integer minor units as JSON numbers; a projection of
+        ledger entries, never authoritative client-side.
+      properties:
+        wallet_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        status: { type: string }
+        cash_balance: { type: integer, format: int64 }
+        available_balance: { type: integer, format: int64 }
+        held_for_withdrawal: { type: integer, format: int64 }
+        locked_balance: { type: integer, format: int64 }
+        bonus_balance: { type: integer, format: int64 }
+      required: [wallet_id, asset_code, status, cash_balance, available_balance, held_for_withdrawal, locked_balance, bonus_balance]
     PaymentAttemptEvent:
       type: object
       description: >
