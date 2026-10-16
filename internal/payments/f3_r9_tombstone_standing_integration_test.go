@@ -111,6 +111,17 @@ func TestF3_R9_MockReturnEvidenceIneligibleOnceARealImportExists(t *testing.T) {
 	}
 }
 
+// Raising uses ANY import: once a non-MOCK import exists, a MOCK succeeded line still raises (it only cannot clear).
+func TestF3_R9_MockSucceededLineRaisesEvenWithARealImport(t *testing.T) {
+	_, w, wr, ref := r9Branch(t, 500)
+	if got := r9Findings(w.stmtRun(w.source(true, r9Line(w, ref, statement.PaymentStatusPending, 500, time.Now()))), wr.ID); len(got) != 0 {
+		t.Fatal("setup: a pending line raises nothing")
+	}
+	if got := r9Findings(w.stmtRun(w.source(false, r9Line(w, ref, statement.PaymentStatusSucceeded, 500, time.Now()))), wr.ID); len(got) != 1 {
+		t.Fatal("a MOCK succeeded line must raise even when a real import exists")
+	}
+}
+
 // K2 net recovery under the branch's withdrawal_failed clears it; a partial recovery does not.
 func TestF3_R9_ClearedByK2NetRecoveryOnly(t *testing.T) {
 	_, w, wr, ref := r9Branch(t, 500)

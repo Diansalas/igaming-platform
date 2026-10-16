@@ -128,6 +128,29 @@ func TestF2_LFA11_1_SucceededWithNoProviderRecordIsStillReported(t *testing.T) {
 	}
 }
 
+// The persisted-line exemption needs a line that records the SUCCESS: a provider that only ever listed the attempt
+// as pending (an earlier import) while the platform recorded success is still reported.
+func TestF2_LFA11_1_PendingOnlyAtTheProviderIsStillReported(t *testing.T) {
+	w := newPayWorld(t)
+	cfg := PaymentSweepConfig{Resolver: mapResolver{payProvA: w.srcA, payProvB: w.srcB}, AllowSynthetic: true, RunLineBound: 100}
+	scopedSweep(t, w.pool, w.f, cfg)
+	a := w.deposit(t, 430)
+	scopedSweep(t, w.pool, w.f, cfg) // imports the provider's PENDING line
+	if refs := importedRefs(t, w.pool, w.f.tenantID, payProvA); refs[*a.ProviderReference] == 0 {
+		t.Fatal("setup: the pending line must be imported")
+	}
+	// The platform records success; the provider's record stays pending (no new line is dated after the cursor).
+	w.applyReceipt(t, payProvA, payments.ReceiptEvidence{EventType: "deposit", ProviderReference: *a.ProviderReference,
+		Outcome: payments.OutcomeSucceeded, Amount: a.Amount, AssetCode: a.AssetCode})
+	o := outcomeFor(t, scopedSweep(t, w.pool, w.f, cfg), payProvA)
+	if o.Err != nil || o.Run.ID == uuid.Nil {
+		t.Fatalf("sweep: %+v", o)
+	}
+	if keys := f2MissingRecords(t, w, o.Run.ID); len(keys) != 1 || !strings.Contains(keys[0], a.ID.String()) {
+		t.Fatalf("a success the provider never recorded must be reported even though a pending line exists: %v", keys)
+	}
+}
+
 // The legacy (creation-dated, non-continuation) mode is unchanged: still windowed by sentAt, no persisted-line
 // exemption (its pins stay). A succeeded attempt sent inside the window and absent from the statement is reported.
 func TestF2_LFA11_1_LegacyModeStillWindowsBySentAt(t *testing.T) {

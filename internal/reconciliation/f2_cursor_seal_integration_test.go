@@ -231,6 +231,10 @@ func TestF2_SR11_10_SealedCursorIsPerSourceLabel(t *testing.T) {
 	if st := f2SealedCursor(t, w, keys, other); !st.cursor.IsZero() || st.unbacked != 1 {
 		t.Fatalf("another source's sealed import must not back this source's cursor: %+v", st)
 	}
+	// The same label from a source that is NOT Synthetic (is_mock differs): not this source's import.
+	if st := f2SealedCursor(t, w, keys, unmarkedSource{src}); !st.cursor.IsZero() {
+		t.Fatalf("an import with another is_mock must not back the cursor: %+v", st)
+	}
 	// Other keys: nothing verifies.
 	if st := f2SealedCursor(t, w, f2Keys(t), src); !st.cursor.IsZero() {
 		t.Fatalf("a seal under other keys must not verify: %+v", st)
@@ -243,6 +247,15 @@ type relabelled struct {
 }
 
 func (r relabelled) Label() string { return r.label }
+
+// unmarkedSource delegates to a recSource WITHOUT its Synthetic marker (same label, is_mock = false).
+type unmarkedSource struct{ inner *recSource }
+
+func (u unmarkedSource) Label() string      { return u.inner.Label() }
+func (u unmarkedSource) ProviderID() string { return u.inner.ProviderID() }
+func (u unmarkedSource) Fetch(ctx context.Context, req statement.PaymentFetchRequest) (statement.PaymentStatement, error) {
+	return u.inner.Fetch(ctx, req)
+}
 
 // Bound: a flood of forged run rows above the cursor cannot make the read unbounded or fall back to a zero
 // cursor silently: once the candidate limit is exhausted the run FAILS (P1), nothing fetched.
