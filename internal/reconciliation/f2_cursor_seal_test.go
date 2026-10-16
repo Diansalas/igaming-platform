@@ -12,11 +12,15 @@ import (
 
 type f2SealOnly struct{}
 
-func (f2SealOnly) SealStatementImport(statement.ImportSealInput) (string, string, error) { return "s", "k", nil }
+func (f2SealOnly) SealStatementImport(statement.ImportSealInput) (string, string, error) {
+	return "s", "k", nil
+}
 
 type f2SealVerify struct{ f2SealOnly }
 
-func (f2SealVerify) VerifyStatementImport(statement.ImportSealInput, string, string) error { return nil }
+func (f2SealVerify) VerifyStatementImport(statement.ImportSealInput, string, string) error {
+	return nil
+}
 
 // F2 / SR11-10 startup gate: production with registered sources needs a sealer that also verifies.
 func TestF2_VerifyPaymentCursorSealing(t *testing.T) {
@@ -105,7 +109,9 @@ func TestF2_PaymentSettleLag(t *testing.T) {
 // truncated page must be in time order.
 func TestF2_ValidateBoundedWindow_HorizonAndOrder(t *testing.T) {
 	t0 := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
-	line := func(at time.Time) statement.PaymentStatementLine { return statement.PaymentStatementLine{OccurredAt: at} }
+	line := func(at time.Time) statement.PaymentStatementLine {
+		return statement.PaymentStatementLine{OccurredAt: at}
+	}
 	req := statement.PaymentFetchRequest{PeriodEnd: t0.Add(time.Hour)}
 	beyond := statement.PaymentStatement{CoverageStart: t0, CoverageEnd: t0.Add(time.Hour + time.Microsecond)}
 	if err := validateBoundedWindow(beyond, req, PaymentStatementOptions{Continuation: true}); !errors.Is(err, ErrPaymentStatementCoverageGap) {
