@@ -10,12 +10,18 @@ import (
 
 // syntheticIBAN builds a checksum-valid GB IBAN from the run id. It names no real account (bank code WEST is the ISO
 // 13616 documentation example); it is unique per run because the platform refuses one destination shared by two players.
+// The platform also refuses anything whose maximal digit run is a Luhn-valid 12-19 digit string (a possible card number),
+// so the account digits are adjusted until the run is not Luhn-valid.
 func syntheticIBAN(runID string) string {
 	digits := ""
 	for _, c := range runID + "0123456789abcdef" {
 		digits += string(rune('0' + int(c)%10))
 	}
-	bban := "WEST" + digits[:14]
+	acct := []byte(digits[:14])
+	for i := 13; luhnValid(string(acct)); {
+		acct[i] = '0' + (acct[i]-'0'+1)%10
+	}
+	bban := "WEST" + string(acct)
 	num := ""
 	for _, c := range bban + "GB00" {
 		if c >= 'A' && c <= 'Z' {
@@ -29,6 +35,22 @@ func syntheticIBAN(runID string) string {
 		rem = (rem*10 + int(c-'0')) % 97
 	}
 	return fmt.Sprintf("GB%02d%s", 98-rem, bban)
+}
+
+func luhnValid(digits string) bool {
+	sum, alt := 0, false
+	for i := len(digits) - 1; i >= 0; i-- {
+		n := int(digits[i] - '0')
+		if alt {
+			n *= 2
+			if n > 9 {
+				n -= 9
+			}
+		}
+		sum += n
+		alt = !alt
+	}
+	return sum%10 == 0
 }
 
 func (w *world) withdrawalChecks() {
@@ -152,7 +174,8 @@ func (w *world) withdrawalChecks() {
 		t.pass("instrument %s verified (mock verifier), masked as %s; re-registration idempotent", instrID, pickStr(r.obj(), "display_mask"))
 	})
 	w.check("withdrawal.request_holds_funds", func(t *T) {
-		if !t.needMoney("withdrawal.payout_instrument_register") {
+		// The identity gate refuses a withdrawal without an approved KYC verification, so the flow depends on kyc.*.
+		if !t.needMoney("withdrawal.payout_instrument_register", "kyc.mock_verification") {
 			return
 		}
 		before, ok := t.wallet(p1, asset)

@@ -69,6 +69,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"started_utc":   started.UTC().Format(time.RFC3339),
 		"finished_utc":  time.Now().UTC().Format(time.RFC3339),
 		"actors":        w.actorSummary(),
+		"retries_429":   fmt.Sprint(c.retries.Load()),
 	}
 	for _, k := range sortedKeys(w.facts) {
 		meta["fact_"+k] = w.facts[k]
@@ -114,6 +115,7 @@ func (w *world) runAll() {
 	w.casinoChecks()
 	w.sportsbookChecks()
 	w.withdrawalChecks()
+	w.backofficeChecks()
 	w.rgChecks()
 	w.isolationChecks()
 	w.marketChecks()

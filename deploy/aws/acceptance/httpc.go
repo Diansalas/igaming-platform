@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -89,6 +90,7 @@ type client struct {
 	rep      *reporter
 	runID    string
 	seq      atomic.Int64
+	retries  atomic.Int64 // requests retried after HTTP 429
 	cur      atomic.Value // current check name (string)
 	debug    bool
 	debugOut io.Writer
@@ -128,6 +130,23 @@ func withHeader(k, v string) reqOpt { return func(r *http.Request) { r.Header.Se
 // call performs a request. body may be nil, a []byte/string (sent verbatim) or any JSON-marshalable value.
 // The request carries X-Request-Id: acc-<run>-<n> so the operator can find the structured log line in CloudWatch.
 func (c *client) call(method, path, token string, body any, opts ...reqOpt) (*response, error) {
+	for attempt := 0; ; attempt++ {
+		r, err := c.callOnce(method, path, token, body, opts...)
+		// The edge or the app may rate limit a burst per IP (login 60/min, register and credential 20/min): back off and
+		// retry a few times instead of reporting a spurious failure; the number of retries is part of the evidence.
+		if err != nil || r.Status != http.StatusTooManyRequests || attempt >= 3 {
+			return r, err
+		}
+		c.retries.Add(1)
+		wait := 8 * time.Second
+		if n, convErr := strconv.Atoi(r.Header.Get("Retry-After")); convErr == nil && n > 0 && n <= 30 {
+			wait = time.Duration(n) * time.Second
+		}
+		time.Sleep(wait)
+	}
+}
+
+func (c *client) callOnce(method, path, token string, body any, opts ...reqOpt) (*response, error) {
 	var rdr io.Reader
 	switch b := body.(type) {
 	case nil:

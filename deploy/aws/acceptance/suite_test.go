@@ -149,6 +149,46 @@ func TestConfigValidationNamesTheProblemAndNeverTheSecret(t *testing.T) {
 	}
 }
 
+// The platform refuses a payout destination whose maximal digit run is a Luhn-valid 12-19 digit string (a possible card
+// number: payoutinstrument.ContainsPAN). A synthetic IBAN that trips it makes a run flaky (observed once in 10% odds).
+func TestSyntheticIBANIsValidAndNeverLooksLikeACardNumber(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 3000; i++ {
+		iban := syntheticIBAN(randHex(4))
+		seen[iban] = true
+		// ISO 13616 mod-97 check
+		rearr := iban[4:] + iban[:4]
+		rem := 0
+		for _, c := range rearr {
+			if c >= 'A' && c <= 'Z' {
+				rem = (rem*100 + int(c-'A') + 10) % 97
+			} else {
+				rem = (rem*10 + int(c-'0')) % 97
+			}
+		}
+		if rem != 1 || len(iban) != 22 || !strings.HasPrefix(iban, "GB") {
+			t.Fatalf("invalid IBAN %q (rem %d)", iban, rem)
+		}
+		run := ""
+		for _, c := range iban {
+			if c >= '0' && c <= '9' {
+				run += string(c)
+				continue
+			}
+			if len(run) >= 12 && len(run) <= 19 && luhnValid(run) {
+				t.Fatalf("IBAN %q contains a Luhn-valid digit run %q", iban, run)
+			}
+			run = ""
+		}
+		if len(run) >= 12 && len(run) <= 19 && luhnValid(run) {
+			t.Fatalf("IBAN %q ends in a Luhn-valid digit run", iban)
+		}
+	}
+	if len(seen) < 2000 {
+		t.Fatalf("only %d distinct IBANs from 3000 run ids", len(seen))
+	}
+}
+
 func TestSecretFilesMustBePrivate(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "pw")
