@@ -466,3 +466,164 @@ real-money use. Conditions: SR5-1 and SR5-2 registered as open rows that MUST cl
 (SR5-2 needs owner authorization per ADR 0110 T8); SR5-3, SR5-4, SR5-6 fixed or registered; SR5-5 put to the owner with
 Q2/Q3. Launch-blocking for real money: SR5-1, SR5-2. This review does not declare the feature "secure": it covered the
 listed code and migrations at `84ac47f` only.
+
+## 11. Fix round (2026-10-16, after the `ledger-finance` and `security` reviews)
+
+Author: `ledger-finance` (implementation). Base: `13b1db5` (the two review commits `1c6c0fa` and `13b1db5` are on
+the branch). Code commits `178b646`, `53009bb`, `caa2fba`; this section is in the commit after them. Evidence is local only
+(private scratch databases `a5_fix` and `a5_mut`, dropped after the run; never CI). Providers stay MOCK. The
+section 1 labels are unchanged, except row 1c (see 11.1, item 1) and R7 (closed).
+
+### 11.1 Items
+
+| # | Review ID | Change | Label |
+|---|---|---|---|
+| 1 | SR5-1 / LF-A5-1 (governance) | The tombstone branch (request `submitted`) now needs each decider to hold an in-force `payment_force_resolve:approve` grant (`ledger_adjustment_eligible_grant`, the M2 rule: active staff, linked Person equal to the grant's request-time Person, eligible role). Go: refused at the decision (`ErrReversalCapabilityRequired`, HTTP 403); the quorum count re-checks the grant of every counted vote at execution (a vote whose grant was revoked stops counting). Database: new **WD027**, an immediate AFTER INSERT trigger on `ledger_transactions` (`ledger_transactions_payout_tombstone_guard`, pinned `search_path`, no SECURITY DEFINER): a `tombstone` whose `correlation_id` names a withdrawal request of the tenant commits only with two distinct ACTIVE Persons holding that grant on one `reverse` digest; every other tombstone (deposit, casino, sportsbook: fresh or unrelated correlation ids) exits at the correlation test, and every other transaction type exits at the first test. The decision now runs in the deciding principal's scope (`alerting.NewPrincipalRunner`, `app.principal_id`), the only tenant session in which `staff_capability_grants` is visible (0112 `tenant_scope_select`); without a principal both checks fail closed. The completed-payout reversal (E11) keeps `withdrawal:approve` x2 (it moves house money the PSP already returned; its money proof is the completion itself). | IMPLEMENTED (MOCK). Signed actor proof still NOT bound (item 7) |
+| 1b | LF-A5-1 (a), late success | A success for the original reference of a payout whose request the tombstone branch failed (the attempt is `disputed` and a tombstone correlated to the request exists for that provider) now writes one audit row `payments.payout_success_after_reversal_tombstone` (OutcomeDenied, ids + reported reference only) per new observation and raises a DISTINCT P1 (`reason:success_after_payout_reversal_tombstone`, dedup per attempt + reason, LAST statement) instead of falling silent. Wired in all three success sources that meet a disputed payout attempt: the verified callback (`receipt.go`, audit once per new receipt; a redelivery only re-raises), the status poll (`applyPayoutStatusEvidenceInTx`) and the lost-CAS late-evidence router (`applyPayoutLateEvidence`). Posts nothing; the request stays `failed`; the ledger also refuses the reference (tombstone UNIQUE, now the typed `ledger.ErrProviderReferenceTaken`). | IMPLEMENTED (MOCK) |
+| 1c | LF-A5-1 (b), standing finding | **NOT IMPLEMENTED, deliberately.** Check D findings are invariant P1s that must be zero on healthy data. A standing "tombstone branch awaiting PSP return evidence" finding has no platform signal that can clear it today (statement reconciliation does not model returns, R6), so it would be a permanent P1 on every legitimate tombstone branch and train operators to ignore D. It is not "cheap and consistent with check D". The detective signal is item 1b (a late success raises a distinct P1). A succeeded STATEMENT line for the tombstoned reference still lands in `payment_statement.go`'s "already a P1" case (`reversal_tombstone_precedes_success` is `reasonExcluded`): residual R9, to close with R6. | NOT IMPLEMENTED (R9) |
+| 2 | SR5-3 (closes R7, LF-A5-6) | A return reference the platform already holds for the provider (a payment attempt's `provider_reference`, a withdrawal's `provider_reference` or a ledger `provider_tx_id` of the same tenant + provider) is refused before any vote is recorded: `ErrReversalReturnReferenceInUse`, HTTP 409 `conflict`. The residual race (a posting taking the reference between the vote and the execution) surfaces as the typed `ledger.ErrProviderReferenceTaken` (new: `ledger.Post` routes a 23505 on `idx_ledger_transactions_tenant_provider_tx` with no idempotency-key match to it, instead of an untyped error), mapped to the same 409. | IMPLEMENTED |
+| 3 | SR5-4 / LF-A5-3 | Only `status = 'active'` staff count, in the Go quorum and in WD026 (0162 guard body). Check D's WD026 twin (item 5) deliberately does NOT re-check status (a voter suspended after a legitimate reversal must not raise a false P1). Vote expiry: not added (no Blueprint or ADR basis; the active-status and grant re-checks cover the stale-vote risk the reviews describe). | IMPLEMENTED |
+| 4 | SR5-6 | `withdrawal_approvals_enforce_governance` (0162 replacement body) now ends `SET search_path = pg_catalog, public, pg_temp`; the down migration keeps the 0034 body byte for byte (snapshot test). Catalog pin: `TestA5DB_FunctionsPinSearchPath` asserts `proconfig` of the five 0162 functions. | IMPLEMENTED |
+| 5 | LF-A5-5 | Check D's link arm reports **WD026** for a `reversed` request with fewer than two distinct linked Persons (non-automated `reverse` decisions) on one digest. One statement, unchanged shape; healthy data stays clean (tested with a later-suspended voter). | IMPLEMENTED |
+| 6 | SR5-7 | HTTP: a `platform_admin` token gets 403 and records nothing; staff whose Person is the paid player's Person gets 403 and exactly one `denied` row of `withdrawal.payout_reversal.http`; plus a held return reference gets 409 `conflict` (item 2). | IMPLEMENTED (tests) |
+| 7 | R1 / SR5-2 / LF-A5-2 | **OPEN.** Proposal in 11.3; not implemented. | NOT IMPLEMENTED (OPEN, before real money) |
+| 8 | LF-A5-4 / SR5-5, Q2 | Owner questions with a recommendation in 11.4. | owner decision |
+
+Why the grant route and not M2 routing (item 1): the grants model was practical. `ledger_adjustment_eligible_grant`
+is the exact function M2 itself uses (0115) and is callable in a principal-scoped tenant session; it carries the
+active-staff, Person-linkage and eligible-role checks, so the branch now needs the same capability as M2 "declare
+not paid" without duplicating the K3 tables or the state machine. Routing through M2 would have needed a second
+resolution kind writing a tombstone and an E10 release through the K3 executor (a cross-domain change for the
+architect). What the branch still lacks compared with M2 is the ADR 0110 signed proof (item 7) and the
+`provider_confirmed_out_of_band` basis (the staff-asserted evidence hash plays that role); both are recorded.
+
+### 11.2 Changed assertions (none weakened)
+
+| Test | Before | After | Why |
+|---|---|---|---|
+| `internal/payments/payout_alerts_test.go` | 6 payout signal reasons | 7 (+ `success_after_payout_reversal_tombstone`, name pinned) | item 1b |
+| `internal/alerting/static_wiring_test.go`, `static_derived_raise_set_test.go` | raise-site table | + `payout_reversal.go:payoutReversalTombstoneCell:raisePayoutDisputeAlert` (1), derived set + the cell | item 1b: raise LAST |
+| `internal/payments/a5_payout_reversal_integration_test.go` `TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease`, `TestA5_PayoutReversal_AmountDisputeThenReturn` | deciders: plain finance staff | K3 world grant holders (`f1`, `f2`); `financeNoGrant` refused with `ErrReversalCapabilityRequired`; late success now asserts 1 audit row per new callback receipt (redelivery: none), +1 per poll, +1 per lost CAS, and a distinct P1 (was: no assertion, probe P-L showed 0/0) | items 1, 1b |
+| `internal/httpserver/a5_payout_reversal_http_integration_test.go` | success audit count over `withdrawal.payout_reversal.http` | filtered `outcome = 'success'` | the new beneficiary `denied` row shares the action |
+
+### 11.3 R1 / SR5-2 / LF-A5-2: proposal (OPEN, NOT IMPLEMENTED; needs owner authorization per ADR 0110 T8)
+
+1. ADR 0110 amendment adding `withdrawal_approvals` INSERT for `decision = 'reverse'` to the proof-bound set.
+   Operation name **`withdrawal_payout_reversal:decide`**; scope `tenant`; target = the withdrawal request id (text).
+2. Payload hash = the existing payout digest that is already the decision's `reason_code` (`payout_reversal:<sha256>`
+   over the length-prefixed request id, provider, original reference, return reference, amount, asset and evidence
+   hash; `withdrawal.PayoutReversal.Digest`). No new payload format: the proof signs exactly what WD026 groups by.
+3. A `zz_actor_proof_guard`-style BEFORE INSERT trigger on `withdrawal_approvals` for `decision = 'reverse'` calling
+   `actor_proof_require(NEW.approver_principal_id, 'tenant', NEW.tenant_id, 'withdrawal_payout_reversal:decide',
+   NEW.withdrawal_request_id::text, <digest>)` and recording the consumed proof id on the row (new nullable column,
+   NOT NULL for `reverse` rows written after the amendment; earlier rows stay as historical evidence).
+4. WD026 (E11) and WD027 (tombstone) count only proof-bound rows; check D's WD026 twin counts the same.
+5. Go: `DecidePayoutReversal` attaches the proof in the decision transaction (as K3 does for
+   `payment_force_resolve:approve`); the HTTP route already carries the step-up the proof issuance needs.
+6. Close ADR 0113 9.3 (`decision = 'approve'`, WD023) in the same amendment.
+Until closed: MOCK providers only; the route stays off any real-money deployment.
+
+### 11.4 Owner questions (recommendation from `ledger-finance`; the owner decides)
+
+- **LF-A5-4 / SR5-5 (block scope).** Recommendation: **accept per wallet (per asset).** The debt is on that wallet's
+  own ledger accounts and is cured on the same wallet; a per-Person block would couple unrelated asset wallets and
+  their RG/AML treatment without an accounting reason. If compliance wants a player-level restriction after a
+  chargeback (a fraud signal), use the existing governed account restriction, not the balance gate. Per Person stays
+  a one-query change in `walletBalanceNegative` if the owner rules otherwise.
+- **Q2 (a deposit lifts the block).** Recommendation: **accept that a deposit clears the block** (section 10.3
+  ruling): the deposit credit nets the debt on the same wallet, a partial deposit keeps the block, a new negative
+  re-blocks, and no second source of truth sits next to the ledger.
+
+### 11.5 Residuals after the fix round
+
+- R1: OPEN (11.3). R7: CLOSED (item 2). R3, R4, R5, R6, R8: unchanged. R2: unchanged, now detected for a reversed
+  request without decisions (item 5).
+- **R9 (new, before real money).** LF-A5-1 (b): no standing finding for a tombstone branch, and a succeeded
+  statement line for the tombstoned reference is still silent in statement reconciliation; closes with R6
+  (statement returns) as a `payoutDisputeReasonClasses` row or a K3-style standing kind that clears on PSP return
+  evidence or a K2 recovery debit (causation = the `withdrawal_failed`).
+- R10 (LOW). WD027 restates the Go grant rule at the database, but the grant check reads
+  `staff_capability_grants` through RLS: a session without `app.principal_id` sees no grants and fails closed
+  (refuses), never open.
+
+### 11.6 Tests and counts (private scratch databases `a5_fix` / `a5_mut`, local PostgreSQL; never CI)
+
+Harness: `PRIV_DB=<db> PRIV_SRC=<worktree> bash priv_db.sh` (fresh database, all migrations), then
+`bash priv_test.sh <go test args>`. `internal/payments` integration tests run on per-test scratch databases
+migrated from the source tree (`depositV2ScratchPool`).
+
+| Run | Command | Result |
+|---|---|---|
+| Static | `gofmt -l`; `go vet ./...`; `go vet -tags integration ./...` | clean |
+| Lint | `golangci-lint run ./...` | 0 issues |
+| Lint (integration tag) | `golangci-lint run --build-tags integration ./...` | 0 issues in any A5 / fix-round file (the 682 reported are the pre-existing errcheck / staticcheck / unused backlog in other test files) |
+| Unit | `go test -count=1 ./...` | 67 packages ok, 0 FAIL |
+| A5 set | `go test -tags integration -count=1 -p 1 -run 'TestA5\|TestMigration0162\|TestMigration0163'` over payments, withdrawal, reconciliation, rg, casino, adjustment, httpserver | 7/7 packages ok; 66 PASS (34 top-level), 0 FAIL, 0 SKIP |
+| A5 set, race | the same with `-race` | 7/7 ok; 66 PASS (34 top-level), 0 FAIL, 0 SKIP, 0 DATA RACE |
+| Batch | `go test -tags integration -count=1 -p 1 -timeout 60m` over withdrawal, reconciliation, ledger, alerting, httpserver, payments, rg, adjustment, db (production code as at `53009bb`; later commits add tests only) | 9/9 packages ok; 5376 PASS (3167 top-level), 0 FAIL, 2 SKIP (pre-existing environment skips: `TestRGEnforceS4/HeavyPlayerMeasurement`, `TestVerifyEnvironmentAnchor_RealDatabase_FourStates`) |
+
+Two fix-round failures were found and fixed on the way. They are recorded here, not hidden. (1) The grant check
+returned "no grant" for real grant holders, because the decision ran in a tenant session without
+`app.principal_id`, where 0112 RLS hides the grants. Fixed by running the decision in the deciding principal's
+scope (item 1; mutant G46 pins this). (2) The new check D plant could not run `ALTER TABLE ... ENABLE TRIGGER` while
+deferred trigger events were pending. The plant now fires them first with `SET CONSTRAINTS ALL IMMEDIATE` (test
+fixture only).
+
+New or extended tests: `TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease` (grant holders; non-holder
+refused; late success via callback x2, status poll and lost CAS: audit rows 1/2/3, distinct P1, nothing posted;
+typed `ErrProviderReferenceTaken`), `TestA5_PayoutReversal_AmountDisputeThenReturn` (grant holders),
+`TestA5_PayoutReversal_TombstoneVoterGrantRevoked_NoLongerCounts`, `TestA5_PayoutReversal_WD027_OneGrantHolderIsNotAQuorum`,
+`TestA5_PayoutReversal_ReturnReferenceAlreadyHeld_Refused` (references held only by an attempt, only by the ledger,
+and by a withdrawal + attempt), `TestA5_PayoutReversal_SuspendedVoterNoLongerCounts`, `TestA5DB_E11` (+ "one suspended
+after voting" -> WD026), `TestA5DB_WD027_PayoutTombstoneNeedsForceResolveGrantHolders`, `TestA5DB_FunctionsPinSearchPath`,
+`TestA5D_ReversedWithoutDecisions_IsWD026`, `TestA5HTTP_PayoutReversal_AuthorizationAndQuorum` (+ platform_admin 403,
+beneficiary 403 + one Denied row, held reference 409).
+
+### 11.7 Mutation pass (fix-round code only; kill or justify)
+
+Driver: one edit per mutant, targeted tests on `a5_mut`, then restore. SQL mutants replace the live function body,
+or, for tests in `internal/payments`, the migration source the scratch databases are built from, and then restore
+it.
+
+| Mutant | Result |
+|---|---|
+| S01 WD027 disabled | KILLED (`TestA5DB_WD027`) |
+| S02 WD027 grant condition dropped | KILLED (`TestA5DB_WD027`) |
+| S03 WD027 active-staff filter dropped | SURVIVED, **equivalent**: `ledger_adjustment_eligible_grant` itself requires `s.status = 'active'`; the filter is kept as an explicit restatement |
+| S04 WD027 fires on every tombstone | KILLED (the deposit-style tombstone in `TestA5DB_WD027`) |
+| S05 WD027 threshold 1 | KILLED (`TestA5_PayoutReversal_WD027_OneGrantHolderIsNotAQuorum`) |
+| S06 WD026 active-staff filter dropped | KILLED (`TestA5DB_E11`) |
+| S07 governance function search_path pin removed | KILLED (`TestA5DB_FunctionsPinSearchPath`) |
+| G30 Go quorum counts suspended voters | KILLED |
+| G31 Go decider grant check skipped | KILLED |
+| G32 Go quorum ignores grant revocation | KILLED |
+| G33 return-reference check disabled | KILLED |
+| G34 return reference: payment_attempts leg dropped | KILLED |
+| G35 return reference: ledger leg dropped | KILLED |
+| G36 ledger: provider-reference conflict untyped | KILLED |
+| G37 / G38 / G39 callback / status-poll / lost-CAS hook removed | KILLED (each) |
+| G40 late-success audit not written | KILLED |
+| G41 late-success audit on every redelivery | KILLED |
+| G42 late success raises the park reason (not distinct) | KILLED |
+| G43 tombstone lookup ignores the provider | SURVIVED, **equivalent in practice**: only the A5 branch writes a tombstone whose correlation id is a withdrawal request, and always with that request's provider (WD027 + the Go path); the provider filter is a narrowing restatement |
+| G44 check D WD026 arm disabled | KILLED |
+| G45 check D WD026 re-checks staff status (false P1) | KILLED |
+| G46 decision without the principal scope | KILLED |
+| G47 HTTP 409 mapping removed | KILLED |
+
+Not mutated: the `withdrawal_requests` leg of the return-reference check. Every withdrawal `provider_reference` is
+first bound on its payout attempt, so the attempt leg already covers it; the leg is kept as a restatement.
+
+### 11.8 Review probe additions
+
+- Security: (a) as `igaming_runtime` in a principal-scoped tenant session, insert two `reverse` rows for two grant
+  holders + a tombstone correlated to the request: expected to commit (R1, the proof is still not bound; not probed
+  in this round); without the grants
+  -> WD027; without `app.principal_id` -> WD027 (fails closed). (b) The 409 refusal leaks only that the reference is
+  held for that provider, to an authenticated finance user of the same tenant. (c) The HTTP route now opens a
+  principal-scoped session for the token subject; check that nothing else in the decision depends on the absence of
+  `app.principal_id`.
+- Ledger-finance: (a) the WD027 trigger fast-exits on every non-tombstone and every tombstone whose correlation id is
+  not a withdrawal request of the tenant (casino, sportsbook and deposit tombstones are unaffected; the full batch is
+  green). (b) `ErrProviderReferenceTaken` is returned only when the key lookup finds no row (a true replay still
+  returns `AlreadyPosted`). (c) The late-success cell posts nothing and changes no state.
