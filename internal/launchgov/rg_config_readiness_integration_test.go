@@ -66,7 +66,8 @@ func TestReadiness_RGConfig_FailsClosedUntilEnforcementIsOnAndEveryFloorIsInForc
 	w := newWorld(t)
 	tid := w.activeTenant()
 	brand := w.activeBrand(tid)
-	jid := w.jurisdiction(tid) // allowed currency EUR
+	jid := w.jurisdiction(tid)                // allowed currency EUR
+	w.licence(tid, jid, "platform", "active") // SR6R-1: enforcement reads the LICENCE jurisdiction
 	code := w.jurCode(jid)
 	tenantSub := launchgov.Subject{TenantID: tid}
 	brandSub := launchgov.Subject{TenantID: tid, BrandID: &brand}
@@ -114,6 +115,7 @@ func TestReadiness_RGConfig_EveryAllowedCurrencyNeedsFloors(t *testing.T) {
 	tid := w.activeTenant()
 	brand := w.activeBrand(tid)
 	jid := w.jurisdiction(tid)
+	w.licence(tid, jid, "platform", "active")
 	code := w.jurCode(jid)
 	// allow a second currency in the tenant's jurisdiction configuration
 	if err := w.owner.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
@@ -135,4 +137,31 @@ func TestReadiness_RGConfig_EveryAllowedCurrencyNeedsFloors(t *testing.T) {
 		w.floorFor(code, k, nil) // EUR only
 	}
 	wantRGCheck(t, "USD has no floors", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_deposit")
+}
+
+// SR6R-1 (same gap as the activation guard): the check must also cover the LICENCE jurisdiction enforcement reads, which the
+// request's JurisdictionIDs need not contain, and a tenant with no licence jurisdiction cannot pass.
+func TestReadiness_RGConfig_CoversTheLicenceJurisdiction(t *testing.T) {
+	w := newWorld(t)
+	tid := w.activeTenant()
+	brand := w.activeBrand(tid)
+	jid := w.jurisdiction(tid) // the market jurisdiction named by the request: gets floors
+	code := w.jurCode(jid)
+	brandSub := launchgov.Subject{TenantID: tid, BrandID: &brand}
+	rgfix.Activate(t, w.owner, tid, nil, rgfix.Staff(t, w.owner, tid))
+	for _, k := range []string{"deposit", "loss", "wager"} {
+		w.floorFor(code, k, nil)
+	}
+	wantRGCheck(t, "no licence jurisdiction", w.rgCheck(brandSub, jid), launchgov.ResultFail, "no_licence_jurisdiction")
+
+	// licensed in another jurisdiction that has NO floors: fails although the requested jurisdiction is fully configured
+	other := w.jurisdiction(tid)
+	w.licence(tid, other, "platform", "active")
+	wantRGCheck(t, "licence jurisdiction without floors", w.rgCheck(brandSub, jid), launchgov.ResultFail, "floor_missing_deposit")
+
+	// floors for the licence jurisdiction too: passes
+	for _, k := range []string{"deposit", "loss", "wager"} {
+		w.floorFor(w.jurCode(other), k, nil)
+	}
+	wantRGCheck(t, "both jurisdictions have floors", w.rgCheck(brandSub, jid), launchgov.ResultPass, "ok")
 }
