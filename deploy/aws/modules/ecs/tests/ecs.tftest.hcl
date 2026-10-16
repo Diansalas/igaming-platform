@@ -461,7 +461,7 @@ run "staging_runner_seed_world_definition_has_only_its_own_inputs" {
   assert {
     condition = !anytrue([
       for e in jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].environment :
-      can(regex("(?i)pass|secret|token|private|credential|keys$", e.name)) && !can(regex("ACTIVE_KID$", e.name))
+      can(regex("(?i)pass|secret|token|private|credential|keys$", e.name)) && !can(regex("ACTIVE_KID$", e.name)) && e.name != "SEED_WORLD_SECRET_ARN" # an ARN (a name), not a value
     ])
     error_message = "No environment variable of the seed-world definition may look like a credential."
   }
