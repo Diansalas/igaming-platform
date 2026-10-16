@@ -58,7 +58,11 @@ Static tests (`go test ./deploy/backup/`): `actor_proof_exclusion_test.go` (excl
 
 ## 5. Results
 
-COUNTS_PLACEHOLDER
+- **Full drill** `deploy/backup/drill.sh` (2026-10-16, throwaway clusters under `/tmp/pgdrill-*` on ports 5499/5498/5497 as `runuser -u postgres`, no pkill, the shared 5432 cluster never contacted; 113,014 synthetic ledger entries in 56,475 transactions, 287,259 rows): **131 PASS, 0 FAIL**, `A12 DRILL RESULT: PASS`, including the PITR phase (the recovered copies keep the key rows: `actor_proof_keys_retained_by_physical_recovery` inside `VERIFY RESULT: PASS`).
+- Smoke drill `drill.sh --small --skip-pitr`: 121 PASS, 0 FAIL. (The first smoke run FAILED on `backup_role_dump_complete` and the backup itself: the column-level grant experiment, residual R1; reverted, re-run green.)
+- `go test ./deploy/...`: all packages ok (static guards incl. the new `actor_proof_exclusion_test.go`); `go vet ./deploy/...` clean; `gofmt -l deploy` empty; `shellcheck -S warning` on every `deploy/backup/*.sh` clean (shellcheck was already installed; no sudo used).
+- Environment note: during the full run another agent's cluster occupied port 5497 (a different tool's `/tmp/pgdrill-*` root). It was left alone; it was gone before the PITR phase started. `go clean -cache` was run once for disk space (3.4 GB), as allowed.
+- NOT run: RDS, Terraform, the HTTP K2/K3 flow on a re-keyed restored database.
 
 ## 6. Residuals and limits
 
