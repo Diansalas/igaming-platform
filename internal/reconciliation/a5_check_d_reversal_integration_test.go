@@ -65,6 +65,64 @@ func a5DReverse(t *testing.T, rt *db.Pool, f fixture, id uuid.UUID, approvers ..
 	}
 }
 
+// Parity with check A on the 'reversed' arm (owner relabels past the state guard): a FAILED request
+// relabelled 'reversed' keeps a withdrawal_failed release, which is not the completion shape (WD033); a
+// COMPLETED request relabelled 'reversed' without a reversal link is WD035. D reports check A's code.
+func TestA5D_ReversedArm_ParityWithCheckA(t *testing.T) {
+	pool := testPool(t)
+	rt := wdpath.RuntimeFor(t, pool)
+	f := seedFixture(t, pool)
+	failed := dWithdrawal(t, pool, f, 10, withdrawal.StateFailed)
+	ownerRelabel(t, pool, f, failed, `state = 'reversed'`)
+	completed := dWithdrawal(t, pool, f, 10, withdrawal.StateCompleted)
+	ownerRelabel(t, pool, f, completed, `state = 'reversed'`)
+	// A release whose ENTRIES have the completion shape (Dr hold / Cr psp_clearing, this request) but whose
+	// TYPE and key are not a completion's (an owner-forged leg): only the type/key rule of the 'reversed'
+	// release arm sees it (WD033).
+	forgedReq := dWithdrawal(t, pool, f, 10, withdrawal.StateCompleted)
+	var forged uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return ownerTamperHoldLegs(ctx, tx, func() error {
+			res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxWithdrawalRejected,
+				IdempotencyKey: forgedReq.String() + ":forged", CorrelationID: forgedReq,
+				Entries: []ledger.EntryInput{{LedgerAccountID: holdAccount(t, pool, f), Direction: ledger.Debit, Amount: 10},
+					{LedgerAccountID: f.clearingID, Direction: ledger.Credit, Amount: 10}}})
+			forged = res.TransactionID
+			return err
+		})
+	}); err != nil {
+		t.Fatalf("owner tamper plant (forged release): %v", err)
+	}
+	ownerRelabel(t, pool, f, forgedReq, `state = 'reversed', release_ledger_transaction_id = '`+forged.String()+`'`)
+
+	o := dSweep(t, rt, f)
+	if o.Err != nil || o.Run.Status != StatusMismatchesFound {
+		t.Fatalf("relabelled requests must be found: %s err=%v", o.Run.Status, o.Err)
+	}
+	got := map[string]string{}
+	for _, r := range dKind(dMismatches(t, pool, f), MismatchKindWithdrawalRequestLedgerLinkInvalid) {
+		got[r.key] = r.actual
+	}
+	for name, c := range map[string]struct {
+		id   uuid.UUID
+		want string
+	}{"failed relabelled": {failed, "WD033"}, "completed relabelled, no link": {completed, "WD035"},
+		"forged completion-shaped release": {forgedReq, "WD033"}} {
+		var v []string
+		if err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT withdrawal_request_ledger_link_violation($1, $2)`, c.id, f.tenantID).Scan(&v)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(v) == 0 || v[0] != c.want {
+			t.Fatalf("%s: check A = %v, want %s", name, v, c.want)
+		}
+		if !strings.HasPrefix(got[c.id.String()], "violation="+c.want+" ") {
+			t.Fatalf("%s: D must report %s, got %q", name, c.want, got[c.id.String()])
+		}
+	}
+}
+
 func TestA5D_GovernedReversalIsClean_OrphanReversalIsWD044(t *testing.T) {
 	pool := testPool(t)
 	rt := wdpath.RuntimeFor(t, pool)

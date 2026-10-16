@@ -228,6 +228,16 @@ func TestA5DB_E11_GovernanceFloorAndShape(t *testing.T) {
 		_, err = tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'reversed', reversal_ledger_transaction_id = $1 WHERE id = $2`, id, wr.ID)
 		return err
 	})
+	attempt("E11 with a reversal that reverses another transaction", "WD044/WD035", twoPersons, func(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest) error {
+		other := wr
+		other.ReleaseLedgerTransactionID = wr.HoldLedgerTransactionID // reverses the hold, not the completion
+		id, err := a5PostReversal(ctx, tx, other, wr.ID.String()+":reversed", "ret-"+wr.ID.String(), wr.Amount)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'reversed', reversal_ledger_transaction_id = $1 WHERE id = $2`, id, wr.ID)
+		return err
+	})
 	attempt("standalone withdrawal_reversed nobody links", "WD044", twoPersons, func(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest) error {
 		_, err := a5PostReversal(ctx, tx, wr, wr.ID.String()+":reversed", "ret-"+wr.ID.String(), wr.Amount)
 		return err
