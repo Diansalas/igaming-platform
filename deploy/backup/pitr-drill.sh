@@ -102,7 +102,11 @@ echo "TIMING|base_backup_seconds|$(elapsed_s "$T0" "$T1")"
 echo "SIZE|base_backup_bytes|$(du -sb "$BASE" | cut -f1)"
 if "${PG_BIN}/pg_verifybackup" "$BASE" >"${WORK}/verifybackup.log" 2>&1; then res base_backup_verifies PASS "pg_verifybackup: $(tail -1 "${WORK}/verifybackup.log")"; else res base_backup_verifies FAIL "$(tail -2 "${WORK}/verifybackup.log" | tr '\n' ' ')"; fi
 START_SEG="$(sed -n 's/.*START WAL LOCATION: [^ ]* (file \([0-9A-F]*\)).*/\1/p' "${BASE}/backup_label")"
-END_SEG="$(ls "${BASE}/pg_wal" | grep -E '^[0-9A-F]{24}$' | sort | tail -1)"
+END_SEG=""
+for _seg in "${BASE}/pg_wal"/*; do # glob expansion is sorted, so the last 24-hex-digit name is the highest WAL segment
+  _seg="${_seg##*/}"
+  if [[ "$_seg" =~ ^[0-9A-F]{24}$ ]]; then END_SEG="$_seg"; fi
+done
 [ -n "$START_SEG" ] && [ -n "$END_SEG" ] || bk_die "cannot determine base backup WAL range"
 chown -R postgres:postgres "$(cl_dir $BASE_NAME)"; chmod 700 "$BASE"
 
