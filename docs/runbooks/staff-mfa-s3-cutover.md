@@ -1,5 +1,10 @@
 # Staff MFA S3 cutover runbook (ADR 0119 slice S3, migration 0138)
 
+**A13 note (2026-10-16): slices S5/S6 (staff lifecycle, invitation, MFA reset, break-glass flags) are now merged. For routine
+joiner/leaver/MFA-reset use `staff-lifecycle-and-mfa-recovery.md`. Sections 4 and 5 below describe the S3-to-S6 interim and are kept for the
+cutover order and as the last-resort owner procedure when no platform admin can act. `cmd/seed-admin` now REQUIRES `-operator` and `-reason`
+in every mode; the command lines below that omit them are incomplete.**
+
 Status: written with slice S3 (`IMPLEMENTED` against the local database, NOT MERGED, gate G pending). It describes a
 procedure for a development or staging environment. **S3 must not reach any persistent environment (staging or
 anything later) without this runbook being followed** (ADR 0119 section 22.8, note under G7). Production has never
@@ -105,7 +110,7 @@ seed-admin -email=<staff email> -issue-bootstrap [-tenant-slug=<tenant slug>] \
   reset is S6; between S3 and S6 use the owner procedure of section 5). `POST /v1/staff/auth/enrol/redeem` refuses a
   bootstrap token of an account that has an active factor too (defence in depth, security review R3) and raises
   `staff.mfa_integrity` / `staff.platform_mfa_integrity`.
-- New platform admins: `seed-admin -email=<email> -create-person` (password from `SEED_ADMIN_PASSWORD`) creates the
+- New platform admins: `seed-admin -email=<email> -create-person -operator=<who> -reason=<ticket>` (password from `SEED_ADMIN_PASSWORD`) creates the
   account and prints its bootstrap token in one run.
 
 ## 5. Break-glass between S3 and S6 (the owner MFA-reset gap)
@@ -174,14 +179,14 @@ locked-out admin is suspected compromised, revoke that admin's sessions with the
 first:
 
   ```text
-  SEED_ADMIN_PASSWORD=<strong password> seed-admin -email=<new break-glass admin email> -create-person
+  SEED_ADMIN_PASSWORD=<strong password> seed-admin -email=<new break-glass admin email> -create-person -break-glass -operator=<who> -reason=<ticket>
   ```
 
   then section 4 for that account.
 
-Human controls for the break-glass (S3; the software controls of section 11 - `-break-glass -reason`, the refusal
-while a usable admin exists, the lifecycle event and the P1 alert `staff_break_glass_used` - are **NOT IMPLEMENTED**
-until S6):
+Human controls for the break-glass (the software controls of ADR 0119 section 11 - `-break-glass -reason`, the refusal
+while a usable admin exists, the lifecycle event and the P1 alert `staff.platform_break_glass_used` - were written in S3 as NOT IMPLEMENTED
+and exist in `cmd/seed-admin` since S6; the human controls below still apply):
 
 1. Two operators present; an incident ticket with the reason before the job runs.
 2. The job runs inside the deployment environment only.

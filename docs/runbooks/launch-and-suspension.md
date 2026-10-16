@@ -59,7 +59,8 @@ sportsbook `brand_not_active`), initiate payments, and the payments sweeper with
 
 1. **Prepare configuration** (partner console / API; nothing here is code): jurisdiction configs in effect, KYC/AML/RG
    rulesets set, allowed currencies active in the asset registry, payment methods and an approved provider credential
-   handle, catalogue enabled, licence record entered by the responsible human.
+   handle, catalogue enabled, licence record entered by the responsible human. Market rows: `market-blocking-configuration.md`. RG floors and the
+   enforcement switch: `rg-enforcement-activation.md`. AML officers: `aml-officer-bootstrap.md`. Containment after launch: `kill-switch-and-containment.md`.
 2. **Read readiness**: `GET /v1/admin/tenants/{tenantID}/launch-readiness?brand_id=`. The server computes it; the client
    cannot supply it.
 3. **Request**: `POST .../launch-authorisations` with action `activate`, the licensing record, jurisdiction ids, responsible
@@ -87,12 +88,15 @@ itself: it must be explicitly acknowledged and the approvers see it. Only the ha
 | `R-CATALOGUE` | the brand has at least one enabled casino game or sportsbook product | empty catalogue | brand operator |
 | `R-MARKET-CONFIG` | at least one country is open for registration, deposit and casino wagering (licence ceiling + tenant opt-in, not narrowed by a brand or operation row) | `no_market_configured`: the tenant never opted a country in; `no_country_permits_all_operations`: configured, but a disabled ceiling, brand or operation row closes every country. Until fixed the market gate refuses every registration, deposit and launch of the brand | compliance (tenant rung) / platform (licence ceiling) / tenant admin (brand rung) |
 | `R-PROVIDER-TIER` | the running process uses production-eligible components | `synthetic_environment`: today every provider is a MOCK, so this fails everywhere | provider contracts (human) |
-| `R-ALERTS` | alert routing has a real recipient for P1 kinds | **always `fail` today**: ALERT-DELIVERY-1 is OPEN, nobody is paged | owner / on-call decision (HD-PRH2-4-OPS) |
+| `R-ALERTS` | the code's alert channel vocabulary contains a kind known to notify a person (`alerting.AllChannelKinds` with `KnownHumanChannelKind`) | `no_human_notification_channel`. **Since A9 (email and webhook kinds exist) this check PASSES statically.** It does NOT prove that a route is authored and enabled, that a real email provider exists (only the MOCK does) or that anyone is paged: ALERT-DELIVERY-1 is still OPEN. Read `GET /v1/admin/alerting/status` and `alert-delivery-channels.md` instead of trusting this row (A13 finding: the check overstates; see `docs/plans/a13-runbook-audit.md`) | owner / on-call decision (HD-PRH2-4-OPS) |
+| `R-AML-QUORUM` | at least two distinct live Persons of the tenant's AML owner scope hold an in-force `aml_officer` grant (`aml-officer-bootstrap.md`) | `quorum_not_met`, `read_error`; for a platform-owned scope the detail carries a platform suffix and a tenant viewer sees `see_platform` | compliance / platform admin |
+| `R-AML-SCREENING` | a screening provider is registered (a MOCK counts only outside production) and every referenced jurisdiction has an effective screening policy | provider or policy missing, `read_error` | compliance (policy needs a legal-review reference) / provider contract (PROVIDER DEPENDENT) |
+| `R-AML-MONITORING` | **always `fail`** (`monitoring_not_implemented`): transaction monitoring (ADR 0116 S4) is NOT IMPLEMENTED. Informational, not blocking; it must be acknowledged knowingly | n/a | owner (decision to launch without monitoring) |
 | `R-RG-CONFIG` | RG limit enforcement is switched ON for the subject (`rg_enforcement_activations`), a compliance floor is in force for deposit, loss and wager in EVERY allowed currency, and no session-duration control is enabled or mandatory (session enforcement is not built) | `enforcement_not_enabled`, `floor_missing_<kind>`, `session_limit_not_enforced`, `session_aggregation_unsupported`, `no_currency` | compliance (floor values, OQ-2) then a tenant compliance staff member (the switch) |
 | `R-PLAYER-FUNDS` | (close and suspend) shows balances and exposure; requires acknowledgement | n/a: it is a position, not a pass/fail | approver reads the notice (section 5) |
 
-An approver who sees `R-PROVIDER-TIER` and `R-ALERTS` failing is looking at the true state of the platform. Acknowledging
-them does not make them true.
+An approver who sees `R-PROVIDER-TIER` or `R-AML-MONITORING` failing is looking at the true state of the platform. Acknowledging
+them does not make them true. `R-ALERTS` passing does not mean anyone would be paged (see its row).
 
 ### 3.2 Hard preconditions (refusals)
 

@@ -307,6 +307,22 @@ deploy order, the staff-session cutover and the break-glass path until S6).
 The published `.env.example` values of the two families are development placeholders and are refused unless
 `APP_ENV` is explicitly `development`.
 
+## Variables added or missing from this checklist (A13 audit, verified against `internal/config`)
+
+| Env var | Required | Default | Notes |
+|---|---|---|---|
+| `PAYOUT_INSTRUMENT_KEYS`, `PAYOUT_INSTRUMENT_ACTIVE_KID`, `PAYOUT_INSTRUMENT_FP_KEYS`, `PAYOUT_INSTRUMENT_FP_ACTIVE_KID` | **Yes in production** (a missing `APP_ENV` counts as production), and in ANY environment that registers a non-synthetic payout adapter | none | **Secrets** (`kid:base64`, each >= 32 bytes, pairwise distinct from every other key family). Without them `POST /v1/me/withdrawals` answers 503 even with MOCK providers. `payout-instrument-keys.md` |
+| `PROVIDER_CREDENTIAL_FINGERPRINT_KEY` | No (absent = the real provider-credential subsystem and its request/approve/apply routes are not built; startup succeeds) | none | **Secret**, >= 32 bytes, differs from both JWT secrets, published dev/CI placeholders refused outside `APP_ENV=development`. Must be stable per environment: changing it fails every credential resolve closed. `secrets-and-credential-rotation.md` |
+| `SECRETSTORE_BACKENDS` | Required for any real credential resolution | empty (no backend built, fail closed) | comma-separated; `awssm` only with an explicit `APP_ENV` of `staging` or `production`; `devfile` only with explicit `development`; `memory` is test-only and refused |
+| `AWS_SECRETSMANAGER_REGION` (falls back to `AWS_REGION`) | Yes when `awssm` is listed | none | validated as an AWS region name; not secret |
+| `SECRETSTORE_DEVFILE_ROOT` | No | `./.secrets/dev` | development-only backend root (git- and docker-ignored) |
+| `WEBHOOK_ADMISSION_ENABLED` | No | `true` | `false` is refused in production (ADR 0097 section 7/9.3) |
+| `WEBHOOK_RL_PER_IP_RPS`, `WEBHOOK_RL_PER_IP_BURST` | No | `0` (per-IP tier off), burst `1` | ADR 0097 A2 tier |
+| `WEBHOOK_ADMISSION_OVERRIDES` | No | none | JSON per-provider overrides; invalid JSON refuses startup |
+| `RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES` | No | `50000` (1..1000000) | A11 per-run bound on payment statement lines; hitting it raises a `truncated` run_failed alert (`observability-and-alerting.md`) |
+| `METRICS_ADDR`, `METRICS_ALLOW_NON_LOOPBACK`, `ALERT_EMAIL_RECIPIENTS`, `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_SECRET_REF`, `ALERT_WEBHOOK_ALLOW_HOSTS`, `ALERT_WEBHOOK_ALLOW_NAT64`, `ALERT_RETENTION_DAYS`, `ALERT_RETENTION_INTERVAL_HOURS` | No | unset | A9; full table in `alert-delivery-channels.md` section 2. A configured-but-unbuildable channel is a startup error |
+| `STAFF_MFA_FACTOR_KEYS` etc. | Yes in every environment | none | already listed above; the staging ECS task definition does not set them yet (gap G3, `aws-staging-deploy-plan.md`) |
+
 ## Back-office static host: do not log query strings (A10a, SR-A10a-5)
 
 Emailed staff links carry the one-time token in the URL FRAGMENT (`/#/enrol?token=...&invite=1`), which never reaches
