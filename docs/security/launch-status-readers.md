@@ -83,6 +83,7 @@ constraint has a tenant / brand status vocabulary (checked against `pg_constrain
 | Where | Literal | Why it is safe for `pending_launch` |
 |---|---|---|
 | `migrations/0115_payment_force_resolution.up.sql` and `migrations/0125_payout_unbound_resolution_m4.up.sql` (each: 3 sites, 3 allow-listed lines) | `tenant_status = 'closed'` / `IS DISTINCT FROM 'closed'` | LF7: `pending_launch` is NOT closed; harmless, a pending tenant has no payments |
+| `migrations/0163_payout_amount_dispute_m2_admission.up.sql` (A5; 1 site: `payment_manual_resolutions_guard`, the 0125 body verbatim plus the amount/asset-mismatch reasons) | `v_policy.tenant_status = 'closed'` | LF7, unchanged from 0125 |
 | `migrations/0121_gameplay_stake_return_and_closure_guard.up.sql` | `IF NEW.status = 'closed'` in `tenants_status_change_gate` | the closure gate fires for a transition INTO `closed`, from any status |
 | `migrations/0128_launch_authorisation_status_governance.up.sql` | `IF OLD.status = 'closed'` in `launch_subject_status_guard` | closed is terminal (ADR 0112 3.1) |
 | `migrations/0129_brand_gameplay_gate.up.sql` | the same `IF OLD.status = 'closed'` (0129 restates 0128's guard with the LF1 brand lock added) | closed is terminal, unchanged |

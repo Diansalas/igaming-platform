@@ -64,6 +64,9 @@ var allowedLiteralCompares = map[string]string{
 	"migrations/0125_payout_unbound_resolution_m4.up.sql:AND (tenant_status IS DISTINCT FROM 'closed' OR r.requested_by_scope = 'platform_acting')": "LF7 (0125 restatement)",
 	"migrations/0125_payout_unbound_resolution_m4.up.sql:AND (tenant_status IS DISTINCT FROM 'closed' OR a.decided_by_scope = 'platform_acting')":   "LF7 (0125 restatement)",
 	"migrations/0125_payout_unbound_resolution_m4.up.sql:IF v_policy.tenant_status = 'closed' AND v_actor.scope <> 'platform_acting' THEN":          "LF7 (0125 restatement)",
+	// 0163 (A5 / PAYOUT-AMOUNT-DISPUTE-1): payment_manual_resolutions_guard is the 0125 body verbatim plus the
+	// mismatch reasons and their basis rule; the one 'closed' comparison it carries is the 0125 line, unchanged.
+	"migrations/0163_payout_amount_dispute_m2_admission.up.sql:IF v_policy.tenant_status = 'closed' AND v_actor.scope <> 'platform_acting' THEN": "LF7 (0163 verbatim restatement of 0125)",
 	// 0121 item B: the closure gate fires for a transition INTO 'closed'. pending_launch ->
 	// closed is such a transition and is counted like any other (a pending tenant has no
 	// bets, so the count is 0 and the closure proceeds).

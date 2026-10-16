@@ -51,7 +51,7 @@ package reconciliation
 //     completion, WD035 the reversal link's exact withdrawal_reversed shape, parity-tested like the
 //     rest), and the read-only WD044: a withdrawal_reversed transaction that no reversed request links
 //     (keyed "ledger_transaction:<id>"), the detective twin of the 0162 commit-time trigger for an owner
-//     DISABLE TRIGGER bypass (ADR 0110 s9.4).
+//     who switched that trigger off (ADR 0110 s9.4).
 
 import (
 	"context"
