@@ -61,6 +61,10 @@ var StepUpOperations = map[string]stepup.Class{
 	OpAMLHoldLift:    stepup.Critical,
 	OpAMLCasePropose: stepup.Critical,
 	OpAMLCaseApprove: stepup.Critical,
+	// ADR 0110 T8 (migration 0165): each half of a four-eyes payout reversal (credits house money to a player,
+	// or releases a hold on the tombstone branch); the route POST /v1/admin/withdrawals/{id}/payout-reversal is
+	// critical in the golden table.
+	OpPayoutReversalDecide: stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4

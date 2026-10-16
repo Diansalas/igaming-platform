@@ -732,9 +732,18 @@ func TestA5_PayoutReversal_WD027_OneGrantHolderIsNotAQuorum(t *testing.T) {
 		if err := tx.QueryRow(ctx, `SELECT reason_code FROM withdrawal_approvals WHERE withdrawal_request_id = $1 AND decision = 'reverse'`, wr.ID).Scan(&reason); err != nil {
 			return err
 		}
+		// ADR 0110 T8 (migration 0165): the non-holder's raw row must itself be proof-bound to be counted at
+		// all, so it is written as that staff member (session principal + a proof signed for it), then the
+		// session returns to f1 (whose principal scope makes the grants visible to WD027).
+		if err := t8AsPrincipalWithProof(ctx, tx, w.financeNoGrant.ID, wr.ID, reason); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_approvals (tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval,
 			decision, reason_code, threshold_amount_at_decision, request_amount_at_decision) VALUES ($1, $2, $3, false, 'reverse', $4, 0, 500)`,
 			e.f.tenantID, wr.ID, w.financeNoGrant.ID, reason); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, w.f1.ID.String()); err != nil {
 			return err
 		}
 		pid := e.pid

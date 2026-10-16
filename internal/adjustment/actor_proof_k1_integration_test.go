@@ -468,6 +468,8 @@ func TestActorProof_ProofTriggerIsLastBeforeRowTriggerOnEveryGovernedTable(t *te
 		"withdrawal_hold_resolutions", "withdrawal_hold_resolution_approvals",
 		// ADR 0112 slice 3 (migration 0130): eleven -> thirteen governed tables.
 		"launch_authorisation_requests", "launch_authorisation_approvals",
+		// ADR 0110 T8 (migration 0165): the 'reverse' decisions of withdrawal_approvals.
+		"withdrawal_approvals",
 	}
 	for _, tbl := range tables {
 		var names []string
