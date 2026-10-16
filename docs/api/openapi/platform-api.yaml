@@ -3508,9 +3508,91 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Responsible gaming, player self-service reads and the original self-exclusion write (ADR 0026) ---
+  # Documented by ADR 0115 S4-min (completion audit A6): both routes existed since Stage 4D-RG but were missing from this specification.
+  /v1/me/rg/self-exclusion:
+    post:
+      summary: Self-exclude (player)
+      description: >
+        Player principals only. Records the player's own PLATFORM-WIDE self-exclusion: it applies to the Person in every brand and tenant and
+        cannot be ended early (the table is append-only). `duration_days` is a positive whole number of days; omit it for an INDEFINITE exclusion.
+        The suggested durations are served by GET /v1/me/rg/options (an engineering default list, not a legal value). While it is in force the
+        player cannot start a launch, place a bet, deposit or claim a bonus; withdrawals of the player's own funds stay possible (ADR 0115).
+        Identity and tenant come from the token; a body carrying anything else is 400.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RGSelfExclusionRequest" }
+      responses:
+        "201":
+          description: The self-exclusion was recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGRestriction" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The player account was not found
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/me/rg/status:
+    get:
+      summary: My own restrictions - self-exclusions and time-outs (player)
+      description: >
+        Player principals only. Every restriction recorded against the player's Person (row-level security limits the result to the caller's own
+        Person), newest first, each with `active` computed at response time. A restriction with `active: true` blocks launches, bets, deposits and
+        bonus claims server-side; the UI never decides that.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's restrictions (a bare array, possibly empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RGRestriction" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The player account was not found
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/me/rg/options:
+    get:
+      summary: The choices the responsible-gaming screen offers (player)
+      description: >
+        Player principals only. Read-only; it decides and enforces nothing. For the asset asked about it returns, per amount kind (deposit, loss,
+        wager), the periods the configuration allows, the numeric ceiling, whether a limit is mandatory, the scope and the increase cooling-off in
+        seconds; the time-out durations in whole hours; and suggested self-exclusion durations in days. Limit configuration comes from the composed
+        rg_limit_configs of the player's brand (compliance values, ADR 0115 OQ-2); with `config_in_force: false` every period of the closed
+        vocabulary is offered (a protective initial value or decrease needs no configuration). The time-out and self-exclusion duration lists are
+        ENGINEERING DEFAULTS unless the configuration lists time-out durations; they are not legal values and the write routes accept any value
+        within their documented bounds. `limit_enforcement_enabled` is informational: self-exclusion and time-out are always enforced.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: asset_code, in: query, required: true, schema: { type: string, maxLength: 32 } }
+      responses:
+        "200":
+          description: The options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGOptions" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The player account was not found
+        "500": { $ref: "#/components/responses/InternalError" }
+
   # --- ADR 0115 slice S2: Responsible Gaming limit, time-out and RG-configuration WRITE APIs ---
-  # API only. These record limits and configuration; NOTHING here enforces a limit on a deposit, a
-  # wager, a launch or a login (ADR 0115 S4), measures usage (S3) or has a UI (S5). Every limit and
+  # These record limits and configuration. Since ADR 0115 S4-min the recorded DEPOSIT, LOSS and WAGER limits
+  # (and rg_config_missing / rg_limit_required) are enforced inside the deposit, bet and launch transactions of
+  # a tenant or brand whose enforcement has been switched on (POST /v1/admin/rg/enforcement; OFF by default).
+  # Session-duration and reality-check controls are recorded but NOT enforced (PROVIDER DEPENDENT / future).
+  # Every limit and
   # time-out write requires an Idempotency-Key header (1-120 printable ASCII characters): the same key
   # with the same request replays the stored result (header Idempotent-Replayed: true), the same key
   # with a different request is 409 RG_IDEMPOTENCY_MISMATCH. tenant_id, person, brand, scope, the
@@ -3652,8 +3734,9 @@ paths:
         enabled / mandatory state and, with no configuration in force, for any positive duration. It cannot be ended early and
         never changes wallet status (withdrawals keep working). The reach is the configured time_out scope
         (platform_person by default; a configured `account` scope is applied as tenant_person, the broader and more
-        protective reach - recorded in the audit row). The restriction is recorded; EvaluateEligibility does not yet read it
-        (ADR 0115 S4), so nothing blocks play yet. Idempotency-Key: honoured under the person lock against the audit record
+        protective reach - recorded in the audit row). The restriction is recorded and ENFORCED server-side from then on (ADR 0115 S4-min):
+        rg.EvaluateEligibility reads it with the same predicate and lock as a self-exclusion, so while it is active the Person cannot launch, bet,
+        deposit or claim a bonus (decision code `timed_out`); withdrawals stay possible. Idempotency-Key: honoured under the person lock against the audit record
         of the earlier request (a replay returns 200 with Idempotent-Replayed: true); it is NOT a database unique constraint.
         Audited (rg.time_out.created / rg.time_out.denied).
       security:
@@ -3760,6 +3843,58 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/RGNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /v1/admin/rg/enforcement:
+    get:
+      summary: Is RG limit enforcement switched on for this tenant? (staff)
+      description: >
+        rg_config:read (tenant_admin, compliance), tenant-scoped. The tenant's activation rows, oldest first. A tenant-wide row (`level: tenant`)
+        covers every brand; a `level: brand` row covers one brand. `enforcement_enabled` is true when any row exists. The switch is OFF by default.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The activation rows
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGEnforcementList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      summary: Switch RG limit enforcement ON for this tenant or one brand (staff)
+      description: >
+        rg_config:write (compliance only; an APPLICATION-enforced check - the database refuses any writer that is not an active staff principal of
+        the same tenant), tenant-scoped. ONE-WAY and IRREVERSIBLE: step-up CRITICAL (403 step_up_required without a fresh step-up; security review SR6-1) because with no compliance floor it halts deposits, launches and wagers of the scope. REFUSED with 409 conflict unless the tenant's licence jurisdiction (the one enforcement reads; a tenant with none is refused, detail no_licence_jurisdiction) and every jurisdiction with a configuration in effect have a compliance floor for deposit, loss and wager in every allowed currency (the floor part of R-RG-CONFIG; the message carries the closed detail code); a repeat for an already switched-on scope is not re-checked. There is no disable operation anywhere, the table
+        is append-only and holds enabling rows only; switching enforcement off is a recorded decision plus a migration. Once on, a deposit,
+        a bet or a launch of the scope is subject to the player's deposit, loss and wager limits, and to `rg_config_missing` (no jurisdiction floor
+        in force for the kind and asset: the action is refused) and `rg_limit_required` (a mandatory kind with no value and no numeric ceiling).
+        Self-exclusion and time-out are enforced whether or not this is on. Idempotent by state: a repeat for the same scope answers 200 with the
+        stored row and writes nothing. `brand_id` (optional) must be a brand of the tenant. Audited (rg.enforcement.activated); a refusal is audited
+        as rg.enforcement.activation_denied. The launch readiness check R-RG-CONFIG reports whether this is on and floors are in force.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RGEnforcementRequest" }
+      responses:
+        "200":
+          description: Already switched on for this scope; the stored row
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGEnforcement" }
+        "201":
+          description: Switched on
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RGEnforcement" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/RGForbidden" }
+        "409": { $ref: "#/components/responses/RGConflict" }
         "500": { $ref: "#/components/responses/InternalError" }
 
   /v1/admin/rg/limit-configs:
@@ -12594,7 +12729,7 @@ components:
     LaunchCheck:
       type: object
       properties:
-        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
+        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, R-RG-CONFIG (ADR 0115 S4-min: RG limit enforcement switched on with a compliance floor for every currency), or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
         result: { type: string, enum: [pass, fail, not_evaluable], description: "not_evaluable is not pass" }
         detail_code: { type: string, description: "A closed detail code, never free text." }
       required: [code, result, detail_code]
@@ -13189,6 +13324,65 @@ components:
           type: array
           items: { $ref: "#/components/schemas/RGStaffLimitChange" }
       required: [history]
+    RGSelfExclusionRequest:
+      type: object
+      properties:
+        duration_days: { type: integer, minimum: 1, description: "Whole days; omit for an indefinite exclusion." }
+    RGLimitOption:
+      type: object
+      properties:
+        kind: { type: string, enum: [deposit, loss, wager] }
+        config_in_force: { type: boolean }
+        mandatory: { type: boolean }
+        allowed_periods:
+          type: array
+          items: { type: string, enum: [rolling_24h, rolling_7d, rolling_30d, calendar_day, calendar_week, calendar_month] }
+        ceiling: { type: string, nullable: true, description: "NUMERIC(38,0) minor units, a decimal string; null = none" }
+        scope: { type: string, enum: [account, tenant_person] }
+        increase_cooldown_seconds: { type: integer, format: int64, nullable: true }
+      required: [kind, config_in_force, mandatory, allowed_periods, ceiling, increase_cooldown_seconds]
+    RGOptions:
+      type: object
+      properties:
+        asset_code: { type: string }
+        limit_enforcement_enabled: { type: boolean }
+        limits:
+          type: array
+          items: { $ref: "#/components/schemas/RGLimitOption" }
+        time_out_hours:
+          type: array
+          items: { type: integer }
+        self_exclusion_days:
+          type: array
+          items: { type: integer }
+        self_exclusion_indefinite_allowed: { type: boolean }
+      required: [asset_code, limit_enforcement_enabled, limits, time_out_hours, self_exclusion_days, self_exclusion_indefinite_allowed]
+    RGEnforcementRequest:
+      type: object
+      properties:
+        brand_id: { type: string, format: uuid, description: "Optional; omit for the whole tenant." }
+        reason_code: { type: string, minLength: 1, maxLength: 64, description: "Printable ASCII." }
+        attestation_ref: { type: string, minLength: 1, maxLength: 200, description: "Printable ASCII; names the compliance signatory." }
+      required: [reason_code, attestation_ref]
+    RGEnforcement:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        level: { type: string, enum: [tenant, brand] }
+        brand_id: { type: string, format: uuid }
+        reason_code: { type: string }
+        attestation_ref: { type: string }
+        created_by: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+      required: [id, level, reason_code, attestation_ref, created_by, created_at]
+    RGEnforcementList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RGEnforcement" }
+        enforcement_enabled: { type: boolean }
+      required: [items, enforcement_enabled]
     RGTimeOutRequest:
       type: object
       properties:

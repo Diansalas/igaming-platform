@@ -112,9 +112,14 @@ export function AccountPage() {
 
       {meQuery.data && <ComplianceStatusCard kycTier={meQuery.data.kyc_tier} />}
 
-      <Link to="/account/bets" className="text-sm text-brand-700 hover:underline">
-        View my bet history &rarr;
-      </Link>
+      <div className="flex flex-col gap-2">
+        <Link to="/account/responsible-gaming" className="text-sm text-brand-700 hover:underline">
+          Responsible gaming: limits, time-out and self-exclusion &rarr;
+        </Link>
+        <Link to="/account/bets" className="text-sm text-brand-700 hover:underline">
+          View my bet history &rarr;
+        </Link>
+      </div>
     </div>
   )
 }

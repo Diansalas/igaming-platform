@@ -635,6 +635,7 @@ $$;
 --   rg_limit_config_change_requests - SELECT/INSERT, and UPDATE on status only (decided_* are forced
 --                                     by the guard trigger). Never DELETE or TRUNCATE.
 --   rg_limit_configs,
+--   rg_enforcement_activations (0158),
 --   player_rg_limit_changes         - append-only: SELECT/INSERT only (+ the seq sequence).
 -- No role, password or attribute change.
 DO $$
@@ -645,6 +646,7 @@ BEGIN
         ('database_environment', 'SELECT'),
         ('rg_limit_config_change_requests', 'SELECT, INSERT'),
         ('rg_limit_configs', 'SELECT, INSERT'),
+        ('rg_enforcement_activations', 'SELECT, INSERT'),
         ('player_rg_limit_changes', 'SELECT, INSERT')) AS v(name, privs)
     LOOP
         IF to_regclass('public.' || t.name) IS NOT NULL THEN

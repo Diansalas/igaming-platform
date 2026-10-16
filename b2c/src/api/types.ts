@@ -34,6 +34,19 @@ export type ApiErrorCode =
   | 'PAYOUT_INSTRUMENT_REQUIRED'
   | 'PAYOUT_INSTRUMENT_NOT_USABLE'
   | 'TENANT_OR_BRAND_NOT_ACTIVE'
+  // ADR 0115 S2: the responsible-gaming limit routes' closed codes (the ones the player screen maps to a message).
+  | 'RG_LIMIT_ABOVE_CEILING'
+  | 'RG_PERIOD_NOT_ALLOWED'
+  | 'RG_DURATION_NOT_ALLOWED'
+  | 'RG_NOT_OFFERED'
+  | 'RG_NO_CHANGE'
+  | 'RG_CHANGE_NOT_PENDING'
+  | 'RG_COOLING_OFF'
+  | 'RG_CONFIG_MISSING'
+  | 'RG_PENDING_CAP'
+  | 'RG_IDEMPOTENCY_MISMATCH'
+  | 'RG_IDENTITY_REVIEW'
+  | 'RG_UNAVAILABLE'
   // ADR 0112 7.3: a suspended or closed brand/tenant accepts no new registration (409).
   | 'BRAND_NOT_ACCEPTING_REGISTRATIONS'
   // A8: the operating-market gate refused registration, a deposit or a game launch (403). One code

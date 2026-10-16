@@ -228,17 +228,25 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		// RG, exactly as the now-deleted InitiateDeposit used to
 		// ([deleted by E2]) (ADR 0095 §4.3 T1+T2 runs RG "after RG" -
 		// the ADR's own ordering).
-		eligibility, err := rg.EvaluateEligibility(actx, tx, rg.EligibilityParams{
+		//
+		// ADR 0115 S4-min: rg.EvaluateAction is EvaluateEligibility plus the time-out and, where limit
+		// enforcement is switched on for the brand, the deposit limit (usage + this deposit <= limit, the
+		// candidate intent itself excluded from the in-flight usage and added once) and the configuration /
+		// mandatory-limit answers, all inside THIS transaction after the L0.4 person lock. A denial is the
+		// same T1 decline as any other RG refusal: the intent is finalized declined in this transaction
+		// and the denial audit carries the computed figures. An error aborts: nothing is created.
+		eligibility, err := rg.EvaluateAction(actx, tx, rg.ActionParams{
 			TenantID: intent.TenantID, BrandID: intent.BrandID, PlayerAccountID: intent.PlayerAccountID, WalletID: intent.WalletID,
+			Action: rg.ActionDeposit, AssetCode: intent.AssetCode, Amount: intent.Amount, CandidateRef: &intent.ID,
 		})
 		if err != nil {
-			return fmt.Errorf("payments: evaluate rg eligibility: %w", err)
+			return fmt.Errorf("payments: evaluate rg action: %w", err)
 		}
 		if !eligibility.Allowed {
 			if err := audit.Record(actx, tx, audit.Entry{
 				TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "payments.deposit_denied_by_rg",
 				TargetType: "player_account", TargetID: intent.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
-				Metadata: map[string]any{"reason_code": eligibility.Code, "person_id": eligibility.PersonID.String(), "deposit_intent_id": intent.ID.String()},
+				Metadata: eligibility.AuditMetadata(map[string]any{"reason_code": eligibility.Code, "person_id": eligibility.PersonID.String(), "deposit_intent_id": intent.ID.String()}),
 			}); err != nil {
 				return fmt.Errorf("payments: audit rg denial: %w", err)
 			}

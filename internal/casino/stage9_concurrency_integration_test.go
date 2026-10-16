@@ -39,6 +39,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // s9CashProjectionRowID resolves the wallet's player_cash
@@ -537,7 +538,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 			_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID, WalletID: f.walletID,
 				AssetCode: "EUR", Amount: amount, IdempotencyKey: "s9-wd-vs-bet",
-				PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
+				PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 			})
 			return err
 		})

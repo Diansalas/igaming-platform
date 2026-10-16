@@ -61,6 +61,15 @@ func TestInitAppRoleSQLMatchesMigration0135Grants(t *testing.T) {
 	for _, m := range regexp.MustCompile(`\('(database_environment|rg_[a-z_]+|player_rg_[a-z_]+)', '([A-Z, ]+)'\)`).FindAllStringSubmatch(deploy, -1) {
 		gotDeploy[m[1]] = normPrivs(m[2])
 	}
+	// ADR 0115 S4-min (migration 0158) adds one RG table to the same deploy block: the enforcement switch
+	// (append-only, SELECT and INSERT only). It is checked against migration 0158 below, not against 0135.
+	if gotDeploy["rg_enforcement_activations"] != "INSERT,SELECT" {
+		t.Errorf("deploy/init-app-role.sql rg_enforcement_activations = %q, want INSERT,SELECT", gotDeploy["rg_enforcement_activations"])
+	}
+	if m158 := s1Read(t, "migrations/0158_rg_enforcement_activation_and_relink_lock.up.sql"); !strings.Contains(m158, "GRANT SELECT, INSERT ON rg_enforcement_activations TO igaming_runtime") {
+		t.Error("migration 0158 must grant exactly SELECT, INSERT on rg_enforcement_activations")
+	}
+	delete(gotDeploy, "rg_enforcement_activations")
 	mig := s1Read(t, m0135Up)
 	gotMig := map[string]string{}
 	for _, m := range regexp.MustCompile(`'GRANT ([A-Z, ]+) ON (database_environment|rg_[a-z_]+|player_rg_[a-z_]+) TO igaming_runtime'`).FindAllStringSubmatch(mig, -1) {

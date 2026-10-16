@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // B13-B (ADR 0111 section 18, owner decisions 2 and 4): the binding happens at RequestWithdrawal, in the
@@ -35,7 +36,7 @@ func req(t *testing.T, pool *db.Pool, f fixture, p RequestParams) (WithdrawalReq
 func baseParams(f fixture, key string, amount int64) RequestParams {
 	return RequestParams{
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID, WalletID: f.walletID,
-		AssetCode: "EUR", Amount: amount, IdempotencyKey: key, PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
+		AssetCode: "EUR", Amount: amount, IdempotencyKey: key, PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 	}
 }
 

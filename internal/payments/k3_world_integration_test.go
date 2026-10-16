@@ -35,6 +35,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 func k3Code(err error) string {
@@ -431,7 +432,7 @@ func (w *k3World) approveWithdrawal(amount int64, idemKey string) withdrawal.Wit
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, PersonID: w.f.personID,
 			WalletID: w.f.walletID, AssetCode: "EUR", Amount: amount, IdempotencyKey: idemKey,
-			PayoutInstrumentID: w.f.instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: w.f.instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 		return err
 	})

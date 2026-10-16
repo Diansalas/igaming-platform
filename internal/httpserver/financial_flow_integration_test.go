@@ -28,6 +28,7 @@ import (
 	tenantctx "github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // --- Stage 3B financial HTTP-layer test fixtures ---
@@ -282,10 +283,14 @@ func mustCreateWithdrawalRequest(t *testing.T, pool *db.Pool, tenantID, brandID,
 			uuid.New(), tenantID, brandID, playerAccountID, account.PersonID); err != nil {
 			return err
 		}
+		// WD-RG-1 (A6): the RG gate requires an ACTIVE account (a freshly registered account is pending_verification).
+		if err := identity.SetPlayerAccountStatus(ctx, tx, playerAccountID, identity.PlayerStatusActive); err != nil {
+			return err
+		}
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: walletID,
 			AssetCode: assetCode, Amount: amount, IdempotencyKey: uuid.NewString(),
-			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 		return err
 	})

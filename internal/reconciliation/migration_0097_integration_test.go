@@ -270,6 +270,7 @@ func TestCasinoConsistency_C5_TombstoneConflict(t *testing.T) {
 // that was migrated only through an older version.
 func applyGameplayGateMigration(t *testing.T, pool *db.Pool) {
 	t.Helper()
+	installRGEnforcementStub(t, pool)
 	b, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0118_gameplay_posting_tenant_status_gate.up.sql"))
 	if err != nil {
 		t.Fatal(err)
@@ -311,5 +312,20 @@ func applyGameplayGateMigration(t *testing.T, pool *db.Pool) {
 		return err
 	}); err != nil {
 		t.Fatalf("apply 0111 on scratch: %v", err)
+	}
+}
+
+// installRGEnforcementStub (ADR 0115 S4-min, A6): the current casino and deposit posting code reads the enforcement
+// switch table created by migration 0158 (fail closed when it is absent). A scratch database that stops at an older
+// migration lacks it; install ONLY the two columns the switch read touches (no rows: enforcement OFF, as in production by
+// default). The real table, policies and triggers are covered by migration_0158_integration_test.go in internal/rg.
+func installRGEnforcementStub(t *testing.T, pool *db.Pool) {
+	t.Helper()
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS rg_enforcement_activations (tenant_id uuid NOT NULL, brand_id uuid);
+			GRANT SELECT ON rg_enforcement_activations TO PUBLIC`)
+		return err
+	}); err != nil {
+		t.Fatalf("install the rg_enforcement_activations stub on the scratch database: %v", err)
 	}
 }

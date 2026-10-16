@@ -416,3 +416,7 @@ request on a legal edge (e.g. a forged E9 completion) passes both A and D; detec
 reconciliation. **CI guard (ledger-finance C2):** the owner tamper-plant tests skip only on the persistent shared
 databases; on the CI service database (`igaming_platform_test`) or with `CI=true`, a skip decision FAILS the test
 (`wdpath.OnPersistentDatabase`).
+
+**WD-RG-1 pointer (A6, 2026-10-15):** `RequestWithdrawal` now runs an RG and risk gate (`internal/withdrawalgate`, codes WD050 RG and WD051 risk, application-level, no
+database backstop) after the tenant gate and before the payout-instrument gate. `RequestParams.Gate` is required; nil refuses. Payout dispatch T1p does not re-run
+it. See `docs/plans/a6-rg-enforcement-record.md`.

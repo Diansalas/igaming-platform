@@ -8,6 +8,7 @@ import { CasinoHistoryPage } from '../features/casino/CasinoHistoryPage'
 import { CasinoLobbyPage } from '../features/casino/CasinoLobbyPage'
 import { CasinoSessionPage } from '../features/casino/CasinoSessionPage'
 import { DepositPage } from '../features/deposit/DepositPage'
+import { ResponsibleGamingPage } from '../features/rg/ResponsibleGamingPage'
 import { EventDetailPage } from '../features/sportsbook/EventDetailPage'
 import { SportsListPage } from '../features/sportsbook/SportsListPage'
 import { WithdrawalPage } from '../features/withdrawal/WithdrawalPage'
@@ -49,6 +50,14 @@ export function AppRoutes() {
           element={
             <RequireAuth>
               <WithdrawalPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="account/responsible-gaming"
+          element={
+            <RequireAuth>
+              <ResponsibleGamingPage />
             </RequireAuth>
           }
         />

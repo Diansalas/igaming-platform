@@ -18,7 +18,18 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
+
+// allowAllGate is a TEST-ONLY withdrawal gate that allows everything. These tests exercise the wallet's
+// sufficiency mechanics, not the WD-RG-1 gate (covered in internal/withdrawal); the production gate
+// (withdrawalgate/standard) cannot be imported here because internal/rg imports this package, which would be
+// a test-only import cycle.
+type allowAllGate struct{}
+
+func (allowAllGate) Evaluate(context.Context, pgx.Tx, withdrawalgate.Input) (withdrawalgate.Decision, error) {
+	return withdrawalgate.Decision{Allowed: true}, nil
+}
 
 // TestInsufficientFunds_OverDebitRejectedAndSummaryUnchanged proves a
 // debit that would drive player_cash negative is rejected rather than
@@ -84,7 +95,7 @@ func TestInsufficientFunds_OverDebitRejectedAndSummaryUnchanged(t *testing.T) {
 			AssetCode:          "EUR",
 			Amount:             101,
 			IdempotencyKey:     "wd-over-balance",
-			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(), Gate: allowAllGate{},
 		})
 		return err
 	})
@@ -106,7 +117,7 @@ func TestInsufficientFunds_OverDebitRejectedAndSummaryUnchanged(t *testing.T) {
 			AssetCode:          "EUR",
 			Amount:             100,
 			IdempotencyKey:     "wd-exact-balance",
-			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(), Gate: allowAllGate{},
 		})
 		return err
 	})

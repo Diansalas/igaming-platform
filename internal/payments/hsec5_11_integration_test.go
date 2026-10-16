@@ -25,6 +25,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 type hsecCase struct {
@@ -122,7 +123,7 @@ func requestWithdrawalTx(pool *db.Pool, f payoutFixture, key string, amount int6
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID,
 			WalletID: f.walletID, AssetCode: "EUR", Amount: amount, IdempotencyKey: key,
-			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 		return err
 	})
@@ -412,7 +413,7 @@ func TestHSEC11_RequestWithdrawal_FlipInsideOpenTxBeforeGate_Refused(t *testing.
 		_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID,
 			WalletID: f.walletID, AssetCode: "EUR", Amount: 500, IdempotencyKey: "h11-flip",
-			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
+			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(), Gate: standard.New(),
 		})
 		return err
 	})

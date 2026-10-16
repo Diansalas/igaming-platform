@@ -19,12 +19,14 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
+	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 var hrClosedTokens = []string{
@@ -109,6 +111,10 @@ func (w *hrWorld) approvedWithdrawalOnSuspendedTenant(amount int64) uuid.UUID {
 			VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`, uuid.New(), w.tenant, w.brand, w.player, person); err != nil {
 			return err
 		}
+		// WD-RG-1 (A6): the RG gate requires an ACTIVE account.
+		if err := identity.SetPlayerAccountStatus(ctx, tx, w.player, identity.PlayerStatusActive); err != nil {
+			return err
+		}
 		cash, err := ledger.GetOrCreateAccount(ctx, tx, w.tenant, &w.wallet, ledger.AccountPlayerCash, "USD")
 		if err != nil {
 			return err
@@ -125,7 +131,7 @@ func (w *hrWorld) approvedWithdrawalOnSuspendedTenant(amount int64) uuid.UUID {
 		}
 		wr, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{TenantID: w.tenant, BrandID: w.brand, PlayerAccountID: w.player, PersonID: person,
 			WalletID: w.wallet, AssetCode: "USD", Amount: amount, IdempotencyKey: uuid.NewString(),
-			PayoutInstrumentID: instrument, Destinations: pitest.Shared()})
+			PayoutInstrumentID: instrument, Destinations: pitest.Shared(), Gate: standard.New()})
 		if err != nil {
 			return err
 		}

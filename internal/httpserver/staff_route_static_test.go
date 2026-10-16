@@ -261,8 +261,9 @@ func TestStaffRoutes_EveryMutatingRouteClassified(t *testing.T) {
 	// ADR 0119 S5 + S6: +24 lifecycle routes (8 reads, 16 mutating), -1 the removed legacy staff creation route:
 	// 203 routes + S1b GET /v1/admin/alerts/{alertID} = 204 routes, 125 mutating.
 	// ADR 0116 A7: +11 AML officer routes (3 reads, 8 mutating): 215 routes, 133 mutating.
-	if mutating != 133 || len(staffRouteGolden) != 215 {
-		t.Errorf("golden table: %d routes, %d mutating; pinned 215 and 133", len(staffRouteGolden), mutating)
+	// ADR 0115 S4-min (A6): +GET and +POST /v1/admin/rg/enforcement = 217 routes, 134 mutating.
+	if mutating != 134 || len(staffRouteGolden) != 217 {
+		t.Errorf("golden table: %d routes, %d mutating; pinned 217 and 134", len(staffRouteGolden), mutating)
 	}
 }
 

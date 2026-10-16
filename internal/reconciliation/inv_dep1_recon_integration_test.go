@@ -533,6 +533,7 @@ func TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("install tenant_status_gate_key on the pre-0107 scratch database: %v", err)
 	}
+	installRGEnforcementStub(t, pool)
 	buildLegacyShape(t, w)
 	// Migrate the SAME database (which carries the two-succeeded-attempts legacy
 	// shape) the rest of the way to the latest on-disk migration.
