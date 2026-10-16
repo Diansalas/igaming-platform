@@ -26,7 +26,13 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 4. Watch `/readyz` on new instances before shifting traffic; watch error
    rate/latency on the affected endpoints for at least one full request
    cycle of each mutating flow (deposit, bet, withdrawal) before declaring
-   the deploy complete.
+   the deploy complete. Confirm WHAT is running with `GET /v1/admin/platform/status`
+   (platform admin only, permission `platform_status:read`; F6 / SA-3): `build.commit` is the source commit the image was built
+   from (`unknown` means the image was built without `GIT_COMMIT`, which `deploy/aws/scripts/deploy.sh` always passes),
+   `migrations.head_version` / `applied_count` must equal the migrate task's `migrate status`, and
+   `database_environment.anchor` must be `production` (production) or `staging` (staging); `unrecorded` means the anchor
+   step of `production-configuration-checklist.md` was skipped. The read is audited (`platform.status_read`, no
+   tenant) and returns no connection detail, secret or tenant data.
 5. Roll out both frontends (`b2c`, `backoffice`) as static builds behind
    their own CDN/hosting target; these are independent of the API rollout
    and can be staged before or after it since the API is versioned
