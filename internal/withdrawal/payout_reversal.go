@@ -176,15 +176,14 @@ func RecordPayoutReversalDecision(
 	case StateCompleted, StateSubmitted:
 	case StateReversed, StateFailed:
 		// An idempotent retry of the call that executed the reversal (or its tombstone branch): this
-		// approver's vote for this exact payload is on file. Anything else is a conflict.
-		var voted bool
-		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM withdrawal_approvals
-			  WHERE withdrawal_request_id = $1 AND approver_principal_id = $2 AND decision = 'reverse' AND reason_code = $3)`,
-			requestID, approverPrincipalID, reason).Scan(&voted); err != nil {
-			return ReversalDecision{}, fmt.Errorf("withdrawal: read reversal decision: %w", err)
+		// approver's vote for this exact payload is on file, that payload reached the four-eyes floor, and
+		// the ledger carries its execution (the reversal with this return reference, or the tombstone on
+		// this original reference). Anything else is a conflict.
+		replay, err := isExecutedReversalReplay(ctx, tx, wr, approverPrincipalID, p, reason)
+		if err != nil {
+			return ReversalDecision{}, err
 		}
-		if voted {
+		if replay {
 			return ReversalDecision{Request: wr, Replay: true}, nil
 		}
 		return ReversalDecision{}, fmt.Errorf("%w: request %s is in state %q", ErrStateConflict, requestID, wr.State)
@@ -278,7 +277,10 @@ func matchReversalPayload(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest, 
 		return ErrReversalPayloadMismatch
 	}
 	if wr.State == StateSubmitted {
-		if wr.ProviderReference == nil || *wr.ProviderReference != p.OriginalProviderReference {
+		// The reference may be bound only on the payout attempt (a parked mismatch binds the attempt); the
+		// caller (internal/payments) proves the reference against the attempt. A reference on the request
+		// must agree.
+		if wr.ProviderReference != nil && *wr.ProviderReference != p.OriginalProviderReference {
 			return ErrReversalPayloadMismatch
 		}
 		return nil
@@ -298,6 +300,32 @@ func matchReversalPayload(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest, 
 		return ErrReversalPayloadMismatch
 	}
 	return nil
+}
+
+// isExecutedReversalReplay reports whether this call repeats the decision that executed the reversal.
+func isExecutedReversalReplay(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest, approverID uuid.UUID, p PayoutReversal, reason string) (bool, error) {
+	var replay bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM withdrawal_approvals
+		                WHERE withdrawal_request_id = $1 AND approver_principal_id = $2 AND decision = 'reverse' AND reason_code = $3)
+		   AND (SELECT count(DISTINCT su.person_id) FROM withdrawal_approvals wa JOIN staff_users su ON su.id = wa.approver_principal_id
+		         WHERE wa.withdrawal_request_id = $1 AND wa.decision = 'reverse' AND NOT wa.is_automated_approval
+		           AND wa.reason_code = $3 AND su.person_id IS NOT NULL) >= $4
+		   AND CASE $5::text
+		         WHEN 'reversed' THEN EXISTS (
+		             SELECT 1 FROM withdrawal_requests w JOIN ledger_transactions t ON t.id = w.reversal_ledger_transaction_id
+		              WHERE w.id = $1 AND t.provider_id = $6 AND t.provider_tx_id = $7)
+		         ELSE EXISTS (
+		             SELECT 1 FROM ledger_transactions t
+		              WHERE t.tenant_id = $9 AND t.transaction_type = 'tombstone' AND t.correlation_id = $1
+		                AND t.provider_id = $6 AND t.provider_tx_id = $8)
+		       END`,
+		wr.ID, approverID, reason, MinReversalApprovers, string(wr.State), p.ProviderID, p.ReturnReference, p.OriginalProviderReference, wr.TenantID,
+	).Scan(&replay)
+	if err != nil {
+		return false, fmt.Errorf("withdrawal: read reversal replay: %w", err)
+	}
+	return replay, nil
 }
 
 // ReverseCompletedPayout performs E11 for a `completed` request whose reversal decision is Ready, in the

@@ -216,6 +216,13 @@ func lockPayoutAttemptsForReversal(ctx context.Context, tx pgx.Tx, wr withdrawal
 			return nil, ErrPayoutReversalAttemptInconsistent
 		}
 	}
+	// The original reference must be one the platform itself holds for this payout (on the request or
+	// on its attempt): the tombstone is written on it, so a staff-typed reference alone is never enough.
+	known := (wr.ProviderReference != nil && *wr.ProviderReference == p.OriginalProviderReference) ||
+		(open != nil && open.ProviderReference != nil && *open.ProviderReference == p.OriginalProviderReference)
+	if !known {
+		return nil, withdrawal.ErrReversalPayloadMismatch
+	}
 	return open, nil
 }
 
