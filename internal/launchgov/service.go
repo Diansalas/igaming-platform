@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
@@ -36,6 +37,10 @@ type Config struct {
 	// Components are the process's wired provider components (R-PROVIDER-TIER). Empty means the
 	// check is not_evaluable.
 	Components []providerkind.Registration
+	// AlertRouting returns the alert dispatcher's effective routing readiness
+	// (alerting.Dispatcher.ReadinessEffective). R-ALERTS passes only from it. nil means the check
+	// is not_evaluable: a Service not wired to a dispatcher cannot claim alerts reach a person.
+	AlertRouting func() []alerting.SeverityReadiness
 	// LockTimeout is SET LOCAL lock_timeout of every governed transaction (default 5s).
 	LockTimeout string
 	// SuspendAttempts bounds the executor's retries of a suspension on a lock timeout (default 3).

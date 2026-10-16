@@ -430,6 +430,9 @@ func run() error {
 		Proofs:      actorProofIssuer,
 		Environment: cfg.GuardEnvironment(),
 		Components:  buildRegistrations(cfg, providers),
+		// R-ALERTS reads the dispatcher's own configuration-only routing readiness (ALERT-DELIVERY-1), not
+		// the channel vocabulary: it passes only for an enabled, wired, human-notification route.
+		AlertRouting: alertDispatcher.ReadinessEffective,
 	})
 	if err != nil {
 		return fmt.Errorf("launch authorisation: %w", err)

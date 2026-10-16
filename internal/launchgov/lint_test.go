@@ -321,28 +321,83 @@ func TestPriorReject_FromDetail_AndFallbackIsNeverTheZeroTime(t *testing.T) {
 	}
 }
 
-// R-ALERTS is derived from the alert channel vocabulary: it passes exactly when some known channel
-// kind notifies a person. Today none does (ALERT-DELIVERY-1 OPEN), so it fails; the expectation is
-// computed from the vocabulary, not restated.
-func TestAlertsCheck_IsDerivedFromTheChannelVocabulary(t *testing.T) {
+// R-ALERTS (A13 fix of audit finding F1) no longer passes on the channel vocabulary: it passes only when the
+// dispatcher's configuration-only routing readiness is READY for every required severity (p1 and p2). The inputs
+// below go through the real alerting.EvaluateReadiness, so the test follows the A9 delivery model (route row,
+// enabled flag, recipient, database human-notification flag, wired sink that itself reports a human).
+func TestAlertsCheck_PassesOnlyForAnEnabledWiredHumanRoute(t *testing.T) {
+	at := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	route := func(sev alerting.Severity, kind alerting.ChannelKind, enabled, recipient, dbHuman bool) alerting.RouteConfig {
+		return alerting.RouteConfig{ID: uuid.NewString(), Severity: sev, Step: 0, ChannelKind: kind, Enabled: enabled,
+			HasRecipient: recipient, DBHuman: dbHuman, EffectiveFrom: at}
+	}
+	both := func(kind alerting.ChannelKind, enabled, recipient, dbHuman bool) []alerting.RouteConfig {
+		return []alerting.RouteConfig{route(alerting.SeverityP1, kind, enabled, recipient, dbHuman), route(alerting.SeverityP2, kind, enabled, recipient, dbHuman)}
+	}
+	humanWebhook := map[alerting.ChannelKind]bool{alerting.ChannelLog: false, alerting.ChannelWebhook: true}
+	mockEmail := map[alerting.ChannelKind]bool{alerting.ChannelLog: false, alerting.ChannelEmail: false} // email over the MOCK provider
+	cases := []struct {
+		name   string
+		routes []alerting.RouteConfig
+		wired  map[alerting.ChannelKind]bool
+		result string
+		detail string
+	}{
+		{"no route at all", nil, humanWebhook, ResultFail, "p1_no_route_configured"},
+		{"only a p2 route", []alerting.RouteConfig{route(alerting.SeverityP2, alerting.ChannelWebhook, true, true, true)}, humanWebhook, ResultFail, "p1_no_route_configured"},
+		{"disabled route", both(alerting.ChannelWebhook, false, true, true), humanWebhook, ResultFail, "p1_route_not_enabled"},
+		{"enabled but no recipient", both(alerting.ChannelWebhook, true, false, true), humanWebhook, ResultFail, "p1_route_not_enabled"},
+		{"enabled log route is not a person", both(alerting.ChannelLog, true, true, false), humanWebhook, ResultFail, "p1_channel_not_human_notification"},
+		{"enabled email route over the MOCK provider", both(alerting.ChannelEmail, true, true, true), mockEmail, ResultFail, "p1_channel_not_human_notification"},
+		{"enabled human route whose sink is not wired", both(alerting.ChannelWebhook, true, true, true), map[alerting.ChannelKind]bool{alerting.ChannelLog: false}, ResultFail, "p1_channel_not_wired"},
+		{"p1 ready, p2 missing", []alerting.RouteConfig{route(alerting.SeverityP1, alerting.ChannelWebhook, true, true, true)}, humanWebhook, ResultFail, "p2_no_route_configured"},
+		{"enabled wired human route for p1 and p2", both(alerting.ChannelWebhook, true, true, true), humanWebhook, ResultPass, "ok"},
+	}
+	for _, c := range cases {
+		got := alertsCheckFrom(alerting.EvaluateReadiness(c.routes, c.wired))
+		if got.Code != CheckAlerts || got.Result != c.result || got.DetailCode != c.detail {
+			t.Errorf("%s: R-ALERTS = %+v, want %s/%s", c.name, got, c.result, c.detail)
+		}
+	}
+}
+
+// Vocabulary alone must never pass: every known channel kind exists in the code, and with no route the check fails.
+func TestAlertsCheck_VocabularyAloneNeverPasses(t *testing.T) {
 	human := false
 	for _, k := range alerting.AllChannelKinds() {
 		if alerting.KnownHumanChannelKind(k) {
 			human = true
 		}
 	}
-	got := alertsCheck()
-	want := ResultFail
-	if human {
-		want = ResultPass
+	if !human {
+		t.Fatal("the premise of this test (a human-notification kind exists in the vocabulary, A9) no longer holds; revisit R-ALERTS")
 	}
-	if got.Code != CheckAlerts || got.Result != want {
-		t.Fatalf("R-ALERTS = %+v, want result %s", got, want)
+	if got := alertsCheckFrom(alerting.EvaluateReadiness(nil, map[alerting.ChannelKind]bool{alerting.ChannelWebhook: true, alerting.ChannelEmail: true})); got.Result == ResultPass {
+		t.Fatalf("R-ALERTS passed on vocabulary and wired sinks alone: %+v", got)
 	}
-	if len(alerting.AllChannelKinds()) < 2 {
-		t.Fatal("the vocabulary must list the known channel kinds")
+}
+
+// Fail closed without evidence: no source, a never-evaluated dispatcher and a stale evaluation are all non-pass (not_evaluable).
+func TestAlertsCheck_FailsClosedWithoutEvidence(t *testing.T) {
+	if got := (&Service{cfg: Config{}}).alertsCheck(); got.Result != ResultNotEvaluable || got.DetailCode != "no_routing_source" {
+		t.Fatalf("no routing source: %+v", got)
 	}
-	if !human && got.DetailCode != "no_human_notification_channel" {
-		t.Fatalf("a failing R-ALERTS names its reason: %+v", got)
+	svc := &Service{cfg: Config{AlertRouting: alerting.NotEvaluated}}
+	if got := svc.alertsCheck(); got.Result != ResultNotEvaluable || got.DetailCode != "routing_not_evaluated" {
+		t.Fatalf("never evaluated: %+v", got)
+	}
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	ready := alerting.EvaluateReadiness([]alerting.RouteConfig{
+		{ID: "a", Severity: alerting.SeverityP1, ChannelKind: alerting.ChannelWebhook, Enabled: true, HasRecipient: true, DBHuman: true, EffectiveFrom: now},
+		{ID: "b", Severity: alerting.SeverityP2, ChannelKind: alerting.ChannelWebhook, Enabled: true, HasRecipient: true, DBHuman: true, EffectiveFrom: now},
+	}, map[alerting.ChannelKind]bool{alerting.ChannelWebhook: true})
+	snap := alerting.ReadinessSnapshot{Evaluated: true, EvaluatedAt: now, Severities: ready}
+	svc = &Service{cfg: Config{AlertRouting: func() []alerting.SeverityReadiness { return snap.Effective(now.Add(time.Minute), time.Hour) }}}
+	if got := svc.alertsCheck(); got.Result != ResultPass {
+		t.Fatalf("a fresh ready evaluation passes: %+v", got)
+	}
+	svc = &Service{cfg: Config{AlertRouting: func() []alerting.SeverityReadiness { return snap.Effective(now.Add(2*time.Hour), time.Hour) }}}
+	if got := svc.alertsCheck(); got.Result != ResultNotEvaluable || got.DetailCode != "routing_evaluation_stale" {
+		t.Fatalf("a stale evaluation must not pass: %+v", got)
 	}
 }

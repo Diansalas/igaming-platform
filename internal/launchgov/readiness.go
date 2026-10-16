@@ -48,7 +48,8 @@ const (
 	// SnapshotVersion is bumped when the check set or the canonical form changes. 2: R-RG-CONFIG (A6, ADR 0115 S4-min). 2 (upstream numbering):
 	// the three R-AML-* checks (A7). 3: R-MARKET-CONFIG (A8). 4 after this merge: the combined set. A request bound to an older
 	// readiness hash is stale and must be re-requested (the hash is recomputed over the current set at decision and at execution).
-	SnapshotVersion = 4
+	// 5: R-ALERTS no longer passes on the channel vocabulary alone; it needs an enabled, wired, human-notification route for p1 and p2.
+	SnapshotVersion = 5
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -423,16 +424,55 @@ func (s *Service) providerTierCheck() Check {
 	return ck(CheckProviderTier, ResultPass, "ok")
 }
 
-// alertsCheck is R-ALERTS: P1 alert routing has a real (human-notifying) channel. Derived from the
-// alert channel vocabulary of the code (ALERT-DELIVERY-1): today no channel kind is known to
-// notify a person, so this is always fail.
-func alertsCheck() Check {
-	for _, k := range alerting.AllChannelKinds() {
-		if alerting.KnownHumanChannelKind(k) {
-			return ck(CheckAlerts, ResultPass, "ok")
+// alertsCheck is R-ALERTS (ALERT-DELIVERY-1, ADR 0102 section 18): it passes ONLY when this process's
+// alert dispatcher currently evaluates every required severity (p1 and p2, alerting.ReadinessSeverities)
+// as READY, meaning: the latest current step-0 platform route for the severity is ENABLED, names a
+// recipient, its channel kind is a human-notification kind (database flag), and the channel's sink is
+// WIRED in this binary and itself reports HumanNotification() (false for an email channel over the MOCK
+// provider and for log/mock). A human-notification route can only be enabled through SR-7 four-eyes
+// (migration 0156), so a pass also means a second admin approved it. The channel vocabulary alone never
+// passes (the A9 overstatement, audit finding F1). It reads configuration only, never live delivery
+// success (a vendor outage must not flip a launch decision).
+//
+// Residual (docs/runbooks/launch-and-suspension.md): routing is PLATFORM-wide, there is no per-tenant
+// route (alert_routes.tenant_id is always NULL), so the check describes the platform path every tenant's
+// alerts take, not a tenant-specific recipient. It does not prove that the recipient or the webhook
+// receiver exists or that anyone is on call; ALERT-DELIVERY-1 stays OPEN until a rota is paged.
+//
+// Fail closed: without a routing source (a Service not wired to a dispatcher), or while the dispatcher
+// has not evaluated routing or its evaluation is stale, the result is not_evaluable, a non-pass the
+// request must acknowledge. Detail codes are closed: "<severity>_<reason>" built from the
+// alerting.ReadinessReason values, "no_routing_source", "routing_not_evaluated",
+// "routing_evaluation_stale" or "ok".
+func (s *Service) alertsCheck() Check {
+	if s.cfg.AlertRouting == nil {
+		return ck(CheckAlerts, ResultNotEvaluable, "no_routing_source")
+	}
+	return alertsCheckFrom(s.cfg.AlertRouting())
+}
+
+// alertsCheckFrom is the pure part of alertsCheck over the dispatcher's effective readiness.
+func alertsCheckFrom(eff []alerting.SeverityReadiness) Check {
+	bySev := make(map[alerting.Severity]alerting.SeverityReadiness, len(eff))
+	for _, r := range eff {
+		bySev[r.Severity] = r
+	}
+	for _, sev := range alerting.ReadinessSeverities {
+		r, ok := bySev[sev]
+		switch {
+		case !ok:
+			return ck(CheckAlerts, ResultFail, string(sev)+"_"+string(alerting.ReadinessNoRoute))
+		case r.Ready:
+			continue
+		case r.Reason == alerting.ReadinessNotEvaluated:
+			return ck(CheckAlerts, ResultNotEvaluable, "routing_not_evaluated")
+		case r.Reason == alerting.ReadinessStale:
+			return ck(CheckAlerts, ResultNotEvaluable, "routing_evaluation_stale")
+		default:
+			return ck(CheckAlerts, ResultFail, string(sev)+"_"+string(r.Reason))
 		}
 	}
-	return ck(CheckAlerts, ResultFail, "no_human_notification_channel")
+	return ck(CheckAlerts, ResultPass, "ok")
 }
 
 // fundsCheck is R-PLAYER-FUNDS (LF3): players with a non-zero wallet balance, open sportsbook
