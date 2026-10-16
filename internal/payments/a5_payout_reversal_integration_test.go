@@ -669,6 +669,24 @@ func TestA5_PayoutReversal_ReturnReferenceAlreadyHeld_Refused(t *testing.T) {
 	if _, err := e.a5Decide(w.f1.ID, wr.ID, p); !errors.Is(err, withdrawal.ErrReversalReturnReferenceInUse) {
 		t.Fatalf("got %v, want ErrReversalReturnReferenceInUse", err)
 	}
+	// Each source on its own: a reference held only by a payment attempt (a pending deposit of the same
+	// provider), and one held only by a ledger posting (a tombstone with an unrelated correlation).
+	_, depRef := pendingDeposit(t, e.pool, w.orch, w.f.orchFixture, "a5-rr-dep-"+uuid.NewString()[:8], 700)
+	ledgerOnly := "a5-rr-ledger-" + uuid.NewString()[:8]
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		pid := e.pid
+		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: e.f.tenantID, TransactionType: ledger.TxTombstone,
+			IdempotencyKey: "tombstone:" + pid + ":" + ledgerOnly, ProviderID: &pid, ProviderTxID: &ledgerOnly, CorrelationID: uuid.New()})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, held := range []string{depRef, ledgerOnly} {
+		p.ReturnReference = held
+		if _, err := e.a5Decide(w.f1.ID, wr.ID, p); !errors.Is(err, withdrawal.ErrReversalReturnReferenceInUse) {
+			t.Fatalf("%s: got %v, want ErrReversalReturnReferenceInUse", held, err)
+		}
+	}
 	// Its own original reference (held by its completion) is refused the same way.
 	p.ReturnReference = "a5-ref-rr-x"
 	q := p
