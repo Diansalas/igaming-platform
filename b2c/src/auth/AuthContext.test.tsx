@@ -8,7 +8,7 @@ import { makeTestJwt } from '../test/jwt'
 import { server } from '../test/mswServer'
 import { renderWithProviders } from '../test/renderWithProviders'
 import { RequireAuth } from './RequireAuth'
-import { getAccessToken, getRefreshToken, setSession } from './tokenStore'
+import { clearSession, getAccessToken, getRefreshToken, setSession } from './tokenStore'
 
 function LoginStub() {
   return <div>Login page</div>
@@ -70,6 +70,19 @@ describe('session expiry mid-session', () => {
     // a client-side back navigation.
     expect(getAccessToken()).toBeNull()
     expect(getRefreshToken()).toBeNull()
+  })
+})
+
+describe('session ending without a logout click', () => {
+  it('clears the react-query cache when the session is cleared by expiry or a refused refresh (SR6R-2)', async () => {
+    setSession(makeTestJwt(), 'refresh-token-for-expiry')
+    const { queryClient } = renderAccount()
+    await screen.findByText('My account')
+    queryClient.setQueryData(['rg', 'status'], { self_excluded: true })
+    expect(queryClient.getQueryData(['rg', 'status'])).toBeDefined()
+    // api/client.ts and the bootstrap effect end an expired / refused session with clearSession() on the token store.
+    clearSession()
+    await waitFor(() => expect(queryClient.getQueryData(['rg', 'status'])).toBeUndefined())
   })
 })
 

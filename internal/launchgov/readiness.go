@@ -608,6 +608,26 @@ func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []s
 	if !activated {
 		return ck(CheckRGConfig, ResultFail, "enforcement_not_enabled")
 	}
+	// SR6R-1 (same gap as the activation guard): enforcement reads the LICENCE jurisdiction, which the request's
+	// JurisdictionIDs need not contain. Add it to the set, and fail when the tenant has none.
+	var licJur *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT l.jurisdiction_id FROM tenants t LEFT JOIN licences l ON l.id = t.licence_id WHERE t.id = $1`,
+		in.Subject.TenantID).Scan(&licJur); err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	if licJur == nil {
+		return ck(CheckRGConfig, ResultFail, "no_licence_jurisdiction")
+	}
+	in.JurisdictionIDs = append([]uuid.UUID(nil), in.JurisdictionIDs...)
+	have := false
+	for _, j := range in.JurisdictionIDs {
+		if j == *licJur {
+			have = true
+		}
+	}
+	if !have {
+		in.JurisdictionIDs = append(in.JurisdictionIDs, *licJur)
+	}
 	return rgFloorChecks(ctx, tx, in, currencies, now)
 }
 
@@ -792,7 +812,22 @@ func RGActivationReadiness(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, b
 	if rows.Err() != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
-	if len(ids) == 0 {
+	// SR6R-1: enforcement (rg.EvaluateAction) reads its floors from the LICENCE jurisdiction (tenants.licence_id ->
+	// licences.jurisdiction_id), not from the market configuration. The guard must be at least as strict as enforcement,
+	// so the licence jurisdiction joins the set (floors required there too), and a tenant with no licence jurisdiction is
+	// refused: every action of such a tenant would be rg_config_missing.
+	var licJur *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT l.jurisdiction_id FROM tenants t LEFT JOIN licences l ON l.id = t.licence_id WHERE t.id = $1`,
+		tenantID).Scan(&licJur); err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	if licJur == nil {
+		return ck(CheckRGConfig, ResultFail, "no_licence_jurisdiction")
+	}
+	if !seen[*licJur] {
+		ids = append(ids, *licJur)
+	}
+	if len(raw) == 0 {
 		return ck(CheckRGConfig, ResultFail, "no_jurisdiction_referenced")
 	}
 	currencies := cfgs2currencies(raw)

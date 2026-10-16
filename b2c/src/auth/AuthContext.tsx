@@ -6,7 +6,7 @@ import { refreshSessionOnce } from '../api/client'
 import { ApiError } from '../api/types'
 import { brandConfig } from '../config/brand'
 import type { PlayerClaims } from './jwt'
-import { clearSession, getRefreshToken, getSessionSnapshot, setSession, subscribeSession } from './tokenStore'
+import { clearSession, getAccessToken, getRefreshToken, getSessionSnapshot, setSession, subscribeSession } from './tokenStore'
 
 interface AuthContextValue {
   claims: PlayerClaims | null
@@ -28,6 +28,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const snapshot = useSyncExternalStore(subscribeSession, getSessionSnapshot, getSessionSnapshot)
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const queryClient = useQueryClient()
+
+  // SR6R-2: ANY transition from a signed-in session to none (explicit logout, session expiry, a refused refresh, a 401 in
+  // api/client.ts) drops the cached player data, because all of them end in clearSession() on the token store.
+  useEffect(() => {
+    let hadSession = getAccessToken() !== null
+    return subscribeSession(() => {
+      const has = getAccessToken() !== null
+      if (hadSession && !has) queryClient.clear()
+      hadSession = has
+    })
+  }, [queryClient])
 
   useEffect(() => {
     let cancelled = false

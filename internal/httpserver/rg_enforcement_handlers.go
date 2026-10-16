@@ -10,8 +10,8 @@ package httpserver
 // append-only and holds enabling rows only). Because it is irreversible and, with no compliance floor in force,
 // halts every deposit, real launch and wager of the scope (rg_config_missing), the POST is step-up CRITICAL
 // (security review SR6-1; ADR 0119 treats protective writes that are outage vectors as critical) and it is
-// REFUSED (409) unless every jurisdiction in effect for the tenant has a compliance floor for the deposit, loss
-// and wager kinds in every allowed currency (the floor part of the R-RG-CONFIG readiness check). It is
+// REFUSED (409) unless the tenant's LICENCE jurisdiction (the one enforcement reads) and every jurisdiction with a
+// configuration in effect have a compliance floor for the deposit, loss and wager kinds in every allowed currency (the floor part of the R-RG-CONFIG readiness check). It is
 // idempotent by state: a repeat for an already switched-on scope answers 200 with the stored row and
 // writes nothing (the precondition is not re-evaluated for a repeat). The tenant and the actor come from the verified token only; the database additionally
 // refuses any writer that is not an active staff principal of that tenant. A refusal is audited in its
