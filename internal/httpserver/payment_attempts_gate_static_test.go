@@ -20,8 +20,9 @@ func TestPaymentAttemptRoutes_GatedOnForceResolveReadAlone(t *testing.T) {
 	s := string(src)
 	// ADR 0119 S4a: registered through staffRoute (class none: reads); the inner gate is unchanged.
 	handles := regexp.MustCompile(`(?m)^\s*mux\.Handle\("GET [^"]+",\n\s*staffRoute\(deps, stepUpNone, ([^\n]*)\)\)$`).FindAllStringSubmatch(s, -1)
-	if len(handles) != 2 {
-		t.Fatalf("expected the two R1 route registrations, found %d", len(handles))
+	// A10c adds the attempt event history (GET .../{attemptID}/events), registered here with the same gate.
+	if len(handles) != 3 {
+		t.Fatalf("expected the three R1 route registrations, found %d", len(handles))
 	}
 	for _, h := range handles {
 		if !strings.HasPrefix(h[1], "auth.RequirePermission(auth.PermPaymentForceResolveRead)(") {
@@ -43,7 +44,9 @@ func TestPaymentAttemptRoutes_GatedOnForceResolveReadAlone(t *testing.T) {
 	if !strings.Contains(string(r2), "auth.RequireAnyPermission(auth.PermPaymentForceResolveRead, auth.PermLedgerAdjustmentRead, auth.PermSportsbookReconciliationRead)") {
 		t.Error("the R2 route gate is not the any-of of the three stream permissions")
 	}
-	if strings.Count(string(r2), "staffStreamRequest(w, r, c)") != 2 {
-		t.Error("both R2 handlers must authorise the requested stream through staffStreamRequest")
+	// A10c: the list handlers call staffStreamRequest directly (2) and the two single-item handlers through the
+	// shared singleStaffReconciliationID helper, which calls it once (so 3 call sites, 2 helper uses).
+	if strings.Count(string(r2), "staffStreamRequest(w, r, c)") != 3 || strings.Count(string(r2), "singleStaffReconciliationID(w, r, c, ") != 2 {
+		t.Error("every R2 handler must authorise the requested stream through staffStreamRequest")
 	}
 }

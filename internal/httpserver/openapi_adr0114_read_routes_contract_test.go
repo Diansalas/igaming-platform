@@ -20,7 +20,7 @@ import (
 // (staff_read_routes_integration_test.go); these pin the documentation, the closed vocabularies
 // and the pure functions.
 
-var adr0114ReadFiles = []string{"payment_attempts_read_routes.go", "staff_reconciliation_routes.go"}
+var adr0114ReadFiles = []string{"payment_attempts_read_routes.go", "payment_attempt_events_routes.go", "staff_reconciliation_routes.go"}
 
 func TestOpenAPI_ADR0114Read_RoutesMountedAndDocumentedBothWays(t *testing.T) {
 	spec := readSpec(t)
@@ -30,6 +30,10 @@ func TestOpenAPI_ADR0114Read_RoutesMountedAndDocumentedBothWays(t *testing.T) {
 		"GET /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}",
 		"GET /v1/admin/tenants/{tenantID}/reconciliation/runs",
 		"GET /v1/admin/tenants/{tenantID}/reconciliation/mismatches",
+		// A10c: attempt event history and the single-run / single-mismatch reads.
+		"GET /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}/events",
+		"GET /v1/admin/tenants/{tenantID}/reconciliation/runs/{runID}",
+		"GET /v1/admin/tenants/{tenantID}/reconciliation/mismatches/{mismatchID}",
 	}
 	sort.Strings(mounted)
 	sort.Strings(want)
@@ -70,6 +74,8 @@ func TestOpenAPI_ADR0114Read_DTOsMatchSchemas(t *testing.T) {
 		{"PayoutAttemptSummary", reflect.TypeOf(payoutAttemptSummaryDTO{})},
 		{"StaffReconciliationRun", reflect.TypeOf(staffReconciliationRunDTO{})},
 		{"StaffReconciliationMismatch", reflect.TypeOf(staffReconciliationMismatchDTO{})},
+		{"PaymentAttemptEvent", reflect.TypeOf(paymentAttemptEventDTO{})},
+		{"WithdrawalHoldCandidate", reflect.TypeOf(holdCandidateDTO{})},
 	} {
 		got, want := jsonFieldNames(c.typ), govSchemaProps(t, spec, c.schema)
 		if !reflect.DeepEqual(got, want) {
@@ -162,6 +168,7 @@ func TestADR0114Read_NoForbiddenFieldOnAnyDTO(t *testing.T) {
 	for _, typ := range []reflect.Type{
 		reflect.TypeOf(paymentAttemptDTO{}), reflect.TypeOf(paymentAttemptSubjectRef{}), reflect.TypeOf(payoutAttemptSummaryDTO{}),
 		reflect.TypeOf(staffReconciliationRunDTO{}), reflect.TypeOf(staffReconciliationMismatchDTO{}), reflect.TypeOf(reconciliationSubjectRef{}),
+		reflect.TypeOf(paymentAttemptEventDTO{}), reflect.TypeOf(holdCandidateDTO{}),
 	} {
 		for _, f := range jsonFieldNames(typ) {
 			if forbidden.MatchString(f) && !allowed[f] {
@@ -303,6 +310,50 @@ func TestAdmissibleKinds_M4PreconditionsBeyondThePredicate(t *testing.T) {
 		mut(&a)
 		if got := admissibleKinds(a); len(got) != 0 {
 			t.Errorf("%s: kinds = %v, want none", name, got)
+		}
+	}
+}
+
+// A10c: the hold-candidate read is mounted once, GET only, step-up none, and documented; the 13 K1/K3/HSEC
+// mutating operations document the optional Idempotency-Key header and the three new filters are documented.
+func TestOpenAPI_A10c_CandidatesIdempotencyAndFilters(t *testing.T) {
+	spec := readSpec(t)
+	mounted := mountedRoutes(t, "withdrawal_hold_candidates_routes.go")
+	want := []string{"GET /v1/admin/tenants/{tenantID}/withdrawal-hold-candidates"}
+	if !reflect.DeepEqual(mounted, want) {
+		t.Fatalf("mounted candidates routes = %v, want %v", mounted, want)
+	}
+	if doc := documentedOps(spec, "/v1/admin/tenants/{tenantID}/withdrawal-hold-candidates"); !reflect.DeepEqual(doc, want) {
+		t.Fatalf("documented candidates operations = %v, want %v", doc, want)
+	}
+	n := 0
+	for _, f := range []string{"capability_routes.go", "payment_force_resolution_routes.go", "withdrawal_hold_resolution_routes.go"} {
+		for _, r := range mountedRoutes(t, f) {
+			if !strings.HasPrefix(r, "POST ") {
+				continue
+			}
+			n++
+			if !strings.Contains(openAPIPathBlock(t, spec, strings.SplitN(r, " ", 2)[1]), "#/components/parameters/StaffIdempotencyKey") {
+				t.Errorf("%s does not document the optional Idempotency-Key", r)
+			}
+		}
+	}
+	if n != 13 {
+		t.Errorf("K1/K3/HSEC mutating routes = %d, want 13", n)
+	}
+	attempts := openAPIPathBlock(t, spec, "/v1/admin/tenants/{tenantID}/payment-attempts")
+	for _, p := range []string{"name: provider_id", "name: min_age_seconds"} {
+		if !strings.Contains(attempts, p) {
+			t.Errorf("payment-attempts list does not document %s", p)
+		}
+	}
+	if !strings.Contains(openAPIPathBlock(t, spec, "/v1/admin/tenants/{tenantID}/reconciliation/mismatches"), "name: run_id") {
+		t.Error("reconciliation mismatches list does not document run_id")
+	}
+	for _, pth := range []string{"/v1/admin/tenants/{tenantID}/capability-grants", "/v1/admin/tenants/{tenantID}/capability-grants/requests"} {
+		b := openAPIPathBlock(t, spec, pth)
+		if !strings.Contains(b, "X-Total-Count") || !strings.Contains(b, "name: offset") {
+			t.Errorf("%s does not document K1 paging", pth)
 		}
 	}
 }
