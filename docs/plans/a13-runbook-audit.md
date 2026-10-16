@@ -103,3 +103,83 @@ Compliance/legal (class E, never blocks technical readiness): jurisdiction floor
 ## 7. Not done, by instruction
 
 No `terraform apply`/`plan`/`init`, no AWS command, no database command, no test run. The staging plan is written so the owner can authorise it; nothing in it was exercised.
+
+## 8. Security review of STAGING-PREP-1 and R-ALERTS
+
+Date: 2026-10-16. Reviewer: `security` (independent of the author). Branch `staging-prep-1`, commits `b65f158` (deploy/aws), `7679706` (launchgov R-ALERTS),
+`3cd9d97` (docs), on top of `4f4164d`. **Verdict: APPROVE for merge, with conditions.** No Critical or High finding. SRSP-1 and SRSP-2 must be closed, or
+signed as exclusions by the owner, before the staging run is executed (plan precondition B6 and the go/no-go list). They do not block the merge. SRSP-3 to SRSP-8
+are recorded residuals.
+
+### 8.1 What was checked, and how
+
+- Read the full diff of `deploy/aws/modules/{secrets,ecs,iam}` and `environments/staging`, plus `deploy/aws/sql/init-runtime-role.rds.sql`,
+  `deploy/aws/bootstrap` (permissions boundary `StagingAppSecrets` = `igaming-staging/*`), `deploy/aws/scripts/deploy.sh` (role-init then migrate on every
+  `up`/`migrate`) and `modules/database` (logging parameters).
+- Key formats compared against the parsers: `internal/staffmfa/keys.go` (`ParseKeySet`, strict std/url base64, >= 32 bytes, HKDF to 32-byte subkeys),
+  `internal/actorproof.ParseKeySet`, `internal/config` (`validatePayoutInstrumentKeys`, `validateActorProofKeys`, `validatePlatformKeyFamilies`) and
+  `internal/payoutinstrument.NewKeys` (HKDF; the 32-byte AES check applies to the derived subkeys). Checked empirically too: a throwaway test, injected with
+  `go test -overlay` so the worktree was not changed, ran `config.Load` 200 times with `APP_ENV=staging` and freshly generated `stg-v1:<64 alphanumeric>` values for all
+  five families, `METRICS_ADDR=127.0.0.1:9464` and `ALERT_RETENTION_DAYS=30`. All loaded. Each value decodes to 48 bytes, and the staff MFA and actor-proof
+  constructors accept them.
+- `deploy/aws/tests/run-static-checks.sh` re-run offline (terraform 1.11.4, local provider mirror, mock providers, no credentials). All checks passed, including
+  `secrets` 8/8 (`secret_string == null` for every key-family version). Nothing was planned or applied, and no AWS command was run.
+- Go: `go vet` and the unit tests of `launchgov`, `alerting/...`, `config`, `staffmfa`, `actorproof`, `payoutinstrument` and `cmd/platform-api` pass. Integration
+  tests ran on a private scratch database that was dropped afterwards: `launchgov` `TestReadiness_Alerts_*` (3/3 PASS, confirmed with `-v`) and `alerting/...` pass.
+- Grep of the diff and of `deploy/aws` for secret values (key-shaped literals, `AKIA`, private-key headers, `stg-vN:<body>`) found none. The only literal is the
+  pinned staging account id in a tftest ARN, which is not a secret.
+
+### 8.2 Answers to the review questions
+
+1. **Secrets kept out of state and logs: yes.** All six key bodies are `ephemeral "random_password"` values written only through `secret_string_wo`, and tftest
+   asserts `secret_string == null`. The outputs carry ARNs, the kid and the `awssm://` reference (ARN plus versionId), which are not secret. The task definitions
+   inject the keys with `valueFrom`, so a value never appears in the task definition. The kid is the only non-secret part. `key_family_version` is separate from
+   `secret_version`, so a DB or JWT rotation does not orphan MFA factors or sealed instruments.
+2. **Key formats are valid.** The kid `stg-v<N>` matches every kid regex. The kid variables all come from the same `module.secrets.key_family_kid` output that is
+   embedded in the secret values, so they cannot diverge. The five bodies are independent ephemeral values, so the cross-family distinctness rules hold.
+   The webhook HMAC (64 raw bytes) is at or above `webhookMinSecretBytes`, and the `awssm://` reference matches `secretstore.awssmRef`.
+3. **IAM is acceptable for staging.** The service execution role gains three named ARNs and the one-off role gains only `staff-mfa-keys`, which seed-admin needs.
+   The one-off role still cannot read the JWT secret, and the service role still cannot read the RDS master secret. Execution-role credentials are never exposed
+   to containers. The task-role grant is a single `GetSecretValue` on one exact ARN, created only when `alert_webhook_url` is set, and capped by the boundary.
+   SRSP-3 covers the shared-role residual.
+4. **Migrate and role-init.** `--single-transaction` is correct: everything in the script is transactional, and the `\o /dev/null` password-suppression still
+   works. The migrate chain has a new ordering gap, SRSP-2. A drift that predates this change and is not part of it is SRSP-1.
+5. **Metrics are not exposed.** `METRICS_ADDR=127.0.0.1:9464` binds loopback inside the awsvpc task. `portMappings` lists only `container_port`, and there is
+   no target group, security-group rule or `METRICS_ALLOW_NON_LOOPBACK`. Config refuses a non-loopback bind outside development unless that flag is set, and a
+   precondition refuses a shared port.
+6. **Staging safety holds.** `APP_ENV=staging` is set on platform-api and on seed-admin. Seed-admin has no staging relaxation: placeholders are refused
+   everywhere outside development. All providers are MOCK. `PROVIDER_CREDENTIAL_FINGERPRINT_KEY` is not provisioned, so `providercred.New` returns no subsystem,
+   which leaves no provider-credential path even though `SECRETSTORE_BACKENDS=awssm` is set. The webhook URL is checked by `egressguard.ValidateURL` and the dial
+   control: loopback, private, link-local and so 169.254.170.2, the ECS credential endpoint, are refused outside development. The transport has no proxy, no
+   redirects and TLS >= 1.2. Terraform also requires `https://`.
+7. **R-ALERTS fails closed.** A missing source gives `no_routing_source`. A never-evaluated dispatcher gives `routing_not_evaluated`, and a stale one gives
+   `routing_evaluation_stale`: both are not_evaluable and never pass. A missing severity is a fail. It passes only when p1 **and** p2 each have a latest step-0
+   `scope='platform'` route that is enabled, has a recipient and has the DB human flag, and whose sink is wired and reports `HumanNotification()`.
+   `EmailSink.HumanNotification()` is `!synthetic`, so email over MOCK cannot pass (integration-tested). `WebhookSink` is false in development posture. Enabling
+   a human route needs SR-7 four-eyes (`AR001`, tested). A newer disabled version or an enabled log route at step 0 can only take a pass away.
+8. **No tenant-controlled input and no isolation issue.** `Config.AlertRouting` is a process function and takes no `EvalInput`. Routes are read under the
+   dispatcher platform-service identity with `scope='platform'`. `alert_routes` is written only under the platform-admin RLS policy, which requires
+   `app.tenant_id` to be empty, and only through the 0110/0156 guard triggers. A tenant principal therefore cannot create, enable or influence the routing that
+   R-ALERTS reads. The result exposes closed detail codes only, never a recipient.
+9. **The SnapshotVersion bump 4 to 5 is right.** The semantics of a check changed, so the version must change. `Hash()` covers the version and every check, so
+   any request bound to a v4 hash goes stale. A changed R-ALERTS result also changes the hash (integration-tested). The only pin is
+   `readiness_aml_test.go`, now 5. No migration or DB constraint stores the version.
+
+### 8.3 Findings
+
+| # | Severity | Finding and concrete failure scenario | Required action |
+|---|---|---|---|
+| SRSP-1 | **Medium** (pre-existing, not introduced by this change; defence in depth) | `init-runtime-role.rds.sql` runs `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES ... TO igaming_runtime` and then re-narrows only `schema_migrations` and `actor_proof_*`. The dev script `deploy/init-app-role.sql` also re-narrows `withdrawal_requests`, `sportsbook_bet_settlements`, every `aml_*` table and the three `provider_credential_*` tables. The RDS script has none of them, and neither script re-narrows the other ~26 tables that migrations `REVOKE` from the runtime role (for example `alert_routes`, `ledger_adjustment_*`, `staff_capability_grants`, `financial_approval_policies`). `deploy.sh up`/`migrate` run role-init BEFORE migrate on every invocation, so any re-run against a migrated database widens the runtime role. Re-runs include the documented secret-rotation path and "re-run on error" after migrations. Scenario: after a rotation, the internet-facing runtime role holds UPDATE/DELETE on append-only and four-eyes tables. Today the guard triggers and FORCE RLS still refuse those writes (checked for `alert_routes`, `withdrawal_requests` and the AML tables), so this is a lost independent layer, not a bypass. It does break the runtime-role-separation section 3 model that step 3 of the plan claims to verify. | Before the staging run: either make the script snapshot-and-restore the runtime grants (or re-assert every migration REVOKE), with a test that re-runs **the RDS script** after `migrate up` and diffs `information_schema.role_table_grants` against the post-migration baseline; or add a plan step that runs that diff after every role-init re-run and STOPs on any difference |
+| SRSP-2 | **Low** (introduced by this change) | The migrate command is now `up && verify && status && REVOKE`. If `migrate verify` fails after `up` has created `schema_migrations`, which on a first deploy holds DML for the runtime role through the default privileges, the authoritative REVOKE never runs. Before this change only `up` sat in front of the REVOKE. Scenario: a first-deploy checksum or gap failure leaves the runtime role able to write `schema_migrations` until a later successful run. ECS services created by `terraform apply` may already be connecting as that role. | Move the REVOKE directly after `up` (`up && REVOKE && verify && status`), or run it unconditionally while keeping the failing exit code. Update the tftest assertion and plan 6.1 |
+| SRSP-3 | Low (accepted for staging) | The task role is shared by all six task definitions, so b2c, backoffice and the one-off tasks can also read the alert-webhook HMAC once `alert_webhook_url` is set. Scenario: code execution in the static-site container yields the HMAC, and with it the ability to forge signed alerts to the owner's receiver. That is integrity of alerts only, with no data access. | Before production: a dedicated platform-api task role, with b2c, backoffice and the one-off tasks on an empty task role |
+| SRSP-4 | Low | `alert_webhook_url` is a plain, non-sensitive variable that ends up in tfvars, state, plan output and the task definition, where `DescribeTaskDefinition` shows it. Many receiver products (chat or incident "incoming webhook" URLs) put a bearer credential in the URL path. | Document in the variable and in plan I that the URL must not embed a credential, because authentication is the HMAC. Alternatively mark it `sensitive` and move it to Secrets Manager |
+| SRSP-5 | Info | Key-family rotation has no overlap (a `key_family_version` bump invalidates enrolled MFA factors and sealed payout instruments). This is acceptable for disposable staging and stated in the module. The pattern must not be reused for production, where `staff-mfa-keys.md` and `payout-instrument-keys.md` apply. | None for staging |
+| SRSP-6 | Info | The `modules/iam/main.tf` file header still says the task role is "intentionally empty". The role description and the new block are correct. | Update the header in the next touch |
+| SRSP-7 | Info (residual of R-ALERTS) | A pass means only that a four-eyes-approved platform route for p1 and p2 points at a wired webhook, or a non-MOCK email channel, from this replica's latest evaluation. It does not show that the receiver pages anyone (ALERT-DELIVERY-1 stays OPEN), and routing is platform-wide, not per tenant. Each platform-api replica evaluates independently, so a decision and its execution on different replicas can disagree, but only towards staleness, never towards a pass. | Keep the `launch-and-suspension.md` wording, and judge the staging delivery by receipt (plan 10.2) |
+| SRSP-8 | Info | Owner actions B (`actor_proof_keys` row) and C (operating-market rows) handle key material and production-adjacent writes by hand, from a VPC session that does not exist yet (G1). Not building them was correct. Any tool written for them later needs its own security review. | As stated in plan G3 |
+
+### 8.4 Not in scope of this review
+
+Real AWS behaviour (IAM simulation of the deployer and boundary, RDS `\getenv`/psql version, whether Secrets Manager JSON-key injection works on Fargate), the
+A12 Terraform beyond what the static checks cover, the backup runner (G1), the alarms (G2), and penetration testing. This review does not declare the staging
+stack "secure". It covers the configuration and code paths listed in 8.1 at commit `3cd9d97`.

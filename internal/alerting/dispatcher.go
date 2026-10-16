@@ -35,8 +35,9 @@ const (
 )
 
 // AllChannelKinds is the closed channel vocabulary of the code: every kind that has a constant
-// above. A new kind is added here with its constant (internal/launchgov R-ALERTS derives its
-// result from this list and KnownHumanChannelKind instead of naming kinds itself).
+// above. A new kind is added here with its constant. (internal/launchgov R-ALERTS no longer reads this
+// vocabulary: since the A13 fix it passes only from the dispatcher's routing readiness, an enabled wired
+// human-notification route.)
 func AllChannelKinds() []ChannelKind {
 	return []ChannelKind{ChannelLog, ChannelMock, ChannelEmail, ChannelWebhook}
 }

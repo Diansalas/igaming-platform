@@ -37,6 +37,13 @@ variables {
   jwt_signing_secret_arn = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/jwt-signing-secret-AbCdEf"
 
   seed_admin_password_secret_arn = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/seed-admin-password-AbCdEf"
+
+  staff_mfa_keys_secret_arn         = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/staff-mfa-keys-AbCdEf"
+  staff_mfa_active_kid              = "stg-v1"
+  payout_instrument_keys_secret_arn = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/payout-instrument-keys-AbCdEf"
+  payout_instrument_active_kid      = "stg-v1"
+  actor_proof_keys_secret_arn       = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/actor-proof-keys-AbCdEf"
+  actor_proof_active_kid            = "stg-v1"
 }
 
 run "database_url_never_carries_a_password" {
@@ -69,10 +76,15 @@ run "credentials_injected_from_the_right_secrets" {
     condition = {
       for s in jsondecode(aws_ecs_task_definition.platform_api.container_definitions)[0].secrets : s.name => s.valueFrom
       } == {
-      PGPASSWORD         = "${var.db_runtime_secret_arn}:password::"
-      JWT_SIGNING_SECRET = var.jwt_signing_secret_arn
+      PGPASSWORD                = "${var.db_runtime_secret_arn}:password::"
+      JWT_SIGNING_SECRET        = var.jwt_signing_secret_arn
+      STAFF_MFA_FACTOR_KEYS     = "${var.staff_mfa_keys_secret_arn}:factor_keys::"
+      STAFF_MFA_MAC_KEYS        = "${var.staff_mfa_keys_secret_arn}:mac_keys::"
+      PAYOUT_INSTRUMENT_KEYS    = "${var.payout_instrument_keys_secret_arn}:master_keys::"
+      PAYOUT_INSTRUMENT_FP_KEYS = "${var.payout_instrument_keys_secret_arn}:fp_keys::"
+      ACTOR_PROOF_KEYS          = var.actor_proof_keys_secret_arn
     }
-    error_message = "platform-api must receive only the RUNTIME password (PGPASSWORD) and the JWT secret."
+    error_message = "platform-api must receive only the RUNTIME password (PGPASSWORD), the JWT secret and the staff MFA, payout instrument and actor proof key families (by Secrets Manager reference)."
   }
 
   assert {
@@ -98,10 +110,12 @@ run "credentials_injected_from_the_right_secrets" {
     condition = {
       for s in jsondecode(aws_ecs_task_definition.seed_admin.container_definitions)[0].secrets : s.name => s.valueFrom
       } == {
-      PGPASSWORD          = "${var.db_master_secret_arn}:password::"
-      SEED_ADMIN_PASSWORD = var.seed_admin_password_secret_arn
+      PGPASSWORD            = "${var.db_master_secret_arn}:password::"
+      SEED_ADMIN_PASSWORD   = var.seed_admin_password_secret_arn
+      STAFF_MFA_FACTOR_KEYS = "${var.staff_mfa_keys_secret_arn}:factor_keys::"
+      STAFF_MFA_MAC_KEYS    = "${var.staff_mfa_keys_secret_arn}:mac_keys::"
     }
-    error_message = "seed-admin must receive only the master password and its own admin password secret."
+    error_message = "seed-admin must receive only the master password, its own admin password secret and the staff MFA keys (staffmfa.LoadKeys)."
   }
 
   assert {
@@ -213,4 +227,147 @@ run "production_app_env_rejected" {
   }
 
   expect_failures = [var.app_environment]
+}
+
+# --- STAGING-PREP-1 (plan G3/G4/G5, findings F2/F3) ---
+
+run "startup_required_names_present_and_secret_values_absent_from_environment" {
+  command = plan
+
+  assert {
+    condition = toset([for e in jsondecode(aws_ecs_task_definition.platform_api.container_definitions)[0].environment : e.name]) == toset([
+      "APP_ENV", "DATABASE_URL", "HTTP_ADDR", "TRUSTED_PROXY_COUNT", "CORS_ALLOWED_ORIGINS", "OTEL_SERVICE_NAME", "OTEL_EXPORTER",
+      "TEST_SUPPORT_ENDPOINTS_ENABLED", "STAFF_MFA_FACTOR_ACTIVE_KID", "STAFF_MFA_MAC_ACTIVE_KID", "PAYOUT_INSTRUMENT_ACTIVE_KID",
+      "PAYOUT_INSTRUMENT_FP_ACTIVE_KID", "ACTOR_PROOF_ACTIVE_KID",
+    ])
+    error_message = "With every optional owner input unset the platform-api environment must be exactly the base set (no MOCK_GEOLOCATION_COUNTRY, METRICS_ADDR, ALERT_* or SECRETSTORE_* variable)."
+  }
+
+  assert {
+    condition = alltrue([
+      for e in jsondecode(aws_ecs_task_definition.platform_api.container_definitions)[0].environment :
+      !can(regex("(KEYS|SECRET|PASSWORD)$", e.name)) || e.name == "ALERT_WEBHOOK_SECRET_REF"
+    ])
+    error_message = "No *_KEYS, *_SECRET or *_PASSWORD variable may be a plain environment entry: key material comes from Secrets Manager only."
+  }
+
+  assert {
+    condition = alltrue([
+      for e in jsondecode(aws_ecs_task_definition.platform_api.container_definitions)[0].environment :
+      e.value == "stg-v1" if endswith(e.name, "_ACTIVE_KID") && e.name != "JWT_ACTIVE_KID"
+    ])
+    error_message = "Active kids must follow the kid variables."
+  }
+}
+
+run "optional_owner_inputs_become_environment" {
+  command = plan
+
+  variables {
+    mock_geolocation_country = "MT"
+    metrics_addr             = "127.0.0.1:9464"
+    alert_retention_days     = 30
+    alert_webhook_url        = "https://alerts.example.com/hook"
+    alert_webhook_secret_ref = "awssm://arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/alert-webhook-hmac-AbCdEf?versionId=0123456789abcdef0123456789abcdef"
+  }
+
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.platform_api.container_definitions)[0].environment : e.name => e.value
+      if contains(["MOCK_GEOLOCATION_COUNTRY", "METRICS_ADDR", "ALERT_RETENTION_DAYS", "ALERT_WEBHOOK_URL", "SECRETSTORE_BACKENDS", "AWS_SECRETSMANAGER_REGION"], e.name)
+      } == {
+      MOCK_GEOLOCATION_COUNTRY  = "MT"
+      METRICS_ADDR              = "127.0.0.1:9464"
+      ALERT_RETENTION_DAYS      = "30"
+      ALERT_WEBHOOK_URL         = "https://alerts.example.com/hook"
+      SECRETSTORE_BACKENDS      = "awssm"
+      AWS_SECRETSMANAGER_REGION = "eu-central-1"
+    }
+    error_message = "Owner inputs must reach platform-api under the exact variable names the binary reads."
+  }
+
+  assert {
+    condition = anytrue([
+      for e in jsondecode(aws_ecs_task_definition.platform_api.container_definitions)[0].environment :
+      e.name == "ALERT_WEBHOOK_SECRET_REF" && startswith(e.value, "awssm://arn:aws:secretsmanager:")
+    ])
+    error_message = "The webhook secret is passed as an awssm:// reference, never a value."
+  }
+}
+
+run "webhook_url_requires_secret_ref" {
+  command = plan
+
+  variables {
+    alert_webhook_url = "https://alerts.example.com/hook"
+  }
+
+  expect_failures = [aws_ecs_task_definition.platform_api]
+}
+
+run "metrics_addr_must_be_loopback" {
+  command = plan
+
+  variables {
+    metrics_addr = "0.0.0.0:9464"
+  }
+
+  expect_failures = [var.metrics_addr]
+}
+
+run "metrics_addr_must_not_share_the_http_port" {
+  command = plan
+
+  variables {
+    metrics_addr = "127.0.0.1:8080"
+  }
+
+  expect_failures = [aws_ecs_task_definition.platform_api]
+}
+
+run "mock_geolocation_country_must_be_iso_alpha2" {
+  command = plan
+
+  variables {
+    mock_geolocation_country = "malta"
+  }
+
+  expect_failures = [var.mock_geolocation_country]
+}
+
+run "migrate_verifies_before_the_revoke" {
+  command = plan
+
+  assert {
+    condition = (
+      strcontains(jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].command[2], "/app/migrate up && /app/migrate verify && /app/migrate status && psql") &&
+      strcontains(jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].command[2], "REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime")
+    )
+    error_message = "The migrate task must run migrate verify (and status) after up and before the schema_migrations revoke, joined with && so a failure stops the task."
+  }
+}
+
+run "role_init_is_single_transaction" {
+  command = plan
+
+  assert {
+    condition     = strcontains(jsondecode(aws_ecs_task_definition.role_init.container_definitions)[0].command[2], "--single-transaction -v ON_ERROR_STOP=1 -f /app/sql/init-runtime-role.rds.sql")
+    error_message = "role-init must run psql --single-transaction so a failure cannot leave the runtime role half-provisioned."
+  }
+}
+
+run "seed_admin_environment_matches_the_mfa_rules" {
+  command = plan
+
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.seed_admin.container_definitions)[0].environment : e.name => e.value
+      } == {
+      DATABASE_URL                = "postgres://igaming@igaming-staging-db.abc123.eu-central-1.rds.amazonaws.com:5432/igaming_platform_staging?sslmode=require"
+      APP_ENV                     = "staging"
+      STAFF_MFA_FACTOR_ACTIVE_KID = "stg-v1"
+      STAFF_MFA_MAC_ACTIVE_KID    = "stg-v1"
+    }
+    error_message = "seed-admin needs APP_ENV and both staff MFA active kids besides DATABASE_URL."
+  }
 }

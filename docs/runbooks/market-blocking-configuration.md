@@ -43,8 +43,9 @@ legitimate access. Rules enforced by the package and by migration 0076:
 | local dev / staging (mock components, non-production) | (1) `MOCK_GEOLOCATION_COUNTRY=<ISO code>` on `platform-api` (honoured only when `TEST_SUPPORT_ENDPOINTS_ENABLED=true`; `config.Load` refuses it under `APP_ENV=production`), AND (2) a licence ceiling plus a tenant opt-in row for that country and the brand (and no narrowing row) |
 | production | a real production-eligible `Locator` (`PROVIDER DEPENDENT`, not built). The MOCK locator is registered with the synthetic-component guard (`geolocation/locator`), so a production process cannot start on it |
 
-`deploy/aws/modules/ecs` does not set `MOCK_GEOLOCATION_COUNTRY` today: a staging stack that must pass those flows needs it added
-(recorded as gap G3 in `aws-staging-deploy-plan.md`).
+`deploy/aws/modules/ecs` sets `MOCK_GEOLOCATION_COUNTRY` only when the owner supplies the root variable `mock_geolocation_country`
+(STAGING-PREP-1, gap G3 in `aws-staging-deploy-plan.md`); unset, the gate refuses everything. The market rows themselves are still an owner action
+(there is no route or tool; see the plan, owner action C).
 
 ## 4. Verify a configuration
 

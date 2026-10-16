@@ -138,7 +138,7 @@ func (s *Service) assess(ctx context.Context, in EvalInput) (assessment, error) 
 		return assessment{}, err
 	}
 	if doConfig {
-		a.Readiness.Checks = append(a.Readiness.Checks, s.providerTierCheck(), alertsCheck())
+		a.Readiness.Checks = append(a.Readiness.Checks, s.providerTierCheck(), s.alertsCheck())
 	}
 	sortChecks(a.Readiness.Checks)
 	return a, nil

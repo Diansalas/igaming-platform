@@ -29,7 +29,8 @@
 // Status of the implementation (CLAUDE.md labels): the service, readiness evaluator, executor
 // and audit are IMPLEMENTED against the local database; no HTTP route or console exists yet
 // (ADR 0112 slices 4-5), so nothing here is reachable by an operator. The readiness checks
-// R-PROVIDER-TIER and R-ALERTS describe the process and the alert vocabulary; R-MARKET-CONFIG (A8)
+// R-PROVIDER-TIER and R-ALERTS describe the process (R-ALERTS: the dispatcher's configuration-only
+// routing readiness for p1 and p2, never the channel vocabulary); R-MARKET-CONFIG (A8)
 // reads the operating-market configuration; R-CATALOGUE
 // covers casino availability only (the sportsbook catalogue is not brand-scoped).
 package launchgov

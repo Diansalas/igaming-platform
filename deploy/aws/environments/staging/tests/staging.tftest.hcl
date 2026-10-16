@@ -163,8 +163,8 @@ run "staging_defaults_are_hardened" {
 
   # --- secret ARNs exposed, never values ---
   assert {
-    condition     = length(output.secret_arns) == 4 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
-    error_message = "secret_arns must list exactly the four secret ARNs."
+    condition     = length(output.secret_arns) == 8 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
+    error_message = "secret_arns must list exactly the eight secret ARNs (db master, runtime, JWT, seed admin, staff MFA, payout instrument, actor proof, alert webhook HMAC)."
   }
 
   # --- ADR 0086 root-level decisions (QA review: each must fail a test if
@@ -210,6 +210,25 @@ run "staging_defaults_are_hardened" {
       toset(module.ecs.service_capacity_provider_strategies[k]) == toset([{ capacity_provider = "FARGATE_SPOT", base = 0, weight = 1 }])
     ])
     error_message = "Frontends run on FARGATE_SPOT only."
+  }
+
+  # --- STAGING-PREP-1: the stack can start the current binary ---
+  assert {
+    condition = alltrue([
+      for k in ["STAFF_MFA_FACTOR_ACTIVE_KID", "STAFF_MFA_MAC_ACTIVE_KID", "PAYOUT_INSTRUMENT_ACTIVE_KID", "PAYOUT_INSTRUMENT_FP_ACTIVE_KID", "ACTOR_PROOF_ACTIVE_KID"] :
+      module.ecs.platform_api_environment[k] == "stg-v1"
+    ])
+    error_message = "platform-api must receive every key-family active kid (staff MFA is required in every environment)."
+  }
+
+  assert {
+    condition     = module.ecs.platform_api_environment["METRICS_ADDR"] == "127.0.0.1:9464" && module.ecs.platform_api_environment["ALERT_RETENTION_DAYS"] == "30"
+    error_message = "Staging binds the metrics listener on loopback and bounds alert history."
+  }
+
+  assert {
+    condition     = !contains(keys(module.ecs.platform_api_environment), "MOCK_GEOLOCATION_COUNTRY") && !contains(keys(module.ecs.platform_api_environment), "ALERT_WEBHOOK_URL") && !contains(keys(module.ecs.platform_api_environment), "SECRETSTORE_BACKENDS")
+    error_message = "Owner inputs (country, webhook) must stay unset until the owner supplies them: an agent never defaults them."
   }
 
   assert {
@@ -333,4 +352,47 @@ run "alarm_email_creates_sns" {
     condition     = output.sns_alerts_topic_arn != null
     error_message = "Setting alarm_email must create the SNS topic."
   }
+}
+
+run "owner_inputs_reach_platform_api" {
+  command = apply
+
+  variables {
+    mock_geolocation_country = "MT"
+    alert_webhook_url        = "https://alerts.example.com/hook"
+  }
+
+  assert {
+    condition     = module.ecs.platform_api_environment["MOCK_GEOLOCATION_COUNTRY"] == "MT"
+    error_message = "The owner-chosen country must reach platform-api."
+  }
+
+  assert {
+    condition = (
+      module.ecs.platform_api_environment["ALERT_WEBHOOK_URL"] == "https://alerts.example.com/hook" &&
+      startswith(module.ecs.platform_api_environment["ALERT_WEBHOOK_SECRET_REF"], "awssm://arn:aws:secretsmanager:") &&
+      module.ecs.platform_api_environment["SECRETSTORE_BACKENDS"] == "awssm"
+    )
+    error_message = "The webhook channel must use an awssm:// reference to the generated HMAC secret."
+  }
+}
+
+run "mock_geolocation_country_validated_at_the_root" {
+  command = plan
+
+  variables {
+    mock_geolocation_country = "xx1"
+  }
+
+  expect_failures = [var.mock_geolocation_country]
+}
+
+run "alert_webhook_url_must_be_https" {
+  command = plan
+
+  variables {
+    alert_webhook_url = "http://alerts.example.com/hook"
+  }
+
+  expect_failures = [var.alert_webhook_url]
 }

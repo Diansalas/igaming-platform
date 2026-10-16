@@ -1,5 +1,7 @@
 # Application secrets generated for this deployment, stored in Secrets
-# Manager. Three secrets:
+# Manager. Three base secrets plus the STAGING-PREP-1 key-family secrets
+# (staff MFA, payout instrument, actor proof, alert webhook HMAC) described
+# in the section at the end of this file. The three base secrets:
 #   1. The igaming_runtime app credential (non-owning runtime role, JSON
 #      {"username","password"} — docs/security/runtime-role-separation.md).
 #   2. JWT_SIGNING_SECRET.
@@ -98,4 +100,126 @@ resource "aws_secretsmanager_secret_version" "seed_admin" {
   # this secret alone would silently break the Back Office login. It
   # changes only with its own counter (new environment / new admin).
   secret_string_wo_version = var.seed_admin_secret_version
+}
+
+# ---------------------------------------------------------------------------
+# STAGING-PREP-1: key families the CURRENT platform-api binary needs.
+# Names verified against the code, not the docs:
+#   - internal/staffmfa/keys.go (EnvFactorKeys, EnvFactorActiveKID, EnvMACKeys,
+#     EnvMACActiveKID): required in EVERY environment (staffmfa.LoadKeys).
+#   - internal/config/config.go (PAYOUT_INSTRUMENT_KEYS / _ACTIVE_KID and
+#     PAYOUT_INSTRUMENT_FP_KEYS / _FP_ACTIVE_KID): withdrawals answer 503
+#     without them.
+#   - internal/config/config.go and internal/actorproof (ACTOR_PROOF_KEYS /
+#     ACTOR_PROOF_ACTIVE_KID): governed writes need them AND a matching
+#     actor_proof_keys row (an owner action, NOT done by Terraform).
+#   - internal/config/observability.go (ALERT_WEBHOOK_SECRET_REF): a
+#     secret-store reference to the webhook HMAC secret.
+# Every key is "<kid>:<base64>" with a 64-character alphanumeric random body.
+# An alphanumeric string whose length is a multiple of 4 is valid standard
+# base64 and decodes to 48 bytes (the parsers require at least 32), so the
+# generated text is directly usable as the base64 part. Each body is an
+# independent ephemeral value, so the cross-family distinctness rules of
+# config.validatePlatformKeyFamilies hold (no value is reused anywhere).
+# The kid carries the key_family_version so a rotation is legible; this
+# generator does NOT keep the previous key (no overlap): rotation of these
+# families on a real environment follows staff-mfa-keys.md /
+# payout-instrument-keys.md by hand. In disposable staging a bump simply
+# invalidates enrolled MFA factors and sealed payout instruments.
+# ---------------------------------------------------------------------------
+
+locals {
+  key_kid = "stg-v${var.key_family_version}"
+}
+
+ephemeral "random_password" "staff_mfa_factor" {
+  length  = 64
+  special = false
+}
+
+ephemeral "random_password" "staff_mfa_mac" {
+  length  = 64
+  special = false
+}
+
+ephemeral "random_password" "payout_instrument_master" {
+  length  = 64
+  special = false
+}
+
+ephemeral "random_password" "payout_instrument_fp" {
+  length  = 64
+  special = false
+}
+
+ephemeral "random_password" "actor_proof" {
+  length  = 64
+  special = false
+}
+
+ephemeral "random_password" "alert_webhook_hmac" {
+  length  = 64
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "staff_mfa_keys" {
+  name                    = "${var.name_prefix}/staff-mfa-keys"
+  description             = "STAFF_MFA_FACTOR_KEYS and STAFF_MFA_MAC_KEYS (JSON keys factor_keys, mac_keys; each kid:base64). Generated ephemerally and written write-only (never in Terraform state)."
+  recovery_window_in_days = var.recovery_window_in_days
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-staff-mfa-keys" })
+}
+
+resource "aws_secretsmanager_secret_version" "staff_mfa_keys" {
+  secret_id = aws_secretsmanager_secret.staff_mfa_keys.id
+  secret_string_wo = jsonencode({
+    factor_keys = "${local.key_kid}:${ephemeral.random_password.staff_mfa_factor.result}"
+    mac_keys    = "${local.key_kid}:${ephemeral.random_password.staff_mfa_mac.result}"
+  })
+  secret_string_wo_version = var.key_family_version
+}
+
+resource "aws_secretsmanager_secret" "payout_instrument_keys" {
+  name                    = "${var.name_prefix}/payout-instrument-keys"
+  description             = "PAYOUT_INSTRUMENT_KEYS and PAYOUT_INSTRUMENT_FP_KEYS (JSON keys master_keys, fp_keys; each kid:base64). Generated ephemerally and written write-only (never in Terraform state)."
+  recovery_window_in_days = var.recovery_window_in_days
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-payout-instrument-keys" })
+}
+
+resource "aws_secretsmanager_secret_version" "payout_instrument_keys" {
+  secret_id = aws_secretsmanager_secret.payout_instrument_keys.id
+  secret_string_wo = jsonencode({
+    master_keys = "${local.key_kid}:${ephemeral.random_password.payout_instrument_master.result}"
+    fp_keys     = "${local.key_kid}:${ephemeral.random_password.payout_instrument_fp.result}"
+  })
+  secret_string_wo_version = var.key_family_version
+}
+
+resource "aws_secretsmanager_secret" "actor_proof_keys" {
+  name                    = "${var.name_prefix}/actor-proof-keys"
+  description             = "ACTOR_PROOF_KEYS (plain string kid:base64). Generated ephemerally and written write-only (never in Terraform state). The owner must insert the matching actor_proof_keys row (docs/runbooks/aws-staging-deploy-plan.md G3)."
+  recovery_window_in_days = var.recovery_window_in_days
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-actor-proof-keys" })
+}
+
+resource "aws_secretsmanager_secret_version" "actor_proof_keys" {
+  secret_id                = aws_secretsmanager_secret.actor_proof_keys.id
+  secret_string_wo         = "${local.key_kid}:${ephemeral.random_password.actor_proof.result}"
+  secret_string_wo_version = var.key_family_version
+}
+
+resource "aws_secretsmanager_secret" "alert_webhook_hmac" {
+  name                    = "${var.name_prefix}/alert-webhook-hmac"
+  description             = "HMAC signing secret of the platform alert webhook channel (referenced by ALERT_WEBHOOK_SECRET_REF as an awssm:// reference). Generated ephemerally and written write-only; the owner configures the receiver with this value."
+  recovery_window_in_days = var.recovery_window_in_days
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-alert-webhook-hmac" })
+}
+
+resource "aws_secretsmanager_secret_version" "alert_webhook_hmac" {
+  secret_id                = aws_secretsmanager_secret.alert_webhook_hmac.id
+  secret_string_wo         = ephemeral.random_password.alert_webhook_hmac.result
+  secret_string_wo_version = var.key_family_version
 }

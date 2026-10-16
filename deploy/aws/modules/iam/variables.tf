@@ -36,6 +36,12 @@ variable "one_off_log_group_arns" {
   type        = list(string)
 }
 
+variable "task_secret_arns" {
+  description = "Exact Secrets Manager secret ARNs the TASK role (application code, not the ECS agent) may read at run time: the platform alert webhook HMAC secret. Empty (default) = the task role has no permissions."
+  type        = list(string)
+  default     = []
+}
+
 variable "permissions_boundary_arn" {
   description = "Optional IAM permissions boundary attached to every role this module creates. The staging root passes the boundary created by deploy/aws/bootstrap (ADR 0086); null = no boundary."
   type        = string
