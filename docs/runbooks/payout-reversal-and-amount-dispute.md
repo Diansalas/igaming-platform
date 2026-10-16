@@ -2,8 +2,9 @@
 
 Status: written in A13 against the code at the A5 merge. `IMPLEMENTED` against the local database and MOCK providers; behaviour with a real
 PSP is `PROVIDER DEPENDENT`. A provider-initiated "payout returned" event does not exist; staff record the return. Open items from the A5
-record that an operator must know: the reverse decisions are NOT covered by the ADR 0110 signed actor proof (residual R1, security HIGH
-before real money); a partial or different-asset return is refused (`409`), not handled.
+record that an operator must know: a partial or different-asset return is refused (`409`), not handled. Since migration 0165 (ADR 0110
+T8 amendment, `docs/plans/t8-proof-bound-reversal-record.md`) every reverse decision is bound to the signed actor proof the server issues
+for the authenticated decider (A5 residual R1 closed for the decision rows; the tombstone branch's hold release, ADR 0110 T5, is not).
 
 ## 1. When to use which procedure
 
@@ -43,8 +44,13 @@ the platform for that provider; already reversed; an attempt in flight (`created
 withdrawal not `completed` or `submitted`; you already decided; `403` for self-benefit, no Person link, inactive account, or a submitted-payout
 reversal without `payment_force_resolve:approve`; `403 step_up_required`.
 
+A `500` means the server could not sign the decision's actor proof (no `ACTOR_PROOF_KEYS` / `ACTOR_PROOF_ACTIVE_KID`, or its kid is not
+an ACTIVE key in `actor_proof_keys`): nothing was recorded; fix the key provisioning (`operational-runbooks.md` section 15), never the rows.
+Reverse decisions recorded before migration 0165 carry no proof and no longer count toward any quorum (WD026, WD027, check D, the route);
+their approver cannot vote again on that request, so other Persons must complete it.
+
 Rollback: none. A reversal is a ledger fact; the only correction is another governed, compensating action. The migration 0162 down
-refuses (`WD097`) while a reversed request exists.
+refuses (`WD097`) while a reversed request exists; the 0165 down refuses (`WD096`) while a proof-bound decision exists.
 
 ## 3. Amount/asset mismatch park: governed M2 exit
 

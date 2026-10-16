@@ -28,6 +28,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
@@ -74,12 +76,27 @@ func a5Payload(wr WithdrawalRequest, ref string) PayoutReversal {
 }
 
 // a5Vote inserts a human 'reverse' decision row directly (the 0034/0162 governance trigger still runs).
+// ADR 0110 T8 (migration 0165): the row is PROOF-BOUND. Inside the caller's tenant session the staff member
+// becomes the session principal, a proof for operation withdrawal_payout_reversal:decide (target the
+// request, payload the digest of reason) is attached by prooftest (the test stand-in of the server-side
+// issuer, which signs only for the authenticated principal), and the plain tenant session is restored after
+// the INSERT. A reason without the payout digest shape attaches no proof (the signer refuses it).
 func a5Vote(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest, staff uuid.UUID, reason string) error {
+	if err := t8AsPrincipal(ctx, tx, staff); err != nil {
+		return err
+	}
+	if err := prooftest.AttachForSession(ctx, tx, actorproof.OpPayoutReversalDecide, wr.ID.String(),
+		strings.TrimPrefix(reason, ReversalReasonPrefix)); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO withdrawal_approvals
 		(tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision, reason_code,
 		 threshold_amount_at_decision, request_amount_at_decision)
 		VALUES ($1, $2, $3, false, 'reverse', $4, 0, $5)`, wr.TenantID, wr.ID, staff, reason, wr.Amount)
-	return err
+	if err != nil {
+		return err
+	}
+	return t8PlainTenantSession(ctx, tx)
 }
 
 // a5PostReversal posts the pinned withdrawal_reversed shape for wr (Dr psp_clearing / Cr player_cash).
@@ -395,7 +412,7 @@ func TestA5DB_RecordDecision_CountsDistinctPersonsPerPayload(t *testing.T) {
 		var d ReversalDecision
 		err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			d, err = RecordPayoutReversalDecision(ctx, tx, wr.ID, staff, q, no, alwaysEligible, auth.StepUpAssertion{})
+			d, err = RecordPayoutReversalDecision(ctx, tx, wr.ID, staff, q, no, alwaysEligible, auth.StepUpAssertion{}, t8Attacher(staff))
 			return err
 		})
 		return d, err
@@ -404,7 +421,7 @@ func TestA5DB_RecordDecision_CountsDistinctPersonsPerPayload(t *testing.T) {
 		t.Fatalf("an empty payload: %v", err)
 	}
 	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := RecordPayoutReversalDecision(ctx, tx, wr.ID, uuid.New(), p, nil, alwaysEligible, auth.StepUpAssertion{})
+		_, err := RecordPayoutReversalDecision(ctx, tx, wr.ID, uuid.New(), p, nil, alwaysEligible, auth.StepUpAssertion{}, t8Attacher(uuid.New()))
 		return err
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("nil beneficiary check: %v", err)

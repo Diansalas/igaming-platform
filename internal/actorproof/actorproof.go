@@ -120,6 +120,12 @@ const (
 	OpAMLHoldLift    = "aml_hold:lift"
 	OpAMLCasePropose = "aml_case:propose"
 	OpAMLCaseApprove = "aml_case:approve"
+
+	// ADR 0110 T8 amendment (migration 0165): one 'reverse' decision of a governed payout reversal
+	// (withdrawal_approvals, A5). Target = the withdrawal request id; payload hash = the payout digest the
+	// decision's reason_code carries (withdrawal.PayoutReversal.Digest). Provable for scope tenant ONLY (the
+	// database trigger pins 'tenant'; the signer refuses every other scope).
+	OpPayoutReversalDecide = "withdrawal_payout_reversal:decide"
 )
 
 // Scopes the database admits.
@@ -181,6 +187,8 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: rg_limit_config operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, staffLifecycleOperationPrefix) && !staffLifecycleOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: staff_lifecycle operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, payoutReversalOperationPrefix) && (c.Operation != OpPayoutReversalDecide || c.Scope != ScopeTenant):
+		return fmt.Errorf("%w: withdrawal_payout_reversal operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):
@@ -198,6 +206,9 @@ func platformOperation(op string) bool {
 }
 
 const staffLifecycleOperationPrefix = "staff_lifecycle:"
+
+// payoutReversalOperationPrefix (migration 0165): the closed set is OpPayoutReversalDecide, scope tenant.
+const payoutReversalOperationPrefix = "withdrawal_payout_reversal:"
 
 // staffLifecycleOperationAdmitted mirrors migration 0139's actor_proof_require block: the closed staff_lifecycle
 // operation set, scope platform only.

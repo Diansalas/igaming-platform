@@ -8,12 +8,15 @@ package reconciliation
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/stepup"
@@ -47,11 +50,20 @@ func a5DReverse(t *testing.T, rt *db.Pool, f fixture, id uuid.UUID, approvers ..
 		ReturnReference: "ret-" + id.String(), Amount: 10, AssetCode: "EUR", EvidenceRefHash: strings.Repeat("5c", 32)}
 	no := func(uuid.UUID) (bool, error) { return false, nil }
 	ok := func(uuid.UUID) (bool, bool, error) { return true, true, nil }
+	prooftest.Install(t, os.Getenv("TEST_DATABASE_URL"))
 	if err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var d withdrawal.ReversalDecision
 		for _, a := range approvers {
 			var err error
-			if d, err = withdrawal.RecordPayoutReversalDecision(ctx, tx, id, a, p, no, ok, stepup.Assertion{}); err != nil {
+			// ADR 0110 T8 (migration 0165): each decision is proof-bound, signed for the decider as the session
+			// principal (prooftest stands in for the server-side issuer).
+			attach := func(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, digest string) error {
+				if _, err := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, a.String()); err != nil {
+					return err
+				}
+				return prooftest.AttachForSession(ctx, tx, actorproof.OpPayoutReversalDecide, requestID.String(), digest)
+			}
+			if d, err = withdrawal.RecordPayoutReversalDecision(ctx, tx, id, a, p, no, ok, stepup.Assertion{}, attach); err != nil {
 				return err
 			}
 		}

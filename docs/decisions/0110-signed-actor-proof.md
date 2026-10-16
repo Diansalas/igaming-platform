@@ -336,3 +336,24 @@ expiry (only when actually expired) branches of migration 0112; mutation evidenc
 runbook changes (secret not inlined as a loggable SQL literal, `log_statement` check, `--single-transaction` for the
 ECS role-init, nonce pruning plan); the "mechanical" claim about extending the proof is withdrawn: it needed a
 NULL-tenant wire encoding, per-flow digests and Go issuance in the K1/policy services.
+
+
+## Amendment 2026-10-16 — T8 implemented for payout-reversal decisions (migration 0165; owner decision 2026-10-16 item 2)
+
+- **Implemented (2026-10-16, migration 0165, ADR 0110 T8 amendment, owner decision 2026-10-16 item 2):** the `reverse` decisions of
+  `withdrawal_approvals` (A5 governed payout reversal) are proof-bound (sixteen governed tables). Operation
+  `withdrawal_payout_reversal:decide`, scope `tenant` only, target = the withdrawal request id, payload hash = the payout digest the
+  decision's `reason_code` carries (`payout_reversal:<sha256>`, `withdrawal.PayoutReversal.Digest`). `zz_actor_proof_guard` (BEFORE
+  INSERT, last BEFORE ROW trigger, catalog-pinned) also requires the approver column to equal the proven actor and the session tenant
+  to equal the row tenant, refuses automated `reverse` rows and records the consumed nonce in `withdrawal_approvals.actor_proof_nonce`;
+  WD026 (E11), WD027 (tombstone branch), reconciliation check D's WD026 twin, the Go quorum and the Go executed-reversal replay check count only rows with that nonce. On `withdrawal_approvals` ONLY `reverse` rows are proof-bound.
+  `approve` / `reject` rows are unchanged (ADR 0113 s9.3 stays open). The issuer is `internal/payments.DecidePayoutReversal`
+  (step-up critical backstop). Record: `docs/plans/t8-proof-bound-reversal-record.md`.
+
+Append to the section 3 table:
+
+| `withdrawal_approvals` | INSERT with `decision = 'reverse'` | `withdrawal_payout_reversal:decide` | the withdrawal request id | the payout digest (`reason_code` without the `payout_reversal:` prefix); scope `tenant` only; `approver_principal_id` must be the proven actor; the consumed nonce is stored in `actor_proof_nonce` and only such rows count (WD026 / WD027 / check D) (migration 0165) |
+
+Section 3 table row added: `withdrawal_approvals` INSERT with `decision = 'reverse'` → operation `withdrawal_payout_reversal:decide`, target = withdrawal request id, payload = payout digest, scope `tenant` only, approver must be the proven actor, nonce stored in `actor_proof_nonce` and only such rows count.
+
+T8 register row: the payout-reversal `reverse` decisions are REMOVED from the unproven list; the other flows (kill-switch release, provider credential handles, KYC enforcement policy, asset-registry dual control, withdrawal `approve`/`reject` (ADR 0113 s9.3), bonus change governance, casino catalogue dual control) stay open. Residual (SRT8-2): check D flags only rows with NO nonce; a table owner who disables the guard can plant rows with any well-formed unique nonce (accepted owner class). T5 note: binding the reversal decisions does NOT close T5 for the A5 tombstone branch (its hold release is the ordinary E10 `withdrawal_failed` posting).

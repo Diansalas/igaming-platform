@@ -12,7 +12,9 @@ package withdrawal
 //     interim (b): never a single-person money correction); the policy's require_step_up applies at ANY
 //     amount (stricter than Approve). Linked, active staff only; never the beneficiary. The database
 //     re-checks the decision shape (0034 governance trigger, extended by 0162) and refuses the E11 edge
-//     without two distinct-Person decisions on one payload (WD026).
+//     without two distinct-Person decisions on one payload (WD026). ADR 0110 T8 (migration 0165): every
+//     'reverse' row is bound to the decider's signed actor proof (zz_actor_proof_guard), and only
+//     proof-bound decisions count, in Go and in WD026 / WD027 / check D.
 //   - ReverseCompletedPayout is E11 (completed -> reversed): a COMPENSATING posting, never an edit of
 //     the completion. withdrawal_reversed Dr psp_clearing / Cr player_cash, the request amount in the
 //     request asset (same asset back to the same wallet), key '<id>:reversed', reverses the completion,
@@ -53,6 +55,14 @@ const ReversalReasonPrefix = "payout_reversal:"
 
 // MinReversalApprovers is the four-eyes floor for a payout reversal (the database floor, WD026).
 const MinReversalApprovers = 2
+
+// ReversalProofAttacher attaches the signed actor proof (ADR 0110 T8 amendment, migration 0165) for ONE
+// 'reverse' decision of requestID on the payload whose digest is payloadDigest (the reason_code without its
+// prefix). internal/payments supplies it (an internal/actorproof signing package; this package never signs);
+// it signs operation withdrawal_payout_reversal:decide, scope tenant, for the authenticated decider. It is
+// REQUIRED: RecordPayoutReversalDecision refuses a nil attacher (ErrInvalidInput), and the database refuses a
+// proof-less 'reverse' row on its own (AP001).
+type ReversalProofAttacher func(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, payloadDigest string) error
 
 var (
 	// ErrReversalPayloadMismatch: the reversal payload does not describe this payout (provider, original
@@ -158,6 +168,8 @@ type ReversalDecision struct {
 // p. approverPrincipalID MUST come from the authenticated staff session (never a body); the caller has
 // already checked the RBAC permission and tenant scope. beneficiaryCheck and approverEligibility are
 // REQUIRED (a reversal is always a human decision). stepUp is the HTTP step-up gate's assertion.
+// attachProof is REQUIRED (ADR 0110 T8): it attaches the decider's signed actor proof right before the
+// INSERT; only proof-bound decisions count toward the quorum (here, WD026 and WD027).
 //
 // The request must be `completed` (the normal reversal) or `submitted` (a return reported before the
 // platform saw the completion: the caller's tombstone branch). The payload must match it. Errors:
@@ -167,12 +179,16 @@ type ReversalDecision struct {
 func RecordPayoutReversalDecision(
 	ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID, p PayoutReversal,
 	beneficiaryCheck BeneficiaryCheck, approverEligibility ApproverEligibility, stepUp stepup.Assertion,
+	attachProof ReversalProofAttacher,
 ) (ReversalDecision, error) {
 	if approverPrincipalID == uuid.Nil {
 		return ReversalDecision{}, fmt.Errorf("%w: approver principal id is required", ErrInvalidInput)
 	}
 	if beneficiaryCheck == nil || approverEligibility == nil {
 		return ReversalDecision{}, fmt.Errorf("%w: a payout reversal needs the beneficiary and eligibility checks", ErrInvalidInput)
+	}
+	if attachProof == nil {
+		return ReversalDecision{}, fmt.Errorf("%w: a payout reversal decision needs the signed actor proof (ADR 0110 T8)", ErrInvalidInput)
 	}
 	if err := p.Validate(); err != nil {
 		return ReversalDecision{}, err
@@ -255,6 +271,12 @@ func RecordPayoutReversalDecision(
 		}
 	}
 
+	// ADR 0110 T8 (migration 0165): the signed actor proof for THIS decision, attached after every Go check
+	// passed and immediately before the INSERT its trigger (zz_actor_proof_guard) consumes it in. Any signing
+	// failure is returned as is (a defect, HTTP 500), never skipped; the database refuses a proof-less row.
+	if err := attachProof(ctx, tx, requestID, p.Digest(requestID)); err != nil {
+		return ReversalDecision{}, err
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO withdrawal_approvals
 			(id, tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision, reason_code,
@@ -270,7 +292,8 @@ func RecordPayoutReversalDecision(
 
 	// SR5-4 / LF-A5-3: only ACTIVE linked staff count at the moment of execution (a suspended voter's vote no
 	// longer counts); for a submitted request (the tombstone branch) each counted voter must still hold the
-	// force-resolve grant (SR5-1). The database restates both (WD026 / WD027, migration 0162).
+	// force-resolve grant (SR5-1); ADR 0110 T8: only proof-bound decisions count (actor_proof_nonce, written by
+	// the 0165 proof guard). The database restates all three (WD026 / WD027, migrations 0162 + 0165).
 	var counted int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(DISTINCT su.person_id)
@@ -278,6 +301,7 @@ func RecordPayoutReversalDecision(
 		   JOIN staff_users su ON su.id = wa.approver_principal_id
 		  WHERE wa.withdrawal_request_id = $1 AND wa.decision = 'reverse' AND wa.is_automated_approval = false
 		    AND wa.reason_code = $2 AND su.person_id IS NOT NULL AND su.status = 'active'
+		    AND wa.actor_proof_nonce IS NOT NULL
 		    AND (NOT $3 OR ledger_adjustment_eligible_grant(wa.tenant_id, wa.approver_principal_id, $4) IS NOT NULL)`,
 		requestID, reason, submitted, ForceResolveApproveCapability).Scan(&counted); err != nil {
 		return ReversalDecision{}, fmt.Errorf("withdrawal: count reversal decisions: %w", err)
@@ -354,10 +378,11 @@ func isExecutedReversalReplay(ctx context.Context, tx pgx.Tx, wr WithdrawalReque
 	var replay bool
 	err := tx.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM withdrawal_approvals
-		                WHERE withdrawal_request_id = $1 AND approver_principal_id = $2 AND decision = 'reverse' AND reason_code = $3)
+		                WHERE withdrawal_request_id = $1 AND approver_principal_id = $2 AND decision = 'reverse' AND reason_code = $3
+		                  AND actor_proof_nonce IS NOT NULL)
 		   AND (SELECT count(DISTINCT su.person_id) FROM withdrawal_approvals wa JOIN staff_users su ON su.id = wa.approver_principal_id
 		         WHERE wa.withdrawal_request_id = $1 AND wa.decision = 'reverse' AND NOT wa.is_automated_approval
-		           AND wa.reason_code = $3 AND su.person_id IS NOT NULL) >= $4
+		           AND wa.reason_code = $3 AND su.person_id IS NOT NULL AND wa.actor_proof_nonce IS NOT NULL) >= $4
 		   AND CASE $5::text
 		         WHEN 'reversed' THEN EXISTS (
 		             SELECT 1 FROM withdrawal_requests w JOIN ledger_transactions t ON t.id = w.reversal_ledger_transaction_id

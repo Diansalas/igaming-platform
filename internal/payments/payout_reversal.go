@@ -16,6 +16,10 @@ package payments
 //     to the player (E10, withdrawal.Fail) because the value is back with the PSP. A P1 alert is raised as
 //     the LAST statement (the same B12 payout-dispute alert every payout park raises).
 //
+// ADR 0110 T8 (migration 0165): the decision is bound to the decider's signed actor proof, issued here (a
+// four-eyes signing package) for the verified token subject in the principal-scoped tenant session; the
+// database refuses a 'reverse' row without it and counts only proof-bound decisions.
+//
 // Every outcome writes audit rows in the same transaction (the decision, the execution, and the
 // caller's own HTTP row with IP / user agent / request id through PayoutReversalInput.Audit). Retries are
 // idempotent: a repeat call by an approver whose vote for the same payload is already on file, after
@@ -34,6 +38,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -80,6 +85,25 @@ type PayoutReversalInput struct {
 	// Audit writes the caller's own audit row (actor, IP, user agent, request id) in the same
 	// transaction, before the alert. Optional; an error rolls everything back.
 	Audit func(ctx context.Context, tx pgx.Tx, res PayoutReversalResult) error
+	// Proofs signs the decider's SIGNED-ACTOR-PROOF (ADR 0110 T8 amendment, migration 0165) for the 'reverse'
+	// row. nil means the process-wide actorproof.Default() (the K3 / hold-release convention).
+	Proofs *actorproof.Issuer
+}
+
+// attachReversalProof returns the withdrawal.ReversalProofAttacher of one decision: operation
+// withdrawal_payout_reversal:decide, scope tenant, the tenant of the session, the decider (the verified
+// token subject, the session's app.principal_id), target = the withdrawal request id, payload = the payout
+// digest. Issuer.Attach applies the step-up backstop (critical) and returns every signing failure (500).
+func attachReversalProof(iss *actorproof.Issuer, tenantID, approverID uuid.UUID) withdrawal.ReversalProofAttacher {
+	return func(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, payloadDigest string) error {
+		if iss == nil {
+			iss = actorproof.Default()
+		}
+		return iss.Attach(ctx, tx, actorproof.Claims{
+			Actor: approverID, Scope: actorproof.ScopeTenant, Tenant: tenantID,
+			Operation: actorproof.OpPayoutReversalDecide, Target: requestID.String(), PayloadHash: payloadDigest,
+		})
+	}
 }
 
 // PayoutReversalResult is DecidePayoutReversal's outcome.
@@ -120,7 +144,8 @@ func DecidePayoutReversal(ctx context.Context, pool *db.Pool, tenantID, requestI
 			}
 		}
 		beneficiary, eligibility := in.Checks(actx, tx)
-		dec, err := withdrawal.RecordPayoutReversalDecision(actx, tx, requestID, in.ApproverID, in.Payload, beneficiary, eligibility, in.StepUp)
+		dec, err := withdrawal.RecordPayoutReversalDecision(actx, tx, requestID, in.ApproverID, in.Payload, beneficiary, eligibility, in.StepUp,
+			attachReversalProof(in.Proofs, tenantID, in.ApproverID))
 		if err != nil {
 			return err
 		}

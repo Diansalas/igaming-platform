@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
@@ -30,6 +32,9 @@ import (
 
 func TestA5HTTP_PayoutReversal_AuthorizationAndQuorum(t *testing.T) {
 	pool, issuer := testEnv(t)
+	// ADR 0110 T8 (migration 0165): the route's decisions are proof-bound; the server signs with the process
+	// issuer (a random per-process key provisioned into the test database).
+	prooftest.Install(t, os.Getenv("TEST_DATABASE_URL"))
 	orchestrator, mock := newMockOrchestrator()
 	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
 	tn := mustCreateTenant(t, pool)
@@ -192,5 +197,17 @@ func TestA5HTTP_PayoutReversal_AuthorizationAndQuorum(t *testing.T) {
 	}
 	if state != "reversed" || actions != 2 {
 		t.Fatalf("state %s, http audit rows %d (want reversed, 2)", state, actions)
+	}
+	// ADR 0110 T8: each decision is bound to a proof the server signed for the AUTHENTICATED caller (the
+	// token subject), the request and the payload digest; the nonce table (owner-only) records the binding.
+	var bound int
+	if err := pool.WithTenant(context.Background(), tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM withdrawal_approvals a JOIN actor_proof_nonces n ON n.nonce = a.actor_proof_nonce
+			WHERE a.withdrawal_request_id = $1 AND a.decision = 'reverse' AND a.approver_principal_id IN ($2, $3)
+			  AND n.actor = a.approver_principal_id AND n.scope = 'tenant' AND n.tenant = $4
+			  AND n.operation = 'withdrawal_payout_reversal:decide' AND n.target = $1::text
+			  AND 'payout_reversal:' || n.payload_hash = a.reason_code`, wr.ID, f1.ID, f2.ID, tn.ID).Scan(&bound)
+	}); err != nil || bound != 2 {
+		t.Fatalf("both HTTP decisions must be bound to a proof for their authenticated decider: %d %v", bound, err)
 	}
 }

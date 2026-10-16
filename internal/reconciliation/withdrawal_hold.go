@@ -52,7 +52,8 @@ package reconciliation
 //     rest), and the read-only WD044: a withdrawal_reversed transaction that no reversed request links
 //     (keyed "ledger_transaction:<id>"), the detective twin of the 0162 commit-time trigger for an owner
 //     who switched that trigger off (ADR 0110 s9.4). Fix round LF-A5-5: WD026 for a reversed request with no
-//     two-Person 'reverse' quorum on one digest (the detective twin of the guard's WD026).
+//     two-Person 'reverse' quorum on one digest (the detective twin of the guard's WD026); since the ADR 0110
+//     T8 amendment (migration 0165) only proof-bound decisions count, as in the guard.
 
 import (
 	"context"
@@ -226,12 +227,15 @@ link_mm AS (
           WHEN r.state = 'reversed' AND (ve.n <> 2 OR ve.dr <> 1 OR ve.cr <> 1) THEN 'WD035'
           -- A5 fix round LF-A5-5: the detective twin of WD026. A reversed request needs >= 2 distinct linked
           -- Persons (human 'reverse' decisions) on ONE digest. Staff status is NOT re-checked here: a voter
-          -- suspended or offboarded after a legitimate reversal must not raise a false P1.
+          -- suspended or offboarded after a legitimate reversal must not raise a false P1. ADR 0110 T8
+          -- (migration 0165): only PROOF-BOUND decisions count (actor_proof_nonce, written by the proof guard),
+          -- read through to_jsonb so the statement still runs on a schema pinned below 0165 (migration tests).
           WHEN r.state = 'reversed' AND COALESCE((
                SELECT max(q.n) FROM (SELECT count(DISTINCT su.person_id) AS n
                                        FROM withdrawal_approvals a JOIN staff_users su ON su.id = a.approver_principal_id
                                       WHERE a.withdrawal_request_id = r.id AND a.tenant_id = r.tenant_id
                                         AND a.decision = 'reverse' AND NOT a.is_automated_approval AND su.person_id IS NOT NULL
+                                        AND (to_jsonb(a) ->> 'actor_proof_nonce') IS NOT NULL
                                       GROUP BY a.reason_code) q), 0) < 2 THEN 'WD026'
           WHEN cs.s <> CASE WHEN r.term THEN 0 ELSE r.amount END THEN 'WD034'
       END AS code) c
