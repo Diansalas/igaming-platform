@@ -701,7 +701,7 @@ by the user. Also treat the incident as a possible application-host compromise (
 **ECS role-init (`deploy/aws/sql/init-runtime-role.rds.sql`).** Run it with `psql --single-transaction -v
 ON_ERROR_STOP=1 -f ...` so a failure part-way cannot leave the runtime role half-provisioned (for example holding the
 blanket table grants but not yet the re-REVOKE on `actor_proof_keys` / `actor_proof_nonces`). The script is idempotent
-and re-asserts that REVOKE on every run. (Terraform / the ECS task command are not changed by this branch.)
+and re-asserts that REVOKE on every run. (The ECS role-init task command now does this: `deploy/aws/modules/ecs` runs `psql --single-transaction`, STAGING-PREP-1.)
 
 **Never:** read `actor_proof_keys` into a ticket or chat; grant the runtime role anything on `actor_proof_keys` or
 `actor_proof_nonces`; re-run `deploy/init-app-role.sql` expecting it to restore a grant (it re-asserts the revoke);
