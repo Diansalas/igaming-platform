@@ -7,11 +7,19 @@
 //     real RLS and trigger regime. Any mismatch is drift, which CLAUDE.md defines as a P1 incident. NOTE: a run writes
 //     one reconciliation_runs row per tenant (that is what the platform does), so verify.sh runs this AFTER the
 //     data comparison;
+//
 //   - RLS is really enforced for the runtime role in the restored database (not merely flagged): without a tenant scope
 //     it sees no tenant rows, and with a tenant scope it sees only that tenant's rows;
+//
 //   - the startup guard db.VerifyEnvironmentAnchor behaves as documented: a production process is refused on a restored
 //     database whose anchor is unrecorded (a restore of a dev/test database, or a fresh cluster), and admitted once the
 //     owner has recorded 'production'; a development process is never blocked.
+//
+//   - the ACTOR-PROOF key state (owner decision 5, ADR 0122 section 10; -actor-proof): a LOGICAL restore carries no actor-proof signing secret,
+//     so `unprovisioned` asserts that the platform's own production startup gate (actorproof.VerifyConfiguredInProduction) REFUSES for the
+//     given kid(s) and that the SQL verifier answers a well-formed proof with AP002; `provisioned` asserts that the gate admits the NEW kid and
+//     refuses the retired ones. This binary never holds, reads or signs with a real key: it only presents a well-formed but unsigned token, so it
+//     can prove the fail-closed state but not a successful verification (the drill proves that at the SQL level with a throwaway key).
 //
 // Output is line oriented ("CHK|name|PASS|detail") and the exit status is non-zero if any check fails.
 //
@@ -20,15 +28,21 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 )
@@ -47,8 +61,15 @@ func chk(name string, ok bool, detail string, a ...any) {
 func main() {
 	expect := flag.String("expect-anchor", "unrecorded", "expected database_environment anchor: unrecorded | production | development | test")
 	persist := flag.Bool("persist", false, "keep the reconciliation_runs rows (default: roll the run back)")
+	apMode := flag.String("actor-proof", "skip", "actor-proof key state of the restored database: unprovisioned | provisioned | skip")
+	apKID := flag.String("actor-proof-kid", "", "the NEW actor-proof key id (provisioned mode; optional extra probe in unprovisioned mode)")
+	var retired []string
+	flag.Func("retired-kid", "an actor-proof key id of the source that must NOT be an active key (repeatable)", func(v string) error {
+		retired = append(retired, v)
+		return nil
+	})
 	flag.Parse()
-	if err := run(*expect, *persist); err != nil {
+	if err := run(*expect, *persist, actorProofCheck{mode: *apMode, kid: *apKID, retired: retired}); err != nil {
 		fmt.Fprintln(os.Stderr, "restorecheck:", err)
 		os.Exit(2)
 	}
@@ -60,7 +81,110 @@ func main() {
 
 var errRollback = errors.New("restorecheck: deliberate rollback of the reconciliation run")
 
-func run(expectAnchor string, persist bool) error {
+type actorProofCheck struct {
+	mode    string
+	kid     string
+	retired []string
+}
+
+var kidRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,32}$`)
+
+func (a actorProofCheck) validate() error {
+	switch a.mode {
+	case "skip":
+		return nil
+	case "unprovisioned":
+	case "provisioned":
+		if !kidRE.MatchString(a.kid) {
+			return errors.New("-actor-proof provisioned needs -actor-proof-kid")
+		}
+	default:
+		return fmt.Errorf("-actor-proof must be unprovisioned, provisioned or skip (got %q)", a.mode)
+	}
+	if a.kid != "" && !kidRE.MatchString(a.kid) {
+		return errors.New("-actor-proof-kid is not a valid key id")
+	}
+	for _, k := range a.retired {
+		if !kidRE.MatchString(k) {
+			return errors.New("-retired-kid is not a valid key id")
+		}
+	}
+	return nil
+}
+
+// startupGate runs the platform's own production startup gate for kid with a throwaway issuer (random key, never stored): the gate only asks
+// the database whether the kid is an ACTIVE key, so the key bytes are irrelevant and no real secret is needed.
+func startupGate(ctx context.Context, pool *db.Pool, kid string) error {
+	key := make([]byte, actorproof.MinKeyBytes)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	iss, err := actorproof.NewIssuer(kid, map[string][]byte{kid: key})
+	if err != nil {
+		return err
+	}
+	return actorproof.VerifyConfiguredInProduction(ctx, "production", iss, pool)
+}
+
+func checkActorProof(ctx context.Context, pool *db.Pool, a actorProofCheck, tenants []uuid.UUID) error {
+	if a.mode == "skip" {
+		return nil
+	}
+	probe := append([]string{}, a.retired...)
+	if a.kid != "" {
+		probe = append(probe, a.kid)
+	}
+	if len(probe) == 0 {
+		probe = append(probe, "restorecheck-probe")
+	}
+	if a.mode == "unprovisioned" {
+		for _, k := range probe {
+			err := startupGate(ctx, pool, k)
+			chk("actor_proof_startup_gate_refuses_"+k, err != nil && strings.Contains(err.Error(), "refusing to start"), "kid=%s err=%v (a production platform-api must refuse to start until a NEW key is provisioned)", k, err)
+		}
+		if len(tenants) == 0 {
+			chk("actor_proof_verifier_fails_closed", false, "no tenant to scope the probe")
+			return nil
+		}
+		// a well-formed proof token (valid shape, random MAC) must be refused with AP002 (unknown/inactive key): no proof can verify
+		now := time.Now().Unix()
+		mac := make([]byte, 32)
+		if _, err := rand.Read(mac); err != nil {
+			return err
+		}
+		actor := uuid.NewString()
+		zeros := strings.Repeat("0", 64)
+		token := strings.Join([]string{"v1", probe[0], actor, "tenant", tenants[0].String(), "ledger_adjustment:initiate", "new", zeros,
+			fmt.Sprint(now), fmt.Sprint(now + 30), "restorecheck-nonce-0001", hex.EncodeToString(mac)}, "|")
+		errRB := errors.New("rollback")
+		err := pool.WithTenant(ctx, tenants[0], func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.actor_proof', $1, true)`, token); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT actor_proof_require($1::uuid, 'tenant', $2::uuid, 'ledger_adjustment:initiate', 'new', $3)`, actor, tenants[0], zeros); err != nil {
+				return err
+			}
+			return errRB
+		})
+		var pe *pgconn.PgError
+		ok := errors.As(err, &pe) && pe.Code == "AP002"
+		chk("actor_proof_verifier_fails_closed", ok, "a well-formed proof presented to actor_proof_require is refused with AP002 (got %v)", err)
+		return nil
+	}
+	// provisioned
+	err := startupGate(ctx, pool, a.kid)
+	chk("actor_proof_startup_gate_admits_new_kid", err == nil, "kid=%s err=%v", a.kid, err)
+	for _, k := range a.retired {
+		err := startupGate(ctx, pool, k)
+		chk("actor_proof_startup_gate_refuses_retired_"+k, err != nil && strings.Contains(err.Error(), "refusing to start"), "kid=%s err=%v", k, err)
+	}
+	return nil
+}
+
+func run(expectAnchor string, persist bool, ap actorProofCheck) error {
+	if err := ap.validate(); err != nil {
+		return err
+	}
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
 		return errors.New("DATABASE_URL (the igaming_runtime credential) is required")
@@ -172,5 +296,6 @@ func run(expectAnchor string, persist bool) error {
 	}
 	_, devErr := db.VerifyEnvironmentAnchor(ctx, "development", pool)
 	chk("startup_guard_development_process_never_blocked", devErr == nil, "err=%v", devErr)
-	return nil
+
+	return checkActorProof(ctx, pool, ap, tenants)
 }

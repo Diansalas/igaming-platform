@@ -31,8 +31,10 @@
 #   5. pg_restore --single-transaction --exit-on-error --no-owner --role=<owner>: ALL or NOTHING; data loads before any trigger or policy
 #      exists (the archive is pre-data/data/post-data). The data of `database_environment` is NOT restored (M4): the anchor of a restored
 #      database is BLANK, so a production start refuses until the owner records the right value deliberately
+#      The rows of `actor_proof_keys` are not restored either (owner decision 5, ADR 0122 section 10): a restored database has NO actor-proof key
+#      and fails closed on every governed write until deploy/backup/rekey-actor-proof.sh provisions a NEW one
 #   6. post-restore-grants.sql (database ACL, schema owner) and ANALYZE
-# NOT done here: credentials, the anchor, `cmd/migrate verify`, the data comparison (verify.sh), reconciliation.
+# NOT done here: credentials, the anchor, the actor-proof re-key, `cmd/migrate verify`, the data comparison (verify.sh), reconciliation.
 #
 # Test hooks (drill only): RESTORE_TEST_FAULT=kill_midway terminates pg_restore part-way to prove the rollback; =swap_after_verify overwrites the
 # originals after verification to prove only the verified private copies are used.
@@ -296,8 +298,16 @@ fi
 
 # ---- 6. all-or-nothing restore --------------------------------------------------------------------------------------
 # the environment anchor DATA is not restored (M4): select the TOC entries without it
-grep -v ' TABLE DATA public database_environment ' "${WORK}/toc.txt" >"${WORK}/toc.filtered"
+# Owner decision 5 (ADR 0122 section 10): the actor-proof signing secrets are NEVER restored either. A set made by this tool's backup.sh does not carry
+# them (the table is dumped EMPTY); a LEGACY set (made before the decision) does, and is treated as a signing-material-bearing artefact: its
+# actor_proof_keys rows are skipped here as well, so the restored database always starts with NO actor-proof key.
+APK_LEGACY=0
+grep -q -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' "${WORK}/toc.txt" && APK_LEGACY=1
+grep -v -e ' TABLE DATA public database_environment ' "${WORK}/toc.txt" | grep -v -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' >"${WORK}/toc.filtered" || true
 SKIPPED=$(( $(grep -c . "${WORK}/toc.txt") - $(grep -c . "${WORK}/toc.filtered") ))
+if [ "$APK_LEGACY" -eq 1 ]; then
+  bk_log "WARNING: this set CARRIES actor_proof_keys data (a legacy set made before owner decision 5). The rows are skipped, but the set itself holds signing secrets: handle and retire it as a signing-key-bearing artefact (docs/runbooks/backup-restore-dr.md section 5a) and rotate the actor-proof key family"
+fi
 T_RESTORE0="$(now_s)"
 if [ "${RESTORE_TEST_FAULT:-}" = "kill_midway" ]; then
   [ "$BK_TARGET_LOCAL" -eq 1 ] || bk_die "RESTORE_TEST_FAULT is honoured only for a throwaway drill target"
@@ -346,7 +356,7 @@ fi
 T_END="$(now_s)"
 CREATED_DB=""   # success: keep it
 
-bk_log "restored into ${NEW_DB} (owner ${OWNER_ROLE}); source environment '${SRC_ENV}'; the environment anchor was NOT restored (${SKIPPED} TOC entry skipped)"
+bk_log "restored into ${NEW_DB} (owner ${OWNER_ROLE}); source environment '${SRC_ENV}'; the environment anchor was NOT restored and actor_proof_keys holds NO key (${SKIPPED} TOC data entries skipped)"
 echo "TIMING|restore_total_seconds|$(elapsed_s "$T0" "$T_END")"
 echo "TIMING|restore_integrity_and_decrypt_seconds|$(elapsed_s "$T0" "$T_CREATE")"
 echo "TIMING|restore_pg_restore_seconds|$(elapsed_s "$T_RESTORE0" "$T_RESTORE1")"
@@ -357,4 +367,7 @@ restore: NEXT (not done by this script): re-provision credentials from the secre
 restore: environment role-provisioning script, then run deploy/backup/verify.sh, then reconcile before opening traffic. The
 restore: database_environment anchor is BLANK: a production platform-api refuses to start until the owner records it - record 'production'
 restore: ONLY after confirming that the source environment above was production. See docs/runbooks/backup-restore-dr.md "Post-restore checklist".
+restore: ACTOR-PROOF KEY: the restored database holds NO actor-proof key (it is never in a logical dump); every governed write (K1/K2/K3, launch,
+restore: RG floors, staff lifecycle) fails closed with AP002 and a production platform-api refuses to start until you provision a NEW key with
+restore: deploy/backup/rekey-actor-proof.sh (never reuse the source's kid; verify.sh --expect-actor-proof provisioned then checks it).
 EOF

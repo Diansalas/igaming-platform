@@ -135,6 +135,11 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO igaming_backup;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM igaming_backup;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_backup;
 
+-- NOTE (owner decision 5, ADR 0122 section 10): "everything" includes actor_proof_keys. The logical DUMP excludes that table's rows (--exclude-table-data) and the
+-- baseline never reads the secret column, but the role keeps the table-level SELECT: pg_dump takes `LOCK TABLE ... IN ACCESS SHARE MODE` on every table it
+-- dumps, including one whose data is excluded, and that lock needs table-level SELECT (a column-level grant was tried in the drill and pg_dump failed with
+-- "permission denied for table actor_proof_keys"). So a stolen backup CREDENTIAL can still read the signing secret; that residual is recorded in
+-- docs/plans/backup-exclude-actor-secret-record.md.
 -- ... and on whatever the migration owner creates later. The migration owner is `igaming` by convention
 -- (on RDS: the master user; this file runs connected as that role there, so current_user is used).
 DO $$
