@@ -2983,3 +2983,20 @@ integration), `go test -p 2 ./...`, golangci-lint `--new-from-rev=ff23a5c` plain
 integration `-p 1` stafflifecycle, cmd/seed-admin, db, identity, providercred, capability PASS; httpserver affected set
 (as in 28.8 plus `NR[0-9]`) PASS. With the (removed) index the eight packages above failed as described; without it
 they were not re-run in this round (no code they reach changed).
+
+
+## Amendment (2026-10-16, A10c, SR10C-5): server-side Idempotency-Key on the K1, K3 and HSEC staff mutating routes
+
+
+**Amendment (A10c, SR10C-5): server-side Idempotency-Key on the K1, K3 and HSEC staff mutating routes.** Sections 6.6 / C8 said the admin four-eyes
+routes carry no `Idempotency-Key` and that the client re-sends after step-up without a server claim. That is superseded for exactly 13 routes
+(K1 request, cancel, approve, reject, revoke; K3 request, approve, reject, cancel; HSEC request, approve, reject, cancel), by an OPTIONAL header.
+Scope and semantics: (1) the wrapper `staffIdempotent` runs inside `staffRoute` and the route's permission gate, so authentication, aal2, session
+liveness, step-up freshness and the static permission are all evaluated before a key is looked at; a replay is never served to a revoked session.
+(2) A key is scoped to (path tenant, acting staff id, key) and pinned to SHA-256 of method, path, query and raw body; the same key with another
+request is 409 `IDEMPOTENCY_MISMATCH`, while the first request is running 409 `IDEMPOTENCY_IN_PROGRESS`. (3) Only the request hash, the 2xx status code,
+the actor and timestamps are stored (table `staff_idempotency_keys`, migration 0164, FORCE RLS on `app.tenant_id`); NEVER a response body, because the
+governed rows are readable only in an acting session (ADR 0114 12.4). A replay answers the stored status with the fixed body
+`{"status":"already_applied"}` and `Idempotent-Replayed: true`; clients re-read through the governed read routes. (4) A guard trigger permits only the
+one-shot `in_progress -> completed` update and deletes of `in_progress` rows or completed rows older than 24 h; the wrapper sweeps expired rows of the
+tenant (completed > 24 h, in_progress > 15 min) before reserving, so an orphaned key is reclaimable after 15 minutes. (5) Accepted limitation (SR10C-3):
