@@ -99,6 +99,12 @@ func TestA10c_HSEC_CandidatesAndIdempotency(t *testing.T) {
 	if n1 := w.a.idemRows(t, w.tenant); n1 != n0 {
 		t.Fatalf("a forbidden tenant role reserved a key (%d -> %d)", n0, n1)
 	}
+	// A platform caller naming a tenant that does not exist: the foreign-key violation of the reservation falls through to the
+	// handler's own refusal (never a 500, never a 2xx) and nothing is stored for that tenant.
+	gr := w.a.doRaw("POST", "/v1/admin/tenants/"+uuid.NewString()+"/withdrawal-hold-resolutions", pa, body, idemHdr("hsec-ghost"))
+	if gr.status < 400 || gr.status >= 500 {
+		t.Fatalf("ghost tenant with a key: %d %s", gr.status, gr.body)
+	}
 	// Mismatch.
 	other := a10cJSON(t, map[string]any{"withdrawal_request_id": wr.String(), "kind": "release_hold_to_player", "reason_code": "tenant_suspended_release",
 		"evidence_ref_hash": strings.Repeat("cd", 32), "note": "changed"})
