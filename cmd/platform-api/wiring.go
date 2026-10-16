@@ -76,9 +76,9 @@ type mockWiring struct {
 	// (geolocation.StaticLocator) reports for every request (A8): the
 	// operator-set MOCK_GEOLOCATION_COUNTRY, honoured ONLY when mock
 	// components are enabled (test support on, non-production guard
-	// environment). Empty means the Locator reports UNKNOWN and the
-	// operating-market gate refuses every request (fail closed). It is
-	// never derived from a request.
+	// environment). Empty (owner decision 3) means the gate's Locator is the
+	// production-eligible KYC-verified-residence source instead
+	// (marketEvidenceLocator). It is never derived from a request.
 	GeolocationCountry string
 }
 

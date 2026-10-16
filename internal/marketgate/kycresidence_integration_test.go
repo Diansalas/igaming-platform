@@ -201,6 +201,12 @@ func TestKYCResidence_NoVerifiedResidenceMeansNoEvidenceAndRefusal(t *testing.T)
 		{"approved, residence only on a rejected row", []kycRow{
 			{status: "approved", age: 2 * time.Hour},
 			{status: "rejected", country: "MT", age: time.Hour, setAge: time.Hour}}},
+		{"older rejected row carries a residence, newer approval has none", []kycRow{
+			{status: "rejected", country: "MT", age: 2 * time.Hour, setAge: 2 * time.Hour},
+			{status: "approved", age: time.Hour}}},
+		{"older pending row carries a residence, newer approval has none", []kycRow{
+			{status: "pending", country: "MT", age: 2 * time.Hour, setAge: 2 * time.Hour},
+			{status: "approved", age: time.Hour}}},
 		{"approved MT then NEWER pending re-verification", []kycRow{
 			{status: "approved", country: "MT", age: 2 * time.Hour, setAge: 2 * time.Hour},
 			{status: "pending", age: time.Hour}}},
@@ -226,6 +232,11 @@ func TestKYCResidence_NoVerifiedResidenceMeansNoEvidenceAndRefusal(t *testing.T)
 			ev := w.locate(pool, p.id)
 			if ev.Known() {
 				t.Fatalf("%s: must be unknown evidence", tc.name)
+			}
+			// The locator itself (before the gate's own ISO validation) must not resolve either.
+			sig, err := NewKYCResidenceLocator(pool).GetSignal(context.Background(), geolocation.SignalRequest{TenantID: w.tenantID, PlayerAccountID: p.id})
+			if err != nil || sig.Outcome != geolocation.SignalInconclusive || sig.CountryCode != "" {
+				t.Fatalf("%s: locator must report inconclusive without a country, got %+v err=%v", tc.name, sig, err)
 			}
 			for _, op := range []Operation{OpDeposit, OpLaunch, OpSportsbookWager} {
 				if d := w.checkWith(t, pool, op, p.id, ev); d.Allowed || d.Code != ReasonEvidenceUnavailable {
