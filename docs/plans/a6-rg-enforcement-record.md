@@ -379,3 +379,39 @@ Private scratch DB, `-tags integration -count=1 -p 1 -v`; counts are PASS lines 
 **HDR-A6-3: stuck deposit intents block deposits (LF-A6-4).** `pending_intent_ttl` has no effect. A deposit stuck on the provider side counts toward the player's deposit limit until it resolves or ages out: up to 24 h, 7 days, 30 days or 31 days with a calendar month, with no operator override, and the player sees `deposit_limit_reached`. Decision needed before activation: accept this in writing (compliance and owner), or fund a payments slice with a governed staff resolve-to-failed path (ledger-finance review).
 
 **HDR-A6-4: PERSON-RELINK-PIN-1 and the re-link deadlock window (LF-A6-5).** No re-link writer exists. When one is built it must take the Person locks in hash order, and its tests must race an evaluation against two re-links of one pair. Open until then.
+
+## 14. Security re-check of the fix round (security specialist, 2026-10-16, tip 881642b)
+
+Scope: the A6 commits 8df678d, 2907dbe, bebd6d8 and 7347eba (SR6-1 to SR6-5, LF-A6-1). Not re-reviewed: the merged A8, A11 and A12 content.
+Method: code review, plus a scratch probe test (not committed) and a hand-applied mutant (reverted), run on the private scratch DB
+`sec_a6_review`, rebuilt at this tip. Suites re-run with `-tags integration -count=1 -p 1`: rg, withdrawal, httpserver (RG enforcement, RG options, WDRG1,
+OpenAPI RG, step-up golden table, staff route), casino, sportsbook, payments with the A6 test filters. Result: 96 PASS, 1 SKIP (the gated heavy run). b2c
+`AuthContext.test.tsx`: 4 PASS.
+
+**Verdict: NOT APPROVED. One blocking finding (SR6R-1).** The step-up part of SR6-1 and SR6-2 to SR6-5 are closed. The LF-A6-1 test is sound.
+
+| Item | Result |
+|---|---|
+| SR6-1 step-up | CLOSED. `stepUpCritical` on the POST, golden entry `critical`, counts critical 63 and none-mutating 42. Test: a stale session gets 403 `step_up_required` before the handler runs. GET stays `none`. |
+| SR6-1 guard: audit and leak | PASS. The 409 refusal is audited in its own transaction as `rg.enforcement.activation_denied` with `code=activation_not_ready`, `readiness_result`, `readiness_detail`, actor, IP, user agent and request id (seen in the probe). The 409 message carries only the closed detail vocabulary (`no_jurisdiction_referenced`, `no_currency`, `floor_missing_<kind>`, `session_*`, `read_error`) to a compliance caller who holds `rg_config:read` anyway: no jurisdiction code, currency or value is disclosed. A refused POST writes no activation row. |
+| SR6-1 guard: bypass | **FAIL, SR6R-1** (below). |
+| SR6-2 | CLOSED. `TestWDRG1_StandardGate_TenantIsolation_DirectEvaluate` calls `standard.Gate.Evaluate` directly under a tenant-B session with tenant-A ids (and with tenant A's account). It asserts an error and never `Allowed`. The HTTP suspended-account case still accepts 401. Left as is: the direct gate test now carries the isolation claim. |
+| SR6-3 | CLOSED. The denial audit records `ActorPlayer` with the account id, IP, user agent and request id. The handler fills them in, and the test asserts all five. |
+| SR6-4 | CLOSED by code (`gateDenied != nil && err != nil` returns 503 before the 403). There is no test. Residual risk is low and was disclosed by the author. |
+| SR6-5 | CLOSED for explicit logout (`queryClient.clear()`, with a test). Residual, Low (SR6R-2): the session-expiry paths (`api/client.ts` lines 103 and 111, `AuthContext.tsx` line 49) call `clearSession()` without clearing the cache. |
+| LF-A6-1 test | SOUND. It is an evaluation-only check after one stake of 100 and one win of 300, with only a loss limit of 100 set. It pins both directions: false gives usage 0, 100 allowed, 101 refused; true gives usage -200, 300 allowed, 301 refused. It also checks `loss_raw_usage` -200. I applied the unsafe mutant `req.LossMayGoNegative = true` myself: `false_floors_usage_at_zero` FAILS (101 allowed), so the mutant is killed. Reverted, and the tree is clean. The deterministic statement-timeout test (an ACCESS EXCLUSIVE lock held by the owner) keeps the assertion and is valid. |
+
+**SR6R-1 (Medium, BLOCKING): the activation guard checks a different jurisdiction from the one enforcement uses, so it can pass while every deposit and wager of the scope is refused.**
+- **What the guard checks:** `launchgov.RGActivationReadiness` checks the jurisdictions of the tenant's in-effect `tenant_jurisdiction_configs`.
+- **What enforcement reads:** `rg.EvaluateAction` reads its floors from `tenantJurisdiction`, which is `tenants.licence_id -> licences.jurisdiction_id`. That is the licence jurisdiction, and it is NULL when the tenant has no licence.
+- **Reproduced (scratch probe, not committed):**
+  1. Tenant A is licensed in jurisdiction J1, which has no floors. Its in-effect configuration names J2, which has deposit, loss and wager floors for EUR.
+  2. POST `/v1/admin/rg/enforcement` answers 201.
+  3. `EvaluateAction(deposit, EUR)` then answers `rg_config_missing`, so every deposit and wager of the tenant is refused, irreversibly.
+- **Same outcome without a licence:** the same happens for any tenant whose `licence_id` is NULL (`jur == nil` gives "not found" for every kind).
+- **Why this is realistic:** the hybrid licensing model (ADR 0006) makes a gap between the licence jurisdiction and the market configuration likely.
+- **Severity:** the critical step-up already closes the stolen-session path. What remains is the honest-mistake halt that the guard exists to prevent. The guard is documented as a guarantee in the OpenAPI text, in section 12 and in the paste-ready HDR-A6-1 ("refused unless compliance floors are in force"), and that guarantee does not hold.
+- **Required:** include the jurisdiction `tenantJurisdiction` returns in the guard's set, and refuse (`no_licence_jurisdiction` or similar) when it is NULL. Add a test for the mismatch case and the no-licence case. If the guard cannot be fixed now, remove the guarantee from the OpenAPI text, section 12 and HDR-A6-1 instead.
+- **Related, for the architect (not blocking A6):** the launch readiness check R-RG-CONFIG checks the request's `JurisdictionIDs`, so it has the same gap. More broadly, which jurisdiction governs RG under hybrid licensing (the licence or the market) is a cross-domain decision. Today enforcement uses only the licence jurisdiction.
+
+**SR6R-2 (Low, non-blocking):** session expiry and a 401 do not clear the react-query cache (see the SR6-5 row). Clear it at the same point as `clearSession()`, or subscribe the query client to session changes.
