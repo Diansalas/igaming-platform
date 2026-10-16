@@ -295,6 +295,14 @@ func TestA5DB_ReversedIsTerminal_OneReversalPerCompletion(t *testing.T) {
 	if got := a5Code(err); got != "WD021" {
 		t.Fatalf("submitted -> reversed: want WD021, got %q (%v)", got, err)
 	}
+	// A non-terminal row never carries a reversal link (WD022, before check A's WD035 at commit).
+	err = runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET reversal_ledger_transaction_id = hold_ledger_transaction_id WHERE id = $1`, sub.ID)
+		return err
+	})
+	if got := a5Code(err); got != "WD022" {
+		t.Fatalf("a reversal link on a submitted row: want WD022, got %q (%v)", got, err)
+	}
 	// ReverseCompletedPayout again: a state conflict, nothing posted.
 	err = runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ReverseCompletedPayout(ctx, tx, wr.ID, p)

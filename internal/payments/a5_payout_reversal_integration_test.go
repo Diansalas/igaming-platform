@@ -570,6 +570,25 @@ func TestA5_PayoutReversal_AmountDisputeThenReturn(t *testing.T) {
 	loAssertBalanced(t, e.pool, e.f.tenantID)
 }
 
+// The four-eyes floor is unconditional: a withdrawal policy asking for ONE approval still needs two
+// distinct Persons for a reversal (ADR 0100 s3.4 interim (b); the database floor WD026 agrees).
+func TestA5_PayoutReversal_FloorOfTwoEvenWhenThePolicyAsksForOne(t *testing.T) {
+	e := newRBEnv(t, "mock-a5-floor")
+	wr, _ := e.a5Completed(t, "a5-fl", "a5-ref-fl")
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO withdrawal_policies (tenant_id, asset_code, approval_threshold_minor_units, required_approvals, effective_from)
+			VALUES ($1, 'EUR', 1000000, 1, now() - interval '1 minute')`, e.f.tenantID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := e.a5Payload("a5-ref-fl")
+	if r := e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalRecorded); r.Required != withdrawal.MinReversalApprovers {
+		t.Fatalf("required = %d, want the floor %d", r.Required, withdrawal.MinReversalApprovers)
+	}
+	e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalExecuted)
+}
+
 // An attempt that may be dispatching right now refuses the reversal (nothing recorded).
 func TestA5_PayoutReversal_AttemptInFlight_Refused(t *testing.T) {
 	e := newRBEnv(t, "mock-a5-flight")
