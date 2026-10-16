@@ -321,3 +321,16 @@ revocation (above); a truly concurrent pair, 8 rounds, same key and body, exactl
 > revoked after the original request still receives "already applied" for that key, with no data and no effect. (6) The header remains optional;
 > without it the routes are idempotent by state as before. The key confers no authority: every four-eyes rule, proof and count is still decided by the
 > flows' own database guards.
+
+### Fix-round commands and counts (after merging `origin/claude/focused-wright-jw88w9` tip 5317641; clean merge, 0164 stays the next free number)
+
+| Command | Result |
+|---|---|
+| `gofmt -l cmd internal`; `go vet ./...`; `go vet -tags integration ./internal/...`; `golangci-lint run ./...` | clean; 0 issues (the new test files are also clean under `--build-tags integration`) |
+| `go test -count=1 ./...` (unit) | all packages ok, 0 FAIL (the earlier `deploy/backup` shellcheck failure is fixed by the merged tip) |
+| scratch DB rebuilt with the edited 0164 (`priv_db.sh`), then `bash priv_test.sh -tags integration -count=1 -p 1 -timeout 120m ./internal/httpserver ./internal/reconciliation ./internal/capability ./internal/apierror ./internal/tenant ./cmd/...` | every package ok (httpserver 1059 s, reconciliation, capability, apierror, tenant, cmd/migrate, cmd/platform-api, cmd/seed-admin) |
+| same harness, `-v`, route freeze + OpenAPI pins + step-up golden + liveness + K1/K3/HSEC + R1/R2 + A10c | 122 top-level PASS, 0 FAIL, 0 SKIP; of which 14 are `TestA10c_*` integration tests (8 from before + SR10C-1, SR10C-2, SR10C-4, session revocation, grant revocation, concurrent pair) |
+| `backoffice`: `npm run build`, `npm test` | build ok; 56 files, 643 tests PASS, 0 FAIL, 0 SKIP |
+| `b2c`: `npm run build`, `npm test` | build ok; 24 files, 140 tests PASS, 0 FAIL, 0 SKIP |
+
+Scratch DBs are dropped at the end of the session.
