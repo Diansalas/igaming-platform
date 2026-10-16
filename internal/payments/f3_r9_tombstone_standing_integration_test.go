@@ -148,6 +148,7 @@ func TestF3_R9_ClearedByK2NetRecoveryOnly(t *testing.T) {
 // reference with a succeeded payout line raises nothing of this kind.
 func TestF3_R9_OnlyRequestCorrelatedTombstones(t *testing.T) {
 	e, w := a5K3(t)
+	w.payout(300) // a withdrawal request exists in the tenant: the tombstone must still not be attributed to it
 	ref := "f3-r9-foreign-" + uuid.NewString()[:8]
 	f3ForeignTombstone(t, e, ref)
 	ms := w.stmtRun(w.source(false, r9Line(w, ref, statement.PaymentStatusSucceeded, 500, time.Now())))
