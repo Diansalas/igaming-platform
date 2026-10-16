@@ -78,7 +78,10 @@ const withdrawalHoldCheckSQL = `
 WITH
 req AS (
     SELECT w.id, w.tenant_id, w.wallet_id, w.asset_code, w.amount, w.state, w.provider_id,
-           w.hold_ledger_transaction_id, w.release_ledger_transaction_id, w.reversal_ledger_transaction_id,
+           w.hold_ledger_transaction_id, w.release_ledger_transaction_id,
+           -- A5: read through to_jsonb so the check also runs on a schema pinned below migration 0162 (the
+           -- 0124 pattern; migration tests drive reconciliation there): absent column = NULL = no reversal.
+           (to_jsonb(w) ->> 'reversal_ledger_transaction_id')::uuid AS reversal_ledger_transaction_id,
            w.state IN ('rejected', 'cancelled', 'failed', 'completed', 'reversed') AS term
       FROM withdrawal_requests w
      WHERE w.tenant_id = $1
