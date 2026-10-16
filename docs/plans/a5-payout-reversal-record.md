@@ -175,7 +175,7 @@ A5 tests (all `//go:build integration` unless noted):
 | `gofmt -l .` (Go) | clean |
 | `go vet ./...` and `go vet -tags integration ./...` | clean |
 | `golangci-lint run ./...` (2.9.0) | 0 issues |
-| `golangci-lint run --build-tags integration ./...` | 682 findings, all PRE-EXISTING (errcheck/staticcheck/unused in older test files); **0 in any A5 file** (filtered by file) |
+| `golangci-lint run --build-tags integration ./...` | 682 findings (errcheck/staticcheck/unused in older test files; the baseline count at `1adce1c` was not re-measured); **0 in any file A5 added or changed** (filtered by file) |
 | `go test ./...` (unit) | 67 packages ok, 0 FAIL, 8 without tests |
 | Integration batch 1 (`a5_rev`, 18 package trees, `-p 1`) | 17 packages ok, 3 FAIL on the first run (withdrawal: the two changed ADR 0113 assertions; adjustment: `TestB19_Migration0113UpDownUp`, check D read the new column on a schema pinned at 0113, fixed with the `to_jsonb` read; bonus: two cashback fixtures overdrew cash, fixed by funding the stake), then withdrawal, adjustment, bonus and reconciliation re-run: 5/5 ok; 4 trees without tests |
 | Integration batch 2 (`a5_rev2`) | payments ok (2738 s); httpserver 1 FAIL on the first run (`TestStepUp_GoldenTable_EveryClassifiedRoute`, the critical-route count pin 63 -> 64), fixed |
