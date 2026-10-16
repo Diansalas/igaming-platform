@@ -105,6 +105,7 @@ func (w *world) actorSummary() string {
 // dependents report SKIP [blocked-by-fail], never PASS.
 func (w *world) runAll() {
 	w.healthChecks()
+	w.captureStaleProbe()
 	w.staffAuthChecks()
 	w.setupChecks()
 	w.platformChecks()
@@ -120,4 +121,5 @@ func (w *world) runAll() {
 	w.alertingChecks()
 	w.killSwitchChecks()
 	w.observabilityChecks()
+	w.staleStepUpChecks()
 }

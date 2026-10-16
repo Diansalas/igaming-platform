@@ -91,8 +91,8 @@ func (w *world) sportsbookChecks() {
 		if !ok {
 			return
 		}
-		if after.Cash+after.Locked+after.Held != before.Cash+before.Locked+before.Held && after.Cash != before.Cash-stake {
-			t.fail("balances before cash/locked=%d/%d after=%d/%d for stake %d", before.Cash, before.Locked, after.Cash, after.Locked, stake)
+		if after.Cash != before.Cash-stake || after.Locked != before.Locked+stake {
+			t.fail("stake not reflected: cash/locked before=%d/%d after=%d/%d for stake %d (stake leaves cash and is locked until settlement)", before.Cash, before.Locked, after.Cash, after.Locked, stake)
 			return
 		}
 		rep := t.call("POST", "/v1/me/sportsbook/bets", p1.access, body)

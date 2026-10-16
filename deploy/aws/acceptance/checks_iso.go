@@ -314,8 +314,98 @@ func (w *world) isolationChecks() {
 		}
 		t.pass("a player token is refused on tenant provisioning, withdrawal approval, provider config and staff listing")
 	})
-	w.check("iso.cross_tenant_active_brand", func(t *T) {
-		t.skipPrereq("a second ACTIVE tenant with operating-market rows is an owner provisioning step (market rows have no API); with only a pending_launch isolation tenant, cross-tenant PLAYER reads cannot be exercised end to end. Staff-, login- and ownership-level isolation are asserted above. See README, 'What the suite cannot prove'")
+	w.check("iso.cross_tenant_player_isolation", func(t *T) {
+		if w.cfg.ActiveTenantB == "" {
+			t.skipPrereq("SECOND_ACTIVE_TENANT/SECOND_ACTIVE_BRAND not supplied: a second ACTIVE tenant with operating-market rows is an owner provisioning step (market rows have no API), so end-to-end cross-tenant PLAYER reads need it. Staff-, login- and ownership-level isolation are asserted by the other iso.* checks")
+			return
+		}
+		if !t.needMoney("ledger.deposit_settle_via_mock_callback") {
+			return
+		}
+		p1 := w.players["p1"]
+		pb := w.newPlayer("pb")
+		r := t.call("POST", "/v1/auth/register", "", map[string]any{"brand_slug": w.cfg.ActiveBrandB, "email": pb.email, "password": pb.password})
+		if r == nil || !t.expect(r, 201, "", "register on the second active brand") || !w.takePlayerTokens(pb, r) {
+			return
+		}
+		rv := t.call("POST", "/v1/me/email-verification/request", pb.access, nil)
+		if rv == nil || !t.expect(rv, 200, "", "token") {
+			return
+		}
+		tok := pickStr(rv.obj(), "token")
+		w.scrub.add(tok)
+		if rc := t.call("POST", "/v1/auth/email-verification/confirm", "", map[string]any{"token": tok}); rc == nil || !t.expect(rc, 204, "", "confirm") {
+			return
+		}
+		rl := t.call("POST", "/v1/auth/login", "", map[string]any{"brand_slug": w.cfg.ActiveBrandB, "email": pb.email, "password": pb.password})
+		if rl == nil || !t.expect(rl, 200, "", "login on B") || !w.takePlayerTokens(pb, rl) {
+			return
+		}
+		me := t.call("GET", "/v1/me", pb.access, nil)
+		if me == nil || !t.expect(me, 200, "", "me on B") {
+			return
+		}
+		pb.id = pickStr(me.obj(), "id")
+		if pickStr(me.obj(), "tenant_id") == w.tenantID {
+			t.fail("the player registered on tenant B's brand is bound to tenant A")
+			return
+		}
+		// A deposit on B (its provider capability is a tenant-B owner step; the read checks below run either way).
+		_, did, _ := t.deposit(pb, w.cfg.Asset, 1234, "acc-"+w.cfg.RunID+"-xt-dep")
+		if did != "" {
+			rr := t.call("GET", "/v1/me/deposits/"+did, p1.access, nil)
+			if rr == nil {
+				return
+			}
+			if rr.ok() || (rr.Status != 404 && rr.Status != 403) {
+				t.fail("tenant-A player reached tenant-B deposit %s: %s", did, rr.brief())
+				return
+			}
+			cb := t.call("POST", "/v1/me/deposits/"+did+"/simulate-callback", p1.access, nil)
+			if cb == nil {
+				return
+			}
+			if cb.ok() {
+				t.fail("tenant-A player settled tenant-B's deposit")
+				return
+			}
+		}
+		if id := w.facts["p1_deposit_id"]; id != "" {
+			rr := t.call("GET", "/v1/me/deposits/"+id, pb.access, nil)
+			if rr == nil {
+				return
+			}
+			if rr.ok() {
+				t.fail("tenant-B player reached tenant-A deposit %s", id)
+				return
+			}
+		}
+		role := w.roleOr("TENANT_ADMIN", "COMPLIANCE", "FINANCE1")
+		if role != "" {
+			g := t.acall(role, "GET", "/v1/admin/players/"+pb.id, nil)
+			if g == nil {
+				return
+			}
+			if g.ok() {
+				t.fail("tenant-A staff read tenant-B player %s", pb.id)
+				return
+			}
+			lst := t.acall(role, "GET", "/v1/admin/players?q=acc-"+w.cfg.RunID+"&limit=100", nil)
+			if lst == nil || !t.expect(lst, 200, "", "list tenant-A players") {
+				return
+			}
+			for _, it := range items(lst) {
+				if pickStr(it, "id") == pb.id {
+					t.fail("tenant-B player appears in tenant A's player list")
+					return
+				}
+			}
+		}
+		dep := "tenant B accepted a deposit, and tenant-A's player could neither read nor settle it"
+		if did == "" {
+			dep = "tenant B has no deposit capability configured, so cross-tenant reads of a tenant-B deposit were NOT exercised"
+		}
+		t.pass("tenant-B player %s is bound to tenant B; %s; tenant-B's player cannot read tenant A's deposit; tenant-A staff cannot read or list the tenant-B player", pb.id, dep)
 	})
 	_ = fmt.Sprint
 }

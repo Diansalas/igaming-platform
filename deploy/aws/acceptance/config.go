@@ -41,6 +41,8 @@ type config struct {
 	Configure       bool // apply the synthetic tenant's provider capabilities and casino game opt-in (idempotent PUTs)
 	KillSwitchDrill bool // engage and release a payments kill switch (the sanctioned synthetic alert); runs last
 	SecondTenant    string
+	ActiveTenantB   string // SECOND_ACTIVE_TENANT: an owner-provisioned ACTIVE second tenant (market rows written) for end-to-end cross-tenant player checks
+	ActiveBrandB    string // SECOND_ACTIVE_BRAND
 	SecondBrand     string
 	ProveStaleStep  bool
 	ReconWait       time.Duration
@@ -115,6 +117,8 @@ func parseConfig(args []string) (*config, error) {
 	fs.BoolVar(&c.Configure, "configure", envBool("CONFIGURE", true), "apply idempotent synthetic-tenant configuration (provider capabilities, casino opt-in) when credentials allow")
 	fs.BoolVar(&c.KillSwitchDrill, "kill-switch-drill", envBool("KILL_SWITCH_DRILL", true), "engage then release a payments kill switch (raises the sanctioned synthetic alert); needs ADMIN and ADMIN2")
 	fs.StringVar(&c.SecondTenant, "second-tenant", envOr("SECOND_TENANT", "acceptance-tenant-b"), "slug of the isolation tenant created/reused by the suite (empty disables)")
+	fs.StringVar(&c.ActiveTenantB, "second-active-tenant", envOr("SECOND_ACTIVE_TENANT", ""), "slug of an owner-provisioned ACTIVE second tenant with open market rows (enables end-to-end cross-tenant player checks)")
+	fs.StringVar(&c.ActiveBrandB, "second-active-brand", envOr("SECOND_ACTIVE_BRAND", ""), "brand slug of SECOND_ACTIVE_TENANT")
 	fs.BoolVar(&c.ProveStaleStep, "prove-stale-stepup", envBool("PROVE_STALE_STEPUP", false), "wait past the critical step-up window and prove a stale second factor is refused (adds ~5.5 min)")
 	reconWait := fs.Duration("recon-wait", 0, "wait up to this long for the first reconciliation run (env RECON_WAIT_SECONDS also accepted)")
 	fs.Usage = func() {
@@ -195,6 +199,12 @@ func (c *config) validate() error {
 	}
 	if c.SecondTenant != "" && (!reSlug.MatchString(c.SecondTenant) || c.SecondTenant == c.Tenant) {
 		errs = append(errs, "SECOND_TENANT must be a slug different from TENANT")
+	}
+	if (c.ActiveTenantB == "") != (c.ActiveBrandB == "") {
+		errs = append(errs, "SECOND_ACTIVE_TENANT and SECOND_ACTIVE_BRAND must be set together")
+	}
+	if c.ActiveTenantB != "" && (!reSlug.MatchString(c.ActiveTenantB) || !reSlug.MatchString(c.ActiveBrandB) || c.ActiveTenantB == c.Tenant) {
+		errs = append(errs, "SECOND_ACTIVE_TENANT/BRAND must be slugs and the tenant must differ from TENANT")
 	}
 	admin := c.Actors["ADMIN"]
 	if !admin.configured() {

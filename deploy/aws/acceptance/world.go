@@ -42,6 +42,7 @@ type world struct {
 	// facts recorded by earlier checks for later ones
 	facts map[string]string
 	bal   map[string]int64 // balances verified so far, "<player tag>/<asset>"
+	probe *staleProbe
 }
 
 func newWorld(cfg *config, rep *reporter, scrub *scrubber, c *client) *world {
