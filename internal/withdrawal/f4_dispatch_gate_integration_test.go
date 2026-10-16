@@ -55,6 +55,11 @@ func TestF4_DB_E7_NeedsAnAllowingDecisionOfTheSameTransaction(t *testing.T) {
 		return MarkSubmitted(ctx, tx, wr.ID, a13PSP, "ref-"+uuid.NewString()[:8])
 	}), "WD053")
 	wantCode(t, "raw E7 with no decision", w.rtExec(`UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'p' WHERE id = $1`, wr.ID), "WD053")
+	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		return TranslateDispatchBackstopError(MarkSubmittedPending(ctx, tx, wr.ID, a13PSP))
+	}); !errors.Is(err, ErrDispatchGateBackstop) || a13Code(err) != "WD053" {
+		t.Fatalf("a WD053 refusal translates to ErrDispatchGateBackstop (keeping the SQLSTATE), got %v", err)
+	}
 
 	// A DENYING decision in the same transaction refuses even next to an allowing one.
 	deny := withdrawalgate.Decision{GateCode: GateCodeRisk, Reason: risk.CodeHardLimitBreach, Outcome: "deny"}
