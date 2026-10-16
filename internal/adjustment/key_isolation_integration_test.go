@@ -746,6 +746,23 @@ func TestRestoreDDL_MatchesTheMigratedKeySchema(t *testing.T) {
 	if err := restored.Raw().QueryRow(ctx, fp).Scan(&fb); err != nil || fb != fa {
 		t.Fatalf("after undoing the drifts the FP must equal the migrated one again: %s vs %s (%v)", fb, fa, err)
 	}
+	// ... and it records WHICH privilege WHO holds, not only how many grants exist (SELECT vs INSERT for the same role, same role vs PUBLIC)
+	fpWith := func(do, undo string) string {
+		t.Helper()
+		kiExec(t, restored, do)
+		defer kiExec(t, restored, undo)
+		var v string
+		if err := restored.Raw().QueryRow(ctx, fp).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	sel := fpWith(`GRANT SELECT ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT ON actorproof_private.actor_proof_keys FROM igaming_runtime`)
+	ins := fpWith(`GRANT INSERT ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE INSERT ON actorproof_private.actor_proof_keys FROM igaming_runtime`)
+	pub := fpWith(`GRANT SELECT ON actorproof_private.actor_proof_keys TO PUBLIC`, `REVOKE SELECT ON actorproof_private.actor_proof_keys FROM PUBLIC`)
+	if sel == ins || sel == pub {
+		t.Errorf("the key-schema FP must tell grants apart: SELECT->runtime %s, INSERT->runtime %s, SELECT->PUBLIC %s", sel, ins, pub)
+	}
 	var n int
 	if err := restored.Raw().QueryRow(ctx, `SELECT count(*) FROM actorproof_private.actor_proof_keys`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("the restore DDL must create the key table EMPTY: %d (%v)", n, err)
