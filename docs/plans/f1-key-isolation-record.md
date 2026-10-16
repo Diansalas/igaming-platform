@@ -59,16 +59,64 @@ view variant breaks restore ordering and is re-granted by the blanket grants).
 
 **Added:**
 - `drill.sh`: `backup_role_cannot_read_actor_proof_key` (6 SQL probes, 42501 only; search_path detour; pg_dump of the schema, the table, `--schema-only` and the whole database without the exclusion all fail with `permission denied for schema actorproof_private` and leak nothing; no privilege by OID; no executable function reaching the schema; superuser control), `backup_role_cannot_dump_actor_proof_schema_even_without_exclusion`, `backup_refused_when_backup_role_can_read_actor_proof_key`, `migration_0166_up_down_up_on_a_backup_granted_database` (incl. the APM01 mismatch refusal and the byte-faithful re-grant on down), `true_legacy_set_is_restored_without_rows_and_migrates`.
-- `internal/adjustment/key_isolation_integration_test.go`: `TestKeyIsolation_Catalog`, `TestKeyIsolation_RuntimeRoleDenied` (20 probes), `TestKeyIsolation_ProofRulesHoldAgainstTheMovedKey` (AP001..AP005, 11 cases), `TestKeyIsolation_StartupGate`, `TestMigration0166_UpDownUp_LegacyRows_Refusals` (5 up refusals, 10 down refusals, each with an unchanged catalog; the baseline INV statement flags all 7 grant plants), `TestRestoreDDL_MatchesTheMigratedKeySchema`.
+- `internal/adjustment/key_isolation_integration_test.go` (beside the K2 actor-proof tests: importing `prooftest` switches on the step-up fallback at init, which `internal/actorproof`'s own unit tests must not see): `TestKeyIsolation_Catalog`, `TestKeyIsolation_RuntimeRoleDenied` (20 probes), `TestKeyIsolation_ProofRulesHoldAgainstTheMovedKey` (AP001..AP005, 11 cases), `TestKeyIsolation_StartupGate`, `TestMigration0166_UpDownUp_LegacyRows_Refusals` (5 up refusals, 10 down refusals, each with an unchanged catalog; the baseline INV statement flags all 7 grant plants), `TestRestoreDDL_MatchesTheMigratedKeySchema` (incl. the FP is not blind: six drifts change it, and it tells SELECT/INSERT/PUBLIC grants apart).
 - `deploy/staging-runner/sql/verify-db.sql`: `backup_role_has_no_actor_proof_key_access`, `actor_proof_key_isolated`; the runtime check now covers the schema.
 
 ## 5. Results
 
-RESULTS_PLACEHOLDER
+All local, synthetic data only; the shared 5432 cluster was used only through the private scratch database `f120261016220530p8792x01` (rebuilt by
+`priv_db.sh`) and the scratch databases the tests create; drills on throwaway clusters under `/tmp/pgdrill-*` (ports 5497-5499 checked free in
+`/proc/net/tcp` first; `runuser -u postgres`; no pkill; 5432 never contacted).
+
+| Check | Command | Result |
+|---|---|---|
+| Full drill (incl. PITR), commit `a894cfc` | `deploy/backup/drill.sh` | **135 PASS, 0 FAIL, `A12 DRILL RESULT: PASS`** (112,732 synthetic ledger entries in 56,334 transactions, 286,555 rows); incl. the five new F1 results and the PITR verifies (now asserting the key rows survived, read as the owner) |
+| Small drill, final commit | `deploy/backup/drill.sh --small --skip-pitr` | **125 PASS, 0 FAIL, `A12 DRILL RESULT: PASS`** (commit `e572f2f`; the only changes after the full drill are test code and `prooftest` statement texts) |
+| Small drill, earlier commit | same | 125 PASS, 0 FAIL (the first small run FAILED `migration_0166_up_down_up_on_a_backup_granted_database`: `cmd/migrate down` needs `APP_ENV=development`; fixed in the drill, then green) |
+| Staging-runner modes on a throwaway cluster | `deploy/staging-runner/tests/run-local-modes.sh` | **207 ok, 0 FAIL**, exit 0 (incl. "3 actor-proof key probes denied", a mis-granted backup role FAILS the key probe, the seed writes `actorproof_private.actor_proof_keys`) |
+| New integration tests | `priv_test.sh -tags integration -count=1 -p 1 -run 'KeyIsolation\|Migration0166\|RestoreDDL' ./internal/adjustment/` | 6/6 PASS |
+| Integration packages | `priv_test.sh -tags integration -count=1 -p 1 <pkgs>` | ok: `internal/actorproof/...`, `internal/adjustment` (K1/K2 + F1), `internal/withdrawal` (T8, 0162/0165 migrations), `internal/launchgov`, `internal/stafflifecycle`, `internal/aml`, `internal/kyc`, `cmd/...` (5 packages); `internal/payments -run 'T8\|A5\|ActorProof\|K3'` ok (1430 s); `internal/httpserver -run 'StepUp\|StaffRoutes\|PayoutReversal\|A5HTTP\|ActorProof'` ok, `internal/rg` ok (366 s), `internal/db` ok |
+| Unit tests | `go test ./...` | 74 packages ok, 8 without tests, 0 FAIL |
+| Static (deploy) | `go test -count=1 ./deploy/...` | all ok |
+| gofmt / vet | `gofmt -l .`; `go vet ./...`; `go vet -tags integration ./...`; `go vet -tags 'integration drillseed' ./internal/httpserver/` | clean |
+| Lint | `golangci-lint run` on the touched packages, plain and `--build-tags integration` | 0 issues |
+| shellcheck | `shellcheck -S warning -e SC1091` on every touched script | clean except 5 pre-existing SC2034/SC2155 in `drill.sh` (identical count on the base commit) |
+
+Intermediate failures, fixed (not hidden): (1) the up migration's unexpected-grant check let a grant through when no `igaming_backup` role exists
+(NULL in `NOT (grantee = NULL ...)`) - caught by the new up-refusal test, fixed with `COALESCE`; (2) `prooftest` first used a "try the new table,
+fall back on 42P01" insert, which aborts a caller's transaction on a pre-0166 scratch database (two withdrawal migration tests failed) - replaced by a
+`to_regclass` lookup first; (3) a `fmt.Sprintf` table name in `prooftest` tripped the launchgov status-writer scan - replaced by literal statements;
+(4) importing `prooftest` into `internal/actorproof`'s own test binary switched on its step-up fallback for the unit tests there - the F1 tests moved
+to `internal/adjustment`; (5) one batch hit a concurrently cleaned Go build cache (`could not import ... no such file`) - re-run green; (6) one
+small-drill attempt hit a toolchain directory being rewritten by another process - re-run green.
 
 ## 6. Mutation pass on the permission model (kill or justify)
 
-MUTATION_PLACEHOLDER
+Each mutant was applied to a private copy of the tree, a private scratch database rebuilt from it, and the six key-isolation integration tests run
+(`scratchpad/f1/mutate.sh`); the paths that need a real `igaming_backup` role (absent from the shared cluster, and roles must not be changed there)
+were run on a throwaway cluster with the drill's own checks (`scratchpad/f1/mutrepro.sh`, port 5497). 24 mutants run: **24 killed** (two of them only after a test was strengthened or a throwaway-cluster check was added, see below); 1 equivalent mutant justified, not run.
+
+| Mutant | Killed by |
+|---|---|
+| up: keep the backup role's SELECT on the moved table | throwaway cluster (drill check): backup keeps the privilege, and the down then refuses |
+| up: GRANT USAGE on the schema to the runtime role / GRANT SELECT to PUBLIC | `TestKeyIsolation_Catalog` (non-owner grants) |
+| up: copy into a new table instead of moving (public table left behind) | `TestKeyIsolation_Catalog` (public table must be gone) |
+| up: verifier `search_path` includes the private schema / verifier still reads `public` / probe not SECURITY DEFINER | `TestKeyIsolation_Catalog` (pinned definer set, config and return types) |
+| up: drop the unexpected-grant check / reintroduce the NULL bug / drop the column-grant check / drop the dependent-object check | `TestMigration0166_...` (APM01 expected) |
+| up: drop the backup-SELECT mismatch refusal | throwaway cluster (drill check: mismatch not refused) |
+| down: drop the grant check / the column check / the object check | `TestMigration0166_...` (APM02 expected) |
+| down: keep the schema / alter the restored probe body | `TestMigration0166_...` (0165 snapshot byte for byte) |
+| down: drop the backup SELECT reconstruction | throwaway cluster (ACL differs from the 0165 one) |
+| restore DDL: no RLS / a PUBLIC grant / a weaker CHECK | `TestRestoreDDL_MatchesTheMigratedKeySchema` |
+| baseline INV: drop the direct-grant term | `TestMigration0166_...` (a write grant must be flagged) |
+| baseline INV: drop the effective USAGE/CREATE term | not killed by the Go tests (every Go plant is a direct grant, also counted by the direct term); **killed on the throwaway cluster**: with `igaming_runtime` a member of `pg_write_all_data` (USAGE on every schema, no SELECT, no direct grant) the original counts 1, the mutant 0 |
+| baseline FP: drop grantee names / privilege types from the relation ACL | first SURVIVED (the FP still counted grants); the DDL test now also requires different FPs for SELECT vs INSERT vs PUBLIC grants: KILLED |
+
+Justified (not a mutant worth killing): `REVOKE ALL ON SCHEMA actorproof_private FROM PUBLIC` in the up and the DDL - `CREATE SCHEMA` grants nothing to
+PUBLIC, so removing it is an equivalent mutant (kept as an explicit belt). Static-only guards (exclusion flag, TOC regexes, preflight, probe pack, init
+scripts) are pinned by `deploy/backup/*_test.go` and `deploy/staging-runner/runner_static_test.go` and exercised end to end by the drill's negative
+controls (`backup_role_cannot_dump_actor_proof_schema_even_without_exclusion`, `backup_refused_when_backup_role_can_read_actor_proof_key`,
+`backup_with_actor_proof_rows_in_stream_is_refused`, the FOREIGN and LEGACY set restores); they were not mutated one by one.
 
 ## 7. Residuals
 
