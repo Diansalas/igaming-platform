@@ -24,7 +24,8 @@ SELECT 'RESULT|temp_denied_for_runtime_session|' || CASE WHEN NOT has_database_p
 SELECT 'RESULT|schema_migrations_denied_for_runtime_session|' ||
        CASE WHEN NOT (has_table_privilege(current_user, 'public.schema_migrations', 'INSERT') OR has_table_privilege(current_user, 'public.schema_migrations', 'UPDATE')
                       OR has_table_privilege(current_user, 'public.schema_migrations', 'DELETE') OR has_table_privilege(current_user, 'public.schema_migrations', 'TRUNCATE')) THEN 'PASS' ELSE 'FAIL' END
-       || '|runtime session cannot write schema_migrations';
+       || '|runtime session INSERT=' || has_table_privilege(current_user, 'public.schema_migrations', 'INSERT') || ' UPDATE=' || has_table_privilege(current_user, 'public.schema_migrations', 'UPDATE')
+       || ' DELETE=' || has_table_privilege(current_user, 'public.schema_migrations', 'DELETE') || ' TRUNCATE=' || has_table_privilege(current_user, 'public.schema_migrations', 'TRUNCATE');
 
 SELECT 'RESULT|schema_create_denied_for_runtime_session|' || CASE WHEN NOT has_schema_privilege(current_user, 'public', 'CREATE') THEN 'PASS' ELSE 'FAIL' END
        || '|CREATE on schema public=' || has_schema_privilege(current_user, 'public', 'CREATE');

@@ -34,7 +34,8 @@ FROM alpine:3.20
 
 # GNU coreutils/grep/sed/gawk/findutils/procps: the deploy/backup scripts use GNU options (stat -c, date -d, sed -i, ps --ppid, ...) that
 # busybox does not provide. openssl >= 3.0 (Alpine 3.20 ships 3.3). postgresql16-client brings psql 16 (\bind) and the 16 dump tools.
-RUN apk add --no-cache bash ca-certificates curl jq coreutils grep sed gawk findutils procps-ng openssl age postgresql16-client aws-cli
+RUN apk add --no-cache bash ca-certificates curl jq coreutils grep sed gawk findutils diffutils openssl age postgresql16-client aws-cli \
+    && (apk add --no-cache procps-ng || apk add --no-cache procps)
 
 RUN adduser -D -u 10001 -h /home/runner runner \
     && install -d -m 0700 -o runner -g runner /home/runner/scratch \

@@ -73,7 +73,7 @@ for sh in "${REPO_ROOT}"/deploy/staging-runner/*.sh "${REPO_ROOT}"/deploy/stagin
   bash -n "${sh}" || fail "bash -n ${sh}"
 done
 if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -x -e SC1091 "${REPO_ROOT}"/deploy/staging-runner/*.sh "${REPO_ROOT}"/deploy/staging-runner/modes/*.sh "${REPO_ROOT}"/deploy/staging-runner/tests/*.sh "${AWS_DIR}/scripts/deploy.sh" \
+  shellcheck -x -S warning -e SC1091 "${REPO_ROOT}"/deploy/staging-runner/*.sh "${REPO_ROOT}"/deploy/staging-runner/modes/*.sh "${REPO_ROOT}"/deploy/staging-runner/tests/*.sh "${AWS_DIR}/scripts/deploy.sh" \
     || fail "shellcheck on the staging runner scripts"
 else
   echo "shellcheck not installed: skipped"

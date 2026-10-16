@@ -212,7 +212,14 @@ rn_drill_restore() {
   else
     rn_show_script_output "${RN_SCRATCH}/restore1.log"
     RN_DRILL_DB_CREATED=0
-    rn_result restore_provision FAIL "restore.sh --phase provision failed: $(grep -E '^(backup|restore):' "${RN_SCRATCH}/restore1.log" | tail -2 | tr '\n' ' ')"
+    local pmsg
+    pmsg="$(grep -E '^(backup|restore):' "${RN_SCRATCH}/restore1.log" | grep -vE 'FAILED \(exit' | tail -1)"
+    if grep -qE 'owner role .* holds|refusing to make it the owner' "${RN_SCRATCH}/restore1.log"; then
+      # restore.sh requires the owner role (igaming) to be unprivileged; on RDS the master/owner is a member of rds_superuser and holds CREATEROLE
+      rn_result restore_provision BLOCKED "restore.sh refused the owner role (plan 8.2, G8: the RDS master igaming is an rds_superuser member): ${pmsg}"
+    else
+      rn_result restore_provision FAIL "restore.sh --phase provision failed: ${pmsg}"
+    fi
     rn_drill_verify_source_only "$rundir" "$keydir" "$anchor"
     return 0
   fi
