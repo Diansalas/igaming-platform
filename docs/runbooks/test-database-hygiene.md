@@ -1,7 +1,6 @@
 # Runbook: test and scratch database hygiene (TEST-HYGIENE-1 policy)
 
-Status: policy and procedure (A13). The leak is a local/dev problem only: CI uses an ephemeral service container. **The automatic reaper proposed
-in section 5 is `NOT IMPLEMENTED`**; until it exists this policy is manual. Evidence of the problem: roughly 740 leaked scratch databases
+Status: policy and procedure (A13). The leak is a local/dev problem only: CI uses an ephemeral service container. **UPDATE (A13a): a safe opt-in reaper now exists** (`SCRATCHDB_REAP=1 go test -tags integration -run '^TestReapLeakedScratchDatabases$' ./internal/testsupport/scratchdb`, see docs/testing/testing-strategy.md); legacy-named leftovers (prefix+16hex) cannot be aged and remain manual. Evidence of the problem: roughly 740 leaked scratch databases
 (about 13 GB, 150 to 300 new on busy days at about 17 MB each) found on 2026-10-05, from
 `docs/plans/prh2-hardening-round/analysis/cleanup-deletion-plan-NOT-EXECUTED.md` (which also holds the one-off deletion plan; nothing in it has been executed).
 
@@ -48,7 +47,7 @@ copy of work). Use only `TEST_ADMIN_DATABASE_URL`. Generate the list with the qu
 `DROP DATABASE "<name>";` and report failures. If a drop is refused, STOP AND REPORT (do not escalate privileges). The ordered one-off plan (worktrees,
 branches, helper databases, hand-named databases, verification) is the deletion plan referenced above.
 
-## 5. Proposed durable fix (NOT IMPLEMENTED; owner to schedule, qa + devops)
+## 5. Durable fix (IMPLEMENTED in A13a as the opt-in reaper; original proposal retained; owner to schedule, qa + devops)
 
 - Put the creation time and pid in the scratch database name (or a registry row) so liveness is decidable.
 - `scratchdb.Reap(ctx, maxAge)` (or `make test-db-reap`): drop databases matching known prefixes that are older than N hours and have no backend,
