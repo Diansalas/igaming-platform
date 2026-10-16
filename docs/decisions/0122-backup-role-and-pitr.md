@@ -325,3 +325,27 @@ section 5a).
 | SR12R-9 IAM-only role path and token refresh | **IMPLEMENTED (simplest safe form), unproven on RDS**: `BACKUP_ROLE_IAM_ONLY=1` creates/alters `igaming_backup` with a NULL password and grants `rds_iam` where it exists; `BACKUP_IAM_TOKEN_COMMAND` (trusted operator configuration, e.g. `aws rds generate-db-auth-token ...`) is run before EVERY new connection (preflight, snapshot holder, `pg_dump`, `pg_dumpall`) and its token written to a private passfile in the work directory. Drilled with the role password standing in for a token; the real token flow, token lifetime vs. the longest single connection (a connection that outlives 15 minutes is unaffected: tokens are only checked at connect) and `rds-db:connect` scoping remain staging-plan items |
 | SR12R-10 freshness / environment binding | **PARTIALLY IMPLEMENTED, rest recorded**: the restore prints `created_utc` and the SHA-256 of `SHA256SUMS` and **requires `RESTORE_EXPECT_SET_SHA256` (from the runner's out-of-band backup log) for any non-drill target**, which pins WHICH signed set may be restored (rollback protection); the verification key is copied before use; source = target environment is enforced (SR12R-5). **Decision recorded, not built:** one Ed25519 signing key and one pinned fingerprint **per environment** (a staging key can never verify a production set because the fingerprint is pinned per environment in change control); a maximum-age policy and a signed "latest" pointer need the backup runner and its log (gap G1) and are future work |
 | Informational | `lib-globals.sh` header corrected; use of `RESTORE_OWNER_ROLE_OVERRIDE` is now logged |
+
+
+## Amendment 2026-10-16 — section 10 DECIDED (owner decision 5)
+
+**Decision: logical dumps exclude `actor_proof_keys.secret`; restore re-keys (owner decision 5, 2026-10-16; implemented and drilled locally)
+
+Status: DECIDED. This section was an open question for the architect (option 1 keep, option 2 exclude); the owner chose option 2.
+
+1. A logical dump never contains the rows of `public.actor_proof_keys`. `backup.sh` runs `pg_dump --exclude-table-data=public.actor_proof_keys` (structure kept) and verifies the
+   exclusion on the encrypted stream itself by reading its table of contents; a data entry for the table fails the whole backup and keeps nothing. The signed manifest records
+   `"actor_proof_keys_data": "excluded"`. The baseline hashes the table's non-secret columns only and `verify.sh` asserts the restored table instead of comparing it.
+2. A restored database has no actor-proof key. `restore.sh` never restores the table's rows (a legacy set that carries them is restored without them, with a warning). Until a new key
+   is provisioned every governed write fails closed (`AP002`) and a production `platform-api` refuses to start (`actorproof.VerifyConfiguredInProduction`).
+3. Re-key is a documented, scripted step: `deploy/backup/rekey-actor-proof.sh` is `operational-runbooks.md` section 15 step 4 with mandatory preconditions (owner role, secret from a
+   0600 tmpfs file as a bound parameter, statement logging checked, no existing key, a kid different from the source's). The key and kid come from the secret store; nothing is
+   copied through a backup. The source's kid is retired by absence.
+4. Physical base backups, snapshots and PITR contain the live key. They stay inside the AWS trust boundary and are what recovers the live key after a total loss; they are never
+   copied out of it.
+5. Residual: the backup role retains table-level SELECT on `actor_proof_keys` (pg_dump takes LOCK TABLE on every dumped table), so a stolen backup credential can read the key; the
+   dump artefact cannot. Moving the secret to a table the backup role cannot read is a possible later change (a migration; architect).
+6. Not proven: the re-key on RDS (pgaudit, parameter group, owner login), the HTTP K2/K3 flow on a re-keyed restored database (the drill proves the SQL verifier path and the startup gate).
+Evidence: docs/plans/backup-exclude-actor-secret-record.md.
+
+7. Security review (SRBX-3): the residual in item 5 is MEDIUM. Accepted for staging. It must be resolved BEFORE PRODUCTION by (a) a migration moving the key to a schema the backup role cannot read (architect), or (b) an owner-accepted interim of column-level pgaudit auditing on `secret` with a P1 alert, plus re-keying after any suspected backup-credential exposure. Option (c) (PostgreSQL 17 MAINTAIN) is unverified.

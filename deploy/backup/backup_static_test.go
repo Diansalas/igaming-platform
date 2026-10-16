@@ -67,7 +67,7 @@ func base(rel string) string { return filepath.Base(rel) }
 
 func TestGlobCoversTheScripts(t *testing.T) {
 	got := strings.Join(files(t, "deploy/backup/*.sh", "deploy/backup/*.sql"), " ")
-	for _, want := range []string{"backup.sh", "restore.sh", "verify.sh", "pitr-drill.sh", "drill.sh", "seed.sh", "lib-common.sh", "lib-cluster.sh", "lib-provision.sh", "lib-sign.sh", "lib-globals.sh", "baseline.sql", "init-backup-role.sql", "harden-backup-surface.sql", "post-restore-grants.sql"} {
+	for _, want := range []string{"backup.sh", "restore.sh", "verify.sh", "pitr-drill.sh", "drill.sh", "seed.sh", "lib-common.sh", "lib-cluster.sh", "lib-provision.sh", "lib-sign.sh", "lib-globals.sh", "baseline.sql", "init-backup-role.sql", "harden-backup-surface.sql", "post-restore-grants.sql", "rekey-actor-proof.sh"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("glob does not cover %s (got %s)", want, got)
 		}
@@ -217,7 +217,7 @@ func TestDropDatabaseOnlyOnValidatedNames(t *testing.T) {
 			if !strings.Contains(strings.ToUpper(line), "DROP DATABASE") {
 				continue
 			}
-			ok := strings.Contains(line, `${CREATED_DB}`) || strings.Contains(line, "igaming_restored") || strings.Contains(line, "${RST_DB}") || regexp.MustCompile(`DROP DATABASE (IF EXISTS )?(malsrc|mal_db|mal_ctl_db|trapsrc|sr2_pw|toctou_db)\b`).MatchString(line) // restore.sh's own rollback; drill's own copies
+			ok := strings.Contains(line, `${CREATED_DB}`) || strings.Contains(line, "igaming_restored") || strings.Contains(line, "${RST_DB}") || regexp.MustCompile(`DROP DATABASE (IF EXISTS )?(malsrc|mal_db|mal_ctl_db|trapsrc|sr2_pw|toctou_db|legacy_db)\b`).MatchString(line) // restore.sh's own rollback; drill's own copies
 			if base(f) == "drill.sh" || base(f) == "restore.sh" {
 				if !ok {
 					t.Errorf("%s: DROP DATABASE on an unvalidated name: %q", f, strings.TrimSpace(line))
@@ -364,6 +364,11 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`postgres(ql)?://[A-Za-z0-9_.-]+:[A-Za-z0-9%_.~-]{12,}@`), // a URL with an inline password (placeholders such as <password> or $VAR do not match)
 	regexp.MustCompile(`(?i)\b(password|passwd|secret|token)\b\s*[=:]\s*["'][A-Za-z0-9/+=_.-]{16,}["']`),
 	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}|gh[pousr]_[A-Za-z0-9]{30,}`),
+	// actor-proof signing material (owner decision 5): a configured key pair (kid:base64), a hex literal decoded into the key table, a bytea hex literal
+	regexp.MustCompile(`(?i)ACTOR_PROOF_KEYS\s*[=:]\s*["']?[A-Za-z0-9._-]{1,32}:[A-Za-z0-9+/_=-]{32,}`),
+	regexp.MustCompile(`(?i)decode\(\s*'[0-9a-f]{64,}'\s*,\s*'hex'\s*\)`),
+	regexp.MustCompile(`(?i)actor_proof_keys[^;]{0,200}\\x[0-9a-f]{64,}`),
+	regexp.MustCompile(`(?i)actor.?proof[^\n]{0,60}(secret|key)[^\n]{0,20}[=:]\s*["']?[0-9a-f]{64,}`),
 }
 
 func findSecrets(body string) []string {
@@ -420,12 +425,17 @@ func TestNoKeyMaterialOrSecretsInTheDirectory(t *testing.T) {
 		"export PGURL=postgres://igaming:hunter2hunter2xyz@db.internal:5432/x", `password = "correct-horse-battery-staple"`,
 		"SCRAM-SHA-256$4096:c2FsdHNhbHRzYWx0c2FsdA==$c3RvcmVka2V5c3RvcmVka2V5c3RvcmVka2V5MTIzNDU=:c2VydmVya2V5c2VydmVya2V5c2VydmVya2V5MTIz",
 		"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+		"export ACTOR_PROOF_KEYS=ap-2026-10:QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5",
+		"INSERT INTO actor_proof_keys (kid, secret) VALUES ('ap-1', decode('00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff', 'hex'))",
+		`INSERT INTO actor_proof_keys VALUES ('k', '\x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff')`,
+		"actor_proof secret: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
 	} {
 		if len(findSecrets(bad)) == 0 {
 			t.Errorf("secret scan missed a planted secret: %q", bad)
 		}
 	}
-	for _, ok := range []string{"postgres://igaming@127.0.0.1:5499/db", "postgres://user:<password>@host/db", "postgres://user:${PW}@host/db", `password = var.db_password`, "PGPASSFILE=/run/secrets/x"} {
+	for _, ok := range []string{"postgres://igaming@127.0.0.1:5499/db", "postgres://user:<password>@host/db", "postgres://user:${PW}@host/db", `password = var.db_password`, "PGPASSFILE=/run/secrets/x",
+		"ACTOR_PROOF_KEYS=ap-2026-10:<base64 secret>", "INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, decode($2, 'hex')) \\bind :ap_kid :ap_hex \\g", "SELECT kid, status, octet_length(secret) FROM actor_proof_keys;"} {
 		if h := findSecrets(ok); len(h) != 0 {
 			t.Errorf("secret scan false positive on %q: %v", ok, h)
 		}
