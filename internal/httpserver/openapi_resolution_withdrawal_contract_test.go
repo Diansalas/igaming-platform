@@ -41,7 +41,7 @@ func TestOpenAPI_ResolutionAndWithdrawalFamilies_Documented(t *testing.T) {
 				n++
 			}
 		}
-		want := map[string]int{"payment_force_resolution_routes.go": 6, "withdrawal_hold_resolution_routes.go": 6, "financial_routes.go": 15}[file]
+		want := map[string]int{"payment_force_resolution_routes.go": 6, "withdrawal_hold_resolution_routes.go": 6, "financial_routes.go": 16}[file] // A5: + payout-reversal
 		if n != want {
 			t.Fatalf("%s: expected %d mounted operations in the family, found %d (update the spec and this test together)", file, want, n)
 		}
