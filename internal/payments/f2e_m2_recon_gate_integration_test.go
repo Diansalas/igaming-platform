@@ -178,3 +178,18 @@ func TestF2e_ImportedByServiceRestatementPinned(t *testing.T) {
 		t.Fatalf("restatement drifted: %q vs %q", importedByServicePaymentStatement, reconciliation.ImportedByServicePaymentStatement)
 	}
 }
+
+// Without keys the A11 rule applies to the evidence: a run row with NO backing import (written as the world's
+// unprivileged session role) is not evidence of a successful run.
+func TestF2e_M2_UnbackedRunRowIsNotEvidence(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1, noStatementRun: true})
+	_, a := w.ambiguousPayout(500)
+	w.tx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, status, coverage_end, provider_id, window_truncated)
+			VALUES ($1, 'payment_statement', now() - interval '1 hour', now(), 'clean', now(), $2, false)`, w.f.tenantID, w.provider)
+		return err
+	})
+	if _, err := f2eRequestM2(w, a.ID, ResolutionM2DeclareNotPaid); !errors.Is(err, ErrResolutionReconciliationNotCurrent) {
+		t.Fatalf("a run row with no backing import must not count as a successful run: %v", err)
+	}
+}
