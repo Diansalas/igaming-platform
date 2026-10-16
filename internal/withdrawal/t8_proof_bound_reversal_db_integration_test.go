@@ -264,6 +264,22 @@ func TestT8DB_ProofDefects_Refused(t *testing.T) {
 	if got := a5Code(insert(s1, s2, fg.Valid(t, s1, actorproof.ScopeTenant, f.tenantID, op, wr.ID.String(), digest))); got != "AP004" {
 		t.Fatalf("approver column is not the proven actor: want AP004, got %q", got)
 	}
+	// A row naming ANOTHER tenant, in this tenant's principal session, with a genuine proof for this tenant: the
+	// guard refuses it itself (AP004), before row-level security would.
+	otherTenant := seedFixture(t, owner, 10).tenantID
+	err := rt.WithPrincipalScope(context.Background(), f.tenantID, s1, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.actor_proof', $1, true)`,
+			fg.Valid(t, s1, actorproof.ScopeTenant, f.tenantID, op, wr.ID.String(), digest)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO withdrawal_approvals (tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval,
+			decision, reason_code, threshold_amount_at_decision, request_amount_at_decision) VALUES ($1, $2, $3, false, 'reverse', $4, 0, $5)`,
+			otherTenant, wr.ID, s1, reason, wr.Amount)
+		return err
+	})
+	if got := a5Code(err); got != "AP004" {
+		t.Fatalf("a row of another tenant: want AP004, got %q (%v)", got, err)
+	}
 	if _, n := t8State(t, owner, wr); n != 0 {
 		t.Fatalf("refusals recorded %d rows", n)
 	}
@@ -277,7 +293,7 @@ func TestT8DB_ProofDefects_Refused(t *testing.T) {
 	}
 	// An automated reverse row is refused by the guard's own shape rule (WD028), before the verifier.
 	tok2 := fg.Valid(t, s2, actorproof.ScopeTenant, f.tenantID, op, wr.ID.String(), digest)
-	err := rt.WithPrincipalScope(context.Background(), f.tenantID, s2, func(ctx context.Context, tx pgx.Tx) error {
+	err = rt.WithPrincipalScope(context.Background(), f.tenantID, s2, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT set_config('app.actor_proof', $1, true)`, tok2); err != nil {
 			return err
 		}
@@ -587,6 +603,24 @@ func TestMigration0165_LegacyRowsDoNotCount_UpDownUp_DownRefusal(t *testing.T) {
 		}
 		return t8InsertReverse(ctx, tx, wr, l2, legacyReason)
 	})
+	// A reversal EXECUTED before 0165 on two legacy decisions (legal under 0162's rules).
+	wrL := a5ScratchCompleted(t, pool)
+	var completionRef string
+	mustRunTx(t, pool, wrL.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT provider_tx_id FROM ledger_transactions WHERE id = $1`, *wrL.ReleaseLedgerTransactionID).Scan(&completionRef)
+	})
+	pL := a5Payload(wrL, completionRef)
+	m1, m2 := mustCreateApprover(t, pool, wrL.TenantID), mustCreateApprover(t, pool, wrL.TenantID)
+	mustRunTx(t, pool, wrL.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := t8InsertReverse(ctx, tx, wrL, m1, pL.ReasonCode(wrL.ID)); err != nil {
+			return err
+		}
+		if err := t8InsertReverse(ctx, tx, wrL, m2, pL.ReasonCode(wrL.ID)); err != nil {
+			return err
+		}
+		_, err := ReverseCompletedPayout(ctx, tx, wrL.ID, pL)
+		return err
+	})
 	full := m132Dir(t, 165)
 	if _, err := pool.MigrateUp(ctx, full); err != nil {
 		t.Fatalf("migrate 0165 up: %v", err)
@@ -612,6 +646,16 @@ func TestMigration0165_LegacyRowsDoNotCount_UpDownUp_DownRefusal(t *testing.T) {
 	err := runTx(pool, wr.TenantID, func(ctx context.Context, tx pgx.Tx) error { return t8E11(ctx, tx, wr) })
 	if got := a5Code(err); got != "WD026" || !strings.Contains(err.Error(), "(found 0)") {
 		t.Fatalf("legacy decisions must not count after 0165: want WD026 (found 0), got %q (%v)", got, err)
+	}
+	// A retry by a legacy voter of that pre-0165 reversal is NOT an idempotent replay any more (its vote and the
+	// quorum are unproven): a state conflict, nothing recorded.
+	no := func(uuid.UUID) (bool, error) { return false, nil }
+	err = runTx(pool, wrL.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := RecordPayoutReversalDecision(ctx, tx, wrL.ID, m1, pL, no, alwaysEligible, auth.StepUpAssertion{}, t8Attacher(m1))
+		return err
+	})
+	if !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("a legacy voter's retry on a pre-0165 reversal: %v, want ErrStateConflict (not a replay)", err)
 	}
 	// Down with legacy rows only: allowed (they carry no proof); the snapshot returns to 0164 exactly.
 	if _, err := pool.MigrateDown(ctx, full, 1); err != nil {
