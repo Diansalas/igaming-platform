@@ -217,3 +217,123 @@ limits stay in memory for the next sign-in in the same tab until they refetch. C
 - A platform session, an acting session and a player-scoped session reaching `EvaluateAction` or `EnforcementEnabled` give an error and never "off" or "allowed" (the player-scoped case is present. Add platform and acting.).
 - The runtime role cannot UPDATE, DELETE or TRUNCATE `rg_enforcement_activations`, and cannot insert as a platform, player, acting or suspended principal, or for another tenant (the catalogue pins are present. The behavioural probes above were run manually: worth a test).
 - After SR6-1: the POST without a fresh step-up returns the step-up-required answer.
+
+## 11. Ledger-finance review (ledger-finance specialist, independent, 2026-10-16, code at 15a30c8)
+
+Scope: the ledger-finance probe list of section 9, plus the heavy-player decision (section 5), the pending-intent TTL residual and a re-run of
+`TestResolutionIsolation_FinancialDuringOutage`. The code reviewed is the code at 15a30c8. Commit 4a300d8 (section 10) changed only this file.
+Method: code reading of every call site and of the usage SQL, the A6 integration suites, one extra mutant, and an independent heavy-player
+measurement. Everything ran on a private scratch database (`lf_a6_review`, sanctioned harness, synthetic data only, `-p 1`).
+
+**Verdict: NOT APPROVED as-is. One blocking finding (LF-A6-1), which needs a test only and no code change.** Every other probe passes. LF-A6-2 and
+LF-A6-4 are conditions on ACTIVATING the switch for a brand. They do not block the merge.
+
+### 11.1 What was verified
+
+| Probe | Result | Evidence |
+|---|---|---|
+| L0.4 before any ledger lock: casino bet | PASS | `postBet`: L0.1 delivery, tenant/brand status gates (SHARE), capability and game reads (no lock), L0.2 `AdvisoryLockPlayerBonusScope`, then `EvaluateAction` (L0.4), then risk, KYC, the projection locks and `ledger.Post`. The call replaces the earlier `EvaluateEligibility` in the same place, so the ADR 0082 order is unchanged. The bet is cash-only (`Dr player_cash / Cr house_gaming`), so the candidate `event.Amount` is exactly the leg that usage measures. |
+| L0.4 before any ledger lock: sportsbook placement | PASS | Idempotency short-circuit (read), tenant/brand gates, catalogue and jurisdiction reads (no lock), then `EvaluateAction` (L0.4), then risk, KYC, L0.6 exposure, the projection locks and `ledger.Post`. |
+| L0.4 before any ledger lock: deposit T1 / T2 | PASS | T1: market gate, replay lookup, tenant gate (SHARE), intent INSERT (a row no other transaction can see, so no wait edge), then `EvaluateAction`, then KYC and the attempt insert. There is no ledger lock in T1. T2: `EvaluateAction` is the first statement, before the `deposit_intents FOR UPDATE` parent lock (RV-0095 N1). |
+| L0.4 before any ledger lock: withdrawal request | PASS | Replay lookup (read), `RequireActiveForPaymentInitiation`, then the WD-RG-1 gate (L0.4 in `EvaluateWithdrawalEligibility`, then risk), then the payout-instrument FOR SHARE lock, KYC, the insert and the hold projections. |
+| Usage reads after the lock, READ COMMITTED | PASS | `usageGuard` (isolation and scope) runs before the lock. Every usage statement runs after `lockPerson` and is a new statement, so its snapshot is newer than the lock. `TestRGEnforceS4/RepeatableRead_IsRefused`. The concurrency tests (stakes, two brands of one Person, deposits) post exactly the allowed number. |
+| Candidate intent counted once | PASS | `inflight` excludes `di.id = $9` and `Amount` is added once. T1 inserts the candidate before the evaluation, so the exclusion is load-bearing. Mutant `exclude_candidate_intent_removed` is killed. `DepositLimit_UsageWindowsAndFigures` asserts 600 + 300 (candidate) == 900 allowed, 401 refused. |
+| T2 double count is conservative only | PASS (LF-A6-6) | Only possible when the candidate already has a ledger credit. The in-flight side cannot double-count it (`ledger_transaction_id IS NULL`, one statement, one snapshot). |
+| Loss netting of wins | PASS | `sg` is debit-positive over `player_cash` for the closed loss set, so a win credit reduces loss. `TestRGEnforceS4_Casino_LossLimitIsNetOfWins` (real postings) and `WagerAndLossLimits` (stake 300, win 250, loss 50). |
+| `loss_may_go_negative` | **GAP, LF-A6-1** | The plumbing is correct (`req.LossMayGoNegative = deref(cfg.LossMayGoNegative)`, a nil compose gives false, `floorLoss`). No S4 test exercises the `false` path. |
+| Boundary `usage + amount > limit` refuses, equality allowed | PASS | `checkDeposit` and `checkStake` use `Cmp(...) > 0`. Pinned at equality and at +1 for deposit (600+400 / 401), wager (300+200 / 201), loss (50+50 / 51), the ceiling (400 / 401) and mandatory-with-ceiling (700 / 701). Mutants `deposit_boundary_ge` and `stake_boundary_ge` are killed. |
+| Win, rollback, settlement, void never evaluated | PASS | The only non-test callers of `EvaluateAction` are casino launch (real), `postBet`, `PlaceBet`, deposit T1 and T2. Tests `..._NeverBlocksSettlement`, `..._NeverBlocksSettlementOrVoid` and the time-out-not-settlement test post settlements while a limit or time-out refuses stakes. |
+| Transaction-local timeouts restored | PASS | `set_config(..., true)` with the values read before the change. Restore runs on the allow and deny returns. On an error the caller aborts (all five call sites return the error, also confirmed in section 10), so the timeouts cannot reach a posting. `TimeoutsAreRestored`, and mutants `timeouts_not_restored` and `timeouts_not_applied` are killed. |
+| Withdrawal gate placement and replay | PASS | Before the instrument FOR SHARE lock and the hold (above). A replay returns before the gate (`TestWDRG1_Replay_IsNotReEvaluated`). A denial commits only the audit, and the key is not consumed. |
+| A withdrawal is not a stake | PASS by code (LF-A6-7) | The `withdrawal_*` transaction types are in neither `RGLossTransactionTypes` nor `RGStakeTransactionTypes`. The deposit read counts only `deposit` credits, so a released hold neither consumes nor restores deposit capacity. No test pins it. |
+| No new ledger write path, no money change | PASS | No change under `internal/ledger` or `internal/wallet` (except one test), and migration 0158 touches no ledger table. Amounts stay `int64` minor units, limits and usage are `big.Int` or decimal strings, and the RG UI uses string arithmetic (`majorToMinorString`, `minorGreater`). The only `float64` in the Go diff is JSON decoding in tests. The only direct ledger INSERTs are the heavy-test seed (test-only, real triggers). |
+| A6 suites (this review) | PASS | rg, casino, sportsbook, payments, withdrawal, launchgov, httpserver filtered to `RGEnforceS4|WDRG1|RGLimits|Eligib|Migration0158|RGConfig|WithdrawalRGGate|LockOrder`: all `ok`. |
+| `TestResolutionIsolation_FinancialDuringOutage` re-run alone | PASS 5 of 5 | Idle box (load average 0.2 to 1.0). The oldest pooled transaction was 43.8, 40.4, 37.3, 43.2 and 42.8 ms against the 400 ms bound. With the switch off, A6 adds only the activation read to this path. The earlier failures (load average above 20) are a load artefact and not an A6 regression. |
+
+### 11.2 Findings
+
+**LF-A6-1 (Medium, BLOCKING; a test only): the `loss_may_go_negative = false` path is not tested through enforcement, and the mutant in the unsafe
+direction survives.** `rgfix.PermissiveFloor` sets `loss_may_go_negative: true` for loss, and `EnforcedFloor` inherits it, so every S4 test runs with net
+winnings giving headroom. I applied the mutant `req.LossMayGoNegative = true` (`internal/rg/enforcement.go`, `checkStake`) and ran
+`TestRGEnforceS4*` in rg, casino and sportsbook. It **SURVIVED** (all `ok`; reverted). In production the effect would be that a player with net
+winnings in the window could stake beyond the loss limit by the amount won, while the configuration says the floor of 0 applies. The current code is
+correct, but nothing pins it. Required before merge: (a) a test with a floor override `loss_may_go_negative: false`, a player with stake 100 and
+win 300 in the window (raw -200), and a loss limit of 100. A stake of 100 must be allowed and 101 refused, with figures `usage` = "0" and
+`loss_raw_usage` = "-200". (b) The same set-up with `true`: 300 allowed, 301 refused. (c) Add the mutant to `a6-mutation-driver.py` as
+`loss_may_go_negative_forced_true`. Recommended: make the engineering floor (false) the default of `EnforcedFloor`, so that tests default to the
+protective reading.
+
+**LF-A6-2 (Medium, ACTIVATION condition; not a merge blocker): the heavy-player cost. The proposal of section 5 is right in direction but too narrow as
+worded.** My independent measurement used the same profile (150,000 bets + 150,000 wins in 29 days, 20 deposits, `ANALYZE`), an idle box, five runs
+each, and a 60 s timeout so the figures are the scan cost:
+
+| Evaluation | p50 | max |
+|---|---|---|
+| casino_wager, wager 24h + 7d, loss 7d | 0.64 s | 0.69 s |
+| casino_wager, plus wager and loss 30d and wager calendar_month | 2.94 s | 3.40 s |
+| deposit, 24h + 7d | 0.40 s | 0.41 s |
+| deposit, 24h + 7d + 30d | 1.64 s | 1.70 s |
+
+The 30-day stake figure uses 74% (p50) to 85% (max) of the 4 s budget on an idle box. The author's 3.46 s / 4.08 s at load 20+ confirms that it fails
+closed under load. Three precisions the proposal needs:
+1. **It is enforced through `allowed_periods`, not through what players choose.** `kindPlan.build` applies a numeric ceiling to EVERY allowed period, and a
+   player may set a limit for any allowed period. So "windows of 7 days or less" means that the floors of wager AND loss list only `rolling_24h`,
+   `rolling_7d`, `calendar_day` and `calendar_week`.
+2. **The deposit read also scans every ledger row of the player in the window,** not only the deposits (the `ent` CTE filters by type after the join).
+   It is cheaper per row: 1.64 s at 300,000 rows leaves about 2.4 times headroom, so a 30-day or calendar-month DEPOSIT limit is acceptable for the
+   first brand at this profile. It fails closed at roughly 600,000 or more rows in 30 days on an idle box, and fewer under load. Monthly deposit limits are the
+   ones regulators most often require, so this matters.
+3. The L0.4 hold equals the evaluation time, so concurrent actions of one heavy Person serialise (LF-A6-3).
+
+**Recommendation:** accept points (1) to (3) of section 5: do not raise the timeout, do not build the rollup in A6, and record the limit. Adopt (4) in
+this form. For the first brand, the wager and loss floors use `allowed_periods` of at most 7 days. The deposit floor may include `rolling_30d` and
+`calendar_month`. Schedule the ledger-derived rollup (a ledger-finance slice: projection, hourly drift job, P1 on drift) BEFORE any brand allows a
+30-day or calendar-month wager or loss period. If compliance says that monthly wager or loss limits are legally required for Anjouan or for the
+first brand, the rollup becomes a launch prerequisite. That is a legal question for compliance, not a ledger-finance call. Recommended, not
+blocking: an R-RG-CONFIG readiness failure when a wager or loss floor allows `rolling_30d` or `calendar_month` while the rollup is `NOT IMPLEMENTED`,
+so the constraint is enforced and not only documented.
+
+**LF-A6-3 (Low; availability only): heavy-Person concurrency.** The L0.4 lock is held from the evaluation to commit. A second concurrent action of the
+same Person waits. In casino the wait happens first on L0.2, under the session `lock_timeout`. On sportsbook and deposit it happens on L0.4, under
+the 2 s `DefaultActionLockTimeout`, and fails closed when exceeded. This is never an unsafe allow. With LF-A6-2 applied (about 0.6 s), it is negligible.
+
+**LF-A6-4 (Medium, OWNER ACCEPTANCE required before activation): `pending_intent_ttl` has no effect. The risk in figures:**
+- What counts: every intent of the Person's measured accounts in status `pending` or `ambiguous` with no ledger posting, at its REQUESTED amount, in
+  every deposit window that contains its `created_at`.
+- Nothing releases it. The sweeper escalates a stale submitted deposit (T16 alert, `escalateDepositIfDue`) but does not fail it. K3 M1 only records
+  evidence on a disputed deposit. No operator path moves a stuck deposit attempt to failed. Only a provider outcome (webhook or poll) or ageing out of
+  the window releases it.
+- Duration: up to the longest allowed deposit window. That is 24 h for `rolling_24h`, 7 days for `rolling_7d` and 30 days for `rolling_30d`. A
+  calendar window holds it until the period ends, so an intent stuck on the 1st of a month blocks for up to 31 days.
+- Amount: each intent was admitted at T1 with usage + amount <= limit, so the stuck total is at most the smallest deposit limit. The worst case is
+  one stuck intent equal to the remaining headroom, which blocks every deposit of the Person for the whole window.
+- Direction: never an unsafe allow and never a double count (one snapshot: once `ledger_transaction_id` is set the in-flight side drops it). A
+  stuck intent that later succeeds counts at its posting time. That is correct (the money arrived then), but it can lift usage above the limit
+  after the fact, and the `rg_deposit_limit_exceeded_post_facto` alert is not built (residual 5).
+- Frequency: unknown. It is `PROVIDER DEPENDENT` (all providers are MOCK, and there is no rate data).
+
+Owner and compliance must accept, in writing: (i) a player can be refused deposits for up to the longest allowed deposit window (31 days with
+`calendar_month`) because of a payment stuck on the provider side that the player did not cause, with no operator override. (ii) The player sees
+`deposit_limit_reached`, not "a payment is still pending". The alternative to acceptance is a payments slice: a governed staff resolution that
+moves a stuck deposit attempt to failed through the attempt state machine, which releases the usage automatically. It needs ledger-finance review.
+If the first brand uses only 24 h deposit windows, the exposure is at most 24 h. With a monthly window it is up to 31 days.
+
+**LF-A6-5 (Low / informational; PERSON-RELINK-PIN-1): a possible deadlock between a re-link and an evaluation.** `evaluateEligibility` locks the
+Person read before the lock (A) and, if the account moved, then the new Person (B), not in hash order. Two re-links of the same Person pair
+in quick succession, with an evaluation in between, can form an A/B cycle. PostgreSQL's deadlock detector aborts one side: the evaluation fails
+closed, or the re-link is retried. No Go re-link writer exists. When it lands, its tests must include an evaluation running concurrently with two
+re-links of one Person pair.
+
+**LF-A6-6 (Informational): the T2 double count is conservative and also desirable.** It occurs only when an earlier attempt of the same intent has
+already credited (a late success) while a cascade attempt is still `created`. Refusing that cascade prevents a second charge for a deposit that has
+already arrived.
+
+**LF-A6-7 (Low, not blocking): "a withdrawal is not a stake" is proven by code only.** Add a test. Request a withdrawal (hold), then reject it or let it
+fail (release). Wager, loss and deposit usage must be unchanged by both postings.
+
+### 11.3 Conditions
+
+- Merge: LF-A6-1 (the test, with the mutant killed). SR6-1 from section 10 also blocks, independently.
+- Activation of the switch for any brand: the LF-A6-2 floor configuration (wager and loss at most 7 days) or the rollup slice merged, and the
+  LF-A6-4 owner and compliance acceptance recorded in the human-decision register.
+- Follow-ups, not blocking: LF-A6-7, the LF-A6-2 readiness check, LF-A6-5 with the re-link writer.
