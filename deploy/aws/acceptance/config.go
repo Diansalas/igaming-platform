@@ -30,6 +30,7 @@ type config struct {
 	// Market gate / evidence (see README "Market evidence dependency").
 	MarketExpect string // open | closed
 	Residence    string // PLAYER_RESIDENCE_COUNTRY: declared by the player after registration when set
+	KYCResidence string // KYC_VERIFIED_RESIDENCE_COUNTRY: set by the compliance reviewer on the KYC approval when set
 
 	Asset          string
 	SecondAsset    string // a second fiat asset for the wallet-per-asset check ("" disables)
@@ -47,7 +48,7 @@ type config struct {
 	Actors map[string]actorSpec
 }
 
-var actorRoles = []string{"ADMIN", "ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2"}
+var actorRoles = []string{"ADMIN", "ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2", "COMPLIANCE"}
 
 func envOr(name, def string) string {
 	if v, ok := os.LookupEnv(name); ok && v != "" {
@@ -105,6 +106,7 @@ func parseConfig(args []string) (*config, error) {
 	fs.StringVar(&c.EdgeHeader, "edge-headers", envOr("EDGE_HEADERS", "auto"), "auto|require|skip: CloudFront security headers (auto: required when BASE_URL is https)")
 	fs.StringVar(&c.MarketExpect, "market-expect", envOr("MARKET_EXPECT", "open"), "open|closed: whether the mock country is expected OPEN for the brand (closed proves fail-closed refusal)")
 	fs.StringVar(&c.Residence, "player-residence", envOr("PLAYER_RESIDENCE_COUNTRY", ""), "ISO-3166 alpha-2 residence the synthetic player declares (KYC-residence evidence); empty = do not declare")
+	fs.StringVar(&c.KYCResidence, "kyc-verified-residence", envOr("KYC_VERIFIED_RESIDENCE_COUNTRY", ""), "ISO-3166 alpha-2 verified-residence determination attached to the KYC approval by the compliance reviewer (needs jurisdiction evidence collection active); empty = none")
 	fs.StringVar(&c.Asset, "asset", envOr("ASSET_CODE", "EUR"), "fiat asset code used for deposits/withdrawals/casino")
 	fs.StringVar(&c.SecondAsset, "second-asset", envOr("SECOND_ASSET", "USD"), "second fiat asset for the wallet-per-asset check (empty disables)")
 	fs.Int64Var(&c.DepositAmount, "deposit-amount", envInt64("DEPOSIT_AMOUNT", 10000), "deposit amount in minor units")
@@ -179,6 +181,9 @@ func (c *config) validate() error {
 	}
 	if c.Residence != "" && !reCC.MatchString(c.Residence) {
 		errs = append(errs, "PLAYER_RESIDENCE_COUNTRY must be an uppercase ISO-3166 alpha-2 code")
+	}
+	if c.KYCResidence != "" && !reCC.MatchString(c.KYCResidence) {
+		errs = append(errs, "KYC_VERIFIED_RESIDENCE_COUNTRY must be an uppercase ISO-3166 alpha-2 code")
 	}
 	switch c.EdgeHeader {
 	case "auto", "require", "skip":

@@ -40,11 +40,12 @@ type world struct {
 
 	// facts recorded by earlier checks for later ones
 	facts map[string]string
+	bal   map[string]int64 // balances verified so far, "<player tag>/<asset>"
 }
 
 func newWorld(cfg *config, rep *reporter, scrub *scrubber, c *client) *world {
 	w := &world{cfg: cfg, c: c, rep: rep, scrub: scrub, now: time.Now, sleep: time.Sleep, warnTo: os.Stderr,
-		actors: map[string]*actor{}, status: map[string]status{}, players: map[string]*player{}, facts: map[string]string{}}
+		actors: map[string]*actor{}, status: map[string]status{}, players: map[string]*player{}, facts: map[string]string{}, bal: map[string]int64{}}
 	for _, r := range actorRoles {
 		spec := cfg.Actors[r]
 		if spec.configured() {
@@ -89,6 +90,10 @@ func (t *T) skipPrereq(format string, a ...any) { t.set(statusSkip, skipPrereq, 
 
 // skipManual: the property cannot be observed through this API at all; the README names the operator's evidence step.
 func (t *T) skipManual(format string, a ...any) { t.set(statusSkip, skipManual, format, a...) }
+
+// skipGap: the property cannot be exercised black-box because the platform offers no test-support path for it (a
+// reported platform gap, not something the operator can fix by supplying an input).
+func (t *T) skipGap(format string, a ...any) { t.set(statusSkip, skipGap, format, a...) }
 
 // need reports whether every named earlier check PASSED; otherwise it concludes this check as blocked and returns false.
 func (t *T) need(names ...string) bool {

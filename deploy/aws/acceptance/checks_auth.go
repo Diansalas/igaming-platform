@@ -167,7 +167,7 @@ func (w *world) setupChecks() {
 		}
 		t.pass("tenant %s (%s) and brand %s (%s) found and active", w.cfg.Tenant, w.tenantID, w.cfg.Brand, w.brandID)
 	})
-	for _, role := range []string{"ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2"} {
+	for _, role := range []string{"ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2", "COMPLIANCE"} {
 		role := role
 		w.check("setup.signin_"+strings.ToLower(role), func(t *T) {
 			a := w.actor(role)
@@ -204,7 +204,7 @@ func (w *world) setupChecks() {
 			return
 		}
 		body := map[string]any{
-			"supported_fiat_currencies": w.assets(), "supported_payment_methods": []string{"card"},
+			"supported_fiat_currencies": w.assets(), "supported_payment_methods": []string{"card", "bank_transfer"},
 			"supports_deposit": true, "supports_withdrawal": true, "priority": 0, "status": "active",
 		}
 		r := t.acall("TENANT_ADMIN", "PUT", "/v1/admin/providers/mock-payments/capability", body)
@@ -215,7 +215,7 @@ func (w *world) setupChecks() {
 			t.fail("PUT mock payments capability: %s", r.brief())
 			return
 		}
-		t.pass("mock-payments capability set for %v (card, deposit+withdrawal), idempotent PUT", w.assets())
+		t.pass("mock-payments capability set for %v (card+bank_transfer, deposit+withdrawal), idempotent PUT", w.assets())
 	})
 	w.check("setup.casino_capability", func(t *T) {
 		if !w.cfg.Configure {
@@ -296,6 +296,8 @@ func roleNeed(role string) string {
 		return "needed for four-eyes on platform actions (kill-switch release, launch) and tenant-B provisioning"
 	case "TENANT_ADMIN":
 		return "needed to apply provider capabilities and the casino opt-in (or pre-configure them and set CONFIGURE=false)"
+	case "COMPLIANCE":
+		return "needed to approve the synthetic player's KYC verification (the mock vendor never auto-approves), which the withdrawal identity gate requires"
 	case "FINANCE1", "FINANCE2":
 		return "both needed for the withdrawal four-eyes flow (two distinct tenant finance staff with distinct Persons)"
 	}

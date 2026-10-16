@@ -2,9 +2,6 @@
 
 package main
 
-func (w *world) ledgerChecks()         {}
-func (w *world) casinoChecks()         {}
-func (w *world) withdrawalChecks()     {}
 func (w *world) rgChecks()             {}
 func (w *world) marketChecks()         {}
 func (w *world) isolationChecks()      {}

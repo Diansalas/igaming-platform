@@ -30,6 +30,7 @@ const (
 	skipPrereq  skipKind = "prerequisite"
 	skipBlocked skipKind = "blocked-by-fail"
 	skipManual  skipKind = "operator-evidence"
+	skipGap     skipKind = "platform-gap"
 )
 
 type result struct {
@@ -165,7 +166,7 @@ func (r *reporter) noteRequest(e reqEvidence) {
 }
 
 type counts struct {
-	Pass, Fail, Skip, SkipPrereq, SkipBlocked, SkipManual int
+	Pass, Fail, Skip, SkipPrereq, SkipBlocked, SkipManual, SkipGap int
 }
 
 func (r *reporter) tally() counts {
@@ -185,6 +186,8 @@ func (r *reporter) tally() counts {
 				c.SkipBlocked++
 			case skipManual:
 				c.SkipManual++
+			case skipGap:
+				c.SkipGap++
 			default:
 				c.SkipPrereq++
 			}
@@ -220,6 +223,7 @@ func (r *reporter) summary(meta map[string]string) counts {
 	r.line("SUMMARY|skip_prerequisite|%d", c.SkipPrereq)
 	r.line("SUMMARY|skip_blocked_by_fail|%d", c.SkipBlocked)
 	r.line("SUMMARY|skip_operator_evidence|%d", c.SkipManual)
+	r.line("SUMMARY|skip_platform_gap|%d", c.SkipGap)
 	r.line("SUMMARY|http_requests|%d", calls)
 	r.line("SUMMARY|duration_seconds|%.1f", total.Seconds())
 	var slow []result

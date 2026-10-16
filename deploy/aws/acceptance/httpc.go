@@ -186,7 +186,11 @@ func (c *client) call(method, path, token string, body any, opts ...reqOpt) (*re
 	check, _ := c.cur.Load().(string)
 	c.rep.noteRequest(reqEvidence{Check: check, Method: method, Path: pathOnly(path), RequestID: out.RequestID, Status: out.Status, Duration: dur})
 	if c.debug && c.debugOut != nil {
-		fmt.Fprintf(c.debugOut, "DEBUG|%s|%s %s|%d|%s\n", check, method, pathOnly(path), out.Status, c.rep.scrub.clean(strings.Join(strings.Fields(string(raw)), " ")))
+		b := c.rep.scrub.clean(strings.Join(strings.Fields(string(raw)), " "))
+		if len(b) > 240 {
+			b = b[:240] + "..."
+		}
+		fmt.Fprintf(c.debugOut, "DEBUG|%s|%s %s|%d|%s\n", check, method, pathOnly(path), out.Status, b)
 	}
 	return out, nil
 }
