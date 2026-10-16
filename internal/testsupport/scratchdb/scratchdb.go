@@ -35,6 +35,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchname"
 )
 
 // New creates an empty scratch database whose name starts with prefix,
@@ -60,7 +62,12 @@ func New(t testing.TB, prefix string) string {
 		t.Fatal("TEST_DATABASE_URL has no user; cannot choose the scratch database owner")
 	}
 
-	name := prefix + strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
+	// The name carries the creation time (UTC) and pid so the reaper (Reap) can
+	// age out databases leaked by timeouts/kills; see internal/testsupport/scratchname.
+	name, err := scratchname.BuildName(prefix, time.Now(), os.Getpid(), strings.ReplaceAll(uuid.New().String(), "-", "")[:8])
+	if err != nil {
+		t.Fatalf("scratch database name: %v", err)
+	}
 	ident := pgx.Identifier{name}.Sanitize()
 
 	ctx := context.Background()
