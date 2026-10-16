@@ -681,8 +681,20 @@ func s4_FailClosed(t *testing.T, w *s1World) {
 	})
 
 	t.Run("StatementTimeout_FailsClosed_NeverZeroUsage", func(t *testing.T) {
+		// Deterministic: the owner holds an ACCESS EXCLUSIVE lock on ledger_entries, so the usage read cannot finish inside
+		// the statement budget (a 1 ms budget alone is racy on a fast machine). Released right after.
+		ctx := context.Background()
+		holder, herr := w.owner.Raw().BeginTx(ctx, pgx.TxOptions{})
+		if herr != nil {
+			t.Fatal(herr)
+		}
+		defer func() { _ = holder.Rollback(ctx) }()
+		if _, herr := holder.Exec(ctx, `LOCK TABLE ledger_entries IN ACCESS EXCLUSIVE MODE`); herr != nil {
+			t.Fatal(herr)
+		}
 		p := f.action(f.acctA1, ActionCasinoWager, 1)
-		p.StatementTimeout = time.Millisecond
+		p.StatementTimeout = 150 * time.Millisecond
+		p.LockTimeout = 10 * time.Second
 		_, err := w.eval(f, f.tenantA, p)
 		if !errors.Is(err, ErrEvaluationUnavailable) {
 			t.Fatalf("a statement timeout must fail closed, got %v", err)
