@@ -190,6 +190,10 @@ func TestA5D_ReversedWithoutDecisions_IsWD026(t *testing.T) {
 		if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'reversed', reversal_ledger_transaction_id = $1 WHERE id = $2`, res.TransactionID, planted); err != nil {
 			return err
 		}
+		// Fire the deferred link checks (A, WD043/WD044) now: ALTER TABLE refuses with pending trigger events.
+		if _, err := tx.Exec(ctx, `SET CONSTRAINTS ALL IMMEDIATE`); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `ALTER TABLE withdrawal_requests ENABLE TRIGGER withdrawal_requests_aa_state_transition_guard`)
 		return err
 	}); err != nil {

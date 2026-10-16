@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -144,6 +145,24 @@ func TestA5HTTP_PayoutReversal_AuthorizationAndQuorum(t *testing.T) {
 			AND outcome = 'denied' AND actor_id = $2 AND target_id = $3`, tn.ID, benef, wr.ID.String()).Scan(&denied)
 	}); err != nil || denied != 1 {
 		t.Fatalf("the beneficiary refusal must write one Denied audit row: %d %v", denied, err)
+	}
+	// SR5-3: a return reference the platform already holds for the provider is a typed 409.
+	held := "a5-held-" + uuid.NewString()[:8]
+	if err := pool.WithTenant(context.Background(), tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		pid := "mockpsp"
+		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: tn.ID, TransactionType: ledger.TxTombstone,
+			IdempotencyKey: "tombstone:mockpsp:" + held, ProviderID: &pid, ProviderTxID: &held, CorrelationID: uuid.New()})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	heldBody := map[string]any{}
+	for k, v := range body {
+		heldBody[k] = v
+	}
+	heldBody["return_reference"] = held
+	if st, _, e := post(tok(f1, tn, auth.RoleFinance, time.Minute), heldBody); st != http.StatusConflict || e.Code != apierror.CodeConflict {
+		t.Fatalf("a held return reference: %d %+v", st, e)
 	}
 	if n := reverseRows(); n != 0 {
 		t.Fatalf("refusals recorded %d decisions", n)

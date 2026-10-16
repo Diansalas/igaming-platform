@@ -99,8 +99,15 @@ func DecidePayoutReversal(ctx context.Context, pool *db.Pool, tenantID, requestI
 	if in.Checks == nil {
 		return PayoutReversalResult{}, fmt.Errorf("%w: the eligibility and beneficiary checks are required", withdrawal.ErrInvalidInput)
 	}
+	if in.ApproverID == uuid.Nil {
+		return PayoutReversalResult{}, fmt.Errorf("%w: the deciding staff principal is required", withdrawal.ErrInvalidInput)
+	}
 	var res PayoutReversalResult
-	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
+	// A5 fix round SR5-1: the decision runs in the deciding principal's scope (app.principal_id), the only
+	// tenant session in which staff_capability_grants are visible (0112 tenant_scope_select), so the Go
+	// payment_force_resolve:approve check and the WD027 trigger can see the deciders' grants. In a session
+	// without a principal the grants are invisible and both checks fail closed.
+	pending, err := alerting.InTx(ctx, alerting.NewPrincipalRunner(pool, tenantID, in.ApproverID), func(actx context.Context, tx pgx.Tx) error {
 		res = PayoutReversalResult{}
 		wr, err := withdrawal.LockForPayoutEvidence(actx, tx, requestID)
 		if err != nil {

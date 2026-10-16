@@ -21,6 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/stepup"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
@@ -536,8 +538,41 @@ func TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease(t *testing.T) {
 	if len(disc) != 2 || disc[lateDisc] < 1 {
 		t.Fatalf("want the park P1 AND a distinct late-success P1, got %v", disc)
 	}
+	// The status-poll source reaches the same cell: posts nothing, one more audit row (every poll is a new
+	// observation), the same distinct P1 counted again.
+	e.r8StatusSuccess(t, wr, mustGetAttempt(t, e.pool, e.f.tenantID, a.ID), ref, 500, "EUR")
+	if fpLedgerTx(t, e.pool, e.f) != txBefore || fpReqState(t, e.pool, e.f, wr.ID).State != withdrawal.StateFailed {
+		t.Fatal("a polled success after the tombstone must post nothing")
+	}
+	if n := e.b12AuditCount(t, "payments.payout_success_after_reversal_tombstone", a.ID); n != 2 {
+		t.Fatalf("late-success audit rows after a poll = %d, want 2", n)
+	}
+	occ := 0
+	for _, row := range e.b12Rows(t) {
+		if row.Discriminator == lateDisc {
+			occ = row.Occurrences
+		}
+	}
+	if occ <= disc[lateDisc] {
+		t.Fatalf("the poll must raise the late-success P1 again: %d -> %d", disc[lateDisc], occ)
+	}
+	// The third source: a success that lost its CAS to the park (applyPayoutLateEvidence, the attempt
+	// re-read as disputed) reaches the same cell.
+	pending, err := alerting.InTx(context.Background(), alerting.NewTenantRunner(e.pool, e.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		return applyPayoutLateEvidence(ctx, tx, a, EvidenceCallback, "late_success_after_terminal", wr.ID, OutcomeSucceeded, ref)
+	})
+	if err != nil {
+		t.Fatalf("late evidence after the tombstone: %v", err)
+	}
+	pending.Flush(context.Background())
+	if n := e.b12AuditCount(t, "payments.payout_success_after_reversal_tombstone", a.ID); n != 3 {
+		t.Fatalf("late-success audit rows after a lost CAS = %d, want 3", n)
+	}
+	if fpLedgerTx(t, e.pool, e.f) != txBefore {
+		t.Fatal("a late success after the tombstone must post nothing")
+	}
 	// The ledger refuses the original reference: (tenant, provider_id, provider_tx_id) UNIQUE, typed.
-	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err = e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (id, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, correlation_id)
 			VALUES ($1, $2, 'withdrawal_completed', $3, $4, $5, $6)`, uuid.New(), e.f.tenantID, e.pid+":"+ref, e.pid, ref, wr.ID)
 		return err
@@ -645,6 +680,54 @@ func TestA5_PayoutReversal_ReturnReferenceAlreadyHeld_Refused(t *testing.T) {
 		t.Fatalf("a refused reference recorded %d decisions", n)
 	}
 	e.a5MustDecide(t, w.f1.ID, wr.ID, p, PayoutReversalRecorded)
+}
+
+// SR5-1: on the tombstone branch a vote counts only while its voter STILL holds payment_force_resolve:approve.
+// f1 votes, f1's grant is revoked, f2's vote alone does not execute (the Go count re-checks the grant at
+// execution; WD027 restates it); f3 completes the quorum.
+func TestA5_PayoutReversal_TombstoneVoterGrantRevoked_NoLongerCounts(t *testing.T) {
+	e, w := a5K3(t)
+	wr, a := w.payout(500)
+	p := e.a5Payload(*a.ProviderReference)
+	e.a5MustDecide(t, w.f1.ID, wr.ID, p, PayoutReversalRecorded)
+	w.revokeGrant(w.f1.ID, capability.CapabilityPaymentForceResolveApprove)
+	if r := e.a5MustDecide(t, w.f2.ID, wr.ID, p, PayoutReversalRecorded); r.Counted != 1 {
+		t.Fatalf("a voter whose grant was revoked must not count: %+v", r)
+	}
+	if fpReqState(t, e.pool, e.f, wr.ID).State != withdrawal.StateSubmitted {
+		t.Fatal("no tombstone with one grant holder")
+	}
+	e.a5MustDecide(t, w.f3.ID, wr.ID, p, PayoutReversalTombstoned)
+	w.assertInvariants()
+}
+
+// WD027 at the database, past the Go gates: one grant holder's recorded decision plus a raw decision row of a
+// finance Person WITHOUT the grant (same digest) is one counted Person, so a tombstone correlated to the
+// request is refused (SQLSTATE WD027) even in the deciders' principal scope.
+func TestA5_PayoutReversal_WD027_OneGrantHolderIsNotAQuorum(t *testing.T) {
+	e, w := a5K3(t)
+	wr, a := w.payout(500)
+	ref := *a.ProviderReference
+	e.a5MustDecide(t, w.f1.ID, wr.ID, e.a5Payload(ref), PayoutReversalRecorded)
+	err := e.pool.WithPrincipalScope(context.Background(), e.f.tenantID, w.f1.ID, func(ctx context.Context, tx pgx.Tx) error {
+		var reason string
+		if err := tx.QueryRow(ctx, `SELECT reason_code FROM withdrawal_approvals WHERE withdrawal_request_id = $1 AND decision = 'reverse'`, wr.ID).Scan(&reason); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_approvals (tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval,
+			decision, reason_code, threshold_amount_at_decision, request_amount_at_decision) VALUES ($1, $2, $3, false, 'reverse', $4, 0, 500)`,
+			e.f.tenantID, wr.ID, w.financeNoGrant.ID, reason); err != nil {
+			return err
+		}
+		pid := e.pid
+		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: e.f.tenantID, TransactionType: ledger.TxTombstone,
+			IdempotencyKey: "tombstone:" + pid + ":" + ref, ProviderID: &pid, ProviderTxID: &ref, CorrelationID: wr.ID})
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "WD027" || !strings.Contains(pgErr.Message, "(found 1)") {
+		t.Fatalf("one grant holder + one non-holder: want WD027 with one counted Person, got %v", err)
+	}
 }
 
 // SR5-4 / LF-A5-3: a vote counts only while its voter is ACTIVE staff. The first voter is suspended, so
