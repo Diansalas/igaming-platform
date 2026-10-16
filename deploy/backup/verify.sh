@@ -113,6 +113,12 @@ if [ "$ANCHOR_MODE" = reset ]; then
   esac
 else
   BASELINE_CMP="$BASELINE"; RESTORED_CMP="${WORK}/restored.txt"
+  # physical recovery (PITR / snapshot) lives inside the cloud trust boundary and keeps the live actor-proof key by design: it is compared like any other table
+  # (row count and a hash over the NON-secret columns), and the key rows must have survived
+  AP_B="$(awk -F'|' '$1=="TABLE" && $2=="actor_proof_keys" {print $3}' "$BASELINE")"; AP_R="$(awk -F'|' '$1=="TABLE" && $2=="actor_proof_keys" {print $3}' "${WORK}/restored.txt")"
+  if [ "${AP_B:-0}" -ge 1 ]; then
+    if [ "$AP_B" = "${AP_R:-}" ]; then chk actor_proof_keys_retained_by_physical_recovery PASS "${AP_R} actor-proof key row(s) recovered (physical recovery keeps the live key; only logical dumps exclude it)"; else chk actor_proof_keys_retained_by_physical_recovery FAIL "baseline ${AP_B} rows, recovered ${AP_R:-?}"; fi
+  fi
 fi
 
 for kind in TABLE ROLE MEMBER DBACL SCHEMAACL ACL COLACL FUNCACL DEFACL TRG POL RLS FP; do

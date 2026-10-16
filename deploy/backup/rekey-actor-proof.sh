@@ -69,8 +69,9 @@ if [ "$HEXLEN" -lt 64 ] || [ $((HEXLEN % 2)) -ne 0 ] || [ "$HEXLEN" -gt 512 ] ||
 fi
 
 # connection-level preconditions (no secret involved yet)
-IFS='|' read -r IS_OWNER LOGSTMT LOGDUR LOGPARAM_ERR NKEYS HAS_KID <<<"$(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -c "SELECT (c.relowner = r.oid)::int, current_setting('log_statement'), current_setting('log_min_duration_statement'), coalesce(current_setting('log_parameter_max_length_on_error', true), '0'), (SELECT count(*) FROM public.actor_proof_keys), (SELECT count(*) FROM public.actor_proof_keys WHERE kid = '${KID}') FROM pg_class c, pg_roles r WHERE c.oid = 'public.actor_proof_keys'::regclass AND r.rolname = current_user" 2>/dev/null)" \
+PRE="$(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -c "SELECT (c.relowner = r.oid)::int, current_setting('log_statement'), current_setting('log_min_duration_statement'), coalesce(current_setting('log_parameter_max_length_on_error', true), '0'), (SELECT count(*) FROM public.actor_proof_keys), (SELECT count(*) FROM public.actor_proof_keys WHERE kid = '${KID}') FROM pg_class c, pg_roles r WHERE c.oid = 'public.actor_proof_keys'::regclass AND r.rolname = current_user" 2>/dev/null)" \
   || bk_die "cannot read public.actor_proof_keys as ${REKEY_PGUSER}: it must be the migration/owner role of a database with migration 0120 applied"
+IFS='|' read -r IS_OWNER LOGSTMT LOGDUR LOGPARAM_ERR NKEYS HAS_KID <<<"$PRE"
 [ "$IS_OWNER" = 1 ] || bk_die "${REKEY_PGUSER} does not own actor_proof_keys; only the owner role provisions keys (operational-runbooks.md section 15)"
 [ "$HAS_KID" = 0 ] || bk_die "kid '${KID}' is already present in actor_proof_keys"
 [ "$NKEYS" = 0 ] || bk_die "actor_proof_keys already holds ${NKEYS} key(s): this script provisions the FIRST key of a restored database. Rotating a live key is operational-runbooks.md section 15 (rotation)"
