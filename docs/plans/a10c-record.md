@@ -14,7 +14,7 @@ Registry, HANDOVER, progress, active-stage and the decision register were not ed
 | 4 | Hold-candidate list `GET .../withdrawal-hold-candidates` (R3) | IMPLEMENTED (MOCK stack); production use still gated by Q-HSEC-1/2/3 (ADR 0111) | `withdrawal_hold_candidates_routes.go` |
 | 5 | Attempt list filters `provider_id` (exact) and `min_age_seconds` | IMPLEMENTED | `payment_attempts_read_routes.go` |
 | 6 | Paged K1 lists (optional `?limit` / `?offset`, `X-Total-Count`, bare array kept) | IMPLEMENTED | `capability_routes.go`, `capability/capability.go` (`List*Page`) |
-| 7 | Server-side `Idempotency-Key` on the 13 K1 / K3 / HSEC mutating routes (optional header; migration 0164 `staff_idempotency_keys`) | IMPLEMENTED (optional, see residual R2) | `staff_idempotency.go`, `migrations/0164_*` |
+| 7 | Server-side `Idempotency-Key` on the 13 K1 / K3 / HSEC mutating routes (optional header; migration 0164 `staff_idempotency_keys`; fix round: no response body stored, guard trigger, bounded table) | IMPLEMENTED (optional, see residual R2); security re-review of the fix round pending | `staff_idempotency.go`, `migrations/0164_*` |
 | 8 | `evidence_ref_hash` decision | NOT IMPLEMENTED / BLOCKED on the owner decision (ADR 0114 9.4, ADR 0111 25.7); options below | none |
 | 9 | Backoffice wiring: parked-payments provider/age filters and event timeline; reconciliation single reads and the "only this run" filter; hold-candidate picker; K1 pager; idempotency doc | IMPLEMENTED against the new routes (MOCK banner unchanged) | `backoffice/src/{api,features}` |
 | 10 | b2c OpenAPI completion (7 routes / bodies that were missing) | IMPLEMENTED | `docs/api/openapi/platform-api.yaml` |
@@ -41,13 +41,19 @@ Registry, HANDOVER, progress, active-stage and the decision register were not ed
   Not adding a definer function is the smaller privilege surface. Tell the architect if a definer function is still wanted.
 - **`open_resolution_id` is not returned on candidates** (hold resolutions are readable only in an acting session, ADR 0114 12.4); the console
   lists the existing requests next to the candidates and says so.
-- **Idempotency design (the one new mechanism).** A tenant-owned table (`tenant_id`, FORCE RLS on `app.tenant_id`, staff sessions only), unique
-  on (tenant, acting staff id, key). The wrapper sits INSIDE `staffRoute` and the route's permission gate, so authentication, aal2, liveness,
-  step-up and permissions have all passed before a key is looked at. It reserves the key (own tx), runs the handler into a buffer, stores a 2xx
-  response (<= 256 KiB) and replays it with `Idempotent-Replayed: true`; same key + different method/path/query/body = 409
-  `IDEMPOTENCY_MISMATCH`; same key while running = 409 `IDEMPOTENCY_IN_PROGRESS`; a non-2xx outcome or a panic deletes the reservation. It
-  decides nothing: the four-eyes rules, proofs, state machines and counts stay the flows' own database guards. Two codes were added to
-  `apierror` and the OpenAPI `Error.code` enum.
+- **Idempotency design (the one new mechanism; fix round after SR10C).** A tenant-owned table (`tenant_id`, FORCE RLS on `app.tenant_id`,
+  staff sessions only), unique on (tenant, acting staff id, key). It stores NO response body (SR10C-1, coordinator decision (b)): only the request
+  SHA-256 (method, path, query, body), the 2xx status code, actor, state and timestamps. The wrapper sits INSIDE `staffRoute` and the route's
+  permission gate, so authentication, aal2, liveness (a revoked session is refused before any replay), step-up and permissions have all passed
+  before a key is looked at. It reserves the key (own tx), runs the handler into a buffer, records the 2xx status and answers a replay with that
+  status, the fixed body `{"status":"already_applied"}` (nothing for 204) and `Idempotent-Replayed: true`; the client re-reads the resource through
+  the governed reads. Same key + different method/path/query/body = 409 `IDEMPOTENCY_MISMATCH`; same key while running = 409
+  `IDEMPOTENCY_IN_PROGRESS`; a non-2xx outcome or a panic deletes the reservation. A trigger (SR10C-2) permits only the one-shot
+  `in_progress -> completed` update (SQLSTATE SK001) and deletes of an `in_progress` row or of a completed row older than 24 h (SK002 otherwise).
+  Before reserving, the wrapper deletes up to 100 expired rows of the same tenant (completed > 24 h, in_progress > 15 min), which bounds the table
+  and makes an orphaned `in_progress` key reclaimable (SR10C-4). It decides nothing: the four-eyes rules, proofs, state machines and counts stay the
+  flows' own database guards. Two codes were added to `apierror` and the OpenAPI `Error.code` enum. Backoffice: `client.ts` turns a replayed answer
+  into the closed client-side outcome `already_applied` (UI-owned text, list refreshed); a 204 replay is a plain success.
 - **K1 lists keep the bare array** (changing to the `{items, total}` envelope would break every existing client and test); paging is optional
   and the total is the `X-Total-Count` header. The UI asks for one row more than it shows to know whether a next page exists.
 - **`provider_id` filter** reuses `webhookauth.ValidProviderID` (`^[a-z0-9][a-z0-9-]{0,62}$`); `min_age_seconds` is 0..31536000.
@@ -68,15 +74,19 @@ It is an OPEN owner decision, not an engineering one (ADR 0114 9.4 / 0111 25.7),
 - **R1** Migration number `0164` may collide with a sibling branch (0159 and 0161 are absent from the base). The orchestrator renumbers at merge.
 - **R2** The `Idempotency-Key` header is OPTIONAL on these routes (the consoles always send it). Making it required would change every existing
   Go test and any other client; not done. Without the header behaviour is unchanged (idempotent by state).
-- **R3** `staff_idempotency_keys` has no retention job (rows are tiny but unbounded) and a crash between the handler's commit and the completion
-  write leaves a key `in_progress` (retries get 409 `IDEMPOTENCY_IN_PROGRESS`; a new key is safe because the flow guards refuse a double act).
+- **R2b (SR10C-3, accepted and documented)** A replay does not re-run the handler's in-handler authority (capability grant, acting session, Person
+  checks). A staff member whose grant was revoked after the original request still gets "already applied" for that key within 24 h; nothing is acted on and
+  no data is returned. A NEW request after the revocation is refused (tested).
+- **R3 (closed by the fix round, SR10C-4)** Retention is opportunistic inside the wrapper (per tenant, <= 100 rows per keyed request; completed > 24 h,
+  in_progress > 15 min), so a tenant that stops sending keyed requests keeps its last rows until its next one (a few tiny rows, no sensitive data). An
+  in_progress key orphaned by a crash is reclaimable after 15 minutes; before that the dialog's retry gets 409 `IDEMPOTENCY_IN_PROGRESS`.
 - **R4** Still open from the A10b list: G4 (platform `open_resolution_id` is always null), G6 (K1 filters, platform staff in the directory, no K1
   payload hash), G7 closed earlier by A10b fix round, G8 (above).
 - **R5** `provider_id` / `min_age_seconds` are filters on the keyset list; the console age options are 1h, 6h, 1d, 3d, 7d.
 - **R6** The b2c contract checker is a COPY of the backoffice one (each app installs and builds alone in CI); keep the two in step.
 - **R7** `deploy/backup` `TestScriptsParse` fails on shellcheck warnings in `drill.sh` / `lib-common.sh`; those files are untouched by A10c
   (pre-existing, unrelated).
-- Security review of the idempotency wrapper and the three new read shapes is pending (probes below). Accessibility is basics only (as A10b).
+- The security re-review of the idempotency fix round is pending (SR10C responses below). Accessibility is basics only (as A10b).
 
 ## b2c OpenAPI: the 10 mismatches (A10a probe) and their state
 
@@ -106,7 +116,7 @@ behaviour is kept where it still applies):
   streams by the run_id filter test; the SAME marking assertions now run for the casino stream (their route has no run filter).
 - `HoldResolutionsPage.test.tsx`: "does not show candidate withdrawals" -> the empty-candidates text.
 - `api/*.test.ts`: request counts grew with the new calls (additions).
-- `idempotency.ts` header comment no longer says the server ignores the key.
+- `idempotency.ts` header comment no longer says the server ignores the key; fix round: the three Go idempotency tests no longer compare a replayed body with the original (it is now the fixed `already_applied` body), the OpenAPI `StaffIdempotencyKey` text changed accordingly.
 
 b2c: `src/api/rg.contract.test.ts` was renamed to `openapiContract.test.ts` and generalised; it still pins the same 8 rg calls (the `{param}`
 placeholder is now the checker's `{}`) and now also checks bodies and query keys for every module.
@@ -137,12 +147,12 @@ each is detected, so a green run is not vacuous. Scratch DBs `a10c_t1`, `a10c_t2
 2. Replay is bound to (tenant, actor, key): another actor with the same key string is not served the stored response (tested); the other tenant's
    RLS scope reads zero rows (tested). Probe: a stolen/replayed access token after session revocation must be refused by `requireLiveStaffSession`
    BEFORE a replay (the wrapper is inside the chain, step-up included).
-3. The stored response bodies contain payload hashes and ids the actor already received; check retention/PII expectations for the table (R3).
+3. The table holds no response body, no payload hash and no resource id (pinned: exact column set, and a dump of the row after a K3 call contains none of the response's ids/hashes).
 4. Request pinning: method, path, raw query, raw body. Probe a body that differs only in whitespace or key order (treated as different = 409).
 5. Reservation race: two simultaneous identical requests: exactly one acts, the other gets 409 IN_PROGRESS (tested via a seeded in-progress row;
    a true concurrent test is not written).
 6. A 5xx or panic path frees the key; a crash after the handler's commit leaves it in_progress (R3). Probe the K3/HSEC decision replay: an approve
-   whose response was lost must replay, not act twice (state guards still refuse a second act under a new key).
+   whose response was lost must be answered `already_applied`, not act twice (state guards still refuse a second act under a new key).
 7. Candidates: tenant_admin/finance/compliance/support all 403, tenant-scoped token with the permission 403, no token 401, ghost tenant 404 with no
    audit row, `tenant_id` query parameter 400; confirm no player/wallet id in the body (tested) and that existing audit metadata carries closed codes only.
 8. Events: only closed vocabularies; confirm `decline_stage` / `resolution` / `disposition_at_receipt` never carry provider text (CHECK constraints) and
@@ -162,7 +172,7 @@ each is detected, so a green run is not vacuous. Scratch DBs `a10c_t1`, `a10c_t2
    recount and the signed proof (migration 0124) - untouched. Probe that a withdrawal whose tenant and brand are both active is never listed.
 4. Idempotent replay of an HSEC/K3/K1 request or decision cannot double-act: the replay never reaches the handler; under a new key the state
    guards (one pending per attempt, already-decided, counted approvals) refuse. Probe: approve replayed after the resolution executed returns the
-   stored 200 (same body) rather than a second posting; confirm that is acceptable for an `executed:true` response.
+   fixed `already_applied` 200 rather than a second posting; confirm that is acceptable (the client re-reads the resolution to learn `executed`).
 5. The events route exposes receipt amounts of `succeeded` events only through `amount_minor_units`/`asset_code` (no reference text); confirm this is
    not a second source of truth for reconciliation (it is a view of `payment_provider_events`, append-only).
 6. `evidence_ref_hash` semantics are unchanged (still an operator-supplied digest); see the options above.
@@ -273,3 +283,41 @@ after the act (a retry with the same key then hits the state guards, 409); the D
    ordering already guarantees it; pin it with one integration test).
 4. Replay after a staff member's G-P2 grant revocation: the documented behaviour (SR10C-3) is pinned, whichever is chosen.
 5. A true concurrent pair (two goroutines, same key, same body): exactly one handler run, the other 409 IN_PROGRESS or a replay.
+
+
+## Fix round after the security review (SR10C responses)
+
+Coordinator decisions applied: option (b) for SR10C-1 (store no body), migration 0164 edited in place (it is unmerged).
+
+| Finding | Treatment | Evidence |
+|---|---|---|
+| SR10C-1 (Medium) | No `response_body` column. Replay = stored status + fixed body `{"status":"already_applied"}` (204: none) + `Idempotent-Replayed: true`. UI maps it to the closed outcome `already_applied` | `TestA10c_SR10C1_TableHoldsNoSensitiveData` (exact column set; row dump after a K3 call holds none of the response ids/hash); backoffice `capabilityGrants.test.ts`, `errors.test.ts` |
+| SR10C-2 (Low) | Trigger `staff_idempotency_keys_guard`: UPDATE only `in_progress -> completed` once with every other column frozen (SK001); DELETE only of `in_progress` rows or completed rows older than 24 h (SK002) | `TestA10c_SR10C2_RowsAreImmutableExceptTheOneShotCompletion` (rewrite, reopen, hash change, actor move, complete twice, delete fresh completed all refused; permitted paths pass; other tenant's scope deletes nothing) |
+| SR10C-3 (Low) | Documented: code comment, OpenAPI `StaffIdempotencyKey` description, residual R2b and the ADR text below | `TestA10c_SR10C3_Replay_AfterGrantRevocation_IsDocumentedBehaviour` |
+| SR10C-4 (Low) | Per-tenant opportunistic delete of expired rows inside the wrapper; an expired `in_progress` key (> 15 min) is reclaimed by the insert | `TestA10c_SR10C4_BoundedTableAndReclaimableOrphan` (live 5-minute key blocks; 20-minute orphan is reclaimed and then replays; a 30-hour completed row is swept; another tenant's expired row is untouched) |
+| SR10C-5 (Low) | ADRs not edited; ready-to-paste amendment below | n/a |
+| SR10C-6 (Info) | `GetRunForStream` / `GetMismatchForStream` take the path tenant id and filter on it explicitly (defence in depth on top of FORCE RLS) | `TestA10c_R2_SingleReadsAndRunFilter` (cross-tenant 404s) |
+| SR10C-7 (Info) | An offset without a limit takes the default page size (50); OpenAPI text updated | `TestA10c_K1_PagedListsAndIdempotency` |
+
+QA tests added: replay after session revocation is 401 with no replay marker (`TestA10c_Replay_AfterSessionRevocationIsRefused`); replay after grant
+revocation (above); a truly concurrent pair, 8 rounds, same key and body, exactly one handler run and the other an `already_applied` replay or 409
+`IDEMPOTENCY_IN_PROGRESS` (`TestA10c_ConcurrentPair_SameKey_RunsTheHandlerOnce`).
+
+### Ready-to-paste ADR 0119 section 6.6 / C8 amendment (for the architect; this record edits no ADR)
+
+> **Amendment (A10c, SR10C-5): server-side Idempotency-Key on the K1, K3 and HSEC staff mutating routes.** Sections 6.6 / C8 said the admin four-eyes
+> routes carry no `Idempotency-Key` and that the client re-sends after step-up without a server claim. That is superseded for exactly 13 routes
+> (K1 request, cancel, approve, reject, revoke; K3 request, approve, reject, cancel; HSEC request, approve, reject, cancel), by an OPTIONAL header.
+> Scope and semantics: (1) the wrapper `staffIdempotent` runs inside `staffRoute` and the route's permission gate, so authentication, aal2, session
+> liveness, step-up freshness and the static permission are all evaluated before a key is looked at; a replay is never served to a revoked session.
+> (2) A key is scoped to (path tenant, acting staff id, key) and pinned to SHA-256 of method, path, query and raw body; the same key with another
+> request is 409 `IDEMPOTENCY_MISMATCH`, while the first request is running 409 `IDEMPOTENCY_IN_PROGRESS`. (3) Only the request hash, the 2xx status code,
+> the actor and timestamps are stored (table `staff_idempotency_keys`, migration 0164, FORCE RLS on `app.tenant_id`); NEVER a response body, because the
+> governed rows are readable only in an acting session (ADR 0114 12.4). A replay answers the stored status with the fixed body
+> `{"status":"already_applied"}` and `Idempotent-Replayed: true`; clients re-read through the governed read routes. (4) A guard trigger permits only the
+> one-shot `in_progress -> completed` update and deletes of `in_progress` rows or completed rows older than 24 h; the wrapper sweeps expired rows of the
+> tenant (completed > 24 h, in_progress > 15 min) before reserving, so an orphaned key is reclaimable after 15 minutes. (5) Accepted limitation (SR10C-3):
+> a replay does not re-run in-handler authority (capability grant G-P2, acting session, Person checks); within 24 h a staff member whose grant was
+> revoked after the original request still receives "already applied" for that key, with no data and no effect. (6) The header remains optional;
+> without it the routes are idempotent by state as before. The key confers no authority: every four-eyes rule, proof and count is still decided by the
+> flows' own database guards.
