@@ -553,6 +553,17 @@ func TestF4_DB_RedispatchBackstop(t *testing.T) {
 	}
 }
 
+// f4RecordDispatchAllow is the FIXTURE step for a test that walks E7 directly (withdrawal.MarkSubmitted /
+// MarkSubmittedPending, not ClaimForDispatch): it records the allowing dispatch decision migration 0169 requires in the
+// transaction (WD053).
+func f4RecordDispatchAllow(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) error {
+	cur, err := withdrawal.GetByID(ctx, tx, requestID)
+	if err != nil {
+		return err
+	}
+	return withdrawal.RecordDispatchGateDecision(ctx, tx, cur, withdrawal.DispatchStageDispatch, nil, withdrawalgate.Decision{Allowed: true, Outcome: "allow"})
+}
+
 // f4RecordRedispatchAllow is the FIXTURE step for a test that drives a payout T2 / T12 directly (not through the
 // sweeper): it records the allowing re-dispatch decision migration 0169 requires in the transaction (WD053).
 func f4RecordRedispatchAllow(ctx context.Context, tx pgx.Tx, requestID, attemptID uuid.UUID) error {
