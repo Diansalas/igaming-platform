@@ -57,6 +57,16 @@ variable "runner_db_resource_id" {
   }
 }
 
+variable "seed_world_secret_arn" {
+  description = "ARN of the secret igaming-staging/seed-world-passwords: the only resource the seed-world runner task role may Get/PutSecretValue."
+  type        = string
+
+  validation {
+    condition     = can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$", var.seed_world_secret_arn)) && !strcontains(var.seed_world_secret_arn, "*")
+    error_message = "seed_world_secret_arn must be one exact Secrets Manager secret ARN (no wildcard)."
+  }
+}
+
 variable "runner_db_user" {
   description = "The only database user the staging-runner task role may mint an IAM token for."
   type        = string

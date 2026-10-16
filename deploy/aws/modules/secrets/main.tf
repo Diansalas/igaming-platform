@@ -223,3 +223,22 @@ resource "aws_secretsmanager_secret_version" "alert_webhook_hmac" {
   secret_string_wo         = ephemeral.random_password.alert_webhook_hmac.result
   secret_string_wo_version = var.key_family_version
 }
+
+# ---------------------------------------------------------------------------
+# STAGING-PREP-3 round 2 (SA-1): the seed-world runner mode's credential store.
+# Terraform creates ONLY the empty secret container: no version, no value, nothing
+# in state. The runner mode `seed-world` (cmd/seed-staging-world, run with its own
+# task role: modules/iam runner_seed_world) generates the one-time passwords of the
+# synthetic tenant staff, uploads them here BEFORE creating the accounts, and adds
+# the bootstrap MFA enrolment tokens afterwards (JSON: tenant_slug, brand_slug,
+# country, actors.<KEY>.{email,password,bootstrap_token}). The acceptance-suite
+# operator reads it with their own credentials (aws secretsmanager get-secret-value)
+# into 0600 files; it is never printed or logged by the runner.
+# ---------------------------------------------------------------------------
+resource "aws_secretsmanager_secret" "seed_world" {
+  name                    = "${var.name_prefix}/seed-world-passwords"
+  description             = "One-time passwords and bootstrap MFA enrolment tokens of the synthetic staging-acceptance tenant staff (runner mode seed-world). Created EMPTY by Terraform; the value is written only by the seed-world task. Synthetic accounts of a disposable staging environment; delete with the environment."
+  recovery_window_in_days = var.recovery_window_in_days
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-seed-world-passwords" })
+}

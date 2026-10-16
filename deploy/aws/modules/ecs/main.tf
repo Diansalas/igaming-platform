@@ -613,6 +613,9 @@ resource "aws_ecs_task_definition" "staging_runner" {
       essential = true
       command   = ["usage"]
       user      = "10001"
+      # SRP3-9: ECS sends SIGTERM and SIGKILLs after stopTimeout; 120 s is the Fargate maximum, so the exit trap (drop the loader role and the
+      # restore-check database) has the longest possible chance to run. The cleanup mode removes whatever a hard kill leaves behind.
+      stopTimeout = 120
       linuxParameters = {
         initProcessEnabled = true
         capabilities       = { drop = ["ALL"] }
@@ -656,6 +659,9 @@ resource "aws_ecs_task_definition" "staging_runner_actor_proof" {
       essential = true
       command   = ["usage"]
       user      = "10001"
+      # SRP3-9: ECS sends SIGTERM and SIGKILLs after stopTimeout; 120 s is the Fargate maximum, so the exit trap (drop the loader role and the
+      # restore-check database) has the longest possible chance to run. The cleanup mode removes whatever a hard kill leaves behind.
+      stopTimeout = 120
       linuxParameters = {
         initProcessEnabled = true
         capabilities       = { drop = ["ALL"] }
@@ -671,6 +677,57 @@ resource "aws_ecs_task_definition" "staging_runner_actor_proof" {
           "awslogs-group"         = aws_cloudwatch_log_group.this["staging-runner"].name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "staging-runner-actor-proof"
+        }
+      }
+    }
+  ])
+
+  tags = var.tags
+}
+
+# STAGING-PREP-3 round 2 (SA-1): the third definition, for mode seed-world only. It needs the master password
+# (the owner connection of cmd/seed-staging-world), the staff MFA key families (the same ones platform-api
+# and seed-admin use; the bootstrap MFA enrolment token is sealed with them) and a task role that can
+# Get/PutSecretValue on the ONE secret igaming-staging/seed-world-passwords. No runtime password, no
+# actor-proof key, no rds-db:connect.
+resource "aws_ecs_task_definition" "staging_runner_seed_world" {
+  family                   = "${var.name_prefix}-staging-runner-seed-world"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = var.one_off_execution_role_arn
+  task_role_arn            = var.runner_seed_world_task_role_arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "staging-runner"
+      image     = var.staging_runner_image
+      essential = true
+      command   = ["usage"]
+      user      = "10001"
+      # SRP3-9: ECS sends SIGTERM and SIGKILLs after stopTimeout; 120 s is the Fargate maximum, so the exit trap (drop the loader role and the
+      # restore-check database) has the longest possible chance to run. The cleanup mode removes whatever a hard kill leaves behind.
+      stopTimeout = 120
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      environment = concat(local.runner_common_environment, [
+        { name = "STAFF_MFA_FACTOR_ACTIVE_KID", value = var.staff_mfa_active_kid },
+        { name = "STAFF_MFA_MAC_ACTIVE_KID", value = var.staff_mfa_active_kid },
+      ], var.mock_geolocation_country != "" ? [{ name = "MOCK_GEOLOCATION_COUNTRY", value = var.mock_geolocation_country }] : [])
+      secrets = [
+        { name = "DB_MASTER_PASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
+        { name = "STAFF_MFA_FACTOR_KEYS", valueFrom = "${var.staff_mfa_keys_secret_arn}:factor_keys::" },
+        { name = "STAFF_MFA_MAC_KEYS", valueFrom = "${var.staff_mfa_keys_secret_arn}:mac_keys::" },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.this["staging-runner"].name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "staging-runner-seed-world"
         }
       }
     }

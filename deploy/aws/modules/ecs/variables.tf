@@ -179,6 +179,11 @@ variable "runner_task_role_arn" {
   type        = string
 }
 
+variable "runner_seed_world_task_role_arn" {
+  description = "Task role of the staging-runner-seed-world definition (modules/iam): Get/PutSecretValue on igaming-staging/seed-world-passwords only. No rds-db:connect."
+  type        = string
+}
+
 variable "runner_task_cpu" {
   description = "CPU units of the staging-runner task (a Fargate-valid pairing with runner_task_memory; the backup/restore drill dumps and restores the staging database in the task)."
   type        = string

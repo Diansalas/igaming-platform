@@ -84,6 +84,16 @@ output "ecs_staging_runner_actor_proof_task_definition_arn" {
   value       = module.ecs.task_definition_arns["staging_runner_actor_proof"]
 }
 
+output "ecs_staging_runner_seed_world_task_definition_arn" {
+  description = "STAGING-PREP-3 round 2 (SA-1): the staging-runner definition for mode seed-world: master password, staff MFA keys and the seed-world task role (Get/PutSecretValue on igaming-staging/seed-world-passwords only)."
+  value       = module.ecs.task_definition_arns["staging_runner_seed_world"]
+}
+
+output "runner_seed_world_task_role_arn" {
+  description = "SA-1: the seed-world task role."
+  value       = module.iam.runner_seed_world_task_role_arn
+}
+
 output "runner_task_role_arn" {
   description = "STAGING-PREP-3: the staging-runner task role (rds-db:connect as igaming_backup on this instance only)."
   value       = module.iam.runner_task_role_arn
@@ -128,6 +138,7 @@ output "secret_arns" {
     payout_instrument_keys = module.secrets.payout_instrument_keys_secret_arn
     actor_proof_keys       = module.secrets.actor_proof_keys_secret_arn
     alert_webhook_hmac     = module.secrets.alert_webhook_hmac_secret_arn
+    seed_world_passwords   = module.secrets.seed_world_secret_arn # empty container; written only by the seed-world runner task
   }
 }
 

@@ -209,3 +209,33 @@ resource "aws_iam_role_policy" "runner_task" {
   role   = aws_iam_role.runner_task.id
   policy = data.aws_iam_policy_document.runner_task.json
 }
+
+# STAGING-PREP-3 round 2 (SA-1): the seed-world TASK ROLE, a third dedicated role. The seed-world runner mode
+# generates the one-time passwords of the synthetic acceptance staff and stores them in ONE secret
+# (igaming-staging/seed-world-passwords), so its only permissions are Get/PutSecretValue on that exact ARN: no
+# rds-db:connect (the mode connects with the master password the execution role injects), no other secret, no
+# CreateSecret/DeleteSecret/Rotate, no wildcard. Kept apart from runner_task so the all-tenant backup login and
+# the secret store are never reachable from the same task. Capped by the permissions boundary, which carries the
+# matching statement (deploy/aws/bootstrap/main.tf, applied by the bootstrap credential).
+resource "aws_iam_role" "runner_seed_world" {
+  name                 = "${var.name_prefix}-ecs-seed-world-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_tasks_assume.json
+  description          = "seed-world runner task role: Get/PutSecretValue on the seed-world-passwords secret only. Do not attach anything else."
+  permissions_boundary = var.permissions_boundary_arn
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-ecs-seed-world-task-role" })
+}
+
+data "aws_iam_policy_document" "runner_seed_world" {
+  statement {
+    sid       = "ReadAndWriteTheSeedWorldSecretOnly"
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]
+    resources = [var.seed_world_secret_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "runner_seed_world" {
+  name   = "${var.name_prefix}-ecs-seed-world-task-policy"
+  role   = aws_iam_role.runner_seed_world.id
+  policy = data.aws_iam_policy_document.runner_seed_world.json
+}

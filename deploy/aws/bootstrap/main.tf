@@ -221,6 +221,18 @@ data "aws_iam_policy_document" "staging_ecs_role_boundary" {
     resources = ["arn:aws:rds-db:${var.aws_region}:${data.aws_caller_identity.current.account_id}:dbuser:db-*/igaming_backup"]
   }
 
+  # STAGING-PREP-3 round 2 (SA-1; BOUNDARY STATEMENT ONLY, applied by the bootstrap credential): the seed-world task role
+  # (modules/iam, igaming-staging-ecs-seed-world-task-role) stores the synthetic acceptance staff's one-time credentials in the
+  # secret igaming-staging/seed-world-passwords. The boundary above already allows GetSecretValue on igaming-staging/*; this adds
+  # PutSecretValue for that ONE secret name (the random ARN suffix is why the name ends in -*), nothing else.
+  # The deployer-policy change that lets the deployer create/manage the new role is NOT applied by this credential: it is
+  # an edit of deploy/aws/iam/staging-deployer-edge-iam-state-policy.json applied by an IAM administrator (the account owner).
+  statement {
+    sid       = "StagingRunnerSeedWorldSecretWrite"
+    actions   = ["secretsmanager:PutSecretValue"]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:igaming-staging/seed-world-passwords-*"]
+  }
+
   # The RDS-managed master secret ("rds!db-<uuid>"), only for the staging DB.
   statement {
     sid       = "StagingRdsManagedMasterSecret"

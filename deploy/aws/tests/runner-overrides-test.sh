@@ -48,5 +48,22 @@ out="$(runner_overrides pitr-verify "PITR_ENDPOINT=igaming-staging-db-pitr-abc12
 out="$(runner_overrides seed-market TENANT_SLUG=demo-casino BRAND_SLUG=demo-brand COUNTRY=SV "AUTH_REF=TICKET-42" OPERATOR=ops-alice "REASON=staging bootstrap")"
 [[ "$(jq -r '.containerOverrides[0].environment[] | select(.name=="REASON") | .value' <<<"${out}")" == "staging bootstrap" ]] && ok "a value with a space survives" || bad "space lost"
 
+# STAGING-PREP-3 round 2: the writing modes need who / why / which authorisation; the new modes accept only their own names
+expect_refused "seed-market without OPERATOR" seed-market TENANT_SLUG=a BRAND_SLUG=b COUNTRY=SV AUTH_REF=T-1 "REASON=x y"
+expect_refused "seed-world without REASON" seed-world TENANT_SLUG=a BRAND_SLUG=b COUNTRY=SV AUTH_REF=T-1 OPERATOR=ops
+expect_refused "seed-world without AUTH_REF" seed-world TENANT_SLUG=a BRAND_SLUG=b COUNTRY=SV OPERATOR=ops "REASON=x y"
+expect_refused "record-anchor without OPERATOR" record-anchor ANCHOR_VALUE=staging AUTH_REF=T-1 REASON=x
+expect_refused "record-anchor with a parameter of another mode" record-anchor ANCHOR_VALUE=staging AUTH_REF=T-1 OPERATOR=o REASON=r TENANT_SLUG=a
+expect_refused "cleanup with a parameter of another mode" cleanup DRY_RUN=1
+expect_refused "seed-world with a credential-looking name" seed-world TENANT_SLUG=a BRAND_SLUG=b COUNTRY=SV AUTH_REF=T-1 OPERATOR=o REASON=r PASSWORD_FILE=x
+out="$(runner_overrides seed-world TENANT_SLUG=acc-one BRAND_SLUG=acc-brand SECOND_TENANT_SLUG=acc-two SECOND_BRAND_SLUG=acc-two-brand COUNTRY=SV AUTH_REF=TICKET-43 OPERATOR=ops-alice "REASON=staging acceptance world")"
+[[ "$(jq -c '.containerOverrides[0].command' <<<"${out}")" == '["seed-world"]' ]] && ok "seed-world is accepted with its parameters" || bad "seed-world rejected"
+out="$(runner_overrides record-anchor ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor")"
+[[ "$(jq -r '.containerOverrides[0].environment[] | select(.name=="REASON") | .value' <<<"${out}")" == "plan 6.2 anchor" ]] && ok "record-anchor is accepted (a reason with spaces and a dot)" || bad "record-anchor rejected"
+out="$(runner_overrides verify-db REQUIRE_ANCHOR=1)"
+[[ "$(jq -r '.containerOverrides[0].environment[0].name' <<<"${out}")" == "REQUIRE_ANCHOR" ]] && ok "verify-db accepts REQUIRE_ANCHOR" || bad "REQUIRE_ANCHOR rejected"
+out="$(runner_overrides cleanup)"
+[[ "$(jq -c '.containerOverrides[0].command' <<<"${out}")" == '["cleanup"]' ]] && ok "cleanup takes no required parameter" || bad "cleanup rejected"
+
 if [[ ${fails} -ne 0 ]]; then echo "${fails} runner override test(s) failed" >&2; exit 1; fi
 echo "runner override tests passed"

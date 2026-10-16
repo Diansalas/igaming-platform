@@ -80,6 +80,11 @@ else
 fi
 command -v jq >/dev/null 2>&1 || fail "jq is required for the deploy.sh runner parameter test"
 bash "${AWS_DIR}/tests/runner-overrides-test.sh" || fail "deploy.sh runner parameter handling"
+bash "${REPO_ROOT}/deploy/staging-runner/tests/probe-verdict-test.sh" || fail "fail-closed probe classification"
+bash "${AWS_DIR}/tests/fetch-seed-world-test.sh" || fail "fetch-seed-world.sh"
+for pj in "${AWS_DIR}"/iam/*.json; do
+  jq -e . "${pj}" >/dev/null || fail "invalid JSON: ${pj}"
+done
 
 step "repository guards"
 # No Terraform state, plans or local tfvars may ever be tracked.

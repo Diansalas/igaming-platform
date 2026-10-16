@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """READ-ONLY IAM policy simulation for the staging deployer policies (ADR 0086).
 
-Evaluates the three deploy/aws/iam/staging-deployer-*.json policies with IAM's
+Evaluates the four deploy/aws/iam/staging-deployer-*.json policies with IAM's
 SimulateCustomPolicy API (no resources are created or changed) and asserts
 that the privilege-escalation paths found in the Stage 9.4 security review
 are denied while every operation the staging lifecycle needs is allowed.
@@ -21,6 +21,11 @@ ACCOUNT = "765578795051"
 REGION = "eu-central-1"
 BOUNDARY = f"arn:aws:iam::{ACCOUNT}:policy/igaming-staging-ecs-role-boundary"
 TASK_ROLE = f"arn:aws:iam::{ACCOUNT}:role/igaming-staging-ecs-task-role"
+# STAGING-PREP-3: the two runner task roles (rds-db:connect as igaming_backup; Get/PutSecretValue on the seed-world secret). They are listed
+# in staging-deployer-runner-roles-policy.json (three statements, same conditions as the edge policy's), a policy created and attached by an IAM
+# administrator (the account owner), NOT by the bootstrap credential.
+RUNNER_ROLE = f"arn:aws:iam::{ACCOUNT}:role/igaming-staging-ecs-runner-task-role"
+SEED_WORLD_ROLE = f"arn:aws:iam::{ACCOUNT}:role/igaming-staging-ecs-seed-world-task-role"
 STATE = "arn:aws:s3:::igaming-platform-staging-tfstate-765578795051/staging/terraform.tfstate"
 
 IAM_DIR = pathlib.Path(__file__).resolve().parent.parent / "iam"
@@ -28,6 +33,9 @@ POLICIES = [
     (IAM_DIR / "staging-deployer-network-policy.json").read_text(),
     (IAM_DIR / "staging-deployer-infra-policy.json").read_text(),
     (IAM_DIR / "staging-deployer-edge-iam-state-policy.json").read_text(),
+    # STAGING-PREP-3: the two runner task roles live in their own policy file because adding them to the edge/IAM/state policy would exceed the
+    # 6,144-character managed-policy limit (6,236 non-whitespace characters). Attached to the deployer by an IAM administrator (the account owner).
+    (IAM_DIR / "staging-deployer-runner-roles-policy.json").read_text(),
 ]
 
 
@@ -43,7 +51,7 @@ CASES = [
     ("CreateRole with the staging boundary", "iam:CreateRole", TASK_ROLE, ctx(iam__PermissionsBoundary=BOUNDARY), True),
     ("CreateRole without a boundary", "iam:CreateRole", TASK_ROLE, None, False),
     ("CreateRole with another boundary", "iam:CreateRole", TASK_ROLE, ctx(iam__PermissionsBoundary=f"arn:aws:iam::{ACCOUNT}:policy/Admin"), False),
-    ("CreateRole outside the three staging role names", "iam:CreateRole", f"arn:aws:iam::{ACCOUNT}:role/igaming-staging-x", ctx(iam__PermissionsBoundary=BOUNDARY), False),
+    ("CreateRole outside the five staging role names", "iam:CreateRole", f"arn:aws:iam::{ACCOUNT}:role/igaming-staging-x", ctx(iam__PermissionsBoundary=BOUNDARY), False),
     ("PutRolePolicy on a bounded staging role", "iam:PutRolePolicy", TASK_ROLE, ctx(iam__PermissionsBoundary=BOUNDARY), True),
     ("PutRolePolicy on an unbounded role", "iam:PutRolePolicy", TASK_ROLE, None, False),
     ("UpdateAssumeRolePolicy (trust hijack)", "iam:UpdateAssumeRolePolicy", TASK_ROLE, None, False),
@@ -53,6 +61,22 @@ CASES = [
     ("CreateAccessKey", "iam:CreateAccessKey", f"arn:aws:iam::{ACCOUNT}:user/anyone", None, False),
     ("PassRole to ecs-tasks", "iam:PassRole", TASK_ROLE, ctx(iam__PassedToService="ecs-tasks.amazonaws.com"), True),
     ("PassRole to lambda", "iam:PassRole", TASK_ROLE, ctx(iam__PassedToService="lambda.amazonaws.com"), False),
+    # STAGING-PREP-3: the runner task roles follow exactly the same rules as the shared task role
+    ("CreateRole runner task role with the staging boundary", "iam:CreateRole", RUNNER_ROLE, ctx(iam__PermissionsBoundary=BOUNDARY), True),
+    ("CreateRole runner task role without a boundary", "iam:CreateRole", RUNNER_ROLE, None, False),
+    ("CreateRole seed-world task role with the staging boundary", "iam:CreateRole", SEED_WORLD_ROLE, ctx(iam__PermissionsBoundary=BOUNDARY), True),
+    ("CreateRole seed-world task role with another boundary", "iam:CreateRole", SEED_WORLD_ROLE, ctx(iam__PermissionsBoundary=f"arn:aws:iam::{ACCOUNT}:policy/Admin"), False),
+    ("PutRolePolicy on the bounded runner task role", "iam:PutRolePolicy", RUNNER_ROLE, ctx(iam__PermissionsBoundary=BOUNDARY), True),
+    ("PutRolePolicy on the bounded seed-world task role", "iam:PutRolePolicy", SEED_WORLD_ROLE, ctx(iam__PermissionsBoundary=BOUNDARY), True),
+    ("PutRolePolicy on the unbounded seed-world task role", "iam:PutRolePolicy", SEED_WORLD_ROLE, None, False),
+    ("GetRole on the runner task role", "iam:GetRole", RUNNER_ROLE, None, True),
+    ("GetRole on the seed-world task role", "iam:GetRole", SEED_WORLD_ROLE, None, True),
+    ("UpdateAssumeRolePolicy on the seed-world task role (trust hijack)", "iam:UpdateAssumeRolePolicy", SEED_WORLD_ROLE, None, False),
+    ("AttachRolePolicy on the runner task role", "iam:AttachRolePolicy", RUNNER_ROLE, None, False),
+    ("PassRole runner task role to ecs-tasks", "iam:PassRole", RUNNER_ROLE, ctx(iam__PassedToService="ecs-tasks.amazonaws.com"), True),
+    ("PassRole seed-world task role to ecs-tasks", "iam:PassRole", SEED_WORLD_ROLE, ctx(iam__PassedToService="ecs-tasks.amazonaws.com"), True),
+    ("PassRole seed-world task role to lambda", "iam:PassRole", SEED_WORLD_ROLE, ctx(iam__PassedToService="lambda.amazonaws.com"), False),
+    ("PassRole a look-alike runner role to ecs-tasks", "iam:PassRole", f"arn:aws:iam::{ACCOUNT}:role/igaming-staging-ecs-runner-task-role2", ctx(iam__PassedToService="ecs-tasks.amazonaws.com"), False),
     ("Modify a non-staging load balancer", "elasticloadbalancing:ModifyLoadBalancerAttributes", f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:loadbalancer/app/prod-alb/abc", None, False),
     ("Create the staging load balancer", "elasticloadbalancing:CreateLoadBalancer", f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:loadbalancer/app/igaming-staging-alb/abc", None, True),
     ("Modify a non-staging DB", "rds:ModifyDBInstance", f"arn:aws:rds:{REGION}:{ACCOUNT}:db:prod-db", None, False),
@@ -72,6 +96,7 @@ CASES = [
     ("Tag a foreign resource (tag hijack)", "ec2:CreateTags", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", REGION_CTX, False),
     ("Read a staging app secret (provider refresh)", "secretsmanager:GetSecretValue", f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:igaming-staging/jwt-signing-secret-AbCdEf", None, True),
     ("Read the RDS-managed master secret", "secretsmanager:GetSecretValue", f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:rds!db-123", None, False),
+    ("Create the seed-world secret container (empty secret)", "secretsmanager:CreateSecret", f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:igaming-staging/seed-world-passwords", None, True),
     ("Delete the state object", "s3:DeleteObject", STATE, None, False),
     ("Delete the state lock file", "s3:DeleteObject", STATE + ".tflock", None, True),
     ("sns:ListTopics (verify-teardown)", "sns:ListTopics", "*", None, True),

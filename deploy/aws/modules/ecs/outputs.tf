@@ -25,6 +25,7 @@ output "task_definition_arns" {
 
     staging_runner             = aws_ecs_task_definition.staging_runner.arn
     staging_runner_actor_proof = aws_ecs_task_definition.staging_runner_actor_proof.arn
+    staging_runner_seed_world  = aws_ecs_task_definition.staging_runner_seed_world.arn
   }
 }
 

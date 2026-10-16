@@ -10,7 +10,7 @@
 #   deploy.sh migrate            re-run role-init + migrate, then roll the services (e.g. after a rotation)
 #   deploy.sh seed-admin <email> create the first platform_admin (Back Office login); password in Secrets Manager
 #   deploy.sh runner <mode> [KEY=VALUE...]   run one in-VPC staging-runner task (STAGING-PREP-3), print its log, exit non-zero on a
-#                                FAIL / STOP. Modes: verify-db seed-actor-proof seed-market backup-restore-drill pitr-verify
+#                                FAIL / STOP. Modes: verify-db seed-actor-proof seed-market seed-world record-anchor cleanup backup-restore-drill pitr-verify
 #                                probe-backup-role. Parameters are NON-secret (see docs/plans/staging-prep-3-record.md); no secret ever
 #                                travels on this command line. Env: RUNNER_TIMEOUT_SECONDS (default 3600), RUNNER_LOG_FILE (also write the log there)
 #   deploy.sh runner-image       build and push the staging-runner image for HEAD (also done by `up`)
@@ -305,9 +305,12 @@ cmd_seed_admin() {
 # ---------------------------------------------------------------------------------------------------------------------
 runner_mode_params() { # mode -> allowed parameter names
   case "$1" in
-    verify-db) echo "EXPECT_BACKUP_ROLE GRANT_LISTING" ;;
+    verify-db) echo "EXPECT_BACKUP_ROLE GRANT_LISTING REQUIRE_ANCHOR" ;;
     seed-actor-proof) echo "" ;;
     seed-market) echo "TENANT_SLUG BRAND_SLUG COUNTRY AUTH_REF OPERATOR REASON ACTOR_ID DRY_RUN" ;;
+    seed-world) echo "TENANT_SLUG BRAND_SLUG SECOND_TENANT_SLUG SECOND_BRAND_SLUG COUNTRY AUTH_REF OPERATOR REASON ACTOR_ID DRY_RUN" ;;
+    record-anchor) echo "ANCHOR_VALUE AUTH_REF OPERATOR REASON" ;;
+    cleanup) echo "CLEANUP_DB" ;;
     backup-restore-drill) echo "DRILL_RESTORE_DB SKIP_RESTORE PRINT_EXPECTED" ;;
     pitr-verify) echo "PITR_ENDPOINT EXPECTED_DIGESTS EXPECT_ANCHOR PITR_SHOW_LINES" ;;
     probe-backup-role) echo "EXPECT_HARDENING" ;;
@@ -320,7 +323,7 @@ runner_overrides() {
   local mode="$1"; shift
   local allowed kv key val total=0
   local -a env_json=()
-  allowed="$(runner_mode_params "${mode}")" || die "unknown runner mode '${mode}' (verify-db seed-actor-proof seed-market backup-restore-drill pitr-verify probe-backup-role)"
+  allowed="$(runner_mode_params "${mode}")" || die "unknown runner mode '${mode}' (verify-db seed-actor-proof seed-market seed-world record-anchor cleanup backup-restore-drill pitr-verify probe-backup-role)"
   local value_re='^[A-Za-z0-9._:/@#=,;+ -]*$'
   for kv in "$@"; do
     [[ "${kv}" == *=* ]] || die "parameter '${kv%%=*}' must be KEY=VALUE"
@@ -334,6 +337,13 @@ runner_overrides() {
     env_json+=("$(jq -n --arg k "${key}" --arg v "${val}" '{name: $k, value: $v}')")
   done
   [[ ${total} -le 6000 ]] || die "parameters are too large for a container override (8192 characters in total)"
+  case "${mode}" in
+    seed-market|seed-world|record-anchor)
+      local need
+      for need in AUTH_REF OPERATOR REASON; do
+        [[ " $* " == *" ${need}="* ]] || die "mode '${mode}' writes to the database: ${need}=... is mandatory (who, why and which authorisation are recorded)"
+      done ;;
+  esac
   jq -n --arg mode "${mode}" --argjson envs "$(printf '%s\n' ${env_json[@]+"${env_json[@]}"} | jq -s '.')" \
     '{containerOverrides: [{name: "staging-runner", command: [$mode], environment: $envs}]}'
 }
@@ -385,11 +395,11 @@ cmd_runner() {
   require_tools terraform aws jq
   local overrides td_output prefix cluster subnets sg assign network_config task_arn task_id
   overrides="$(runner_overrides "${mode}" "$@")"
-  if [[ "${mode}" == "seed-actor-proof" ]]; then
-    td_output="ecs_staging_runner_actor_proof_task_definition_arn"; prefix="staging-runner-actor-proof"
-  else
-    td_output="ecs_staging_runner_task_definition_arn"; prefix="staging-runner"
-  fi
+  case "${mode}" in
+    seed-actor-proof) td_output="ecs_staging_runner_actor_proof_task_definition_arn"; prefix="staging-runner-actor-proof" ;;
+    seed-world) td_output="ecs_staging_runner_seed_world_task_definition_arn"; prefix="staging-runner-seed-world" ;;
+    *) td_output="ecs_staging_runner_task_definition_arn"; prefix="staging-runner" ;;
+  esac
   cluster="$(tf_out ecs_cluster_name)"
   subnets="$(tf output -json ecs_task_subnet_ids)"
   sg="$(tf_out ecs_security_group_id)"

@@ -164,8 +164,8 @@ run "staging_defaults_are_hardened" {
 
   # --- secret ARNs exposed, never values ---
   assert {
-    condition     = length(output.secret_arns) == 8 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
-    error_message = "secret_arns must list exactly the eight secret ARNs (db master, runtime, JWT, seed admin, staff MFA, payout instrument, actor proof, alert webhook HMAC)."
+    condition     = length(output.secret_arns) == 9 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
+    error_message = "secret_arns must list exactly the nine secret ARNs (db master, runtime, JWT, seed admin, staff MFA, payout instrument, actor proof, alert webhook HMAC, seed-world passwords)."
   }
 
   # --- ADR 0086 root-level decisions (QA review: each must fail a test if
