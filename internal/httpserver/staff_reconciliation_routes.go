@@ -370,7 +370,7 @@ func newStaffReconciliationRunHandler(deps Deps) http.HandlerFunc {
 		var dto staffReconciliationRunDTO
 		found := false
 		err = deps.DB.WithTenantReadOnly(r.Context(), c.target, func(ctx context.Context, tx pgx.Tx) error {
-			run, ok, err := reconciliation.GetRunForStream(ctx, tx, stream, id)
+			run, ok, err := reconciliation.GetRunForStream(ctx, tx, c.target, stream, id)
 			if err != nil || !ok {
 				return err
 			}
@@ -415,7 +415,7 @@ func newStaffReconciliationMismatchHandler(deps Deps) http.HandlerFunc {
 		var dto staffReconciliationMismatchDTO
 		found := false
 		err = deps.DB.WithTenantReadOnly(r.Context(), c.target, func(ctx context.Context, tx pgx.Tx) error {
-			m, ok, err := reconciliation.GetMismatchForStream(ctx, tx, stream, id)
+			m, ok, err := reconciliation.GetMismatchForStream(ctx, tx, c.target, stream, id)
 			if err != nil || !ok {
 				return err
 			}

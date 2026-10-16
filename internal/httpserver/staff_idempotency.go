@@ -23,28 +23,35 @@ import (
 //
 // staffIdempotent wraps the route's own handler INSIDE its permission gate (and inside staffRoute, so
 // authentication, liveness, aal2 and step-up have already passed: a replay is never served to a caller that
-// would be refused by step-up). The header is OPTIONAL here: without it the route behaves exactly as before
-// (idempotent by state: a replayed governed write is a 409 from the flow's own guards). With it:
+// would be refused by step-up or whose session was revoked). The header is OPTIONAL here: without it the route
+// behaves exactly as before (idempotent by state: a replayed governed write is a 409 from the flow's own
+// guards). With it:
 //
 //   - the key is 1-120 printable ASCII (400 otherwise) and scoped to (path tenant, acting staff id, key);
 //   - the request is pinned by SHA-256 over method, path, query and raw body. The same key with a different
 //     request is 409 IDEMPOTENCY_MISMATCH; the same key while the first request is still running is 409
 //     IDEMPOTENCY_IN_PROGRESS;
-//   - the first request's 2xx response is stored and replayed byte-identically (header Idempotent-Replayed:
-//     true) without calling the handler again;
-//   - a non-2xx outcome (or a panic) deletes the reservation, so the client can retry with the same key.
+//   - the first request's 2xx STATUS CODE is stored, never its body (security review SR10C-1: the response DTOs
+//     copy acting-session-only rows). A replay answers the stored status with the fixed body
+//     {"status":"already_applied"} (no body for 204) and Idempotent-Replayed: true, without acting again; the
+//     client re-reads the resource through the governed read routes;
+//   - a non-2xx outcome (or a panic) deletes the reservation, so the client can retry with the same key;
+//   - rows are bounded (SR10C-4): before reserving, the wrapper deletes up to 100 expired rows of the same
+//     tenant (completed > 24 h, in_progress > 15 min). An expired in_progress key is therefore reclaimable, which
+//     fixes the orphan left by a crash between the handler's commit and the completion write. The table's
+//     trigger permits only the one-shot in_progress -> completed update and those deletes (SR10C-2).
 //
-// What this is NOT: it grants no authority and decides nothing. The path tenant is checked with
-// canActOnTenant before any database work (a refused caller reaches the handler's own refusal, nothing is
-// reserved), the tenant GUC is the path tenant (RLS), and the stored response is only ever replayed to the
-// same staff id in the same tenant. A crash between the handler's commit and the completion write leaves the
-// key in_progress (retries see 409 IDEMPOTENCY_IN_PROGRESS); the governed flows' state guards still make a
-// retry under a new key safe.
+// What this is NOT: it grants no authority and decides nothing. A replay does not re-run the handler's in-handler
+// authority (capability grant, acting session, Person checks), so a staff member whose grant was revoked after
+// the original request still gets the "already applied" status for that key within the 24 h window; nothing is
+// acted on and no data is returned (SR10C-3, accepted and documented). The path tenant is checked with
+// canActOnTenant before any database work, the tenant GUC is the path tenant (RLS), and a stored row is only
+// ever replayed to the same staff id in the same tenant.
 
 const (
 	idempotencyHeader    = "Idempotency-Key"
 	idempotencyMaxBody   = 1 << 20
-	idempotencyMaxStored = 256 * 1024
+	idempotencyReplayMsg = `{"status":"already_applied"}` + "\n"
 )
 
 func validIdempotencyKey(k string) bool {
@@ -128,9 +135,19 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 			hash   []byte
 			state  string
 			status *int
-			body   []byte
 		}
 		err = deps.DB.WithTenant(r.Context(), target, func(ctx context.Context, tx pgx.Tx) error {
+			// SR10C-4: bounded table, reclaimable orphan. Expired rows of this tenant go first (the guard trigger allows
+			// exactly these deletes), so an expired in_progress key is reclaimed by the insert below.
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM staff_idempotency_keys WHERE id IN (
+				    SELECT id FROM staff_idempotency_keys
+				     WHERE tenant_id = $1
+				       AND ((state = 'completed' AND completed_at < now() - interval '24 hours')
+				         OR (state = 'in_progress' AND created_at < now() - interval '15 minutes'))
+				     LIMIT 100)`, target); err != nil {
+				return err
+			}
 			tag, err := tx.Exec(ctx, `
 				INSERT INTO staff_idempotency_keys (tenant_id, actor_id, idempotency_key, route, request_hash, state)
 				VALUES ($1, $2, $3, $4, $5, 'in_progress')
@@ -143,9 +160,9 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 				return nil
 			}
 			return tx.QueryRow(ctx, `
-				SELECT request_hash, state, response_status, response_body FROM staff_idempotency_keys
+				SELECT request_hash, state, response_status FROM staff_idempotency_keys
 				WHERE tenant_id = $1 AND actor_id = $2 AND idempotency_key = $3`, target, subject, key).
-				Scan(&prior.hash, &prior.state, &prior.status, &prior.body)
+				Scan(&prior.hash, &prior.state, &prior.status)
 		})
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -166,11 +183,13 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 				apierror.Write(w, requestID, apierror.CodeIdempotencyInProgress, "a request with this Idempotency-Key is still being processed")
 			default:
 				w.Header().Set("Idempotent-Replayed", "true")
-				if len(prior.body) > 0 {
-					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				if *prior.status == http.StatusNoContent {
+					w.WriteHeader(http.StatusNoContent)
+					return
 				}
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				w.WriteHeader(*prior.status)
-				_, _ = w.Write(prior.body)
+				_, _ = w.Write([]byte(idempotencyReplayMsg))
 			}
 			return
 		}
@@ -198,11 +217,11 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 		if cw.status == 0 {
 			cw.status = http.StatusOK
 		}
-		if cw.status >= 200 && cw.status < 300 && cw.body.Len() <= idempotencyMaxStored {
+		if cw.status >= 200 && cw.status < 300 {
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 			err := deps.DB.WithTenant(rctx, target, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE staff_idempotency_keys SET state = 'completed', response_status = $4, response_body = $5, completed_at = now()
-					WHERE tenant_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND state = 'in_progress'`, target, subject, key, cw.status, cw.body.Bytes())
+				_, err := tx.Exec(ctx, `UPDATE staff_idempotency_keys SET state = 'completed', response_status = $4, completed_at = now()
+					WHERE tenant_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND state = 'in_progress'`, target, subject, key, cw.status)
 				return err
 			})
 			cancel()

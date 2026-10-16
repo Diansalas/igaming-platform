@@ -9177,7 +9177,7 @@ paths:
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
         - name: limit
           in: query
-          description: "A10c. OPTIONAL page size (1..200). Neither limit nor offset gives the whole list, as before."
+          description: "A10c. OPTIONAL page size (1..200). Neither limit nor offset gives the whole list, as before; an offset without a limit takes the default page size of 50."
           schema: { type: integer, minimum: 1, maximum: 200 }
         - name: offset
           in: query
@@ -9279,7 +9279,7 @@ paths:
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
         - name: limit
           in: query
-          description: "A10c. OPTIONAL page size (1..200). Neither limit nor offset gives the whole list, as before."
+          description: "A10c. OPTIONAL page size (1..200). Neither limit nor offset gives the whole list, as before; an offset without a limit takes the default page size of 50."
           schema: { type: integer, minimum: 1, maximum: 200 }
         - name: offset
           in: query
@@ -10694,11 +10694,17 @@ components:
       required: false
       description: >
         A10c (ADR 0114 G10). OPTIONAL on the K1 / K3 / HSEC staff mutating routes. 1-120 printable ASCII characters, chosen by the client
-        (otherwise 400). Scoped to (path tenant, acting staff, key). The same key with the same request (method, path and raw body) replays the
-        stored 2xx response (Idempotent-Replayed: true) without acting again; the same key with a different request is 409 IDEMPOTENCY_MISMATCH;
-        the same key while the first request is still running is 409 IDEMPOTENCY_IN_PROGRESS. A non-2xx outcome stores nothing, so the client
-        may retry with the same key. The key grants no authority: step-up, permissions and the flow's own database guards are unchanged and
-        still decide first. Without the header the route behaves as before (idempotent by state: a replayed governed write is a 409).
+        (otherwise 400). Scoped to (path tenant, acting staff, key). The same key with the same request (method, path, query and raw body)
+        is answered with the stored 2xx STATUS and a fixed body `{"status":"already_applied"}` (no body for 204) plus
+        `Idempotent-Replayed: true`, without acting again; the response body of the first call is NOT stored (it may carry acting-session-only
+        governed data), so the client re-reads the resource through the governed read routes. The same key with a different request is
+        409 IDEMPOTENCY_MISMATCH; the same key while the first request is still running is 409 IDEMPOTENCY_IN_PROGRESS. A non-2xx outcome
+        stores nothing, so the client may retry with the same key. A stored key is kept for 24 hours; an unfinished one (a crash) is
+        reclaimable after 15 minutes. The key grants no authority: step-up, session liveness, permissions and the flow's own database guards
+        still decide first. A replay does NOT re-run the handler's in-handler authority (capability grant, acting session, Person checks): a
+        staff member whose grant was revoked after the original request still receives the "already applied" status for that key within
+        the 24 hour window; nothing is acted on and no data is returned. Without the header the route behaves as before (idempotent by
+        state: a replayed governed write is a 409).
       schema: { type: string, minLength: 1, maxLength: 120, pattern: "^[\\x20-\\x7e]{1,120}$" }
     IdempotencyKey:
       name: Idempotency-Key

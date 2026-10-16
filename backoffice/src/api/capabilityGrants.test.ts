@@ -1,4 +1,6 @@
+import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
+import { server } from '../test/mswServer'
 import { captureRequests } from '../test/contractCapture'
 import { PLATFORM_ADMIN_CLAIMS, signInAs } from '../test/session'
 import { checkAgainstSpec, schemaEnum, schemaProps } from '../test/openapiLite'
@@ -35,5 +37,17 @@ describe('capabilityGrants api: UI-to-OpenAPI contract (K1)', () => {
     for (const n of ['CapabilityGrantRequestBody', 'CapabilityGrantDecisionBody', 'CapabilityGrantRevokeBody', 'CapabilityGrantRequest', 'CapabilityGrant']) {
       expect(schemaProps(n)).not.toContain('payload_hash')
     }
+  })
+})
+
+describe('server-side Idempotency-Key replay (A10c)', () => {
+  it('a replayed (fixed-body) answer is surfaced as already_applied, never as the resource; a 204 replay is a plain success', async () => {
+    signInAs(PLATFORM_ADMIN_CLAIMS)
+    server.use(
+      http.post(`/v1/admin/tenants/${T}/capability-grants/requests`, () => HttpResponse.json({ status: 'already_applied' }, { status: 201, headers: { 'Idempotent-Replayed': 'true' } })),
+      http.post(`/v1/admin/tenants/${T}/capability-grants/requests/${X}/cancel`, () => new HttpResponse(null, { status: 204, headers: { 'Idempotent-Replayed': 'true' } })),
+    )
+    await expect(createGrantRequest(T, { grantee_staff_id: X, capability: 'payment_force_resolve:request', reason_code: 'r' }, 'k')).rejects.toMatchObject({ code: 'already_applied', status: 201 })
+    await expect(cancelGrantRequest(T, X, 'k')).resolves.toBeUndefined()
   })
 })

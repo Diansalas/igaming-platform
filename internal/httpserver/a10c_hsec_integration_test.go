@@ -3,7 +3,6 @@
 package httpserver
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -79,7 +78,7 @@ func TestA10c_HSEC_CandidatesAndIdempotency(t *testing.T) {
 		t.Fatalf("request: %d %s", r1.status, r1.body)
 	}
 	r2 := w.a.doRaw("POST", w.base(), pa, body, idemHdr("hsec-req"))
-	if r2.status != http.StatusCreated || !bytes.Equal(r1.body, r2.body) || r2.header.Get("Idempotent-Replayed") != "true" {
+	if r2.status != http.StatusCreated || !isAlreadyApplied(r2.body) || r2.header.Get("Idempotent-Replayed") != "true" {
 		t.Fatalf("replay: %d %s", r2.status, r2.body)
 	}
 	var d hrDTO

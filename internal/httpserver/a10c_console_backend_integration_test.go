@@ -58,6 +58,11 @@ func (a *cgAPI) doRaw(method, path, token string, raw []byte, hdr map[string][]s
 	return cgResp{status: resp.StatusCode, body: b, header: resp.Header.Clone()}
 }
 
+// isAlreadyApplied reports whether body is the fixed replay body (SR10C-1: a replay never carries the stored DTO).
+func isAlreadyApplied(body []byte) bool {
+	return strings.TrimSpace(string(body)) == `{"status":"already_applied"}`
+}
+
 func idemHdr(k string) map[string][]string { return map[string][]string{"Idempotency-Key": {k}} }
 
 func a10cJSON(t *testing.T, v any) []byte {
@@ -105,8 +110,8 @@ func TestA10c_K1_PagedListsAndIdempotency(t *testing.T) {
 		t.Error("the first response must not be marked as a replay")
 	}
 	replay := a.doRaw("POST", base+"/requests", tok, body(grantees[0], "t1"), idemHdr("k1-create"))
-	if replay.status != http.StatusCreated || !bytes.Equal(replay.body, first.body) || replay.header.Get("Idempotent-Replayed") != "true" {
-		t.Fatalf("replay: %d replayed=%q body-equal=%v: %s", replay.status, replay.header.Get("Idempotent-Replayed"), bytes.Equal(replay.body, first.body), replay.body)
+	if replay.status != http.StatusCreated || !isAlreadyApplied(replay.body) || replay.header.Get("Idempotent-Replayed") != "true" {
+		t.Fatalf("replay: %d replayed=%q: %s", replay.status, replay.header.Get("Idempotent-Replayed"), replay.body)
 	}
 	if n := a.requestCount(tenantID, grantees[0]); n != 1 {
 		t.Fatalf("a replayed create made %d requests, want 1", n)
@@ -276,7 +281,7 @@ func TestA10c_K3_IdempotentRequestAndDecisionReplay(t *testing.T) {
 		t.Fatalf("request: %d %s", r1.status, r1.body)
 	}
 	r2 := w.a.doRaw("POST", w.base(), w.tok(w.f1), body, idemHdr("k3-req"))
-	if r2.status != http.StatusCreated || !bytes.Equal(r1.body, r2.body) || r2.header.Get("Idempotent-Replayed") != "true" {
+	if r2.status != http.StatusCreated || !isAlreadyApplied(r2.body) || r2.header.Get("Idempotent-Replayed") != "true" {
 		t.Fatalf("replay: %d %s", r2.status, r2.body)
 	}
 	var d frDTO
@@ -289,7 +294,7 @@ func TestA10c_K3_IdempotentRequestAndDecisionReplay(t *testing.T) {
 	cancel := w.base() + "/" + d.ID + "/cancel"
 	c1 := w.a.doRaw("POST", cancel, w.tok(w.f1), nil, idemHdr("k3-cancel"))
 	c2 := w.a.doRaw("POST", cancel, w.tok(w.f1), nil, idemHdr("k3-cancel"))
-	if c1.status != http.StatusOK || c2.status != http.StatusOK || !bytes.Equal(c1.body, c2.body) || c2.header.Get("Idempotent-Replayed") != "true" {
+	if c1.status != http.StatusOK || c2.status != http.StatusOK || !isAlreadyApplied(c2.body) || c2.header.Get("Idempotent-Replayed") != "true" {
 		t.Fatalf("cancel replay: %d %s / %d %s", c1.status, c1.body, c2.status, c2.body)
 	}
 	if res := w.a.doRaw("POST", cancel, w.tok(w.f1), nil, nil); res.status < 400 {

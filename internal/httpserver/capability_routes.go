@@ -568,9 +568,7 @@ func capabilityListWindow(w http.ResponseWriter, r *http.Request, c capabilityCa
 		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid query parameter")
 		return 0, 0, false
 	}
-	if !q.Has("limit") {
-		l = 0
-	}
+	// SR10C-7: an offset without a limit takes the default page size (strictPage: 50), never "the rest of the list".
 	return l, o, true
 }
 

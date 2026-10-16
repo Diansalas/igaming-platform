@@ -6,6 +6,15 @@ import { HSEC_TOKENS, K3_TOKENS, REFUSAL_TEXT, describeConsoleError, describeRef
 const SENTINEL = 'RAW SERVER MESSAGE <b>x</b>'
 const err = (status: number, code: string, message: string, requestId = 'req-1') => new ApiError(code as never, message, status, requestId)
 
+describe('A10c replay outcome', () => {
+  it('already_applied is UI-owned text, marks the list stale and never prints the server body', () => {
+    const v = describeConsoleError(err(201, 'already_applied', SENTINEL), 'k3', 'request')
+    expect(v.stale).toBe(true)
+    expect(v.message).toContain('already applied')
+    expect(v.message).not.toContain('RAW SERVER')
+  })
+})
+
 describe('K3 / HSEC closed tokens (ADR 0114 invariant 7.9)', () => {
   it('maps every token the OpenAPI documents, by status, to UI-owned text', () => {
     for (const [token, t] of Object.entries(K3_TOKENS)) {

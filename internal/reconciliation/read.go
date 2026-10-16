@@ -247,11 +247,11 @@ func ListMismatchesForStream(ctx context.Context, tx pgx.Tx, f StaffMismatchFilt
 // GetRunForStream reads ONE run of the given stream under the caller's tenant-scoped transaction
 // (A10c). found is false when no such run exists for the tenant and stream (a run of another stream
 // is not found either).
-func GetRunForStream(ctx context.Context, tx pgx.Tx, stream Stream, id uuid.UUID) (run Run, found bool, err error) {
+func GetRunForStream(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stream Stream, id uuid.UUID) (run Run, found bool, err error) {
 	var s, st string
 	err = tx.QueryRow(ctx, `
 		SELECT id, tenant_id, stream, period_start, period_end, run_at, status
-		  FROM reconciliation_runs WHERE id = $1 AND stream = $2`, id, string(stream)).
+		  FROM reconciliation_runs WHERE id = $1 AND stream = $2 AND tenant_id = $3`, id, string(stream), tenantID).
 		Scan(&run.ID, &run.TenantID, &s, &run.PeriodStart, &run.PeriodEnd, &run.RunAt, &st)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Run{}, false, nil
@@ -265,14 +265,14 @@ func GetRunForStream(ctx context.Context, tx pgx.Tx, stream Stream, id uuid.UUID
 
 // GetMismatchForStream reads ONE mismatch whose owning run belongs to the given stream (A10c), under
 // the caller's tenant-scoped transaction. found is false for an unknown id or another stream's mismatch.
-func GetMismatchForStream(ctx context.Context, tx pgx.Tx, stream Stream, id uuid.UUID) (m StoredMismatch, found bool, err error) {
+func GetMismatchForStream(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stream Stream, id uuid.UUID) (m StoredMismatch, found bool, err error) {
 	var kind string
 	err = tx.QueryRow(ctx, `
 		SELECT m.id, m.tenant_id, m.reconciliation_run_id, m.reconciliation_key, m.expected_value, m.actual_value,
 		       m.mismatch_kind, m.investigation_status, m.created_at, m.resolved_at
 		  FROM reconciliation_mismatches m
 		  JOIN reconciliation_runs r ON r.id = m.reconciliation_run_id AND r.tenant_id = m.tenant_id
-		 WHERE m.id = $1 AND r.stream = $2`, id, string(stream)).
+		 WHERE m.id = $1 AND r.stream = $2 AND m.tenant_id = $3`, id, string(stream), tenantID).
 		Scan(&m.ID, &m.TenantID, &m.RunID, &m.ReconciliationKey, &m.ExpectedValue, &m.ActualValue,
 			&kind, &m.InvestigationStatus, &m.CreatedAt, &m.ResolvedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
