@@ -41,7 +41,8 @@ package withdrawal
 // call (payments T1p, T2, T12) re-run this same gate before their L1 lock (ADR 0082 N1), and migration
 // 0169 backstops them in the database: see dispatchgate.go. Because the database cannot evaluate a risk
 // rule, the WD050 / WD051 codes themselves stay application-level; the backstop's own SQLSTATEs are
-// WD052 (the RG half re-checked in SQL) and WD053 (no allowing decision recorded in the transaction).
+// WD052 (account / wallet status re-checked in SQL) and WD053 (no allowing decision recorded in the
+// transaction).
 
 import (
 	"context"

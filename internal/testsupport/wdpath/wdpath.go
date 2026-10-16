@@ -164,8 +164,7 @@ func Advance(ctx context.Context, tx pgx.Tx, id uuid.UUID, target withdrawal.Sta
 		case wr.State == withdrawal.StateApproved:
 			// F4 (migration 0169): E7 needs an allowing WD-RG-1 dispatch decision of the same transaction. The
 			// fixture RECORDS one (like Plant, it skips the Go-layer gate evaluation these fixtures do not
-			// test); the database still re-checks the RG half (WD052: account and wallet active, no negative
-			// balance) at the transition.
+			// test); the database still re-checks the account and wallet status (WD052) at the transition.
 			// (A migration test on a scratch schema that predates 0169 has no table and no backstop.)
 			var present bool
 			if step = tx.QueryRow(ctx, `SELECT to_regclass('public.withdrawal_gate_decisions') IS NOT NULL`).Scan(&present); step == nil && present {

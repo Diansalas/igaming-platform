@@ -15,7 +15,7 @@ package payments
 // poll, the evidence / completion / decline / dispute paths (money may already have left: the platform records
 // the truth, never refuses it). The database backstop (migration 0169) refuses approved -> submitted and a payout
 // attempt's created|ambiguous -> submitting without an allowing decision row of the same transaction (WD053) and
-// re-checks the RG half in SQL (WD052).
+// re-checks the account and wallet status in SQL (WD052).
 
 import (
 	"context"

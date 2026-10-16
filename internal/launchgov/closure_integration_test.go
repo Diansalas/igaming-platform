@@ -36,7 +36,9 @@ func (w *world) playerWithWallet(tenantID, brandID uuid.UUID) (player, walletID 
 			return err
 		}
 		player, walletID = p.ID, wl.ID
-		return nil
+		// F4 (migration 0169, WD052): a withdrawal reaches `submitted` only for an active account (the
+		// withdrawal fixtures walk E7); a registered player starts pending_verification. Assertions unchanged.
+		return identity.SetPlayerAccountStatus(ctx, tx, p.ID, identity.PlayerStatusActive)
 	}); err != nil {
 		w.t.Fatalf("seed player + wallet: %v", err)
 	}

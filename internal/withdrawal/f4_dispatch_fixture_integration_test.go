@@ -16,7 +16,7 @@ import (
 // `approved`, exactly what the E7 writers answer) and RECORDS an allowing WD-RG-1 dispatch decision, which
 // migration 0169 requires in the transaction of the transition (WD053). These fixtures test the state machine,
 // not the gate (the gate itself is tested in f4_dispatch_gate_integration_test.go and in internal/payments); the
-// database still re-checks the RG half (WD052) at the transition.
+// database still re-checks the account and wallet status (WD052) at the transition.
 func f4AllowDispatch(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
 	wr, err := LockApprovedForSubmission(ctx, tx, id)
 	if err != nil {

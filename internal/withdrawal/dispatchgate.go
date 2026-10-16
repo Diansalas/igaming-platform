@@ -17,7 +17,8 @@ package withdrawal
 //
 // The database (0169) refuses approved -> submitted (WD053) and a payout attempt's created|ambiguous -> submitting
 // (WD053) unless an ALLOWING decision row of the matching stage was recorded in THE SAME transaction and no denying
-// one was; it re-checks the RG half in SQL at the instant of the transition (WD052).
+// one was; it re-checks the account and wallet STATUS in SQL at the instant of the transition (WD052). The
+// negative-balance refusal is applied by the gate here, not mirrored in SQL (record residual R2).
 
 import (
 	"context"

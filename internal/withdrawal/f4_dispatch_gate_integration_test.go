@@ -155,21 +155,23 @@ func TestF4_DB_E7_RGBackstop(t *testing.T) {
 	}
 }
 
-func TestF4_DB_E7_NegativeBalanceBackstop(t *testing.T) {
+// The negative-balance rule (owner decision 13) at dispatch is the APPLICATION gate's (record residual R2: not mirrored
+// in SQL): a wallet driven negative after approval (a chargeback) is a WD050 wallet_negative_balance denial.
+func TestF4_EvaluateDispatchGate_NegativeBalanceAfterApproval_Refuses(t *testing.T) {
 	w := newA13(t)
 	wr := w.at(t, StateApproved)
 	mustRunTx(t, w.owner, w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := negbal.Chargeback(ctx, tx, w.f.tenantID, w.f.walletID, "EUR", 200_000_000) // far below zero
 		return err
 	})
-	err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
-		if err := f4Record(ctx, tx, wr.ID, f4Allow); err != nil {
-			return err
-		}
-		return MarkSubmittedPending(ctx, tx, wr.ID, a13PSP)
-	})
-	wantCode(t, "negative balance", err, "WD052")
-	wantMsg(t, "negative balance", err, "wallet_negative_balance")
+	var d withdrawalgate.Decision
+	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		var e error
+		d, e = EvaluateDispatchGate(ctx, tx, standard.New(), wr)
+		return e
+	}); err != nil || d.Allowed || d.GateCode != GateCodeRG || d.Reason != rg.CodeWalletNegativeBalance {
+		t.Fatalf("want a WD050 wallet_negative_balance denial at dispatch, got %+v %v", d, err)
+	}
 }
 
 // Completion, failure, rejection and cancellation are NOT gated: once money may have left, the truth is recorded.

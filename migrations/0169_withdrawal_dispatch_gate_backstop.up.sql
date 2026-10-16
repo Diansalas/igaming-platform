@@ -7,10 +7,12 @@
 --
 -- SQLSTATE class "WD" (0131 WD010-012, 0132 WD020-043/WD098, 0162/0165 WD026-028/WD035/WD044/WD096-099). WD050
 -- and WD051 are the APPLICATION gate codes of WD-RG-1 (internal/withdrawalgate); they are not raised here. New:
---   WD052 RG backstop: the withdrawing player account is not 'active', the wallet is not 'active', the wallet's
---         player_cash / player_locked_cash projection is negative, or one of those rows is not visible to the
---         session (fail closed). Exactly the RG half of WD-RG-1 (rg.EvaluateWithdrawalEligibility with
---         restrictions NOT blocking: a self-exclusion / time-out does not refuse a withdrawal, ADR 0115).
+--   WD052 RG backstop: the withdrawing player account is not 'active' or the wallet is not 'active' (or one of
+--         those rows is not visible to the session: fail closed). The STATUS part of the RG half of WD-RG-1
+--         (rg.EvaluateWithdrawalEligibility with restrictions NOT blocking: a self-exclusion / time-out does not
+--         refuse a withdrawal, ADR 0115). NOT mirrored here: the negative-wallet-balance refusal (owner decision
+--         13), which the application gate applies at dispatch; see docs/plans/f4-withdrawal-gate-backstop-record.md
+--         (residual R2) for why.
 --   WD053 no ALLOWING dispatch gate decision was recorded for this request (and, for a re-dispatch, this
 --         attempt) in THIS transaction, or a DENYING one was.
 --   WD054 a withdrawal_gate_decisions row does not match its request / attempt / tenant / stage.
@@ -151,9 +153,9 @@ CREATE POLICY tenant_staff_scope ON withdrawal_gate_decisions
 -- 2. The shared checks.
 -- =========================================================================
 
--- withdrawal_dispatch_rg_violation: the RG half of WD-RG-1 for (tenant, account, wallet), read at the instant
--- of the transition. NULL when it passes; otherwise a closed reason word. A row the session cannot see is a
--- violation (fail closed). The negative-balance read is the one rg.walletBalanceNegative makes.
+-- withdrawal_dispatch_rg_violation: the status part of the RG half of WD-RG-1 for (tenant, account, wallet), read
+-- at the instant of the transition. NULL when it passes; otherwise a closed reason word. A row the session cannot
+-- see is a violation (fail closed).
 CREATE FUNCTION withdrawal_dispatch_rg_violation(p_tenant uuid, p_account uuid, p_wallet uuid) RETURNS text
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
@@ -170,11 +172,6 @@ BEGIN
      WHERE w.id = p_wallet AND w.tenant_id = p_tenant AND w.player_account_id = p_account;
     IF v_status IS DISTINCT FROM 'active' THEN
         RETURN 'wallet_not_active';
-    END IF;
-    IF EXISTS (SELECT 1 FROM public.wallet_balance_projection b
-                WHERE b.wallet_id = p_wallet AND b.account_type IN ('player_cash', 'player_locked_cash')
-                  AND b.credit_total < b.debit_total) THEN
-        RETURN 'wallet_negative_balance';
     END IF;
     RETURN NULL;
 END
