@@ -31,7 +31,11 @@ import (
 //     review_required row of the account is newer than that determination's
 //     row (SRME-2: a determination is not carried forward across a rejection,
 //     an expiry or a manual-review stage; a fresh determination is needed. A
-//     plain pending re-verification does not break the carry-forward).
+//     plain pending re-verification does not break the carry-forward). SRME-R2-1:
+//     two more breakers, both treated by enforcement like rejected/expired: a
+//     DECIDED 'unverified' row (provider_reference set; an orphan intent row
+//     with no reference is not a decision and does not break), and an 'approved'
+//     row whose expires_at has lapsed (its status stays 'approved').
 //
 // Anything else - no row, no determination, an unverified / pending / review /
 // rejected / expired latest row - is "no evidence" and the caller refuses.
@@ -73,8 +77,11 @@ func ReadMarketResidenceEvidence(ctx context.Context, q RowQuerier, tenantID, pl
 		           AND NOT EXISTS (
 		                 SELECT 1 FROM kyc_verifications brk
 		                  WHERE brk.tenant_id = $1 AND brk.player_account_id = $2
-		                    AND brk.status IN ('rejected', 'expired', 'review_required')
-		                    AND (brk.created_at, brk.id) > (kv.created_at, kv.id))
+		                    AND (brk.created_at, brk.id) > (kv.created_at, kv.id)
+		                    AND (brk.status IN ('rejected', 'expired', 'review_required')
+		                         OR (brk.status = 'unverified' AND brk.provider_reference IS NOT NULL)
+		                         OR (brk.status = 'approved' AND brk.expires_at IS NOT NULL
+		                             AND brk.expires_at <= clock_timestamp())))
 		         ORDER BY kv.verified_residence_set_at DESC, kv.id DESC LIMIT 1
 		       ) r ON true
 		 WHERE l.status = 'approved'
