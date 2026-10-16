@@ -407,10 +407,12 @@ resource "aws_ecs_service" "backoffice" {
 # schema_migrations write-revoke in the SAME task invocation, using the
 # same master ("igaming") credential, so the revoke can never be
 # accidentally skipped by an operator forgetting a separate step.
-# STAGING-PREP-1 (G3): `migrate verify` (checksum drift and version gaps) and
-# `migrate status` (the head of the deployed commit) run between `up` and the
-# revoke, so a verify failure stops the task with a non-zero exit before the
-# revoke and before deploy.sh rolls the services. Both
+# STAGING-PREP-1 (G3) / STAGING-PREP-2 (SRSP-2): the revoke runs IMMEDIATELY
+# after `up`, so a failing `migrate verify` (checksum drift, version gap) can
+# never leave the runtime role able to write schema_migrations; `migrate verify`
+# and `migrate status` (the head of the deployed commit) follow it, and a
+# failure of either makes the task exit non-zero, which stops deploy.sh before it
+# rolls the services. Both
 # `migrate` and `psql` are present in the platform-api image — see
 # deploy/docker/platform-api.Dockerfile.
 resource "aws_ecs_task_definition" "migrate" {
@@ -429,7 +431,7 @@ resource "aws_ecs_task_definition" "migrate" {
       essential = true
       command = [
         "sh", "-c",
-        "/app/migrate up && /app/migrate verify && /app/migrate status && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -c \"REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;\""
+        "/app/migrate up && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -c \"REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;\" && /app/migrate verify && /app/migrate status"
       ]
       environment = [
         { name = "DATABASE_URL", value = local.database_url_migration },

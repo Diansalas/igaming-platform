@@ -335,7 +335,7 @@ variable "metrics_addr" {
 }
 
 variable "alert_webhook_url" {
-  description = "ALERT_WEBHOOK_URL: https URL of an owner-controlled alert receiver. Empty (default) = no webhook channel and none of the awssm settings below are set. Not secret (the config refuses embedded credentials)."
+  description = "ALERT_WEBHOOK_URL: https URL of an owner-controlled alert receiver. Empty (default) = no webhook channel and none of the awssm settings below are set. Treated as NON-secret everywhere (tfvars, state, plan output, DescribeTaskDefinition), so it MUST NOT embed a credential: many receiver products put a bearer token in the URL path, and such a URL must not be used. Authentication is the HMAC signature (the generated alert-webhook-hmac secret), not the URL. It is deliberately not marked sensitive: a sensitive value would hide the whole container definition from plan review."
   type        = string
   default     = ""
 
