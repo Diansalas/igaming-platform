@@ -1,4 +1,4 @@
-package scratchdb
+package scratchname
 
 import (
 	"strings"

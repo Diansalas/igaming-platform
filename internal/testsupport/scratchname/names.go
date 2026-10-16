@@ -1,7 +1,7 @@
-// Pure (database-free, build-tag-free) naming and selection logic for scratch
+// Package scratchname holds the pure (database-free, build-tag-free) naming and selection logic for scratch
 // databases, so the name pattern and the reaper's selection rules are unit
 // tested in the default `go test ./...` run.
-package scratchdb
+package scratchname
 
 import (
 	"fmt"
@@ -40,17 +40,17 @@ type ScratchName struct {
 // characters).
 func BuildName(prefix string, now time.Time, pid int, rand8 string) (string, error) {
 	if !prefixRe.MatchString(prefix) {
-		return "", fmt.Errorf("scratchdb: prefix %q must match %s", prefix, prefixRe)
+		return "", fmt.Errorf("scratchname: prefix %q must match %s", prefix, prefixRe)
 	}
 	if pid < 0 {
-		return "", fmt.Errorf("scratchdb: negative pid %d", pid)
+		return "", fmt.Errorf("scratchname: negative pid %d", pid)
 	}
 	name := prefix + now.UTC().Format(nameTimeLayout) + "p" + strconv.Itoa(pid) + "x" + rand8
 	if len(name) > maxIdentLen {
-		return "", fmt.Errorf("scratchdb: name %q is %d bytes, over the %d-byte identifier limit", name, len(name), maxIdentLen)
+		return "", fmt.Errorf("scratchname: name %q is %d bytes, over the %d-byte identifier limit", name, len(name), maxIdentLen)
 	}
 	if !nameRe.MatchString(name) {
-		return "", fmt.Errorf("scratchdb: generated name %q does not match the scratch pattern (bad random suffix?)", name)
+		return "", fmt.Errorf("scratchname: generated name %q does not match the scratch pattern (bad random suffix?)", name)
 	}
 	return name, nil
 }

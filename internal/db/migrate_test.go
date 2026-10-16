@@ -151,6 +151,26 @@ func TestDescribeMigrations_FormatsVersionAndDescription(t *testing.T) {
 	}
 }
 
+// The reserved list must contain only genuinely unused versions: 0158 is a real migration (A6) and
+// must never be silently tolerated if its file went missing.
+func TestReservedUnusedVersions_ExactSet(t *testing.T) {
+	want := []int64{143, 144, 145, 146, 147, 148, 149, 150, 159, 161}
+	if len(reservedUnusedVersions) != len(want) {
+		t.Fatalf("reservedUnusedVersions has %d entries, want %d", len(reservedUnusedVersions), len(want))
+	}
+	for _, v := range want {
+		if _, ok := reservedUnusedVersions[v]; !ok {
+			t.Errorf("version %d should be reserved", v)
+		}
+	}
+	if gaps := findVersionGaps([]migration{{Version: 157}, {Version: 159}}); len(gaps) != 1 || !strings.Contains(gaps[0], "158") {
+		t.Errorf("a missing 158 must be reported, got %v", gaps)
+	}
+	if gaps := findVersionGaps([]migration{{Version: 158}, {Version: 160}, {Version: 162}}); len(gaps) != 0 {
+		t.Errorf("159 and 161 are reserved and must be tolerated, got %v", gaps)
+	}
+}
+
 func TestFindVersionGaps_ReservedRangeToleratedOnlyForListedVersions(t *testing.T) {
 	// 142 -> 151 spans exactly the reserved 143-150: tolerated.
 	if gaps := findVersionGaps([]migration{{Version: 142}, {Version: 151}}); len(gaps) != 0 {

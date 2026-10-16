@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchname"
 )
 
 // TestReapDropsOnlyOldIdleScratchDatabases creates databases with
@@ -37,19 +39,35 @@ func TestReapDropsOnlyOldIdleScratchDatabases(t *testing.T) {
 
 	now := time.Now()
 	mk := func(age time.Duration, rnd string) string {
-		n, err := BuildName("reaptest_", now.Add(-age), os.Getpid(), rnd)
+		n, err := scratchname.BuildName("reaptest_", now.Add(-age), os.Getpid(), rnd)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return n
 	}
 	oldIdle, young, oldBusy := mk(30*time.Hour, "00000001"), mk(time.Minute, "00000002"), mk(30*time.Hour, "00000003")
-	legacy := "reaptest_legacy0123456789abcdef"
+	legacy := "reaptest_legacy" + strconv.FormatInt(now.UnixNano(), 16) // legacy (non-pattern) form, unique per run
 	all := []string{oldIdle, young, oldBusy, legacy}
 
+	// Fresh connection: the deferred admin.Close above runs BEFORE t.Cleanup.
 	t.Cleanup(func() {
+		c, err := pgx.Connect(context.Background(), adminURL)
+		if err != nil {
+			t.Errorf("cleanup connect (databases %v left behind): %v", all, err)
+			return
+		}
+		defer func() { _ = c.Close(context.Background()) }()
 		for _, n := range all {
-			_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{n}.Sanitize()+" WITH (FORCE)")
+			var derr error
+			for i := 0; i < 40; i++ { // wait for the closed backend to be reaped
+				if _, derr = c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+pgx.Identifier{n}.Sanitize()+" WITH (FORCE)"); derr == nil {
+					break
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+			if derr != nil {
+				t.Errorf("cleanup: drop %s: %v", n, derr)
+			}
 		}
 	})
 	for _, n := range all {
@@ -89,7 +107,7 @@ func TestReapDropsOnlyOldIdleScratchDatabases(t *testing.T) {
 		}
 	}
 	for _, n := range dropped {
-		if _, ok := ParseName(n); !ok {
+		if _, ok := scratchname.ParseName(n); !ok {
 			t.Errorf("Reap dropped non-pattern database %s", n)
 		}
 	}

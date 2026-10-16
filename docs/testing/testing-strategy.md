@@ -3548,6 +3548,51 @@ application roles are deliberately `NOCREATEDB`
 - Ownership: `qa` and `security` co-own this mechanism (it is a
   privilege boundary, not only a test convenience).
 
+### Scratch-database names and the leak reaper (TEST-HYGIENE-1, A13a)
+
+`t.Cleanup` does not run when `go test` hits its timeout or the process is
+killed, so scratch databases leak. Two controls (no role is created or
+altered; both use the existing `igaming_test_admin` credentials):
+
+- **Names.** `scratchdb.New(t, prefix)` names a database
+  `<prefix><yyyymmddhhmmss UTC>p<pid>x<8 hex>` (e.g.
+  `m0102_20261016083005p4242xdeadbeef`). `prefix` must match
+  `^[a-z][a-z0-9_]*$` and the name must fit PostgreSQL's 63-byte limit
+  (the helper fails the test otherwise). The pure pattern/selection logic
+  lives in the untagged package `internal/testsupport/scratchname`
+  (unit-tested in the normal `go test ./...`).
+- **Reaper.** `scratchdb.Reap(ctx, adminURL, ownerURL, maxAge)` drops only
+  databases that (1) match the exact pattern above (legacy `prefix+16hex`
+  names, `igaming_*_local`, `postgres`, templates are never touched), (2)
+  are at least `maxAge` old by the timestamp in the name, (3) are owned by
+  `TEST_DATABASE_URL`'s role, and (4) have no session; it uses a plain
+  `DROP DATABASE` (never `FORCE`), refuses `maxAge <= 0`, and does not
+  touch the database it is connected to.
+
+Usage (opt-in; skipped unless `SCRATCHDB_REAP=1`, so a normal run never
+drops anything; default 6 h, minimum 1 h):
+
+```
+SCRATCHDB_REAP=1 SCRATCHDB_REAP_MAX_AGE_HOURS=6 \
+  go test -tags integration -count=1 -run '^TestReapLeakedScratchDatabases$' \
+  ./internal/testsupport/scratchdb
+```
+
+- **CI:** each integration shard has its own throw-away postgres service, so
+  nothing leaks across runs and CI does not need the reaper. If a long-lived
+  database is ever shared by CI, run the command above as a separate step
+  after the shards, never inside a shard.
+- **Local:** run it after killed or timed-out runs (and use `-timeout 60m`
+  for `internal/payments`, see the registry). Legacy-format leftovers from
+  before this change are NOT reaped (they cannot be aged); they remain an
+  owner-authorized manual cleanup (CLEANUP-2026-10-05).
+- **Private databases from `priv_db.sh`:** name them with the same pattern
+  (e.g. `mytask_<UTC yyyymmddhhmmss>p<pid>x<8 hex>`, owner `igaming`) so
+  the reaper can age them out, and drop them explicitly when done.
+- Tests: `scratchname` unit tests (pattern, rejects, selection rules) and
+  `TestReapDropsOnlyOldIdleScratchDatabases` (real PostgreSQL: old+idle
+  dropped; young, in-use and legacy-named kept).
+
 ### Lock-wait polling must be scoped to the test's own blocker
 
 `go test ./...` runs packages in parallel against the same test

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchname"
 )
 
 // Reap drops scratch databases leaked by timed-out or killed test runs
@@ -48,9 +50,9 @@ func Reap(ctx context.Context, adminURL, ownerURL string, maxAge time.Duration) 
 	if err != nil {
 		return nil, fmt.Errorf("scratchdb: list databases: %w", err)
 	}
-	var cands []Candidate
+	var cands []scratchname.Candidate
 	for rows.Next() {
-		var c Candidate
+		var c scratchname.Candidate
 		if err := rows.Scan(&c.Name, &c.Owner, &c.IsTemplate, &c.Sessions); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scratchdb: scan: %w", err)
@@ -63,7 +65,7 @@ func Reap(ctx context.Context, adminURL, ownerURL string, maxAge time.Duration) 
 	}
 
 	var firstErr error
-	for _, name := range SelectReapable(time.Now(), maxAge, owner, cands) {
+	for _, name := range scratchname.SelectReapable(time.Now(), maxAge, owner, cands) {
 		if _, derr := conn.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()); derr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("scratchdb: drop %s: %w", name, derr)
