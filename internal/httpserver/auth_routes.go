@@ -115,15 +115,17 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 
 		ip, ua := clientIP(r), r.UserAgent()
 
-		// A8: server-derived country evidence is gathered OUTSIDE the
-		// transaction (a future vendor lookup is network I/O); the policy
-		// read and the refusal audit happen INSIDE it, as its first
-		// statement. The country is never taken from the request body.
+		// A8 / owner decision 3 (PD-MKT-REG-1): registration precedes KYC, so
+		// there is NO player evidence to gather and none is taken from the
+		// request (no country, no IP). The gate applies the brand-level rule
+		// (the brand's operating-market configuration must permit
+		// registration for at least one country); the policy read and the
+		// refusal audit happen INSIDE the transaction, as its first
+		// statement. Deposit / launch / placement re-check the player's
+		// KYC-verified residence.
 		marketGuard := deps.MarketGate.Guard(
 			marketgate.Request{TenantID: brand.TenantID, BrandID: brand.ID, Operation: marketgate.OpRegistration, RequestID: requestID},
-			deps.MarketGate.Locate(r.Context(), marketgate.LocateRequest{
-				TenantID: brand.TenantID, BrandID: brand.ID, RequestID: requestID, IPAddress: ip,
-			}),
+			marketgate.Evidence{},
 		)
 
 		// SR8-5: a cheap pre-check BEFORE the Argon2id hash (~64 MiB, tens of
