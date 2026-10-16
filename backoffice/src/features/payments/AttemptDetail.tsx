@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { listForceResolutions } from '../../api/forceResolutions'
-import { getPaymentAttempt } from '../../api/paymentAttempts'
+import { getPaymentAttempt, listAttemptEvents } from '../../api/paymentAttempts'
 import { useAuth } from '../../auth/AuthContext'
 import { getNavPermissions } from '../../auth/permissions'
 import { Badge } from '../../components/Badge'
@@ -26,8 +26,9 @@ function when(iso: string): string {
 
 /**
  * One attempt (R1 single read) with a timeline assembled ONLY from fields the API returns: created, last change,
- * resolved, and the K3 resolutions filed for this attempt (when the viewer may read them). The API has no event
- * history route for attempts, so intermediate provider interactions are not shown and the screen says so.
+ * resolved, the verified provider events linked to the attempt (A10c event history route: closed vocabularies,
+ * never a reference text; receipts not yet linked to an attempt are not listed) and the K3 resolutions filed for
+ * this attempt (when the viewer may read them).
  * Never rendered: the provider reference text (the API does not return it), merchant reference, idempotency key,
  * player, wallet or destination (the API does not return them either).
  */
@@ -35,6 +36,11 @@ export function AttemptDetail({ tenantId, attemptId, onClose }: { tenantId: stri
   const { claims } = useAuth()
   const perms = getNavPermissions(claims?.role)
   const q = useQuery({ queryKey: ['parked', 'detail', tenantId, attemptId], queryFn: () => getPaymentAttempt(tenantId, attemptId), retry: false })
+  const ev = useQuery({
+    queryKey: ['parked', 'events', tenantId, attemptId],
+    queryFn: () => listAttemptEvents(tenantId, attemptId, { limit: 200 }),
+    retry: false,
+  })
   const res = useQuery({
     queryKey: ['parked', 'resolutions', tenantId],
     queryFn: () => listForceResolutions(tenantId),
@@ -50,6 +56,9 @@ export function AttemptDetail({ tenantId, attemptId, onClose }: { tenantId: stri
     timeline.push({ at: a.created_at, text: `Attempt ${a.attempt_no} created` })
     if (a.updated_at !== a.created_at) timeline.push({ at: a.updated_at, text: `Last change: ${describeAttemptState(a.state).label}` })
     if (a.resolved_at) timeline.push({ at: a.resolved_at, text: 'Left the in-flight states' })
+  }
+  for (const e of ev.data?.items ?? []) {
+    timeline.push({ at: e.received_at, text: `Provider event: ${safeCode(e.event_type)} ${safeCode(e.outcome)}, ${safeCode(e.disposition_at_receipt)}${e.resolution ? `, resolved as ${safeCode(e.resolution)}` : ''}` })
   }
   for (const r of mine) {
     timeline.push({ at: r.created_at, text: `Force-resolution filed: ${describeKind(r.kind).label} (${safeCode(r.state)})` })
@@ -117,9 +126,11 @@ export function AttemptDetail({ tenantId, attemptId, onClose }: { tenantId: stri
               ))}
             </ol>
             <p className="mt-2 text-xs text-slate-500">
-              Built only from the fields the API returns. The API has no event history for an attempt, so provider interactions between these points are not shown.
+              Built only from the fields the API returns, plus the verified provider events linked to this attempt (their reference texts are never shown, and receipts not yet linked to an attempt are not listed).
+              {ev.data && ev.data.total > ev.data.items.length ? ` Showing the first ${ev.data.items.length} of ${ev.data.total} provider events.` : ''}
               {perms.paymentForceResolutions ? '' : ' Your role does not read force-resolutions, so none are listed.'}
             </p>
+            {ev.error && <ConsoleErrorAlert error={ev.error} family="attempts" op="get" />}
             {res.error && <ConsoleErrorAlert error={res.error} family="k3" op="list" />}
           </div>
 

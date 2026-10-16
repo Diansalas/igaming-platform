@@ -16,10 +16,24 @@ const BASE = `/v1/admin/tenants/${TENANT}/withdrawal-hold-resolutions`
 const PA = { ...PLATFORM_ADMIN_CLAIMS, sub: 'f9000000-0000-4000-8000-000000000009' }
 const route = `/hold-resolutions?tenant=${TENANT}`
 
-function setup(rows = [holdResolution()]) {
+const CAND = '/v1/admin/tenants/' + TENANT + '/withdrawal-hold-candidates'
+const candidate = (over = {}) => ({
+  withdrawal_request_id: WD1,
+  brand_id: 'b2000000-0000-4000-8000-000000000002',
+  amount_minor_units: '5000',
+  asset_code: 'EUR',
+  exponent: 2,
+  state_changed_at: '2026-10-10T10:00:00Z',
+  tenant_status: 'closed',
+  brand_status: 'closed',
+  ...over,
+})
+
+function setup(rows = [holdResolution()], candidates: unknown[] = []) {
   server.use(
     http.get('/v1/admin/tenants', () => HttpResponse.json({ items: [{ id: TENANT, name: 'Acme', slug: 'acme', status: 'closed' }], limit: 50, offset: 0, total: 1 })),
     http.get(BASE, () => HttpResponse.json({ items: rows })),
+    http.get(CAND, () => HttpResponse.json({ items: candidates, limit: 50, offset: 0, total: candidates.length })),
   )
 }
 
@@ -36,18 +50,43 @@ describe('withdrawal hold release (S8, HSEC)', () => {
     }
   })
 
-  it('platform admin sees the banner, the candidate-list gap, and the frozen hash; own request cannot be approved', async () => {
+  it('platform admin sees the banner, the candidate section, and the frozen hash; own request cannot be approved', async () => {
     signInAs(PA)
     setup([holdResolution({ requested_by: PA.sub })])
     renderWithProviders(<AppRoutes />, { route })
     expect(await screen.findByRole('note', { name: 'Stack status' })).toHaveTextContent('not a regulatory approval')
-    expect(screen.getByText(/does not show candidate withdrawals/)).toBeInTheDocument()
+    expect(await screen.findByText(/No approved withdrawal of this tenant is held/)).toBeInTheDocument()
+    expect(screen.queryByText(/does not show candidate withdrawals/)).toBeNull()
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: `Open hold-resolution ${RES2.slice(0, 8)}` }))
     const d = await screen.findByRole('region', { name: 'Hold-resolution detail' })
     expect(within(d).getByText(HASH1)).toBeInTheDocument()
     expect(within(d).getByRole('button', { name: 'Approve' })).toBeDisabled()
     expect(within(d).getByRole('button', { name: 'Cancel request' })).toBeEnabled()
+  })
+
+  it('A10c: lists the hold candidates (server list) and "Request release" pre-fills the withdrawal id but never the last-6 confirmation', async () => {
+    signInAs(PA)
+    setup([], [candidate()])
+    renderWithProviders(<AppRoutes />, { route })
+    const t = await screen.findByRole('table', { name: 'Candidate withdrawals' })
+    expect(within(t).getByText('50.00 EUR')).toBeInTheDocument()
+    expect(within(t).getAllByText('closed').length).toBe(2)
+    const user = userEvent.setup()
+    await user.click(within(t).getByRole('button', { name: `Request release for withdrawal ${WD1.slice(0, 8)}` }))
+    const dlg = await screen.findByRole('dialog', { name: 'Request a hold release' })
+    expect(within(dlg).getByLabelText('Withdrawal id')).toHaveValue(WD1)
+    expect(within(dlg).getByLabelText(/Type the LAST 6 characters/)).toHaveValue('')
+    expect(within(dlg).getByRole('button', { name: 'File request' })).toBeDisabled()
+  })
+
+  it('A10c: a refused candidate list is shown through the closed map and never prints the server message', async () => {
+    signInAs(PA)
+    setup()
+    server.use(http.get(CAND, () => refusal(403, 'forbidden')))
+    renderWithProviders(<AppRoutes />, { route })
+    expect((await screen.findAllByRole('alert')).length).toBeGreaterThan(0)
+    expect(document.body).not.toHaveTextContent('do-not-render')
   })
 
   it('pure form rules match the spec (reason token, 64-hex hash, UUID, only release_hold_to_player)', () => {

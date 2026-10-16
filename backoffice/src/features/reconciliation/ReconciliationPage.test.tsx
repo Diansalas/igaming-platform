@@ -33,11 +33,32 @@ const mm = (over = {}) => ({
 })
 const paged = (items: unknown[]) => HttpResponse.json({ items, limit: 20, offset: 0, total: items.length })
 
+// `singles` records the A10c single-item reads (kept apart from `seen` so list assertions are unaffected).
+const singles: URL[] = []
+
 function staff(streamItems: { runs?: unknown[]; mismatches?: unknown[] } = {}) {
   const seen: URL[] = []
+  singles.length = 0
+  const runs = (streamItems.runs ?? [run()]) as Array<{ id: string }>
+  const mismatches = (streamItems.mismatches ?? [mm()]) as Array<{ id: string; run_id?: string }>
   server.use(
-    http.get(`${BASE}/runs`, ({ request }) => { seen.push(new URL(request.url)); return paged(streamItems.runs ?? [run()]) }),
-    http.get(`${BASE}/mismatches`, ({ request }) => { seen.push(new URL(request.url)); return paged(streamItems.mismatches ?? [mm()]) }),
+    http.get(`${BASE}/runs`, ({ request }) => { seen.push(new URL(request.url)); return paged(runs) }),
+    http.get(`${BASE}/mismatches`, ({ request }) => {
+      const u = new URL(request.url)
+      seen.push(u)
+      const rid = u.searchParams.get('run_id')
+      return paged(rid ? mismatches.filter((m) => m.run_id === rid) : mismatches)
+    }),
+    http.get(`${BASE}/runs/:id`, ({ request, params }) => {
+      singles.push(new URL(request.url))
+      const r = runs.find((x) => x.id === params.id)
+      return r ? HttpResponse.json(r) : refusal(404, 'not_found')
+    }),
+    http.get(`${BASE}/mismatches/:id`, ({ request, params }) => {
+      singles.push(new URL(request.url))
+      const m = mismatches.find((x) => x.id === params.id)
+      return m ? HttpResponse.json(m) : refusal(404, 'not_found')
+    }),
   )
   return seen
 }
@@ -158,11 +179,57 @@ describe('reconciliation views (S5)', () => {
     expect(screen.queryByLabelText('Tenant')).toBeNull()
   })
 
-  it('marks which loaded findings belong to the selected run (the API cannot filter by run)', async () => {
+  it('A10c: run detail is the single-run read and "Show only this run\'s findings" sends the server-side run_id filter', async () => {
     signInAs(CO)
-    staff({ mismatches: [mm(), mm({ id: '72000000-0000-4000-8000-000000000002', run_id: '71000000-0000-4000-8000-000000000009' })] })
+    const OTHER_RUN = '71000000-0000-4000-8000-000000000009'
+    const seen = staff({ mismatches: [mm(), mm({ id: '72000000-0000-4000-8000-000000000002', run_id: OTHER_RUN })] })
     renderWithProviders(<AppRoutes />, { route: '/reconciliation' })
     const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: `Open run ${RUN.slice(0, 8)}` }))
+    const d = await screen.findByRole('region', { name: 'Run detail' })
+    await waitFor(() => expect(singles.some((u) => u.pathname === `${BASE}/runs/${RUN}` && u.searchParams.get('stream') === 'payment_statement')).toBe(true))
+    expect(within(d).queryByText(/cannot filter findings by run/)).toBeNull()
+    // no client-side "In selected run" column on staff streams any more
+    expect(within(screen.getAllByRole('table')[1]).queryByText('In selected run')).toBeNull()
+    expect(within(screen.getAllByRole('table')[1]).getAllByRole('row').slice(1)).toHaveLength(2)
+    await user.click(within(d).getByRole('button', { name: /Show only this run/ }))
+    await waitFor(() => expect(seen[seen.length - 1]?.searchParams.get('run_id')).toBe(RUN))
+    await waitFor(() => expect(within(screen.getAllByRole('table')[1]).getAllByRole('row').slice(1)).toHaveLength(1))
+    expect(screen.getByRole('status')).toHaveTextContent('Showing only the findings of run')
+    await user.click(screen.getByRole('button', { name: 'Show all runs' }))
+    await waitFor(() => expect(seen[seen.length - 1]?.searchParams.has('run_id')).toBe(false))
+  })
+
+  it('A10c: finding detail comes from the single-mismatch read, and a refused single read is shown through the closed map', async () => {
+    signInAs(FI)
+    staff()
+    renderWithProviders(<AppRoutes />, { route: '/reconciliation' })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: `Open mismatch ${MM.slice(0, 8)}` }))
+    await waitFor(() => expect(singles.some((u) => u.pathname === `${BASE}/mismatches/${MM}` && u.searchParams.get('stream') === 'payment_statement')).toBe(true))
+    server.use(http.get(`${BASE}/mismatches/${MM}`, () => refusal(404, 'not_found')))
+    await user.click(screen.getByRole('button', { name: 'Close detail' }))
+    await user.click(screen.getByRole('button', { name: `Open mismatch ${MM.slice(0, 8)}` }))
+    const d = await screen.findByRole('region', { name: 'Finding detail' })
+    expect(await within(d).findByRole('alert')).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent('do-not-render')
+  })
+
+  it('casino streams still mark which loaded findings belong to the selected run (their route has no run filter)', async () => {
+    signInAs(TA)
+    const OTHER_RUN = '71000000-0000-4000-8000-000000000009'
+    server.use(
+      http.get('/v1/admin/casino/reconciliation/runs', () => paged([run({ stream: 'casino_consistency', status: 'clean' })])),
+      http.get('/v1/admin/casino/reconciliation/mismatches', () => paged([
+        { id: MM, run_id: RUN, mismatch_kind: 'cas_orphan_win', reconciliation_key: 'k', expected_value: 'e', actual_value: 'a', investigation_status: 'open', created_at: '2026-10-10T01:00:00Z', resolved_at: null },
+        { id: '72000000-0000-4000-8000-000000000002', run_id: OTHER_RUN, mismatch_kind: 'cas_orphan_win', reconciliation_key: 'k2', expected_value: 'e', actual_value: 'a', investigation_status: 'open', created_at: '2026-10-10T01:00:00Z', resolved_at: null },
+      ])),
+      http.get(`${BASE}/runs`, () => paged([])),
+      http.get(`${BASE}/mismatches`, () => paged([])),
+    )
+    renderWithProviders(<AppRoutes />, { route: '/reconciliation' })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('tab', { name: 'Casino consistency' }))
     await user.click(await screen.findByRole('button', { name: `Open run ${RUN.slice(0, 8)}` }))
     const d = await screen.findByRole('region', { name: 'Run detail' })
     expect(within(d).getByText(/cannot filter findings by run/)).toBeInTheDocument()

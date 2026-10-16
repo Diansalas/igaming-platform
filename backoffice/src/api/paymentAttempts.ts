@@ -4,9 +4,11 @@
 //  - the response never carries the provider reference text (only `has_provider_reference`), the merchant
 //    reference, a player/wallet id, a destination or a staff id; this module therefore has no such field and
 //    the screens cannot render one;
-//  - there is NO provider filter and NO age filter on the list (only operation, state, terminal_reason,
-//    withdrawal_request_id) and NO per-attempt event history route; the keyset cursor is opaque.
+//  - A10c: the list also filters by provider_id (exact) and min_age_seconds (at least that old), and a per-attempt
+//    event history route lists the verified provider receipts (closed vocabularies only, never a reference text);
+//    the keyset cursor is opaque.
 import { apiFetch, buildQuery } from './client'
+import type { PagedResponse } from './types'
 
 export const ATTEMPT_OPERATIONS = ['payout', 'deposit'] as const
 export type AttemptOperation = (typeof ATTEMPT_OPERATIONS)[number]
@@ -78,9 +80,29 @@ export interface ListAttemptsParams {
   state?: AttemptState
   terminal_reason?: string
   withdrawal_request_id?: string
+  /** Exact provider id (^[a-z0-9][a-z0-9-]{0,62}$). */
+  provider_id?: string
+  /** Only attempts created at least this many seconds ago (0..31536000). */
+  min_age_seconds?: number
   limit?: number
   cursor?: string
 }
+
+/** One verified provider callback receipt linked to an attempt (PaymentAttemptEvent). */
+export interface AttemptEvent {
+  id: string
+  event_type: string
+  outcome: string
+  disposition_at_receipt: string
+  resolution: string | null
+  decline_stage: string | null
+  amount_minor_units: string | null
+  asset_code: string | null
+  received_at: string
+  resolved_at: string | null
+}
+
+export const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/
 
 const base = (tenantId: string) => `/v1/admin/tenants/${encodeURIComponent(tenantId)}/payment-attempts`
 
@@ -90,4 +112,8 @@ export function listPaymentAttempts(tenantId: string, params: ListAttemptsParams
 
 export function getPaymentAttempt(tenantId: string, attemptId: string): Promise<PaymentAttempt> {
   return apiFetch(`${base(tenantId)}/${encodeURIComponent(attemptId)}`)
+}
+
+export function listAttemptEvents(tenantId: string, attemptId: string, params: { limit?: number; offset?: number } = {}): Promise<PagedResponse<AttemptEvent>> {
+  return apiFetch(`${base(tenantId)}/${encodeURIComponent(attemptId)}/events${buildQuery(params)}`)
 }

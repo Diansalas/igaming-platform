@@ -13,17 +13,21 @@ describe('capabilityGrants api: UI-to-OpenAPI contract (K1)', () => {
     const seen = captureRequests((r) => (r.method === 'POST' && /cancel|reject|revoke/.test(r.pathname) ? { status: 204 } : { body: [] }))
     await listGrantRequests(T)
     await listGrants(T)
+    await listGrantRequests(T, { limit: 26, offset: 25 })
+    await listGrants(T, { limit: 26, offset: 0 })
     await createGrantRequest(T, { grantee_staff_id: X, capability: 'payment_force_resolve:request', valid_until: '2026-12-01T00:00:00Z', reason_code: 'rota_cover' }, 'k1')
     await approveGrantRequest(T, X, 'ok', 'k2')
     await rejectGrantRequest(T, X, 'no', 'k3')
     await cancelGrantRequest(T, X, 'k4')
     await revokeGrant(T, X, 'left_team', 'k5')
     await listTenantStaff(T, { status: 'active', role: 'finance' })
-    expect(seen).toHaveLength(8)
+    expect(seen).toHaveLength(10)
     for (const s of seen) expect(checkAgainstSpec(s)).toEqual([])
     // no tenant id in any body: the target tenant is the path value only
     for (const s of seen) if (s.body && typeof s.body === 'object') expect(Object.keys(s.body)).not.toContain('tenant_id')
-    expect(seen[2].headers.get('Idempotency-Key')).toBe('k1')
+    expect(seen[2].query.get('limit')).toBe('26')
+    expect(seen[2].query.get('offset')).toBe('25')
+    expect(seen[4].headers.get('Idempotency-Key')).toBe('k1')
   })
 
   it('the capability list equals the OpenAPI enum and K1 has no payload_hash anywhere', () => {

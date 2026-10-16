@@ -25,6 +25,44 @@ function setup(reqs = [grantRequest()], grants = [grant()]) {
   )
 }
 
+describe('A10c: paged K1 lists (optional ?limit / ?offset window; the body stays a bare array)', () => {
+  it('asks for one row more than it shows, shows 25, and Next / Previous move the offset', async () => {
+    signInAs(PA)
+    const reqUrls: URL[] = []
+    const many = Array.from({ length: 26 }, (_, i) => grantRequest({ id: `d${String(i).padStart(7, '0')}-0000-4000-8000-000000000001`, requested_by: STAFF_B }))
+    setup()
+    server.use(
+      http.get(`${BASE}/requests`, ({ request }) => {
+        const u = new URL(request.url)
+        reqUrls.push(u)
+        const off = Number(u.searchParams.get('offset') ?? '0')
+        return HttpResponse.json(many.slice(off, off + Number(u.searchParams.get('limit') ?? '1000')))
+      }),
+    )
+    renderWithProviders(<AppRoutes />, { route })
+    const t = await screen.findByRole('table', { name: 'Capability grant requests' })
+    expect(reqUrls[0].searchParams.get('limit')).toBe('26')
+    expect(reqUrls[0].searchParams.get('offset')).toBe('0')
+    expect(within(t).getAllByRole('row').slice(1)).toHaveLength(25)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Requests: next page' }))
+    await waitFor(() => expect(reqUrls[reqUrls.length - 1].searchParams.get('offset')).toBe('25'))
+    await waitFor(() => expect(within(screen.getByRole('table', { name: 'Capability grant requests' })).getAllByRole('row').slice(1)).toHaveLength(1))
+    expect(screen.getByRole('button', { name: 'Requests: next page' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Requests: previous page' }))
+    await waitFor(() => expect(reqUrls[reqUrls.length - 1].searchParams.get('offset')).toBe('0'))
+  })
+
+  it('shows no pager when everything fits on the first page', async () => {
+    signInAs(PA)
+    setup()
+    renderWithProviders(<AppRoutes />, { route })
+    await screen.findByRole('table', { name: 'Capability grant requests' })
+    expect(screen.queryByRole('navigation', { name: 'Requests pages' })).toBeNull()
+    expect(screen.queryByRole('navigation', { name: 'Grants pages' })).toBeNull()
+  })
+})
+
 describe('role-driven actions (UI hint; the server decides)', () => {
   it('platform admin sees approve / reject / revoke; tenant_admin sees request + revoke + cancel-own but never approve; compliance reads only', async () => {
     signInAs(PA)
