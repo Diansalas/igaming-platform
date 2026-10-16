@@ -119,12 +119,30 @@ $$;
 
 GRANT USAGE ON SCHEMA public TO igaming_runtime;
 
--- Direct grants cover any table/sequence that already exists (relevant on
--- a re-run after migrations have already created tables). The ALTER
--- DEFAULT PRIVILEGES statements below cover every table/sequence a FUTURE
--- migration creates.
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO igaming_runtime;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_runtime;
+-- STAGING-PREP-2 (security review SRSP-1): the blanket table/sequence grants are
+-- FIRST-INSTALL ONLY. The per-table privileges of a migrated database are owned
+-- by the migrations (the default privileges below give each new table full DML,
+-- and ~60 migration blocks then narrow it with table, column and function level
+-- REVOKE/GRANT statements: alert_routes, ledger_adjustment_*, aml_*,
+-- staff_*, provider_credential_*, withdrawal_requests, sportsbook_bet_settlements
+-- and others). Re-running a blanket GRANT here (secret rotation, "re-run on
+-- error", deploy.sh migrate) would silently widen all of them, and no hand-kept
+-- copy of those statements can stay complete. So when the schema already holds
+-- migrated tables this script leaves their grants exactly as the migrations set
+-- them. When it does not (the normal order: role-init runs BEFORE migrate) there
+-- is nothing to grant on and the statements are a no-op. The ALTER DEFAULT
+-- PRIVILEGES statements below cover every table/sequence a migration creates.
+-- A restored database without ACLs is NOT repaired by this script (restore
+-- procedure, backup-restore-dr.md); the plan diffs the runtime grants after
+-- every role-init run (aws-staging-deploy-plan.md 3.1).
+DO $$
+BEGIN
+    IF to_regclass('public.schema_migrations') IS NULL THEN
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO igaming_runtime;
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_runtime;
+    END IF;
+END
+$$;
 
 -- Uses current_user (dynamic) rather than a hardcoded "igaming" literal,
 -- so this script keeps working unmodified if the operator ever renames

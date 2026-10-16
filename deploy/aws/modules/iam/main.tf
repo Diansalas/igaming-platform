@@ -19,14 +19,16 @@
 #   specific resource ARN at all (it is an account/region-wide token
 #   operation) — documented here rather than silently used.
 #
-# - Task role: what the APPLICATION CODE itself would assume via the
-#   container's AWS SDK, if it made any AWS API calls. It does not today —
-#   platform-api's only external dependencies are Postgres and (per
-#   internal/observability) an OTLP endpoint, neither of which is an AWS
-#   API call requiring IAM. This role is therefore intentionally empty: no
-#   permissions are granted "just in case." Extend it only when a real,
-#   named AWS API call is added to the application (e.g. S3 for exports),
-#   not speculatively.
+# - Task role: what the APPLICATION CODE itself assumes via the container's
+#   AWS SDK. It has NO permissions by default. The one named exception is
+#   var.task_secret_arns (STAGING-PREP-1): the platform alert webhook channel
+#   reads its HMAC secret through the awssm:// secret-store backend, an
+#   application-level GetSecretValue on exact secret ARNs (see the policy at the
+#   end of this file). Do not grant anything "just in case"; add a permission
+#   only for a real, named AWS API call. KNOWN RESIDUAL (SRSP-3): the role is
+#   shared by all six task definitions, so b2c, backoffice and the one-off tasks
+#   can read that secret too; a dedicated platform-api task role (the others on
+#   an empty one) is required before production.
 
 # PERMISSIONS BOUNDARY (ADR 0086, security review P1): when
 # var.permissions_boundary_arn is set, every role here carries it. The

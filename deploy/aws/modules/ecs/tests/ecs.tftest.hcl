@@ -335,15 +335,12 @@ run "mock_geolocation_country_must_be_iso_alpha2" {
   expect_failures = [var.mock_geolocation_country]
 }
 
-run "migrate_verifies_before_the_revoke" {
+run "migrate_revokes_right_after_up_then_verifies" {
   command = plan
 
   assert {
-    condition = (
-      strcontains(jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].command[2], "/app/migrate up && /app/migrate verify && /app/migrate status && psql") &&
-      strcontains(jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].command[2], "REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime")
-    )
-    error_message = "The migrate task must run migrate verify (and status) after up and before the schema_migrations revoke, joined with && so a failure stops the task."
+    condition     = strcontains(jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].command[2], "/app/migrate up && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -c \"REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;\" && /app/migrate verify && /app/migrate status")
+    error_message = "The migrate task must run the schema_migrations revoke immediately after up (so a failing verify cannot leave the runtime role able to write it), then verify and status, all joined with && so any failure stops the task."
   }
 }
 
