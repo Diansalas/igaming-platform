@@ -20,6 +20,11 @@ staging_access_cidrs = ["203.0.113.10/32"]
 # alarm_email                = "you@example.com"  # creates SNS topic + subscription
 # ecs_public_ip_mode         = true   # false = production-shaped NAT layout (+~$0.057/h)
 
+# --- OWNER INPUTS for the staging deploy (docs/runbooks/aws-staging-deploy-plan.md G3/G5) ---
+# Unset = the binary's own fail-closed default (operating-market gate refuses everything; no webhook channel).
+# mock_geolocation_country = "MT"                           # ISO-3166-1 alpha-2, the owner's choice; not a recommendation
+# alert_webhook_url        = "https://alerts.example.com/h" # a receiver the owner controls; the HMAC secret is generated
+
 tags = {
   Owner = "devops"
 }

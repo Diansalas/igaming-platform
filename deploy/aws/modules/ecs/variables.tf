@@ -263,6 +263,110 @@ variable "seed_admin_password_secret_arn" {
   type        = string
 }
 
+# --- STAGING-PREP-1: key families and configuration the current binary needs ---
+#     Names verified against internal/staffmfa/keys.go, internal/config/config.go,
+#     internal/config/observability.go and cmd/platform-api (not against docs).
+
+variable "staff_mfa_keys_secret_arn" {
+  description = "Secret with JSON keys factor_keys and mac_keys (each kid:base64). Injected as STAFF_MFA_FACTOR_KEYS / STAFF_MFA_MAC_KEYS into platform-api AND the seed-admin task: the binary refuses to start without them in every environment (staffmfa.LoadKeys)."
+  type        = string
+}
+
+variable "staff_mfa_active_kid" {
+  description = "STAFF_MFA_FACTOR_ACTIVE_KID and STAFF_MFA_MAC_ACTIVE_KID (not secret; must name the kid used inside the secret)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]{1,32}$", var.staff_mfa_active_kid))
+    error_message = "staff_mfa_active_kid must be 1-32 characters of [A-Za-z0-9._-]."
+  }
+}
+
+variable "payout_instrument_keys_secret_arn" {
+  description = "Secret with JSON keys master_keys and fp_keys (each kid:base64). Injected as PAYOUT_INSTRUMENT_KEYS / PAYOUT_INSTRUMENT_FP_KEYS into platform-api (withdrawals answer 503 without them)."
+  type        = string
+}
+
+variable "payout_instrument_active_kid" {
+  description = "PAYOUT_INSTRUMENT_ACTIVE_KID and PAYOUT_INSTRUMENT_FP_ACTIVE_KID (not secret)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]{1,32}$", var.payout_instrument_active_kid))
+    error_message = "payout_instrument_active_kid must be 1-32 characters of [A-Za-z0-9._-]."
+  }
+}
+
+variable "actor_proof_keys_secret_arn" {
+  description = "Plain-string secret (kid:base64) injected as ACTOR_PROOF_KEYS. Governed writes also need the matching actor_proof_keys database row, which is an owner action (docs/runbooks/aws-staging-deploy-plan.md G3)."
+  type        = string
+}
+
+variable "actor_proof_active_kid" {
+  description = "ACTOR_PROOF_ACTIVE_KID (not secret)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]{1,32}$", var.actor_proof_active_kid))
+    error_message = "actor_proof_active_kid must be 1-32 characters of [A-Za-z0-9._-]."
+  }
+}
+
+variable "mock_geolocation_country" {
+  description = "MOCK_GEOLOCATION_COUNTRY (A8): the static country the MOCK locator reports. Honoured only when test_support_endpoints_enabled is true (cmd/platform-api mockProviderWiring); the config refuses it under APP_ENV=production. Empty (default) = the variable is NOT set and the operating-market gate refuses every request (fail closed). The value is an OWNER choice, never defaulted by an agent."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.mock_geolocation_country == "" || can(regex("^[A-Z]{2}$", var.mock_geolocation_country))
+    error_message = "mock_geolocation_country must be empty or an uppercase ISO-3166-1 alpha-2 code."
+  }
+}
+
+variable "metrics_addr" {
+  description = "METRICS_ADDR: host:port of the dedicated Prometheus listener (A9). Empty = no listener. Must differ from the HTTP port. A loopback address (127.0.0.1) needs no extra acknowledgement; there is NO scrape path from outside the task (no collector or sidecar exists), so this only proves the listener binds at startup. A non-loopback bind would also need METRICS_ALLOW_NON_LOOPBACK, which this module deliberately does not set."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.metrics_addr == "" || can(regex("^127\\.0\\.0\\.1:[0-9]{2,5}$", var.metrics_addr))
+    error_message = "metrics_addr must be empty or a loopback 127.0.0.1:<port> address."
+  }
+}
+
+variable "alert_webhook_url" {
+  description = "ALERT_WEBHOOK_URL: https URL of an owner-controlled alert receiver. Empty (default) = no webhook channel and none of the awssm settings below are set. Not secret (the config refuses embedded credentials)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.alert_webhook_url == "" || startswith(var.alert_webhook_url, "https://")
+    error_message = "alert_webhook_url must be empty or an https:// URL."
+  }
+}
+
+variable "alert_webhook_secret_ref" {
+  description = "ALERT_WEBHOOK_SECRET_REF: awssm:// reference (ARN plus pinned versionId) of the webhook HMAC secret. Required when alert_webhook_url is set; the reference is not secret."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.alert_webhook_secret_ref == "" || startswith(var.alert_webhook_secret_ref, "awssm://arn:aws:secretsmanager:")
+    error_message = "alert_webhook_secret_ref must be empty or an awssm://arn:aws:secretsmanager:... reference."
+  }
+}
+
+variable "alert_retention_days" {
+  description = "ALERT_RETENTION_DAYS: resolved-alert retention (floor 7 days in the config). 0 (default) = not set, so no purge job runs."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.alert_retention_days == 0 || var.alert_retention_days >= 7
+    error_message = "alert_retention_days must be 0 (not set) or at least 7 (internal/config floor)."
+  }
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

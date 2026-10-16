@@ -95,10 +95,14 @@ output "log_group_names" {
 output "secret_arns" {
   description = "Secrets Manager ARNs only — never the underlying values (which are not in Terraform state either; ADR 0086)."
   value = {
-    db_master_rds_managed = module.database.master_user_secret_arn
-    db_runtime            = module.secrets.db_runtime_secret_arn
-    jwt_signing           = module.secrets.jwt_signing_secret_arn
-    seed_admin_password   = module.secrets.seed_admin_password_secret_arn
+    db_master_rds_managed  = module.database.master_user_secret_arn
+    db_runtime             = module.secrets.db_runtime_secret_arn
+    jwt_signing            = module.secrets.jwt_signing_secret_arn
+    seed_admin_password    = module.secrets.seed_admin_password_secret_arn
+    staff_mfa_keys         = module.secrets.staff_mfa_keys_secret_arn
+    payout_instrument_keys = module.secrets.payout_instrument_keys_secret_arn
+    actor_proof_keys       = module.secrets.actor_proof_keys_secret_arn
+    alert_webhook_hmac     = module.secrets.alert_webhook_hmac_secret_arn
   }
 }
 

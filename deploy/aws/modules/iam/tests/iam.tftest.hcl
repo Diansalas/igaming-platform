@@ -73,3 +73,25 @@ run "every_role_carries_the_boundary" {
     error_message = "Every role must carry the permissions boundary the deployer policy requires."
   }
 }
+
+run "task_role_has_no_policy_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(aws_iam_role_policy.task) == 0
+    error_message = "The task role must carry no policy unless task_secret_arns is set."
+  }
+}
+
+run "task_role_reads_only_named_secrets" {
+  command = plan
+
+  variables {
+    task_secret_arns = ["arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/alert-webhook-hmac-AbCdEf"]
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policy.task) == 1 && length(data.aws_iam_policy_document.task) == 1
+    error_message = "task_secret_arns must produce exactly one task-role policy."
+  }
+}

@@ -18,6 +18,17 @@ variable "secret_version" {
   }
 }
 
+variable "key_family_version" {
+  description = "Write-only version counter for the generated key-family secrets (staff MFA, payout instrument, actor proof, alert webhook HMAC). Also embedded in the kid (stg-v<N>). Separate from secret_version so rotating the database password or the JWT secret does not invalidate enrolled MFA factors or sealed payout instruments. This generator does not keep the previous key: see the comment in main.tf."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.key_family_version >= 1 && floor(var.key_family_version) == var.key_family_version
+    error_message = "key_family_version must be a positive integer."
+  }
+}
+
 variable "seed_admin_secret_version" {
   description = "Write-only version counter for the seed-admin password only (NOT bumped by secret_version: the admin's stored password hash would not follow). Bump only together with seeding a new admin in a fresh environment."
   type        = number

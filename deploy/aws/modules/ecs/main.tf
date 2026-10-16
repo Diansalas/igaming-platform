@@ -65,6 +65,47 @@ resource "aws_cloudwatch_log_group" "this" {
 }
 
 locals {
+  # STAGING-PREP-1: platform-api configuration beyond the base set. Every
+  # name below was verified against the code (internal/config,
+  # internal/staffmfa, cmd/platform-api), not against the docs. Optional
+  # settings are added ONLY when their variable is non-empty, so an unset
+  # owner input leaves the binary's own fail-closed default in force.
+  alert_webhook_enabled = var.alert_webhook_url != ""
+
+  platform_api_base_environment = [
+    { name = "APP_ENV", value = var.app_environment },
+    { name = "DATABASE_URL", value = local.database_url_runtime },
+    { name = "HTTP_ADDR", value = ":${var.container_port}" },
+    { name = "TRUSTED_PROXY_COUNT", value = tostring(var.trusted_proxy_count) },
+    { name = "CORS_ALLOWED_ORIGINS", value = var.cors_allowed_origins },
+    { name = "OTEL_SERVICE_NAME", value = "platform-api" },
+    { name = "OTEL_EXPORTER", value = "stdout" },
+    # Stage 9.4: the second, independent gate app_environment alone is
+    # no longer sufficient for — see variables.tf's own doc comment on
+    # this variable and internal/config/config.go's Environment/
+    # TestSupportEndpointsEnabled doc comments.
+    { name = "TEST_SUPPORT_ENDPOINTS_ENABLED", value = tostring(var.test_support_endpoints_enabled) },
+    # Key ids are not secret; the key material is injected from Secrets Manager below.
+    { name = "STAFF_MFA_FACTOR_ACTIVE_KID", value = var.staff_mfa_active_kid },
+    { name = "STAFF_MFA_MAC_ACTIVE_KID", value = var.staff_mfa_active_kid },
+    { name = "PAYOUT_INSTRUMENT_ACTIVE_KID", value = var.payout_instrument_active_kid },
+    { name = "PAYOUT_INSTRUMENT_FP_ACTIVE_KID", value = var.payout_instrument_active_kid },
+    { name = "ACTOR_PROOF_ACTIVE_KID", value = var.actor_proof_active_kid },
+  ]
+
+  platform_api_optional_environment = concat(
+    var.mock_geolocation_country != "" ? [{ name = "MOCK_GEOLOCATION_COUNTRY", value = var.mock_geolocation_country }] : [],
+    var.metrics_addr != "" ? [{ name = "METRICS_ADDR", value = var.metrics_addr }] : [],
+    var.alert_retention_days > 0 ? [{ name = "ALERT_RETENTION_DAYS", value = tostring(var.alert_retention_days) }] : [],
+    local.alert_webhook_enabled ? [
+      { name = "ALERT_WEBHOOK_URL", value = var.alert_webhook_url },
+      { name = "ALERT_WEBHOOK_SECRET_REF", value = var.alert_webhook_secret_ref },
+      # The webhook secret is read through the awssm:// secret-store backend (task role).
+      { name = "SECRETSTORE_BACKENDS", value = "awssm" },
+      { name = "AWS_SECRETSMANAGER_REGION", value = var.aws_region },
+    ] : [],
+  )
+
   # Non-secret connection strings: no password component, ever (see file
   # header). sslmode=require matches the database module's rds.force_ssl=1.
   database_url_runtime   = "postgres://${var.db_runtime_username}@${var.database_host}:${var.database_port}/${var.database_name}?sslmode=require"
@@ -114,23 +155,15 @@ resource "aws_ecs_task_definition" "platform_api" {
       portMappings = [
         { containerPort = var.container_port, protocol = "tcp" }
       ]
-      environment = [
-        { name = "APP_ENV", value = var.app_environment },
-        { name = "DATABASE_URL", value = local.database_url_runtime },
-        { name = "HTTP_ADDR", value = ":${var.container_port}" },
-        { name = "TRUSTED_PROXY_COUNT", value = tostring(var.trusted_proxy_count) },
-        { name = "CORS_ALLOWED_ORIGINS", value = var.cors_allowed_origins },
-        { name = "OTEL_SERVICE_NAME", value = "platform-api" },
-        { name = "OTEL_EXPORTER", value = "stdout" },
-        # Stage 9.4: the second, independent gate app_environment alone is
-        # no longer sufficient for — see variables.tf's own doc comment on
-        # this variable and internal/config/config.go's Environment/
-        # TestSupportEndpointsEnabled doc comments.
-        { name = "TEST_SUPPORT_ENDPOINTS_ENABLED", value = tostring(var.test_support_endpoints_enabled) },
-      ]
+      environment = concat(local.platform_api_base_environment, local.platform_api_optional_environment)
       secrets = [
         { name = "PGPASSWORD", valueFrom = "${var.db_runtime_secret_arn}:password::" },
         { name = "JWT_SIGNING_SECRET", valueFrom = var.jwt_signing_secret_arn },
+        { name = "STAFF_MFA_FACTOR_KEYS", valueFrom = "${var.staff_mfa_keys_secret_arn}:factor_keys::" },
+        { name = "STAFF_MFA_MAC_KEYS", valueFrom = "${var.staff_mfa_keys_secret_arn}:mac_keys::" },
+        { name = "PAYOUT_INSTRUMENT_KEYS", valueFrom = "${var.payout_instrument_keys_secret_arn}:master_keys::" },
+        { name = "PAYOUT_INSTRUMENT_FP_KEYS", valueFrom = "${var.payout_instrument_keys_secret_arn}:fp_keys::" },
+        { name = "ACTOR_PROOF_KEYS", valueFrom = var.actor_proof_keys_secret_arn },
       ]
       # Liveness only (process is up) — never /readyz here. Probing
       # readiness for liveness would make the orchestrator kill a
@@ -155,6 +188,17 @@ resource "aws_ecs_task_definition" "platform_api" {
   ])
 
   tags = var.tags
+
+  lifecycle {
+    precondition {
+      condition     = var.alert_webhook_url == "" || var.alert_webhook_secret_ref != ""
+      error_message = "alert_webhook_url requires alert_webhook_secret_ref (config.Load refuses ALERT_WEBHOOK_URL without ALERT_WEBHOOK_SECRET_REF)."
+    }
+    precondition {
+      condition     = var.metrics_addr == "" || !endswith(var.metrics_addr, ":${var.container_port}")
+      error_message = "metrics_addr must not share the HTTP port (config.Load refuses it)."
+    }
+  }
 }
 
 resource "aws_ecs_service" "platform_api" {
@@ -362,7 +406,11 @@ resource "aws_ecs_service" "backoffice" {
 # Command chains `cmd/migrate up` and THEN the authoritative
 # schema_migrations write-revoke in the SAME task invocation, using the
 # same master ("igaming") credential, so the revoke can never be
-# accidentally skipped by an operator forgetting a separate step. Both
+# accidentally skipped by an operator forgetting a separate step.
+# STAGING-PREP-1 (G3): `migrate verify` (checksum drift and version gaps) and
+# `migrate status` (the head of the deployed commit) run between `up` and the
+# revoke, so a verify failure stops the task with a non-zero exit before the
+# revoke and before deploy.sh rolls the services. Both
 # `migrate` and `psql` are present in the platform-api image — see
 # deploy/docker/platform-api.Dockerfile.
 resource "aws_ecs_task_definition" "migrate" {
@@ -381,7 +429,7 @@ resource "aws_ecs_task_definition" "migrate" {
       essential = true
       command = [
         "sh", "-c",
-        "/app/migrate up && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -c \"REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;\""
+        "/app/migrate up && /app/migrate verify && /app/migrate status && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -c \"REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;\""
       ]
       environment = [
         { name = "DATABASE_URL", value = local.database_url_migration },
@@ -427,7 +475,7 @@ resource "aws_ecs_task_definition" "role_init" {
       essential = true
       command = [
         "sh", "-c",
-        "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f /app/sql/init-runtime-role.rds.sql"
+        "psql \"$DATABASE_URL\" --single-transaction -v ON_ERROR_STOP=1 -f /app/sql/init-runtime-role.rds.sql"
       ]
       environment = [
         { name = "DATABASE_URL", value = local.database_url_migration },
@@ -479,10 +527,19 @@ resource "aws_ecs_task_definition" "seed_admin" {
       command = ["/app/seed-admin"]
       environment = [
         { name = "DATABASE_URL", value = local.database_url_migration },
+        # cmd/seed-admin applies the same staff MFA rules as platform-api
+        # (config.ValidateStaffMFAEnv, staffmfa.LoadKeys): APP_ENV decides
+        # whether published placeholder keys are refused, and the keys are
+        # required in every environment.
+        { name = "APP_ENV", value = var.app_environment },
+        { name = "STAFF_MFA_FACTOR_ACTIVE_KID", value = var.staff_mfa_active_kid },
+        { name = "STAFF_MFA_MAC_ACTIVE_KID", value = var.staff_mfa_active_kid },
       ]
       secrets = [
         { name = "PGPASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
         { name = "SEED_ADMIN_PASSWORD", valueFrom = var.seed_admin_password_secret_arn },
+        { name = "STAFF_MFA_FACTOR_KEYS", valueFrom = "${var.staff_mfa_keys_secret_arn}:factor_keys::" },
+        { name = "STAFF_MFA_MAC_KEYS", valueFrom = "${var.staff_mfa_keys_secret_arn}:mac_keys::" },
       ]
       logConfiguration = {
         logDriver = "awslogs"

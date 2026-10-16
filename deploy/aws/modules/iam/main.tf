@@ -138,8 +138,36 @@ resource "aws_iam_role_policy" "execution" {
 resource "aws_iam_role" "task" {
   name                 = "${var.name_prefix}-ecs-task-role"
   assume_role_policy   = data.aws_iam_policy_document.ecs_tasks_assume.json
-  description          = "Intentionally empty/minimal: platform-api, b2c and backoffice make no AWS API calls today. Do not attach permissions speculatively."
+  description          = "Minimal: no permissions unless var.task_secret_arns names exact secrets (STAGING-PREP-1: the platform alert webhook HMAC secret, read by platform-api through the awssm secret store). Do not attach permissions speculatively."
   permissions_boundary = var.permissions_boundary_arn
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-ecs-task-role" })
+}
+
+# STAGING-PREP-1: the platform alert webhook channel reads its HMAC secret at
+# use time through the awssm:// secret-store backend (internal/secretstore/
+# awssm, ALERT_WEBHOOK_SECRET_REF). That is an application-level AWS API call
+# made with THIS role, so it needs exactly one named permission: GetSecretValue
+# on the listed secret ARNs and nothing else. Omitted entirely when the list is
+# empty (an IAM statement with an empty resource list is invalid). The role is
+# shared by every task definition (b2c, backoffice and the one-off tasks assume
+# it too but make no such call); the grant is scoped to exact ARNs and capped by
+# the permissions boundary (StagingAppSecrets). Residual recorded in the staging
+# plan: a dedicated platform-api task role would narrow it further.
+data "aws_iam_policy_document" "task" {
+  count = length(var.task_secret_arns) > 0 ? 1 : 0
+
+  statement {
+    sid       = "ReadNamedApplicationSecrets"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = var.task_secret_arns
+  }
+}
+
+resource "aws_iam_role_policy" "task" {
+  count = length(var.task_secret_arns) > 0 ? 1 : 0
+
+  name   = "${var.name_prefix}-ecs-task-policy"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task[0].json
 }
