@@ -357,7 +357,18 @@ fail (release). Wager, loss and deposit usage must be unchanged by both postings
 
 ### 12.1 Counts and commands (after the fix round)
 
-COUNTS_PLACEHOLDER
+Private scratch DB, `-tags integration -count=1 -p 1 -v`; counts are PASS lines (tests and subtests), after merging origin/claude/focused-wright-jw88w9 (30f77f7 already contained).
+- rg whole package: 187 PASS, 0 FAIL, 1 SKIP (the gated heavy run). `-race` rg (`RGEnforceS4|RGLimits|Eligib`): 50 PASS, 0 FAIL, 1 SKIP.
+- withdrawal whole package: 164 PASS, 0 FAIL; `-race` whole package: 164 PASS, 0 FAIL.
+- launchgov whole package: 123 PASS, 0 FAIL. tenant: 64 PASS, 0 FAIL. db (migration pins): 310 PASS, 0 FAIL, 1 SKIP.
+- httpserver `RGEnforcement|RGOptions|WDRG1|WithdrawalRGGate|OpenAPI|StepUp|Golden|Staff|Withdraw`: 353 PASS, 0 FAIL.
+- casino, sportsbook, payments `RGEnforceS4`: 8, 4 and 4 PASS, 0 FAIL. The full payments suite is still not completed in this environment (see 7b).
+- Not re-run in this round: bonus, risk, kyc, wallet, reconciliation, identity (untouched by the fix round; passed in 7b).
+- `go test ./...` PASS; `go vet` plain and `-tags integration` PASS; gofmt clean; golangci-lint 2.9.0 0 issues; b2c build PASS and `npm test` 128 tests PASS (127 + the logout cache test).
+- Mutation: `loss_may_go_negative_forced_true` KILLED (it SURVIVED before the LF-A6-1 test); `min_becomes_max` and `stake_boundary_ge` re-run KILLED. 31 mutants in `a6-mutation-results.tsv`.
+- Test stability change: `FailClosed/StatementTimeout_FailsClosed_NeverZeroUsage` failed once on a fast idle box with a bare 1 ms budget (the read finished inside it). It now holds an ACCESS EXCLUSIVE lock on `ledger_entries` so the read cannot finish; 3 of 3 repeat runs PASS. The assertion (fail closed, never zero usage) is unchanged.
+- Changed assertions this round: step-up golden counts (critical 62 to 63, none-mutating 43 to 42); `TestWDRG1_TenantIsolation_ForeignAccountIsRefused` left as is (SR6-2 is covered by the new direct gate test); HTTP enforcement test now creates a jurisdiction configuration and floors before the first activation (the new SR6-1 guard) and asserts the 409 before that.
+- Not unit-tested: SR6-4 (commit failure of the denial-audit transaction answers 503).
 
 ## 13. Paste-ready text for the human-decision register (proposal; the register is not edited here)
 
