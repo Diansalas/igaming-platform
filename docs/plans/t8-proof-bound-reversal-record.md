@@ -320,3 +320,99 @@ Add to the T5 row's State column:
 > ... NOT by an actor proof. Note (migration 0165): binding the payout-reversal decisions does NOT close T5 for the A5 tombstone
 > branch: its hold release is the ordinary E10 `withdrawal_failed` posting, reachable by a runtime session through the ordinary fail
 > path without any decision; WD027 binds only the payout tombstone row.
+
+## 10. Security review (independent, `security`, 2026-10-16)
+
+Scope: the branch diff against its merge-base with `origin/claude/focused-wright-jw88w9` (`12edec0`, 4 commits): migration 0165 up/down,
+`internal/actorproof` (operation, signer scope rule, step-up registration), `internal/withdrawal` (attacher, Go quorum, replay check),
+`internal/payments` (issuer), `internal/reconciliation` check D, the HTTP handler (read, unchanged), the runbook note and the ADR 0110
+amendment text in section 9. Read against ADR 0110, ADR 0113, migration 0124 (precedent), 0162, 0034, 0026 and the current
+`actor_proof_require` (0139 body). Code- and design-level review on private scratch databases only (PostgreSQL 16.13); not a
+penetration test. Not in scope: ADR 0113 s9.3 (`approve` / `reject`), T5 / E10, the other T8 flows, production key provisioning.
+
+**Verdict: APPROVE.** No HIGH or MEDIUM finding. SR5-2 / A5 R1 is closed for the `reverse` decision rows against the
+`igaming_runtime` threat model of ADR 0110 (THREAT-MODEL-ARBITRARY-SQL-1); the ADR 0110 s9 residuals (T3, T6, T7, owner class, wire
+window) apply unchanged and are NOT closed by this change. SRT8-1..3 are documentation accuracy items, non-blocking.
+
+### 10.1 Verified by execution (scratch databases `t8s20261016174135p19928x01`, `t8s20261016174150p20304x02`, both dropped)
+
+- Targeted suites green: `TestT8DB_*` (6), `TestMigration0165_*`, `TestT8D_*`, `TestT8_*` (payments, 2), every `TestA5_PayoutReversal_*`
+  (14), `TestA5DB_*`, `TestA5D_*`, `TestA5HTTP_*`, `TestPayoutReversalRoute_*`, `TestActorProof_PayoutReversal_*`,
+  `TestStepUpOperations_*`, both governed-table catalog pins (16 tables carry `zz_actor_proof_guard`, confirmed in the catalog);
+  `go vet -tags integration` clean on the touched packages.
+- Additional probes (temporary test file, NOT committed; as `igaming_runtime`, principal-scoped tenant session unless noted):
+
+| Probe | Result |
+|---|---|
+| `decision` = `Reverse` / `REVERSE` / ` reverse` / `reverse ` / `reverse\n` (no proof) | 23514 (0162 decision CHECK; the guard passes them, the CHECK refuses, so no non-canonical `reverse` row can exist); NUL byte 22021 |
+| `reason_code` with a trailing newline, valid proof | 23514 (guard shape check; ARE `$` is end-of-string) |
+| `COPY` a `reverse` row, with and without a planted nonce | 0A000 (COPY FROM refused under RLS; the BEFORE ROW guard would fire on COPY in any case) |
+| multi-row INSERT, one proof, two approvers | AP004 (second row's approver is not the proven actor) |
+| `INSERT ... ON CONFLICT (one reverse per approver) DO UPDATE`, no proof / fresh valid proof | AP001 / P0001 append-only (the BEFORE INSERT guard runs before conflict resolution; the UPDATE arm hits `withdrawal_approvals_immutable`) |
+| UPDATE a proven row's approver; DELETE it; UPDATE a legacy (pre-0165 shape) row to add a nonce | P0001 append-only (all three) |
+| tenant + principal + `app.platform_admin_principal_id` (mixed shape), valid proof | CG001 |
+| player GUC set, valid proof | CG001 |
+| acting GUCs set, valid tenant proof | CG020 |
+| token with 13 fields; token with an upper-case hex MAC | AP001 / AP001 |
+| session of ANOTHER tenant naming this tenant's staff and row | refused by the 0034 governance trigger (staff row invisible under RLS) before the guard |
+| `SET session_replication_role = replica` | permission denied |
+| `ALTER TABLE ... DISABLE TRIGGER zz_actor_proof_guard`, `DROP TRIGGER`, `CREATE TRIGGER`, `TRUNCATE` | must be owner / permission denied (runtime has no TRIGGER / TRUNCATE privilege; the 0026 no-truncate trigger also applies) |
+| read `actor_proof_keys`; read / write `actor_proof_nonces`; `CREATE FUNCTION` in `public`; `CREATE TEMP TABLE` | permission denied (no shadowing of the guard's unqualified `financial_actor_session` / `actor_proof_require` calls is possible; the guard's `search_path` is pinned in any case) |
+| after all refusals, one genuine proof per approver | admitted; stored nonce = the consumed token's field 11; `approve` rows of the fixture carry NULL (pass-through) |
+
+- SECURITY DEFINER functions in `public` (27) were scanned for writes to `withdrawal_approvals`, `DISABLE TRIGGER`,
+  `session_replication_role`, `app.actor_proof` or `app.principal_id`: only `actor_proof_require` (the verifier) and `aml_readiness`
+  (sets and restores `app.principal_id` around a read; no approvals write) match. No definer path inserts a `reverse` row.
+
+### 10.2 Verified by reading
+
+- Guard: last BEFORE ROW trigger (`zz_` after `withdrawal_approvals_enforce_governance`, which modifies no bound column); NOT security
+  definer; `search_path` pinned; `actor_proof_require(actor, 'tenant', session tenant, 'withdrawal_payout_reversal:decide',
+  request id, substr(reason_code, 17))`; approver must equal `financial_actor_session().actor`; session scope `tenant` and session tenant =
+  row tenant; automated `reverse` refused (WD028); nonce on non-`reverse` refused (WD028) and also by the CHECK; nonce taken from the same
+  GUC the verifier just consumed in the same trigger invocation (no interleaving possible). Rolled-back proof is reusable within its 60 s
+  window by design (ADR 0110 s5), tested.
+- Counting: the WD026 guard, the WD027 tombstone guard, check D's WD026 twin, the Go quorum and BOTH arms of `isExecutedReversalReplay`
+  filter `actor_proof_nonce IS NOT NULL`. No other reader of `decision = 'reverse'` exists in Go or SQL (grep). The HTTP handler
+  derives only from `DecidePayoutReversal`'s result, so it cannot report a quorum the counts deny.
+- Pre-0165 rows: NULL nonce, counted nowhere, still occupy the approver's one-`reverse`-per-request slot (R-T8-1). Acceptable: it can
+  only reduce who may vote (fail-closed), never add a vote; no production data exists, and a post-0165 attacker cannot occupy a slot
+  without a proof.
+- Go: `OpPayoutReversalDecide` constant; signer refuses any other `withdrawal_payout_reversal:` operation and any scope but `tenant`;
+  step-up registry `critical`, equal to the route's golden class (unit test); attacher REQUIRED (nil = `ErrInvalidInput`) and called
+  after every typed Go refusal, immediately before the INSERT; `Issuer.Attach` errors (`ErrNoIssuer`, `ErrStepUpMissing`, signing) fall
+  into the handler's default branch: 500, logged without the token, transaction rolled back, nothing recorded. `internal/withdrawal`
+  does not import `internal/actorproof` (signer allow-list unchanged). The decision runs in `NewPrincipalRunner(pool, tenant,
+  ApproverID)`, ApproverID is the verified token subject. Audit rows: unchanged fields (actor, IP, UA, request id, outcome, counts,
+  payload digest); no token, key or nonce is written.
+- HTTP contract unchanged (body, responses, step-up class, route counts); no back-office screen exists.
+- Down: refuses WD096 while any proof-bound row exists (per-tenant count under FORCE RLS); otherwise restores the two 0162 bodies
+  (verified textually identical to 0162, and by the whole-schema snapshot test) and drops trigger, function, index, constraint, column.
+  A down to 0164 re-opens SR5-2 by definition; the refusal guarantees it never silently re-counts proven rows. Honest.
+- ADR 0113 s9.3: the guard returns `approve` / `reject` rows unchanged (nonce must be NULL); WD023 untouched. T5 / E10: unchanged and
+  correctly labelled NOT CLOSED (the tombstone branch's hold release is the ordinary E10 posting).
+
+### 10.3 Findings
+
+- **SRT8-1 (LOW, documentation).** The 0165 up header cites a whole-schema snapshot test
+  `internal/withdrawal/t8_migration_0165_integration_test.go`, which does not exist; the test is
+  `TestMigration0165_LegacyRowsDoNotCount_UpDownUp_DownRefusal` in `internal/withdrawal/t8_proof_bound_reversal_db_integration_test.go`.
+  Fix the comment before merge (unmerged migration, comment-only change). Non-blocking.
+- **SRT8-2 (INFO, claim accuracy; owner class).** Section 7 states that check D's WD026 twin "now detects a reversal whose decisions
+  are unproven". That holds for NULL-nonce rows only. An actor holding the table OWNER (ADR 0110 s9.4) can disable
+  `zz_actor_proof_guard` and plant `reverse` rows with any shape-valid, unique nonce; the CHECK and UNIQUE do not bind the nonce to a
+  consumed proof, so WD026, WD027 and check D all count them. No regression (before 0165 the owner could plant counting rows too) and
+  the owner class is an accepted ADR 0110 residual, but the record / ADR must not imply detection of an owner forgery. Optional
+  future hardening (not required): check D could join `actor_proof_nonces` and flag a counted nonce that is absent or not bound to
+  (approver, tenant, operation, request id, digest) while the nonce is inside the retention window.
+- **SRT8-3 (INFO, ADR text in section 9).** (a) "(sixteen governed tables)" should say that on `withdrawal_approvals` only `reverse`
+  rows are bound, e.g. "(sixteen tables carry `zz_actor_proof_guard`; on `withdrawal_approvals` only `decision = 'reverse'` rows are
+  proof-bound)"; (b) the list of counters should include the Go replay check (`isExecutedReversalReplay`); (c) add to the T8 row that
+  the owner-class residual (SRT8-2) applies to the nonce marker. The rest of the section 9 text (operation, scope, target, payload,
+  ordering, WD codes, T5 note, T8 state PARTIALLY MITIGATED with `approve` / `reject` still open) is accurate against the code.
+
+### 10.4 Launch flag
+
+Nothing in this change blocks launch on its own. The open items that still bear on real-money launch are unchanged by it and remain
+owner decisions: ADR 0110 T8 for the other flows (including withdrawal `approve` / `reject`, ADR 0113 s9.3), T5 (including the A5
+tombstone branch's E10 hold release), and the ADR 0110 s9 inherent residuals (T6 application-host compromise holds the signing key).
