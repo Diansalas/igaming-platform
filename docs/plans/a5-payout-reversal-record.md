@@ -122,6 +122,8 @@ mismatch park exists.
 | `internal/tenant/status_readers_static_test.go` + `docs/security/launch-status-readers.md` | allow-list | + the 0163 verbatim 0125 `'closed'` line (LF7) | verbatim restatement |
 | `internal/ledger/withdrawal_types_wd043_static_test.go` | `withdrawal_reversed`: refused end to end | no hold leg; linked at commit (WD044) | the WD043 decision for the type |
 | `internal/payments/manual_resolution.go` `PayoutDisputeReasons` | both mismatch reasons `false` | `true` (out-of-band basis only) | migration 0163; `TestK3_C5_C33` now iterates the remaining refused reasons |
+| `internal/httpserver/staff_stepup_integration_test.go` `TestStepUp_GoldenTable_EveryClassifiedRoute` | critical 63 | critical 64 | the new critical route |
+| `internal/bonus/cashback_scheduler_integration_test.go` `seedCasinoBetForCashback` (fixture, no assertion changed) | a bet posted from an unfunded wallet (cash -1000) | the stake is funded by a deposit first | a production bet never overdraws cash; a negative wallet is now blocked for bonus play (decision 13). The deposit does not enter the net-loss query |
 
 ## 5. Tests (local private databases; exact commands; counts in section 6)
 
@@ -166,13 +168,86 @@ A5 tests (all `//go:build integration` unless noted):
 - `internal/httpserver/a5_payout_reversal_http_integration_test.go`: support 403, stale step-up 403, other tenant 404,
   body actor 400, fractional amount 400, quorum over HTTP, duplicate 409, HTTP audit rows.
 
-## 6. Counts
+## 6. Counts (local private databases; never CI)
 
-(filled in below after the runs)
+| Check | Result |
+|---|---|
+| `gofmt -l .` (Go) | clean |
+| `go vet ./...` and `go vet -tags integration ./...` | clean |
+| `golangci-lint run ./...` (2.9.0) | 0 issues |
+| `golangci-lint run --build-tags integration ./...` | 682 findings, all PRE-EXISTING (errcheck/staticcheck/unused in older test files); **0 in any A5 file** (filtered by file) |
+| `go test ./...` (unit) | 67 packages ok, 0 FAIL, 8 without tests |
+| Integration batch 1 (`a5_rev`, 18 package trees, `-p 1`) | 17 packages ok, 3 FAIL on the first run (withdrawal: the two changed ADR 0113 assertions; adjustment: `TestB19_Migration0113UpDownUp`, check D read the new column on a schema pinned at 0113, fixed with the `to_jsonb` read; bonus: two cashback fixtures overdrew cash, fixed by funding the stake), then withdrawal, adjustment, bonus and reconciliation re-run: 5/5 ok; 4 trees without tests |
+| Integration batch 2 (`a5_rev2`) | payments ok (2738 s); httpserver 1 FAIL on the first run (`TestStepUp_GoldenTable_EveryClassifiedRoute`, the critical-route count pin 63 -> 64), fixed |
+| Final batch (`a5_rev2`, after every fix) | httpserver ok (757 s); payments `-run 'Recon|recon|TestA5|K3_C4|K3_C5'` ok (170 s) |
+| A5 set under `-race -json` (`a5_mut`, 7 packages) | 27 top-level PASS, 31 subtests PASS, 0 FAIL, 0 SKIP, 0 DATA RACE |
+| Migrations 0162 / 0163 | up/down/up whole-schema snapshots PASS; 0162 down refused WD097, 0163 down refused MR099 (tests) |
+
+No test was skipped by the A5 tests (the owner-plant tests skip only on the persistent shared databases; the
+private databases are not on that list).
 
 ## 7. Mutation pass (ledger-critical code; kill or justify)
 
-(filled in below)
+Drivers: `sqlmut.py` (SQL: replaces ONE function body / drops ONE constraint on the private `a5_mut` database, or for
+the 0163 guard mutates the migration file the scratch M2 world migrates from; runs the targeted tests; restores) and
+`gomut.py` (Go: edits ONE source line, runs the targeted tests on `a5_mut`, restores). Both live in the session
+scratchpad (not committed). Killed = the targeted tests FAIL with the mutant in place. Result: **42 mutants, 42
+killed** (5 initially survived; each was killed by an added test, listed). 4 further mutants are justified
+equivalent (not run).
+
+| # | Mutant | Targeted test | Result |
+|---|---|---|---|
+| M01 | guard: WD026 block removed | `TestA5DB_E11_GovernanceFloorAndShape` | KILLED |
+| M02 | guard: WD026 counts logins, not Persons | same | KILLED |
+| M03 | guard: WD026 ignores the payload digest | same | KILLED |
+| M04 | guard: E11 also from `submitted` | `TestA5DB_ReversedIsTerminal_OneReversalPerCompletion` | KILLED |
+| M05 | guard: reversal link free outside E11 | same (WD022 on a submitted row, added) | KILLED |
+| M06 | guard: E11 may move the release link | `TestA5DB_E11...` | KILLED |
+| M07 | guard: terminal exception widened to any completed update | E11 + terminal tests | KILLED |
+| M08 | check A: reversal entry shape not checked | `TestA5DB_E11...` | KILLED |
+| M09 | check A: reversal key not pinned | same | KILLED |
+| M10 | check A: `reversed` release accepts any type | `TestA5D_ReversedArm_ParityWithCheckA` (forged completion-shaped release, added) | KILLED (survived first) |
+| M11 | check A: reversal need not reverse the completion | `TestA5DB_E11...` ("reverses another transaction", added) | KILLED (survived first) |
+| M12 | WD044: link-at-commit check removed | `TestA5DB_E11...` | KILLED |
+| M13 | WD044: check A call removed | same | KILLED |
+| M14 | WD044: `withdrawal_reversed` falls back to the hold-leg rule | same | KILLED |
+| M15 | 0034 governance: beneficiary rule excludes `reverse` | `TestA5DB_ReverseDecisionRow_Guards` | KILLED |
+| M16 | 0034 governance: automated `reverse` admitted | same | KILLED |
+| M17 | 0163 M2 guard: mismatch basis rule removed at submission | `TestA5_AmountDispute_M2_OnlyWithOutOfBandBasis` | KILLED |
+| M18 | index `ledger_transactions_one_withdrawal_reversal` dropped | `TestA5DB_ReversedIsTerminal...` | KILLED |
+| M19 | CHECK `withdrawal_approvals_reverse_reason_shape` dropped | `TestA5DB_ReverseDecisionRow_Guards` | KILLED (re-run on a fresh database) |
+| M20 | index `withdrawal_approvals_one_reverse_decision_per_approver` dropped | same | KILLED (re-run on a fresh database) |
+| G01 | floor of two dropped (policy count only) | `TestA5_PayoutReversal_FloorOfTwoEvenWhenThePolicyAsksForOne` (added) | KILLED |
+| G02 | policy step-up not enforced | `TestA5_PayoutReversal_StepUpPolicy` | KILLED |
+| G03 | beneficiary check skipped (DB still refuses, wrong error) | `TestA5_PayoutReversal_AuthorizationRefusals` | KILLED |
+| G04 | count ignores the payload digest | `TestA5_PayoutReversal_DuplicatesReplaysAndPayloadBinding` | KILLED |
+| G05 | payload amount not matched | authorization refusals | KILLED |
+| G06 | eligibility (linked) not enforced | authorization refusals | KILLED |
+| G07 | replay ignores the quorum | duplicates test (evidence-only payload, added) | KILLED (survived first) |
+| G08 | reversal direction swapped | normal test | KILLED |
+| G09 | execution does not re-match the completion reference | `TestA5DB_RecordDecision...` (wrong original at execution, added) | KILLED (survived first) |
+| G10 | tombstone branch: attempt not parked | `TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease` | KILLED |
+| G11 | tombstone on the return reference instead of the original | same | KILLED |
+| G12 | tombstone branch: reference-known check dropped | `TestA5_PayoutReversal_AmountDisputeThenReturn` | KILLED |
+| G13 | `submitting` attempt not refused | `TestA5_PayoutReversal_AttemptInFlight_Refused` | KILLED |
+| G14 | P1 not raised on the park | tombstone test | KILLED |
+| G15 | rg: deposits blocked too | `TestA5_NegativeBalance_...` | KILLED |
+| G16 | rg: locked cash ignored | `TestA5_NegativeLockedCash_Blocks` | KILLED |
+| G17 | rg: withdrawal not blocked | `TestA5_NegativeBalance_...` | KILLED |
+| G18 | rg: zero balance treated as negative | same | KILLED |
+| G19 | D: reversed release arm dropped | `TestA5D_*` | KILLED |
+| G20 | D: orphan reversal check dropped | `TestA5D_*` | KILLED |
+| G21 | D: reversal entry rule dropped | `TestA5D_ReversedArm_ParityWithCheckA` (bad entries, added) | KILLED (survived first) |
+| G22 | M2 Go mirror: mismatch reasons not admitted | M2 amount-dispute test | KILLED |
+
+Justified (equivalent under every reachable state; not run):
+- 0163 basis rule at `-> executing` (MR010): `basis_code` is part of the resolution's immutable payload (0115
+  guard), so a resolution admitted at submission always passes it; it is defence in depth.
+- Go `AmountDisputeReason` execution re-check: same reason (the Go mirror of the immutable basis).
+- WD044 "no hold leg" branch: B-i (0132, unchanged) refuses any hold leg of `withdrawal_reversed` first (WD040,
+  tested); the branch matters only with B-i switched off.
+- check A "only a reversed request carries a reversal link": the guard refuses first (WD022/WD020, M05 kills that);
+  the branch matters only after an owner trigger bypass (residual R2).
 
 ## 8. Residuals
 
@@ -194,6 +269,9 @@ A5 tests (all `//go:build integration` unless noted):
   is the residual.
 - R6. A payout reversal posted for a PSP that later also reports the payout in a statement: statement
   reconciliation of returns is NOT IMPLEMENTED (PROVIDER DEPENDENT).
+- R8. The database floor (WD026) proves two Persons agreed on ONE payload digest, not that the posting equals that
+  payload (the evidence hash is not on the ledger); the binding of the posting to the voted payload is Go-level
+  (`matchReversalPayload` at decision time, the re-check under the L2 lock at execution, G09). Same trust class as R1.
 - R7. A provider return reference reused for a second reversal (or colliding with another posting) is refused by
   the (tenant, provider, provider_tx_id) UNIQUE but surfaces as a 500, not a typed 409.
 
