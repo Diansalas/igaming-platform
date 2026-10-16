@@ -93,9 +93,10 @@ func TestValidateManifest_ProductionEligibleAdapterSatisfiedByCallbackEcho(t *te
 		ProviderID:      "real-psp-2",
 		SupportsDeposit: true,
 		Manifest: OperationManifest{
-			SupportsDeposit:                 true,
-			CallbackEchoesMerchantReference: true,
-			StatusQuery:                     "by_provider_reference",
+			SupportsDeposit:                         true,
+			CallbackEchoesMerchantReference:         true,
+			StatusQuerySuccessCarriesAmountAndAsset: true,
+			StatusQuery:                             "by_provider_reference",
 		},
 	}
 	fake := nonSyntheticFakeProvider{capability: declared}
@@ -130,7 +131,8 @@ func TestB7_ValidateManifest_MerchantReferenceStatusQueryWithCallbackEchoAccepte
 		ProviderID: "real-psp-3b", SupportsDeposit: true, SupportsWithdrawal: true,
 		Manifest: OperationManifest{
 			SupportsDeposit: true, CallbackEchoesMerchantReference: true, StatusQuery: "by_provider_or_merchant_reference",
-			DestinationEchoSemantics: payoutinstrument.DestinationEchoUnsupported,
+			StatusQuerySuccessCarriesAmountAndAsset: true,
+			DestinationEchoSemantics:                payoutinstrument.DestinationEchoUnsupported,
 		},
 	}
 	if err := validateManifest(nonSyntheticFakeProvider{capability: declared}, declared); err != nil {
@@ -175,7 +177,7 @@ func TestA1_ValidateManifest_SettlementWindowCeiling(t *testing.T) {
 				t.Fatalf("synthetic window %v: err=%v, refused want %v", tc.w, err, tc.refused)
 			}
 			real := AdapterCapability{ProviderID: "real-a1", SupportsDeposit: true,
-				Manifest: OperationManifest{SupportsDeposit: true, CallbackEchoesMerchantReference: true, SettlementWindow: tc.w}}
+				Manifest: OperationManifest{SupportsDeposit: true, CallbackEchoesMerchantReference: true, StatusQuerySuccessCarriesAmountAndAsset: true, SettlementWindow: tc.w}}
 			err = validateManifest(nonSyntheticFakeProvider{capability: real}, real)
 			if tc.refused != errors.Is(err, ErrManifestRegistrationRefused) || (!tc.refused && err != nil) {
 				t.Fatalf("non-synthetic window %v: err=%v, refused want %v", tc.w, err, tc.refused)
@@ -195,5 +197,35 @@ func TestValidateManifest_ProductionEligibleAdapterNotSupportingMoneyMovementIsE
 	fake := nonSyntheticFakeProvider{capability: declared}
 	if err := validateManifest(fake, declared); err != nil {
 		t.Fatalf("an adapter supporting neither deposit nor withdrawal has nothing to converge; unexpected refusal: %v", err)
+	}
+}
+
+// PAY-DEPOSIT-ESCALATION-1 (LF E3, ADR 0095 41.5): a production-eligible adapter that moves money must DECLARE that a
+// QueryStatus success carries amount and asset; a Synthetic adapter and an adapter that moves no money are exempt.
+func TestE3_ValidateManifest_StatusSuccessMustCarryAmountAndAsset(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		deposit, withdraw  bool
+		carries, wantRefus bool
+	}{
+		{"deposit adapter, not declared", true, false, false, true},
+		{"withdrawal adapter, not declared", false, true, false, true},
+		{"deposit adapter, declared", true, false, true, false},
+		{"withdrawal adapter, declared", false, true, true, false},
+		{"adapter moving no money, not declared", false, false, false, false},
+	} {
+		declared := AdapterCapability{ProviderID: "real-e3", SupportsDeposit: tc.deposit, SupportsWithdrawal: tc.withdraw,
+			Manifest: OperationManifest{SupportsDeposit: tc.deposit, CallbackEchoesMerchantReference: true, StatusQuerySuccessCarriesAmountAndAsset: tc.carries,
+				DestinationEchoSemantics: payoutinstrument.DestinationEchoUnsupported}}
+		err := validateManifest(nonSyntheticFakeProvider{capability: declared}, declared)
+		if tc.wantRefus != errors.Is(err, ErrManifestRegistrationRefused) || (!tc.wantRefus && err != nil) {
+			t.Errorf("%s: err=%v, refusal wanted=%v", tc.name, err, tc.wantRefus)
+		}
+	}
+	mock := NewMockProvider("mock-e3", "EUR")
+	declared := mock.Capabilities()
+	declared.Manifest.StatusQuerySuccessCarriesAmountAndAsset = false
+	if err := validateManifest(mock, declared); err != nil {
+		t.Fatalf("a Synthetic (MOCK) adapter is exempt from the E3 declaration, got %v", err)
 	}
 }

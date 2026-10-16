@@ -418,7 +418,11 @@ func TestR3_Static_OnlyOwnStoresAreWritten(t *testing.T) {
 func TestR3_Static_ObservationEntryPointCallsOnlyThePaymentStatementStream(t *testing.T) {
 	allowed := map[string]bool{
 		"len": true, "make": true, "append": true,
-		"listNonActiveTenants": true, "runLedgerStreamForTenant": true, "ReconcilePaymentStatementForTenant": true,
+		"listNonActiveTenants": true, "runLedgerStreamForTenant": true,
+		// A11: the payment_statement stream is reached through reconcilePaymentStreamsForTenant (per-provider
+		// source resolution); that helper is itself pinned read-only by
+		// TestR3_Static_PaymentStreamsHelperCallsOnlyTheStreamAndRecorders below.
+		"reconcilePaymentStreamsForTenant": true,
 	}
 	var fn *ast.FuncDecl
 	for _, f := range r3ProductionFiles(t) {
@@ -450,9 +454,57 @@ func TestR3_Static_ObservationEntryPointCallsOnlyThePaymentStatementStream(t *te
 		}
 		return true
 	})
-	for _, must := range []string{"listNonActiveTenants", "runLedgerStreamForTenant", "ReconcilePaymentStatementForTenant"} {
+	for _, must := range []string{"listNonActiveTenants", "runLedgerStreamForTenant", "reconcilePaymentStreamsForTenant"} {
 		if !calls[must] {
 			t.Errorf("observeNonActiveTenants no longer calls %s (the pin would be vacuous)", must)
+		}
+	}
+}
+
+// A11: reconcilePaymentStreamsForTenant is the one helper the active and the observation sweeps use to run the
+// payment_statement stream. It may call only the stream itself, the provider/source resolver, the
+// not-reconciled recorder and builtins - so the evidence-only guarantee of observeNonActiveTenants still holds
+// through it.
+func TestR3_Static_PaymentStreamsHelperCallsOnlyTheStreamAndRecorders(t *testing.T) {
+	allowed := map[string]bool{
+		"len": true, "make": true, "append": true, "string": true,
+		"ReconcilePaymentStatementForTenant": true, "resolvePaymentTargets": true, "reconcilePaymentNotReconciled": true,
+		"discPart": true, // pure charset sanitiser for the error text (SR11-3)
+	}
+	var fn *ast.FuncDecl
+	for _, f := range r3ProductionFiles(t) {
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "reconcilePaymentStreamsForTenant" {
+				fn = fd
+			}
+		}
+	}
+	if fn == nil {
+		t.Fatal("reconcilePaymentStreamsForTenant not found")
+	}
+	calls := map[string]bool{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ce, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := ce.Fun.(type) {
+		case *ast.Ident:
+			calls[fun.Name] = true
+			if !allowed[fun.Name] {
+				t.Errorf("reconcilePaymentStreamsForTenant calls %s: it may call only the payment_statement stream, the target resolver and the not-reconciled recorder", fun.Name)
+			}
+		case *ast.SelectorExpr:
+			if exprName(fun.X) == "fmt" && fun.Sel.Name == "Errorf" {
+				return true // building the not-reconciled cause; no I/O
+			}
+			t.Errorf("reconcilePaymentStreamsForTenant calls %s.%s: only package-local functions (and fmt.Errorf) are allowed", exprName(fun.X), fun.Sel.Name)
+		}
+		return true
+	})
+	for _, must := range []string{"ReconcilePaymentStatementForTenant", "resolvePaymentTargets", "reconcilePaymentNotReconciled"} {
+		if !calls[must] {
+			t.Errorf("reconcilePaymentStreamsForTenant no longer calls %s (the pin would be vacuous)", must)
 		}
 	}
 }

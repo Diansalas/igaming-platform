@@ -32,7 +32,7 @@ func TestEchoDeclaration_UnsetIsRefusedForEveryWithdrawalCapableAdapter(t *testi
 	}
 	// Non-Synthetic with an unset declaration (everything else satisfied): refused.
 	real := AdapterCapability{ProviderID: "real-psp-echo", SupportsWithdrawal: true,
-		Manifest: OperationManifest{CallbackEchoesMerchantReference: true}}
+		Manifest: OperationManifest{CallbackEchoesMerchantReference: true, StatusQuerySuccessCarriesAmountAndAsset: true}}
 	if err := validateManifest(nonSyntheticFakeProvider{capability: real}, real); !errors.Is(err, ErrManifestRegistrationRefused) {
 		t.Fatalf("non-synthetic + unset: got %v", err)
 	}
@@ -45,7 +45,7 @@ func TestEchoDeclaration_UnsetIsRefusedForEveryWithdrawalCapableAdapter(t *testi
 	}
 	// A deposit-only adapter makes no payout and needs no payout declaration.
 	dep := AdapterCapability{ProviderID: "real-psp-dep", SupportsDeposit: true,
-		Manifest: OperationManifest{SupportsDeposit: true, CallbackEchoesMerchantReference: true}}
+		Manifest: OperationManifest{SupportsDeposit: true, CallbackEchoesMerchantReference: true, StatusQuerySuccessCarriesAmountAndAsset: true}}
 	if err := validateManifest(nonSyntheticFakeProvider{capability: dep}, dep); err != nil {
 		t.Fatalf("deposit-only adapter: %v", err)
 	}

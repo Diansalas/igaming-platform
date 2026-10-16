@@ -168,8 +168,10 @@ func TestWiring_CoverageGate(t *testing.T) {
 
 // Static pin: in run(), ONE variable (paySources, assigned from
 // providers.paymentStatementSources()) is (1) passed to the coverage gate,
-// (2) registered, and (3) spread as the scheduler's trailing argument - and all
-// of it happens before db.ConnectWithRuntimeParams and before the HTTP server is built, and
+// (2) registered, and (3) turned into the scheduler's source registry
+// (newPaymentStatementRegistry(env, paySources), A11) whose SweepConfig is the
+// scheduler's trailing argument - and all of it happens before
+// db.ConnectWithRuntimeParams and before the HTTP server is built, and
 // Deps.StatementSources receives the registry that was filled.
 func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	fset := token.NewFileSet()
@@ -194,8 +196,11 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 		registerArgs       []string
 		registerPos        token.Pos
 		coveragePos        token.Pos
-		schedulerLast      string
-		schedulerEllipsis  bool
+		schedulerLastRecv  string
+		schedulerLastFn    string
+		legacySchedulerUse bool
+		registryArg        string
+		registryAssignedTo string
 		connectPos         token.Pos
 		newServerPos       token.Pos
 		depsStmtSourcesVal string
@@ -209,6 +214,15 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 			for _, lhs := range x.Lhs {
 				if paySourcesWrite(lhs) {
 					paySourcesWrites++
+				}
+			}
+			if len(x.Lhs) == 2 && len(x.Rhs) == 1 {
+				if call, ok := x.Rhs[0].(*ast.CallExpr); ok {
+					if f, ok := call.Fun.(*ast.Ident); ok && f.Name == "newPaymentStatementRegistry" {
+						if id, ok := x.Lhs[0].(*ast.Ident); ok {
+							registryAssignedTo = id.Name
+						}
+					}
 				}
 			}
 			if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
@@ -253,9 +267,19 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 					}
 				}
 			case "reconciliation.RunSchedulerLoop":
-				schedulerEllipsis = x.Ellipsis.IsValid()
+				legacySchedulerUse = true
+			case "newPaymentStatementRegistry":
 				if id, ok := x.Args[len(x.Args)-1].(*ast.Ident); ok {
-					schedulerLast = id.Name
+					registryArg = id.Name
+				}
+			case "reconciliation.RunSchedulerLoopScoped":
+				if call, ok := x.Args[len(x.Args)-1].(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+						schedulerLastFn = sel.Sel.Name
+						if id, ok := sel.X.(*ast.Ident); ok {
+							schedulerLastRecv = id.Name
+						}
+					}
 				}
 			case "db.ConnectWithRuntimeParams":
 				if connectPos == 0 {
@@ -279,8 +303,17 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	if len(registerArgs) != 2 || registerArgs[1] != "paySources" {
 		t.Fatalf("registerPaymentStatementSources must take (registry, paySources), got %v", registerArgs)
 	}
-	if schedulerLast != "paySources" || !schedulerEllipsis {
-		t.Fatalf("RunSchedulerLoop's trailing argument must be paySources..., got %q ellipsis=%v", schedulerLast, schedulerEllipsis)
+	// A11: the scheduler is the SCOPED loop, fed by the registry built from paySources and by nothing else; the
+	// legacy flat-list loop (every source for every tenant, silent about a provider with no source) is not used.
+	if legacySchedulerUse {
+		t.Fatal("run() must not use the legacy reconciliation.RunSchedulerLoop: it has no per-provider source resolution")
+	}
+	if registryArg != "paySources" {
+		t.Fatalf("newPaymentStatementRegistry must take paySources as its last argument, got %q", registryArg)
+	}
+	if registryAssignedTo == "" || schedulerLastRecv != registryAssignedTo || schedulerLastFn != "SweepConfig" {
+		t.Fatalf("RunSchedulerLoopScoped's trailing argument must be <registry>.SweepConfig(...) of the registry built from paySources, got %s.%s (registry var %q)",
+			schedulerLastRecv, schedulerLastFn, registryAssignedTo)
 	}
 	if depsStmtSourcesVal != registerArgs[0] {
 		t.Fatalf("Deps.StatementSources must receive the registry that was filled (%q), got %q", registerArgs[0], depsStmtSourcesVal)

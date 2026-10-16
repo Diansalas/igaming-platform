@@ -786,6 +786,7 @@ there is **no tenant label** and no free text.
 | `db_pool_acquire_wait_seconds_total`, `db_pool_empty_acquires_total` | time and count of callers that waited for a connection | `DbPoolAcquireWaiting` (rate >0.5 for 10 m, ticket) |
 | `reconciliation_last_success_unix_seconds{stream}` | OLDEST per-tenant last success of the stream; `0` = a tenant never succeeded in this process | `ReconciliationStale` (>2 h, page) |
 | `reconciliation_last_sweep_unix_seconds` | end of the last COMPLETE sweep (not advanced when tenant listing failed) | `ReconciliationSweepStalled` (>2 h, page) |
+| `reconciliation_payment_unreconciled{reason}` | (tenant, provider) payment_statement pairs whose latest outcome is NOT "reconciled up to now": `no_source` / `source_not_eligible` (a configured provider has no eligible statement source), `scope_unavailable` (the provider listing failed), `truncated` (the run stopped at the per-run bound), `run_failed` (fetch/ingest/match failed); no tenant label | `PaymentProviderNotReconciled` (page), `PaymentStatementBacklog` (ticket) |
 | `reconciliation_mismatches_open{stream}` | mismatches reported by each tenant's latest completed run, summed; a failed run does not clear it | `ReconciliationMismatchesOpen` (>0, page) |
 | `reconciliation_runs_total{stream,result}` | per-tenant stream runs: success, mismatch, failed, skipped (lock contention) | `ReconciliationRunFailures` (ticket) |
 | `reconciliation_sweeps_total{result}` | sweeps: ok or listing_failed | `ReconciliationListingFailed` (page) |
@@ -821,6 +822,40 @@ Already raised by the scheduler for every failed per-tenant stream run (RECON-RU
 re-verifies it: `scheduler.go` raises it from all five stream functions, detached, discriminator `stream:<stream>[:provider:<id>]`,
 no raise on graceful-shutdown cancellation). Attributes `stream`, `phase`, `sqlstate_class`. See `operational-runbooks.md` section 3
 (and the `ErrWithdrawalHoldCheckBlind` note) and the `reconciliation_runs_total{result="failed"}` series.
+
+#### `reconciliation.run_failed` phases raised by the payment_statement stream (A11)
+
+Discriminator `stream:payment_statement:provider:<id>:<phase>` (ONE open alert per tenant, provider and phase, occurrences grow):
+
+- `no_statement_source`: the tenant has the provider configured (a `provider_capabilities` row, or payment attempts naming it) and the
+  process registry has NO statement source for it. The provider is not reconciled: no run row is written (a run row would read as clean),
+  `reconciliation_payment_unreconciled{reason="no_source"}` shows it and `ReconciliationStale` stays at 0 for the stream. Register the
+  provider's statement source in `paymentStatementSources()` (cmd/platform-api) or remove the stale capability row; never silence the alert.
+- `source_not_eligible`: a source is registered but cannot vouch for this provider (it speaks for another provider id, or it is a MOCK source
+  where mock components are not allowed). It is never fetched.
+- `scope`: the tenant's provider listing failed (database).
+- `cursor_anomaly` (SR11-1): run rows exist for the pair above its backed cursor that no stored import backs. They are IGNORED by the cursor
+  read (the stream keeps fetching from the genuine cursor) but are a forgery/corruption indicator: treat as a security incident (who wrote
+  `reconciliation_runs`?), keep the rows as evidence, and do not resolve the alert until security has reviewed.
+- `truncated`: the run stopped at the per-run line bound (`RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`). The run matched only the window the
+  source vouched for (`window_truncated=true` in `reconciliation_runs` and the audit row) and the next run continues from the persisted
+  cursor (`reconciliation_runs.coverage_end` of the provider's last committed run). It is not a failure and not a clean claim; it clears
+  when a later run completes the window. A backlog that never drains means the bound is below the provider's volume.
+
+#### Runbook: payment_statement stuck cursor (A11)
+
+Symptom: `reconciliation.run_failed` (phase `fetch`, for one (tenant, provider)) on EVERY run, the audit row's `error` mentions
+`coverage is not contiguous with the continuation cursor` or `above the per-run bound` / `made no progress`, and
+`reconciliation_payment_unreconciled{reason="run_failed"}` stays at 1 for that pair.
+
+1. Read the pair's cursor: `SELECT max(coverage_end) FROM reconciliation_runs WHERE tenant_id=$1 AND stream='payment_statement' AND provider_id=$2`.
+2. Gap or overlap error: the source returned a statement that does not start exactly at the cursor, or contains a line dated before it (a
+   backdated / late-visible line, or a collect-then-page source). That is a SOURCE contract violation (`docs/plans/a11-payments-wiring-record.md`
+   section 3, items 6 to 8): fix or pause the source; do not edit `reconciliation_runs` (append-only).
+3. Bound error: the source returned more lines than `RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`, or an unsplittable group of lines shares one
+   microsecond (`ErrPaymentStatementUnpageable`): fix the source's paging or raise the bound (<= 1000000).
+4. There is no automatic skip-forward: moving a cursor past unmatched lines would be a silent false negative. A deliberate skip is a governed
+   decision (owner + ledger-finance) executed as a new, audited run row, not a SQL edit.
 
 ### Runbook: undelivered alerts (`AlertUndeliveredP1Old`, `alert_undelivered_*`)
 

@@ -94,6 +94,10 @@ var (
 	// same Person as the withdrawing player_account_id (bypass #2).
 	ErrSelfApproval = errors.New("withdrawal: an approver cannot approve their own withdrawal")
 
+	// ErrStaffIsBeneficiary (PAY-SEC-LAUNCH-1 / S-L1): the staff member submitting or resolving a payout resolves to
+	// the same Person as the withdrawing player. The httpserver maps it to 403 before anything is claimed or polled.
+	ErrStaffIsBeneficiary = errors.New("withdrawal: a staff member linked to the withdrawing player's own Person cannot submit or resolve it")
+
 	// ErrStepUpRequired is returned by Approve when the resolved
 	// ApprovalPolicy.RequireStepUp (policy.go) is true for a decision at
 	// or above threshold and the caller's step-up assertion is missing,
