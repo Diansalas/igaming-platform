@@ -207,8 +207,8 @@ bk_sweep_stale() {
 # are considered (never a symlink or anything else: SR12R-6); `.incomplete` holds "host:pid" and a run recorded by ANOTHER host is never touched
 # (liveness cannot be judged across hosts / shared storage).
 bk_sweep_runs() {
-  local out="$1" d rec host pid re='/[0-9]{8}T[0-9]{6}Z-[a-z][a-z0-9_]*(-[A-Za-z0-9_.-]+)?$'
-  for d in "${out}"/*; do
+  local outdir="$1" d rec host pid re='/[0-9]{8}T[0-9]{6}Z-[a-z][a-z0-9_]*(-[A-Za-z0-9_.-]+)?$'
+  for d in "${outdir}"/*; do
     [ -d "$d" ] && [ ! -L "$d" ] && [[ "$d" =~ $re ]] && [ -f "${d}/.incomplete" ] && [ ! -L "${d}/.incomplete" ] || continue
     rec="$(cat "${d}/.incomplete" 2>/dev/null || true)"
     host="${rec%%:*}"; pid="${rec#*:}"

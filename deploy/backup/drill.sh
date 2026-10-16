@@ -88,7 +88,7 @@ export RESTORE_EXPECT_SOURCE_ENVIRONMENT=development RESTORE_TARGET_ENVIRONMENT=
 rehash_manifest() { sed -i "s/\"plaintext_dump_sha256\": \"[0-9a-f]*\"/\"plaintext_dump_sha256\": \"$(sha256sum <"$1/db.dump" | cut -d' ' -f1)\"/" "$1/manifest.json"; }
 # build_trap_archive <outfile> <plpgsql statement> : a custom-format archive whose CHECK-constraint function runs <statement> while the rows are loaded by a restore
 build_trap_archive() {
-  local out="$1" body="$2"
+  local outfile="$1" body="$2"
   cl_super src "$SRC_PORT" -d postgres -c "CREATE DATABASE trapsrc OWNER igaming TEMPLATE template0" >/dev/null
   cl_super src "$SRC_PORT" -d trapsrc >/dev/null <<SQL
 SET ROLE igaming;
@@ -97,7 +97,7 @@ CREATE TABLE trap_t (a int CONSTRAINT trap_chk CHECK (evil(a) > 0));
 INSERT INTO trap_t VALUES (1);
 CREATE OR REPLACE FUNCTION evil(int) RETURNS int LANGUAGE plpgsql VOLATILE AS \$f\$ BEGIN ${body}; RETURN \$1; END \$f\$;
 SQL
-  pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fc -f "$out" trapsrc
+  pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fc -f "$outfile" trapsrc
   cl_super src "$SRC_PORT" -d postgres -c "DROP DATABASE trapsrc WITH (FORCE)" >/dev/null
 }
 # resign <dir> [key] : recompute SHA256SUMS over the artefacts and sign it (a legitimate re-seal: used to build tamper fixtures)
@@ -367,7 +367,7 @@ env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_ENCRYPT_AGE_RECIPIENT="$BADR" "${SCRIPT_D
 if [ -f "${DRILL_ROOT}/symtarget/keepme" ] && [ -d "${H1OUT}/20200101T000002Z-otherhost" ] && [ -L "${H1OUT}/20200101T000001Z-link" ]; then res backup_sweep_ignores_symlinks_and_other_hosts_runs PASS "a symlinked run name and a run recorded by another host were left untouched (only real same-host orphans are removed)"; else res backup_sweep_ignores_symlinks_and_other_hosts_runs FAIL "symlink target contents or foreign run were deleted"; fi
 rm -rf "${H1OUT}/20200101T000001Z-link" "${H1OUT}/20200101T000002Z-otherhost" "${DRILL_ROOT}/symtarget"
 if [ ! -e "${BACKUP_TMPDIR}/bk-run.STALE001" ] && [ ! -e "${H1OUT}/20200101T000000Z-orphan" ] && no_tmp_left; then res backup_startup_sweeps_stale_temp_and_orphan_runs PASS "a stale temp directory and an orphaned incomplete run directory of a dead pid were removed at the next start"; else res backup_startup_sweeps_stale_temp_and_orphan_runs FAIL "tmp=$(ls -A "$BACKUP_TMPDIR" | tr '\n' ' ') out=$(ls -A "$H1OUT" | tr '\n' ' ')"; fi
-rm -rf "$H1OUT"/* 2>/dev/null || true
+rm -rf "${H1OUT:?}"/* 2>/dev/null || true
 TMPMODE="$(stat -c %a "$BACKUP_TMPDIR")"
 if [ "$TMPMODE" = 700 ]; then res backup_temp_root_is_private PASS "controlled temp root mode ${TMPMODE}; per-run directories are mktemp -d (0700) with unpredictable names"; else res backup_temp_root_is_private FAIL "mode ${TMPMODE}"; fi
 
@@ -529,7 +529,8 @@ auth_count() { grep -c 'connection authorized: user=drill_restore' "${DRILL_ROOT
 h3_case() { # name dir regex [VAR=value | -VAR (unset)]...
   local name="$1" dir="$2" rx="$3" c0 c1 out rc kv; shift 3
   c0="$(auth_count)"
-  out="$( ( for kv in "$@"; do case "$kv" in -*) unset "${kv#-}" ;; *) export "$kv" ;; esac; done; restore_run "$dir" h3_db ) )" && rc=0 || rc=$?
+  # shellcheck disable=SC2163 # intentional: export the KEY=VALUE string held in kv (a -KEY argument is unset instead)
+  out="$( ( for kv in "$@"; do case "$kv" in -*) unset "${kv#-}" ;; *) export -- "$kv" ;; esac; done; restore_run "$dir" h3_db ) )" && rc=0 || rc=$?
   c1="$(auth_count)"
   if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qE "$rx" && [ "$(db_exists h3_db)" = 0 ] && [ "$c0" = "$c1" ]; then
     res "$name" PASS "refused (exit ${rc}): $(printf '%s' "$out" | head -1 | cut -c1-150); no database contact (0 new connections), nothing decrypted, nothing restored"

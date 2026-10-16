@@ -82,6 +82,11 @@ run "pitr_snapshot_and_audit_settings" {
   }
 
   assert {
+    condition     = output.backup_retention_period == 14 && output.deletion_protection == true
+    error_message = "The module must expose the recovery posture (retention, deletion protection) that the staging database_recovery output reads."
+  }
+
+  assert {
     condition     = aws_db_instance.this.copy_tags_to_snapshot == true && aws_db_instance.this.storage_encrypted == true
     error_message = "Snapshots must carry the tags and stay encrypted."
   }
