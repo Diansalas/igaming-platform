@@ -24,18 +24,17 @@ type actorSpec struct {
 func (s actorSpec) configured() bool { return s.Email != "" && s.PasswordFile != "" }
 
 type actor struct {
-	spec      actorSpec
-	w         *world
-	password  string
-	totp      *totpSecret
-	access    string
-	refresh   string
-	loginAt   time.Time
-	tokenAt   time.Time // when the current access token was issued (staff access tokens live 15 minutes)
-	stepUpAt  time.Time // when the last step-up (or login/enrolment) established a fresh second factor
-	enrolled  bool      // this run enrolled the factor
-	available bool
-	err       error // sticky failure of the sign-in (reported once by the check that tried)
+	spec     actorSpec
+	w        *world
+	password string
+	totp     *totpSecret
+	access   string
+	refresh  string
+	loginAt  time.Time
+	tokenAt  time.Time // when the current access token was issued (staff access tokens live 15 minutes)
+	stepUpAt time.Time // when the last step-up (or login/enrolment) established a fresh second factor
+	enrolled bool      // this run enrolled the factor
+	err      error     // sticky failure of the sign-in (reported once by the check that tried)
 }
 
 // readSecretFile reads a secret from a regular file that is not accessible to group/other. The content is returned

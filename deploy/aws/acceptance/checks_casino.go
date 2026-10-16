@@ -234,7 +234,7 @@ func (w *world) casinoChecks() {
 		if again == nil {
 			return
 		}
-		if again.Status != 409 && !(again.Status == 200 && pickStr(again.obj(), "outcome") != "succeeded") {
+		if again.Status != 409 && (again.Status != 200 || pickStr(again.obj(), "outcome") == "succeeded") {
 			t.fail("a second rollback of the same bet was not refused/idempotent: %s", again.brief())
 			return
 		}

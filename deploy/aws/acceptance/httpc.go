@@ -92,7 +92,6 @@ type client struct {
 	cur      atomic.Value // current check name (string)
 	debug    bool
 	debugOut io.Writer
-	insecure bool
 }
 
 func newClient(base string, rep *reporter, runID string, timeout time.Duration, debug bool, debugOut io.Writer) (*client, error) {
@@ -190,7 +189,7 @@ func (c *client) call(method, path, token string, body any, opts ...reqOpt) (*re
 		if len(b) > 240 {
 			b = b[:240] + "..."
 		}
-		fmt.Fprintf(c.debugOut, "DEBUG|%s|%s %s|%d|%s\n", check, method, pathOnly(path), out.Status, b)
+		_, _ = fmt.Fprintf(c.debugOut, "DEBUG|%s|%s %s|%d|%s\n", check, method, pathOnly(path), out.Status, b)
 	}
 	return out, nil
 }

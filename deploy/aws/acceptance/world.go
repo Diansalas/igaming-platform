@@ -59,7 +59,7 @@ func newWorld(cfg *config, rep *reporter, scrub *scrubber, c *client) *world {
 
 func (w *world) warnf(format string, a ...any) {
 	if w.warnTo != nil {
-		fmt.Fprintln(w.warnTo, "WARN: "+w.scrub.clean(fmt.Sprintf(format, a...)))
+		_, _ = fmt.Fprintln(w.warnTo, "WARN: "+w.scrub.clean(fmt.Sprintf(format, a...)))
 	}
 }
 

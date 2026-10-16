@@ -122,7 +122,7 @@ func parseConfig(args []string) (*config, error) {
 	fs.BoolVar(&c.ProveStaleStep, "prove-stale-stepup", envBool("PROVE_STALE_STEPUP", false), "wait past the critical step-up window and prove a stale second factor is refused (adds ~5.5 min)")
 	reconWait := fs.Duration("recon-wait", 0, "wait up to this long for the first reconciliation run (env RECON_WAIT_SECONDS also accepted)")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: staging-acceptance [flags]   (see deploy/aws/acceptance/README.md; secrets are FILE paths in the environment)")
+		_, _ = fmt.Fprintln(fs.Output(), "usage: staging-acceptance [flags]   (see deploy/aws/acceptance/README.md; secrets are FILE paths in the environment)")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

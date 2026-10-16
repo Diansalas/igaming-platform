@@ -26,14 +26,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		if err.Error() != "flag: help requested" {
-			fmt.Fprintln(stderr, "staging-acceptance:", err)
+			_, _ = fmt.Fprintln(stderr, "staging-acceptance:", err)
 		}
 		return 2
 	}
 	scrub := newScrubber()
 	out, err := openResultsFile(cfg.OutFile)
 	if err != nil {
-		fmt.Fprintln(stderr, "staging-acceptance: cannot create the results file:", pathErr(err))
+		_, _ = fmt.Fprintln(stderr, "staging-acceptance: cannot create the results file:", pathErr(err))
 		return 2
 	}
 	defer func() { _ = out.Close() }()
@@ -44,14 +44,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	c, err := newClient(cfg.BaseURL, rep, cfg.RunID, cfg.Timeout, cfg.Debug, dbg)
 	if err != nil {
-		fmt.Fprintln(stderr, "staging-acceptance:", err)
+		_, _ = fmt.Fprintln(stderr, "staging-acceptance:", err)
 		return 2
 	}
 	w := newWorld(cfg, rep, scrub, c)
 	w.warnTo = stderr
 	for _, a := range w.actors {
 		if err := a.load(); err != nil {
-			fmt.Fprintln(stderr, "staging-acceptance:", scrub.clean(err.Error()))
+			_, _ = fmt.Fprintln(stderr, "staging-acceptance:", scrub.clean(err.Error()))
 			return 2
 		}
 	}

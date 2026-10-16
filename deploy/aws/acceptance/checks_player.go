@@ -2,10 +2,7 @@
 
 package main
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // player is one synthetic B2C player created by this run.
 type player struct {
@@ -25,8 +22,6 @@ func (t *T) needMoney(names ...string) bool {
 	}
 	return t.need(names...)
 }
-
-func (p *player) authHeader() string { return p.access }
 
 func (w *world) newPlayer(tag string) *player {
 	p := &player{tag: tag, email: w.email(tag), password: "Pw-" + randHex(10)}
@@ -252,16 +247,6 @@ func (w *world) playerChecks() {
 		}
 		t.pass("declared residence %s read back", w.cfg.Residence)
 	})
-}
-
-func joinNonEmpty(parts ...string) string {
-	var out []string
-	for _, p := range parts {
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return strings.Join(out, " ")
 }
 
 var _ = fmt.Sprint
