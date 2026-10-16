@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useSyncExternalStore } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { login as apiLogin, logout as apiLogout, register as apiRegister, type TokenPairResponse } from '../api/auth'
 import { refreshSessionOnce } from '../api/client'
 import { ApiError } from '../api/types'
@@ -26,6 +27,7 @@ function applyTokens(pair: TokenPairResponse): void {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const snapshot = useSyncExternalStore(subscribeSession, getSessionSnapshot, getSessionSnapshot)
   const [isBootstrapping, setIsBootstrapping] = useState(true)
+  const queryClient = useQueryClient()
 
   useEffect(() => {
     let cancelled = false
@@ -78,7 +80,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
     }
     clearSession()
-  }, [])
+    // SR6-5: player data (RG restrictions, limits, balances, ...) must not survive into the next sign-in in this tab.
+    queryClient.clear()
+  }, [queryClient])
 
   const value = useMemo<AuthContextValue>(
     () => ({

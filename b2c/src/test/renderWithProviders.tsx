@@ -9,7 +9,7 @@ export function renderWithProviders(ui: ReactElement, { route = '/' }: { route?:
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <BetSlipProvider>
@@ -18,4 +18,5 @@ export function renderWithProviders(ui: ReactElement, { route = '/' }: { route?:
       </AuthProvider>
     </QueryClientProvider>,
   )
+  return { ...result, queryClient }
 }

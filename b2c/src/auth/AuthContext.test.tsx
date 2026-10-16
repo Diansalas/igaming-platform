@@ -74,6 +74,19 @@ describe('session expiry mid-session', () => {
 })
 
 describe('logout', () => {
+  it('clears the react-query cache so player data (e.g. RG restrictions) does not leak into the next sign-in (SR6-5)', async () => {
+    setSession(makeTestJwt(), 'refresh-token-for-cache')
+    const { queryClient } = renderAccount()
+    const user = userEvent.setup()
+    await screen.findByText('My account')
+    queryClient.setQueryData(['rg', 'status'], { self_excluded: true })
+    expect(queryClient.getQueryData(['rg', 'status'])).toBeDefined()
+    await user.click(screen.getByRole('button', { name: 'Log out' }))
+    expect(await screen.findByText('Login page')).toBeInTheDocument()
+    expect(queryClient.getQueryData(['rg', 'status'])).toBeUndefined()
+  })
+
+
   it('clears all local session state and calls the backend revocation endpoint (not just a client-side navigation)', async () => {
     setSession(makeTestJwt(), 'refresh-token-to-revoke')
 
