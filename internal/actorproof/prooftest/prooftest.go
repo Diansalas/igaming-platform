@@ -4,7 +4,9 @@
 // tag so no production binary can contain it) provisions a per-process, randomly generated actor-proof
 // signing key for integration tests (SIGNED-ACTOR-PROOF, ADR 0110). It connects
 // as the OWNER/migration role (TEST_DATABASE_URL) - the only role that may write
-// the owner-only actor_proof_keys table - inserts the key, and installs the
+// the owner-only key table (actorproof_private.actor_proof_keys since migration
+// 0166; public.actor_proof_keys on a scratch database migrated below it) -
+// inserts the key, and installs the
 // matching issuer as the process default. Production code never imports this
 // package; no key is ever committed.
 package prooftest
@@ -38,6 +40,25 @@ var (
 	loaded = map[string]bool{}
 )
 
+// Key table locations (F1, migration 0166): the key table lives in the owner-only schema actorproof_private; a scratch
+// database migrated below 0166 still has it in public.
+const (
+	keyTable       = "actorproof_private.actor_proof_keys"
+	legacyKeyTable = "public.actor_proof_keys"
+)
+
+// execKeyTable runs stmt (a format string with ONE %s for the key table) against the 0166 location and, only when that
+// relation does not exist (42P01: a database below 0166), against the legacy public location. Any other error (e.g. a
+// permission error: the caller is not the owner) is returned as is. ex must not be inside a caller transaction.
+func execKeyTable(ctx context.Context, ex Execer, stmt string, args ...any) error {
+	_, err := ex.Exec(ctx, fmt.Sprintf(stmt, keyTable), args...)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+		_, err = ex.Exec(ctx, fmt.Sprintf(stmt, legacyKeyTable), args...)
+	}
+	return err
+}
+
 // NewKey returns 32 random bytes.
 func NewKey(t testing.TB) []byte {
 	t.Helper()
@@ -58,7 +79,7 @@ func Provision(t testing.TB, ownerURL, kid string, key []byte) {
 		t.Fatalf("prooftest: connect owner: %v", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	if _, err := conn.Exec(ctx, `INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, $2)`, kid, key); err != nil {
+	if err := execKeyTable(ctx, conn, `INSERT INTO %s (kid, secret) VALUES ($1, $2)`, kid, key); err != nil {
 		t.Fatalf("prooftest: provision key %q: %v", kid, err)
 	}
 }
@@ -73,7 +94,7 @@ func Retire(t testing.TB, ownerURL, kid string) {
 		t.Fatalf("prooftest: connect owner: %v", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	if _, err := conn.Exec(ctx, `UPDATE actor_proof_keys SET status = 'retired', retired_at = now() WHERE kid = $1`, kid); err != nil {
+	if err := execKeyTable(ctx, conn, `UPDATE %s SET status = 'retired', retired_at = now() WHERE kid = $1`, kid); err != nil {
 		t.Fatalf("prooftest: retire key %q: %v", kid, err)
 	}
 }
@@ -113,7 +134,7 @@ func Install(t testing.TB, ownerURL string) *actorproof.Issuer {
 			t.Fatalf("prooftest: connect owner: %v", err)
 		}
 		defer func() { _ = conn.Close(ctx) }()
-		if _, err := conn.Exec(ctx, `INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
+		if err := execKeyTable(ctx, conn, `INSERT INTO %s (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
 			t.Fatalf("prooftest: provision process key: %v", err)
 		}
 		loaded[ownerURL] = true
@@ -165,7 +186,7 @@ func EnsureKey(ctx context.Context, ex Execer) (*actorproof.Issuer, error) {
 	if err := ensureProcessErrLocked(); err != nil {
 		return nil, err
 	}
-	if _, err := ex.Exec(ctx, `INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
+	if err := execKeyTable(ctx, ex, `INSERT INTO %s (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
 		return nil, fmt.Errorf("provision process key: %w", err)
 	}
 	actorproof.SetDefault(process)
@@ -200,7 +221,7 @@ func InstallVia(t testing.TB, ex Execer, cacheKey string) *actorproof.Issuer {
 	if !loaded[cacheKey] {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if _, err := ex.Exec(ctx, `INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
+		if err := execKeyTable(ctx, ex, `INSERT INTO %s (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
 			t.Fatalf("prooftest: provision process key: %v", err)
 		}
 		loaded[cacheKey] = true
