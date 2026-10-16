@@ -3000,3 +3000,7 @@ governed rows are readable only in an acting session (ADR 0114 12.4). A replay a
 `{"status":"already_applied"}` and `Idempotent-Replayed: true`; clients re-read through the governed read routes. (4) A guard trigger permits only the
 one-shot `in_progress -> completed` update and deletes of `in_progress` rows or completed rows older than 24 h; the wrapper sweeps expired rows of the
 tenant (completed > 24 h, in_progress > 15 min) before reserving, so an orphaned key is reclaimable after 15 minutes. (5) Accepted limitation (SR10C-3):
+a replay does not re-run in-handler authority (capability grant G-P2, acting session, Person checks); within 24 h a staff member whose grant was
+revoked after the original request still receives "already applied" for that key, with no data and no effect. (6) The header remains optional;
+without it the routes are idempotent by state as before. The key confers no authority: every four-eyes rule, proof and count is still decided by the
+flows' own database guards.
