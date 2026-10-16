@@ -70,6 +70,29 @@ describe('parked payments queue (S3)', () => {
     await waitFor(() => expect(seen[seen.length - 1]?.searchParams.get('withdrawal_request_id')).toBe(WD1))
   })
 
+  it('A10c: the provider and age filters are sent to the server, and a malformed provider id is refused locally', async () => {
+    signInAs(FI)
+    const seen = page()
+    renderWithProviders(<AppRoutes />, { route: '/parked-payments' })
+    await inTable('Payout destination differs from the bound instrument')
+    expect(seen[0].searchParams.has('provider_id')).toBe(false)
+    expect(seen[0].searchParams.has('min_age_seconds')).toBe(false)
+    expect(screen.queryByText(/no provider or age filter/)).toBeNull()
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Older than'), '86400')
+    await waitFor(() => expect(seen[seen.length - 1]?.searchParams.get('min_age_seconds')).toBe('86400'))
+    await user.click(screen.getByLabelText('Provider'))
+    await user.paste('mock-payments')
+    await waitFor(() => expect(seen[seen.length - 1]?.searchParams.get('provider_id')).toBe('mock-payments'))
+    const before = seen.length
+    await user.clear(screen.getByLabelText('Provider'))
+    await user.click(screen.getByLabelText('Provider'))
+    await user.paste('Bad_Provider')
+    expect(screen.getByText(/Not a valid provider id/)).toBeInTheDocument()
+    expect(seen.length).toBe(before + 1) // only the clear (provider removed) re-queried; the invalid id sent nothing
+    expect(seen[seen.length - 1]?.searchParams.has('provider_id')).toBe(false)
+  })
+
   it('walks the opaque keyset cursor forward and back', async () => {
     signInAs(FI)
     const cursors: Array<string | null> = []
@@ -154,27 +177,45 @@ describe('parked payments queue (S3)', () => {
 })
 
 describe('attempt detail (S3)', () => {
-  function detail(a = attempt(), resolutions = [resolution()]) {
+  const event = (over = {}) => ({
+    id: 'e1000000-0000-4000-8000-000000000001',
+    event_type: 'payout',
+    outcome: 'pending',
+    disposition_at_receipt: 'applied',
+    resolution: null,
+    decline_stage: null,
+    amount_minor_units: null,
+    asset_code: null,
+    received_at: '2026-10-10T10:30:00Z',
+    resolved_at: null,
+    ...over,
+  })
+
+  function detail(a = attempt(), resolutions = [resolution()], events: unknown[] = []) {
     server.use(
+      http.get(`${BASE}/payment-attempts/${a.id}/events`, () => HttpResponse.json({ items: events, limit: 200, offset: 0, total: events.length })),
       http.get(`${BASE}/payment-attempts/${a.id}`, () => HttpResponse.json(a)),
       http.get(`${BASE}/payment-force-resolutions`, () => HttpResponse.json({ items: resolutions })),
     )
   }
 
-  it('shows the fields and a timeline built only from returned timestamps and the attempt\'s force-resolutions', async () => {
+  it('shows the fields and a timeline built from returned timestamps, the provider events and the attempt\'s force-resolutions', async () => {
     signInAs(FI)
     page()
-    detail()
+    detail(attempt(), [resolution()], [event(), event({ id: 'e2000000-0000-4000-8000-000000000002', outcome: 'ambiguous', received_at: '2026-10-10T10:45:00Z' })])
     renderWithProviders(<AppRoutes />, { route: `/parked-payments?attempt=${ATT1}` })
     const d = await screen.findByRole('region', { name: 'Attempt detail' })
     await within(d).findByText('Timeline')
     const tl = await within(d).findByRole('list', { name: 'Timeline' })
-    await waitFor(() => expect(within(tl).getAllByRole('listitem').length).toBe(4))
+    await waitFor(() => expect(within(tl).getAllByRole('listitem').length).toBe(6))
     const items = within(tl).getAllByRole('listitem').map((li) => li.textContent)
     expect(items[0]).toContain('Attempt 1 created')
     expect(items.some((t) => t?.includes('Force-resolution filed'))).toBe(true)
+    expect(items.filter((t) => t?.includes('Provider event: payout')).length).toBe(2)
+    expect(items.some((t) => t?.includes('Provider event: payout ambiguous, applied'))).toBe(true)
     expect(within(d).getByText(/Yes \(the reference text is never shown here\)/)).toBeInTheDocument()
-    expect(within(d).getByText(/no event history/)).toBeInTheDocument()
+    expect(within(d).getByText(/verified provider events linked to this attempt/)).toBeInTheDocument()
+    expect(within(d).queryByText(/no event history/)).toBeNull()
     expect(within(d).getByRole('link', { name: WD1 })).toHaveAttribute('href', `/withdrawals/${WD1}`)
   })
 
@@ -196,6 +237,18 @@ describe('attempt detail (S3)', () => {
     await within(d2).findByText(/read only for force-resolutions/)
     expect(within(d2).queryByRole('link', { name: /Propose a force-resolution/ })).toBeNull()
     expect(within(d2).getByText(/Pending/)).toBeInTheDocument()
+  })
+
+  it('a refused event history degrades to the closed message and the rest of the detail still renders', async () => {
+    signInAs(FI)
+    page()
+    detail()
+    server.use(http.get(`${BASE}/payment-attempts/${ATT1}/events`, () => refusal(403, 'forbidden')))
+    renderWithProviders(<AppRoutes />, { route: `/parked-payments?attempt=${ATT1}` })
+    const d = await screen.findByRole('region', { name: 'Attempt detail' })
+    expect(await within(d).findByRole('alert')).toBeInTheDocument()
+    expect(within(d).getByRole('list', { name: 'Timeline' })).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent('do-not-render')
   })
 
   it('a refused or unknown attempt degrades to the closed message', async () => {

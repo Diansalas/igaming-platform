@@ -47,17 +47,17 @@ func registerWithdrawalHoldResolutionRoutes(mux *http.ServeMux, deps Deps) {
 	// Literal patterns only: the webhook route guard (security C3/L8) fails closed on
 	// any non-literal Handle pattern.
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions",
-		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(newRequestHoldResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(staffIdempotent(deps, newRequestHoldResolutionHandler(deps, svc)))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRead)(newListHoldResolutionsHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRead)(newGetHoldResolutionHandler(deps, svc))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/approve",
-		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(newDecideHoldResolutionHandler(deps, svc, payments.ResolutionApprove))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(staffIdempotent(deps, newDecideHoldResolutionHandler(deps, svc, payments.ResolutionApprove)))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/reject",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(newDecideHoldResolutionHandler(deps, svc, payments.ResolutionReject))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionApprove)(staffIdempotent(deps, newDecideHoldResolutionHandler(deps, svc, payments.ResolutionReject)))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/cancel",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(newCancelHoldResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermWithdrawalHoldResolutionRequest)(staffIdempotent(deps, newCancelHoldResolutionHandler(deps, svc)))))
 }
 
 // holdCall is the per-request context, mirroring resolutionCall.

@@ -6,6 +6,7 @@ import {
   HOLD_REASON_RE,
   approveHoldResolution,
   cancelHoldResolution,
+  listHoldCandidates,
   listHoldResolutions,
   rejectHoldResolution,
   requestHoldResolution,
@@ -19,7 +20,7 @@ import { Checkbox, TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Modal } from '../../components/Modal'
 import { PageHeader } from '../../components/PageHeader'
-import { formatAmountBoth } from '../../lib/minorUnits'
+import { formatAge, formatAmountBoth, formatMinorUnits } from '../../lib/minorUnits'
 import { ActingOn, ConsoleErrorAlert, Hint, MockPaymentsBanner, Notice, PII_WARNING, actorText, isUuid, shortId, useConsoleTenant } from '../consoles/ConsoleBits'
 import { describeRefusalCode, refusalIsStale } from '../consoles/errors'
 import { EnumText } from '../killswitch/KillSwitchBits'
@@ -50,15 +51,17 @@ export function validateHoldRequest(f: HoldForm): string[] {
   return p
 }
 
-type Dialog = { op: 'request' } | { op: 'approve' | 'reject' | 'cancel'; snap: WithdrawalHoldResolution }
+type Dialog = { op: 'request'; withdrawalId?: string } | { op: 'approve' | 'reject' | 'cancel'; snap: WithdrawalHoldResolution }
 
 const CONSEQUENCE =
   'Releasing the hold moves one APPROVED withdrawal of a tenant or brand that is not active to rejected and returns the held amount to the player\'s own cash wallet. It dispatches nothing to a provider.'
 
 /**
  * Withdrawal hold-resolution console (ADR 0111 6.3 / ADR 0113 / ADR 0114 S8). platform_admin only; every other
- * role is refused by the route. There is no candidate list route (ADR 0114 R3), so the withdrawal to release is
- * identified by an id the operator types; this screen cannot look a withdrawal up.
+ * role is refused by the route. A10c (ADR 0114 R3): the candidate list names the approved withdrawals of the tenant
+ * whose tenant or brand is not active, so the operator can pick one; the id can still be typed. Picking pre-fills the
+ * id only: the last-6 confirmation is never pre-filled, and listing authorises nothing (the four-eyes flow and its
+ * database guards decide).
  */
 export function HoldResolutionsPage() {
   const { claims, platform, tenantId, tenantLabel, picker, searchParams, setSearchParams } = useConsoleTenant()
@@ -68,6 +71,7 @@ export function HoldResolutionsPage() {
   const [notice, setNotice] = useState('')
   const selectedId = searchParams.get('resolution') ?? ''
   const list = useQuery({ queryKey: ['hold', 'list', tenantId], queryFn: () => listHoldResolutions(tenantId), enabled: tenantId !== '', retry: false })
+  const cands = useQuery({ queryKey: ['hold', 'candidates', tenantId], queryFn: () => listHoldCandidates(tenantId, { limit: 50 }), enabled: tenantId !== '', retry: false })
   const rows = list.data?.items ?? []
   const selected = rows.find((r) => r.id === selectedId) ?? null
   const refresh = () => void qc.invalidateQueries({ queryKey: ['hold'] })
@@ -92,8 +96,40 @@ export function HoldResolutionsPage() {
             {perms.withdrawalHoldResolutionAct && <Button onClick={() => { setNotice(''); setDialog({ op: 'request' }) }}>Request a hold release</Button>}
             <Button variant="secondary" onClick={refresh} isLoading={list.isFetching}>Refresh</Button>
           </div>
-          <p className="text-xs text-slate-500">The server refuses a request while no enabled policy exists for the tenant. This screen does not show candidate withdrawals: the API has no list for them.</p>
+          <p className="text-xs text-slate-500">The server refuses a request while no enabled policy exists for the tenant.</p>
           {notice && <Notice>{notice}</Notice>}
+          <h2 className="text-sm font-semibold text-slate-900">Candidate withdrawals</h2>
+          {cands.isLoading && <LoadingSpinner label="Loading candidates..." />}
+          {cands.error && <ConsoleErrorAlert error={cands.error} family="hsec" op="list" />}
+          {cands.data && cands.data.items.length === 0 && <p className="text-sm text-slate-600">No approved withdrawal of this tenant is held by a tenant or brand that is not active.</p>}
+          {cands.data && cands.data.items.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
+              <table className="w-full text-left text-sm">
+                <caption className="sr-only">Candidate withdrawals</caption>
+                <thead className="bg-surface-alt text-xs uppercase tracking-wide text-slate-500">
+                  <tr>{['Withdrawal', 'Amount', 'Tenant status', 'Brand status', 'Held for', ''].map((h) => <th key={h || 'actions'} scope="col" className="px-3 py-2 font-medium">{h}</th>)}</tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {cands.data.items.map((c) => (
+                    <tr key={c.withdrawal_request_id}>
+                      <td className="px-3 py-2 font-mono text-xs">{shortId(c.withdrawal_request_id)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{formatMinorUnits(c.amount_minor_units, c.exponent, c.asset_code)}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{safeCode(c.tenant_status)}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{safeCode(c.brand_status)}</td>
+                      <td className="px-3 py-2">{formatAge(c.state_changed_at)}</td>
+                      <td className="px-3 py-2">
+                        {perms.withdrawalHoldResolutionAct && (
+                          <Button variant="secondary" onClick={() => { setNotice(''); setDialog({ op: 'request', withdrawalId: c.withdrawal_request_id }) }} aria-label={`Request release for withdrawal ${shortId(c.withdrawal_request_id)}`}>Request release</Button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {cands.data.total > cands.data.items.length && <p className="px-3 py-2 text-xs text-slate-500">Showing the first {cands.data.items.length} of {cands.data.total}. A candidate that already has an open request is not marked here; check the requests below.</p>}
+            </div>
+          )}
+          <h2 className="text-sm font-semibold text-slate-900">Hold-release requests</h2>
           {list.isLoading && <LoadingSpinner label="Loading hold-resolutions..." />}
           {list.error && <ConsoleErrorAlert error={list.error} family="hsec" op="list" />}
           {list.data && rows.length === 0 && <p className="text-sm text-slate-600">No hold-resolutions for this tenant.</p>}
@@ -161,7 +197,7 @@ export function HoldResolutionsPage() {
         </>
       )}
       {dialog?.op === 'request' && (
-        <HoldRequestDialog tenantId={tenantId} tenantLabel={tenantLabel} onClose={() => setDialog(null)} onRefresh={refresh} onDone={(r) => { setDialog(null); setNotice('Hold release requested. Nothing was released; a different platform administrator must approve.'); select(r.id) }} />
+        <HoldRequestDialog tenantId={tenantId} tenantLabel={tenantLabel} initialWithdrawalId={dialog.withdrawalId} onClose={() => setDialog(null)} onRefresh={refresh} onDone={(r) => { setDialog(null); setNotice('Hold release requested. Nothing was released; a different platform administrator must approve.'); select(r.id) }} />
       )}
       {(dialog?.op === 'approve' || dialog?.op === 'reject') && (
         <DecisionDialog
@@ -207,8 +243,8 @@ export function HoldResolutionsPage() {
   )
 }
 
-function HoldRequestDialog({ tenantId, tenantLabel, onClose, onDone, onRefresh }: { tenantId: string; tenantLabel: string | undefined; onClose: () => void; onDone: (r: WithdrawalHoldResolution) => void; onRefresh: () => void }) {
-  const [f, setF] = useState<HoldForm>({ withdrawalId: '', reason: '', evidenceHash: '', note: '' })
+function HoldRequestDialog({ tenantId, tenantLabel, initialWithdrawalId, onClose, onDone, onRefresh }: { tenantId: string; tenantLabel: string | undefined; initialWithdrawalId?: string; onClose: () => void; onDone: (r: WithdrawalHoldResolution) => void; onRefresh: () => void }) {
+  const [f, setF] = useState<HoldForm>({ withdrawalId: initialWithdrawalId ?? '', reason: '', evidenceHash: '', note: '' })
   const [ack, setAck] = useState(false)
   const [typed, setTyped] = useState('')
   const [key] = useState(newIdempotencyKey)
@@ -251,7 +287,7 @@ function HoldRequestDialog({ tenantId, tenantLabel, onClose, onDone, onRefresh }
         <p className="text-sm font-bold text-red-800">MOCK stack - software capability only, not a regulatory approval.</p>
         <ActingOn tenantId={tenantId} label={tenantLabel} />
         <p className="text-sm text-slate-700">{CONSEQUENCE} This only files a request; nothing is released until the required approvals are recorded.</p>
-        <TextInput label="Withdrawal id" value={f.withdrawalId} onChange={(e) => set('withdrawalId', e.target.value.trim())} autoComplete="off" spellCheck={false} aria-invalid={f.withdrawalId !== '' && !isUuid(f.withdrawalId)} help="The API has no candidate list; enter the id of the approved withdrawal." />
+        <TextInput label="Withdrawal id" value={f.withdrawalId} onChange={(e) => set('withdrawalId', e.target.value.trim())} autoComplete="off" spellCheck={false} aria-invalid={f.withdrawalId !== '' && !isUuid(f.withdrawalId)} help="Pick a candidate above or enter the id of the approved withdrawal." />
         <TextInput label="Reason code (required)" value={f.reason} onChange={(e) => set('reason', e.target.value)} autoComplete="off" help="Lowercase token, for example tenant_closed." />
         <TextInput label="Evidence reference hash" value={f.evidenceHash} onChange={(e) => set('evidenceHash', e.target.value.trim())} autoComplete="off" spellCheck={false} help="64 lowercase hex characters: the SHA-256 of your external evidence reference, computed outside this console. Never type the reference itself or personal data." />
         <label className="flex flex-col gap-1 text-sm">

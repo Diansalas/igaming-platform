@@ -2410,11 +2410,32 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   # --- Casino round history / mock-provider play simulation (Stage 7) ---
-  # NOTE: only the Stage 7 endpoints below, plus A8's launch route, are documented here. The
-  # pre-existing Stage 4A casino endpoints (GET /v1/me/casino/games, the admin catalogue/
-  # capability/availability routes, and the provider webhook) predate
+  # NOTE: the Stage 7 endpoints below, A8's launch route and (A10c) the player game list are documented here. The
+  # pre-existing Stage 4A admin catalogue/capability/availability routes and the provider webhook predate
   # this OpenAPI file's casino coverage and are tracked as separate,
   # pre-existing documentation debt - not introduced by Stage 7.
+  /v1/me/casino/games:
+    get:
+      summary: List the games available to the caller (the tenant catalogue joined to the brand's opt-in layer)
+      description: >
+        A10c. Player-authenticated. A bare JSON array (no envelope). The tenant and brand are resolved server-side from the caller's
+        player account; nothing about the tenant is taken from the request. 503 when casino is not enabled on this deployment.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The available games
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/CasinoGame" } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Casino is not enabled on this deployment
   /v1/me/casino/games/{gameID}/launch:
     post:
       summary: Launch a casino game (mints a single-use launch session and token)
@@ -2533,7 +2554,8 @@ paths:
               type: object
               properties:
                 stake_amount: { type: integer, format: int64, description: "Minor units, must be positive" }
-              required: [stake_amount]
+                idempotency_key: { type: string, minLength: 1, description: "Required. One key per attempt, reused on a retry; it keys the provider transaction id, so the same key with a different amount is refused." }
+              required: [stake_amount, idempotency_key]
       responses:
         "200":
           description: The simulated bet's outcome
@@ -2571,7 +2593,8 @@ paths:
               type: object
               properties:
                 win_amount: { type: integer, format: int64, description: "Minor units, must be positive" }
-              required: [win_amount]
+                idempotency_key: { type: string, minLength: 1, description: "Required. One key per attempt, reused on a retry; it keys the provider transaction id." }
+              required: [win_amount, idempotency_key]
       responses:
         "200":
           description: The simulated win's outcome
@@ -2629,6 +2652,23 @@ paths:
         "503":
           description: Casino is not enabled on this deployment, or the session's provider is not the mock adapter
   /v1/me/deposits:
+    get:
+      summary: List the caller's own deposit intents
+      description: >
+        A10c. Player-authenticated, read under the player's own row-level-security scope. A bare JSON array (no envelope) of the caller's
+        own intents; another player's intent is never returned.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's deposit intents
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/DepositIntent" } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       summary: Initiate a deposit for the caller's own wallet
       description: >
@@ -2690,6 +2730,78 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           description: Deposits are not enabled on this deployment, or no operating-market gate is configured (fail closed)
+  /v1/me/deposits/{id}:
+    get:
+      summary: Get one of the caller's own deposit intents
+      description: >
+        A10c. Player-authenticated. A deposit that does not exist, or belongs to another player, is the same 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The deposit intent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositIntent" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/wallets:
+    get:
+      summary: List the caller's wallets with their balance summary
+      description: >
+        A10c. Player-authenticated, read under the player's own row-level-security scope. A bare JSON array, one entry per asset the player
+        holds a wallet for. Amounts are integer minor units rendered as JSON numbers. The summary is a projection of ledger entries, shown
+        as the server computed it; no client ever derives a balance.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's wallets
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/WalletSummary" } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/wallets/{assetCode}:
+    get:
+      summary: Get the caller's wallet for one asset (created on first access)
+      description: >
+        A10c. Player-authenticated. The wallet is the caller's own for the named asset; the first read of an asset the player has never held
+        creates the (empty) wallet. An asset code that is not in the asset registry is 400.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: assetCode
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: The wallet summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WalletSummary" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/me/deposits/{id}/simulate-callback:
     post:
       summary: >-
@@ -7219,6 +7331,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7312,6 +7425,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7352,6 +7466,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7391,6 +7506,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7435,6 +7551,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7528,6 +7645,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7568,6 +7686,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7607,6 +7726,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - name: tenantID
           in: path
           required: true
@@ -7631,6 +7751,54 @@ paths:
           $ref: "#/components/responses/HoldResolutionNotFound"
         "409":
           $ref: "#/components/responses/HoldResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/tenants/{tenantID}/withdrawal-hold-candidates:
+    get:
+      summary: Approved withdrawals the hold-release flow could act on (ADR 0114 R3, read-only)
+      description: >
+        A10c. withdrawal_hold_resolution:read (platform_admin only) AND a platform token (a tenant-scoped token is 403). The approved withdrawals of the
+        path tenant whose tenant or brand is not active, oldest change first, paginated (limit 1..200 default 50, offset >= 0). Read in the path
+        tenant's own RLS scope (no new policy, no cross-tenant read); the read is first recorded as a tenant-visible platform-action audit row
+        (`withdrawal_hold_candidates.platform_read`) and nothing is returned if that cannot be written. Never returned: a player, wallet or
+        destination identifier, a provider reference or an idempotency key. Listing here authorises nothing: a release still needs the four-eyes
+        hold resolution and its database guards.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Paginated hold candidates
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/WithdrawalHoldCandidate" }
+                    required: [items]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -7670,6 +7838,14 @@ paths:
         - name: withdrawal_request_id
           in: query
           schema: { type: string, format: uuid }
+        - name: provider_id
+          in: query
+          description: A10c. Exact match on the attempt's provider id (the closed provider-id charset; no pattern or wildcard).
+          schema: { type: string, minLength: 1, maxLength: 63, pattern: "^[a-z0-9][a-z0-9-]{0,62}$" }
+        - name: min_age_seconds
+          in: query
+          description: A10c. Only attempts created at least this many seconds ago (created_at <= now() - N s). 0..31536000.
+          schema: { type: integer, minimum: 0, maximum: 31536000 }
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
@@ -7716,6 +7892,55 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PaymentAttempt" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}/events:
+    get:
+      summary: Provider event history of one payment attempt (ADR 0114 G2, read-only)
+      description: >
+        A10c. Same gate (payment_force_resolve:read ALONE), tenant rule and platform-action audit as the attempt routes. The verified provider
+        callback receipts linked to the attempt, oldest first, paginated (limit 1..200 default 50, offset >= 0). Closed vocabularies only: never the
+        provider, original, merchant or settlement reference, the provider's decline text, or the event fingerprint. Receipts not yet linked to an
+        attempt are not listed. An attempt that does not exist in the target tenant is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: attemptID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Paginated provider events, oldest first
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/PaymentAttemptEvent" }
+                    required: [items]
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
@@ -7777,6 +8002,43 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/reconciliation/runs/{runID}:
+    get:
+      summary: One reconciliation run of one stream (ADR 0114 R2, read-only)
+      description: >
+        A10c. `stream` is required and is also the permission selector (same per-stream permissions, tenant rule and platform-action audit as the
+        runs list). A run of another stream, of another tenant or an unknown id is 404. No other query parameter is accepted.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: runID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: stream
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/StaffReconciliationStream" }
+      responses:
+        "200":
+          description: The run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffReconciliationRun" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/reconciliation/mismatches:
     get:
       summary: Reconciliation mismatches of one stream (ADR 0114 R2, read-only)
@@ -7807,6 +8069,10 @@ paths:
         - name: subject_id
           in: query
           schema: { type: string, format: uuid }
+        - name: run_id
+          in: query
+          description: A10c. Only the mismatches recorded by this run (a canonical UUID; any other input is 400).
+          schema: { type: string, format: uuid }
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
@@ -7827,6 +8093,44 @@ paths:
                         type: array
                         items: { $ref: "#/components/schemas/StaffReconciliationMismatch" }
                     required: [items]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/tenants/{tenantID}/reconciliation/mismatches/{mismatchID}:
+    get:
+      summary: One reconciliation mismatch of one stream (ADR 0114 R2, read-only)
+      description: >
+        A10c. Same stream selector, permissions, tenant rule, audit and redaction (StaffReconciliationMismatch) as the mismatches list. A mismatch
+        of another stream, of another tenant or an unknown id is 404. No other query parameter is accepted.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: mismatchID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: stream
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/StaffReconciliationStream" }
+      responses:
+        "200":
+          description: The mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StaffReconciliationMismatch" }
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
@@ -8844,6 +9148,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
         required: true
@@ -8864,15 +9169,27 @@ paths:
     get:
       summary: List the tenant's capability grant requests (K1)
       description: >
-        capability_grant:read (tenant_admin, compliance, platform_admin), staff principals only. A bare JSON array (no envelope, no pagination) of the target tenant's requests.
+        capability_grant:read (tenant_admin, compliance, platform_admin), staff principals only. A bare JSON array (no envelope) of the target tenant's requests. A10c: optional ?limit / ?offset window (newest first, stable order); the response header X-Total-Count carries the size of the whole list. Without them the whole list is returned, as before. Unknown query parameters are 400.
         ADR 0114 S0: requested_by and grantee_staff_id are null for a tenant-scoped caller when the actor's scope is not tenant; the scope fields say which scope acted.
       security:
         - bearerAuth: []
       parameters:
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - name: limit
+          in: query
+          description: "A10c. OPTIONAL page size (1..200). Neither limit nor offset gives the whole list, as before; an offset without a limit takes the default page size of 50."
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          description: A10c. OPTIONAL rows to skip (0..1000000).
+          schema: { type: integer, minimum: 0, maximum: 1000000 }
       responses:
         "200":
           description: The requests
+          headers:
+            X-Total-Count:
+              description: A10c. The number of rows of the whole list (before limit / offset).
+              schema: { type: integer }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/CapabilityGrantRequest" } }
@@ -8888,6 +9205,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
@@ -8906,6 +9224,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -8932,6 +9251,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -8951,15 +9271,27 @@ paths:
     get:
       summary: List the tenant's capability grants (K1)
       description: >
-        capability_grant:read (tenant_admin, compliance, platform_admin), staff principals only. A bare JSON array (no envelope, no pagination).
+        capability_grant:read (tenant_admin, compliance, platform_admin), staff principals only. A bare JSON array (no envelope). A10c: optional ?limit / ?offset window (newest first, stable order); the response header X-Total-Count carries the size of the whole list. Without them the whole list is returned, as before. Unknown query parameters are 400.
         ADR 0114 S0: grantee_staff_id is null for a tenant-scoped caller when grantee_scope is not tenant.
       security:
         - bearerAuth: []
       parameters:
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - name: limit
+          in: query
+          description: "A10c. OPTIONAL page size (1..200). Neither limit nor offset gives the whole list, as before; an offset without a limit takes the default page size of 50."
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          description: A10c. OPTIONAL rows to skip (0..1000000).
+          schema: { type: integer, minimum: 0, maximum: 1000000 }
       responses:
         "200":
           description: The grants
+          headers:
+            X-Total-Count:
+              description: A10c. The number of rows of the whole list (before limit / offset).
+              schema: { type: integer }
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/CapabilityGrant" } }
@@ -8975,6 +9307,7 @@ paths:
       security:
         - bearerAuth: []
       parameters:
+        - $ref: "#/components/parameters/StaffIdempotencyKey"
         - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: grantID, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -10355,6 +10688,24 @@ paths:
 
 components:
   parameters:
+    StaffIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        A10c (ADR 0114 G10). OPTIONAL on the K1 / K3 / HSEC staff mutating routes. 1-120 printable ASCII characters, chosen by the client
+        (otherwise 400). Scoped to (path tenant, acting staff, key). The same key with the same request (method, path, query and raw body)
+        is answered with the stored 2xx STATUS and a fixed body `{"status":"already_applied"}` (no body for 204) plus
+        `Idempotent-Replayed: true`, without acting again; the response body of the first call is NOT stored (it may carry acting-session-only
+        governed data), so the client re-reads the resource through the governed read routes. The same key with a different request is
+        409 IDEMPOTENCY_MISMATCH; the same key while the first request is still running is 409 IDEMPOTENCY_IN_PROGRESS. A non-2xx outcome
+        stores nothing, so the client may retry with the same key. A stored key is kept for 24 hours; an unfinished one (a crash) is
+        reclaimable after 15 minutes. The key grants no authority: step-up, session liveness, permissions and the flow's own database guards
+        still decide first. A replay does NOT re-run the handler's in-handler authority (capability grant, acting session, Person checks): a
+        staff member whose grant was revoked after the original request still receives the "already applied" status for that key within
+        the 24 hour window; nothing is acted on and no data is returned. Without the header the route behaves as before (idempotent by
+        state: a replayed governed write is a 409).
+      schema: { type: string, minLength: 1, maxLength: 120, pattern: "^[\\x20-\\x7e]{1,120}$" }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -11707,6 +12058,85 @@ components:
           items: { $ref: "#/components/schemas/PaymentAttempt" }
         next_cursor: { type: string, nullable: true, description: Null on the last page. }
       required: [items, next_cursor]
+    CasinoGame:
+      type: object
+      description: A10c. One game of the caller's resolved catalogue (casino_handlers.go casinoGameResponse).
+      properties:
+        id: { type: string, format: uuid }
+        provider_id: { type: string }
+        name: { type: string }
+        game_type: { type: string }
+        rtp_variant: { type: string, description: Omitted when empty. }
+        volatility: { type: string, description: Omitted when empty. }
+        feature_flags: { type: array, items: { type: string } }
+        supported_assets: { type: array, items: { type: string } }
+        mobile_supported: { type: boolean }
+        demo_supported: { type: boolean }
+      required: [id, provider_id, name, game_type, feature_flags, supported_assets, mobile_supported, demo_supported]
+    DepositIntent:
+      type: object
+      description: A10c. A player's deposit intent (deposit_handlers.go depositIntentResponse); optional fields are omitted when empty.
+      properties:
+        id: { type: string, format: uuid }
+        asset_code: { type: string }
+        amount: { type: integer, format: int64, description: Minor units }
+        payment_method: { type: string }
+        status: { type: string }
+        provider_id: { type: string }
+        redirect_url: { type: string }
+        hosted_field_token: { type: string }
+        ledger_transaction_id: { type: string, format: uuid }
+      required: [id, asset_code, amount, payment_method, status]
+    WalletSummary:
+      type: object
+      description: >
+        A10c. The player-facing balance view (wallet_handlers.go walletSummaryResponse). Integer minor units as JSON numbers; a projection of
+        ledger entries, never authoritative client-side.
+      properties:
+        wallet_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        status: { type: string }
+        cash_balance: { type: integer, format: int64 }
+        available_balance: { type: integer, format: int64 }
+        held_for_withdrawal: { type: integer, format: int64 }
+        locked_balance: { type: integer, format: int64 }
+        bonus_balance: { type: integer, format: int64 }
+      required: [wallet_id, asset_code, status, cash_balance, available_balance, held_for_withdrawal, locked_balance, bonus_balance]
+    PaymentAttemptEvent:
+      type: object
+      description: >
+        A10c. One verified provider callback receipt linked to a payment attempt. Closed vocabularies (the table's CHECK constraints). No reference
+        text, no provider decline text, no fingerprint.
+      properties:
+        id: { type: string, format: uuid }
+        event_type: { type: string, enum: [deposit, deposit_reversal, payout, payout_returned] }
+        outcome: { type: string, enum: [pending, succeeded, declined, ambiguous] }
+        disposition_at_receipt: { type: string, enum: [applied, duplicate_effect, deferred_unresolved, anomaly, unsupported_event] }
+        resolution:
+          type: string
+          nullable: true
+          enum: [applied, anomaly_cross_provider, anomaly_reference_conflict, anomaly_predates_submission, anomaly_other, null]
+        decline_stage: { type: string, nullable: true, enum: [at_submission, after_acceptance, null] }
+        amount_minor_units: { type: string, nullable: true }
+        asset_code: { type: string, nullable: true }
+        received_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+      required: [id, event_type, outcome, disposition_at_receipt, resolution, decline_stage, amount_minor_units, asset_code, received_at, resolved_at]
+    WithdrawalHoldCandidate:
+      type: object
+      description: >
+        A10c (ADR 0114 R3). An approved withdrawal of the path tenant whose tenant or brand is not active. Amounts are decimal strings of minor units;
+        `exponent` is the asset registry's. No player, wallet or destination identifier.
+      properties:
+        withdrawal_request_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid }
+        amount_minor_units: { type: string }
+        asset_code: { type: string }
+        exponent: { type: integer }
+        state_changed_at: { type: string, format: date-time }
+        tenant_status: { type: string }
+        brand_status: { type: string }
+      required: [withdrawal_request_id, brand_id, amount_minor_units, asset_code, exponent, state_changed_at, tenant_status, brand_status]
     StaffReconciliationStream:
       type: string
       enum: [payment_statement, ledger_vs_projection, sportsbook_settlement]
@@ -13255,6 +13685,8 @@ components:
             - RG_CONFIG_MISSING
             - RG_PENDING_CAP
             - RG_IDEMPOTENCY_MISMATCH
+            - IDEMPOTENCY_MISMATCH
+            - IDEMPOTENCY_IN_PROGRESS
             - RG_OPERATOR_LOOSENS
             - RG_NO_FLOOR_IN_FORCE
             - RG_SELF_APPROVAL

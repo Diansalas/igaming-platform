@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -178,6 +179,8 @@ type StaffMismatchFilter struct {
 	// it matches a mismatch whose reconciliation_key names that id as the whole key or as one of
 	// the subject tokens (attempt=, deposit_intent=, receipt=, bet=, wallet=, ledger_transaction=).
 	SubjectID string
+	// RunID, when not uuid.Nil, restricts the page to the mismatches recorded by that run (A10c).
+	RunID uuid.UUID
 }
 
 // ErrBadSubjectID is a StaffMismatchFilter.SubjectID that is not a canonical lower-case UUID.
@@ -205,19 +208,24 @@ func ListMismatchesForStream(ctx context.Context, tx pgx.Tx, f StaffMismatchFilt
 		           SELECT 1
 		             FROM (SELECT regexp_replace(m.expected_value, '` + FreeTextTokenSQL + `', '') AS p) x
 		            WHERE x.p ~ ('(^| )attempt=' || $4 || '( |$)')
-		              AND (SELECT count(*) FROM regexp_matches(x.p, '(^| )attempt=', 'g')) = 1)))`
+		              AND (SELECT count(*) FROM regexp_matches(x.p, '(^| )attempt=', 'g')) = 1)))
+		  AND ($5::uuid IS NULL OR m.reconciliation_run_id = $5::uuid)`
 	if f.SubjectID != "" && !IsCanonicalUUID(f.SubjectID) {
 		return nil, 0, ErrBadSubjectID
 	}
+	var runID *uuid.UUID
+	if f.RunID != uuid.Nil {
+		runID = &f.RunID
+	}
 	var total int
-	if err := tx.QueryRow(ctx, `SELECT count(*)`+where, string(f.Stream), string(f.Kind), f.Status, f.SubjectID).Scan(&total); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*)`+where, string(f.Stream), string(f.Kind), f.Status, f.SubjectID, runID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("reconciliation: count staff-view mismatches: %w", err)
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT m.id, m.tenant_id, m.reconciliation_run_id, m.reconciliation_key, m.expected_value, m.actual_value,
 		       m.mismatch_kind, m.investigation_status, m.created_at, m.resolved_at`+where+`
 		 ORDER BY m.created_at DESC, m.id
-		 LIMIT $5 OFFSET $6`, string(f.Stream), string(f.Kind), f.Status, f.SubjectID, limit, offset)
+		 LIMIT $6 OFFSET $7`, string(f.Stream), string(f.Kind), f.Status, f.SubjectID, runID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reconciliation: list staff-view mismatches: %w", err)
 	}
@@ -234,4 +242,45 @@ func ListMismatchesForStream(ctx context.Context, tx pgx.Tx, f StaffMismatchFilt
 		out = append(out, m)
 	}
 	return out, total, rows.Err()
+}
+
+// GetRunForStream reads ONE run of the given stream under the caller's tenant-scoped transaction
+// (A10c). found is false when no such run exists for the tenant and stream (a run of another stream
+// is not found either).
+func GetRunForStream(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stream Stream, id uuid.UUID) (run Run, found bool, err error) {
+	var s, st string
+	err = tx.QueryRow(ctx, `
+		SELECT id, tenant_id, stream, period_start, period_end, run_at, status
+		  FROM reconciliation_runs WHERE id = $1 AND stream = $2 AND tenant_id = $3`, id, string(stream), tenantID).
+		Scan(&run.ID, &run.TenantID, &s, &run.PeriodStart, &run.PeriodEnd, &run.RunAt, &st)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, fmt.Errorf("reconciliation: get run: %w", err)
+	}
+	run.Stream, run.Status = Stream(s), Status(st)
+	return run, true, nil
+}
+
+// GetMismatchForStream reads ONE mismatch whose owning run belongs to the given stream (A10c), under
+// the caller's tenant-scoped transaction. found is false for an unknown id or another stream's mismatch.
+func GetMismatchForStream(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stream Stream, id uuid.UUID) (m StoredMismatch, found bool, err error) {
+	var kind string
+	err = tx.QueryRow(ctx, `
+		SELECT m.id, m.tenant_id, m.reconciliation_run_id, m.reconciliation_key, m.expected_value, m.actual_value,
+		       m.mismatch_kind, m.investigation_status, m.created_at, m.resolved_at
+		  FROM reconciliation_mismatches m
+		  JOIN reconciliation_runs r ON r.id = m.reconciliation_run_id AND r.tenant_id = m.tenant_id
+		 WHERE m.id = $1 AND r.stream = $2 AND m.tenant_id = $3`, id, string(stream), tenantID).
+		Scan(&m.ID, &m.TenantID, &m.RunID, &m.ReconciliationKey, &m.ExpectedValue, &m.ActualValue,
+			&kind, &m.InvestigationStatus, &m.CreatedAt, &m.ResolvedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return StoredMismatch{}, false, nil
+	}
+	if err != nil {
+		return StoredMismatch{}, false, fmt.Errorf("reconciliation: get mismatch: %w", err)
+	}
+	m.MismatchKind = MismatchKind(kind)
+	return m, true, nil
 }

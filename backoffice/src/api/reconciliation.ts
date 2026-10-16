@@ -5,8 +5,9 @@
 //  - the existing casino routes (`/v1/admin/casino/reconciliation/{runs,mismatches}`): tenant-scoped (no tenant in
 //    the path; a platform token gets no data) and they DO return reconciliation_key / expected_value /
 //    actual_value free text, which the screen renders as plain text only.
-// There is no single-run route, no single-mismatch route, no run_id filter on mismatches, no severity field on the
-// R2 shapes and no mutation route: nothing here resolves or compensates a finding.
+// A10c: the R2 family also has a single-run and a single-mismatch read (stream is required on both, it selects the
+// permission) and a run_id filter on mismatches. There is no severity field on the R2 shapes and no mutation route:
+// nothing here resolves or compensates a finding.
 import { apiFetch, buildQuery } from './client'
 import type { PagedResponse } from './types'
 
@@ -101,10 +102,20 @@ export interface StaffMismatchParams extends PageParams {
   status?: string
   kind?: string
   subject_id?: string
+  /** Only the findings recorded by this run (a canonical UUID). */
+  run_id?: string
 }
 
 export function listStaffReconMismatches(tenantId: string, params: StaffMismatchParams): Promise<PagedResponse<StaffReconMismatch>> {
   return apiFetch(`${base(tenantId)}/mismatches${buildQuery(params)}`)
+}
+
+export function getStaffReconRun(tenantId: string, runId: string, stream: StaffStream): Promise<StaffReconRun> {
+  return apiFetch(`${base(tenantId)}/runs/${encodeURIComponent(runId)}${buildQuery({ stream })}`)
+}
+
+export function getStaffReconMismatch(tenantId: string, mismatchId: string, stream: StaffStream): Promise<StaffReconMismatch> {
+  return apiFetch(`${base(tenantId)}/mismatches/${encodeURIComponent(mismatchId)}${buildQuery({ stream })}`)
 }
 
 export function listCasinoReconRuns(params: { stream?: CasinoStream } & PageParams = {}): Promise<PagedResponse<CasinoReconRun>> {

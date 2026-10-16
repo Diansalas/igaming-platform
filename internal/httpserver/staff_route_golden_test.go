@@ -162,6 +162,7 @@ var staffRouteGolden = map[string]string{
 	"POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/reject":                     "none",
 	"GET /v1/admin/tenants/{tenantID}/payment-attempts":                                           "none",
 	"GET /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}":                               "none",
+	"GET /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}/events":                        "none",
 	"GET /v1/admin/tenants/{tenantID}/payment-force-resolutions":                                  "none",
 	"POST /v1/admin/tenants/{tenantID}/payment-force-resolutions":                                 "financial",
 	"GET /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}":                   "none",
@@ -183,7 +184,9 @@ var staffRouteGolden = map[string]string{
 	"GET /v1/admin/tenants/{tenantID}/provider-credentials":                                       "none",
 	"POST /v1/admin/tenants/{tenantID}/provider-credentials/{handleID}/transitions":               "critical",
 	"GET /v1/admin/tenants/{tenantID}/reconciliation/mismatches":                                  "none",
+	"GET /v1/admin/tenants/{tenantID}/reconciliation/mismatches/{mismatchID}":                     "none",
 	"GET /v1/admin/tenants/{tenantID}/reconciliation/runs":                                        "none",
+	"GET /v1/admin/tenants/{tenantID}/reconciliation/runs/{runID}":                                "none",
 	// ADR 0119 S5 + S6 (section 14.2): the staff lifecycle routes. Lifecycle mutations are critical (8.2 "Staff");
 	// four-eyes reject / cancel are protective (none); reads none. The legacy admin-chosen-password
 	// POST /v1/admin/tenants/{tenantID}/staff was removed (S6).
@@ -216,6 +219,7 @@ var staffRouteGolden = map[string]string{
 	"POST /v1/admin/tenants/{tenantID}/suspend":                                            "none",
 	"GET /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions":                         "none",
 	"POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions":                        "financial",
+	"GET /v1/admin/tenants/{tenantID}/withdrawal-hold-candidates":                          "none",
 	"GET /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}":          "none",
 	"POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/approve": "financial",
 	"POST /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/cancel":  "none",

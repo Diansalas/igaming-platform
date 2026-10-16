@@ -4,6 +4,8 @@ import { Link } from 'react-router-dom'
 import {
   KINDS_BY_STREAM,
   RECON_STATUSES,
+  getStaffReconMismatch,
+  getStaffReconRun,
   listCasinoReconMismatches,
   listCasinoReconRuns,
   listStaffReconMismatches,
@@ -69,9 +71,10 @@ const when = (iso: string) => (Number.isNaN(Date.parse(iso)) ? 'Unknown time' : 
 /**
  * Reconciliation views (ADR 0114 S5): runs and mismatches per stream, READ ONLY. Detection only: nothing here
  * resolves or compensates a finding (corrections are K2/K3 flows, ADR 0114 section 2.3), so there is no mutation
- * button. Facts of the API the screen is honest about: no single-run or single-mismatch route (detail comes from
- * the list row), no run filter on mismatches, no severity on the staff streams, and no withdrawal-hold check D
- * vocabulary (its findings, if any, can only surface as `other`).
+ * button. Staff streams (A10c): run and finding detail come from the single-item routes and the findings table can
+ * be narrowed to one run with the server-side run_id filter. Facts the screen is honest about: the casino streams
+ * keep the older list-only routes (detail comes from the list row, the "In selected run" column only marks loaded
+ * rows) and the staff streams carry no severity.
  */
 export function ReconciliationPage() {
   const { claims, platform, tenantId, picker } = useConsoleTenant()
@@ -86,6 +89,8 @@ export function ReconciliationPage() {
   const [subject, setSubject] = useState('')
   const [runSel, setRunSel] = useState<string | null>(null)
   const [mmSel, setMmSel] = useState<string | null>(null)
+  // Staff streams: the run whose findings the table is narrowed to (server-side run_id filter).
+  const [runFilter, setRunFilter] = useState<string | null>(null)
 
   const casino = stream ? isCasino(stream) : false
   const needsTenant = !casino
@@ -100,17 +105,25 @@ export function ReconciliationPage() {
     retry: false,
   })
   const mms = useQuery<PagedResponse<StaffReconMismatch | CasinoReconMismatch>>({
-    queryKey: ['recon', 'mismatches', stream, tenantId, mmOffset, status, kind, subjectValid ? subject : ''],
+    queryKey: ['recon', 'mismatches', stream, tenantId, mmOffset, status, kind, subjectValid ? subject : '', runFilter ?? ''],
     queryFn: () =>
       casino
         ? listCasinoReconMismatches({ stream: stream as CasinoStream, status: status || undefined, limit: PAGE, offset: mmOffset })
-        : listStaffReconMismatches(tenantId, { stream: stream as StaffStream, status: status || undefined, kind: kind || undefined, subject_id: subject && subjectValid ? subject : undefined, limit: PAGE, offset: mmOffset }),
+        : listStaffReconMismatches(tenantId, { stream: stream as StaffStream, status: status || undefined, kind: kind || undefined, subject_id: subject && subjectValid ? subject : undefined, run_id: runFilter ?? undefined, limit: PAGE, offset: mmOffset }),
     enabled: ready && subjectValid,
+    retry: false,
+  })
+
+  const runOne = useQuery({
+    queryKey: ['recon', 'run', stream, tenantId, runSel ?? ''],
+    queryFn: () => getStaffReconRun(tenantId, runSel as string, stream as StaffStream),
+    enabled: ready && !casino && runSel !== null && isUuid(runSel),
     retry: false,
   })
 
   function changeStream(s: ReconciliationStreamId) {
     setStreamPick(s)
+    setRunFilter(null)
     setRunOffset(0)
     setMmOffset(0)
     setKind('')
@@ -131,7 +144,8 @@ export function ReconciliationPage() {
 
   const runRows = (runs.data?.items ?? []) as Array<StaffReconRun | CasinoReconRun>
   const mmRows = (mms.data?.items ?? []) as Array<StaffReconMismatch | CasinoReconMismatch>
-  const selectedRun = runRows.find((r) => r.id === runSel) ?? null
+  // Casino: the list row. Staff: the single-run read (the list row only while that read is in flight or has failed).
+  const selectedRun = (casino ? null : runOne.data) ?? runRows.find((r) => r.id === runSel) ?? null
   const selectedMm = mmRows.find((m) => m.id === mmSel) ?? null
 
   const runColumns: Column<StaffReconRun | CasinoReconRun>[] = [
@@ -145,7 +159,7 @@ export function ReconciliationPage() {
     { key: 'kind', header: 'Kind', render: (m) => describeKindLabel('kind' in m ? m.kind : m.mismatch_kind) },
     { key: 'status', header: 'Status', render: (m) => <Badge tone={statusTone('status' in m ? m.status : m.investigation_status)}>{statusText('status' in m ? m.status : m.investigation_status)}</Badge> },
     { key: 'severity', header: 'Severity', render: () => (casino ? 'P1' : 'Not provided') },
-    { key: 'in_run', header: 'In selected run', render: (m) => (runSel ? (m.run_id === runSel ? 'Yes' : 'No') : '-') },
+    ...(casino ? [{ key: 'in_run', header: 'In selected run', render: (m: StaffReconMismatch | CasinoReconMismatch) => (runSel ? (m.run_id === runSel ? 'Yes' : 'No') : '-') }] : []),
     { key: 'open', header: '', render: (m) => <Button variant="secondary" onClick={() => setMmSel(m.id)} aria-label={`Open mismatch ${shortId(m.id)}`}>Details</Button> },
   ]
 
@@ -177,11 +191,24 @@ export function ReconciliationPage() {
                 <dt className="text-slate-500">Run at</dt><dd>{when(selectedRun.run_at)} ({formatAge(selectedRun.run_at)} ago)</dd>
                 <dt className="text-slate-500">Period</dt><dd>{when(selectedRun.period_start)} to {when(selectedRun.period_end)}</dd>
               </dl>
-              <p className="mt-2 text-xs text-slate-500">The API cannot filter findings by run, so the findings table marks, for the rows loaded, which ones belong to this run.</p>
+              {casino ? (
+                <p className="mt-2 text-xs text-slate-500">The casino route cannot filter findings by run, so the findings table marks, for the rows loaded, which ones belong to this run.</p>
+              ) : (
+                <div className="mt-2 flex items-center gap-2">
+                  {runOne.error && <ConsoleErrorAlert error={runOne.error} family="recon" op="get" />}
+                  <Button variant="secondary" onClick={() => { setRunFilter(selectedRun.id); setMmOffset(0) }} disabled={runFilter === selectedRun.id}>Show only this run&apos;s findings</Button>
+                </div>
+              )}
             </section>
           )}
 
           <h2 className="text-sm font-semibold text-slate-900">Findings</h2>
+          {runFilter && (
+            <p className="flex items-center gap-2 text-sm text-slate-700" role="status">
+              Showing only the findings of run <span className="font-mono text-xs">{shortId(runFilter)}</span>.
+              <Button variant="secondary" onClick={() => { setRunFilter(null); setMmOffset(0) }}>Show all runs</Button>
+            </p>
+          )}
           <div className="flex flex-wrap items-end gap-2" role="search" aria-label="Finding filters">
             <label className="flex flex-col gap-1 text-sm"><span className="font-medium text-slate-700">Status</span>
               <Select aria-label="Status" placeholder="Any status" value={status} onChange={(e) => { setStatus(e.target.value); setMmOffset(0) }} options={RECON_STATUSES.map((s) => ({ value: s, label: statusText(s) }))} />
@@ -197,18 +224,27 @@ export function ReconciliationPage() {
           </div>
           {mms.error && <ConsoleErrorAlert error={mms.error} family="recon" op="list" />}
           <Table columns={mmColumns} rows={mmRows} getRowKey={(m) => m.id} isLoading={mms.isLoading} emptyMessage="No findings match." pagination={mms.data ? { limit: mms.data.limit, offset: mms.data.offset, total: mms.data.total, onPageChange: setMmOffset } : undefined} />
-          {selectedMm && <MismatchDetail m={selectedMm} casino={casino} tenantId={tenantId} canOpenAttempt={perms.paymentForceResolutions} onClose={() => setMmSel(null)} />}
+          {selectedMm && <MismatchDetail m={selectedMm} casino={casino} tenantId={tenantId} stream={stream as ReconciliationStreamId} canOpenAttempt={perms.paymentForceResolutions} onClose={() => setMmSel(null)} />}
         </>
       )}
     </div>
   )
 }
 
-function MismatchDetail({ m, casino, tenantId, canOpenAttempt, onClose }: { m: StaffReconMismatch | CasinoReconMismatch; casino: boolean; tenantId: string; canOpenAttempt: boolean; onClose: () => void }) {
+function MismatchDetail({ m, casino, tenantId, stream, canOpenAttempt, onClose }: { m: StaffReconMismatch | CasinoReconMismatch; casino: boolean; tenantId: string; stream: ReconciliationStreamId; canOpenAttempt: boolean; onClose: () => void }) {
+  // Staff streams: the single-mismatch read is the source of truth; the list row shows while it loads or if it fails.
+  const one = useQuery({
+    queryKey: ['recon', 'mismatch', stream, tenantId, m.id],
+    queryFn: () => getStaffReconMismatch(tenantId, m.id, stream as StaffStream),
+    enabled: !casino,
+    retry: false,
+  })
+  const shown = !casino && one.data ? one.data : m
   return (
     <section aria-label="Finding detail" className="rounded-lg border border-border bg-surface p-4 shadow-sm">
       <div className="flex items-start justify-between"><h3 className="text-sm font-semibold">Finding detail</h3><button type="button" className="text-xs text-slate-500 hover:underline" onClick={onClose}>Close detail</button></div>
-      {'kind' in m ? <StaffBody m={m} tenantId={tenantId} canOpenAttempt={canOpenAttempt} /> : <CasinoBody m={m} />}
+      {one.error && <ConsoleErrorAlert error={one.error} family="recon" op="get" />}
+      {'kind' in shown ? <StaffBody m={shown} tenantId={tenantId} canOpenAttempt={canOpenAttempt} /> : <CasinoBody m={shown} />}
       {!casino && <p className="mt-3 text-xs text-slate-500">Corrections to the ledger go through a governed adjustment (K2) or a force-resolution (K3); this screen only shows the finding.</p>}
     </section>
   )

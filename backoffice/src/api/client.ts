@@ -166,6 +166,11 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   }
 
   if (res.status === 204) return undefined as T
+  // A10c: a replayed Idempotency-Key is answered with the stored status and a fixed body, never the resource, so a caller that
+  // expects the resource must not treat it as one. It is surfaced as the closed client-side outcome `already_applied`.
+  if (res.headers.get('Idempotent-Replayed') === 'true') {
+    throw new ApiError('already_applied', 'already_applied', res.status)
+  }
   const text = await res.text()
   return (text ? JSON.parse(text) : undefined) as T
 }

@@ -97,6 +97,8 @@ export function describeConsoleError(err: unknown, family: ConsoleFamily, op: Co
 function describeConsoleErrorBase(err: unknown, family: ConsoleFamily, op: ConsoleOp): ConsoleErrorView {
   if (!(err instanceof ApiError)) return { message: 'Something went wrong. Nothing was confirmed. Please try again.', stale: false }
   const base = { requestId: err.requestId, status: err.status, code: SAFE_CODE.test(err.code) ? err.code : undefined, stale: false }
+  if (err.code === 'already_applied')
+    return { ...base, stale: true, message: 'This action was already applied by an earlier send of this dialog, so nothing more was done. The list is being refreshed; check it for the result.' }
   if (err.code === 'network_error') return { ...base, message: 'Could not reach the server. Nothing was confirmed. Check your connection and try again.' }
   const su = stepUp(err)
   if (su) return { ...base, message: su }

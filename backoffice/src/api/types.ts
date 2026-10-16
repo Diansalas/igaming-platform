@@ -75,6 +75,8 @@ export type ApiErrorCode =
   | 'step_up_required'
   | 'step_up_cancelled'
   | 'step_up_failed'
+  // A10c: a keyed K1/K3/HSEC mutation answered by the server as a replay (Idempotent-Replayed, fixed body): the action was already applied.
+  | 'already_applied'
   // ADR 0119 S5/S6 staff-lifecycle codes (docs/plans/adr0119-s5s6-api-contract.md section 1).
   | 'self_target_forbidden'
   | 'role_not_grantable'

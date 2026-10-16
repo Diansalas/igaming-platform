@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
-import { ATTEMPT_OPERATIONS, ATTEMPT_STATES, TERMINAL_REASONS, listPaymentAttempts, type AttemptOperation, type AttemptState, type PaymentAttempt } from '../../api/paymentAttempts'
+import { ATTEMPT_OPERATIONS, ATTEMPT_STATES, PROVIDER_ID_RE, TERMINAL_REASONS, listPaymentAttempts, type AttemptOperation, type AttemptState, type PaymentAttempt } from '../../api/paymentAttempts'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { TextInput } from '../../components/FormField'
@@ -19,34 +19,48 @@ const PAGE_SIZE = 50
 /**
  * Parked payments queue (ADR 0114 S3, R1). Read-only. The queue is the attempts list filtered to a state (default
  * `disputed`, the parked state). Pagination is the API's opaque keyset cursor: Next uses the page's `next_cursor`,
- * Previous pops a stack of cursors this screen already used. Filters the ADR names that the API does NOT have
- * (provider, age) are not offered: a client-side filter over one page would silently hide rows. Age is shown per
- * row instead. Route gating by permissions is a convenience; the server decides and every refusal is rendered.
+ * Previous pops a stack of cursors this screen already used. A10c: the provider (exact id) and age ("at least this
+ * old") filters are server-side, so they never hide rows of a page. Route gating by permissions is a convenience;
+ * the server decides and every refusal is rendered.
  */
+
+/** Age thresholds offered by the "Older than" filter (seconds sent as min_age_seconds). */
+const AGE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '3600', label: '1 hour' },
+  { value: '21600', label: '6 hours' },
+  { value: '86400', label: '1 day' },
+  { value: '259200', label: '3 days' },
+  { value: '604800', label: '7 days' },
+]
 export function ParkedPaymentsPage() {
   const { platform, tenantId, picker, searchParams, setSearchParams } = useConsoleTenant()
   const [state, setState] = useState<AttemptState | ''>('disputed')
   const [operation, setOperation] = useState<AttemptOperation | ''>('')
   const [reason, setReason] = useState('')
   const [withdrawalId, setWithdrawalId] = useState('')
+  const [provider, setProvider] = useState('')
+  const [minAge, setMinAge] = useState('')
   // cursors[i] is the cursor that produced page i; page 0 has none.
   const [cursors, setCursors] = useState<string[]>([])
   const cursor = cursors.length > 0 ? cursors[cursors.length - 1] : undefined
   const withdrawalValid = withdrawalId === '' || isUuid(withdrawalId)
+  const providerValid = provider === '' || PROVIDER_ID_RE.test(provider)
   const selectedId = searchParams.get('attempt') ?? ''
 
   const list = useQuery({
-    queryKey: ['parked', 'list', tenantId, state, operation, reason, withdrawalValid ? withdrawalId : '', cursor ?? ''],
+    queryKey: ['parked', 'list', tenantId, state, operation, reason, withdrawalValid ? withdrawalId : '', providerValid ? provider : '', minAge, cursor ?? ''],
     queryFn: () =>
       listPaymentAttempts(tenantId, {
         state: state || undefined,
         operation: operation || undefined,
         terminal_reason: reason || undefined,
         withdrawal_request_id: withdrawalId && withdrawalValid ? withdrawalId : undefined,
+        provider_id: provider && providerValid ? provider : undefined,
+        min_age_seconds: minAge ? Number(minAge) : undefined,
         limit: PAGE_SIZE,
         cursor,
       }),
-    enabled: tenantId !== '' && withdrawalValid,
+    enabled: tenantId !== '' && withdrawalValid && providerValid,
     retry: false,
   })
 
@@ -90,10 +104,22 @@ export function ParkedPaymentsPage() {
               aria-invalid={!withdrawalValid}
               help={withdrawalValid ? 'Exact withdrawal request id (optional).' : 'Not a valid id (expected a UUID); no request is sent.'}
             />
+            <TextInput
+              label="Provider"
+              value={provider}
+              onChange={(e) => { setProvider(e.target.value.trim()); resetPaging() }}
+              autoComplete="off"
+              aria-invalid={!providerValid}
+              help={providerValid ? 'Exact provider id, for example mock-payments (optional).' : 'Not a valid provider id (lower-case letters, digits and hyphens); no request is sent.'}
+            />
+            <label className="flex flex-col gap-1 text-sm">
+              <span className="font-medium text-slate-700">Older than</span>
+              <Select aria-label="Older than" placeholder="Any age" value={minAge} onChange={(e) => { setMinAge(e.target.value); resetPaging() }} options={AGE_OPTIONS} />
+            </label>
             <Button variant="secondary" onClick={() => void list.refetch()} isLoading={list.isFetching}>Refresh</Button>
           </div>
           <p className="text-xs text-slate-500">
-            The API filters by state, operation, park reason and withdrawal only. It has no provider or age filter, so none is offered; the Age column is computed from the creation time.
+            Provider and age are filtered by the server, so a page never hides rows. The Age column is computed from the creation time.
           </p>
           {list.isLoading && <LoadingSpinner label="Loading payment attempts..." />}
           {list.error && <ConsoleErrorAlert error={list.error} family="attempts" op="list" />}

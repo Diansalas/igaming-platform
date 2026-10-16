@@ -50,17 +50,17 @@ func registerPaymentForceResolutionRoutes(mux *http.ServeMux, deps Deps) {
 	// Literal patterns only: the webhook route guard (security C3/L8) fails
 	// closed on any non-literal Handle pattern.
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions",
-		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermPaymentForceResolveRequest)(newRequestResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermPaymentForceResolveRequest)(staffIdempotent(deps, newRequestResolutionHandler(deps, svc)))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-force-resolutions",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newListResolutionsHandler(deps, svc))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newGetResolutionHandler(deps, svc))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/approve",
-		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermPaymentForceResolveApprove)(newDecideResolutionHandler(deps, svc, payments.ResolutionApprove))))
+		staffRoute(deps, stepUpFinancial, auth.RequirePermission(auth.PermPaymentForceResolveApprove)(staffIdempotent(deps, newDecideResolutionHandler(deps, svc, payments.ResolutionApprove)))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/reject",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveApprove)(newDecideResolutionHandler(deps, svc, payments.ResolutionReject))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveApprove)(staffIdempotent(deps, newDecideResolutionHandler(deps, svc, payments.ResolutionReject)))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/cancel",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRequest)(newCancelResolutionHandler(deps, svc))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRequest)(staffIdempotent(deps, newCancelResolutionHandler(deps, svc)))))
 }
 
 // resolutionCall is the per-request context, mirroring adjustmentCall.

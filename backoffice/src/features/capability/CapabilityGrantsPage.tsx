@@ -54,6 +54,9 @@ export function grantStatus(g: CapabilityGrant, now: number = Date.now()): { lab
   return { label: g.valid_until ? 'In force until expiry' : 'In force, no expiry', tone: 'success' }
 }
 
+/** Rows shown per page; the screen asks for one more to learn whether a next page exists. */
+const K1_PAGE = 25
+
 const when = (iso: string | undefined) => (iso && !Number.isNaN(Date.parse(iso)) ? new Date(iso).toLocaleString() : 'None')
 
 type Dialog =
@@ -62,8 +65,8 @@ type Dialog =
   | { op: 'revoke'; grant: CapabilityGrant }
 
 /**
- * K1 capability grants console (ADR 0114 S7, ADR 0099). Lists requests and grants (bare arrays, no pagination or
- * filters), files a request, approves / rejects (platform_admin only), cancels (the requester) and revokes. The
+ * K1 capability grants console (ADR 0114 S7, ADR 0099). Lists requests and grants (bare arrays; A10c: paged with the
+ * optional ?limit / ?offset window, no filters), files a request, approves / rejects (platform_admin only), cancels (the requester) and revokes. The
  * database enforces R-7 (a tenant never approves), the distinct-person rule and the no-self-grant rule; the
  * buttons here are hints and every refusal is rendered. K1 has no payload hash (approve takes only a reason), so
  * the decision dialog shows the request's frozen content instead.
@@ -74,8 +77,14 @@ export function CapabilityGrantsPage() {
   const qc = useQueryClient()
   const [dialog, setDialog] = useState<Dialog | null>(null)
   const [notice, setNotice] = useState('')
-  const reqs = useQuery({ queryKey: ['k1', 'requests', tenantId], queryFn: () => listGrantRequests(tenantId), enabled: tenantId !== '', retry: false })
-  const grants = useQuery({ queryKey: ['k1', 'grants', tenantId], queryFn: () => listGrants(tenantId), enabled: tenantId !== '', retry: false })
+  const [reqOffset, setReqOffset] = useState(0)
+  const [grantOffset, setGrantOffset] = useState(0)
+  const reqs = useQuery({ queryKey: ['k1', 'requests', tenantId, reqOffset], queryFn: () => listGrantRequests(tenantId, { limit: K1_PAGE + 1, offset: reqOffset }), enabled: tenantId !== '', retry: false })
+  const grants = useQuery({ queryKey: ['k1', 'grants', tenantId, grantOffset], queryFn: () => listGrants(tenantId, { limit: K1_PAGE + 1, offset: grantOffset }), enabled: tenantId !== '', retry: false })
+  const reqRows = (reqs.data ?? []).slice(0, K1_PAGE)
+  const reqHasNext = (reqs.data?.length ?? 0) > K1_PAGE
+  const grantRows = (grants.data ?? []).slice(0, K1_PAGE)
+  const grantHasNext = (grants.data?.length ?? 0) > K1_PAGE
   const refresh = () => void qc.invalidateQueries({ queryKey: ['k1'] })
   const sub = claims?.sub
 
@@ -96,8 +105,8 @@ export function CapabilityGrantsPage() {
           <h2 className="text-sm font-semibold text-slate-900">Requests</h2>
           {reqs.isLoading && <LoadingSpinner label="Loading requests..." />}
           {reqs.error && <ConsoleErrorAlert error={reqs.error} family="k1" op="list" />}
-          {reqs.data && reqs.data.length === 0 && <p className="text-sm text-slate-600">No requests for this tenant.</p>}
-          {reqs.data && reqs.data.length > 0 && (
+          {reqs.data && reqRows.length === 0 && <p className="text-sm text-slate-600">{reqOffset > 0 ? 'No more requests.' : 'No requests for this tenant.'}</p>}
+          {reqs.data && reqRows.length > 0 && (
             <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
               <table className="w-full text-left text-sm">
                 <caption className="sr-only">Capability grant requests</caption>
@@ -105,7 +114,7 @@ export function CapabilityGrantsPage() {
                   <tr>{['Filed', 'Capability', 'Grantee', 'Valid until', 'Requested by', 'State', 'Request expires', 'Actions'].map((h) => <th key={h} scope="col" className="px-3 py-2 font-medium">{h}</th>)}</tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {reqs.data.map((r) => {
+                  {reqRows.map((r) => {
                     const s = reqState(r.status)
                     const pending = r.status === 'pending'
                     const own = !!sub && r.requested_by === sub
@@ -139,11 +148,13 @@ export function CapabilityGrantsPage() {
             </div>
           )}
 
+          <Pager label="Requests" offset={reqOffset} shown={reqRows.length} hasNext={reqHasNext} onChange={setReqOffset} />
+
           <h2 className="text-sm font-semibold text-slate-900">Grants</h2>
           {grants.isLoading && <LoadingSpinner label="Loading grants..." />}
           {grants.error && <ConsoleErrorAlert error={grants.error} family="k1" op="list" />}
-          {grants.data && grants.data.length === 0 && <p className="text-sm text-slate-600">No grants for this tenant.</p>}
-          {grants.data && grants.data.length > 0 && (
+          {grants.data && grantRows.length === 0 && <p className="text-sm text-slate-600">{grantOffset > 0 ? 'No more grants.' : 'No grants for this tenant.'}</p>}
+          {grants.data && grantRows.length > 0 && (
             <div className="overflow-x-auto rounded-lg border border-border bg-surface shadow-sm">
               <table className="w-full text-left text-sm">
                 <caption className="sr-only">Capability grants</caption>
@@ -151,7 +162,7 @@ export function CapabilityGrantsPage() {
                   <tr>{['Granted', 'Capability', 'Grantee', 'Valid from', 'Valid until', 'Status', 'Revoke reason', 'Actions'].map((h) => <th key={h} scope="col" className="px-3 py-2 font-medium">{h}</th>)}</tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {grants.data.map((g) => {
+                  {grantRows.map((g) => {
                     const s = grantStatus(g)
                     return (
                       <tr key={g.id}>
@@ -174,7 +185,8 @@ export function CapabilityGrantsPage() {
               </table>
             </div>
           )}
-          <p className="text-xs text-slate-500">The lists are complete, unpaged and unfiltered: the API has no pagination or filter for them. Status is computed from the local clock for display; the database decides what is in force.</p>
+          <Pager label="Grants" offset={grantOffset} shown={grantRows.length} hasNext={grantHasNext} onChange={setGrantOffset} />
+          <p className="text-xs text-slate-500">The lists are paged, newest first, and have no filters. Status is computed from the local clock for display; the database decides what is in force.</p>
         </>
       )}
 
@@ -186,6 +198,19 @@ export function CapabilityGrantsPage() {
         <CancelDialog title="Cancel grant request" family="k1" tenantId={tenantId} tenantLabel={tenantLabel} detail="Cancelling closes this pending request; nothing was granted. Only the person who filed it can cancel it." send={(key) => cancelGrantRequest(tenantId, dialog.req.id, key)} onClose={() => setDialog(null)} onDone={() => { setDialog(null); setNotice('Request cancelled.'); refresh() }} onRefused={refresh} />
       )}
       {dialog?.op === 'revoke' && <RevokeDialog tenantId={tenantId} tenantLabel={tenantLabel} grant={dialog.grant} onClose={() => setDialog(null)} onRefresh={refresh} onDone={() => { setDialog(null); setNotice('Grant revoked. Revoking is immediate and cannot be undone; a new request is needed to grant it again.'); refresh() }} />}
+    </div>
+  )
+}
+
+function Pager({ label, offset, shown, hasNext, onChange }: { label: string; offset: number; shown: number; hasNext: boolean; onChange: (n: number) => void }) {
+  if (offset === 0 && !hasNext) return null
+  return (
+    <div className="flex items-center justify-between text-sm text-slate-600" role="navigation" aria-label={`${label} pages`}>
+      <span>{shown > 0 ? `Rows ${offset + 1} to ${offset + shown}` : 'No rows on this page'}</span>
+      <div className="flex gap-2">
+        <Button variant="secondary" disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - K1_PAGE))} aria-label={`${label}: previous page`}>Previous</Button>
+        <Button variant="secondary" disabled={!hasNext} onClick={() => onChange(offset + K1_PAGE)} aria-label={`${label}: next page`}>Next</Button>
+      </div>
     </div>
   )
 }

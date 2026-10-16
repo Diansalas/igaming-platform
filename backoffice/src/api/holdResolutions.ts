@@ -4,10 +4,26 @@
 // WithdrawalHoldResolutionDecision). Same contract as K3: the client echoes the `payload_hash` it displayed, the
 // operator supplies the 64-hex `evidence_ref_hash` (computed outside the console), the actor proof is server-side,
 // request and approve are step-up `financial`, reject and cancel are `none`.
-// Known API gap (ADR 0114 R3): there is no candidate-list route, so the withdrawal id is typed by the operator;
-// nothing here can look a withdrawal up.
-import { apiFetch } from './client'
+// A10c (ADR 0114 R3): the candidate list names the approved withdrawals of the tenant whose tenant or brand is not
+// active, so the operator can pick one instead of typing an id. It carries no player, wallet or destination data.
+import { apiFetch, buildQuery } from './client'
 import { idempotencyHeaders } from './idempotency'
+import type { PagedResponse } from './types'
+
+export interface HoldCandidate {
+  withdrawal_request_id: string
+  brand_id: string
+  amount_minor_units: string
+  asset_code: string
+  exponent: number
+  state_changed_at: string
+  tenant_status: string
+  brand_status: string
+}
+
+export function listHoldCandidates(tenantId: string, params: { limit?: number; offset?: number } = {}): Promise<PagedResponse<HoldCandidate>> {
+  return apiFetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}/withdrawal-hold-candidates${buildQuery(params)}`)
+}
 
 export interface HoldResolutionRequest {
   withdrawal_request_id: string

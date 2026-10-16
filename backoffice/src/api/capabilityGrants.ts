@@ -1,7 +1,9 @@
 // ADR 0114 S7 client: K1 capability grants (ADR 0099). Wire shapes are copied from
 // docs/api/openapi/platform-api.yaml (CapabilityGrantRequest, CapabilityGrant, *Body); no field is invented.
 // API facts the UI relies on:
-//  - list routes are bare arrays, no pagination, no filters;
+//  - list routes are bare arrays; A10c adds an OPTIONAL ?limit / ?offset window (the array shape is unchanged, the
+//    whole-list size is in the X-Total-Count response header, which the UI does not need: it asks for one row more
+//    than it shows to know whether a next page exists);
 //  - K1 has NO payload_hash: approve/reject take only { reason_code }. The "proof-bound payload hash" of K2/K3/
 //    HSEC does not exist on K1 (the signed actor proof is produced server-side, ADR 0110), so none is shown;
 //  - step-up: request, approve and revoke are `critical` (the apiFetch interceptor prompts and re-sends once);
@@ -60,12 +62,17 @@ export interface CapabilityGrant {
 
 const base = (tenantId: string) => `/v1/admin/tenants/${encodeURIComponent(tenantId)}/capability-grants`
 
-export function listGrantRequests(tenantId: string): Promise<CapabilityGrantRequest[]> {
-  return apiFetch(`${base(tenantId)}/requests`)
+export interface ListWindow {
+  limit?: number
+  offset?: number
 }
 
-export function listGrants(tenantId: string): Promise<CapabilityGrant[]> {
-  return apiFetch(`${base(tenantId)}`)
+export function listGrantRequests(tenantId: string, window: ListWindow = {}): Promise<CapabilityGrantRequest[]> {
+  return apiFetch(`${base(tenantId)}/requests${buildQuery(window)}`)
+}
+
+export function listGrants(tenantId: string, window: ListWindow = {}): Promise<CapabilityGrant[]> {
+  return apiFetch(`${base(tenantId)}${buildQuery(window)}`)
 }
 
 export function createGrantRequest(tenantId: string, body: GrantRequestBody, key?: string): Promise<CapabilityGrantRequest> {
