@@ -393,3 +393,33 @@ This review is not a statement that A11 is "secure". It covers code- and design-
   `TestWithdrawalApprove_SelfApprovalRejected`).
 - **SR11-6**: S-L4(2) is committed with `FOR SHARE` and tests (see 9.4); wording "CLOSED" applies to the committed code.
 - SR11-7 (static test that only `_test.go` assigns `payoutClaimAfterRoutingHook`) not added (optional).
+
+### 10.4 Security re-check of the follow-up (2026-10-16, head `4dd019a`)
+
+Scope: the commits `cc4c7ac`, `93ab71b`, `84bf6f9` and `4dd019a` against SR11-1 to SR11-6 (`git diff 7ace24c 4dd019a`). Verified on a new private scratch DB
+(`sec_a11_review2`, sanctioned harness; no role, password or process changes). With `-tags integration` these are green:
+- the full `./internal/reconciliation/...` and `./cmd/platform-api`;
+- `TestSL1_*` (including `TestSL1_RefusalsAreAuditedDenied`), `TestWithdrawalApprove_SelfApprovalRejected`, `TestSL4_*` (including
+  `TestSL4_CapabilityRereadIsLockedForShare_ConcurrentDisableWaitsAndIsThenSeen`), `TestParkBindRace_*` and `TestH12_*`.
+
+The first-pass probe file was not left in the tree. A second temporary probe was run, then removed and not committed.
+
+| id | status | evidence |
+|---|---|---|
+| SR11-1 | **Mitigated for the single-forged-row case. Residual accurately stated. Row stays OPEN (HIGH, binding before the first non-MOCK statement source).** | The cursor read now requires a stored import with the same tenant, provider and `coverage_end`, plus `coverage_end <= now()`. Unbacked rows above the backed cursor are ignored and raise a durable P1 (`...:cursor_anomaly`). **Attack re-run (probe, confirmed):** in one runtime-role tenant session, forge a 0-line, unsealed, `is_mock=false` import with label `forged` and `coverage_end=now()`, plus a run row with the same `coverage_end`, before each sweep. A MOCK deposit created after the genuine cursor was never imported, every run read `clean`, and nothing counted as unbacked. That is exactly the residual the record now states (1.2, 7.3, section 6 row SR11-1, recheck row). The wording no longer overclaims: "skips at most that window" is withdrawn, and the stream is explicitly "not forgery-proof". Minor nuance for the row text: "system-shaped tenant session" is not a higher bar for a SQL-capable attacker. The GUCs are the runtime session's own. The forge is two plain INSERTs from the same role. |
+| SR11-2 | CLOSED | A continuation statement whose `CoverageEnd` is after the server clock is refused (`ErrPaymentStatementCoverageGap`). The cursor read also ignores `coverage_end > now()`. |
+| SR11-3 | CLOSED | The not-reconciled error is built from `discPart(providerID)`, so the audit/log `error` no longer carries the raw id. Test `TestScoped_SR11_HostileProviderIDNeverReachesTheAuditError`. |
+| SR11-4 | CLOSED | `auditBeneficiaryRefusal` writes a Denied audit row in its own transaction for the S-L1 submit/resolve refusals and for the self-approval refusal. The row holds: actor = the staff id; target = the withdrawal id; action `withdrawal.{submit,resolve,approve}.http`; the staff caller's own IP, user agent and request id (the audit fields CLAUDE.md requires); metadata `{reason: staff_is_beneficiary}`. It holds no player or Person data and no amounts. A failed audit write is logged and never turns the 403 into a success. |
+| SR11-6 / LF-A11-3 | CLOSED | `LoadCapabilityForShare` locks the effective capability row FOR SHARE inside the claim. **Lock ordering:** the claim takes it after the request `FOR UPDATE` and the staff `FOR SHARE`, and never locks `provider_capability_amount_limits`. The only writer, `WriteCapability` (partner-console handler), locks the capability row (upsert), then the amount-limit rows, then inserts audit. It takes no request, attempt, staff, instrument or ledger lock, so no cycle with the claim is possible. A disable waits for in-flight claims, and later claims can queue behind the waiting disable: that costs latency, not a deadlock. Residual as stated: a concurrently inserted brand-specific override is not predicate-locked; the kill switch stays the stop. ADR 0082 does not list `provider_capabilities`, so the architect should record it as a leaf lock (INFO). |
+
+New items:
+
+| id | severity | finding | action |
+|---|---|---|---|
+| SR11-10 | MEDIUM. Part of the OPEN SR11-1 row, not blocking a MOCK-only merge | The backing check accepts ANY import row: unsealed, `is_mock=false`, any label, 0 lines. The platform already HMAC-seals imports. `main.go` installs `SetDefaultImportSealer`, and the seal covers tenant, provider, `CoverageEnd` and the lines digest. Requiring the backing import to carry a seal that VERIFIES under the configured key (and to match the source's label and mock flag) would defeat a SQL-only attacker (SQL injection, or a stolen runtime DB credential) without any DB role change. The remaining residual would be a compromise of the application process holding the key. | Add this to SR11-1 as the preferred near-term closure step (payments + security). Keep the role-level and lookback options for the process-compromise case. |
+| SR11-11 | LOW | `cursor_anomaly` uses one discriminator per (tenant, provider). A forged unbacked row with a far-future `coverage_end` stays "above the cursor" forever, so the alert re-occurs on every sweep and cannot be cleared. A LATER forgery then only adds occurrences to an alert that is already open, and nothing distinguishes it. | Put the unbacked-row count, or the newest unbacked row's id, into the alert's occurrence attributes, and have the runbook compare it. Alternatively, page again when the count grows. |
+
+**Verdict: APPROVED for a MOCK-only merge at `4dd019a`.** SR11-2, SR11-3, SR11-4 and SR11-6 are closed. SR11-1 is mitigated for the cheap case, its residual
+is honestly stated, and it remains an OPEN HIGH row. **Launch flag (unchanged):** SR11-1, with SR11-10 as its next step, must be resolved before
+any non-MOCK statement source or real-money payment reconciliation relies on this stream. This review does not certify A11 as secure. It is a
+code- and design-level review against MOCK providers only.
