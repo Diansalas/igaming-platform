@@ -135,6 +135,19 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO igaming_backup;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM igaming_backup;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_backup;
 
+-- ... EXCEPT the actor-proof signing secret (owner decision 5, ADR 0122 section 10): the logical dump excludes the rows of actor_proof_keys, and the
+-- backup credential cannot read them either. Only the non-secret columns stay readable (the baseline records the key ids and statuses). Because a table
+-- created by a migration that runs AFTER this file gets the default privilege below (whole-table SELECT), run this file again after migrations;
+-- backup.sh warns when the role can still read the secret column.
+DO $$
+BEGIN
+    IF to_regclass('public.actor_proof_keys') IS NOT NULL THEN
+        REVOKE ALL ON public.actor_proof_keys FROM igaming_backup;
+        GRANT SELECT (kid, status, created_at, retired_at) ON public.actor_proof_keys TO igaming_backup;
+    END IF;
+END
+$$;
+
 -- ... and on whatever the migration owner creates later. The migration owner is `igaming` by convention
 -- (on RDS: the master user; this file runs connected as that role there, so current_user is used).
 DO $$

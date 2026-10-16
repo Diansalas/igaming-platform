@@ -244,7 +244,7 @@ func TestSignatureAndEncryptionOrdering(t *testing.T) {
 	if probe < 0 || dump < 0 || probe > dump {
 		t.Error("backup.sh must probe-encrypt before it dumps")
 	}
-	if !strings.Contains(b, `pg_dump -Fc --snapshot="$SNAP" 2>`) || strings.Contains(b, "--file=-") || !strings.Contains(b, "set -o pipefail") {
+	if !strings.Contains(b, `pg_dump -Fc --snapshot="$SNAP" "${EXCL[@]}" 2>`) || strings.Contains(b, "--file=-") || !strings.Contains(b, "set -o pipefail") {
 		t.Error("backup.sh must stream pg_dump to the encryptor through a pipe with pipefail and no --file option (--file=- would create a plaintext file literally named minus)")
 	}
 	if regexp.MustCompile(`age\s[^\n]*&&\s*rm`).MatchString(b) || regexp.MustCompile(`gpg\s[^\n]*&&\s*rm`).MatchString(b) {

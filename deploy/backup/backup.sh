@@ -12,6 +12,13 @@
 #   baseline.txt.age|.gpg   baseline.sql evaluated in the SAME snapshot (exact row counts + content hashes per table, ledger
 #                           invariants, sequences, roles/grants, triggers, policies, catalog fingerprints)
 #   manifest.json           what/when/where, tool versions, sizes, timings, invariant status. No secret.
+#
+# SIGNING MATERIAL IS NOT IN A LOGICAL DUMP (owner decision 5, ADR 0122 section 10): pg_dump runs with --exclude-table-data for
+# public.actor_proof_keys, so the table STRUCTURE is dumped and its ROWS (the actor-proof HMAC secrets) are not. The table of contents
+# of the stream is read while it is written and the backup FAILS if a data entry for it is present; the manifest records the
+# derived fact (`actor_proof_keys_data`: excluded). A restored database therefore starts with NO actor-proof key and every governed write is
+# refused (AP002) until deploy/backup/rekey-actor-proof.sh provisions a NEW key. Physical base backups / PITR are not affected (they stay
+# inside the cloud trust boundary and carry the live key).
 #   SHA256SUMS              sha256 of every artefact above INCLUDING manifest.json
 #   SHA256SUMS.sig          Ed25519 signature over SHA256SUMS (key by reference: BACKUP_SIGNING_KEY_FILE). restore.sh refuses a set
 #                           that is unsigned or not signed by the pinned key
@@ -118,8 +125,15 @@ IFS='|' read -r R_SUPER R_BYPASS R_CREATEROLE R_CREATEDB R_REPL R_VERNUM <<<"$PR
 [ "$R_CREATEROLE" = 0 ] && [ "$R_CREATEDB" = 0 ] && [ "$R_REPL" = 0 ] || bk_die "role ${BACKUP_PGUSER} holds CREATEROLE/CREATEDB/REPLICATION; the backup role must have none of them"
 RO="$(bk_sql "SELECT current_setting('default_transaction_read_only')")"
 [ "$RO" = on ] || bk_die "backup role session is not read-only by default (default_transaction_read_only=${RO}); re-run init-backup-role.sql"
-MISSING="$(bk_sql "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public' WHERE c.relkind IN ('r','p','S') AND NOT has_table_privilege(c.oid, 'SELECT')")"
+MISSING="$(bk_sql "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public' WHERE c.relkind IN ('r','p','S') AND NOT has_table_privilege(c.oid, 'SELECT') AND NOT (c.relname = 'actor_proof_keys' AND has_any_column_privilege(c.oid, 'SELECT'))")"
 [ "$MISSING" = 0 ] || bk_die "backup role lacks SELECT on ${MISSING} table(s)/sequence(s) (a new migration table without the default privilege?); re-run init-backup-role.sql. Refusing to produce an incomplete dump"
+
+# The dump never carries the actor-proof secret (below), but a backup credential that can still SELECT the secret column is a way to read it
+# (owner decision 5): init-backup-role.sql narrows the role to the non-secret columns. A role provisioned before that change is flagged loudly;
+# the backup itself is unaffected (the secret is neither dumped nor read by the baseline).
+if [ "$(bk_sql "SELECT has_column_privilege('public.actor_proof_keys', 'secret', 'SELECT')")" = t ]; then
+  echo "backup: WARNING: ${BACKUP_PGUSER} can SELECT actor_proof_keys.secret; re-run deploy/backup/init-backup-role.sql to narrow it to the non-secret columns (the dump excludes the secret regardless)" >&2
+fi
 
 # ---- encryption: validated BEFORE any dump (H1) -----------------------------------------------------------------------
 ENC=none
@@ -209,9 +223,14 @@ if [ "$FAULT" = slow_dump ]; then sleep "${BACKUP_TEST_SLOW_SECONDS:-12}" & SLEE
 # the dump, STREAMED through the encryptor: no plaintext on the backup volume
 DUMP_OUT="${RUN_DIR}/db.dump${EXT}"
 bk_iam_refresh
+# Owner decision 5: the rows of actor_proof_keys (the HMAC secrets) are excluded from the stream; the structure stays. The stream is also read by a
+# `pg_restore --list` while it is written, so the exclusion is VERIFIED on the very bytes that are encrypted (not assumed from the flag).
+EXCL=(--exclude-table-data=public.actor_proof_keys)
+# drill-only negative control: drop the exclusion to prove the TOC assertion below refuses the backup
+[ "$FAULT" != include_actor_proof_keys ] || EXCL=()
 (
   set -o pipefail
-  pg_dump -Fc --snapshot="$SNAP" 2>"${TMPW}/pg_dump.err" | tee >(sha256sum | cut -d' ' -f1 >"${TMPW}/plain.sha") | enc_stream >"${DUMP_OUT}.partial" 2>"${TMPW}/enc.err"
+  pg_dump -Fc --snapshot="$SNAP" "${EXCL[@]}" 2>"${TMPW}/pg_dump.err" | tee >(sha256sum | cut -d' ' -f1 >"${TMPW}/plain.sha") >(pg_restore --list >"${TMPW}/stream.toc" 2>"${TMPW}/toc.err"; echo $? >"${TMPW}/toc.rc") | enc_stream >"${DUMP_OUT}.partial" 2>"${TMPW}/enc.err"
 ) &
 DUMP_PID=$!
 while kill -0 "$DUMP_PID" 2>/dev/null; do
@@ -231,6 +250,14 @@ mv "${DUMP_OUT}.partial" "$DUMP_OUT"
 for _ in $(seq 1 50); do [ -s "${TMPW}/plain.sha" ] && break; sleep 0.2; done   # the tee process substitution may finish just after the pipeline
 PLAIN_SHA="$(cat "${TMPW}/plain.sha" 2>/dev/null || true)"
 [[ "$PLAIN_SHA" =~ ^[0-9a-f]{64}$ ]] || bk_die "could not record the plaintext checksum"
+for _ in $(seq 1 100); do [ -s "${TMPW}/toc.rc" ] && break; sleep 0.2; done   # the pg_restore --list process substitution may finish just after the pipeline
+[ "$(cat "${TMPW}/toc.rc" 2>/dev/null || echo missing)" = 0 ] || bk_die "could not read the table of contents of the dump stream ($(head -2 "${TMPW}/toc.err" 2>/dev/null | tr '\n' ' ')); the actor-proof exclusion cannot be verified, so no backup is kept"
+grep -q ' TABLE public actor_proof_keys ' "${TMPW}/stream.toc" || bk_die "the dump holds no definition of public.actor_proof_keys (migration 0120 missing, or an unexpected dump); refusing"
+if grep -q ' TABLE DATA public actor_proof_keys ' "${TMPW}/stream.toc"; then
+  bk_die "the dump stream carries the DATA of public.actor_proof_keys (the actor-proof signing secrets); logical backups must never contain them (ADR 0122 section 10). No backup is kept"
+fi
+APK_DATA=excluded
+rm -f "${TMPW}/stream.toc"
 T_DUMP="$(now_s)"
 kill "$KEEP_PID" 2>/dev/null || true; KEEP_PID=""
 echo "COMMIT;" >&7 2>/dev/null || true
@@ -285,6 +312,7 @@ cat >"${RUN_DIR}/manifest.json" <<EOF
   "environment_anchor": "${ANCHOR:-unknown}",
   "tables_in_baseline": "${TABLES}",
   "encryption": "${REAL_ENC}",
+  "actor_proof_keys_data": "${APK_DATA}",
   "signed": "ed25519-sha256sums",
   "plaintext_dump_sha256": "${PLAIN_SHA}",
   "dump_bytes": ${DUMP_BYTES},

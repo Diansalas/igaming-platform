@@ -5,7 +5,8 @@
 #   BACKUP_PGHOST=.. BACKUP_PGPORT=.. BACKUP_PGDATABASE=<restored db> BACKUP_PGUSER=igaming_backup BACKUP_PGPASSFILE=.. \
 #   VERIFY_OWNER_PGUSER=igaming VERIFY_OWNER_PGPASSFILE=.. \
 #   VERIFY_OWNER_DATABASE_URL=... VERIFY_RUNTIME_DATABASE_URL=... MIGRATE_BIN=.. RESTORECHECK_BIN=.. \
-#   deploy/backup/verify.sh --baseline <plaintext baseline.txt> [--seq-mode exact|ge] [--expect-anchor unrecorded|production|...]
+#   deploy/backup/verify.sh --baseline <plaintext baseline.txt> [--seq-mode exact|ge] [--expect-anchor unrecorded|production|...] \
+#                           [--expect-actor-proof unprovisioned|provisioned|skip] [--actor-proof-kid <new kid>] [--retired-kid <old kid>]...
 #
 # Gates, in order (every one must PASS):
 #   1. baseline.sql re-evaluated on the restored database as the BYPASSRLS backup role and compared line for line:
@@ -19,6 +20,12 @@
 #   3. `cmd/migrate verify` (applied-migration checksums) as the owner.
 #   4. restorecheck as the runtime role: the platform's own ledger_vs_projection reconciliation per tenant (drift 0),
 #      real RLS behaviour, and the database_environment startup guard behaviour (see --expect-anchor).
+# Actor-proof key (owner decision 5, ADR 0122 section 10): a LOGICAL restore carries no actor-proof signing secret. --expect-actor-proof
+# (default: `unprovisioned` with --anchor-mode reset, `skip` with --anchor-mode preserved, i.e. physical recovery, which keeps the live key):
+#   unprovisioned  actor_proof_keys holds 0 rows, the platform's own startup probe says the configured kid is not an active key, and a proof
+#                  presented to the SQL verifier is refused with AP002 (fail closed). Run this right after the restore.
+#   provisioned    after deploy/backup/rekey-actor-proof.sh: exactly one ACTIVE key whose kid is --actor-proof-kid, none of the --retired-kid
+#                  values exists, and the platform's startup probe reports the new kid active.
 # Exit 0 only if everything passed; 1 otherwise; 2 on usage/preflight refusal.
 set -euo pipefail
 
@@ -27,13 +34,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=deploy/backup/lib-common.sh
 . "${SCRIPT_DIR}/lib-common.sh"
 
-BASELINE=""; SEQ_MODE=exact; EXPECT_ANCHOR=unrecorded; ANCHOR_MODE=reset
+BASELINE=""; SEQ_MODE=exact; EXPECT_ANCHOR=unrecorded; ANCHOR_MODE=reset; EXPECT_AP=""; AP_KID=""; RETIRED_KIDS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --baseline) shift; BASELINE="${1:-}" ;;
     --seq-mode) shift; SEQ_MODE="${1:-}" ;;
     --expect-anchor) shift; EXPECT_ANCHOR="${1:-}" ;;
     --anchor-mode) shift; ANCHOR_MODE="${1:-}" ;;
+    --expect-actor-proof) shift; EXPECT_AP="${1:-}" ;;
+    --actor-proof-kid) shift; AP_KID="${1:-}" ;;
+    --retired-kid) shift; RETIRED_KIDS+=("${1:-}") ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^set -euo/d'; exit 0 ;;
     *) bk_die "unknown argument: $1" ;;
   esac
@@ -42,6 +52,11 @@ done
 [ -f "$BASELINE" ] || bk_die "--baseline must be the plaintext baseline.txt (decrypt an encrypted backup's baseline first)"
 case "$SEQ_MODE" in exact|ge) ;; *) bk_die "--seq-mode must be exact or ge" ;; esac
 case "$ANCHOR_MODE" in reset|preserved) ;; *) bk_die "--anchor-mode must be reset (logical restore: the anchor is blank) or preserved (physical recovery)" ;; esac
+if [ -z "$EXPECT_AP" ]; then if [ "$ANCHOR_MODE" = reset ]; then EXPECT_AP=unprovisioned; else EXPECT_AP=skip; fi; fi
+case "$EXPECT_AP" in unprovisioned|provisioned|skip) ;; *) bk_die "--expect-actor-proof must be unprovisioned, provisioned or skip" ;; esac
+[[ "$AP_KID" =~ ^[A-Za-z0-9._-]{0,32}$ ]] || bk_die "--actor-proof-kid must match [A-Za-z0-9._-]{1,32}"
+[ "$EXPECT_AP" != provisioned ] || [ -n "$AP_KID" ] || bk_die "--expect-actor-proof provisioned needs --actor-proof-kid (the NEW key id)"
+for k in "${RETIRED_KIDS[@]}"; do [[ "$k" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || bk_die "--retired-kid must match [A-Za-z0-9._-]{1,32}"; done
 : "${VERIFY_OWNER_PGUSER:?VERIFY_OWNER_PGUSER is required}"
 : "${VERIFY_OWNER_PGPASSFILE:?VERIFY_OWNER_PGPASSFILE is required}"
 : "${VERIFY_OWNER_DATABASE_URL:?VERIFY_OWNER_DATABASE_URL is required (for cmd/migrate verify; NO password in it: the passfile is used)}"
@@ -81,8 +96,21 @@ if [ "$ANCHOR_MODE" = reset ]; then
   # M4: a logical restore must NOT carry the environment anchor: its data is excluded from the comparison and MUST be absent
   ANCH_ROWS="$(awk -F'|' '$1=="TABLE" && $2=="database_environment" {print $3}' "${WORK}/restored.txt")"
   if [ "$ANCH_ROWS" = 0 ]; then chk anchor_blank_after_restore PASS "database_environment holds 0 rows: a production start refuses until the owner records the environment deliberately"; else chk anchor_blank_after_restore FAIL "database_environment holds ${ANCH_ROWS:-?} row(s) after a logical restore"; fi
-  grep -v '^TABLE|database_environment|' "$BASELINE" >"${WORK}/baseline.noanchor"; BASELINE_CMP="${WORK}/baseline.noanchor"
-  grep -v '^TABLE|database_environment|' "${WORK}/restored.txt" >"${WORK}/restored.noanchor"; RESTORED_CMP="${WORK}/restored.noanchor"
+  grep -v -e '^TABLE|database_environment|' -e '^TABLE|actor_proof_keys|' "$BASELINE" >"${WORK}/baseline.noanchor"; BASELINE_CMP="${WORK}/baseline.noanchor"
+  grep -v -e '^TABLE|database_environment|' -e '^TABLE|actor_proof_keys|' "${WORK}/restored.txt" >"${WORK}/restored.noanchor"; RESTORED_CMP="${WORK}/restored.noanchor"
+  # owner decision 5: the logical dump excludes the actor-proof signing secrets by design, so the table is NOT compared with the baseline; it is asserted instead
+  AP_ROWS="$(awk -F'|' '$1=="TABLE" && $2=="actor_proof_keys" {print $3}' "${WORK}/restored.txt")"
+  AP_KIDS="$(grep '^META|actor_proof_kids|' "${WORK}/restored.txt" | cut -d'|' -f3- || true)"
+  case "$EXPECT_AP" in
+    unprovisioned)
+      if [ "$AP_ROWS" = 0 ] && [ -z "$AP_KIDS" ]; then chk actor_proof_keys_empty_after_logical_restore PASS "actor_proof_keys holds 0 rows: no actor-proof secret came back through the backup; the platform fails closed until deploy/backup/rekey-actor-proof.sh provisions a NEW key"
+      else chk actor_proof_keys_empty_after_logical_restore FAIL "actor_proof_keys holds ${AP_ROWS:-?} row(s) after a logical restore (kids: ${AP_KIDS:-none}): signing material travelled through the backup"; fi ;;
+    provisioned)
+      bad=""
+      [ "$AP_KIDS" = "${AP_KID}:active" ] || bad="the table holds '${AP_KIDS:-nothing}', expected exactly '${AP_KID}:active'"
+      for k in "${RETIRED_KIDS[@]}"; do case ",${AP_KIDS}," in *",${k}:"*) bad="${bad}; retired kid ${k} is present" ;; esac; done
+      if [ -z "$bad" ]; then chk actor_proof_key_is_the_new_one PASS "exactly one actor-proof key, kid ${AP_KID}, active; the source's kid(s) ${RETIRED_KIDS[*]:-(none given)} are not present"; else chk actor_proof_key_is_the_new_one FAIL "$bad"; fi ;;
+  esac
 else
   BASELINE_CMP="$BASELINE"; RESTORED_CMP="${WORK}/restored.txt"
 fi
@@ -132,7 +160,10 @@ else
 fi
 
 # ---- gate 4: the application's own code against the restored database --------------------------------------------
-if OUT="$(PGPASSFILE="$VERIFY_RUNTIME_PGPASSFILE" DATABASE_URL="$VERIFY_RUNTIME_DATABASE_URL" "$RESTORECHECK_BIN" -expect-anchor "$EXPECT_ANCHOR" 2>&1)"; then RC=0; else RC=$?; fi
+RC_ARGS=(-expect-anchor "$EXPECT_ANCHOR" -actor-proof "$EXPECT_AP")
+[ -z "$AP_KID" ] || RC_ARGS+=(-actor-proof-kid "$AP_KID")
+for k in "${RETIRED_KIDS[@]}"; do RC_ARGS+=(-retired-kid "$k"); done
+if OUT="$(PGPASSFILE="$VERIFY_RUNTIME_PGPASSFILE" DATABASE_URL="$VERIFY_RUNTIME_DATABASE_URL" "$RESTORECHECK_BIN" "${RC_ARGS[@]}" 2>&1)"; then RC=0; else RC=$?; fi
 printf '%s\n' "$OUT" | grep '^CHK|' | while IFS= read -r line; do echo "$line"; done
 NPASS="$(printf '%s\n' "$OUT" | grep -c '^CHK|.*|PASS|' || true)"; NFAIL="$(printf '%s\n' "$OUT" | grep -c '^CHK|.*|FAIL|' || true)"
 PASSES=$((PASSES + NPASS)); FAILS=$((FAILS + NFAIL))
