@@ -40,26 +40,32 @@ var (
 	loaded = map[string]bool{}
 )
 
-// Key table locations (F1, migration 0166): the key table lives in the owner-only schema actorproof_private; a scratch
-// database migrated below 0166 still has it in public.
-const (
-	keyTable       = "actorproof_private.actor_proof_keys"
-	legacyKeyTable = "public.actor_proof_keys"
+// keyStmt is one key-table statement in both locations (F1, migration 0166): the key table lives in the owner-only schema
+// actorproof_private; a scratch database migrated below 0166 still has it in public. Both texts are literal (no table name
+// is spliced into SQL).
+type keyStmt struct{ private, legacy string }
+
+var (
+	insertKey       = keyStmt{`INSERT INTO actorproof_private.actor_proof_keys (kid, secret) VALUES ($1, $2)`, `INSERT INTO public.actor_proof_keys (kid, secret) VALUES ($1, $2)`}
+	insertKeyIfNone = keyStmt{`INSERT INTO actorproof_private.actor_proof_keys (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`,
+		`INSERT INTO public.actor_proof_keys (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`}
+	retireKey = keyStmt{`UPDATE actorproof_private.actor_proof_keys SET status = 'retired', retired_at = now() WHERE kid = $1`,
+		`UPDATE public.actor_proof_keys SET status = 'retired', retired_at = now() WHERE kid = $1`}
 )
 
-// execKeyTable runs stmt (a format string with ONE %s for the key table) against the key table of the database ex is
-// connected to: the 0166 location, or the legacy public one on a database below 0166. The location is looked up first
-// with a query that cannot fail (to_regclass), so ex may be a caller's transaction: no failed statement aborts it.
-func execKeyTable(ctx context.Context, ex Execer, stmt string, args ...any) error {
+// execKeyTable runs st against the key table of the database ex is connected to: the 0166 location, or the legacy public
+// one on a database below 0166. The location is looked up first with a query that cannot fail (to_regclass), so ex may be
+// a caller's transaction: no failed statement aborts it.
+func execKeyTable(ctx context.Context, ex Execer, st keyStmt, args ...any) error {
 	var moved bool
 	if err := ex.QueryRow(ctx, `SELECT to_regclass('actorproof_private.actor_proof_keys') IS NOT NULL`).Scan(&moved); err != nil {
 		return fmt.Errorf("locate the actor-proof key table: %w", err)
 	}
-	tbl := legacyKeyTable
+	sql := st.legacy
 	if moved {
-		tbl = keyTable
+		sql = st.private
 	}
-	_, err := ex.Exec(ctx, fmt.Sprintf(stmt, tbl), args...)
+	_, err := ex.Exec(ctx, sql, args...)
 	return err
 }
 
@@ -83,7 +89,7 @@ func Provision(t testing.TB, ownerURL, kid string, key []byte) {
 		t.Fatalf("prooftest: connect owner: %v", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	if err := execKeyTable(ctx, conn, `INSERT INTO %s (kid, secret) VALUES ($1, $2)`, kid, key); err != nil {
+	if err := execKeyTable(ctx, conn, insertKey, kid, key); err != nil {
 		t.Fatalf("prooftest: provision key %q: %v", kid, err)
 	}
 }
@@ -98,7 +104,7 @@ func Retire(t testing.TB, ownerURL, kid string) {
 		t.Fatalf("prooftest: connect owner: %v", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	if err := execKeyTable(ctx, conn, `UPDATE %s SET status = 'retired', retired_at = now() WHERE kid = $1`, kid); err != nil {
+	if err := execKeyTable(ctx, conn, retireKey, kid); err != nil {
 		t.Fatalf("prooftest: retire key %q: %v", kid, err)
 	}
 }
@@ -138,7 +144,7 @@ func Install(t testing.TB, ownerURL string) *actorproof.Issuer {
 			t.Fatalf("prooftest: connect owner: %v", err)
 		}
 		defer func() { _ = conn.Close(ctx) }()
-		if err := execKeyTable(ctx, conn, `INSERT INTO %s (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
+		if err := execKeyTable(ctx, conn, insertKeyIfNone, processKID, processKey); err != nil {
 			t.Fatalf("prooftest: provision process key: %v", err)
 		}
 		loaded[ownerURL] = true
@@ -190,7 +196,7 @@ func EnsureKey(ctx context.Context, ex Execer) (*actorproof.Issuer, error) {
 	if err := ensureProcessErrLocked(); err != nil {
 		return nil, err
 	}
-	if err := execKeyTable(ctx, ex, `INSERT INTO %s (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
+	if err := execKeyTable(ctx, ex, insertKeyIfNone, processKID, processKey); err != nil {
 		return nil, fmt.Errorf("provision process key: %w", err)
 	}
 	actorproof.SetDefault(process)
@@ -226,7 +232,7 @@ func InstallVia(t testing.TB, ex Execer, cacheKey string) *actorproof.Issuer {
 	if !loaded[cacheKey] {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := execKeyTable(ctx, ex, `INSERT INTO %s (kid, secret) VALUES ($1, $2) ON CONFLICT (kid) DO NOTHING`, processKID, processKey); err != nil {
+		if err := execKeyTable(ctx, ex, insertKeyIfNone, processKID, processKey); err != nil {
 			t.Fatalf("prooftest: provision process key: %v", err)
 		}
 		loaded[cacheKey] = true
