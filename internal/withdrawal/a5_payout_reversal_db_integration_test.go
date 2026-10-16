@@ -4,14 +4,14 @@
 // exempt from the 0132/0162 triggers) and, for the Go primitives, through RecordPayoutReversalDecision /
 // ReverseCompletedPayout. Every refusal names its pinned SQLSTATE:
 //
-//   WD026 E11 without two distinct-Person 'reverse' decisions on ONE payload digest
-//   WD022 E11 column discipline (the reversal link set exactly once, the release link unchanged)
-//   WD020 / WD021 a reversed row is terminal; no edge leaves it
-//   WD035 check A: the reversal link must be this request's exact withdrawal_reversed posting
-//   WD040 B-i: a withdrawal_reversed transaction can never touch a hold account
-//   WD044 a withdrawal_reversed posting nobody links at COMMIT
-//   23505 one reversal per completion (ledger.ErrWithdrawalReversalAlreadyExists); one reverse vote per
-//         approver; 23514 the 'reverse' reason_code shape
+//	WD026 E11 without two distinct-Person 'reverse' decisions on ONE payload digest
+//	WD022 E11 column discipline (the reversal link set exactly once, the release link unchanged)
+//	WD020 / WD021 a reversed row is terminal; no edge leaves it
+//	WD035 check A: the reversal link must be this request's exact withdrawal_reversed posting
+//	WD040 B-i: a withdrawal_reversed transaction can never touch a hold account
+//	WD044 a withdrawal_reversed posting nobody links at COMMIT
+//	23505 one reversal per completion (ledger.ErrWithdrawalReversalAlreadyExists); one reverse vote per
+//	      approver; 23514 the 'reverse' reason_code shape
 //
 // plus migration 0162 up -> down -> up on a scratch database (whole-schema snapshot) and the down refusal
 // (WD097) while a reversal row exists.
@@ -176,7 +176,9 @@ func TestA5DB_E11_GovernanceFloorAndShape(t *testing.T) {
 		return err
 	}
 	attempt("governed shape", "", twoPersons, e11)
-	attempt("one decision", "WD026", func(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest) error { return a5Vote(ctx, tx, wr, s1, reason) }, e11)
+	attempt("one decision", "WD026", func(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest) error {
+		return a5Vote(ctx, tx, wr, s1, reason)
+	}, e11)
 	attempt("no decision", "WD026", func(context.Context, pgx.Tx, WithdrawalRequest) error { return nil }, e11)
 	attempt("two logins one person", "WD026", func(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest) error {
 		if err := a5Vote(ctx, tx, wr, l1, reason); err != nil {
