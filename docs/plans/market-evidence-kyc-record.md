@@ -267,3 +267,50 @@ clearance; (6) no per-country signal; (7) the unknown, resolved and not-permitte
 player already knows their own KYC status, so timing reveals nothing new; (8) see SRME-6; (9) a Synthetic Locator under another name is
 refused by the synthetic guard (any registration), and a missing `geolocation/locator` by the new check; (10) no country or IP in new log
 lines or error strings.
+
+## 11. Round 2: fixable security findings closed (SRME-1, 2, 3, 7, 8), open decisions recorded
+
+Merged `origin/claude/focused-wright-jw88w9` (tip `00c52d9`) into this branch first: no conflicts, and `git diff origin/claude/focused-wright-jw88w9 --stat -- docs/governance`
+is EMPTY (no governance row was touched or lost by this branch).
+
+| Finding | Done |
+|---|---|
+| SRME-1 (Medium) | **The write path is an HTTP route**: `POST /v1/admin/kyc/verifications/{id}/review`. New body-dependent step-up classifier `kycResidenceReviewClass` (`staff_stepup.go`, registered as `stepUpByKYCResidence`): a review that carries `verified_residence_country` (present and non-null) is **critical**; one without it stays none; a malformed, unknown-field, empty or oversized body is classified at the ceiling (critical). The classifier decodes the same buffered bytes with `decodeJSON`'s exact rules (`decodeLikeHandler`), so duplicate keys (last wins) and case-folded keys cannot make it disagree with the handler. Updated: route registration (`kyc_routes.go`), `routeClassifiers` / `stepUpClassifiers` (7 -> 8), `staffRouteGolden` row (`none` -> `classifier:kycResidenceReviewClass`), the static test's class-ident and classifier-name sets, the integration coverage pin (none-mutating 42 -> 41, one new classifier bucket, stale factor 403 / fresh factor not refused with a residence body), 9 classifier unit cases, OpenAPI text. **No second-reviewer rule exists in the permission model for KYC reviews** (no maker-checker is built; four-eyes exists only for enforcement-policy and similar governed writes), so the second control is **step-up plus an alert-able audit action**: `market.residence_into_open_market` (ids and the new status only, never the country), written in the SAME transaction when a reviewer records a residence in a country the brand currently serves for deposit, casino wagering or sportsbook wagering (`marketgate.CountryServedForAny`, database clock). If the market cannot be evaluated the whole review fails and nothing is written (fail closed). **Still open: maker-checker / second-reviewer sampling for residence determinations and the alert route for this action (production prerequisite, ledger/compliance decision).** |
+| SRME-2 (Low-Medium) | `kyc.ReadMarketResidenceEvidence`: a determination is carried forward only when no `rejected`, `expired` or `review_required` row of the account is newer than the determination's row. The exact review probe (approved MT -> rejected -> approved without a new residence) yields no evidence; so do the `expired` and `review_required` variants; a fresh determination after the rejection restores evidence; a plain `pending` re-verification between two approvals does NOT break the carry-forward (routine re-verification; the coordinator's list excluded it deliberately). |
+| SRME-3 (Low) | **Done without changing the gate's API or the lock order.** `Evidence` now optionally carries an unexported re-checker, set by `Gate.Locate` when the Locator is the KYC source. `Check` (which already runs as the first statement of the gated transaction, for registration-excluded player operations) re-reads the evidence on that transaction with the same query: a plain `SELECT`, no lock, before any guarded write, so the deposit / launch / placement lock order is unchanged. The in-transaction answer wins (withdrawn evidence refuses; a changed country governs; a player-id mismatch re-reads for the request's player). The read-evidence -> rejection commits -> check sequence is tested for deposit, launch and sportsbook, plus the changed-country case. The outside read remains a cheap pre-filter. |
+| SRME-7 | `cmd/platform-api/main.go` comment rewritten (KYC residence source by default, static MOCK only with an explicit dev/staging country). |
+| SRME-8 | New `requireMarketEvidenceBound`, called in `main` right after `bindMarketEvidence`: in production the Locator must be the `*marketgate.KYCResidenceLocator` AND `Bound()`. Unit-tested (unbound, static, none, staging). |
+
+### Open owner / legal decisions (recorded, NOT implemented)
+
+* **SRME-4 (Medium, compliance): residence-only evidence versus vendor geolocation for Anjouan (and each later B2B jurisdiction).** Residence is not physical location. Whether the licence requires location blocking is a legal question. Production launch needs this confirmed, or a vendor geolocation Locator (PROVIDER DEPENDENT) becomes a prerequisite. Owner + legal.
+* **SRME-5 (Medium, pre-existing MKT-WIRE-CREDIT-1 / SR8-2): deposit credits and casino bet callbacks are not per-player market-gated.** Decide, before real-money production, whether open game sessions are revoked (or lifetime bounded) when a player's evidence is withdrawn, and the hold / refund policy for credits of a player who lost evidence. ledger-finance + owner.
+* **SRME-6 (Low, owner decision PD-MKT-REG-1): registration for excluded-market visitors; production acceptance.** Accepted for staging. For production the owner / legal must confirm that opening an (unverified, unusable) account is compatible with the licence terms; otherwise option B (declared country + KYC recheck) or disabling `registration` per brand.
+
+### Changed assertions (none weakened)
+
+* `staffRouteGolden`: `POST /v1/admin/kyc/verifications/{id}/review` `none` -> `classifier:kycResidenceReviewClass` (deliberate, SRME-1).
+* `TestStepUpClassifiers_ParityWithRouteClassifiers`: classifier count 7 -> 8; the static classifier-name set gains `kycResidenceReviewClass`.
+* Step-up integration coverage pin: `none-mutating` 42 -> 41, `classifier:kycResidenceReviewClass` 1 (total mutating routes unchanged).
+* Existing KYC residence HTTP tests were not edited and still pass (their staff tokens satisfy the new step-up class).
+* Record section 7 item 3 ("an approved re-verification without a new determination carries the previous one forward") is superseded: it no longer crosses a rejection, expiry or review_required row.
+
+### Mutation pass (round 2)
+
+9 mutants (SQL break statuses narrowed / check dropped / direction flipped; re-check skipped / stale country kept / not-ok allowed; classifier always none / malformed none; bound check dropped), all killed; two first drafts failed to compile and were rewritten as compiling mutants.
+
+### Round 2 verification (private DB `me20261016162943p7001x01`, dropped afterwards; runtime role; `-tags integration -count=1 -p 1`)
+
+| Run | PASS | FAIL | SKIP |
+|---|---|---|---|
+| `./internal/marketgate/` | 55 | 0 | 0 |
+| `-race ./internal/marketgate/` | 55 | 0 | 0 |
+| `./internal/kyc/` | 307 | 0 | 0 |
+| `./internal/launchgov/` | 103 | 0 | 0 |
+| `./internal/tenant/` | 62 | 0 | 0 |
+| `./cmd/...` | 91 | 0 | 0 |
+| `./internal/httpserver/` subset: every test of the market, register, deposit, launch, casino-flow, financial-flow, sportsbook, kyc, staff-route (freeze/golden), staff step-up and OpenAPI test files, plus `TestStaff*`, `TestOpenAPI*`, `TestStepUp*`, `TestClassif*`, `TestKYC*` | 374 | 0 | 0 |
+
+gofmt clean; `go vet ./...` and `go vet -tags integration ./...` clean; golangci-lint 2.9.0 0 issues; whole-module `go test ./...` (unit) passes.
+Not re-run this round (unchanged by it): sportsbook, casino, payments (round 1 counts above stand; this round touched none of their code).
+`git diff origin/claude/focused-wright-jw88w9 --stat -- docs/governance` is empty.
