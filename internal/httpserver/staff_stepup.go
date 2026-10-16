@@ -59,6 +59,7 @@ var stepUpClassifiers = map[string]stepUpClassifier{
 	"alertRouteManageClass":      alertRouteManageClass,
 	"amlHoldPlaceClass":          amlHoldPlaceClass,
 	"amlTransitionClass":         amlTransitionClass,
+	"kycResidenceReviewClass":    kycResidenceReviewClass,
 }
 
 // requireStepUp enforces class. It must run after requireLiveStaffSession (it
@@ -335,6 +336,27 @@ func amlHoldPlaceClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
 		return auth.StepUpCritical, nil
 	}
 	if aml.ReasonClass(body.ReasonClass) == aml.ReasonManual {
+		return auth.StepUpNone, nil
+	}
+	return auth.StepUpCritical, nil
+}
+
+// kycResidenceReviewClass (owner decision 3, security SRME-1): the verified residence country is now the evidence that admits
+// money and games, so a review that RECORDS one (verified_residence_country present and non-null) is critical; a review that
+// makes no residence determination stays none. The handler decodes the SAME buffered bytes with decodeJSON's exact rules
+// (decodeLikeHandler), so the class cannot differ from what the handler writes. A body the handler will refuse is classified at
+// the ceiling. There is no maker-checker for KYC reviews in the permission model, so the second control is the alert-able audit
+// action market.residence_into_open_market (see newReviewVerificationHandler).
+func kycResidenceReviewClass(_ Deps, r *http.Request) (auth.StepUpClass, error) {
+	b, err := bufferedBody(r)
+	if err != nil {
+		return auth.StepUpCritical, nil
+	}
+	var body reviewVerificationRequest
+	if err := decodeLikeHandler(b, &body); err != nil {
+		return auth.StepUpCritical, nil
+	}
+	if body.VerifiedResidenceCountry == nil {
 		return auth.StepUpNone, nil
 	}
 	return auth.StepUpCritical, nil

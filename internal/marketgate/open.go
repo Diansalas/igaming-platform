@@ -117,6 +117,38 @@ func BrandOpen(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, ops 
 	return open, err
 }
 
+// AuditActionResidenceIntoOpenMarket is the alert-able audit action written when a reviewer records a
+// verified residence in a country the brand currently serves for at least one gated operation (SRME-1).
+// Its metadata carries ids only, never the country.
+const AuditActionResidenceIntoOpenMarket = "market.residence_into_open_market"
+
+// CountryServedForAny reports whether country is currently permitted for the brand for AT LEAST ONE of
+// deposit, casino wagering or sportsbook wagering, at the database clock (a residence recorded there would
+// admit the player to that operation). tx must be a tenant-scoped, non-player-scoped transaction. An
+// error means "could not decide".
+func CountryServedForAny(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, country string) (bool, error) {
+	if tenantID == uuid.Nil || brandID == uuid.Nil {
+		return false, fmt.Errorf("%w: tenant and brand are required", ErrInvalidRequest)
+	}
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err != nil {
+		return false, fmt.Errorf("marketgate: read database clock: %w", err)
+	}
+	for _, op := range []Operation{OpDeposit, OpLaunch, OpSportsbookWager} {
+		code, product, _ := opCodes(op)
+		res, err := operatingmarket.ResolveOperatingCountryPolicy(ctx, tx, operatingmarket.Query{
+			TenantID: tenantID, BrandID: &brandID, CountryCode: country, OperationCode: code, ProductCode: product, AsOf: asOf,
+		})
+		if err != nil {
+			return false, fmt.Errorf("marketgate: resolve %s: %w", op, err)
+		}
+		if res.Permitted() {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // openHints remembers, per (tenant, brand, operation set), the country that last
 // permitted it. Process-local and advisory only; bounded at openHintsMax entries
 // (cleared wholesale when full - losing it only costs latency).

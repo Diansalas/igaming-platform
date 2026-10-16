@@ -26,13 +26,15 @@
 // request, validated against the ISO-3166-1 alpha-2 registry. Anything
 // else - no Locator, a Go error, a non-resolved outcome, a malformed
 // country, a panic, a timeout - is UNKNOWN evidence, and unknown evidence
-// REFUSES (fail closed). Because no geolocation vendor exists, the shipped
-// Locator (geolocation.StaticLocator) reports unknown by default: this
-// gate therefore refuses everything unless a development/test deployment
-// configures a static country. That is the recorded, deliberate state
-// (docs/plans/a8-market-blocking-record.md): the open human decisions
-// (HDR-J-7/J-8 on which evidence is authoritative, PC-GAP-1) are not
-// answered by engineering.
+// REFUSES (fail closed).
+//
+// Owner decision 3 (docs/plans/market-evidence-kyc-record.md): the CURRENT
+// production-eligible Locator is KYCResidenceLocator - the country of the
+// player's KYC-VERIFIED residence. Vendor geolocation can replace or
+// complement it later by wiring a different Locator; no vendor is invented.
+// geolocation.StaticLocator stays a Synthetic MOCK (refused in production).
+// REGISTRATION precedes KYC, so it does not use player evidence at all: it is
+// a brand-level rule (see Check).
 //
 // # Where it runs
 //
@@ -150,6 +152,17 @@ type LocateRequest struct {
 type Evidence struct {
 	country string
 	known   bool
+	// rechecker is set by Gate.Locate when the Locator can re-read its evidence INSIDE the
+	// gated transaction (SRME-3). The lookup outside the transaction stays a cheap pre-filter;
+	// Check re-reads and uses the in-transaction answer, so evidence withdrawn between the two
+	// can never admit the action.
+	rechecker txRechecker
+}
+
+// txRechecker re-reads a player's evidence on the gated transaction. Unexported: only
+// Locators in this package can opt in (KYCResidenceLocator).
+type txRechecker interface {
+	recheck(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) (country string, ok bool, err error)
 }
 
 // Known reports whether a validated country was resolved.
@@ -244,7 +257,11 @@ func (g *Gate) Locate(ctx context.Context, req LocateRequest) Evidence {
 			done <- Evidence{}
 			return
 		}
-		done <- Evidence{country: res.CountryCode, known: true}
+		ev := Evidence{country: res.CountryCode, known: true}
+		if rc, ok := g.locator.(txRechecker); ok {
+			ev.rechecker = rc
+		}
+		done <- ev
 	}()
 	select {
 	case ev := <-done:
@@ -290,8 +307,47 @@ func Check(ctx context.Context, tx pgx.Tx, req Request, ev Evidence) (Decision, 
 		return Decision{}, fmt.Errorf("%w: operation/tenant/brand are required server-derived values", ErrInvalidRequest)
 	}
 
+	// Registration happens BEFORE any KYC can exist, so there is no player
+	// evidence to consult, and a client-declared country is not evidence
+	// (docs/plans/market-evidence-kyc-record.md, product decision PD-MKT-REG-1).
+	// The rule is BRAND-LEVEL and takes no country, no IP and no client value:
+	// registration is permitted only while the brand's operating-market
+	// configuration permits the registration operation for AT LEAST ONE
+	// country; an unconfigured, closed or undecidable brand refuses (fail
+	// closed). Money and games stay gated per request on the KYC-verified
+	// residence (deposit, launch, sportsbook), so an account registered from an
+	// excluded market cannot reach either.
+	if req.Operation == OpRegistration {
+		brand := req.BrandID
+		var regAsOf time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&regAsOf); err != nil {
+			return Decision{}, fmt.Errorf("marketgate: read database clock: %w", err)
+		}
+		_, open, err := AnyCountryPermits(ctx, tx, req.TenantID, &brand, regAsOf, OpRegistration)
+		if err != nil {
+			return Decision{}, fmt.Errorf("marketgate: registration market check: %w", err)
+		}
+		if open {
+			return Decision{Allowed: true}, nil
+		}
+		return refuse(ctx, tx, req, ReasonNotPermitted, "brand_level", "")
+	}
+
 	if !ev.known {
 		return refuse(ctx, tx, req, ReasonEvidenceUnavailable, "unknown", "")
+	}
+	country := ev.country
+	if ev.rechecker != nil {
+		// SRME-3: re-read inside THIS transaction (a plain read before any guarded write, so it takes no
+		// lock and cannot change the lock order). The in-transaction answer wins.
+		c, ok, err := ev.rechecker.recheck(ctx, tx, req.TenantID, req.PlayerAccountID)
+		if err != nil {
+			return Decision{}, fmt.Errorf("marketgate: re-read evidence: %w", err)
+		}
+		if !ok || !validation.IsISO3166Alpha2(c) {
+			return refuse(ctx, tx, req, ReasonEvidenceUnavailable, "unknown", "")
+		}
+		country = c
 	}
 
 	// AsOf from the database clock, the same clock that stamped every
@@ -304,22 +360,9 @@ func Check(ctx context.Context, tx pgx.Tx, req Request, ev Evidence) (Decision, 
 	}
 
 	brand := req.BrandID
-	if req.Operation == OpRegistration {
-		// The ONE sanctioned anonymous-path projection (bool only).
-		permitted, err := operatingmarket.IsRegistrationPermitted(ctx, tx, operatingmarket.RegistrationQuery{
-			TenantID: req.TenantID, BrandID: &brand, CountryCode: ev.country, AsOf: asOf,
-		})
-		if err != nil {
-			return Decision{}, fmt.Errorf("marketgate: registration market check: %w", err)
-		}
-		if permitted {
-			return Decision{Allowed: true}, nil
-		}
-		return refuse(ctx, tx, req, ReasonNotPermitted, "resolved", "")
-	}
 
 	result, err := operatingmarket.ResolveOperatingCountryPolicy(ctx, tx, operatingmarket.Query{
-		TenantID: req.TenantID, BrandID: &brand, CountryCode: ev.country,
+		TenantID: req.TenantID, BrandID: &brand, CountryCode: country,
 		OperationCode: opCode, ProductCode: product, AsOf: asOf,
 	})
 	if err != nil {

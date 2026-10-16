@@ -322,7 +322,9 @@ func TestCheck_UnknownEvidenceFailsClosedEvenWhenMarketIsOpen(t *testing.T) {
 		"erroring vendor": New(&fakeLocator{err: errors.New("down")}).Locate(context.Background(), LocateRequest{}),
 	}
 	for name, ev := range unknowns {
-		for _, op := range allOps {
+		// Registration is excluded: it takes no player evidence at all (PD-MKT-REG-1),
+		// see TestCheck_RegistrationIsBrandLevelAndNeedsNoEvidence.
+		for _, op := range []Operation{OpDeposit, OpLaunch, OpSportsbookWager} {
 			req := w.req(op)
 			d, err := w.check(pool, req, ev)
 			if err != nil || d.Allowed || d.Code != ReasonEvidenceUnavailable {

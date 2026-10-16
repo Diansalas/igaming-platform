@@ -313,7 +313,7 @@ variable "actor_proof_active_kid" {
 }
 
 variable "mock_geolocation_country" {
-  description = "MOCK_GEOLOCATION_COUNTRY (A8): the static country the MOCK locator reports. Honoured only when test_support_endpoints_enabled is true (cmd/platform-api mockProviderWiring); the config refuses it under APP_ENV=production. Empty (default) = the variable is NOT set and the operating-market gate refuses every request (fail closed). The value is an OWNER choice, never defaulted by an agent."
+  description = "MOCK_GEOLOCATION_COUNTRY (A8): the static country the MOCK locator reports. Honoured only when test_support_endpoints_enabled is true (cmd/platform-api mockProviderWiring); the config refuses it under APP_ENV=production. Empty (default, supported since owner decision 3) = the variable is NOT set and the operating-market gate uses the KYC-verified residence of the player (deposit/launch/placement are refused without it; fail closed). Set it only to force one static country for every request. The value is an OWNER choice, never defaulted by an agent."
   type        = string
   default     = ""
 

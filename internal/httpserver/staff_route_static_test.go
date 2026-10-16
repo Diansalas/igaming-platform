@@ -39,6 +39,7 @@ var routeClassIdents = map[string]routeClass{
 	"stepUpByAlertKind": stepUpByAlertKind, "stepUpByRGLimitDirection": stepUpByRGLimitDirection,
 	"stepUpByAlertRouteManager": stepUpByAlertRouteManager,
 	"stepUpByAMLHoldPlace":      stepUpByAMLHoldPlace, "stepUpByAMLTransition": stepUpByAMLTransition,
+	"stepUpByKYCResidence": stepUpByKYCResidence,
 }
 
 // mixedPrincipalStaffPaths are the self-service routes any principal may call, where a STAFF caller must still pass
@@ -292,7 +293,7 @@ func TestStaffRoutes_ClassIdentsAreTheClosedSet(t *testing.T) {
 	if len(strs) != len(routeClassIdents) {
 		t.Error("two class identifiers have the same value")
 	}
-	want := []string{"alertResolveClass", "alertRouteManageClass", "amlHoldPlaceClass", "amlTransitionClass", "financialPolicyChangeClass", "launchActionClass", "rgLimitChangeClass"}
+	want := []string{"alertResolveClass", "alertRouteManageClass", "amlHoldPlaceClass", "amlTransitionClass", "financialPolicyChangeClass", "kycResidenceReviewClass", "launchActionClass", "rgLimitChangeClass"}
 	var got []string
 	for n := range routeClassifiers {
 		got = append(got, n)

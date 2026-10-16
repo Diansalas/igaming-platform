@@ -46,6 +46,7 @@ var (
 	stepUpByAlertRouteManager  = routeClass{classifier: "alertRouteManageClass"}      // critical for a caller the handler admits; none otherwise
 	stepUpByAMLHoldPlace       = routeClass{classifier: "amlHoldPlaceClass"}          // critical for a confirmed_sanctions hold; none for a manual one (ADR 0116 A7, SR7-1)
 	stepUpByAMLTransition      = routeClass{classifier: "amlTransitionClass"}         // critical for closed_no_action; none for every other move (ADR 0116 A7, SR7-5)
+	stepUpByKYCResidence       = routeClass{classifier: "kycResidenceReviewClass"}    // critical when the review records verified_residence_country; none otherwise (SRME-1)
 )
 
 // routeClassifiers is the closed set of classifier names (pinned by the static
@@ -53,6 +54,7 @@ var (
 var routeClassifiers = map[string]bool{
 	"launchActionClass": true, "financialPolicyChangeClass": true, "alertResolveClass": true, "rgLimitChangeClass": true,
 	"alertRouteManageClass": true, "amlHoldPlaceClass": true, "amlTransitionClass": true,
+	"kycResidenceReviewClass": true,
 }
 
 // valid reports whether c is exactly one of: a valid static class, or a known
