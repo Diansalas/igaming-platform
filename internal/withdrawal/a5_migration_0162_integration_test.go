@@ -19,6 +19,38 @@ import (
 
 const migration0162Version = 162
 
+// Migration 0163 (A5 / PAYOUT-AMOUNT-DISPUTE-1, the M2 admission): up -> down restores the 0115 / 0125
+// function bodies byte for byte -> up again equals the first up. (Its down refusal, MR099, is tested in
+// internal/payments, which has the M2 world.)
+func TestMigration0163_UpDownUp_Snapshot(t *testing.T) {
+	ctx := context.Background()
+	pool := m132Scratch(t, "m0163_")
+	if _, err := pool.MigrateUp(ctx, m132Dir(t, 162)); err != nil {
+		t.Fatalf("migrate to 0162: %v", err)
+	}
+	snapBefore := m132Snapshot(t, pool)
+	full := m132Dir(t, 163)
+	if _, err := pool.MigrateUp(ctx, full); err != nil {
+		t.Fatalf("migrate 0163 up: %v", err)
+	}
+	snapUp := m132Snapshot(t, pool)
+	if snapUp == snapBefore {
+		t.Fatal("0163 changed nothing (non-vacuity)")
+	}
+	if _, err := pool.MigrateDown(ctx, full, 1); err != nil {
+		t.Fatalf("migrate 0163 down: %v", err)
+	}
+	if got := m132Snapshot(t, pool); got != snapBefore {
+		t.Fatalf("0163 down must restore the 0162 schema byte for byte:\n%s", m132Diff(snapBefore, got))
+	}
+	if _, err := pool.MigrateUp(ctx, full); err != nil {
+		t.Fatalf("migrate 0163 up again: %v", err)
+	}
+	if got := m132Snapshot(t, pool); got != snapUp {
+		t.Fatalf("0163 up again must equal the first up:\n%s", m132Diff(snapUp, got))
+	}
+}
+
 func TestMigration0162_UpDownUp_SnapshotAndDownRefusal(t *testing.T) {
 	ctx := context.Background()
 	pool := m132Scratch(t, "m0162_")

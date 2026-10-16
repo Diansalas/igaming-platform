@@ -110,12 +110,14 @@ const BasisProviderConfirmedOutOfBand = "provider_confirmed_out_of_band"
 
 // M2ResolvableDispute is the closed literal allow-list of ADR 0101 5.1 (F9):
 // an M2 admits an `ambiguous` payout, or a `disputed` one whose terminal reason
-// is provider_reference_mismatch or success_for_never_sent_attempt. EVERY other
-// payout reason is refused for both M2 kinds (amount_asset_mismatch and
-// callback_amount_asset_mismatch go to PAYOUT-AMOUNT-DISPUTE-1; the invalid-
-// reference parks keep their hold; the tombstone and late_* reasons have no
-// path yet). NULL and unknown reasons are refused. The database restates the
-// same set in payment_m2_admits and the resolution guard (C-47 pins parity).
+// is provider_reference_mismatch, success_for_never_sent_attempt or (A5,
+// PAYOUT-AMOUNT-DISPUTE-1, migration 0163) amount_asset_mismatch /
+// callback_amount_asset_mismatch - the last two ONLY with basis
+// provider_confirmed_out_of_band for both kinds (AmountDisputeReason). EVERY
+// other payout reason is refused for both M2 kinds (the invalid-reference parks
+// keep their hold; the tombstone and late_* reasons have no path). NULL and
+// unknown reasons are refused. The database restates the same set in
+// payment_m2_admits and the resolution guard (C-47 pins parity).
 func M2ResolvableDispute(state AttemptState, terminalReason *string) bool {
 	switch state {
 	case AttemptAmbiguous:
@@ -125,11 +127,18 @@ func M2ResolvableDispute(state AttemptState, terminalReason *string) bool {
 			return false
 		}
 		switch *terminalReason {
-		case "provider_reference_mismatch", "success_for_never_sent_attempt":
+		case "provider_reference_mismatch", "success_for_never_sent_attempt",
+			"amount_asset_mismatch", "callback_amount_asset_mismatch":
 			return true
 		}
 	}
 	return false
+}
+
+// AmountDisputeReason reports whether a payout park reason is an amount/asset mismatch (PAYOUT-AMOUNT-DISPUTE-1):
+// M2-resolvable only with basis provider_confirmed_out_of_band (A5, migration 0163).
+func AmountDisputeReason(terminalReason *string) bool {
+	return terminalReason != nil && (*terminalReason == "amount_asset_mismatch" || *terminalReason == TerminalReasonCallbackAmountAssetMismatch)
 }
 
 // PayoutDisputeReasons is the single classification table of every payout
@@ -141,8 +150,8 @@ func PayoutDisputeReasons() map[string]bool {
 	return map[string]bool{
 		"provider_reference_mismatch":         true,
 		"success_for_never_sent_attempt":      true,
-		"amount_asset_mismatch":               false,
-		"callback_amount_asset_mismatch":      false,
+		"amount_asset_mismatch":               true, // A5 (migration 0163): basis provider_confirmed_out_of_band only
+		"callback_amount_asset_mismatch":      true, // A5 (migration 0163): basis provider_confirmed_out_of_band only
 		"invalid_provider_reference":          false,
 		"provider_reference_conflict":         false, // PAY-PAYOUT-REFBIND-1: hold kept; no M2 path
 		"reversal_tombstone_precedes_success": false,
@@ -1070,6 +1079,11 @@ func (s *ManualResolutionService) executionRefusal(res ManualResolution, att Pay
 		if att.EverPossiblySent && (res.BasisCode == nil || *res.BasisCode != BasisProviderConfirmedOutOfBand) {
 			return resolutionRefusedPrecond
 		}
+	}
+	// A5 (PAYOUT-AMOUNT-DISPUTE-1): against contradicting amount/asset evidence, only the provider's out-of-band
+	// confirmation resolves the park, for BOTH kinds (the database restates it, MR010).
+	if AmountDisputeReason(att.TerminalReason) && (res.BasisCode == nil || *res.BasisCode != BasisProviderConfirmedOutOfBand) {
+		return resolutionRefusedPrecond
 	}
 	// PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds need a statement source
 	// registered for this attempt's provider (the standing kinds

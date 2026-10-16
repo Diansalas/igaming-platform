@@ -7078,11 +7078,13 @@ paths:
         match the withdrawal request" - the provider confirmed success but
         the amount or asset differs from the request, the payment attempt is
         parked as disputed (terminal reason amount_asset_mismatch) and the
-        hold is kept. No automatic, M2, M4 or hold-release path admits this
-        reason today (M2 refuses it, M4 admits only the invalid or conflicting
-        provider reference and destination reasons, and the hold release
-        refuses a withdrawal that has an attempt): it needs operator
-        investigation, for example a PSP recall. 503 service_unavailable: resolution
+        hold is kept. Nothing automatic resolves it. The governed exits (A5)
+        are an M2 force-resolution with basis provider_confirmed_out_of_band
+        (the provider confirmed the requested amount and asset were paid, or
+        that nothing was paid; migration 0163) and, when the provider returned
+        the whole payout, the payout reversal route. A partial or
+        different-asset payout has no exit: it needs operator investigation,
+        for example a PSP recall. 503 service_unavailable: resolution
         is not enabled on this deployment, or the provider recorded on the
         withdrawal is not available on it.
       security:
