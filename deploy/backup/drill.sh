@@ -645,7 +645,7 @@ DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" up >>"${WORK}
 L_SNAP1="$(leg_snap "$LEG_DB")"; L_KEYS1="$(leg_keys "$LEG_DB")"; L_BK1="$(leg_bk "$LEG_DB")"
 L_PUB1="$(cl_super src "$SRC_PORT" -d "$LEG_DB" -c "SELECT (to_regclass('public.actor_proof_keys') IS NULL AND to_regclass('actorproof_private.actor_proof_keys') IS NOT NULL)::int")"
 L_PROBE="$(ap_probe "$SRC_PORT" "$LEG_DB" "$CANARY_KID" "$CANARY_HEX")"                  # the moved key still verifies (as igaming_runtime)
-DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" -steps 1 down >>"${WORK}/leg-migrate.log" 2>&1 && L_DOWN=0 || L_DOWN=$?
+APP_ENV=development DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" -steps 1 down >>"${WORK}/leg-migrate.log" 2>&1 && L_DOWN=0 || L_DOWN=$?
 L_SNAP2="$(leg_snap "$LEG_DB")"; L_KEYS2="$(leg_keys "$LEG_DB")"; L_BK2="$(leg_bk "$LEG_DB")"
 DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" up >>"${WORK}/leg-migrate.log" 2>&1 && L_UP2=0 || L_UP2=$?
 L_SNAP3="$(leg_snap "$LEG_DB")"; L_KEYS3="$(leg_keys "$LEG_DB")"
@@ -655,7 +655,7 @@ if [ "$L_MIS_OK" = 1 ] && [ "$L_UP" = 0 ] && [ "$L_DOWN" = 0 ] && [ "$L_UP2" = 0
   res migration_0166_up_down_up_on_a_backup_granted_database PASS "0165 database with the backup role's blanket SELECT and 2 key rows: up refused (APM01, nothing changed) while the backup role's SELECT on the key table differed from the one on actor_proof_nonces; then up moved the rows intact into actorproof_private (row digest unchanged) and removed every backup-role privilege on the key; the moved canary key still verifies a proof as igaming_runtime; down restored the 0165 catalog byte for byte (incl. igaming_backup's SELECT) with the rows intact; up again equals the first up"
 else res migration_0166_up_down_up_on_a_backup_granted_database FAIL "mismatch_refused=${L_MIS_OK} up=${L_UP} down=${L_DOWN} up2=${L_UP2} bk=${L_BK0}/${L_BK1}/${L_BK2} moved=${L_PUB1} probe=${L_PROBE} keys=${L_KEYS0}|${L_KEYS1}|${L_KEYS2}|${L_KEYS3} snap0=${L_SNAP0} snap1=${L_SNAP1} snap2=${L_SNAP2} snap3=${L_SNAP3} $(tail -3 "${WORK}/leg-migrate.log" | tr '\n' ' ')"; fi
 # (2) back to 0165 for the legacy set, then dump it the way an old tool did (no exclusion) and re-seal it as a valid signed set
-DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" -steps 1 down >>"${WORK}/leg-migrate.log" 2>&1 || bk_die "legacy database: migrate down to 0165 failed"
+APP_ENV=development DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" -steps 1 down >>"${WORK}/leg-migrate.log" 2>&1 || bk_die "legacy database: migrate down to 0165 failed"
 cp -a "$PLAIN_DIR" "${BKUP}/legacy165"
 pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fc -f "${BKUP}/legacy165/db.dump" "$LEG_DB"
 rehash_manifest "${BKUP}/legacy165"; resign "${BKUP}/legacy165"

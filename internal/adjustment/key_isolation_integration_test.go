@@ -598,19 +598,41 @@ func TestMigration0166_UpDownUp_LegacyRows_Refusals(t *testing.T) {
 		t.Fatalf("0166 up again must equal the first up:\n%s", kiDiff(snap1, got))
 	}
 
-	// down refusals (APM02): each leaves the catalog and the rows exactly as they were
-	downRefusals := []struct{ name, plant, undo string }{
-		{"another table in the schema", `CREATE TABLE actorproof_private.zz_extra (a int)`, `DROP TABLE actorproof_private.zz_extra`},
-		{"a function in the schema", `CREATE FUNCTION actorproof_private.zz_f() RETURNS int LANGUAGE sql AS 'SELECT 1'`, `DROP FUNCTION actorproof_private.zz_f()`},
-		{"USAGE granted on the schema", `GRANT USAGE ON SCHEMA actorproof_private TO igaming_runtime`, `REVOKE USAGE ON SCHEMA actorproof_private FROM igaming_runtime`},
-		{"a table grant", `GRANT SELECT ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT ON actorproof_private.actor_proof_keys FROM igaming_runtime`},
-		{"a column grant", `GRANT SELECT (kid) ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT (kid) ON actorproof_private.actor_proof_keys FROM igaming_runtime`},
-		{"a dependent view", `CREATE VIEW public.zz_apk2 AS SELECT kid FROM actorproof_private.actor_proof_keys`, `DROP VIEW public.zz_apk2`},
-		{"public.actor_proof_keys exists again", `CREATE TABLE public.actor_proof_keys (a int)`, `DROP TABLE public.actor_proof_keys`},
+	// down refusals (APM02): each leaves the catalog and the rows exactly as they were. Every grant plant must also be flagged by the backup
+	// baseline's privilege invariant (deploy/backup/baseline.sql INV|actor_proof_key_reachable_by_non_owner), which is 0 on the clean schema.
+	inv := baselineStatement(t, `SELECT 'INV\|actor_proof_key_reachable_by_non_owner\|'`)
+	invOf := func() string {
+		t.Helper()
+		var line string
+		if err := pool.Raw().QueryRow(ctx, inv).Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimPrefix(line, "INV|actor_proof_key_reachable_by_non_owner|")
+	}
+	if got := invOf(); got != "0" {
+		t.Fatalf("baseline invariant on the clean 0166 schema = %s, want 0", got)
+	}
+	downRefusals := []struct {
+		name, plant, undo string
+		invFlags          bool
+	}{
+		{"another table in the schema", `CREATE TABLE actorproof_private.zz_extra (a int)`, `DROP TABLE actorproof_private.zz_extra`, false},
+		{"a function in the schema", `CREATE FUNCTION actorproof_private.zz_f() RETURNS int LANGUAGE sql AS 'SELECT 1'`, `DROP FUNCTION actorproof_private.zz_f()`, false},
+		{"USAGE granted on the schema", `GRANT USAGE ON SCHEMA actorproof_private TO igaming_runtime`, `REVOKE USAGE ON SCHEMA actorproof_private FROM igaming_runtime`, true},
+		{"CREATE granted on the schema", `GRANT CREATE ON SCHEMA actorproof_private TO igaming_runtime`, `REVOKE CREATE ON SCHEMA actorproof_private FROM igaming_runtime`, true},
+		{"a table grant", `GRANT SELECT ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT ON actorproof_private.actor_proof_keys FROM igaming_runtime`, true},
+		{"a write grant", `GRANT INSERT ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE INSERT ON actorproof_private.actor_proof_keys FROM igaming_runtime`, true},
+		{"a PUBLIC grant", `GRANT SELECT ON actorproof_private.actor_proof_keys TO PUBLIC`, `REVOKE SELECT ON actorproof_private.actor_proof_keys FROM PUBLIC`, true},
+		{"a column grant", `GRANT SELECT (kid) ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT (kid) ON actorproof_private.actor_proof_keys FROM igaming_runtime`, true},
+		{"a dependent view", `CREATE VIEW public.zz_apk2 AS SELECT kid FROM actorproof_private.actor_proof_keys`, `DROP VIEW public.zz_apk2`, false},
+		{"public.actor_proof_keys exists again", `CREATE TABLE public.actor_proof_keys (a int)`, `DROP TABLE public.actor_proof_keys`, false},
 	}
 	keys1 := kiKeys(t, pool)
 	for _, r := range downRefusals {
 		kiExec(t, pool, r.plant)
+		if got := invOf(); r.invFlags && got == "0" {
+			t.Fatalf("the baseline invariant must flag %s (got 0)", r.name)
+		}
 		planted := kiSnapshot(t, pool)
 		_, err := pool.MigrateDown(ctx, dir, 1)
 		if err == nil || !strings.Contains(err.Error(), "APM02") {
@@ -644,18 +666,24 @@ func kiPrivateSnapshot(t *testing.T, pool *db.Pool) string {
 	return strings.Join(keep, "\n")
 }
 
-// baselineFP extracts the FP|actorproof_private_md5 statement from deploy/backup/baseline.sql (one definition: the one the backup and verify use).
-func baselineFP(t *testing.T) string {
+// baselineStatement extracts ONE statement (from its quoted prefix to the next ';' at a line end) from deploy/backup/baseline.sql: the
+// definition the backup and verify.sh use, not a copy.
+func baselineStatement(t *testing.T, prefixRE string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "..", "deploy", "backup", "baseline.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?s)SELECT 'FP\|actorproof_private_md5\|'.*?\) q;`).FindString(string(b))
+	m := regexp.MustCompile(`(?s)` + prefixRE + `.*?;\n`).FindString(string(b))
 	if m == "" {
-		t.Fatal("baseline.sql has no FP|actorproof_private_md5 statement")
+		t.Fatalf("baseline.sql has no statement starting %s", prefixRE)
 	}
-	return strings.TrimSuffix(m, ";")
+	return strings.TrimSuffix(strings.TrimSpace(m), ";")
+}
+
+func baselineFP(t *testing.T) string {
+	t.Helper()
+	return baselineStatement(t, `SELECT 'FP\|actorproof_private_md5\|'`)
 }
 
 func TestRestoreDDL_MatchesTheMigratedKeySchema(t *testing.T) {

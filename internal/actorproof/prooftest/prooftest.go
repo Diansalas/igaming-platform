@@ -47,15 +47,19 @@ const (
 	legacyKeyTable = "public.actor_proof_keys"
 )
 
-// execKeyTable runs stmt (a format string with ONE %s for the key table) against the 0166 location and, only when that
-// relation does not exist (42P01: a database below 0166), against the legacy public location. Any other error (e.g. a
-// permission error: the caller is not the owner) is returned as is. ex must not be inside a caller transaction.
+// execKeyTable runs stmt (a format string with ONE %s for the key table) against the key table of the database ex is
+// connected to: the 0166 location, or the legacy public one on a database below 0166. The location is looked up first
+// with a query that cannot fail (to_regclass), so ex may be a caller's transaction: no failed statement aborts it.
 func execKeyTable(ctx context.Context, ex Execer, stmt string, args ...any) error {
-	_, err := ex.Exec(ctx, fmt.Sprintf(stmt, keyTable), args...)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
-		_, err = ex.Exec(ctx, fmt.Sprintf(stmt, legacyKeyTable), args...)
+	var moved bool
+	if err := ex.QueryRow(ctx, `SELECT to_regclass('actorproof_private.actor_proof_keys') IS NOT NULL`).Scan(&moved); err != nil {
+		return fmt.Errorf("locate the actor-proof key table: %w", err)
 	}
+	tbl := legacyKeyTable
+	if moved {
+		tbl = keyTable
+	}
+	_, err := ex.Exec(ctx, fmt.Sprintf(stmt, tbl), args...)
 	return err
 }
 
@@ -205,9 +209,10 @@ func Issuer(t testing.TB) *actorproof.Issuer {
 	return process
 }
 
-// Execer is satisfied by *pgxpool.Pool (the pool's raw pgx pool) and *pgx.Conn.
+// Execer is satisfied by *pgxpool.Pool (the pool's raw pgx pool), *pgx.Conn and pgx.Tx.
 type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // InstallVia is Install for a database reachable through an OWNER-role pool the
