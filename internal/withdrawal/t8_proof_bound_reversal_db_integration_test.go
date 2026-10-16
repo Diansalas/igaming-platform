@@ -424,8 +424,12 @@ func TestT8DB_UnprovenDecisionsDoNotCount_WD026AndGo(t *testing.T) {
 	// The Go count: an unproven decision on the same digest is invisible to RecordPayoutReversalDecision.
 	wr2 := a5Completed(t, f, 100, ref+"-b")
 	pl := a5Payload(wr2, ref+"-b")
-	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return t8VoteUnproven(ctx, tx, wr2, u1, pl.ReasonCode(wr2.ID)) })
-	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return t8VoteUnproven(ctx, tx, wr2, u2, pl.ReasonCode(wr2.ID)) })
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return t8VoteUnproven(ctx, tx, wr2, u1, pl.ReasonCode(wr2.ID))
+	})
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return t8VoteUnproven(ctx, tx, wr2, u2, pl.ReasonCode(wr2.ID))
+	})
 	no := func(uuid.UUID) (bool, error) { return false, nil }
 	var d ReversalDecision
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
