@@ -15,7 +15,7 @@ func TestBackupExcludesActorProofSecretAndVerifiesIt(t *testing.T) {
 	for _, want := range []string{
 		"--exclude-table-data=public.actor_proof_keys", // the exclusion itself
 		"pg_restore --list",                            // the TOC of the very stream that is encrypted is read ...
-		" TABLE DATA public actor_proof_keys ",         // ... and a data entry for the table refuses the backup
+		"TABLE DATA [^ ]+ actor_proof_key[^ ]* ",       // ... and a data entry for the table (any schema) refuses the backup
 		" TABLE public actor_proof_keys ",              // the structure must be present (a restore needs the empty table)
 		`"actor_proof_keys_data": "${APK_DATA}"`,       // the manifest records the derived fact
 		"include_actor_proof_keys",                     // the drill-only negative control
@@ -42,7 +42,7 @@ func TestBackupExcludesActorProofSecretAndVerifiesIt(t *testing.T) {
 
 func TestRestoreNeverRestoresActorProofKeys(t *testing.T) {
 	r := read(t, "deploy/backup/restore.sh")
-	for _, want := range []string{"-e ' TABLE DATA public actor_proof_keys '", "APK_LEGACY", "legacy set", "rekey-actor-proof.sh", "AP002"} {
+	for _, want := range []string{"grep -v -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* '", "APK_LEGACY", "legacy set", "rekey-actor-proof.sh", "AP002"} {
 		if !strings.Contains(r, want) {
 			t.Errorf("restore.sh lost %q", want)
 		}
@@ -132,9 +132,16 @@ func TestRekeyScriptProperties(t *testing.T) {
 	r := read(t, "deploy/backup/rekey-actor-proof.sh")
 	code := stripComments(r)
 	for _, want := range []string{
-		`\bind :ap_kid :ap_hex`,             // the secret is a bound parameter
-		"decode($2, 'hex')",                 //
-		`cat "$AP_SECRET_FILE"`,             // read by psql from the file, never via argv
+		`\bind :ap_kid :ap_hex`,        // the secret is a bound parameter
+		"decode($2, 'hex')",            //
+		`\getenv ap_hex AP_SECRET_HEX`, // read ONCE from an open descriptor, handed to psql through the environment (never argv)
+		"exec 9<",
+		"--first-key",
+		"LOCK TABLE public.actor_proof_keys IN SHARE ROW EXCLUSIVE MODE",
+		"WHERE NOT EXISTS (SELECT 1 FROM public.actor_proof_keys)",
+		"log_transaction_sample_rate",
+		"auto_explain.log_min_duration",
+		"pgaudit.log_parameter",
 		"must be mode 0600 or 0400",         //
 		"must be on tmpfs",                  // a real target never writes the secret to disk
 		"equals a retired kid",              // the source's kid is not reusable

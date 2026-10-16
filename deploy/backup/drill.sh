@@ -575,23 +575,34 @@ REKEY_NEG=""
 OUTP="$(rekey_run --kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE" --retired-kid "$SEED_AP_KID")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'equals a retired kid' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} reuse_of_retired_kid($RC)"
 # (2) a world-readable secret file
 cp "$NEWHEX_FILE" "${SECRETS}/ap-open.hex"; chmod 644 "${SECRETS}/ap-open.hex"
-OUTP="$(rekey_run --kid "$REKEY_KID" --secret-hex-file "${SECRETS}/ap-open.hex")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'must be mode 0600' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} open_file($RC)"
+OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "${SECRETS}/ap-open.hex")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'must be mode 0600' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} open_file($RC)"
 rm -f "${SECRETS}/ap-open.hex"
 # (3) a too-short secret
 printf 'abcd' >"${SECRETS}/ap-short.hex"; chmod 600 "${SECRETS}/ap-short.hex"
-OUTP="$(rekey_run --kid "$REKEY_KID" --secret-hex-file "${SECRETS}/ap-short.hex")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'even-length hex' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} short_secret($RC)"
+OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "${SECRETS}/ap-short.hex")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'even-length hex' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} short_secret($RC)"
 rm -f "${SECRETS}/ap-short.hex"
 # (4) not the table owner: the runtime role
-OUTP="$(REKEY_USER=igaming_runtime rekey_run --kid "$REKEY_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'cannot read public.actor_proof_keys' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} runtime_role($RC)"
+OUTP="$(REKEY_USER=igaming_runtime rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'cannot read public.actor_proof_keys' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} runtime_role($RC)"
 # (5) statement logging that could capture the bound secret
 cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming SET log_statement = 'all'" >/dev/null
-OUTP="$(rekey_run --kid "$REKEY_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'log_statement=all' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} statement_logging($RC)"
+OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'log_statement=all' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} statement_logging($RC)"
 cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming RESET log_statement" >/dev/null
-if [ -z "$REKEY_NEG" ] && [ "$(ap_rows)" = 0 ]; then res rekey_script_refuses_unsafe_use PASS "refused, table still empty: reuse of the source's kid, a world-readable secret file, a too-short secret, a non-owner role (igaming_runtime), log_statement=all on the owner role"; else res rekey_script_refuses_unsafe_use FAIL "not refused:${REKEY_NEG} rows=$(ap_rows)"; fi
+# (6) sampled-transaction logging writes every statement of a sampled transaction WITH its parameters
+cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming SET log_transaction_sample_rate = 1" >/dev/null
+OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'log_transaction_sample_rate' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} txn_sampling($RC)"
+cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming RESET log_transaction_sample_rate" >/dev/null
+cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming SET log_statement_sample_rate = 1" -c "ALTER ROLE igaming SET log_min_duration_sample = 0" >/dev/null
+OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'log_statement_sample_rate' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} stmt_sampling($RC)"
+cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming RESET log_statement_sample_rate" -c "ALTER ROLE igaming RESET log_min_duration_sample" >/dev/null
+# (7) no source kid named, and no --first-key
+OUTP="$(rekey_run --kid "$REKEY_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q -e '--retired-kid' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} no_retired_kid($RC)"
+# (8) verify.sh refuses to skip the actor-proof assertion after a LOGICAL restore
+OUTP="$(verify_run "$SRC_PORT" "$RST_DB" "${PLAIN_DIR}/baseline.txt" --expect-actor-proof skip 2>&1)" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'allowed only with --anchor-mode preserved' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} verify_skip($RC)"
+if [ -z "$REKEY_NEG" ] && [ "$(ap_rows)" = 0 ]; then res rekey_script_refuses_unsafe_use PASS "refused, table still empty: reuse of the source kid, a world-readable secret file, a too-short secret, a non-owner role (igaming_runtime), log_statement=all, log_transaction_sample_rate, sampled statement logging, no --retired-kid; and verify.sh refuses --expect-actor-proof skip after a logical restore"; else res rekey_script_refuses_unsafe_use FAIL "not refused:${REKEY_NEG} rows=$(ap_rows)"; fi
 # the real re-key
 LOGBYTES_RK="$(stat -c %s "${DRILL_ROOT}/src/server.log")"
-ROUT_RK="$(rekey_run --kid "$REKEY_KID" --secret-hex-file "$NEWHEX_FILE" --retired-kid "$CANARY_KID" --retired-kid "$SEED_AP_KID")" && RKRC=0 || RKRC=$?
-ROUT_RK2="$(rekey_run --kid ap-rekey-2 --secret-hex-file "$NEWHEX_FILE")" && RKRC2=0 || RKRC2=$?
+ROUT_RK="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE" --retired-kid "$CANARY_KID" --retired-kid "$SEED_AP_KID")" && RKRC=0 || RKRC=$?
+ROUT_RK2="$(rekey_run --kid ap-rekey-2 --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RKRC2=0 || RKRC2=$?
 RK_LOG_LEAK="$( { tail -c +"$((LOGBYTES_RK + 1))" "${DRILL_ROOT}/src/server.log"; printf '%s\n%s\n' "$ROUT_RK" "$ROUT_RK2"; } | grep -a -c -F "$NEWHEX" || true)"
 if [ "$RKRC" -eq 0 ] && grep -q "probe_active=true" <<<"$ROUT_RK" && [ "$RKRC2" -ne 0 ] && grep -q 'already holds 1 key' <<<"$ROUT_RK2" && [ "$(ap_rows)" = 1 ] && [ "$RK_LOG_LEAK" = 0 ]; then
   res rekey_script_provisions_new_key PASS "kid ${REKEY_KID} inserted as the owner with the secret as a bound parameter (psql read it from a 0600 file; not in argv, statement text or the server log: ${RK_LOG_LEAK} occurrences in the log and script output); the SECURITY DEFINER probe reports it active; a second run is refused ('already holds 1 key': first-key provisioning only)"

@@ -54,6 +54,7 @@ case "$SEQ_MODE" in exact|ge) ;; *) bk_die "--seq-mode must be exact or ge" ;; e
 case "$ANCHOR_MODE" in reset|preserved) ;; *) bk_die "--anchor-mode must be reset (logical restore: the anchor is blank) or preserved (physical recovery)" ;; esac
 if [ -z "$EXPECT_AP" ]; then if [ "$ANCHOR_MODE" = reset ]; then EXPECT_AP=unprovisioned; else EXPECT_AP=skip; fi; fi
 case "$EXPECT_AP" in unprovisioned|provisioned|skip) ;; *) bk_die "--expect-actor-proof must be unprovisioned, provisioned or skip" ;; esac
+[ "$EXPECT_AP" != skip ] || [ "$ANCHOR_MODE" = preserved ] || bk_die "--expect-actor-proof skip is allowed only with --anchor-mode preserved (physical recovery, which keeps the live key): after a logical restore the actor-proof state must be asserted (unprovisioned or provisioned)"
 [[ "$AP_KID" =~ ^[A-Za-z0-9._-]{0,32}$ ]] || bk_die "--actor-proof-kid must match [A-Za-z0-9._-]{1,32}"
 [ "$EXPECT_AP" != provisioned ] || [ -n "$AP_KID" ] || bk_die "--expect-actor-proof provisioned needs --actor-proof-kid (the NEW key id)"
 for k in "${RETIRED_KIDS[@]}"; do [[ "$k" =~ ^[A-Za-z0-9._-]{1,32}$ ]] || bk_die "--retired-kid must match [A-Za-z0-9._-]{1,32}"; done

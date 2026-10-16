@@ -29,7 +29,7 @@ scripts, no role DDL outside provisioning, no literal passwords, target guard pr
 |---|---|---|
 | `igaming` (migration owner) | `cmd/migrate`, owning objects, restore target owner | on RDS the master user; subject to FORCE RLS: **cannot** produce a complete dump |
 | `igaming_runtime` | the application | non-owning; cannot dump (`permission denied for table actor_proof_keys`) |
-| **`igaming_backup`** | the backup runner and `verify.sh` baseline/count queries | NOSUPERUSER, **BYPASSRLS**, SELECT-only (and **not** on `actor_proof_keys.secret`: only the non-secret columns `kid, status, created_at, retired_at`; owner decision 5), CONNECTION LIMIT 2, no membership, read-only sessions, **VALID UNTIL** (time-boxed), audited; never used by the application |
+| **`igaming_backup`** | the backup runner and `verify.sh` baseline/count queries | NOSUPERUSER, **BYPASSRLS**, SELECT-only (table-level SELECT on every table including `actor_proof_keys`: it can read the actor-proof secret, residual R1 of `docs/plans/backup-exclude-actor-secret-record.md`), CONNECTION LIMIT 2, no membership, read-only sessions, **VALID UNTIL** (time-boxed), audited; never used by the application |
 | restore role | `restore.sh --phase all` or `load` | the **non-superuser** owner role `igaming`, or a CREATEDB role that is a member of it (drill: `drill_restore`). It must NOT be a superuser or `rds_superuser` member: the archive is executable SQL (ADR 0122 section 5a). `--owner-role` is `igaming` unless `RESTORE_OWNER_ROLE_OVERRIDE` names another; postgres / igaming_backup / igaming_runtime / rdsadmin / rds_superuser are always refused |
 | provisioning role | `restore.sh --phase provision` | on a brand-new cluster the bootstrap superuser (RDS: the master - unverified): creates the three project roles WITHOUT passwords and the EMPTY database only; no archive content runs as this role |
 
@@ -91,8 +91,8 @@ stale temp directories and orphaned `.incomplete` run directories of killed (SIG
 table's structure is in the dump, its rows (the HMAC secrets of the signed actor proof, ADR 0110) are not, and neither the baseline (it records the row count and
 non-secret key ids only, never a hash of the secret), the manifest (`"actor_proof_keys_data": "excluded"`) nor any log carries them. The exclusion is verified on the very
 stream that is encrypted: `backup.sh` reads its table of contents while it is written and **fails the whole backup** (nothing kept) if a data entry for the table is present.
-The backup credential itself cannot read the secret column (`init-backup-role.sql` grants only `kid, status, created_at, retired_at`; re-run it **after migrations**, because a
-table created later gets the default whole-table `SELECT`; `backup.sh` warns when the role can still read the column). **Physical base backups, snapshots and PITR (section 4.2)
+The exclusion protects the ARTEFACT, not the CREDENTIAL: `igaming_backup` keeps table-level `SELECT` on `actor_proof_keys` (residual R1; `pg_dump` takes `LOCK TABLE` on every dumped
+table, and a column-level grant broke the dump in the drill), so a stolen backup credential can still read the key. Hence section 5a: any exposure of the backup credential means re-keying. **Physical base backups, snapshots and PITR (section 4.2)
 are not affected: they copy the data files and WAL, so they DO contain the live key.** That is deliberate - they stay inside the AWS trust boundary (KMS-encrypted volumes and
 snapshots, no human read path) and are what restores the live key after a total loss; do not copy a physical backup or a snapshot out of that boundary.
 
@@ -253,7 +253,7 @@ its refusals cannot be skipped. Never copy a key through the backup, a ticket or
    It inserts the key with the secret as a **bound parameter** (psql reads the file itself: not in argv, statement text or logs) and refuses: a kid equal to any `--retired-kid`;
    an insecure secret file (not 0600, not owned by you, not on tmpfs for a real target, too short); a non-owner role; **any existing key** (it provisions the first key of a restored
    database; rotating a live key stays `operational-runbooks.md` section 15); statement logging that could capture the parameter (`log_statement` `mod`/`all`,
-   `log_min_duration_statement` >= 0, `log_parameter_max_length_on_error` > 0 - fix the role/parameter group, do not work around). It prints the kid, status, the secret's length and
+   `log_min_duration_statement` >= 0, `log_parameter_max_length_on_error` > 0, `log_transaction_sample_rate` > 0, sampled statement logging, `auto_explain` parameter logging, `pgaudit` with `pgaudit.log_parameter` on - fix the role/parameter group, do not work around). It also requires `--retired-kid` (the source's ids) or an explicit `--first-key`, reads the secret file once from an open descriptor, and inserts atomically (table locked, row inserted only if the table is still empty). It prints the kid, status, the secret's length and
    the SECURITY DEFINER probe result, never the secret. Shred the hex file.
 4. Put the same secret into the application's `ACTOR_PROOF_KEYS` (`<new kid>:<base64>`) and set `ACTOR_PROOF_ACTIVE_KID=<new kid>` from the secret store; **remove the old pair**.
 5. `verify.sh --baseline <baseline.txt> --expect-actor-proof provisioned --actor-proof-kid <new kid> --retired-kid <old kid>`: exactly one ACTIVE key with the new kid, the old ids
@@ -269,9 +269,9 @@ that decision) does, and so does every **physical** artefact (base backup, WAL a
 carries the password hashes. Treat a suspected exposure (lost or unencrypted set, leaked decryption identity or signing key, credential used outside the runner, an
 untrusted restore target) as a security incident and, without waiting for proof:
 
-1. **Rotate the signed-actor-proof keys** if the exposed artefact was a legacy logical set or any physical copy (a current logical set cannot contain them): follow
-   `operational-runbooks.md` section 15 (mint a new `actor_proof_keys` row, switch the application to it, retire the old kid); in-flight proofs under the old key stop verifying, by design.
-   Retire legacy sets rather than keep them.
+1. **Rotate (re-key) the signed-actor-proof key family** after ANY suspected exposure of a legacy logical set, any physical copy, **or the backup credential** (it reads the key, R1); a
+   current logical set alone cannot contain it. Follow `operational-runbooks.md` section 15 (emergency path: new kid, deploy, retire every older kid at once); in-flight proofs under
+   the old key stop verifying, by design. Retire legacy sets rather than keep them (their baselines also hold an md5 over row text that includes the secret).
 2. **Rotate the other signing material that was in or protected next to the dump**: JWT signing secrets, the staff MFA key families, the payout-instrument keys, provider
    credentials and webhook secrets, per their own runbooks; revoke sessions (the dump holds `sessions.refresh_token_hash` and token MACs).
 3. **Reset staff passwords** and force MFA re-enrolment where the staff MFA ciphertext and its key family could both have been reached; player password hashes are

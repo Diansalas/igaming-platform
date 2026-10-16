@@ -246,7 +246,7 @@ PLAIN_SHA="$(cat "${TMPW}/plain.sha" 2>/dev/null || true)"
 for _ in $(seq 1 100); do [ -s "${TMPW}/toc.rc" ] && break; sleep 0.2; done   # the pg_restore --list process substitution may finish just after the pipeline
 [ "$(cat "${TMPW}/toc.rc" 2>/dev/null || echo missing)" = 0 ] || bk_die "could not read the table of contents of the dump stream ($(head -2 "${TMPW}/toc.err" 2>/dev/null | tr '\n' ' ')); the actor-proof exclusion cannot be verified, so no backup is kept"
 grep -q ' TABLE public actor_proof_keys ' "${TMPW}/stream.toc" || bk_die "the dump holds no definition of public.actor_proof_keys (migration 0120 missing, or an unexpected dump); refusing"
-if grep -q ' TABLE DATA public actor_proof_keys ' "${TMPW}/stream.toc"; then
+if grep -q -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' "${TMPW}/stream.toc"; then
   bk_die "the dump stream carries the DATA of public.actor_proof_keys (the actor-proof signing secrets); logical backups must never contain them (ADR 0122 section 10). No backup is kept"
 fi
 APK_DATA=excluded

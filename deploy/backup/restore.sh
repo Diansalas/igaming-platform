@@ -302,8 +302,8 @@ fi
 # them (the table is dumped EMPTY); a LEGACY set (made before the decision) does, and is treated as a signing-material-bearing artefact: its
 # actor_proof_keys rows are skipped here as well, so the restored database always starts with NO actor-proof key.
 APK_LEGACY=0
-grep -q ' TABLE DATA public actor_proof_keys ' "${WORK}/toc.txt" && APK_LEGACY=1
-grep -v -e ' TABLE DATA public database_environment ' -e ' TABLE DATA public actor_proof_keys ' "${WORK}/toc.txt" >"${WORK}/toc.filtered"
+grep -q -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' "${WORK}/toc.txt" && APK_LEGACY=1
+grep -v -e ' TABLE DATA public database_environment ' "${WORK}/toc.txt" | grep -v -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' >"${WORK}/toc.filtered" || true
 SKIPPED=$(( $(grep -c . "${WORK}/toc.txt") - $(grep -c . "${WORK}/toc.filtered") ))
 if [ "$APK_LEGACY" -eq 1 ]; then
   bk_log "WARNING: this set CARRIES actor_proof_keys data (a legacy set made before owner decision 5). The rows are skipped, but the set itself holds signing secrets: handle and retire it as a signing-key-bearing artefact (docs/runbooks/backup-restore-dr.md section 5a) and rotate the actor-proof key family"
