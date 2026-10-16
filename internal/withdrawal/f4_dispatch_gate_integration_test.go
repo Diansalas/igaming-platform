@@ -32,17 +32,6 @@ func f4Record(ctx context.Context, tx pgx.Tx, id uuid.UUID, d withdrawalgate.Dec
 	return RecordDispatchGateDecision(ctx, tx, wr, DispatchStageDispatch, nil, d)
 }
 
-func f4Decisions(t *testing.T, w *a13World, id uuid.UUID) (allowed, denied int) {
-	t.Helper()
-	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE allowed), count(*) FILTER (WHERE NOT allowed)
-			FROM withdrawal_gate_decisions WHERE withdrawal_request_id = $1`, id).Scan(&allowed, &denied)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return allowed, denied
-}
-
 // E7 without an allowing decision of the same transaction is refused WD053, whatever writer performs it, and nothing
 // changes; with one it passes.
 func TestF4_DB_E7_NeedsAnAllowingDecisionOfTheSameTransaction(t *testing.T) {

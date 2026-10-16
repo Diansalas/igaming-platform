@@ -41,7 +41,7 @@ func TestSubmitWithdrawalHandler_F4_DispatchGateDenial_Is409_AndParks(t *testing
 	}
 	mustOpenReviewQueue(t, srv, financeToken.AccessToken)
 	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", financeToken.AccessToken, nil)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("approve withdrawal: status %d", resp.StatusCode)
 	}
@@ -58,7 +58,7 @@ func TestSubmitWithdrawalHandler_F4_DispatchGateDenial_Is409_AndParks(t *testing
 	setStatus(identity.PlayerStatusSuspended)
 	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "bank_transfer"})
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("a dispatch-time gate denial must be 409, got %d: %s", resp.StatusCode, body)
 	}
