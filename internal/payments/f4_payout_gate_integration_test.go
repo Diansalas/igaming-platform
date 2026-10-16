@@ -88,7 +88,9 @@ func (w *f4World) holdBalance(t *testing.T) int64 {
 
 func (w *f4World) setAccount(t *testing.T, s identity.PlayerAccountStatus) {
 	t.Helper()
-	w.tx(t, func(ctx context.Context, tx pgx.Tx) error { return identity.SetPlayerAccountStatus(ctx, tx, w.f.playerAccountID, s) })
+	w.tx(t, func(ctx context.Context, tx pgx.Tx) error {
+		return identity.SetPlayerAccountStatus(ctx, tx, w.f.playerAccountID, s)
+	})
 }
 
 func (w *f4World) addRiskRule(t *testing.T, threshold int64, action risk.RuleAction) {
