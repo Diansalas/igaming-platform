@@ -39,6 +39,11 @@ func registerStaffReconciliationRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, gate(newStaffReconciliationRunsHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/reconciliation/mismatches",
 		staffRoute(deps, stepUpNone, gate(newStaffReconciliationMismatchesHandler(deps))))
+	// A10c (ADR 0114 G5): single-run and single-mismatch reads, same gate and per-stream permission.
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/reconciliation/runs/{runID}",
+		staffRoute(deps, stepUpNone, gate(newStaffReconciliationRunHandler(deps))))
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/reconciliation/mismatches/{mismatchID}",
+		staffRoute(deps, stepUpNone, gate(newStaffReconciliationMismatchHandler(deps))))
 }
 
 // staffStreamPermission is the per-stream read permission. A stream not in it is unknown (400).
@@ -96,6 +101,17 @@ func staffStreamRequest(w http.ResponseWriter, r *http.Request, c staffReadCall)
 	return stream, true
 }
 
+func toStaffReconciliationRunDTO(stream reconciliation.Stream, run reconciliation.Run) staffReconciliationRunDTO {
+	status := string(run.Status)
+	if status != string(reconciliation.StatusClean) && status != string(reconciliation.StatusMismatchesFound) {
+		status = terminalReasonOther
+	}
+	return staffReconciliationRunDTO{
+		ID: run.ID.String(), Stream: string(stream), PeriodStart: run.PeriodStart.UTC().Format(rfc3339),
+		PeriodEnd: run.PeriodEnd.UTC().Format(rfc3339), RunAt: run.RunAt.UTC().Format(rfc3339), Status: status,
+	}
+}
+
 func newStaffReconciliationRunsHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, ok := beginStaffRead(deps, w, r)
@@ -133,14 +149,7 @@ func newStaffReconciliationRunsHandler(deps Deps) http.HandlerFunc {
 			total = count
 			items = make([]staffReconciliationRunDTO, 0, len(runs))
 			for _, run := range runs {
-				status := string(run.Status)
-				if status != string(reconciliation.StatusClean) && status != string(reconciliation.StatusMismatchesFound) {
-					status = terminalReasonOther
-				}
-				items = append(items, staffReconciliationRunDTO{
-					ID: run.ID.String(), Stream: string(stream), PeriodStart: run.PeriodStart.UTC().Format(rfc3339),
-					PeriodEnd: run.PeriodEnd.UTC().Format(rfc3339), RunAt: run.RunAt.UTC().Format(rfc3339), Status: status,
-				})
+				items = append(items, toStaffReconciliationRunDTO(stream, run))
 			}
 			return nil
 		})
@@ -166,7 +175,7 @@ func newStaffReconciliationMismatchesHandler(deps Deps) http.HandlerFunc {
 		q := r.URL.Query()
 		bad := func() { apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid query parameter") }
 		limit, offset, pok := strictPage(q)
-		if !pok || !onlyParams(q, "stream", "status", "kind", "subject_id", "limit", "offset") ||
+		if !pok || !onlyParams(q, "stream", "status", "kind", "subject_id", "run_id", "limit", "offset") ||
 			len(q["limit"]) > 1 || len(q["offset"]) > 1 {
 			bad()
 			return
@@ -210,6 +219,15 @@ func newStaffReconciliationMismatchesHandler(deps Deps) http.HandlerFunc {
 				bad()
 				return
 			}
+		}
+		if q.Has("run_id") {
+			v, one := singleParam(q, "run_id")
+			id, err := uuid.Parse(v)
+			if !one || err != nil || id == uuid.Nil || id.String() != v {
+				bad()
+				return
+			}
+			f.RunID = id
 		}
 		exists, err := c.auditPlatformRead(r.Context(), deps, "reconciliation.platform_read", "reconciliation_mismatch", "",
 			map[string]any{"op": "mismatches", "stream": string(stream)})
@@ -307,4 +325,113 @@ func toStaffReconciliationMismatchDTO(res *assetResolver, stream reconciliation.
 		}
 	}
 	return d
+}
+
+// singleStaffReconciliationID parses the stream and the {pathName} id of a single-item read. Order:
+// tenant/caller (beginStaffRead), stream (400), permission (403), id (400); no query has run.
+func singleStaffReconciliationID(w http.ResponseWriter, r *http.Request, c staffReadCall, pathName string) (reconciliation.Stream, uuid.UUID, bool) {
+	stream, ok := staffStreamRequest(w, r, c)
+	if !ok {
+		return "", uuid.Nil, false
+	}
+	if !onlyParams(r.URL.Query(), "stream") {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid query parameter")
+		return "", uuid.Nil, false
+	}
+	id, err := uuid.Parse(r.PathValue(pathName))
+	if err != nil || id == uuid.Nil || id.String() != r.PathValue(pathName) {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid id")
+		return "", uuid.Nil, false
+	}
+	return stream, id, true
+}
+
+func newStaffReconciliationRunHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, ok := beginStaffRead(deps, w, r)
+		if !ok {
+			return
+		}
+		stream, id, ok := singleStaffReconciliationID(w, r, c, "runID")
+		if !ok {
+			return
+		}
+		exists, err := c.auditPlatformRead(r.Context(), deps, "reconciliation.platform_read", "reconciliation_run", id.String(),
+			map[string]any{"op": "run", "stream": string(stream)})
+		if err != nil {
+			c.logger.Error("staff_reconciliation_audit_failed", "err", err.Error())
+			apierror.Write(w, c.requestID, apierror.CodeInternal, "failed to load reconciliation run")
+			return
+		}
+		if !exists {
+			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
+			return
+		}
+		var dto staffReconciliationRunDTO
+		found := false
+		err = deps.DB.WithTenantReadOnly(r.Context(), c.target, func(ctx context.Context, tx pgx.Tx) error {
+			run, ok, err := reconciliation.GetRunForStream(ctx, tx, stream, id)
+			if err != nil || !ok {
+				return err
+			}
+			found, dto = true, toStaffReconciliationRunDTO(stream, run)
+			return nil
+		})
+		if err != nil {
+			c.logger.Error("staff_reconciliation_run_failed", "err", err.Error())
+			apierror.Write(w, c.requestID, apierror.CodeInternal, "failed to load reconciliation run")
+			return
+		}
+		if !found {
+			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, dto)
+	}
+}
+
+func newStaffReconciliationMismatchHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, ok := beginStaffRead(deps, w, r)
+		if !ok {
+			return
+		}
+		stream, id, ok := singleStaffReconciliationID(w, r, c, "mismatchID")
+		if !ok {
+			return
+		}
+		exists, err := c.auditPlatformRead(r.Context(), deps, "reconciliation.platform_read", "reconciliation_mismatch", id.String(),
+			map[string]any{"op": "mismatch", "stream": string(stream)})
+		if err != nil {
+			c.logger.Error("staff_reconciliation_audit_failed", "err", err.Error())
+			apierror.Write(w, c.requestID, apierror.CodeInternal, "failed to load reconciliation mismatch")
+			return
+		}
+		if !exists {
+			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
+			return
+		}
+		vocab, _ := reconciliation.StaffViewMismatchKinds(stream)
+		var dto staffReconciliationMismatchDTO
+		found := false
+		err = deps.DB.WithTenantReadOnly(r.Context(), c.target, func(ctx context.Context, tx pgx.Tx) error {
+			m, ok, err := reconciliation.GetMismatchForStream(ctx, tx, stream, id)
+			if err != nil || !ok {
+				return err
+			}
+			res := &assetResolver{ctx: ctx, tx: tx, cache: map[string]*resolvedAsset{}}
+			found, dto = true, toStaffReconciliationMismatchDTO(res, stream, vocab, m)
+			return nil
+		})
+		if err != nil {
+			c.logger.Error("staff_reconciliation_mismatch_failed", "err", err.Error())
+			apierror.Write(w, c.requestID, apierror.CodeInternal, "failed to load reconciliation mismatch")
+			return
+		}
+		if !found {
+			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, dto)
+	}
 }

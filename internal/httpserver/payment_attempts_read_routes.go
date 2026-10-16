@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // ADR 0114 slice S2 - R1 (payment attempts list and detail) and R1b (the payout attempt summary on
@@ -43,6 +44,9 @@ func registerPaymentAttemptReadRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newListPaymentAttemptsHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newGetPaymentAttemptHandler(deps))))
+	// A10c (ADR 0114 G2): the verified provider events recorded against one attempt.
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/payment-attempts/{attemptID}/events",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermPaymentForceResolveRead)(newListPaymentAttemptEventsHandler(deps))))
 }
 
 // --- the closed catalogue of terminal reasons ---
@@ -348,15 +352,16 @@ func newListPaymentAttemptsHandler(deps Deps) http.HandlerFunc {
 		}
 		q := r.URL.Query()
 		bad := func() { apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid query parameter") }
-		if !onlyParams(q, "operation", "state", "terminal_reason", "withdrawal_request_id", "limit", "cursor") {
+		if !onlyParams(q, "operation", "state", "terminal_reason", "withdrawal_request_id", "provider_id", "min_age_seconds", "limit", "cursor") {
 			bad()
 			return
 		}
-		var operation, state, reason, wd, cur string
+		var operation, state, reason, wd, cur, provider, minAge string
 		for _, p := range []struct {
 			name string
 			dst  *string
-		}{{"operation", &operation}, {"state", &state}, {"terminal_reason", &reason}, {"withdrawal_request_id", &wd}, {"cursor", &cur}} {
+		}{{"operation", &operation}, {"state", &state}, {"terminal_reason", &reason}, {"withdrawal_request_id", &wd}, {"cursor", &cur},
+			{"provider_id", &provider}, {"min_age_seconds", &minAge}} {
 			v, one := singleParam(q, p.name)
 			if !one {
 				bad()
@@ -369,6 +374,21 @@ func newListPaymentAttemptsHandler(deps Deps) http.HandlerFunc {
 			(q.Has("terminal_reason") && !paymentAttemptTerminalReasons[reason]) {
 			bad()
 			return
+		}
+		// A10c: provider_id is the closed provider-id charset (no wildcard, no pattern); min_age_seconds keeps
+		// the attempts at least that old (created_at <= now() - N s), N within one year.
+		if q.Has("provider_id") && !webhookauth.ValidProviderID(provider) {
+			bad()
+			return
+		}
+		var minAgeSeconds int64 = -1
+		if q.Has("min_age_seconds") {
+			n, err := strconv.ParseInt(minAge, 10, 64)
+			if err != nil || n < 0 || n > 31_536_000 || strconv.FormatInt(n, 10) != minAge {
+				bad()
+				return
+			}
+			minAgeSeconds = n
 		}
 		var wdID uuid.UUID
 		if q.Has("withdrawal_request_id") {
@@ -423,6 +443,12 @@ func newListPaymentAttemptsHandler(deps Deps) http.HandlerFunc {
 		}
 		if wdID != uuid.Nil {
 			add("a.withdrawal_request_id = ?", wdID)
+		}
+		if provider != "" {
+			add("a.provider_id = ?", provider)
+		}
+		if minAgeSeconds >= 0 {
+			add("a.created_at <= now() - make_interval(secs => ?::double precision)", minAgeSeconds)
 		}
 		if after != nil {
 			args = append(args, after.CreatedAt, after.ID)

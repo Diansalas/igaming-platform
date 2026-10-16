@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,19 +39,19 @@ import (
 
 func registerCapabilityRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests",
-		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantRequest)(newCreateCapabilityGrantRequestHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantRequest)(staffIdempotent(deps, newCreateCapabilityGrantRequestHandler(deps)))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/capability-grants/requests",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantRead)(newListCapabilityGrantRequestsHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/cancel",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantRequest)(newCancelCapabilityGrantRequestHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantRequest)(staffIdempotent(deps, newCancelCapabilityGrantRequestHandler(deps)))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/approve",
-		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantApprove)(newDecideCapabilityGrantRequestHandler(deps, "approve"))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantApprove)(staffIdempotent(deps, newDecideCapabilityGrantRequestHandler(deps, "approve")))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/requests/{requestID}/reject",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantApprove)(newDecideCapabilityGrantRequestHandler(deps, "reject"))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantApprove)(staffIdempotent(deps, newDecideCapabilityGrantRequestHandler(deps, "reject")))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/capability-grants",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermCapabilityGrantRead)(newListCapabilityGrantsHandler(deps))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/capability-grants/{grantID}/revoke",
-		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantRevoke)(newRevokeCapabilityGrantHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermCapabilityGrantRevoke)(staffIdempotent(deps, newRevokeCapabilityGrantHandler(deps)))))
 }
 
 // capabilityCall mirrors killSwitchCall exactly - see that type's own doc
@@ -551,16 +552,43 @@ func newRevokeCapabilityGrantHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// totalCountHeader carries the number of rows of the whole K1 list (before ?limit / ?offset).
+const totalCountHeader = "X-Total-Count"
+
+// capabilityListWindow parses the OPTIONAL ?limit=&offset= of the two K1 lists (A10c). Neither present is
+// the legacy behaviour (the whole list, limit 0 = none); the body stays a bare array in every case so an
+// existing client is unaffected. Bad or unknown parameters are 400.
+func capabilityListWindow(w http.ResponseWriter, r *http.Request, c capabilityCall) (limit, offset int, ok bool) {
+	q := r.URL.Query()
+	if len(q) == 0 {
+		return 0, 0, true
+	}
+	l, o, pok := strictPage(q)
+	if !pok || !onlyParams(q, "limit", "offset") || len(q["limit"]) > 1 || len(q["offset"]) > 1 {
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid query parameter")
+		return 0, 0, false
+	}
+	if !q.Has("limit") {
+		l = 0
+	}
+	return l, o, true
+}
+
 func newListCapabilityGrantRequestsHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, ok := beginCapabilityCall(deps, w, r, "list_requests")
 		if !ok {
 			return
 		}
+		limit, offset, ok := capabilityListWindow(w, r, c)
+		if !ok {
+			return
+		}
 		var reqs []capability.Request
+		var total int
 		err := runCapabilityTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
 			var txErr error
-			reqs, txErr = capability.ListRequests(ctx, tx, c.target)
+			reqs, total, txErr = capability.ListRequestsPage(ctx, tx, c.target, limit, offset)
 			return txErr
 		})
 		if err != nil {
@@ -571,6 +599,7 @@ func newListCapabilityGrantRequestsHandler(deps Deps) http.HandlerFunc {
 		for _, req := range reqs {
 			dtos = append(dtos, toCapabilityRequestDTO(staffViewerOf(c.tc), req))
 		}
+		w.Header().Set(totalCountHeader, strconv.Itoa(total))
 		writeJSON(w, http.StatusOK, dtos)
 	}
 }
@@ -581,10 +610,15 @@ func newListCapabilityGrantsHandler(deps Deps) http.HandlerFunc {
 		if !ok {
 			return
 		}
+		limit, offset, ok := capabilityListWindow(w, r, c)
+		if !ok {
+			return
+		}
 		var grants []capability.Grant
+		var total int
 		err := runCapabilityTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
 			var txErr error
-			grants, txErr = capability.ListGrants(ctx, tx, c.target)
+			grants, total, txErr = capability.ListGrantsPage(ctx, tx, c.target, limit, offset)
 			return txErr
 		})
 		if err != nil {
@@ -595,6 +629,7 @@ func newListCapabilityGrantsHandler(deps Deps) http.HandlerFunc {
 		for _, g := range grants {
 			dtos = append(dtos, toCapabilityGrantDTO(staffViewerOf(c.tc), g))
 		}
+		w.Header().Set(totalCountHeader, strconv.Itoa(total))
 		writeJSON(w, http.StatusOK, dtos)
 	}
 }

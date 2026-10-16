@@ -121,6 +121,15 @@ func TestRGCodes_LiteralsAndStatuses(t *testing.T) {
 	}
 }
 
+// A10c: the staff Idempotency-Key codes keep their literal strings and statuses.
+func TestIdempotencyCodes_LiteralsAndStatuses(t *testing.T) {
+	for code, lit := range map[Code]string{CodeIdempotencyMismatch: "IDEMPOTENCY_MISMATCH", CodeIdempotencyInProgress: "IDEMPOTENCY_IN_PROGRESS"} {
+		if string(code) != lit || Status(code) != 409 {
+			t.Errorf("%s: literal %q status %d (want 409)", lit, code, Status(code))
+		}
+	}
+}
+
 func TestWriteWithCheckCodes_CarriesTheClosedCodes(t *testing.T) {
 	rec := httptest.NewRecorder()
 	WriteWithCheckCodes(rec, "r1", CodeLaunchPreconditionFailed, "refused", []string{"H-2:licence_id_required", "R-LIC-VALID"})

@@ -123,6 +123,12 @@ const (
 	CodeLaunchUnavailable                   Code = "LAUNCH_AUTHORISATION_UNAVAILABLE" // 503: the service is not wired in this process
 )
 
+// A10c (ADR 0114 G10): the staff Idempotency-Key wrapper on the K1 / K3 / HSEC mutating routes.
+const (
+	CodeIdempotencyMismatch   Code = "IDEMPOTENCY_MISMATCH"    // 409: the Idempotency-Key was used with a different request
+	CodeIdempotencyInProgress Code = "IDEMPOTENCY_IN_PROGRESS" // 409: a request with this Idempotency-Key is still being processed
+)
+
 // ADR 0115 slice S2 (Responsible Gaming limit write APIs): the closed RG_* vocabulary. Messages are
 // fixed sentences, never the underlying database error text.
 const (
@@ -229,6 +235,7 @@ func httpStatus(c Code) int {
 		CodeKillSwitchReleaseRequestAlreadyOpen, CodeMFAEnrolmentExpired,
 		CodeLastAdmin, CodeLifecycleBusy, CodeLifecycleTransitionInvalid,
 		CodeRGNoChange, CodeRGChangeNotPending, CodeRGCoolingOff, CodeRGConfigMissing, CodeRGPendingCap,
+		CodeIdempotencyMismatch, CodeIdempotencyInProgress,
 		CodeRGIdempotencyMismatch, CodeRGOperatorLoosens, CodeRGNoFloor, CodeRGSelfApproval, CodeRGRequestNotPending, CodeRGGuardRefused:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch, CodePersonRequired,

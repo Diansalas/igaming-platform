@@ -381,52 +381,76 @@ func RevokeGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, re
 // list would silently include every OTHER tenant's requests too, not just
 // the path-named one.
 func ListRequests(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]Request, error) {
+	out, _, err := ListRequestsPage(ctx, tx, tenantID, 0, 0)
+	return out, err
+}
+
+// ListRequestsPage is ListRequests with an optional window (A10c): limit <= 0 means no limit. The second
+// result is the total number of rows for the tenant (before the window). Order is (created_at DESC, id DESC)
+// so a page boundary is stable.
+func ListRequestsPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, limit, offset int) ([]Request, int, error) {
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grant_requests WHERE tenant_id = $1`, tenantID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant_id, grantee_staff_id, grantee_scope, capability, valid_from, valid_until,
 			reason_code, requested_by, requested_by_scope, requested_by_person_id, status, created_at, expires_at
 		FROM staff_capability_grant_requests
 		WHERE tenant_id = $1
-		ORDER BY created_at DESC
-	`, tenantID)
+		ORDER BY created_at DESC, id DESC
+		LIMIT NULLIF($2::int, 0) OFFSET $3::int
+	`, tenantID, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []Request
 	for rows.Next() {
 		var req Request
 		if err := scanRequestRow(rows, &req); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, req)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // ListGrants returns every staff_capability_grants row for tenantID,
 // visible under the caller's own RLS scope, most recently granted first.
 // tenantID is required (K1-C1 - see ListRequests's identical rationale).
 func ListGrants(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]Grant, error) {
+	out, _, err := ListGrantsPage(ctx, tx, tenantID, 0, 0)
+	return out, err
+}
+
+// ListGrantsPage is ListGrants with an optional window (A10c); see ListRequestsPage.
+func ListGrantsPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, limit, offset int) ([]Grant, int, error) {
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grants WHERE tenant_id = $1`, tenantID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant_id, grantee_staff_id, grantee_scope, capability, request_id, approval_id,
 			valid_from, valid_until, granted_at, revoked_at, revoked_by, revoked_by_scope, revoke_reason_code
 		FROM staff_capability_grants
 		WHERE tenant_id = $1
-		ORDER BY granted_at DESC
-	`, tenantID)
+		ORDER BY granted_at DESC, id DESC
+		LIMIT NULLIF($2::int, 0) OFFSET $3::int
+	`, tenantID, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []Grant
 	for rows.Next() {
 		var g Grant
 		if err := scanGrantRow(rows, &g); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, g)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 type scannable interface {

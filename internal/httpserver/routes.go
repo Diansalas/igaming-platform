@@ -183,6 +183,7 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerPaymentAttemptReadRoutes(mux, deps)
 	registerStaffReconciliationRoutes(mux, deps)
 	registerWithdrawalHoldResolutionRoutes(mux, deps) // HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 s6, migration 0124)
+	registerWithdrawalHoldCandidateRoutes(mux, deps)  // A10c: R3 hold-candidate list (read only)
 	// B13 (ADR 0111 2.9): payout instruments.
 	registerPayoutInstrumentRoutes(mux, deps)
 	// ADR 0112 slice 4: launch authorisation (tenant and brand status governance).
