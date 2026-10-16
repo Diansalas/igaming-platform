@@ -627,3 +627,65 @@ first bound on its payout attempt, so the attempt leg already covers it; the leg
   not a withdrawal request of the tenant (casino, sportsbook and deposit tombstones are unaffected; the full batch is
   green). (b) `ErrProviderReferenceTaken` is returned only when the key lookup finds no row (a true replay still
   returns `AlreadyPosted`). (c) The late-success cell posts nothing and changes no state.
+
+## 12. Security re-check of the fix round (SR5R, `security`, 2026-10-16)
+
+Scope: `13b1db5..33a52e8` only (WD027, principal-scoped decision, late-success cell, return-reference refusal and
+`ledger.ErrProviderReferenceTaken`, active-only quorum, pinned search_path, HTTP tests). Evidence: private scratch
+database `sr5_a5b` (dropped after the run). Re-ran `-run 'TestA5|TestMigration0162|TestMigration0163|TestStaffRoutes|TestStepUp_GoldenTable'`
+over payments, withdrawal, reconciliation, rg, casino, adjustment, httpserver (7/7 ok, 43 top-level PASS, 0 FAIL, 0 SKIP)
+and the full integration packages casino, sportsbook, ledger (3/3 ok; they are the other tombstone writers and Post callers
+affected by the new typed error). One throwaway probe was run and deleted.
+
+### 12.1 Verified
+
+- **WD027** (immediate AFTER INSERT on `ledger_transactions`, pinned search_path, not SECURITY DEFINER): counts distinct
+  Persons over `reverse` rows of ONE digest whose voter is active, linked and holds an in-force
+  `payment_force_resolve:approve` grant (`ledger_adjustment_eligible_grant` re-checks status, Person = grant-request Person,
+  eligible role). Grants are only visible in a principal-scoped tenant session (0112 `tenant_scope_select`), so a session
+  without `app.principal_id` fails CLOSED. Grants themselves are minted only through the proof-bound K1 flow (ADR 0110 T1/T2
+  closed), so a runtime-credential forger needs two real grant holders (the R1 class, not a new hole). The other tombstone
+  writers (deposit: fresh `uuid.New()` correlation; casino: round correlation; sportsbook: `bet.ID`) cannot name a
+  withdrawal request, so the fast exit cannot be abused by them, and their integration packages are green.
+- **Principal scope** (`alerting.NewPrincipalRunner` -> `WithPrincipalScope(tenant, ApproverID)`): `ApproverID` is the verified
+  token subject (the handler's `staffID`); the eligibility closure still refuses an approver that is not the authenticated actor;
+  the tenant comes from the token and `RequireTenantScope`; another tenant's staff is invisible under tenant RLS. One staff member
+  therefore cannot act in another's scope. I enumerated every RLS policy that requires `app.principal_id IS NULL`: on the payment
+  path only `payout_park_evidence` and `payment_attempt_reference_evidence` (system-only insert/select). The decision path
+  (`LockForPayoutEvidence`, attempt locks, `ApplyDisputeFromNonTerminal`, `withdrawal.Fail`, `ledger.Post`, audit, alert raise)
+  touches neither; a future write to them from this path would fail closed (RLS refusal), not open. Policies that key on a present
+  principal (K2/K3/K1 tables, kill-switch session) only widen reads or add actor checks, none on this path's writes.
+- **Late success** after a tombstone branch: one audit row per new observation (`OutcomeDenied`, ids + the provider-reported
+  reference; no PII), a DISTINCT P1 raised last, nothing posted, no state change; tested on all three success sources.
+- **Typed 409 / `ErrProviderReferenceTaken`**: returned only when the key lookup finds no row (a true replay is still
+  `AlreadyPosted`). The HTTP body is a fixed message; the error string carries only the provider id and reference (identifiers
+  the same-tenant finance caller supplied or already sees), no secrets or PII. Before this change the branch wrapped
+  `pgx.ErrNoRows`; no caller relied on that (no `ErrNoRows` check after `ledger.Post` in casino, sportsbook, bonus, payments,
+  wallet, adjustment), and the affected packages are green. The pre-check (`returnReferenceFree`) reveals only that a reference is
+  held for that provider inside the caller's own tenant (RLS).
+- **Active-only quorum**: Go count and WD026 filter `su.status = 'active'`; check D's twin deliberately does not (no false P1 for a
+  voter suspended after a legitimate reversal): accepted.
+- SR5-6 pinned (catalog test); SR5-7 HTTP tests present (platform_admin 403, beneficiary 403 + one Denied row, held reference 409).
+
+### 12.2 New findings
+
+| # | Severity | Finding |
+|---|---|---|
+| SR5R-1 | LOW | **A pre-existing tombstone on the payout reference skips WD027 and the late-success cell.** Probe: a deposit-style tombstone (fresh correlation id, same key `tombstone:<provider>:<ref>`) on a pending payout's reference; two grant holders then decide -> `tombstoned_hold_released`, request `failed`, and ZERO request-correlated tombstones, because the branch's `ledger.Post` is a replay (tombstone correlation is exempt from the replay comparison), so no row is inserted and WD027 never fires. The Go grant gate still applied (a non-holder was refused), so this removes the database backstop only. It also means the late-success cell (which looks up the tombstone by request correlation) and `isExecutedReversalReplay` will not recognise this branch. Precondition: a provider-originated deposit-reversal event naming the payout's reference, or the R1 class. Fix: in `reversePayoutBeforeCompletion`, refuse when `posted.AlreadyPosted` (or when any tombstone already exists on (provider, original reference)) with `ErrPayoutReversalAttemptInconsistent`, before or instead of releasing the hold. |
+| SR5R-2 | INFO | The status-poll and lost-CAS hooks call the late-success cell with `newReceipt = true`, so every repeated poll writes another audit row (tested as "+1 per poll"). This is audit noise, not a security issue; the P1 is deduplicated. |
+
+### 12.3 R1 open-row proposal (11.3): adequate, with two additions
+
+The proposal binds the right thing: actor, `tenant` scope, request-id target and the existing digest that WD026/WD027 group by.
+WD026/WD027 and the check-D twin will count only proof-bound rows. It also closes ADR 0113 9.3 in the same amendment and
+correctly records that this needs owner authorization (ADR 0110 T8). Add: (1) the proof-bound guard must be the LAST BEFORE ROW
+trigger on `withdrawal_approvals` (the `zz_` ordering rule and its catalog pin, ADR 0110 s3); and (2) the E10 hold release of the
+tombstone branch is not itself bound (WD027 binds the tombstone row only, and a runtime session can still reach E10 through
+the ordinary fail path, ADR 0110 T5). Record that the amendment does not close T5. The row must stay OPEN and gate any
+real-money payout reversal.
+
+### 12.4 Verdict
+
+**APPROVE for the MOCK-only merge.** SR5-1, SR5-3, SR5-4, SR5-6 and SR5-7 are closed as described. SR5-2 / R1 stays OPEN
+under 11.3 (plus 12.3) as a real-money launch blocker. SR5R-1 (LOW) should be fixed or registered before real money. SR5-5 is
+with the owner (11.4). Not a declaration that the feature is secure: scope as stated above.
