@@ -13,7 +13,8 @@
 //     binding guard (0126) still runs unless the caller is an owner tamper plant inside
 //     pitest.WithoutBindingGuard.
 //   - Advance walks the REAL transitions through the Go writers in internal/withdrawal
-//     (MoveToPendingReview, MarkSubmittedPending, AttachProviderReference, Complete, Fail, Cancel). E3
+//     (MoveToPendingReview, MarkSubmittedPending, AttachProviderReference, Complete, Fail, Cancel). E7
+//     first records a fixture ALLOW of the WD-RG-1 dispatch gate (F4, migration 0169 WD053). E3
 //     and E4 are the two exceptions, driven as the same legal database edge withdrawal.Approve /
 //     withdrawal.Reject produce (an AUTOMATED approve / reject record, then the UPDATE and, for E4,
 //     the `:rejected` release leg) because the Go writers resolve a four-eyes policy and a
@@ -40,6 +41,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
 
 // Spec is one request to create. Zero ID / IdempotencyKey are generated. InstrumentID and Fingerprint
@@ -160,7 +162,14 @@ func Advance(ctx context.Context, tx pgx.Tx, id uuid.UUID, target withdrawal.Sta
 		case wr.State == withdrawal.StatePendingReview:
 			step = approveE3(ctx, tx, wr)
 		case wr.State == withdrawal.StateApproved:
-			step = withdrawal.MarkSubmittedPending(ctx, tx, id, spec.ProviderID)
+			// F4 (migration 0169): E7 needs an allowing WD-RG-1 dispatch decision of the same transaction. The
+			// fixture RECORDS one (like Plant, it skips the Go-layer gate evaluation these fixtures do not
+			// test); the database still re-checks the RG half (WD052: account and wallet active, no negative
+			// balance) at the transition.
+			step = withdrawal.RecordDispatchGateDecision(ctx, tx, wr, withdrawal.DispatchStageDispatch, nil, withdrawalgate.Decision{Allowed: true, Outcome: "allow"})
+			if step == nil {
+				step = withdrawal.MarkSubmittedPending(ctx, tx, id, spec.ProviderID)
+			}
 			if step == nil && spec.ProviderReference != "" {
 				step = withdrawal.AttachProviderReference(ctx, tx, id, spec.ProviderReference)
 			}

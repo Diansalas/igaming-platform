@@ -1904,7 +1904,12 @@ paths:
         the destination gate refuses; the request stays `approved`, no
         attempt is created and no provider is called. The 200 body is
         returned also when the claim was denied by the payout KYC gate (no
-        provider is called).
+        provider is called). The withdrawal RG/risk gate (WD-RG-1) is
+        re-evaluated at dispatch under the request-time rules: a refusal is
+        409 conflict with a generic message (the request stays `approved`
+        with its hold, no attempt, no provider call; the reason is only in
+        the audit record), and an evaluation that cannot decide is 503
+        (nothing written, retry).
       security:
         - bearerAuth: []
       parameters:
@@ -1936,8 +1941,10 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           description: >
-            conflict (not approved and ready), PAYOUT_DESTINATION_NOT_USABLE
-            (the request stays `approved`), or TENANT_OR_BRAND_NOT_ACTIVE.
+            conflict (not approved and ready, or held by the withdrawal
+            RG/risk gate at dispatch; the request stays `approved`),
+            PAYOUT_DESTINATION_NOT_USABLE (the request stays `approved`), or
+            TENANT_OR_BRAND_NOT_ACTIVE.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

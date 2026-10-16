@@ -37,10 +37,11 @@ package withdrawal
 // a risk rule, and an RG-status backstop is a recorded residual); they are the closed reason vocabulary of
 // the denial audit record and of GateDeniedError.
 //
-// NOT covered (recorded residual): the payout dispatch (payments T1p/T2) does not re-run this gate, so a
-// risk rule or an account status that changes between the request and the dispatch is not re-evaluated
-// there. The ADR 0082 N1 note applies: such a re-check would need the L0.4 lock before the
-// withdrawal_requests lock.
+// Dispatch (F4, closes A6 residual 4 / SR6 I-2): the payout dispatch points that lead to a NEW Withdraw
+// call (payments T1p, T2, T12) re-run this same gate before their L1 lock (ADR 0082 N1), and migration
+// 0169 backstops them in the database: see dispatchgate.go. Because the database cannot evaluate a risk
+// rule, the WD050 / WD051 codes themselves stay application-level; the backstop's own SQLSTATEs are
+// WD052 (the RG half re-checked in SQL) and WD053 (no allowing decision recorded in the transaction).
 
 import (
 	"context"

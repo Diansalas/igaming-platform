@@ -277,6 +277,12 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 	// B13-B (ADR 0102 7.7, security re-pin): this transaction can raise the B12 destination P1 (destinationGateAndEscalate),
 	// so it opens through alerting.InTx and flushes after the commit, like escalateAmbiguousPayout.
 	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
+		// F4: the WD-RG-1 gate BEFORE the L1 lock (its L0.4 / L0.5 advisories; ADR 0082 A7-N1). A failure rolls
+		// this tick back: no send, retried on a later tick.
+		gateDecision, err := s.evaluateRedispatchGate(actx, tx, attempt)
+		if err != nil {
+			return err
+		}
 		wr, err := lockSubmittedRequest(actx, tx, *attempt.WithdrawalRequestID)
 		if err != nil {
 			return err
@@ -293,6 +299,12 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 		if err != nil || blocked {
 			return err
 		}
+		// F4: a WD-RG-1 denial escalates (T16: no resend, no release); an allow records the decision row the
+		// 0169 backstop requires before the attempt's created|ambiguous -> submitting.
+		allowed, err = applyRedispatchGate(actx, tx, wr, attempt, gateDecision, nextPoll)
+		if err != nil || !allowed {
+			return err
+		}
 		// B13-B (ADR 0111 2.4 "T2 re-claim / T12 resend"): the destination gate and the tiering
 		// predicate on the exact adapter, next to the KYC gate. Failure escalates (T16): no
 		// resend, no release. The destination is never re-resolved.
@@ -306,7 +318,7 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 		}
 		claimToken := uuid.New()
 		if err := ClaimCreatedForSubmission(actx, tx, attempt.ID, *attempt.ProviderID, claimToken, "sweeper-payout-reclaim", time.Now().Add(payoutResubmitLease)); err != nil {
-			return err
+			return withdrawal.TranslateDispatchBackstopError(err)
 		}
 		claimed, err = GetAttemptByID(actx, tx, attempt.ID)
 		return err
@@ -383,6 +395,12 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 	// B13-B (ADR 0102 7.7, security re-pin): this transaction can raise the B12 destination P1 (destinationGateAndEscalate),
 	// so it opens through alerting.InTx and flushes after the commit, like escalateAmbiguousPayout.
 	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
+		// F4: the WD-RG-1 gate BEFORE the L1 lock (its L0.4 / L0.5 advisories; ADR 0082 A7-N1). A failure rolls
+		// this tick back: no send, retried on a later tick.
+		gateDecision, err := s.evaluateRedispatchGate(actx, tx, attempt)
+		if err != nil {
+			return err
+		}
 		wr, err := lockSubmittedRequest(actx, tx, *attempt.WithdrawalRequestID)
 		if err != nil {
 			return err
@@ -400,6 +418,12 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 		if err != nil || blocked {
 			return err
 		}
+		// F4: a WD-RG-1 denial escalates (T16: no resend, no release); an allow records the decision row the
+		// 0169 backstop requires before the attempt's created|ambiguous -> submitting.
+		allowed, err = applyRedispatchGate(actx, tx, wr, attempt, gateDecision, nextPoll)
+		if err != nil || !allowed {
+			return err
+		}
 		// B13-B (ADR 0111 2.4 "T2 re-claim / T12 resend"): the destination gate and the tiering
 		// predicate on the exact adapter, next to the KYC gate. Failure escalates (T16): no
 		// resend, no release. The destination is never re-resolved.
@@ -413,7 +437,7 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 		}
 		claimToken := uuid.New()
 		if err := ResubmitAmbiguous(actx, tx, attempt.ID, claimToken, "sweeper-payout-resubmit", time.Now().Add(payoutResubmitLease), s.maxResubmits()); err != nil {
-			return err
+			return withdrawal.TranslateDispatchBackstopError(err)
 		}
 		claimed, err = GetAttemptByID(actx, tx, attempt.ID)
 		return err

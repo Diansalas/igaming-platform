@@ -166,6 +166,14 @@ const KindAMLHoldEvalFailed Kind = "aml.hold_eval_failed"
 // principal. Attributes: phase (closed set) and sqlstate_class. Never the error text.
 const KindReconciliationSweepFailed Kind = "reconciliation.sweep_failed"
 
+// KindWithdrawalPayoutGateDenied is the F4 (migration 0169) Kind: the WD-RG-1 withdrawal RG/risk gate, re-run at payout
+// dispatch (T1p) or re-dispatch (the sweeper's T2 / T12), REFUSED a payout that was allowed at request time. No money
+// moved: a T1p denial leaves the request `approved` with its hold, a T2 / T12 denial escalates the attempt (T16). Raised
+// in-tx by internal/payments as the last statement of the denial transaction. Attributes are closed codes only (gate
+// code, reason code, stage): never an amount, an account or a person. Severity p2 is an ENGINEERING DEFAULT
+// (ALERT-DELIVERY-1 OPEN: nobody is paged).
+const KindWithdrawalPayoutGateDenied Kind = "withdrawal.payout_gate_denied"
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -275,6 +283,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindAMLHoldEvalFailed, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("operation"),
+	},
+	KindWithdrawalPayoutGateDenied: {
+		Kind: KindWithdrawalPayoutGateDenied, Severity: SeverityP2, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("gate_code", "reason_code", "stage"),
 	},
 	KindReconciliationSweepFailed: {
 		Kind: KindReconciliationSweepFailed, Severity: SeverityP1, Scope: ScopeKindPlatform,
