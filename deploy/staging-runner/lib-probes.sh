@@ -1,19 +1,30 @@
 #!/usr/bin/env bash
 # The denied-probe pack of the backup role (plan 5.3, ADR 0122 sections 3 and 5b): 15 write / escalation probes that MUST be denied,
-# then 8 abuse-primitive probes that harden-backup-surface.sql denies. SOURCED by modes/backup-restore-drill.sh and
-# modes/probe-backup-role.sh. Every probe runs as igaming_backup (IAM database authentication on RDS) in its OWN connection inside
+# then 9 abuse-primitive probes that harden-backup-surface.sql denies. SOURCED by modes/backup-restore-drill.sh, modes/pitr-verify.sh and
+# modes/probe-backup-role.sh. Every probe runs as igaming_backup (IAM database authentication on RDS) in its OWN connection:
+#   SET statement_timeout / SET lock_timeout (bounded: a probe that unexpectedly blocks cannot hang the task), then
 #   BEGIN READ WRITE; <statement>; ROLLBACK
 # (READ WRITE so the role's read-only session default cannot be what denies it; ROLLBACK so a probe that unexpectedly SUCCEEDS cannot
-# change anything that is transactional). One RESULT per probe:
-#   PASS     denied, and by a privilege error (permission denied / must be owner / must be superuser / only roles with ...);
-#   FAIL     the statement SUCCEEDED (a privilege the backup role must not have);
-#   FINDING  the statement failed for another reason (not a privilege error: the probe itself may need updating), or, for the abuse
-#            primitives only, succeeded because the environment recorded that harden-backup-surface.sql was refused (EXPECT_HARDENING=refused:
-#            a residual per ADR 0122 section 5b, not a script failure).
+# change anything that is transactional).
+#
+# FAIL CLOSED (SRP3-2). The verdict comes from the SQLSTATE (psql -v VERBOSITY=sqlstate), never from message text:
+#   PASS     the ONLY privilege-denied SQLSTATEs: 42501 insufficient_privilege, 0L000 invalid_grantor, 0LP01 invalid_grant_operation. The two
+#            connect probes (a CONNECT denial happens before psql can report a SQLSTATE) accept exactly the server's CONNECT-privilege
+#            message ("permission denied for database", "User does not have CONNECT privilege");
+#   FAIL     the statement SUCCEEDED, or (write/escalation probes) it failed with any OTHER SQLSTATE: such an error is raised only AFTER the
+#            privilege check passed (constraint, missing object, timeout, ...), so the role holds the privilege;
+#   FINDING  an abuse-primitive probe that failed with another SQLSTATE (the probe may need updating), or succeeded because the environment
+#            recorded that harden-backup-surface.sql was refused (EXPECT_HARDENING=refused: a residual per ADR 0122 section 5b);
+#   BLOCKED  the probe could not run (connection or credential failure): it is not a pass.
+# Completeness: rn_probe_pack counts the probes that actually ran (PASS, FAIL or FINDING). If fewer than all ran, probe_pack_complete is a
+# FAIL, so a dead connection can never end in a zero-PASS exit 0.
 
 # shellcheck shell=bash
 
-RN_PRIV_RE='permission denied|must be owner|must be superuser|only roles with|insufficient[ _]privilege|must have the [A-Z]+ attribute|permission to'
+RN_PROBE_RAN=0
+RN_PROBE_EXPECTED=0
+RN_PROBE_TIMEOUT_STMT="15s"
+RN_PROBE_TIMEOUT_LOCK="5s"
 
 # name|database|statement
 RN_WRITE_PROBES=(
@@ -35,6 +46,7 @@ RN_WRITE_PROBES=(
 )
 RN_ABUSE_PROBES=(
   "pg_advisory_lock|*|SELECT pg_advisory_lock(42)"
+  "pg_advisory_lock_two_key|*|SELECT pg_advisory_lock(42, 43)"
   "pg_try_advisory_lock|*|SELECT pg_try_advisory_lock(42)"
   "pg_advisory_xact_lock|*|SELECT pg_advisory_xact_lock(42)"
   "pg_logical_emit_message|*|SELECT pg_logical_emit_message(false, 'x', 'y')"
@@ -44,44 +56,82 @@ RN_ABUSE_PROBES=(
   "connect_template1|template1|SELECT 1"
 )
 
+# rn_probe_sqlstate <errfile> : the SQLSTATE psql reported ("ERROR:  42501" under VERBOSITY=sqlstate), or empty
+rn_probe_sqlstate() { sed -n 's/^\(ERROR\|FATAL\):  \([0-9A-Z]\{5\}\)$/\2/p' "$1" 2>/dev/null | head -1; }
+
+# rn_probe_privilege_state <sqlstate> : 0 when it is one of the privilege-denied states
+rn_probe_privilege_state() { case "$1" in 42501|0L000|0LP01) return 0 ;; *) return 1 ;; esac; }
+
+# rn_probe_verdict <class> <hard> <rc> <errfile> <name> <stmt>  ->  prints "STATUS|detail" (pure classification; unit-testable)
+rn_probe_verdict() {
+  local class="$1" hard="$2" rc="$3" err="$4" name="$5" stmt="$6" st first
+  first="$(rn_first_line "$err")"
+  st="$(rn_probe_sqlstate "$err")"
+  case "$rc" in
+    0)
+      if [ "$class" = abuse ] && [ "$hard" = refused ]; then
+        printf 'FINDING|NOT denied: RESIDUAL (ADR 0122 section 5b): harden-backup-surface.sql was refused by RDS, so the backup credential can still do this'
+      else
+        printf 'FAIL|NOT denied: the backup role could execute: %s' "$stmt"
+      fi
+      return 0 ;;
+    1|3)
+      # psql -c exits 1 when the statement fails (3 for scripts); 1 is also psql's own fatal error. The SQLSTATE line tells them apart: no
+      # SQLSTATE at exit 1 means the statement never reached the server's error path.
+      if [ "$rc" = 1 ] && [ -z "$st" ]; then printf 'BLOCKED|the probe did not run (client exit 1, no SQLSTATE): %s' "$first"; return 0; fi
+      if rn_probe_privilege_state "$st"; then printf 'PASS|denied (SQLSTATE %s)' "$st"; return 0; fi
+      if [ "$class" = write ]; then
+        printf 'FAIL|failed with SQLSTATE %s, which is not a privilege error: the error is raised only after the privilege check passed, so the role holds the privilege (or the probe is stale): %s' "${st:-unknown}" "$first"
+      else
+        printf 'FINDING|failed with SQLSTATE %s, which is not a privilege error (the probe may need updating): %s' "${st:-unknown}" "$first"
+      fi
+      return 0 ;;
+    2)
+      if [ "${name#connect_}" != "$name" ] && grep -qiE 'permission denied for database|User does not have CONNECT privilege' "$err"; then
+        printf 'PASS|CONNECT denied: %s' "$first"; return 0
+      fi
+      printf 'BLOCKED|could not connect as the backup role, so the probe did not run: %s' "$first"; return 0 ;;
+    *)
+      printf 'BLOCKED|the probe did not run (client exit %s): %s' "$rc" "$first"; return 0 ;;
+  esac
+}
+
 # rn_run_probe <name> <database> <statement> <class> <expect_hardening>   (class: write | abuse)
 rn_run_probe() {
-  local name="$1" db="$2" stmt="$3" class="$4" hard="$5" err first
+  local name="$1" db="$2" stmt="$3" class="$4" hard="$5" err rc=0 v
   [ "$db" != '*' ] || db="$DB_NAME"
   err="${RN_SCRATCH}/probe.${name}.err"
-  if rn_psql backup "$db" -c "BEGIN READ WRITE; ${stmt}; ROLLBACK" >/dev/null 2>"$err"; then
-    if [ "$class" = abuse ] && [ "$hard" = refused ]; then
-      rn_result "probe_${class}_${name}" FINDING "NOT denied: RESIDUAL (ADR 0122 section 5b): harden-backup-surface.sql was refused by RDS, so the backup credential can still do this"
-    else
-      rn_result "probe_${class}_${name}" FAIL "NOT denied: the backup role could execute: ${stmt}"
-    fi
-    return 0
-  fi
-  first="$(rn_first_line "$err")"
-  if grep -qiE "$RN_PRIV_RE" "$err"; then
-    rn_result "probe_${class}_${name}" PASS "denied: ${first}"
-  elif grep -qiE 'password authentication failed|no pg_hba|PAM authentication failed|could not connect|connection refused|timeout expired|SSL' "$err" && [ "$class" != abuse ]; then
-    rn_result "probe_${class}_${name}" BLOCKED "could not connect as the backup role, so the probe did not run: ${first}"
-  else
-    rn_result "probe_${class}_${name}" FINDING "failed, but not by a privilege error (the probe may need updating): ${first}"
-  fi
+  rn_psql backup "$db" -v VERBOSITY=sqlstate \
+    -c "SET statement_timeout = '${RN_PROBE_TIMEOUT_STMT}'" -c "SET lock_timeout = '${RN_PROBE_TIMEOUT_LOCK}'" \
+    -c "BEGIN READ WRITE; ${stmt}; ROLLBACK" >/dev/null 2>"$err" || rc=$?
+  v="$(rn_probe_verdict "$class" "$hard" "$rc" "$err" "$name" "$stmt")"
+  case "${v%%|*}" in PASS|FAIL|FINDING) RN_PROBE_RAN=$((RN_PROBE_RAN + 1)) ;; esac
+  rn_result "probe_${class}_${name}" "${v%%|*}" "${v#*|}"
 }
 
 # rn_probe_pack <expect_hardening: applied|refused|unknown>
 rn_probe_pack() {
   local hard="${1:-applied}" p name db stmt
+  RN_PROBE_RAN=0
+  RN_PROBE_EXPECTED=$(( ${#RN_WRITE_PROBES[@]} + ${#RN_ABUSE_PROBES[@]} ))
   for p in "${RN_WRITE_PROBES[@]}"; do IFS='|' read -r name db stmt <<<"$p"; rn_run_probe "$name" "$db" "$stmt" write "$hard"; done
   for p in "${RN_ABUSE_PROBES[@]}"; do IFS='|' read -r name db stmt <<<"$p"; rn_run_probe "$name" "$db" "$stmt" abuse "$hard"; done
+  if [ "$RN_PROBE_RAN" -eq "$RN_PROBE_EXPECTED" ]; then
+    rn_result probe_pack_complete PASS "all ${RN_PROBE_EXPECTED} probes ran"
+  else
+    rn_result probe_pack_complete FAIL "only ${RN_PROBE_RAN} of ${RN_PROBE_EXPECTED} probes ran (the rest were BLOCKED: no connection or credential): the denial of the backup role is NOT demonstrated"
+  fi
 }
 
 # rn_backup_role_attributes : the role as the role sees itself (plan 5.2): NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 2,
 # memberships only rds_iam (IAM authentication on RDS) or none
 rn_backup_role_attributes() {
   local a
-  if ! a="$(rn_psql backup "$DB_NAME" -F, -c "SELECT rolsuper::int, rolbypassrls::int, rolcreatedb::int, rolcreaterole::int, rolreplication::int, rolconnlimit, COALESCE((SELECT string_agg(g.rolname, '+' ORDER BY g.rolname) FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid), 'none'), COALESCE(rolvaliduntil::text, 'none') FROM pg_roles r WHERE rolname = 'igaming_backup'" 2>"${RN_SCRATCH}/attrs.err")"; then
+  if ! a="$(rn_psql backup "$DB_NAME" -F, -c "SET statement_timeout = '${RN_PROBE_TIMEOUT_STMT}'" -c "SET lock_timeout = '${RN_PROBE_TIMEOUT_LOCK}'" -c "SELECT rolsuper::int, rolbypassrls::int, rolcreatedb::int, rolcreaterole::int, rolreplication::int, rolconnlimit, COALESCE((SELECT string_agg(g.rolname, '+' ORDER BY g.rolname) FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid), 'none'), COALESCE(rolvaliduntil::text, 'none') FROM pg_roles r WHERE rolname = 'igaming_backup'" 2>"${RN_SCRATCH}/attrs.err")"; then
     rn_result backup_role_attributes BLOCKED "cannot read the role's own attributes as igaming_backup: $(rn_first_line "${RN_SCRATCH}/attrs.err")"
     return 0
   fi
+  a="$(printf '%s\n' "$a" | grep -v '^SET$' | head -1)"
   case "$a" in
     0,1,0,0,0,2,none,*|0,1,0,0,0,2,rds_iam,*) rn_result backup_role_attributes PASS "NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 2; membership: $(printf '%s' "$a" | cut -d, -f7); valid until: $(printf '%s' "$a" | cut -d, -f8)" ;;
     *) rn_result backup_role_attributes FAIL "unexpected attributes (super,bypassrls,createdb,createrole,replication,connlimit,member-of,valid-until): ${a}" ;;

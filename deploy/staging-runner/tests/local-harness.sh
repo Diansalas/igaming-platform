@@ -44,7 +44,7 @@ cmd_up() {
   cl_start src "$port"
   mkdir -p "${DRILL_ROOT}/bin" "${DRILL_ROOT}/scratch"
   chmod 700 "${DRILL_ROOT}/bin" "${DRILL_ROOT}/scratch"
-  ( cd "$REPO_ROOT" && for c in cmd/migrate cmd/seed-market cmd/seed-admin deploy/backup/restorecheck deploy/backup/scramhash; do go build -o "${DRILL_ROOT}/bin/$(basename "$c")" "./$c"; done )
+  ( cd "$REPO_ROOT" && for c in cmd/migrate cmd/seed-market cmd/seed-staging-world cmd/seed-admin deploy/backup/restorecheck deploy/backup/scramhash; do go build -o "${DRILL_ROOT}/bin/$(basename "$c")" "./$c"; done )
   export SCRAMHASH_BIN="${DRILL_ROOT}/bin/scramhash"
   prov_roles src "$port"
   local ipw spw
@@ -57,6 +57,10 @@ cmd_up() {
 ALTER ROLE postgres WITH PASSWORD :'pw';
 SQL
   printf '%s' "$spw" >"${DRILL_ROOT}/secrets/super.pw"; chmod 600 "${DRILL_ROOT}/secrets/super.pw"
+  # throwaway staff MFA key families for the seed-world mode (two distinct random families, 48 bytes each)
+  printf 'stg-v1:%s' "$(head -c 48 /dev/urandom | base64 -w0)" >"${DRILL_ROOT}/secrets/mfa-factor.key"
+  printf 'stg-v1:%s' "$(head -c 48 /dev/urandom | base64 -w0)" >"${DRILL_ROOT}/secrets/mfa-mac.key"
+  chmod 600 "${DRILL_ROOT}/secrets/mfa-factor.key" "${DRILL_ROOT}/secrets/mfa-mac.key"
   {
     printf 'HARNESS_ROOT=%q\n' "$DRILL_ROOT"
     printf 'HARNESS_PORT=%q\n' "$port"
@@ -79,6 +83,10 @@ cmd_run() {
   local mode="${1:?mode}"; shift
   local -a kv=("$@")
   local scratch="${HARNESS_ROOT}/scratch"
+  # HARNESS_ENTRY=entrypoint.sh runs the entrypoint directly (without boot.sh) to test its own hardening; the default is the image's ENTRYPOINT, boot.sh under sh
+  local entry="${HARNESS_ENTRY:-boot.sh}" runner=(sh) entry_path
+  [ "$(basename "$entry")" = boot.sh ] || runner=(bash)
+  case "$entry" in /*) entry_path="$entry" ;; *) entry_path="${REPO_ROOT}/deploy/staging-runner/${entry}" ;; esac
   # a clean environment: only what the ECS task definition would provide, plus the explicit local-harness switches
   env -i PATH="$PATH" HOME="${HOME:-/root}" \
     APP_ENV="${HARNESS_APP_ENV:-development}" RUNNER_ALLOW_LOCAL=local-test-harness RN_ROOT="$REPO_ROOT" RN_BIN="${HARNESS_ROOT}/bin" \
@@ -86,9 +94,11 @@ cmd_run() {
     RDS_HOST=127.0.0.1 RDS_PORT="$HARNESS_PORT" DB_NAME="$SRC_DB_NAME" DB_MASTER_USER=postgres DB_OWNER_USER=igaming DB_RUNTIME_USER=igaming_runtime \
     DB_MASTER_PASSWORD="$(cat "${HARNESS_ROOT}/secrets/super.pw")" DB_OWNER_PASSWORD="$(pw_of igaming)" DB_RUNTIME_PASSWORD="$(pw_of igaming_runtime)" \
     ACTOR_PROOF_ACTIVE_KID="${ACTOR_PROOF_ACTIVE_KID:-stg-v1}" \
+    STAFF_MFA_FACTOR_ACTIVE_KID=stg-v1 STAFF_MFA_MAC_ACTIVE_KID=stg-v1 \
+    STAFF_MFA_FACTOR_KEYS="$(cat "${HARNESS_ROOT}/secrets/mfa-factor.key")" STAFF_MFA_MAC_KEYS="$(cat "${HARNESS_ROOT}/secrets/mfa-mac.key")" \
     ${ACTOR_PROOF_KEYS:+ACTOR_PROOF_KEYS="$ACTOR_PROOF_KEYS"} ${MOCK_GEOLOCATION_COUNTRY:+MOCK_GEOLOCATION_COUNTRY="$MOCK_GEOLOCATION_COUNTRY"} \
     ${kv[@]+"${kv[@]}"} \
-    bash ${HARNESS_BASH_FLAGS:+"$HARNESS_BASH_FLAGS"} "${REPO_ROOT}/deploy/staging-runner/entrypoint.sh" "$mode"   # HARNESS_BASH_FLAGS=-x only for debugging against THROWAWAY passwords
+    "${runner[@]}" "$entry_path" "$mode"
 }
 
 cmd_psql() {

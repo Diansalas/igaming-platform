@@ -301,7 +301,7 @@ rn_drill_verify_source_only() {
          "VERIFY_OWNER_DATABASE_URL=$(rn_migrate_url owner)" "VERIFY_RUNTIME_DATABASE_URL=$(rn_migrate_url runtime)"
          "MIGRATE_BIN=${RN_BIN}/migrate" "RESTORECHECK_BIN=${RN_BIN}/restorecheck")
   local rc=0
-  rn_script_run verify_source "${RN_SCRATCH}/verify-source.log" venv verify.sh --baseline "$baseline" --seq-mode ge --expect-anchor "$anchor" --anchor-mode preserved || rc=$?
+  rn_script_run verify_source "${RN_SCRATCH}/verify-source.log" venv verify.sh --baseline "$baseline" --seq-mode ge --expect-anchor "$anchor" --anchor-mode preserved --expect-actor-proof skip || rc=$?
   RN_CHK_INFO_ONLY=1 rn_relay_chk "${RN_SCRATCH}/verify-source.log" source_verify
   rn_result source_verify INFO "restore did not complete; verify.sh compared the backup baseline with the live source instead (exit ${rc}): $(grep 'VERIFY RESULT' "${RN_SCRATCH}/verify-source.log" | tail -1)"
 }

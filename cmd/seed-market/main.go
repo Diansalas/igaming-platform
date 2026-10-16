@@ -80,7 +80,7 @@ func parseSettings(args []string, getenv func(string) string) (settings, error) 
 	if err := stagingseed.CheckAppEnv(getenv("APP_ENV")); err != nil {
 		return s, err
 	}
-	if err := s.MarketParams.Validate(); err != nil {
+	if err := s.Validate(); err != nil {
 		return s, err
 	}
 	if mock := strings.TrimSpace(getenv("MOCK_GEOLOCATION_COUNTRY")); mock != "" && mock != s.Country {

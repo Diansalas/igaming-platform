@@ -27,7 +27,7 @@
 mode_pitr_verify() {
   rn_need_tools psql openssl awk sha256sum
   local endpoint digests anchor_expect src_host src_port
-  endpoint="$(rn_param PITR_ENDPOINT '^(igaming-staging-[a-z0-9-]{1,60}\.[a-z0-9]{8,20}\.eu-central-1\.rds\.amazonaws\.com|127\.0\.0\.1)$')"
+  endpoint="$(rn_param PITR_ENDPOINT '^(igaming-staging-db-pitr-[a-z0-9-]{1,50}\.[a-z0-9]{8,20}\.eu-central-1\.rds\.amazonaws\.com|127\.0\.0\.1)$')"
   digests="$(rn_param EXPECTED_DIGESTS '^([A-Z]+=[0-9a-f]{16};)*[A-Z]+=[0-9a-f]{16}$')"
   anchor_expect="$(rn_param EXPECT_ANCHOR '^(unrecorded|staging|development|test|production)$' unrecorded)"
   src_host="${RDS_HOST:-}"; src_port="${RDS_PORT:-}"
@@ -85,7 +85,7 @@ mode_pitr_verify() {
   else
     rn_result pitr_database_privileges FAIL "post-restore-grants.sql failed on the clone: $(rn_first_line "${RN_SCRATCH}/pgrants.err")"
   fi
-  rn_psql owner "$DB_NAME" -v owner_role="$DB_OWNER_USER" -v expect_backup=present -v active_kid=unset -v file_head=0 -v file_count=0 -v listing=0 -f "${RN_DIR}/sql/verify-db.sql" >"${RN_SCRATCH}/pverify-db.out" 2>/dev/null || true
+  rn_psql owner "$DB_NAME" -v owner_role="$DB_OWNER_USER" -v expect_backup=present -v active_kid=unset -v file_head=0 -v file_count=0 -v listing=0 -v require_anchor=0 -v iam_only=0 -f "${RN_DIR}/sql/verify-db.sql" >"${RN_SCRATCH}/pverify-db.out" 2>/dev/null || true
   local checkline
   for checkline in temp_revoked_runtime temp_revoked_public temp_backup_role role_backup_attributes; do
     grep "^RESULT|${checkline}|" "${RN_SCRATCH}/pverify-db.out" | sed "s/^RESULT|/RESULT|pitr_/" | while IFS= read -r l; do
@@ -122,7 +122,7 @@ mode_pitr_verify() {
          "VERIFY_OWNER_DATABASE_URL=$(rn_migrate_url owner)" "VERIFY_RUNTIME_DATABASE_URL=$(rn_migrate_url runtime)"
          "MIGRATE_BIN=${RN_BIN}/migrate" "RESTORECHECK_BIN=${RN_BIN}/restorecheck")
   local rc=0
-  rn_script_run pitr_verify "${RN_SCRATCH}/pverify.log" venv verify.sh --baseline "$raw" --seq-mode ge --expect-anchor "$anchor_expect" --anchor-mode preserved || rc=$?
+  rn_script_run pitr_verify "${RN_SCRATCH}/pverify.log" venv verify.sh --baseline "$raw" --seq-mode ge --expect-anchor "$anchor_expect" --anchor-mode preserved --expect-actor-proof skip || rc=$?
   RN_CHK_SKIP_RE='^(baseline_queries_run|equal_|sequences_not_behind_baseline|baseline_itself_invariant_clean|anchor_blank_after_restore)' rn_relay_chk "${RN_SCRATCH}/pverify.log" pitr_verify
   if [ "$rc" -eq 0 ]; then rn_result pitr_verify_structural PASS "$(grep 'VERIFY RESULT' "${RN_SCRATCH}/pverify.log" | tail -1) (line-by-line baseline gates excluded: see the digest results above)"
   else rn_result pitr_verify_structural FAIL "$(grep 'VERIFY RESULT' "${RN_SCRATCH}/pverify.log" | tail -1)"; fi

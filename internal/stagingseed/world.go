@@ -135,6 +135,11 @@ func (p WorldParams) gate(ctx context.Context, pool *db.Pool, appEnv string) (uu
 		if actor, err = SoleActivePlatformAdmin(ctx, pool); err != nil {
 			return uuid.Nil, "", err
 		}
+	} else if err = pool.WithPlatformAdmin(ctx, actor, func(ctx context.Context, tx pgx.Tx) error {
+		// an explicit actor must be an ACTIVE platform_admin already at plan time, so a dry run reports a bad actor (SRP3-3)
+		return RequireActivePlatformAdmin(ctx, tx, actor)
+	}); err != nil {
+		return uuid.Nil, "", err
 	}
 	return actor, anchor, nil
 }

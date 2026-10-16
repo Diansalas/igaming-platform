@@ -324,3 +324,61 @@ func TestSeedMarket_RefusesAnUnknownOrWrongKindOfActor(t *testing.T) {
 		t.Fatalf("nothing may be written for a refused actor, got %d ceiling rows", n)
 	}
 }
+
+// setAnchor replaces the write-once database_environment row of a SCRATCH test database ("" = no row). It is a test-only operation: the table
+// owner disables the guard trigger inside one transaction, rewrites the row, and re-enables it before committing.
+func setAnchor(t *testing.T, pool *db.Pool, value string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Raw().Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, q := range []string{`ALTER TABLE database_environment DISABLE TRIGGER database_environment_guard`, `DELETE FROM database_environment`} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if value != "" {
+		if _, err := tx.Exec(ctx, `INSERT INTO database_environment (environment) VALUES ($1)`, value); err != nil {
+			t.Fatalf("insert anchor: %v", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE database_environment ENABLE TRIGGER database_environment_guard`); err != nil {
+		t.Fatalf("re-enable the guard: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+// SRP3-1: the environment anchor, not APP_ENV, decides. No row means production (refused), production is refused, and staging is accepted.
+func TestSeedMarket_RefusesADatabaseWhoseAnchorIsMissingOrProduction(t *testing.T) {
+	pool := testPool(t)
+	f := seed(t, pool, true)
+	t.Cleanup(func() { setAnchor(t, pool, "test") })
+	for _, c := range []struct{ anchor, want string }{{"", "no database_environment anchor"}, {"production", "production"}} {
+		setAnchor(t, pool, c.anchor)
+		for _, dry := range []bool{true, false} {
+			p := settingsFor(f, "SV")
+			p.DryRun = dry
+			var out bytes.Buffer
+			err := apply(context.Background(), pool, p, &out)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("anchor %q (dry=%v): want a refusal mentioning %q, got %v", c.anchor, dry, c.want, err)
+			}
+			if strings.Contains(out.String(), "created") {
+				t.Fatalf("anchor %q: a refused run reported a write:\n%s", c.anchor, out.String())
+			}
+		}
+		if n := count(t, pool, uuid.Nil, true, `SELECT count(*) FROM licence_country_ceilings WHERE licence_id=$1`, f.licenceID); n != 0 {
+			t.Fatalf("anchor %q: a refused run wrote %d ceiling row(s)", c.anchor, n)
+		}
+	}
+	setAnchor(t, pool, "staging")
+	var out bytes.Buffer
+	if err := apply(context.Background(), pool, settingsFor(f, "SV"), &out); err != nil {
+		t.Fatalf("a staging anchor must be accepted: %v\n%s", err, out.String())
+	}
+}

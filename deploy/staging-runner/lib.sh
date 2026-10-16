@@ -18,7 +18,11 @@
 #
 # SECRET HANDLING (hard rules, tested statically in deploy/staging-runner/runner_static_test.go):
 #   * passwords arrive ONLY as environment variables injected by the ECS execution role (DB_MASTER_PASSWORD,
-#     DB_RUNTIME_PASSWORD, ACTOR_PROOF_KEYS); they are copied into 0600 libpq passfiles / tmpfs files and UNSET at once;
+#     DB_RUNTIME_PASSWORD, ACTOR_PROOF_KEYS, STAFF_MFA_*). entrypoint.sh moves them, before it runs any other program, into
+#     NON-EXPORTED shell variables (RN_S_*) and unsets the environment copies, so no child process (mktemp, psql, ...) inherits them;
+#     they are then written to 0600 libpq passfiles / tmpfs files. Honest limit: the kernel's /proc/<pid>/environ of PID 1 / the
+#     shell keeps the initial environment block, readable by any process of the same uid in the container (same trust as every ECS
+#     secret; there is no ECS Exec);
 #   * no password, token or key is ever placed on a command line, in a URL, in a -v variable or in a log line; every
 #     message passes through rn_scrub, which masks the registered secret values;
 #   * no `set -x`, no `bash -x`, no PGPASSWORD, no echo of a secret-bearing variable;
@@ -33,6 +37,14 @@ RN_DIR="${RN_ROOT}/deploy/staging-runner"
 RN_BACKUP_DIR="${RN_ROOT}/deploy/backup"
 RN_BIN="${RN_BIN:-${RN_ROOT}/bin}"
 RN_BACKUP_USER=igaming_backup
+# Shared parameter formats of the seeding modes. REASON may hold spaces (SRP3-11: deploy.sh's override value pattern allows one), so a
+# human sentence works; the Go side (stagingseed.CheckField) applies its own bounds again.
+# shellcheck disable=SC2034  # used by the sourced modes
+RN_RE_AUTHREF='^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,118}$'
+# shellcheck disable=SC2034
+RN_RE_OPERATOR='^[A-Za-z0-9][A-Za-z0-9._@-]{0,78}$'
+# shellcheck disable=SC2034
+RN_RE_REASON='^[A-Za-z0-9][A-Za-z0-9._:/# -]{0,118}$'
 RN_MODE=""
 RN_SCRATCH=""
 RN_SHM=""
@@ -193,8 +205,8 @@ rn_pgpass_line() {
   printf '%s:%s:*:%s:%s\n' "$h" "$p" "$u" "$w"
 }
 
-# rn_load_credentials : DB_MASTER_PASSWORD / DB_RUNTIME_PASSWORD / DB_OWNER_PASSWORD env -> one 0600 passfile in tmpfs; the variables are unset
-# at once (children never inherit them). Registers the values for scrubbing.
+# rn_load_credentials : the non-exported RN_S_MASTER / RN_S_OWNER / RN_S_RUNTIME (captured from DB_*_PASSWORD by entrypoint.sh) -> one 0600
+# passfile in tmpfs. Registers the values for scrubbing.
 rn_load_credentials() {
   : "${RDS_HOST:?RDS_HOST is required}" "${RDS_PORT:?RDS_PORT is required}" "${DB_NAME:?DB_NAME is required}" "${DB_MASTER_USER:?DB_MASTER_USER is required}"
   rn_validate_target "$RDS_HOST" "$RDS_PORT" "RDS_HOST"
@@ -206,23 +218,21 @@ rn_load_credentials() {
   DB_RUNTIME_USER="${DB_RUNTIME_USER:-igaming_runtime}"
   RN_PGPASS="${RN_SHM}/db.pgpass"
   : >"$RN_PGPASS"; chmod 600 "$RN_PGPASS"
-  if [ -n "${DB_MASTER_PASSWORD:-}" ]; then
-    rn_register_secret "$DB_MASTER_PASSWORD"
-    rn_pgpass_line "$RN_HOST" "$RDS_PORT" "$DB_MASTER_USER" "$DB_MASTER_PASSWORD" >>"$RN_PGPASS"
-    if [ -n "${DB_OWNER_PASSWORD:-}" ]; then
-      rn_register_secret "$DB_OWNER_PASSWORD"
-      rn_pgpass_line "$RN_HOST" "$RDS_PORT" "$DB_OWNER_USER" "$DB_OWNER_PASSWORD" >>"$RN_PGPASS"
-    elif [ "$DB_OWNER_USER" = "$DB_MASTER_USER" ]; then
-      :
-    else
+  if [ -n "${RN_S_MASTER:-}" ]; then
+    rn_register_secret "$RN_S_MASTER"
+    rn_pgpass_line "$RN_HOST" "$RDS_PORT" "$DB_MASTER_USER" "$RN_S_MASTER" >>"$RN_PGPASS"
+    if [ -n "${RN_S_OWNER:-}" ]; then
+      rn_register_secret "$RN_S_OWNER"
+      rn_pgpass_line "$RN_HOST" "$RDS_PORT" "$DB_OWNER_USER" "$RN_S_OWNER" >>"$RN_PGPASS"
+    elif [ "$DB_OWNER_USER" != "$DB_MASTER_USER" ]; then
       rn_die "DB_OWNER_USER differs from DB_MASTER_USER but DB_OWNER_PASSWORD is not set"
     fi
   fi
-  if [ -n "${DB_RUNTIME_PASSWORD:-}" ]; then
-    rn_register_secret "$DB_RUNTIME_PASSWORD"
-    rn_pgpass_line "$RN_HOST" "$RDS_PORT" "$DB_RUNTIME_USER" "$DB_RUNTIME_PASSWORD" >>"$RN_PGPASS"
+  if [ -n "${RN_S_RUNTIME:-}" ]; then
+    rn_register_secret "$RN_S_RUNTIME"
+    rn_pgpass_line "$RN_HOST" "$RDS_PORT" "$DB_RUNTIME_USER" "$RN_S_RUNTIME" >>"$RN_PGPASS"
   fi
-  unset DB_MASTER_PASSWORD DB_RUNTIME_PASSWORD DB_OWNER_PASSWORD
+  RN_S_MASTER=""; RN_S_OWNER=""; RN_S_RUNTIME=""
   [ -s "$RN_PGPASS" ] || rn_die "no database credential was injected (DB_MASTER_PASSWORD missing)"
 }
 

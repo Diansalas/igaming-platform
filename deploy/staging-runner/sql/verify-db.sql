@@ -176,10 +176,35 @@ SELECT 'RESULT|migration_checksums_recorded|' || CASE WHEN count(*) = 0 THEN 'PA
   FROM schema_migrations WHERE checksum IS NULL;
 
 -- ---------------------------------------------------------------- 6.2 environment anchor
+-- require_anchor=1 (SRP3-1): the seeding commands (seed-market, seed-world) refuse a database whose anchor is not staging / development / test
+-- (no row = production). 0: a blank anchor is acceptable (nothing is about to be seeded).
 SELECT 'RESULT|database_environment_anchor|' ||
-       CASE WHEN a.n = 0 THEN 'PASS' WHEN a.n = 1 AND a.env = 'staging' THEN 'PASS' ELSE 'FAIL' END
-       || '|rows=' || a.n || ' environment=' || COALESCE(a.env, 'unrecorded (blank; a staging database may leave it blank or record staging, never production)')
+       CASE WHEN a.n = 0 AND :'require_anchor' = '0' THEN 'PASS'
+            WHEN a.n = 0 THEN 'FAIL'
+            WHEN a.n = 1 AND a.env = 'staging' THEN 'PASS'
+            WHEN a.n = 1 AND a.env IN ('development', 'test') AND :'require_anchor' = '1' THEN 'PASS'
+            ELSE 'FAIL' END
+       || '|rows=' || a.n || ' environment=' || COALESCE(a.env, 'unrecorded (blank = production for the seeding commands: run the record-anchor mode, plan 6.2)')
+       || ' require_anchor=' || :'require_anchor'
   FROM (SELECT count(*) AS n, min(environment) AS env FROM database_environment) a;
+
+-- ---------------------------------------------------------------- leftovers of a drill (SRP3-9)
+-- Nothing a drill creates may remain: the disposable restore-loader login, a restore-check database (any database that is not the application
+-- database or a system database), and, on RDS (iam_only=1), a finite validity on igaming_backup (it is IAM-only there; the 2-hour password
+-- credential exists only on a disposable PITR clone). Fix with the cleanup mode.
+SELECT 'RESULT|leftover_restore_loader_role|' || CASE WHEN count(*) = 0 THEN 'PASS' ELSE 'FAIL' END
+       || '|igaming_restore_loader roles=' || count(*) || CASE WHEN count(*) = 0 THEN '' ELSE ' (run the cleanup mode)' END
+  FROM pg_roles WHERE rolname = 'igaming_restore_loader';
+SELECT 'RESULT|leftover_restore_check_database|' || CASE WHEN count(*) = 0 THEN 'PASS' ELSE 'FAIL' END
+       || '|databases other than ' || current_database() || ' and the system databases=' || count(*)
+       || CASE WHEN count(*) = 0 THEN '' ELSE ': ' || string_agg(datname, ',' ORDER BY datname) || ' (run the cleanup mode)' END
+  FROM pg_database WHERE datname NOT IN (current_database(), 'postgres', 'template0', 'template1', 'rdsadmin');
+SELECT 'RESULT|leftover_backup_credential|' ||
+       CASE WHEN r.rolvaliduntil IS NULL OR r.rolvaliduntil = 'infinity' THEN 'PASS'
+            WHEN :'iam_only' = '1' THEN 'FAIL' ELSE 'INFO' END
+       || '|igaming_backup valid until ' || COALESCE(r.rolvaliduntil::text, 'none')
+       || CASE WHEN :'iam_only' = '1' THEN ' (IAM-only on RDS: a finite validity is a leftover; run the cleanup mode)' ELSE ' (local harness: password credential by design)' END
+  FROM pg_roles r WHERE r.rolname = 'igaming_backup';
 
 -- ---------------------------------------------------------------- server posture (observations)
 SELECT 'RESULT|server_posture|INFO|version=' || current_setting('server_version') || ' ssl=' || COALESCE((SELECT ssl::text FROM pg_stat_ssl WHERE pid = pg_backend_pid()), 'n/a')

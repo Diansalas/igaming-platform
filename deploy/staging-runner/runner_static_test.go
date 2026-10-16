@@ -6,7 +6,9 @@ package stagingrunner_test
 // recorded in docs/plans/staging-prep-3-record.md. Planted-offender tests show the guards bite.
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -70,7 +72,7 @@ func runnerShell(t *testing.T) []string {
 	return fs
 }
 
-var modes = []string{"backup-restore-drill", "pitr-verify", "probe-backup-role", "seed-actor-proof", "seed-market", "verify-db"}
+var modes = []string{"backup-restore-drill", "cleanup", "pitr-verify", "probe-backup-role", "record-anchor", "seed-actor-proof", "seed-market", "seed-world", "verify-db"}
 
 func TestModesAreConsistentAcrossEntrypointFilesAndDeploySh(t *testing.T) {
 	entry := read(t, "deploy/staging-runner/entrypoint.sh")
@@ -181,7 +183,7 @@ func TestActorProofSQLBindsTheSecretAndNeverInterpolatesIt(t *testing.T) {
 		t.Error("both the existence check and the insert must be parameter-bound")
 	}
 	sh := read(t, "deploy/staging-runner/modes/seed-actor-proof.sh")
-	for _, want := range []string{"unset ACTOR_PROOF_KEYS", `rm -f "$hexfile"`, "log_parameter_max_length_on_error", "RN_AP_HEX_FILE=", "conflict_different_secret_for_this_kid"} {
+	for _, want := range []string{`RN_S_ACTOR_KEYS=""`, `rm -f "$hexfile"`, "log_parameter_max_length_on_error", "RN_AP_HEX_FILE=", "conflict_different_secret_for_this_kid"} {
 		if !strings.Contains(sh, want) {
 			t.Errorf("seed-actor-proof.sh lacks %q", want)
 		}
@@ -191,7 +193,7 @@ func TestActorProofSQLBindsTheSecretAndNeverInterpolatesIt(t *testing.T) {
 	}
 }
 
-func TestProbePackHasFifteenWritesAndEightAbusePrimitives(t *testing.T) {
+func TestProbePackHasFifteenWritesAndNineAbusePrimitivesAndFailsClosed(t *testing.T) {
 	src := read(t, "deploy/staging-runner/lib-probes.sh")
 	count := func(arr string) int {
 		m := regexp.MustCompile(`(?s)` + arr + `=\((.*?)\n\)`).FindStringSubmatch(src)
@@ -203,12 +205,12 @@ func TestProbePackHasFifteenWritesAndEightAbusePrimitives(t *testing.T) {
 	if n := count("RN_WRITE_PROBES"); n != 15 {
 		t.Errorf("expected the 15 write/escalation probes of drill.sh phase 2, found %d", n)
 	}
-	if n := count("RN_ABUSE_PROBES"); n != 8 {
-		t.Errorf("expected the 8 abuse-primitive probes of ADR 0122 section 5b, found %d", n)
+	if n := count("RN_ABUSE_PROBES"); n != 9 {
+		t.Errorf("expected the 9 abuse-primitive probes of ADR 0122 section 5b (8 + the two-key advisory lock), found %d", n)
 	}
 	for _, want := range []string{"INSERT INTO tenants", "UPDATE ledger_entries", "DELETE FROM ledger_entries", "TRUNCATE ledger_entries", "CREATE TABLE", "CREATE TEMP TABLE", "DROP TABLE", "DISABLE TRIGGER ALL",
 		"SET ROLE", "session_replication_role", "CREATE ROLE", "ALTER ROLE igaming_backup SUPERUSER", "COPY (SELECT 1) TO PROGRAM", "pg_read_file", "pg_reload_conf",
-		"pg_advisory_lock", "pg_try_advisory_lock", "pg_advisory_xact_lock", "pg_logical_emit_message", "lo_create", "pg_notify", "connect_postgres", "connect_template1"} {
+		"pg_advisory_lock(42, 43)", "pg_advisory_lock", "pg_try_advisory_lock", "pg_advisory_xact_lock", "pg_logical_emit_message", "lo_create", "pg_notify", "connect_postgres", "connect_template1"} {
 		if !strings.Contains(src, want) {
 			t.Errorf("probe pack lacks %q", want)
 		}
@@ -216,6 +218,190 @@ func TestProbePackHasFifteenWritesAndEightAbusePrimitives(t *testing.T) {
 	// a probe that unexpectedly succeeds must be rolled back, never committed
 	if !strings.Contains(src, "BEGIN READ WRITE; ${stmt}; ROLLBACK") || strings.Contains(code(src), "COMMIT") {
 		t.Error("every probe must run inside BEGIN READ WRITE; ...; ROLLBACK")
+	}
+	// SRP3-2: fail closed. The verdict comes from the SQLSTATE; sessions are time-bounded; completeness is counted.
+	c := code(src)
+	for _, want := range []string{"VERBOSITY=sqlstate", "42501|0L000|0LP01", "statement_timeout", "lock_timeout", "probe_pack_complete", "RN_PROBE_RAN", "RN_PROBE_EXPECTED", "BLOCKED"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("lib-probes.sh lacks %q", want)
+		}
+	}
+	if strings.Contains(c, "RN_PRIV_RE") {
+		t.Error("a PASS must not be derived from a message-text regex (only the connect probes read the server's CONNECT message)")
+	}
+}
+
+// The classification itself is exercised by an offline shell test (needs bash only).
+func TestProbeVerdictClassification(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	out, err := exec.Command("bash", filepath.Join(root(t), "deploy/staging-runner/tests/probe-verdict-test.sh")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe-verdict-test.sh failed: %v\n%s", err, out)
+	}
+}
+
+// SRP3-6: boot.sh and the entrypoint cannot be made to trace and keep secrets out of the environment and every argument list.
+func TestBootAndEntrypointHardening(t *testing.T) {
+	boot := read(t, "deploy/staging-runner/boot.sh")
+	bc := code(boot)
+	if !strings.HasPrefix(boot, "#!/bin/sh\n") {
+		t.Error("boot.sh must be POSIX sh: it runs before any bash can be trusted")
+	}
+	for _, want := range []string{"set +x +v", "exec env -i", "bash --noprofile --norc", "RN_SECRETS_FD=3", "3<<EOF"} {
+		if !strings.Contains(bc, want) {
+			t.Errorf("boot.sh lacks %q", want)
+		}
+	}
+	// the allow-list holds no secret and no shell-behaviour variable
+	m := regexp.MustCompile(`(?s)names="(.*?)"`).FindStringSubmatch(bc)
+	if m == nil {
+		t.Fatal("boot.sh allow-list not found")
+	}
+	deny := regexp.MustCompile(`PASSWORD|_KEYS$|^(SHELLOPTS|BASHOPTS|BASH_ENV|ENV|PS4|IFS|BASH_XTRACEFD|PATH|LD_.*|BASH_FUNC.*)$`)
+	for _, name := range strings.Fields(m[1]) {
+		if deny.MatchString(name) {
+			t.Errorf("boot.sh allow-list must not contain %s", name)
+		}
+	}
+	if !strings.Contains(m[1], "TENANT_SLUG") || !strings.Contains(m[1], "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") {
+		t.Error("boot.sh allow-list lost the runner parameters or the ECS credential variables")
+	}
+	// every parameter name deploy.sh accepts for any mode must survive the allow-list, or a mode would silently lose its parameter
+	deploy := read(t, "deploy/aws/scripts/deploy.sh")
+	allowed := map[string]bool{}
+	for _, n := range strings.Fields(m[1]) {
+		allowed[n] = true
+	}
+	n := 0
+	for _, line := range regexp.MustCompile(`(?m)^\s+[a-z-]+(\|[a-z-]+)*\)\s+echo "([A-Z_ ]*)" ;;`).FindAllStringSubmatch(deploy, -1) {
+		for _, name := range strings.Fields(line[2]) {
+			n++
+			if !allowed[name] {
+				t.Errorf("deploy.sh accepts parameter %s but boot.sh's allow-list would drop it", name)
+			}
+		}
+	}
+	if n < 20 {
+		t.Errorf("vacuous: only %d deploy.sh parameter names were checked", n)
+	}
+	// secrets reach the new shell only on fd 3: the here-document is the only place they are expanded
+	for i, l := range strings.Split(bc, "\n") {
+		if strings.Contains(l, "PASSWORD-") || strings.Contains(l, "_KEYS-") {
+			if !regexp.MustCompile(`^\$\{[A-Z_]+-\}$`).MatchString(strings.TrimSpace(l)) {
+				t.Errorf("boot.sh line %d expands a secret outside the here-document: %s", i+1, l)
+			}
+		}
+	}
+	entry := code(read(t, "deploy/staging-runner/entrypoint.sh"))
+	iTrace, iRead, iFirst := strings.Index(entry, "set +x +v"), strings.Index(entry, "read -r -u 3"), strings.Index(entry, "RN_SELF=")
+	if iTrace < 0 || iRead < 0 || iFirst < 0 || iTrace > iRead || iRead > iFirst {
+		t.Error("entrypoint.sh must `set +x +v`, then read the secrets from fd 3, before it runs anything else")
+	}
+	for _, f := range runnerShell(t) {
+		c := code(read(t, f))
+		if regexp.MustCompile(`(export|declare\s+-x|typeset\s+-x)\s+(-[a-zA-Z]+\s+)?RN_S_`).MatchString(c) {
+			t.Errorf("%s exports an RN_S_ secret variable", f)
+		}
+		if regexp.MustCompile(`env\s[^\n]*\$\{?RN_S_`).MatchString(c) {
+			t.Errorf("%s puts an RN_S_ secret into an argument list", f)
+		}
+	}
+	if !strings.Contains(code(read(t, "deploy/staging-runner/lib.sh")), `RN_S_MASTER=""; RN_S_OWNER=""; RN_S_RUNTIME=""`) {
+		t.Error("rn_load_credentials must blank the captured passwords after writing the passfile")
+	}
+}
+
+// SA-1 / SRP3-1: the seeding modes never print or pass credentials on a command line, and every seeding command checks the anchor.
+func TestSeedWorldModeKeepsCredentialsOutOfOutputAndArguments(t *testing.T) {
+	raw := read(t, "deploy/staging-runner/modes/seed-world.sh")
+	c := code(raw)
+	if !regexp.MustCompile(`--secret-string "file://`).MatchString(c) || strings.Contains(c, `--secret-string "$`) {
+		t.Error("put-secret-value must take the value as file://<path>, never as an argument")
+	}
+	for i, l := range strings.Split(c, "\n") {
+		if strings.Contains(l, "jq") && regexp.MustCompile(`password|bootstrap_token|\.actors\[\]|to_entries`).MatchString(l) {
+			t.Errorf("seed-world.sh line %d reads credential values: %s", i+1, l)
+		}
+		if regexp.MustCompile(`\b(echo|printf)\b[^\n]*\$\{?(existing|plan|stored|applied|final)\b`).MatchString(l) && !strings.Contains(l, ">") {
+			t.Errorf("seed-world.sh line %d prints a credentials file: %s", i+1, l)
+		}
+		if strings.Contains(l, "RN_S_MFA") && regexp.MustCompile(`\b(env|bash|aws)\b`).MatchString(l) {
+			t.Errorf("seed-world.sh line %d may put a key on a command line: %s", i+1, l)
+		}
+	}
+	for _, want := range []string{`RN_SW_SECRET_ID="igaming-staging/seed-world-passwords"`, "NOTHING was created", "rn_sw_merge", "DRY_RUN"} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("seed-world.sh lacks %q", want)
+		}
+	}
+	// the plan phase is stored BEFORE the apply phase runs
+	iPlan, iPut, iApply := strings.Index(c, "rn_sw_run plan"), strings.Index(c, `rn_sw_put "$stored"`), strings.Index(c, "rn_sw_run apply")
+	if iPlan < 0 || iPut < 0 || iApply < 0 || iPlan >= iPut || iPut >= iApply {
+		t.Error("the planned passwords must be stored before the accounts are created")
+	}
+	// every seeding command goes through the anchor gate
+	for _, f := range []string{"internal/stagingseed/market.go", "internal/stagingseed/world.go"} {
+		if !strings.Contains(read(t, f), "RequireSyntheticAnchor") && !strings.Contains(read(t, f), "p.gate(") {
+			t.Errorf("%s does not apply the anchor gate", f)
+		}
+	}
+	// record-anchor never records production
+	ra := read(t, "deploy/staging-runner/modes/record-anchor.sh") + read(t, "deploy/staging-runner/sql/record-anchor.sql")
+	if !strings.Contains(ra, "(staging|development|test)") || !strings.Contains(ra, "IN ('staging', 'development', 'test')") {
+		t.Error("record-anchor must accept staging, development and test only")
+	}
+}
+
+func TestSeedWorldIamAndTerraformAreScopedToOneSecret(t *testing.T) {
+	iam := read(t, "deploy/aws/modules/iam/main.tf")
+	i := strings.Index(iam, `data "aws_iam_policy_document" "runner_seed_world"`)
+	if i < 0 {
+		t.Fatal("seed-world policy document not found")
+	}
+	body := iam[i : i+400]
+	if !strings.Contains(body, `"secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"`) || !strings.Contains(body, "resources = [var.seed_world_secret_arn]") {
+		t.Error("the seed-world task role must Get/PutSecretValue on exactly var.seed_world_secret_arn")
+	}
+	if strings.Contains(body, "rds-db") || strings.Contains(body, "*") {
+		t.Error("the seed-world task role holds no rds-db permission and no wildcard")
+	}
+	boot := read(t, "deploy/aws/bootstrap/main.tf")
+	if !strings.Contains(boot, "StagingRunnerSeedWorldSecretWrite") || !strings.Contains(boot, "secret:igaming-staging/seed-world-passwords-*") {
+		t.Error("the permissions boundary must allow PutSecretValue on the seed-world secret (bootstrap credential)")
+	}
+	sec := read(t, "deploy/aws/modules/secrets/main.tf")
+	if !strings.Contains(sec, `resource "aws_secretsmanager_secret" "seed_world"`) || strings.Contains(sec, `resource "aws_secretsmanager_secret_version" "seed_world"`) {
+		t.Error("the seed-world secret must be an EMPTY container: no secret_version resource")
+	}
+	// the deployer-policy change (applied by an IAM administrator, not by the bootstrap credential) is its OWN policy file: adding the roles to the
+	// edge/IAM/state policy would exceed the 6,144-character managed-policy limit
+	dep := read(t, "deploy/aws/iam/staging-deployer-runner-roles-policy.json")
+	for _, role := range []string{"igaming-staging-ecs-runner-task-role", "igaming-staging-ecs-seed-world-task-role"} {
+		if n := strings.Count(dep, "role/"+role+`"`); n != 3 {
+			t.Errorf("%s appears %d times in the runner-roles policy, want 3 (create, manage, pass)", role, n)
+		}
+	}
+	for _, want := range []string{`"iam:PermissionsBoundary": "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"`, `"iam:PassedToService": "ecs-tasks.amazonaws.com"`} {
+		if !strings.Contains(dep, want) {
+			t.Errorf("runner-roles policy lacks the condition %s", want)
+		}
+	}
+	if strings.Contains(dep, "*") || strings.Contains(dep, "Deny") {
+		t.Error("the runner-roles policy holds exact ARNs only (no wildcard); the explicit Deny statements stay in the edge/IAM/state policy")
+	}
+	// every deployer policy fits the managed-policy limit (non-whitespace characters)
+	for _, f := range glob(t, "deploy/aws/iam/staging-deployer-*.json") {
+		var v any
+		if err := json.Unmarshal([]byte(read(t, f)), &v); err != nil {
+			t.Errorf("%s is not valid JSON: %v", f, err)
+			continue
+		}
+		b, _ := json.Marshal(v)
+		if n := len(strings.Join(strings.Fields(string(b)), "")); n > 6144 {
+			t.Errorf("%s has %d non-whitespace characters, over the 6,144 managed-policy limit", f, n)
+		}
 	}
 }
 
@@ -271,8 +457,8 @@ func TestDockerfileBakesNoKeyAndHasTheToolchain(t *testing.T) {
 			t.Errorf("the image does not install %s", pkg)
 		}
 	}
-	for _, want := range []string{"USER 10001", `ENTRYPOINT ["/opt/igaming/deploy/staging-runner/entrypoint.sh"]`, `CMD ["usage"]`, "FROM golang:1.26.9-alpine", "FROM alpine:3.20",
-		"./cmd/seed-market", "./deploy/backup/restorecheck", "./deploy/backup/scramhash", "./cmd/migrate", "deploy/drill/verify.sql"} {
+	for _, want := range []string{"USER 10001", `ENTRYPOINT ["/opt/igaming/deploy/staging-runner/boot.sh"]`, `CMD ["usage"]`, "FROM golang:1.26.9-alpine", "FROM alpine:3.20@sha256:",
+		"./cmd/seed-market", "./cmd/seed-staging-world", "deploy/staging-runner/boot.sh", "./deploy/backup/restorecheck", "./deploy/backup/scramhash", "./cmd/migrate", "deploy/drill/verify.sql"} {
 		if !strings.Contains(c, want) {
 			t.Errorf("Dockerfile lacks %q", want)
 		}

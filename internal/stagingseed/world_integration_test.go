@@ -205,8 +205,7 @@ func TestWorld_Gates(t *testing.T) {
 	q := p
 	q.ActorID = uuid.New()
 	if _, err := PlanWorld(ctx, pool, q, "staging", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "not an active platform_admin") {
-		// plan resolves the actor only in apply; the plan itself must at least not create anything
-		t.Logf("plan with an unknown actor: %v", err)
+		t.Errorf("the plan (a dry run) must already refuse an unknown actor, got %v", err)
 	}
 	plan, _ := PlanWorld(ctx, pool, p, "staging", &bytes.Buffer{})
 	if _, err := ApplyWorld(ctx, pool, mfa, q, "staging", plan, &bytes.Buffer{}); err == nil {
@@ -242,5 +241,55 @@ func TestWorld_RefusesToTouchAPendingTenant(t *testing.T) {
 	plan, _ := PlanWorld(ctx, pool, p, "staging", &bytes.Buffer{})
 	if _, err := ApplyWorld(ctx, pool, mfa, p, "staging", plan, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "governed launch decision") {
 		t.Fatalf("an existing pending tenant must not be activated by this tool, got %v", err)
+	}
+}
+
+// setAnchor replaces the write-once anchor of a SCRATCH test database ("" = no row): the table owner disables the guard trigger inside one
+// transaction and re-enables it before committing. Test-only.
+func setAnchor(t *testing.T, pool *db.Pool, value string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Raw().Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, q := range []string{`ALTER TABLE database_environment DISABLE TRIGGER database_environment_guard`, `DELETE FROM database_environment`} {
+		if _, err := tx.Exec(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if value != "" {
+		if _, err := tx.Exec(ctx, `INSERT INTO database_environment (environment) VALUES ($1)`, value); err != nil {
+			t.Fatalf("insert anchor: %v", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `ALTER TABLE database_environment ENABLE TRIGGER database_environment_guard`); err != nil {
+		t.Fatalf("re-enable the guard: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+// SRP3-1: with no anchor row (= production) or a production anchor, both phases refuse before reading or writing anything.
+func TestWorld_RefusesADatabaseWhoseAnchorIsMissingOrProduction(t *testing.T) {
+	pool := testPool(t)
+	mfa := mfaStore(t)
+	ctx := context.Background()
+	p := params(platformAdmin(t, pool))
+	t.Cleanup(func() { setAnchor(t, pool, "test") })
+	for _, anchor := range []string{"", "production"} {
+		setAnchor(t, pool, anchor)
+		if _, err := PlanWorld(ctx, pool, p, "staging", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "anchor") {
+			t.Fatalf("anchor %q: plan must be refused on the anchor, got %v", anchor, err)
+		}
+		plan := Creds{TenantSlug: p.TenantSlug, BrandSlug: p.BrandSlug, Country: p.Country, Actors: map[string]*ActorCred{}}
+		if _, err := ApplyWorld(ctx, pool, mfa, p, "staging", plan, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "anchor") {
+			t.Fatalf("anchor %q: apply must be refused on the anchor, got %v", anchor, err)
+		}
+		if n := count(t, pool, `SELECT count(*) FROM tenants WHERE slug = $1`, p.TenantSlug); n != 0 {
+			t.Fatalf("anchor %q: a refused run created %d tenant(s)", anchor, n)
+		}
 	}
 }

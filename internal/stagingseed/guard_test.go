@@ -53,7 +53,7 @@ func TestCheckField(t *testing.T) {
 	if err := CheckField("operator", "ops-alice"); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"", " x", "x ", "a\nb", "a‮b", "a​b", strings.Repeat("x", MaxField+1)} {
+	for _, bad := range []string{"", " x", "x ", "a\nb", "a\u202eb", "a\u200bb", strings.Repeat("x", MaxField+1)} {
 		if err := CheckField("operator", bad); err == nil {
 			t.Errorf("%q must be refused", bad)
 		}

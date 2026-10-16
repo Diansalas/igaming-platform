@@ -21,17 +21,17 @@ mode_seed_actor_proof() {
   rn_need_tools psql base64 od tr wc
   local kid entries e k b64="" n=0 hexfile binfile size oldifs psql_major
   kid="$(rn_param ACTOR_PROOF_ACTIVE_KID '^[A-Za-z0-9._-]{1,32}$')"
-  [ -n "${ACTOR_PROOF_KEYS:-}" ] || rn_die "ACTOR_PROOF_KEYS is not injected: this mode runs only in the staging-runner-actor-proof task definition"
+  [ -n "${RN_S_ACTOR_KEYS:-}" ] || rn_die "ACTOR_PROOF_KEYS is not injected: this mode runs only in the staging-runner-actor-proof task definition"
   psql_major="$(psql --version | sed -n 's/.* \([0-9][0-9]*\)\..*/\1/p')"
   [ "${psql_major:-0}" -ge 16 ] || rn_die "psql 16 or later is required for the parameter-bound insert (\\bind)"
 
   # 1. the entry for the active kid
-  oldifs="$IFS"; IFS=','; read -ra entries <<<"$ACTOR_PROOF_KEYS"; IFS="$oldifs"
+  oldifs="$IFS"; IFS=','; read -ra entries <<<"$RN_S_ACTOR_KEYS"; IFS="$oldifs"
   for e in "${entries[@]}"; do
     k="${e%%:*}"
     if [ "$k" = "$kid" ]; then b64="${e#*:}"; n=$((n + 1)); fi
   done
-  unset ACTOR_PROOF_KEYS entries e
+  RN_S_ACTOR_KEYS=""; unset entries e
   if [ "$n" -ne 1 ] || [ -z "$b64" ]; then
     rn_stop "the actor-proof secret holds ${n} entries for kid ${kid}: the kid inside igaming-staging/actor-proof-keys must equal ACTOR_PROOF_ACTIVE_KID (terraform output key_family_kid); nothing was written"
   fi
@@ -49,21 +49,24 @@ mode_seed_actor_proof() {
   rn_load_credentials
   rn_fetch_ca
 
-  # 2. the runbook's pre-check: the secret must not be able to reach the database log
+  # 2. the runbook's pre-check (extended, SRP3-5): nothing the server could log may carry the bound parameter. Reads use current_setting(..., true),
+  # so a library that is not loaded (pgaudit, auto_explain) simply reads as unset.
   local logchk
-  if ! logchk="$(rn_psql owner "$DB_NAME" -F '|' -c "SELECT current_setting('log_statement'), current_setting('log_min_duration_statement'), current_setting('log_duration'), COALESCE(current_setting('log_parameter_max_length_on_error', true), '0'), COALESCE((SELECT setting FROM pg_settings WHERE name = 'pgaudit.log'), 'none'), COALESCE((SELECT setting FROM pg_settings WHERE name = 'pgaudit.log_parameter'), 'off')" 2>"${RN_SCRATCH}/logchk.err")"; then
+  if ! logchk="$(rn_psql owner "$DB_NAME" -F '|' -c "SELECT current_setting('log_statement'), current_setting('log_min_duration_statement'), current_setting('log_duration'), COALESCE(current_setting('log_parameter_max_length_on_error', true), '0'), (current_setting('log_transaction_sample_rate')::float8 <> 0)::int, (current_setting('log_statement_sample_rate')::float8 <> 0 AND current_setting('log_min_duration_sample') <> '-1')::int, (COALESCE(current_setting('auto_explain.log_min_duration', true), '-1') <> '-1' AND COALESCE(current_setting('auto_explain.log_parameter_max_length', true), '-1') <> '0')::int, (COALESCE(NULLIF(current_setting('pgaudit.log', true), ''), 'none') <> 'none' AND COALESCE(NULLIF(current_setting('pgaudit.log_parameter', true), ''), 'off') IN ('on', 'true', '1'))::int, (NULLIF(current_setting('pgaudit.role', true), '') IS NOT NULL AND COALESCE(NULLIF(current_setting('pgaudit.log_parameter', true), ''), 'off') IN ('on', 'true', '1'))::int, COALESCE(NULLIF(current_setting('pgaudit.log', true), ''), 'none')" 2>"${RN_SCRATCH}/logchk.err")"; then
     rn_stop "cannot connect as ${DB_OWNER_USER} to check the statement-logging settings: $(rn_first_line "${RN_SCRATCH}/logchk.err")"
   fi
-  local l_stmt l_dur l_logdur l_onerr l_pga l_pgaparam
-  IFS='|' read -r l_stmt l_dur l_logdur l_onerr l_pga l_pgaparam <<<"$logchk"
-  rn_result actor_proof_logging_precheck INFO "log_statement=${l_stmt} log_min_duration_statement=${l_dur} log_duration=${l_logdur} log_parameter_max_length_on_error=${l_onerr} pgaudit.log=${l_pga} pgaudit.log_parameter=${l_pgaparam}"
+  local l_stmt l_dur l_logdur l_onerr l_txn l_sample l_autoexp l_pga l_pgaobj l_pgalog
+  IFS='|' read -r l_stmt l_dur l_logdur l_onerr l_txn l_sample l_autoexp l_pga l_pgaobj l_pgalog <<<"$logchk"
+  rn_result actor_proof_logging_precheck INFO "log_statement=${l_stmt} log_min_duration_statement=${l_dur} log_duration=${l_logdur} log_parameter_max_length_on_error=${l_onerr} txn_sample=${l_txn} stmt_sample=${l_sample} auto_explain_params=${l_autoexp} pgaudit_param_logging=${l_pga} pgaudit_object_param_logging=${l_pgaobj} pgaudit.log=${l_pgalog}"
   case "$l_stmt" in mod|all) rn_stop "log_statement=${l_stmt}: the secret would be written to the database log; nothing was written (operational-runbooks.md section 15 step 4)" ;; esac
   [ "$l_dur" = "-1" ] || rn_stop "log_min_duration_statement=${l_dur}: a slow statement could be logged with its parameters; nothing was written"
   [ "$l_logdur" = "off" ] || rn_stop "log_duration=on: nothing was written"
   [ "$l_onerr" = "0" ] || rn_stop "log_parameter_max_length_on_error=${l_onerr}: a failing statement would log its parameters; nothing was written"
-  if [ "$l_pgaparam" = "on" ]; then
-    case "$l_pga" in *write*|*all*|*misc*|*function*) rn_stop "pgaudit logs parameters (pgaudit.log=${l_pga}, log_parameter=on); nothing was written" ;; esac
-  fi
+  [ "$l_txn" = "0" ] || rn_stop "log_transaction_sample_rate is not 0: a sampled transaction logs every statement with its parameters; nothing was written"
+  [ "$l_sample" = "0" ] || rn_stop "sampled statement logging (log_statement_sample_rate with log_min_duration_sample) is on; nothing was written"
+  [ "$l_autoexp" = "0" ] || rn_stop "auto_explain logs parameters (auto_explain.log_min_duration / log_parameter_max_length); nothing was written"
+  [ "$l_pga" = "0" ] || rn_stop "pgaudit logs parameters (pgaudit.log=${l_pgalog}, pgaudit.log_parameter=on); nothing was written"
+  [ "$l_pgaobj" = "0" ] || rn_stop "pgaudit object auditing (pgaudit.role) logs parameters (pgaudit.log_parameter=on); nothing was written"
   rn_result actor_proof_logging_safe PASS "the database would not log the bound parameter"
 
   # 3. the insert

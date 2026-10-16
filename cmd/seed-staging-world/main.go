@@ -80,7 +80,7 @@ func parse(args []string, getenv func(string) string) (settings, error) {
 	if err := stagingseed.CheckAppEnv(s.appEnv); err != nil {
 		return s, err
 	}
-	if err := s.WorldParams.Validate(); err != nil {
+	if err := s.Validate(); err != nil {
 		return s, err
 	}
 	switch s.phase {
