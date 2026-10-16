@@ -10,6 +10,8 @@ package payments
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,7 +24,21 @@ func TestA5_Migration0163_DownRefusedWhileAMismatchResolutionExists(t *testing.T
 	w := newK3World(t, k3Opts{base: 1})
 	_, a := w.disputedPayout(300, "amount_asset_mismatch")
 	w.executeM2(a.ID, ResolutionM2DeclareNotPaid)
-	_, err := w.pool.MigrateDown(context.Background(), realMigrationsDir(t), 1)
+	// 0163 is no longer the newest migration: step down through every later one (their downs succeed on
+	// this scratch DB) so the call reaches 0163's own refusal.
+	dir := realMigrationsDir(t)
+	steps := 1
+	files, err := filepath.Glob(filepath.Join(dir, "*.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		var v int
+		if _, scanErr := fmt.Sscanf(filepath.Base(f), "%d_", &v); scanErr == nil && v > 163 {
+			steps++
+		}
+	}
+	_, err = w.pool.MigrateDown(context.Background(), dir, steps)
 	if err == nil || !strings.Contains(err.Error(), "MR099") {
 		t.Fatalf("0163 down must refuse MR099, got %v", err)
 	}
