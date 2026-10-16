@@ -334,3 +334,45 @@ revocation (above); a truly concurrent pair, 8 rounds, same key and body, exactl
 | `b2c`: `npm run build`, `npm test` | build ok; 24 files, 140 tests PASS, 0 FAIL, 0 SKIP |
 
 Scratch DBs are dropped at the end of the session.
+
+## Security re-review of the fix round (SR10C, at 9595486)
+
+Reviewer: `security`. Scope: commit `eb003e7` (plus the record commits); the deploy/ changes in the range come from the merge of the
+integration branch and were not reviewed here. Method: code and migration reading; private scratch DB `sr10c_re` (dropped):
+all 14 `TestA10c_*` PASS, route freeze / step-up golden / OpenAPI / ADR 0114 pins / HSEC / K3 / K1 suites PASS; backoffice
+`errors.test.ts`, `capabilityGrants.test.ts`, `openapiContract.test.ts` 45 PASS; one temporary probe (not committed).
+
+**Verdict: APPROVED for merge.** SR10C-1 (the blocker) is closed. One new Low (SR10C-8) is recorded and does not block the merge;
+fix it before launch.
+
+- **SR10C-1 closed.** 0164 has no body column: the table holds tenant, actor, key, route (method + path of ids), SHA-256,
+  state, a 2xx status and timestamps. None of these is acting-session-only content. A replay sends the fixed
+  `{"status":"already_applied"}` (204: no body) with `Idempotent-Replayed: true`, so it carries no data from the original response.
+- **SR10C-2 closed.** `staff_idempotency_keys_guard`: UPDATE only `in_progress -> completed` with every identity column frozen
+  (SK001); DELETE only of `in_progress` rows or completed rows older than 24 h (SK002). The runtime role can still delete a LIVE
+  `in_progress` row. That only frees a key and is covered by SR10C-8. It cannot forge an outcome.
+- **SR10C-3 accepted and documented.** A replay now returns a status only, so after a grant is revoked the only leak is the bare
+  fact "already applied" for that actor's own key, for 24 h at most. This is acceptable.
+- **SR10C-4 closed, and the reclaim was attacked.** The sweep is tenant-scoped (`WHERE tenant_id = $1`, under RLS) and capped at 100 rows.
+  Q: can reclaiming an `in_progress` key start a second execution while the original handler is still running? YES, if the
+  original handler runs for more than 15 minutes. Nothing bounds handler duration: `WriteTimeout` 60 s does not cancel the
+  handler, and the pool sets no `statement_timeout` or `lock_timeout`. But a second run is not a second ACT. The governed flows keep
+  their database guards: the one-pending unique indexes on K1/K3/HSEC requests, one-executed, and decided/counted approvals.
+  Probe: the original's effect was committed and its reservation was left `in_progress` for 20 minutes; a keyed retry reclaimed
+  the key, the handler ran and was refused with 409 `conflict`, and nothing was created twice. This is the same protection the
+  routes had without the header.
+- **SR10C-6 closed.** `GetRunForStream` / `GetMismatchForStream` now filter on the path tenant explicitly. **SR10C-7 closed.**
+  An offset without a limit now returns the default page of 50.
+- **Backoffice.** `client.ts` turns any `Idempotent-Replayed: true` non-204 response into `ApiError('already_applied')` before
+  parsing, so the fixed body is never treated as the resource. `errors.ts` shows a fixed sentence, marks the result stale and
+  refreshes. A 204 replay resolves as success, which is acceptable because 204 carries nothing.
+
+**SR10C-8 (Low, new, before launch): the reclaim race is keyed by key, not by reservation.** Completion and release match on
+`(tenant, actor, key, state = 'in_progress')`, not on the reserved row's id. Failure scenario: original A runs for more than 15 min,
+B reclaims and reserves the same key, and A then ends non-2xx. A's `release()` deletes B's live reservation, so a third request C
+reserves the key and runs concurrently with B. If A instead ends 2xx, A's completion marks B's row `completed` with A's status.
+The impact is extra concurrent handler runs and a possibly wrong "already applied" answer. A double financial or governance act
+is not possible, because the flows' database guards refuse it (probe above). Fix:
+(1) `INSERT ... RETURNING id` and complete/release `WHERE id = $reserved`; and (2) bound the inner handler with
+`context.WithTimeout` well below the reclaim age (for example 2 min), so a live handler can never be treated as an orphan. Add a
+test that seeds a reclaimed row and asserts a late release from the stale reservation removes nothing.
