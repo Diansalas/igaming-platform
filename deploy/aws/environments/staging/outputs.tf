@@ -40,6 +40,16 @@ output "rds_port" {
   value = module.database.port
 }
 
+output "database_recovery" {
+  description = "A12 / ADR 0122 recovery posture of the staging database (settings only; PREPARED, NOT APPLIED until the staging deploy). latest_restorable_time is the newest point PITR can restore to right now."
+  value = {
+    backup_retention_days  = module.database.backup_retention_period
+    deletion_protection    = module.database.deletion_protection
+    latest_restorable_time = module.database.latest_restorable_time
+    backup_runner_secret   = var.backup_runner_secret_arn # reference only; Terraform never holds the value
+  }
+}
+
 output "ecr_repository_urls" {
   value = module.ecr.repository_urls
 }

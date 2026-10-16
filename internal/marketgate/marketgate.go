@@ -61,6 +61,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -205,6 +206,11 @@ func New(locator geolocation.Locator) *Gate {
 // memory, and never delays a player request past the deadline.
 const maxInflightLookups = 128
 
+// LocateSlotsExhausted counts lookups refused because all maxInflightLookups slots were held by
+// abandoned lookups (SR8R-6: a cheap metric; expose it when a metrics endpoint exists, and size the
+// cap against the vendor's latency and the gated request rate when a vendor is chosen).
+var LocateSlotsExhausted atomic.Int64
+
 // Locate resolves the request's country evidence. It never errors and
 // never panics, and it NEVER waits longer than the Gate's timeout even if
 // the Locator ignores its context: the lookup runs in its own goroutine and a
@@ -216,6 +222,7 @@ func (g *Gate) Locate(ctx context.Context, req LocateRequest) Evidence {
 	select {
 	case g.slots <- struct{}{}:
 	default:
+		LocateSlotsExhausted.Add(1)
 		return Evidence{} // too many abandoned lookups in flight: unknown
 	}
 	lctx, cancel := context.WithTimeout(ctx, g.timeout)
@@ -328,7 +335,7 @@ func Check(ctx context.Context, tx pgx.Tx, req Request, ev Evidence) (Decision, 
 }
 
 func refuse(ctx context.Context, tx pgx.Tx, req Request, reason, evidence, marketOutcome string) (Decision, error) {
-	write, suppressed := refusalAudit.take(refusalKey{
+	write, suppressed, evicted := refusalAudit.takeDetailed(refusalKey{
 		tenant: req.TenantID, brand: req.BrandID, player: req.PlayerAccountID, op: req.Operation, reason: reason,
 	})
 	if !write {
@@ -343,6 +350,9 @@ func refuse(ctx context.Context, tx pgx.Tx, req Request, reason, evidence, marke
 	}
 	if suppressed > 0 {
 		meta["suppressed_since_last_row"] = suppressed
+	}
+	if evicted > 0 {
+		meta["suppressed_evicted"] = evicted // tenant-wide, from buckets evicted for memory (SR8R3-1)
 	}
 	if marketOutcome != "" {
 		meta["market_outcome"] = marketOutcome

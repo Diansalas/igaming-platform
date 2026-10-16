@@ -79,6 +79,13 @@ type Run struct {
 	// casino_statement run compared (migration 0152); zero (stored NULL) for
 	// every other stream and for sources that state none.
 	CoverageEnd time.Time
+	// ProviderID and WindowTruncated are the payment_statement stream's per-provider continuation cursor
+	// (migration 0160, R3-OBS-BOUND-1): ProviderID names the provider whose statement the run matched
+	// (empty = not a payment_statement run, stored NULL), and WindowTruncated is true when the source stopped
+	// at the per-run bound so the run covers less than the requested window. A payment_statement run's
+	// CoverageEnd is the cursor the next run continues from.
+	ProviderID      string
+	WindowTruncated bool
 }
 
 // Mismatch is one discrepancy a Run found, per
@@ -273,12 +280,19 @@ func persistRun(ctx context.Context, tx pgx.Tx, run Run, mismatches []Mismatch) 
 	// other stream keeps the exact pre-0152 INSERT (and works against a schema
 	// below 0152, e.g. the migration round-trip scratch databases).
 	var insertErr error
-	if run.CoverageEnd.IsZero() {
+	switch {
+	case run.ProviderID != "":
+		// payment_statement (migration 0160): the cursor columns are written in the run's own insert.
+		_, insertErr = tx.Exec(ctx,
+			`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status, coverage_end, provider_id, window_truncated)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status, run.CoverageEnd, run.ProviderID, run.WindowTruncated)
+	case run.CoverageEnd.IsZero():
 		_, insertErr = tx.Exec(ctx,
 			`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status)
-	} else {
+	default:
 		_, insertErr = tx.Exec(ctx,
 			`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status, coverage_end)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,

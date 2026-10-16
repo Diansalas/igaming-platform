@@ -2,7 +2,6 @@ package casino
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -22,8 +21,8 @@ import (
 // settlement would strand player funds):
 //
 //  1. an absolute maximum lifetime for a CONSUMED launch session, measured from
-//     the session's creation by the DATABASE clock. Past it a NEW bet is refused
-//     (ErrLaunchSessionRequired) and the player must pass the evidence-gated
+//     the session's creation by the DATABASE clock. Past it a NEW bet is DECLINED (audited, SR8R-7)
+//     and the player must pass the evidence-gated
 //     launch again - this is what bounds "the player travelled after launch";
 //  2. a brand-level "market still open" check on every NEW bet and on the
 //     launch-token bootstrap: when the operating-market configuration currently
@@ -43,6 +42,10 @@ const DefaultSessionMaxLifetime = 4 * time.Hour
 // NEW bet refused because the brand's market is closed. One generic reason,
 // like DeclineReasonGameUnavailable; the audit row keeps the cause.
 const DeclineReasonMarketUnavailable = "market_unavailable"
+
+// DeclineReasonSessionExpired is the provider-visible decline reason for a NEW bet
+// refused because the consumed session passed its maximum lifetime.
+const DeclineReasonSessionExpired = "session_expired"
 
 // SetSessionMaxLifetime sets the maximum lifetime of a consumed session for NEW
 // bets. Call at construction (not concurrency-safe against in-flight bets). A
@@ -92,5 +95,3 @@ func sessionPastMaxLifetime(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID,
 	}
 	return past, nil
 }
-
-var errSessionTooOld = errors.New("session exceeded its maximum lifetime for new bets")

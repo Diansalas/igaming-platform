@@ -38,13 +38,15 @@
         "rds:ModifyDBParameterGroup",
         "rds:DeleteDBParameterGroup",
         "rds:AddTagsToResource",
-        "rds:RemoveTagsFromResource"
+        "rds:RemoveTagsFromResource",
+        "rds:CreateDBSnapshot"
       ],
       "Resource": [
         "arn:aws:rds:eu-central-1:765578795051:db:igaming-staging-*",
         "arn:aws:rds:eu-central-1:765578795051:subgrp:igaming-staging-*",
         "arn:aws:rds:eu-central-1:765578795051:pg:igaming-staging-*",
-        "arn:aws:rds:eu-central-1:765578795051:og:default:*"
+        "arn:aws:rds:eu-central-1:765578795051:og:default:*",
+        "arn:aws:rds:eu-central-1:765578795051:snapshot:igaming-staging-*"
       ]
     },
     {
@@ -156,7 +158,10 @@
         "logs:FilterLogEvents",
         "logs:DescribeLogStreams"
       ],
-      "Resource": "arn:aws:logs:eu-central-1:765578795051:log-group:/ecs/igaming-staging/*"
+      "Resource": [
+        "arn:aws:logs:eu-central-1:765578795051:log-group:/ecs/igaming-staging/*",
+        "arn:aws:logs:eu-central-1:765578795051:log-group:/aws/rds/instance/igaming-staging-*"
+      ]
     },
     {
       "Sid": "AlarmsDescribe",

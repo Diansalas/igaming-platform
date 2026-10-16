@@ -76,6 +76,10 @@ func (s *MockStatementSource) PayoutLinesCarryMerchantReference() bool { return 
 // Label implements statement.PaymentStatementSource.
 func (s *MockStatementSource) Label() string { return MockStatementSourceLabel }
 
+// ReadOnlyStatementCredential implements statement.ReadOnlyAttested: the MOCK only ever reads (the gate call
+// is ReadOnly and the MockProvider's statementFor mutates nothing).
+func (s *MockStatementSource) ReadOnlyStatementCredential() bool { return true }
+
 // ProviderID implements statement.PaymentStatementSource.
 func (s *MockStatementSource) ProviderID() string {
 	if s == nil || s.provider == nil {
@@ -108,7 +112,7 @@ func (s *MockStatementSource) Fetch(ctx context.Context, req statement.PaymentFe
 	gr := callProvider(ctx, nil, s.resolver, callProviderInput{
 		TenantID: req.TenantID, ProviderID: req.ProviderID, ReadOnly: true, Domain: "payments",
 	}, func(_ context.Context, cc CallContext) (statement.PaymentStatement, ErrorClass, error) {
-		out, err := s.provider.statementFor(cc, s.maxLines)
+		out, err := s.provider.statementFor(cc, s.maxLines, req)
 		capErr = err
 		return out, ErrorClassSucceeded, nil
 	})
@@ -125,21 +129,41 @@ func (s *MockStatementSource) Fetch(ctx context.Context, req statement.PaymentFe
 // sorted by provider reference (deterministic), through a
 // statement.PaymentLineCollector (security C1: the same streaming line cap
 // a real source must apply; the MOCK has no wire body to byte-limit).
-func (m *MockProvider) statementFor(cc CallContext, maxLines int) (statement.PaymentStatement, error) {
+//
+// R3-OBS-BOUND-1 (A11): when req carries a continuation cursor the statement starts exactly there and holds only
+// lines at or after it; when req.MaxLines is positive the statement is cut at an instant boundary
+// (statement.PagePaymentLines) and flagged Truncated with CoverageEnd = the first instant left out. With
+// neither set the behaviour is the unbounded one it always had.
+func (m *MockProvider) statementFor(cc CallContext, maxLines int, req statement.PaymentFetchRequest) (statement.PaymentStatement, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	out := statement.PaymentStatement{CoverageStart: m.createdAt, CoverageEnd: time.Now().UTC()}
+	cursor := time.Time{}
+	if !req.ContinueFrom.IsZero() {
+		cursor = req.ContinueFrom.UTC().Truncate(time.Microsecond)
+		out.CoverageStart = cursor
+	}
 	if !out.CoverageEnd.After(out.CoverageStart) {
 		out.CoverageEnd = out.CoverageStart.Add(time.Microsecond)
 	}
 	if cc.ProviderID != m.providerID {
 		return out, nil
 	}
+	// Bounded/continuation mode dates each line by its last status change (see mockAttempt.changedAt); the
+	// unbounded legacy mode keeps dating by creation.
+	bounded := !cursor.IsZero() || req.MaxLines > 0
 	lines := statement.NewPaymentLineCollector(maxLines)
 	for ref, a := range m.attempts {
 		if !a.tenantTagged || a.tenantID != cc.TenantID {
 			continue
+		}
+		at := a.createdAt
+		if bounded && !a.changedAt.IsZero() {
+			at = a.changedAt
+		}
+		if !cursor.IsZero() && at.UTC().Truncate(time.Microsecond).Before(cursor) {
+			continue // already covered by the run that produced the cursor
 		}
 		kind := statement.PaymentLineDeposit
 		if a.kind == "withdraw" {
@@ -154,12 +178,22 @@ func (m *MockProvider) statementFor(cc CallContext, maxLines int) (statement.Pay
 		}
 		if err := lines.Add(statement.PaymentStatementLine{
 			ProviderID: m.providerID, ProviderReference: ref, MerchantReference: a.merchantReference,
-			Kind: kind, Status: status, Amount: a.amount, AssetCode: a.assetCode, OccurredAt: a.createdAt,
+			Kind: kind, Status: status, Amount: a.amount, AssetCode: a.assetCode, OccurredAt: at,
 		}); err != nil {
 			return statement.PaymentStatement{}, err
 		}
 	}
 	out.Lines = lines.Lines()
+	if req.MaxLines > 0 {
+		page, cutoff, truncated, err := statement.PagePaymentLines(out.Lines, req.MaxLines)
+		if err != nil {
+			return statement.PaymentStatement{}, err
+		}
+		out.Lines = page
+		if truncated {
+			out.Truncated, out.CoverageEnd = true, cutoff
+		}
+	}
 	sort.Slice(out.Lines, func(i, j int) bool { return out.Lines[i].ProviderReference < out.Lines[j].ProviderReference })
 	return out, nil
 }

@@ -101,9 +101,18 @@ module "database" {
   engine_version        = var.db_engine_version
   db_name               = var.db_name
   backup_retention_days = var.db_backup_retention_days
+  backup_window         = var.db_backup_window
   multi_az              = var.db_multi_az
   deletion_protection   = var.db_deletion_protection
-  create_kms_key        = false # AWS-managed aws/rds key; no CMK left pending deletion per teardown
+  create_kms_key        = false # AWS-managed aws/rds key unless db_kms_key_arn references an existing CMK
+  kms_key_arn           = var.db_kms_key_arn
+
+  # A12 / ADR 0122 (prepared, not applied): final snapshot, audit logging and log export
+  skip_final_snapshot             = var.db_skip_final_snapshot
+  final_snapshot_identifier       = var.db_skip_final_snapshot ? null : var.db_final_snapshot_identifier
+  enabled_cloudwatch_logs_exports = var.db_log_exports
+  enable_pgaudit                  = var.db_enable_pgaudit
+  log_retention_days              = var.log_retention_days
   # engine_version is pinned exactly (16.15) — keep RDS from drifting it.
   auto_minor_version_upgrade = false
   tags                       = var.tags

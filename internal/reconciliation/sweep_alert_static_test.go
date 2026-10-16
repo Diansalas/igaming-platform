@@ -47,14 +47,27 @@ func TestStatic_EveryStreamRaisesRunFailed(t *testing.T) {
 
 func TestStatic_SchedulerLoopMakesSweepFailuresDurable(t *testing.T) {
 	fns := dFuncs(t, "scheduler.go", "sweep_alert.go")
-	loop := fns["RunSchedulerLoop"]
+	// A11: both public loops (legacy RunSchedulerLoop and the production RunSchedulerLoopScoped) share one body,
+	// runSchedulerLoop, which owns the durable-failure handling; each public loop must reach its sweep and that body.
+	loop := fns["runSchedulerLoop"]
 	if loop == nil {
-		t.Fatal("RunSchedulerLoop not found")
+		t.Fatal("runSchedulerLoop not found")
 	}
 	calls := dCalls(loop)
-	for _, must := range []string{"RunSweep", "handleSweepError", "recoverSweepPanic"} {
+	for _, must := range []string{"handleSweepError", "recoverSweepPanic"} {
 		if !dHas(calls, must) {
-			t.Errorf("RunSchedulerLoop must call %s", must)
+			t.Errorf("runSchedulerLoop must call %s", must)
+		}
+	}
+	for fn, sweep := range map[string]string{"RunSchedulerLoop": "RunSweep", "RunSchedulerLoopScoped": "RunSweepScoped"} {
+		d := fns[fn]
+		if d == nil {
+			t.Fatalf("%s not found", fn)
+		}
+		for _, must := range []string{sweep, "runSchedulerLoop"} {
+			if !dHas(dCalls(d), must) {
+				t.Errorf("%s must call %s", fn, must)
+			}
 		}
 	}
 	if h := fns["handleSweepError"]; h == nil || !dHas(dCalls(h), "alertSweepFailure") {
@@ -64,7 +77,7 @@ func TestStatic_SchedulerLoopMakesSweepFailuresDurable(t *testing.T) {
 		t.Error("recoverSweepPanic must raise through alertSweepFailure")
 	}
 	// The sentinel wrapping that selects the alert phase.
-	for _, fn := range []string{"RunSweep", "RunSweepTenants"} {
+	for _, fn := range []string{"runSweepAll", "runSweepNamed"} {
 		d := fns[fn]
 		if d == nil {
 			t.Fatalf("%s not found", fn)
@@ -75,6 +88,13 @@ func TestStatic_SchedulerLoopMakesSweepFailuresDurable(t *testing.T) {
 		}
 		if !found["ErrListActiveTenants"] || !found["ErrListNonActiveTenants"] {
 			t.Errorf("%s must wrap both listing sentinels (the alert phase depends on them)", fn)
+		}
+	}
+	// ... and every public entry point reaches those bodies.
+	for fn, body := range map[string]string{"RunSweep": "runSweepAll", "RunSweepScoped": "runSweepAll", "RunSweepTenants": "runSweepNamed", "RunSweepTenantsScoped": "runSweepNamed"} {
+		d := fns[fn]
+		if d == nil || !dHas(dCalls(d), body) {
+			t.Errorf("%s must call %s (the listing-failure alert phases live there)", fn, body)
 		}
 	}
 }

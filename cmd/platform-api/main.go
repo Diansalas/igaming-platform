@@ -112,6 +112,14 @@ func run() error {
 	if err := registerPaymentStatementSources(stmtSources, paySources); err != nil {
 		return err
 	}
+	// A11: the SAME list becomes the per-provider source registry the reconciliation sweep resolves per
+	// (tenant, provider). In production it refuses a Synthetic or non-production-eligible source and a source
+	// that does not attest a read-only credential; a configured provider with no registered source is a failed
+	// run plus a durable alert, never a clean result (see payment_statement_registry.go).
+	payRegistry, err := newPaymentStatementRegistry(cfg.GuardEnvironment(), paySources)
+	if err != nil {
+		return err
+	}
 	// Security S-1/I-1: every domain's webhook schemes are validated here,
 	// pre-DB, as an error (the orchestrator constructors below re-check and
 	// panic as the last line of defence).
@@ -596,7 +604,11 @@ func run() error {
 		// MOCK payments statement source (PRH-I5, ADR 0095 §12.4): the
 		// MockProvider's own records, fetched with no transaction held;
 		// real PSP statement matching is PROVIDER DEPENDENT.
-		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt, providers.CasinoStmt, paySources...)
+		// A11: the payment_statement stream is scoped per (tenant, provider) through payRegistry and bounded
+		// per run (R3-OBS-BOUND-1); a configured provider without an eligible source is NOT reconciled and
+		// says so.
+		reconciliation.RunSchedulerLoopScoped(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt, providers.CasinoStmt,
+			payRegistry.SweepConfig(cfg.ReconciliationPaymentStatementMaxLines))
 	}()
 
 	// Stage 4H-B0-R7 directive item 4: operationalize the self-exclusion

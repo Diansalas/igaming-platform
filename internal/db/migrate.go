@@ -104,13 +104,9 @@ func findVersionGaps(migrations []migration) []string {
 }
 
 // reservedUnusedVersions are version numbers deliberately never used (reserved by in-flight work that was
-// renumbered before merge: 0143-0150 sit between the AML migrations and the staff step-up migration). A gap
+// renumbered before merge: 0143-0150 sit between the AML migrations and the staff step-up migration; 0158/0159 were allocated to A6 and 0161 to A11 and are tolerated whether or not they are used). A gap
 // is tolerated ONLY for a version listed here; any other missing version still fails `migrate verify`.
-//
-// 0159 is reserved by A6 and unused (above the head, so it needs no entry).
-var reservedUnusedVersions = map[int64]struct{}{
-	143: {}, 144: {}, 145: {}, 146: {}, 147: {}, 148: {}, 149: {}, 150: {},
-}
+var reservedUnusedVersions = map[int64]struct{}{143: {}, 144: {}, 145: {}, 146: {}, 147: {}, 148: {}, 149: {}, 150: {}, 159: {}, 161: {}}
 
 func findVersionGapsExcluding(migrations []migration, reserved map[int64]struct{}) []string {
 	if len(migrations) == 0 {

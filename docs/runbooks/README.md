@@ -10,6 +10,11 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `stage-9-3-staging-deployment-runbook.md`, `stage-9-4-aws-account-verification.md`
   and `stage-9-4-staging-lifecycle-runbook.md` — staging (AWS is currently OFF;
   see `../governance/staging-teardown-2026-09-26.md`).
+- `backup-restore-dr.md` — A12 / ADR 0122: backup, restore and point-in-time-recovery runbooks (full loss, operator
+  error -> PITR to a timestamp, single tenant), post-restore checklist, failure handling, measured local RTO/RPO
+  (`deploy/backup/drill.sh`; throwaway cluster, synthetic data; managed RDS NOT proven).
+- `aws-staging-deploy-plan.md` — PREPARED, NOT APPLIED: the single named-commit staging deploy verification checklist
+  (roles, secrets, migrations, PITR restore to a timestamp, logical restore, observability, alert delivery).
 - `backup-and-disaster-recovery.md` — honest RPO/RTO evidence status
   (production NOT MET; a local restore drill is DONE for the dev dataset only).
 - `restore-from-backup.md` — restore procedure matching the local drill

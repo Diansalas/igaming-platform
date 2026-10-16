@@ -132,6 +132,10 @@ func TestWithdrawalApprove_SelfApprovalRejected(t *testing.T) {
 	if count := countWithdrawalApprovals(t, pool, tenant.ID, wr.ID); count != 0 {
 		t.Fatalf("expected zero withdrawal_approvals rows after a rejected self-approval, got %d", count)
 	}
+	// SR11-4 (A11): the refusal is also durable evidence (a Denied audit row), not log-only.
+	if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.approve.http' AND outcome = 'denied' AND target_id = $2 AND metadata->>'reason' = 'staff_is_beneficiary'`, tenant.ID, wr.ID.String()); n != 1 {
+		t.Fatalf("expected one denied approve audit row for the self-approval refusal, got %d", n)
+	}
 }
 
 // TestWithdrawalApprove_SamePersonAlternateStaffIdentityRejected is

@@ -223,6 +223,10 @@ type mockAttempt struct {
 	tenantTagged      bool
 	merchantReference string
 	createdAt         time.Time
+	// changedAt is the last time the provider's own record of this attempt changed (creation, Resolve,
+	// SetConfirmedAmount). In bounded/continuation statement mode (A11) it dates the statement line, so a later
+	// settlement re-appears in the window it happened in.
+	changedAt time.Time
 }
 
 // tagRecord stamps the record just created under ref with the calling
@@ -235,6 +239,7 @@ func (m *MockProvider) tagRecord(ctx context.Context, ref, merchantReference str
 	}
 	a.merchantReference = merchantReference
 	a.createdAt = time.Now().UTC()
+	a.changedAt = a.createdAt
 	if cc, ok := callContextFrom(ctx); ok && cc.ProviderID == m.providerID && cc.TenantID != uuid.Nil {
 		a.tenantID, a.tenantTagged = cc.TenantID, true
 	}
@@ -335,6 +340,7 @@ func (m *MockProvider) Resolve(providerReference string, outcome Outcome, declin
 		a.outcome = outcome
 		a.declineReason = declineReason
 		a.cascadable = cascadable
+		a.changedAt = time.Now().UTC()
 	}
 }
 

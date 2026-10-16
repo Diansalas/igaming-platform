@@ -299,6 +299,11 @@ type ClaimResult struct {
 // - see TestClaimForDispatch_GateRunsUnderOuterLock, which pins this by
 // asserting a spy gate is not invoked until a concurrent holder of the
 // same row lock releases it.
+// payoutClaimAfterRoutingHook, when non-nil, runs between ClaimForDispatch's A0 routing and its T1p claim
+// transaction. TEST-ONLY (the S-L4 capability re-read test changes the capability in exactly that gap); always nil
+// in production.
+var payoutClaimAfterRoutingHook func()
+
 func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycGate PayoutKYCGate, tenantID, requestID uuid.UUID, paymentMethod string, actor SubmitActor) (ClaimResult, error) {
 	// A0: route outside any tx.
 	var routingInput withdrawal.WithdrawalRequest
@@ -348,6 +353,10 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		TenantID: tenantID, BrandID: routingInput.BrandID, AssetCode: routingInput.AssetCode,
 		PaymentMethod: paymentMethod, Amount: routingInput.Amount, Operation: OperationWithdrawal,
 	})
+
+	if payoutClaimAfterRoutingHook != nil {
+		payoutClaimAfterRoutingHook()
+	}
 
 	var result ClaimResult
 	// kycUnavailable is set (and the closure returns nil, so the tx COMMITS)
@@ -435,6 +444,16 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			// request stays `approved`, retriable once routing succeeds) -
 			// never a partial claim.
 			return fmt.Errorf("payments: route payout: %w", routeErr)
+		}
+
+		// PAY-SEC-LAUNCH-1 / S-L4 (2), ADR 0095 5.2 step (4): the capability the A0 routing chose is re-read INSIDE this
+		// transaction, FOR SHARE (a concurrent disable waits for this claim; LF-A11-3). A capability disabled, removed or no longer withdrawal-capable between routing and this commit
+		// is not claimed: the request stays `approved` (the whole claim rolls back, nothing written), retriable once
+		// routing succeeds. The kill switch above stays the emergency stop; this closes the window it cannot.
+		if cur, found, cerr := LoadCapabilityForShare(actx, tx, tenantID, wr.BrandID, routedCapability.ProviderID); cerr != nil {
+			return cerr
+		} else if !found || cur.Status != CapabilityActive || !cur.SupportsWithdrawal {
+			return fmt.Errorf("payments: payout claim refused: capability for %q changed since routing: %w", routedCapability.ProviderID, ErrNoRoutableProvider)
 		}
 
 		// B13-B destination gate (ADR 0111 2.4): AFTER the KYC gate and the route error, BEFORE the

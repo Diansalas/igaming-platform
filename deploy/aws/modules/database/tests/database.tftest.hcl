@@ -55,3 +55,94 @@ run "engine_version_has_no_default" {
 
   expect_failures = [var.engine_version]
 }
+
+# --- A12 / ADR 0122: managed PITR, final snapshot, audit logging (prepared, not applied) ---
+
+run "pitr_snapshot_and_audit_settings" {
+  command = plan
+
+  variables {
+    backup_retention_days           = 14
+    backup_window                   = "01:00-02:00"
+    deletion_protection             = true
+    skip_final_snapshot             = false
+    final_snapshot_identifier       = "igaming-staging-db-final-abc1234"
+    enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+    enable_pgaudit                  = true
+  }
+
+  assert {
+    condition     = aws_db_instance.this.backup_retention_period == 14 && aws_db_instance.this.backup_window == "01:00-02:00"
+    error_message = "Automated backups (the PITR window) must be 14 days with the configured backup window."
+  }
+
+  assert {
+    condition     = aws_db_instance.this.deletion_protection == true && aws_db_instance.this.skip_final_snapshot == false && aws_db_instance.this.final_snapshot_identifier == "igaming-staging-db-final-abc1234"
+    error_message = "Deletion protection on and a named final snapshot are required."
+  }
+
+  assert {
+    condition     = aws_db_instance.this.copy_tags_to_snapshot == true && aws_db_instance.this.storage_encrypted == true
+    error_message = "Snapshots must carry the tags and stay encrypted."
+  }
+
+  assert {
+    condition     = aws_db_instance.this.iam_database_authentication_enabled == true
+    error_message = "IAM database authentication must be enabled (the backup role's required credential mechanism on RDS, ADR 0122 section 3)."
+  }
+
+  assert {
+    condition     = toset(aws_db_instance.this.enabled_cloudwatch_logs_exports) == toset(["postgresql", "upgrade"]) && length(aws_cloudwatch_log_group.rds_export) == 2
+    error_message = "postgresql and upgrade logs must be exported to pre-created, retention-managed log groups."
+  }
+
+  assert {
+    condition = alltrue([
+      for n in ["rds.force_ssl", "log_connections", "log_disconnections", "shared_preload_libraries"] :
+      contains([for p in aws_db_parameter_group.this.parameter : p.name], n)
+    ])
+    error_message = "Parameter group must force SSL, log connections and disconnections, and preload pgaudit when enabled."
+  }
+}
+
+run "pgaudit_is_opt_in" {
+  command = plan
+
+  assert {
+    condition     = !contains([for p in aws_db_parameter_group.this.parameter : p.name], "shared_preload_libraries")
+    error_message = "shared_preload_libraries (a reboot-requiring parameter) must only be set when enable_pgaudit = true."
+  }
+}
+
+run "customer_managed_key_reference_takes_precedence" {
+  command = plan
+
+  variables {
+    kms_key_arn = "arn:aws:kms:eu-central-1:765578795051:key/11111111-2222-3333-4444-555555555555"
+  }
+
+  assert {
+    condition     = aws_db_instance.this.kms_key_id == "arn:aws:kms:eu-central-1:765578795051:key/11111111-2222-3333-4444-555555555555"
+    error_message = "An explicit kms_key_arn must be the storage/snapshot/PITR key."
+  }
+}
+
+run "final_snapshot_requires_an_identifier" {
+  command = plan
+
+  variables {
+    skip_final_snapshot = false
+  }
+
+  expect_failures = [aws_db_instance.this]
+}
+
+run "zero_retention_would_disable_pitr_and_is_rejected" {
+  command = plan
+
+  variables {
+    backup_retention_days = 0
+  }
+
+  expect_failures = [var.backup_retention_days]
+}

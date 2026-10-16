@@ -1,4 +1,4 @@
-.PHONY: drill-backup-restore drill-backup-restore-dry-run smoke-local build run test test-integration test-integration-runtime-role lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down dev-db-init-roles dev-db-init-test-admin ci
+.PHONY: drill-a12 drill-a12-small drill-backup-restore drill-backup-restore-dry-run smoke-local build run test test-integration test-integration-runtime-role lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down dev-db-init-roles dev-db-init-test-admin ci
 
 GO ?= go
 DATABASE_URL ?= postgres://igaming:igaming_dev_password@127.0.0.1:5432/igaming_platform_dev?sslmode=disable
@@ -113,3 +113,13 @@ drill-backup-restore-dry-run:
 
 smoke-local:
 	@TEST_ADMIN_DATABASE_URL='$(TEST_ADMIN_DATABASE_URL)' TEST_DATABASE_URL='$(DATABASE_URL)' deploy/loadtest/local-smoke.sh
+
+# A12 (ADR 0122): real backup / restore / point-in-time-recovery drill. Unlike the targets above it uses NO shared-cluster
+# credential at all: it builds and destroys its own throwaway PostgreSQL 16 clusters under /tmp/pgdrill-* (ports 5499/5498/5497,
+# run as the OS user postgres via runuser), never touches 5432, and generates random per-run passwords. Runbook:
+# docs/runbooks/backup-restore-dr.md. `drill-a12-small` is a ~3 minute smoke; `drill-a12` loads >=100k ledger entries.
+drill-a12:
+	@deploy/backup/drill.sh
+
+drill-a12-small:
+	@deploy/backup/drill.sh --small

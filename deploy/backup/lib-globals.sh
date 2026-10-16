@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Allow-list validation of the role statements restore.sh replays from a backup's globals.sql (--apply-globals).
+# SOURCED by restore.sh. The set is signed (lib-sign.sh), but a compromised backup pipeline could sign a hostile globals.sql, so
+# replaying it blindly as a role-creating restore user would be a privilege-escalation path
+# (e.g. `ALTER ROLE igaming WITH SUPERUSER`). Only the exact, expected shapes pass; anything else aborts the restore
+# before any role or database is created.
+#
+#   bk_validate_role_stmts <role> <file>   returns 0 if every non-empty line of <file> is an allowed statement for <role>
+#
+# Allowed, for role r in {igaming, igaming_runtime, igaming_backup}:
+#   CREATE ROLE r;
+#   ALTER ROLE r WITH <attrs>;   attrs only from: NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION (all four REQUIRED),
+#                                INHERIT NOINHERIT LOGIN NOLOGIN, CONNECTION LIMIT n, VALID UNTIL '<timestamp>', and
+#                                BYPASSRLS if and only if r = igaming_backup (every other role must say NOBYPASSRLS)
+#   (ALTER ROLE ... SET statements are NOT replayed any more: session defaults come from the repository's own provisioning
+#   scripts, init-backup-role.sql for the backup role; A12 security review L4.)
+
+# shellcheck shell=bash
+
+bk_validate_role_stmts() {
+  local r="$1" f="$2" stmt rest tok re_chars
+  while IFS= read -r stmt; do
+    [ -n "$stmt" ] || continue
+    if [ "$stmt" = "CREATE ROLE ${r};" ]; then continue; fi
+    case "$stmt" in
+      "ALTER ROLE ${r} WITH "*";")
+        rest="${stmt#"ALTER ROLE ${r} WITH "}"; rest="${rest%;}"
+        # character allow-list first (no quotes except around the VALID UNTIL timestamp, no parentheses, no semicolons)
+        re_chars="^[A-Za-z0-9 ':.+-]+\$"
+        [[ "$rest" =~ $re_chars ]] || { echo "role ${r}: unexpected characters in: ${stmt}" >&2; return 1; }
+        # attribute tokens
+        local words=" ${rest} " need
+        for need in NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION; do
+          [[ "$words" == *" ${need} "* ]] || { echo "role ${r}: ${need} is required in: ${stmt}" >&2; return 1; }
+        done
+        if [ "$r" = igaming_backup ]; then
+          [[ "$words" == *" CONNECTION LIMIT 2 "* ]] || { echo "role ${r}: CONNECTION LIMIT 2 is required: ${stmt}" >&2; return 1; }
+          [[ "$words" == *" BYPASSRLS "* ]] || { echo "role ${r}: BYPASSRLS expected for the backup role: ${stmt}" >&2; return 1; }
+        else
+          [[ "$words" == *" NOBYPASSRLS "* && "$words" != *" BYPASSRLS "* ]] || { echo "role ${r}: NOBYPASSRLS required: ${stmt}" >&2; return 1; }
+        fi
+        # nothing outside the known grammar: strip the known pieces, nothing may remain
+        local residue="$words"
+        for tok in NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION BYPASSRLS NOBYPASSRLS INHERIT NOINHERIT LOGIN NOLOGIN; do residue="${residue// ${tok} / }"; done
+        residue="$(printf '%s' "$residue" | sed -E "s/ CONNECTION LIMIT -?[0-9]+ / /; s/ VALID UNTIL '[0-9][0-9: .+-]*' / /")"
+        residue="${residue// /}"
+        [ -z "$residue" ] || { echo "role ${r}: unrecognised attribute text '${residue}' in: ${stmt}" >&2; return 1; }
+        ;;
+      *) echo "role ${r}: statement not allowed: ${stmt}" >&2; return 1 ;;
+    esac
+  done <"$f"
+}

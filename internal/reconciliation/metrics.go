@@ -20,6 +20,10 @@ import (
 //	reconciliation_last_success_unix_seconds{stream}  the OLDEST per-tenant last success of the stream
 //	reconciliation_mismatches_open{stream}            mismatches reported by each tenant's latest completed run
 //	reconciliation_last_sweep_unix_seconds            end of the last COMPLETE sweep
+//	reconciliation_payment_unreconciled{reason}       (tenant, provider) payment_statement pairs whose latest outcome is NOT
+//	                                                  "reconciled up to now": no_source | source_not_eligible | truncated | run_failed |
+//	                                                  scope_unavailable (A11: a configured provider with no eligible statement
+//	                                                  source, or a run stopped at the per-run bound; never reads as clean)
 //
 // Labels are bounded: stream is the closed set below (anything else is "other"); there is NO tenant label
 // (per-tenant state is held in memory and only its min / sum leave the process). The aggregation is chosen
@@ -36,6 +40,10 @@ const (
 	resultMismatch = "mismatch"
 	resultFailed   = "failed"
 	resultSkipped  = "skipped"
+	// resultTruncated: a payment_statement run that completed but stopped at the per-run bound (R3-OBS-BOUND-1).
+	// It is not a success for freshness (reconciliation_last_success_unix_seconds does not advance), so a
+	// backlog that never catches up reads as stale.
+	resultTruncated = "truncated"
 )
 
 var boundedStreams = map[string]bool{
@@ -63,6 +71,8 @@ type runState struct {
 	lastSuccessUnix int64
 	mismatches      int64
 	seenGen         uint64
+	// unreconciled is the NotReconciled reason of the latest non-skipped outcome ("" = reconciled).
+	unreconciled string
 }
 
 type runTracker struct {
@@ -115,6 +125,16 @@ func (t *runTracker) register(meter metric.Meter) error {
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
 			for stream, v := range t.mismatchesByStream() {
 				o.Observe(v, metric.WithAttributes(attribute.String("stream", stream)))
+			}
+			return nil
+		})); err != nil {
+		return err
+	}
+	if _, err = meter.Int64ObservableGauge("reconciliation_payment_unreconciled",
+		metric.WithDescription("payment_statement (tenant, provider) pairs whose latest outcome is not 'reconciled up to now', by reason: no_source, source_not_eligible, truncated, run_failed, scope_unavailable."),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			for reason, v := range t.PaymentUnreconciled() {
+				o.Observe(v, metric.WithAttributes(attribute.String("reason", reason)))
 			}
 			return nil
 		})); err != nil {
@@ -179,6 +199,8 @@ func (t *runTracker) record(gen uint64, tenant uuid.UUID, stream, source string,
 		result = resultFailed
 	case out.Skipped:
 		result = resultSkipped
+	case out.Truncated:
+		result = resultTruncated
 	case out.Run.Status == StatusMismatchesFound:
 		result = resultMismatch
 	}
@@ -198,7 +220,17 @@ func (t *runTracker) record(gen uint64, tenant uuid.UUID, stream, source string,
 			t.states[key] = st
 		}
 		st.seenGen = gen
-		if result != resultFailed {
+		st.unreconciled = out.NotReconciled
+		if stream == string(StreamPaymentStatement) && result == resultFailed && st.unreconciled == "" {
+			st.unreconciled = "run_failed" // a failed fetch/ingest/match is not "reconciled up to now" either
+		}
+		if result == resultTruncated {
+			// A truncated run matched the window it covered (its mismatches count) but is not "reconciled up to now".
+			st.mismatches = int64(out.Mismatches)
+			if out.Run.Status == StatusMismatchesFound && out.Mismatches == 0 {
+				st.mismatches = 1
+			}
+		} else if result != resultFailed {
 			st.lastSuccessUnix = t.now().Unix()
 			st.mismatches = int64(out.Mismatches)
 			if result == resultMismatch && out.Mismatches == 0 {
@@ -228,8 +260,10 @@ func (t *runTracker) recordOutcomes(gen uint64, outcomes []SweepOutcome, paySour
 			t.record(gen, o.TenantID, string(StreamCasinoStatement), "", o.CasinoStatement)
 		}
 		for i, ps := range o.PaymentStatement {
-			src := ""
-			if i < len(paySources) {
+			// The scoped sweep stamps every outcome with its provider; the legacy sweep's outcomes are
+			// positional (one per registered source, in order).
+			src := ps.ProviderID
+			if src == "" && i < len(paySources) {
 				src = sourceKey(paySources[i])
 			}
 			t.record(gen, o.TenantID, string(StreamPaymentStatement), src, ps)
@@ -248,6 +282,25 @@ func (t *runTracker) lastSuccessByStream() map[string]int64 {
 	}
 	return out
 }
+
+// PaymentUnreconciled returns, per NotReconciled reason, how many (tenant, provider) payment_statement pairs
+// are currently not reconciled (latest outcome per pair). It is the readiness signal for "a configured payment
+// provider has no statement source / is only partially covered": non-empty means NOT reconciled.
+func (t *runTracker) PaymentUnreconciled() map[string]int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := map[string]int64{}
+	for k, s := range t.states {
+		if k.stream == string(StreamPaymentStatement) && s.unreconciled != "" {
+			out[s.unreconciled]++
+		}
+	}
+	return out
+}
+
+// PaymentUnreconciled is the process-wide view of the run tracker's unreconciled payment pairs (see
+// runTracker.PaymentUnreconciled).
+func PaymentUnreconciled() map[string]int64 { return defaultTracker.PaymentUnreconciled() }
 
 func (t *runTracker) mismatchesByStream() map[string]int64 {
 	t.mu.Lock()

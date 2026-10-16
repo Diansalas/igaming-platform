@@ -751,6 +751,43 @@ type approveWithdrawalResponse struct {
 	Approved bool `json:"approved"`
 }
 
+// auditBeneficiaryRefusal writes the durable Denied audit row of a refused beneficiary action (SR11-4): an insider-fraud
+// signal must not be log-only. It runs in its own transaction because the refused request's transaction rolled back;
+// a failure to write it is logged and never changes the refusal.
+func auditBeneficiaryRefusal(r *http.Request, deps Deps, logger *slog.Logger, tenantID, staffID, withdrawalID uuid.UUID, action, requestID string) {
+	if err := deps.DB.WithTenant(r.Context(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: staffID,
+			Action: action, TargetType: "withdrawal_request", TargetID: withdrawalID.String(),
+			Outcome: audit.OutcomeDenied, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+			Metadata: map[string]any{"reason": "staff_is_beneficiary"},
+		})
+	}); err != nil {
+		logger.Error("beneficiary_refusal_audit_failed", "error", err)
+	}
+}
+
+// staffIsWithdrawalBeneficiary reports whether the staff member resolves to the SAME Person as the withdrawing player
+// of withdrawalID (withdrawal-state-machine.md section 5 bypass #2). found is false when the withdrawal is not
+// visible in this tenant scope. Shared by approve, submit and /resolve (PAY-SEC-LAUNCH-1 / S-L1: a beneficiary
+// controls the dispatch timing and the payout rail, so submit and resolve refuse it like approve does).
+func staffIsWithdrawalBeneficiary(ctx context.Context, tx pgx.Tx, withdrawalID, staffID uuid.UUID) (isBeneficiary, found bool, err error) {
+	err = tx.QueryRow(ctx, `
+		SELECT pa.person_id IS NOT NULL
+			AND su.person_id IS NOT NULL
+			AND pa.person_id = su.person_id
+		FROM withdrawal_requests wr
+		JOIN player_accounts pa ON pa.id = wr.player_account_id
+		LEFT JOIN staff_users su ON su.id = $2
+		WHERE wr.id = $1`,
+		withdrawalID, staffID,
+	).Scan(&isBeneficiary)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	return isBeneficiary, err == nil, err
+}
+
 // newApproveWithdrawalHandler records a four-eyes 'approve' decision.
 // approverPrincipalID is ALWAYS the calling staff member's own
 // authenticated subject id - never anything from the request body - per
@@ -799,18 +836,8 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		var approved bool
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			beneficiaryCheck := func(approverPrincipalID uuid.UUID) (bool, error) {
-				var isBeneficiary bool
-				err := tx.QueryRow(ctx, `
-					SELECT pa.person_id IS NOT NULL
-						AND su.person_id IS NOT NULL
-						AND pa.person_id = su.person_id
-					FROM withdrawal_requests wr
-					JOIN player_accounts pa ON pa.id = wr.player_account_id
-					LEFT JOIN staff_users su ON su.id = $2
-					WHERE wr.id = $1`,
-					id, approverPrincipalID,
-				).Scan(&isBeneficiary)
-				if errors.Is(err, pgx.ErrNoRows) {
+				isBeneficiary, found, err := staffIsWithdrawalBeneficiary(ctx, tx, id, approverPrincipalID)
+				if err == nil && !found {
 					// The withdrawal itself doesn't exist (or isn't
 					// visible in this tenant scope) - Approve's own
 					// lockRequestForUpdate, called before this check runs,
@@ -858,6 +885,7 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if errors.Is(err, withdrawal.ErrSelfApproval) {
+			auditBeneficiaryRefusal(r, deps, logger, tc.TenantID, approverID, id, "withdrawal.approve.http", requestID)
 			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot approve your own withdrawal")
 			return
 		}
@@ -1083,9 +1111,22 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			if !active {
 				return withdrawal.ErrApproverInactive
 			}
+			// PAY-SEC-LAUNCH-1 / S-L1: the submitter must not be the withdrawing player's own Person. An unknown
+			// withdrawal (found=false) falls through to ClaimForDispatch's own 404.
+			if isBeneficiary, _, err := staffIsWithdrawalBeneficiary(ctx, tx, id, submitterID); err != nil {
+				return fmt.Errorf("withdrawal: submitter beneficiary check: %w", err)
+			} else if isBeneficiary {
+				return withdrawal.ErrStaffIsBeneficiary
+			}
 			eligible = true
 			return nil
 		})
+		if errors.Is(err, withdrawal.ErrStaffIsBeneficiary) {
+			logger.Warn("submit_withdrawal_refused_beneficiary_staff", "request_id", requestID, "tenant_id", tc.TenantID)
+			auditBeneficiaryRefusal(r, deps, logger, tc.TenantID, submitterID, id, "withdrawal.submit.http", requestID)
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is linked to the withdrawing player's own Person and cannot submit the withdrawal")
+			return
+		}
 		if errors.Is(err, withdrawal.ErrApproverNotLinked) {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account has no confirmed Person linkage and is not eligible to submit withdrawals")
 			return
@@ -1354,6 +1395,13 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			if !active {
 				return withdrawal.ErrApproverInactive
 			}
+			// PAY-SEC-LAUNCH-1 / S-L1: the resolver must not be the withdrawing player's own Person (checked before
+			// any read of the attempt, so nothing is polled or rescheduled for a refused caller).
+			if isBeneficiary, _, err := staffIsWithdrawalBeneficiary(ctx, tx, id, resolverID); err != nil {
+				return fmt.Errorf("withdrawal: resolver beneficiary check: %w", err)
+			} else if isBeneficiary {
+				return withdrawal.ErrStaffIsBeneficiary
+			}
 
 			// Read-only (no lock, no I/O held): H4 requires no transaction
 			// held across the QueryStatus call, which now happens entirely
@@ -1381,6 +1429,12 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrStateConflict) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not submitted and awaiting resolution")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrStaffIsBeneficiary) {
+			logger.Warn("resolve_withdrawal_refused_beneficiary_staff", "request_id", requestID, "tenant_id", tc.TenantID)
+			auditBeneficiaryRefusal(r, deps, logger, tc.TenantID, resolverID, id, "withdrawal.resolve.http", requestID)
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is linked to the withdrawing player's own Person and cannot resolve the withdrawal")
 			return
 		}
 		if errors.Is(err, withdrawal.ErrApproverNotLinked) {

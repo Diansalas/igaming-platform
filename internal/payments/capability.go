@@ -19,6 +19,19 @@ import (
 // tenant-owned, RLS-protected table with no platform-global fallback
 // (docs/decisions/0022 §2.2).
 func LoadCapability(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, providerID string) (ProviderCapability, bool, error) {
+	return loadCapability(ctx, tx, tenantID, brandID, providerID, "")
+}
+
+// LoadCapabilityForShare is LoadCapability that also locks the effective capability row FOR SHARE until the caller's
+// transaction ends (PAY-SEC-LAUNCH-1 / S-L4(2)): a concurrent disable (WriteCapability's upsert takes the row lock)
+// waits for the claim, so the claim cannot commit on a capability that was disabled after it was re-read. The row
+// is a leaf in the lock order: capability writers take no request, attempt or ledger lock after it. Residual: a
+// brand-specific row inserted concurrently over a tenant-wide one is not locked (no predicate lock).
+func LoadCapabilityForShare(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, providerID string) (ProviderCapability, bool, error) {
+	return loadCapability(ctx, tx, tenantID, brandID, providerID, " FOR SHARE")
+}
+
+func loadCapability(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, providerID, lockClause string) (ProviderCapability, bool, error) {
 	row := tx.QueryRow(ctx,
 		`SELECT id, tenant_id, brand_id, provider_id, provider_kind,
 			supported_fiat_currencies, supported_crypto_assets, supported_payment_methods, supported_countries,
@@ -27,7 +40,7 @@ func LoadCapability(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID,
 		 FROM provider_capabilities
 		 WHERE tenant_id = $1 AND provider_id = $2 AND (brand_id = $3 OR brand_id IS NULL)
 		 ORDER BY (brand_id IS NULL) ASC
-		 LIMIT 1`,
+		 LIMIT 1`+lockClause,
 		tenantID, providerID, brandID,
 	)
 	pc, err := scanCapabilityRow(row)
@@ -380,6 +393,12 @@ func validateManifest(provider PaymentProvider, declared AdapterCapability) erro
 		// CallbackEchoesMerchantReference = true.
 		if (declared.SupportsDeposit || declared.SupportsWithdrawal) && !m.CallbackEchoesMerchantReference {
 			return fmt.Errorf("%w: production-eligible adapter %s supports deposit or withdrawal but does not echo merchant_reference on callback (LF95-C5; StatusQuery by_provider_or_merchant_reference is not accepted while no merchant-reference status method exists)",
+				ErrManifestRegistrationRefused, declared.ProviderID)
+		}
+		// PAY-DEPOSIT-ESCALATION-1 (LF E3): a QueryStatus success must carry amount and asset, or the attempt can
+		// never be compared and posted.
+		if (declared.SupportsDeposit || declared.SupportsWithdrawal) && !m.StatusQuerySuccessCarriesAmountAndAsset {
+			return fmt.Errorf("%w: production-eligible adapter %s supports deposit or withdrawal but does not declare that a QueryStatus success carries amount and asset (LF E3, ADR 0095 41.5)",
 				ErrManifestRegistrationRefused, declared.ProviderID)
 		}
 	}
