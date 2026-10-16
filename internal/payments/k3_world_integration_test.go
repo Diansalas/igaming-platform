@@ -78,6 +78,9 @@ type k3Opts struct {
 	// tenant has NO psp_clearing account until an M2 "declare paid" creates it
 	// (T-2: the first-ever psp_clearing creation for a tenant and asset).
 	noClearing bool
+	// noStatementRun skips the world's genuine payment_statement run (F2e: an M2 is then refused,
+	// reconciliation_not_current).
+	noStatementRun bool
 }
 
 type k3World struct {
@@ -196,6 +199,12 @@ func newK3WorldOn(t *testing.T, pool *db.Pool, opts k3Opts) *k3World {
 		w.reg.Register(w.provider)
 	}
 	w.svc = NewManualResolutionService(pool, w.reg)
+	if !opts.noStatementRun {
+		// F2e / H-W1 second half: M2 needs the provider's payment_statement reconciliation to be current. The
+		// world's evidence is a GENUINE run of the real stream over the world's MOCK provider (no attempts yet:
+		// an empty, clean statement), never a hand-written row.
+		k3StatementRun(t, pool, w.f.tenantID, w.mock, nil)
+	}
 
 	w.adminA = w.staffMember(uuid.Nil, "platform_admin")
 	w.adminB = w.staffMember(uuid.Nil, "platform_admin")
