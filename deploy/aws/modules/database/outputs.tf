@@ -41,3 +41,17 @@ output "engine_version" {
 output "publicly_accessible" {
   value = aws_db_instance.this.publicly_accessible
 }
+
+output "backup_retention_period" {
+  description = "Automated backup retention in days = the point-in-time-recovery window (A12 / ADR 0122)."
+  value       = aws_db_instance.this.backup_retention_period
+}
+
+output "deletion_protection" {
+  value = aws_db_instance.this.deletion_protection
+}
+
+output "latest_restorable_time" {
+  description = "Newest point in time PITR can restore to right now (RFC 3339; known only after apply)."
+  value       = aws_db_instance.this.latest_restorable_time
+}
