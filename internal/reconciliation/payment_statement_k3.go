@@ -242,6 +242,8 @@ type k3Evidence struct {
 	// capturedSeen: (attempt, evidencing reference) pairs already reported this
 	// run (S6: one finding per exposure per run).
 	capturedSeen map[string]bool
+	// payoutTombstones (F3 / A5 R9): the payouts the A5 reversal tombstone branch failed for this provider.
+	payoutTombstones []payoutTombstone
 }
 
 // clearEligible reports whether lines of an import with the given is_mock may
@@ -411,8 +413,19 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		}
 	}
 
+	// F3 / A5 R9: the payouts the A5 tombstone branch failed (a tombstone correlated to the withdrawal request).
+	if err := m.loadPayoutTombstones(ctx, tx, e); err != nil {
+		return fmt.Errorf("payout reversal tombstones: %w", err)
+	}
+
 	// The references and merchant references the run needs evidence for.
 	refs, merchants := map[string]bool{}, map[string]bool{}
+	for _, pt := range e.payoutTombstones {
+		refs[pt.ref] = true
+		for _, mr := range pt.merchants {
+			merchants[mr] = true
+		}
+	}
 	for _, a := range m.attempts {
 		if a.state != "disputed" {
 			continue

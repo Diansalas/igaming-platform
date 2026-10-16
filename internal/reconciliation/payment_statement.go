@@ -857,6 +857,7 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	if err := m.checkDeferredReceipts(ctx, tx); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: payment receipt check: %w", err)
 	}
+	m.checkPayoutReversalTombstones()
 	if err := m.checkM2Standing(ctx, tx); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: M2 standing check: %w", err)
 	}

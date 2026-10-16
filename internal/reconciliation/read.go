@@ -146,6 +146,8 @@ var PaymentStatementMismatchKinds = []MismatchKind{
 	MismatchKindPayDuplicate, MismatchKindPayUnresolved, MismatchKindPayCapturedUnposted,
 	MismatchKindPayDeclaredPaidUnconfirmed, MismatchKindPayDeclaredNotPaidButPaid,
 	MismatchKindPayDeclaredPaidCompensatedButPaid,
+	// F3 / A5 R9 (migration 0167).
+	MismatchKindPayPayoutReversalTombstoneButPaid,
 }
 
 // SportsbookSettlementMismatchKinds are the kinds the sportsbook_settlement stream records.
