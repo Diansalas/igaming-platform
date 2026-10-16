@@ -1,5 +1,19 @@
 # iGaming Platform — Live Developer Handover
 
+## Current state (2026-10-16)
+
+> **This section supersedes "Current state (2026-10-15)" below and every older statement where they differ.** Full detail: `docs/plans/final-production-readiness-report-2026-10-16.md`.
+
+**Branch and commit.** `claude/focused-wright-jw88w9`; code head `0dc2680` (hosted CI 27/27 green); migration head 0164. **A1-A13 are complete; core platform development is stopped.** Providers are MOCK, AWS is OFF, no brand is activated.
+
+**What was built since 2026-10-15:** A3 casino pre-adapter fixes (0152), A4 manual-adjustment link fence (0153), A7 AML operability (0154/0155), A9 observability + alert channels (0156/0157), A6 RG enforcement + withdrawal RG/risk gate + B2C RG page (0158; enforcement is OFF per brand until compliance supplies floors and an owner switches it on, step-up critical), A8 operating-market blocking, A11 payments statement-source registry + bounded cursor (0160), A5 governed payout reversal + amount-dispute exit + negative-balance block (0162/0163), A10/A10c consoles, staff invite, server-side Idempotency-Key (0164), A12 backup role + signed/encrypted logical backup + restore + PITR drill (ADR 0122), A13 scratch-DB reaper, `migrate verify`, runbooks, STAGING-PREP-1/2, fail-closed R-ALERTS (SnapshotVersion 5).
+
+**Verification:** see section 1 of the final report (unit 68 packages, local integration all packages, hosted CI 27/27 incl. `-race` shards, frontends 643 + 140 tests, drill 118/0 at head 164).
+
+**Where to look:** open items by class and owner decisions: final report sections 4 and 7; staging deployment: `docs/runbooks/aws-staging-deploy-plan.md` (PREPARED, NOT AUTHORISED); runbooks index: `docs/runbooks/README.md`; per-item records: `docs/plans/a5-*`, `a6-*`, `a8-*`, `a10c-*`, `a11-*`, `a12-*`, `a13-*`; decision register: `docs/governance/human-decision-register.md` (HDR-A6-1..4 added); registry rows 2026-10-15/16 in `docs/governance/task-registry.md`.
+
+**What must not be assumed:** no real provider, money, customer or production credential is authorised; RG limit enforcement and market-gate evidence are not production-configured; real AWS/RDS behaviour of the backup tooling and Terraform is unverified; technical readiness is not legal or licensing approval.
+
 ## Current state (2026-10-15)
 
 > **This section is authoritative and supersedes every older status statement below it.** The long body of this file was written

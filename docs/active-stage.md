@@ -1,5 +1,12 @@
 # Active Stage
 
+**Current-state entry 2026-10-16 (supersedes the 2026-10-15 entry and every older status note below where they differ; history is not rewritten).**
+Authoritative detail: `docs/plans/final-production-readiness-report-2026-10-16.md` (final report), `docs/HANDOVER.md` section "Current state (2026-10-16)" and the task registry.
+Branch `claude/focused-wright-jw88w9`; code head `0dc2680` (later commits are documentation only); migration head **0164** (0143-0150, 0159, 0161 reserved and unused); hosted CI on `0dc2680`: **27/27 checks green**.
+**A-list A1-A13: ALL DONE** (A5 payout reversal, A6 RG enforcement (OFF by default per brand), A7 AML operability, A8 market blocking, A9 observability/alerts, A10/A10c consoles + staff invite + idempotency, A11 payments statement-source wiring, A12 backup/restore/PITR drill (118 PASS / 0 FAIL at head 164, local synthetic), A13 hygiene/`migrate verify`/runbooks/status docs). All providers MOCK; AWS OFF; no brand activated.
+Four states: technical readiness MET for the MOCK-provider scope (finish line met; AWS staging run not yet executed); provider-integration readiness PARTIALLY IMPLEMENTED; real provider integration NONE; brand activation NONE.
+**Core platform development is STOPPED.** Next authorised-only steps: the ONE named-commit AWS staging deployment (`docs/runbooks/aws-staging-deploy-plan.md`, prepared, NOT authorised) and the provider-integration phase. Owner decisions required are listed in section 7 of the final report. No new stage is authorised by this entry.
+
 **Current-state entry 2026-10-15 (supersedes every older status note and stage header in this file where they differ; history below is not rewritten).**
 Authoritative detail: `docs/HANDOVER.md` section "Current state (2026-10-15)" and `docs/plans/platform-completion-audit-2026-10-14.md`.
 Branch `claude/focused-wright-jw88w9`, tip `73b2836`; migration head **0151** (0143-0150 intentionally unused, `internal/db/migrate.go` `reservedUnusedVersions`);
