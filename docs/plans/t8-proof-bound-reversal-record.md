@@ -416,3 +416,99 @@ window) apply unchanged and are NOT closed by this change. SRT8-1..3 are documen
 Nothing in this change blocks launch on its own. The open items that still bear on real-money launch are unchanged by it and remain
 owner decisions: ADR 0110 T8 for the other flows (including withdrawal `approve` / `reject`, ADR 0113 s9.3), T5 (including the A5
 tombstone branch's E10 hold release), and the ADR 0110 s9 inherent residuals (T6 application-host compromise holds the signing key).
+
+## 11. Ledger-finance review (independent, `ledger-finance`, 2026-10-16)
+
+Scope: the branch diff against its merge-base with `origin/claude/focused-wright-jw88w9` (`12edec0`), read against ADR 0113, ADR 0082,
+migrations 0162 and 0165 (up and down), the 0139 `actor_proof_require` body and `docs/plans/a5-payout-reversal-record.md`. Separate from
+the security review in section 10; no overlap in findings numbering (LFT8-n).
+
+**Verdict: APPROVE.** No HIGH or MEDIUM finding. The money path is unchanged; the only semantic change is that a `reverse` decision
+needs a consumed proof to exist and only proof-bound decisions count (WD026, WD027, check D twin, Go quorum, Go replay).
+
+### 11.1 Verified by execution (private scratch database `t8l20261016174112p19219x01`, dropped after the run)
+
+- `-run 'T8|A5|TestADR0113|TestMigration0165|TestMigration0162|TestActorProof|TestStepUpOperations|TestPayoutReversalRoute'` over
+  `internal/withdrawal`, `internal/reconciliation`, `internal/actorproof/...`, `internal/adjustment`, `internal/httpserver`: 5/5 ok,
+  70 top-level / 130 total PASS, 0 FAIL, 0 SKIP.
+- `-run 'T8|A5|TestADR0113|TestHSEC_HoldRelease_ActorProofTriggerOnGovernedTables_Last'` over `internal/payments` (per-test scratch
+  databases): ok, 22 top-level / 47 total PASS, 0 FAIL, 0 SKIP. Includes the A5 normal, duplicates/replay, 8 Persons x 3 rounds
+  concurrency (exactly one posting), partial failure, tombstone branch, grant revoked, suspended voter, in-flight attempt and floor-of-two
+  tests, now running proof-bound end to end, and the two T8 payments tests (balanced ledger, projection = rebuild).
+- Catalog (scratch database at 0165): BEFORE ROW triggers on `withdrawal_approvals` are `withdrawal_approvals_enforce_governance`,
+  `zz_actor_proof_guard` (INSERT) and `withdrawal_approvals_immutable` (UPDATE / DELETE, unconditional `ledger_deny_mutation`), so the
+  nonce marker cannot be added to a legacy row after the fact (security 10.1 probed the same as `igaming_runtime`).
+- Function bodies (text comparison of the migration files): the 0165 up bodies of `withdrawal_requests_state_transition_guard` and
+  `ledger_transactions_payout_tombstone_guard` differ from 0162 by exactly the one marked line each (plus `CREATE` -> `CREATE OR
+  REPLACE` on the tombstone guard header); the 0165 down bodies are byte-identical to 0162 (8264 and 1374 bytes). The snapshot test
+  hashes `prosrc`, `proconfig`, `prosecdef` and ACLs, so the restoration is also asserted in the catalog.
+
+### 11.2 Money path (verified by reading)
+
+- No new ledger write path. `ReverseCompletedPayout` (E11 posting `withdrawal_reversed` Dr psp_clearing / Cr player_cash, key
+  `<id>:reversed`), the provider UNIQUE on the return reference, one reversal per completion (WD035 / WD044, E11 only out of
+  `completed`), the tombstone branch (tombstone + E10 `withdrawal.Fail` hold release), check A and check D's other arms are untouched
+  by the diff. The proof nonce is not an idempotency key of any posting; the business idempotency is unchanged.
+- Quorum: the Go count, `isExecutedReversalReplay` (both arms), WD026, WD027 and the check D twin carry the same
+  `actor_proof_nonce IS NOT NULL` filter; nothing else reads `decision = 'reverse'`. The Go count and WD026 can therefore not disagree
+  about a proof-bound quorum, so a Go "Ready" is never followed by a database WD026 on the same rows.
+- Lock order (ADR 0082): the new acquisitions are (a) the `actor_proof_nonces` insert (`ON CONFLICT (nonce) DO NOTHING`, random nonce),
+  (b) the partial UNIQUE index entry on `withdrawal_approvals.actor_proof_nonce`, (c) plain reads of `staff_users` and
+  `actor_proof_keys` (no row locks). On the Go path they are taken after `LockForPayoutEvidence` / `lockRequestForUpdate` (and the
+  attempt locks on the submitted branch) and before any ledger / projection lock, the same position as the K3 and hold-release proofs.
+  The only possible wait on (a) or (b) is between two consumers of the SAME token, which is bound to one request id: on the Go path
+  both already hold that request's row lock, so they serialise there first. No new cycle with request, attempt, staff or ledger locks.
+  The down migration takes `SHARE ROW EXCLUSIVE` on `withdrawal_approvals` only (migration-time, 0162 pattern).
+
+### 11.3 Concurrency and retries (reading + the executed tests above)
+
+- Two approvers voting simultaneously: both take the request row lock first and serialise; each consumes its own proof; the second
+  sees the first's committed row and executes (8 x 3 concurrency test: exactly one posting).
+- Retry by the approver whose vote completed the quorum: the request is `reversed` (or `failed` on the tombstone branch), so
+  `RecordPayoutReversalDecision` returns through `isExecutedReversalReplay` BEFORE the attacher: no proof is signed or consumed, nothing
+  is recorded or posted (200 replay).
+- Retry by an approver whose vote is on file but the quorum is not reached: a fresh proof is consumed, the INSERT hits the
+  (request, approver, decision) UNIQUE -> `ErrDuplicateApproval` (409); the transaction rolls back, so the nonce is not burnt.
+- Vote while `submitted` (tombstone branch): unchanged plus the proof; WD027 counts proof-bound grant holders only (T8 payments test).
+  Vote after completion: the normal branch. Vote by a third Person after execution: `ErrStateConflict`.
+- Reversal racing completion (E9): both take the request row lock; unchanged from A5 / ADR 0113 (concurrent edge race tests pass).
+- Rolled-back transaction: the `actor_proof_nonces` row and the decision row roll back together; a retry with the same proof inside
+  its 60 s window succeeds (tested in `TestT8DB_ProofDefects_Refused`); no counted row survives a rollback.
+- `alerting.InTx` re-runs the closure on a retry: each run signs a fresh proof (the attacher is invoked inside the closure).
+
+### 11.4 Legacy (pre-0165) rows
+
+- R-T8-1 (a legacy `reverse` row occupies its approver's one-per-request slot, counts nowhere): fail-closed; it can only remove a
+  voter, never add a vote; other Persons can complete the request. Harmless.
+- R-T8-2 (a request reversed before 0165 shows as check D WD026, P1): NOT a false-P1 risk in any real environment. No production
+  data exists, and the AWS staging run has not been executed (`docs/progress.md` status line), so no shared environment holds
+  pre-0165 reversals. Only local development databases that executed A5 reversals between 0162 and 0164 would show it.
+- Recommendation: **no backfill and no exemption.** A backfill would have to invent a nonce for an unproven decision (a forged proof
+  marker, and it requires disabling `withdrawal_approvals_immutable`); an exemption list in check D or WD026 would be a weakening of
+  the detective twin. Instead, condition for the staging deployment (LFT8-2 below): the named staging commit must include 0165, and
+  any local development database with pre-0165 reversals is rebuilt rather than patched.
+
+### 11.5 Findings
+
+- **LFT8-1 (LOW, detective accuracy on old schemas).** Check D reads the nonce through `to_jsonb(a) ->> 'actor_proof_nonce'`. On a
+  schema pinned below 0162 no request can be `reversed`, so the arm is inert; on a schema pinned at 0162-0164 every `reversed` request
+  would be reported WD026 (the key is absent, read as NULL). The statement is robust (it parses and runs at every version, same
+  technique as the 0162 `reversal_ledger_transaction_id` read); no current test runs check D at 0162-0164 with a reversal, and the
+  application always runs against the head schema. Accept; if a future migration test pins 0162-0164 and runs check D on a reversal,
+  it must expect WD026. Non-blocking.
+- **LFT8-2 (LOW, operational condition).** Pre-0165 reversals become standing check D WD026 P1 findings (R-T8-2). Condition: the AWS
+  staging deployment commit includes migration 0165 (deploy from a commit at or after the T8 merge), so no shared environment ever holds
+  legacy reversals. Add one line to the staging deploy plan / runbook when T8 is merged (orchestrator). Non-blocking for the merge.
+- **LFT8-3 (INFO).** The decision INSERT now has two UNIQUE indexes that can raise 23505 (one-`reverse`-per-approver and the nonce
+  index); `db.IsUniqueViolation` maps both to `ErrDuplicateApproval` (409). The nonce-index arm is unreachable in practice (a replayed
+  token is AP005 at `actor_proof_nonces` first, and a pruned nonce is past expiry, AP003) and would in any case be a refusal with nothing
+  recorded. Optional: map by constraint name. No change required.
+- **LFT8-4 (INFO, documentation).** ADR 0082 s1.7 (`internal/withdrawal` inventory) does not mention that a reversal decision now
+  inserts into `actor_proof_nonces` after the request row lock and before any ledger lock (11.2). Doc-only addition for the orchestrator.
+- **LFT8-5 (INFO, concurrence).** Concur with SRT8-1 (stale test-file name in the 0165 up header; comment-only fix) and SRT8-2 (the
+  nonce marker is not cross-checked against `actor_proof_nonces`; owner-class only, no regression). From the ledger side, the
+  optional SRT8-2 hardening of check D would be read-only and is acceptable if pursued later; it is not required for this merge.
+
+No changed assertion is a weakening: the catalog pins go 15 -> 16 tables and the step-up registry 21 -> 22 (strictly more coverage);
+the A5 fixtures (`a5Vote`, `a5DReverse`, the WD027 one-grant-holder fixture) now write proof-bound rows because unproven rows no longer
+count, and every original assertion (codes, "(found n)" messages, posting counts, balances) is unchanged.
