@@ -477,7 +477,7 @@ func TestLockApprovedForSubmission_ConcurrentSubmitsOnlyOneReachesProvider(t *te
 				mu.Lock()
 				providerCalls++
 				mu.Unlock()
-				return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", "payout-ref-race-"+uuid.New().String())
+				return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", "payout-ref-race-"+uuid.New().String()) })
 			})
 		}(i)
 	}

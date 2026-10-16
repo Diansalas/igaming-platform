@@ -146,7 +146,9 @@ func (w *a13World) at(t *testing.T, s State) WithdrawalRequest {
 	}
 	toSubmitted := func() {
 		toApproved()
-		step(func(ctx context.Context, tx pgx.Tx) error { return MarkSubmittedPending(ctx, tx, wr.ID, a13PSP) })
+		step(func(ctx context.Context, tx pgx.Tx) error {
+			return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmittedPending(ctx, tx, wr.ID, a13PSP) })
+		})
 	}
 	switch s {
 	case StateRequested:
@@ -302,26 +304,40 @@ func TestADR0113_HeaderFirstAttacks(t *testing.T) {
 	})
 	wantCode(t, "header -> pending_review -> approved without a record", err, "WD023")
 	// ... with a forged automated approve record, every immediate check passes, and the COMMIT is
-	// refused because nothing holds the funds (A, WD031).
-	err = w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
-		id, err := header(ctx, tx)
-		if err != nil {
+	// refused because nothing holds the funds (A, WD031). F4 (0169): E7 now also needs an allowing
+	// dispatch gate decision of the same transaction, so the walk is refused at the transition
+	// (WD053) without one, and - with a forged one - still at COMMIT by check A (WD031).
+	for _, forgeDecision := range []bool{false, true} {
+		err = w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+			id, err := header(ctx, tx)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'pending_review' WHERE id = $1`, id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_approvals (tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision, threshold_amount_at_decision, request_amount_at_decision)
+				VALUES ($1, $2, $3, true, 'approve', 0, 700)`, w.f.tenantID, id, uuid.New()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`, id); err != nil {
+				return err
+			}
+			if forgeDecision {
+				if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_gate_decisions (tenant_id, withdrawal_request_id, stage, allowed)
+					VALUES ($1, $2, 'dispatch', true)`, w.f.tenantID, id); err != nil {
+					return err
+				}
+			}
+			_, err = tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'p' WHERE id = $1`, id)
 			return err
+		})
+		if forgeDecision {
+			wantCode(t, "header walked to submitted with no hold", err, "WD031")
+		} else {
+			wantCode(t, "header walked to submitted with no gate decision", err, "WD053")
 		}
-		if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'pending_review' WHERE id = $1`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_approvals (tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision, threshold_amount_at_decision, request_amount_at_decision)
-			VALUES ($1, $2, $3, true, 'approve', 0, 700)`, w.f.tenantID, id, uuid.New()); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`, id); err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'p' WHERE id = $1`, id)
-		return err
-	})
-	wantCode(t, "header walked to submitted with no hold", err, "WD031")
+	}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -371,7 +387,7 @@ func (w *a13World) legalEdge(t *testing.T, from, to State) (bool, error) {
 			_, err := DenyForCompliance(ctx, tx, wr.ID, decision, params)
 			return err
 		case edge{StateApproved, StateSubmitted}:
-			return MarkSubmittedPending(ctx, tx, wr.ID, a13PSP)
+			return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmittedPending(ctx, tx, wr.ID, a13PSP) })
 		case edge{StateSubmitted, StateCompleted}:
 			return Complete(ctx, tx, wr.ID, a13PSP, "ptx-"+wr.ID.String())
 		default:
@@ -1081,7 +1097,7 @@ func TestADR0113_ConcurrentEdgeRaces(t *testing.T) {
 				return err
 			},
 			func(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-				return MarkSubmittedPending(ctx, tx, id, a13PSP)
+				return f4ThenSubmit(ctx, tx, id, func() error { return MarkSubmittedPending(ctx, tx, id, a13PSP) })
 			},
 			map[State]bool{StateRejected: true, StateSubmitted: true}},
 	}

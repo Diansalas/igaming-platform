@@ -166,7 +166,11 @@ func Advance(ctx context.Context, tx pgx.Tx, id uuid.UUID, target withdrawal.Sta
 			// fixture RECORDS one (like Plant, it skips the Go-layer gate evaluation these fixtures do not
 			// test); the database still re-checks the RG half (WD052: account and wallet active, no negative
 			// balance) at the transition.
-			step = withdrawal.RecordDispatchGateDecision(ctx, tx, wr, withdrawal.DispatchStageDispatch, nil, withdrawalgate.Decision{Allowed: true, Outcome: "allow"})
+			// (A migration test on a scratch schema that predates 0169 has no table and no backstop.)
+			var present bool
+			if step = tx.QueryRow(ctx, `SELECT to_regclass('public.withdrawal_gate_decisions') IS NOT NULL`).Scan(&present); step == nil && present {
+				step = withdrawal.RecordDispatchGateDecision(ctx, tx, wr, withdrawal.DispatchStageDispatch, nil, withdrawalgate.Decision{Allowed: true, Outcome: "allow"})
+			}
 			if step == nil {
 				step = withdrawal.MarkSubmittedPending(ctx, tx, id, spec.ProviderID)
 			}

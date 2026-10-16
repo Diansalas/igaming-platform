@@ -54,7 +54,9 @@ func a5Walk(t *testing.T, f fixture, amount int64, ref string, complete bool) Wi
 		_, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible, auth.StepUpAssertion{})
 		return err
 	})
-	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return MarkSubmitted(ctx, tx, wr.ID, "a5psp", "out-"+ref) })
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmitted(ctx, tx, wr.ID, "a5psp", "out-"+ref) })
+	})
 	if complete {
 		mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return Complete(ctx, tx, wr.ID, "a5psp", ref) })
 	}

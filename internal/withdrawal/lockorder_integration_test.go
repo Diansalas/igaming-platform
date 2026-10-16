@@ -93,7 +93,9 @@ func TestLockOrder_ConcurrentWithdrawalRequestAndRejection_NoDeadlock(t *testing
 					return err
 				})
 				mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-					return MarkSubmitted(ctx, tx, requestID, "mockpsp", "lockorder-payout-"+requestID.String()[:8])
+					return f4ThenSubmit(ctx, tx, requestID, func() error {
+						return MarkSubmitted(ctx, tx, requestID, "mockpsp", "lockorder-payout-"+requestID.String()[:8])
+					})
 				})
 				return func(ctx context.Context, tx pgx.Tx) error {
 					return Fail(ctx, tx, requestID, "psp_declined")
