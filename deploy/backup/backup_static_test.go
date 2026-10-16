@@ -256,10 +256,6 @@ func TestBackupRoleDefinition(t *testing.T) {
 	// only SELECT / USAGE / CONNECT may ever be granted to the backup role
 	for _, m := range regexp.MustCompile(`(?is)GRANT\s+(.+?)\s+ON\s+.+?\s+TO\s+igaming_backup`).FindAllStringSubmatch(sql, -1) {
 		priv := strings.ToUpper(strings.TrimSpace(m[1]))
-		// owner decision 5: the one allowed column-limited grant is the NON-SECRET columns of actor_proof_keys (TestBackupRoleCannotReadActorProofSecret)
-		if priv == "SELECT (KID, STATUS, CREATED_AT, RETIRED_AT)" {
-			continue
-		}
 		if priv != "SELECT" && priv != "USAGE" && priv != "CONNECT" {
 			t.Errorf("init-backup-role.sql grants %q to igaming_backup (only SELECT, USAGE, CONNECT are allowed)", priv)
 		}

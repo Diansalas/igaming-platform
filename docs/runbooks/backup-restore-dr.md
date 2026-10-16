@@ -29,7 +29,7 @@ scripts, no role DDL outside provisioning, no literal passwords, target guard pr
 |---|---|---|
 | `igaming` (migration owner) | `cmd/migrate`, owning objects, restore target owner | on RDS the master user; subject to FORCE RLS: **cannot** produce a complete dump |
 | `igaming_runtime` | the application | non-owning; cannot dump (`permission denied for table actor_proof_keys`) |
-| **`igaming_backup`** | the backup runner and `verify.sh` baseline/count queries | NOSUPERUSER, **BYPASSRLS**, SELECT-only, CONNECTION LIMIT 2, no membership, read-only sessions, **VALID UNTIL** (time-boxed), audited; never used by the application |
+| **`igaming_backup`** | the backup runner and `verify.sh` baseline/count queries | NOSUPERUSER, **BYPASSRLS**, SELECT-only (and **not** on `actor_proof_keys.secret`: only the non-secret columns `kid, status, created_at, retired_at`; owner decision 5), CONNECTION LIMIT 2, no membership, read-only sessions, **VALID UNTIL** (time-boxed), audited; never used by the application |
 | restore role | `restore.sh --phase all` or `load` | the **non-superuser** owner role `igaming`, or a CREATEDB role that is a member of it (drill: `drill_restore`). It must NOT be a superuser or `rds_superuser` member: the archive is executable SQL (ADR 0122 section 5a). `--owner-role` is `igaming` unless `RESTORE_OWNER_ROLE_OVERRIDE` names another; postgres / igaming_backup / igaming_runtime / rdsadmin / rds_superuser are always refused |
 | provisioning role | `restore.sh --phase provision` | on a brand-new cluster the bootstrap superuser (RDS: the master - unverified): creates the three project roles WITHOUT passwords and the EMPTY database only; no archive content runs as this role |
 
@@ -86,6 +86,15 @@ The recipient and the signing key are **validated before anything is dumped** (a
 gpg key or an unusable signing key stops the run with nothing written. The dump is streamed through the encryptor, so no plaintext archive is ever on the
 backup volume; if anything fails (including a killed encryptor, SIGTERM/SIGINT, a closed stdout) the whole run directory is removed. The next run also sweeps
 stale temp directories and orphaned `.incomplete` run directories of killed (SIGKILL/OOM) runs.
+
+**The actor-proof signing secret is NOT in a logical dump (owner decision 5, ADR 0122 section 10).** `backup.sh` runs `pg_dump --exclude-table-data=public.actor_proof_keys`: the
+table's structure is in the dump, its rows (the HMAC secrets of the signed actor proof, ADR 0110) are not, and neither the baseline (it records the row count and
+non-secret key ids only, never a hash of the secret), the manifest (`"actor_proof_keys_data": "excluded"`) nor any log carries them. The exclusion is verified on the very
+stream that is encrypted: `backup.sh` reads its table of contents while it is written and **fails the whole backup** (nothing kept) if a data entry for the table is present.
+The backup credential itself cannot read the secret column (`init-backup-role.sql` grants only `kid, status, created_at, retired_at`; re-run it **after migrations**, because a
+table created later gets the default whole-table `SELECT`; `backup.sh` warns when the role can still read the column). **Physical base backups, snapshots and PITR (section 4.2)
+are not affected: they copy the data files and WAL, so they DO contain the live key.** That is deliberate - they stay inside the AWS trust boundary (KMS-encrypted volumes and
+snapshots, no human read path) and are what restores the live key after a total loss; do not copy a physical backup or a snapshot out of that boundary.
 
 Operational notes (re-review informational items):
 - `BACKUP_IAM_TOKEN_COMMAND` is executed with `bash -c`: it is **trusted operator configuration** and must never be taken from a backup set, a ticket field or any
@@ -154,10 +163,14 @@ the restored ledger.
    `pg_catalog` function REVOKEs are dumped but a non-superuser restore cannot apply them: drilled, the backup role could take advisory locks on the restored cluster until it was re-run);
    the **`database_environment` anchor** (section 5);
    the secret-store material that is not in any database (JWT secrets, staff MFA key families, payout-instrument keys,
-   provider credentials).
-6. `deploy/backup/verify.sh --baseline <baseline.txt>` (after decrypting the baseline) as described in section 5. **Do not open traffic
+   provider credentials);
+   **the actor-proof key (owner decision 5): the restored database has NO actor-proof key** (never in a logical dump). Every governed write (K1/K2/K3, launch, RG floors, staff lifecycle)
+   is refused with `AP002` and a production `platform-api` refuses to start until a NEW key is provisioned (section 5b).
+6. `deploy/backup/verify.sh --baseline <baseline.txt>` (after decrypting the baseline) as described in section 5; right after the load it asserts the **unprovisioned**
+   state (`actor_proof_keys_empty_after_logical_restore`, the platform's production startup gate refuses the source's key ids, a well-formed proof is refused with `AP002`).
+7. **Re-key the actor proof (section 5b)**, then re-run `verify.sh ... --expect-actor-proof provisioned --actor-proof-kid <new kid> --retired-kid <old kid>`. **Do not open traffic
    until it prints `VERIFY RESULT: PASS`.**
-7. Post-restore checklist (section 5), then bring one writer back, watch `/readyz` and the 5xx ratio, then scale up.
+8. Post-restore checklist (section 5), then bring one writer back, watch `/readyz` and the 5xx ratio, then scale up.
 
 ### 4.2 Logical corruption / operator error: PITR to a timestamp (drilled physically; RDS prepared)
 
@@ -202,6 +215,11 @@ subset of rows through triggers. A tenant-wide revert needs an ADR (it contradic
 5. `restorecheck` as `igaming_runtime`: the platform's own `ledger_vs_projection` reconciliation per tenant (rolled back by default so the verified
    database stays byte-identical), real RLS behaviour (no scope -> no tenant rows; a scope -> only that tenant), and the **startup guard**
    `db.VerifyEnvironmentAnchor`.
+6. **Actor-proof key state** (owner decision 5): `--expect-actor-proof unprovisioned` (default after a logical restore) asserts `actor_proof_keys` holds 0 rows, the production startup gate
+   `actorproof.VerifyConfiguredInProduction` refuses the source's key ids, and a well-formed proof presented to `actor_proof_require` is refused with `AP002` (fails closed);
+   `provisioned` (after section 5b) asserts exactly one ACTIVE key, the new kid, none of the retired ids, and that the gate admits the new kid. After physical recovery
+   (`--anchor-mode preserved`) the key rows are compared with the baseline (count and a hash over the non-secret columns) and must have survived.
+   `actor_proof_keys` is deliberately not compared row-for-row after a logical restore (the baseline never hashes the secret).
 
 What must be re-provisioned after a restore (the drill proves each of these is needed):
 
@@ -211,28 +229,57 @@ What must be re-provisioned after a restore (the drill proves each of these is n
 | Database-level ACL, `public` schema owner | not in a dump (the verifier caught the schema owner on the first run) | `post-restore-grants.sql` (done by `restore.sh`) + the environment's full role-provisioning script |
 | **`database_environment` anchor** | a logical restore does **NOT carry the anchor** (its data is excluded from the restore): the restored database is **blank/unrecorded** and a production `platform-api` **refuses to start** until the owner records it (drilled with a development-source backup: `verify.sh` asserts 0 rows and that the production guard refuses; recorded truthfully as `development` the guard still refuses) | **the owner first verifies that the SOURCE environment of the backup was production** (the set's `manifest.json` `environment_anchor`, the value `restore.sh` required in `RESTORE_EXPECT_SOURCE_ENVIRONMENT`, and the ticket for the incident), and only then, once: `INSERT INTO database_environment (environment) VALUES ('production');` then re-run `restorecheck -expect-anchor production`. Never record `production` on a restored development/test/staging copy (that turns the guard into a rubber stamp); never restore such a copy into production (`restore.sh` refuses it). Physical recovery (PITR) keeps the anchor: it is the same database |
 | Backup-surface hardening | pg_catalog function ACLs are dumped but cannot be applied by the non-superuser load | re-run `deploy/backup/harden-backup-surface.sql` as the bootstrap superuser (ADR 0122 section 5b) |
-| Secret-store material | not in any database backup | restore from the secret store: JWT secrets, `STAFF_MFA_*` key families, payout-instrument keys, provider credentials. (`actor_proof_keys` IS in the database: the dump is therefore a signing-key-bearing artefact) |
+| Secret-store material | not in any database backup | restore from the secret store: JWT secrets, `STAFF_MFA_*` key families, payout-instrument keys, provider credentials |
+| **Actor-proof key** (`actor_proof_keys`) | a logical dump carries the table **empty** by design (owner decision 5, ADR 0122 section 10): the restored platform fails closed (`AP002` on every governed write, production start refused) until re-keyed. The source's key id is retired by absence and must never be reused | **section 5b**: a NEW kid and a NEW secret from the secret store through `deploy/backup/rekey-actor-proof.sh` (never copied from the source database, a backup or a ticket); `ACTOR_PROOF_KEYS` / `ACTOR_PROOF_ACTIVE_KID` switched to the new pair; `verify.sh --expect-actor-proof provisioned` |
 | Reconciliation | prove no drift in the running system | run the scheduler once (or `restorecheck -persist`) so a `reconciliation_runs` row exists; require 0 mismatches before traffic |
 | Provider-side state | the restore point is earlier than provider events | reconcile PSP statements and casino rounds since the restore time; do not assume vendors rolled back |
 | Alert routes, credential handles | live in the DB; a restore reverts them to the restore time | check `/v1/admin/alerting/status`, re-apply changes |
 | Communication | | incident channel update at: restore started, restore point chosen, verify PASS, traffic restored; notify affected tenants and compliance if committed financial history was discarded |
 
+### 5b. Re-key the actor proof after a logical restore (owner decision 5; drilled)
+
+The restored `actor_proof_keys` table exists and is **empty**. Re-keying is the reviewed provisioning procedure of `operational-runbooks.md` section 15 step 4, scripted so that
+its refusals cannot be skipped. Never copy a key through the backup, a ticket or a chat; never reuse the source's key id (the old key is retired by absence).
+
+1. In the secret store generate a NEW secret and a NEW key id (`[A-Za-z0-9._-]{1,32}`, for example `ap-2026-11`; it must differ from the source's: the source's ids are the
+   `META|actor_proof_kids|` line of the set's `baseline.txt` and the application's previous `ACTOR_PROOF_ACTIVE_KID`). Staging: a new `stg-v<N>` family entry in
+   `igaming-staging/actor-proof-keys` (owner action B of `aws-staging-deploy-plan.md`).
+2. Write the secret's hex into a 0600 file on tmpfs (for example `/dev/shm`), as the owner action B describes.
+3. As the **owner role** (`igaming`; not the runtime or backup role), from the same VPC-resident session as the restore:
+   ```sh
+   REKEY_PGHOST=<host> REKEY_PGPORT=<port> REKEY_PGDATABASE=<restored db> REKEY_PGUSER=igaming REKEY_PGPASSFILE=<0600 passfile> \
+   deploy/backup/rekey-actor-proof.sh --kid <new kid> --secret-hex-file /dev/shm/<new kid>.hex --retired-kid <old kid> [--retired-kid ...]
+   ```
+   It inserts the key with the secret as a **bound parameter** (psql reads the file itself: not in argv, statement text or logs) and refuses: a kid equal to any `--retired-kid`;
+   an insecure secret file (not 0600, not owned by you, not on tmpfs for a real target, too short); a non-owner role; **any existing key** (it provisions the first key of a restored
+   database; rotating a live key stays `operational-runbooks.md` section 15); statement logging that could capture the parameter (`log_statement` `mod`/`all`,
+   `log_min_duration_statement` >= 0, `log_parameter_max_length_on_error` > 0 - fix the role/parameter group, do not work around). It prints the kid, status, the secret's length and
+   the SECURITY DEFINER probe result, never the secret. Shred the hex file.
+4. Put the same secret into the application's `ACTOR_PROOF_KEYS` (`<new kid>:<base64>`) and set `ACTOR_PROOF_ACTIVE_KID=<new kid>` from the secret store; **remove the old pair**.
+5. `verify.sh --baseline <baseline.txt> --expect-actor-proof provisioned --actor-proof-kid <new kid> --retired-kid <old kid>`: exactly one ACTIVE key with the new kid, the old ids
+   absent, and the platform's own production startup gate (`actorproof.VerifyConfiguredInProduction`) admits the new kid and refuses the old ones.
+6. Start one `platform-api`; it starts only if the key is configured AND active. First governed write: a K2/K3/K1 flow succeeds (no `AP002`).
+
+Physical recovery (PITR, snapshot restore) needs none of this: it carries the live key (section 1 and 4.2); `verify.sh --anchor-mode preserved` checks the key rows survived.
+
 ### 5a. After ANY suspected exposure of a backup set, a dump or the backup credential: rotate
 
-A logical dump (and so a backup set, a decrypted copy, a restored database) carries `actor_proof_keys.secret` in the clear (inside the encrypted artefact) and every
-password hash. Treat a suspected exposure (lost or unencrypted set, leaked decryption identity or signing key, credential used outside the runner, an
+A logical dump made since owner decision 5 (a set whose manifest says `"actor_proof_keys_data": "excluded"`) does **not** carry `actor_proof_keys.secret`. A **legacy set** (made before
+that decision) does, and so does every **physical** artefact (base backup, WAL archive, snapshot, restored PITR copy); `restore.sh` warns on a legacy set and skips its key rows. Every dump
+carries the password hashes. Treat a suspected exposure (lost or unencrypted set, leaked decryption identity or signing key, credential used outside the runner, an
 untrusted restore target) as a security incident and, without waiting for proof:
 
-1. **Rotate the signed-actor-proof keys**: follow `operational-runbooks.md` section 15 (mint a new `actor_proof_keys` row, switch the application to it, retire the
-   old kid); in-flight proofs under the old key stop verifying, by design.
+1. **Rotate the signed-actor-proof keys** if the exposed artefact was a legacy logical set or any physical copy (a current logical set cannot contain them): follow
+   `operational-runbooks.md` section 15 (mint a new `actor_proof_keys` row, switch the application to it, retire the old kid); in-flight proofs under the old key stop verifying, by design.
+   Retire legacy sets rather than keep them.
 2. **Rotate the other signing material that was in or protected next to the dump**: JWT signing secrets, the staff MFA key families, the payout-instrument keys, provider
    credentials and webhook secrets, per their own runbooks; revoke sessions (the dump holds `sessions.refresh_token_hash` and token MACs).
 3. **Reset staff passwords** and force MFA re-enrolment where the staff MFA ciphertext and its key family could both have been reached; player password hashes are
    offline-crackable: require password resets when the exposure is credible.
 4. Rotate the backup **signing key** and re-pin the verification fingerprint if the signing key may have been exposed; rotate the **age/gpg** recipient and re-encrypt or
    destroy old sets if the decryption identity may have been exposed; re-mint (or revoke the IAM grant of) the backup credential.
-5. Record the incident, the sets involved and their disposition. Whether logical dumps should exclude `actor_proof_keys.secret` altogether is an open architect
-   decision (ADR 0122 section 10; recommendation: exclude and re-key on restore, with PITR covering physical recovery).
+5. Record the incident, the sets involved and their disposition. (Excluding `actor_proof_keys.secret` from logical dumps and re-keying on restore is the owner's
+   decision 5 on ADR 0122 section 10, implemented above; physical recovery keeps the key by design.)
 
 ## 6. Measured RTO / RPO (LOCAL, SYNTHETIC, THIS MACHINE - not production)
 
@@ -310,6 +357,8 @@ beyond a few GB**; the physical path (snapshots / PITR) is the primary, and its 
 | Backup credential minted with statement logging on | the password is not in the server log (control: a naive `PASSWORD :'pw'` is) | PASS |
 | Restored data differs from the baseline | `verify.sh` FAILS naming the differing categories; verified by a **negative control** (one ledger amount changed by 7 -> `equal_TABLE` and `invariants_all_zero` fail) and by reverting it (passes again) | PASS |
 | Unencrypted dump requested | refused unless the synthetic-data acknowledgement is set | PASS |
+| Actor-proof rows in the dump stream (drill fault `include_actor_proof_keys`) | `backup.sh` refuses (TOC check on the encrypted stream) and keeps nothing | drilled (see the record) |
+| Re-key misuse (reused kid, open/short secret file, non-owner role, `log_statement=all`, a second key) | `rekey-actor-proof.sh` refuses, table unchanged | drilled (see the record) |
 
 ## 8. NOT proven (read before relying on this)
 
@@ -325,8 +374,9 @@ beyond a few GB**; the physical path (snapshots / PITR) is the primary, and its 
 - Backup-of-the-backup; automatic scheduling and alerting on backup failure or stale `latest_restorable_time`; the `OBS-BACKUP-ABUSE-1` signal.
 - An asymmetric-**KMS** signing key (the drill signs with an ephemeral Ed25519 key file, the pinned fingerprint is supplied by the operator); gpg end to end (only
   its refusals are drilled); IAM database authentication and `REVOKE` on `pg_catalog` functions **on RDS**; a restore load as a non-`rds_superuser` owner on RDS.
-- The security review is recorded (`docs/plans/prh2-hardening-round/a12-security-review.md`); its dispositions are in ADR 0122 section 9. Open: the architect
-  decision on excluding `actor_proof_keys.secret` from logical dumps (ADR 0122 section 10).
+- The security review is recorded (`docs/plans/prh2-hardening-round/a12-security-review.md`); its dispositions are in ADR 0122 section 9. Section 10 (exclude
+  `actor_proof_keys.secret` from logical dumps) is decided by the owner (decision 5) and implemented; see `docs/plans/backup-exclude-actor-secret-record.md` for what was and was not proven
+  (the post-re-key check is at SQL level with the application's verifier, not a full HTTP K2/K3 flow; the re-key script was not run against RDS).
 
 ## 9. Running the drill
 

@@ -125,15 +125,8 @@ IFS='|' read -r R_SUPER R_BYPASS R_CREATEROLE R_CREATEDB R_REPL R_VERNUM <<<"$PR
 [ "$R_CREATEROLE" = 0 ] && [ "$R_CREATEDB" = 0 ] && [ "$R_REPL" = 0 ] || bk_die "role ${BACKUP_PGUSER} holds CREATEROLE/CREATEDB/REPLICATION; the backup role must have none of them"
 RO="$(bk_sql "SELECT current_setting('default_transaction_read_only')")"
 [ "$RO" = on ] || bk_die "backup role session is not read-only by default (default_transaction_read_only=${RO}); re-run init-backup-role.sql"
-MISSING="$(bk_sql "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public' WHERE c.relkind IN ('r','p','S') AND NOT has_table_privilege(c.oid, 'SELECT') AND NOT (c.relname = 'actor_proof_keys' AND has_any_column_privilege(c.oid, 'SELECT'))")"
+MISSING="$(bk_sql "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public' WHERE c.relkind IN ('r','p','S') AND NOT has_table_privilege(c.oid, 'SELECT')")"
 [ "$MISSING" = 0 ] || bk_die "backup role lacks SELECT on ${MISSING} table(s)/sequence(s) (a new migration table without the default privilege?); re-run init-backup-role.sql. Refusing to produce an incomplete dump"
-
-# The dump never carries the actor-proof secret (below), but a backup credential that can still SELECT the secret column is a way to read it
-# (owner decision 5): init-backup-role.sql narrows the role to the non-secret columns. A role provisioned before that change is flagged loudly;
-# the backup itself is unaffected (the secret is neither dumped nor read by the baseline).
-if [ "$(bk_sql "SELECT has_column_privilege('public.actor_proof_keys', 'secret', 'SELECT')")" = t ]; then
-  echo "backup: WARNING: ${BACKUP_PGUSER} can SELECT actor_proof_keys.secret; re-run deploy/backup/init-backup-role.sql to narrow it to the non-secret columns (the dump excludes the secret regardless)" >&2
-fi
 
 # ---- encryption: validated BEFORE any dump (H1) -----------------------------------------------------------------------
 ENC=none

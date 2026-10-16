@@ -91,18 +91,13 @@ func stripGoLineComments(s string) string {
 
 // TestNoToolReadsTheActorProofSecret: the baseline, the dump, the restore and the verification never SELECT or hash the secret column. The only code
 // that may mention it is the re-key script (which writes it as a bound parameter), the role definition (which keeps it out of the backup role's
-// reach) and the drill (which plants and hunts a canary).
+// reach of) and the drill (which plants and hunts a canary).
 func TestNoToolReadsTheActorProofSecret(t *testing.T) {
 	secretRef := regexp.MustCompile(`(?is)actor_proof_keys\.secret|\bsecret\b[^;\n]{0,80}\bFROM\b[^;\n]{0,40}actor_proof_keys|\b(SELECT|COPY|UPDATE)\b[^;]{0,200}actor_proof_keys[^;]{0,60}\bsecret\b`)
 	for _, f := range []string{"deploy/backup/backup.sh", "deploy/backup/restore.sh", "deploy/backup/verify.sh", "deploy/backup/baseline.sql", "deploy/backup/post-restore-grants.sql",
 		"deploy/backup/lib-common.sh", "deploy/backup/lib-sign.sh", "deploy/backup/lib-globals.sh", "deploy/backup/pitr-drill.sh", "deploy/backup/seed.sh"} {
 		var kept []string
 		for _, l := range strings.Split(stripComments(read(t, f)), "\n") {
-			// the only mentions allowed are the privilege probe and its warning (they read no value)
-			if strings.Contains(l, "has_column_privilege('public.actor_proof_keys', 'secret', 'SELECT')") || strings.Contains(l, "can SELECT actor_proof_keys.secret") ||
-				strings.Contains(l, "carries actor_proof_keys.secret") {
-				continue
-			}
 			kept = append(kept, l)
 		}
 		if m := secretRef.FindString(strings.Join(kept, "\n")); m != "" {
@@ -120,25 +115,16 @@ func TestNoToolReadsTheActorProofSecret(t *testing.T) {
 	}
 }
 
-func TestBackupRoleCannotReadActorProofSecret(t *testing.T) {
-	sql := stripComments(read(t, "deploy/backup/init-backup-role.sql"))
-	for _, want := range []string{
-		"REVOKE ALL ON public.actor_proof_keys FROM igaming_backup",
-		"GRANT SELECT (kid, status, created_at, retired_at) ON public.actor_proof_keys TO igaming_backup",
-	} {
-		if !strings.Contains(sql, want) {
-			t.Errorf("init-backup-role.sql lost %q", want)
-		}
+// TestBackupRoleKeepsTableSelectResidualIsRecorded pins a drilled finding: a column-level grant on actor_proof_keys (the secret withheld) makes pg_dump fail
+// (`LOCK TABLE ... IN ACCESS SHARE MODE` needs table-level SELECT even when the data is excluded), so the backup role keeps the table-level SELECT and the residual (a
+// stolen backup CREDENTIAL can read the secret) is recorded next to the grant. A later change that narrows the grant must re-prove the dump in the drill.
+func TestBackupRoleKeepsTableSelectResidualIsRecorded(t *testing.T) {
+	raw := read(t, "deploy/backup/init-backup-role.sql")
+	if !strings.Contains(raw, "a stolen backup CREDENTIAL can still read the signing secret") || !strings.Contains(raw, "LOCK TABLE") {
+		t.Error("init-backup-role.sql lost the recorded actor_proof_keys residual (pg_dump LOCK TABLE needs table-level SELECT)")
 	}
-	// no grant on that table may name the secret column or be table-wide
-	for _, m := range regexp.MustCompile(`(?is)GRANT\s+(.+?)\s+ON\s+(?:TABLE\s+)?public\.actor_proof_keys\s+TO`).FindAllStringSubmatch(sql, -1) {
-		if strings.Contains(strings.ToLower(m[1]), "secret") || !strings.Contains(m[1], "(") {
-			t.Errorf("init-backup-role.sql grants %q on actor_proof_keys to the backup role", m[1])
-		}
-	}
-	bk := read(t, "deploy/backup/backup.sh")
-	if !strings.Contains(bk, "has_column_privilege('public.actor_proof_keys', 'secret', 'SELECT')") {
-		t.Error("backup.sh no longer warns when the backup role can still read the secret column")
+	if regexp.MustCompile(`(?is)(GRANT|REVOKE)[^;]*actor_proof_keys`).MatchString(stripComments(raw)) {
+		t.Error("init-backup-role.sql must not special-case actor_proof_keys grants without re-proving the dump (see the test comment)")
 	}
 }
 

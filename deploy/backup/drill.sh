@@ -172,14 +172,10 @@ SRC_AP_ROWS="$(psql_as igaming "$OPF" "$SRC_PORT" "$DB" -c "SELECT count(*) FROM
 if [ "$SRC_AP_ROWS" -ge 2 ] && [ -n "$SEED_AP_HEX" ] && [ "$(wc -l <"${WORK}/canary.patterns")" = 5 ]; then res source_holds_actor_proof_secrets_to_hunt PASS "the source has ${SRC_AP_ROWS} actor_proof_keys rows (kids: ${SRC_AP_KIDS}): the seed's platform key plus a planted canary; 5 search patterns (canary ASCII/hex/base64, platform key hex/base64) are held in the work dir"; else res source_holds_actor_proof_secrets_to_hunt FAIL "rows=${SRC_AP_ROWS} seed_hex_len=${#SEED_AP_HEX} kids=${SRC_AP_KIDS}"; fi
 # leak counter: occurrences of any pattern (-F fixed strings, -a binary as text) in the given files / stdin
 leaks() { { grep -a -h -c -F -f "${WORK}/canary.patterns" "$@" 2>/dev/null || true; } | awk '{n += $1} END {print n+0}'; }
-# the backup credential cannot read the secret column (init-backup-role.sql narrows it to kid, status, created_at, retired_at)
-if psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT secret FROM actor_proof_keys" >/dev/null 2>"${WORK}/apk-col.err" || psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT * FROM actor_proof_keys" >/dev/null 2>>"${WORK}/apk-col.err" \
-   || psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT md5(secret::text) FROM actor_proof_keys" >/dev/null 2>>"${WORK}/apk-col.err"; then
-  res backup_role_cannot_read_actor_proof_secret FAIL "the backup role read the secret column"
-elif psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT kid, status, created_at, retired_at FROM actor_proof_keys" >/dev/null 2>&1 && grep -q 'permission denied' "${WORK}/apk-col.err" \
-     && [ "$(psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT has_column_privilege('public.actor_proof_keys', 'secret', 'SELECT')")" = f ]; then
-  res backup_role_cannot_read_actor_proof_secret PASS "igaming_backup: SELECT secret / SELECT * / md5(secret) on actor_proof_keys all 'permission denied'; the non-secret columns (kid, status, created_at, retired_at) stay readable (the baseline needs them)"
-else res backup_role_cannot_read_actor_proof_secret FAIL "$(head -2 "${WORK}/apk-col.err" | tr '\n' ' ')"; fi
+# CONTROL for recorded residual R1: the backup role keeps table-level SELECT on actor_proof_keys (pg_dump's LOCK TABLE needs it - a column-level grant was tried in this drill and broke the
+# dump), so a dump by that role WITHOUT the exclusion WOULD carry the secret. backup.sh's exclusion (verified on the stream) is therefore the control, and this proves the hunt sees a leak.
+BR_CTRL="$(PGPASSFILE="$BPF" pg_dump -h 127.0.0.1 -p "$SRC_PORT" -U igaming_backup -Fp -t public.actor_proof_keys "$DB" 2>/dev/null | leaks)"
+if [ "${BR_CTRL:-0}" -ge 2 ]; then res backup_role_dump_without_exclusion_would_carry_the_secret PASS "control: pg_dump as igaming_backup of actor_proof_keys WITHOUT --exclude-table-data has ${BR_CTRL} leaking lines (the role keeps table-level SELECT; residual R1: a stolen backup CREDENTIAL can read the key, which is why backup.sh's verified exclusion, the time-boxed/IAM credential and dumping from a clone matter)"; else res backup_role_dump_without_exclusion_would_carry_the_secret FAIL "leaks=${BR_CTRL}"; fi
 
 # ================================================================= phase 2: BACKUP-ROLE-1 proof
 section "2 BACKUP-ROLE-1: the problem, and the dedicated role"
@@ -196,7 +192,7 @@ fi
 rm -f "${WORK}/owner-rls.dump"
 if OUTP="$(dump_as igaming_runtime "$OPF" -f /dev/null 2>&1)"; then res runtime_role_dump_refused FAIL "runtime role dump unexpectedly succeeded"; else res runtime_role_dump_refused PASS "pg_dump as igaming_runtime FAILS: $(printf '%s' "$OUTP" | head -1 | cut -c1-120)"; fi
 # the backup role: complete and read-only
-dump_as igaming_backup "$BPF" -f "${WORK}/probe.dump" >/dev/null 2>&1 && PROBE_ROWS="$(pg_restore -a -t ledger_entries -f - "${WORK}/probe.dump" | awk '/^COPY /{f=1;next} /^\\\.$/{f=0} f{n++} END{print n+0}')" || PROBE_ROWS=-1
+dump_as igaming_backup "$BPF" --exclude-table-data=public.actor_proof_keys -f "${WORK}/probe.dump" >/dev/null 2>&1 && PROBE_ROWS="$(pg_restore -a -t ledger_entries -f - "${WORK}/probe.dump" | awk '/^COPY /{f=1;next} /^\\\.$/{f=0} f{n++} END{print n+0}')" || PROBE_ROWS=-1
 rm -f "${WORK}/probe.dump"
 if [ "$PROBE_ROWS" = "$ENTRIES" ]; then res backup_role_dump_complete PASS "pg_dump as igaming_backup holds all ${PROBE_ROWS} ledger_entries"; else res backup_role_dump_complete FAIL "backup role dump rows=${PROBE_ROWS} expected ${ENTRIES}"; fi
 write_denied=0; write_total=0
