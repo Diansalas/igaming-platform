@@ -150,3 +150,70 @@ Commands (private scratch DB, `-p 1`): integration `-tags integration` PASS for 
 Security: (1) `usageGuard` and the `session != tenantID` check: can a platform-acting or player-scoped session reach `EvaluateAction`? (2) the 403 generic body on gate denial (no reason leakage) and the 503 on unavailable; (3) `/v1/admin/rg/enforcement` RBAC and step-up classification (`stepUpNone`: is that right for a switch that can only turn enforcement ON?); (4) RLS and grants of `rg_enforcement_activations`; (5) the relink trigger as `SECURITY DEFINER` or not, search_path pin, and its lock order against `rg.lockPerson`; (6) tenant isolation on the withdrawal gate input (foreign account refused); (7) no session or game token reaches a provider on the launch path (unchanged, test retained); (8) the b2c page never stores or logs limit values outside component state.
 
 Ledger-finance: (1) the L0.4 lock is taken before any ledger lock on casino bet, sportsbook placement, deposit T1/T2 and withdrawal request, and the usage reads run after it under READ COMMITTED; (2) the deposit candidate intent counted exactly once (ExcludeIntentID) and the T2 double-count conservatism; (3) loss usage netting (wins offset losses; `loss_may_go_negative`); (4) boundary semantics `usage + amount > limit` refuses, equality allowed; (5) rollback, win and settlement never evaluated; (6) timeouts are transaction-local and restored so the posting keeps its own; (7) withdrawal gate placement before the instrument FOR SHARE lock and the hold; replay of an idempotent request is not re-evaluated; (8) the held-funds interaction: a withdrawal request is not a stake and is not counted in loss/wager usage; (9) the heavy-player cost under the L0.4 hold time.
+
+## 10. Security review (security specialist, independent, 2026-10-16, branch tip 15a30c8)
+
+Scope: the A6 diff against origin/claude/focused-wright-jw88w9 (enforcement, activation switch and route, relink trigger, withdrawal
+gate WD050/WD051, `GET /v1/me/rg/options`, the b2c RG page). Method: code review, plus adversarial SQL probes as `igaming_runtime` and the
+A6 integration suites, run on a private scratch database (`sec_a6_review`, sanctioned harness, synthetic data only). Not in scope: penetration
+testing, the ledger-finance probe list (section 9), the payments full suite, the heavy-player run, and code outside the diff except where a
+diff path calls it. Passing this review does not make the subsystem "secure". It means no further finding was found within this scope.
+
+**Verdict: NOT APPROVED. One blocking finding (SR6-1), and the fix is small.** All other probe items pass. SR6-2 to SR6-5 are Low and do not block.
+
+### 10.1 What was verified
+
+| Probe | Result | Evidence |
+|---|---|---|
+| Time-out / self-exclusion predicate | PASS | One query in `evaluateEligibility` (self-exclusion ranked first), database clock, exclusive `ends_at`. It reaches casino real and demo launch, `postBet`, sportsbook `PlaceBet`, deposit T1 and T2 (all through `EvaluateAction`, which falls through to `EvaluateEligibility` when the switch is off) and bonus eligibility (`bonus/eligibility.go`, direct `EvaluateEligibility`). A grep of every non-test call site shows that postWin, postRollback, sportsbook settle/void/rollback and payout never call it. Withdrawals use `EvaluateWithdrawalEligibility` (restriction reported, not blocking: an owner decision). |
+| Fail-closed | PASS | `EvaluateAction` wraps every error after validation in `ErrEvaluationUnavailable`. The switch read refuses a session for another tenant (`ErrUsageScope`) instead of answering "off". All five call sites return the error, so the transaction aborts. Withdrawal: a nil gate, a gate error or an unknown gate code or risk outcome gives `ErrGateUnavailable` and a 503. Tests: `RepeatableRead_IsRefused`, `PlayerScopedSession_IsRefused`, `StatementTimeout_FailsClosed_NeverZeroUsage`, `LockTimeout_FailsClosed`, `TestWDRG1_NoGate_And_FailingGate_FailClosed_NothingWritten`, `..._GateCannotDecide_Is503`. |
+| 0158 activation table: RLS, grants, append-only | PASS | Catalogue: RLS on, FORCE RLS on, runtime grants are exactly SELECT and INSERT, and every function is non-SECURITY DEFINER with a pinned search_path. The runtime-role probes were all refused: a player-scoped insert, a platform insert, an acting-session insert, a tenant-B staff member claiming tenant A, a tenant-A staff member inserting for tenant B (RL001), a tenant-B brand (FK), a suspended staff member (RL001), UPDATE, DELETE, TRUNCATE, `ON CONFLICT DO UPDATE` (permission denied), `ALTER TABLE ... DISABLE TRIGGER` (must be owner), and a duplicate scope (23505). Caller-supplied id, actor and `created_at` are overwritten by the trigger. Reads: tenant B sees 0 rows, a session with no tenant sees 0, a platform session sees 0, tenant A sees its row. |
+| The runtime role cannot turn enforcement off | PASS | No UPDATE or DELETE grant or policy, the immutability trigger, and no TRUNCATE grant. The down migration refuses with RL099 while a row exists. There is no Go or SQL disable path. |
+| `/v1/admin/rg/enforcement` RBAC | PASS | GET needs `rg_config:read`. POST needs `rg_config:write` (compliance only), `RequireTenantScope`, and the tenant and actor from the token (an unknown `tenant_id` body field gives 400). Tested: support 403, tenant_admin 403, platform 403, player 403, no token 401, another tenant's brand 400, and tenant B does not inherit. Success and denial are both audited. |
+| `/v1/admin/rg/enforcement` stepUpNone | **FAIL, SR6-1** | See below. |
+| Relink trigger | PASS | Not SECURITY DEFINER. `search_path = pg_catalog, public, pg_temp`, and every call is schema-qualified. It uses the same key as `rg.lockPerson` (`hashtext('player_restrictions'), hashtext(person_id::text)`). It takes the lower hash first, so two relinks cannot invert the order. A relink takes the tuple lock and then both person locks. An evaluation takes the person lock, then re-reads the Person and follows a move. No Go code takes a row lock on `player_accounts`. `person_id` is in no unique index, so a relink takes FOR NO KEY UPDATE, which does not conflict with the FK KEY SHARE taken by ledger and withdrawal inserts, so there is no ABBA cycle. Tests `RelinkWaitsForAnInFlightEvaluation`, `EvaluationFollowsAMoveCommittedBeforeItsLock`. |
+| WD050/WD051 | PASS (see SR6-2, SR6-3, SR6-4) | The 403 body is one generic sentence for both gates. Code and reason stay in the audit row and the server log. The gate returns a 503 when it cannot decide. A nil gate refuses. The denial audit holds gate_code, reason_code, brand_id, wallet_id, asset_code, amount and risk_outcome, with no PII (no email, name, instrument detail or fingerprint). `rg_restriction_in_force` on the success audit holds only the restriction type. |
+| Platform or player-scoped session reaching `EvaluateAction` across tenants | PASS | Platform session: `app.tenant_id` is empty, so `ErrUsageScope` gives unavailable. Acting or other-tenant session: the tenant mismatch is refused. A player-scoped session of the same tenant: with the switch on, `usageGuard` refuses (`app.player_account_id` set). With the switch off, it runs eligibility only, under RLS, so another player's account is not found and the call errors. Another tenant's account id under the right tenant session: RLS hides it, so the call errors and fails closed. |
+| Usage reads, tenant isolation | PASS | `accts` CTE, `ledger_entries`, `ledger_transactions`, `ledger_accounts` and `deposit_intents` are all filtered by `tenant_id = $1`, the joins match on tenant, RLS applies, and `usageGuard` runs on each reader. |
+| b2c RG page | PASS (see SR6-5) | Form values are held only in `useState`. Server responses are in the in-memory react-query cache. No localStorage, sessionStorage, cookie, console, beacon or analytics call in `features/rg`, `api/rg.ts` or `lib/money.ts`. The contract test pins every `apiFetch` path and method of `rg.ts` to the OpenAPI spec and includes a self-check of the extractor. Limitation: it checks paths and methods only, not request or response shapes (the Go-side OpenAPI DTO tests cover the server half). |
+| Test run (this review) | PASS | Run with `-tags integration -count=1 -p 1` on the private DB: rg, withdrawal, httpserver (RG enforcement, WDRG1, OpenAPI RG, staff route/golden), casino, sportsbook, payments with the A6 test filters. 69 PASS, 1 SKIP (the heavy run, gated by `RG_S4_HEAVY`). |
+
+### 10.2 Findings
+
+**SR6-1 (Medium, BLOCKS completion of the staff route; fix before the item is marked IMPLEMENTED): `POST /v1/admin/rg/enforcement` is classified `stepUpNone`.**
+The "protective" label of ADR 0119 rule 8.1 does not fit this write. With the switch on and no floor in force, every deposit, real launch and wager of the
+brand, or of the whole tenant when `brand_id` is omitted, fails closed with `rg_config_missing` (section 1). The write cannot be undone: no software
+path reverses it, and the 0158 down migration refuses (RL099). Recovery needs a hand-written owner migration.
+Failure scenario: an attacker with a stolen aal2 compliance session (token theft, an unlocked workstation) sends one POST with no `brand_id`. This
+irreversibly halts all deposits and gameplay of the tenant until engineering ships a migration. The handler has no precondition that a floor is configured.
+ADR 0119 already treats protective writes that are outage vectors as `critical`: capability-grant revoke, provider-credential revoke, staff
+suspension. This case is stronger, because it is also irreversible. Required: classify the POST `critical`. That means the route
+registration, `staffRouteGolden`, and the step-up count pins in `staff_route_static_test.go`. GET stays `none`. Recommended, as a product or compliance decision and not
+blocking: refuse activation unless R-RG-CONFIG passes for the scope, so an honest mistake cannot halt a brand either.
+
+**SR6-2 (Low): the gate's tenant-isolation tests do not prove what they say.** `TestWDRG1_TenantIsolation_ForeignAccountIsRefused` asserts only
+`err != nil`. The foreign account is refused by the earlier tenant/status gate before the WD-RG-1 gate runs, so the test does not exercise the gate's
+own isolation. The HTTP suspended-account case also accepts 401. Add an assertion on the error class, and add a direct test of
+`standard.Gate.Evaluate` under a tenant-B session with tenant-A ids. It must return an error and never `Allowed`.
+
+**SR6-3 (Low): the WD-RG-1 denial audit records `ActorSystem` with no actor id, IP, user agent or request id.** The request is player-initiated, and the
+success audit uses `ActorPlayer`. CLAUDE.md requires an actor and an IP on audit records. Record `ActorPlayer` with the account id and the request meta.
+
+**SR6-4 (Low): the handler checks `gateDenied` before `err`.** If the commit of the denial-audit transaction fails, the player still gets a 403 while the
+denial audit is lost. Nothing else is written, so this is not unsafe. Check the WithTenant error first and answer 503.
+
+**SR6-5 (Low, pre-existing pattern that A6 extends): b2c `logout` does not clear the react-query cache.** RG restrictions (self-exclusion status) and
+limits stay in memory for the next sign-in in the same tab until they refetch. Call `queryClient.clear()` on logout. This applies to every player-data query, not only RG.
+
+**Informational and residual (no action in A6, flagged for launch):**
+- I-1: the database checks that `app.principal_id` is an active staff member of the tenant. It cannot prove that the request came from that staff member, so any code running as the runtime role can activate the switch. This is the accepted trust model of 0135.
+- I-2 (launch-relevant): WD050/WD051 have no database backstop, and payout dispatch does not re-run the gate (residual 4 in section 8). A code path that bypasses `RequestWithdrawal` is ungated. This must stay on the launch risk list.
+- I-3: by probing amounts, a player can locate a risk-rule threshold (403 against 201). This is inherent to any amount limit and is not reduced by a generic body.
+- I-4: `ActivateEnforcement`'s idempotent 23505 branch is race-safe (savepoint, then read the stored row). A repeat writes no second audit row. Tested.
+
+### 10.3 Tests the specialists' QA coverage must keep
+
+- Another tenant's token or session against `/v1/admin/rg/enforcement`, `/v1/me/rg/options` and `/v1/me/withdrawals` returns 403 or 404 and never data or an allow (present). Add the direct gate case from SR6-2.
+- A platform session, an acting session and a player-scoped session reaching `EvaluateAction` or `EnforcementEnabled` give an error and never "off" or "allowed" (the player-scoped case is present. Add platform and acting.).
+- The runtime role cannot UPDATE, DELETE or TRUNCATE `rg_enforcement_activations`, and cannot insert as a platform, player, acting or suspended principal, or for another tenant (the catalogue pins are present. The behavioural probes above were run manually: worth a test).
+- After SR6-1: the POST without a fresh step-up returns the step-up-required answer.
