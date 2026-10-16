@@ -138,10 +138,10 @@ GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_backup;
 -- NOTE (owner decision 5, ADR 0122 section 10; F1, migration 0166): "everything" is everything in schema PUBLIC. The actor-proof signing secrets
 -- are NOT there any more: migration 0166 moved actor_proof_keys into the owner-only schema actorproof_private, on which this role holds NO
 -- privilege (no USAGE, no table grant). backup.sh dumps with --exclude-schema=actorproof_private (pg_dump then neither locks nor reads it) and
--- refuses to run if this role can reach that schema. The denial is re-asserted on every run (below); the only actor-proof object this role may
--- use is the SECURITY DEFINER inventory public.actor_proof_key_inventory(), which returns the NON-secret columns (kid, status, created_at,
--- retired_at) for the baseline. (Before 0166 the role had table-level SELECT on public.actor_proof_keys - residual R1 of
--- docs/plans/backup-exclude-actor-secret-record.md - because pg_dump's LOCK TABLE needs it; a column-level grant broke the dump.)
+-- refuses to run if this role can reach that schema. The denial is re-asserted on every run (below); the role is given NOTHING actor-proof
+-- related (not even the key ids: verify.sh asserts the key table's state as the owner). (Before 0166 the role had table-level SELECT on
+-- public.actor_proof_keys - residual R1 of docs/plans/backup-exclude-actor-secret-record.md - because pg_dump's LOCK TABLE needs it; a
+-- column-level grant broke the dump.)
 DO $$
 BEGIN
     IF to_regnamespace('actorproof_private') IS NOT NULL THEN
@@ -149,9 +149,6 @@ BEGIN
         REVOKE ALL ON ALL TABLES IN SCHEMA actorproof_private FROM igaming_backup;
         REVOKE ALL ON ALL SEQUENCES IN SCHEMA actorproof_private FROM igaming_backup;
         REVOKE ALL ON ALL FUNCTIONS IN SCHEMA actorproof_private FROM igaming_backup;
-    END IF;
-    IF to_regprocedure('public.actor_proof_key_inventory()') IS NOT NULL THEN
-        GRANT EXECUTE ON FUNCTION public.actor_proof_key_inventory() TO igaming_backup;
     END IF;
 END
 $$;

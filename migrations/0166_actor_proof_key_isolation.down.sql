@@ -7,8 +7,8 @@
 --   * the key table or the schema carries a grant to anyone other than the owner, or a column-level grant, or a view/rule/trigger/policy
 --     depends on the table (0166 left none; something was added since, and the down cannot know what 0165's state of it would be).
 -- Otherwise the schema returns to 0165 byte for byte (whole-schema snapshot test): the table (rows included, never copied) moves back, the two
--- function bodies below are 0139's and 0120's verbatim, actor_proof_key_inventory is dropped, and igaming_backup's table-level SELECT on the
--- key table is restored exactly when it holds SELECT on actor_proof_nonces (0166 refused to run unless both were alike).
+-- function bodies below are 0139's and 0120's verbatim, and igaming_backup's table-level SELECT on the key table is restored exactly when it
+-- holds SELECT on actor_proof_nonces (0166 refused to run unless both were alike).
 
 LOCK TABLE actorproof_private.actor_proof_keys IN ACCESS EXCLUSIVE MODE;
 
@@ -60,8 +60,6 @@ BEGIN
     END IF;
 END;
 $$;
-
-DROP FUNCTION actor_proof_key_inventory();
 
 ALTER TABLE actorproof_private.actor_proof_keys SET SCHEMA public;
 

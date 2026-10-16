@@ -16,12 +16,10 @@
 --     lookup pointed at the new table) and the existence probe actor_proof_key_active (0120's body, same change). search_path stays pinned to
 --     pg_catalog, public, pg_temp (the private schema is NOT on it: the reference is schema-qualified), so no caller-controlled object can be
 --     substituted;
---   * ONE new definer function, actor_proof_key_inventory(), returns the NON-SECRET columns (kid, status, created_at, retired_at) to
---     igaming_backup ONLY (EXECUTE revoked from PUBLIC; never granted to igaming_runtime). It replaces what the backup baseline used to read from
---     the table itself (META|actor_proof_kids and the TABLE|actor_proof_keys row count / hash over the non-secret columns), so the baseline and
---     the physical-recovery comparison keep working while the backup role can no longer touch the secret. A view was rejected: it would be
---     re-granted to igaming_runtime by the init scripts' blanket "ALL TABLES IN SCHEMA public" grant and would make the logical restore depend
---     on the excluded table during pg_restore.
+--   * NO new function, view or grant: the backup role does not even see the key ids any more (the backup baseline stops listing them; verify.sh
+--     asserts the key table's state as the OWNER role). A non-secret view or inventory function was considered and rejected: a view in public
+--     would be re-granted to igaming_runtime by the init scripts' blanket "ALL TABLES IN SCHEMA public" grant and would make the logical
+--     restore depend on the excluded table during pg_restore; an inventory function would be new reachable surface for no security gain.
 -- Proof semantics are unchanged: same token format, same AP001..AP005 rules and order, same nonce table (public.actor_proof_nonces holds no
 -- secret and stays where it is), same triggers. Nothing else reads the key table.
 --
@@ -253,20 +251,3 @@ CREATE OR REPLACE FUNCTION actor_proof_key_active(p_kid text) RETURNS boolean AS
     SELECT EXISTS (SELECT 1 FROM actorproof_private.actor_proof_keys k WHERE k.kid = p_kid AND k.status = 'active');
 $$ LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp;
-
--- The NON-SECRET key inventory for the backup baseline (deploy/backup/baseline.sql): kid, status, created_at, retired_at. Never the secret
--- (the return type has no bytea column; a catalog test pins it). EXECUTE: igaming_backup only (granted here when the role exists, and by
--- deploy/backup/init-backup-role.sql for databases provisioned afterwards); never PUBLIC, never igaming_runtime.
-CREATE FUNCTION actor_proof_key_inventory()
-RETURNS TABLE (kid text, status text, created_at timestamptz, retired_at timestamptz) AS $$
-    SELECT k.kid, k.status, k.created_at, k.retired_at FROM actorproof_private.actor_proof_keys k ORDER BY k.kid;
-$$ LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path = pg_catalog, public, pg_temp;
-REVOKE ALL ON FUNCTION actor_proof_key_inventory() FROM PUBLIC;
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'igaming_backup') THEN
-        GRANT EXECUTE ON FUNCTION actor_proof_key_inventory() TO igaming_backup;
-    END IF;
-END;
-$$;
