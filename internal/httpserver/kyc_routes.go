@@ -31,7 +31,7 @@ func registerKYCRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/kyc/cases",
 		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListKYCCasesHandler(deps)))))
 	mux.Handle("POST /v1/admin/kyc/verifications/{id}/review",
-		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationReview)(newReviewVerificationHandler(deps)))))
+		staffRoute(deps, stepUpByKYCResidence, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationReview)(newReviewVerificationHandler(deps)))))
 	mux.Handle("GET /v1/admin/kyc/documents",
 		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListDocumentsForAccountHandler(deps)))))
 	mux.Handle("POST /v1/admin/kyc/documents/{id}/review",

@@ -180,7 +180,7 @@ variable "key_family_version" {
 # --- STAGING-PREP-1 owner inputs (docs/runbooks/aws-staging-deploy-plan.md G3/G5) ---
 
 variable "mock_geolocation_country" {
-  description = "OWNER INPUT. MOCK_GEOLOCATION_COUNTRY for platform-api: an uppercase ISO-3166-1 alpha-2 country code. Empty (default) = not set, and the operating-market gate refuses registration, deposit, casino launch and sportsbook placement (fail closed). Honoured only because staging enables test-support endpoints; a real locator is PROVIDER DEPENDENT. The matching operating-market rows are a separate owner action (docs/runbooks/market-blocking-configuration.md)."
+  description = "OWNER INPUT. MOCK_GEOLOCATION_COUNTRY for platform-api: an uppercase ISO-3166-1 alpha-2 country code. Empty (default, supported since owner decision 3) = not set; the operating-market gate then uses the KYC-verified residence of the player (deposit, casino launch and sportsbook placement are refused without it, registration needs only the market rows; fail closed). Set it only to force one static country for every request. Honoured only because staging enables test-support endpoints; a real locator is PROVIDER DEPENDENT. The matching operating-market rows are a separate owner action (docs/runbooks/market-blocking-configuration.md)."
   type        = string
   default     = ""
 

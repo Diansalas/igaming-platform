@@ -7,6 +7,7 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -270,7 +272,29 @@ func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
 				VerifiedResidenceCountry: req.VerifiedResidenceCountry,
 				IPAddress:                clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
-			return err
+			if err != nil || req.VerifiedResidenceCountry == nil {
+				return err
+			}
+			// SRME-1: the residence is the evidence that admits money and games. There is no maker-checker for KYC
+			// reviews, so a residence recorded in a country the brand currently serves writes an alert-able audit
+			// row in the SAME transaction (ids and a boolean only, never the country). If the market cannot be
+			// evaluated the whole review fails and nothing is written (fail closed; the reviewer retries).
+			served, merr := marketgate.CountryServedForAny(ctx, tx, tc.TenantID, result.BrandID, *req.VerifiedResidenceCountry)
+			if merr != nil {
+				return fmt.Errorf("review: evaluate residence market: %w", merr)
+			}
+			if !served {
+				return nil
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
+				Action: marketgate.AuditActionResidenceIntoOpenMarket, TargetType: "kyc_verification", TargetID: verificationID.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{
+					"player_account_id": result.PlayerAccountID.String(), "brand_id": result.BrandID.String(),
+					"new_status": string(result.Status),
+				},
+			})
 		})
 		if errors.Is(err, kyc.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "verification not found")

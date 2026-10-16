@@ -68,6 +68,7 @@ var classifierCriticalBody = map[string]any{
 	"classifier:rgLimitChangeClass":         map[string]any{"kind": "deposit", "value": nil},
 	"classifier:amlHoldPlaceClass":          map[string]any{"reason_class": "confirmed_sanctions"},
 	"classifier:amlTransitionClass":         map[string]any{"to": "closed_no_action"},
+	"classifier:kycResidenceReviewClass":    map[string]any{"status": "approved", "verified_residence_country": "MT"},
 }
 
 // stepUpRefused asserts r is the step-up refusal for maxAge seconds (body code and max_age; RFC 9470 header).
@@ -165,10 +166,11 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// ADR 0116 A7: +11 AML routes: +3 critical (lift, propose, approve), +3 reads; place hold and transition are the classifiers amlHoldPlaceClass / amlTransitionClass (SR7-1, SR7-5), so 3 static none-mutating (open case, note, SAR flag) + 2 classifiers.
 	// none-mutating 39 -> 42. A6 (ADR 0115 S4-min): +1 critical (POST /v1/admin/rg/enforcement, SR6-1) and +1 read (GET): critical 63, none-mutating 42, read 83.
 	// A5 (WITHDRAWAL-REVERSAL-1): +1 critical (POST /v1/admin/withdrawals/{id}/payout-reversal): critical 64.
+	// Owner decision 3 (SRME-1): POST /v1/admin/kyc/verifications/{id}/review became the classifier kycResidenceReviewClass: none-mutating 42 -> 41.
 	// A10c: +4 reads (attempt events, reconciliation single run, single mismatch, hold candidates): read 87; nothing mutating changes.
 	if counts["critical"] != 64 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["none-mutating"] != 42 || counts["read"] != 87 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 41 || counts["read"] != 87 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

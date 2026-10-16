@@ -4299,6 +4299,17 @@ paths:
         presence/provenance are tracked internally
         (kyc_verifications.verified_residence_set_at/set_by) for a
         future phase's read surface.
+
+        Step-up class: classifier kycResidenceReviewClass (owner
+        decision 3, SRME-1). The recorded residence is the evidence that
+        admits deposit, launch and sportsbook placement, so a review
+        that carries verified_residence_country is critical (a stale
+        second factor gets 403 step_up_required and nothing is
+        written); a review without it needs no step-up. A residence
+        recorded in a country the brand currently serves also writes the
+        audit action market.residence_into_open_market (ids only, never
+        the country) for alerting. There is no maker-checker for KYC
+        reviews in the permission model.
       security:
         - bearerAuth: []
       parameters:

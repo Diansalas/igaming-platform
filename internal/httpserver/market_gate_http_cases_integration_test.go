@@ -46,20 +46,28 @@ func TestMarketGate_HTTP_AllowedMarketPassesAtAllThreePoints(t *testing.T) {
 // side effects, one audit row per refusal.
 func TestMarketGate_HTTP_EveryCauseIsOneIdenticalRefusalAndCreatesNothing(t *testing.T) {
 	w := newMarketWorld(t)
+	// Owner decision 3: deposit and launch are refused on the player's KYC-verified residence evidence
+	// (the static test Locator stands in for it here): a country outside the market, or unknown
+	// evidence. Registration takes NO player evidence (brand-level rule), so only the configuration
+	// cause refuses it; the first two causes therefore do not include it.
 	causes := []struct {
-		name  string
-		apply func()
+		name         string
+		apply        func()
+		registration bool
 	}{
-		{"country outside the operating market", func() { w.locator.SetCountry("DE") }},
-		{"unknown location evidence", func() { w.locator.SetCountry("") }},
-		{"market configuration disabled", func() { w.locator.SetCountry("MT"); w.setTenant(operatingmarket.StateDisabled) }},
+		{"country outside the operating market", func() { w.locator.SetCountry("DE") }, false},
+		{"unknown location evidence", func() { w.locator.SetCountry("") }, false},
+		{"market configuration disabled", func() { w.locator.SetCountry("MT"); w.setTenant(operatingmarket.StateDisabled) }, true},
 	}
 	var canonical string
 	audits := map[string]int{}
 	for _, c := range causes {
 		c.apply()
 		p0, i0, s0, wl0 := w.counts(t)
-		points := map[string]*http.Response{"registration": w.register(t), "deposit": w.deposit(t), "launch": w.launch(t)}
+		points := map[string]*http.Response{"deposit": w.deposit(t), "launch": w.launch(t)}
+		if c.registration {
+			points["registration"] = w.register(t)
+		}
 		for op, resp := range points {
 			status, body := refusalBody(t, resp)
 			if status != http.StatusForbidden {
@@ -148,12 +156,14 @@ func TestMarketGate_HTTP_UnconfiguredBrandIsRefusedAndTenantsAreIsolated(t *test
 // geo/forwarding headers cannot move a request into the operating market.
 func TestMarketGate_HTTP_ClientSuppliedCountryIsIgnored(t *testing.T) {
 	w := newMarketWorld(t)
-	w.locator.SetCountry("DE") // the server-side evidence says: outside the market
+	// Registration is brand-level (owner decision 3): close the brand's market and prove that spoofed
+	// country headers cannot reopen it. (The body carries no country field; a strict decoder would
+	// reject one with a 400, which would make this test pass for the wrong reason, so none is sent.)
+	w.setTenant(operatingmarket.StateDisabled)
 	p0, _, _, _ := w.counts(t)
 
 	body, _ := json.Marshal(map[string]string{
 		"brand_slug": w.brand.Slug, "email": "mg-spoof-" + uuid.NewString() + "@example.com", "password": "a-decent-password-1",
-		"country": "MT", "country_code": "MT",
 	})
 	req, _ := http.NewRequest(http.MethodPost, w.srv.URL+"/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -167,8 +177,8 @@ func TestMarketGate_HTTP_ClientSuppliedCountryIsIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusCreated {
-		t.Fatal("a client-supplied country/header moved a request into the operating market")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a client-supplied country/header moved a request into the operating market: %d", resp.StatusCode)
 	}
 	if p1, _, _, _ := w.counts(t); p1 != p0 {
 		t.Fatalf("a spoofed registration created %d player accounts", p1-p0)
