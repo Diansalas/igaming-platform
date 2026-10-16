@@ -22,7 +22,8 @@
 --
 -- Variables (-v): owner_role (default igaming), expect_backup (present|absent|any), active_kid
 -- (ACTOR_PROOF_ACTIVE_KID, informational), file_head / file_count (highest migration number and number of
--- .up.sql files baked into the image), listing (0|1).
+-- .up.sql files baked into the image), listing (0|1), require_anchor (0|1: a blank environment anchor is a FAIL),
+-- iam_only (0|1: igaming_backup is IAM-only, so a finite validity on it is a leftover FAIL).
 \set ON_ERROR_STOP on
 
 -- ---------------------------------------------------------------- 3.1 roles

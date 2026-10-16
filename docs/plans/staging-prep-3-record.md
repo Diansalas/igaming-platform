@@ -14,29 +14,34 @@ against a throwaway local PostgreSQL 16 cluster on a drill port.
 | Deliverable | Label | Evidence / caveat |
 |---|---|---|
 | `staging-runner` image definition (`deploy/docker/staging-runner.Dockerfile`) | PARTIALLY IMPLEMENTED | `docker build --check` is clean; the image was NEVER built: the Alpine CDN is not reachable from the sandbox, so the package list (bash, curl, jq, coreutils, grep, sed, gawk, findutils, diffutils, openssl, age, postgresql16-client, aws-cli, procps-ng with a `procps` fallback) is unverified against Alpine 3.20. The Go helpers it builds compile on the host. |
-| Terraform: ECR repo, 2 task definitions, log group, task role, boundary statement, outputs | IMPLEMENTED (offline) | `terraform fmt`, `validate`, `terraform test` (staging root 13, ecs 22, iam 8, ecr 2 runs; all pass). Never planned or applied. |
+| Terraform: ECR repo, 3 task definitions, log group, 2 task roles, empty `seed-world-passwords` secret, boundary statements, outputs | IMPLEMENTED (offline) | `terraform fmt`, `validate`, `terraform test` (counts in section 10 and 12.6). Never planned or applied. |
 | `deploy.sh runner <mode> [KEY=VALUE...]`, `runner-image`, image build in `up` | PARTIALLY IMPLEMENTED | Parameter handling is tested offline (`deploy/aws/tests/runner-overrides-test.sh`, 20 assertions) and shellcheck-clean. `run-task`, polling and CloudWatch log retrieval have never run. |
 | Mode `verify-db` | IMPLEMENTED (local) | Run against a throwaway cluster; 38 RESULT records + 3 grant SNAPSHOT lines. Not run on RDS. |
 | Mode `seed-actor-proof` | IMPLEMENTED (local) | Idempotent, conflict-refusing, secret-free log, tested locally; not run with the real secret. |
 | `cmd/seed-market` + mode `seed-market` | IMPLEMENTED (local + 8 integration tests) | Library calls only; tested on a private scratch DB and the throwaway cluster. |
 | Mode `backup-restore-drill` | PARTIALLY IMPLEMENTED | Every step ran locally, including the two-phase restore, `verify.sh`, the drop and the PITR baseline. IAM authentication, TLS `verify-full`, `rds_iam`, `BYPASSRLS` creation on RDS, the `pg_catalog` revoke on RDS and `pgaudit` are PROVIDER DEPENDENT unknowns that only the real run answers. The restore is EXPECTED to be BLOCKED on RDS (section 5). |
 | Mode `pitr-verify` | PARTIALLY IMPLEMENTED | Run locally against a physical copy of the cluster on another port; the RDS-clone specifics (master secret following the clone, credential reset) are unverified. |
-| Mode `probe-backup-role` | IMPLEMENTED (local) | 15 + 8 probes, classification verified including the un-hardened and "RDS refused" paths. |
-| IAM delta | BLOCKED until applied by the bootstrap credential | Section 6. |
+| Mode `probe-backup-role` | IMPLEMENTED (local) | 15 + 9 probes, fail-closed classification by SQLSTATE (section 12, SRP3-2), verified including the un-hardened, "RDS refused", granted-write and no-connection paths. |
+| Modes `record-anchor`, `cleanup` (round 2) | IMPLEMENTED (local) | SRP3-1 / SRP3-9. |
+| Mode `seed-world` + `cmd/seed-staging-world` (round 2, SA-1) | IMPLEMENTED (local + 4 integration tests) | Credentials only in Secrets Manager (a file store stands in locally). The Secrets Manager calls themselves have never run. |
+| IAM delta | BLOCKED until applied: the boundary statements by the BOOTSTRAP credential, the deployer-policy change by an IAM administrator (the account owner) | Section 6 and 12.4. The new policy JSON is written and the simulator cases are added; neither has been applied or run against AWS. |
 
 ## 2. What exists
 
 | Path | What |
 |---|---|
-| `cmd/seed-market/` | `main.go`, `settings_test.go` (6 unit tests), `seed_market_integration_test.go` (8 integration tests, tag `integration`) |
-| `deploy/staging-runner/entrypoint.sh`, `lib.sh`, `lib-probes.sh`, `modes/*.sh` (6), `sql/*.sql` (5) | the runner |
+| `cmd/seed-market/` | thin command over `internal/stagingseed` (round 2): `main.go`, `settings_test.go`, `seed_market_integration_test.go` (tag `integration`) |
+| `internal/stagingseed/`, `cmd/seed-staging-world/` | round 2: the shared guard (APP_ENV + environment anchor), `EnsureMarket`, `PlanWorld` / `ApplyWorld`, and the world command; unit and integration tests |
+| `deploy/staging-runner/boot.sh`, `entrypoint.sh`, `lib.sh`, `lib-probes.sh`, `modes/*.sh` (9), `sql/*.sql` (6) | the runner (`boot.sh` = the image ENTRYPOINT, round 2) |
 | `deploy/staging-runner/runner_static_test.go` | 10 static guards in `go test ./deploy/...` (no secret exposure patterns, read-only verification pack, bound actor-proof secret, 15 + 8 probes, drill follows the plan, Dockerfile bakes no key, exactly one `rds-db:connect` statement) |
 | `deploy/staging-runner/tests/local-harness.sh`, `run-local-modes.sh`, `fixture.sql` | throwaway-cluster harness and the end-to-end local suite (81 assertions) |
 | `deploy/docker/staging-runner.Dockerfile` | the image |
 | `deploy/aws/modules/ecr` | `staging-runner` repository (immutable tags, scan on push, same pattern) |
-| `deploy/aws/modules/ecs` | log group `/ecs/igaming-staging/staging-runner`; task definitions `igaming-staging-staging-runner` and `igaming-staging-staging-runner-actor-proof` |
-| `deploy/aws/modules/iam` | `igaming-staging-ecs-runner-task-role` (`rds-db:connect` as `igaming_backup` on this DbiResourceId only) |
-| `deploy/aws/bootstrap/main.tf` | boundary statement `StagingRunnerBackupRoleIamAuth` |
+| `deploy/aws/modules/ecs` | log group `/ecs/igaming-staging/staging-runner`; task definitions `igaming-staging-staging-runner`, `igaming-staging-staging-runner-actor-proof` and (round 2) `igaming-staging-staging-runner-seed-world` |
+| `deploy/aws/modules/iam` | `igaming-staging-ecs-runner-task-role` (`rds-db:connect` as `igaming_backup` on this DbiResourceId only); round 2: `igaming-staging-ecs-seed-world-task-role` (Get/PutSecretValue on the one seed-world secret) |
+| `deploy/aws/modules/secrets` | round 2: the EMPTY secret container `igaming-staging/seed-world-passwords` (no version) |
+| `deploy/aws/iam/staging-deployer-runner-roles-policy.json`, `deploy/aws/tests/simulate-deployer-policies.py` | round 2: NEW deployer policy file with the three role statements (create, manage, pass) for the two runner roles; 16 new simulator cases (not run: needs AWS) |
+| `deploy/aws/bootstrap/main.tf` | boundary statements `StagingRunnerBackupRoleIamAuth` and (round 2) `StagingRunnerSeedWorldSecretWrite` |
 | `deploy/aws/environments/staging` | wiring, outputs `ecs_staging_runner_task_definition_arn`, `ecs_staging_runner_actor_proof_task_definition_arn`, `runner_task_role_arn`, `db_resource_id`, `key_family_kid`, tftests |
 | `deploy/aws/scripts/deploy.sh` | `runner`, `runner-image`, runner image in `up` phase 2, sourceable for tests |
 | `deploy/aws/tests/run-static-checks.sh`, `runner-overrides-test.sh` | the runner scripts are syntax-checked, shellchecked and the parameter handling is tested |
@@ -63,24 +68,27 @@ Every detail is one line, bounded, and scrubbed of the registered secret values.
 
 ### 3.2 Task definitions and identities
 
-| | `staging-runner` | `staging-runner-actor-proof` |
-|---|---|---|
-| Modes | verify-db, seed-market, backup-restore-drill, pitr-verify, probe-backup-role | seed-actor-proof |
+| | `staging-runner` | `staging-runner-actor-proof` | `staging-runner-seed-world` (round 2) |
+|---|---|---|---|
+| Modes | verify-db, seed-market, record-anchor, cleanup, backup-restore-drill, pitr-verify, probe-backup-role | seed-actor-proof | seed-world |
 | Execution role | one-off execution role (ECR pull of the runner repo, secrets, runner log group) | same |
-| Task role | `igaming-staging-ecs-runner-task-role`: `rds-db:connect` as `igaming_backup` on this DbiResourceId, nothing else | NONE (no AWS credential in the container) |
-| Secrets injected | `DB_MASTER_PASSWORD` (RDS-managed master secret), `DB_RUNTIME_PASSWORD` | `DB_MASTER_PASSWORD`, `ACTOR_PROOF_KEYS` |
-| Hardening | uid 10001, all capabilities dropped, init process, 1 vCPU / 2 GiB, 20 GiB ephemeral storage | uid 10001, caps dropped, 0.25 vCPU / 0.5 GiB |
+| Task role | `igaming-staging-ecs-runner-task-role`: `rds-db:connect` as `igaming_backup` on this DbiResourceId, nothing else | NONE (no AWS credential in the container) | `igaming-staging-ecs-seed-world-task-role`: Get/PutSecretValue on `igaming-staging/seed-world-passwords` only |
+| Secrets injected | `DB_MASTER_PASSWORD` (RDS-managed master secret), `DB_RUNTIME_PASSWORD` | `DB_MASTER_PASSWORD`, `ACTOR_PROOF_KEYS` | `DB_MASTER_PASSWORD`, `STAFF_MFA_FACTOR_KEYS`, `STAFF_MFA_MAC_KEYS` |
+| Hardening | uid 10001, all capabilities dropped, init process, 1 vCPU / 2 GiB, 20 GiB ephemeral storage | uid 10001, caps dropped, 0.25 vCPU / 0.5 GiB | same as actor-proof |
 
-Passwords arrive as `DB_*_PASSWORD`, never `PGPASSWORD`: the runner copies them into a 0600 libpq passfile on tmpfs and `unset`s them before any child process starts. No connection string
+Passwords arrive as `DB_*_PASSWORD`, never `PGPASSWORD`. **Corrected in round 2 (SRP3-6):** the earlier text said they were unset "before any child process starts"; that was not true (`rn_init` ran `mktemp`, `date`, `hostname` while they were still in the environment). Now the image ENTRYPOINT is `boot.sh` (POSIX sh), which re-executes `entrypoint.sh` under `env -i` with an explicit allow-list of NON-secret names and hands the secrets over on file descriptor 3 (a here-document), never as `NAME=value` arguments; `entrypoint.sh` runs `set +x +v` and reads them with the `read` builtin into NON-EXPORTED shell variables before it executes any other program. No child process and no argument list ever carries a secret. Honest limit, unchanged: the process that starts `boot.sh` (tini as PID 1) keeps the initial environment block, secrets included, in `/proc/1/environ`, readable by processes of the same uid in the container (same trust boundary as every ECS-injected secret; there is no ECS Exec and no inbound path). The secrets are then written to 0600 passfiles on tmpfs. No connection string
 carries a password; psql, `cmd/migrate` and `cmd/seed-market` read the passfile.
 
 ### 3.3 Modes
 
 | Mode | Parameters (all non-secret) | Writes |
 |---|---|---|
-| `verify-db` | `EXPECT_BACKUP_ROLE` present/absent/any, `GRANT_LISTING` 0/1 | nothing (plain SELECTs; `migrate verify` is read-only) |
+| `verify-db` | `EXPECT_BACKUP_ROLE` present/absent/any, `GRANT_LISTING` 0/1, `REQUIRE_ANCHOR` 0/1 | nothing (plain SELECTs; `migrate verify` is read-only) |
 | `seed-actor-proof` | none | one `actor_proof_keys` row, only when the kid is absent |
-| `seed-market` | `TENANT_SLUG`, `BRAND_SLUG`, `COUNTRY`, `AUTH_REF`, `OPERATOR`, `REASON`, optional `ACTOR_ID`, `DRY_RUN` | one licence-ceiling version, one tenant policy version, and the audit rows the library writes |
+| `seed-market` | `TENANT_SLUG`, `BRAND_SLUG`, `COUNTRY`, `AUTH_REF`, `OPERATOR`, `REASON` (mandatory), optional `ACTOR_ID`, `DRY_RUN` | one licence-ceiling version, one tenant policy version, and the audit rows the library writes; refuses unless the environment anchor is staging/development/test |
+| `record-anchor` | `ANCHOR_VALUE` staging/development/test, `AUTH_REF`, `OPERATOR`, `REASON` (mandatory) | the write-once `database_environment` row, nothing else |
+| `seed-world` | as `seed-market` plus optional `SECOND_TENANT_SLUG` / `SECOND_BRAND_SLUG`; mandatory `AUTH_REF`, `OPERATOR`, `REASON`; `DRY_RUN` | synthetic ACTIVE tenant(s) + brand(s) + market rows + 5 tenant staff + bootstrap enrolment tokens, and the Secrets Manager secret (12.5) |
+| `cleanup` | optional `CLEANUP_DB` | drops leftover `igaming_restore*` databases, the `igaming_restore_loader` role, a finite validity on `igaming_backup` (RDS only); nothing else |
 | `backup-restore-drill` | `DRILL_RESTORE_DB`, `SKIP_RESTORE`, `PRINT_EXPECTED` | see 4 |
 | `pitr-verify` | `PITR_ENDPOINT`, `EXPECTED_DIGESTS`, `EXPECT_ANCHOR` | only on the disposable clone, see 4.3 |
 | `probe-backup-role` | `EXPECT_HARDENING` applied/refused/unknown | nothing (every probe is `BEGIN READ WRITE; ...; ROLLBACK`) |
@@ -90,8 +98,8 @@ caps the total size (container overrides are limited to 8192 characters). The ru
 
 ### 3.4 What each mode cannot do
 
-None of them can: write a ledger, balance, player or staff row; read a secret other than the ones injected; change a role other than as listed in 4; connect to anything but the pinned RDS endpoint
-(host must be an `eu-central-1` RDS endpoint on port 5432; `pitr-verify` accepts only `igaming-staging-*` endpoints other than the primary); run when `APP_ENV` is not `staging`.
+None of them can (`seed-world` excepted for tenant staff rows, 12.5): write a ledger, balance, player or staff row; read a secret other than the ones injected; change a role other than as listed in 4; connect to anything but the pinned RDS endpoint
+(host must be an `eu-central-1` RDS endpoint on port 5432; `pitr-verify` accepts only `igaming-staging-db-pitr-*` endpoints other than the primary); run when `APP_ENV` is not `staging`.
 Loopback targets exist only behind `RUNNER_ALLOW_LOCAL=local-test-harness` and ports 5497-5499; `deploy.sh` cannot set that variable and the task definition does not.
 
 ## 4. The backup/restore drill in detail
@@ -126,7 +134,7 @@ On the primary: create/alter `igaming_backup` (+ `rds_iam` membership, `pgaudit.
 3. **The logical restore is expected to be BLOCKED.** `restore.sh` refuses (a) an owner role that holds CREATEROLE or is a member of any `rds_*` / `pg_*` role (check "the owner role must be unprivileged", applies to every phase) and (b) a data-load identity that is a member of such a role. On RDS the owner `igaming` IS the master: CREATEROLE and `rds_superuser`, so (a) refuses even at `--phase provision`, and any role created `IN ROLE igaming` is transitively privileged for (b). The drill records `restore_provision|BLOCKED` (or `restore_load|BLOCKED`) with the exact error, then runs `verify.sh` with the backup's baseline against the LIVE source as `INFO` records (the source may have changed since the snapshot). This needs an architect decision before production (for example an unprivileged application-database owner distinct from the RDS master, or an ADR 0122 amendment); it is not worked around here.
 4. `restorecheck` (gate 4 of `verify.sh`) scopes to the first tenant it lists and requires it to hold ledger rows (`runtime_role_scoped_sees_only_own_tenant`); `deploy/drill/verify.sql` requires a non-empty ledger. A staging database whose first listed tenant has no ledger entries FAILS that check by design. Make sure every synthetic tenant has ledger activity (6.6) before the drill, or treat that single check as data-dependent.
 
-## 6. IAM delta (NOT applied; listed, policy files NOT edited)
+## 6. IAM delta (NOT applied; the policy file IS edited as of round 2, see 12.4)
 
 No action was found missing from `deploy/aws/iam/staging-deployer-infra-policy.json` for the runner: ECR repository create/describe/push on `repository/igaming-staging/*`, `ecs:RegisterTaskDefinition`, `RunTask`, `DescribeTasks`, `StopTask`, `logs:CreateLogGroup`, `PutRetentionPolicy`, `GetLogEvents`, `DescribeLogStreams` on `/ecs/igaming-staging/*`, `rds:Describe*` (for `resource_id`) are all present.
 Two deltas ARE needed:
@@ -136,7 +144,7 @@ Two deltas ARE needed:
    - `IamManageStagingRoles`: `iam:GetRole`, `iam:DeleteRole`, `iam:UpdateRole`, `iam:TagRole`, `iam:UntagRole`, `iam:GetRolePolicy`, `iam:ListRolePolicies`, `iam:ListAttachedRolePolicies`, `iam:ListInstanceProfilesForRole`;
    - `IamPassStagingRolesToEcsOnly`: `iam:PassRole` (condition `iam:PassedToService = ecs-tasks.amazonaws.com`; `ecs:RunTask` needs it for the task role).
    Extend `deploy/aws/tests/simulate-deployer-policies.py` with the corresponding allow cases (and a deny case for creating the role without the boundary).
-2. **Permissions boundary** `igaming-staging-ecs-role-boundary` (managed in `deploy/aws/bootstrap`, applied by the BOOTSTRAP credential only): the new statement `StagingRunnerBackupRoleIamAuth` allows `rds-db:connect` on `arn:aws:rds-db:eu-central-1:765578795051:dbuser:db-*/igaming_backup` (the DbiResourceId does not exist when the boundary is applied; the role's inline policy pins the exact instance). Without it the task role's permission is capped to nothing and the IAM login fails with an authentication error. **This one is in the repository's bootstrap Terraform, not in a policy JSON; it must be re-applied with the bootstrap credential before the first runner task.**
+2. **Permissions boundary** `igaming-staging-ecs-role-boundary` (managed in `deploy/aws/bootstrap`, applied by the BOOTSTRAP credential only): the new statement `StagingRunnerBackupRoleIamAuth` allows `rds-db:connect` on `arn:aws:rds-db:eu-central-1:765578795051:dbuser:db-*/igaming_backup` (the DbiResourceId does not exist when the boundary is applied; the role's inline policy pins the exact instance). Without it the task role's permission is capped to nothing and the IAM login fails with an authentication error. **This one is in the repository's bootstrap Terraform, not in a policy JSON; it must be re-applied with the bootstrap credential before the first runner task. CORRECTION (SRP3-4): the bootstrap credential applies ONLY the boundary statements (it can version `policy/igaming-staging-ecs-role-boundary` and nothing else). The deployer-policy change of item 1 is applied by an IAM administrator (the account owner): the deployer holds an explicit `Deny iam:CreatePolicyVersion`, and the bootstrap policy cannot touch the deployer policy. Earlier wording in this record and in the runbook that said otherwise is replaced.**
 
 Also relevant to plan 7.3, but pre-existing and unchanged: the deployer cannot `rds:RestoreDBInstanceToPointInTime` (the simulator asserts the deny). The clone must be created by a credential that may (the bootstrap/owner credential), or the deployer policy needs `RestoreDBInstanceToPointInTime` (and `AddTagsToResource`) on `db:igaming-staging-db`, `db:igaming-staging-db-pitr-*`, the subnet/parameter/option groups: not added here.
 
@@ -157,13 +165,15 @@ Also relevant to plan 7.3, but pre-existing and unchanged: the deployer cannot `
 
 ## 8. Probe list (for the security review)
 
-Each runs as `igaming_backup` in its own connection inside `BEGIN READ WRITE; <statement>; ROLLBACK`; PASS = denied by a privilege error.
+Each runs as `igaming_backup` in its own connection inside `BEGIN READ WRITE; <statement>; ROLLBACK`; PASS = denied by a privilege-denied SQLSTATE.
+
+Verdicts (round 2, SRP3-2): PASS only for a privilege-denied SQLSTATE (42501, 0L000, 0LP01); a write probe that fails any other way or succeeds is a FAIL; a probe that could not connect is BLOCKED and the pack's `probe_pack_complete` check FAILS unless all 24 ran. Each session sets `statement_timeout = 15s` and `lock_timeout = 5s`.
 
 Write / escalation (15, must be denied): `INSERT INTO tenants ...`; `UPDATE ledger_entries SET amount = amount + 1`; `DELETE FROM ledger_entries`; `TRUNCATE ledger_entries`; `CREATE TABLE zz_backup_probe (a int)`; `CREATE TEMP TABLE zz_probe (a int)`;
 `DROP TABLE ledger_entries`; `ALTER TABLE ledger_entries DISABLE TRIGGER ALL`; `SET ROLE igaming`; `SET session_replication_role = replica`; `CREATE ROLE zz_probe`; `ALTER ROLE igaming_backup SUPERUSER`; `COPY (SELECT 1) TO PROGRAM 'true'`;
 `SELECT pg_read_file('/etc/passwd')`; `SELECT pg_reload_conf()`.
 
-Abuse primitives (8, denied once `harden-backup-surface.sql` took effect; FINDING when RDS refused it): `pg_advisory_lock(42)`; `pg_try_advisory_lock(42)`; `pg_advisory_xact_lock(42)`; `pg_logical_emit_message(false, 'x', 'y')`;
+Abuse primitives (9: the original 8 plus the two-key `pg_advisory_lock(42, 43)`; denied once `harden-backup-surface.sql` took effect; FINDING when RDS refused it): `pg_advisory_lock(42)`; `pg_advisory_lock(42, 43)`; `pg_try_advisory_lock(42)`; `pg_advisory_xact_lock(42)`; `pg_logical_emit_message(false, 'x', 'y')`;
 `lo_create(0)`; `pg_notify('c', 'p')`; connect to `postgres`; connect to `template1`.
 
 Plus the role's own attribute check (`rolsuper=0, bypassrls=1, createdb=0, createrole=0, replication=0, connlimit=2`, member of `rds_iam` or nothing).
@@ -172,22 +182,22 @@ Plus the role's own attribute check (`rolsuper=0, bypassrls=1, createdb=0, creat
 
 1. Apply the bootstrap boundary and the deployer-policy delta; run the simulator; run `deploy/aws/tests/run-static-checks.sh` on the named commit.
 2. `deploy.sh up` (builds platform-api and staging-runner images under the commit SHA; role-init and migrate run inside it). Then `deploy.sh runner verify-db EXPECT_BACKUP_ROLE=absent`: record the SNAPSHOT digests (3.1, 3.5).
-3. `deploy.sh seed-admin <email>`; create the synthetic tenant (with licence) and brand in the Back Office; `deploy.sh runner seed-actor-proof`; `deploy.sh runner seed-market ... DRY_RUN=1`, then without `DRY_RUN`; acceptance flows (6.6) so every tenant has ledger rows.
+3. `deploy.sh seed-admin <email>`; `deploy.sh runner record-anchor ANCHOR_VALUE=staging ...` (plan 6.2; every seeding command refuses without it); `deploy.sh runner seed-actor-proof`; `deploy.sh runner seed-world ... DRY_RUN=1`, then without `DRY_RUN` (synthetic ACTIVE tenant(s), brand(s), market rows and tenant staff; credentials only in Secrets Manager), or `seed-market` alone for an existing tenant; acceptance flows (6.6) so every tenant has ledger rows.
 4. `deploy.sh runner backup-restore-drill` (nothing else writing): record RDS findings, probes, timings, `PITR|T_utc`, `PITR|expected_digests`, `PITR|anchor`.
 5. Restore the PITR clone at T with a credential allowed to (section 6); wait for it; `deploy.sh runner pitr-verify PITR_ENDPOINT=... EXPECTED_DIGESTS=... EXPECT_ANCHOR=...`; delete the clone (7.5).
-6. `deploy.sh runner verify-db EXPECT_BACKUP_ROLE=present` and `deploy.sh runner probe-backup-role` for the final evidence; teardown (section 13). The runner image, task definitions, role and log group are destroyed with the stack (the ECR repository is `force_delete`).
+6. `deploy.sh runner cleanup`, then `deploy.sh runner verify-db EXPECT_BACKUP_ROLE=present REQUIRE_ANCHOR=1` (no loader role, restore-check database or finite backup credential may remain) and `deploy.sh runner probe-backup-role` for the final evidence; teardown (section 13). The runner image, task definitions, role and log group are destroyed with the stack (the ECR repository is `force_delete`).
 
 ## 10. Verification performed
 
 | Check | Result |
 |---|---|
-| `terraform fmt -recursive -check deploy/aws`, init/validate of every root and module, `terraform test` (offline mirror, terraform 1.11.4) via `deploy/aws/tests/run-static-checks.sh` | pass (staging root 13, ecs 22, iam 8, ecr 2 runs; all other modules unchanged) |
-| `deploy/aws/tests/runner-overrides-test.sh` (via the static checks) | 20 assertions pass |
+| `terraform fmt -recursive -check deploy/aws`, init/validate of every root and module, `terraform test` (offline mirror, terraform 1.11.4) via `deploy/aws/tests/run-static-checks.sh` | pass at the end of round 1 (staging root 13, ecs 22, iam 8, ecr 2 runs); round 2 counts are in 12.6 |
+| `deploy/aws/tests/runner-overrides-test.sh` (via the static checks) | 20 assertions pass at the end of round 1; 31 after round 2 |
 | shellcheck (`-S warning`) on `deploy/staging-runner/**/*.sh` and `deploy.sh` | clean |
 | `gofmt`, `go vet` (plain and `-tags integration`) on `./cmd/... ./deploy/...` | clean |
 | `go test ./deploy/... ./cmd/...` | see final report |
 | `cmd/seed-market` integration tests on a private scratch DB | 8 pass |
-| `deploy/staging-runner/tests/run-local-modes.sh` against a throwaway cluster (drill port 5497-5499) with a synthetic world loaded through the platform services | 81 assertions held, 0 failed (SEED_WORLD=1: 2 tenants, 3 players each, loaded through the platform's own services) |
+| `deploy/staging-runner/tests/run-local-modes.sh` against a throwaway cluster (drill port 5497-5499) with a synthetic world loaded through the platform services | round 1: 81 assertions held, 0 failed (round 2: 185, section 12.6) (SEED_WORLD=1: 2 tenants, 3 players each, loaded through the platform's own services) |
 | `docker build --check` of the Dockerfile | no warnings |
 
 ### Could NOT be tested locally
@@ -254,3 +264,75 @@ SRP3-4 (wording on who applies the IAM delta) and SRP3-6(a)/(b) (overstated clai
 SRP3-3, -5, -6(c), -7, -8, -9 are LOW: fix them, or have the owner accept them in writing as staging residuals. SRP3-10..12 are informational.
 None of these findings needs a schedule change for the infrastructure parts (Terraform, the task-role design, the actor-proof task definition), which are approved as designed, subject to the PROVIDER DEPENDENT items of section 5.
 **Launch-relevant (production):** SRP3-1 (any environment-sensitive tool must bind to the database anchor), SRP3-7/-8/-12 (production network, digest pinning, a dedicated boundary), and section 5 item 3 (the logical restore on RDS) must be resolved before any production use of this tooling.
+
+## 12. Round 2: response to the security review (section 11) and the acceptance-suite seeding mode SA-1 (devops, 2026-10-16)
+
+Status: IMPLEMENTED (local) for everything below unless a line says otherwise. **Nothing here has touched AWS, and nothing here is declared secure: section 11's verdict (NOT APPROVED as complete) stands until the security specialist re-reviews this round.** Same rules as before: no AWS call, no `terraform plan/apply`, throwaway PostgreSQL clusters on drill ports and a private scratch database only.
+
+### 12.1 Response to each finding
+
+| Id | Status | What changed, and the evidence |
+|---|---|---|
+| SRP3-1 | FIXED | `internal/stagingseed.RequireSyntheticAnchor` reads the anchor with `db.Pool.ReadEnvironmentAnchor` and refuses unless it is `staging`, `development` or `test`; a missing row (= production), `production`, any other value and a read error all refuse. It is the FIRST thing `EnsureMarket` (`seed-market`) and `PlanWorld` / `ApplyWorld` (`seed-world`) do, so `-dry-run` and the plan phase refuse too; `APP_ENV` is checked as well (both gates must hold). Sanctioned path to record the anchor: NEW runner mode `record-anchor` (the runner's owner login is the table owner, the only role migration 0135 lets write the row; one transaction with the table locked; write-once; idempotent; `ANCHOR_VALUE` staging/development/test only, never `production`; mandatory `AUTH_REF`, `OPERATOR`, `REASON`). Plan 6.2 now records it BEFORE 6.5 and `verify-db REQUIRE_ANCHOR=1` proves it. Tests: fake-reader unit tests (`internal/stagingseed/guard_test.go`), integration tests with no anchor row and with `production` for BOTH commands, dry-run included, and `staging` accepted (the test helper disables the guard trigger as the table owner on the scratch database only); local runner tests `market_noanchor`, `world_noanchor`, `anchor_*`, `verify_db_require_anchor`. |
+| SRP3-2 | FIXED (one deliberate deviation) | The verdict comes from the SQLSTATE (`psql -v VERBOSITY=sqlstate`), never from message text. PASS only for 42501, 0L000, 0LP01 (the two CONNECT probes accept exactly the server's CONNECT-denial message, because a connection-time denial carries no SQLSTATE). A write/escalation probe that SUCCEEDS or fails with ANY other SQLSTATE is a FAIL (the privilege check passed first); an abuse probe with another SQLSTATE is a FINDING; a probe that cannot connect is BLOCKED and is not a pass. `probe_pack_complete` counts the probes that actually ran and FAILS unless all 24 ran, so an unreachable role or an expired token ends in exit 1 with `pass=0`, never a zero-PASS exit 0. Every probe session sets `statement_timeout = 15s` and `lock_timeout = 5s`; the two-key `pg_advisory_lock(42, 43)` is a ninth abuse probe (harden-backup-surface.sql revokes every signature). **Deviation:** the review asked for exit 3 on a BLOCKED probe; I made it a FAIL result (exit 1) because exit 3 means "STOP, do not work around it" and the drill should still reach its remaining steps and report them. Found by the full local run: `psql -c` exits 1 (not 3) when a statement fails, so the classifier keys on the SQLSTATE line, not the exit code. Tests: `tests/probe-verdict-test.sh` (26 offline assertions, also run by `go test` and by `run-static-checks.sh`), local `probes_granted_insert` (a granted INSERT is a FAIL), `probes_noconn` (a dead credential), `probes_refused`, `probes_unhardened`. |
+| SRP3-3 | FIXED (one clarification) | An explicit or defaulted actor must be an ACTIVE `platform_admin` with `tenant_id IS NULL`, re-checked with `FOR SHARE` INSIDE the writing transaction (and, for an explicit actor, already at plan / dry-run time). The tenant row is locked `FOR SHARE` and its status checked in the same transaction as the write; the open ceiling version row is locked `FOR UPDATE`, so check and write are atomic and a concurrent close cannot interleave. A suspended or closed tenant is refused. **Clarification:** `active` AND `pending_launch` tenants are accepted, because the market rows are a prerequisite of the launch-readiness check that precedes activation (refusing `pending_launch` would make the documented order impossible). Tests: `TestSeedMarket_RefusesAnUnknownOrWrongKindOfActor`, the missing/foreign cases, `TestWorld_Gates`. |
+| SRP3-4 | FIXED (wording and files) | Sections 1, 6 and 9 of this record, plan C / 0.4 / 6.2 and the stage 9.4 runbook now say who applies what: the BOOTSTRAP credential applies ONLY the boundary statements (`StagingRunnerBackupRoleIamAuth`, `StagingRunnerSeedWorldSecretWrite`); the deployer-policy change is applied by an IAM administrator (the account owner). The change is a NEW file, `deploy/aws/iam/staging-deployer-runner-roles-policy.json` (see 12.4 for why it is not an edit of the edge/IAM/state policy). `simulate-deployer-policies.py` gains 16 cases (allow with the boundary, deny without it or with another boundary, GetRole, PassRole to `ecs-tasks` only, a look-alike ARN, trust-policy and attach denies, the empty secret container). They have NOT been run (they need AWS). |
+| SRP3-5 | FIXED | The actor-proof pre-check also stops on `log_transaction_sample_rate` <> 0, `log_statement_sample_rate` with `log_min_duration_sample` set, `auto_explain.log_min_duration` with a non-zero `auto_explain.log_parameter_max_length`, `pgaudit.log` <> none with `pgaudit.log_parameter` on, and `pgaudit.role` (object auditing) with `log_parameter` on, all read with `current_setting(..., true)` like `rekey-actor-proof.sh`. Local tests `actor_txn_sample`, `actor_stmt_sample`, `actor_clean_again`. auto_explain and pgaudit are not installed on the throwaway cluster, so those two branches are tested only as SQL that reads as unset. |
+| SRP3-6 | FIXED (limits stated) | (a)/(b) the false claim is corrected in 3.2. (c) hardened, see 12.3. |
+| SRP3-7 | ACCEPTED, documented | Public-IP mode stays for this one disposable run; plan 0.6b records it as an accepted staging residual with the production requirement (private subnets, VPC endpoints for ECR / Secrets Manager / Logs / STS or restricted NAT, no general egress). |
+| SRP3-8 | PARTIALLY FIXED | The runtime base is pinned: `alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc`. That digest was obtained offline and has NOT been checked by a build or against the registry (no registry access here); a wrong digest fails the build, it cannot silently pull something else. The builder stage `golang:1.26.9-alpine` is still pinned by tag only: its digest could not be obtained here. The RDS CA bundle is still trusted on first use (SHA-256 logged). All three remain production requirements. |
+| SRP3-9 | FIXED | NEW mode `cleanup` (idempotent): drops leftover `igaming_restore*` databases (+ an optional `CLEANUP_DB`), the `igaming_restore_loader` role, and on RDS a finite validity on `igaming_backup`; it never drops a database it does not recognise (verify-db reports it). `verify-db` ALWAYS checks `leftover_restore_loader_role`, `leftover_restore_check_database` (any database other than the application and system ones) and `leftover_backup_credential` (a FAIL on RDS). Plan 8.4 makes `cleanup` + `verify-db` mandatory after every drill or aborted task; plan 7.5 makes the clone deletion mandatory and evidenced. `stopTimeout = 120` (the Fargate maximum) on all three runner definitions so the exit trap has the longest chance to run (tftest). Local tests `verify_db_leftovers`, `cleanup_*`. |
+| SRP3-10 | FIXED | `pitr-verify` accepts only `igaming-staging-db-pitr-*` endpoints (plan 7.3 names the clone that way); local test `pitr_notpitr`. |
+| SRP3-11 | FIXED | One set of parameter regexes for the writing modes (`RN_RE_AUTHREF`, `RN_RE_OPERATOR`, `RN_RE_REASON` in `lib.sh`); `REASON` may contain spaces and `.`. `deploy.sh` now also refuses `seed-market`, `seed-world` and `record-anchor` without `AUTH_REF`, `OPERATOR` and `REASON`. 11 new override assertions. |
+| SRP3-12 | UNCHANGED (production requirement) | Still true, and slightly wider: the shared boundary now also allows `PutSecretValue` on the seed-world secret to any role that carries it. Same non-escalation reasoning (the deployer can already read and write every `igaming-staging/*` secret). Production needs a dedicated boundary for the runner roles. |
+
+### 12.2 SA-1: mode `seed-world` (+ `cmd/seed-staging-world`, `internal/stagingseed`)
+
+Purpose: give the acceptance suite (`deploy/aws/acceptance`) an ACTIVE synthetic tenant and brand with market rows, tenant staff for `tenant_admin`, `finance` x2, `compliance`, `risk_manager`, and optionally a second ACTIVE tenant, in a staging that has no supported path to create tenant staff.
+
+- **Services used, not raw SQL for domain rows:** `identity.CreatePerson` / `CreateStaffUser`, the staff MFA store's bootstrap enrolment token (the same one `seed-admin -issue-bootstrap` issues; delivered through the single allow-listed `RevealForDelivery` call site), and the operating-market library for the market rows (`CreateLicenceCountryCeilingVersion`, `CreateOperatingCountryPolicyVersion`, then the gate is re-resolved). ACTIVE tenant and brand rows are written through the SANCTIONED owner-provisioning path (migration 0128: the table owner may INSERT an `active` subject and the database records an `owner_provisioned` launch transition). The tool never activates anything that already exists in another state (activation of a pending subject stays a governed launch decision, test `TestWorld_RefusesToTouchAPendingTenant`). A synthetic jurisdiction `STG-SYNTHETIC` and licence `STG-SYNTHETIC-1` carry the tenants. Audit rows are written by the library and by the tool (actor, reason, authorisation reference).
+- **Gating (before anything is read or written, both phases):** `APP_ENV` development or staging AND the environment anchor staging/development/test (12.1 SRP3-1); mandatory `-operator`, `-reason`, `-authorization-reference`; an ACTIVE platform admin as the actor.
+- **Credentials cannot be lost and are never printed:** TWO PHASES. PLAN (read-only) generates a password for each missing account into a 0600 tmpfs file; the runner uploads it to the secret BEFORE APPLY creates anything (an unwritable store stops the run with nothing created, tested); APPLY creates the accounts and writes passwords and bootstrap tokens to a second 0600 file; the runner merges it into the secret. A re-run keeps the stored credentials of existing accounts (tested: the secret is byte-identical). Stdout carries only `SEEDWORLD|key|value` status lines and counts. The values travel as `file://` arguments to the AWS CLI and as `jq` file-to-file operations; static tests forbid printing the credential files, reading credential values with `jq`, or a `--secret-string` that is not `file://`.
+- **Terraform:** `aws_secretsmanager_secret.seed_world` (`igaming-staging/seed-world-passwords`) is an EMPTY container (no version, nothing in state); task definition `igaming-staging-staging-runner-seed-world` (master password + staff MFA key families, task role below); task role `igaming-staging-ecs-seed-world-task-role` with exactly `GetSecretValue` and `PutSecretValue` on that one ARN (a wildcard is rejected by a variable validation, tftest), under the permissions boundary; `deploy.sh runner seed-world` selects that definition; `secret_arns` has nine entries.
+- **Consumption by the suite:** `deploy/aws/acceptance/fetch-seed-world.sh <abs dir outside the repo>` reads the secret with the OPERATOR's credential and writes the 0600 files and a `suite.env` of non-secret variables; the README (section 4) and plan 6.4 / 6.5 / 6.6 describe it. Tested offline (`deploy/aws/tests/fetch-seed-world-test.sh`, 17 assertions, part of `run-static-checks.sh`).
+- **MFA enrolment path:** each account gets the single-use bootstrap enrolment token (valid 24 h, `staffmfa.BootstrapTokenTTL`); the suite redeems it, starts the TOTP enrolment and writes the TOTP secret file before confirming (README section 3). Not exercised end to end here (needs the deployed API).
+
+### 12.3 Entry hardening (SRP3-6 in detail)
+
+1. The image ENTRYPOINT is `boot.sh` (POSIX `sh`). It re-executes `entrypoint.sh` as `env -i PATH=... HOME=... LC_ALL=... <allow-listed NAME=value> bash --noprofile --norc entrypoint.sh <mode>`. The allow-list holds the database target, the ECS credential-endpoint variables and the runner parameters only; `SHELLOPTS`, `BASHOPTS`, `BASH_ENV`, `ENV`, `PS4`, `BASH_XTRACEFD`, `IFS`, `LD_*` and exported functions are not on it, so a `run-task` environment override cannot make the entrypoint trace. A static test fails if a secret or a shell-behaviour variable is ever added to the list, and if a parameter name `deploy.sh` accepts is missing from it.
+2. The secrets are NOT on the allow-list (that would put them in `env`'s argument list). `boot.sh` passes them on file descriptor 3 as a here-document; `entrypoint.sh` starts with `set +x +v`, then reads them with the `read` builtin into non-exported shell variables (`RN_S_*`), before it executes any other program. `rn_load_credentials` writes the passfile and blanks the variables. No child process inherits a secret and no argument list contains one.
+3. The entrypoint also works when run directly (fallback: it copies the `DB_*_PASSWORD` / `ACTOR_PROOF_KEYS` / `STAFF_MFA_*` variables and unsets them).
+4. Tests: local `trace_boot` (SHELLOPTS=xtrace, BASHOPTS, BASH_ENV, ENV, PS4, BASH_XTRACEFD all set through the image path: exit 0, no xtrace line, no password, no passfile line, the BASH_ENV file not sourced), `trace_direct` (entrypoint run directly with SHELLOPTS=xtrace: no password), and `trace_control`, the control that proves the assertions can fail: the same run against a copy of the entrypoint WITHOUT its `set +x +v` line does trace and the master password then appears in the output.
+5. Honest limits, unchanged: the process that starts `boot.sh` (tini as PID 1, `initProcessEnabled`) keeps the initial environment block, secrets included, in `/proc/<pid>/environ`, readable by processes of the same uid; there is no ECS Exec and no inbound path. `boot.sh` was exercised under `dash`, not under Alpine's busybox `ash` (not available here); it uses only POSIX constructs (`eval` on fixed names, `set --`, `exec env -i`, a here-document on fd 3).
+
+### 12.4 IAM delta, corrected and extended (nothing applied)
+
+1. **BOOTSTRAP credential** (re-apply `deploy/aws/bootstrap`): the boundary gains `StagingRunnerBackupRoleIamAuth` (round 1: `rds-db:connect` on `dbuser:db-*/igaming_backup`) and `StagingRunnerSeedWorldSecretWrite` (round 2: `secretsmanager:PutSecretValue` on `secret:igaming-staging/seed-world-passwords-*`; `GetSecretValue` on `igaming-staging/*` was already allowed). Nothing else changes in the bootstrap diff.
+2. **IAM administrator (the account owner), not the bootstrap credential and not the deployer:** create the managed policy from the NEW file `deploy/aws/iam/staging-deployer-runner-roles-policy.json` and attach it to the deployer principal. It has three statements (create / put-delete-role-policy with the boundary condition, manage, pass-role to `ecs-tasks.amazonaws.com`), exact ARNs of `igaming-staging-ecs-runner-task-role` and `igaming-staging-ecs-seed-world-task-role`, no wildcard, no Deny (the explicit Denys of the edge/IAM/state policy keep applying). **Why a new file:** adding the six ARNs to the three statements of `staging-deployer-edge-iam-state-policy.json` makes it 6,236 non-whitespace characters against the 6,144 managed-policy limit (it is 5,804 today); a static test now fails if any deployer policy file exceeds the limit. The deployer therefore has four managed deployer policies instead of three.
+3. Unchanged: the deployer cannot `rds:RestoreDBInstanceToPointInTime`; the PITR clone is created with the owner credential.
+4. The simulator (`simulate-deployer-policies.py`) reads all four files; it needs AWS and has not been run.
+
+### 12.5 Open items and residuals for the re-review
+
+| Id | Item |
+|---|---|
+| R2-1 | `seed-world` creates ACTIVE tenants and brands through the owner-provisioning path, i.e. WITHOUT the governed four-eyes launch decision. That path exists for exactly this (migration 0128, ADR 0112) and is gated here by APP_ENV and the environment anchor, but it is a security-relevant capability of the runner image and of whoever may run the `seed-world` definition. Needs the security specialist's review (CLAUDE.md: security-sensitive functionality is not complete without it). |
+| R2-2 | The generated one-time passwords and bootstrap tokens sit in Secrets Manager, readable by the deployer principal (which already reads every `igaming-staging/*` secret) and the seed-world task role. They are synthetic accounts of a disposable environment; the secret goes with the stack (`recovery_window_in_days` as for the other secrets). Tokens expire after 24 h and are single-use. |
+| R2-3 | UNVERIFIED against the real service: the runner treats the AWS error "can't find the specified secret value" as "no value yet" (text match). If the text differs the mode STOPs (fail closed, nothing created), it does not write blindly. `aws secretsmanager put-secret-value --secret-string file://...` has never run. |
+| R2-4 | The mode relies on the staff MFA key families being identical to the ones platform-api uses (same secret): a token sealed with other keys would be useless. They are injected from the same Secrets Manager secret, so this holds by construction; not testable offline. |
+| R2-5 | `seed-world` seeds the five staff accounts for the FIRST tenant only (the second tenant exists for isolation checks and has no staff). |
+| R2-6 | Alpine package availability, the digest pin, `boot.sh` under busybox `ash`, the image as uid 10001, and everything on ECS remain untested (no image build possible here). |
+| R2-7 | The deployer-policy simulator cases are written but unexecuted. |
+
+### 12.6 Verification performed in round 2 (exact counts)
+
+| Check | Result |
+|---|---|
+| `terraform fmt -recursive -check deploy/aws`, init/validate of both roots and every module, `terraform test` (offline mirror, terraform 1.11.4) via `deploy/aws/tests/run-static-checks.sh` | pass: staging root 13, ecs 24, iam 10, ecr 2, secrets 8, database 8, alb 2, edge 5, network 2, observability 5, security 1 runs; 0 failed |
+| `deploy/aws/tests/runner-overrides-test.sh`, `probe-verdict-test.sh`, `fetch-seed-world-test.sh` (all in the static checks) | 31, 26 and 17 assertions pass |
+| shellcheck (`-S warning`) on `deploy/staging-runner/**/*.sh`, `deploy.sh`, `fetch-seed-world.sh` and the shell tests | clean |
+| `gofmt`, `go vet` (plain and `-tags integration`), `golangci-lint` v2.6.2 with the repository config (also `-tags integration`) on `cmd/seed-market`, `cmd/seed-staging-world`, `internal/stagingseed`, `deploy/staging-runner` | clean (0 issues) |
+| `go test -count=1 ./deploy/... ./cmd/... ./internal/stagingseed/... ./internal/httpserver/` | all pass; unit tests: `deploy/staging-runner` 14, `cmd/seed-staging-world` 4, `cmd/seed-market` 6, `internal/stagingseed` 3 |
+| Integration tests (`-tags integration -p 1`) on a private scratch database | `cmd/seed-market` 16 tests (10 integration + 6 unit; includes a missing and a `production` anchor refused for dry run and apply, and `staging` accepted), `cmd/seed-staging-world` 4, `internal/stagingseed` 8 (5 integration: the plan/apply world, a stale plan not overwriting an account, the gates, a pending tenant refused, a missing/production anchor refused; 3 unit); all pass. The scratch database was dropped afterwards |
+| `deploy/staging-runner/tests/run-local-modes.sh` against a throwaway cluster on drill port 5497 with a synthetic world loaded through the platform services | **185 assertions held, 0 failed** (round 1: 81). The first complete runs found three real defects, all fixed: `psql -c` exits 1 (not 3) so the probe classifier keyed on the wrong code and BLOCKED every probe; the local credential store ignored a failed `cp`; and a pre-existing flaky test generator sometimes produced invalid base64 keys. Cluster removed; ports 5497-5499 free afterwards |
+| An image build / `docker build --check` | NOT possible here (no Alpine CDN, no registry); the Dockerfile changes (digest pin, `boot.sh`, `seed-staging-world`) are unbuilt |
