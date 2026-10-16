@@ -28,8 +28,8 @@ scripts, no role DDL outside provisioning, no literal passwords, target guard pr
 | Role | Used for | Notes |
 |---|---|---|
 | `igaming` (migration owner) | `cmd/migrate`, owning objects, restore target owner | on RDS the master user; subject to FORCE RLS: **cannot** produce a complete dump |
-| `igaming_runtime` | the application | non-owning; cannot dump (`permission denied for table actor_proof_keys`) |
-| **`igaming_backup`** | the backup runner and `verify.sh` baseline/count queries | NOSUPERUSER, **BYPASSRLS**, SELECT-only (table-level SELECT on every table including `actor_proof_keys`: it can read the actor-proof secret, residual R1 of `docs/plans/backup-exclude-actor-secret-record.md`), CONNECTION LIMIT 2, no membership, read-only sessions, **VALID UNTIL** (time-boxed), audited; never used by the application |
+| `igaming_runtime` | the application | non-owning; cannot dump (`permission denied for table actor_proof_nonces` / `for schema actorproof_private`) |
+| **`igaming_backup`** | the backup runner and `verify.sh` baseline/count queries | NOSUPERUSER, **BYPASSRLS**, SELECT-only on every table of schema `public`; **no privilege at all on the schema `actorproof_private`** that holds the actor-proof signing key (F1, migration 0166: it cannot read, lock or even name the key table; `backup.sh` refuses to run otherwise; this closed residual R1 of `docs/plans/backup-exclude-actor-secret-record.md`), CONNECTION LIMIT 2, no membership, read-only sessions, **VALID UNTIL** (time-boxed), audited; never used by the application |
 | restore role | `restore.sh --phase all` or `load` | the **non-superuser** owner role `igaming`, or a CREATEDB role that is a member of it (drill: `drill_restore`). It must NOT be a superuser or `rds_superuser` member: the archive is executable SQL (ADR 0122 section 5a). `--owner-role` is `igaming` unless `RESTORE_OWNER_ROLE_OVERRIDE` names another; postgres / igaming_backup / igaming_runtime / rdsadmin / rds_superuser are always refused |
 | provisioning role | `restore.sh --phase provision` | on a brand-new cluster the bootstrap superuser (RDS: the master - unverified): creates the three project roles WITHOUT passwords and the EMPTY database only; no archive content runs as this role |
 
@@ -87,12 +87,13 @@ gpg key or an unusable signing key stops the run with nothing written. The dump 
 backup volume; if anything fails (including a killed encryptor, SIGTERM/SIGINT, a closed stdout) the whole run directory is removed. The next run also sweeps
 stale temp directories and orphaned `.incomplete` run directories of killed (SIGKILL/OOM) runs.
 
-**The actor-proof signing secret is NOT in a logical dump (owner decision 5, ADR 0122 section 10).** `backup.sh` runs `pg_dump --exclude-table-data=public.actor_proof_keys`: the
-table's structure is in the dump, its rows (the HMAC secrets of the signed actor proof, ADR 0110) are not, and neither the baseline (it records the row count and
-non-secret key ids only, never a hash of the secret), the manifest (`"actor_proof_keys_data": "excluded"`) nor any log carries them. The exclusion is verified on the very
-stream that is encrypted: `backup.sh` reads its table of contents while it is written and **fails the whole backup** (nothing kept) if a data entry for the table is present.
-The exclusion protects the ARTEFACT, not the CREDENTIAL: `igaming_backup` keeps table-level `SELECT` on `actor_proof_keys` (residual R1; `pg_dump` takes `LOCK TABLE` on every dumped
-table, and a column-level grant broke the dump in the drill), so a stolen backup credential can still read the key. Hence section 5a: any exposure of the backup credential means re-keying. **Physical base backups, snapshots and PITR (section 4.2)
+**The actor-proof signing secret is NOT in a logical dump, and the backup credential cannot read it (owner decision 5, ADR 0122 section 10; F1, migration 0166).** The key
+table lives in the owner-only schema `actorproof_private`. `backup.sh` runs `pg_dump --exclude-schema=actorproof_private` (pg_dump then neither locks nor reads it, so the
+backup role needs no privilege on it and has none), refuses to start if the backup role can reach that schema or if migration 0166 is not applied, and reads the table of
+contents of the very stream that is encrypted: it **fails the whole backup** (nothing kept) if any entry of that schema or any `actor_proof_key*` data entry (in any schema) is
+present. Neither the baseline (since 0166 it holds no key row line and no key id, only the schema's structure fingerprint `FP|actorproof_private_md5` and the privilege
+invariant `INV|actor_proof_key_reachable_by_non_owner`), the manifest (`"actor_proof_keys_data": "excluded"`) nor any log carries key material. This protects the artefact AND
+the credential: a stolen backup credential cannot read the key (drilled: `backup_role_cannot_read_actor_proof_key`). The owner role and a superuser still can (ADR 0110 T7). **Physical base backups, snapshots and PITR (section 4.2)
 are not affected: they copy the data files and WAL, so they DO contain the live key.** That is deliberate - they stay inside the AWS trust boundary (KMS-encrypted volumes and
 snapshots, no human read path) and are what restores the live key after a total loss; do not copy a physical backup or a snapshot out of that boundary.
 
@@ -215,11 +216,12 @@ subset of rows through triggers. A tenant-wide revert needs an ADR (it contradic
 5. `restorecheck` as `igaming_runtime`: the platform's own `ledger_vs_projection` reconciliation per tenant (rolled back by default so the verified
    database stays byte-identical), real RLS behaviour (no scope -> no tenant rows; a scope -> only that tenant), and the **startup guard**
    `db.VerifyEnvironmentAnchor`.
-6. **Actor-proof key state** (owner decision 5): `--expect-actor-proof unprovisioned` (default after a logical restore) asserts `actor_proof_keys` holds 0 rows, the production startup gate
+6. **Actor-proof key state** (owner decision 5; read as the OWNER role, since the backup role cannot see the key table): `--expect-actor-proof unprovisioned` (default after a logical restore) asserts `actorproof_private.actor_proof_keys` holds 0 rows, the production startup gate
    `actorproof.VerifyConfiguredInProduction` refuses the source's key ids, and a well-formed proof presented to `actor_proof_require` is refused with `AP002` (fails closed);
    `provisioned` (after section 5b) asserts exactly one ACTIVE key, the new kid, none of the retired ids, and that the gate admits the new kid. After physical recovery
-   (`--anchor-mode preserved`) the key rows are compared with the baseline (count and a hash over the non-secret columns) and must have survived.
-   `actor_proof_keys` is deliberately not compared row-for-row after a logical restore (the baseline never hashes the secret).
+   (`--anchor-mode preserved`) at least one key row must have survived (counted as the owner; with `--actor-proof-kid` that kid must be active; a legacy baseline's row count
+   is compared too). The key schema's STRUCTURE is compared with the baseline (`FP|actorproof_private_md5`, so the restore DDL must equal the migrations) and nobody but the
+   owner may reach it (`INV|actor_proof_key_reachable_by_non_owner` = 0). The key rows are deliberately not compared after a logical restore (the baseline never sees them).
 
 What must be re-provisioned after a restore (the drill proves each of these is needed):
 
@@ -238,11 +240,13 @@ What must be re-provisioned after a restore (the drill proves each of these is n
 
 ### 5b. Re-key the actor proof after a logical restore (owner decision 5; drilled)
 
-The restored `actor_proof_keys` table exists and is **empty**. Re-keying is the reviewed provisioning procedure of `operational-runbooks.md` section 15 step 4, scripted so that
+The restored `actorproof_private.actor_proof_keys` table exists and is **empty** (`restore.sh` recreated it from `deploy/backup/actorproof-private-schema.sql`; a LEGACY set
+restored at a migration below 0166 keeps an empty `public.actor_proof_keys` instead, which `cmd/migrate up` moves). Re-keying is the reviewed provisioning procedure of `operational-runbooks.md` section 15 step 4, scripted so that
 its refusals cannot be skipped. Never copy a key through the backup, a ticket or a chat; never reuse the source's key id (the old key is retired by absence).
 
 1. In the secret store generate a NEW secret and a NEW key id (`[A-Za-z0-9._-]{1,32}`, for example `ap-2026-11`; it must differ from the source's: the source's ids are the
-   `META|actor_proof_kids|` line of the set's `baseline.txt` and the application's previous `ACTOR_PROOF_ACTIVE_KID`). Staging: a new `stg-v<N>` family entry in
+   application's previous `ACTOR_PROOF_ACTIVE_KID` / `ACTOR_PROOF_KEYS` in the secret store (a legacy set's `baseline.txt` also lists them as `META|actor_proof_kids|`; since
+   migration 0166 the backup role cannot see them, so that line is empty)). Staging: a new `stg-v<N>` family entry in
    `igaming-staging/actor-proof-keys` (owner action B of `aws-staging-deploy-plan.md`).
 2. Write the secret's hex into a 0600 file on tmpfs (for example `/dev/shm`), as the owner action B describes.
 3. As the **owner role** (`igaming`; not the runtime or backup role), from the same VPC-resident session as the restore:
@@ -265,12 +269,14 @@ Physical recovery (PITR, snapshot restore) needs none of this: it carries the li
 ### 5a. After ANY suspected exposure of a backup set, a dump or the backup credential: rotate
 
 A logical dump made since owner decision 5 (a set whose manifest says `"actor_proof_keys_data": "excluded"`) does **not** carry `actor_proof_keys.secret`. A **legacy set** (made before
-that decision) does, and so does every **physical** artefact (base backup, WAL archive, snapshot, restored PITR copy); `restore.sh` warns on a legacy set and skips its key rows. Every dump
+that decision) does, and so does every **physical** artefact (base backup, WAL archive, snapshot, restored PITR copy); `restore.sh` warns on a legacy set (or a set not made by
+`backup.sh` that carries the schema `actorproof_private`) and skips its key rows. Every dump
 carries the password hashes. Treat a suspected exposure (lost or unencrypted set, leaked decryption identity or signing key, credential used outside the runner, an
 untrusted restore target) as a security incident and, without waiting for proof:
 
-1. **Rotate (re-key) the signed-actor-proof key family** after ANY suspected exposure of a legacy logical set, any physical copy, **or the backup credential** (it reads the key, R1); a
-   current logical set alone cannot contain it. Follow `operational-runbooks.md` section 15 (emergency path: new kid, deploy, retire every older kid at once); in-flight proofs under
+1. **Rotate (re-key) the signed-actor-proof key family** after ANY suspected exposure of a legacy logical set, any physical copy, the **owner/migration credential**, or a backup
+   credential used against a database still below migration 0166 (before 0166 it could read the key: residual R1). A current logical set and the backup credential of a
+   migrated database cannot reach it (F1); check `backup.sh`'s preflight / the baseline invariant were green for the period in question. Follow `operational-runbooks.md` section 15 (emergency path: new kid, deploy, retire every older kid at once); in-flight proofs under
    the old key stop verifying, by design. Retire legacy sets rather than keep them (their baselines also hold an md5 over row text that includes the secret).
 2. **Rotate the other signing material that was in or protected next to the dump**: JWT signing secrets, the staff MFA key families, the payout-instrument keys, provider
    credentials and webhook secrets, per their own runbooks; revoke sessions (the dump holds `sessions.refresh_token_hash` and token MACs).
@@ -357,7 +363,8 @@ beyond a few GB**; the physical path (snapshots / PITR) is the primary, and its 
 | Backup credential minted with statement logging on | the password is not in the server log (control: a naive `PASSWORD :'pw'` is) | PASS |
 | Restored data differs from the baseline | `verify.sh` FAILS naming the differing categories; verified by a **negative control** (one ledger amount changed by 7 -> `equal_TABLE` and `invariants_all_zero` fail) and by reverting it (passes again) | PASS |
 | Unencrypted dump requested | refused unless the synthetic-data acknowledgement is set | PASS |
-| Actor-proof rows in the dump stream (drill fault `include_actor_proof_keys`) | `backup.sh` refuses (TOC check on the encrypted stream) and keeps nothing | drilled (see the record) |
+| Actor-proof rows in the dump stream (drill fault `include_actor_proof_keys` on a deliberately mis-granted backup role) | `backup.sh` refuses (TOC check on the encrypted stream) and keeps nothing | drilled (`docs/plans/f1-key-isolation-record.md`) |
+| The backup role can reach the key schema (mis-grant) / dumps without the exclusion | `backup.sh` refuses in its preflight; without the exclusion the role's `pg_dump` fails `permission denied for schema actorproof_private` | drilled (F1 record) |
 | Re-key misuse (reused kid, open/short secret file, non-owner role, `log_statement=all`, a second key) | `rekey-actor-proof.sh` refuses, table unchanged | drilled (see the record) |
 
 ## 8. NOT proven (read before relying on this)
