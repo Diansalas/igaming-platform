@@ -32,7 +32,7 @@
 -- proof-bound decisions exist.
 --
 -- Replaced IN PLACE (the 0162 bodies plus ONE marked line each; the down restores the 0162 bodies byte for
--- byte - whole-schema snapshot test internal/withdrawal/t8_migration_0165_integration_test.go):
+-- byte - whole-schema snapshot test internal/withdrawal/t8_proof_bound_reversal_db_integration_test.go (TestMigration0165_*)):
 --   withdrawal_requests_state_transition_guard()   WD026 counts proof-bound decisions only
 --   ledger_transactions_payout_tombstone_guard()   WD027 counts proof-bound decisions only
 --
