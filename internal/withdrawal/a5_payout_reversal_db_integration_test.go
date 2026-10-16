@@ -406,6 +406,18 @@ func TestA5DB_RecordDecision_CountsDistinctPersonsPerPayload(t *testing.T) {
 	if err != nil || !d2.Ready || d2.Counted != 2 {
 		t.Fatalf("second: %+v %v", d2, err)
 	}
+	// ReverseCompletedPayout re-checks the payload against the completion it reverses, under the L2 lock: a
+	// payload naming another original reference is refused even when two Persons agreed on a valid one (the
+	// database floor WD026 proves two Persons agreed on SOME payload; the Go layer binds it to the posting).
+	wrong := p
+	wrong.OriginalProviderReference = "a5db-not-the-completion"
+	err = runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReverseCompletedPayout(ctx, tx, wr.ID, wrong)
+		return err
+	})
+	if !errors.Is(err, ErrReversalPayloadMismatch) {
+		t.Fatalf("a payload not matching the completion: %v, want ErrReversalPayloadMismatch", err)
+	}
 	// The digest binds every payload field.
 	base := p.Digest(wr.ID)
 	for name, mut := range map[string]func(*PayoutReversal){

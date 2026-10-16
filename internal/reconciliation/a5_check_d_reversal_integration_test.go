@@ -95,6 +95,35 @@ func TestA5D_ReversedArm_ParityWithCheckA(t *testing.T) {
 	}
 	ownerRelabel(t, pool, f, forgedReq, `state = 'reversed', release_ledger_transaction_id = '`+forged.String()+`'`)
 
+	// A reversal link to a withdrawal_reversed with the right header but the wrong ENTRIES (11 instead of the
+	// request's 10, balanced), planted with the 0162 commit check off: only the entry rule sees it (WD035).
+	badEntries := dWithdrawal(t, pool, f, 10, withdrawal.StateCompleted)
+	var badRev uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var completion uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT release_ledger_transaction_id FROM withdrawal_requests WHERE id = $1`, badEntries).Scan(&completion); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `ALTER TABLE ledger_transactions DISABLE TRIGGER ledger_transactions_withdrawal_hold_leg_at_commit`); err != nil {
+			return err
+		}
+		pid, ret := "wdpath-psp", "bad-ret-"+badEntries.String()
+		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxWithdrawalReversed,
+			IdempotencyKey: badEntries.String() + ":reversed", ProviderID: &pid, ProviderTxID: &ret, CorrelationID: badEntries,
+			ReversesTransactionID: &completion,
+			Entries: []ledger.EntryInput{{LedgerAccountID: f.clearingID, Direction: ledger.Debit, Amount: 11},
+				{LedgerAccountID: f.cashAccountID, Direction: ledger.Credit, Amount: 11}}})
+		if err != nil {
+			return err
+		}
+		badRev = res.TransactionID
+		_, err = tx.Exec(ctx, `ALTER TABLE ledger_transactions ENABLE TRIGGER ledger_transactions_withdrawal_hold_leg_at_commit`)
+		return err
+	}); err != nil {
+		t.Fatalf("owner tamper plant (bad reversal entries): %v", err)
+	}
+	ownerRelabel(t, pool, f, badEntries, `state = 'reversed', reversal_ledger_transaction_id = '`+badRev.String()+`'`)
+
 	o := dSweep(t, rt, f)
 	if o.Err != nil || o.Run.Status != StatusMismatchesFound {
 		t.Fatalf("relabelled requests must be found: %s err=%v", o.Run.Status, o.Err)
@@ -107,7 +136,7 @@ func TestA5D_ReversedArm_ParityWithCheckA(t *testing.T) {
 		id   uuid.UUID
 		want string
 	}{"failed relabelled": {failed, "WD033"}, "completed relabelled, no link": {completed, "WD035"},
-		"forged completion-shaped release": {forgedReq, "WD033"}} {
+		"forged completion-shaped release": {forgedReq, "WD033"}, "reversal with the wrong entries": {badEntries, "WD035"}} {
 		var v []string
 		if err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT withdrawal_request_ledger_link_violation($1, $2)`, c.id, f.tenantID).Scan(&v)

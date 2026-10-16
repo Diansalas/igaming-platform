@@ -205,6 +205,13 @@ func TestA5_PayoutReversal_DuplicatesReplaysAndPayloadBinding(t *testing.T) {
 	if r := e.a5MustDecide(t, s2, wr.ID, other, PayoutReversalRecorded); r.Counted != 1 {
 		t.Fatalf("a different payload counts on its own: %+v", r)
 	}
+	// A payload that differs ONLY in its evidence hash (same references) is a different payload too.
+	evid := p
+	evid.EvidenceRefHash = strings.Repeat("0e", 32)
+	s5 := e.a5Staff(t)
+	if r := e.a5MustDecide(t, s5, wr.ID, evid, PayoutReversalRecorded); r.Counted != 1 {
+		t.Fatalf("an evidence-only difference counts on its own: %+v", r)
+	}
 	txBefore := fpLedgerTx(t, e.pool, e.f)
 	r := e.a5MustDecide(t, s3, wr.ID, p, PayoutReversalExecuted)
 	if fpLedgerTx(t, e.pool, e.f) != txBefore+1 {
@@ -220,6 +227,10 @@ func TestA5_PayoutReversal_DuplicatesReplaysAndPayloadBinding(t *testing.T) {
 	}
 	if _, err := e.a5Decide(s2, wr.ID, other); !errors.Is(err, withdrawal.ErrStateConflict) {
 		t.Fatalf("the other payload's voter after execution: %v, want ErrStateConflict", err)
+	}
+	// Same references as the executed reversal, but a payload that never reached the quorum: not a replay.
+	if _, err := e.a5Decide(s5, wr.ID, evid); !errors.Is(err, withdrawal.ErrStateConflict) {
+		t.Fatalf("the evidence-only payload's voter after execution: %v, want ErrStateConflict", err)
 	}
 	loAssertBalanced(t, e.pool, e.f.tenantID)
 }
