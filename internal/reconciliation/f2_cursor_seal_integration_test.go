@@ -319,3 +319,27 @@ func TestF2_VerifyImportSealParityWithPayoutInstrument(t *testing.T) {
 		}
 	}
 }
+
+// SR11-10 through the PROCESS-WIDE keys (production's wiring: cmd/platform-api installs payoutinstrument.Keys with
+// SetDefaultImportSealer and passes no ImportKeys): the stream seals with them AND reads a verified cursor with them.
+func TestF2_SR11_10_ProcessWideKeysSealAndVerify(t *testing.T) {
+	prev := DefaultImportSealer()
+	keys := f2Keys(t)
+	SetDefaultImportSealer(keys)
+	t.Cleanup(func() { SetDefaultImportSealer(prev) })
+	w := newPayWorld(t)
+	rt := f2RuntimePool(t)
+	src := &recSource{provider: payProvA, fn: contiguousEmpty}
+	cfg := PaymentSweepConfig{Resolver: mapResolver{payProvA: src, payProvB: w.srcB}, AllowSynthetic: true}
+	scopedSweep(t, w.pool, w.f, cfg)
+	genuine, err := readPaymentCursorState(context.Background(), w.pool, w.f.tenantID, payProvA, cursorBasisFor(src, PaymentStatementOptions{}))
+	if err != nil || genuine.cursor.IsZero() || !genuine.sealed {
+		t.Fatalf("the process-wide keys must seal the import and verify the cursor: %+v %v", genuine, err)
+	}
+	f2Forge(t, rt, w.f.tenantID, payProvA, src.Label(), true, time.Now().UTC().Truncate(time.Microsecond), nil, nil)
+	scopedSweep(t, w.pool, w.f, cfg)
+	reqs := src.requests()
+	if last := reqs[len(reqs)-1]; !last.ContinueFrom.Equal(genuine.cursor) {
+		t.Fatalf("the sweep must continue from the sealed cursor %s, not the forgery: %s", genuine.cursor, last.ContinueFrom)
+	}
+}

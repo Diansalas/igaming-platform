@@ -99,6 +99,50 @@ func TestF2_LFA11_1_TruncationBoundary_SettledAttemptsAreNotFalselyMissing(t *te
 	}
 }
 
+// The persisted-line exemption also resolves by MERCHANT reference (a provider whose lines carry another reference
+// than the platform holds): the LF-A11-1 probe with every statement line re-referenced.
+func TestF2_LFA11_1_ExemptionByMerchantReference(t *testing.T) {
+	w := newPayWorld(t)
+	rereferenced := payDivergentSource{inner: w.srcA, mutate: func(s statement.PaymentStatement) statement.PaymentStatement {
+		for i := range s.Lines {
+			s.Lines[i].ProviderReference = "alt-" + s.Lines[i].ProviderReference[:20]
+		}
+		return s
+	}}
+	cfg := PaymentSweepConfig{Resolver: mapResolver{payProvA: rereferenced, payProvB: w.srcB}, AllowSynthetic: true, RunLineBound: 1}
+	if a := outcomeFor(t, scopedSweep(t, w.pool, w.f, cfg), payProvA); a.Err != nil {
+		t.Fatalf("establish the cursor: %+v", a)
+	}
+	var deps []payments.PaymentAttempt
+	for i := 0; i < 3; i++ {
+		deps = append(deps, w.deposit(t, int64(310+i)))
+	}
+	for _, a := range deps {
+		time.Sleep(3 * time.Millisecond)
+		w.mockA.Resolve(*a.ProviderReference, payments.OutcomeSucceeded, "", false)
+	}
+	time.Sleep(3 * time.Millisecond)
+	for _, a := range deps {
+		w.applyReceipt(t, payProvA, payments.ReceiptEvidence{EventType: "deposit", ProviderReference: *a.ProviderReference,
+			Outcome: payments.OutcomeSucceeded, Amount: a.Amount, AssetCode: a.AssetCode})
+	}
+	for i := 0; i < 8; i++ {
+		a := outcomeFor(t, scopedSweep(t, w.pool, w.f, cfg), payProvA)
+		if a.Err != nil {
+			t.Fatalf("sweep %d: %+v", i, a)
+		}
+		if a.Run.ID == uuid.Nil {
+			break
+		}
+		if keys := f2MissingRecords(t, w, a.Run.ID); len(keys) != 0 {
+			t.Fatalf("sweep %d: an attempt whose line (by merchant reference) an earlier window imported must not be missing: %v", i, keys)
+		}
+		if !a.Truncated {
+			break
+		}
+	}
+}
+
 // "Never silently missing": in bounded mode an attempt the platform says succeeded and of which the provider has NO
 // record in any statement is still reported, in the window of its last change.
 func TestF2_LFA11_1_SucceededWithNoProviderRecordIsStillReported(t *testing.T) {
@@ -254,9 +298,10 @@ func TestF2_LFA11_6_OutOfOrderPageRefused_MockPagesInTimeOrder(t *testing.T) {
 		t.Fatalf("nothing stored: %v", refs)
 	}
 
-	// The MOCK: three deposits created in reference order unlike their time order; a bounded fetch lists them by
-	// time and never past the requested horizon.
-	for i := 0; i < 3; i++ {
+	// The MOCK: twelve deposits whose references sort differently from their creation time ("<p>-10-..." sorts before
+	// "<p>-2-..."); a bounded fetch lists them by time and never past the requested horizon.
+	const n = 12
+	for i := 0; i < n; i++ {
 		w.deposit(t, int64(500+i))
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -267,7 +312,7 @@ func TestF2_LFA11_6_OutOfOrderPageRefused_MockPagesInTimeOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mock fetch: %v", err)
 	}
-	if st.CoverageEnd.After(horizon) || len(st.Lines) != 3 {
+	if st.CoverageEnd.After(horizon) || len(st.Lines) != n {
 		t.Fatalf("the MOCK must cap at the horizon %s: end %s, %d lines", horizon, st.CoverageEnd, len(st.Lines))
 	}
 	for i := 1; i < len(st.Lines); i++ {
