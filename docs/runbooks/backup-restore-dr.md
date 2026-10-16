@@ -16,7 +16,7 @@ cluster; during a real incident a human with database authority runs the privile
 | Projection drift only | Recompute from the ledger (`internal/ledger.RebuildBalance`, reconciliation) - not a restore | existing | 0 | existing tests |
 | Bad migration / bad deploy | Fix forward (`expand-contract-migrations.md`); restore only for data loss | - | - | policy |
 
-Artefacts: `deploy/backup/` - `backup.sh`, `restore.sh`, `verify.sh`, `pitr-drill.sh`, `drill.sh` (orchestrates everything on throwaway
+Artefacts: `deploy/backup/` - `backup.sh`, `restore.sh`, `verify.sh`, `rekey-actor-proof.sh` (owner decision 5: provisions a NEW actor-proof key into a restored database), `pitr-drill.sh`, `drill.sh` (orchestrates everything on throwaway
 clusters), `init-backup-role.sql` (takes a SCRAM verifier, never a password), `harden-backup-surface.sql`, `post-restore-grants.sql`, `baseline.sql`,
 `scramhash/` (Go; computes the verifier on the client), `lib-sign.sh` (Ed25519 signing/verification of the set), `seed.sh` (+ the seeder
 `internal/httpserver/drillseed_integration_test.go`, tags `integration drillseed`), `restorecheck/` (Go; platform reconciliation + startup guards),

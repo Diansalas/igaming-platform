@@ -53,6 +53,8 @@ done
 BACKUP_PGHOST="$REKEY_PGHOST" BACKUP_PGPORT="$REKEY_PGPORT" BACKUP_PGDATABASE="$REKEY_PGDATABASE" BACKUP_PGUSER="$REKEY_PGUSER" BACKUP_PGPASSFILE="${REKEY_PGPASSFILE:-}"
 export BACKUP_PGHOST BACKUP_PGPORT BACKUP_PGDATABASE BACKUP_PGUSER BACKUP_PGPASSFILE
 bk_need_tools psql stat
+PSQL_MAJOR="$(psql --version | sed -n 's/^psql (PostgreSQL) \([0-9]*\).*/\1/p')"
+[ "${PSQL_MAJOR:-0}" -ge 16 ] || bk_die "psql 16 or later is required (\\bind sends the secret as a bound parameter; older clients would need it in statement text)"
 bk_connect_env
 umask 077
 
