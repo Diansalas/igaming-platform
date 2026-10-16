@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
+	"github.com/Diansalas/igaming-platform/internal/stagingseed"
 )
 
 type fixture struct {
@@ -35,6 +36,10 @@ func testPool(t *testing.T) *db.Pool {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// the anchor gate (SRP3-1): a synthetic test database carries the anchor 'test' (write-once, owner-written)
+	if _, err := pool.Raw().Exec(context.Background(), `INSERT INTO database_environment (environment) VALUES ('test') ON CONFLICT (singleton) DO NOTHING`); err != nil {
+		t.Fatalf("record the test anchor: %v", err)
+	}
 	return pool
 }
 
@@ -85,8 +90,13 @@ func seed(t *testing.T, pool *db.Pool, withLicence bool) fixture {
 	return f
 }
 
-func settingsFor(f fixture, country string) settings {
-	return settings{tenantSlug: f.tenantSlug, brandSlug: f.brandSlug, country: country, authRef: "TICKET-SM-1", operator: "ops-test", reason: "seed-market-test", actorID: f.admin}
+func settingsFor(f fixture, country string) stagingseed.MarketParams {
+	return stagingseed.MarketParams{TenantSlug: f.tenantSlug, BrandSlug: f.brandSlug, Country: country, AuthRef: "TICKET-SM-1", Operator: "ops-test", Reason: "seed-market-test", ActorID: f.admin}
+}
+
+// apply is the library entry point the command uses; the tests drive it with their own pool.
+func apply(ctx context.Context, pool *db.Pool, p stagingseed.MarketParams, out *bytes.Buffer) error {
+	return stagingseed.EnsureMarket(ctx, pool, p, out)
 }
 
 func count(t *testing.T, pool *db.Pool, tenant uuid.UUID, platform bool, q string, args ...any) int {
@@ -158,7 +168,12 @@ func TestSeedMarket_ResumesAfterAPartialRun(t *testing.T) {
 	pool := testPool(t)
 	f := seed(t, pool, true)
 	ctx := context.Background()
-	if _, err := ensureCeiling(ctx, pool, settingsFor(f, "SV"), f.licenceID, mustActor(f)); err != nil {
+	if err := pool.WithPlatformAdmin(ctx, f.admin, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := operatingmarket.CreateLicenceCountryCeilingVersion(ctx, tx, operatingmarket.CreateLicenceCountryCeilingVersionParams{
+			LicenceID: f.licenceID, CountryCode: "SV", State: operatingmarket.StateEnabled, Status: operatingmarket.StatusActive, AuthorizationReference: "partial", Actor: mustActor(f),
+		})
+		return err
+	}); err != nil {
 		t.Fatalf("ceiling only: %v", err)
 	}
 	var out bytes.Buffer
@@ -189,7 +204,7 @@ func TestSeedMarket_RefusesToReEnableAClosedCountry(t *testing.T) {
 		t.Fatalf("disable: %v", err)
 	}
 	err = apply(ctx, pool, settingsFor(f, "SV"), &bytes.Buffer{})
-	if !errors.Is(err, errConflict) {
+	if !errors.Is(err, stagingseed.ErrConflict) {
 		t.Fatalf("a closed country must not be silently re-enabled, got %v", err)
 	}
 	if n := count(t, pool, f.tenantID, false, `SELECT count(*) FROM operating_country_policies WHERE tenant_id=$1 AND country_code='SV' AND effective_to IS NULL AND state='disabled'`, f.tenantID); n != 1 {
@@ -202,18 +217,18 @@ func TestSeedMarket_RefusesAMissingOrLicencelessTenantAndForeignBrand(t *testing
 	ctx := context.Background()
 	f := seed(t, pool, true)
 	s := settingsFor(f, "SV")
-	s.tenantSlug = "no-such-tenant"
+	s.TenantSlug = "no-such-tenant"
 	if err := apply(ctx, pool, s, &bytes.Buffer{}); err == nil {
 		t.Error("an unknown tenant must be refused")
 	}
 	s = settingsFor(f, "SV")
-	s.brandSlug = "no-such-brand"
+	s.BrandSlug = "no-such-brand"
 	if err := apply(ctx, pool, s, &bytes.Buffer{}); err == nil {
 		t.Error("an unknown brand must be refused")
 	}
 	other := seed(t, pool, true)
 	s = settingsFor(f, "SV")
-	s.brandSlug = other.brandSlug // a brand of ANOTHER tenant
+	s.BrandSlug = other.brandSlug // a brand of ANOTHER tenant
 	if err := apply(ctx, pool, s, &bytes.Buffer{}); err == nil {
 		t.Error("a brand of another tenant must be refused")
 	}
@@ -231,7 +246,7 @@ func TestSeedMarket_DryRunWritesNothing(t *testing.T) {
 	pool := testPool(t)
 	f := seed(t, pool, true)
 	s := settingsFor(f, "SV")
-	s.dryRun = true
+	s.DryRun = true
 	var out bytes.Buffer
 	if err := apply(context.Background(), pool, s, &out); err != nil {
 		t.Fatalf("dry-run: %v", err)
@@ -248,8 +263,8 @@ func TestSeedMarket_AmbiguousPlatformAdminRequiresAnExplicitActor(t *testing.T) 
 	pool := testPool(t)
 	seed(t, pool, true)
 	seed(t, pool, true) // at least two active platform admins now exist in this database
-	_, err := soleActivePlatformAdmin(context.Background(), pool)
-	if err == nil || !strings.Contains(err.Error(), "pass -actor-id") {
+	_, err := stagingseed.SoleActivePlatformAdmin(context.Background(), pool)
+	if err == nil || !strings.Contains(err.Error(), "pass the actor id explicitly") {
 		t.Fatalf("expected the ambiguity to be refused, got %v", err)
 	}
 }
@@ -273,5 +288,39 @@ func TestSeedMarket_ARunThatCannotOpenTheGateFails(t *testing.T) {
 	err = apply(ctx, pool, settingsFor(f, "SV"), &out)
 	if err == nil || !strings.Contains(err.Error(), "gate is NOT open") {
 		t.Fatalf("expected the post-write verification to fail, got %v\n%s", err, out.String())
+	}
+}
+
+// SRP3-3: the actor must be an existing ACTIVE platform_admin.
+func TestSeedMarket_RefusesAnUnknownOrWrongKindOfActor(t *testing.T) {
+	pool := testPool(t)
+	f := seed(t, pool, true)
+	ctx := context.Background()
+	s := settingsFor(f, "SV")
+	s.ActorID = uuid.New() // no such staff member
+	if err := apply(ctx, pool, s, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "not an active platform_admin") {
+		t.Fatalf("a random actor id must be refused, got %v", err)
+	}
+	// a tenant staff member is not a platform admin
+	tenantStaff, person := uuid.New(), uuid.New()
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.WithTenant(ctx, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, $2, $3, 'x', 'finance', $4, 'active')`,
+			tenantStaff, f.tenantID, tenantStaff.String()+"@example.com", person)
+		return err
+	}); err != nil {
+		t.Fatalf("seed tenant staff: %v", err)
+	}
+	s.ActorID = tenantStaff
+	if err := apply(ctx, pool, s, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "not an active platform_admin") {
+		t.Fatalf("a tenant staff actor must be refused, got %v", err)
+	}
+	if n := count(t, pool, uuid.Nil, true, `SELECT count(*) FROM licence_country_ceilings WHERE licence_id=$1`, f.licenceID); n != 0 {
+		t.Fatalf("nothing may be written for a refused actor, got %d ceiling rows", n)
 	}
 }

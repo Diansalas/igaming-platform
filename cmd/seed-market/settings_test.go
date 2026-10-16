@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/Diansalas/igaming-platform/internal/stagingseed"
 )
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -18,7 +20,7 @@ func TestParseSettings_AcceptsAPlainStagingInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a plain staging invocation must pass: %v", err)
 	}
-	if s.country != "SV" || s.tenantSlug != "demo" || s.brandSlug != "demo-casino" || s.authRef != "TICKET-1" {
+	if s.Country != "SV" || s.TenantSlug != "demo" || s.BrandSlug != "demo-casino" || s.AuthRef != "TICKET-1" {
 		t.Fatalf("unexpected settings: %+v", s)
 	}
 }
@@ -78,7 +80,7 @@ func TestParseSettings_CountryRules(t *testing.T) {
 }
 
 func TestParseSettings_AuditFieldsRefuseUnsafeText(t *testing.T) {
-	for _, bad := range []string{"a\nb", "a\u202eb", " lead", "trail ", "a\u200bb", strings.Repeat("x", maxField+1)} {
+	for _, bad := range []string{"a\nb", "a\u202eb", " lead", "trail ", "a\u200bb", strings.Repeat("x", stagingseed.MaxField+1)} {
 		for _, flagName := range []string{"-operator", "-reason", "-authorization-reference"} {
 			args := append(append([]string{}, okArgs...), flagName, bad)
 			if _, err := parseSettings(args, env(okEnv())); err == nil {
