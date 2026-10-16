@@ -90,7 +90,7 @@ var staffRouteGolden = map[string]string{
 	"POST /v1/admin/kyc/documents/{id}/review":                                                    "none",
 	"GET /v1/admin/kyc/enforcement-decisions":                                                     "none",
 	"GET /v1/admin/kyc/verifications":                                                             "none",
-	"POST /v1/admin/kyc/verifications/{id}/review":                                                "none",
+	"POST /v1/admin/kyc/verifications/{id}/review":                                                "classifier:kycResidenceReviewClass",
 	"GET /v1/admin/launch-authorisations":                                                         "none",
 	"GET /v1/admin/licences":                                                                      "none",
 	"POST /v1/admin/licences":                                                                     "critical",

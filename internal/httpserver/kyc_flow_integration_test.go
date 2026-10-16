@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -656,6 +657,62 @@ func TestKYC_ReviewWithVerifiedResidenceDetermination(t *testing.T) {
 		if k == "verified_residence_country" {
 			t.Fatalf("did not expect the review response to echo verified_residence_country, got %+v", reviewed)
 		}
+	}
+}
+
+// SRME-1: a residence recorded in a country the brand currently serves writes the alert-able audit action
+// market.residence_into_open_market (ids only, never the country); a residence in a closed country, or a
+// review without a residence, writes none.
+func TestKYC_ReviewResidenceIntoAnOpenMarketWritesAnAlertableAuditRow(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	openMarketFor(t, pool, tenant.ID, "MT")
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-open-pw-1")
+	tokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-open-pw-1")
+	enable := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-evidence-collection/verified_residence", http.MethodPut, tokens.AccessToken,
+		map[string]any{"active": true, "reason_code": "kyc-open-market-audit-test"})
+	if enable.StatusCode != http.StatusOK {
+		t.Fatalf("enable collection: %d", enable.StatusCode)
+	}
+	enable.Body.Close()
+
+	review := func(body map[string]any) string {
+		player := mustRegisterPlayer(t, srv, brand.Slug)
+		verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+		var v map[string]any
+		decodeBody(t, verResp, &v)
+		id := v["id"].(string)
+		r := postJSON(t, srv, "/v1/admin/kyc/verifications/"+id+"/review", tokens.AccessToken, body)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("review %v: %d", body, r.StatusCode)
+		}
+		return id
+	}
+	count := func(id string) int {
+		return countTenantRows(t, pool, tenant.ID,
+			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'market.residence_into_open_market' AND target_id = '`+id+`'`, tenant.ID)
+	}
+	open := review(map[string]any{"status": "approved", "reason": "ok", "verified_residence_country": "MT"})
+	if n := count(open); n != 1 {
+		t.Fatalf("residence into an open market: want 1 audit row, got %d", n)
+	}
+	var meta string
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata::text FROM audit_log WHERE tenant_id = $1 AND action = 'market.residence_into_open_market' AND target_id = $2`, tenant.ID, open).Scan(&meta)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(meta, "MT") {
+		t.Fatalf("the audit row must not carry the country: %s", meta)
+	}
+	if n := count(review(map[string]any{"status": "approved", "reason": "ok", "verified_residence_country": "US"})); n != 0 {
+		t.Fatalf("residence into a closed country: want no row, got %d", n)
+	}
+	if n := count(review(map[string]any{"status": "approved", "reason": "ok"})); n != 0 {
+		t.Fatalf("a review without a residence: want no row, got %d", n)
 	}
 }
 

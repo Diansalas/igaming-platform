@@ -41,7 +41,7 @@ func TestStepUpClassifiers_ParityWithRouteClassifiers(t *testing.T) {
 	}
 	sort.Strings(a)
 	sort.Strings(b)
-	if strings.Join(a, ",") != strings.Join(b, ",") || len(a) != 7 {
+	if strings.Join(a, ",") != strings.Join(b, ",") || len(a) != 8 {
 		t.Fatalf("routeClassifiers %v vs stepUpClassifiers %v (ADR 0119 section 8.2: four classifiers + alertRouteManageClass + the two AML classifiers of ADR 0116 A7)", a, b)
 	}
 }
@@ -93,6 +93,15 @@ func TestClassifiers_DecisionsAndBodyDiscipline(t *testing.T) {
 		{"aml hold, unknown field", amlHoldPlaceClass, auth.RoleCompliance, `{"reason_class":"manual","tenant_id":"x"}`, auth.StepUpCritical},
 		{"aml hold, malformed", amlHoldPlaceClass, auth.RoleCompliance, `{`, auth.StepUpCritical},
 		{"aml hold, empty", amlHoldPlaceClass, auth.RoleCompliance, ``, auth.StepUpCritical},
+		{"kyc review, residence recorded", kycResidenceReviewClass, auth.RoleCompliance, `{"status":"approved","verified_residence_country":"MT"}`, auth.StepUpCritical},
+		{"kyc review, residence on a non-terminal transition", kycResidenceReviewClass, auth.RoleCompliance, `{"status":"review_required","verified_residence_country":"DE"}`, auth.StepUpCritical},
+		{"kyc review, no residence", kycResidenceReviewClass, auth.RoleCompliance, `{"status":"approved","reason":"ok"}`, auth.StepUpNone},
+		{"kyc review, null residence is no determination", kycResidenceReviewClass, auth.RoleCompliance, `{"status":"approved","verified_residence_country":null}`, auth.StepUpNone},
+		{"kyc review, duplicate key last wins", kycResidenceReviewClass, auth.RoleCompliance, `{"status":"approved","verified_residence_country":null,"verified_residence_country":"MT"}`, auth.StepUpCritical},
+		{"kyc review, case-folded key", kycResidenceReviewClass, auth.RoleCompliance, `{"status":"approved","Verified_Residence_Country":"MT"}`, auth.StepUpCritical},
+		{"kyc review, unknown field", kycResidenceReviewClass, auth.RoleCompliance, `{"status":"approved","tenant_id":"x"}`, auth.StepUpCritical},
+		{"kyc review, malformed", kycResidenceReviewClass, auth.RoleCompliance, `{`, auth.StepUpCritical},
+		{"kyc review, empty", kycResidenceReviewClass, auth.RoleCompliance, ``, auth.StepUpCritical},
 		{"aml transition to no action", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":2,"to":"closed_no_action","reason_code":"x"}`, auth.StepUpCritical},
 		{"aml transition to review", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":2,"to":"in_review","reason_code":"x"}`, auth.StepUpNone},
 		{"aml transition to escalated", amlTransitionClass, auth.RoleCompliance, `{"expected_seq":2,"to":"escalated","reason_code":"x"}`, auth.StepUpNone},

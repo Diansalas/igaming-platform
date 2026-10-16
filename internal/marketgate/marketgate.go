@@ -152,6 +152,17 @@ type LocateRequest struct {
 type Evidence struct {
 	country string
 	known   bool
+	// rechecker is set by Gate.Locate when the Locator can re-read its evidence INSIDE the
+	// gated transaction (SRME-3). The lookup outside the transaction stays a cheap pre-filter;
+	// Check re-reads and uses the in-transaction answer, so evidence withdrawn between the two
+	// can never admit the action.
+	rechecker txRechecker
+}
+
+// txRechecker re-reads a player's evidence on the gated transaction. Unexported: only
+// Locators in this package can opt in (KYCResidenceLocator).
+type txRechecker interface {
+	recheck(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) (country string, ok bool, err error)
 }
 
 // Known reports whether a validated country was resolved.
@@ -246,7 +257,11 @@ func (g *Gate) Locate(ctx context.Context, req LocateRequest) Evidence {
 			done <- Evidence{}
 			return
 		}
-		done <- Evidence{country: res.CountryCode, known: true}
+		ev := Evidence{country: res.CountryCode, known: true}
+		if rc, ok := g.locator.(txRechecker); ok {
+			ev.rechecker = rc
+		}
+		done <- ev
 	}()
 	select {
 	case ev := <-done:
@@ -321,6 +336,19 @@ func Check(ctx context.Context, tx pgx.Tx, req Request, ev Evidence) (Decision, 
 	if !ev.known {
 		return refuse(ctx, tx, req, ReasonEvidenceUnavailable, "unknown", "")
 	}
+	country := ev.country
+	if ev.rechecker != nil {
+		// SRME-3: re-read inside THIS transaction (a plain read before any guarded write, so it takes no
+		// lock and cannot change the lock order). The in-transaction answer wins.
+		c, ok, err := ev.rechecker.recheck(ctx, tx, req.TenantID, req.PlayerAccountID)
+		if err != nil {
+			return Decision{}, fmt.Errorf("marketgate: re-read evidence: %w", err)
+		}
+		if !ok || !validation.IsISO3166Alpha2(c) {
+			return refuse(ctx, tx, req, ReasonEvidenceUnavailable, "unknown", "")
+		}
+		country = c
+	}
 
 	// AsOf from the database clock, the same clock that stamped every
 	// policy row's effective_from: no application clock skew can make a
@@ -334,7 +362,7 @@ func Check(ctx context.Context, tx pgx.Tx, req Request, ev Evidence) (Decision, 
 	brand := req.BrandID
 
 	result, err := operatingmarket.ResolveOperatingCountryPolicy(ctx, tx, operatingmarket.Query{
-		TenantID: req.TenantID, BrandID: &brand, CountryCode: ev.country,
+		TenantID: req.TenantID, BrandID: &brand, CountryCode: country,
 		OperationCode: opCode, ProductCode: product, AsOf: asOf,
 	})
 	if err != nil {

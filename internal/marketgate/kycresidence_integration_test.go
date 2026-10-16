@@ -201,6 +201,19 @@ func TestKYCResidence_NoVerifiedResidenceMeansNoEvidenceAndRefusal(t *testing.T)
 		{"approved, residence only on a rejected row", []kycRow{
 			{status: "approved", age: 2 * time.Hour},
 			{status: "rejected", country: "MT", age: time.Hour, setAge: time.Hour}}},
+		// SRME-2: no carry-forward across a rejection, an expiry or a manual-review stage.
+		{"SRME-2 probe: approved MT, then rejected, then approved without a new residence", []kycRow{
+			{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour},
+			{status: "rejected", age: 2 * time.Hour},
+			{status: "approved", age: time.Hour}}},
+		{"approved MT, then expired, then approved without a new residence", []kycRow{
+			{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour},
+			{status: "expired", age: 2 * time.Hour},
+			{status: "approved", age: time.Hour}}},
+		{"approved MT, then review_required, then approved without a new residence", []kycRow{
+			{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour},
+			{status: "review_required", age: 2 * time.Hour},
+			{status: "approved", age: time.Hour}}},
 		{"older rejected row carries a residence, newer approval has none", []kycRow{
 			{status: "rejected", country: "MT", age: 2 * time.Hour, setAge: 2 * time.Hour},
 			{status: "approved", age: time.Hour}}},
@@ -278,6 +291,24 @@ func TestKYCResidence_SelectionRules(t *testing.T) {
 			t.Fatal("the newer determination (DE, not open) must govern, not the older MT one")
 		}
 	})
+	t.Run("a fresh determination after a rejection restores the evidence", func(t *testing.T) {
+		p := w.seedPlayer(t, pool)
+		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: 4 * time.Hour, setAge: 4 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "rejected", age: 3 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: time.Hour, setAge: time.Hour})
+		if !w.locate(pool, p.id).Known() {
+			t.Fatal("a determination recorded AFTER the rejection must be usable")
+		}
+	})
+	t.Run("a pending re-verification between two approvals keeps the carry-forward", func(t *testing.T) {
+		p := w.seedPlayer(t, pool)
+		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: 4 * time.Hour, setAge: 4 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "pending", age: 3 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "approved", age: time.Hour})
+		if !w.locate(pool, p.id).Known() {
+			t.Fatal("pending is not a break (routine re-verification)")
+		}
+	})
 	t.Run("approved re-verification without a new determination keeps the last determination", func(t *testing.T) {
 		p := w.seedPlayer(t, pool)
 		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour})
@@ -286,6 +317,47 @@ func TestKYCResidence_SelectionRules(t *testing.T) {
 			t.Fatal("a fresh approval carries forward the last reviewer determination")
 		}
 	})
+}
+
+// SRME-3: evidence read outside the transaction is re-read INSIDE the check's transaction. The
+// sequence read-evidence -> a rejection commits -> check must refuse, for every player operation, and
+// a determination changed in between governs (not the stale country).
+func TestKYCResidence_EvidenceIsReReadInsideTheChecksTransaction(t *testing.T) {
+	pool := testPool(t)
+	w := seedWorld(t, pool)
+	w.openMarket(t, pool, "MT")
+	for _, op := range []Operation{OpDeposit, OpLaunch, OpSportsbookWager} {
+		p := w.seedPlayer(t, pool)
+		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: time.Hour, setAge: time.Hour})
+		ev := w.locate(pool, p.id)
+		if !ev.Known() {
+			t.Fatalf("%s: precondition: evidence read", op)
+		}
+		w.addKYC(t, pool, p, kycRow{status: "rejected", age: 0}) // a rejection commits after the read
+		d := w.checkWith(t, pool, op, p.id, ev)
+		if d.Allowed || d.Code != ReasonEvidenceUnavailable {
+			t.Fatalf("%s: stale evidence must not admit after a rejection committed, got %+v", op, d)
+		}
+	}
+	// A different determination committed in between governs the decision.
+	p := w.seedPlayer(t, pool)
+	w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: 2 * time.Hour, setAge: 2 * time.Hour})
+	ev := w.locate(pool, p.id)
+	w.addKYC(t, pool, p, kycRow{status: "approved", country: "DE", age: 0, setAge: 0}) // DE is not an open market
+	if d := w.checkWith(t, pool, OpDeposit, p.id, ev); d.Allowed || d.Code != ReasonNotPermitted {
+		t.Fatalf("the in-transaction country (DE) must govern, got %+v", d)
+	}
+	// Control: unchanged evidence still admits.
+	q := w.seedPlayer(t, pool)
+	w.addKYC(t, pool, q, kycRow{status: "approved", country: "MT", age: time.Hour, setAge: time.Hour})
+	if d := w.checkWith(t, pool, OpLaunch, q.id, w.locate(pool, q.id)); !d.Allowed {
+		t.Fatalf("control: %+v", d)
+	}
+	// A check whose request names a different player than the evidence was read for re-reads for THAT player.
+	other := w.seedPlayer(t, pool)
+	if d := w.checkWith(t, pool, OpDeposit, other.id, w.locate(pool, q.id)); d.Allowed {
+		t.Fatal("evidence read for one player must not admit another player's request")
+	}
 }
 
 // Another tenant's KYC data is never read: the same player id queried under a

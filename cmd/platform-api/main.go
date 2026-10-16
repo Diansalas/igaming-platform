@@ -200,6 +200,11 @@ func run() error {
 	if err := bindMarketEvidence(providers, pool); err != nil {
 		return fmt.Errorf("bind market evidence source: %w", err)
 	}
+	// SRME-8: in production the source must be the KYC locator AND bound; the count check alone
+	// (requireMarketEvidenceInProduction) accepts any non-nil component.
+	if err := requireMarketEvidenceBound(cfg, providers); err != nil {
+		return err
+	}
 
 	// PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md):
 	// fail-closed production safety check. Refuses to start if the
@@ -531,13 +536,15 @@ func run() error {
 		// goes through the resolution boundary, never bypassing it.
 		PersonResolver: providers.PersonResolver,
 
-		// A8: the operating-market gate for registration, deposit
-		// initiation and casino launch (internal/marketgate), over the
-		// bundle's MOCK static Locator. That Locator is registered with the
-		// synthetic guard (buildRegistrations), so production cannot start
-		// on it; until a real geolocation vendor exists the gate refuses
-		// every request in any deployment that does not set
-		// MOCK_GEOLOCATION_COUNTRY (fail closed on unknown evidence).
+		// A8 / owner decision 3: the operating-market gate for registration,
+		// deposit initiation, casino launch and sportsbook placement
+		// (internal/marketgate), over the bundle's Locator: by default the
+		// production-eligible KYC-verified-residence source (bound to the pool
+		// above), or the Synthetic static MOCK only when a development/staging
+		// MOCK_GEOLOCATION_COUNTRY is set. The synthetic guard
+		// (buildRegistrations) refuses the MOCK in production. Registration
+		// takes no player evidence; the other points refuse (fail closed)
+		// unless the player has a KYC-verified residence in an open market.
 		MarketGate: marketgate.New(providers.Geolocation),
 
 		// Stage 4F: no real KYC/identity-verification vendor is contracted

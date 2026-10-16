@@ -73,6 +73,14 @@ func (l *KYCResidenceLocator) bindReader(r tenantReader) error {
 // Bound reports whether a database pool is attached.
 func (l *KYCResidenceLocator) Bound() bool { return l != nil && l.reader.Load() != nil }
 
+// recheck implements txRechecker: the same read as GetSignal, on the caller's gated transaction.
+func (l *KYCResidenceLocator) recheck(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) (string, bool, error) {
+	if tenantID == uuid.Nil || playerAccountID == uuid.Nil {
+		return "", false, nil
+	}
+	return kyc.ReadMarketResidenceEvidence(ctx, tx, tenantID, playerAccountID)
+}
+
 // MarkProductionEligible implements providerkind.ProductionEligible
 // (structural marker): this is a platform-owned read of platform-owned KYC
 // data, not a mock. It is NOT Synthetic, so the MOCK-ADAPTER-PROD-1 guard accepts it.

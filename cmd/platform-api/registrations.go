@@ -523,6 +523,19 @@ func requireMarketEvidenceInProduction(cfg config.Config, regs []providerkind.Re
 	return nil
 }
 
+// requireMarketEvidenceBound (SRME-8) runs after bindMarketEvidence: in production the bundle's
+// Locator must be the KYC residence source and it must be bound to the database.
+func requireMarketEvidenceBound(cfg config.Config, b providerBundle) error {
+	if cfg.GuardEnvironment() != "production" {
+		return nil
+	}
+	k, ok := b.Geolocation.(*marketgate.KYCResidenceLocator)
+	if !ok || !k.Bound() {
+		return errors.New("market evidence: refusing to start in production unless the KYC residence locator is wired and bound to the database")
+	}
+	return nil
+}
+
 // marketEvidenceLocator picks the gate's Locator from the (pure) wiring: the
 // static MOCK only when an explicit development/staging country is configured
 // (mockProviderWiring already ignores it unless mocks are enabled and the guard

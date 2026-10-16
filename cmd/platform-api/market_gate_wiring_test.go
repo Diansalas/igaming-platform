@@ -135,6 +135,29 @@ func TestBindMarketEvidence_BindsOnlyTheKYCSourceAndNeedsAPool(t *testing.T) {
 	}
 }
 
+// SRME-8: in production the Locator must be the KYC source and bound; elsewhere nothing is required.
+func TestRequireMarketEvidenceBound(t *testing.T) {
+	prod := baseConfig(t, "production", true)
+	unbound := buildProviderBundle(mockWiring{})
+	if err := requireMarketEvidenceBound(prod, unbound); err == nil {
+		t.Fatal("production with an unbound KYC locator must refuse")
+	}
+	k := unbound.Geolocation.(*marketgate.KYCResidenceLocator)
+	if err := k.Bind(nil); err == nil {
+		t.Fatal("nil pool must not bind")
+	}
+	if err := requireMarketEvidenceBound(baseConfig(t, "staging", true), unbound); err != nil {
+		t.Fatalf("staging must not require it: %v", err)
+	}
+	static := buildProviderBundle(mockWiring{GeolocationCountry: "MT"})
+	if err := requireMarketEvidenceBound(prod, static); err == nil {
+		t.Fatal("production with the static MOCK must refuse")
+	}
+	if err := requireMarketEvidenceBound(prod, providerBundle{}); err == nil {
+		t.Fatal("production with no locator must refuse")
+	}
+}
+
 // main.go must bind the pool to the market-evidence source right after the
 // database connects, or the gate has no evidence (fail closed, but unusable).
 func TestMain_BindsTheMarketEvidenceSourceToThePool(t *testing.T) {
