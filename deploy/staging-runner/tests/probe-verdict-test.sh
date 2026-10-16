@@ -42,7 +42,14 @@ expect "undefined table (42P01), write" FAIL write applied 1 "ERROR:  42P01"
 expect "statement timeout (57014), write" FAIL write applied 1 "ERROR:  57014"
 expect "lock not available (55P03), write" FAIL write applied 1 "ERROR:  55P03"
 expect "no SQLSTATE at all, write" FAIL write applied 3 "psql: something odd"
-expect "other SQLSTATE, abuse" FINDING abuse applied 1 "ERROR:  22023"
+expect "other SQLSTATE, abuse, hardening applied" FAIL abuse applied 1 "ERROR:  22023"
+expect "statement timeout (57014), abuse, hardening applied" FAIL abuse applied 1 "ERROR:  57014"
+expect "lock timeout (55P03), abuse, hardening applied" FAIL abuse applied 1 "ERROR:  55P03"
+expect "undefined function (42883), abuse, hardening applied" FINDING abuse applied 1 "ERROR:  42883"
+expect "feature not supported (0A000), abuse, hardening applied" FINDING abuse applied 1 "ERROR:  0A000"
+expect "timeout (57014), abuse, hardening refused" FINDING abuse refused 1 "ERROR:  57014"
+expect "timeout (55P03), abuse, hardening unknown" FINDING abuse unknown 1 "ERROR:  55P03"
+expect "other SQLSTATE, abuse, hardening refused" FINDING abuse refused 1 "ERROR:  22023"
 expect "message text alone is not trusted: 'permission denied' without a privilege SQLSTATE" FAIL write applied 1 $'ERROR:  23505\nDETAIL: permission denied appears in the text'
 expect "connection failure, write" BLOCKED write applied 2 'psql: error: connection to server at "x" failed: FATAL:  password authentication failed for user "igaming_backup"'
 expect "connection failure, abuse (not a connect probe)" BLOCKED abuse applied 2 "psql: error: connection to server failed: timeout expired" pg_notify

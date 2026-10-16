@@ -82,8 +82,11 @@ rn_probe_verdict() {
       if rn_probe_privilege_state "$st"; then printf 'PASS|denied (SQLSTATE %s)' "$st"; return 0; fi
       if [ "$class" = write ]; then
         printf 'FAIL|failed with SQLSTATE %s, which is not a privilege error: the error is raised only after the privilege check passed, so the role holds the privilege (or the probe is stale): %s' "${st:-unknown}" "$first"
+      elif [ "$hard" = applied ] && [ "$st" != 42883 ] && [ "$st" != 0A000 ]; then
+        # hardening is expected: an abuse primitive that got past the EXECUTE check (timeout 57014 / 55P03, anything else) is NOT denied (SRP3R-3)
+        printf 'FAIL|failed with SQLSTATE %s after the privilege check passed, so the primitive is not denied although hardening is expected: %s' "${st:-unknown}" "$first"
       else
-        printf 'FINDING|failed with SQLSTATE %s, which is not a privilege error (the probe may need updating): %s' "${st:-unknown}" "$first"
+        printf 'FINDING|failed with SQLSTATE %s, which is not a privilege error (the probe may need updating, or hardening was refused): %s' "${st:-unknown}" "$first"
       fi
       return 0 ;;
     2)

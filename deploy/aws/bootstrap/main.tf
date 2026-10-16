@@ -226,7 +226,7 @@ data "aws_iam_policy_document" "staging_ecs_role_boundary" {
   # secret igaming-staging/seed-world-passwords. The boundary above already allows GetSecretValue on igaming-staging/*; this adds
   # PutSecretValue for that ONE secret name (the random ARN suffix is why the name ends in -*), nothing else.
   # The deployer-policy change that lets the deployer create/manage the new role is NOT applied by this credential: it is
-  # an edit of deploy/aws/iam/staging-deployer-edge-iam-state-policy.json applied by an IAM administrator (the account owner).
+  # the NEW file deploy/aws/iam/staging-deployer-runner-roles-policy.json, created and attached by an IAM administrator (the account owner).
   statement {
     sid       = "StagingRunnerSeedWorldSecretWrite"
     actions   = ["secretsmanager:PutSecretValue"]

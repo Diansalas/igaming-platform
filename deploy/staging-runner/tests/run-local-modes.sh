@@ -197,6 +197,18 @@ has cleanup_leftovers 'cleanup_loader_role\|PASS\|dropped leftover role igaming_
 run cleanup_again 0 cleanup
 has cleanup_again 'cleanup_loader_role\|PASS\|no igaming_restore_loader role' "cleanup is idempotent"
 run verify_db_after_cleanup 0 verify-db
+# SRP3R-2: on RDS (forced here with RUNNER_LOCAL_IAM_ONLY=1) igaming_backup must be IAM-only; cleanup restores that state instead of making a password permanent
+sq "CREATE ROLE rds_iam NOLOGIN"
+run verify_db_iam_bad 1 verify-db RUNNER_LOCAL_IAM_ONLY=1
+has verify_db_iam_bad '^RESULT\|backup_role_iam_member\|FAIL\|' "a backup role that is not an rds_iam member is a FAIL on RDS"
+has verify_db_iam_bad '^RESULT\|leftover_backup_credential\|FAIL\|' "...and its finite validity is a FAIL"
+run cleanup_iam 0 cleanup RUNNER_LOCAL_IAM_ONLY=1
+has cleanup_iam 'cleanup_backup_credential\|PASS\|.*restored to IAM-only: PASSWORD NULL, VALID UNTIL infinity, member of rds_iam' "cleanup restores PASSWORD NULL + VALID UNTIL infinity + rds_iam"
+[ "$(bash "$H" psql -d igaming_platform_dev -c "SELECT rolvaliduntil::text FROM pg_roles WHERE rolname = 'igaming_backup'")" = infinity ] && ok "the validity is infinity because the password is gone" || bad "unexpected validity"
+[ "$(bash "$H" psql -d igaming_platform_dev -c "SELECT (rolpassword IS NULL)::text FROM pg_authid WHERE rolname = 'igaming_backup'")" = true ] && ok "igaming_backup has no password any more" || bad "a password remains on igaming_backup"
+run verify_db_iam_ok 0 verify-db RUNNER_LOCAL_IAM_ONLY=1
+has verify_db_iam_ok '^RESULT\|backup_role_iam_member\|PASS\|' "an IAM-only backup role passes"
+sq "DROP ROLE rds_iam"
 run cleanup_badname 2 cleanup CLEANUP_DB=postgres
 sq "CREATE DATABASE unrelated_db"
 run verify_db_unknown_db 1 verify-db
@@ -216,9 +228,27 @@ has world_noanchor 'seed_world_plan\|FAIL\|.*no database_environment anchor' "se
 [ ! -e "${OUT}/store.json" ] && ok "nothing was uploaded" || bad "a store file exists after a refused run"
 run anchor_production 2 record-anchor ANCHOR_VALUE=production AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2"
 run anchor_noreason 2 record-anchor ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice
-run anchor_record 0 record-anchor ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor"
-has anchor_record 'record_anchor\|PASS\|database_environment recorded as staging' "record-anchor records staging"
+# SRP3R-1: record-anchor writes only on a FRESH database. This one holds tenants (and, with the drill world, players and ledger entries): refused.
+run anchor_refused_live 1 record-anchor ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor"
+has anchor_refused_live 'record_anchor\|FAIL\|.*only records the anchor on a FRESH database' "record-anchor refuses a database that holds data"
+[ "$(bash "$H" psql -d igaming_platform_dev -c "SELECT count(*) FROM database_environment")" = 0 ] && ok "nothing was written by the refused run" || bad "an anchor row exists after the refused run"
+# a fresh (migrated, empty) database accepts it, and then it is idempotent
+bash "$H" psql -d postgres -c "CREATE DATABASE igaming_fresh OWNER igaming" >/dev/null
+DATABASE_URL="postgres://igaming:${OWNERPW}@127.0.0.1:${HARNESS_PORT}/igaming_fresh?sslmode=disable" "${HARNESS_ROOT}/bin/migrate" -dir "${HERE}/../../../migrations" up >/dev/null 2>&1
+run anchor_record 0 record-anchor DB_NAME=igaming_fresh ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor"
+has anchor_record 'record_anchor\|PASS\|database_environment recorded as staging' "record-anchor records staging on a fresh database"
 has anchor_record '^ANCHOR\|row\|staging\|by=' "the stored row is reported"
+run anchor_record_again 0 record-anchor DB_NAME=igaming_fresh ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor"
+has anchor_record_again 'already staging; nothing written' "record-anchor is idempotent on the fresh database"
+# a fresh database that gets one tenant is no longer fresh (a second fresh database, anchor still unset)
+bash "$H" psql -d postgres -c "CREATE DATABASE igaming_fresh2 OWNER igaming" >/dev/null
+DATABASE_URL="postgres://igaming:${OWNERPW}@127.0.0.1:${HARNESS_PORT}/igaming_fresh2?sslmode=disable" "${HARNESS_ROOT}/bin/migrate" -dir "${HERE}/../../../migrations" up >/dev/null 2>&1
+bash "$H" psql -d igaming_fresh2 -f "${HERE}/fixture.sql" >/dev/null
+run anchor_refused_tenant 1 record-anchor DB_NAME=igaming_fresh2 ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor"
+has anchor_refused_tenant 'only records the anchor on a FRESH database' "one tenant is enough to refuse"
+bash "$H" psql -d postgres -c "DROP DATABASE igaming_fresh WITH (FORCE)" -c "DROP DATABASE igaming_fresh2 WITH (FORCE)" >/dev/null
+# the owner of THIS (non-fresh, test) database records the anchor deliberately, as the runbook describes
+sq "INSERT INTO database_environment (environment) VALUES ('staging')"
 run anchor_again 0 record-anchor ANCHOR_VALUE=staging AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor"
 has anchor_again 'already staging; nothing written' "record-anchor is idempotent"
 run anchor_other 1 record-anchor ANCHOR_VALUE=test AUTH_REF=TICKET-44 OPERATOR=ops-alice "REASON=plan 6.2 anchor"
@@ -252,6 +282,15 @@ has world_dry 'seed_world_plan\|PASS\|.*5 staff account' "dry run plans five acc
 MOCK_GEOLOCATION_COUNTRY=SV run world_nostore 3 seed-world "${W[@]/SEED_WORLD_LOCAL_STORE=*/SEED_WORLD_LOCAL_STORE=${OUT}/no-such-dir/store.json}"
 has world_nostore 'NOTHING was created' "an unwritable credential store stops the run before any account exists"
 [ "$(bash "$H" psql -d igaming_platform_dev -c "SELECT count(*) FROM tenants WHERE slug IN ('acc-one','acc-two')")" = 0 ] && ok "no tenant was created by the refused run" || bad "a tenant exists after the refused run"
+# SRP3R-7: two concurrent seed-world runs are serialized: a held advisory lock makes a second run STOP with nothing written
+bash "$H" psql -d igaming_platform_dev -c "SELECT pg_advisory_lock(7461020001); SELECT pg_sleep(120)" >/dev/null 2>&1 &
+LOCKPID=$!
+until [ "$(bash "$H" psql -d igaming_platform_dev -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = 1 AND objid = 3166052705")" = 1 ]; do sleep 0.2; done
+MOCK_GEOLOCATION_COUNTRY=SV run world_locked 3 seed-world "${W[@]}"
+has world_locked 'another seed-world run is in progress' "a concurrent run is refused while the lock is held"
+[ ! -e "${OUT}/store.json" ] && ok "the refused concurrent run uploaded nothing" || bad "the concurrent run wrote the store"
+bash "$H" psql -d igaming_platform_dev -c "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = 1 AND objid = 3166052705" >/dev/null
+wait "$LOCKPID" 2>/dev/null || true
 MOCK_GEOLOCATION_COUNTRY=SV run world 0 seed-world "${W[@]}"
 has world 'RESULT\|seed_world\|PASS\|' "seed-world succeeds"
 has world 'RESULT\|seed_world_credentials_planned\|PASS\|5 generated one-time password' "passwords stored before the accounts were created"

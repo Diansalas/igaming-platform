@@ -184,6 +184,11 @@ variable "runner_seed_world_task_role_arn" {
   type        = string
 }
 
+variable "seed_world_secret_arn" {
+  description = "ARN of the secret igaming-staging/seed-world-passwords. Passed to the seed-world definition as SEED_WORLD_SECRET_ARN (not secret) so the runner addresses the secret by ARN, never by a name."
+  type        = string
+}
+
 variable "runner_task_cpu" {
   description = "CPU units of the staging-runner task (a Fargate-valid pairing with runner_task_memory; the backup/restore drill dumps and restores the staging database in the task)."
   type        = string

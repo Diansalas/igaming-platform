@@ -211,6 +211,7 @@ module "ecs" {
   staging_runner_image            = "${module.ecr.repository_urls["staging-runner"]}:${var.image_tag}"
   runner_task_role_arn            = module.iam.runner_task_role_arn
   runner_seed_world_task_role_arn = module.iam.runner_seed_world_task_role_arn
+  seed_world_secret_arn           = module.secrets.seed_world_secret_arn
 
   platform_api_image = "${module.ecr.repository_urls["platform-api"]}:${var.image_tag}"
   b2c_image          = "${module.ecr.repository_urls["b2c"]}:${var.image_tag}"

@@ -716,6 +716,7 @@ resource "aws_ecs_task_definition" "staging_runner_seed_world" {
       environment = concat(local.runner_common_environment, [
         { name = "STAFF_MFA_FACTOR_ACTIVE_KID", value = var.staff_mfa_active_kid },
         { name = "STAFF_MFA_MAC_ACTIVE_KID", value = var.staff_mfa_active_kid },
+        { name = "SEED_WORLD_SECRET_ARN", value = var.seed_world_secret_arn },
       ], var.mock_geolocation_country != "" ? [{ name = "MOCK_GEOLOCATION_COUNTRY", value = var.mock_geolocation_country }] : [])
       secrets = [
         { name = "DB_MASTER_PASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },

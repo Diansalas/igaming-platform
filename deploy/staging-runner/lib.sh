@@ -58,6 +58,9 @@ RN_SECRETS=()
 RN_BACKUP_TOKEN_AT=0
 RN_EXIT_HOOKS=()
 
+# rn_iam_only : 1 when igaming_backup is expected to be IAM-only (RDS); the local harness may force it to test those paths
+rn_iam_only() { if [ "$RN_LOCAL" = 0 ] || [ "${RUNNER_LOCAL_IAM_ONLY:-}" = 1 ]; then echo 1; else echo 0; fi; }
+
 rn_now() { date +%s.%N; }
 rn_elapsed() { awk -v a="$1" -v b="${2:-$(date +%s.%N)}" 'BEGIN { printf "%.2f", b - a }'; }
 

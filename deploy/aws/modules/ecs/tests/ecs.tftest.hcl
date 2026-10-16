@@ -49,6 +49,7 @@ variables {
   runner_task_role_arn = "arn:aws:iam::765578795051:role/igaming-staging-ecs-runner-task-role"
 
   runner_seed_world_task_role_arn = "arn:aws:iam::765578795051:role/igaming-staging-ecs-seed-world-task-role"
+  seed_world_secret_arn           = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/seed-world-passwords-AbCdEf"
 }
 
 run "database_url_never_carries_a_password" {
@@ -450,6 +451,11 @@ run "staging_runner_seed_world_definition_has_only_its_own_inputs" {
       jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].linuxParameters.capabilities.drop == ["ALL"]
     )
     error_message = "SA-1: the seed-world definition uses the one-off execution role, runs as a non-root user with all capabilities dropped, defaults to usage and logs to the runner group with its own stream prefix."
+  }
+
+  assert {
+    condition     = anytrue([for e in jsondecode(aws_ecs_task_definition.staging_runner_seed_world.container_definitions)[0].environment : e.name == "SEED_WORLD_SECRET_ARN" && e.value == var.seed_world_secret_arn])
+    error_message = "SRP3R-6: the seed-world definition addresses the secret by ARN (SEED_WORLD_SECRET_ARN)."
   }
 
   assert {

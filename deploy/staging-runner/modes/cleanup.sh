@@ -6,7 +6,8 @@
 #   * the disposable restore-loader login igaming_restore_loader (created by the drill's two-phase restore, 2-hour validity);
 #   * the restore-check database: every database named igaming_restore* (the drill's default is igaming_restore_check) plus the optional
 #     CLEANUP_DB (a custom DRILL_RESTORE_DB), never the application database, postgres, template0/1, rdsadmin;
-#   * on RDS only: a finite validity on igaming_backup (it is IAM-only there; a password credential with an expiry is a leftover).
+#   * on RDS only: a password-style state on igaming_backup (finite validity, or no rds_iam membership): it is restored to IAM-only (PASSWORD NULL,
+#     VALID UNTIL infinity, GRANT rds_iam), never made "permanent" (SRP3R-2).
 # It never touches igaming_backup otherwise (that role stays by design, ADR 0122), data, or any other database: an unknown extra database is
 # REPORTED (a FAIL in verify-db) but not dropped. Parameters (non-secret): CLEANUP_DB optional. Run it only when no drill is in progress.
 # verify-db's leftover checks (no loader role, no restore-check database, no finite backup credential) are the proof it worked.
@@ -47,16 +48,19 @@ mode_cleanup() {
     rn_result cleanup_loader_role PASS "no igaming_restore_loader role (nothing to drop)"
   fi
 
-  if [ "$RN_LOCAL" = 0 ]; then
-    left="$(rn_psql master "$DB_NAME" -c "SELECT COALESCE(rolvaliduntil::text, '') FROM pg_roles WHERE rolname = 'igaming_backup'")"
-    if [ -n "$left" ] && [ "$left" != infinity ]; then
-      if rn_psql master "$DB_NAME" -c "ALTER ROLE igaming_backup VALID UNTIL 'infinity'" >/dev/null 2>"${RN_SCRATCH}/cleanup.err"; then
-        rn_result cleanup_backup_credential PASS "igaming_backup carried a finite validity (${left}); reset (the role is IAM-only on RDS)"
-      else
-        rn_result cleanup_backup_credential FAIL "could not reset the finite validity of igaming_backup: $(rn_first_line "${RN_SCRATCH}/cleanup.err")"
-      fi
+  if [ "$(rn_iam_only)" = 1 ]; then
+    # SRP3R-2: on RDS igaming_backup is IAM-only (PASSWORD NULL, VALID UNTIL infinity, member of rds_iam). A finite validity or a missing rds_iam
+    # membership means a password credential was put on it (e.g. reset-backup-credential.sql run on the wrong instance). Never make that password
+    # permanent: remove it and restore the IAM-only state.
+    left="$(rn_psql master "$DB_NAME" -c "SELECT COALESCE(rolvaliduntil::text, '') || '|' || (SELECT count(*) FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid AND g.rolname = 'rds_iam') FROM pg_roles r WHERE rolname = 'igaming_backup'")"
+    if [ -z "$left" ]; then
+      rn_result cleanup_backup_credential INFO "igaming_backup does not exist (nothing to restore)"
+    elif { [ "${left%%|*}" = "" ] || [ "${left%%|*}" = infinity ]; } && [ "${left##*|}" = 1 ]; then
+      rn_result cleanup_backup_credential PASS "igaming_backup is IAM-only (no finite validity, member of rds_iam)"
+    elif rn_psql master "$DB_NAME" -c "ALTER ROLE igaming_backup PASSWORD NULL VALID UNTIL 'infinity'" -c "GRANT rds_iam TO igaming_backup" >/dev/null 2>"${RN_SCRATCH}/cleanup.err"; then
+      rn_result cleanup_backup_credential PASS "igaming_backup carried a password-style state (valid until '${left%%|*}', rds_iam members ${left##*|}); restored to IAM-only: PASSWORD NULL, VALID UNTIL infinity, member of rds_iam"
     else
-      rn_result cleanup_backup_credential PASS "igaming_backup carries no finite validity"
+      rn_result cleanup_backup_credential FAIL "could not restore igaming_backup to IAM-only: $(rn_first_line "${RN_SCRATCH}/cleanup.err"). The owner must remove the password and re-grant rds_iam by hand"
     fi
   else
     rn_result cleanup_backup_credential INFO "local harness: the backup login uses a password credential by design; not touched"

@@ -207,6 +207,13 @@ SELECT 'RESULT|leftover_backup_credential|' ||
        || CASE WHEN :'iam_only' = '1' THEN ' (IAM-only on RDS: a finite validity is a leftover; run the cleanup mode)' ELSE ' (local harness: password credential by design)' END
   FROM pg_roles r WHERE r.rolname = 'igaming_backup';
 
+-- SRP3R-2: on RDS (iam_only=1) igaming_backup must be an rds_iam member (IAM-only credential); anything else is a password login on the all-tenant role.
+SELECT 'RESULT|backup_role_iam_member|' || CASE WHEN m.is_member THEN 'PASS' WHEN :'iam_only' = '1' THEN 'FAIL' ELSE 'INFO' END
+       || '|igaming_backup is a member of rds_iam: ' || m.is_member || CASE WHEN m.is_member OR :'iam_only' <> '1' THEN '' ELSE ' (IAM-only expected on RDS; run the cleanup mode)' END
+  FROM (SELECT EXISTS (SELECT 1 FROM pg_auth_members am JOIN pg_roles g ON g.oid = am.roleid JOIN pg_roles u ON u.oid = am.member
+                        WHERE g.rolname = 'rds_iam' AND u.rolname = 'igaming_backup') AS is_member) m
+ WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_backup');
+
 -- ---------------------------------------------------------------- server posture (observations)
 SELECT 'RESULT|server_posture|INFO|version=' || current_setting('server_version') || ' ssl=' || COALESCE((SELECT ssl::text FROM pg_stat_ssl WHERE pid = pg_backend_pid()), 'n/a')
        || ' rds.force_ssl=' || COALESCE(current_setting('rds.force_ssl', true), 'n/a') || ' log_connections=' || current_setting('log_connections')

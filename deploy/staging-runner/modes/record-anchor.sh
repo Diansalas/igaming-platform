@@ -8,7 +8,7 @@
 #   ANCHOR_VALUE  staging (default) | development | test. NEVER production (recording production belongs to the production provisioning runbook)
 #   AUTH_REF      the authorisation reference (ticket id)
 #   OPERATOR      who runs it;  REASON  why  (both are recorded in the run log with the run's task id)
-# Idempotent: the same value already recorded is a no-op; a different value is a FAIL (the row can never change). Same gating as seed-world:
+# Refuses (exit 1) unless the database is fresh: no tenants, players or ledger entries (see sql/record-anchor.sql, SRP3R-1). Idempotent: the same value already recorded is a no-op; a different value is a FAIL (the row can never change). Same gating as seed-world:
 # APP_ENV development or staging (the container's own setting) and the owner credential only. Restore consequence (backup-restore-dr.md): a
 # restored copy's anchor is blank by design, and restore.sh requires target environment = source environment.
 
@@ -36,6 +36,7 @@ mode_record_anchor() {
     inserted) rn_result record_anchor PASS "database_environment recorded as ${value} (write-once; recorded_by is the owner login)" ;;
     already_recorded_same) rn_result record_anchor PASS "database_environment is already ${value}; nothing written (idempotent)" ;;
     conflict_other_value:*) rn_result record_anchor FAIL "database_environment is already recorded as '${state#conflict_other_value:}'; it can never be changed: nothing written" ;;
+    refused_live_data) rn_result record_anchor FAIL "the database already holds tenants, players or ledger entries: no anchor row means PRODUCTION for the seeding commands, so this mode only records the anchor on a FRESH database (SRP3R-1). Nothing was written. If this really is the staging database, an owner records the anchor deliberately with psql (and writes down why)" ;;
     no_table) rn_result record_anchor FAIL "table database_environment does not exist: migrations have not run (migration 0135)" ;;
     *) rn_result record_anchor FAIL "unexpected state '${state}'" ;;
   esac

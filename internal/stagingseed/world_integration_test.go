@@ -187,10 +187,70 @@ func TestWorld_StalePlanDoesNotOverwriteAnExistingAccount(t *testing.T) {
 	if _, err := ApplyWorld(ctx, pool, mfa, p, "staging", plan, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	// replaying the same plan: every account exists, so none is re-created and no token is issued
+	// replaying the same plan: every account exists, so none is re-created and no token is issued, and no orphan Person is left (SRP3R-7)
+	personsBefore := count(t, pool, `SELECT count(*) FROM persons`)
 	res, err := ApplyWorld(ctx, pool, mfa, p, "staging", plan, &bytes.Buffer{})
 	if err != nil || len(res.Actors) != 0 {
 		t.Fatalf("a replayed plan must create nothing: %v %v", res.Actors, err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM persons`); n != personsBefore {
+		t.Fatalf("a replayed plan left %d orphan Person row(s)", n-personsBefore)
+	}
+}
+
+// SRP3R-5: the staff, bootstrap-token and brand audit rows name the platform admin as the actor, not "system".
+func TestWorld_AuditRowsCarryThePlatformAdminActor(t *testing.T) {
+	pool := testPool(t)
+	mfa := mfaStore(t)
+	admin := platformAdmin(t, pool)
+	p := params(admin)
+	ctx := context.Background()
+	plan, _ := PlanWorld(ctx, pool, p, "staging", &bytes.Buffer{})
+	if _, err := ApplyWorld(ctx, pool, mfa, p, "staging", plan, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"staging_seed.staff_created", "staff.bootstrap_token_issued"} {
+		if n := countT(t, pool, p.TenantSlug, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = '`+action+`'`); n != len(WorldStaff) {
+			t.Fatalf("%s: %d rows, want %d", action, n, len(WorldStaff))
+		}
+		if n := countT(t, pool, p.TenantSlug, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = '`+action+`' AND actor_type = 'staff' AND actor_id = '`+admin.String()+`'`); n != len(WorldStaff) {
+			t.Fatalf("%s: only %d rows carry the platform admin as actor", action, n)
+		}
+	}
+	if n := countT(t, pool, p.TenantSlug, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'staging_seed.brand_owner_provisioned' AND actor_id = '`+admin.String()+`'`); n != 1 {
+		t.Fatalf("the brand audit row must carry the actor, got %d", n)
+	}
+}
+
+// SRP3R-4: staff accounts are only added to the synthetic tenants this tool created (its licence marker).
+func TestWorld_RefusesAnActiveTenantThatIsNotSynthetic(t *testing.T) {
+	pool := testPool(t)
+	mfa := mfaStore(t)
+	admin := platformAdmin(t, pool)
+	p := params(admin)
+	ctx := context.Background()
+	if err := pool.WithPlatformAdmin(ctx, admin, func(ctx context.Context, tx pgx.Tx) error {
+		var jur, lic uuid.UUID
+		if err := tx.QueryRow(ctx, `INSERT INTO jurisdictions (code, name) VALUES ($1, 'Other') RETURNING id`, "OT-"+p.TenantSlug).Scan(&jur); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO licences (jurisdiction_id, licensee, licence_number) VALUES ($1, 'platform', $2) RETURNING id`, jur, "OT-"+p.TenantSlug).Scan(&lic); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (name, slug, licensing_model, status, licence_id) VALUES ('Real', $1, 'under_platform_licence', 'active', $2)`, p.TenantSlug, lic)
+		return err
+	}); err != nil {
+		t.Fatalf("seed a non-synthetic active tenant: %v", err)
+	}
+	if _, err := PlanWorld(ctx, pool, p, "staging", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "synthetic licence marker") {
+		t.Fatalf("the plan must refuse a non-synthetic tenant, got %v", err)
+	}
+	plan := Creds{TenantSlug: p.TenantSlug, BrandSlug: p.BrandSlug, Country: p.Country, Actors: map[string]*ActorCred{}}
+	if _, err := ApplyWorld(ctx, pool, mfa, p, "staging", plan, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "synthetic licence marker") {
+		t.Fatalf("apply must refuse a non-synthetic tenant, got %v", err)
+	}
+	if n := countT(t, pool, p.TenantSlug, `SELECT count(*) FROM staff_users WHERE tenant_id = $1`); n != 0 {
+		t.Fatalf("no staff may be added to a non-synthetic tenant, got %d", n)
 	}
 }
 
@@ -238,7 +298,7 @@ func TestWorld_RefusesToTouchAPendingTenant(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	plan, _ := PlanWorld(ctx, pool, p, "staging", &bytes.Buffer{})
+	plan := Creds{TenantSlug: p.TenantSlug, BrandSlug: p.BrandSlug, Country: p.Country, Actors: map[string]*ActorCred{}}
 	if _, err := ApplyWorld(ctx, pool, mfa, p, "staging", plan, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "governed launch decision") {
 		t.Fatalf("an existing pending tenant must not be activated by this tool, got %v", err)
 	}

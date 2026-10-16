@@ -26,6 +26,34 @@
 # shellcheck shell=bash
 
 RN_SW_SECRET_ID="igaming-staging/seed-world-passwords"
+RN_SW_LOCK_KEY=7461020001
+RN_SW_LOCK_PID=""
+
+# rn_sw_lock : serialize concurrent seed-world runs (SRP3R-7): a session advisory lock on the owner connection, held by a background psql whose
+# stdin is a FIFO that this shell keeps open (fd 8) until it exits. A second run STOPs instead of leaving a planned password in the secret for an
+# account the other run created with a different one.
+rn_sw_lock() {
+  local fifo="${RN_SHM}/sw-lock.in" outf="${RN_SCRATCH}/sw-lock.out"
+  mkfifo -m 600 "$fifo"
+  : >"$outf"
+  rn_psql owner "$DB_NAME" <"$fifo" >"$outf" 2>"${RN_SCRATCH}/sw-lock.err" &
+  RN_SW_LOCK_PID=$!
+  exec 8>"$fifo"
+  rn_on_exit rn_sw_unlock
+  printf 'SELECT pg_try_advisory_lock(%s);\n' "$RN_SW_LOCK_KEY" >&8
+  for _ in $(seq 1 150); do [ -s "$outf" ] && break; sleep 0.1; done
+  case "$(head -1 "$outf")" in
+    t) return 0 ;;
+    f) rn_stop "another seed-world run is in progress (advisory lock ${RN_SW_LOCK_KEY} is held); run it again when the other task has stopped. Nothing was written" ;;
+    *) rn_stop "cannot take the seed-world lock: $(rn_first_line "${RN_SCRATCH}/sw-lock.err"). Nothing was written" ;;
+  esac
+}
+
+rn_sw_unlock() {
+  exec 8>&- 2>/dev/null || true
+  [ -z "$RN_SW_LOCK_PID" ] || wait "$RN_SW_LOCK_PID" 2>/dev/null || true
+  RN_SW_LOCK_PID=""
+}
 
 # rn_sw_get <outfile> : the current secret value (JSON) or {} when the secret has no value yet. Returns 1 on any other failure.
 rn_sw_get() {
@@ -115,6 +143,13 @@ mode_seed_world() {
     rn_register_secret "$RN_S_MFA_FACTOR_KEYS"; rn_register_secret "$RN_S_MFA_MAC_KEYS"
   fi
   rn_fetch_ca
+  if [ "$RN_LOCAL" = 0 ]; then
+    # the secret is addressed by its ARN (Terraform output, task-definition environment), never by a name an override could redirect (SRP3R-6)
+    local arn="${SEED_WORLD_SECRET_ARN:-}"
+    [[ "$arn" =~ ^arn:aws:secretsmanager:eu-central-1:[0-9]{12}:secret:igaming-staging/seed-world-passwords-[A-Za-z0-9]{6}$ ]] || rn_die "SEED_WORLD_SECRET_ARN is missing or is not the seed-world-passwords secret of this environment"
+    RN_SW_SECRET_ID="$arn"
+  fi
+  if [ "$dry" = 0 ]; then rn_sw_lock; fi
 
   local existing="${RN_SHM}/sw-existing.json" plan="${RN_SHM}/sw-plan.json" stored="${RN_SHM}/sw-stored.json" applied="${RN_SHM}/sw-applied.json" final="${RN_SHM}/sw-final.json"
   local n

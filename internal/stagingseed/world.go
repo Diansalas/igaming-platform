@@ -22,6 +22,9 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
+// SyntheticLicenceNumber marks the tenants this tool created: only tenants carrying this licence get staff accounts (SRP3R-4).
+const SyntheticLicenceNumber = "STG-SYNTHETIC-1"
+
 // StaffSpec is one synthetic tenant staff account the acceptance suite (deploy/aws/acceptance) consumes. Key is the suite's
 // actor name (<KEY>_EMAIL, <KEY>_PASSWORD_FILE, <KEY>_BOOTSTRAP_TOKEN_FILE).
 type StaffSpec struct {
@@ -155,6 +158,18 @@ func PlanWorld(ctx context.Context, pool *db.Pool, p WorldParams, appEnv string,
 	}
 	say("anchor", anchor)
 	say("actor_id", actor.String())
+	for _, slug := range []string{p.TenantSlug, p.SecondTenantSlug} {
+		if slug == "" {
+			continue
+		}
+		exists, synthetic, err := syntheticTenantState(ctx, pool, actor, slug)
+		if err != nil {
+			return Creds{}, err
+		}
+		if exists && !synthetic {
+			return Creds{}, fmt.Errorf("refused: tenant %q exists but does not carry this tool's synthetic licence marker (%s): it was not created by seed-world", slug, SyntheticLicenceNumber)
+		}
+	}
 	c := Creds{TenantSlug: p.TenantSlug, BrandSlug: p.BrandSlug, Country: p.Country, Actors: map[string]*ActorCred{}}
 	for _, s := range WorldStaff {
 		exists, err := staffExists(ctx, pool, p.TenantSlug, p.email(s))
@@ -173,6 +188,17 @@ func PlanWorld(ctx context.Context, pool *db.Pool, p WorldParams, appEnv string,
 		say("staff_"+s.Key, "to be created")
 	}
 	return c, nil
+}
+
+// syntheticTenantState reports whether a tenant with the slug exists and whether it carries the synthetic licence marker of this tool.
+func syntheticTenantState(ctx context.Context, pool *db.Pool, actor uuid.UUID, slug string) (exists, synthetic bool, err error) {
+	err = pool.WithPlatformAdmin(ctx, actor, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT true, COALESCE(l.licence_number = $2, false) FROM tenants t LEFT JOIN licences l ON l.id = t.licence_id WHERE t.slug = $1`, slug, SyntheticLicenceNumber).Scan(&exists, &synthetic)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	return exists, synthetic, err
 }
 
 func staffExists(ctx context.Context, pool *db.Pool, tenantSlug, email string) (bool, error) {
@@ -254,7 +280,7 @@ func ApplyWorld(ctx context.Context, pool *db.Pool, mfa *store.Store, p WorldPar
 		if cred.Email != p.email(s) || cred.Password == "" {
 			return Creds{}, fmt.Errorf("credential for %s does not match the plan", s.Key)
 		}
-		tok, created, err := createStaff(ctx, pool, mfa, tenantID, s, cred, p)
+		tok, created, err := createStaff(ctx, pool, mfa, tenantID, actor, s, cred, p)
 		if err != nil {
 			return res, fmt.Errorf("staff %s: %w", s.Key, err) // res holds the accounts created so far: the caller still delivers them
 		}
@@ -297,19 +323,23 @@ func ensureTenantAndBrand(ctx context.Context, pool *db.Pool, actor uuid.UUID, t
 			ON CONFLICT (code) DO UPDATE SET code = EXCLUDED.code RETURNING id`).Scan(&jurID); err != nil {
 			return fmt.Errorf("synthetic jurisdiction: %w", err)
 		}
-		err := tx.QueryRow(ctx, `SELECT id FROM licences WHERE licence_number = 'STG-SYNTHETIC-1' AND jurisdiction_id = $1`, jurID).Scan(&licID)
+		err := tx.QueryRow(ctx, `SELECT id FROM licences WHERE licence_number = '`+SyntheticLicenceNumber+`' AND jurisdiction_id = $1`, jurID).Scan(&licID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			err = tx.QueryRow(ctx, `INSERT INTO licences (jurisdiction_id, licensee, licence_number) VALUES ($1, 'platform', 'STG-SYNTHETIC-1') RETURNING id`, jurID).Scan(&licID)
+			err = tx.QueryRow(ctx, `INSERT INTO licences (jurisdiction_id, licensee, licence_number) VALUES ($1, 'platform', '`+SyntheticLicenceNumber+`') RETURNING id`, jurID).Scan(&licID)
 		}
 		if err != nil {
 			return fmt.Errorf("synthetic licence: %w", err)
 		}
 		var status string
-		err = tx.QueryRow(ctx, `SELECT id, status FROM tenants WHERE slug = $1 FOR UPDATE`, tenantSlug).Scan(&tenantID, &status)
+		var existingLicence *uuid.UUID
+		err = tx.QueryRow(ctx, `SELECT id, status, licence_id FROM tenants WHERE slug = $1 FOR UPDATE`, tenantSlug).Scan(&tenantID, &status, &existingLicence)
 		switch {
 		case err == nil:
 			if status != "active" {
 				return fmt.Errorf("refused: tenant %q exists with status %s; activation is a governed launch decision, not this tool's", tenantSlug, status)
+			}
+			if existingLicence == nil || *existingLicence != licID {
+				return fmt.Errorf("refused: tenant %q exists but does not carry this tool's synthetic licence marker (%s): it was not created by seed-world, and staff accounts are only added to the synthetic tenants this tool created", tenantSlug, SyntheticLicenceNumber)
 			}
 			say("tenant_"+tenantSlug, "exists (active)")
 		case errors.Is(err, pgx.ErrNoRows):
@@ -352,8 +382,8 @@ func ensureTenantAndBrand(ctx context.Context, pool *db.Pool, actor uuid.UUID, t
 			return fmt.Errorf("provision brand %q: %w", brandSlug, err)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "staging_seed.brand_owner_provisioned", TargetType: "brand", TargetID: brandID.String(),
-			Outcome: audit.OutcomeSuccess, RequestID: "seed-staging-world",
+			TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor, Action: "staging_seed.brand_owner_provisioned", TargetType: "brand", TargetID: brandID.String(),
+			Outcome: audit.OutcomeSuccess, RequestID: "seed-staging-world", UserAgent: "cmd/seed-staging-world operator=" + p.Operator,
 			Metadata: map[string]any{"slug": brandSlug, "operator": p.Operator, "reason": p.Reason, "authorization_reference": p.AuthRef, "path": "owner_provisioned", "actor": actor.String()},
 		}); err != nil {
 			return err
@@ -365,17 +395,9 @@ func ensureTenantAndBrand(ctx context.Context, pool *db.Pool, actor uuid.UUID, t
 
 // createStaff creates one tenant staff account (a Person, a staff_users row, a bootstrap enrolment token, audit rows) and returns the
 // bootstrap token. created is false when the account already exists (nothing is changed).
-func createStaff(ctx context.Context, pool *db.Pool, mfa *store.Store, tenantID uuid.UUID, s StaffSpec, cred *ActorCred, p WorldParams) (string, bool, error) {
+func createStaff(ctx context.Context, pool *db.Pool, mfa *store.Store, tenantID, actor uuid.UUID, s StaffSpec, cred *ActorCred, p WorldParams) (string, bool, error) {
 	hash, err := auth.HashPassword(cred.Password)
 	if err != nil {
-		return "", false, err
-	}
-	var personID uuid.UUID
-	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		pr, err := identity.CreatePerson(ctx, tx)
-		personID = pr.ID
-		return err
-	}); err != nil {
 		return "", false, err
 	}
 	var tok string
@@ -386,6 +408,12 @@ func createStaff(ctx context.Context, pool *db.Pool, mfa *store.Store, tenantID 
 		} else if !errors.Is(err, identity.ErrNotFound) {
 			return err
 		}
+		// the Person is created in the same transaction, after the existence check: no orphan Person on the "exists" path or on a failure (SRP3R-7)
+		pr, err := identity.CreatePerson(ctx, tx)
+		if err != nil {
+			return err
+		}
+		personID := pr.ID
 		st, err := identity.CreateStaffUser(ctx, tx, tenantID, cred.Email, hash, s.Role, &personID)
 		if err != nil {
 			return err
@@ -399,12 +427,12 @@ func createStaff(ctx context.Context, pool *db.Pool, mfa *store.Store, tenantID 
 			return fmt.Errorf("issue bootstrap enrolment token: %w", err)
 		}
 		tok = deliverToken(token)
-		meta := map[string]any{"tool": "cmd/seed-staging-world", "role": string(s.Role), "operator": p.Operator, "reason": p.Reason, "authorization_reference": p.AuthRef}
-		if err := audit.Record(ctx, tx, audit.Entry{TenantID: tenantID, ActorType: audit.ActorSystem, Action: "staging_seed.staff_created", TargetType: "staff_user", TargetID: st.ID.String(),
+		meta := map[string]any{"tool": "cmd/seed-staging-world", "actor": actor.String(), "role": string(s.Role), "operator": p.Operator, "reason": p.Reason, "authorization_reference": p.AuthRef}
+		if err := audit.Record(ctx, tx, audit.Entry{TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor, Action: "staging_seed.staff_created", TargetType: "staff_user", TargetID: st.ID.String(),
 			Outcome: audit.OutcomeSuccess, RequestID: "seed-staging-world", Metadata: meta}); err != nil {
 			return err
 		}
-		if err := audit.Record(ctx, tx, audit.Entry{TenantID: tenantID, ActorType: audit.ActorSystem, Action: "staff.bootstrap_token_issued", TargetType: "staff_user", TargetID: st.ID.String(),
+		if err := audit.Record(ctx, tx, audit.Entry{TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor, Action: "staff.bootstrap_token_issued", TargetType: "staff_user", TargetID: st.ID.String(),
 			Outcome: audit.OutcomeSuccess, RequestID: "seed-staging-world", Metadata: map[string]any{"tool": "cmd/seed-staging-world", "mode": "create", "operator": p.Operator, "reason": p.Reason, "ttl_hours": int(staffmfa.BootstrapTokenTTL.Hours())}}); err != nil {
 			return err
 		}
