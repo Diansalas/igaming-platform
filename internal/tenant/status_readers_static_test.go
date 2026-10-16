@@ -193,6 +193,8 @@ var reviewedStatusReaderFiles = []string{
 	"internal/kyc/enforcement_dormancy.go",
 	"internal/kyc/outbox_worker.go",
 	"internal/payments/sweeper_resolution_only.go",
+	// A10c (ADR 0114 R3): the read-only hold-candidate list selects approved withdrawals whose tenant or brand is `<> 'active'`.
+	"internal/httpserver/withdrawal_hold_candidates_routes.go",
 	"internal/reconciliation/scheduler.go",
 	"internal/rg/enumeration_sweep.go",
 	"internal/tenant/gameplay_gate.go",

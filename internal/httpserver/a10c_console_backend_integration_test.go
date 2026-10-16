@@ -397,7 +397,7 @@ func TestA10c_R1_AttemptEventHistory(t *testing.T) {
 		pg.Items[0].AssetCode == nil || *pg.Items[0].AssetCode != "USD" || pg.Items[1].DeclineStage == nil || *pg.Items[1].DeclineStage != "at_submission" {
 		t.Fatalf("events page = %+v", pg)
 	}
-	if !(pg.Items[0].ReceivedAt <= pg.Items[1].ReceivedAt && pg.Items[1].ReceivedAt <= pg.Items[2].ReceivedAt) {
+	if pg.Items[0].ReceivedAt > pg.Items[1].ReceivedAt || pg.Items[1].ReceivedAt > pg.Items[2].ReceivedAt {
 		t.Errorf("events are not oldest first: %+v", pg.Items)
 	}
 	p2 := w.a.do("GET", evURL(w.tenant, w.unbAtt, "limit=2&offset=2"), w.tok(w.comp), nil)
