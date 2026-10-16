@@ -22,6 +22,9 @@ output "task_definition_arns" {
     migrate      = aws_ecs_task_definition.migrate.arn
     role_init    = aws_ecs_task_definition.role_init.arn
     seed_admin   = aws_ecs_task_definition.seed_admin.arn
+
+    staging_runner             = aws_ecs_task_definition.staging_runner.arn
+    staging_runner_actor_proof = aws_ecs_task_definition.staging_runner_actor_proof.arn
   }
 }
 

@@ -1,7 +1,9 @@
 # One ECR repository per deployable image: platform-api (the Go binary,
 # also used for the one-off migration/role-init tasks — same image,
 # different container command override, see deploy/docker/platform-api.Dockerfile),
-# b2c, backoffice (static SPA builds served by nginx).
+# b2c, backoffice (static SPA builds served by nginx), staging-runner (the
+# one-off in-VPC operations image: verification pack, seed commands, backup
+# drill; never a service; STAGING-PREP-3).
 #
 # IMAGE IDENTITY (ADR 0086): tags are IMMUTABLE. A deployed tag is the full
 # git commit SHA the image was built from (deploy/aws/scripts/deploy.sh), so

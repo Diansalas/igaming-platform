@@ -53,6 +53,9 @@ locals {
     "migrate"      = null
     "role-init"    = null
     "seed-admin"   = null
+    # STAGING-PREP-3: both runner task definitions log to ONE group; the awslogs
+    # stream prefix tells them apart.
+    "staging-runner" = null
   }
 }
 
@@ -549,6 +552,125 @@ resource "aws_ecs_task_definition" "seed_admin" {
           "awslogs-group"         = aws_cloudwatch_log_group.this["seed-admin"].name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "seed-admin"
+        }
+      }
+    }
+  ])
+
+  tags = var.tags
+}
+
+# --- staging-runner (one-off; run via `deploy.sh runner <mode> [KEY=VALUE...]`, never a service) ---
+#
+# STAGING-PREP-3 (plan gap G1, owner actions B and C): the RDS instance is
+# private, so every in-VPC operation that is not migrate / role-init / seed-admin
+# runs as ONE-OFF tasks of a purpose-built image (deploy/docker/staging-runner.
+# Dockerfile: bash, psql 16, OpenSSL 3, age, jq, aws cli, the deploy/backup
+# scripts, the SQL verification pack, cmd/seed-market). The MODE is the single
+# command argument deploy.sh passes (verify-db, seed-market, backup-restore-drill,
+# pitr-verify, probe-backup-role; seed-actor-proof on the second definition);
+# parameters are NON-secret container-environment overrides. The default command
+# `usage` prints the modes and does nothing else.
+#
+# Two definitions, so key material is injected only where it is needed:
+#   staging-runner              master + runtime DB passwords (execution-role
+#                               injection, env DB_MASTER_PASSWORD / DB_RUNTIME_PASSWORD,
+#                               never PGPASSWORD: the scripts build 0600 passfiles and
+#                               unset the variables) and the RUNNER TASK ROLE, whose only
+#                               permission is rds-db:connect as igaming_backup on this
+#                               instance (modules/iam).
+#   staging-runner-actor-proof  master password and ACTOR_PROOF_KEYS only, and NO task
+#                               role at all (no AWS credentials in the container).
+# Both use the one-off execution role (ECR pull of the runner repository, the secrets
+# above, the runner log group), never the service execution role.
+locals {
+  runner_common_environment = [
+    { name = "APP_ENV", value = var.app_environment },
+    { name = "AWS_REGION", value = var.aws_region },
+    { name = "AWS_DEFAULT_REGION", value = var.aws_region },
+    { name = "RDS_HOST", value = var.database_host },
+    { name = "RDS_PORT", value = tostring(var.database_port) },
+    { name = "DB_NAME", value = var.database_name },
+    { name = "DB_MASTER_USER", value = var.db_master_username },
+    { name = "RDS_CA_BUNDLE_URL", value = var.rds_ca_bundle_url },
+    { name = "ACTOR_PROOF_ACTIVE_KID", value = var.actor_proof_active_kid },
+  ]
+}
+
+resource "aws_ecs_task_definition" "staging_runner" {
+  family                   = "${var.name_prefix}-staging-runner"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.runner_task_cpu
+  memory                   = var.runner_task_memory
+  execution_role_arn       = var.one_off_execution_role_arn
+  task_role_arn            = var.runner_task_role_arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "staging-runner"
+      image     = var.staging_runner_image
+      essential = true
+      command   = ["usage"]
+      user      = "10001"
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      environment = concat(local.runner_common_environment, [
+        { name = "DB_RUNTIME_USER", value = var.db_runtime_username },
+      ], var.mock_geolocation_country != "" ? [{ name = "MOCK_GEOLOCATION_COUNTRY", value = var.mock_geolocation_country }] : [])
+      secrets = [
+        { name = "DB_MASTER_PASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
+        { name = "DB_RUNTIME_PASSWORD", valueFrom = "${var.db_runtime_secret_arn}:password::" },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.this["staging-runner"].name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "staging-runner"
+        }
+      }
+    }
+  ])
+
+  tags = var.tags
+}
+
+resource "aws_ecs_task_definition" "staging_runner_actor_proof" {
+  family                   = "${var.name_prefix}-staging-runner-actor-proof"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = var.one_off_execution_role_arn
+  # No task_role_arn: this definition holds the actor-proof key material and must
+  # carry no AWS credentials at all (it needs none: the secrets are injected by
+  # the execution role at start).
+
+  container_definitions = jsonencode([
+    {
+      name      = "staging-runner"
+      image     = var.staging_runner_image
+      essential = true
+      command   = ["usage"]
+      user      = "10001"
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      environment = local.runner_common_environment
+      secrets = [
+        { name = "DB_MASTER_PASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
+        { name = "ACTOR_PROOF_KEYS", valueFrom = var.actor_proof_keys_secret_arn },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.this["staging-runner"].name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "staging-runner-actor-proof"
         }
       }
     }

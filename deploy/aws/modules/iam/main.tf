@@ -1,4 +1,5 @@
-# Three roles, deliberately asymmetric:
+# Three roles, deliberately asymmetric (plus the STAGING-PREP-3 runner task role at
+# the end of this file):
 #
 # - SERVICE execution role: what the ECS AGENT uses to pull images, fetch
 #   secrets, and write logs for the three long-running services
@@ -172,4 +173,39 @@ resource "aws_iam_role_policy" "task" {
   name   = "${var.name_prefix}-ecs-task-policy"
   role   = aws_iam_role.task.id
   policy = data.aws_iam_policy_document.task[0].json
+}
+
+# STAGING-PREP-3: the staging-runner TASK ROLE (a dedicated role, NOT the shared
+# task role above: sharing it would let platform-api, b2c and every one-off task
+# mint a token for the all-tenant BYPASSRLS backup login).
+#
+# Its ONLY permission is rds-db:connect as the backup role on THIS instance, by
+# DbiResourceId: the single statement ADR 0122 section 3 requires of the "runner
+# identity" (aws-staging-deploy-plan.md 4.2). A PITR clone has a different
+# DbiResourceId and is deliberately NOT covered: the pitr-verify mode resets the
+# backup role's credential on the disposable clone instead. No secret read, no
+# rds:*, no logs, no ECR (those are the execution role's job). Capped by the
+# permissions boundary, which therefore MUST allow rds-db:connect for the backup
+# user (deploy/aws/bootstrap/main.tf, applied by the bootstrap credential).
+resource "aws_iam_role" "runner_task" {
+  name                 = "${var.name_prefix}-ecs-runner-task-role"
+  assume_role_policy   = data.aws_iam_policy_document.ecs_tasks_assume.json
+  description          = "staging-runner task role: rds-db:connect as ${var.runner_db_user} on this instance only. Do not attach anything else."
+  permissions_boundary = var.permissions_boundary_arn
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-ecs-runner-task-role" })
+}
+
+data "aws_iam_policy_document" "runner_task" {
+  statement {
+    sid       = "ConnectAsBackupRoleOnThisInstanceOnly"
+    actions   = ["rds-db:connect"]
+    resources = ["arn:aws:rds-db:${var.aws_region}:${data.aws_caller_identity.current.account_id}:dbuser:${var.runner_db_resource_id}/${var.runner_db_user}"]
+  }
+}
+
+resource "aws_iam_role_policy" "runner_task" {
+  name   = "${var.name_prefix}-ecs-runner-task-policy"
+  role   = aws_iam_role.runner_task.id
+  policy = data.aws_iam_policy_document.runner_task.json
 }

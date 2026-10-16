@@ -74,6 +74,31 @@ output "ecs_seed_admin_task_definition_arn" {
   value = module.ecs.task_definition_arns["seed_admin"]
 }
 
+output "ecs_staging_runner_task_definition_arn" {
+  description = "STAGING-PREP-3: the one-off staging runner (deploy.sh runner <mode>): verify-db, seed-market, backup-restore-drill, pitr-verify, probe-backup-role."
+  value       = module.ecs.task_definition_arns["staging_runner"]
+}
+
+output "ecs_staging_runner_actor_proof_task_definition_arn" {
+  description = "STAGING-PREP-3: the staging-runner definition that carries the actor-proof key material and no task role (mode seed-actor-proof only)."
+  value       = module.ecs.task_definition_arns["staging_runner_actor_proof"]
+}
+
+output "runner_task_role_arn" {
+  description = "STAGING-PREP-3: the staging-runner task role (rds-db:connect as igaming_backup on this instance only)."
+  value       = module.iam.runner_task_role_arn
+}
+
+output "db_resource_id" {
+  description = "DbiResourceId of the staging instance (not secret; names the rds-db:connect ARN)."
+  value       = module.database.resource_id
+}
+
+output "key_family_kid" {
+  description = "Active kid of every key family (staff MFA, payout instrument, actor proof); the seed-actor-proof mode requires it to equal the kid inside the actor-proof secret."
+  value       = module.secrets.key_family_kid
+}
+
 output "ecs_task_subnet_ids" {
   description = "Subnets deploy.sh runs the one-off tasks in (same as the services)."
   value       = var.ecs_public_ip_mode ? module.network.public_subnet_ids : module.network.private_subnet_ids

@@ -33,7 +33,7 @@ variable "service_execution_role_arn" {
 }
 
 variable "one_off_execution_role_arn" {
-  description = "Execution role for the migrate/role-init one-off tasks."
+  description = "Execution role for the migrate/role-init/seed-admin/staging-runner one-off tasks."
   type        = string
 }
 
@@ -165,6 +165,40 @@ variable "one_off_task_cpu" {
 variable "one_off_task_memory" {
   type    = string
   default = "512"
+}
+
+# --- STAGING-PREP-3: staging-runner (one-off in-VPC operations image) ---
+
+variable "staging_runner_image" {
+  description = "Full repository_url:tag of the staging-runner image (deploy/docker/staging-runner.Dockerfile), immutable tag = the full git SHA."
+  type        = string
+}
+
+variable "runner_task_role_arn" {
+  description = "Task role of the staging-runner definition (modules/iam): rds-db:connect as igaming_backup on this instance, nothing else. The actor-proof definition deliberately has NO task role."
+  type        = string
+}
+
+variable "runner_task_cpu" {
+  description = "CPU units of the staging-runner task (a Fargate-valid pairing with runner_task_memory; the backup/restore drill dumps and restores the staging database in the task)."
+  type        = string
+  default     = "1024"
+}
+
+variable "runner_task_memory" {
+  type    = string
+  default = "2048"
+}
+
+variable "rds_ca_bundle_url" {
+  description = "Where the runner downloads the RDS CA bundle for sslmode=verify-full (the runner refuses any host other than truststore.pki.rds.amazonaws.com and logs the bundle's SHA-256)."
+  type        = string
+  default     = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
+
+  validation {
+    condition     = startswith(var.rds_ca_bundle_url, "https://truststore.pki.rds.amazonaws.com/")
+    error_message = "rds_ca_bundle_url must be on https://truststore.pki.rds.amazonaws.com/."
+  }
 }
 
 # --- Application configuration (non-secret) ---

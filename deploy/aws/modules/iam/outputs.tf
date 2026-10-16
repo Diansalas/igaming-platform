@@ -9,3 +9,7 @@ output "one_off_execution_role_arn" {
 output "task_role_arn" {
   value = aws_iam_role.task.arn
 }
+
+output "runner_task_role_arn" {
+  value = aws_iam_role.runner_task.arn
+}

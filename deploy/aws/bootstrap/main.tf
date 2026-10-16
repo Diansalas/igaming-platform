@@ -210,6 +210,17 @@ data "aws_iam_policy_document" "staging_ecs_role_boundary" {
     resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:igaming-staging/*"]
   }
 
+  # STAGING-PREP-3 (IAM DELTA, applied by the bootstrap credential only): the staging-runner task role
+  # (modules/iam, igaming-staging-ecs-runner-task-role) mints IAM database-authentication tokens for the
+  # dedicated backup login. A role can never exceed its boundary, so the boundary must allow the action,
+  # but ONLY for that one database user (the DbiResourceId does not exist yet when this policy is applied
+  # before the first deploy, hence db-*; the role's own inline policy pins the exact instance).
+  statement {
+    sid       = "StagingRunnerBackupRoleIamAuth"
+    actions   = ["rds-db:connect"]
+    resources = ["arn:aws:rds-db:${var.aws_region}:${data.aws_caller_identity.current.account_id}:dbuser:db-*/igaming_backup"]
+  }
+
   # The RDS-managed master secret ("rds!db-<uuid>"), only for the staging DB.
   statement {
     sid       = "StagingRdsManagedMasterSecret"
