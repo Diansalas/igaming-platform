@@ -6,12 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/rgfix"
 )
 
@@ -29,6 +32,32 @@ func TestRGEnforcement_HTTP_StaffSwitch(t *testing.T) {
 	r.want(t, http.StatusOK, "")
 	if m := r.obj(t); m["enforcement_enabled"] != false {
 		t.Fatalf("enforcement must be off by default: %v", m)
+	}
+
+	// SR6-1: the switch is step-up CRITICAL. A stale session (older than the 5 minute window) is refused before any handler runs.
+	stale := authtest.LiveStaffTokenAged(t, w.rt, testStaffMFAKeys(), w.issuer, f.compA, f.tenantA, auth.RoleCompliance, 11*time.Minute)
+	sr := w.call("POST", "/v1/admin/rg/enforcement", stale, "", body)
+	if sr.status != http.StatusForbidden || !strings.Contains(string(sr.body), "step_up_required") {
+		t.Fatalf("a stale session must get 403 step_up_required, got %d %s", sr.status, sr.body)
+	}
+	// SR6-1 guard: no jurisdiction configuration and no floors yet: refused 409 with the closed readiness detail, audited, nothing written.
+	r = w.call("POST", "/v1/admin/rg/enforcement", comp, "", body)
+	r.want(t, http.StatusConflict, "conflict")
+	if !strings.Contains(string(r.body), "no_jurisdiction_referenced") {
+		t.Fatalf("the refusal must name the readiness detail: %s", r.body)
+	}
+	w.tenantConfig(f.tenantA, f.jur)
+	r = w.call("POST", "/v1/admin/rg/enforcement", comp, "", body)
+	r.want(t, http.StatusConflict, "conflict")
+	if !strings.Contains(string(r.body), "floor_missing_deposit") {
+		t.Fatalf("the refusal must name the missing floor: %s", r.body)
+	}
+	r = w.call("GET", "/v1/admin/rg/enforcement", comp, "", nil)
+	if m := r.obj(t); m["enforcement_enabled"] != false {
+		t.Fatalf("a refused activation must write nothing: %v", m)
+	}
+	for _, kind := range []string{"deposit", "loss", "wager"} {
+		w.floor(f.jur, kind, rgfix.Spec{"attestation_ref": "sr6-1-test", "asset_code": "EUR"})
 	}
 
 	// compliance switches it on for the tenant; a repeat answers 200 with the stored row
@@ -143,7 +172,8 @@ func TestRGOptions_HTTP(t *testing.T) {
 		t.Fatalf("configured time-out durations (whole hours only): %v", hours)
 	}
 
-	// the switch is reported once compliance turns it on
+	// the switch is reported once compliance turns it on (SR6-1 guard: needs a configuration and the floors, set up here)
+	w.tenantConfig(f.tenantA, f.jur)
 	w.call("POST", "/v1/admin/rg/enforcement", w.staff(f.tenantA, f.compA, auth.RoleCompliance), "",
 		map[string]any{"reason_code": "r", "attestation_ref": "a"}).want(t, http.StatusCreated, "")
 	r = w.call("GET", "/v1/me/rg/options?asset_code=EUR", player, "", nil)
@@ -182,4 +212,20 @@ func TestRGStatus_HTTP_ShowsATimeOutAndTheOptionsDurationsAreAccepted(t *testing
 	// a self-exclusion with a day count from the options list is accepted
 	days := w.call("GET", "/v1/me/rg/options?asset_code=EUR", w.player(f, f.acctX), "", nil).obj(t)["self_exclusion_days"].([]any)
 	w.call("POST", "/v1/me/rg/self-exclusion", w.player(f, f.acctX), "", map[string]any{"duration_days": int(days[0].(float64))}).want(t, http.StatusCreated, "")
+}
+
+// tenantConfig gives a tenant an in-effect jurisdiction configuration (EUR) for the jurisdiction code, as owner.
+func (w *rgW) tenantConfig(tenant uuid.UUID, jurCode string) {
+	w.t.Helper()
+	if err := w.owner.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		var jid uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT id FROM jurisdictions WHERE code = $1`, jurCode).Scan(&jid); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, allowed_currencies, allowed_payment_methods, effective_from)
+			VALUES ($1, $2, 'kyc1', 'aml1', 'rg1', '["EUR"]', '["card"]', now() - interval '1 minute') ON CONFLICT DO NOTHING`, tenant, jid)
+		return err
+	}); err != nil {
+		w.t.Fatalf("tenant jurisdiction config: %v", err)
+	}
 }

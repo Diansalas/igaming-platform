@@ -163,10 +163,10 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// 125 mutating routes: 59 critical, 22 financial, 5 classifier routes, 39 none; 79 reads (S1b adds GET /v1/admin/alerts/{alertID}). ADR 0119 S5 + S6: +14
 	// critical lifecycle routes, -1 (the legacy critical create route), +2 none (four-eyes reject / cancel), +8 reads.
 	// ADR 0116 A7: +11 AML routes: +3 critical (lift, propose, approve), +3 reads; place hold and transition are the classifiers amlHoldPlaceClass / amlTransitionClass (SR7-1, SR7-5), so 3 static none-mutating (open case, note, SAR flag) + 2 classifiers.
-	// none-mutating 39 -> 42. A6 (ADR 0115 S4-min): +1 none-mutating (POST /v1/admin/rg/enforcement) and +1 read (GET): 43 and 83.
-	if counts["critical"] != 62 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// none-mutating 39 -> 42. A6 (ADR 0115 S4-min): +1 critical (POST /v1/admin/rg/enforcement, SR6-1) and +1 read (GET): critical 63, none-mutating 42, read 83.
+	if counts["critical"] != 63 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["none-mutating"] != 43 || counts["read"] != 83 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["none-mutating"] != 42 || counts["read"] != 83 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

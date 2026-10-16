@@ -608,6 +608,12 @@ func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []s
 	if !activated {
 		return ck(CheckRGConfig, ResultFail, "enforcement_not_enabled")
 	}
+	return rgFloorChecks(ctx, tx, in, currencies, now)
+}
+
+// rgFloorChecks is the part of R-RG-CONFIG that does not depend on the activation row: a compliance floor in force
+// for every kind and allowed currency of every referenced jurisdiction, and no session control the platform cannot enforce.
+func rgFloorChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []string, now time.Time) Check {
 	rows, err := tx.Query(ctx, `SELECT code FROM jurisdictions WHERE id = ANY($1) ORDER BY code`, in.JurisdictionIDs)
 	if err != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
@@ -753,4 +759,45 @@ func amlScreeningCheck(d amlData, referenced int, comps []providerkind.Registrat
 		return ck(CheckAMLScreening, ResultPass, "ok_mock_provider")
 	}
 	return ck(CheckAMLScreening, ResultPass, "ok")
+}
+
+// RGActivationReadiness answers whether RG limit enforcement MAY be switched on for a tenant or one brand (SR6-1 guard):
+// every jurisdiction with a configuration in effect for the tenant has a compliance floor for the deposit, loss and wager
+// kinds in every allowed currency, and no session control that the platform cannot enforce is enabled. It is the floor part of
+// R-RG-CONFIG, without the "already switched on" test (that is what is about to be created). Read-only; the caller passes a
+// tenant-scoped transaction. Result pass/fail/not_evaluable, never an error for a failing precondition.
+func RGActivationReadiness(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID, now time.Time) Check {
+	rows, err := tx.Query(ctx, `SELECT jurisdiction_id, allowed_currencies FROM tenant_jurisdiction_configs
+		 WHERE tenant_id = $1 AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)`, tenantID, now)
+	if err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	var ids []uuid.UUID
+	var raw [][]byte
+	seen := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var id uuid.UUID
+		var cur []byte
+		if err := rows.Scan(&id, &cur); err != nil {
+			rows.Close()
+			return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		raw = append(raw, cur)
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	if len(ids) == 0 {
+		return ck(CheckRGConfig, ResultFail, "no_jurisdiction_referenced")
+	}
+	currencies := cfgs2currencies(raw)
+	if len(currencies) == 0 {
+		return ck(CheckRGConfig, ResultFail, "no_currency")
+	}
+	return rgFloorChecks(ctx, tx, EvalInput{Subject: Subject{TenantID: tenantID, BrandID: brandID}, JurisdictionIDs: ids}, currencies, now)
 }
