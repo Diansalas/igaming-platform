@@ -166,3 +166,110 @@ each is detected, so a green run is not vacuous. Scratch DBs `a10c_t1`, `a10c_t2
 5. The events route exposes receipt amounts of `succeeded` events only through `amount_minor_units`/`asset_code` (no reference text); confirm this is
    not a second source of truth for reconciliation (it is a view of `payment_provider_events`, append-only).
 6. `evidence_ref_hash` semantics are unchanged (still an operator-supplied digest); see the options above.
+
+## Security review (independent, SR10C)
+
+Reviewer: `security` specialist. Scope: the diff `6bf9642..33163c7` (staff idempotency wrapper and migration 0164, the four new
+staff read routes, K1 paging, the R1 attempt filters, backoffice wiring, b2c OpenAPI and contract test). Method: code and
+migration reading, the A10c / HSEC / K1 / K3 / R1 / R2 / step-up / route-freeze integration suites re-run on a private scratch DB
+(`sr10c_sec`, all PASS, dropped afterwards), plus a temporary probe test (not committed) whose results are quoted below. Out of
+scope: penetration testing, the unchanged governed flows themselves, the evidence_ref_hash decision (deliverable 8), the ADR 0119
+S8 UI. Passing this review does not make the subsystem "secure"; it states what was and was not found.
+
+**Verdict: NOT APPROVED as-is. One Medium finding (SR10C-1) blocks marking deliverable 7 (Idempotency-Key) complete. Deliverables
+1-6 and 9-11 are approved on their own.** No launch-blocking finding beyond SR10C-1 (which must be fixed before any launch).
+
+### Verified (no finding)
+
+- `staffIdempotent` wraps exactly the 13 POST routes of `capability_routes.go` (5), `payment_force_resolution_routes.go` (4),
+  `withdrawal_hold_resolution_routes.go` (4), always as `staffRoute(..., RequirePermission(...)(staffIdempotent(...)))`; no GET is
+  wrapped (static freeze test). `staffRoute` = `auth.Middleware -> RequireStaffPrincipal -> requireLiveStaffSession -> RequireAAL2 ->
+  requireStepUp`, so authentication, liveness (revoked session / deactivated staff), aal2, step-up freshness and the static
+  permission all run before a key is looked at. Probe: same subject re-presenting the key with a token lacking the permission is
+  refused (401/403) with no `Idempotent-Replayed`.
+- Scope: unique `(tenant_id, actor_id, idempotency_key)`, tenant = path tenant after `canActOnTenant`, actor = authenticated
+  subject, RLS GUC = path tenant. Probes: another platform admin with the same key and body is NOT served the stored body; the same
+  actor with the same key on another tenant's path is NOT a replay; a body differing only by one leading space is 409
+  `IDEMPOTENCY_MISMATCH`. A refused caller (permission, foreign tenant, ghost tenant via FK 23503) reserves nothing.
+- 409 bodies are fixed sentences with no stored data; MISMATCH / IN_PROGRESS are only ever observable by the same actor.
+  Concurrency: `INSERT ... ON CONFLICT DO NOTHING` under the unique index serialises two identical requests (one acts, one 409).
+- Only 2xx is stored (CHECK 200-299, body <= 256 KiB, both DB-enforced); non-2xx and panic release the reservation. The stored
+  bodies are the existing DTOs: ids, closed codes, amounts, payload/evidence hashes, staff ids; no reference text R, no note, no
+  player/wallet/destination id, no token or secret. The request body is stored only as a SHA-256 (the K3/HSEC request bodies do
+  not carry R; the free-text `note` is only hashed).
+- Migration 0164: ENABLE + FORCE RLS, `tenant_id` = `app.tenant_id` and no player GUC, REVOKE ALL FROM PUBLIC, runtime gets
+  S/I/U/D only. Down migration is a plain drop (holds no authority or audit evidence).
+- New reads: permission gate at registration (events: `payment_force_resolve:read`; run/mismatch single reads: per-stream permission
+  in `singleStaffReconciliationID` before any query; candidates: `withdrawal_hold_resolution:read`, platform_admin only, plus a
+  `c.platform()` check). Tenant scope by `beginStaffRead`/`canActOnTenant` (foreign tenant 404), platform reads audited first and
+  fail closed, ghost tenant 404 without an audit row. RLS on `payment_provider_events`, `reconciliation_runs/_mismatches`,
+  `withdrawal_requests` is the strict tenant policy (FORCE). Event DTO fields are DB CHECK-closed vocabularies (`event_type`,
+  `outcome`, `disposition_at_receipt`, `resolution`, `decline_stage`); `provider_reference`, `original_provider_reference`,
+  `merchant_reference`, `settlement_reference`, `decline_reason` and `event_fingerprint` are not selected. Candidates carry no
+  player, wallet or destination id. Unknown query parameters are 400 (`tenant_id` included).
+- Pagination: `strictPage` limit 1..200, offset 0..1,000,000; the attempt list stays keyset; `min_age_seconds` 0..31,536,000 with an
+  exact-decimal round-trip; `provider_id` is the closed webhook charset; `run_id` canonical lower-case UUID only.
+- Backoffice: "Request release" pre-fills `withdrawalId` only; the typed last-6 confirmation (`typed`) starts empty; new strings are
+  rendered through `safeCode` / text, no `dangerouslySetInnerHTML`; one Idempotency-Key per dialog (fresh key on reopen).
+- b2c contract test: the copied checker differs from the backoffice one only in the directory constant and a comment; the allow-list
+  is empty with a stale-entry check; the A6 rg pins are kept; negative fixtures prove path/method/body drift is detected; a scan
+  proves no b2c source outside `src/api` calls `fetch`/`apiFetch`. Not weakened.
+
+### Findings
+
+**SR10C-1 (Medium, BLOCKS deliverable 7): stored responses copy acting-session-only rows into a table any tenant-scoped session can
+read.** `withdrawal_hold_resolutions` (0124) and `payment_manual_resolutions` (0115), and `staff_capability_grant_requests` in the
+acting path (0113), are SELECT-able only with `app.acting_tenant_id` AND `financial_acting_session_valid()`; ADR 0114 12.4 relies on
+it (the record itself withholds `open_resolution_id` from candidates for this reason). `staff_idempotency_keys` stores the full
+response DTO under a policy that needs only `app.tenant_id`. Probe result: in a plain `WithTenant(tenant)` transaction (no acting
+session) `withdrawal_hold_resolutions` returned 0 rows while `staff_idempotency_keys` returned the stored 201 body containing the
+resolution id, `payload_hash`, amount, withdrawal id and the requesting PLATFORM staff id (which ADR 0114 H1 redacts from tenant
+viewers). Failure scenario: any tenant-scoped code path with a SQL-injection or a mis-scoped query (or a future reader of this table)
+reads governed four-eyes state that the database was designed to hide outside an acting session; the DB-level control is silently
+bypassed even though no API route exposes it today. Fix (either): (a) bind the policy to the actor through the existing narrow GUC,
+`actor_id = NULLIF(current_setting('app.actor_staff_id', true), '')::uuid`, set by the wrapper through
+`db.SetActorStaffIDForCurrentTx` (the only setter, static-test pinned, ADR 0119 C2 pattern), and add a probe test that a
+tenant-scoped session without it reads zero rows; or (b) store no response body for K3/HSEC/K1 (store status + resource id and answer
+a replay with a minimal body / let the client re-read through the governed read routes). (a) is the smaller change. Needs the
+architect's sign-off because it reuses a GUC owned by ADR 0119.
+
+**SR10C-2 (Low): stored responses are mutable by the runtime role.** Nothing prevents an UPDATE of a `completed` row's
+`response_status`/`response_body`, or a DELETE of a completed row. A buggy or compromised code path could rewrite what is replayed to
+an approver (for example a decision response showing `executed:true` / `refused:false`), i.e. DB-level cache poisoning of an
+operator-facing result. Fix: a BEFORE UPDATE/DELETE trigger allowing only `in_progress -> completed` (one shot, every other column
+frozen) and DELETE only of `in_progress` rows (retention deletes through a separate owner/job path).
+
+**SR10C-3 (Low, accept with documentation): a replay skips the handler's in-handler authority.** The route-level chain re-runs, but
+the K3/K1 G-P2 capability-grant check, the acting session and the Person checks live in the handler, which a replay does not call.
+A staff member whose capability grant was revoked after the original request can still receive the original 2xx body by replaying
+the key. Nothing is acted on and the body is one this actor was already entitled to receive, so the impact is information only; a
+replay also writes no audit row (it mutates nothing). Record this in the ADR amendment (SR10C-5) and consider a short retention
+(SR10C-4) to bound the window.
+
+**SR10C-4 (Low, availability): no retention and no recovery for an orphaned `in_progress` key** (already residual R3). A crash
+between the handler's commit and the completion write leaves the key `in_progress` forever (409 to that dialog). Safe (the console
+uses a fresh key on reopen and the flows' state guards refuse a double act), but add a retention job (for example completed rows
+older than 24 h, `in_progress` older than 1 h deleted only after confirming no handler is running) before launch.
+
+**SR10C-5 (Low, governance): ADR 0119 6.6 / C8 now contradict the code.** They state the admin four-eyes routes carry no
+`Idempotency-Key` and that the client re-sends after step-up without a server claim. A10c introduces a new cross-cutting mechanism on
+those routes; the architect must record the amendment (scope: 13 routes, optional header, replay semantics, SR10C-1/3) in
+`docs/decisions/`. The record's "Design decisions taken inside the approved architecture" heading understates this.
+
+**SR10C-6 (Info): the R2 single reads have no explicit `tenant_id` predicate** (`GetRunForStream`, `GetMismatchForStream`), contrary
+to the record's "plus an explicit `tenant_id` predicate". Isolation holds through the strict FORCE RLS policy (0028), as for the
+existing list. Recommended defence in depth: add `AND tenant_id = $n` (as the events and candidate routes do), or correct the record.
+
+**SR10C-7 (Info):** K1 lists with `?offset=` and no `?limit=` return every remaining row (the legacy unbounded behaviour, now
+reachable with an offset); tables are per tenant and small, not a DoS on their own. A stored 2xx body over 256 KiB releases the key
+after the act (a retry with the same key then hits the state guards, 409); the DTOs are far below that.
+
+### Tests the qa coverage must include (from this review)
+
+1. SR10C-1 regression: after a stored K3 and HSEC response, a `WithTenant(tenant)` session without the actor binding / acting
+   session reads 0 rows of `staff_idempotency_keys` (today it reads 1).
+2. SR10C-2: UPDATE of a completed row and DELETE of a completed row by the runtime role are refused.
+3. Replay after session revocation (`sessions.revoked_at`) is 401 `session_revoked` with no `Idempotent-Replayed` header (the chain
+   ordering already guarantees it; pin it with one integration test).
+4. Replay after a staff member's G-P2 grant revocation: the documented behaviour (SR10C-3) is pinned, whichever is chosen.
+5. A true concurrent pair (two goroutines, same key, same body): exactly one handler run, the other 409 IN_PROGRESS or a replay.
