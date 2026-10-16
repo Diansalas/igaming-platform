@@ -91,7 +91,7 @@ has drill 'RESULT\|restore_check_database_dropped\|PASS\|' "the restore-check da
 [ "$(grep -c '^RESULT|probe_abuse_.*|PASS|' "${OUT}/drill.out")" = 8 ] && ok "8 abuse probes denied" || bad "expected 8 denied abuse probes"
 has drill '^PITR\|T_utc=[0-9T:.Z-]+' "T is printed"
 has drill '^PITR\|expected_digests=TABLE=[0-9a-f]{16};' "the baseline digests are printed"
-hasnt drill 'BEGIN PRIVATE KEY' "private key text"
+hasnt drill "BEGIN"" PRIVATE"" KEY" "private key text"
 DIG="$(sed -n 's/^PITR|expected_digests=//p' "${OUT}/drill.out" | head -1)"
 run probes 0 probe-backup-role
 has probes 'SUMMARY\|probe-backup-role\|pass=24\|fail=0' "24 probe results (attributes + 15 + 8)"

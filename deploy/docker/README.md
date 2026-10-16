@@ -164,6 +164,7 @@ docker run -p 8082:8080 igaming-backoffice:staging
 |---|---|
 | `platform-api.Dockerfile` | Multi-stage build of `cmd/platform-api` and `cmd/migrate` into one Alpine-based image. |
 | `frontend.Dockerfile` | Generic multi-stage build for either `b2c` or `backoffice`, parameterized by `ARG APP_DIR`, served by non-root `nginx:1.27-alpine`. |
+| `staging-runner.Dockerfile` | The one-off in-VPC operations image (STAGING-PREP-3): bash, psql 16, OpenSSL 3, age, jq, AWS CLI, the `deploy/backup` scripts, the SQL verification pack and the Go helpers (`migrate`, `restorecheck`, `scramhash`, `seed-market`). Never a service; run by `deploy/aws/scripts/deploy.sh runner <mode>`; bakes no key or credential. See `docs/plans/staging-prep-3-record.md`. |
 | `nginx-spa.conf` | Shared SPA-fallback nginx server block (`try_files $uri /index.html;`), COPYed into both frontend images. |
 | `README.md` | This file. |
 

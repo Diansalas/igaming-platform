@@ -78,7 +78,7 @@ func TestParseSettings_CountryRules(t *testing.T) {
 }
 
 func TestParseSettings_AuditFieldsRefuseUnsafeText(t *testing.T) {
-	for _, bad := range []string{"a\nb", "a‮b", " lead", "trail ", "a​b", strings.Repeat("x", maxField+1)} {
+	for _, bad := range []string{"a\nb", "a\u202eb", " lead", "trail ", "a\u200bb", strings.Repeat("x", maxField+1)} {
 		for _, flagName := range []string{"-operator", "-reason", "-authorization-reference"} {
 			args := append(append([]string{}, okArgs...), flagName, bad)
 			if _, err := parseSettings(args, env(okEnv())); err == nil {

@@ -149,7 +149,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 
 // apply is the DB part, separate from run so the integration tests can drive it with their own pool.
 func apply(ctx context.Context, pool *db.Pool, s settings, out io.Writer) error {
-	say := func(k, v string) { fmt.Fprintf(out, "SEEDMARKET|%s|%s\n", k, v) }
+	say := func(k, v string) { _, _ = fmt.Fprintf(out, "SEEDMARKET|%s|%s\n", k, v) }
 	say("environment", "synthetic-only")
 
 	var tenantID, licenceID, brandID uuid.UUID
