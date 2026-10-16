@@ -338,10 +338,16 @@ type PaymentStatementOptions struct {
 	// (PaymentFetchRequest.ContinueFrom = PeriodStart = cursor) and the statement must start exactly there -
 	// a gap would skip a window, an overlap would count lines twice, and either is refused as invalid.
 	Continuation bool
+	// ImportKeys (F2 / SR11-10) seals the run's import and verifies the cursor's backing imports. nil = the
+	// process-wide sealer (SetDefaultImportSealer), which also verifies when it implements
+	// statement.ImportSealVerifier (payoutinstrument.Keys does). With no verifier at all the cursor falls back to
+	// the A11 rule (any backing import); production refuses that configuration at startup.
+	ImportKeys statement.ImportSealKeys
 
-	// cursor and truncated are internal to ReconcilePaymentStatementForTenant (the cursor it read, and
-	// whether the validated statement was truncated).
+	// cursor, basis and truncated are internal to ReconcilePaymentStatementForTenant (the cursor it read, how it
+	// was read, and whether the validated statement was truncated).
 	cursor    time.Time
+	basis     cursorBasis
 	truncated bool
 }
 
@@ -373,6 +379,10 @@ var (
 	// ErrPaymentStatementCoverageGap: a continuation statement did not start exactly at the cursor, or a
 	// truncated statement broke its own contract (R3-OBS-BOUND-1). Refused with nothing stored.
 	ErrPaymentStatementCoverageGap = errors.New("reconciliation: payment statement refused: coverage is not contiguous with the continuation cursor")
+	// ErrPaymentStatementOutOfOrder (F2 / LF-A11-6): a truncated page whose lines are not in OccurredAt order
+	// (the source did not page by time). Refused with nothing stored. It wraps ErrPaymentStatementCoverageGap
+	// (it is a broken window contract).
+	ErrPaymentStatementOutOfOrder = fmt.Errorf("%w: page not in time order", ErrPaymentStatementCoverageGap)
 )
 
 // syntheticComponent is providerkind.Synthetic, restated structurally so
@@ -423,7 +433,7 @@ func FetchPaymentStatement(ctx context.Context, source statement.PaymentStatemen
 	providerID := source.ProviderID()
 	req := statement.PaymentFetchRequest{
 		TenantID: tenantID, ProviderID: providerID, PeriodStart: periodStart, PeriodEnd: periodEnd,
-		MaxLines: opts.RunLineBound,
+		MaxLines: opts.RunLineBound, Continuation: opts.Continuation,
 	}
 	if !opts.cursor.IsZero() {
 		req.ContinueFrom, req.PeriodStart = opts.cursor, opts.cursor
@@ -493,8 +503,24 @@ func validateBoundedWindow(stmt statement.PaymentStatement, req statement.Paymen
 			}
 		}
 	}
+	// F2 / LF-A11-2a: in continuation mode CoverageEnd becomes the next cursor, a permanent completeness claim, so
+	// it may never pass the completeness horizon the stream asked for (PeriodEnd = min(sweep end, now - the
+	// provider's settle lag)). Truncated or not.
+	if opts.Continuation && !req.PeriodEnd.IsZero() && stmt.CoverageEnd.After(req.PeriodEnd.UTC().Truncate(time.Microsecond)) {
+		return fmt.Errorf("%w: coverage end %s is beyond the completeness horizon %s (now - settle lag)", ErrPaymentStatementCoverageGap,
+			stmt.CoverageEnd.Format(time.RFC3339Nano), req.PeriodEnd.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano))
+	}
 	if !stmt.Truncated {
 		return nil
+	}
+	// F2 / LF-A11-6: a page must be cut by time. A source that pages in any other order (by reference, by id)
+	// can return a page whose window [CoverageStart, CoverageEnd) is NOT complete; the only part of that the
+	// stream can check is the page's own order, so a truncated page must list its lines in non-decreasing
+	// OccurredAt order (ties in any order).
+	for i := 1; i < len(stmt.Lines); i++ {
+		if stmt.Lines[i].OccurredAt.Before(stmt.Lines[i-1].OccurredAt) {
+			return fmt.Errorf("%w: a truncated page is not in time order (line %d is dated before line %d)", ErrPaymentStatementOutOfOrder, i, i-1)
+		}
 	}
 	if !req.ContinueFrom.IsZero() && !stmt.CoverageEnd.After(req.ContinueFrom.UTC().Truncate(time.Microsecond)) {
 		return fmt.Errorf("%w: a truncated statement made no progress past the cursor", ErrPaymentStatementCoverageGap)
@@ -786,11 +812,11 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	if opts.Continuation {
 		// A11 / R3-OBS-BOUND-1: under the advisory lock the cursor must still be the one the statement was
 		// fetched from; otherwise another instance already covered this window (see errPaymentCursorStale).
-		cur, err := queryPaymentCursor(ctx, tx, tenantID, info.ProviderID)
+		cur, err := queryPaymentCursorState(ctx, tx, tenantID, info.ProviderID, opts.basis)
 		if err != nil {
 			return Run{}, nil, PaymentStatementInfo{}, err
 		}
-		if !cur.Equal(opts.cursor) {
+		if !cur.cursor.Equal(opts.cursor) {
 			return Run{}, nil, PaymentStatementInfo{}, errPaymentCursorStale
 		}
 	}
@@ -801,6 +827,7 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 		cs:    info.CoverageStart, ce: info.CoverageEnd,
 		agedBefore: info.CoverageEnd.Add(-opts.horizon()),
 		r:          &sbRecorder{tenantID: tenantID},
+		bounded:    opts.Continuation,
 	}
 	lines, err := m.loadLines(ctx, tx, importID)
 	if err != nil {
@@ -818,6 +845,9 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	}
 	m.matchLines(lines)
 	m.checkUnmatchedAttempts()
+	if err := m.confirmMissingProviderRecords(ctx, tx); err != nil {
+		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: missing provider record check: %w", err)
+	}
 	m.checkStandingUnbound()
 	m.checkLedgerJoin()
 	info.LegacyUnattempted = m.legacyUnattempted
@@ -863,15 +893,19 @@ type payLine struct {
 }
 
 type payAttempt struct {
-	id                  uuid.UUID
-	operation           string // "deposit" | "payout"
-	depositIntent       *uuid.UUID
-	providerRef         string // "" when NULL
-	merchantRef         string
-	state               string
-	amount              *big.Int
-	asset               string
-	sentAt              time.Time
+	id            uuid.UUID
+	operation     string // "deposit" | "payout"
+	depositIntent *uuid.UUID
+	providerRef   string // "" when NULL
+	merchantRef   string
+	state         string
+	amount        *big.Int
+	asset         string
+	sentAt        time.Time
+	// lastChangeAt is the platform record time of the attempt's last state change (resolved_at for a terminal
+	// attempt, else updated_at): F2 / LF-A11-1's bounded-mode "missing provider record" window, the same
+	// semantics as a bounded statement's line time (the provider's record time of the line's last change).
+	lastChangeAt        time.Time
 	ledgerTx            *uuid.UUID // deposit: payment_attempts.ledger_transaction_id
 	releaseTx           *uuid.UUID // payout: withdrawal_requests.release_ledger_transaction_id
 	settlementRef       string     // payout: the release tx's provider_tx_id when it is this provider's withdrawal_completed
@@ -930,6 +964,13 @@ type payMatcher struct {
 	// PRH-2 K3 (ADR 0101 9.2/9.3): the persisted-evidence substrate. Set by
 	// loadK3Evidence before any line is matched.
 	k3 *k3Evidence
+
+	// bounded (F2 / LF-A11-1): the import came from the continuation (bounded) stream, whose lines are dated by
+	// their last status change. The "missing provider record" rule then windows succeeded attempts by their own
+	// last change (lastChangeAt) and spares an attempt that an earlier persisted import already evidences;
+	// missingCandidates holds the attempts that rule still has to check against the persisted lines.
+	bounded           bool
+	missingCandidates []*payAttempt
 }
 
 func (m *payMatcher) key(parts ...string) string {
@@ -974,6 +1015,7 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 	rows, err := tx.Query(ctx, `
 		SELECT a.id, a.operation, a.deposit_intent_id, COALESCE(a.provider_reference, ''), a.merchant_reference,
 		       a.state, a.amount::text, a.asset_code, COALESCE(a.first_submitted_at, a.created_at),
+		       COALESCE(a.resolved_at, a.updated_at),
 		       a.ledger_transaction_id, wr.release_ledger_transaction_id,
 		       COALESCE(rl.provider_tx_id, ''),
 		       COALESCE(rl.transaction_type = 'withdrawal_completed' AND rl.provider_id = a.provider_id, false),
@@ -996,7 +1038,7 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 		a := &payAttempt{}
 		var amount string
 		if err := rows.Scan(&a.id, &a.operation, &a.depositIntent, &a.providerRef, &a.merchantRef, &a.state, &amount, &a.asset,
-			&a.sentAt, &a.ledgerTx, &a.releaseTx, &a.settlementRef, &a.releaseIsCompletion, &a.terminalReason, &a.unexpectedEcho); err != nil {
+			&a.sentAt, &a.lastChangeAt, &a.ledgerTx, &a.releaseTx, &a.settlementRef, &a.releaseIsCompletion, &a.terminalReason, &a.unexpectedEcho); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1561,6 +1603,14 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// rule. Ageing is not coverage-gated (code review F2): with a
 		// window no longer than the horizon an in-flight attempt would
 		// otherwise never be flagged. aged() implies sentAt < coverage_end.
+		case a.state == "succeeded" && m.bounded:
+			// F2 / LF-A11-1: bounded (continuation) mode. Lines are dated by their last status change, so the
+			// attempt is windowed by ITS last change, never by sentAt: a payout or deposit sent before a truncation
+			// cut but settled after it is the NEXT window's business. Whether an earlier import already holds its
+			// line is decided against the persisted lines (confirmMissingProviderRecords).
+			if m.inCoverage(a.lastChangeAt) {
+				m.missingCandidates = append(m.missingCandidates, a)
+			}
 		case a.state == "succeeded" && m.inCoverage(a.sentAt):
 			m.r.add(MismatchKindPayMissingProviderRecord, k+" check=unmatched", "statement: a line for this attempt", m.label+"no statement line; platform: "+a.render())
 		case inFlight(a.state) && m.aged(a):
@@ -1570,12 +1620,72 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 	}
 }
 
+// confirmMissingProviderRecords is the bounded-mode tail of the "missing provider record" rule (F2 /
+// LF-A11-1). A candidate is a succeeded attempt whose last change lies in this window and that no line of THIS
+// import matched. It is reported unless a persisted line of an ELIGIBLE import (D-4: non-MOCK, or no non-MOCK import
+// exists for the pair) of this provider already records it - same operation, status succeeded or reversed, by
+// provider reference, payout settlement reference or merchant reference. That spares the attempt whose provider line
+// was dated (and imported) in an EARLIER window than the platform's own record of the change (callback or poll
+// latency across a cut); it never spares an attempt the provider has no record of: "never silently missing".
+func (m *payMatcher) confirmMissingProviderRecords(ctx context.Context, tx pgx.Tx) error {
+	if len(m.missingCandidates) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(m.missingCandidates))
+	ops, refs, settlements, merchants := make([]string, len(ids)), make([]string, len(ids)), make([]string, len(ids)), make([]string, len(ids))
+	for i, a := range m.missingCandidates {
+		ids[i], ops[i], refs[i], settlements[i], merchants[i] = a.id, a.operation, a.providerRef, a.settlementRef, a.merchantRef
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT c.id FROM unnest($3::uuid[], $4::text[], $5::text[], $6::text[], $7::text[]) AS c(id, op, ref, settlement, merchant)
+		 WHERE EXISTS (
+		   SELECT 1 FROM payment_statement_lines l
+		     JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
+		    WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind = c.op AND l.status IN ('succeeded', 'reversed')
+		      AND (NOT i.is_mock OR NOT $8)
+		      AND ((c.ref <> '' AND l.provider_reference = c.ref)
+		        OR (c.settlement <> '' AND (l.provider_reference = c.settlement OR l.settlement_reference = c.settlement))
+		        OR (c.merchant <> '' AND l.merchant_reference = c.merchant)))`,
+		m.tenantID, m.provider, ids, ops, refs, settlements, merchants, m.k3.hasRealImp)
+	if err != nil {
+		return err
+	}
+	evidenced := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		evidenced[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, a := range m.missingCandidates {
+		if evidenced[a.id] {
+			continue
+		}
+		k := m.key("attempt="+a.id.String(), "provider_reference="+orNone(a.providerRef))
+		m.r.add(MismatchKindPayMissingProviderRecord, k+" check=unmatched", "statement: a line for this attempt",
+			m.label+"no statement line (bounded: windowed by the attempt's last change, no persisted line); platform: "+a.render())
+	}
+	return nil
+}
+
 // checkLedgerJoin is LF95-C13: the ledger's own (provider_id,
 // provider_tx_id) against the succeeded attempts, both directions.
 func (m *payMatcher) checkLedgerJoin() {
 	// (a) every succeeded attempt has exactly its one posting.
 	for _, a := range m.attempts {
-		if a.state != "succeeded" || !m.inCoverage(a.sentAt) {
+		// F2 / LF-A11-1: in bounded mode an attempt is windowed by its last change (its success), so one that
+		// succeeded after the window of its sentAt is still checked, exactly once, in the window of its success.
+		at := a.sentAt
+		if m.bounded {
+			at = a.lastChangeAt
+		}
+		if a.state != "succeeded" || !m.inCoverage(at) {
 			continue
 		}
 		k := m.key("attempt="+a.id.String(), "provider_reference="+orNone(a.providerRef), "check=ledger_join")

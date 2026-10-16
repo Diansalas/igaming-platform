@@ -66,6 +66,20 @@ type ImportSealer interface {
 	SealStatementImport(in ImportSealInput) (seal, kid string, err error)
 }
 
+// ImportSealVerifier verifies a stored import seal over in (implemented by
+// payoutinstrument.Keys; constant-time). Any failure - unknown kid, empty
+// seal, mismatch - is an error. F2 / SR11-10: the payment_statement cursor
+// trusts only a run row whose backing import carries a seal that verifies.
+type ImportSealVerifier interface {
+	VerifyStatementImport(in ImportSealInput, kid, seal string) error
+}
+
+// ImportSealKeys both seals and verifies (payoutinstrument.Keys).
+type ImportSealKeys interface {
+	ImportSealer
+	ImportSealVerifier
+}
+
 func canonField(f *string) string {
 	if f == nil {
 		return "~"
