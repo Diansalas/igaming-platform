@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
@@ -112,6 +113,38 @@ func TestA5HTTP_PayoutReversal_AuthorizationAndQuorum(t *testing.T) {
 	if st, _, e := post(tok(f1, tn, auth.RoleFinance, time.Minute), bad); st != http.StatusBadRequest {
 		t.Fatalf("a fractional amount: %d %+v", st, e)
 	}
+	// SR5-7: a platform_admin token is refused by the tenant scope (403) and records nothing.
+	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "a-decent-password-1")
+	adminTok := authtest.LiveStaffTokenAged(t, pool, testStaffMFAKeys(), issuer, admin.ID, uuid.Nil, auth.RolePlatformAdmin, time.Minute)
+	if st, _, e := post(adminTok, body); st != http.StatusForbidden {
+		t.Fatalf("platform_admin token: %d %+v", st, e)
+	}
+	// SR5-7: staff whose Person is the paid player's Person gets 403 and ONE durable Denied audit row.
+	var playerPerson uuid.UUID
+	if err := pool.WithTenant(context.Background(), tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, player.ID).Scan(&playerPerson)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	benef := uuid.New()
+	if err := pool.WithTenant(context.Background(), tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
+			VALUES ($1, $2, $3, 'x', 'finance', 'active', $4)`, benef, tn.ID, "a5-benef-"+benef.String()+"@test.invalid", playerPerson)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	benefTok := authtest.LiveStaffTokenAged(t, pool, testStaffMFAKeys(), issuer, benef, tn.ID, auth.RoleFinance, time.Minute)
+	if st, _, e := post(benefTok, body); st != http.StatusForbidden {
+		t.Fatalf("the beneficiary: %d %+v", st, e)
+	}
+	var denied int
+	if err := pool.WithTenant(context.Background(), tn.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.payout_reversal.http'
+			AND outcome = 'denied' AND actor_id = $2 AND target_id = $3`, tn.ID, benef, wr.ID.String()).Scan(&denied)
+	}); err != nil || denied != 1 {
+		t.Fatalf("the beneficiary refusal must write one Denied audit row: %d %v", denied, err)
+	}
 	if n := reverseRows(); n != 0 {
 		t.Fatalf("refusals recorded %d decisions", n)
 	}
@@ -134,7 +167,7 @@ func TestA5HTTP_PayoutReversal_AuthorizationAndQuorum(t *testing.T) {
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.payout_reversal.http'
-			AND target_id = $2 AND ip_address IS NOT NULL`, tn.ID, wr.ID.String()).Scan(&actions)
+			AND target_id = $2 AND ip_address IS NOT NULL AND outcome = 'success'`, tn.ID, wr.ID.String()).Scan(&actions)
 	}); err != nil {
 		t.Fatal(err)
 	}

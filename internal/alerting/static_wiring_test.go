@@ -379,6 +379,9 @@ func g(ctx, tx any) error { return raisePayoutDisputeAlert(ctx, tx, a, r) }`
 		// reversal_tombstone_precedes_success); the raise is the LAST statement of the alerting.InTx closure in
 		// DecidePayoutReversal, after the park, the release, the tombstone and every audit row (ADR 0102 7.7).
 		"internal/payments/payout_reversal.go:DecidePayoutReversal:raisePayoutDisputeAlert": 1,
+		// A5 fix round LF-A5-1: a success after the tombstone branch (callback cell, late-evidence and poll paths);
+		// raise only, the LAST statement after its audit row, inside the callers' alerting.InTx transactions.
+		"internal/payments/payout_reversal.go:payoutReversalTombstoneCell:raisePayoutDisputeAlert": 1,
 	}
 	got := map[string]int{}
 	for _, c := range staticCollectCalls(t) {

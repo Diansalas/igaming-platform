@@ -235,6 +235,15 @@ const reversalOneCasinoRollbackConstraint = "ledger_transactions_one_casino_roll
 // original). internal/casino reports it as ErrAlreadyRolledBack.
 var ErrCasinoReversalAlreadyExists = errors.New("ledger: a casino_rollback transaction already exists for this original")
 
+// providerTxConstraint is migration 0021's (tenant_id, provider_id, provider_tx_id) UNIQUE index.
+const providerTxConstraint = "idx_ledger_transactions_tenant_provider_tx"
+
+// ErrProviderReferenceTaken is returned by Post when the INSERT violates the (tenant_id, provider_id,
+// provider_tx_id) UNIQUE index and this idempotency key was never written: the provider reference is
+// already held by ANOTHER posting (for example a tombstone). Nothing is posted (A5 SR5-3 / R7: a typed
+// refusal instead of an untyped error).
+var ErrProviderReferenceTaken = errors.New("ledger: the provider reference is already held by another transaction")
+
 // reversalOneWithdrawalReversalConstraint is migration 0162's partial unique index (tenant_id,
 // reverses_transaction_id) WHERE transaction_type = 'withdrawal_reversed': a payout completion is reversed
 // at most once per tenant (A5 / WITHDRAWAL-REVERSAL-1; the 0092 / 0121 pattern).
@@ -345,7 +354,8 @@ type PostResult struct {
 // resolve the retry before calling Post. A unique violation on the
 // (tenant_id, provider_id, provider_tx_id) index alone (a NEW key whose
 // provider reference is already taken, e.g. by a tombstone) is not a
-// replay: it returns an untyped wrapped error and posts nothing.
+// replay: it returns ErrProviderReferenceTaken (A5 SR5-3; before A5 an untyped wrapped error) and posts
+// nothing.
 //
 // A violation of migration 0092's partial unique index
 // (ledger_transactions_one_deposit_reversal) is a THIRD, distinct case,
@@ -483,6 +493,9 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 			}
 			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == reversalOneCasinoRollbackConstraint {
 				return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrCasinoReversalAlreadyExists, in.ReversesTransactionID)
+			}
+			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == providerTxConstraint {
+				return PostResult{}, fmt.Errorf("%w: provider_id=%v provider_tx_id=%v", ErrProviderReferenceTaken, deref(in.ProviderID), deref(in.ProviderTxID))
 			}
 			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == reversalOneWithdrawalReversalConstraint {
 				return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrWithdrawalReversalAlreadyExists, in.ReversesTransactionID)
@@ -694,4 +707,12 @@ func RebuildProjectionRow(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.U
 		return Balance{}, fmt.Errorf("ledger: rebuild projection row: %w", err)
 	}
 	return b, nil
+}
+
+// deref renders an optional string for an error message.
+func deref(s *string) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return *s
 }

@@ -1013,6 +1013,10 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 			if err := recordSuccessOnPark(ctx, tx, attempt.ID, evidence); err != nil {
 				return err
 			}
+			// A5 LF-A5-1 (see payoutReversalTombstoneCell).
+			if handled, err := payoutReversalTombstoneCell(ctx, tx, attempt, evidence, true, reference); handled || err != nil {
+				return err
+			}
 		}
 		return payoutPostM4Cell(ctx, tx, attempt, observed, evidence, nil, reference)
 	case AttemptSucceeded, AttemptRejected:
@@ -1383,6 +1387,10 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, env payoutEn
 			case ErrorClassSucceeded:
 				// GOV-R32: a success polled on a park is recorded durably first (no state change).
 				if err := recordSuccessOnPark(actx, tx, attempt.ID, evidence); err != nil {
+					return err
+				}
+				// A5 LF-A5-1 (see payoutReversalTombstoneCell).
+				if handled, err := payoutReversalTombstoneCell(actx, tx, attempt, evidence, true, res.ProviderReference); handled || err != nil {
 					return err
 				}
 				return payoutPostM4Cell(actx, tx, attempt, OutcomeSucceeded, evidence, nil, res.ProviderReference)

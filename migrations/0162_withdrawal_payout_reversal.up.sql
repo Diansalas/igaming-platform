@@ -19,7 +19,11 @@
 -- proves distinct-Person decision records exist; it does not prove who typed them (ADR 0113 s9.3).
 --
 -- SQLSTATEs (class WD; 0131/0132 own WD010-WD043, WD098):
---   WD026 E11 without two distinct-Person 'reverse' decisions on one payload digest
+--   WD026 E11 without two distinct-Person 'reverse' decisions on one payload digest (ACTIVE linked staff only:
+--         fix round SR5-4 / LF-A5-3)
+--   WD027 a tombstone correlated to a withdrawal request (the A5 reversal-before-completion branch) without two
+--         distinct active Persons, each holding an in-force payment_force_resolve:approve grant, on ONE reverse
+--         digest (fix round SR5-1 / LF-A5-1: the branch releases a hold like M2 "declare not paid")
 --   WD035 A: the reversal link / reversal transaction is not the s4.2 shape for the state
 --   WD044 a withdrawal_reversed transaction that no 'reversed' request links at COMMIT (or a hold leg on it,
 --         or check A fails for its request)
@@ -142,7 +146,8 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp; -- A5 fix round SR5-6
 
 -- =========================================================================
 -- 3. The state-transition guard (0132 body + the marked A5 lines).
@@ -278,7 +283,7 @@ BEGIN
                   JOIN staff_users su ON su.id = a.approver_principal_id
                  WHERE a.withdrawal_request_id = OLD.id AND a.tenant_id = OLD.tenant_id
                    AND a.decision = 'reverse' AND NOT a.is_automated_approval
-                   AND su.person_id IS NOT NULL
+                   AND su.person_id IS NOT NULL AND su.status = 'active' -- SR5-4 / LF-A5-3
                  GROUP BY a.reason_code) x;
         IF v_persons < 2 THEN
             RAISE EXCEPTION 'withdrawal_requests: completed -> reversed needs two distinct-Person reverse decisions on one payload (found %)', v_persons
@@ -506,3 +511,46 @@ BEGIN
     RETURN NULL;
 END
 $$;
+
+-- =========================================================================
+-- 6. WD027 (fix round SR5-1 / LF-A5-1): the tombstone branch. A `tombstone` whose correlation_id names a
+--    withdrawal request of the tenant is the A5 reversal-before-completion branch (deposit tombstones carry a
+--    fresh correlation id). It commits only with two distinct ACTIVE Persons, each holding an in-force
+--    payment_force_resolve:approve grant (ledger_adjustment_eligible_grant, the M2 rule), on ONE reverse
+--    digest of that request. Immediate AFTER INSERT (the decisions are inserted before the tombstone in the
+--    same transaction); fast exit on every other type; no lock.
+-- =========================================================================
+
+CREATE FUNCTION ledger_transactions_payout_tombstone_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_persons bigint;
+BEGIN
+    IF NEW.transaction_type IS DISTINCT FROM 'tombstone' THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM withdrawal_requests r WHERE r.id = NEW.correlation_id AND r.tenant_id = NEW.tenant_id) THEN
+        RETURN NULL;
+    END IF;
+    SELECT COALESCE(max(x.n), 0) INTO v_persons
+      FROM (SELECT a.reason_code, count(DISTINCT su.person_id) AS n
+              FROM withdrawal_approvals a
+              JOIN staff_users su ON su.id = a.approver_principal_id
+             WHERE a.withdrawal_request_id = NEW.correlation_id AND a.tenant_id = NEW.tenant_id
+               AND a.decision = 'reverse' AND NOT a.is_automated_approval
+               AND su.person_id IS NOT NULL AND su.status = 'active'
+               AND ledger_adjustment_eligible_grant(a.tenant_id, a.approver_principal_id, 'payment_force_resolve:approve') IS NOT NULL
+             GROUP BY a.reason_code) x;
+    IF v_persons < 2 THEN
+        RAISE EXCEPTION 'ledger_transactions: a payout tombstone needs two distinct active Persons with payment_force_resolve:approve on one reverse decision (found %)', v_persons
+            USING ERRCODE = 'WD027';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER ledger_transactions_payout_tombstone_guard
+    AFTER INSERT ON ledger_transactions
+    FOR EACH ROW EXECUTE FUNCTION ledger_transactions_payout_tombstone_guard();

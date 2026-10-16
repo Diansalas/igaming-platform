@@ -465,24 +465,35 @@ func TestA5_PayoutReversal_StepUpPolicy(t *testing.T) {
 	}
 }
 
+// a5K3 is the tombstone-branch environment: the K3 world (finance staff f1..f4 WITH in-force
+// payment_force_resolve:request|approve grants, financeNoGrant WITHOUT) seen through the rbEnv helpers.
+func a5K3(t *testing.T) (rbEnv, *k3World) {
+	t.Helper()
+	w := newK3World(t, k3Opts{base: 1})
+	return rbEnv{pool: w.pool, f: w.f, orch: w.orch, pid: w.provider}, w
+}
+
 // Reversal seen before the original (tombstone rule): the provider reports the return while the
-// platform still has the payout `submitted` (attempt pending). The quorum writes the tombstone on the
+// platform still has the payout `submitted` (attempt pending). Fix round SR5-1 / LF-A5-1: each decider
+// must hold payment_force_resolve:approve (Go and WD027). The quorum writes the tombstone on the
 // original reference, parks the attempt, releases the hold to the player and raises the P1. A late
-// success for that reference then posts nothing, and the ledger refuses any posting on it.
+// success for that reference then posts nothing but writes its own audit row and a DISTINCT P1; the
+// ledger refuses any posting on the reference with the typed ErrProviderReferenceTaken.
 func TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease(t *testing.T) {
-	e := newRBEnv(t, "mock-a5-tomb")
-	ref := "a5-ref-t"
-	wr, a := e.seedBound(t, "a5-t", ref)
-	if a.State != AttemptPending {
-		t.Fatalf("setup: want pending, got %s", a.State)
-	}
+	e, w := a5K3(t)
+	wr, a := w.payout(500)
+	ref := *a.ProviderReference
 	p := e.a5Payload(ref)
 	cashBefore := e.a5Cash(t)
-	e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalRecorded)
+	// A decider without the force-resolve grant cannot take the tombstone branch at all.
+	if _, err := e.a5Decide(w.financeNoGrant.ID, wr.ID, p); !errors.Is(err, withdrawal.ErrReversalCapabilityRequired) {
+		t.Fatalf("no grant: %v, want ErrReversalCapabilityRequired", err)
+	}
+	e.a5MustDecide(t, w.f1.ID, wr.ID, p, PayoutReversalRecorded)
 	if got := mustGetAttempt(t, e.pool, e.f.tenantID, a.ID); got.State != AttemptPending {
 		t.Fatal("one decision must not park")
 	}
-	r := e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalTombstoned)
+	r := e.a5MustDecide(t, w.f2.ID, wr.ID, p, PayoutReversalTombstoned)
 	if r.ParkedAttemptID == nil || *r.ParkedAttemptID != a.ID || r.LedgerTransactionID == nil {
 		t.Fatalf("%+v", r)
 	}
@@ -490,9 +501,9 @@ func TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease(t *testing.T) {
 	if got.State != AttemptDisputed || got.TerminalReason == nil || *got.TerminalReason != TerminalReasonTombstonePrecedesSuccess {
 		t.Fatalf("attempt must be parked with the tombstone reason: %s %v", got.State, got.TerminalReason)
 	}
-	w := fpReqState(t, e.pool, e.f, wr.ID)
-	if w.State != withdrawal.StateFailed || w.ReleaseLedgerTransactionID == nil {
-		t.Fatalf("the hold must be released (E10): %s", w.State)
+	wNow := fpReqState(t, e.pool, e.f, wr.ID)
+	if wNow.State != withdrawal.StateFailed || wNow.ReleaseLedgerTransactionID == nil {
+		t.Fatalf("the hold must be released (E10): %s", wNow.State)
 	}
 	if d := e.a5Cash(t) - cashBefore; d != 500 {
 		t.Fatalf("player_cash back by the hold, delta %d", d)
@@ -505,13 +516,27 @@ func TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease(t *testing.T) {
 	if n := e.a5Count(t, `SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action='payments.payout_reversal_tombstoned' AND target_id=$2`, e.f.tenantID, wr.ID.String()); n != 1 {
 		t.Fatalf("tombstone audit = %d", n)
 	}
-	// A late success for the original reference: nothing posts, the request stays failed.
+	// LF-A5-1: a late success for the original reference posts nothing, keeps the request failed, writes
+	// ONE audit row (redelivery: no second row) and raises a DISTINCT P1.
 	txBefore := fpLedgerTx(t, e.pool, e.f)
-	e.b12Callback(t, a, OutcomeSucceeded, ref, 500)
+	for i := 0; i < 2; i++ {
+		e.b12Callback(t, a, OutcomeSucceeded, ref, 500)
+	}
 	if fpLedgerTx(t, e.pool, e.f) != txBefore || fpReqState(t, e.pool, e.f, wr.ID).State != withdrawal.StateFailed {
 		t.Fatal("a late success after the tombstone must post nothing")
 	}
-	// The ledger itself refuses the original reference: (tenant, provider_id, provider_tx_id) UNIQUE.
+	if n := e.b12AuditCount(t, "payments.payout_success_after_reversal_tombstone", a.ID); n != 1 {
+		t.Fatalf("late-success audit rows = %d, want 1 (once per new receipt)", n)
+	}
+	disc := map[string]int{}
+	for _, row := range e.b12Rows(t) {
+		disc[row.Discriminator] = row.Occurrences
+	}
+	lateDisc := "payout_attempt:" + a.ID.String() + ":reason:" + alertReasonPayoutSuccessAfterReversalTombstone
+	if len(disc) != 2 || disc[lateDisc] < 1 {
+		t.Fatalf("want the park P1 AND a distinct late-success P1, got %v", disc)
+	}
+	// The ledger refuses the original reference: (tenant, provider_id, provider_tx_id) UNIQUE, typed.
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (id, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, correlation_id)
 			VALUES ($1, $2, 'withdrawal_completed', $3, $4, $5, $6)`, uuid.New(), e.f.tenantID, e.pid+":"+ref, e.pid, ref, wr.ID)
@@ -521,29 +546,46 @@ func TestA5_PayoutReversal_BeforeCompletion_TombstoneParkRelease(t *testing.T) {
 	if !errors.As(err, &pgErr) || pgErr.Code != "23505" || pgErr.ConstraintName != "idx_ledger_transactions_tenant_provider_tx" {
 		t.Fatalf("a completion on the tombstoned reference must be refused by the provider unique index, got %v", err)
 	}
-	loAssertBalanced(t, e.pool, e.f.tenantID)
-	loAssertProjectionMatchesRebuild(t, e.pool, e.f.tenantID)
+	err = e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		cash, err := ledger.GetOrCreateAccount(ctx, tx, e.f.tenantID, &e.f.walletID, ledger.AccountPlayerCash, "EUR")
+		if err != nil {
+			return err
+		}
+		clr, err := ledger.GetOrCreateAccount(ctx, tx, e.f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+		if err != nil {
+			return err
+		}
+		pid, rr := e.pid, ref
+		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: e.f.tenantID, TransactionType: ledger.TxDeposit,
+			IdempotencyKey: "a5-late-" + uuid.NewString(), ProviderID: &pid, ProviderTxID: &rr, CorrelationID: uuid.New(),
+			Entries: []ledger.EntryInput{{LedgerAccountID: clr, Direction: ledger.Debit, Amount: 500}, {LedgerAccountID: cash, Direction: ledger.Credit, Amount: 500}}})
+		return err
+	})
+	if !errors.Is(err, ledger.ErrProviderReferenceTaken) {
+		t.Fatalf("ledger.Post on a held provider reference: %v, want ErrProviderReferenceTaken", err)
+	}
+	w.assertInvariants()
 }
 
 // PAYOUT-AMOUNT-DISPUTE-1 x reversal: a success reporting a different amount parks the payout (no
-// posting, hold kept); when the provider then returns the payout, the governed reversal releases the
-// hold through the tombstone branch (the attempt is already parked: no second park). A park whose
-// reference the platform never held (a payout park stays reference-less, ledger-finance C1) cannot be
-// tombstoned: the reversal is refused and the existing unbound-park exit (M4 "not paid") applies.
+// posting, hold kept); when the provider then returns the payout, the governed reversal (force-resolve
+// grant holders) releases the hold through the tombstone branch (the attempt is already parked: no second
+// park). A park whose reference the platform never held (a payout park stays reference-less,
+// ledger-finance C1) cannot be tombstoned: the reversal is refused (the M4 unbound-park exit applies).
 func TestA5_PayoutReversal_AmountDisputeThenReturn(t *testing.T) {
-	e := newRBEnv(t, "mock-a5-aad")
+	e, w := a5K3(t)
 	t.Run("reference never held: refused", func(t *testing.T) {
 		wr, a := e.claim(t, "a5-aad-unbound")
 		e.b12Callback(t, a, OutcomeSucceeded, "a5-ref-aad-unbound", 499)
 		if got := mustGetAttempt(t, e.pool, e.f.tenantID, a.ID); got.State != AttemptDisputed || got.ProviderReference != nil {
 			t.Fatalf("setup: an unbound park: %s %v", got.State, got.ProviderReference)
 		}
-		if _, err := e.a5Decide(e.a5Staff(t), wr.ID, e.a5Payload("a5-ref-aad-unbound")); !errors.Is(err, withdrawal.ErrReversalPayloadMismatch) {
+		if _, err := e.a5Decide(w.f1.ID, wr.ID, e.a5Payload("a5-ref-aad-unbound")); !errors.Is(err, withdrawal.ErrReversalPayloadMismatch) {
 			t.Fatalf("got %v", err)
 		}
 	})
-	ref := "a5-ref-aad"
-	wr, a := e.seedBound(t, "a5-aad", ref)
+	wr, a := w.payout(500)
+	ref := *a.ProviderReference
 	txBefore := fpLedgerTx(t, e.pool, e.f)
 	e.b12Callback(t, a, OutcomeSucceeded, ref, 499)
 	got := mustGetAttempt(t, e.pool, e.f.tenantID, a.ID)
@@ -554,16 +596,16 @@ func TestA5_PayoutReversal_AmountDisputeThenReturn(t *testing.T) {
 		t.Fatal("a mismatched amount must never post")
 	}
 	p := e.a5Payload(ref)
-	e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalRecorded)
-	r := e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalTombstoned)
+	e.a5MustDecide(t, w.f1.ID, wr.ID, p, PayoutReversalRecorded)
+	r := e.a5MustDecide(t, w.f2.ID, wr.ID, p, PayoutReversalTombstoned)
 	if r.ParkedAttemptID == nil || *r.ParkedAttemptID != a.ID {
 		t.Fatalf("%+v", r)
 	}
 	if got := mustGetAttempt(t, e.pool, e.f.tenantID, a.ID); *got.TerminalReason != TerminalReasonCallbackAmountAssetMismatch {
 		t.Fatalf("the original park reason is kept: %v", got.TerminalReason)
 	}
-	if w := fpReqState(t, e.pool, e.f, wr.ID); w.State != withdrawal.StateFailed {
-		t.Fatalf("hold released, got %s", w.State)
+	if wNow := fpReqState(t, e.pool, e.f, wr.ID); wNow.State != withdrawal.StateFailed {
+		t.Fatalf("hold released, got %s", wNow.State)
 	}
 	// Only the original mismatch alert of THIS attempt: no second alert for an attempt already parked.
 	n := 0
@@ -578,7 +620,54 @@ func TestA5_PayoutReversal_AmountDisputeThenReturn(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("want exactly the original mismatch alert, got %d", n)
 	}
-	loAssertBalanced(t, e.pool, e.f.tenantID)
+	w.assertInvariants()
+}
+
+// SR5-3: a return reference the platform already holds for the provider (here another payout's own
+// reference) is refused before any vote is recorded, so it can never occupy that payout's reference.
+func TestA5_PayoutReversal_ReturnReferenceAlreadyHeld_Refused(t *testing.T) {
+	e, w := a5K3(t)
+	_, other := w.payout(300) // its reference is held by its attempt and its withdrawal
+	wr, _ := e.a5Completed(t, "a5-rr", "a5-ref-rr")
+	p := e.a5Payload("a5-ref-rr")
+	p.ReturnReference = *other.ProviderReference
+	if _, err := e.a5Decide(w.f1.ID, wr.ID, p); !errors.Is(err, withdrawal.ErrReversalReturnReferenceInUse) {
+		t.Fatalf("got %v, want ErrReversalReturnReferenceInUse", err)
+	}
+	// Its own original reference (held by its completion) is refused the same way.
+	p.ReturnReference = "a5-ref-rr-x"
+	q := p
+	q.ReturnReference = "a5-ref-rr" // == the completion's provider_tx_id is already refused by Validate (return != original)
+	if _, err := e.a5Decide(w.f1.ID, wr.ID, q); !errors.Is(err, withdrawal.ErrInvalidInput) {
+		t.Fatalf("got %v", err)
+	}
+	if n := e.a5Count(t, `SELECT count(*) FROM withdrawal_approvals WHERE withdrawal_request_id=$1 AND decision='reverse'`, wr.ID); n != 0 {
+		t.Fatalf("a refused reference recorded %d decisions", n)
+	}
+	e.a5MustDecide(t, w.f1.ID, wr.ID, p, PayoutReversalRecorded)
+}
+
+// SR5-4 / LF-A5-3: a vote counts only while its voter is ACTIVE staff. The first voter is suspended, so
+// the second vote alone does not execute (Go count); a third active Person completes the quorum.
+func TestA5_PayoutReversal_SuspendedVoterNoLongerCounts(t *testing.T) {
+	e := newRBEnv(t, "mock-a5-susp")
+	wr, _ := e.a5Completed(t, "a5-su", "a5-ref-su")
+	p := e.a5Payload("a5-ref-su")
+	s1 := e.a5Staff(t)
+	e.a5MustDecide(t, s1, wr.ID, p, PayoutReversalRecorded)
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, s1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalRecorded); r.Counted != 1 {
+		t.Fatalf("the suspended voter must not count: %+v", r)
+	}
+	if fpReqState(t, e.pool, e.f, wr.ID).State != withdrawal.StateCompleted {
+		t.Fatal("no execution with one active Person")
+	}
+	e.a5MustDecide(t, e.a5Staff(t), wr.ID, p, PayoutReversalExecuted)
 }
 
 // The four-eyes floor is unconditional: a withdrawal policy asking for ONE approval still needs two

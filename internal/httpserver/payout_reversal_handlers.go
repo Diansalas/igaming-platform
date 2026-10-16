@@ -139,6 +139,12 @@ func newPayoutReversalHandler(deps Deps) http.HandlerFunc {
 		case errors.Is(err, withdrawal.ErrReversalPayloadMismatch):
 			apierror.Write(w, requestID, apierror.CodeConflict, "the reversal does not match the payout (provider, reference, amount or asset)")
 			return
+		case errors.Is(err, withdrawal.ErrReversalReturnReferenceInUse):
+			apierror.Write(w, requestID, apierror.CodeConflict, "the return reference is already held by the platform for this provider")
+			return
+		case errors.Is(err, withdrawal.ErrReversalCapabilityRequired):
+			apierror.Write(w, requestID, apierror.CodeForbidden, "a reversal of a submitted payout requires the payment_force_resolve:approve capability")
+			return
 		case errors.Is(err, withdrawal.ErrReversalAlreadyExists):
 			apierror.Write(w, requestID, apierror.CodeConflict, "the payout has already been reversed")
 			return

@@ -82,6 +82,8 @@ var payoutSignalReasons = map[string]struct{}{
 	// ADR 0111 4.8 (F-1): the post-M4 signal cells (payout_post_m4.go). Raise only; the attempt stays disputed.
 	alertReasonPayoutSuccessAfterM4NotPaid:    {},
 	alertReasonPayoutContradictionAfterM4Paid: {},
+	// A5 LF-A5-1: a success after the governed reversal-before-completion (payout_reversal.go). Raise only.
+	alertReasonPayoutSuccessAfterReversalTombstone: {},
 }
 
 // payoutAlertReasonFor maps a payout terminal or escalation reason to its

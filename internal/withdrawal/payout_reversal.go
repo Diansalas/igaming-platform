@@ -61,7 +61,18 @@ var (
 	ErrReversalPayloadMismatch = errors.New("withdrawal: the payout reversal does not match the payout (provider, reference, amount or asset)")
 	// ErrReversalAlreadyExists: a different reversal of this completion is already on the ledger.
 	ErrReversalAlreadyExists = errors.New("withdrawal: this payout completion has already been reversed")
+	// ErrReversalReturnReferenceInUse (SR5-3): the return reference is a reference the platform already holds for
+	// this provider (a payment attempt, a withdrawal request or a ledger posting). Nothing is recorded; the HTTP
+	// layer answers a typed 409. Also the typed form of a provider-UNIQUE collision at posting time (R7).
+	ErrReversalReturnReferenceInUse = errors.New("withdrawal: the return reference is already held by the platform for this provider")
+	// ErrReversalCapabilityRequired (SR5-1 / LF-A5-1): the request is still `submitted`, so the reversal would take
+	// the tombstone branch (a hold release, the functional twin of M2 "declare not paid"); each decider must hold
+	// an in-force payment_force_resolve:approve grant (the same capability M2 requires). Nothing is recorded.
+	ErrReversalCapabilityRequired = errors.New("withdrawal: a reversal of a submitted payout requires the payment_force_resolve:approve capability")
 )
+
+// ForceResolveApproveCapability is the capability each decider of the tombstone branch must hold (0112 catalogue).
+const ForceResolveApproveCapability = "payment_force_resolve:approve"
 
 var evidenceRefHashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -193,6 +204,9 @@ func RecordPayoutReversalDecision(
 	if err := matchReversalPayload(ctx, tx, wr, p); err != nil {
 		return ReversalDecision{}, err
 	}
+	if err := returnReferenceFree(ctx, tx, wr.TenantID, p.ProviderID, p.ReturnReference); err != nil {
+		return ReversalDecision{}, err
+	}
 
 	linked, active, err := approverEligibility(approverPrincipalID)
 	if err != nil {
@@ -210,6 +224,17 @@ func RecordPayoutReversalDecision(
 	}
 	if isBeneficiary {
 		return ReversalDecision{}, ErrSelfApproval
+	}
+	submitted := wr.State == StateSubmitted
+	if submitted {
+		var granted bool
+		if err := tx.QueryRow(ctx, `SELECT ledger_adjustment_eligible_grant($1, $2, $3) IS NOT NULL`,
+			wr.TenantID, approverPrincipalID, ForceResolveApproveCapability).Scan(&granted); err != nil {
+			return ReversalDecision{}, fmt.Errorf("withdrawal: read force-resolve grant: %w", err)
+		}
+		if !granted {
+			return ReversalDecision{}, ErrReversalCapabilityRequired
+		}
 	}
 
 	policy, err := ResolveApprovalPolicy(ctx, tx, wr.TenantID, wr.BrandID, nil, wr.AssetCode, time.Now())
@@ -243,14 +268,18 @@ func RecordPayoutReversalDecision(
 		return ReversalDecision{}, fmt.Errorf("withdrawal: insert reversal decision: %w", err)
 	}
 
+	// SR5-4 / LF-A5-3: only ACTIVE linked staff count at the moment of execution (a suspended voter's vote no
+	// longer counts); for a submitted request (the tombstone branch) each counted voter must still hold the
+	// force-resolve grant (SR5-1). The database restates both (WD026 / WD027, migration 0162).
 	var counted int
 	if err := tx.QueryRow(ctx,
 		`SELECT count(DISTINCT su.person_id)
 		   FROM withdrawal_approvals wa
 		   JOIN staff_users su ON su.id = wa.approver_principal_id
 		  WHERE wa.withdrawal_request_id = $1 AND wa.decision = 'reverse' AND wa.is_automated_approval = false
-		    AND wa.reason_code = $2 AND su.person_id IS NOT NULL`,
-		requestID, reason).Scan(&counted); err != nil {
+		    AND wa.reason_code = $2 AND su.person_id IS NOT NULL AND su.status = 'active'
+		    AND (NOT $3 OR ledger_adjustment_eligible_grant(wa.tenant_id, wa.approver_principal_id, $4) IS NOT NULL)`,
+		requestID, reason, submitted, ForceResolveApproveCapability).Scan(&counted); err != nil {
 		return ReversalDecision{}, fmt.Errorf("withdrawal: count reversal decisions: %w", err)
 	}
 
@@ -298,6 +327,24 @@ func matchReversalPayload(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest, 
 	if typ != string(ledger.TxWithdrawalCompleted) || providerID == nil || *providerID != p.ProviderID ||
 		providerTxID == nil || *providerTxID != p.OriginalProviderReference {
 		return ErrReversalPayloadMismatch
+	}
+	return nil
+}
+
+// returnReferenceFree refuses a return reference the platform already holds for (tenant, provider): a payment
+// attempt's reference, a withdrawal request's reference or any ledger posting's provider_tx_id (SR5-3). Typing
+// another payout's reference as the "return" would otherwise occupy the provider UNIQUE and park that payout.
+func returnReferenceFree(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, ref string) error {
+	var held bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM payment_attempts WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3)
+		    OR EXISTS (SELECT 1 FROM withdrawal_requests WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3)
+		    OR EXISTS (SELECT 1 FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3)`,
+		tenantID, providerID, ref).Scan(&held); err != nil {
+		return fmt.Errorf("withdrawal: check return reference: %w", err)
+	}
+	if held {
+		return ErrReversalReturnReferenceInUse
 	}
 	return nil
 }
@@ -385,6 +432,9 @@ func ReverseCompletedPayout(ctx context.Context, tx pgx.Tx, requestID uuid.UUID,
 	})
 	if errors.Is(err, ledger.ErrWithdrawalReversalAlreadyExists) || errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
 		return uuid.Nil, fmt.Errorf("%w: %w", ErrReversalAlreadyExists, err)
+	}
+	if errors.Is(err, ledger.ErrProviderReferenceTaken) {
+		return uuid.Nil, fmt.Errorf("%w: %w", ErrReversalReturnReferenceInUse, err)
 	}
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("withdrawal: post payout reversal: %w", err)

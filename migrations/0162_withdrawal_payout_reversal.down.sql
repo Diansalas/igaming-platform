@@ -33,6 +33,9 @@ BEGIN
     END IF;
 END $$;
 
+DROP TRIGGER ledger_transactions_payout_tombstone_guard ON ledger_transactions;
+DROP FUNCTION ledger_transactions_payout_tombstone_guard();
+
 CREATE OR REPLACE FUNCTION ledger_transactions_withdrawal_hold_leg_at_commit() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp

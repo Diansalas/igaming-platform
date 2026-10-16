@@ -186,6 +186,17 @@ func TestA5DB_E11_GovernanceFloorAndShape(t *testing.T) {
 		}
 		return a5Vote(ctx, tx, wr, l2, reason)
 	}, e11)
+	attempt("two persons, one suspended after voting", "WD026", func(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest) error {
+		s3 := mustCreateApprover(t, pool, f.tenantID)
+		if err := a5Vote(ctx, tx, wr, s1, reason); err != nil {
+			return err
+		}
+		if err := a5Vote(ctx, tx, wr, s3, reason); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, s3)
+		return err
+	}, e11)
 	attempt("two persons two payloads", "WD026", func(ctx context.Context, tx pgx.Tx, wr WithdrawalRequest) error {
 		if err := a5Vote(ctx, tx, wr, s1, reason); err != nil {
 			return err

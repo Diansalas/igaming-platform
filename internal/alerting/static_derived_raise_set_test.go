@@ -129,6 +129,10 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	// InTx owners), all already in this set, and the call sites are pinned by
 	// TestStaticWiring_PayoutPostM4CellSitesArePinned_F1. The raise is its last statement, after its audit row.
 	"internal/payments/payout_post_m4.go:payoutPostM4Cell": true,
+	// A5 fix round (LF-A5-1): the success-after-reversal-tombstone cell. Reached only from applyResolvedReceiptEvidence
+	// (webhook InTx), applyPayoutLateEvidence and applyPayoutStatusEvidenceInTx (both inside ApplyPayoutResult /
+	// applyPayoutStatusEvidence InTx closures), exactly like payoutPostM4Cell.
+	"internal/payments/payout_reversal.go:payoutReversalTombstoneCell": true,
 }
 
 func TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4(t *testing.T) {

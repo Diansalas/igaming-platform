@@ -270,3 +270,45 @@ func reversePayoutBeforeCompletion(ctx context.Context, tx pgx.Tx, wr withdrawal
 	}
 	return posted.TransactionID, parked, nil
 }
+
+// alertReasonPayoutSuccessAfterReversalTombstone is the closed alert reason of LF-A5-1 (raise only).
+const alertReasonPayoutSuccessAfterReversalTombstone = "success_after_payout_reversal_tombstone"
+
+// payoutReversalTombstoneCell is LF-A5-1: success evidence (callback or poll) for a payout attempt whose
+// withdrawal was failed by the A5 tombstone branch (a tombstone correlated to the request, on the attempt's
+// provider). The staff attestation "the PSP returned it" is then contradicted: the hold is already back with the
+// player, so this is a double-payout candidate. It writes its own audit row (once per new receipt) and raises a
+// DISTINCT P1 (its own discriminator, so the earlier park alert does not swallow it) as the LAST statement. No
+// state change, no posting. handled = false when the attempt is not such a payout (the caller continues).
+func payoutReversalTombstoneCell(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, newReceipt bool, reference string) (bool, error) {
+	if attempt.Operation != AttemptOperationPayout || attempt.WithdrawalRequestID == nil || attempt.ProviderID == nil {
+		return false, nil
+	}
+	var tombstone *uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM ledger_transactions
+		  WHERE tenant_id = $1 AND transaction_type = 'tombstone' AND correlation_id = $2 AND provider_id = $3
+		  ORDER BY id LIMIT 1`,
+		attempt.TenantID, *attempt.WithdrawalRequestID, *attempt.ProviderID).Scan(&tombstone); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("payments: read payout reversal tombstone: %w", err)
+	}
+	if tombstone == nil {
+		return false, nil
+	}
+	if newReceipt {
+		meta := map[string]any{
+			"withdrawal_request_id": attempt.WithdrawalRequestID.String(), "tombstone_ledger_transaction_id": tombstone.String(),
+			"evidence": string(evidence), "provider_id": *attempt.ProviderID, "attempt_state": string(attempt.State),
+		}
+		if reference != "" {
+			meta["reported_reference"] = reference
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_success_after_reversal_tombstone",
+			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied, Metadata: meta,
+		}); err != nil {
+			return false, fmt.Errorf("payments: audit success after reversal tombstone: %w", err)
+		}
+	}
+	return true, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutSuccessAfterReversalTombstone)
+}

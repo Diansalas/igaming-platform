@@ -152,6 +152,59 @@ func TestA5D_ReversedArm_ParityWithCheckA(t *testing.T) {
 	}
 }
 
+// LF-A5-5: the detective twin of WD026. A well-shaped reversal (check A passes) on a request with NO
+// 'reverse' decisions, planted by the owner with the state guard switched off, is a standing finding
+// (violation=WD026); a governed reversal whose voter is LATER suspended is not (no false P1).
+func TestA5D_ReversedWithoutDecisions_IsWD026(t *testing.T) {
+	pool := testPool(t)
+	rt := wdpath.RuntimeFor(t, pool)
+	f := seedFixture(t, pool)
+	governed := dWithdrawal(t, pool, f, 10, withdrawal.StateCompleted)
+	s1 := a5DStaff(t, pool, f.tenantID)
+	a5DReverse(t, rt, f, governed, s1, a5DStaff(t, pool, f.tenantID))
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, s1)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wdpath.SkipOnPersistentDatabase(t, pool)
+	planted := dWithdrawal(t, pool, f, 10, withdrawal.StateCompleted)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var completion uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT release_ledger_transaction_id FROM withdrawal_requests WHERE id = $1`, planted).Scan(&completion); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `ALTER TABLE withdrawal_requests DISABLE TRIGGER withdrawal_requests_aa_state_transition_guard`); err != nil {
+			return err
+		}
+		pid, ret := "wdpath-psp", "plant-ret-"+planted.String()
+		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxWithdrawalReversed,
+			IdempotencyKey: planted.String() + ":reversed", ProviderID: &pid, ProviderTxID: &ret, CorrelationID: planted,
+			ReversesTransactionID: &completion,
+			Entries: []ledger.EntryInput{{LedgerAccountID: f.clearingID, Direction: ledger.Debit, Amount: 10},
+				{LedgerAccountID: f.cashAccountID, Direction: ledger.Credit, Amount: 10}}})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'reversed', reversal_ledger_transaction_id = $1 WHERE id = $2`, res.TransactionID, planted); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `ALTER TABLE withdrawal_requests ENABLE TRIGGER withdrawal_requests_aa_state_transition_guard`)
+		return err
+	}); err != nil {
+		t.Fatalf("owner tamper plant (reversal without decisions): %v", err)
+	}
+	o := dSweep(t, rt, f)
+	if o.Err != nil || o.Run.Status != StatusMismatchesFound {
+		t.Fatalf("the plant must be found: %s err=%v", o.Run.Status, o.Err)
+	}
+	rows := dKind(dMismatches(t, pool, f), MismatchKindWithdrawalRequestLedgerLinkInvalid)
+	if len(rows) != 1 || rows[0].key != planted.String() || !strings.HasPrefix(rows[0].actual, "violation=WD026 ") {
+		t.Fatalf("want exactly the planted request reported WD026 (the governed one with a later-suspended voter is clean): %+v", rows)
+	}
+}
+
 func TestA5D_GovernedReversalIsClean_OrphanReversalIsWD044(t *testing.T) {
 	pool := testPool(t)
 	rt := wdpath.RuntimeFor(t, pool)
