@@ -5,6 +5,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,6 +167,24 @@ func TestF2e_M2_WithKeys_OnlyASealedRunIsEvidence(t *testing.T) {
 	k3StatementRun(t, w.pool, w.f.tenantID, w.mock, nil)
 	if _, err := f2eRequestM2(w, a.ID, ResolutionM2DeclareNotPaid); !errors.Is(err, ErrResolutionReconciliationNotCurrent) {
 		t.Fatalf("an unsealed run must not be evidence when the process has keys: %v", err)
+	}
+	// A forged import shaped like the stream's own (service set, a made-up seal and the real kid, 0 lines) plus a run
+	// row with its coverage_end, written in the world's unprivileged tenant session: not evidence (the seal must VERIFY).
+	w.tx(func(ctx context.Context, tx pgx.Tx) error {
+		digest := make([]byte, 32)
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_statement_imports
+			    (id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at,
+			     payout_lines_carry_merchant_reference, imported_by_service, import_seal, seal_kid)
+			VALUES ($1, $2, $3, 'MOCK forged', true, now() - interval '1 hour', date_trunc('milliseconds', now()), 0, $4, now(), false, $5, $6, 'f2e')`,
+			uuid.New(), w.f.tenantID, w.provider, digest, importedByServicePaymentStatement, strings.Repeat("ab", 32)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, status, coverage_end, provider_id, window_truncated)
+			VALUES ($1, 'payment_statement', now() - interval '1 hour', now(), 'clean', date_trunc('milliseconds', now()), $2, false)`, w.f.tenantID, w.provider)
+		return err
+	})
+	if _, err := f2eRequestM2(w, a.ID, ResolutionM2DeclareNotPaid); !errors.Is(err, ErrResolutionReconciliationNotCurrent) {
+		t.Fatalf("a forged sealed-looking import must not be evidence: %v", err)
 	}
 	k3StatementRun(t, w.pool, w.f.tenantID, w.mock, keys)
 	if _, err := f2eRequestM2(w, a.ID, ResolutionM2DeclareNotPaid); err != nil {
