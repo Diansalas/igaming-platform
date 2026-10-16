@@ -12,6 +12,7 @@ var staffRouteGolden = map[string]string{
 	"POST /v1/admin/alerting/routes":          "classifier:alertRouteManageClass",
 	"GET /v1/admin/alerting/status":           "none",
 	"GET /v1/admin/alerts":                    "none",
+	"GET /v1/admin/platform/status":           "none",
 	"GET /v1/admin/alerts/{alertID}":          "none",
 	"POST /v1/admin/alerts/{alertID}/ack":     "none",
 	"POST /v1/admin/alerts/{alertID}/resolve": "classifier:alertResolveClass",

@@ -60,7 +60,10 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/platform-api ./cmd/platform-api \
+# F6 / SA-3: the source commit reported by GET /v1/admin/platform/status. Optional: an image built without it reports
+# "unknown" (internal/buildinfo validates the value, 7 to 64 lower-case hex characters, and ignores anything else).
+ARG GIT_COMMIT=unknown
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X github.com/Diansalas/igaming-platform/internal/buildinfo.Commit=${GIT_COMMIT}" -o /out/platform-api ./cmd/platform-api \
     && CGO_ENABLED=0 GOOS=linux go build -o /out/migrate ./cmd/migrate \
     && CGO_ENABLED=0 GOOS=linux go build -o /out/seed-admin ./cmd/seed-admin
 

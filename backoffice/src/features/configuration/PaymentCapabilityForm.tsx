@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
-import { writePaymentCapability, type AmountLimit } from '../../api/providerConfig'
+import { writePaymentCapability, type AmountLimit, type PaymentCapabilityRequest } from '../../api/providerConfig'
 import { ErrorAlert, InfoNote, SuccessAlert } from '../../components/Alert'
 import { Button } from '../../components/Button'
 import { Card } from '../../components/Card'
@@ -40,7 +40,7 @@ export function PaymentCapabilityForm() {
   const [status, setStatus] = useState<'active' | 'disabled'>('active')
   const [limits, setLimits] = useState<LimitRow[]>([])
   const [error, setError] = useState<ErrorDetails | null>(null)
-  const [saved, setSaved] = useState<{ id: string; providerId: string } | null>(null)
+  const [saved, setSaved] = useState<{ id: string; providerId: string; effective?: PaymentCapabilityRequest; narrowed?: boolean } | null>(null)
 
   const limitsInvalid = limits.some(
     (l) => !l.asset_code.trim() || !/^\d+$/.test(l.min_amount) || !/^\d+$/.test(l.max_amount),
@@ -68,7 +68,7 @@ export function PaymentCapabilityForm() {
       }),
     onSuccess: (res, pid) => {
       setError(null)
-      setSaved({ id: res.id, providerId: pid })
+      setSaved({ id: res.id, providerId: pid, effective: res.effective, narrowed: res.narrowed })
     },
     onError: (err) => setError(describeError(err, 'Failed to save payment provider capability.')),
     onSettled: () => guard.release(),
@@ -166,6 +166,15 @@ export function PaymentCapabilityForm() {
           <SuccessAlert>
             Payment capability for <span className="font-mono">{saved.providerId}</span> saved. Capability ID:{' '}
             <span className="font-mono">{saved.id}</span>
+            {saved.effective && (
+              <>
+                <br />
+                Stored (effective) payment methods:{' '}
+                <span className="font-mono">{saved.effective.supported_payment_methods.join(', ') || 'none'}</span>; currencies:{' '}
+                <span className="font-mono">{saved.effective.supported_fiat_currencies.join(', ') || 'none'}</span>.
+                {saved.narrowed && <strong> The stored configuration differs from what you sent; check it before relying on it.</strong>}
+              </>
+            )}
           </SuccessAlert>
         )}
         <div>
