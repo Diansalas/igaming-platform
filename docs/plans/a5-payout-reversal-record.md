@@ -397,3 +397,72 @@ accounts that went negative through a chargeback (a fraud signal), that belongs 
 
 None blocking for the MOCK-only merge. Before real money: LF-A5-1 and LF-A5-2 closed and re-reviewed by
 `ledger-finance` and `security`; R6 (statement reconciliation of returns) remains PROVIDER DEPENDENT.
+
+## 10. Security review (SR5, `security`, 2026-10-16, independent)
+
+Scope: diff `1adce1c..84ac47f` (migrations 0162 / 0163, `internal/withdrawal/payout_reversal.go`,
+`internal/payments/payout_reversal.go`, `internal/payments/manual_resolution.go`, `internal/httpserver/payout_reversal_handlers.go`
++ route, OpenAPI, `internal/rg` negative-balance gate), against ADR 0110, 0113, 0119 and the 9.1 probe list. Evidence:
+private scratch database `sr5_a5` (local, dropped after the run; never CI). Probes were throwaway test files run once and
+deleted (not committed). Re-ran: `-run 'TestA5|TestStaffRoutes|TestStepUp_GoldenTable'` over httpserver, withdrawal, rg,
+casino, reconciliation, adjustment (35 PASS, 0 SKIP) and `-run TestA5 ./internal/payments/` (13 PASS). NOT in scope:
+penetration testing, the back-office screen (not built), a real PSP, the identity-store threats T3/T4 of ADR 0110.
+
+### 10.1 Verified (no finding)
+
+- Route `POST /v1/admin/withdrawals/{id}/payout-reversal`: `staffRoute(stepUpCritical, RequireTenantScope(RequirePermission(
+  PermWithdrawalApprove)))`; golden table `critical`; route freeze pins 218 / 135 and critical 64 updated; OpenAPI entry present
+  (strict body `additionalProperties: false`, amount as a decimal string, evidence hash pattern). The decider is the token
+  subject only; `approverEligibilityCheckLocked` re-asserts role and `staff_version` FOR SHARE (ADR 0119 9.5). No
+  Idempotency-Key header: idempotency is database-enforced (three UNIQUEs + the state machine) and the executing call's retry
+  is `already_executed`; acceptable for a staff decision route (a lost response on a non-executing vote returns 409, UX only).
+- Four-eyes: distinct non-NULL Persons on ONE digest in Go and in WD026; the digest is length-prefixed and binds request id,
+  provider, both references, amount, asset and evidence hash; `withdrawal_approvals` is append-only (`ledger_deny_mutation`
+  on UPDATE/DELETE/TRUNCATE), so a vote cannot be re-pointed to another payload. The approve quorum counts
+  `decision = 'approve'` only (a `reverse` vote never counts toward a payout approval).
+- S-L1 analogue: staff whose Person is the withdrawing player's Person cannot decide a reversal: Go `ErrSelfApproval`
+  (403 + durable Denied audit row, SR11-4 pattern) and the 0162 governance trigger (`reverse` covered).
+  `player_accounts.person_id` is NOT NULL, so the comparison never degrades to "unknown".
+- RLS: `withdrawal_approvals` and `withdrawal_requests` FORCE RLS, tenant-bound policies unchanged; the new column and
+  indexes inherit them; runtime grants unchanged (no DELETE on `withdrawal_requests`). No new SECURITY DEFINER; the three
+  0132-derived functions and both 0163 functions pin `search_path = pg_catalog, public, pg_temp` (see SR5-6 for the fourth).
+- Audit: decision, execution, tombstone and HTTP rows carry ids, provider references, amount, asset, digest and evidence
+  hash only; the HTTP row adds IP / user agent / request id as CLAUDE.md requires. No names, e-mails, free text or secrets.
+- M2 mismatch exit (0163): admitted only with basis `provider_confirmed_out_of_band` at submission and at `-> executing`
+  (MR010, Go mirror); `basis_code` is in the immutable payload; M2 keeps its ADR 0110 proof, capability grants, four-eyes
+  and statement-source rule; `evidence_ref_hash` is NOT NULL for M2 (check4). The basis cannot be swapped after approval.
+- Negative-balance gate: a tenant-RLS read of the wallet's own projection rows, no lock, no new SECURITY DEFINER; it cannot
+  affect another tenant or another player (derived from the gated wallet only). Deposits are never blocked, so a player can
+  always self-cure; making a wallet negative on purpose needs a chargeback (own deposit) or a governed K2 debit.
+- Tombstone abuse from outside: no unauthenticated or player path writes this tombstone. The tombstone is written only on
+  a reference the platform already holds for THIS payout (probe: a park with no bound reference is refused with
+  `ErrReversalPayloadMismatch`), and the provider UNIQUE is per tenant, so no cross-tenant blocking.
+
+### 10.2 Findings
+
+| # | Severity | Finding |
+|---|---|---|
+| SR5-1 | **MEDIUM** (must close before real money) | **The tombstone branch is a weaker-governed "declare not paid".** Probe: a normal `pending` payout (provider accepted, reference bound, no dispute); two finance staff with `withdrawal:approve` record the same payload -> `tombstoned_hold_released`, player cash +500 (hold released); the genuine late success is then parked `disputed` (P1). If the PSP actually paid, the player is paid twice. M2 "declare not paid" for the same situation requires the ADR 0110 signed proof, the `payment_force_resolve` capability grants, basis `provider_confirmed_out_of_band` (L-3) and a statement source; this branch requires none of them (only `withdrawal:approve` x2, critical step-up and a staff-asserted evidence hash). The same applies to an amount/asset-mismatch park (record 2b), which now has a stronger exit (M2, 0163) and a weaker one (this branch). Fix (any one): require the `payment_force_resolve:approve` eligible grant for each decider of the submitted branch (Go + database), or route the submitted case through K3 M2 "declare not paid" (basis out-of-band) plus the tombstone. Mitigations today: four-eyes by Persons, critical step-up, audit, P1 on the park, MOCK providers only. |
+| SR5-2 | **HIGH before real money / not a merge blocker** (= R1) | **Reverse decisions are not bound to the ADR 0110 signed actor proof.** Confirmed as `igaming_runtime` in a tenant session: two well-shaped `reverse` rows naming two real linked staff + `ReverseCompletedPayout` commit (state `reversed`, cash credited); no step-up, no HTTP layer, no decision or HTTP audit row is written by the forger. This adds a money-crediting flow to ADR 0110 threat-register T8 (withdrawal approvals 0026/0034, DEFERRED-REQUIRES-OWNER-AUTHORIZATION) and is undetectable by reconciliation today (R1/R6). Recommendation: do NOT route reversals through the K2 adjustment tables (K2 is wallet-adjustment semantics: it would duplicate the governance, lose the E11 / reversal-link discipline and need an architect decision). Instead, register an open row now and close it before any real-money reversal by an ADR 0110 amendment (owner authorization, as T8 requires) that adds `withdrawal_approvals` INSERT to the proof-bound set: operation `withdrawal_payout_reversal:decide`, target = request id, payload hash = the existing payout digest (already the `reason_code`), with WD026 counting only proof-bound rows; close ADR 0113 9.3 (`approve`) in the same amendment. Until closed: MOCK providers only, and the route must stay off any real-money deployment. |
+| SR5-3 | LOW | **Return-reference poisoning.** `return_reference` is staff-typed and lands in the (tenant, provider_id, provider_tx_id) UNIQUE shared with every posting of that provider. Probe: reverse payout A naming payout B's provider reference as the return reference; B's genuine success then cannot post and parks `provider_reference_conflict` (hold kept, no M2 path; ops needed). A deceived second approver cannot see the collision. Needs two decisions on the same payload; no money is lost (hold kept, P1). Fix: refuse a return reference the platform already holds for any payment attempt / withdrawal / deposit of the same (tenant, provider), and map the residual UNIQUE collision to a typed 409 (closes R7 too). |
+| SR5-4 | LOW | **A vote never goes stale.** Probe: staff 1 votes, is then suspended; staff 2 votes -> the reversal executes counting the suspended Person (WD026 and the Go count check Person linkage, not status). Votes also have no expiry. Fix: count only `status = 'active'` linked staff at execution (Go and WD026) and/or a vote lifetime. |
+| SR5-5 | LOW (owner question) | **Negative-balance block is per wallet.** A player with a negative EUR wallet (e.g. after a chargeback) is not blocked from withdrawing or playing from another asset wallet. Owner decision 13 says "block until cleared"; confirm per wallet vs per player (Q2/Q3). Also, the gate is skipped when a caller passes `WalletID = uuid.Nil` (pre-existing contract); every current gated caller passes the wallet (verified: casino launch/bet, sportsbook bet, bonus eligibility, withdrawal gate). |
+| SR5-6 | LOW / INFO | **`withdrawal_approvals_enforce_governance` has no pinned `search_path`** (the 0034 body, replaced by 0162, which states "every function pins search_path"). It is SECURITY INVOKER and resolves `staff_users` / `player_accounts` unqualified; a session able to create a temp table could shadow them (pg_temp is searched first when not listed). `igaming_runtime` has no TEMP privilege on the scratch database; production TEMP grants are not verified here. Fix: add `SET search_path = pg_catalog, public, pg_temp` to the 0162 body (down keeps the 0034 body). |
+| SR5-7 | INFO (test gap) | The HTTP test does not cover a `platform_admin` token (tenant scope) nor the beneficiary 403 + Denied audit row over HTTP (both are covered by the generic scope middleware and by the Go-level test respectively). Add both to `a5_payout_reversal_http_integration_test.go`. |
+
+### 10.3 Authorization / tenant-isolation tests the `qa` coverage must keep (security specification)
+
+1. Another tenant's valid finance token on this route returns 404 and records nothing (present).
+2. A `platform_admin` token returns 403 (tenant scope) and records nothing (SR5-7, add).
+3. The paid player's own Person (staff login) returns 403 and writes one Denied audit row (add the HTTP variant).
+4. Two logins of one Person never reach the quorum (present, Go and WD026).
+5. After SR5-1: a decider without the force-resolve capability cannot take the submitted (tombstone) branch.
+6. After SR5-2: a `reverse` row inserted without a valid proof is refused by the database (AP class).
+
+### 10.4 Verdict
+
+**APPROVE for merge at the current development stage (MOCK providers), with conditions**; NOT approved for any
+real-money use. Conditions: SR5-1 and SR5-2 registered as open rows that MUST close before real-money payout reversals
+(SR5-2 needs owner authorization per ADR 0110 T8); SR5-3, SR5-4, SR5-6 fixed or registered; SR5-5 put to the owner with
+Q2/Q3. Launch-blocking for real money: SR5-1, SR5-2. This review does not declare the feature "secure": it covered the
+listed code and migrations at `84ac47f` only.
