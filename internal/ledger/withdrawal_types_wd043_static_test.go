@@ -25,7 +25,7 @@ var wd043Decided = map[string]string{
 	"withdrawal_rejected":  "hold leg required (Dr player_withdrawal_hold, release)",
 	"withdrawal_failed":    "hold leg required (Dr player_withdrawal_hold, release)",
 	"withdrawal_completed": "hold leg required (Dr player_withdrawal_hold, release)",
-	"withdrawal_reversed":  "hold leg required; no writer, refused end to end by B-i (WITHDRAWAL-REVERSAL-1 needs a new migration)",
+	"withdrawal_reversed":  "NO hold leg (B-i still refuses one: WD040); instead linked at COMMIT as the reversal link of a reversed request that passes check A (WD044, migration 0162, A5 WITHDRAWAL-REVERSAL-1)",
 }
 
 // withdrawalTxTypeConstants returns the values of the TransactionType constants of this package

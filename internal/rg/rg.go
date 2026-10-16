@@ -565,6 +565,14 @@ const (
 	// CodeTimedOut: the Person is inside an active time-out (ADR 0115 2.3; completion audit A6). Same
 	// shape and the same L0.4 lock as self-exclusion; it never changes wallet status.
 	CodeTimedOut = "timed_out"
+	// CodeWalletNegativeBalance: owner decision 13 (2026-10-15, negative-balance policy "block until
+	// cleared"; completion audit A5). A wallet whose player_cash or player_locked_cash balance is
+	// negative (a reversal or correction posted against funds already spent: a deposit chargeback, the
+	// rollback of a spent win) is blocked for withdrawals, bets, launches and bonus (deposit-less) play
+	// until the balance is no longer negative - in practice a governed compensating credit (ADR 0100 K2)
+	// or a player deposit, which this gate deliberately never blocks. It is derived from the wallet's
+	// balance on every check, so there is no flag to set or clear and nothing to forget.
+	CodeWalletNegativeBalance = "wallet_negative_balance"
 )
 
 // EligibilityParams is EvaluateEligibility's input. TenantID/BrandID/
@@ -613,7 +621,7 @@ type EligibilityParams struct {
 // query's own correctness never depends on which scope helper a future
 // caller happens to choose.
 func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams) (Decision, error) {
-	return evaluateEligibility(ctx, tx, params, true)
+	return evaluateEligibility(ctx, tx, params, true, true)
 }
 
 // EvaluateWithdrawalEligibility is the RG half of the WD-RG-1 withdrawal gate (owner decision
@@ -626,10 +634,13 @@ func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 // after the lock and the same account-status and wallet-status refusals apply. Takes the person lock, so it
 // must run BEFORE any L1+ lock (ADR 0082 R8).
 func EvaluateWithdrawalEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams) (Decision, error) {
-	return evaluateEligibility(ctx, tx, params, false)
+	return evaluateEligibility(ctx, tx, params, false, true)
 }
 
-func evaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams, restrictionsBlock bool) (Decision, error) {
+// evaluateEligibility is the shared body. restrictionsBlock: an active self-exclusion / time-out refuses
+// (false only for withdrawals). negativeBlocks: a negative wallet balance refuses (owner decision 13;
+// false only for a deposit, which is how a player can bring the balance back).
+func evaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams, restrictionsBlock, negativeBlocks bool) (Decision, error) {
 	// BrandID is required, not merely recommended: the self-exclusion
 	// query below treats brand_id IS NULL in a STORED restriction row as
 	// "applies platform/tenant-wide", but if params.BrandID itself were
@@ -746,6 +757,18 @@ func evaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 				Message: fmt.Sprintf("wallet status is %q, not active", wl.Status),
 			}, nil
 		}
+		if negativeBlocks {
+			negative, err := walletBalanceNegative(ctx, tx, params.WalletID)
+			if err != nil {
+				return Decision{}, err
+			}
+			if negative {
+				return Decision{
+					Allowed: false, Code: CodeWalletNegativeBalance, PersonID: account.PersonID,
+					Message: "wallet balance is negative: blocked until cleared by a compensating credit",
+				}, nil
+			}
+		}
 	}
 
 	d := Decision{Allowed: true, Code: CodeAllowed, PersonID: account.PersonID}
@@ -753,4 +776,21 @@ func evaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 		d.RestrictionInForce = activeType
 	}
 	return d, nil
+}
+
+// walletBalanceNegative reports whether the wallet's player_cash or player_locked_cash balance is below
+// zero (owner decision 13). It reads the wallet's projection rows in the caller's transaction - the same
+// trigger-maintained projection every posting path locks and reads for its own funds check (ADR 0082
+// L3), so a posting committed before this statement is seen. It takes no lock (it runs before the
+// caller's L1+ locks, ADR 0082 R8); a negative-making posting that commits after this read is caught by
+// the next gated action. Projection drift is the hourly ledger_vs_projection reconciliation's P1.
+func walletBalanceNegative(ctx context.Context, tx pgx.Tx, walletID uuid.UUID) (bool, error) {
+	var negative bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM wallet_balance_projection
+		                 WHERE wallet_id = $1 AND account_type IN ('player_cash', 'player_locked_cash')
+		                   AND credit_total < debit_total)`, walletID).Scan(&negative); err != nil {
+		return false, fmt.Errorf("rg: read wallet balance sign: %w", err)
+	}
+	return negative, nil
 }

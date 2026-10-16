@@ -84,6 +84,11 @@ func registerFinancialRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalReview)(newListSubmittedWithdrawalsHandler(deps)))))
 	mux.Handle("POST /v1/admin/withdrawals/{id}/resolve",
 		staffRoute(deps, stepUpFinancial, auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalSubmit)(newResolveWithdrawalHandler(deps)))))
+	// A5 / WITHDRAWAL-REVERSAL-1: one decision of a governed payout reversal (four-eyes, distinct Persons;
+	// the call completing the quorum posts the compensating entry). Critical: each half of a four-eyes
+	// money action (ADR 0119 rule 8.1 (d)).
+	mux.Handle("POST /v1/admin/withdrawals/{id}/payout-reversal",
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newPayoutReversalHandler(deps)))))
 
 	// Stage 5 Back Office read-only history/detail views - reuse
 	// PermWithdrawalReview (same "may see withdrawal data" authority the

@@ -418,6 +418,12 @@ func TestADR0113_GraphMatrix_TenantSession(t *testing.T) {
 			if a13Terminal(from) {
 				want = "WD020"
 			}
+			if from == StateCompleted && to == StateReversed {
+				// A5 (migration 0162): E11 is a legal edge now, but only with the reversal link and the
+				// two-Person decisions (covered by internal/withdrawal a5_* and internal/payments a5_*); a
+				// bare state change is refused by the column discipline first (WD022). Before 0162: WD020.
+				want = "WD022"
+			}
 			wantCode(t, pair, err, want)
 			if got := w.get(t, rows[from].ID); got.State != from {
 				t.Fatalf("%s: refused UPDATE changed the state to %s", pair, got.State)
@@ -443,7 +449,8 @@ func TestADR0113_GraphMatrix_TenantSession(t *testing.T) {
 // plants one inside a transaction that is always rolled back, with the guard AND check A disabled
 // for the plant only (ADR 0110 9.4 owner tamper), re-enables both, and then: the guard (no role is
 // exempt) refuses every UPDATE of the row, updated_at included (WD020); and check A's function
-// refuses the row (no legal release shape exists for `reversed`, WD033).
+// refuses the row. A5 (migration 0162): the release (the completion) is now the legal release shape of
+// a `reversed` row, so check A reports the missing reversal link (WD035); before 0162 it was WD033.
 func TestADR0113_ReversedIsTerminal(t *testing.T) {
 	w := newA13(t)
 	wr := w.at(t, StateCompleted)
@@ -491,8 +498,8 @@ func TestADR0113_ReversedIsTerminal(t *testing.T) {
 	if err := tx.QueryRow(ctx, `SELECT withdrawal_request_ledger_link_violation($1, $2)`, wr.ID, w.f.tenantID).Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if len(v) != 2 || v[0] != "WD033" {
-		t.Fatalf("check A on a reversed row: %v, want WD033", v)
+	if len(v) != 2 || v[0] != "WD035" {
+		t.Fatalf("check A on a reversed row without a reversal link: %v, want WD035", v)
 	}
 }
 

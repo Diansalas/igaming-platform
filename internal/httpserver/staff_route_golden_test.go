@@ -228,6 +228,7 @@ var staffRouteGolden = map[string]string{
 	"GET /v1/admin/withdrawals/submitted":                                                  "none",
 	"GET /v1/admin/withdrawals/{id}":                                                       "none",
 	"POST /v1/admin/withdrawals/{id}/approve":                                              "financial",
+	"POST /v1/admin/withdrawals/{id}/payout-reversal":                                      "critical",
 	"POST /v1/admin/withdrawals/{id}/reject":                                               "none",
 	"POST /v1/admin/withdrawals/{id}/resolve":                                              "financial",
 	"POST /v1/admin/withdrawals/{id}/submit":                                               "financial",

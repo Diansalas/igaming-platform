@@ -375,6 +375,13 @@ func g(ctx, tx any) error { return raisePayoutDisputeAlert(ctx, tx, a, r) }`
 		// ADR 0111 4.8 (F-1): the post-M4 signal cells. One function, one raise, the LAST statement after its audit row;
 		// reached only through the three pinned call sites in TestStaticWiring_PayoutPostM4CellSitesArePinned_F1.
 		"internal/payments/payout_post_m4.go:payoutPostM4Cell:raisePayoutDisputeAlert": 1, // success_after_m4_not_paid / contradiction_after_m4_paid
+		// A5 (WITHDRAWAL-REVERSAL-1): the reversal-before-completion tombstone branch parks the open attempt (T10,
+		// reversal_tombstone_precedes_success); the raise is the LAST statement of the alerting.InTx closure in
+		// DecidePayoutReversal, after the park, the release, the tombstone and every audit row (ADR 0102 7.7).
+		"internal/payments/payout_reversal.go:DecidePayoutReversal:raisePayoutDisputeAlert": 1,
+		// A5 fix round LF-A5-1: a success after the tombstone branch (callback cell, late-evidence and poll paths);
+		// raise only, the LAST statement after its audit row, inside the callers' alerting.InTx transactions.
+		"internal/payments/payout_reversal.go:payoutReversalTombstoneCell:raisePayoutDisputeAlert": 1,
 	}
 	got := map[string]int{}
 	for _, c := range staticCollectCalls(t) {

@@ -35,6 +35,24 @@ func seedCasinoBetForCashback(t *testing.T, pool *db.Pool, f lifecycleFixture, a
 		if err != nil {
 			return err
 		}
+		// A5 (owner decision 13): fund the stake first. A production bet can never overdraw player_cash (the
+		// under-lock funds check), and a wallet left negative by this shortcut is now blocked for bonus play
+		// (wallet_negative_balance). A deposit does not enter the net-loss query (casino_bet / casino_win only).
+		clearing, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, nil, ledger.AccountPSPClearing, f.assetCode)
+		if err != nil {
+			return err
+		}
+		provider, ref := "mock-psp", "cashback-fund-"+uuid.NewString()
+		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: provider + ":" + ref,
+			ProviderID: &provider, ProviderTxID: &ref, CorrelationID: uuid.New(),
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: clearing, Direction: ledger.Debit, Amount: amount},
+				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: amount},
+			},
+		}); err != nil {
+			return err
+		}
 		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: ledger.TxCasinoBet, IdempotencyKey: "mock-casino:" + uuid.NewString(),
 			CorrelationID: uuid.New(),

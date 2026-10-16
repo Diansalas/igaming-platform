@@ -947,6 +947,11 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				if err := recordSuccessOnPark(ctx, tx, attempt.ID, EvidenceCallback); err != nil {
 					return false, ResolutionAnomalyOther, err
 				}
+				// A5 LF-A5-1: a success after the governed reversal-before-completion released the hold is a
+				// double-payout candidate: its own audit row and a distinct P1 (raised LAST), no state change.
+				if handled, err := payoutReversalTombstoneCell(ctx, tx, attempt, EvidenceCallback, newReceipt, ev.ProviderReference); handled || err != nil {
+					return false, ResolutionAnomalyOther, err
+				}
 			}
 			return false, ResolutionAnomalyOther, payoutPostM4Cell(ctx, tx, attempt, OutcomeSucceeded, EvidenceCallback, &newReceipt, ev.ProviderReference)
 		case AttemptSucceeded:

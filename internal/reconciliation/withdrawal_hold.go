@@ -47,6 +47,12 @@ package reconciliation
 //     links as its hold or release (an anti-join of the tenant's hold-leg transactions against the
 //     requests' two link columns), keyed "ledger_transaction:<id>". This also reports an unattributed
 //     hold-leg pair that nets to zero on its wallet (no balance left), which the aggregate cannot see.
+//     A5 (WITHDRAWAL-REVERSAL-1, migration 0162): the 'reversed' arm of check A (WD033 release = the
+//     completion, WD035 the reversal link's exact withdrawal_reversed shape, parity-tested like the
+//     rest), and the read-only WD044: a withdrawal_reversed transaction that no reversed request links
+//     (keyed "ledger_transaction:<id>"), the detective twin of the 0162 commit-time trigger for an owner
+//     who switched that trigger off (ADR 0110 s9.4). Fix round LF-A5-5: WD026 for a reversed request with no
+//     two-Person 'reverse' quorum on one digest (the detective twin of the guard's WD026).
 
 import (
 	"context"
@@ -74,6 +80,9 @@ WITH
 req AS (
     SELECT w.id, w.tenant_id, w.wallet_id, w.asset_code, w.amount, w.state, w.provider_id,
            w.hold_ledger_transaction_id, w.release_ledger_transaction_id,
+           -- A5: read through to_jsonb so the check also runs on a schema pinned below migration 0162 (the
+           -- 0124 pattern; migration tests drive reconciliation there): absent column = NULL = no reversal.
+           (to_jsonb(w) ->> 'reversal_ledger_transaction_id')::uuid AS reversal_ledger_transaction_id,
            w.state IN ('rejected', 'cancelled', 'failed', 'completed', 'reversed') AS term
       FROM withdrawal_requests w
      WHERE w.tenant_id = $1
@@ -130,6 +139,14 @@ unlinked_mm AS (
       LEFT JOIN linked l ON l.tx = u.tx
      WHERE l.tx IS NULL
 ),
+unlinked_rev_mm AS (
+    SELECT 'withdrawal_request_ledger_link_invalid'::text AS kind, 'ledger_transaction:' || t.id::text AS key,
+           'every withdrawal_reversed transaction is the reversal link of a reversed request'::text AS expected,
+           format('violation=WD044 unlinked withdrawal_reversed transaction=%s', t.id) AS actual
+      FROM ledger_transactions t
+     WHERE t.tenant_id = $1 AND t.transaction_type = 'withdrawal_reversed'
+       AND NOT EXISTS (SELECT 1 FROM req r WHERE r.state = 'reversed' AND r.reversal_ledger_transaction_id = t.id)
+),
 link_mm AS (
     SELECT 'withdrawal_request_ledger_link_invalid'::text AS kind, r.id::text AS key,
            'check A link rules (ADR 0113 s4.2) hold for this request'::text AS expected,
@@ -150,11 +167,20 @@ link_mm AS (
                  count(*) FILTER (WHERE e.direction = 'debit' AND la.account_type = 'player_withdrawal_hold'
                                     AND e.wallet_id = r.wallet_id AND e.asset_code = r.asset_code AND e.amount = r.amount) AS dr,
                  count(*) FILTER (WHERE e.direction = 'credit' AND e.asset_code = r.asset_code AND e.amount = r.amount
-                                    AND CASE WHEN r.state = 'completed'
+                                    AND CASE WHEN r.state IN ('completed', 'reversed')
                                              THEN la.account_type = 'psp_clearing' AND e.wallet_id IS NULL
                                              ELSE la.account_type = 'player_cash' AND e.wallet_id = r.wallet_id END) AS cr
             FROM ledger_entries e LEFT JOIN ledger_accounts la ON la.id = e.ledger_account_id
            WHERE e.ledger_transaction_id = rt.id) re ON true
+      LEFT JOIN ledger_transactions vt ON vt.id = r.reversal_ledger_transaction_id AND vt.tenant_id = r.tenant_id
+      LEFT JOIN LATERAL (
+          SELECT count(*) AS n,
+                 count(*) FILTER (WHERE e.direction = 'debit' AND la.account_type = 'psp_clearing' AND e.wallet_id IS NULL
+                                    AND e.asset_code = r.asset_code AND e.amount = r.amount) AS dr,
+                 count(*) FILTER (WHERE e.direction = 'credit' AND la.account_type = 'player_cash'
+                                    AND e.wallet_id = r.wallet_id AND e.asset_code = r.asset_code AND e.amount = r.amount) AS cr
+            FROM ledger_entries e LEFT JOIN ledger_accounts la ON la.id = e.ledger_account_id
+           WHERE e.ledger_transaction_id = vt.id) ve ON true
       LEFT JOIN LATERAL (
           SELECT COALESCE(sum(CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END), 0) AS s
             FROM ledger_transactions x
@@ -183,16 +209,38 @@ link_mm AS (
               WHEN 'completed' THEN rt.transaction_type = 'withdrawal_completed' AND r.provider_id IS NOT NULL
                                     AND rt.provider_id = r.provider_id AND rt.idempotency_key = r.provider_id || ':' || rt.provider_tx_id
                                     AND rt.reverses_transaction_id IS NULL
+              WHEN 'reversed'  THEN rt.transaction_type = 'withdrawal_completed' AND r.provider_id IS NOT NULL
+                                    AND rt.provider_id = r.provider_id AND rt.idempotency_key = r.provider_id || ':' || rt.provider_tx_id
+                                    AND rt.reverses_transaction_id IS NULL
               ELSE false END, false) THEN 'WD033'
           WHEN r.term AND re.n = 0 THEN 'WD030'
           WHEN r.term AND (re.n <> 2 OR re.dr <> 1 OR re.cr <> 1) THEN 'WD033'
+          WHEN r.state <> 'reversed' AND r.reversal_ledger_transaction_id IS NOT NULL THEN 'WD035'
+          WHEN r.state = 'reversed' AND r.reversal_ledger_transaction_id IS NULL THEN 'WD035'
+          WHEN r.state = 'reversed' AND vt.id IS NULL THEN 'WD030'
+          WHEN r.state = 'reversed' AND (vt.transaction_type IS DISTINCT FROM 'withdrawal_reversed'
+               OR vt.idempotency_key IS DISTINCT FROM r.id::text || ':reversed' OR vt.correlation_id IS DISTINCT FROM r.id
+               OR vt.reverses_transaction_id IS DISTINCT FROM r.release_ledger_transaction_id
+               OR vt.provider_id IS DISTINCT FROM r.provider_id OR vt.provider_tx_id IS NULL) THEN 'WD035'
+          WHEN r.state = 'reversed' AND ve.n = 0 THEN 'WD030'
+          WHEN r.state = 'reversed' AND (ve.n <> 2 OR ve.dr <> 1 OR ve.cr <> 1) THEN 'WD035'
+          -- A5 fix round LF-A5-5: the detective twin of WD026. A reversed request needs >= 2 distinct linked
+          -- Persons (human 'reverse' decisions) on ONE digest. Staff status is NOT re-checked here: a voter
+          -- suspended or offboarded after a legitimate reversal must not raise a false P1.
+          WHEN r.state = 'reversed' AND COALESCE((
+               SELECT max(q.n) FROM (SELECT count(DISTINCT su.person_id) AS n
+                                       FROM withdrawal_approvals a JOIN staff_users su ON su.id = a.approver_principal_id
+                                      WHERE a.withdrawal_request_id = r.id AND a.tenant_id = r.tenant_id
+                                        AND a.decision = 'reverse' AND NOT a.is_automated_approval AND su.person_id IS NOT NULL
+                                      GROUP BY a.reason_code) q), 0) < 2 THEN 'WD026'
           WHEN cs.s <> CASE WHEN r.term THEN 0 ELSE r.amount END THEN 'WD034'
       END AS code) c
      WHERE c.code IS NOT NULL
 )
 SELECT v.sess_ok, v.n_req, v.n_e0b, v.n_hold_entries, v.n_proj_active, f.kind, f.key, f.expected, f.actual
   FROM vis v
-  LEFT JOIN (SELECT * FROM open_mm UNION ALL SELECT * FROM link_mm UNION ALL SELECT * FROM unlinked_mm) f ON true
+  LEFT JOIN (SELECT * FROM open_mm UNION ALL SELECT * FROM link_mm UNION ALL SELECT * FROM unlinked_mm
+             UNION ALL SELECT * FROM unlinked_rev_mm) f ON true
  ORDER BY f.kind, f.key`
 
 // withdrawalHoldVisibility is check D's visibility probe, read in the same statement as the findings.

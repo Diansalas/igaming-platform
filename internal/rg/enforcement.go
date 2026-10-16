@@ -171,7 +171,7 @@ func EvaluateAction(ctx context.Context, tx pgx.Tx, p ActionParams) (Decision, e
 	}
 	if !on {
 		// Limit enforcement is off for this brand: eligibility only (self-exclusion, time-out, status).
-		return EvaluateEligibility(ctx, tx, elig)
+		return evaluateEligibility(ctx, tx, elig, true, p.Action != ActionDeposit)
 	}
 
 	// Isolation, scope and the READ COMMITTED requirement of the post-lock usage read (ADR 0115 3.1).
@@ -183,7 +183,7 @@ func EvaluateAction(ctx context.Context, tx pgx.Tx, p ActionParams) (Decision, e
 		return Decision{}, unavailable("set timeouts", err)
 	}
 
-	dec, err := EvaluateEligibility(ctx, tx, elig)
+	dec, err := evaluateEligibility(ctx, tx, elig, true, p.Action != ActionDeposit)
 	if err != nil {
 		return Decision{}, unavailable("eligibility", err)
 	}

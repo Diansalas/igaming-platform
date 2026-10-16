@@ -41,7 +41,7 @@ func TestOpenAPI_ResolutionAndWithdrawalFamilies_Documented(t *testing.T) {
 				n++
 			}
 		}
-		want := map[string]int{"payment_force_resolution_routes.go": 6, "withdrawal_hold_resolution_routes.go": 6, "financial_routes.go": 15}[file]
+		want := map[string]int{"payment_force_resolution_routes.go": 6, "withdrawal_hold_resolution_routes.go": 6, "financial_routes.go": 16}[file] // A5: + payout-reversal
 		if n != want {
 			t.Fatalf("%s: expected %d mounted operations in the family, found %d (update the spec and this test together)", file, want, n)
 		}
@@ -84,7 +84,7 @@ func TestOpenAPI_ResolutionAndWithdrawalFamilies_Documented(t *testing.T) {
 
 	// Specific contract points.
 	resolve := openAPIPathBlock(t, spec, "/v1/admin/withdrawals/{id}/resolve")
-	for _, want := range []string{"dispatch is still in progress", "amount/asset does not", "PSP recall", "No automatic, M2, M4 or hold-release path", `"409"`, `"503"`} {
+	for _, want := range []string{"dispatch is still in progress", "amount/asset does not", "PSP recall", "basis provider_confirmed_out_of_band", `"409"`, `"503"`} {
 		if !strings.Contains(resolve, want) {
 			t.Errorf("resolve: OpenAPI entry lacks %q", want)
 		}

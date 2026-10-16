@@ -331,7 +331,8 @@ func TestADR0113D_LinkRules_ParityWithCheckA(t *testing.T) {
 	// WD031: the hold link cleared.
 	unlinked := dWithdrawal(t, pool, f, 16, withdrawal.StateRequested)
 	ownerRelabel(t, pool, f, unlinked, `hold_ledger_transaction_id = NULL`)
-	// reversed: no shape exists (WD033).
+	// reversed WITHOUT a reversal link (owner relabel past E11): since migration 0162 (A5) the release
+	// passes as the completion and check A reports WD035 (no reversal link); before 0162 it was WD033.
 	rev := dWithdrawal(t, pool, f, 17, withdrawal.StateCompleted)
 	ownerRelabel(t, pool, f, rev, `state = 'reversed'`)
 	// WD033 (release shape only): rejected legally (release key `:rejected`), relabelled `cancelled`, whose
