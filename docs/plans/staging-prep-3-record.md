@@ -442,3 +442,36 @@ Status: IMPLEMENTED (local). Same limits as sections 12 and 13: no AWS call, not
 | shell tests | `runner-overrides-test.sh` 31, `probe-verdict-test.sh` 33, `fetch-seed-world-test.sh` 17 assertions |
 | gofmt, `go vet` (plain and `-tags integration`), golangci-lint (also `-tags integration`), shellcheck `-S warning` | clean |
 | Not done | an image build, anything on AWS, busybox ash, the simulator run (unchanged from section 12) |
+
+## 15. Security re-check of round 3 (security specialist, 2026-10-16)
+
+Scope: `6fddeaa..75c143e`, limited to the responses to SRP3R-1..7 (section 14): `sql/record-anchor.sql`, `modes/cleanup.sh`, `sql/verify-db.sql`,
+`lib-probes.sh`, `boot.sh`, `modes/seed-world.sh`, `internal/stagingseed/world.go`, the ecs/staging Terraform for `SEED_WORLD_SECRET_ARN`. The T8 /
+migration 0165 content merged in the same range is NOT part of this re-check. Not done: anything on AWS, an image build, `run-local-modes.sh` (the
+cleanup / verify-db IAM-only paths need an `rds_iam` role, which may not be created on the shared cluster; they were reviewed as code only).
+
+Checks run: `go test -count=1 ./cmd/... ./deploy/... ./internal/stagingseed/...` pass; integration (`-tags integration -p 1`) on a private scratch
+database: 30 tests pass (seed-market 16, seed-staging-world 4, stagingseed 10); `run-static-checks.sh` passes (all Terraform test runs, 88 shell `ok`
+assertions); shellcheck `-S warning` clean apart from the pre-existing SC2115 at `run-static-checks.sh:60`. Reviewer probes of `record-anchor.sql` as
+the owner on a freshly migrated scratch database: fresh -> `inserted`; again -> `already_recorded_same`; another value -> `conflict_other_value:staging`;
+on a fresh database with ONE `pending_launch` tenant -> `refused_live_data`, nothing written. An attempt to hide the tenants from the owner with a
+database-level `app.player_account_id` default (the only predicate of `tenants_read`) is refused for the owner (`permission denied to set parameter`).
+The scratch database was dropped.
+
+| Id | Verdict |
+|---|---|
+| SRP3R-1 | **CLOSED.** The freshness test is sound for its purpose (preventing a MISTAKE): `tenants_read` hides rows only when `app.player_account_id` is set, `rn_psql` strips `PGOPTIONS`, and the owner cannot set a database-level default for it; every tenant staff / player / ledger row references a tenant, ledger entries are append-only (so tenants of a live database cannot be removed without disabling triggers), and `n_live_tup` of the two unpartitioned tables only adds refusals (stale or reset statistics cannot make a database with tenants look fresh). A database with players but no visible tenant is not reachable without deliberate owner-level tampering, and that owner can INSERT the anchor with psql anyway (the anchor protects against mistakes, not against the owner). Residual INFO: a role-level `ALTER ROLE <owner> SET app.player_account_id` (a privileged role change) would hide the tenants; set `SET LOCAL app.player_account_id = ''` (and `app.tenant_id`) in the script before counting to close it cheaply. |
+| SRP3R-2 | **CLOSED.** On RDS a finite validity OR a missing `rds_iam` membership is restored to the IAM-only state (`PASSWORD NULL VALID UNTIL 'infinity'`, `GRANT rds_iam`), never made permanent; if the GRANT fails after the password was removed the role has no usable credential (fails closed) and the result is FAIL. `verify-db` FAILs on RDS when the role is not an `rds_iam` member. Whether the RDS master may `ALTER ROLE` a BYPASSRLS role is PROVIDER DEPENDENT (the FAIL branch tells the owner). |
+| SRP3R-3 | **CLOSED.** With `applied`, every abuse SQLSTATE other than 42883 / 0A000 is FAIL (57014, 55P03 tested). |
+| SRP3R-4 | **CLOSED.** Plan refuses an existing tenant whose licence is not `STG-SYNTHETIC-1`; apply requires the exact synthetic licence id (stricter). Only a platform admin re-pointing a tenant's licence could spoof the marker (staging, audited). |
+| SRP3R-5 | **CLOSED.** The tenant, brand, staff-created and bootstrap-token audit rows carry `actor_type = staff` and the platform admin's id. |
+| SRP3R-6 | **CLOSED.** The allow-list drops `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, `ECS_CONTAINER_METADATA_URI*`, `AWS_EXECUTION_ENV`; `RN_ROOT` only with the local-harness switch. Keeping only `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` (+ `AWS_REGION`) is what the AWS CLI needs for an ECS/Fargate task role (the relative URI is resolved against the fixed 169.254.170.2 endpoint, so it cannot redirect to a foreign host); PROVIDER DEPENDENT until the first run on Fargate. The secret is addressed by the Terraform-supplied ARN, validated against `^arn:aws:secretsmanager:eu-central-1:<12 digits>:secret:igaming-staging/seed-world-passwords-[A-Za-z0-9]{6}$`; `deploy.sh` cannot override the variable (its name matches the credential deny-list). |
+| SRP3R-7 | **CLOSED.** Comment fixed; the Person is created inside the staff transaction after the existence check; concurrent runs are serialized by a session advisory lock (key 7461020001, `pg_try_advisory_lock`, STOP when held). The owner keeps EXECUTE on the advisory-lock functions after `harden-backup-surface.sql` (it re-grants to the owner and runtime roles). |
+
+**Verdict: APPROVED as complete (code- and design-level, staging only)** for the STAGING-PREP-3 runner modes, `seed-market`, `seed-world`
+(`cmd/seed-staging-world`), `record-anchor`, `cleanup`, the probe pack and the IAM/Terraform delta of section 13.4. This is not a statement that the runner is
+secure on AWS: every PROVIDER DEPENDENT item (section 5, R2-3/R2-6, the Fargate credential path, the RDS `ALTER ROLE` / `GRANT rds_iam` behaviour, the
+unexecuted deployer-policy simulator, the unbuilt image and busybox `ash`) remains unverified and must be evidenced on the first staging run. Staging
+residuals SRP3-7 and SRP3-8 still need the owner's written acceptance. Launch-relevant items of sections 11.4 and 13.5 are unchanged (production anchor
+recorded explicitly, no `seed-world` / `record-anchor` in any production image or task definition, private networking, digest pinning, a dedicated
+boundary).
