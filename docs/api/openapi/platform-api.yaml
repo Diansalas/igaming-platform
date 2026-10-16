@@ -13679,6 +13679,8 @@ components:
             - RG_CONFIG_MISSING
             - RG_PENDING_CAP
             - RG_IDEMPOTENCY_MISMATCH
+            - IDEMPOTENCY_MISMATCH
+            - IDEMPOTENCY_IN_PROGRESS
             - RG_OPERATOR_LOOSENS
             - RG_NO_FLOOR_IN_FORCE
             - RG_SELF_APPROVAL
