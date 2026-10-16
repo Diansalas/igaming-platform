@@ -12,7 +12,9 @@
 //   - deploy/backup/actorproof-private-schema.sql (the restore DDL) produces the same catalog as the migrations.
 //
 // Requires TEST_DATABASE_URL, TEST_RUNTIME_DATABASE_URL and TEST_ADMIN_DATABASE_URL (scratch databases); a skip is NOT evidence.
-package actorproof_test
+// It lives beside the K2 actor-proof tests (internal/adjustment), not in internal/actorproof: importing prooftest switches on the
+// integration step-up fallback at init, which the actorproof package's own unit tests must not see.
+package adjustment_test
 
 import (
 	"context"
