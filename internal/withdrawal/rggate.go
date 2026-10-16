@@ -120,8 +120,9 @@ func auditGateDenial(ctx context.Context, tx pgx.Tx, p RequestParams, action, ga
 		md[k] = v
 	}
 	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: p.TenantID, ActorType: audit.ActorSystem, Action: action,
+		TenantID: p.TenantID, ActorType: audit.ActorPlayer, ActorID: p.PlayerAccountID, Action: action,
 		TargetType: "player_account", TargetID: p.PlayerAccountID.String(), Outcome: audit.OutcomeDenied, Metadata: md,
+		IPAddress: p.IPAddress, UserAgent: p.UserAgent, RequestID: p.RequestID,
 	}); err != nil {
 		return fmt.Errorf("withdrawal: audit gate denial: %w", err)
 	}

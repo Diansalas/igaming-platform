@@ -363,9 +363,12 @@ func LockForPayoutEvidence(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) 
 // the caller's own." This package does not and cannot re-derive or check
 // that for the caller - it trusts these fields exactly as given.
 type RequestParams struct {
-	TenantID        uuid.UUID
-	BrandID         uuid.UUID
-	PlayerAccountID uuid.UUID
+	// IPAddress, UserAgent and RequestID are the optional request metadata of the player's call (SR6-3). They are
+	// recorded on the WD-RG-1 denial audit; empty is allowed (system-initiated test callers).
+	IPAddress, UserAgent, RequestID string
+	TenantID                        uuid.UUID
+	BrandID                         uuid.UUID
+	PlayerAccountID                 uuid.UUID
 	// PersonID is required (ADR 0096 §3.2 point 1 / §5), resolved
 	// server-side exactly like every other identity field here - never
 	// accepted from a client. The primary KYC read key is still this

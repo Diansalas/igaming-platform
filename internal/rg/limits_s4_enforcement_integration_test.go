@@ -464,6 +464,34 @@ func s4_WagerAndLossLimits(t *testing.T, w *s1World) {
 	wantDenied(t, "both breached: wager first", w.mustEval(t, f, f.tenantA, f.action(f.acctX, ActionCasinoWager, 51)), CodeWagerLimitReached)
 }
 
+// LF-A6-1: loss_may_go_negative. A player with stake 100 and win 300 in the window (raw net loss -200) and a loss limit of 100.
+// false: the usage is floored at 0, so 100 is allowed and 101 refused. true: -200 gives headroom, so 300 is allowed and 301 refused.
+func s4_LossMayGoNegative(t *testing.T, w *s1World) {
+	for _, tc := range []struct {
+		name         string
+		spec         rgfix.Spec
+		okAmt, noAmt int64
+		usage        string
+	}{
+		{"false_floors_usage_at_zero", rgfix.Spec{"loss_may_go_negative": false}, 100, 101, "0"},
+		{"true_net_winnings_give_headroom", rgfix.Spec{"loss_may_go_negative": true}, 300, 301, "-200"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			f := w.s4Fix(t, map[string]rgfix.Spec{"loss": tc.spec})
+			w.activate(t, f, nil)
+			w.setLimit(t, f.tenantA, f.acctA1, ControlLoss, PeriodRolling24h, strp("100"))
+			w.stakeWithWin(t, f.tenantA, f.acctA1, "100", "300")
+			wantAllowed(t, "at the limit", w.mustEval(t, f, f.tenantA, f.action(f.acctA1, ActionCasinoWager, tc.okAmt)))
+			d := w.mustEval(t, f, f.tenantA, f.action(f.acctA1, ActionCasinoWager, tc.noAmt))
+			wantDenied(t, "one above the limit", d, CodeLossLimitReached)
+			if figStr(t, d, "usage") != tc.usage || figStr(t, d, "loss_raw_usage") != "-200" {
+				t.Fatalf("figures: want usage %s and loss_raw_usage -200, got %v", tc.usage, d.Figures)
+			}
+		})
+	}
+}
+
 func s4_WindowBoundary_Rolling24h(t *testing.T, w *s1World) {
 	f := w.s4Fix(t, nil)
 	w.activate(t, f, nil)
@@ -1086,6 +1114,7 @@ func TestRGEnforceS4(t *testing.T) {
 		{"MandatoryWithCeiling_UsesTheCeiling", s4_MandatoryWithCeiling_UsesTheCeiling},
 		{"Launch_AllowedWhenUsageExceedsLoweredLimit", s4_Launch_AllowedWhenUsageExceedsLoweredLimit},
 		{"WagerAndLossLimits", s4_WagerAndLossLimits},
+		{"LossMayGoNegative", s4_LossMayGoNegative},
 		{"WindowBoundary_Rolling24h", s4_WindowBoundary_Rolling24h},
 		{"DecreaseImmediate_IncreaseAfterCoolingOff", s4_DecreaseImmediate_IncreaseAfterCoolingOff},
 		{"ScopeMIN_AccountAndTenantPerson", s4_ScopeMIN_AccountAndTenantPerson},

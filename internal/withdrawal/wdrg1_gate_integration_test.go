@@ -23,6 +23,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/rgfix"
 	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // reqCommitDenial mirrors the HTTP handler: a *GateDeniedError / *KYCDeniedError is captured inside the closure
@@ -303,4 +304,99 @@ func TestWDRG1_TenantIsolation_ForeignAccountIsRefused(t *testing.T) {
 	}
 	nothingWritten(t, pool, a, 10_000, "tenant A")
 	nothingWritten(t, pool, b, 10_000, "tenant B")
+}
+
+// SR6-2: the gate's OWN tenant isolation. A tenant-B session handed tenant A's ids (and tenant A's id with a
+// tenant-B session) must return an error and never Allowed, whatever the earlier request gates do.
+func TestWDRG1_StandardGate_TenantIsolation_DirectEvaluate(t *testing.T) {
+	pool := testPool(t)
+	a := seedFixture(t, pool, 10_000)
+	b := seedFixture(t, pool, 10_000)
+	for name, tc := range map[string]struct {
+		session uuid.UUID
+		in      withdrawalgate.Input
+	}{
+		"tenant B session, tenant A ids": {b.tenantID, withdrawalgate.Input{TenantID: a.tenantID, BrandID: a.brandID, PlayerAccountID: a.playerAccountID, WalletID: a.walletID, AssetCode: "EUR", Amount: 100}},
+		"tenant B ids, tenant A account": {b.tenantID, withdrawalgate.Input{TenantID: b.tenantID, BrandID: b.brandID, PlayerAccountID: a.playerAccountID, WalletID: a.walletID, AssetCode: "EUR", Amount: 100}},
+	} {
+		var d withdrawalgate.Decision
+		err := runTx(pool, tc.session, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			d, e = standard.New().Evaluate(ctx, tx, tc.in)
+			return e
+		})
+		if err == nil || d.Allowed {
+			t.Fatalf("%s: the gate must return an error and never Allowed, got err=%v decision=%+v", name, err, d)
+		}
+	}
+}
+
+// SR6-3: the denial audit names the player as the actor and carries the request metadata.
+func TestWDRG1_DenialAudit_RecordsPlayerActorAndRequestMetadata(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 10_000)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return identity.SetPlayerAccountStatus(ctx, tx, f.playerAccountID, identity.PlayerStatusSuspended)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := baseParams(f, "wdrg1-meta-"+uuid.NewString(), 100)
+	p.IPAddress, p.UserAgent, p.RequestID = "203.0.113.7", "wdrg1-agent", "req-wdrg1-meta"
+	_, err := reqCommitDenial(t, pool, f, p)
+	var denied *GateDeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("a suspended account must be a gate denial, got %v", err)
+	}
+	var actorType, actorID, ip, ua, rid string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT actor_type, COALESCE(actor_id::text, ''), COALESCE(host(ip_address), ''), COALESCE(user_agent, ''), COALESCE(request_id, '')
+			FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.denied_by_rg' ORDER BY created_at DESC LIMIT 1`, f.tenantID).Scan(&actorType, &actorID, &ip, &ua, &rid)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if actorType != "player" || actorID != f.playerAccountID.String() || ip != "203.0.113.7" || ua != "wdrg1-agent" || rid != "req-wdrg1-meta" {
+		t.Fatalf("denial audit actor/metadata: %q %q %q %q %q", actorType, actorID, ip, ua, rid)
+	}
+}
+
+// LF-A6-7: a withdrawal request (hold) and its release change neither the stake (wager / loss) nor the deposit usage.
+func TestWDRG1_WithdrawalHoldAndRelease_DoNotChangeStakeOrDepositUsage(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 10_000)
+	measure := func(what string) (string, string, string, string) {
+		var wager, loss, dep, inflight string
+		if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			win := []rg.WindowSpec{{Period: rg.PeriodRolling24h}}
+			su, e := rg.MeasureStakeUsage(ctx, tx, rg.UsageRequest{TenantID: f.tenantID, PlayerAccountID: f.playerAccountID, Scope: rg.LimitScopeAccount, AssetCode: "EUR", Windows: win})
+			if e != nil {
+				return e
+			}
+			du, e := rg.MeasureDepositUsage(ctx, tx, rg.UsageRequest{TenantID: f.tenantID, PlayerAccountID: f.playerAccountID, Scope: rg.LimitScopeAccount, AssetCode: "EUR", Windows: win})
+			if e != nil {
+				return e
+			}
+			wager, loss = su.Windows[0].Wager.Account.String(), su.Windows[0].LossRaw.Account.String()
+			dep, inflight = du.Windows[0].Credited.Account.String(), du.Windows[0].InFlight.Account.String()
+			return nil
+		}); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		return wager, loss, dep, inflight
+	}
+	w0, l0, d0, i0 := measure("before")
+	wr, err := req(t, pool, f, baseParams(f, "wdrg1-usage-"+uuid.NewString(), 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w1, l1, d1, i1 := measure("hold placed")
+	if w0 != w1 || l0 != l1 || d0 != d1 || i0 != i1 {
+		t.Fatalf("a withdrawal hold changed usage: before (%s %s %s %s) after hold (%s %s %s %s)", w0, l0, d0, i0, w1, l1, d1, i1)
+	}
+	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return Cancel(ctx, tx, wr.ID) }); err != nil {
+		t.Fatalf("release the hold: %v", err)
+	}
+	w2, l2, d2, i2 := measure("hold released")
+	if w0 != w2 || l0 != l2 || d0 != d2 || i0 != i2 {
+		t.Fatalf("releasing a withdrawal hold changed usage: before (%s %s %s %s) after release (%s %s %s %s)", w0, l0, d0, i0, w2, l2, d2, i2)
+	}
 }

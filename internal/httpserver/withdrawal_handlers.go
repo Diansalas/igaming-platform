@@ -160,12 +160,19 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: wl.ID,
 				AssetCode: req.AssetCode, Amount: req.Amount, IdempotencyKey: req.IdempotencyKey,
 				PayoutInstrumentID: instrumentID, Destinations: destinations, Gate: standard.New(),
+				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
 			if errors.As(err, &kycDenied) || errors.As(err, &gateDenied) {
 				return nil
 			}
 			return err
 		})
+		if gateDenied != nil && err != nil {
+			// SR6-4: the denial-audit transaction did not commit, so the audit is lost: answer 503, never the 403.
+			logger.Error("request_withdrawal_gate_denial_audit_not_committed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "withdrawals are temporarily unavailable, please retry")
+			return
+		}
 		if gateDenied != nil {
 			// Player-facing surface: one generic sentence for both gates. The gate code and the reason
 			// stay in the audit record and the server log (no risk-rule oracle, no account-state oracle).

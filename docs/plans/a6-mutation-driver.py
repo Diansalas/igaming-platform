@@ -39,6 +39,7 @@ M = [
     ("removal_treated_as_value", ENF, "if !st.HasValue || st.Value == nil {", "if !st.HasValue {", [RG]),
     ("ceiling_not_applied", ENF, 'consider(key{p, scope}, c, "ceiling")', "_, _ = p, c", [RG]),
     ("ceiling_only_for_valued_periods_off", ENF, "\t\tfor p := range periods {\n\t\t\tconsider(", "\t\tfor p := range map[PeriodKind]bool{} {\n\t\t\tconsider(", [RG]),
+    ("loss_may_go_negative_forced_true", ENF, "req.LossMayGoNegative = deref(pl.cfg.LossMayGoNegative)", "req.LossMayGoNegative = true", [RG]),
     ("min_becomes_max", ENF, "!ok || v.Cmp(cur.value) < 0 {", "!ok || v.Cmp(cur.value) > 0 {", [RG]),
     ("timeouts_not_restored", ENF, "\t\t_, err := tx.Exec(ctx, `" + SET + "`, prevLock, prevStmt)\n\t\treturn err", "\t\treturn nil", [RG]),
     ("timeouts_not_applied", ENF, "\tif _, err := tx.Exec(ctx, `" + SET + "`,\n\t\tfmt.Sprintf", "\tif _, err := tx.Exec(ctx, `SELECT $1::text, $2::text`,\n\t\tfmt.Sprintf", [RG]),
