@@ -74,6 +74,7 @@ func (w *world) ledgerChecks() {
 			return
 		}
 		depositID = id
+		w.facts["p1_deposit_id"] = id
 		t.pass("deposit intent %s pending for %d %s minor units via mock-payments", id, w.cfg.DepositAmount, asset)
 	})
 	w.check("ledger.deposit_idempotent_initiation", func(t *T) {

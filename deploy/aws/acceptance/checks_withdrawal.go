@@ -132,6 +132,7 @@ func (w *world) withdrawalChecks() {
 			return
 		}
 		instrID = pickStr(r.obj(), "id")
+		w.facts["p1_instrument_id"] = instrID
 		if strings.Contains(string(r.Body), iban) || strings.Contains(string(r.Body), "WEST") {
 			t.fail("the response echoes the raw IBAN: only a mask may be returned")
 			return
@@ -175,6 +176,7 @@ func (w *world) withdrawalChecks() {
 			return
 		}
 		wdID = pickStr(r.obj(), "id")
+		w.facts["p1_withdrawal_id"] = wdID
 		st := pickStr(r.obj(), "state")
 		if wdID == "" {
 			t.fail("no withdrawal id: %s", r.brief())

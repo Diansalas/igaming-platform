@@ -48,7 +48,7 @@ type config struct {
 	Actors map[string]actorSpec
 }
 
-var actorRoles = []string{"ADMIN", "ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2", "COMPLIANCE"}
+var actorRoles = []string{"ADMIN", "ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2", "COMPLIANCE", "RISK_MANAGER"}
 
 func envOr(name, def string) string {
 	if v, ok := os.LookupEnv(name); ok && v != "" {

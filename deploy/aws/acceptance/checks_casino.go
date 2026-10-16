@@ -47,6 +47,7 @@ func (w *world) casinoChecks() {
 			return
 		}
 		sessionID = pickStr(r.obj(), "session_id")
+		w.facts["p1_session_id"] = sessionID
 		if sessionID == "" || pickStr(r.obj(), "launch_url") == "" {
 			t.fail("launch returned no session: %s", r.brief())
 			return

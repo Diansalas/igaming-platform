@@ -167,7 +167,23 @@ func (w *world) setupChecks() {
 		}
 		t.pass("tenant %s (%s) and brand %s (%s) found and active", w.cfg.Tenant, w.tenantID, w.cfg.Brand, w.brandID)
 	})
-	for _, role := range []string{"ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2", "COMPLIANCE"} {
+	w.check("setup.no_stale_containment", func(t *T) {
+		if !t.need("setup.resolve_tenant_brand") {
+			return
+		}
+		r := t.acall("ADMIN", "GET", "/v1/admin/tenants/"+w.tenantID+"/payments/kill-switches", nil)
+		if r == nil || !t.expect(r, 200, "", "list kill switches") {
+			return
+		}
+		for _, it := range items(r) {
+			if on, _ := pick(it, "engaged").(bool); on {
+				t.fail("a payment kill switch is ALREADY engaged on the synthetic tenant (provider_scope=%s operation_scope=%s, id %s): money flows would be refused. It may be real containment or left over from an aborted run; the suite never releases a switch it did not engage (kill-switch-and-containment.md section 1.3)", pickStr(it, "provider_scope"), pickStr(it, "operation_scope"), pickStr(it, "id"))
+				return
+			}
+		}
+		t.pass("no kill switch is engaged on the synthetic tenant (%d switch record(s))", len(items(r)))
+	})
+	for _, role := range []string{"ADMIN2", "TENANT_ADMIN", "FINANCE1", "FINANCE2", "COMPLIANCE", "RISK_MANAGER"} {
 		role := role
 		w.check("setup.signin_"+strings.ToLower(role), func(t *T) {
 			a := w.actor(role)
@@ -296,6 +312,8 @@ func roleNeed(role string) string {
 		return "needed for four-eyes on platform actions (kill-switch release, launch) and tenant-B provisioning"
 	case "TENANT_ADMIN":
 		return "needed to apply provider capabilities and the casino opt-in (or pre-configure them and set CONFIGURE=false)"
+	case "RISK_MANAGER":
+		return "needed only to drive the mock sportsbook settlement (sportsbook_settlement:simulate)"
 	case "COMPLIANCE":
 		return "needed to approve the synthetic player's KYC verification (the mock vendor never auto-approves), which the withdrawal identity gate requires"
 	case "FINANCE1", "FINANCE2":

@@ -8,14 +8,16 @@ import (
 	"strings"
 )
 
-// items returns the rows of a list response: a bare array, or the "items" member of a paginated envelope.
+// items returns the rows of a list response: a bare array, or the "items" (or "alerts") member of an envelope.
 func items(r *response) []any {
 	if a := r.arr(); a != nil {
 		return a
 	}
 	if m := r.obj(); m != nil {
-		if a, ok := m["items"].([]any); ok {
-			return a
+		for _, k := range []string{"items", "alerts"} {
+			if a, ok := m[k].([]any); ok {
+				return a
+			}
 		}
 	}
 	return nil

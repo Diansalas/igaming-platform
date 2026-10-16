@@ -32,6 +32,7 @@ type world struct {
 
 	actors map[string]*actor
 	status map[string]status // outcome of every check so far, by name
+	kinds  map[string]skipKind
 
 	// learned during the run
 	tenantID string
@@ -45,7 +46,7 @@ type world struct {
 
 func newWorld(cfg *config, rep *reporter, scrub *scrubber, c *client) *world {
 	w := &world{cfg: cfg, c: c, rep: rep, scrub: scrub, now: time.Now, sleep: time.Sleep, warnTo: os.Stderr,
-		actors: map[string]*actor{}, status: map[string]status{}, players: map[string]*player{}, facts: map[string]string{}, bal: map[string]int64{}}
+		actors: map[string]*actor{}, status: map[string]status{}, kinds: map[string]skipKind{}, players: map[string]*player{}, facts: map[string]string{}, bal: map[string]int64{}}
 	for _, r := range actorRoles {
 		spec := cfg.Actors[r]
 		if spec.configured() {
@@ -108,7 +109,12 @@ func (t *T) need(names ...string) bool {
 			return false
 		}
 		if s == statusSkip {
-			t.set(statusSkip, skipBlocked, "BLOCKED: required check %s was skipped", n)
+			// A dependency that was skipped for a documented reason makes this check skipped for the same reason class.
+			k := t.w.kinds[n]
+			if k == skipBlocked || k == "" {
+				k = skipBlocked
+			}
+			t.set(statusSkip, k, "depends on %s, which was skipped (%s)", n, k)
 			return false
 		}
 	}
@@ -179,6 +185,7 @@ func (w *world) check(name string, fn func(t *T)) {
 		t.set(statusFail, "", "check did not reach a verdict (internal error)")
 	}
 	w.status[name] = t.status
+	w.kinds[name] = t.skip
 	w.rep.add(result{Name: name, Status: t.status, Detail: t.detail, Skip: t.skip, Duration: w.now().Sub(start)})
 }
 
