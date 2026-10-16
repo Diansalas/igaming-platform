@@ -49,9 +49,11 @@ import (
 // ever replayed to the same staff id in the same tenant.
 
 const (
-	idempotencyHeader    = "Idempotency-Key"
-	idempotencyMaxBody   = 1 << 20
-	idempotencyReplayMsg = `{"status":"already_applied"}` + "\n"
+	idempotencyHeader  = "Idempotency-Key"
+	idempotencyMaxBody = 1 << 20
+	// idempotencyHandlerTimeout caps a keyed handler well under the 15 minute reclaim age of an in_progress key.
+	idempotencyHandlerTimeout = 2 * time.Minute
+	idempotencyReplayMsg      = `{"status":"already_applied"}` + "\n"
 )
 
 func validIdempotencyKey(k string) bool {
@@ -131,6 +133,7 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 		}
 
 		var reserved bool
+		var resID uuid.UUID // SR10C-8: complete and release act on THIS reservation only
 		var prior struct {
 			hash   []byte
 			state  string
@@ -148,16 +151,17 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 				     LIMIT 100)`, target); err != nil {
 				return err
 			}
-			tag, err := tx.Exec(ctx, `
+			err := tx.QueryRow(ctx, `
 				INSERT INTO staff_idempotency_keys (tenant_id, actor_id, idempotency_key, route, request_hash, state)
 				VALUES ($1, $2, $3, $4, $5, 'in_progress')
-				ON CONFLICT (tenant_id, actor_id, idempotency_key) DO NOTHING`, target, subject, key, route, hash)
-			if err != nil {
-				return err
-			}
-			if tag.RowsAffected() == 1 {
+				ON CONFLICT (tenant_id, actor_id, idempotency_key) DO NOTHING
+				RETURNING id`, target, subject, key, route, hash).Scan(&resID)
+			if err == nil {
 				reserved = true
 				return nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
 			}
 			return tx.QueryRow(ctx, `
 				SELECT request_hash, state, response_status FROM staff_idempotency_keys
@@ -199,7 +203,7 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 			defer cancel()
 			if err := deps.DB.WithTenant(rctx, target, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := tx.Exec(ctx, `DELETE FROM staff_idempotency_keys
-					WHERE tenant_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND state = 'in_progress'`, target, subject, key)
+					WHERE tenant_id = $1 AND id = $2 AND state = 'in_progress'`, target, resID)
 				return err
 			}); err != nil {
 				logger.Error("staff_idempotency_release_failed", "err", err.Error())
@@ -212,7 +216,11 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 			}
 		}()
 		cw := &captureWriter{h: http.Header{}}
-		inner.ServeHTTP(cw, r)
+		// SR10C-8: a live handler must never look abandoned. The handler runs under a deadline far below the 15 minute
+		// reclaim age, so a reservation old enough to be reclaimed belongs to a dead request.
+		hctx, hcancel := context.WithTimeout(r.Context(), idempotencyHandlerTimeout)
+		defer hcancel()
+		inner.ServeHTTP(cw, r.WithContext(hctx))
 		done = true
 		if cw.status == 0 {
 			cw.status = http.StatusOK
@@ -220,8 +228,8 @@ func staffIdempotent(deps Deps, inner http.Handler) http.Handler {
 		if cw.status >= 200 && cw.status < 300 {
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 			err := deps.DB.WithTenant(rctx, target, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE staff_idempotency_keys SET state = 'completed', response_status = $4, completed_at = now()
-					WHERE tenant_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND state = 'in_progress'`, target, subject, key, cw.status)
+				_, err := tx.Exec(ctx, `UPDATE staff_idempotency_keys SET state = 'completed', response_status = $3, completed_at = now()
+					WHERE tenant_id = $1 AND id = $2 AND state = 'in_progress'`, target, resID, cw.status)
 				return err
 			})
 			cancel()

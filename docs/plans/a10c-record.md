@@ -376,3 +376,14 @@ is not possible, because the flows' database guards refuse it (probe above). Fix
 (1) `INSERT ... RETURNING id` and complete/release `WHERE id = $reserved`; and (2) bound the inner handler with
 `context.WithTimeout` well below the reclaim age (for example 2 min), so a live handler can never be treated as an orphan. Add a
 test that seeds a reclaimed row and asserts a late release from the stale reservation removes nothing.
+
+### SR10C-8 fix (reclaim race keyed by reservation)
+
+- The reservation is `INSERT ... RETURNING id`; completion and release now match `tenant_id AND id = <that id> AND state = 'in_progress'`, never the key, so
+  a late completion or release of an old request cannot complete or delete a newer reservation of the same key.
+- The keyed handler runs under `context.WithTimeout(2 minutes)`, far below the 15 minute reclaim age, so a live handler is never treated as abandoned.
+- Test: `TestA10c_SR10C8_LateCompleteOrReleaseNeverTouchesANewerReservation` (sweeps the old row and reserves the key anew while the old handler runs,
+  for both the 2xx completion path and the non-2xx release path; the newer row stays `in_progress` with no status). The other idempotency tests would fail
+  if completion stopped working (a first run of this change caught a wrong placeholder that way).
+- Results (scratch DB `a10c_t1`, route freeze + OpenAPI pins + step-up golden + liveness + K1/K3/HSEC + R1/R2 + A10c, `-v`): 129 top-level PASS, 0 FAIL,
+  0 SKIP, of which 15 are `TestA10c_*`. gofmt clean, `go vet` (plain and integration) clean, golangci-lint 0 issues, unit tests for httpserver and tenant ok.
