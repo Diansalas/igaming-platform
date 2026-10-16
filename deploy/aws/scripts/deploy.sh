@@ -281,8 +281,9 @@ cmd_seed_admin() {
   local overrides secret_arn
   # The email is not a secret, so it travels as a command override; the
   # password never does (SEED_ADMIN_PASSWORD comes from Secrets Manager).
+  # cmd/seed-admin requires -operator and -reason in every mode (recorded in the audit rows; ADR 0119 S5+S6 review SR-1).
   overrides="$(jq -n --arg email "${email}" \
-    '{containerOverrides: [{name: "seed-admin", command: ["/app/seed-admin", "-email", $email, "-create-person"]}]}')"
+    '{containerOverrides: [{name: "seed-admin", command: ["/app/seed-admin", "-email", $email, "-create-person", "-operator", "deploy.sh", "-reason", "staging-bootstrap"]}]}')"
   run_one_off_task "$(tf_out ecs_seed_admin_task_definition_arn)" "seed-admin" "${overrides}"
   secret_arn="$(tf output -json secret_arns | jq -r '.seed_admin_password')"
   echo "   platform_admin ${email} created. Its password is in Secrets Manager (not printed here):"

@@ -12,8 +12,12 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 1. Merge to the deploy branch only after CI is green (build, vet, lint,
    unit + integration tests, both frontend test suites).
 2. Apply pending migrations first, separately from the app rollout:
-   `DATABASE_URL=<prod> go run ./cmd/migrate up`. Never let app startup
-   apply migrations implicitly.
+   `DATABASE_URL=<prod> go run ./cmd/migrate up`, then `go run ./cmd/migrate verify`
+   (checksums and version gaps; it tolerates only the reserved unused versions, see
+   `expand-contract-migrations.md`). Never let app startup apply migrations implicitly.
+   Environment-specific procedure and the first staging deployment: `aws-staging-deploy-plan.md`;
+   a new variable a release requires (staff MFA keys, payout-instrument keys, actor-proof keys)
+   must be present BEFORE the rollout (`production-configuration-checklist.md`).
 3. Roll the new `platform-api` build using the deployment's normal
    rolling-update mechanism (see `docs/architecture/38-deployment-
    architecture.md`). `VerifyRuntimeRoleInProduction` runs on every
@@ -64,15 +68,18 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 5. Root-cause before closing: a lock-ordering gap, a missed idempotency
    key collision, or a provider double-callback are the known historical
    causes in this codebase (see `LOCK-1`..`LOCK-4` in the Stage 9 report).
-6. Write the incident and its resolution to `reconciliation_mismatches`'
+6. Read runs and mismatches without SQL: `GET /v1/admin/tenants/{tenantID}/reconciliation/runs` and `.../reconciliation/mismatches`
+   (and the Back Office reconciliation screens), casino: `GET /v1/admin/casino/reconciliation/runs|mismatches`. Payment-statement
+   failures (`no_statement_source`, `cursor_anomaly`, `truncated`, stuck cursor): `observability-and-alerting.md` section 4.
+   Write the incident and its resolution to `reconciliation_mismatches`'
    investigation columns (mutable by design — see migration 0082) and to
    the audit log if any compensating entry was posted.
 7. **Suspended / closed tenants (PRH-2 R3, H-W1).** Only `ledger_vs_projection`
    and `payment_statement` observe a tenant that is not `active` (the sportsbook
    and casino streams stay active-only). A closed tenant's ledger can still move
-   through staff M2, so drift on it is a real P1. A failure to LIST tenants is
-   log-only (no alert): if observation findings stop appearing, check the
-   scheduler log for "tenant listing failed". A finding or `reconciliation.*` alert for such a tenant is real
+   through staff M2, so drift on it is a real P1. A failure to LIST tenants raises the durable P1 alert
+   `reconciliation.sweep_failed` since A9 (phases `list_active`, `list_non_active`, `panic`; runbook in `observability-and-alerting.md` section 4);
+   the scheduler log line "tenant listing failed" is still written. A finding or `reconciliation.*` alert for such a tenant is real
    evidence: the audit record of its run shows `non_active_tenant_observation:
    true` and the `tenant_status`. The observation never resolves anything: do
    not expect, and do not build, an automatic release, dispatch or posting for a
@@ -250,9 +257,11 @@ Applies to the `staff_capability_grant_requests` / `_approvals` /
    `person_id`.
 
 **A grantee's status/role changed after a grant was approved:** there is
-no automatic revoke yet (STAFF-LIFECYCLE-1 is not implemented — ADR §8.4,
-security ruling S-b). Revoke the grant manually as part of any
-suspend/role-change/off-boarding procedure until that automation exists.
+no automatic revoke (the staff lifecycle API of ADR 0119 S5/S6 exists, but
+suspending, demoting or offboarding a staff member does not revoke their K1
+grants — ADR §8.4, security ruling S-b). Revoke the grant manually as part of
+every suspend/role-change/off-boarding (`staff-lifecycle-and-mfa-recovery.md`
+section 3).
 
 **G-P1 is not available:** a platform-originated grant request naming a
 tenant's own `finance` staff always fails closed (`CG010`, HTTP 409) — this
@@ -346,7 +355,7 @@ causation's `player_cash` leg), `policy_disabled`.
 **Emergency stop:** revoke the actor's `ledger_adjustment:*` grant (§10).
 The next in-transaction read refuses the authority; an execution already
 holding `FOR SHARE` on the grant completes first, then the revoke applies.
-There is still no staff suspend API (STAFF-LIFECYCLE-1).
+Suspend the actor through the staff lifecycle API (`staff-lifecycle-and-mfa-recovery.md`).
 
 **`ledger_unlinked_manual_adjustment` (P1 reconciliation finding):** a
 `manual_adjustment` ledger transaction exists after the K2 cutover with no
@@ -430,8 +439,8 @@ dispatch is being withheld for a non-active tenant (expected, see step 5).
 7. **Escalated payouts** (`payments.payout_resend_escalated`, `payments.payout_reclaim_denied_by_kyc` audit
    rows; `escalated_at` set): the sweeper never resends a non-idempotent or exhausted attempt. Resolve through the
    staff payout-resolution path (poll / `/resolve`). Releasing the hold of a never-sent attempt (M3,
-   `RejectCreated` plus hold release) has NO caller today and the governed force-resolution path (ADR 0101, K3) is
-   not implemented, so there is currently no supported release path; escalate to engineering and the business
+   `RejectCreated` plus hold release) has NO caller today (the K3 force-resolution of section 14 implements M1, M2 and M4 only), so there is
+   currently no supported release path; escalate to engineering and the business
    owner. Never resend or edit rows by hand.
 
 `PROVIDER DEPENDENT`: all of this is exercised against MOCK adapters only.
@@ -545,9 +554,11 @@ first gate: a missing or revoked grant is refused by the database.
 3. **Check the reason is resolvable.** M2 admits an `ambiguous` payout, or a `disputed` payout with
    `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is still
    `submitted`. NOT resolvable by M1/M2 (the request is refused `force_resolve_reason_not_resolvable`):
-   `amount_asset_mismatch`, `callback_amount_asset_mismatch` (PAYOUT-AMOUNT-DISPUTE-1, open),
    `invalid_provider_reference*`, `late_*`, a tombstone. Those go to engineering and the business
-   owner; do not try to edit rows.
+   owner; do not try to edit rows. **`amount_asset_mismatch` and `callback_amount_asset_mismatch`** (PAYOUT-AMOUNT-DISPUTE-1,
+   migration 0163, A5) are resolvable by M2 ONLY with `basis_code` `provider_confirmed_out_of_band`; if the provider returned the whole
+   payout use the governed reversal instead; a partial or different-asset payout has no exit
+   (`payout-reversal-and-amount-dispute.md`).
 4. **"Declare paid" needs a provider reference on the attempt.** A reference-less ambiguous payout
    (a timeout before the provider acknowledged) can only be declared NOT paid, with the out-of-band
    basis.
@@ -594,7 +605,8 @@ Nothing pages anyone: staff must read the findings list.
 **psp_clearing residual.** An executed declare-paid credits `psp_clearing` by the withdrawn amount at
 execution, without a PSP confirmation. Each open `pay_declared_paid_unconfirmed` finding itemises that credit
 as an explained difference. If the PSP never paid, the amount stays in `psp_clearing` until a
-WITHDRAWAL-REVERSAL-1 posting or a governed correction; it is never netted away. Do not fix it by hand.
+governed payout reversal (WITHDRAWAL-REVERSAL-1, IMPLEMENTED in A5: `payout-reversal-and-amount-dispute.md`) or a governed correction;
+it is never netted away. Do not fix it by hand.
 
 **Stranding by MA020.** After a declared-paid M2 the player's cash can be below what an in-flight K2
 compensation expects; MA020 (open payment exposure) is a K2 payload refusal; it never applies to the Step B
@@ -745,7 +757,8 @@ shows a NET `recovered` of at least the amount for exactly one payout** (the pla
 ADR 0111 §21: debits under the `withdrawal_failed` causation, none reversed, minus every credit under it). The alert and RR-1 are
 different channels and **neither clears the other**: closing the alert does not recover anything, and a recovery shown by RR-1
 does not close the alert. `contradiction_after_m4_paid` is closed only after a human has established with the provider which
-side is right; nothing in the platform moves money back on its own (governed WITHDRAWAL-REVERSAL-1 is required first).
+side is right; nothing in the platform moves money back on its own (the governed payout reversal of `payout-reversal-and-amount-dispute.md`,
+which needs the PSP's return of the WHOLE payout, is the only platform path).
 
 ### Related: recovery findings with NO automatic stop path (ADR 0111 §21, r30; LF C-b)
 

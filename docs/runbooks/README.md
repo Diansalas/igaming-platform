@@ -13,14 +13,23 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `backup-restore-dr.md` — A12 / ADR 0122: backup, restore and point-in-time-recovery runbooks (full loss, operator
   error -> PITR to a timestamp, single tenant), post-restore checklist, failure handling, measured local RTO/RPO
   (`deploy/backup/drill.sh`; throwaway cluster, synthetic data; managed RDS NOT proven).
-- `aws-staging-deploy-plan.md` — PREPARED, NOT APPLIED: the single named-commit staging deploy verification checklist
-  (roles, secrets, migrations, PITR restore to a timestamp, logical restore, observability, alert delivery).
+- `aws-staging-deploy-plan.md` — PREPARED, NOT APPLIED, NOT AUTHORISED TO RUN: the ONE named-commit AWS staging deployment plan (owner decision 8):
+  preconditions, owner inputs, go/no-go, roles, secrets, migrations, PITR, logical restore, observability, alert delivery, evidence, teardown.
 - `backup-and-disaster-recovery.md` — honest RPO/RTO evidence status
   (production NOT MET; a local restore drill is DONE for the dev dataset only).
 - `restore-from-backup.md` — restore procedure matching the local drill
   (`deploy/drill/backup-restore-drill.sh`), findings and measured dev-dataset numbers.
 - `launch-and-suspension.md` — ADR 0112 brand/tenant launch, suspension, reactivation, closure.
 - `incident-response-and-oncall.md` — TEMPLATE: no rota or recipient exists (ALERT-DELIVERY-1 open).
+- `kill-switch-and-containment.md` — A13: stop something now (payment kill switch engage/release, casino game status, market
+  disable, brand/tenant suspension); `payment-kill-switch-release-recovery.md` is its wedged-release companion.
+- `rg-enforcement-activation.md` — A13: A6 RG floors, the one-way enforcement switch, readiness `R-RG-CONFIG`, failure modes.
+- `market-blocking-configuration.md` — A13: A8 operating-market gate, no-route configuration model, staging prerequisites.
+- `payout-reversal-and-amount-dispute.md` — A13: A5 governed payout reversal, amount/asset mismatch exit, negative-balance block.
+- `staff-lifecycle-and-mfa-recovery.md` — A13: joiner/mover/leaver, MFA reset and recovery, `cmd/seed-admin` break-glass.
+- `secrets-and-credential-rotation.md` — A13: inventory of every secret family and where its rotation procedure lives.
+- `test-database-hygiene.md` — A13: TEST-HYGIENE-1 scratch database policy (automatic reaper NOT IMPLEMENTED).
+- Audit of this whole directory against the finish line: `docs/plans/a13-runbook-audit.md`.
 - `expand-contract-migrations.md` — forward-fix versus restore policy, pre-flight refusals, write-quiet window.
 - `load-and-soak-test-plan.md` — load/soak/chaos plan plus one small local smoke (`deploy/loadtest/`).
 - `observability-and-alerting.md` — minimum alert-rule inventory; section 4 the A9 signals and the response for

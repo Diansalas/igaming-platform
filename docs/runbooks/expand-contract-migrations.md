@@ -12,6 +12,11 @@ Status: policy and procedure document (no code). It consolidates rules that alre
   version gaps. It does not compare the live schema to the SQL and does not look at down-files.
 - `down` **refuses** unless `APP_ENV` is explicitly `development` or `staging` (unset or `production` is refused, checked
   before any connection). Some downs refuse data-bearing states. CI proves reversibility only for the last 4 steps.
+- `verify` tolerates exactly the reserved unused versions declared in `internal/db/migrate.go` (`reservedUnusedVersions`: 143 to 150, 159 and 161
+  at this commit); any other gap fails it. Do not add to that list to silence a real gap.
+- Data-bearing refusals in `down` files (a down is refused while the data it would destroy exists): `WD097` (0162, a reversed withdrawal/reversal
+  exists), `MR099` (0163, a pending or executed mismatch M2 exists), `RL099` (0158, an RG enforcement activation exists), `AM099` (0154,
+  a screening row exists), plus the older ones in the migration files. Forward-fix; never remove the guard.
 - Rolling deploys run two application versions against one schema (section 3 of the deployment architecture).
 - `up` and `down` take a session advisory lock, so two migrators cannot run concurrently.
 - A restore or `CREATE DATABASE` does not carry the database ACL (TEMPORARY revoke, migration 0116); `migrate up` will not

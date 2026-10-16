@@ -212,6 +212,8 @@ always re-applies `PLATFORM_API_DESIRED_COUNT` (default 1).
 
 ## 6. Teardown and verification
 
+> **A13 note.** Since A12 (ADR 0122) the database module has deletion protection and takes a final snapshot, and retained automated backups survive a destroy, so the "RDS: no final snapshot, automated backups deleted" bullet below is out of date and `down` is multi-step: use section 13 of `aws-staging-deploy-plan.md`. The current stack also lacks the staff MFA key variables the binary now requires (gap G3 there); do not run this lifecycle as written until that plan's section G is closed.
+
 ```bash
 deploy/aws/scripts/deploy.sh down     # interactive terraform destroy, then verify-teardown.sh
 # Session-end security check (ADR 0086 decision 18): no staging role may be

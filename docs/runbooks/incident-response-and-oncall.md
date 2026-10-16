@@ -84,6 +84,13 @@ One person may hold several roles in a small team; the IC and the operator shoul
 | Suspected compromise / secret exposure | `operational-runbooks.md` section 9 and 15 (actor proof keys); rotate, do not paste secrets anywhere |
 | Need to restore | `restore-from-backup.md` (human decision; section 6 there) |
 | A brand must stop now | `launch-and-suspension.md` section 4 |
+| Stop payments / one game / one country now | `kill-switch-and-containment.md` |
+| Deposits, launches or wagers suddenly refused after enabling RG limits (`rg_config_missing`) | `rg-enforcement-activation.md` section 4 |
+| Everyone refused `MARKET_NOT_AVAILABLE` | `market-blocking-configuration.md` sections 3 and 6 |
+| Payout returned by the PSP, or `amount_asset_mismatch` park, or a negative player wallet | `payout-reversal-and-amount-dispute.md` |
+| `payment_statement` run failing for one provider (`no_statement_source`, `cursor_anomaly`, `truncated`, stuck cursor) | `observability-and-alerting.md` section 4 (A11 runbooks); `cursor_anomaly` is a security incident |
+| Staff locked out, lost MFA device, leaver, no platform admin can sign in | `staff-lifecycle-and-mfa-recovery.md` |
+| Suspected key or credential exposure | `secrets-and-credential-rotation.md` section 3 |
 
 ## 6. Rules during an incident
 

@@ -1,9 +1,10 @@
 # Runbook: AML officer bootstrap and quorum (ADR 0116 S3, migration 0140)
 
-Status: the database and Go capability is IMPLEMENTED. There is NO HTTP route, Back Office screen or auth permission
-constant for it (ADR 0116 S6, NOT IMPLEMENTED), so the steps below are performed by calling the existing capability
-service (`internal/capability`) from an operator tool or a reviewed script. This runbook describes mechanism only. It
-sets no legal value and is not a statement that any licence condition is met.
+Status: the database and Go capability is IMPLEMENTED. **Granting the `aml_officer` capability still has no dedicated HTTP route or Back
+Office screen** (K1 capability-grant flow only), so the bootstrap steps below are performed by calling the existing capability service
+(`internal/capability`) from an operator tool or a reviewed script, or through the K1 grant routes where they apply (`operational-runbooks.md`
+section 10). **Since A7 the officer WORK (cases, holds, notes, proposals, approvals) has 11 routes and a Back Office queue**: see "Working the
+queue" at the end. This runbook describes mechanism only. It sets no legal value and is not a statement that any licence condition is met.
 
 ## What the role is
 
@@ -65,8 +66,11 @@ in force.
 - Case notes are plaintext; the lint is an accident guard only.
 - Erasure of a person with AML records fails closed (`aml_person_has_records`); the erasure job itself (HD-RET-1) is NOT
   IMPLEMENTED.
-- Transaction monitoring rules (S4) and SAR export (S5) are NOT IMPLEMENTED. Screening (S2) is a MOCK provider with an
-  officer-initiated orchestrator; there is no screening vendor, no automatic trigger and no Back Office screen for policies.
+- Transaction monitoring rules (S4) and SAR export (S5) are NOT IMPLEMENTED (a case can be SAR-flagged; nothing is exported or filed). Screening (S2)
+  is a MOCK provider with an officer-initiated orchestrator; there is no screening vendor (PROVIDER DEPENDENT), no automatic trigger and no
+  Back Office screen for screening policies.
+- Whether the officer role is operable by real people in production also depends on real staff onboarding (email provider, PROVIDER DEPENDENT) and on
+  the compliance/legal decisions HD-AML-1..9 (OWNER/COMPLIANCE).
 
 ## Working the queue (A7: routes and Back Office, ADR 0116 section 13)
 
