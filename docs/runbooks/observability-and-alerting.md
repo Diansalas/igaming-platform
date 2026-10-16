@@ -834,9 +834,18 @@ Discriminator `stream:payment_statement:provider:<id>:<phase>` (ONE open alert p
 - `source_not_eligible`: a source is registered but cannot vouch for this provider (it speaks for another provider id, or it is a MOCK source
   where mock components are not allowed). It is never fetched.
 - `scope`: the tenant's provider listing failed (database).
-- `cursor_anomaly` (SR11-1): run rows exist for the pair above its backed cursor that no stored import backs. They are IGNORED by the cursor
-  read (the stream keeps fetching from the genuine cursor) but are a forgery/corruption indicator: treat as a security incident (who wrote
-  `reconciliation_runs`?), keep the rows as evidence, and do not resolve the alert until security has reviewed.
+- `cursor_anomaly` (SR11-1, SR11-10, SR11-11): run rows exist for the pair above its trusted cursor that no verifying import backs (with
+  import seal keys: an import written by this stream and source whose seal VERIFIES; without keys, non-production only: any import). They are
+  IGNORED by the cursor read (the stream keeps fetching from the genuine cursor) but are a forgery/corruption indicator: treat as a security
+  incident (who wrote `reconciliation_runs` / `payment_statement_imports`?), keep the rows as evidence, and do not resolve the alert until
+  security has reviewed. The discriminator ends `cursor_anomaly:n<count>:<digest>`: the digest covers the ids of the unbacked rows, so an
+  unchanged set re-occurs on ONE alert and a NEW forgery opens a NEW alert. Compare the digests in the audit rows
+  `reconciliation.payment_cursor_anomaly` (count, `newest_unbacked_run_id`, `unbacked_digest`, `sealed_cursor`) to tell a new forgery from a
+  known one. Benign one-off causes (still investigate): import keys newly configured on a stack whose history is unsealed (one alert, gone
+  after the first sealed run), a statement source relabelled, or a retired key id dropped from the process (its imports no longer verify).
+- `cursor` phase with `ErrPaymentCursorUnverifiable`: the newest 64 run rows of the pair are all unbacked: the run fails closed and fetches
+  nothing. Same security handling; the stream resumes when a genuine run row is again among the newest 64 (a deliberate fix is a governed
+  decision, never a SQL edit of the append-only tables).
 - `truncated`: the run stopped at the per-run line bound (`RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`). The run matched only the window the
   source vouched for (`window_truncated=true` in `reconciliation_runs` and the audit row) and the next run continues from the persisted
   cursor (`reconciliation_runs.coverage_end` of the provider's last committed run). It is not a failure and not a clean claim; it clears
@@ -848,7 +857,10 @@ Symptom: `reconciliation.run_failed` (phase `fetch`, for one (tenant, provider))
 `coverage is not contiguous with the continuation cursor` or `above the per-run bound` / `made no progress`, and
 `reconciliation_payment_unreconciled{reason="run_failed"}` stays at 1 for that pair.
 
-1. Read the pair's cursor: `SELECT max(coverage_end) FROM reconciliation_runs WHERE tenant_id=$1 AND stream='payment_statement' AND provider_id=$2`.
+1. Read the pair's cursor: the `continued_from` of the pair's latest `reconciliation.sweep_run` audit row is the TRUSTED cursor the stream used
+   (F2: the newest run row backed by a sealed import of this source that verifies). `SELECT max(coverage_end) FROM reconciliation_runs WHERE
+   tenant_id=$1 AND stream='payment_statement' AND provider_id=$2` is only an upper bound: a value above `continued_from` means unbacked rows
+   (see `cursor_anomaly`).
 2. Gap or overlap error: the source returned a statement that does not start exactly at the cursor, or contains a line dated before it (a
    backdated / late-visible line, or a collect-then-page source). That is a SOURCE contract violation (`docs/plans/a11-payments-wiring-record.md`
    section 3, items 6 to 8): fix or pause the source; do not edit `reconciliation_runs` (append-only).
@@ -856,6 +868,16 @@ Symptom: `reconciliation.run_failed` (phase `fetch`, for one (tenant, provider))
    microsecond (`ErrPaymentStatementUnpageable`): fix the source's paging or raise the bound (<= 1000000).
 4. There is no automatic skip-forward: moving a cursor past unmatched lines would be a silent false negative. A deliberate skip is a governed
    decision (owner + ledger-finance) executed as a new, audited run row, not a SQL edit.
+5. Horizon error (F2 / LF-A11-2, `beyond the completeness horizon (now - settle lag)`): the source stated a CoverageEnd later than the request's
+   PeriodEnd. The source must cap its coverage at PeriodEnd (and leave later lines for the next statement); if the provider's real reporting lag
+   is longer than declared, raise the source's `StatementSettleLag()` (bounded to 7 days; validated at startup). Never lower the lag to make a
+   run pass.
+6. Order error (F2 / LF-A11-6, `ErrPaymentStatementOutOfOrder`): a truncated page was not in OccurredAt order, so the source is not paging by
+   time and the page's window may be incomplete. Fix the source's provider-side paging (by OccurredAt ascending, tie groups whole).
+7. A run that is SKIPPED with "horizon not past the cursor" (Info log, no failure) is normal right after a settle lag was raised; it resolves
+   by itself once now - lag passes the cursor.
+8. While the pair fails, M2 force-resolutions for that provider are refused (`reconciliation_not_current`, F2e): restore the stream first; do
+   not work around the gate.
 
 ### Runbook: undelivered alerts (`AlertUndeliveredP1Old`, `alert_undelivered_*`)
 

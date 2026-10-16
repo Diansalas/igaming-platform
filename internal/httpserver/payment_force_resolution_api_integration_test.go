@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,6 +20,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 )
 
 var frClosedTokens = []string{
@@ -33,6 +35,7 @@ var frClosedTokens = []string{
 type frWorld struct {
 	*maWorld
 	orch *payments.Orchestrator
+	mock *payments.MockProvider
 	// refusals collects every refusal (>= 400) body seen, for the leakage check.
 	refusals [][]byte
 }
@@ -87,6 +90,10 @@ func newFRWorld(t *testing.T, withPolicy bool) *frWorld {
 	orch, mock := newMockOrchestrator()
 	w.orch = orch
 	mustRegisterCapability(t, w.a.pool, w.tenant, mock)
+	// F2e / H-W1 second half: an M2 needs the provider's payment_statement reconciliation to be current. The
+	// world's evidence is one GENUINE run of the real stream over the MOCK provider (no attempts yet: clean).
+	w.mock = mock
+	w.statementRun()
 	for _, f := range []uuid.UUID{w.f1, w.f2} {
 		w.grant(w.tenant, w.ta, f, false, capability.CapabilityPaymentForceResolveRequest)
 		w.grant(w.tenant, w.ta, f, false, capability.CapabilityPaymentForceResolveApprove)
@@ -367,4 +374,17 @@ func TestForceResolutionAPI_T14_FlowTokensAndAudit(t *testing.T) {
 	// No refusal body ever carries SQL text or a SQLSTATE (non-vacuous: every refusal
 	// collected above is checked, and there must be several).
 	w.noLeakage(t, 6)
+}
+
+// statementRun runs the real payment_statement stream once for (tenant, "mock") in continuation mode, as the
+// production scoped sweep does (F2e: the M2 reconciliation-currency evidence).
+func (w *frWorld) statementRun() {
+	t := w.a.t
+	t.Helper()
+	now := time.Now()
+	out := reconciliation.ReconcilePaymentStatementForTenant(context.Background(), w.a.pool, nil, w.tenant, now.Add(-time.Hour), now,
+		payments.NewMockStatementSource(w.mock, payments.MockCredentialResolver{}), reconciliation.PaymentStatementOptions{Continuation: true})
+	if out.Err != nil {
+		t.Fatalf("payment_statement run: %+v", out)
+	}
 }
