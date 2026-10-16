@@ -311,3 +311,89 @@ Justified (equivalent under every reachable state; not run):
 7. M2 on mismatch parks: declare paid posts the full requested amount; acceptable only on out-of-band confirmation.
 8. Negative balance definition (player_cash or player_locked_cash < 0 on the wallet), deposits never blocked.
 9. Mutation table (section 7): every survivor justified.
+
+## 10. Independent ledger-finance review (2026-10-16, tip `84ac47f`, diff vs `1adce1c`)
+
+Reviewer: `ledger-finance` (independent of the implementation). Evidence: code and migration reading (0162, 0163,
+`internal/withdrawal/payout_reversal.go`, `internal/payments/payout_reversal.go`, check D, `internal/rg`, statement
+reconciliation, `receipt.go`), the A5 integration set re-run on a private scratch database (`lf_a5_rev`, dropped
+after): `go test -tags integration -count=1 -p 1 -run 'TestA5|TestADR0113'` over payments, withdrawal,
+reconciliation, rg, casino, adjustment, httpserver: 7/7 packages ok (rg, casino, adjustment, httpserver re-run with
+`-v`: every A5 test PASS, none skipped). Four scratch probe tests (NOT committed, file removed) are reported below
+as P-R, P-S, P-M, P-L.
+
+**Verdict: APPROVE for merge into the MOCK-only line, with LF-A5-1 and LF-A5-2 recorded as open rows that MUST
+close before any real money (owner decision 17). Not approved for real money.**
+
+### 10.1 Verified (no finding)
+
+- Posting shape: `withdrawal_reversed` Dr `psp_clearing` (house, `wallet_id IS NULL`) / Cr `player_cash` (the
+  request's wallet), request amount, request asset, exactly two entries, balanced; the exact mirror of the
+  completion (Dr hold / Cr `psp_clearing`). Check A (WD035) pins type, key `<id>:reversed`, correlation, reversed
+  completion, provider, wallet, asset, amount and entry count. The completion row and entries are never touched; the
+  release link must stay the completion (WD022 on E11). Integer minor units only (`int64` in Go, decimal-string
+  amount at HTTP, `NUMERIC(38,0)` in the database); no float anywhere.
+- Idempotency is database-enforced: `(tenant_id, idempotency_key)` UNIQUE on `<id>:reversed`;
+  `idx_ledger_transactions_tenant_provider_tx` on the return reference; `ledger_transactions_one_withdrawal_reversal`
+  (one reversal per completion); the state machine (terminal `reversed`, WD020/WD021). None is check-then-insert.
+- Tombstone branch accounting: the hold goes back to cash once (E10 `withdrawal.Fail`, key `<id>:failed`, WD034
+  terminal sum 0); `psp_clearing` is never touched (net zero at the PSP); the tombstone sits on (provider, ORIGINAL
+  reference), so a late `withdrawal_completed` is refused twice (WD020 on the failed request, and the provider
+  UNIQUE, tested). M2 / M4 require `submitted` and are refused after it. The attempt is parked (T10) and the P1 is
+  raised LAST.
+- Commit-time checks: WD026 is in the BEFORE UPDATE guard (cannot be skipped by statement order; votes are
+  append-only, `withdrawal_approvals_immutable`); WD035 / WD044 are `DEFERRABLE INITIALLY DEFERRED` constraint
+  triggers (`SET CONSTRAINTS ... IMMEDIATE` only fires them earlier, which refuses the reversal INSERT; disabling
+  needs the table owner or superuser: ADR 0110 9.4, R2). No SECURITY DEFINER; `search_path` pinned.
+- Lock order against ADR 0082 (A7/A8/A9): L1 request -> L1 payout attempts (after the parent, ascending id) ->
+  staff FOR SHARE -> L2 completion FOR UPDATE -> L3/L4 in `ledger.Post`; the tombstone `Post` has no entries (no L3)
+  and comes after Fail's L3/L4; nothing takes an L0-L2 lock after a Post. The payout callback/poll paths lock the
+  withdrawal first, so there is no cycle with the reversal.
+- Concurrency: 8 Persons x 3 rounds (implementation test) and probe **P-R** (12 rounds: the FINAL vote races a
+  success callback on a submitted payout): both interleavings occurred (11 tombstone, 1 complete-then-E11), cash
+  credited exactly once in every round, ledger balanced, projection = rebuild. Probe **P-M**: a vote cast while
+  `submitted` plus a vote after the completion executes E11 on the same digest correctly.
+- Check D: the reversed arm is a parity copy of check A (WD033/WD035, wallet/asset/amount/entry count) and the
+  orphan `withdrawal_reversed` arm (WD044) is keyed per transaction; the governed-reversal test is clean (no false
+  positive on healthy data); the tombstone (no entries, no hold leg) cannot reach `unlinked_mm` or WD034.
+- Down migrations: 0162 refuses (WD097) on any reversed request, reversal link, `withdrawal_reversed` or `reverse`
+  row, so the restored `(request, approver)` UNIQUE cannot fail; bodies restored byte for byte (snapshot test).
+  0163 refuses (MR099) on pending/executed M2 of a mismatch park. Honest.
+- M2 exit (0163): admitted for both mismatch reasons only with basis `provider_confirmed_out_of_band`, at
+  submission and at `-> executing` (database authority, Go mirror). The M2 itself stays the K2/K3 proof-bound,
+  payload-hashed, four-eyes framework. "Declare paid" posts the request amount through `Complete` (Dr hold / Cr
+  `psp_clearing`); "declare not paid" posts `Fail` (Dr hold / Cr cash). One executed resolution per attempt, the
+  request must be `submitted`, so the two kinds and the A5 tombstone branch are mutually exclusive: no double count.
+  Note (not a finding): "declare paid" on a mismatch park is an attestation that the provider paid the REQUESTED
+  amount; a different amount has no exit (R3) and must not be declared paid.
+- Negative-balance block: sign is right (`credit_total < debit_total` on the credit-normal `player_cash` /
+  `player_locked_cash`); every gated path passes the wallet id (casino launch/bootstrap/wager, sportsbook wager, bonus
+  `GateCheckpoint`, the WD-RG-1 withdrawal gate); `ActionDeposit` is the one exemption; it lifts at `>= 0` (tested);
+  no new lock.
+
+### 10.2 Findings
+
+| ID | Severity | Finding | Required action |
+|---|---|---|---|
+| LF-A5-1 | **HIGH before real money** (MEDIUM while MOCK) | The tombstone branch releases the hold on a staff attestation that the PSP returned the payout, but nothing afterwards detects that the attestation was wrong (PSP paid, never returned = double payout). Probe **P-L**: after the tombstone branch, a late SUCCESS callback for the original reference writes **0 alert rows and 0 audit rows** (the attempt is already `disputed`, the B12 discriminator dedups). Statement reconciliation classifies `reversal_tombstone_precedes_success` as `reasonExcluded` and a succeeded payout line on a `disputed` attempt falls into the silent "already a P1" case (`payment_statement.go` `matchPayment`). The functionally equivalent M2 "declare not paid" has the standing kind `pay_declared_not_paid_but_paid`; the A5 branch has none. | Before real money: (a) a late success / succeeded statement line on a payout whose request the A5 tombstone branch failed raises a distinct P1 and writes an audit row; (b) a payout-scoped standing finding (in `payoutDisputeReasonClasses` or a K3-style standing kind keyed on the tombstone) that clears only on PSP return evidence for the original reference or a K2 recovery debit (causation = the `withdrawal_failed`). Recommended as the first A5 follow-up. |
+| LF-A5-2 | **HIGH before real money** (= R1, judged) | `reverse` rows are not bound to the ADR 0110 signed actor proof. A5 makes `withdrawal_approvals` authorise a CREDIT of house money to a player (E11) and a hold release on a submitted payout (tombstone branch, a second "declare not paid" exit with weaker governance than M2: `withdrawal:approve` + critical step-up instead of the proof-bound K3 approvals and `payment_force_resolve` grant). The precedent is HSEC-APPROVED-HOLD-RELEASE-1 (0124), which proof-bound the hold-release tables for exactly this class. | **Recommendation: bind, do not route through K2, accept as an open row for the MOCK merge only.** Bind the `reverse` decisions to the 0120 proof (ADR 0110 amendment: a `withdrawal_payout_reversal:*` operation, `zz_actor_proof_guard` on `withdrawal_approvals` for `decision = 'reverse'` or a dedicated proof-bound decision table), ideally together with ADR 0113 9.3 / ADR 0110 T8 for `approve`. Routing through the K2 tables is rejected: K2 posts `manual_adjustment` / `compensating_entry` under the K2 fence and cannot drive E11 or produce the check-A-pinned `withdrawal_reversed` shape without duplicating the state machine. Must close before real money; owner authorization per ADR 0110 T8. |
+| LF-A5-3 | LOW | A vote stays counted after its approver is suspended (probe **P-S**: first voter suspended, second vote EXECUTED the reversal, `counted=2`). Neither the Go count nor WD026 re-checks `status = 'active'` at execution. Same pre-existing class as `withdrawal.Approve`; K2 re-validates at execution. | Count only `active` staff in the Go quorum and in WD026 (with LF-A5-2). |
+| LF-A5-4 | LOW (owner question) | The negative-balance block is per wallet (per asset), not per Person: a player negative in one fiat wallet can still bet or withdraw from another asset wallet of the same player. Decision 13 does not say which. | Owner to confirm scope (Q2b). Per Person is a one-query change in `walletBalanceNegative`. |
+| LF-A5-5 | LOW | Check D has no detective twin of WD026: a well-shaped `reversed` row with no `reverse` decisions (owner `DISABLE TRIGGER`, R2) passes check D. | Add "reversed needs >= 2 distinct-Person `reverse` decisions on one digest" to check D's reversed arm. |
+| LF-A5-6 | INFO | The return reference is staff-typed in the provider's `provider_tx_id` namespace. A typo equal to a future real reference of the same PSP would make that later posting fail (R7, surfaces as 500). Keeping the real return reference there is right (a future PSP return event dedups on it). | Map the provider-UNIQUE conflict to a typed 409 (R7) and log it; no namespace change. |
+| LF-A5-7 | INFO | `isExecutedReversalReplay` checks the floor (2), not `max(2, policy)`. A replay posts nothing, so this is harmless. 0163 down takes no `LOCK TABLE` (0162 down does); DEV-only. | Optional tidy-up. |
+
+### 10.3 Owner question Q2 (a deposit lifts the block): ruling
+
+Accept as implemented (derived block, a deposit cures it). On the ledger the debt is netted on the same wallet: the
+deposit credit simply brings `player_cash` back to >= 0, so no separate recovery posting is needed and nothing can
+drift from the ledger. A partial deposit keeps the block, and a new negative (another chargeback) re-blocks
+automatically. Decision 13 says "block until cleared", and a debt repaid in full is cleared. A sticky flag would
+add a second source of truth next to the ledger for no accounting gain. If compliance/AML wants a human review of
+accounts that went negative through a chargeback (a fraud signal), that belongs in the account/risk restriction
+(existing governed status), not in the balance gate. Owner to confirm, together with LF-A5-4 (scope).
+
+### 10.4 Merge conditions
+
+None blocking for the MOCK-only merge. Before real money: LF-A5-1 and LF-A5-2 closed and re-reviewed by
+`ledger-finance` and `security`; R6 (statement reconciliation of returns) remains PROVIDER DEPENDENT.
