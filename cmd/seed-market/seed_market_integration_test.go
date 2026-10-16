@@ -76,7 +76,7 @@ func seed(t *testing.T, pool *db.Pool, withLicence bool) fixture {
 		t.Fatalf("seed platform rows: %v", err)
 	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'B', 'active')`, f.brandID, f.tenantID, f.brandSlug)
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'B', 'pending_launch')`, f.brandID, f.tenantID, f.brandSlug)
 		return err
 	})
 	if err != nil {
