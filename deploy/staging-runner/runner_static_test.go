@@ -208,6 +208,16 @@ func TestProbePackHasFifteenWritesAndNineAbusePrimitivesAndFailsClosed(t *testin
 	if n := count("RN_ABUSE_PROBES"); n != 9 {
 		t.Errorf("expected the 9 abuse-primitive probes of ADR 0122 section 5b (8 + the two-key advisory lock), found %d", n)
 	}
+	// F1 (migration 0166, owner decision 5): the backup credential cannot read, lock or plant anything in the actor-proof key schema
+	if n := count("RN_KEY_PROBES"); n != 3 {
+		t.Errorf("expected the 3 actor-proof key probes of drill.sh phase 2 (F1), found %d", n)
+	}
+	for _, want := range []string{"SELECT secret FROM actorproof_private.actor_proof_keys", "LOCK TABLE actorproof_private.actor_proof_keys IN ACCESS SHARE MODE",
+		"CREATE TABLE actorproof_private.zz_backup_probe", `rn_run_probe "$name" "$db" "$stmt" key "$hard"`, `[ "$class" = write ] || [ "$class" = key ]`} {
+		if !strings.Contains(src, want) {
+			t.Errorf("probe pack lacks the F1 key probe element %q", want)
+		}
+	}
 	for _, want := range []string{"INSERT INTO tenants", "UPDATE ledger_entries", "DELETE FROM ledger_entries", "TRUNCATE ledger_entries", "CREATE TABLE", "CREATE TEMP TABLE", "DROP TABLE", "DISABLE TRIGGER ALL",
 		"SET ROLE", "session_replication_role", "CREATE ROLE", "ALTER ROLE igaming_backup SUPERUSER", "COPY (SELECT 1) TO PROGRAM", "pg_read_file", "pg_reload_conf",
 		"pg_advisory_lock(42, 43)", "pg_advisory_lock", "pg_try_advisory_lock", "pg_advisory_xact_lock", "pg_logical_emit_message", "lo_create", "pg_notify", "connect_postgres", "connect_template1"} {

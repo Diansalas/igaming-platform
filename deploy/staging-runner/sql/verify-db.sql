@@ -133,14 +133,28 @@ SELECT 'RESULT|runtime_cannot_write_schema_migrations|' ||
        || ' DELETE=' || has_table_privilege('igaming_runtime', 'public.schema_migrations', 'DELETE') || ' TRUNCATE=' || has_table_privilege('igaming_runtime', 'public.schema_migrations', 'TRUNCATE')
  WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') AND to_regclass('public.schema_migrations') IS NOT NULL;
 
--- the owner-only actor proof tables (migration 0120): the runtime role holds no privilege at all
+-- the owner-only actor proof tables (migration 0120) and the owner-only key schema (migration 0166, F1): the runtime role holds no privilege
+-- at all on the nonce table, the schema actorproof_private or the key table in it, and the backup role (when it exists) none on the schema or
+-- the key table (privileges read by OID: a name lookup in a schema without USAGE would itself be refused)
 SELECT 'RESULT|runtime_has_no_actor_proof_table_access|' ||
-       CASE WHEN NOT (has_table_privilege('igaming_runtime', 'public.actor_proof_keys', 'SELECT') OR has_table_privilege('igaming_runtime', 'public.actor_proof_keys', 'INSERT')
-                      OR has_table_privilege('igaming_runtime', 'public.actor_proof_keys', 'UPDATE') OR has_table_privilege('igaming_runtime', 'public.actor_proof_keys', 'DELETE')
+       CASE WHEN NOT (has_schema_privilege('igaming_runtime', n.oid, 'USAGE') OR has_schema_privilege('igaming_runtime', n.oid, 'CREATE')
+                      OR has_table_privilege('igaming_runtime', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                      OR has_any_column_privilege('igaming_runtime', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')
                       OR has_table_privilege('igaming_runtime', 'public.actor_proof_nonces', 'DELETE') OR has_table_privilege('igaming_runtime', 'public.actor_proof_nonces', 'SELECT'))
             THEN 'PASS' ELSE 'FAIL' END
-       || '|actor_proof_keys / actor_proof_nonces are owner-only'
- WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') AND to_regclass('public.actor_proof_keys') IS NOT NULL AND to_regclass('public.actor_proof_nonces') IS NOT NULL;
+       || '|actorproof_private (schema and actor_proof_keys) and actor_proof_nonces are owner-only'
+  FROM pg_namespace n JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'actor_proof_keys'
+ WHERE n.nspname = 'actorproof_private' AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') AND to_regclass('public.actor_proof_nonces') IS NOT NULL;
+SELECT 'RESULT|backup_role_has_no_actor_proof_key_access|' ||
+       CASE WHEN NOT (has_schema_privilege('igaming_backup', n.oid, 'USAGE') OR has_schema_privilege('igaming_backup', n.oid, 'CREATE')
+                      OR has_table_privilege('igaming_backup', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                      OR has_any_column_privilege('igaming_backup', c.oid, 'SELECT,INSERT,UPDATE,REFERENCES'))
+            THEN 'PASS' ELSE 'FAIL' END
+       || '|the backup credential cannot read the actor-proof signing key (owner decision 5, migration 0166)'
+  FROM pg_namespace n JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'actor_proof_keys'
+ WHERE n.nspname = 'actorproof_private' AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_backup');
+SELECT 'RESULT|actor_proof_key_isolated|' || CASE WHEN to_regclass('public.actor_proof_keys') IS NULL AND to_regnamespace('actorproof_private') IS NOT NULL THEN 'PASS' ELSE 'FAIL' END
+       || '|the key table lives only in the owner-only schema actorproof_private (migration 0166 applied; no public.actor_proof_keys)';
 
 -- ---------------------------------------------------------------- V4 ownership
 SELECT 'RESULT|database_owner_is_owner_role|' || CASE WHEN pg_get_userbyid(datdba) = :'owner_role' THEN 'PASS' ELSE 'FAIL' END
@@ -224,7 +238,7 @@ SELECT 'RESULT|extensions|INFO|' || COALESCE(string_agg(extname || ' ' || extver
 
 SELECT 'RESULT|actor_proof_keys_rows|INFO|active kids (no key material): ' || COALESCE(string_agg(kid || ':' || status, ', ' ORDER BY kid), 'none')
        || ' ; ACTOR_PROOF_ACTIVE_KID=' || :'active_kid'
-  FROM actor_proof_keys;
+  FROM actorproof_private.actor_proof_keys;
 
 -- ---------------------------------------------------------------- fingerprints comparable with the local drill (same definitions as deploy/backup/baseline.sql)
 SELECT 'RESULT|fingerprint_functions_md5|INFO|' || md5(string_agg(p.proname || '(' || pg_get_function_identity_arguments(p.oid) || '):' || md5(pg_get_functiondef(p.oid))
