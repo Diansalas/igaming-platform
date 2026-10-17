@@ -324,6 +324,37 @@ Private DB rebuilt from the merged tree (through 0170); `migrate verify`: clean,
 | unit `./internal/db/ ./cmd/...`; gofmt; vet (plain + integration); golangci-lint | ok / clean / clean / 0 issues (integration tag: 0 in F2/F3 files) |
 | `git diff origin/claude/focused-wright-jw88w9 --stat -- docs/governance` | EMPTY |
 
+### 4.3 Fix round (2026-10-17)
+
+Setup:
+- Private DBs: `f220261017024540p27680x01` for the suites and `f220261017024540p27680x02` for targeted runs and mutants.
+  Both were migrated through 0170, including 0168.
+- The suites ran on the tree at `b4cc039`. The only later code commits add tests:
+  - `TestF2fr_FutureDatedReversalNeverClears` (80dec80);
+  - `TestF2_LFF2_5_OutOfCoverageLineDoesNotExempt` (b098e24).
+
+  These ran separately and PASS. The full reconciliation run predates b098e24, so its count excludes that one new test.
+- An earlier fix-round reconciliation run, before the clock-bound change in `8377f93`, had 17 FAILs:
+  - `TestK3_C34-36`, `TestR2_GY2*`, `TestMA020_Parity_*`, `TestD2_14`, `TestRes1_I1`, `TestStanding1`, `TestBoundClear1`;
+  - the cause was the run-coverage-end date bound (section 2.8 item 4);
+  - after the fix, all of these PASS in the table below.
+
+| Run | Command | Result |
+|---|---|---|
+| Format / vet | `gofmt -l internal cmd`; `go vet ./...`; `go vet -tags integration ./...` | clean / clean / clean |
+| Lint | `golangci-lint run --allow-parallel-runners ./...` | 0 issues |
+| Lint (integration tag) | same with `--build-tags integration` over reconciliation, payments, httpserver, cmd, db, payoutinstrument | 653 (errcheck 649, staticcheck 4), all pre-existing backlog; 0 in any F2/F3/fix-round file |
+| Unit | `go test -count=1 ./...` | 75 packages ok, 0 FAIL |
+| Reconciliation (integration, full) | `priv_test.sh -tags integration -count=1 -p 1 -v -timeout 100m ./internal/reconciliation/...` | ok; 361 PASS, 0 FAIL, 0 SKIP |
+| Reconciliation (-race, new + touched) | `priv_test.sh -race ... -run 'TestF2\|TestBound_\|TestScoped_\|TestMigration016\|TestK3_C3\|TestMA020' ./internal/reconciliation/` | ok; 63 PASS, 0 FAIL, no DATA RACE |
+| Payments (-race, new) | `priv_test.sh -race ... -run '^Test(F2e\|F3\|F2fr)' ./internal/payments/` | ok; 26 PASS, 0 FAIL, no DATA RACE |
+| Payments subset 1 | `... -timeout 110m -run '^Test(F2e\|F3\|F2fr\|A5\|T8\|K3\|SL\|ParkBind\|H12\|R3\|R32\|M2\|S4B\|PRH2\|Migration0115\|Migration0162\|Migration0163\|Migration0165)' ./internal/payments/` | ok; 189 PASS, 0 FAIL, 0 SKIP |
+| Payments subset 2 (letters) | `... -timeout 110m -run '^Test(D7\|M4\|PostM4\|B11\|B12\|RV\|IWire\|DrainMerchant\|OrphanResolve\|Receipt\|RR\|Sweeper)' ./internal/payments/` | ok; 318 PASS, 0 FAIL, 0 SKIP |
+| db (migration pins) + cmd + withdrawal + payoutinstrument | `priv_test.sh -tags integration -count=1 -p 1 -v ./internal/db/ ./cmd/... ./internal/withdrawal/ ./internal/payoutinstrument/` | 8 packages ok; 460 PASS, 0 FAIL, 1 SKIP (the anchor test, by design) |
+| httpserver subsets | `... -run 'TestForceResolution\|TestStaffRead\|Golden\|TestStaffRoutes\|PayoutReversal\|OpenAPI\|Reconciliation' ./internal/httpserver/` | ok; 91 PASS, 0 FAIL, 0 SKIP |
+| New tests after `b4cc039` | `-run '^TestF2fr'` (payments); `-run 'TestF2_LFF2_'` (reconciliation) | 2 PASS; 3 PASS |
+| Merge check | `git fetch origin claude/focused-wright-jw88w9` (still `9378c91`, already an ancestor); `git diff origin/claude/focused-wright-jw88w9 --stat -- docs/governance` | up to date; EMPTY |
+
 ## 5. Mutation pass
 
 Script `f2_mutate.py` in the session scratchpad: a copy of the tree, one mutant at a time, the targeted test set, the private DB.
@@ -395,6 +426,53 @@ make the world's run explicit first, commit `8807c42`).
 | G10 | R9 check not called | KILLED `TestF3_R9_*` |
 | G11 | the original reference not added to the evidence keys | KILLED `TestF3_R9_*` |
 | G12 | a return under another reference clears | KILLED (round 2, "other reference" case) |
+
+### 5.1 Fix-round mutation pass
+
+Method: the same as above (script `f2_mutate2.py`, private DB `f220261017024540p27680x02`). Mutants of the old fail-closed
+cursor (A6) and of the run-bounded date rule are obsolete, because that code no longer exists.
+
+Results: 26 mutants. R9 first failed to build and was rewritten. R15 survived the first pass and was killed after the new test
+`TestF2_LFF2_5_OutOfCoverageLineDoesNotExempt`. **Final: 26 valid, 23 killed, 3 survived (R2, R16, R19), all justified
+below.**
+
+| id | mutant | result |
+|---|---|---|
+| R1 | cursor accepts any run seal | KILLED `TestF2_SRF2_1_*`, `TestF2_SRF2_2_*` |
+| R2 | cursor skips the import-seal check of a run-seal-verified run | SURVIVED, equivalent for a SQL-only actor (see the note below the table) |
+| R3 | cursor's import backing ignores source label / is_mock | KILLED `TestF2_SR11_10_SealedCursorIsPerSourceLabel` |
+| R4 | anomaly set ignores rows newer by `run_at` | KILLED `TestF2_SRF2_2_*` |
+| R5 | no run is ever trusted in sealed mode | KILLED `TestF2_SR11_10_*`, `TestF2_SRF2_*` |
+| R6 | stall never reported | KILLED `TestF2_SRF2_1_HeldLockIsAVisibleStall` |
+| R7 | skipped match not reported | KILLED `TestF2_SRF2_1_*` |
+| R8 | the run seal is never persisted | KILLED `TestF2_SRF2_*`, `TestF2_SR11_*` |
+| R9 | K3 line eligibility ignores the import seal | KILLED `TestF3_R9_WithKeysOnlyASealedReturnClears` / `TestF2fr_*` |
+| R10 | K3 line read without the clock bound | KILLED `TestF3_R9_ForgedFutureReturnLineDoesNotSuppress` |
+| R11 | persisted reversal accepted without import verification | KILLED `TestF2fr_WithKeysOnlyASealedDepositReversalClears` |
+| R12 | F2c exemption ignores the amount | KILLED `TestF2_LFF2_5_ForgedUnsealedLineDoesNotExempt` |
+| R13 | a `reversed` line exempts | KILLED `TestF2_LFF2_6_*` |
+| R14 | F2c exemption ignores the import seal | KILLED `TestF2_LFF2_5_*` |
+| R15 | F2c exemption ignores the import coverage | KILLED (after the new test) `TestF2_LFF2_5_OutOfCoverageLineDoesNotExempt` |
+| R16 | current import's reversal pre-scan without `currentImportOK` | SURVIVED, equivalent in the stream path (see the note below the table) |
+| R17 | M2 gate accepts any non-empty run seal | KILLED `TestF2e_*` (copied/forged rows) |
+| R18 | M2 failure-after check without the future bound | KILLED `TestF2e_LFF2_3_*` |
+| R19 | M2 gate skips the import-seal check | SURVIVED, equivalent for a SQL-only actor (as R2) |
+| R20 | `Request` does not pre-read the evidence | KILLED `TestF2e_*` (refused as unread) |
+| R21 | `Decide` does not pre-read the evidence | KILLED `TestF2e_M2_Execution*`, `TestK3_C4_M2DeclarePaid_FromAmbiguous` |
+| R22 | a missing pre-read admits | KILLED `TestF2e_SRF2_5_*` |
+| R23 | runs never sealed at write | KILLED `TestF2_SRF2_*`, `TestF2_SR11_*` |
+| R24 | cursor reads only the first page | KILLED `TestF2_SRF2_4_*` (2000-row flood) |
+| R25 | reversal lookup without the clock bound | KILLED `TestF2fr_FutureDatedReversalNeverClears` |
+| R26 | K3 lines without coverage / clock bound | KILLED `TestF3_R9_*` |
+
+Why the three survivors are equivalent:
+
+- **R2 and R19.** The run seal binds the import id and that import's coverage. Only the key holder can produce a run seal,
+  and the key holder also seals the import. Import rows are append-only, and their lines are immutable with the count
+  enforced at insert (A8). So for a SQL-only actor, a verifying run always names a genuine sealed import. The import-seal
+  check is kept as defence in depth.
+- **R16.** The matcher is given only the import id that the stream wrote and sealed in the same sweep. A SQL-only actor cannot
+  redirect it, so `currentImportOK` is always true on that path. The check is kept as defence in depth.
 
 ## 6. Residuals and open items
 
