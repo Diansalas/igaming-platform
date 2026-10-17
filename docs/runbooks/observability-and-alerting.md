@@ -40,10 +40,15 @@ without threading those fields through every function call by hand.
   single source for both request-latency and HTTP-error-rate alerting
   today - every request, success or failure, produces exactly one of
   these.
-- **`panic_recovered`** (`internal/httpserver/middleware.go:92`,
+- **`panic_recovered`** (`internal/httpserver/middleware.go`,
   `recoverMiddleware`) - an unhandled panic in any handler, converted to a
-  clean 500 instead of crashing the process; the panic value and path are
-  logged server-side only.
+  clean 500 instead of crashing the process; logged server-side with the
+  path, `panic_code` (`http_handler_panic`) and `panic_type` (the Go type
+  of the panic value) only. The panic VALUE and the stack trace are never
+  logged (PANIC-LOG-VALUE-1: a panic message can carry a credential or
+  player PII); reproduce from the request id, route and type. The static
+  guard `internal/observability/panic_value_log_guard_static_test.go`
+  enforces this for every `recover()` in production code.
 - OpenTelemetry HTTP server spans: `internal/httpserver/server.go`'s
   `New` wraps the whole mux in `otelhttp.NewHandler(mux, deps.ServiceName)`
   (line ~178), giving every request a trace span (method, route, status,

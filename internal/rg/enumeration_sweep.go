@@ -193,6 +193,17 @@ func RunEnumerationReconciliationSweep(ctx context.Context, pool *db.Pool, logge
 	return outcomes, nil
 }
 
+// recoverEnumerationSweepPanic is deferred DIRECTLY by the scheduler loop's
+// runOnce (so its recover() stops the panic). PANIC-LOG-VALUE-1: it logs
+// the panic TYPE and a stable code only, never the value - a panic
+// message or a panicked error can carry a secret or player PII - and no
+// stack trace.
+func recoverEnumerationSweepPanic(logger *slog.Logger) {
+	if r := recover(); r != nil && logger != nil {
+		logger.Error("enumeration reconciliation sweep: recovered from panic", "panic_code", "rg_enumeration_sweep_panic", "panic_type", fmt.Sprintf("%T", r))
+	}
+}
+
 // RunEnumerationReconciliationSchedulerLoop invokes
 // RunEnumerationReconciliationSweep on a fixed interval until ctx is
 // canceled, mirroring internal/reconciliation.RunSchedulerLoop exactly:
@@ -204,11 +215,7 @@ func RunEnumerationReconciliationSweep(ctx context.Context, pool *db.Pool, logge
 // down the whole platform-api process, not just this sweep.
 func RunEnumerationReconciliationSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval, stalledOlderThan time.Duration) {
 	runOnce := func() {
-		defer func() {
-			if r := recover(); r != nil && logger != nil {
-				logger.Error("enumeration reconciliation sweep: recovered from panic", "panic", r)
-			}
-		}()
+		defer recoverEnumerationSweepPanic(logger)
 		if _, err := RunEnumerationReconciliationSweep(ctx, pool, logger, stalledOlderThan); err != nil && logger != nil {
 			logger.Error("enumeration reconciliation sweep: failed to list tenants", "error", err)
 		}

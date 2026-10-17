@@ -1653,6 +1653,16 @@ var requestIntegrityReasons = map[string]bool{
 	payoutinstrument.ReasonVerificationMissing: true, payoutinstrument.ReasonVerificationNotLast: true,
 }
 
+// recoverIntegrityRecordPanic is deferred DIRECTLY by
+// recordRequestIntegrityRefusal's goroutine (so its recover() stops the
+// panic). PANIC-LOG-VALUE-1: the panic TYPE and a stable code only, never
+// the value (it can carry a secret or player PII), and no stack trace.
+func recoverIntegrityRecordPanic(logger *slog.Logger) {
+	if r := recover(); r != nil {
+		logger.Error("request_withdrawal_integrity_record_panic", "panic_code", "withdrawal_integrity_record_panic", "panic_type", fmt.Sprintf("%T", r))
+	}
+}
+
 // recordRequestIntegrityRefusal writes the durable audit row (LF L-4) and raises the detached P1 (security L-2) for a request-time
 // integrity refusal. It runs OFF the response path with a bounded context (security M-R1): RaiseDetached retries with backoff, and
 // the request transaction already rolled back, so nothing here may slow or fail the 409.
@@ -1667,11 +1677,7 @@ func recordRequestIntegrityRefusal(deps Deps, logger *slog.Logger, tenantID, pla
 	}
 	go func() {
 		defer func() { <-integrityRefusalSem }()
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Error("request_withdrawal_integrity_record_panic", "panic", fmt.Sprint(r))
-			}
-		}()
+		defer recoverIntegrityRecordPanic(logger)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {

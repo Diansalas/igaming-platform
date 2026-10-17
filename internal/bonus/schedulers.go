@@ -313,7 +313,9 @@ func runSchedulerLoop(ctx context.Context, logger *slog.Logger, interval time.Du
 	runOnce := func() {
 		defer func() {
 			if r := recover(); r != nil && logger != nil {
-				logger.Error(jobName+": recovered from panic", "panic", r)
+				// PANIC-LOG-VALUE-1: type and stable code only, never the
+				// panic value (it can carry a secret or player PII).
+				logger.Error(jobName+": recovered from panic", "panic_code", "bonus_scheduler_panic", "panic_type", fmt.Sprintf("%T", r))
 			}
 		}()
 		if err := run(); err != nil && logger != nil {

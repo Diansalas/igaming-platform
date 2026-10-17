@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -104,7 +105,12 @@ func loggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 
 // recoverMiddleware converts a panic in any downstream handler into a
 // clean 500 response instead of crashing the process or leaking a stack
-// trace to the caller. The panic detail is logged server-side only.
+// trace to the caller. PANIC-LOG-VALUE-1: only the panic value's TYPE and
+// a stable code are logged server-side - never the value itself (a panic
+// message or a panicked error/struct can carry a credential, a token, a
+// URL with a query-string secret or player PII), and never a stack trace.
+// The static guard internal/observability/panic_value_log_guard_static_test.go
+// keeps every recover() site in production code to this rule.
 func recoverMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +118,8 @@ func recoverMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				if rec := recover(); rec != nil {
 					requestID := observability.RequestIDFromContext(r.Context())
 					observability.LoggerFromContext(r.Context(), logger).Error("panic_recovered",
-						"panic", rec,
+						"panic_code", "http_handler_panic",
+						"panic_type", fmt.Sprintf("%T", rec),
 						"path", logPathFor(r),
 					)
 					apierror.Write(w, requestID, apierror.CodeInternal, "internal server error")
