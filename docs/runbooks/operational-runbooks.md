@@ -335,7 +335,15 @@ code):** every CREDIT to a player who has a deposit attempt in
 refused, whatever the reason code. **There is no override**, deliberately: a
 hand credit could pay a captured-but-unposted deposit twice (INV-DEP-1).
 Resolve the payment side first (the PSP refund produces the tombstone that
-clears it). Debits are unaffected.
+clears it). Debits are unaffected. Since migration 0172 (SRF2R-3) ONLY a
+ledger tombstone on the parked reference clears the database guard: a
+completed `deposit_reversal` line in a payment STATEMENT no longer does (a
+statement line is runtime-writable and cannot be seal-verified in SQL). If
+the PSP reports the refund only in its statement (the reversal callback never
+arrived), the reconciliation standing finding clears but the credit stays
+refused until a tombstone exists: ask the PSP to re-deliver the reversal
+callback (its verified handling writes the tombstone). This is an accepted
+operational cost; never work around it with a hand credit.
 
 **Other `refused_at_execution` codes:** `asset_suspended` (goodwill in an
 asset that is not active, not platform-authorized, or not authorized for the
