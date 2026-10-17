@@ -154,7 +154,7 @@ func TestDescribeMigrations_FormatsVersionAndDescription(t *testing.T) {
 // The reserved list must contain only genuinely unused versions: 0158 is a real migration (A6) and
 // must never be silently tolerated if its file went missing.
 func TestReservedUnusedVersions_ExactSet(t *testing.T) {
-	want := []int64{143, 144, 145, 146, 147, 148, 149, 150, 159, 161, 167, 168, 169}
+	want := []int64{143, 144, 145, 146, 147, 148, 149, 150, 159, 161, 168, 169}
 	if len(reservedUnusedVersions) != len(want) {
 		t.Fatalf("reservedUnusedVersions has %d entries, want %d", len(reservedUnusedVersions), len(want))
 	}
