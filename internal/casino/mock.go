@@ -46,13 +46,16 @@ type MockCasinoProvider struct {
 	providerID string
 	capability AdapterCapability
 
-	mu       sync.Mutex
-	health   ProviderHealth
-	seq      int
-	games    []CatalogueEntry
-	balances map[string]BalanceResult // keyed by playerRef+assetCode (CAS-PLAYER-REF-1)
-	launches []LaunchRequest          // every LaunchRequest received (LaunchRequests)
-	failNext bool
+	mu     sync.Mutex
+	health ProviderHealth
+	// healthErr, when non-nil, makes HealthStatus return it (fault injection
+	// for CAS-HEALTH-FAILOPEN-1: a probe error must fail closed).
+	healthErr error
+	seq       int
+	games     []CatalogueEntry
+	balances  map[string]BalanceResult // keyed by playerRef+assetCode (CAS-PLAYER-REF-1)
+	launches  []LaunchRequest          // every LaunchRequest received (LaunchRequests)
+	failNext  bool
 
 	// masterSecret is this adapter INSTANCE's own process-local, per-
 	// process random secret (webhookauth.NewMockMaster - never config,
@@ -199,6 +202,13 @@ func (m *MockCasinoProvider) SetHealth(h ProviderHealth) {
 	defer m.mu.Unlock()
 	h.ProviderID = m.providerID
 	m.health = h
+}
+
+// SetHealthError fault-injects a HealthStatus probe error (nil clears it).
+func (m *MockCasinoProvider) SetHealthError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.healthErr = err
 }
 
 // FailNextCall makes the next Launch/Bet/Win/Rollback call return a
@@ -625,5 +635,8 @@ func (m *MockCasinoProvider) Capabilities() AdapterCapability {
 func (m *MockCasinoProvider) HealthStatus(_ context.Context) (ProviderHealth, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.healthErr != nil {
+		return ProviderHealth{}, m.healthErr
+	}
 	return m.health, nil
 }

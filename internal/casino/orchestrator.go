@@ -97,9 +97,13 @@ func (o *Orchestrator) phaseCLogger() *slog.Logger {
 type LaunchFailureReason string
 
 const (
-	LaunchFailureProviderUnavailable       LaunchFailureReason = "provider_unavailable"
-	LaunchFailureDeclined                  LaunchFailureReason = "declined"
-	LaunchFailureCircuitOpen               LaunchFailureReason = "circuit_open"
+	LaunchFailureProviderUnavailable LaunchFailureReason = "provider_unavailable"
+	LaunchFailureDeclined            LaunchFailureReason = "declined"
+	LaunchFailureCircuitOpen         LaunchFailureReason = "circuit_open"
+	// LaunchFailureHealthUnavailable (CAS-HEALTH-FAILOPEN-1): the provider's
+	// HealthStatus probe itself returned an error, so health is unknown and
+	// the launch fails closed.
+	LaunchFailureHealthUnavailable         LaunchFailureReason = "health_unavailable"
 	LaunchFailureCredentialUnavailable     LaunchFailureReason = "credential_unavailable"
 	LaunchFailureCredentialBindingMismatch LaunchFailureReason = "credential_binding_mismatch"
 	LaunchFailureCtxCancelled              LaunchFailureReason = "ctx_cancelled"
@@ -410,6 +414,11 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		if blocked, denialCode, err := evaluateJurisdictionBlocklist(game.JurisdictionBlocklist, jurisdictionResolution); err != nil {
 			return err
 		} else if blocked {
+			// CAS-JURIS-AUDIT-1: audit the denial in this same transaction,
+			// like the RG and risk denials (committed with the denied result).
+			if err := auditJurisdictionDenial(ctx, tx, params, game, jurisdictionResolution, denialCode); err != nil {
+				return err
+			}
 			denied = &LaunchGameResult{Denied: true, DenialCode: denialCode}
 			return nil
 		}
@@ -630,7 +639,16 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 	// Health snapshot outside any transaction (ADR 0095 §9.6/§15.1):
 	// HealthStatus is contractually in-memory-only and returns promptly, so
 	// this never performs I/O while (or without) a pooled connection held.
-	if health, err := provider.HealthStatus(ctx); err == nil && health.CircuitState == CircuitOpen {
+	//
+	// CAS-HEALTH-FAILOPEN-1: fail CLOSED. A probe error means health is
+	// unknown, which is treated as unhealthy; it must never be read as
+	// healthy. The error text is not persisted (launchFailed audits only the
+	// closed reason) and reaches the operator log only in redacted form.
+	health, healthErr := provider.HealthStatus(ctx)
+	if healthErr != nil {
+		return launchFailed(LaunchFailureHealthUnavailable, fmt.Errorf("%w: provider health unavailable: %v", ErrProviderUnavailable, healthErr))
+	}
+	if health.CircuitState == CircuitOpen {
 		return launchFailed(LaunchFailureCircuitOpen, fmt.Errorf("%w: circuit open", ErrProviderUnavailable))
 	}
 
@@ -898,6 +916,32 @@ func evaluateAndAuditRisk(ctx context.Context, tx pgx.Tx, req risk.RiskRequest, 
 		return risk.RiskDecision{}, fmt.Errorf("casino: audit risk denial: %w", err)
 	}
 	return decision, nil
+}
+
+// auditJurisdictionDenial writes the casino.launch_denied_by_jurisdiction
+// audit row (CAS-JURIS-AUDIT-1): system actor, tenant-scoped, target = the
+// player account id (opaque uuid), outcome denied. Metadata is an allowlist
+// of ids and codes only: no PII, no IP/user agent, no raw jurisdiction
+// resolution detail. jurisdiction_code is recorded only when the resolution
+// actually resolved (a blocked code); an unresolved denial omits it.
+func auditJurisdictionDenial(ctx context.Context, tx pgx.Tx, params LaunchGameParams, game Game, res jurisdiction.Resolution, denialCode string) error {
+	metadata := map[string]any{
+		"reason_code": denialCode, "brand_id": params.BrandID.String(), "provider_id": game.ProviderID,
+		"game_id": params.GameID.String(), "asset_code": params.AssetCode, "mode": string(params.Mode),
+	}
+	if res.Outcome() == jurisdiction.Resolved {
+		if code, err := res.Code(); err == nil {
+			metadata["jurisdiction_code"] = code
+		}
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: params.TenantID, ActorType: audit.ActorSystem, Action: "casino.launch_denied_by_jurisdiction",
+		TargetType: "player_account", TargetID: params.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: metadata,
+	}); err != nil {
+		return fmt.Errorf("casino: audit jurisdiction denial: %w", err)
+	}
+	return nil
 }
 
 // evaluateJurisdictionBlocklist implements K-3's per-game blocklist
