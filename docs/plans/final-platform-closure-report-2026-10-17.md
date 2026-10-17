@@ -3,7 +3,7 @@
 Scope: the provider-independent platform. Supersedes `platform-freeze-report-2026-10-17.md` where they differ. Nothing here is a legal, regulatory or licensing approval or a launch authorisation. All providers are MOCK. **No AWS resource was created or touched in this phase. No provider integration was started. No brand is activated.**
 
 ## 1. Freeze commit
-Branch `claude/focused-wright-jw88w9`. **Recommended freeze commit: `50eded5afe80ef00e01765827dba77a9f9627b20`** (hosted CI 27/27; every later commit on the branch is documentation/registry only — verify with `git diff 50eded5..HEAD --stat -- . ':!docs'`, which must be empty). Migration head **0175** (reserved, never used: 0143–0150, 0159, 0161, pinned by test). Previous candidate `76187cc` is superseded.
+Branch `claude/focused-wright-jw88w9`. **Recommended freeze commit: `1505a165e9152729b5df573211c80b1c0a35bc87`** (hosted CI 27/27 after one re-run of a single failed shard, see section 3; every later commit on the branch is documentation/registry only — verify with `git diff 1505a16..HEAD --stat -- . ':!docs'`, which must be empty). It differs from the locally fully-verified tree (`1a5b587`) only in test files (lint fix in the panic guard test; the request_id exclusion in two HTTP log-leak assertions). Migration head **0175** (reserved, never used: 0143–0150, 0159, 0161, pinned by test). Previous candidate `76187cc` is superseded.
 
 ## 2. What the closure round did (all merged, each with a record in `docs/plans/`)
 | Item | Result | Migration |
@@ -25,11 +25,12 @@ Reviews: security + ledger-finance independent, two rounds (records `closure-sec
 ## 3. Verification (final tree)
 | Check | Result |
 |---|---|
-| Hosted CI on `50eded5` | **27/27** (build-test-lint incl. golangci-lint, 16 `-race` integration shards, timing lane, evidence gate, frontends, images, infrastructure). Two lint-only failures on the way (`1a5b587`: deprecated `ast.Object`, unused helper in the new panic-guard test) were fixed in test code only |
+| Hosted CI on `1505a16` (freeze) and `50eded5` | **27/27** (build-test-lint incl. golangci-lint, 16 `-race` integration shards, timing lane, evidence gate, frontends, images, infrastructure). Two lint-only failures on the way (`1a5b587`: deprecated `ast.Object`, unused helper in the new panic-guard test) were fixed in test code only |
 | Local, clean worktree at `1a5b587` (code identical to `50eded5` except that one test file's lint fix; its package test re-run green) | go build/vet clean; unit all packages 0 FAIL; integration all packages except httpserver/payments 74 ok, 0 FAIL; `internal/httpserver` integration ok (timing-sensitive tests pass on a quiet machine); `internal/payments` integration full, end to end, ok |
 | Frontends (final tree) | backoffice build + 688 tests; b2c build + 185 tests |
 | `migrate verify` at 0175 | up clean; 166 downs to zero and re-up clean |
 | Backup/restore/PITR drill at 0175 | **138 PASS / 0 FAIL** |
+| Hosted intermittents on the final commits (disclosed) | (1) `http-tuw`: `TestWebhook_ReversalAmountMismatchAfterVerification_Maps400` — reproduced locally (1 in ~30 runs): the leak assertion scanned the random `request_id` UUID for the short amounts `1234`/`9999`; test-only fix (skip `request_id`; every other attribute is still checked), 40/40 afterwards; same weakness fixed in a sibling test. (2) `core-rg-recon-aml`: `TestADR0113D_ConcurrentLiveWithdrawals_NoFalseP1` failed once on the first run of `1505a16` and passed on the re-run of that one job; **NOT reproduced locally** (about 100 runs under `-race`, including 4 parallel stress processes and the full shard package set); the failure text was not retrievable (annotation truncated). Unexplained intermittent: registered `TEST-DCONC-INTERMITTENT-1`; if it fails again it is treated as real (suspect area: the C3 detector running next to concurrent live withdrawals) |
 | Notes | an intermediate local run, with several agents loading the machine, failed `TestINV_IO_1c` (a real analyzer hit: the new cursor helper's `Fetch` method name; renamed `NextBatch`) and 3 timing-lane tests (environmental contention; pass on the quiet re-run) | RPO 0 and RTO < 15 min are **not demonstrated**.
 
 ## 4. Remaining items, classified
