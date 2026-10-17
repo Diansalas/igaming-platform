@@ -722,8 +722,16 @@ func TestMigration0101_UpdateGuard_TransitionWhitelist(t *testing.T) {
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO payment_attempts (id, tenant_id, operation, withdrawal_request_id, attempt_no, provider_id, payment_method, asset_code, amount, interactive, merchant_reference, external_idempotency_key, state, last_evidence_kind)
-			 VALUES ($1,$2,'payout',$3,1,'mock-psp','bank_transfer','EUR',500,true,$4,$5,'submitting','platform')`,
+			 VALUES ($1,$2,'payout',$3,1,'mock-psp','bank_transfer','EUR',500,true,$4,$5,'created','platform')`,
 			payoutSubmitting, f.tenantID, wID, payoutSubmitting.String(), "pa:"+payoutSubmitting.String())
+		if err != nil {
+			return err
+		}
+		// F4 (migration 0169, WD053): created -> submitting of a payout attempt needs an allowing re-dispatch decision in the transaction.
+		if err := f4RecordRedispatchAllow(ctx, tx, wID, payoutSubmitting); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE payment_attempts SET state = 'submitting' WHERE id = $1`, payoutSubmitting)
 		return err
 	}); err != nil {
 		t.Fatalf("seed payout attempt: %v", err)
