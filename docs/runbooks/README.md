@@ -26,6 +26,7 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `rg-enforcement-activation.md` — A13: A6 RG floors, the one-way enforcement switch, readiness `R-RG-CONFIG`, failure modes.
 - `market-blocking-configuration.md` — A13: A8 operating-market gate, no-route configuration model, staging prerequisites.
 - `payout-reversal-and-amount-dispute.md` — A13: A5 governed payout reversal, amount/asset mismatch exit, negative-balance block.
+- `withdrawal-dispatch-gate.md` — F4: withdrawal gate re-run at payout dispatch, `withdrawal_gate_decisions` backstop, symptoms and residuals.
 - `staff-lifecycle-and-mfa-recovery.md` — A13: joiner/mover/leaver, MFA reset and recovery, `cmd/seed-admin` break-glass.
 - `secrets-and-credential-rotation.md` — A13: inventory of every secret family and where its rotation procedure lives.
 - `test-database-hygiene.md` — A13: TEST-HYGIENE-1 scratch database policy (automatic reaper NOT IMPLEMENTED).
