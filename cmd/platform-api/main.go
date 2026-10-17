@@ -515,24 +515,32 @@ func run() error {
 		// runs, both operands are already known-good; TestSupportRoutesEnabled
 		// is the second, independent layer, not a redundant restatement of
 		// the first.
-		CasinoPlaySimulationEnabled: cfg.TestSupportRoutesEnabled(),
+		//
+		// U-6 (defence in depth): all four flags go through
+		// testSupportRoutesGate (wiring.go), which additionally requires
+		// cfg.GuardEnvironment() to be explicitly "development" or
+		// "staging" - so none of them can be true when GuardEnvironment()
+		// is "production" (including a missing APP_ENV), independently of
+		// config.Load()'s and the synthetic guard's earlier refusals.
+		// test_support_gate_test.go pins this by AST.
+		CasinoPlaySimulationEnabled: testSupportRoutesGate(cfg),
 		// Stage 9.3: the payments-domain twin of the above - see
 		// Deps.PaymentsMockSettlementEnabled's own doc comment
 		// (internal/httpserver/server.go) and payment_deposit_simulation_
 		// handlers.go's doc comment for the full rationale. Same gate,
 		// same Stage 9.4 two-layer guarantee as above.
-		PaymentsMockSettlementEnabled: cfg.TestSupportRoutesEnabled(),
+		PaymentsMockSettlementEnabled: testSupportRoutesGate(cfg),
 		// Stage 9.3: closes the account-activation gap the two flags above
 		// don't - see Deps.AccountActivationTestSupportEnabled's own doc
 		// comment (internal/httpserver/server.go) for the full rationale.
 		// Same gate, same Stage 9.4 two-layer guarantee as above.
-		AccountActivationTestSupportEnabled: cfg.TestSupportRoutesEnabled(),
+		AccountActivationTestSupportEnabled: testSupportRoutesGate(cfg),
 		SportsbookEnabled:                   true,
 		// Stage 10 W1 (ADR 0088 §9): the sportsbook-domain twin of the
 		// three flags above - see Deps.SportsbookSettlementSimulationEnabled's
 		// own doc comment (internal/httpserver/server.go) for the full
 		// rationale. Same gate, same Stage 9.4 two-layer guarantee as above.
-		SportsbookSettlementSimulationEnabled: cfg.TestSupportRoutesEnabled(),
+		SportsbookSettlementSimulationEnabled: testSupportRoutesGate(cfg),
 		// Stage 4E: no real identity-resolution vendor is contracted yet
 		// (docs/decisions/0027 §3) - MockPersonResolver's honest default
 		// (NoMatch for every registration, since none carries verified
