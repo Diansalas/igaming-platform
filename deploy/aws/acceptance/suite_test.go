@@ -454,3 +454,83 @@ func TestEnrolmentRefusesToRunWithoutAPlaceToKeepTheSecret(t *testing.T) {
 		t.Fatal("the factor was confirmed although the secret could not be stored")
 	}
 }
+
+// SA-3 (NA-5): platform.version_evidence / platform.migration_head / platform.database_anchor read
+// GET /v1/admin/platform/status as the platform admin. Offline: an httptest fixture stands in for platform-api.
+func TestPlatformStatusChecks(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	type body = map[string]any
+	good := func(c string, head, applied int, anchor string, rec bool) body {
+		return body{"build": body{"commit": c}, "migrations": body{"head_version": head, "applied_count": applied},
+			"database_environment": body{"anchor": anchor, "recorded": rec}}
+	}
+	cases := []struct {
+		name                         string
+		status                       int
+		resp                         any
+		mutate                       func(*config)
+		noActor                      bool
+		wantVer, wantHead, wantAnchr string
+	}{
+		{"all good, shape only", 200, good(commit, 170, 170, "staging", true), nil, false, "PASS", "PASS", "PASS"},
+		{"expectations match (prefix commit)", 200, good(commit, 170, 170, "staging", true),
+			func(c *config) { c.ExpectCommit = "0123456"; c.ExpectMigrationHead = 170; c.ExpectAnchor = "staging" }, false, "PASS", "PASS", "PASS"},
+		{"unknown commit", 200, good("unknown", 170, 170, "staging", true), nil, false, "FAIL", "PASS", "PASS"},
+		{"wrong commit", 200, good(commit, 170, 170, "staging", true), func(c *config) { c.ExpectCommit = "fedcba9" }, false, "FAIL", "PASS", "PASS"},
+		{"wrong migration head", 200, good(commit, 169, 169, "staging", true), func(c *config) { c.ExpectMigrationHead = 170 }, false, "PASS", "FAIL", "PASS"},
+		{"no migrations", 200, good(commit, 0, 0, "staging", true), nil, false, "PASS", "FAIL", "PASS"},
+		{"anchor unrecorded", 200, good(commit, 170, 170, "unrecorded", false), nil, false, "PASS", "PASS", "FAIL"},
+		{"anchor production on a staging stack", 200, good(commit, 170, 170, "production", true), nil, false, "PASS", "PASS", "FAIL"},
+		{"anchor defaults to EXPECT_APP_ENV", 200, good(commit, 170, 170, "development", true), func(c *config) { c.ExpectEnv = "development" }, false, "PASS", "PASS", "PASS"},
+		{"forbidden (not a platform admin)", 403, body{"error": body{"code": "forbidden"}}, nil, false, "FAIL", "FAIL", "FAIL"},
+		{"malformed body", 200, body{"build": body{}}, nil, false, "FAIL", "FAIL", "FAIL"},
+		{"admin not configured", 200, nil, nil, true, "SKIP", "SKIP", "SKIP"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			srv := stubAPI(func(mux *http.ServeMux) {
+				mux.HandleFunc("GET /v1/admin/platform/status", func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if r.Header.Get("Authorization") != "Bearer admin-token" {
+						http.Error(w, "no", http.StatusUnauthorized)
+						return
+					}
+					w.WriteHeader(tc.status)
+					_ = json.NewEncoder(w).Encode(tc.resp)
+				})
+			})
+			defer srv.Close()
+			w, out := newStubWorld(t, srv, func(c *config) {
+				c.ExpectEnv = "staging"
+				if tc.mutate != nil {
+					tc.mutate(c)
+				}
+			})
+			if !tc.noActor {
+				w.actors["ADMIN"] = &actor{spec: actorSpec{Role: "ADMIN"}, w: w, access: "admin-token", tokenAt: w.now()}
+			}
+			w.platformChecks()
+			for name, want := range map[string]string{"platform.version_evidence": tc.wantVer, "platform.migration_head": tc.wantHead, "platform.database_anchor": tc.wantAnchr} {
+				if got := resultOf(out, name); got != want {
+					t.Errorf("%s = %s, want %s\n%s", name, got, want, out.String())
+				}
+			}
+			if !tc.noActor && tc.status == 200 && tc.resp != nil && calls != 1 && tc.name != "malformed body" {
+				t.Errorf("the status endpoint must be read once and shared, got %d calls", calls)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsMalformedSA3Expectations(t *testing.T) {
+	for _, k := range []string{"BASE_URL", "TENANT", "BRAND", "ADMIN_EMAIL", "ADMIN_PASSWORD_FILE", "ADMIN_TOTP_SECRET_FILE"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("EXPECT_COMMIT", "NOT-HEX")
+	t.Setenv("EXPECT_MIGRATION_HEAD", "170")
+	_, err := parseConfig(nil)
+	if err == nil || !strings.Contains(err.Error(), "EXPECT_COMMIT") {
+		t.Fatalf("a malformed EXPECT_COMMIT must be named: %v", err)
+	}
+}

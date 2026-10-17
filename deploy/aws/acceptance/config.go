@@ -14,18 +14,22 @@ import (
 
 // config is the whole input of a run. Secrets are never values here, only file paths (see actorSpec).
 type config struct {
-	BaseURL    string
-	Tenant     string // tenant slug of the synthetic tenant under test
-	Brand      string // brand slug of the synthetic brand under test
-	OutFile    string
-	RunID      string
-	Timeout    time.Duration
-	Debug      bool
-	Only       *regexp.Regexp
-	Strict     bool // exit non-zero when any check was skipped for a missing prerequisite
-	ExpectEnv  string
-	CORSOrigin string
-	EdgeHeader string // auto | require | skip
+	BaseURL   string
+	Tenant    string // tenant slug of the synthetic tenant under test
+	Brand     string // brand slug of the synthetic brand under test
+	OutFile   string
+	RunID     string
+	Timeout   time.Duration
+	Debug     bool
+	Only      *regexp.Regexp
+	Strict    bool // exit non-zero when any check was skipped for a missing prerequisite
+	ExpectEnv string
+	// SA-3 (GET /v1/admin/platform/status): optional exact expectations; empty/0 = assert shape only.
+	ExpectAnchor        string // default: ExpectEnv (a staging stack is anchored staging)
+	ExpectCommit        string // lower-case hex prefix (7-64) the reported build commit must start with
+	ExpectMigrationHead int64  // the exact highest applied migration version
+	CORSOrigin          string
+	EdgeHeader          string // auto | require | skip
 
 	// Market gate / evidence (see README "Market evidence dependency").
 	MarketExpect string // open | closed
@@ -84,9 +88,10 @@ func envInt64(name string, def int64) int64 {
 }
 
 var (
-	reSlug  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
-	reAsset = regexp.MustCompile(`^[A-Z0-9]{2,12}$`)
-	reCC    = regexp.MustCompile(`^[A-Z]{2}$`)
+	reSlug   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	reAsset  = regexp.MustCompile(`^[A-Z0-9]{2,12}$`)
+	reCommit = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+	reCC     = regexp.MustCompile(`^[A-Z]{2}$`)
 )
 
 // parseConfig reads flags (defaults come from the environment) and validates them. It returns a user-facing error
@@ -104,6 +109,9 @@ func parseConfig(args []string) (*config, error) {
 	only := fs.String("only", envOr("ONLY", ""), "regexp: run only checks whose name matches (dependents will report blocked)")
 	fs.BoolVar(&c.Strict, "strict", envBool("STRICT", false), "exit 3 if any check was skipped for a missing prerequisite")
 	fs.StringVar(&c.ExpectEnv, "expect-app-env", envOr("EXPECT_APP_ENV", "staging"), "APP_ENV the stack must report in launch-readiness (env EXPECT_APP_ENV)")
+	fs.StringVar(&c.ExpectAnchor, "expect-anchor", envOr("EXPECT_ANCHOR", ""), "database_environment anchor platform/status must report (env EXPECT_ANCHOR; default: the value of EXPECT_APP_ENV)")
+	fs.StringVar(&c.ExpectCommit, "expect-commit", envOr("EXPECT_COMMIT", ""), "git commit (hex, 7-64 chars) the running build must report in platform/status (env EXPECT_COMMIT); empty = only require a valid commit")
+	fs.Int64Var(&c.ExpectMigrationHead, "expect-migration-head", envInt64("EXPECT_MIGRATION_HEAD", 0), "highest applied migration version platform/status must report (env EXPECT_MIGRATION_HEAD); 0 = only require a positive head")
 	fs.StringVar(&c.CORSOrigin, "cors-origin", envOr("CORS_ORIGIN", ""), "an Origin that CORS_ALLOWED_ORIGINS allows (env CORS_ORIGIN); empty skips the CORS check")
 	fs.StringVar(&c.EdgeHeader, "edge-headers", envOr("EDGE_HEADERS", "auto"), "auto|require|skip: CloudFront security headers (auto: required when BASE_URL is https)")
 	fs.StringVar(&c.MarketExpect, "market-expect", envOr("MARKET_EXPECT", "open"), "open|closed: whether the mock country is expected OPEN for the brand (closed proves fail-closed refusal)")
@@ -188,6 +196,12 @@ func (c *config) validate() error {
 	}
 	if c.KYCResidence != "" && !reCC.MatchString(c.KYCResidence) {
 		errs = append(errs, "KYC_VERIFIED_RESIDENCE_COUNTRY must be an uppercase ISO-3166 alpha-2 code")
+	}
+	if c.ExpectCommit != "" && !reCommit.MatchString(c.ExpectCommit) {
+		errs = append(errs, "EXPECT_COMMIT must be 7 to 64 lower-case hexadecimal characters")
+	}
+	if c.ExpectMigrationHead < 0 {
+		errs = append(errs, "EXPECT_MIGRATION_HEAD must not be negative")
 	}
 	switch c.EdgeHeader {
 	case "auto", "require", "skip":

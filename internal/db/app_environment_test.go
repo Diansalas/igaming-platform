@@ -29,7 +29,11 @@ func TestVerifyEnvironmentAnchor(t *testing.T) {
 		{"production", "production", nil},
 		{"development", "development", ErrEnvironmentAnchorMismatch},
 		{"test", "test", ErrEnvironmentAnchorMismatch},
-		{"staging (not synthetic-admitting; unchanged)", "staging", nil},
+		// NA-6 (intentional behaviour change; this case previously asserted nil): staging under the
+		// production guard is refused, as is any unrecognised value.
+		{"staging", "staging", ErrEnvironmentAnchorMismatch},
+		{"unrecognised", "qa", ErrEnvironmentAnchorMismatch},
+		{"case variant", "Production", ErrEnvironmentAnchorMismatch},
 	}
 	for _, c := range cases {
 		got, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{env: c.anchor})
@@ -78,5 +82,40 @@ func TestDropURLAppEnvironment(t *testing.T) {
 	}
 	if err := dropURLAppEnvironment(map[string]string{"options": "-c statement_timeout=5s"}); err != nil {
 		t.Fatalf("an unrelated options value is untouched: %v", err)
+	}
+}
+
+// NA-6: the guard x anchor matrix. Only the production guard (which config.GuardEnvironment returns for
+// APP_ENV=production AND for an unset APP_ENV) reads and enforces the anchor, and it admits exactly
+// "production". Every non-production guard (a staging process runs APP_ENV=staging) checks nothing.
+func TestVerifyEnvironmentAnchor_GuardAnchorMatrix(t *testing.T) {
+	ctx := context.Background()
+	guards := []string{"production", "staging", "development", "test", ""}
+	anchors := []string{"", "production", "staging", "development", "test", "other"}
+	for _, g := range guards {
+		for _, a := range anchors {
+			_, err := VerifyEnvironmentAnchor(ctx, g, fakeAnchor{env: a})
+			var want error
+			if g == "production" {
+				switch a {
+				case "production":
+				case "":
+					want = ErrEnvironmentAnchorUnrecorded
+				default:
+					want = ErrEnvironmentAnchorMismatch
+				}
+			}
+			if want == nil && err != nil {
+				t.Errorf("guard %q anchor %q: must start, got %v", g, a, err)
+			}
+			if want != nil && !errors.Is(err, want) {
+				t.Errorf("guard %q anchor %q: want %v, got %v", g, a, want, err)
+			}
+		}
+	}
+	// The staging anchor refusal names the anchor so the operator can see what the database says.
+	_, err := VerifyEnvironmentAnchor(ctx, "production", fakeAnchor{env: "staging"})
+	if err == nil || !strings.Contains(err.Error(), `anchor="staging"`) {
+		t.Fatalf("refusal must name the anchor: %v", err)
 	}
 }
