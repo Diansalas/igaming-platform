@@ -40,3 +40,29 @@ describe('string-exact RG money helpers', () => {
     expect(minorGreater('123456789012345678901234567890', '123456789012345678901234567889')).toBe(true)
   })
 })
+
+describe('U-5 exact formatMoney / toMinorUnits (float-free)', () => {
+  it('formats number, digit-string and bigint minor units identically and exactly', async () => {
+    const { formatMoney } = await import('./money')
+    expect(formatMoney(12345, 'USD')).toBe('123.45 USD')
+    expect(formatMoney('12345', 'USD')).toBe('123.45 USD')
+    expect(formatMoney(12345n, 'USD')).toBe('123.45 USD')
+    expect(formatMoney('9007199254740993', 'USD')).toBe('90071992547409.93 USD')
+    expect(formatMoney('9223372036854775807', 'JPY')).toBe('9223372036854775807 JPY')
+    expect(formatMoney(-5, 'USD')).toBe('-0.05 USD')
+    expect(formatMoney(5, 'XYZ')).toBe('5 XYZ (minor units)')
+    expect(formatMoney(1.5, 'USD')).toBe('1.5 USD') // not an exact integer: shown raw, never scaled
+  })
+  it('toMinorUnits is exact, rejects excess precision, zero, garbage and unsafe sizes', async () => {
+    const { toMinorUnits } = await import('./money')
+    expect(toMinorUnits('1.15', 'USD')).toBe(115)
+    expect(toMinorUnits('4.35', 'USD')).toBe(435)
+    expect(toMinorUnits('0.07', 'EUR')).toBe(7)
+    expect(toMinorUnits('500', 'JPY')).toBe(500)
+    for (const bad of ['', '0', '0.00', '-1', '1.005', 'abc', '1e2', '90071992547409.92', '90071992547409.93']) {
+      expect(toMinorUnits(bad, 'USD'), bad).toBeNull()
+    }
+    expect(toMinorUnits('90071992547409.91', 'USD')).toBe(9007199254740991)
+    expect(toMinorUnits('10', 'XYZ')).toBeNull()
+  })
+})

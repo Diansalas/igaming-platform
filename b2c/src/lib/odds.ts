@@ -1,3 +1,5 @@
+import { parseMinor, toWireInteger, type MinorAmount } from './amount'
+
 // DISPLAY-ONLY odds/return math. The server's integer numerator/
 // denominator fraction (e.g. 5/2) is the only value ever sent back to the
 // server (expected_odds_numerator/expected_odds_denominator) or trusted
@@ -30,7 +32,11 @@ export function formatDecimalOdds(numerator: number, denominator: number): strin
  * Mirrors the server's stake * numerator/denominator exactly - see
  * formatDecimalOdds's own comment for why there is no "+1" here.
  */
-export function estimatePotentialReturnMinorUnits(stakeAmountMinorUnits: number, numerator: number, denominator: number): number {
-  if (denominator <= 0 || stakeAmountMinorUnits <= 0) return 0
-  return Math.floor((stakeAmountMinorUnits * numerator) / denominator)
+export function estimatePotentialReturnMinorUnits(stakeAmountMinorUnits: MinorAmount, numerator: number, denominator: number): MinorAmount {
+  const stake = parseMinor(stakeAmountMinorUnits)
+  if (stake === null || stake <= 0n || !Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) || numerator < 0 || denominator <= 0) return 0
+  // BigInt integer division truncates toward zero, i.e. rounds down for the positive operands guaranteed above.
+  const result = (stake * BigInt(numerator)) / BigInt(denominator)
+  // A safe-integer JSON number when it fits exactly, otherwise the exact digit string (MinorAmount).
+  return toWireInteger(result) ?? result.toString()
 }

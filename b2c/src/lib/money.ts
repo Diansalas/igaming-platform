@@ -10,6 +10,8 @@
 // performs NO business logic - the authoritative integer amount is always
 // what the server returns, and this function's output never feeds back
 // into a request.
+import { formatMinor, minorGreater, parseDecimalToMinor, toWireInteger, type MinorAmount } from './amount'
+
 const KNOWN_EXPONENTS: Record<string, number> = {
   USD: 2,
   EUR: 2,
@@ -23,40 +25,35 @@ export function knownExponentFor(assetCode: string): number | undefined {
   return KNOWN_EXPONENTS[assetCode.toUpperCase()]
 }
 
-export function formatMoney(amountMinorUnits: number, assetCode: string): string {
+export function formatMoney(amountMinorUnits: MinorAmount, assetCode: string): string {
   const exponent = knownExponentFor(assetCode)
+  const raw = typeof amountMinorUnits === 'bigint' ? amountMinorUnits.toString() : String(amountMinorUnits)
   if (exponent === undefined) {
-    return `${amountMinorUnits} ${assetCode} (minor units)`
+    return `${raw} ${assetCode} (minor units)`
   }
-  if (exponent === 0) {
-    return `${amountMinorUnits} ${assetCode}`
-  }
-  const divisor = 10 ** exponent
-  return `${(amountMinorUnits / divisor).toFixed(exponent)} ${assetCode}`
+  // Exact BigInt/string formatting (lib/amount.ts); an amount that is not an exact integer is shown raw, never guessed.
+  const text = formatMinor(amountMinorUnits, exponent)
+  return text === null ? `${raw} ${assetCode}` : `${text} ${assetCode}`
 }
 
 /**
- * Converts a user-entered major-unit string (e.g. "25.00") to integer
- * minor units for a request. Returns null if not a valid positive amount
- * OR if assetCode's exponent is unknown - guessing an exponent on the
- * OUTBOUND path (unlike display's explicit "(minor units)" fallback)
- * would silently submit a wrong amount, so this refuses instead. Every
- * asset code this app currently offers (DepositPage's selector, the bet
- * slip's brandConfig.defaultAssetCode) is in KNOWN_EXPONENTS.
+ * Converts a user-entered major-unit string (e.g. "25.00") to integer minor units for a request body whose DTO field
+ * is an int64 JSON number. Exact string arithmetic; returns null if the text is not a positive amount, has more
+ * fractional digits than the asset's exponent (never rounded), the asset's exponent is unknown - guessing an exponent
+ * on the OUTBOUND path (unlike display's explicit "(minor units)" fallback) would silently submit a wrong amount - or
+ * the amount cannot be carried exactly in a JS number (> 2^53-1 minor units). Every asset code this app currently
+ * offers (DepositPage's selector, the bet slip's brandConfig.defaultAssetCode) is in KNOWN_EXPONENTS.
  */
 export function toMinorUnits(majorAmountInput: string, assetCode: string): number | null {
-  const trimmed = majorAmountInput.trim()
-  if (trimmed === '') return null
-  const value = Number(trimmed)
-  if (!Number.isFinite(value) || value <= 0) return null
   const exponent = knownExponentFor(assetCode)
   if (exponent === undefined) return null
-  return Math.round(value * 10 ** exponent)
+  const minor = parseDecimalToMinor(majorAmountInput, exponent)
+  if (minor === null || minor <= 0n) return null
+  return toWireInteger(minor)
 }
 
 // ---- string-exact helpers for NUMERIC(38,0) values (responsible-gaming limits) ----------------------
-// RG limit values are decimal strings of minor units (up to 38 digits). They never pass through a float:
-// parsing and display use string arithmetic only.
+// RG limit values are decimal strings of minor units (up to 38 digits). They never pass through a float.
 
 /**
  * Converts a user-entered major-unit string ("25", "25.5", "25.00") to a decimal string of minor units for
@@ -66,14 +63,8 @@ export function toMinorUnits(majorAmountInput: string, assetCode: string): numbe
 export function majorToMinorString(majorAmountInput: string, assetCode: string): string | null {
   const exponent = knownExponentFor(assetCode)
   if (exponent === undefined) return null
-  const m = /^(\d+)(?:\.(\d+))?$/.exec(majorAmountInput.trim())
-  if (!m) return null
-  const whole = m[1]
-  const frac = m[2] ?? ''
-  if (frac.length > exponent) return null
-  const digits = (whole + frac.padEnd(exponent, '0')).replace(/^0+/, '')
-  if (digits === '' || digits.length > 38) return null
-  return digits
+  const minor = parseDecimalToMinor(majorAmountInput, exponent)
+  return minor === null || minor <= 0n ? null : minor.toString()
 }
 
 /** Formats a decimal string of minor units for display, exactly (no float). Unknown exponents are shown as raw minor units. */
@@ -81,15 +72,8 @@ export function formatMinorString(minor: string, assetCode: string): string {
   const exponent = knownExponentFor(assetCode)
   if (!/^\d+$/.test(minor)) return `${minor} ${assetCode}`
   if (exponent === undefined) return `${minor} ${assetCode} (minor units)`
-  if (exponent === 0) return `${minor} ${assetCode}`
-  const padded = minor.padStart(exponent + 1, '0')
-  return `${padded.slice(0, -exponent)}.${padded.slice(-exponent)} ${assetCode}`
+  const text = formatMinor(minor, exponent)
+  return text === null ? `${minor} ${assetCode}` : `${text} ${assetCode}`
 }
 
-/** True when decimal string a is strictly greater than b (both non-negative integers, no float). */
-export function minorGreater(a: string, b: string): boolean {
-  const x = a.replace(/^0+/, '') || '0'
-  const y = b.replace(/^0+/, '') || '0'
-  if (x.length !== y.length) return x.length > y.length
-  return x > y
-}
+export { minorGreater }

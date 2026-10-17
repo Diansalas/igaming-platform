@@ -1,3 +1,4 @@
+import type { MinorAmount } from '../lib/amount'
 import { apiFetch } from './client'
 
 // Mirrors internal/httpserver/withdrawal_handlers.go's
@@ -19,7 +20,7 @@ export type WithdrawalState =
 export interface WithdrawalRequest {
   id: string
   asset_code: string
-  amount: number
+  amount: MinorAmount
   state: WithdrawalState
   requested_at: string
   hold_ledger_transaction_id?: string
@@ -27,7 +28,7 @@ export interface WithdrawalRequest {
 
 export function requestWithdrawal(params: {
   assetCode: string
-  amount: number
+  amount: number /* exact safe integer from toMinorUnits; never a float */
   idempotencyKey: string
   /** Required by the backend (B13-B): the player's chosen payout instrument id. Re-validated server-side. */
   payoutInstrumentId: string
