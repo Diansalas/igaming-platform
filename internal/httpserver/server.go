@@ -517,7 +517,8 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	registerJurisdictionRoutes(mux, deps)
 	registerProviderCredentialRoutes(mux, deps)
 	registerPaymentsKillSwitchRoutes(mux, deps)
-	registerAlertAdminRoutes(mux, deps) // ADR 0102 4.2: platform-scope ack/resolve (alert:manage)
+	registerAlertAdminRoutes(mux, deps)     // ADR 0102 4.2: platform-scope ack/resolve (alert:manage)
+	registerPlatformStatusRoutes(mux, deps) // F6 / SA-3: platform-admin-only build, migration head and environment anchor read
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

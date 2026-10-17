@@ -62,6 +62,9 @@ is either a secret or noise).
   migration credential, no new role, no password change) runs the one statement above; (c) verify with the SELECT above
   (`environment = production`); (d) only then start `platform-api`. The statement is idempotent-safe to repeat only in the
   sense that a second INSERT fails on the primary key: the row is write-once, so there is nothing to undo or retry.
+- **Read it from the running service (F6 / SA-3):** `GET /v1/admin/platform/status` (platform admin, `platform_status:read`) reports
+  `database_environment.anchor` (`production`, `staging`, `development`, `test`, or `unrecorded` when no row exists) next to the
+  applied migration head and the build commit, so the anchor no longer needs an owner connection to check. The read is audited.
 - A database restored from a test / development backup carries that backup's anchor row: never restore one into production
   (`restore-from-backup.md`).
 

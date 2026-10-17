@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
@@ -265,34 +266,65 @@ func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
 		}
 
 		var result kyc.Verification
-		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// F5(b): the residence-into-open-market alert is raised in this same transaction (alerting.InTx +
+		// RaiseGuarded); a swallowed in-tx raise gets its mandatory detached retry via Flush, deferred so it runs
+		// after the response was written (ADR 0102 7.3). A rolled-back review has no Pending to flush.
+		var pendingAlerts *alerting.Pending
+		defer func() { pendingAlerts.Flush(r.Context()) }()
+		pendingAlerts, err = alerting.InTx(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID), func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			result, err = kyc.ReviewVerification(ctx, tx, kyc.ReviewVerificationParams{
 				VerificationID: verificationID, StaffID: staffID, NewStatus: kyc.VerificationStatus(req.Status), Reason: req.Reason,
 				VerifiedResidenceCountry: req.VerifiedResidenceCountry,
 				IPAddress:                clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
-			if err != nil || req.VerifiedResidenceCountry == nil {
+			if err != nil {
 				return err
+			}
+			// SRF5-1: the country that becomes (or stays) effective at this review. A request that records one uses it. An
+			// `approved` review that records none keeps a previously recorded residence (COALESCE in ReviewVerification) and
+			// thereby makes it evidence, so the stored one is evaluated the same way and signalled again (same audit action,
+			// same discriminator: an occurrence on the open alert).
+			effectiveCountry := req.VerifiedResidenceCountry
+			if effectiveCountry == nil && result.Status == kyc.StatusApproved {
+				var stored *string
+				if qerr := tx.QueryRow(ctx, `SELECT verified_residence_country FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&stored); qerr != nil {
+					return fmt.Errorf("review: read stored residence: %w", qerr)
+				}
+				effectiveCountry = stored
+			}
+			if effectiveCountry == nil {
+				return nil
 			}
 			// SRME-1: the residence is the evidence that admits money and games. There is no maker-checker for KYC
 			// reviews, so a residence recorded in a country the brand currently serves writes an alert-able audit
 			// row in the SAME transaction (ids and a boolean only, never the country). If the market cannot be
 			// evaluated the whole review fails and nothing is written (fail closed; the reviewer retries).
-			served, merr := marketgate.CountryServedForAny(ctx, tx, tc.TenantID, result.BrandID, *req.VerifiedResidenceCountry)
+			served, merr := marketgate.CountryServedForAny(ctx, tx, tc.TenantID, result.BrandID, *effectiveCountry)
 			if merr != nil {
 				return fmt.Errorf("review: evaluate residence market: %w", merr)
 			}
 			if !served {
 				return nil
 			}
-			return audit.Record(ctx, tx, audit.Entry{
+			if aerr := audit.Record(ctx, tx, audit.Entry{
 				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
 				Action: marketgate.AuditActionResidenceIntoOpenMarket, TargetType: "kyc_verification", TargetID: verificationID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 				Metadata: map[string]any{
 					"player_account_id": result.PlayerAccountID.String(), "brand_id": result.BrandID.String(),
 					"new_status": string(result.Status),
+				},
+			}); aerr != nil {
+				return aerr
+			}
+			// The durable alert: Kind kyc.residence_into_open_market (p2), ids only (NEVER the country), one open
+			// alert per determination (discriminator verification:<id>).
+			return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
+				Kind: alerting.KindKYCResidenceIntoOpenMarket, SubjectTenantID: tc.TenantID,
+				Discriminator: "verification:" + verificationID.String(),
+				Attributes: map[string]alerting.AttrValue{
+					"verification_id": verificationID.String(), "brand_id": result.BrandID.String(), "request_id": requestID,
 				},
 			})
 		})

@@ -89,6 +89,11 @@ identity): such a session can create `platform_admin` staff rows and then play b
 accepted R1 class registered as NULL-ARM-WRITE-1 (OPEN); do not describe SR-7 as protection against a compromised runtime
 database role.
 
+**Routing is by severity and step, not by Kind.** There is no per-Kind route. `kyc.residence_into_open_market` (F5(b)) is p2, so
+it reaches a person exactly when a p2 route is live (and appears in `alert_undelivered_count{severity="p2"}` /
+`AlertUndeliveredP2Old` while it is not). A deployment that wants compliance (not the on-call engineer) to see it must route p2 to a
+recipient who can act on it, or accept that the durable row plus the runbook in `observability-and-alerting.md` is the only signal.
+
 ## 4. Webhook contract (for the receiver)
 
 `POST <ALERT_WEBHOOK_URL>`, `Content-Type: application/json`, headers:
