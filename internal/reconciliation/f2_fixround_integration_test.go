@@ -274,6 +274,48 @@ func TestF2_LFF2_5_ForgedUnsealedLineDoesNotExempt(t *testing.T) {
 	}
 }
 
+// LFF2-5 (coverage): without keys, a forged line with the EXACT amount and asset, dated outside its own import's
+// coverage, is not usable: the attempt is still pay_missing_provider_record (never exempted).
+func TestF2_LFF2_5_OutOfCoverageLineDoesNotExempt(t *testing.T) {
+	w := newPayWorld(t)
+	rt := f2RuntimePool(t)
+	a := w.deposit(t, 430)
+	ref := *a.ProviderReference
+	hiding := payDivergentSource{inner: w.srcA, mutate: func(s statement.PaymentStatement) statement.PaymentStatement {
+		out := s.Lines[:0]
+		for _, l := range s.Lines {
+			if l.ProviderReference != ref {
+				out = append(out, l)
+			}
+		}
+		s.Lines = out
+		return s
+	}}
+	cfg := PaymentSweepConfig{Resolver: mapResolver{payProvA: hiding, payProvB: w.srcB}, AllowSynthetic: true, RunLineBound: 100}
+	scopedSweep(t, w.pool, w.f, cfg)
+	w.succeed(t, w.mockA, payProvA, a)
+	if err := rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		imp := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_statement_imports
+			(id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at)
+			VALUES ($1, $2, $3, $4, true, now() - interval '3 hours', now() - interval '2 hours', 1, $5, now())`, imp, w.f.tenantID, payProvA, hiding.Label(), make([]byte, 32)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO payment_statement_lines (id, tenant_id, import_id, line_no, provider_id, kind, provider_reference, status, amount, asset_code, occurred_at)
+			VALUES ($1, $2, $3, 0, $4, 'deposit', $5, 'succeeded', $6, $7, now() - interval '1 minute')`, uuid.New(), w.f.tenantID, imp, payProvA, ref, a.Amount, a.AssetCode)
+		return err
+	}); err != nil {
+		t.Fatalf("forge a line as runtime: %v", err)
+	}
+	o := outcomeFor(t, scopedSweep(t, w.pool, w.f, cfg), payProvA)
+	if o.Err != nil || o.Run.ID == uuid.Nil {
+		t.Fatalf("sweep: %+v", o)
+	}
+	if missing := f2MissingRecords(t, w, o.Run.ID); len(missing) != 1 {
+		t.Fatalf("a line outside its import's coverage must not exempt: missing=%v", missing)
+	}
+}
+
 // LFF2-6: the provider reversed what the platform later recorded as succeeded: pay_status_mismatch, never an
 // exemption.
 func TestF2_LFF2_6_ReversedPersistedLineIsAStatusMismatch(t *testing.T) {
