@@ -944,7 +944,7 @@ func TestB7_UnreferencedDeposit_StaleSnapshot_TerminalWithoutReference_WritesNot
 	e.setWindow(time.Nanosecond)
 	ref := "b7-tomb-ref-" + uuid.NewString()
 	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := postDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, ref)
+		_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, ref)
 		return err
 	}); err != nil {
 		t.Fatalf("seed tombstone: %v", err)

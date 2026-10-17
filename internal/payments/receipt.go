@@ -1466,7 +1466,7 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 	}
 
 	if unresolved || original.LedgerTransactionID == nil {
-		txID, err := postDepositReversalTombstone(ctx, tx, tenantID, verifiedProviderID, ev.OriginalProviderReference)
+		txID, err := postDepositReversalTombstone(ctx, tx, tenantID, verifiedProviderID, ev.OriginalProviderReference, receiptID)
 		if err != nil {
 			return "", err
 		}

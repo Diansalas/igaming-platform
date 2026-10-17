@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -22,10 +21,11 @@ func f3ForeignTombstone(t *testing.T, e rbEnv, ref string) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		pid, r := e.pid, ref
-		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: e.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "tombstone:" + pid + ":" + r, ProviderID: &pid, ProviderTxID: &r, CorrelationID: uuid.New()})
-		id = res.TransactionID
+		// Migration 0175: a deposit-style tombstone on a payment provider is the signed one (same key
+		// "tombstone:<provider>:<ref>", fresh correlation); a raw one is refused (AP001). The fixture bypasses only the
+		// real callback's not-a-deposit integrity check, which is what this backstop test needs.
+		var err error
+		id, err = PlantVerifiedDepositReversalTombstone(ctx, tx, e.f.tenantID, e.pid, ref)
 		return err
 	}); err != nil {
 		t.Fatalf("seed the foreign tombstone: %v", err)

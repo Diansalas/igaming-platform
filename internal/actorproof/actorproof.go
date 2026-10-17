@@ -133,10 +133,27 @@ const (
 	// the withdrawal request id; payload hash = the digest of the decision (withdrawal.dispatchAllowDigest), recomputed by the
 	// database from the inserted withdrawal_gate_decisions row and the request's immutable columns.
 	OpDispatchGateAllow = "withdrawal_dispatch_gate:allow"
+
+	// Closure security review F-1 (migration 0175): a DEPOSIT reversal tombstone (the tombstone branch of a verified
+	// deposit_reversal callback for a never-posted original) is an attestation of the platform itself. Provable for scope
+	// ScopeSystem ONLY, with a tenant, for the fixed actor SystemActorDepositReversal(). Target = the stored reversal receipt
+	// id (payment_provider_events); payload hash = SHA-256(k2_canonical(tenant, provider, original reference, ledger
+	// idempotency key, correlation, receipt)), recomputed by the database from the inserted ledger row.
+	OpDepositReversalTombstone = "deposit_reversal_tombstone:write"
 )
 
-// SystemActorDispatchGate is the fixed actor of OpDispatchGateAllow proofs (migration 0171 pins the same uuid).
-var SystemActorDispatchGate = uuid.MustParse("00000000-0000-0000-0000-00000f4d1500")
+// The fixed system actors (the SQL verifier pins the same uuids). Unexported values behind functions (closure security
+// review F-3): no package can reassign them.
+var (
+	systemActorDispatchGate    = uuid.MustParse("00000000-0000-0000-0000-00000f4d1500") // migration 0171
+	systemActorDepositReversal = uuid.MustParse("00000000-0000-0000-0000-0000000de175") // migration 0175
+)
+
+// SystemActorDispatchGate is the fixed actor of OpDispatchGateAllow proofs (migration 0171).
+func SystemActorDispatchGate() uuid.UUID { return systemActorDispatchGate }
+
+// SystemActorDepositReversal is the fixed actor of OpDepositReversalTombstone proofs (migration 0175).
+func SystemActorDepositReversal() uuid.UUID { return systemActorDepositReversal }
 
 // Scopes the database admits.
 const (
@@ -146,8 +163,9 @@ const (
 	// capability_grant: and financial_policy_change: operations and carries a
 	// NULL tenant (an empty tenant field on the wire).
 	ScopePlatform = "platform"
-	// ScopeSystem (migration 0171) is the platform's own attestation: provable ONLY for OpDispatchGateAllow, with a
-	// tenant, for SystemActorDispatchGate. No staff identity is involved.
+	// ScopeSystem (migration 0171) is the platform's own attestation: provable ONLY for OpDispatchGateAllow (actor
+	// SystemActorDispatchGate()) and, since migration 0175, OpDepositReversalTombstone (actor SystemActorDepositReversal()),
+	// always with a tenant. No staff identity is involved.
 	ScopeSystem = "system"
 )
 
@@ -202,9 +220,10 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: staff_lifecycle operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, payoutReversalOperationPrefix) && (c.Operation != OpPayoutReversalDecide || c.Scope != ScopeTenant):
 		return fmt.Errorf("%w: withdrawal_payout_reversal operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
-	case (c.Scope == ScopeSystem || strings.HasPrefix(c.Operation, dispatchGateOperationPrefix)) &&
-		(c.Operation != OpDispatchGateAllow || c.Scope != ScopeSystem || c.Actor != SystemActorDispatchGate):
-		return fmt.Errorf("%w: system scope is provable only for %s by the dispatch gate system actor", ErrInvalidClaims, OpDispatchGateAllow)
+	case (c.Scope == ScopeSystem || strings.HasPrefix(c.Operation, dispatchGateOperationPrefix) ||
+		strings.HasPrefix(c.Operation, depositTombstoneOperationPrefix)) && !systemClaimAdmitted(c):
+		return fmt.Errorf("%w: system scope is provable only for %s / %s, each by its own system actor", ErrInvalidClaims,
+			OpDispatchGateAllow, OpDepositReversalTombstone)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):
@@ -225,6 +244,24 @@ const staffLifecycleOperationPrefix = "staff_lifecycle:"
 
 // dispatchGateOperationPrefix (migration 0171): the closed set is OpDispatchGateAllow, scope system.
 const dispatchGateOperationPrefix = "withdrawal_dispatch_gate:"
+
+// depositTombstoneOperationPrefix (migration 0175): the closed set is OpDepositReversalTombstone, scope system.
+const depositTombstoneOperationPrefix = "deposit_reversal_tombstone:"
+
+// systemClaimAdmitted mirrors the verifier's system-scope block (migrations 0171 + 0175): exactly two (operation, actor)
+// pairs, scope system only.
+func systemClaimAdmitted(c Claims) bool {
+	if c.Scope != ScopeSystem {
+		return false
+	}
+	switch c.Operation {
+	case OpDispatchGateAllow:
+		return c.Actor == systemActorDispatchGate
+	case OpDepositReversalTombstone:
+		return c.Actor == systemActorDepositReversal
+	}
+	return false
+}
 
 // payoutReversalOperationPrefix (migration 0165): the closed set is OpPayoutReversalDecide, scope tenant.
 const payoutReversalOperationPrefix = "withdrawal_payout_reversal:"
@@ -457,8 +494,8 @@ func UUIDP(u *uuid.UUID) *string {
 }
 
 // TestEnsureKeyHook is nil in production. Only internal/actorproof/prooftest (integration build tag) sets it, and only
-// internal/withdrawal/dispatchproof.go reads it (both pinned by TestStatic_OnlyFourEyesPackagesSign): before the system
-// dispatch-gate proof is signed it makes sure the process signing key is provisioned in the database the transaction runs
+// internal/withdrawal/dispatchproof.go and internal/payments/deposit_tombstone_proof.go read it (all pinned by
+// TestStatic_OnlyFourEyesPackagesSign): before a system proof is signed it makes sure the process signing key is provisioned in the database the transaction runs
 // on, so fixtures and tests that drive the real dispatch paths need no per-site key setup. It cannot sign, alter a claim
 // or verify anything.
 var TestEnsureKeyHook func(ctx context.Context, tx pgx.Tx) error

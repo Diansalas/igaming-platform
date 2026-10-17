@@ -114,12 +114,75 @@ func applyRedispatchGate(ctx context.Context, tx pgx.Tx, wr withdrawal.Withdrawa
 // refusal raises. Both dedup on an open alert per request / attempt, so repeats only add occurrences (throttle).
 const gateUnavailableAlertAfter = 3
 
-var (
-	gateFailMu     sync.Mutex
-	gateFailCounts = map[uuid.UUID]int{} // attempt id -> consecutive fail-closed ticks (process-local, a throttle only)
-)
+// gateFailCounts: attempt id -> consecutive fail-closed ticks (process-local, a throttle only).
+var gateFailCounts = newGateFailCounter(gateFailCountsMax, gateFailStaleAfter, time.Now)
 
+// gateFailCountsMax bounds the counter's memory. Closure security review F-4: reaching it must never SILENCE the alert.
+// The previous version wiped the whole map at the bound, so with more than gateFailCountsMax attempts failing closed at
+// once (a missing key everywhere: the case the alert exists for) no attempt ever reached the threshold.
 const gateFailCountsMax = 4096
+
+// gateFailStaleAfter: an entry not touched for this long belongs to an attempt the sweeper no longer ticks (it moved on
+// through another path); only such entries are evicted to make room.
+const gateFailStaleAfter = time.Hour
+
+// gateFailCounter counts consecutive fail-closed ticks per attempt with bounded memory. At the bound it first evicts
+// stale entries (not touched for staleAfter); if the counter is still full, the failing attempt it cannot track is
+// reported as AT the threshold (more than max attempts failing closed at once is itself the outage the alert is for), so
+// a mass outage always alerts and nothing that is still failing is ever dropped.
+type gateFailCounter struct {
+	mu         sync.Mutex
+	max        int
+	staleAfter time.Duration
+	now        func() time.Time
+	m          map[uuid.UUID]gateFailEntry
+}
+
+type gateFailEntry struct {
+	n    int
+	last time.Time
+}
+
+func newGateFailCounter(limit int, staleAfter time.Duration, now func() time.Time) *gateFailCounter {
+	return &gateFailCounter{max: limit, staleAfter: staleAfter, now: now, m: map[uuid.UUID]gateFailEntry{}}
+}
+
+// reset forgets an attempt (a tick that did not fail closed).
+func (c *gateFailCounter) reset(id uuid.UUID) {
+	c.mu.Lock()
+	delete(c.m, id)
+	c.mu.Unlock()
+}
+
+// fail records one fail-closed tick of id and reports the consecutive count to compare with the threshold (overflow
+// reports gateUnavailableAlertAfter: alert now).
+func (c *gateFailCounter) fail(id uuid.UUID) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	e, tracked := c.m[id]
+	if !tracked && len(c.m) >= c.max {
+		for k, v := range c.m {
+			if now.Sub(v.last) >= c.staleAfter {
+				delete(c.m, k)
+			}
+		}
+		if len(c.m) >= c.max {
+			return gateUnavailableAlertAfter
+		}
+	}
+	e.n++
+	e.last = now
+	c.m[id] = e
+	return e.n
+}
+
+// len is the number of tracked attempts (tests).
+func (c *gateFailCounter) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.m)
+}
 
 // gateUnavailableCause maps an error wrapping withdrawal.ErrGateUnavailable to a closed cause code.
 func gateUnavailableCause(err error) string {
@@ -148,19 +211,10 @@ func raiseGateUnavailable(ctx context.Context, pool *db.Pool, tenantID uuid.UUID
 // any tick that did not fail closed resets the count. It returns err unchanged.
 func (s *Sweeper) observeRedispatchGate(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt, err error) error {
 	if err == nil || !errors.Is(err, withdrawal.ErrGateUnavailable) {
-		gateFailMu.Lock()
-		delete(gateFailCounts, attempt.ID)
-		gateFailMu.Unlock()
+		gateFailCounts.reset(attempt.ID)
 		return err
 	}
-	gateFailMu.Lock()
-	if len(gateFailCounts) >= gateFailCountsMax {
-		gateFailCounts = map[uuid.UUID]int{}
-	}
-	gateFailCounts[attempt.ID]++
-	n := gateFailCounts[attempt.ID]
-	gateFailMu.Unlock()
-	if n >= gateUnavailableAlertAfter {
+	if n := gateFailCounts.fail(attempt.ID); n >= gateUnavailableAlertAfter {
 		raiseGateUnavailable(ctx, s.Pool, tenantID, "payout_attempt:"+attempt.ID.String(), withdrawal.DispatchStageRedispatch, gateUnavailableCause(err))
 	}
 	return err

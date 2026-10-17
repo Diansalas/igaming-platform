@@ -1196,12 +1196,9 @@ func (w *k3World) b11RequirePayoutCU(ms []reconciliation.Mismatch, attempt uuid.
 // b11Tombstone writes a tombstone ledger row on (provider, ref) - a deposit-shaped signal.
 func (w *k3World) b11Tombstone(ref string) {
 	w.t.Helper()
-	pid := w.provider
 	w.tx(func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "tombstone:" + pid + ":" + ref, ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
-		})
+		// Migration 0175: the signed deposit-shaped tombstone (a raw one on a payment provider is refused, AP001).
+		_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, w.f.tenantID, w.provider, ref)
 		return err
 	})
 }

@@ -26,7 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/auth/authtest"
 	"github.com/Diansalas/igaming-platform/internal/identity"
-	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -158,9 +158,9 @@ func TestA5HTTP_PayoutReversal_AuthorizationAndQuorum(t *testing.T) {
 	// SR5-3: a return reference the platform already holds for the provider is a typed 409.
 	held := "a5-held-" + uuid.NewString()[:8]
 	if err := pool.WithTenant(context.Background(), tn.ID, func(ctx context.Context, tx pgx.Tx) error {
-		pid := "mockpsp"
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: tn.ID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "tombstone:mockpsp:" + held, ProviderID: &pid, ProviderTxID: &held, CorrelationID: uuid.New()})
+		// Migration 0175: a deposit-shaped tombstone on a payment provider is the signed one a verified deposit_reversal
+		// writes (a raw one is refused, AP001).
+		_, err := payments.PlantVerifiedDepositReversalTombstone(ctx, tx, tn.ID, "mockpsp", held)
 		return err
 	}); err != nil {
 		t.Fatal(err)

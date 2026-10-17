@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
-	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
@@ -120,9 +119,8 @@ func (w *payWorld) ma020Tombstone(t *testing.T, ref string) { w.ma020TombstoneFo
 func (w *payWorld) ma020TombstoneFor(t *testing.T, provider, ref string) {
 	t.Helper()
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		p := provider
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "ma020-tomb:" + provider + ":" + ref, ProviderID: &p, ProviderTxID: &ref, CorrelationID: uuid.New()})
+		// Migration 0175: the signed tombstone a verified deposit_reversal writes (a raw one is refused, AP001).
+		_, err := payments.PlantVerifiedDepositReversalTombstone(ctx, tx, w.f.tenantID, provider, ref)
 		return err
 	}); err != nil {
 		t.Fatalf("tombstone %s: %v", ref, err)

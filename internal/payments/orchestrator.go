@@ -1328,18 +1328,29 @@ func RecordDepositReversalRejection(ctx context.Context, tx pgx.Tx, tenantID uui
 // reference directly (not a CallbackEvent) so both the live callback path
 // (receipt.go's applyReversalReceiptEvidence) and any future caller can
 // invoke it without constructing an adapter-shaped event value.
-func postDepositReversalTombstone(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, originalRef string) (uuid.UUID, error) {
+//
+// Closure security review F-1 (migration 0175): receiptID is the stored,
+// applied deposit_reversal receipt this tombstone answers. The row is a
+// signed system attestation (deposit_tombstone_proof.go) bound to it; with
+// no issuer the call fails closed (ErrDepositTombstoneProofUnavailable) and
+// the whole callback transaction rolls back for the PSP to redeliver.
+func postDepositReversalTombstone(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, originalRef string, receiptID uuid.UUID) (uuid.UUID, error) {
 	// ReasonCode is deliberately left nil: ledger_transactions' own CHECK
 	// constraint (migration 0021) requires reason_code IS NOT NULL if and
 	// only if transaction_type = 'manual_adjustment', and forbids it for
 	// every other type including 'tombstone'. The human-readable reason
 	// ("deposit_reversal_for_unseen_original") is carried in this
 	// function's caller's audit record instead, not on the ledger row.
+	idempotencyKey := fmt.Sprintf("tombstone:%s:%s", providerID, originalRef)
+	correlationID := uuid.New()
+	if err := attachDepositTombstoneProof(ctx, tx, tenantID, providerID, originalRef, idempotencyKey, correlationID, receiptID); err != nil {
+		return uuid.Nil, err
+	}
 	result, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: tenantID, TransactionType: ledger.TxTombstone,
-		IdempotencyKey: fmt.Sprintf("tombstone:%s:%s", providerID, originalRef),
+		IdempotencyKey: idempotencyKey,
 		ProviderID:     &providerID, ProviderTxID: &originalRef,
-		CorrelationID: uuid.New(),
+		CorrelationID: correlationID,
 	})
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("payments: post reversal tombstone: %w", err)
