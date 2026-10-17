@@ -222,3 +222,39 @@ SRF1-1 and SRF1-2 are cheap defence-in-depth fixes. Make them before F1 is close
 | SRF1-5 | Informational (pre-existing, outside F1) | **A hostile but validly signed archive runs arbitrary SQL as the owner role during `pg_restore`.** Every TOC entry's text is executed. It could, for example, redefine `public.actor_proof_require` or set a role- or database-level `search_path` that shadows functions used in the DDL's CHECK constraints at re-key time. F1 does not widen this. The private-schema DDL comes from the repository, a pre-existing `actorproof_private` is refused, and the trust root remains the backup signing key (ADR 0122). | Keep the residual as stated in ADR 0122. Pinning `search_path` in the DDL (SRF1-1a) removes the cheap shadowing variant. |
 
 **Residuals check (section 7):** documented adequately. Physical artefacts carry the key. Owner, superusers and owner-role members can read it (T7; add the member wording to the ADR text, SRF1-4). Mis-grant detection runs at backup time and is not continuous. A backup credential exposed while the database was below 0166 requires a re-key (`backup-restore-dr.md` 5a step 1, corrected). The READY-TO-PASTE ADR 0122 text is accurate. The ADR 0110 text is accurate apart from SRF1-4(2).
+
+## 11. Fix round after the security review (SRF1-1..5)
+
+- **SRF1-1**: `actorproof-private-schema.sql` now sets `search_path = pg_catalog` first and ends with an assertion that raises `APM03` unless the schema, the
+  table and its columns carry no non-owner ACL entry (one transaction, so a refused DDL leaves nothing; `restore.sh` then fails and drops the database).
+  `rekey-actor-proof.sh` evaluates the backup baseline's own isolation invariant (`INV|actor_proof_key_reachable_by_non_owner`, read from `baseline.sql`) as
+  the owner and refuses unless it is 0, before any secret is written. Migration 0166 up also asserts owner-only ACLs after the move (APM01; covers a global
+  DEFAULT PRIVILEGES inheritance on `CREATE SCHEMA`). Not done (optional c): `restore.sh` still keeps global `DEFAULT ACL` TOC entries; the DDL assertion
+  is what refuses them for the key schema.
+- **SRF1-2**: `'pg_catalog.pg_proc'` added to the dependency classes of both the up and down refusals (edited in place, unmerged); the baseline INV counts
+  function dependencies on the key schema; `TestKeyIsolation_Catalog` reads SQL-standard bodies (`pg_get_functiondef` when `prosqlbody` is set) and pins
+  "no `pg_proc` dependency on the key schema or its relations". The reviewer's `f1s_leak()` (BEGIN ATOMIC, SECURITY DEFINER) is now an up refusal case
+  (APM01) and a BEGIN ATOMIC reader of the private table a down refusal case (APM02, also flagged by the INV). Mutation check: removing `pg_proc` from the
+  up list makes the test fail (`want APM01, got <nil>`).
+- **SRF1-3**: `backup.sh`'s preflight refuses any `pg_auth_members` row of the backup role other than `rds_iam` (drill:
+  `backup_refused_when_backup_role_is_a_member_of_a_role`, with `pg_read_all_data`). The key table's RLS-enabled-no-policy state is marked load-bearing in
+  the 0166 header and the restore DDL (the FP line pins the flag).
+- **SRF1-4**: 0166 header corrected (missing table = 42P01 at the LOCK, not APM01); ADR 0110 amendment text names members of the owner role in the T7
+  sentence (section 9); `backup-restore-dr.md` 5a step 1 adds owner-role member credentials to the rotation triggers; the `k2_gates_integration_test.go`
+  comment points at `internal/adjustment`; the ownership refusal is drilled (`migration_0166_refuses_a_key_table_not_owned_by_the_migrating_role`: key
+  table owned by the superuser with every privilege granted to `igaming`, so the LOCK passes and the APM01 refusal is reached).
+- **SRF1-5**: recorded as an accepted residual (section 7): trust root = the backup signing key.
+- New drill cases: `restore_refuses_key_schema_inheriting_a_default_privilege` (the reviewer's reproduction: a signed set carrying the owner's global
+  default privileges for `igaming_backup` is refused by the DDL assertion), the ownership refusal, the membership refusal, and the re-key refusal on a
+  key schema that is not owner-only (inside `rekey_script_refuses_unsafe_use`). New Go cases: the f1s_leak up refusal, a global default privilege up
+  refusal, the BEGIN ATOMIC down refusal, the DDL refusing under inherited default privileges (APM03, nothing left behind). New static pins:
+  `TestSecurityReviewF1Fixes`; the drill's DROP DATABASE allow-list gains its own `legacy_own` and `defacl_db`.
+
+**Re-run (commit `8206887`):**
+- Full drill with PITR: **138 PASS, 0 FAIL, `A12 DRILL RESULT: PASS`** (112,938 ledger entries, 56,437 transactions, 287,070 rows; ports 5497-5499 checked
+  free in `/proc/net/tcp` first; throwaway clusters under `/tmp/pgdrill-*`; `go clean -cache` run once first to bring free disk from 1.7 GB to 7.3 GB).
+- Staging-runner local modes: **207 ok, 0 FAIL**, exit 0.
+- F1 integration tests (`-run 'KeyIsolation|Migration0166|RestoreDDL' ./internal/adjustment/`): 6/6 PASS.
+- Integration `internal/adjustment`, `internal/actorproof/...`, `internal/db`, `internal/withdrawal`: all ok (private DB `f120261017000000p8792x11`).
+- `go test -count=1 ./deploy/...`: all ok. shellcheck `-S warning -e SC1091,SC2034,SC2155` on every `deploy/backup` and `deploy/staging-runner` script: clean.
+  gofmt clean; `go vet` plain and `-tags integration` clean; golangci-lint (`--build-tags integration`, touched packages): 0 issues.
