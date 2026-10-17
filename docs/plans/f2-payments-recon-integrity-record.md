@@ -776,3 +776,105 @@ Conditions:
 2. **Recommended in this branch** (small, Go-only, no schema): LFF2-3, LFF2-2 interim, LFF2-5 (2).
 3. **Before the first non-MOCK statement source:** the run-row seal (architect + security decision; a new B13 key label and
    columns), LFF2-5 (1) and (3), LFF2-4 and LFF2-7.
+
+## SRF2R. Security re-review of the fix round (`security`, 2026-10-17, head `6f07dfb`)
+
+Same attacker model as SRF2: arbitrary SQL as `igaming_runtime`, without the application's key. The scratch DB
+`f2s20261017040943p2418x01` was built from a `git archive` of `6f07dfb` (migrations through 0170, including 0168) and dropped afterwards.
+
+**Re-run here:**
+- My SRF2 probes, the LFF2 probes, and new SRF2R probes. The probe files were not added to the branch; they are described in
+  the reviewer's scratchpad (`srf2_probes/SRF2R_README.txt`).
+- Authors' suites:
+  - reconciliation `-run 'TestF2|TestBound_|TestScoped_|TestMigration016|TestK3_C3|TestMA020'`: 64 PASS, 0 FAIL;
+  - payments `-run '^Test(F2e|F3|F2fr)'`: 26 PASS, 0 FAIL;
+  - unit tests in `payoutinstrument`, `cmd/platform-api`, `reconciliation`, `db`: ok.
+
+### SRF2R.1 Closure checks (all confirmed by probe)
+
+**SRF2-1 is closed.** Held advisory lock plus one forged run row at the orphan import's `coverage_end`:
+- the cursor did not move;
+- the next sweep re-covered the window: `pay_missing_platform_record` = 1, the same as the control;
+- `cursor_anomaly` was audited and alerted.
+
+A forged unsealed run row over a genuine sealed import that has no run row does not move the cursor (`unbacked` = 1).
+
+**SRF2-2 is closed.**
+- My replay probes (failed and stale) are now refused (`last_run_failed`, `last_run_stale`). The LFF2 probes for failed,
+  stale and truncated are refused too.
+- A genuine sealed run row copied VERBATIM, seal included, with `run_at = now()` is refused by the gate (`last_run_failed`).
+- In the cursor, copies with a new id (with `coverage_end + 1 s`, or with `run_at = now()`) are not trusted and are reported
+  (`unbacked` 1, then 2). Reusing the id fails on the primary key (`23505`).
+
+**Run seal coverage.** The seal covers every column the cursor and the gate decide on:
+- run id, tenant, provider, stream;
+- `run_import_id`;
+- the import's coverage window: start is read from `period_start`, end from `coverage_end`;
+- `window_truncated`;
+- `run_at`.
+
+Unsigned columns:
+- `status` and `period_end`: not read by the cursor or the gate. The staff read surfaces still display unsealed rows as runs.
+  That is informational and not decisive.
+- The `sweep_run_failed` audit rows: they can only refuse, and their future dating is now bounded to the DB clock plus 5 min.
+
+Cross-tenant and cross-provider copies fail for two reasons: tenant and provider are inside the seal, and the FK
+`(run_import_id, tenant_id)` requires the import to belong to the same tenant. Replaying an old genuine sealed row is
+impossible: a new id breaks the seal, and the same id hits the primary key.
+
+**Keys.**
+- Separate HKDF info label `b13-run-v1`, plus the domain tag `run` in `RunCanon`, so run and import seals are not
+  interchangeable.
+- Constant-time compare (`hmac.Equal`).
+- The reconciliation package sees only the `RunSealer` / `RunSealVerifier` interfaces.
+- The production refusal now requires BOTH verifiers (`streamVerifier`), and its position in `run()` is still pinned.
+- An unset `APP_ENV` is still treated as production.
+
+**SRF2-3 is closed for the Go paths.** With keys, a line may clear or confirm only when ALL of these hold: D-4 eligible, its
+import's seal verifies, it lies inside its import's coverage, and it is dated no later than the DB clock plus 5 min. This
+covers K3, R9, deposit reversals and the F2c exemption (which uses the run's coverage end instead). The LFF2 probes
+"forged unsealed line exempts" and "forged future return suppresses R9" are now refused.
+
+**The 5-minute deviation is acceptable.** With keys, a SQL-only actor cannot produce a verifying line at all, so the clock
+bound only limits a genuine provider whose clock runs ahead. Continuation imports end at `now - lag`, so their lines are
+always in the past. The cost is a delayed clear, never a false clear (residual 6.12).
+
+Note: `hasRealImp` (RC-3) still counts unsealed non-MOCK imports. A forged one can only make MOCK evidence ineligible, so it
+fails closed (more findings, not fewer). In production every import is non-MOCK, so this has no effect there.
+
+**SRF2-5 is closed.** The F2e evidence is pre-read before the M2 transaction, so there is no second pooled connection inside
+it. The millisecond TOCTOU window is disclosed (6.5), and the execution step re-checks.
+
+Minor: for platform staff, the pre-read (a system-view read of the target tenant) runs BEFORE the acting-session fence. Its
+result never leaves the service unless the fence passes, so this is informational. It costs one evidence read per
+approve, for every provider of the tenant.
+
+### SRF2R.2 New findings
+
+| ID | Severity | Finding | Recommendation |
+|---|---|---|---|
+| SRF2R-1 | LOW-MEDIUM (DoS by a SQL-only actor; loud only eventually) | **The flood cost is super-linear.** Sealed-looking forged run rows (random 64-hex seal, a real kid, any existing import id; all accepted by the 0168 CHECKs and FK) above the cursor were measured as follows. **Cursor read:** 2,000 rows took a sweep from 72 ms to 113 ms; 200,000 rows took it from 65 ms to **70.6 s**. That is 100x the rows for about 600x the time. The likely cause is the keyset `(coverage_end, run_at, id) < (...)`: no index matches it, so each 512-row page re-scans and sorts the flood. The read also runs a second time under the advisory lock inside the REPEATABLE READ match transaction. **M2 gate pre-read:** 52,000 rows cost **4.3 s per request**. It runs for every approve (any kind) and for every provider of the tenant, so a few hundred thousand rows push force-resolution requests and approvals past HTTP timeouts. Correctness holds: the cursor still advanced and nothing was trusted. "A flood cannot stop the stream" (2.8 item 2, 6.11) is true for correctness but not for liveness. Only `ReconciliationStale` (2 h) makes a stuck pair loud. If the sweep loop is sequential across tenants, one flooded pair also delays the other tenants. | Before the first non-MOCK source: (a) add an index matching each keyset, e.g. partial `(tenant_id, provider_id, coverage_end DESC, run_at DESC, id DESC) WHERE stream='payment_statement' AND run_seal IS NOT NULL`, plus a `run_at` variant for the gate; or read the candidates in ONE streaming query instead of re-issued pages. (b) Add a per-read budget (rows or time). When it is exhausted, fail THIS run loud (P1 `cursor_flood`, or the gate's `evidence_not_read`) rather than hang. That is not the old fail-closed state, because the next run retries. (c) Narrow the gate pre-read to the attempt's provider. Recovery stays the owner-authorised runbook procedure (6.11). |
+| SRF2R-2 | LOW (operational: false P1) | **`match_stalled` also fires on benign multi-instance contention.** `platform_api_desired_count >= 1`, and every instance runs the scoped loop. A contention loser's sealed import usually ends a moment after the winner's run, because it fetched later. It then sits above the trusted cursor until the NEXT sweep, which (hourly) is past `MatchStallAfter` (30 min). So the next sweep raises a durable P1 `match_stalled` even though its own run re-covers and clears the window. Probe (with the stall threshold shortened): `payment_match_stalled` audits = 1 after a benign loser import. False P1s train operators to ignore the alert that exists to expose a held lock. | Count an import as stalled only when no verifying sealed run has `run_at` after that import's `fetched_at`. Any committed run since the fetch means the stream progressed and the orphan window has been, or is being, re-covered. A continuously held lock still trips it (no run commits). Pin it with a test. |
+| SRF2R-3 (= residual 6.10) | MEDIUM (pre-existing since 0119; binding before the first real PSP / non-MOCK statement source; NOT freeze-blocking) | **The SQL MA020 guard `payment_attempt_open_exposure` trusts unsealed `deposit_reversal` lines.** It is the DATABASE-level preventive guard: 0115's `ledger_adjustment_payload_refusal` blocks a manual credit while a captured-but-unposted deposit is open. A SQL-only actor who plants an unsealed non-MOCK import with a completed `deposit_reversal` line naming the reference makes the exposure read as closed. That disables the preventive block, which allows a double credit: a manual credit, then the late posting or refund. This was reviewed from code; the record states it and my reading agrees. Remaining controls: the manual adjustment still needs staff, a reason code and four-eyes above the threshold, and the keyed Go reconciliation now ignores the planted line, so the detective standing finding (captured-unposted) stays raised. Net: a preventive control is defeatable by SQL, while the detective control holds. | Architect + security decision, before the first real PSP. Preferred option: make the SQL guard fail closed, with only ledger tombstones clearing in SQL and statement lines no longer clearing there. Then let a Go path that verifies the seal turn a verified completed reversal into a ledger-level clearing artifact (for example the existing tombstone mechanism), which the SQL guard can trust. A "verified" marker table written by the runtime role is NOT acceptable: it is as forgeable as the line. Register it as its own OPEN row (MEDIUM). |
+
+### SRF2R.3 Verdict
+
+**APPROVED for the MOCK-only freeze at `6f07dfb`.** SRF2-1, SRF2-2, SRF2-3 (Go paths) and SRF2-5 are closed, with the
+probes re-run and the authors' suites green. SRF2-4 is superseded by SRF2R-1. SRF2-6 (staging has no keys) remains LOW and
+open.
+
+**SR11-1 can be CLOSED for the freeze**, scoped to the SQL-only threat it was raised for: "CLOSED (F2 + fix round, run seal
+0168, IMPLEMENTED against MOCK): an actor with runtime SQL access but without the key can no longer blind, steer or fake the
+currency of the payment_statement stream." Explicitly outside it, and tracked elsewhere:
+- an attacker inside the application process who holds the key (T6 class);
+- deletion by privileged roles;
+- non-production processes without keys.
+
+**Launch flags (first real PSP / non-MOCK statement source):**
+- SRF2R-1: index or streaming read plus a per-read budget;
+- SRF2R-3 / 6.10: SQL MA020 guard (MEDIUM, own OPEN row);
+- SRF2R-2: recommended before production alerting goes live;
+- SRF2-6: staging import keys.
+
+None of these block the freeze. This review covers code and design plus targeted probes against MOCK. It is not a
+penetration test, and it does not claim real-PSP behaviour.
