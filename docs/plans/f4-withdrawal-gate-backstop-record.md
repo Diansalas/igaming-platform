@@ -393,3 +393,19 @@ matched by `TestReservedUnusedVersions_ExactSet`. Private scratch database rebui
 | `-tags integration ./internal/withdrawal/ ./internal/withdrawalgate/... ./internal/rg/ ./internal/risk/ ./internal/db/ ./internal/launchgov/ ./cmd/...` | all ok |
 | `-tags integration ./internal/reconciliation/ ./internal/alerting/...` | all ok |
 | `-tags integration -v -run 'F4\|Claim\|Payout\|Withdraw\|Sweeper\|Dispatch\|HSEC\|HoldRelease\|B13B\|B11\|M2\|M4\|A5\|T8\|R32\|RVLF\|K3\|DepRef\|Drain' ./internal/payments/` | ok: 640 top-level tests PASS, 0 FAIL, 0 SKIP |
+| `-tags integration -run 'Withdraw\|Submit\|Route\|Golden\|OpenAPI\|Staff\|Financial\|HSEC\|Stage3C\|Stage3D\|Payout\|A5\|T8\|Launch\|StepUp\|Freeze\|IWire\|PaymentForce' ./internal/httpserver/` | ok |
+| `-race -tags integration ./internal/withdrawal/` | ok, no race |
+| `-race -tags integration -run 'TestF4\|TestSubmitWithdrawalHandler_F4' ./internal/payments/ ./internal/httpserver/` | ok, no race |
+
+Fix-round test changes beyond section 12: the RF4-1 guard needed fixture changes after all (correcting section 12's
+"no existing test needed a fixture change"). They test the reconciliation and the kill switch, not the gate, and
+their assertions are unchanged unless noted:
+- `internal/reconciliation`: the payout fixtures (`payment_statement` `payoutFixture`, `prh2_r9` `bcPendingPayout`,
+  `prh2_r16` `rsPayout`) insert the attempt in the transaction that performs E7, through the new
+  `legacyApprovedForT1p` (`adr0113_fixtures_integration_test.go`).
+- `internal/payments/killswitch_claim_predicate_coverage_test.go` `TestKillSwitchPredicate_T1p_Payout_InsertSubmittingAttempt`:
+  the fixture E7 runs first, and the blocked case now asserts `ErrKillSwitchEngaged` instead of any error. This is a
+  CHANGED ASSERTION and a stricter one.
+- `internal/payments/payout_dispatch_round4_test.go` (N6 fallback reference): E7 and the attempt insert are now one
+  transaction.
+- The full payments suite was still not run end to end, so payments remains `PARTIALLY VERIFIED` beyond the subsets.
