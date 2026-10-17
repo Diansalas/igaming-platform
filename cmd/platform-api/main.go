@@ -97,6 +97,12 @@ func run() error {
 	if err := refuseSyntheticInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {
 		return err
 	}
+	// C-2 / S-2: provider_id namespaces must be disjoint across adapter
+	// families (migration 0175 classifies a provider id with payment rows as a
+	// payment provider). Refuses to start, naming the colliding ids.
+	if err := refuseProviderIDCollisions(providers); err != nil {
+		return err
+	}
 	// Owner decision 3 (MKT-EVIDENCE-1): production needs the KYC residence
 	// market-evidence source wired (the guard above skips a nil component).
 	if err := requireMarketEvidenceInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {

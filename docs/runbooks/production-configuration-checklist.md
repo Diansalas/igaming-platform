@@ -253,6 +253,22 @@ environment with `APP_ENV=production`:
    `database_environment` anchor step is in the restore runbook. None of this is proven on AWS yet
    (`docs/runbooks/aws-staging-deploy-plan.md`).
 
+## Provider-id namespace rule (closure C-2 / S-2, migration 0175)
+
+`provider_id` values MUST be disjoint across adapter families (payments PSP, casino, sportsbook, KYC, and their statement
+sources). Migration 0175 treats a provider id that has a payment attempt or payment provider event in a tenant as a
+payment provider and then requires deposit proof for that provider's tombstones; a casino provider id equal to a payment
+provider id would make every unseen-original casino rollback tombstone fail `AP001` permanently (the payment tables are
+append-only; only owner DDL can undo it). `cmd/platform-api` therefore refuses to start, in every environment, naming the
+colliding ids, when two adapter families claim the same id (`providerkind.RefuseProviderIDCollisions`, comparison trimmed
+and case-insensitive; `buildProviderIDClaims` in `cmd/platform-api/registrations.go`). Operators: when onboarding a vendor,
+choose a unique id; a real sportsbook adapter must add its claim in `buildProviderIDClaims`. Tenant-level configuration
+rows are not checked by this startup guard (they are bundle-level ids); a per-tenant configuration refusal is a residual.
+
+Related alert: `payment_webhook_deposit_tombstone_proof_key_fault` (`AP002` key not active / `AP003` clock skew) - see
+`operational-runbooks.md` and `observability-and-alerting.md`. Go-live: run the unsigned-tombstone query in the
+operational runbook (MA020 stranding case); it must return zero rows.
+
 ## Backup, restore and point-in-time recovery (A12, ADR 0122)
 
 Operational detail: `docs/runbooks/backup-restore-dr.md`. Configuration items an operator must set or confirm:

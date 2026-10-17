@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
@@ -652,7 +654,11 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			logger.Error("payment_webhook_failed", "error", err, "provider_id", providerID)
+			// Closure re-review C-3: an actor-proof key/clock fault on the deposit-reversal tombstone gets its own
+			// event; the HTTP behaviour (generic retryable 500) is unchanged.
+			if !logDepositTombstoneProofKeyFault(logger, err, providerID, t.ID.String(), requestID) {
+				logger.Error("payment_webhook_failed", "error", err, "provider_id", providerID)
+			}
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
 			return
 		}
@@ -686,4 +692,27 @@ type webhookReceivedResponse struct {
 
 func writeWebhookReceivedResponse(w http.ResponseWriter, requestID string) {
 	writeJSON(w, http.StatusOK, webhookReceivedResponse{RequestID: requestID, Received: true})
+}
+
+// logDepositTombstoneProofKeyFault emits the dedicated structured event for the two actor-proof verifier failures
+// that can make a verified deposit reversal fail until configuration is repaired (closure re-review C-3):
+//
+//	AP002  the signing key id is not 'active' in the database (rotation desync) or the MAC does not verify;
+//	AP003  the application clock is outside the database clock window (more than 5 s ahead, or expired).
+//
+// It logs the SQLSTATE code only (never the error text, which may carry proof material, and never the proof) plus
+// provider_id, tenant_id and request_id. It returns true when it logged, so the caller skips the generic
+// payment_webhook_failed line for the same failure (the dedicated event carries the page). The caller's HTTP answer
+// (500, retried by the PSP) is deliberately unchanged.
+func logDepositTombstoneProofKeyFault(logger *slog.Logger, err error, providerID, tenantID, requestID string) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	if pgErr.Code != "AP002" && pgErr.Code != "AP003" {
+		return false
+	}
+	logger.Error("payment_webhook_deposit_tombstone_proof_key_fault",
+		"code", pgErr.Code, "provider_id", providerID, "tenant_id", tenantID, "request_id", requestID)
+	return true
 }

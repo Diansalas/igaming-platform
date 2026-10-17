@@ -58,6 +58,14 @@ rules:
     source: internal/httpserver/deposit_handlers.go
     runbook: docs/runbooks/operational-runbooks.md
 
+  - id: PaymentWebhookDepositTombstoneProofKeyFault
+    severity: page
+    event: "payment_webhook_deposit_tombstone_proof_key_fault"
+    match: 'msg = "payment_webhook_deposit_tombstone_proof_key_fault" (fields code = AP002 | AP003, provider_id, tenant_id, request_id)'
+    threshold: ">0. A verified deposit reversal cannot be tombstoned: AP002 = actor-proof key not active in the database (rotation desync); AP003 = application clock skew against the database. HTTP 500, retried by the PSP; self-heals once the key or clock is fixed."
+    source: internal/httpserver/deposit_handlers.go
+    runbook: docs/runbooks/operational-runbooks.md
+
   - id: PaymentWebhookIntegrityAlertPayloadMismatch
     severity: page
     event: "payment_webhook_integrity_alert_payload_mismatch"

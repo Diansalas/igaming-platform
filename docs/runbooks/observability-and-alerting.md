@@ -125,6 +125,12 @@ liveness/readiness poller already alerts on today.
   `payment_webhook_rejected_key_material` / `payment_webhook_tenant_lookup_
   failed` (`internal/httpserver/deposit_handlers.go:328,341` and
   neighboring lines) - the deposit/payment provider callback boundary.
+- `payment_webhook_deposit_tombstone_proof_key_fault` (fields `code` = `AP002` | `AP003`, `provider_id`, `tenant_id`,
+  `request_id`; no error text, no proof material; closure C-3) - a verified deposit reversal could not be tombstoned
+  because the actor-proof key is not active in the database (AP002) or the app clock is skewed against the database
+  (AP003). HTTP stays a generic retryable 500 and the generic `payment_webhook_failed` line is NOT also emitted for it.
+  Alert rule `PaymentWebhookDepositTombstoneProofKeyFault` (page) in `deploy/observability/log-event-alert-rules.yml`;
+  remedy in `operational-runbooks.md` (MA020 section, "Deposit-reversal webhook 500").
 - `resolve_withdrawal_provider_amount_mismatch` /
   `resolve_withdrawal_unknown_provider` and the withdrawal admin-action
   failures below cover the payout side.

@@ -296,3 +296,32 @@ func credentialTestConfig(t *testing.T) config.Config {
 	cfg.SecretStoreDevFileRoot = root
 	return cfg
 }
+
+func TestProviderIDNamespace_MockBundlePasses(t *testing.T) {
+	b := buildProviderBundle(mockProviderWiring(baseConfig(t, "development", true)))
+	if err := refuseProviderIDCollisions(b); err != nil {
+		t.Fatalf("mock bundle must pass: %v", err)
+	}
+	if len(buildProviderIDClaims(b)) < 3 {
+		t.Fatal("expected payments, payments statement source and casino claims")
+	}
+}
+
+func TestProviderIDNamespace_CasinoIDEqualToPaymentIDRefusedNamingID(t *testing.T) {
+	b := buildProviderBundle(mockProviderWiring(baseConfig(t, "development", true)))
+	b.Casino = casino.NewMockCasinoProvider(b.Payments.Capabilities().ProviderID, "EUR")
+	err := refuseProviderIDCollisions(b)
+	if err == nil || !strings.Contains(err.Error(), b.Payments.Capabilities().ProviderID) {
+		t.Fatalf("collision must be refused naming the id: %v", err)
+	}
+}
+
+func TestProviderIDNamespace_CheckedAtStartup(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "refuseProviderIDCollisions(providers)") {
+		t.Fatal("run() must call refuseProviderIDCollisions(providers) before the process serves")
+	}
+}
