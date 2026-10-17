@@ -182,7 +182,8 @@ type LaunchSession struct {
 	// jurisdiction context stays fixed for its whole lifetime even if the
 	// player's resolved jurisdiction could theoretically change mid-round.
 	// Empty when LaunchGame itself had no resolved jurisdiction to persist
-	// (TODO(jurisdiction) - see LaunchGameParams' own doc comment) - never
+	// (the player-scoped resolver returns unresolved(no_signal) until
+	// HDR-J-1/HDR-J-3 are answered; see LaunchGame's K-3 comment) - never
 	// silently defaulted to a real code. Populated for a DEMO-mode session
 	// too (LaunchGame computes it unconditionally, before branching on
 	// Mode) - harmless: postBet already rejects any non-real-mode session

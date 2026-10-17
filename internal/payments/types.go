@@ -377,7 +377,8 @@ type AdapterCapability struct {
 	// absent-value contracts (reconnaissance C-3(d)) and concluded it is
 	// NOT a specialization of them: it lives in ISO-3166 country-code
 	// space, never `jurisdictions.code` space, and today - RouteProvider's
-	// dimension 2 remains TODO(jurisdiction) below - it is consumed ONLY
+	// dimension 2 is a documented, unbuilt extension point (see the design note on
+	// RoutingRequest in orchestrator.go) - it is consumed ONLY
 	// by WriteCapability's narrow-only invariant, never by a live
 	// routing or regulatory decision. Two rules bind whoever eventually
 	// builds routing dimension 2 or any country->jurisdiction mapping:

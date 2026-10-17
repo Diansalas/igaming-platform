@@ -94,9 +94,18 @@ var ErrMissingScopeContext = fmt.Errorf("%w: a rule scoped by a dimension this r
 // JurisdictionCode "matches only jurisdiction-unscoped rules". It now
 // fails closed instead, once any jurisdiction-scoped rule is effective
 // for the operation - the same fail-open shape §10 already rejected for
-// licensing mode. Root cause is unchanged and still open: nothing in this
-// codebase resolves a per-player jurisdiction yet (TODO(jurisdiction),
-// ADR 0031 §9/§34).
+// licensing mode.
+//
+// Callers (casino launch/bet) now obtain JurisdictionCode from
+// internal/jurisdiction.Resolve, but Resolve returns unresolved(no_signal)
+// for EVERY player-scoped operation until the owner/legal decisions HDR-J-1
+// (no tenant/brand fallback) and HDR-J-3 (player residence evidence) are
+// answered and the resolver is wired to the evidence accessors. So for a
+// real player the request-side value is empty today, and this error is the
+// designed, fail-closed outcome whenever a jurisdiction-scoped rule exists
+// (never "rule does not apply"). Adding a second jurisdiction needs no
+// change here: a rule row carrying that jurisdiction_code is matched
+// against whatever code the caller resolved (ADR 0031 §9/§34).
 var ErrMissingJurisdiction = fmt.Errorf("%w: a jurisdiction-scoped rule is configured for this operation but the request supplied no jurisdiction_code", ErrMissingScopeContext)
 
 // ErrMissingLicensingMode is returned when at least one rule configured

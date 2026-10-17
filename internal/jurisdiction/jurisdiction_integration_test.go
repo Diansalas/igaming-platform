@@ -954,3 +954,70 @@ func TestCreateJurisdiction_DuplicateCodeIsRejected(t *testing.T) {
 		t.Fatalf("expected ErrInvalidInput for a duplicate code, got %v", err)
 	}
 }
+
+// TestResolve_SecondJurisdictionIsConfigurationOnly proves the same Resolve
+// code path selects each tenant's own licence jurisdiction when a second
+// synthetic jurisdiction + licence is added as DATA (registry rows and
+// tenants.licence_id), with no code change - and that a player-scoped
+// operation of the licensed tenant still never inherits that licence
+// jurisdiction (HDR-J-1: no tenant/brand fallback; unresolved is the
+// fail-closed answer consumers rely on).
+func TestResolve_SecondJurisdictionIsConfigurationOnly(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	licence2 := uuid.New()
+	err := pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'platform', 'LIC-2')`,
+			licence2, f.jurisdiction2); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, f.otherTenantID, licence2)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("configure second jurisdiction: %v", err)
+	}
+
+	resolveCode := func(tenantID uuid.UUID, player bool) (Resolution, string) {
+		var res Resolution
+		err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			p := Params{TenantID: tenantID, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem}
+			if player {
+				p = Params{TenantID: tenantID, BrandID: &f.brandID, PlayerAccountID: &f.playerID, OperationClass: OperationPlay,
+					RequestedByActorType: ActorPlayer, RequestedByActorID: &f.playerID}
+			}
+			var err error
+			res, err = Resolve(ctx, tx, p)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Outcome() != Resolved {
+			return res, ""
+		}
+		code, err := res.Code()
+		if err != nil {
+			t.Fatalf("Code: %v", err)
+		}
+		return res, code
+	}
+
+	if _, code := resolveCode(f.tenantID, false); code != "TJ-"+f.jurisdictionID.String()[:8] {
+		t.Fatalf("tenant 1 resolved %q", code)
+	}
+	if _, code := resolveCode(f.otherTenantID, false); code != "TJ-"+f.jurisdiction2.String()[:8] {
+		t.Fatalf("tenant 2 (second jurisdiction, config only) resolved %q", code)
+	}
+	res, code := resolveCode(f.tenantID, true)
+	if res.Outcome() == Resolved || code != "" || res.Reason() != ReasonNoSignal {
+		t.Fatalf("player-scoped operation must stay unresolved(no_signal) with no tenant-licence fallback, got %s(%s) code=%q", res.Outcome(), res.Reason(), code)
+	}
+}
