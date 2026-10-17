@@ -282,7 +282,7 @@ func queryPaymentCursorState(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 // sealedRunBatch fetches the next batch (at most cursorRunsPerPage rows) of a candidate cursor, in order, each with
 // whether its run seal verifies under v.
 func sealedRunBatch(ctx context.Context, cur *db.ServerCursor, tenantID uuid.UUID, providerID string, v statement.RunSealVerifier) ([]sealedRun, error) {
-	rows, err := cur.Fetch(ctx, cursorRunsPerPage)
+	rows, err := cur.NextBatch(ctx, cursorRunsPerPage)
 	if err != nil {
 		return nil, fmt.Errorf("reconciliation: read payment statement run candidates: %w", err)
 	}

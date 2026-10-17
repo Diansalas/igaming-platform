@@ -251,7 +251,7 @@ func newestSealedRun(ctx context.Context, tx pgx.Tx, keys *payoutinstrument.Keys
 	defer func() { _ = cur.Close(ctx) }()
 	scanned := 0
 	for {
-		rows, err := cur.Fetch(ctx, evidenceRunsPerPage)
+		rows, err := cur.NextBatch(ctx, evidenceRunsPerPage)
 		if err != nil {
 			return nil, false, err
 		}

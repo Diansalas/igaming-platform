@@ -34,8 +34,8 @@ func DeclareCursor(ctx context.Context, tx pgx.Tx, name, query string, args ...a
 	return &ServerCursor{tx: tx, name: name}, nil
 }
 
-// Fetch returns the next (at most) n rows. The caller must Close the returned rows before running another statement.
-func (c *ServerCursor) Fetch(ctx context.Context, n int) (pgx.Rows, error) {
+// NextBatch returns the next (at most) n rows. The caller must Close the returned rows before running another statement.
+func (c *ServerCursor) NextBatch(ctx context.Context, n int) (pgx.Rows, error) {
 	if n <= 0 {
 		return nil, fmt.Errorf("db: fetch of %d rows", n)
 	}
