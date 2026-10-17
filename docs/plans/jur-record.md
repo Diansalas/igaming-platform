@@ -26,13 +26,12 @@ No existing assertion changed or weakened.
 ## 4. Commands / results
 - gofmt clean; go vet plain and -tags integration on payments, risk, casino, withdrawal, jurisdiction: clean.
 - go test -count=1 (unit) payments risk jurisdiction marketgate bonus casino withdrawal: all ok.
-- INTEGRATION TESTS NOT RUN: PostgreSQL at 127.0.0.1:5432 refused connections (pg_isready: no response, no postgres process), so priv_db.sh failed. Per rules I stopped and did not start/alter anything. The 3 new integration tests compile (vet -tags integration) but are UNRUN; they must be run by the orchestrator when the DB is up:
-  export PRIV_DB=jurNNNNNNp1x01 PRIV_SRC=<worktree>; bash $S/priv_db.sh; bash $S/priv_test.sh -tags integration -count=1 -p 1 ./internal/jurisdiction ./internal/casino ./internal/withdrawal ./internal/risk ./internal/marketgate ./internal/bonus ./internal/payments -run 'SecondJurisdiction|JurisdictionScopedRow|Jurisdiction|Blocklist'
+- Integration (private DB, now run): jurisdiction (full package, after one fixture fix), casino, withdrawal, risk, marketgate, bonus: all ok (full packages, -p 1). First run revealed my new jurisdiction test used licensee 'second-licensee', violating CHECK licences_licensee_check; fixed to 'platform' (test fixture only). TestResolve_SecondJurisdictionIsConfigurationOnly and ResolveTenantLicence tests PASS (5/5 in targeted -v run). Payments subset -run 'Route|Routing|Capab|Jurisdiction|MarketGuard|Market': ok (90.7s). The casino and withdrawal new tests ran inside their passing full packages. Private DB dropped.
 
 ## 5. Residuals (labels)
 - Player-scoped jurisdiction resolution (resolver wiring to residence evidence): NOT IMPLEMENTED, owner/legal dependent (HDR-J-1, HDR-J-3). Real players currently hit the fail-closed path whenever any jurisdiction-scoped rule/blocklist/AssetAuthorization exists.
 - Payments routing dimension 2 (jurisdiction gate) and jurisdiction-scoped withdrawal policies: NOT IMPLEMENTED, second-jurisdiction / PSP-licence-matrix dependent; needs migration (lift CHECK / policy table) + security review. Single-jurisdiction behaviour pinned fail-closed/absent by the tests above.
-- Integration tests above: written, UNRUN (DB down).
+- Full payments integration package not run (exceeds tool timeout); routing/capability/market subset run and green.
 
 ## 6. Proposed registry text (orchestrator applies)
 "JUR-CLOSURE: all 7 TODO(jurisdiction) markers resolved to precise documented notes (no marker was first-jurisdiction-blocking). Payments dim-2 / jurisdiction-scoped withdrawal policy: NOT IMPLEMENTED (second-jurisdiction dependent; pins in internal/payments/jurisdiction_dimension_pin_test.go and withdrawal CHECK test). Player-scoped resolver wiring: NOT IMPLEMENTED (HDR-J-1/J-3). Second jurisdiction proven configuration-only (jurisdiction + casino tests; integration run pending DB)." The audit item "TODO(jurisdiction) filtering ... must close before a second jurisdiction" should be re-worded to "before a second jurisdiction: wire player-scoped resolver (HDR-J-1/J-3) and build payments dim-2 per the RoutingRequest design note".

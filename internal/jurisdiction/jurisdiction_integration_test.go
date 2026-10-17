@@ -968,7 +968,7 @@ func TestResolve_SecondJurisdictionIsConfigurationOnly(t *testing.T) {
 	licence2 := uuid.New()
 	err := pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'second-licensee', 'LIC-2')`,
+			`INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'platform', 'LIC-2')`,
 			licence2, f.jurisdiction2); err != nil {
 			return err
 		}
