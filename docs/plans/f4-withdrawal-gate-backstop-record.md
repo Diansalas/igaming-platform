@@ -195,7 +195,7 @@ migration 0169), each run against the F4 suites of the affected package (`TestF4
 `TestSubmitWithdrawalHandler_F4` in httpserver; SQL mutants rebuild a second private database). **33 KILLED, 1
 SURVIVED.** Two mutants needed a corrected pattern on the first pass (a build error and a stale pattern after the
 pre-lock refactor) and were re-run; their final verdicts are in the table. The pass ran on the branch before the final
-merge with origin; the merge touched none of the mutated F4 files except by adding unrelated lines to `kind.go`.
+merge with origin; the merge changed none of the mutated files (only the NUMBERING comment of the 0169 header).
 
 Survivor, justified: `t1p_not_evaluated_guard_off` (the `if !gateEvaluated` refusal after L1 disabled). It is reachable
 only when the request becomes `approved`, or its subject active, between the unlocked pre-read and the L1 lock of the
