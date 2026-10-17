@@ -227,7 +227,7 @@ mutant changes the error class (an internal 23514 instead of the retryable unava
   lock exists in ADR 0082).
 - **R4 (park has no queue).** A parked payout stays `approved`; nothing re-submits it automatically. The alert is raised
   but notification is ALERT-DELIVERY-1 (open). Staff see it in the approved list; the reason is in the audit row.
-- **R5 (T2/T12 escalation is sticky).** A WD-RG-1 denial at T2 / T12 escalates (T16) like a KYC denial; there is no new
+- **R5 (T2/T12 escalation parks the payout but is NOT sticky — see SF4-3: once the cause clears the next sweeper tick re-runs the gate and may resend; owner question whether compliance escalation needs an explicit human release).** A WD-RG-1 denial at T2 / T12 escalates (T16) like a KYC denial; there is no new
   staff action to un-escalate after the cause is cleared beyond the existing ones (RejectCreated for a never-sent
   attempt, force-resolution). Unchanged behaviour class.
 - **R6 (unavailable label is best-effort).** The T1p unavailable audit is written in a detached transaction after the
