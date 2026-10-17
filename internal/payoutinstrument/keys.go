@@ -28,6 +28,10 @@ const (
 	// labelImport derives the statement-import seal subkey (ADR 0111 4.3,
 	// S-5; T10): a third independent subkey of the same master.
 	labelImport = "b13-import-v1"
+	// labelRun derives the payment_statement RUN seal subkey (F2 / SRF2-1, migration 0168): a fourth independent
+	// subkey of the same master, so a run seal is never interchangeable with an import seal (the domain tag "run"
+	// separates the canonical inputs as well).
+	labelRun = "b13-run-v1"
 
 	fpLabel = "b13-fp-v1"
 
@@ -64,6 +68,7 @@ type Keys struct {
 	seal         map[string][]byte // kid -> seal subkey
 	detail       map[string][]byte // kid -> detail subkey
 	imp          map[string][]byte // kid -> statement-import seal subkey
+	run          map[string][]byte // kid -> payment_statement run seal subkey
 	fpActive     string
 	fp           map[string][]byte
 }
@@ -94,7 +99,7 @@ func NewKeys(masterActiveKID string, master map[string][]byte, fpActiveKID strin
 		return nil, fmt.Errorf("%w: active fingerprint kid has no key", ErrKeyConfig)
 	}
 	k := &Keys{masterActive: masterActiveKID, fpActive: fpActiveKID,
-		seal: map[string][]byte{}, detail: map[string][]byte{}, imp: map[string][]byte{}, fp: map[string][]byte{}}
+		seal: map[string][]byte{}, detail: map[string][]byte{}, imp: map[string][]byte{}, run: map[string][]byte{}, fp: map[string][]byte{}}
 	seen := map[string]bool{}
 	for kid, m := range master {
 		if !kidRE.MatchString(kid) || len(m) < MinKeyBytes {
@@ -116,7 +121,11 @@ func NewKeys(masterActiveKID string, master map[string][]byte, fpActiveKID strin
 		if err != nil {
 			return nil, fmt.Errorf("%w: hkdf", ErrKeyConfig)
 		}
-		k.seal[kid], k.detail[kid], k.imp[kid] = sk, dk, ik
+		rk, err := hkdf.Key(sha256.New, m, nil, labelRun, 32)
+		if err != nil {
+			return nil, fmt.Errorf("%w: hkdf", ErrKeyConfig)
+		}
+		k.seal[kid], k.detail[kid], k.imp[kid], k.run[kid] = sk, dk, ik, rk
 	}
 	for kid, m := range fp {
 		if !kidRE.MatchString(kid) || len(m) < MinKeyBytes {

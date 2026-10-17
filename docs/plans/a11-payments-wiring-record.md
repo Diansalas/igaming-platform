@@ -111,21 +111,33 @@ Open (not decided here):
 2. `Fetch` runs with NO transaction held (`txscope`), resolves the tenant's read-only credential through the gate (`ReadOnly: true`), reads the
    wire body through `statement.LimitPaymentStatementBody` and collects lines through `PaymentLineCollector`/`DecodePaymentStatementJSONLines`.
 3. Honour `req.MaxLines` (use `statement.PagePaymentLines`) and `req.ContinueFrom`: return `CoverageStart == ContinueFrom` when it is set, no
-   line dated before it, and `Truncated`/`CoverageEnd` per section 1.2. Never return more than `MaxLines` lines.
+   line dated before it, and `Truncated`/`CoverageEnd` per section 1.2. Never return more than `MaxLines` lines. **Enforced** (refused, nothing
+   stored): `validateBoundedWindow`.
 4. Date every line by the time its status last changed; carry `merchant_reference` on payout lines (R-S3) and declare
    `PayoutLinesCarryMerchantReference` honestly.
-5. Never write; never return a `PaymentProvider`, a tx, a callback or a credential through the statement.
-6. **Completeness horizon (LF-A11-2a).** The cursor turns `CoverageEnd` into a permanent completeness claim: the next request starts there and
-   a line that only becomes visible later with `OccurredAt < cursor` is never requested again (a silent false negative), and if a source returns
-   it anyway every later statement is refused with `ErrPaymentStatementCoverageGap` (stuck cursor, see the runbook). So `CoverageEnd` MUST never
-   exceed the provider's own completeness / reporting-lag horizon. Before a real source is wired the sweep must request
-   `PeriodEnd = now - <per-provider settle lag>` (NOT IMPLEMENTED; the MOCK returns its fetch time and a non-truncated `CoverageEnd` is checked
-   only against `now + 5 min`, not against `PeriodEnd`).
+5. Never write; never return a `PaymentProvider`, a tx, a callback or a credential through the statement. **Enforced by construction**
+   (`TestPaymentStatementSource_TypeLevelReadOnly`).
+6. **Completeness horizon (LF-A11-2a; F2 IMPLEMENTED).** The cursor turns `CoverageEnd` into a permanent completeness claim: the next request
+   starts there and a line that only becomes visible later with `OccurredAt < cursor` is never requested again (a silent false negative), and if
+   a source returns it anyway every later statement is refused with `ErrPaymentStatementCoverageGap` (stuck cursor, see the runbook). So
+   `CoverageEnd` MUST never exceed the provider's own completeness / reporting-lag horizon. **Enforced (F2):** every continuation request
+   carries `Continuation = true` and `PeriodEnd = min(sweep end, now - settle lag)`; a statement whose `CoverageEnd` is later than `PeriodEnd` is
+   refused (truncated or not). The settle lag is the source's declaration `StatementSettleLag()` (`statement.SettleLagDeclarer`; must lie in
+   [0, 7 days]; refused at registry startup and per run otherwise); a real source that declares none gets `statement.DefaultStatementSettleLag`
+   (15 min), a MOCK 0. A real source MUST declare the vendor's documented reporting lag (PROVIDER DEPENDENT) and cap its coverage at
+   `PeriodEnd`, leaving later lines for the next statement. The MOCK does both.
 7. **Line time is the provider's record time (LF-A11-2b).** `OccurredAt` MUST be the time the provider recorded the change (monotonic with its
-   reporting), never a value date, effective date or other backdatable field. A backdated line lands before the cursor and is lost (6).
+   reporting), never a value date, effective date or other backdatable field. A backdated line lands before the cursor and is lost (6). NOT
+   enforceable by the platform (PROVIDER DEPENDENT; a conformance-test item for the first real source).
 8. **Time-ordered provider-side paging (LF-A11-6).** A source MUST page by `OccurredAt` on the provider side (ascending, the tie group kept whole)
    and stop at `MaxLines`. Collecting the whole window and paging afterwards (as the MOCK does through `PaymentLineCollector`) hits the 1M
-   line / body cap on a large backlog, is refused on every run, and sticks the cursor.
+   line / body cap on a large backlog, is refused on every run, and sticks the cursor. **Enforced in part (F2):** a truncated page must list its
+   lines in non-decreasing `OccurredAt` order (`ErrPaymentStatementOutOfOrder` otherwise); the MOCK lists bounded pages in time order. Whether the
+   provider pages server-side (rather than collect-then-page) cannot be checked by the platform (PROVIDER DEPENDENT).
+9. **Sealed imports and runs (F2 / SR11-10, migration 0168).** The stream seals every import and every run row it writes; the cursor trusts
+   only a run whose run seal verifies and whose import, written by THIS source (`source_label`, `is_mock`, `imported_by_service`), has a seal
+   that verifies. A real source must therefore keep a stable `Label()`: relabelling a source resets its trusted cursor to the newest run under
+   the new label (a re-fetch from that point). Production refuses to start a registered source without the keys.
 
 ## 4. Migration numbers
 

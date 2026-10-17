@@ -78,6 +78,9 @@ type k3Opts struct {
 	// tenant has NO psp_clearing account until an M2 "declare paid" creates it
 	// (T-2: the first-ever psp_clearing creation for a tenant and asset).
 	noClearing bool
+	// noStatementRun skips the world's genuine payment_statement run before its first M2 request (F2e: an M2 is
+	// then refused, reconciliation_not_current).
+	noStatementRun bool
 }
 
 type k3World struct {
@@ -86,6 +89,10 @@ type k3World struct {
 	f    payoutFixture
 	svc  *ManualResolutionService
 	reg  *StatementSourceRegistry
+
+	// F2e: whether the world's genuine payment_statement run was made (lazily, before the first M2 request) or
+	// must never be made (k3Opts.noStatementRun).
+	statementRunDone, noStatementRun bool
 
 	provider string
 	mock     *MockProvider
@@ -196,6 +203,7 @@ func newK3WorldOn(t *testing.T, pool *db.Pool, opts k3Opts) *k3World {
 		w.reg.Register(w.provider)
 	}
 	w.svc = NewManualResolutionService(pool, w.reg)
+	w.noStatementRun = opts.noStatementRun
 
 	w.adminA = w.staffMember(uuid.Nil, "platform_admin")
 	w.adminB = w.staffMember(uuid.Nil, "platform_admin")
@@ -375,6 +383,9 @@ func (w *k3World) target(actor k3Staff) ResolutionTarget {
 }
 
 func (w *k3World) request(actor k3Staff, in ResolutionRequestInput) (ManualResolution, error) {
+	if in.Kind == ResolutionM2DeclarePaid || in.Kind == ResolutionM2DeclareNotPaid {
+		w.ensureStatementRun()
+	}
 	return w.svc.Request(k3Ctx(actor), w.target(actor), in, ResolutionMeta{RequestID: "k3-test", IPAddress: "203.0.113.7", UserAgent: "k3-test-agent"})
 }
 
@@ -772,4 +783,17 @@ func ensureTenantStatusGateKeyFn(t *testing.T, pool *db.Pool) {
 	}); err != nil {
 		t.Fatalf("install tenant_status_gate_key on the pre-0118 scratch database: %v", err)
 	}
+}
+
+// ensureStatementRun gives the world its M2 evidence (F2e / H-W1 second half: an M2 needs the provider's
+// payment_statement reconciliation to be current): ONE genuine run of the real stream over the world's MOCK provider,
+// made lazily before the first M2 request (so worlds that never request an M2 keep their run and import counts),
+// never a hand-written row. No-op with k3Opts.noStatementRun.
+func (w *k3World) ensureStatementRun() {
+	w.t.Helper()
+	if w.statementRunDone || w.noStatementRun {
+		return
+	}
+	k3StatementRun(w.t, w.pool, w.f.tenantID, w.mock, nil)
+	w.statementRunDone = true
 }

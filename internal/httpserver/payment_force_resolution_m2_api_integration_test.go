@@ -14,10 +14,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -150,6 +152,40 @@ func TestForceResolutionAPI_M2_SourceRegistry(t *testing.T) {
 		if res.status != http.StatusConflict {
 			t.Fatalf("only another provider registered: want 409, got %d %s", res.status, res.body)
 		}
+	})
+
+	// F2e / H-W1 second half: the provider registered, but its payment_statement reconciliation is not current (a
+	// failure was audited after the last successful run): both kinds refused with the closed precondition token
+	// and a denied audit row; a new successful run re-admits.
+	t.Run("refused_when_reconciliation_not_current", func(t *testing.T) {
+		reg := &payments.StatementSourceRegistry{}
+		reg.Register("mock")
+		w := newFRWorldWithSources(t, reg)
+		attempt := w.ambiguousPayout()
+		time.Sleep(5 * time.Millisecond)
+		if err := w.a.pool.WithTenant(context.Background(), w.tenant, func(ctx context.Context, tx pgx.Tx) error {
+			return audit.Record(ctx, tx, audit.Entry{TenantID: w.tenant, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
+				TargetType: "tenant", TargetID: w.tenant.String(), Outcome: audit.OutcomeFailure,
+				Metadata: map[string]any{"stream": "payment_statement", "phase": "fetch", "provider_id": "mock", "severity": "P1"}})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, kind := range []string{"m2_declare_not_paid", "m2_declare_paid"} {
+			before := w.deniedAudits()
+			res := w.a.do("POST", w.base(), w.tok(w.f1), w.m2Body(attempt, kind))
+			if res.status != http.StatusConflict || !strings.Contains(string(res.body), `"`+payments.TokenForceResolvePreconditionFail+`"`) {
+				t.Fatalf("%s: want 409 %s, got %d %s", kind, payments.TokenForceResolvePreconditionFail, res.status, res.body)
+			}
+			if got := w.deniedAudits(); got != before+1 {
+				t.Fatalf("%s: want exactly one new denied audit row, %d -> %d", kind, before, got)
+			}
+			w.note(res.status, res.body)
+		}
+		w.statementRun()
+		if res := w.a.do("POST", w.base(), w.tok(w.f1), w.m2Body(attempt, "m2_declare_not_paid")); res.status != http.StatusCreated {
+			t.Fatalf("after a successful run: want 201, got %d %s", res.status, res.body)
+		}
+		w.noLeakage(t, 2)
 	})
 
 	// Unknown attempt and a foreign tenant's attempt: no data, closed refusal, and

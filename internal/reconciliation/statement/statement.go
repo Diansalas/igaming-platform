@@ -264,12 +264,22 @@ type PaymentStatement struct {
 // window, an earlier start an overlap that counts lines twice, and the stream
 // refuses both) and must contain no line before it (OccurredAt >=
 // ContinueFrom); PeriodStart equals ContinueFrom in that case.
+//
+// F2 / LF-A11-2a: in continuation mode PeriodEnd is the completeness horizon,
+// min(sweep end, now - the provider's settle lag); the statement's CoverageEnd
+// must not exceed it (the stream refuses a statement that does). A truncated
+// statement must also list its lines in non-decreasing OccurredAt order (a page
+// cut by time, LF-A11-6); a page in any other order is refused.
 type PaymentFetchRequest struct {
 	TenantID               uuid.UUID
 	ProviderID             string
 	PeriodStart, PeriodEnd time.Time
 	MaxLines               int
 	ContinueFrom           time.Time
+	// Continuation is set by the continuation (scoped) stream on every request, including the first one of a
+	// pair (zero ContinueFrom): PeriodEnd is then the completeness horizon (see above) and lines are dated by
+	// their last status change.
+	Continuation bool
 }
 
 // ReadOnlyAttested is implemented by every NON-Synthetic payment statement source and must return true: the
@@ -284,6 +294,25 @@ type PaymentFetchRequest struct {
 type ReadOnlyAttested interface {
 	ReadOnlyStatementCredential() bool
 }
+
+// SettleLagDeclarer (F2 / LF-A11-2, optional) declares the provider's own reporting / completeness lag: a
+// line the provider records at time T may only become visible in its statements up to that long after T. The
+// continuation cursor turns a statement's CoverageEnd into a permanent completeness claim, so the stream
+// requests PeriodEnd = now - lag and refuses a CoverageEnd beyond it. A declared value must lie in
+// [0, MaxStatementSettleLag]; the cmd/platform-api registry refuses any other value at startup. A
+// non-Synthetic source that declares nothing gets DefaultStatementSettleLag; a Synthetic (MOCK) source that
+// declares nothing gets 0 (the MOCK records synchronously).
+type SettleLagDeclarer interface {
+	StatementSettleLag() time.Duration
+}
+
+const (
+	// DefaultStatementSettleLag is the conservative lag of a real source that declares none (PROVIDER
+	// DEPENDENT: the real value comes from the vendor's reporting documentation).
+	DefaultStatementSettleLag = 15 * time.Minute
+	// MaxStatementSettleLag bounds a declared lag (a larger value is a configuration error).
+	MaxStatementSettleLag = 7 * 24 * time.Hour
+)
 
 // PaymentStatementSource supplies one provider's statement for one tenant
 // to the payment_statement reconciliation stream (ADR 0095 §9.5, §12).

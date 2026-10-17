@@ -262,6 +262,11 @@ func run() error {
 	if payoutInstruments != nil {
 		reconciliation.SetDefaultImportSealer(payoutInstruments.Keys())
 	}
+	// F2 / SR11-10: the scoped payment_statement sweep trusts only a cursor backed by a SEALED import that
+	// verifies; production refuses to start a registered source without the keys to verify it.
+	if err := reconciliation.VerifyPaymentCursorSealing(cfg.GuardEnvironment() == "production", len(payRegistry.Providers())); err != nil {
+		return err
+	}
 	// B13-B security L-4: a non-Synthetic payout adapter needs the NULL-arm-closing migration (0126).
 	if err := payoutinstrument.VerifyBindingGuardApplied(ctx, payoutRegistrations(providers), bindingGuardChecker(pool)); err != nil {
 		return err

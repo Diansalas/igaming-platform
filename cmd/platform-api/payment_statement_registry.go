@@ -75,6 +75,11 @@ func newPaymentStatementRegistry(environment string, srcs []statement.PaymentSta
 				bad = true
 			}
 		}
+		// F2 / LF-A11-2: a declared settle lag must lie in [0, statement.MaxStatementSettleLag].
+		if err := reconciliation.ValidatePaymentSettleLag(src); err != nil {
+			problems = append(problems, fmt.Sprintf("provider %q: statement source %T: %v", id, src, err))
+			bad = true
+		}
 		if bad {
 			continue
 		}

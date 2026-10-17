@@ -50,7 +50,7 @@ func (s *recSource) Fetch(_ context.Context, req statement.PaymentFetchRequest) 
 	n := len(s.reqs)
 	s.mu.Unlock()
 	if s.fn == nil {
-		return statement.PaymentStatement{CoverageStart: time.Now().Add(-time.Hour).UTC(), CoverageEnd: time.Now().UTC()}, nil
+		return statement.PaymentStatement{CoverageStart: time.Now().Add(-time.Hour).UTC(), CoverageEnd: horizonOf(req)}, nil
 	}
 	return s.fn(n, req)
 }
@@ -66,7 +66,17 @@ func contiguousEmpty(_ int, req statement.PaymentFetchRequest) (statement.Paymen
 	if start.IsZero() {
 		start = time.Now().Add(-time.Hour).UTC()
 	}
-	return statement.PaymentStatement{CoverageStart: start, CoverageEnd: time.Now().UTC()}, nil
+	return statement.PaymentStatement{CoverageStart: start, CoverageEnd: horizonOf(req)}, nil
+}
+
+// horizonOf is the end a contract-abiding test source states: its fetch time, but never past the completeness
+// horizon a continuation request carries (F2 / LF-A11-2a: PeriodEnd = min(sweep end, now - settle lag)).
+func horizonOf(req statement.PaymentFetchRequest) time.Time {
+	end := time.Now().UTC()
+	if req.Continuation && !req.PeriodEnd.IsZero() && end.After(req.PeriodEnd) {
+		end = req.PeriodEnd.UTC()
+	}
+	return end
 }
 
 func scopedSweep(t *testing.T, pool *db.Pool, f fixture, cfg PaymentSweepConfig) SweepOutcome {
@@ -343,6 +353,7 @@ func TestScoped_PerTenantIsolation(t *testing.T) {
 		t.Fatalf("A's source must be fetched once per tenant with that tenant's id: %v", seen)
 	}
 
+	c2Before := mustCursor(t, w1.pool, f2.tenantID, payProvA)
 	// Now only tenant 1 loses B's source: tenant 2's result and cursor are untouched.
 	cfg2 := PaymentSweepConfig{Resolver: mapResolver{payProvA: spyA}, AllowSynthetic: true}
 	outs, err = RunSweepTenantsScoped(context.Background(), w1.pool, nil, []uuid.UUID{w1.f.tenantID, f2.tenantID}, now.Add(-time.Hour), now,
@@ -359,8 +370,20 @@ func TestScoped_PerTenantIsolation(t *testing.T) {
 	if runs := paymentRuns(t, w1.pool, f2.tenantID, payProvB); len(runs) != 0 {
 		t.Fatalf("tenant 2 has no provider B: %+v", runs)
 	}
-	if c1, c2 := mustCursor(t, w1.pool, w1.f.tenantID, payProvA), mustCursor(t, w1.pool, f2.tenantID, payProvA); c1.IsZero() || c2.IsZero() || c1.Equal(c2) {
-		t.Fatalf("each tenant keeps its own cursor: %v vs %v", c1, c2)
+	// F2: both tenants' runs end at the sweep's completeness horizon, so equal cursor VALUES are expected; each
+	// tenant's cursor is its OWN last run's coverage_end, and tenant 2's did not move.
+	for _, tc := range []struct {
+		tenant uuid.UUID
+		label  string
+	}{{w1.f.tenantID, "tenant 1"}, {f2.tenantID, "tenant 2"}} {
+		runs := paymentRuns(t, w1.pool, tc.tenant, payProvA)
+		c := mustCursor(t, w1.pool, tc.tenant, payProvA)
+		if len(runs) == 0 || c.IsZero() || runs[len(runs)-1].coverageEnd == nil || !c.Equal(runs[len(runs)-1].coverageEnd.UTC().Truncate(time.Microsecond)) {
+			t.Fatalf("%s keeps its own cursor (its own last run's coverage_end): cursor %v runs %+v", tc.label, c, runs)
+		}
+	}
+	if c2 := mustCursor(t, w1.pool, f2.tenantID, payProvA); !c2.Equal(c2Before) {
+		t.Fatalf("tenant 2's cursor moved because of tenant 1: %v -> %v", c2Before, c2)
 	}
 }
 
@@ -417,11 +440,11 @@ func TestScoped_NonActiveTenantObservation_MissingSourceIsVisible(t *testing.T) 
 
 func mustCursor(t *testing.T, pool *db.Pool, tenantID uuid.UUID, provider string) time.Time {
 	t.Helper()
-	c, err := readPaymentCursor(context.Background(), pool, tenantID, provider)
+	st, err := readPaymentCursorState(context.Background(), pool, tenantID, provider, cursorBasis{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return st.cursor
 }
 
 func TestBound_TruncatedRunContinuesFromTheCursor_NoSkippingNoDoubleCounting(t *testing.T) {
@@ -634,6 +657,7 @@ func TestBound_ForgedCursorsAreIgnored(t *testing.T) {
 	w := newPayWorld(t)
 	scopedSweep(t, w.pool, w.f, PaymentSweepConfig{Resolver: mapResolver{payProvA: &recSource{provider: payProvA, fn: contiguousEmpty}, payProvB: w.srcB}, AllowSynthetic: true})
 	real := mustCursor(t, w.pool, w.f.tenantID, payProvA)
+	realB := mustCursor(t, w.pool, w.f.tenantID, payProvB)
 	// The runtime role may INSERT a run row (0152 accepts that): a coverage_end far in the future must not move the cursor.
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, status, coverage_end, provider_id, window_truncated)
@@ -646,8 +670,10 @@ func TestBound_ForgedCursorsAreIgnored(t *testing.T) {
 		t.Fatalf("a forged far-future coverage_end must be ignored: %s vs %s", got, real)
 	}
 	// A forged run for ANOTHER provider never moves this provider's cursor, nor another tenant's.
-	if got := mustCursor(t, w.pool, w.f.tenantID, payProvB); got.IsZero() == false && got.Equal(real) {
-		t.Fatalf("provider cursors are independent: B=%s", got)
+	// F2: both providers' runs now end at the same completeness horizon (the sweep's end), so their cursors may be
+	// EQUAL; independence means A's forged row leaves B's cursor exactly where it was.
+	if got := mustCursor(t, w.pool, w.f.tenantID, payProvB); !got.Equal(realB) {
+		t.Fatalf("provider cursors are independent: B moved %s -> %s", realB, got)
 	}
 	other := seedFixture(t, w.pool)
 	if got := mustCursor(t, w.pool, other.tenantID, payProvA); !got.IsZero() {
@@ -773,7 +799,8 @@ func TestBound_SR11_ForgedInSkewCursorDoesNotBlindTheStream_AndIsReportedLoudly(
 	}
 	found := false
 	for _, r := range alertinject.Find(alertinject.WaitForKind(t, w.pool, w.f.tenantID, "reconciliation.run_failed", 1), "reconciliation.run_failed") {
-		if r.Discriminator == "stream:payment_statement:provider:"+payProvA+":cursor_anomaly" && r.Severity == "p1" {
+		// F2 / SR11-11: the discriminator now ends in the unbacked-row count and digest.
+		if strings.HasPrefix(r.Discriminator, "stream:payment_statement:provider:"+payProvA+":cursor_anomaly:") && r.Severity == "p1" {
 			found = true
 		}
 	}

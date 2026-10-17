@@ -72,6 +72,13 @@ var (
 	// tombstone branch can act on (more than one open or parked attempt, or one that names another
 	// provider or reference). Nothing recorded; an integrity case for investigation.
 	ErrPayoutReversalAttemptInconsistent = errors.New("payments: the payout attempts are inconsistent with the reversal")
+	// ErrPayoutReversalReferenceTombstoned (F3 / SR5R-1): the payout's original reference already carries a
+	// ledger tombstone (any correlation: e.g. a provider-originated deposit-reversal tombstone naming the payout's
+	// reference). The tombstone branch's own tombstone would then be an idempotent replay of that row (the
+	// tombstone correlation is exempt from the replay comparison): nothing would be inserted, WD027 would never
+	// fire and the request-correlated late-success cell would not recognise the branch. Refused, nothing recorded;
+	// an integrity case for investigation. It wraps ErrPayoutReversalAttemptInconsistent (HTTP 409).
+	ErrPayoutReversalReferenceTombstoned = fmt.Errorf("%w: the payout's original reference already carries a tombstone", ErrPayoutReversalAttemptInconsistent)
 )
 
 // PayoutReversalInput is one staff decision. ApproverID comes from the verified staff token.
@@ -255,7 +262,29 @@ func lockPayoutAttemptsForReversal(ctx context.Context, tx pgx.Tx, wr withdrawal
 	if !known {
 		return nil, withdrawal.ErrReversalPayloadMismatch
 	}
+	// F3 / SR5R-1: refuse every vote while the original reference already carries a tombstone (see
+	// ErrPayoutReversalReferenceTombstoned); reversePayoutBeforeCompletion re-checks the post itself.
+	tombstoned, err := referenceTombstoned(ctx, tx, wr.TenantID, p.ProviderID, p.OriginalProviderReference)
+	if err != nil {
+		return nil, err
+	}
+	if tombstoned {
+		return nil, ErrPayoutReversalReferenceTombstoned
+	}
 	return open, nil
+}
+
+// referenceTombstoned reports whether a tombstone ledger transaction already holds (provider, reference) in the
+// tenant (any correlation).
+func referenceTombstoned(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, reference string) (bool, error) {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM ledger_transactions
+		                 WHERE tenant_id = $1 AND transaction_type = 'tombstone' AND provider_id = $2 AND provider_tx_id = $3)`,
+		tenantID, providerID, reference).Scan(&exists); err != nil {
+		return false, fmt.Errorf("payments: read existing tombstone on the payout reference: %w", err)
+	}
+	return exists, nil
 }
 
 // reversePayoutBeforeCompletion is the tombstone branch (see the file comment). It returns the tombstone
@@ -282,6 +311,12 @@ func reversePayoutBeforeCompletion(ctx context.Context, tx pgx.Tx, wr withdrawal
 	})
 	if err != nil {
 		return uuid.Nil, false, fmt.Errorf("payments: post payout reversal tombstone: %w", err)
+	}
+	if posted.AlreadyPosted {
+		// F3 / SR5R-1 backstop: the key was already taken by another tombstone (a race past the vote-time check,
+		// or a caller that skipped it). This branch's tombstone was NOT written, so WD027 did not see it: refuse
+		// and roll everything back (the park and the E10 release above included).
+		return uuid.Nil, false, ErrPayoutReversalReferenceTombstoned
 	}
 	meta := map[string]any{
 		"state_before": string(withdrawal.StateSubmitted), "state_after": string(withdrawal.StateFailed),

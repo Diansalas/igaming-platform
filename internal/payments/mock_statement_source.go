@@ -147,12 +147,25 @@ func (m *MockProvider) statementFor(cc CallContext, maxLines int, req statement.
 	if !out.CoverageEnd.After(out.CoverageStart) {
 		out.CoverageEnd = out.CoverageStart.Add(time.Microsecond)
 	}
+	// Bounded/continuation mode dates each line by its last status change (see mockAttempt.changedAt); the
+	// unbounded legacy mode keeps dating by creation.
+	bounded := req.Continuation || !cursor.IsZero() || req.MaxLines > 0
+	// F2 / LF-A11-2a: in bounded mode the statement covers no more than the completeness horizon the stream asked
+	// for (PeriodEnd = now - settle lag); a line dated at or after it is left for the next statement.
+	horizon := time.Time{}
+	if bounded && !req.PeriodEnd.IsZero() {
+		horizon = req.PeriodEnd.UTC().Truncate(time.Microsecond)
+		if out.CoverageEnd.After(horizon) {
+			out.CoverageEnd = horizon
+		}
+		if !out.CoverageEnd.After(out.CoverageStart) {
+			out.CoverageEnd = out.CoverageStart.Add(time.Microsecond)
+			horizon = out.CoverageEnd
+		}
+	}
 	if cc.ProviderID != m.providerID {
 		return out, nil
 	}
-	// Bounded/continuation mode dates each line by its last status change (see mockAttempt.changedAt); the
-	// unbounded legacy mode keeps dating by creation.
-	bounded := !cursor.IsZero() || req.MaxLines > 0
 	lines := statement.NewPaymentLineCollector(maxLines)
 	for ref, a := range m.attempts {
 		if !a.tenantTagged || a.tenantID != cc.TenantID {
@@ -164,6 +177,9 @@ func (m *MockProvider) statementFor(cc CallContext, maxLines int, req statement.
 		}
 		if !cursor.IsZero() && at.UTC().Truncate(time.Microsecond).Before(cursor) {
 			continue // already covered by the run that produced the cursor
+		}
+		if !horizon.IsZero() && !at.UTC().Truncate(time.Microsecond).Before(horizon) {
+			continue // not yet complete at the provider: the next statement reports it
 		}
 		kind := statement.PaymentLineDeposit
 		if a.kind == "withdraw" {
@@ -193,6 +209,16 @@ func (m *MockProvider) statementFor(cc CallContext, maxLines int, req statement.
 		if truncated {
 			out.Truncated, out.CoverageEnd = true, cutoff
 		}
+	}
+	if bounded {
+		// LF-A11-6: a bounded statement is a page cut by time, listed in time order (ties by reference).
+		sort.SliceStable(out.Lines, func(i, j int) bool {
+			if !out.Lines[i].OccurredAt.Equal(out.Lines[j].OccurredAt) {
+				return out.Lines[i].OccurredAt.Before(out.Lines[j].OccurredAt)
+			}
+			return out.Lines[i].ProviderReference < out.Lines[j].ProviderReference
+		})
+		return out, nil
 	}
 	sort.Slice(out.Lines, func(i, j int) bool { return out.Lines[i].ProviderReference < out.Lines[j].ProviderReference })
 	return out, nil
