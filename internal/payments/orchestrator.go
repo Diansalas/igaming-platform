@@ -157,8 +157,8 @@ const (
 )
 
 // RoutingRequest is RouteProvider's input - every filterable dimension
-// payment-orchestration.md §4 requires MINUS jurisdiction/country
-// (TODO(jurisdiction) below).
+// payment-orchestration.md §4 requires MINUS jurisdiction/country (step 2).
+// See the "Dimension 2" design note on ExcludeProviderIDs below.
 type RoutingRequest struct {
 	TenantID      uuid.UUID
 	BrandID       uuid.UUID
@@ -172,20 +172,39 @@ type RoutingRequest struct {
 	// provider that already produced a cascadable decline for this same
 	// business operation.
 	//
-	// TODO(jurisdiction): country/jurisdiction-based filtering
-	// (payment-orchestration.md §4 step 2, "drops providers not
-	// licensed/permitted to serve that country") requires
-	// tenant_jurisdiction_configs integration (Stage 1) and is out of
-	// scope for Stage 3B, per the task's own explicit scope note.
 	//
-	// Stage 4I note (docs/governance/stage-4i-payments-model.md): when
-	// this dimension is finally built, it is a regulatory gate resolved
-	// via internal/jurisdiction.Resolve against the platform's own
-	// jurisdiction/licence model - it is a SEPARATE mechanism from
-	// AdapterCapability.SupportedCountries (a provider's own declared
-	// market/rail coverage, ISO-3166 code space) and must not reuse that
-	// field's "empty = unrestricted" default as its own absent-value
-	// contract; see the longer note on SupportedCountries in types.go.
+	// Dimension 2 (design note; NOT IMPLEMENTED - second-jurisdiction /
+	// real-provider dependent, deliberately not built for the first
+	// jurisdiction): payment-orchestration.md §4 step 2 ("drops providers
+	// not licensed/permitted to serve that jurisdiction") has NO policy
+	// store today - no table maps (tenant, jurisdiction) to a permitted
+	// provider/method set, so there is no jurisdiction-dependent routing
+	// policy that this function could evaluate as if it did not exist; the
+	// platform's market restriction for deposits is the A8 operating-market
+	// gate (internal/marketgate, evaluated before routing in
+	// InitiateDepositAttempt phase A), and the only jurisdiction-keyed
+	// payments policy column, withdrawal_policies.jurisdiction_code, is held
+	// NULL by CHECK withdrawal_policies_jurisdiction_not_yet_resolvable
+	// (migration 0033), so a jurisdiction-scoped policy cannot be authored
+	// and silently skipped. These pins fail the build/test run if either
+	// changes: TestRoutingRequest_HasNoJurisdictionOrCountryDimension,
+	// TestPaymentsRouting_NeverReadsSupportedCountries and
+	// internal/withdrawal TestWithdrawalPolicies_JurisdictionScopedRowIsRejectedByCheck.
+	//
+	// Extension point when a second jurisdiction (or a PSP with a licence
+	// matrix) needs it: add a Jurisdiction field to RoutingRequest that the
+	// CALLER fills from internal/jurisdiction.Resolve (same transaction,
+	// AssertScope against the authenticated tenant/brand/player), plus a
+	// policy table read in ListRoutingCandidates' transaction, and filter in
+	// RankRoutingCandidates. Contract for that gate: if a jurisdiction-
+	// dependent policy exists for the tenant/operation and the resolution is
+	// not Resolved, route NOTHING (fail closed) - never treat it as
+	// "unrestricted". It is a SEPARATE mechanism from
+	// AdapterCapability.SupportedCountries (a provider's declared rail
+	// coverage in ISO-3166 space) and must not reuse that field's
+	// "empty = unrestricted" default; see the note on SupportedCountries in
+	// types.go. Requires a migration and `security` review (out of scope
+	// for this closure: no migration allowed).
 	ExcludeProviderIDs []string
 }
 

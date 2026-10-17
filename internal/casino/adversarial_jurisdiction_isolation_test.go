@@ -106,8 +106,8 @@ func TestReceiveCallback_SessionWithNoJurisdictionFailsClosedAgainstJurisdiction
 	// mintSession (not mintSessionWithJurisdiction) leaves
 	// casino_launch_sessions.jurisdiction_code NULL -> "" server-side,
 	// exactly the "LaunchGame itself had no resolved jurisdiction" case
-	// the orchestrator.go postBet comment names (TODO(jurisdiction) is
-	// still the unfixed root cause - ADR 0031 §9/§34).
+	// the orchestrator.go postBet comment names (a player-scoped resolution
+	// is unresolved(no_signal) until HDR-J-1/HDR-J-3 - ADR 0031 §9/§34).
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)).WithUngatedMarketOpenForTests()
 

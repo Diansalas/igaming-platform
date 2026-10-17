@@ -1976,8 +1976,11 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// when the round began, denormalized onto casino_launch_sessions
 	// exactly like ProviderGameID/AssetCode already were. Empty only when
 	// LaunchGame itself had no resolved jurisdiction to persist
-	// (TODO(jurisdiction) still applies at its root cause - no per-player
-	// jurisdiction resolution exists yet anywhere in this codebase) -
+	// (LaunchGame DOES call jurisdiction.Resolve, but a player-scoped
+	// resolution is unresolved(no_signal) until HDR-J-1/HDR-J-3 are answered
+	// and the resolver is wired to player evidence; an empty value here is
+	// handled fail-closed by risk.Evaluate - ErrMissingJurisdiction - whenever
+	// a jurisdiction-scoped rule exists for this operation) -
 	// this closes the previously-disclosed "reachable from LaunchGame but
 	// never from postBet" gap (ADR 0031 §8/§9) without inventing a new,
 	// independent per-bet jurisdiction source.
