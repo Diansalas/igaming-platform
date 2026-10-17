@@ -1,3 +1,4 @@
+import type { MinorAmount } from '../lib/amount'
 import { apiFetch, buildQuery } from './client'
 import type { PagedResponse } from './types'
 
@@ -22,7 +23,7 @@ export interface SettlementLifecycleEvent {
   event_kind: SettlementEventKind
   generation: number | null
   outcome: SettlementOutcome | null
-  payout_amount: number | null
+  payout_amount: MinorAmount | null
   void_reason: VoidReason | null
   ledger_transaction_id: string
   created_at: string
@@ -33,10 +34,10 @@ export interface AdminBet {
   player_account_id: string
   selection_id: string
   asset_code: string
-  stake_amount: number
+  stake_amount: MinorAmount
   odds_numerator: number
   odds_denominator: number
-  potential_return: number
+  potential_return: MinorAmount
   status: AdminBetStatus
   placed_at: string
   decimal_exponent: number
@@ -58,7 +59,7 @@ export interface AdminBet {
    * `request_id`; those are admin-only.
    */
   outcome?: SettlementOutcome | null
-  payout_amount?: number | null
+  payout_amount?: MinorAmount | null
   settled_at?: string | null
   correlation_id?: string
   lifecycle?: SettlementLifecycleEvent[]

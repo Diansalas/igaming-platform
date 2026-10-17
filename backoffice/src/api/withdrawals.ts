@@ -1,3 +1,4 @@
+import type { MinorAmount } from '../lib/amount'
 import { apiFetch, buildQuery } from './client'
 import type { PagedResponse } from './types'
 
@@ -26,7 +27,7 @@ export interface BoundPayoutInstrument {
 export interface Withdrawal {
   id: string
   asset_code: string
-  amount: number
+  amount: MinorAmount
   state: WithdrawalState
   requested_at: string
   hold_ledger_transaction_id?: string
@@ -93,7 +94,7 @@ export function listSubmittedWithdrawals(): Promise<Withdrawal[]> {
 export interface SubmittedWithdrawal {
   id: string
   asset_code: string
-  amount: number
+  amount: MinorAmount
   state: WithdrawalState
   requested_at: string
   hold_ledger_transaction_id?: string

@@ -1,3 +1,5 @@
+import { formatMinor, type MinorAmount } from './amount'
+
 /**
  * Formats an integer minor-units amount (e.g. cents) as a human-readable
  * decimal string using the asset's real decimal exponent - never a
@@ -10,16 +12,14 @@
  * amount is always what the server returns and what any mutation call
  * uses; this function never feeds back into a request.
  */
-export function formatMoney(amountMinorUnits: number, assetCode: string, decimalExponent: number | undefined): string {
+export function formatMoney(amountMinorUnits: MinorAmount, assetCode: string, decimalExponent: number | undefined): string {
+  const raw = typeof amountMinorUnits === 'bigint' ? amountMinorUnits.toString() : String(amountMinorUnits)
   if (decimalExponent === undefined) {
-    return `${amountMinorUnits} ${assetCode} (exponent unknown)`
+    return `${raw} ${assetCode} (exponent unknown)`
   }
-  if (decimalExponent === 0) {
-    return `${amountMinorUnits} ${assetCode}`
-  }
-  const divisor = 10 ** decimalExponent
-  const major = amountMinorUnits / divisor
-  return `${major.toFixed(decimalExponent)} ${assetCode}`
+  // Exact BigInt/string formatting (lib/amount.ts). An amount that is not an exact integer is shown raw, never guessed.
+  const text = formatMinor(amountMinorUnits, decimalExponent)
+  return text === null ? `${raw} ${assetCode}` : `${text} ${assetCode}`
 }
 
 /**

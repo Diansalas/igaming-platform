@@ -4,11 +4,12 @@ import { Badge } from '../../components/Badge'
 import { PageHeader } from '../../components/PageHeader'
 import { Table, type Column } from '../../components/Table'
 import { usePagination } from '../../components/usePagination'
+import type { MinorAmount } from '../../lib/amount'
 import { formatMoney } from '../../lib/money'
 import { roundStatusTone } from './status'
 
 /** Renders an optional minor-units amount, or a dash when the round never reached that stage (e.g. no win on a loss, no rollback on a settled round). */
-function formatOptionalMoney(amount: number | undefined, assetCode: string, decimalExponent: number): string {
+function formatOptionalMoney(amount: MinorAmount | undefined, assetCode: string, decimalExponent: number): string {
   if (amount === undefined) return '—'
   return formatMoney(amount, assetCode, decimalExponent)
 }

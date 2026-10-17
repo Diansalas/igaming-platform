@@ -34,3 +34,11 @@ describe('estimatePotentialReturnMinorUnits', () => {
     expect(estimatePotentialReturnMinorUnits(1000, 250, 0)).toBe(0)
   })
 })
+
+describe('estimatePotentialReturnMinorUnits above 2^53 (U-5)', () => {
+  it('multiplies in BigInt and returns an exact digit string when the result is not a safe integer', () => {
+    expect(estimatePotentialReturnMinorUnits('9007199254740993', 2, 1)).toBe('18014398509481986')
+    expect(estimatePotentialReturnMinorUnits(1000, 250, 100)).toBe(2500)
+    expect(estimatePotentialReturnMinorUnits('x', 250, 100)).toBe(0)
+  })
+})

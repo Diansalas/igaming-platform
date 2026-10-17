@@ -1,3 +1,5 @@
+import { formatMinor } from './amount'
+
 /**
  * Formats a decimal STRING of integer minor units with the asset's exponent using BigInt arithmetic only (ADR 0114
  * principle 5: never floating point, no precision loss for 38-digit amounts). Anything that is not an optionally
@@ -10,13 +12,9 @@ export function formatMinorUnits(amount: string | null | undefined, exponent: nu
   if (!/^-?\d+$/.test(amount) || exponent === null || exponent === undefined || !Number.isInteger(exponent) || exponent < 0 || exponent > 36) {
     return `${/^-?\d{1,40}$/.test(amount) ? amount : 'unprintable'} minor units of ${asset} (exponent unknown)`
   }
-  const neg = amount.startsWith('-')
-  const digits = BigInt(neg ? amount.slice(1) : amount).toString()
-  if (exponent === 0) return `${neg ? '-' : ''}${digits} ${asset}`
-  const padded = digits.padStart(exponent + 1, '0')
-  const whole = padded.slice(0, padded.length - exponent)
-  const frac = padded.slice(padded.length - exponent)
-  return `${neg ? '-' : ''}${whole}.${frac} ${asset}`
+  const text = formatMinor(amount, exponent)
+  if (text === null) return `${/^-?\d{1,40}$/.test(amount) ? amount : 'unprintable'} minor units of ${asset} (exponent unknown)`
+  return `${text} ${asset}`
 }
 
 /** "123.45 EUR (12345 minor units)": the major-unit form AND the exact minor units, so a reviewer sees both. */

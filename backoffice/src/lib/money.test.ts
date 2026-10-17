@@ -24,3 +24,17 @@ describe('formatUnscaledAmount', () => {
     expect(formatUnscaledAmount('5000', 'USD')).toBe('5000 USD (raw minor units, exponent unknown)')
   })
 })
+
+describe('formatMoney exactness (U-5)', () => {
+  it('accepts number, digit-string and bigint and is exact above 2^53 and at exponent 18', () => {
+    expect(formatMoney('9007199254740993', 'USD', 2)).toBe('90071992547409.93 USD')
+    expect(formatMoney(9007199254740993n, 'USD', 2)).toBe('90071992547409.93 USD')
+    expect(formatMoney('9223372036854775807', 'ETH', 18)).toBe('9.223372036854775807 ETH')
+    expect(formatMoney(-5, 'USD', 2)).toBe('-0.05 USD')
+    expect(formatMoney(0, 'BTC', 8)).toBe('0.00000000 BTC')
+  })
+  it('shows a non-exact amount raw instead of scaling a guess', () => {
+    expect(formatMoney(1.5, 'USD', 2)).toBe('1.5 USD')
+    expect(formatMoney('12abc', 'USD', 2)).toBe('12abc USD')
+  })
+})

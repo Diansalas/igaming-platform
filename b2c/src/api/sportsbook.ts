@@ -1,3 +1,4 @@
+import type { MinorAmount } from '../lib/amount'
 import { apiFetch, buildQuery } from './client'
 import type { PagedResponse } from './types'
 
@@ -75,10 +76,10 @@ export interface Bet {
   id: string
   selection_id: string
   asset_code: string
-  stake_amount: number
+  stake_amount: MinorAmount
   odds_numerator: number
   odds_denominator: number
-  potential_return: number
+  potential_return: MinorAmount
   status: string
   placed_at: string
   /**
@@ -90,7 +91,7 @@ export interface Bet {
    * treat these as optional as well as nullable.
    */
   outcome?: 'won' | 'lost' | null
-  payout_amount?: number | null
+  payout_amount?: MinorAmount | null
   settled_at?: string | null
 }
 

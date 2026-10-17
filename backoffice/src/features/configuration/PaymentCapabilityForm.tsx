@@ -1,3 +1,4 @@
+import { parseMinor, toWireInteger } from '../../lib/amount'
 import { useMutation } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 import { writePaymentCapability, type AmountLimit, type PaymentCapabilityRequest } from '../../api/providerConfig'
@@ -12,6 +13,12 @@ const STATUS_OPTIONS = [
   { value: 'active', label: 'active' },
   { value: 'disabled', label: 'disabled' },
 ]
+
+/** Integer minor units typed as digits, converted exactly; null if not digits or not exactly representable as an int64 JSON number (> 2^53-1). */
+function limitToWire(text: string): number | null {
+  const n = /^\d+$/.test(text) ? parseMinor(text) : null
+  return n === null ? null : toWireInteger(n)
+}
 
 interface LimitRow {
   asset_code: string
@@ -43,7 +50,7 @@ export function PaymentCapabilityForm() {
   const [saved, setSaved] = useState<{ id: string; providerId: string; effective?: PaymentCapabilityRequest; narrowed?: boolean } | null>(null)
 
   const limitsInvalid = limits.some(
-    (l) => !l.asset_code.trim() || !/^\d+$/.test(l.min_amount) || !/^\d+$/.test(l.max_amount),
+    (l) => !l.asset_code.trim() || limitToWire(l.min_amount) === null || limitToWire(l.max_amount) === null,
   )
   const priorityInvalid = !/^-?\d+$/.test(priority.trim())
   const incomplete = !providerId.trim() || priorityInvalid || limitsInvalid
@@ -60,8 +67,8 @@ export function PaymentCapabilityForm() {
         supports_refund_reversal: refund,
         amount_limits: limits.map<AmountLimit>((l) => ({
           asset_code: l.asset_code.trim(),
-          min_amount: Number(l.min_amount),
-          max_amount: Number(l.max_amount),
+          min_amount: limitToWire(l.min_amount) ?? 0, // limitsInvalid blocks submit, so never 0 in practice
+          max_amount: limitToWire(l.max_amount) ?? 0,
         })),
         priority: Number(priority.trim()),
         status,

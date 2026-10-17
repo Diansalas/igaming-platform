@@ -1,3 +1,4 @@
+import type { MinorAmount } from '../lib/amount'
 import { apiFetch } from './client'
 
 // Mirrors internal/httpserver/deposit_handlers.go's depositIntentResponse.
@@ -13,7 +14,7 @@ export type DepositStatus = 'pending' | 'succeeded' | 'declined' | 'ambiguous' |
 export interface DepositIntent {
   id: string
   asset_code: string
-  amount: number
+  amount: MinorAmount
   payment_method: string
   status: DepositStatus
   provider_id?: string
@@ -24,7 +25,7 @@ export interface DepositIntent {
 
 export function initiateDeposit(params: {
   assetCode: string
-  amount: number
+  amount: number /* exact safe integer from toMinorUnits; never a float */
   paymentMethod: string
   idempotencyKey: string
 }): Promise<DepositIntent> {

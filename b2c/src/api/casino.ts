@@ -1,3 +1,4 @@
+import type { MinorAmount } from '../lib/amount'
 import { apiFetch, buildQuery } from './client'
 import type { PagedResponse } from './types'
 
@@ -97,9 +98,9 @@ export interface CasinoRound {
   mode: CasinoLaunchMode
   status: CasinoRoundStatus
   launched_at: string
-  bet_amount?: number
-  win_amount?: number
-  rollback_amount?: number
+  bet_amount?: MinorAmount
+  win_amount?: MinorAmount
+  rollback_amount?: MinorAmount
   bet_provider_tx_id?: string
   win_provider_tx_id?: string
   rollback_provider_tx_id?: string

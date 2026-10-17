@@ -6,6 +6,7 @@
 // for the full rationale; the single-flight refresh fix in particular is
 // copied deliberately, not reinvented.
 import { clearSession, getAccessToken, getRefreshToken, setSession } from '../auth/tokenStore'
+import { parseJsonExact } from '../lib/amount'
 import { ApiError, type ApiErrorBody } from './types'
 
 // Relative by default so the Vite dev-server proxy (vite.config.ts)
@@ -114,7 +115,8 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
 
   if (res.status === 204) return undefined as T
   const text = await res.text()
-  return (text ? JSON.parse(text) : undefined) as T
+  // parseJsonExact: int64 amounts above 2^53 arrive as exact digit strings instead of rounded floats (lib/amount.ts).
+  return (text ? parseJsonExact(text) : undefined) as T
 }
 
 /** Builds a query string from a plain object, skipping undefined/empty values. */

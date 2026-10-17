@@ -1,3 +1,4 @@
+import type { MinorAmount } from '../lib/amount'
 import { apiFetch } from './client'
 
 // Mirrors internal/httpserver/wallet_handlers.go's walletSummaryResponse
@@ -9,11 +10,11 @@ export interface WalletSummary {
   wallet_id: string
   asset_code: string
   status: string
-  cash_balance: number
-  available_balance: number
-  held_for_withdrawal: number
-  locked_balance: number
-  bonus_balance: number
+  cash_balance: MinorAmount
+  available_balance: MinorAmount
+  held_for_withdrawal: MinorAmount
+  locked_balance: MinorAmount
+  bonus_balance: MinorAmount
 }
 
 export function listMyWallets(): Promise<WalletSummary[]> {
