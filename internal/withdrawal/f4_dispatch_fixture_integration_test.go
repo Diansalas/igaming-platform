@@ -37,3 +37,12 @@ func f4ThenSubmit(ctx context.Context, tx pgx.Tx, id uuid.UUID, e7 func() error)
 	}
 	return e7()
 }
+
+// f4AllowDispatchNoLock records the signed fixture ALLOW without taking the request's L1 lock first.
+func f4AllowDispatchNoLock(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	wr, err := GetByID(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	return RecordDispatchGateDecision(ctx, tx, wr, DispatchStageDispatch, nil, withdrawalgate.Decision{Allowed: true, Outcome: "allow"})
+}

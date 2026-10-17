@@ -42,6 +42,9 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
+
+	// F4 residual R1: installs the key-provisioning hook the signed dispatch-gate ALLOW needs (E7 records one).
+	_ "github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 )
 
 // Spec is one request to create. Zero ID / IdempotencyKey are generated. InstrumentID and Fingerprint

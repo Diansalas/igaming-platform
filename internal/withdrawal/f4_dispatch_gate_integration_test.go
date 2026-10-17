@@ -212,8 +212,10 @@ func TestF4_DB_DecisionRows_AppendOnly_Shape_AndTriggerOwnedColumns(t *testing.T
 	var gotID uuid.UUID
 	var sameXact bool
 	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO withdrawal_gate_decisions (id, tenant_id, withdrawal_request_id, stage, allowed, decided_at, decided_xact)
-			VALUES ($1, $2, $3, 'dispatch', true, '2000-01-01', '1') RETURNING id, decided_xact = pg_current_xact_id()`, forged, w.f.tenantID, wr.ID).Scan(&gotID, &sameXact)
+		// F4 residual R1 (CHANGED, intentionally): an ALLOWED raw row now needs a signed proof (AP001 without), so the
+		// trigger-owned-columns probe uses a DENYING row, which is not proof-bound; the columns are the same.
+		return tx.QueryRow(ctx, `INSERT INTO withdrawal_gate_decisions (id, tenant_id, withdrawal_request_id, stage, allowed, gate_code, reason_code, decided_at, decided_xact)
+			VALUES ($1, $2, $3, 'dispatch', false, 'WD051', 'x', '2000-01-01', '1') RETURNING id, decided_xact = pg_current_xact_id()`, forged, w.f.tenantID, wr.ID).Scan(&gotID, &sameXact)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -247,9 +249,24 @@ func TestF4_DB_DecisionRows_AppendOnly_Shape_AndTriggerOwnedColumns(t *testing.T
 	})
 	wantCode(t, "owner TRUNCATE", err, "WD055")
 
+	// F4 residual R1 (CHANGED, intentionally): the CHECK constraints run after the BEFORE triggers, and an ALLOWED row now
+	// meets the proof guard (AP001) first. Rows the CHECKs must still refuse are therefore inserted WITH a valid signed
+	// proof (the probe is the CHECK, not the proof), exactly as before for every other code.
+	f := f4r1Forger(t)
 	ins := func(id uuid.UUID, stage string, attempt *uuid.UUID, allowed bool, gate, reason *string) error {
-		return w.rtExec(`INSERT INTO withdrawal_gate_decisions (tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`, w.f.tenantID, id, attempt, stage, allowed, gate, reason)
+		return w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+			if allowed {
+				x := wr
+				x.ID = id
+				tok := f4r1Token(t, f, w.f.tenantID, id.String(), dispatchAllowDigest(x, DispatchStage(stage), attempt, nil, nil))
+				if _, e := tx.Exec(ctx, `SELECT set_config('app.actor_proof', $1, true)`, tok); e != nil {
+					return e
+				}
+			}
+			_, e := tx.Exec(ctx, `INSERT INTO withdrawal_gate_decisions (tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`, w.f.tenantID, id, attempt, stage, allowed, gate, reason)
+			return e
+		})
 	}
 	s := func(v string) *string { return &v }
 	requested := w.at(t, StateRequested)
@@ -382,7 +399,7 @@ func TestF4_EvaluateDispatchGate_SameRulesAsRequestTime(t *testing.T) {
 // runtime role holds exactly SELECT and INSERT.
 func TestF4_DB_Catalog(t *testing.T) {
 	pool := testPool(t)
-	var lastWR, lastPA, lastPAIns string
+	var lastWR, lastPA, lastPAIns, lastDec string
 	var secdef, unpinned int
 	var force bool
 	var privs string
@@ -400,11 +417,17 @@ func TestF4_DB_Catalog(t *testing.T) {
 			AND (tgtype & 2) = 2 AND (tgtype & 1) = 1 AND (tgtype & 4) = 4 ORDER BY tgname DESC LIMIT 1`).Scan(&lastPAIns); err != nil {
 			return err
 		}
+		// F4 residual R1: the proof guard is the LAST BEFORE INSERT row trigger of withdrawal_gate_decisions.
+		if err := tx.QueryRow(ctx, `SELECT tgname FROM pg_trigger WHERE tgrelid = 'withdrawal_gate_decisions'::regclass AND NOT tgisinternal
+			AND (tgtype & 2) = 2 AND (tgtype & 1) = 1 AND (tgtype & 4) = 4 ORDER BY tgname DESC LIMIT 1`).Scan(&lastDec); err != nil {
+			return err
+		}
 		if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE prosecdef), count(*) FILTER (WHERE NOT EXISTS (
 				SELECT 1 FROM unnest(proconfig) c WHERE c LIKE 'search_path=%'))
 			FROM pg_proc WHERE proname IN ('withdrawal_gate_decisions_before_insert', 'withdrawal_gate_decisions_deny_mutation',
 				'withdrawal_dispatch_rg_violation', 'withdrawal_dispatch_decision_ok', 'withdrawal_requests_dispatch_gate_guard',
-				'payment_attempts_payout_redispatch_gate_guard', 'payment_attempts_payout_dispatch_insert_guard')`).Scan(&secdef, &unpinned); err != nil {
+				'payment_attempts_payout_redispatch_gate_guard', 'payment_attempts_payout_dispatch_insert_guard',
+				'withdrawal_gate_decisions_actor_proof_guard')`).Scan(&secdef, &unpinned); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT relforcerowsecurity FROM pg_class WHERE oid = 'withdrawal_gate_decisions'::regclass`).Scan(&force); err != nil {
@@ -420,6 +443,9 @@ func TestF4_DB_Catalog(t *testing.T) {
 	}
 	if lastPAIns != "payment_attempts_zz_payout_dispatch_insert_guard" {
 		t.Fatalf("the RF4-1 guard must be the last BEFORE INSERT row trigger of payment_attempts, got %q", lastPAIns)
+	}
+	if lastDec != "withdrawal_gate_decisions_zz_actor_proof_guard" {
+		t.Fatalf("the proof guard must be the last BEFORE INSERT row trigger of withdrawal_gate_decisions, got %q", lastDec)
 	}
 	if secdef != 0 || unpinned != 0 {
 		t.Fatalf("F4 functions: %d SECURITY DEFINER, %d without a pinned search_path", secdef, unpinned)

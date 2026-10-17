@@ -80,9 +80,9 @@ func (s *Sweeper) processPayoutAttempt(ctx context.Context, tenantID uuid.UUID, 
 	}
 	switch attempt.State {
 	case AttemptCreated:
-		return s.reclaimPayoutCreated(ctx, tenantID, attempt)
+		return s.observeRedispatchGate(ctx, tenantID, attempt, s.reclaimPayoutCreated(ctx, tenantID, attempt))
 	case AttemptAmbiguous:
-		return s.resubmitPayoutAmbiguous(ctx, tenantID, attempt)
+		return s.observeRedispatchGate(ctx, tenantID, attempt, s.resubmitPayoutAmbiguous(ctx, tenantID, attempt))
 	case AttemptSubmitting, AttemptPending:
 		return s.resolvePayoutViaQueryStatus(ctx, tenantID, attempt)
 	default:

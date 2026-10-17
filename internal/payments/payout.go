@@ -619,6 +619,11 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		// it authorizes (migration 0169 refuses the transition without it: WD053; and re-checks the RG half in
 		// SQL: WD052). A rollback below discards it together with the claim.
 		if err := withdrawal.RecordDispatchGateDecision(actx, tx, wr, withdrawal.DispatchStageDispatch, nil, gateDecision); err != nil {
+			if errors.Is(err, withdrawal.ErrDispatchProofUnavailable) {
+				// F4 residual R1: the allow could not be signed (no issuer): fail closed and retryable, like an
+				// unavailable gate; the whole claim rolls back.
+				return fmt.Errorf("%w: %w", ErrPayoutWithdrawalGateUnavailable, err)
+			}
 			return err
 		}
 
@@ -690,6 +695,10 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		}
 		if errors.Is(err, ErrPayoutWithdrawalGateUnavailable) {
 			recordPayoutGateUnavailableAudit(ctx, pool, tenantID, requestID, actor)
+			if errors.Is(err, withdrawal.ErrGateUnavailable) {
+				// SF4-5: an evaluation / signing failure (not the benign "changed during the claim" retry) is raised.
+				raiseGateUnavailable(ctx, pool, tenantID, "withdrawal:"+requestID.String(), withdrawal.DispatchStageDispatch, gateUnavailableCause(err))
+			}
 		}
 		return ClaimResult{}, err
 	}
