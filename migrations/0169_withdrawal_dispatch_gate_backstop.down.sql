@@ -28,6 +28,8 @@ EXCEPTION WHEN foreign_key_violation THEN
 END
 $$;
 
+DROP TRIGGER payment_attempts_zz_payout_dispatch_insert_guard ON payment_attempts;
+DROP FUNCTION payment_attempts_payout_dispatch_insert_guard();
 DROP TRIGGER payment_attempts_zz_payout_redispatch_gate_guard ON payment_attempts;
 DROP FUNCTION payment_attempts_payout_redispatch_gate_guard();
 DROP TRIGGER withdrawal_requests_zz_dispatch_gate_guard ON withdrawal_requests;

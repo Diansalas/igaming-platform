@@ -28,7 +28,13 @@
 --   3. payment_attempts_zz_payout_redispatch_gate_guard: BEFORE UPDATE, WHEN a PAYOUT attempt moves
 --      created -> submitting (T2) or ambiguous -> submitting (T12).
 --   4. The alert Kind withdrawal.payout_gate_denied (raised in-tx by internal/payments on a dispatch denial).
---   Both guards refuse WD052 (the RG half, re-read in SQL at the instant of the transition) and WD053 (the
+--   5. payment_attempts_zz_payout_dispatch_insert_guard (ledger-finance RF4-1): BEFORE INSERT, WHEN a PAYOUT
+--      attempt is born directly in `submitting` (the T1p shape). WD053 unless the request is `submitted` (T1p
+--      performs E7 first in the same transaction) AND an allowing `dispatch` decision of THIS transaction exists
+--      (and no denying one); WD052 on the account / wallet status. Without it a payout attempt inserted in
+--      `submitting` for a request that never went through E7 in a gated transaction was admitted by every
+--      immediate check.
+--   The guards refuse WD052 (the RG half, re-read in SQL at the instant of the transition) and WD053 (the
 --   recorded decision). The risk half cannot be evaluated by the database (a rule engine with cumulative
 --   advisory locks): WD053 proves that the dispatch code path evaluated the gate and recorded an ALLOW in the
 --   SAME transaction as the transition (decided_xact = pg_current_xact_id()), so a path that bypasses the
@@ -260,6 +266,46 @@ CREATE TRIGGER payment_attempts_zz_payout_redispatch_gate_guard
     FOR EACH ROW
     WHEN (NEW.operation = 'payout' AND NEW.state = 'submitting' AND OLD.state IN ('created', 'ambiguous'))
     EXECUTE FUNCTION payment_attempts_payout_redispatch_gate_guard();
+
+-- =========================================================================
+-- 4b. T1p shape: a PAYOUT attempt INSERTed directly in `submitting` (RF4-1).
+-- =========================================================================
+
+CREATE FUNCTION payment_attempts_payout_dispatch_insert_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_account uuid;
+    v_wallet  uuid;
+    v_state   text;
+    v_rg      text;
+BEGIN
+    SELECT r.player_account_id, r.wallet_id, r.state INTO v_account, v_wallet, v_state FROM public.withdrawal_requests r
+     WHERE r.id = NEW.withdrawal_request_id AND r.tenant_id = NEW.tenant_id;
+    IF v_account IS NULL THEN
+        RAISE EXCEPTION 'payment_attempts: the payout attempt''s withdrawal request is not visible (RG backstop)'
+            USING ERRCODE = 'WD052';
+    END IF;
+    v_rg := public.withdrawal_dispatch_rg_violation(NEW.tenant_id, v_account, v_wallet);
+    IF v_rg IS NOT NULL THEN
+        RAISE EXCEPTION 'payment_attempts: a payout attempt born submitting refused by the RG backstop (%)', v_rg
+            USING ERRCODE = 'WD052';
+    END IF;
+    IF v_state IS DISTINCT FROM 'submitted'
+       OR NOT public.withdrawal_dispatch_decision_ok(NEW.tenant_id, NEW.withdrawal_request_id, 'dispatch', NULL) THEN
+        RAISE EXCEPTION 'payment_attempts: a payout attempt born submitting needs a submitted request and an allowing dispatch gate decision recorded in this transaction (request state %)', v_state
+            USING ERRCODE = 'WD053';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER payment_attempts_zz_payout_dispatch_insert_guard
+    BEFORE INSERT ON payment_attempts
+    FOR EACH ROW
+    WHEN (NEW.operation = 'payout' AND NEW.state = 'submitting')
+    EXECUTE FUNCTION payment_attempts_payout_dispatch_insert_guard();
 
 -- =========================================================================
 -- 5. The alert Kind withdrawal.payout_gate_denied (the 0141 pattern: a temporary literal single-Kind FOR INSERT

@@ -382,7 +382,7 @@ func TestF4_EvaluateDispatchGate_SameRulesAsRequestTime(t *testing.T) {
 // runtime role holds exactly SELECT and INSERT.
 func TestF4_DB_Catalog(t *testing.T) {
 	pool := testPool(t)
-	var lastWR, lastPA string
+	var lastWR, lastPA, lastPAIns string
 	var secdef, unpinned int
 	var force bool
 	var privs string
@@ -395,11 +395,16 @@ func TestF4_DB_Catalog(t *testing.T) {
 		if err := tx.QueryRow(ctx, q, "payment_attempts").Scan(&lastPA); err != nil {
 			return err
 		}
+		// RF4-1: the T1p-shape INSERT guard is the LAST BEFORE INSERT row trigger of payment_attempts.
+		if err := tx.QueryRow(ctx, `SELECT tgname FROM pg_trigger WHERE tgrelid = 'payment_attempts'::regclass AND NOT tgisinternal
+			AND (tgtype & 2) = 2 AND (tgtype & 1) = 1 AND (tgtype & 4) = 4 ORDER BY tgname DESC LIMIT 1`).Scan(&lastPAIns); err != nil {
+			return err
+		}
 		if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE prosecdef), count(*) FILTER (WHERE NOT EXISTS (
 				SELECT 1 FROM unnest(proconfig) c WHERE c LIKE 'search_path=%'))
 			FROM pg_proc WHERE proname IN ('withdrawal_gate_decisions_before_insert', 'withdrawal_gate_decisions_deny_mutation',
 				'withdrawal_dispatch_rg_violation', 'withdrawal_dispatch_decision_ok', 'withdrawal_requests_dispatch_gate_guard',
-				'payment_attempts_payout_redispatch_gate_guard')`).Scan(&secdef, &unpinned); err != nil {
+				'payment_attempts_payout_redispatch_gate_guard', 'payment_attempts_payout_dispatch_insert_guard')`).Scan(&secdef, &unpinned); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT relforcerowsecurity FROM pg_class WHERE oid = 'withdrawal_gate_decisions'::regclass`).Scan(&force); err != nil {
@@ -412,6 +417,9 @@ func TestF4_DB_Catalog(t *testing.T) {
 	}
 	if lastWR != "withdrawal_requests_zz_dispatch_gate_guard" || lastPA != "payment_attempts_zz_payout_redispatch_gate_guard" {
 		t.Fatalf("the F4 guards must be the last BEFORE UPDATE row triggers: %q, %q", lastWR, lastPA)
+	}
+	if lastPAIns != "payment_attempts_zz_payout_dispatch_insert_guard" {
+		t.Fatalf("the RF4-1 guard must be the last BEFORE INSERT row trigger of payment_attempts, got %q", lastPAIns)
 	}
 	if secdef != 0 || unpinned != 0 {
 		t.Fatalf("F4 functions: %d SECURITY DEFINER, %d without a pinned search_path", secdef, unpinned)
@@ -441,7 +449,8 @@ func TestMigration0169_UpDownUp_SnapshotAndDownRefusal(t *testing.T) {
 	if snapUp == snapBefore {
 		t.Fatal("0169 changed nothing (non-vacuity)")
 	}
-	for _, want := range []string{"withdrawal_gate_decisions", "withdrawal_requests_zz_dispatch_gate_guard", "payment_attempts_zz_payout_redispatch_gate_guard"} {
+	for _, want := range []string{"withdrawal_gate_decisions", "withdrawal_requests_zz_dispatch_gate_guard", "payment_attempts_zz_payout_redispatch_gate_guard",
+		"payment_attempts_zz_payout_dispatch_insert_guard"} {
 		if !strings.Contains(snapUp, want) {
 			t.Fatalf("0169 up must create %q", want)
 		}

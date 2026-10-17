@@ -120,11 +120,19 @@ type cumulativeSpec struct {
 // One reference shape is still written down here, so the next author does
 // not have to re-derive it from the flows document:
 //
-//	withdrawal step A (Flow 3, NOT wired here - no withdrawal Risk call
-//	site exists): {[withdrawal_requested], [...], measured=[player_cash],
-//	ignored=[player_withdrawal_hold], debit}
+//	withdrawal step A (Flow 3, NOT wired here): {[withdrawal_requested],
+//	[...], measured=[player_cash], ignored=[player_withdrawal_hold], debit}
 //
-// It is not added by this stage.
+// It is not added. OperationWithdrawal HAS two Risk call sites (the WD-RG-1
+// gate, internal/withdrawalgate/standard): at withdrawal REQUEST time (A6)
+// and at payout DISPATCH (T1p / T2 / T12, F4). With no spec here, a
+// cumulative withdrawal rule fails closed at both. RULE for whoever adds the
+// withdrawal spec (F4, ledger-finance RF4-5): at dispatch the request being
+// dispatched has ALREADY posted its withdrawal_requested hold (its
+// player_cash debit), so the dispatch-time measure MUST exclude that
+// request's own transaction (as internal/rg excludes the candidate deposit
+// intent, ExcludeIntentID) or the withdrawal is counted twice and an allowed request is
+// refused at dispatch.
 var operationCumulativeSpecs = map[Operation]cumulativeSpec{
 	OperationCasinoBet: {
 		TransactionTypes: []string{"casino_bet"},

@@ -258,6 +258,7 @@ func TestF4_Claim_RiskRuleFlipsBetweenRequestAndDispatch_Parks(t *testing.T) {
 func TestF4_Claim_AccountSuspendedAfterApproval_Parks(t *testing.T) {
 	w := newF4World(t, "f4-susp")
 	wr := approvedWithdrawal(t, w.pool, w.f, 500, "f4-susp")
+	holdBefore := w.holdBalance(t)
 	w.setAccount(t, identity.PlayerStatusSuspended)
 	_, err := w.claim(t, wr.ID)
 	var denied *withdrawal.GateDeniedError
@@ -270,6 +271,15 @@ func TestF4_Claim_AccountSuspendedAfterApproval_Parks(t *testing.T) {
 	if w.decisions(t, wr.ID, "dispatch", false) != 1 || w.alerts(t, "withdrawal:"+wr.ID.String()+":gate:WD050") != 1 {
 		t.Fatal("the denying decision and the alert must be committed")
 	}
+	// RF4-6: no money moved - the hold is unchanged, no attempt, the ledger balances.
+	if h := w.holdBalance(t); h != holdBefore {
+		t.Fatalf("the hold must stay, before %d after %d", holdBefore, h)
+	}
+	if n := countAttempts(t, w.pool, w.f.tenantID, wr.ID); n != 0 {
+		t.Fatalf("no attempt may exist, got %d", n)
+	}
+	loAssertBalanced(t, w.pool, w.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, w.pool, w.f.tenantID)
 	// Reactivated: the re-submit is evaluated again and goes through.
 	w.setAccount(t, identity.PlayerStatusActive)
 	if claim, err := w.claim(t, wr.ID); err != nil || claim.Request.State != withdrawal.StateSubmitted {
