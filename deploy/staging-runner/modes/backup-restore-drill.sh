@@ -4,7 +4,7 @@
 # ONE task run that exercises, on the real RDS instance, with the deploy/backup scripts exactly as the plan uses them:
 #   5.1/5.2  provision igaming_backup as the master (init-backup-role.sql, BACKUP_ROLE_IAM_ONLY=1, then GRANT rds_iam), pgaudit role setting
 #   5.1      harden-backup-surface.sql (RDS may refuse the revoke on pg_catalog functions: recorded as a FINDING, not a failure)
-#   5.3      the 15 write/escalation probes + 8 abuse-primitive probes as igaming_backup over IAM database authentication
+#   5.3      the 15 write/escalation probes + 9 abuse-primitive probes + 3 actor-proof key probes (F1) as igaming_backup over IAM database authentication
 #   8.1      backup.sh: IAM token auth, sslmode=verify-full with the RDS CA bundle (SHA-256 logged), age-encrypted, Ed25519-signed
 #   8.2      two-phase restore into a NEW database: provision as the master, load as a NON-rds_superuser owner login (BLOCKED if RDS cannot
 #            provide one, with the exact refusal), verify.sh, DROP of the restore-check database

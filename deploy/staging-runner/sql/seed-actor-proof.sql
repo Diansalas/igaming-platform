@@ -1,4 +1,5 @@
--- staging-runner mode seed-actor-proof: write the actor_proof_keys verification row, following the reviewed procedure of
+-- staging-runner mode seed-actor-proof: write the actorproof_private.actor_proof_keys verification row (the owner-only schema of migration
+-- 0166, F1), following the reviewed procedure of
 -- docs/runbooks/operational-runbooks.md section 15 (provisioning step 4). Run by modes/seed-actor-proof.sh as the table owner
 -- (the RDS master), never as igaming_runtime.
 --
@@ -13,7 +14,7 @@
 
 \set ap_hex `cat "$RN_AP_HEX_FILE"`
 
-SELECT (to_regclass('public.actor_proof_keys') IS NOT NULL) AS has_table \gset
+SELECT (to_regclass('actorproof_private.actor_proof_keys') IS NOT NULL) AS has_table \gset
 \if :has_table
 \else
 \echo ACTOR|state|no_table
@@ -22,7 +23,7 @@ SELECT (to_regclass('public.actor_proof_keys') IS NOT NULL) AS has_table \gset
 
 SELECT (count(*) FILTER (WHERE secret = decode($2, 'hex')) > 0) AS is_same,
        (count(*) FILTER (WHERE secret <> decode($2, 'hex')) > 0) AS is_other
-  FROM actor_proof_keys WHERE kid = $1 \bind :ap_kid :ap_hex \gset
+  FROM actorproof_private.actor_proof_keys WHERE kid = $1 \bind :ap_kid :ap_hex \gset
 
 \if :is_same
 \echo ACTOR|state|already_present_identical
@@ -30,9 +31,9 @@ SELECT (count(*) FILTER (WHERE secret = decode($2, 'hex')) > 0) AS is_same,
 \echo ACTOR|state|conflict_different_secret_for_this_kid
 \quit
 \else
-INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, decode($2, 'hex')) \bind :ap_kid :ap_hex \g
+INSERT INTO actorproof_private.actor_proof_keys (kid, secret) VALUES ($1, decode($2, 'hex')) \bind :ap_kid :ap_hex \g
 \echo ACTOR|state|inserted
 \endif
 
--- verification without printing the secret (runbook: SELECT kid, status, octet_length(secret) FROM actor_proof_keys)
-SELECT 'ACTOR|row|' || kid || '|' || status || '|octets=' || octet_length(secret) FROM actor_proof_keys ORDER BY kid;
+-- verification without printing the secret (runbook: SELECT kid, status, octet_length(secret) FROM actorproof_private.actor_proof_keys)
+SELECT 'ACTOR|row|' || kid || '|' || status || '|octets=' || octet_length(secret) FROM actorproof_private.actor_proof_keys ORDER BY kid;

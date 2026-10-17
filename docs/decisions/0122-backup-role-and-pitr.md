@@ -349,3 +349,14 @@ Status: DECIDED. This section was an open question for the architect (option 1 k
 Evidence: docs/plans/backup-exclude-actor-secret-record.md.
 
 7. Security review (SRBX-3): the residual in item 5 is MEDIUM. Accepted for staging. It must be resolved BEFORE PRODUCTION by (a) a migration moving the key to a schema the backup role cannot read (architect), or (b) an owner-accepted interim of column-level pgaudit auditing on `secret` with a P1 alert, plus re-keying after any suspected backup-credential exposure. Option (c) (PostgreSQL 17 MAINTAIN) is unverified.
+
+
+## Amendment 2026-10-16 (F1, migration 0166) - section 10 item 5 replaced
+
+5. (F1, migration 0166) The actor-proof key table lives in the owner-only schema `actorproof_private`. `backup.sh` dumps with `--exclude-schema=actorproof_private`
+   (pg_dump neither locks nor reads it), refuses to run if migration 0166 is not applied or if the backup role holds any privilege on that schema or its relations,
+   and fails the backup if the stream carries any entry of that schema or any actor_proof_key* data entry in any schema. The backup role holds no privilege on the
+   key at all (residual R1 is closed for databases at migration >= 0166; init-backup-role.sql re-asserts the denial). The baseline carries only the key schema's
+   structure fingerprint and a privilege invariant (no key ids); `verify.sh` reads the key table's state as the owner. `restore.sh` recreates the schema with an EMPTY
+   key table from the reviewed DDL `deploy/backup/actorproof-private-schema.sql` (compared with the source's structure by verify.sh). Physical backups, snapshots
+   and PITR still contain the key (inside the AWS boundary). A backup credential that may have been exposed while a database was below 0166 still requires a re-key.

@@ -26,8 +26,20 @@ export interface PaymentCapabilityRequest {
   status: 'active' | 'disabled'
 }
 
-/** The handler returns only the capability row id. There is no GET for this resource. */
-export function writePaymentCapability(providerId: string, body: PaymentCapabilityRequest): Promise<{ id: string }> {
+/**
+ * writeCapabilityResponse (SA-5): the row id plus the configuration that was actually STORED (read back after the
+ * write) and `narrowed`, true if that differs from the request. A request outside the adapter's manifest is a 400, so
+ * `narrowed` is false on every 200 today. `effective` and `narrowed` are optional here only so an older server that
+ * returns just `{ id }` still works.
+ */
+export interface PaymentCapabilityResponse {
+  id: string
+  effective?: PaymentCapabilityRequest
+  narrowed?: boolean
+}
+
+/** There is no GET for this resource; the PUT response is the only read-back. */
+export function writePaymentCapability(providerId: string, body: PaymentCapabilityRequest): Promise<PaymentCapabilityResponse> {
   return apiFetch(`/v1/admin/providers/${encodeURIComponent(providerId)}/capability`, {
     method: 'PUT',
     body: JSON.stringify(body),

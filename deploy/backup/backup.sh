@@ -13,12 +13,14 @@
 #                           invariants, sequences, roles/grants, triggers, policies, catalog fingerprints)
 #   manifest.json           what/when/where, tool versions, sizes, timings, invariant status. No secret.
 #
-# SIGNING MATERIAL IS NOT IN A LOGICAL DUMP (owner decision 5, ADR 0122 section 10): pg_dump runs with --exclude-table-data for
-# public.actor_proof_keys, so the table STRUCTURE is dumped and its ROWS (the actor-proof HMAC secrets) are not. The table of contents
-# of the stream is read while it is written and the backup FAILS if a data entry for it is present; the manifest records the
-# derived fact (`actor_proof_keys_data`: excluded). A restored database therefore starts with NO actor-proof key and every governed write is
-# refused (AP002) until deploy/backup/rekey-actor-proof.sh provisions a NEW key. Physical base backups / PITR are not affected (they stay
-# inside the cloud trust boundary and carry the live key).
+# SIGNING MATERIAL IS NOT IN A LOGICAL DUMP, AND THE BACKUP ROLE CANNOT READ IT (owner decision 5, ADR 0122 section 10; F1 / migration 0166):
+# the actor-proof HMAC secrets live in the schema actorproof_private, on which this role holds NO privilege (no USAGE, no table grant; checked
+# in the preflight below, which refuses the backup otherwise). pg_dump runs with --exclude-schema=actorproof_private, so it neither locks nor
+# reads that table. The table of contents of the stream is read while it is written and the backup FAILS if any entry of that schema or any
+# actor_proof_key* data entry (in ANY schema) is present; the manifest records the derived fact (`actor_proof_keys_data`: excluded). A
+# restored database therefore starts with an EMPTY key table (restore.sh recreates the schema from actorproof-private-schema.sql) and every
+# governed write is refused (AP002) until deploy/backup/rekey-actor-proof.sh provisions a NEW key. Physical base backups / PITR are not
+# affected (they stay inside the cloud trust boundary and carry the live key).
 #   SHA256SUMS              sha256 of every artefact above INCLUDING manifest.json
 #   SHA256SUMS.sig          Ed25519 signature over SHA256SUMS (key by reference: BACKUP_SIGNING_KEY_FILE). restore.sh refuses a set
 #                           that is unsigned or not signed by the pinned key
@@ -127,6 +129,20 @@ RO="$(bk_sql "SELECT current_setting('default_transaction_read_only')")"
 [ "$RO" = on ] || bk_die "backup role session is not read-only by default (default_transaction_read_only=${RO}); re-run init-backup-role.sql"
 MISSING="$(bk_sql "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public' WHERE c.relkind IN ('r','p','S') AND NOT has_table_privilege(c.oid, 'SELECT')")"
 [ "$MISSING" = 0 ] || bk_die "backup role lacks SELECT on ${MISSING} table(s)/sequence(s) (a new migration table without the default privilege?); re-run init-backup-role.sql. Refusing to produce an incomplete dump"
+# F1 (migration 0166): the actor-proof signing key must be OUT OF THIS ROLE'S REACH. Privileges are read by OID (a name lookup in a schema
+# without USAGE would itself be refused). Refused: migration 0166 not applied (the key would still be in public, readable by this role), or
+# this role holding USAGE/CREATE on actorproof_private or any privilege on a relation in it. The drill-only fault include_actor_proof_keys
+# skips this check (it exists to prove the stream assertion below on a deliberately mis-granted role).
+APK_PRE="$(bk_sql "SELECT (pg_catalog.to_regnamespace('actorproof_private') IS NOT NULL)::int || '|' || (pg_catalog.to_regclass('public.actor_proof_keys') IS NOT NULL)::int || '|' || ((SELECT count(*) FROM pg_namespace n WHERE n.nspname = 'actorproof_private' AND (has_schema_privilege(n.oid, 'USAGE') OR has_schema_privilege(n.oid, 'CREATE'))) + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private' WHERE c.relkind IN ('r','p','v','m','S','f') AND (has_table_privilege(c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(c.oid, 'SELECT,INSERT,UPDATE,REFERENCES'))))")"
+IFS='|' read -r APK_SCHEMA APK_PUBLIC APK_PRIVS <<<"$APK_PRE"
+# SRF1-3: has_*_privilege ignores roles reachable only through SET ROLE (the backup role is NOINHERIT), so a membership is refused outright, as
+# init-backup-role.sql does: the only membership allowed is rds_iam (IAM database authentication on RDS).
+APK_MEMBER="$(bk_sql "SELECT COALESCE(string_agg(g.rolname, ',' ORDER BY g.rolname), '') FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = current_user) AND g.rolname <> 'rds_iam'")"
+[ -z "$APK_MEMBER" ] || bk_die "${BACKUP_PGUSER} is a member of ${APK_MEMBER}: the backup role must be a member of no role but rds_iam (a membership can reach the actor-proof key schema through SET ROLE and widens what a stolen credential can do). Revoke it (init-backup-role.sql refuses it too); nothing was dumped"
+if [ "${BACKUP_TEST_FAULT:-}" != include_actor_proof_keys ] || [ "$BK_TARGET_LOCAL" -ne 1 ]; then
+  [ "$APK_SCHEMA" = 1 ] && [ "$APK_PUBLIC" = 0 ] || bk_die "the actor-proof key table is not isolated (schema actorproof_private present: ${APK_SCHEMA}, public.actor_proof_keys present: ${APK_PUBLIC}): migration 0166 is not applied, so this role could read the signing key. Migrate first; nothing was dumped"
+  [ "$APK_PRIVS" = 0 ] || bk_die "${BACKUP_PGUSER} holds ${APK_PRIVS} privilege(s) on the schema actorproof_private or its relations: the backup credential can read the actor-proof signing key (owner decision 5). Revoke them (deploy/backup/init-backup-role.sql re-asserts the denial); nothing was dumped"
+fi
 
 # ---- encryption: validated BEFORE any dump (H1) -----------------------------------------------------------------------
 ENC=none
@@ -216,10 +232,11 @@ if [ "$FAULT" = slow_dump ]; then sleep "${BACKUP_TEST_SLOW_SECONDS:-12}" & SLEE
 # the dump, STREAMED through the encryptor: no plaintext on the backup volume
 DUMP_OUT="${RUN_DIR}/db.dump${EXT}"
 bk_iam_refresh
-# Owner decision 5: the rows of actor_proof_keys (the HMAC secrets) are excluded from the stream; the structure stays. The stream is also read by a
-# `pg_restore --list` while it is written, so the exclusion is VERIFIED on the very bytes that are encrypted (not assumed from the flag).
-EXCL=(--exclude-table-data=public.actor_proof_keys)
-# drill-only negative control: drop the exclusion to prove the TOC assertion below refuses the backup
+# Owner decision 5 / F1: the schema holding the actor-proof HMAC secrets is excluded from the stream (pg_dump neither locks nor reads it). The
+# stream is also read by a `pg_restore --list` while it is written, so the exclusion is VERIFIED on the very bytes that are encrypted (not
+# assumed from the flag).
+EXCL=(--exclude-schema=actorproof_private)
+# drill-only negative control: drop the exclusion to prove that the role cannot dump the schema and that the TOC assertion below refuses the backup
 [ "$FAULT" != include_actor_proof_keys ] || EXCL=()
 (
   set -o pipefail
@@ -245,9 +262,12 @@ PLAIN_SHA="$(cat "${TMPW}/plain.sha" 2>/dev/null || true)"
 [[ "$PLAIN_SHA" =~ ^[0-9a-f]{64}$ ]] || bk_die "could not record the plaintext checksum"
 for _ in $(seq 1 100); do [ -s "${TMPW}/toc.rc" ] && break; sleep 0.2; done   # the pg_restore --list process substitution may finish just after the pipeline
 [ "$(cat "${TMPW}/toc.rc" 2>/dev/null || echo missing)" = 0 ] || bk_die "could not read the table of contents of the dump stream ($(head -2 "${TMPW}/toc.err" 2>/dev/null | tr '\n' ' ')); the actor-proof exclusion cannot be verified, so no backup is kept"
-grep -q ' TABLE public actor_proof_keys ' "${TMPW}/stream.toc" || bk_die "the dump holds no definition of public.actor_proof_keys (migration 0120 missing, or an unexpected dump); refusing"
+grep -q ' FUNCTION public actor_proof_require(' "${TMPW}/stream.toc" || bk_die "the dump holds no actor_proof_require verifier (migration 0120 missing, or an unexpected dump); refusing"
 if grep -q -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' "${TMPW}/stream.toc"; then
-  bk_die "the dump stream carries the DATA of public.actor_proof_keys (the actor-proof signing secrets); logical backups must never contain them (ADR 0122 section 10). No backup is kept"
+  bk_die "the dump stream carries the DATA of an actor_proof_keys table (the actor-proof signing secrets); logical backups must never contain them (ADR 0122 section 10). No backup is kept"
+fi
+if grep -q -E '(^| )actorproof_private( |$)' "${TMPW}/stream.toc"; then
+  bk_die "the dump stream carries entries of the schema actorproof_private (the actor-proof signing secrets live there); logical backups must exclude it (ADR 0122 section 10, migration 0166). No backup is kept"
 fi
 APK_DATA=excluded
 rm -f "${TMPW}/stream.toc"

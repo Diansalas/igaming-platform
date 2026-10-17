@@ -357,3 +357,14 @@ Append to the section 3 table:
 Section 3 table row added: `withdrawal_approvals` INSERT with `decision = 'reverse'` → operation `withdrawal_payout_reversal:decide`, target = withdrawal request id, payload = payout digest, scope `tenant` only, approver must be the proven actor, nonce stored in `actor_proof_nonce` and only such rows count.
 
 T8 register row: the payout-reversal `reverse` decisions are REMOVED from the unproven list; the other flows (kill-switch release, provider credential handles, KYC enforcement policy, asset-registry dual control, withdrawal `approve`/`reject` (ADR 0113 s9.3), bonus change governance, casino catalogue dual control) stay open. Residual (SRT8-2): check D flags only rows with NO nonce; a table owner who disables the guard can plant rows with any well-formed unique nonce (accepted owner class). T5 note: binding the reversal decisions does NOT close T5 for the A5 tombstone branch (its hold release is the ordinary E10 `withdrawal_failed` posting).
+
+
+## Amendment 2026-10-16 - the verification key lives in an owner-only schema (F1, migration 0166; SRBX-3 / R1; owner decision 5)
+
+The verification copy of the actor-proof keys moved from `public.actor_proof_keys` to `actorproof_private.actor_proof_keys`. The schema `actorproof_private` is owned
+by the migration owner and grants nothing to anyone else (no USAGE, no CREATE, no table or column privilege for PUBLIC, `igaming_runtime` or `igaming_backup`); the
+table keeps its columns, constraints, RLS flag (enabled, not forced, no policy) and owner-only ACL. It is reachable only through the two existing SECURITY DEFINER
+functions, `actor_proof_require` and `actor_proof_key_active`, whose bodies changed only in the schema-qualified table reference; their `search_path` stays
+`pg_catalog, public, pg_temp` and their EXECUTE grants are unchanged. No other function, view or grant reaches the schema. Proof format and the AP001..AP005 rules
+are unchanged. Section 6 ("Where they must NOT live") now also excludes the backup role: it cannot read the key, so a stolen backup credential no longer yields it
+(T7 unchanged: the owner/migration role, members of the owner role - e.g. the restore loader role, on RDS the master user - and a superuser still can). Evidence: docs/plans/f1-key-isolation-record.md.

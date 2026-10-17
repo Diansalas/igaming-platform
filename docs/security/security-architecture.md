@@ -5246,7 +5246,10 @@ the review conditions R-1..R-9, T-1..T-18 are implemented and tested, see the AD
   target and payload, verified in the database by an owner-owned `SECURITY DEFINER` function against an owner-only key
   table. A stolen `igaming_runtime` credential that sets the actor GUCs of two real admins is refused (`AP001`..`AP005`).
 - **Key handling.** Signing key in configuration only (`ACTOR_PROOF_KEYS`, `ACTOR_PROOF_ACTIVE_KID`); verification copy
-  in `actor_proof_keys` (no runtime privilege, RLS on with no policy); kid-based rotation with at least two active keys;
+  in `actorproof_private.actor_proof_keys`, a table in an OWNER-ONLY schema (migration 0166, F1: no privilege for
+  `igaming_runtime` or `igaming_backup` on the schema or the table, RLS on with no policy; reachable only through the
+  definer verifier `actor_proof_require` and the probe `actor_proof_key_active`; excluded from logical dumps with the whole
+  schema, so neither a dump nor a stolen backup credential discloses it); kid-based rotation with at least two active keys;
   production refuses to start without a provisioned key. Runbook: `docs/runbooks/operational-runbooks.md` section 15.
 - **Also covered (review finding H2).** The K1 capability-grant requests / approvals / revokes and the financial
   policy-change proposals / approvals / cancels, with a NULL-tenant encoding confined to the `platform` scope and

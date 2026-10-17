@@ -590,6 +590,13 @@ const PermAlertManage Permission = "alert:manage"
 // Never granted to a tenant-scoped role.
 const PermAlertRouteManage Permission = "alert:route_manage"
 
+// PermPlatformStatusRead gates the platform operations status read (GET /v1/admin/platform/status, F6 / SA-3): the
+// running build's commit, the applied migration head and the database_environment anchor state. Read only, platform
+// scope only, granted solely to RolePlatformAdmin and deliberately NOT folded into PermAlertManage or any tenant
+// permission: it describes the platform itself, not any tenant's data. Never granted to a tenant-scoped role. Not added
+// to backoffice/src/auth/permissions.ts (no UI control exists for it).
+const PermPlatformStatusRead Permission = "platform_status:read"
+
 // Provider credential permissions (Stage 10.3 W2a; ADR 0093 §3 and its
 // W2a design-review amendment; security review §6). Four distinct
 // permissions, never bundled into PermTenantWrite, PermCasinoConfigWrite
@@ -861,6 +868,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ALERT-DELIVERY-1 (ADR 0102 section 18): sole grantee of the routing
 		// authoring permission, kept apart from PermAlertManage.
 		PermAlertRouteManage,
+		// F6 / SA-3: sole grantee of the platform status read. See that permission's own doc comment.
+		PermPlatformStatusRead,
 		// B13 (ADR 0111 2.9): payout instrument read.
 		PermPayoutInstrumentRead,
 		// PRH-2 K1 (ADR 0099 §3.2): platform_admin holds every governance

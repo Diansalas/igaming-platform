@@ -88,7 +88,7 @@ mode_seed_actor_proof() {
     inserted) rn_result actor_proof_row PASS "kid ${kid} inserted (parameter-bound, no key material in any statement text or log)" ;;
     already_present_identical) rn_result actor_proof_row PASS "kid ${kid} already present with the identical secret; nothing written (idempotent)" ;;
     conflict_different_secret_for_this_kid) rn_result actor_proof_row FAIL "kid ${kid} exists with a DIFFERENT secret; refusing to overwrite (rotation is a separate reviewed procedure, operational-runbooks.md section 15)" ;;
-    no_table) rn_result actor_proof_row FAIL "table actor_proof_keys does not exist: migrations have not run (migration 0120)" ;;
+    no_table) rn_result actor_proof_row FAIL "table actorproof_private.actor_proof_keys does not exist: migrations have not run (migrations 0120 and 0166)" ;;
     *) rn_result actor_proof_row FAIL "unexpected state '${state}'" ;;
   esac
   if [ "$row_ok" = 1 ]; then rn_result actor_proof_row_verified PASS "kid ${kid}: status active, octet_length >= 32 (governed writes no longer answer AP002 once platform-api's ACTOR_PROOF_KEYS carries the same kid)"

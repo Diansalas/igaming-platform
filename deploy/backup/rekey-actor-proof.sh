@@ -80,8 +80,8 @@ exec 9<&-
 export AP_SECRET_HEX
 
 # connection-level preconditions (no secret involved yet)
-PRE="$(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -c "SELECT (c.relowner = r.oid)::int, current_setting('log_statement'), current_setting('log_min_duration_statement'), coalesce(current_setting('log_parameter_max_length_on_error', true), '0'), (current_setting('log_transaction_sample_rate')::float8 <> 0)::int, (current_setting('log_statement_sample_rate')::float8 <> 0 AND current_setting('log_min_duration_sample') <> '-1')::int, (coalesce(current_setting('auto_explain.log_min_duration', true), '-1') <> '-1' AND coalesce(current_setting('auto_explain.log_parameter_max_length', true), '-1') <> '0')::int, (coalesce(nullif(current_setting('pgaudit.log', true), ''), 'none') <> 'none' AND coalesce(nullif(current_setting('pgaudit.log_parameter', true), ''), 'off') IN ('on', 'true', '1'))::int, (SELECT count(*) FROM public.actor_proof_keys), (SELECT count(*) FROM public.actor_proof_keys WHERE kid = '${KID}') FROM pg_class c, pg_roles r WHERE c.oid = 'public.actor_proof_keys'::regclass AND r.rolname = current_user" 2>/dev/null)" \
-  || bk_die "cannot read public.actor_proof_keys as ${REKEY_PGUSER}: it must be the migration/owner role of a database with migration 0120 applied"
+PRE="$(psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -c "SELECT (c.relowner = r.oid)::int, current_setting('log_statement'), current_setting('log_min_duration_statement'), coalesce(current_setting('log_parameter_max_length_on_error', true), '0'), (current_setting('log_transaction_sample_rate')::float8 <> 0)::int, (current_setting('log_statement_sample_rate')::float8 <> 0 AND current_setting('log_min_duration_sample') <> '-1')::int, (coalesce(current_setting('auto_explain.log_min_duration', true), '-1') <> '-1' AND coalesce(current_setting('auto_explain.log_parameter_max_length', true), '-1') <> '0')::int, (coalesce(nullif(current_setting('pgaudit.log', true), ''), 'none') <> 'none' AND coalesce(nullif(current_setting('pgaudit.log_parameter', true), ''), 'off') IN ('on', 'true', '1'))::int, (SELECT count(*) FROM actorproof_private.actor_proof_keys), (SELECT count(*) FROM actorproof_private.actor_proof_keys WHERE kid = '${KID}') FROM pg_class c, pg_roles r WHERE c.oid = 'actorproof_private.actor_proof_keys'::regclass AND r.rolname = current_user" 2>/dev/null)" \
+  || bk_die "cannot read actorproof_private.actor_proof_keys as ${REKEY_PGUSER}: it must be the migration/owner role of a database with migrations 0120 and 0166 applied"
 IFS='|' read -r IS_OWNER LOGSTMT LOGDUR LOGPARAM_ERR LOGTXN LOGSAMPLE AUTOEXP PGAUDIT NKEYS HAS_KID <<<"$PRE"
 [ "$IS_OWNER" = 1 ] || bk_die "${REKEY_PGUSER} does not own actor_proof_keys; only the owner role provisions keys (operational-runbooks.md section 15)"
 [ "$HAS_KID" = 0 ] || bk_die "kid '${KID}' is already present in actor_proof_keys"
@@ -95,15 +95,25 @@ case "$LOGSTMT" in mod|all) bk_die "log_statement=${LOGSTMT}: the server could l
 [ "$AUTOEXP" = 0 ] || bk_die "auto_explain logs parameters (auto_explain.log_min_duration set and auto_explain.log_parameter_max_length not 0); disable it for this role. Nothing was written"
 [ "$PGAUDIT" = 0 ] || bk_die "pgaudit is active with pgaudit.log_parameter=on: the bound secret would be written to the audit log (CloudWatch on RDS); set pgaudit.log_parameter=off for this role/session. Nothing was written"
 
+# SRF1-1(b): the key schema must be OWNER-ONLY before a secret is written into it. This is the backup baseline's own isolation invariant
+# (INV|actor_proof_key_reachable_by_non_owner, read from baseline.sql, not a copy), evaluated here as the owner: no non-owner grant on the schema,
+# the table or a column, no other role with effective USAGE/CREATE/SELECT, no SQL-standard function body depending on the table. A restored
+# archive that carried a DEFAULT PRIVILEGES entry, or a hand-made grant, refuses the re-key instead of handing the new key to another role.
+ISO_SQL="$(sed -n '/^SELECT .INV|actor_proof_key_reachable_by_non_owner|/,/;$/p' "${SCRIPT_DIR}/baseline.sql")"
+[ -n "$ISO_SQL" ] || bk_die "cannot find the isolation invariant in baseline.sql; nothing was written"
+ISO="$(psql -X -q -At -v ON_ERROR_STOP=1 -c "$ISO_SQL" 2>/dev/null)" || bk_die "cannot evaluate the key-schema isolation invariant; nothing was written"
+[ "$ISO" = "INV|actor_proof_key_reachable_by_non_owner|0" ] \
+  || bk_die "the actor-proof key schema is NOT owner-only (${ISO##*|} non-owner path(s): a grant, a DEFAULT PRIVILEGES inheritance, a role membership or a dependent function). Investigate and remove it before provisioning a key (backup-restore-dr.md section 5b). Nothing was written"
+
 # the INSERT (atomic: the table is locked SHARE ROW EXCLUSIVE and the row is inserted only if the table is still EMPTY, so two concurrent runs cannot both provision): the secret travels as a bound PARAMETER (extended protocol), never in statement text and never in argv (psql reads the file itself)
 psql -X -q -At -v ON_ERROR_STOP=1 -v ap_kid="$KID" <<'SQL' >/dev/null
 \getenv ap_hex AP_SECRET_HEX
 BEGIN;
-LOCK TABLE public.actor_proof_keys IN SHARE ROW EXCLUSIVE MODE;
-INSERT INTO public.actor_proof_keys (kid, secret) SELECT $1, decode($2, 'hex') WHERE NOT EXISTS (SELECT 1 FROM public.actor_proof_keys) \bind :ap_kid :ap_hex \g
+LOCK TABLE actorproof_private.actor_proof_keys IN SHARE ROW EXCLUSIVE MODE;
+INSERT INTO actorproof_private.actor_proof_keys (kid, secret) SELECT $1, decode($2, 'hex') WHERE NOT EXISTS (SELECT 1 FROM actorproof_private.actor_proof_keys) \bind :ap_kid :ap_hex \g
 COMMIT;
 SQL
 unset AP_SECRET_HEX
-[ "$(psql -X -q -At -c "SELECT count(*) FROM public.actor_proof_keys WHERE kid = '${KID}'")" = 1 ] || bk_die "the key was NOT inserted: another key appeared between the check and the insert (nothing was changed)"
-bk_log "actor-proof key '${KID}' provisioned: $(psql -X -q -At -F ', ' -v ON_ERROR_STOP=1 -c "SELECT 'status=' || status || ', secret_bytes=' || octet_length(secret) || ', probe_active=' || actor_proof_key_active(kid)::text FROM public.actor_proof_keys WHERE kid = '${KID}'")"
+[ "$(psql -X -q -At -c "SELECT count(*) FROM actorproof_private.actor_proof_keys WHERE kid = '${KID}'")" = 1 ] || bk_die "the key was NOT inserted: another key appeared between the check and the insert (nothing was changed)"
+bk_log "actor-proof key '${KID}' provisioned: $(psql -X -q -At -F ', ' -v ON_ERROR_STOP=1 -c "SELECT 'status=' || status || ', secret_bytes=' || octet_length(secret) || ', probe_active=' || actor_proof_key_active(kid)::text FROM actorproof_private.actor_proof_keys WHERE kid = '${KID}'")"
 echo "rekey: NEXT: put ${KID} (and the same secret as kid:base64) into the application's ACTOR_PROOF_ACTIVE_KID / ACTOR_PROOF_KEYS in the secret store, remove the old pair, shred ${SECRET_FILE##*/}, then run verify.sh --expect-actor-proof provisioned."

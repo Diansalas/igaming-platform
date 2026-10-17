@@ -216,7 +216,7 @@ cmd_up() {
   ecr_login "${registry}"
 
   say "phase 2/5: platform-api image and staging-runner image"
-  build_and_push "${api_repo}" - -f "${REPO_ROOT}/deploy/docker/platform-api.Dockerfile"
+  build_and_push "${api_repo}" - -f "${REPO_ROOT}/deploy/docker/platform-api.Dockerfile" --build-arg "GIT_COMMIT=${IMAGE_TAG}"
   build_and_push "$(tf output -json ecr_repository_urls | jq -r '.["staging-runner"]')" - -f "${REPO_ROOT}/deploy/docker/staging-runner.Dockerfile"
 
   # Phase 3: everything else. CloudFront distributions/VPC origin take

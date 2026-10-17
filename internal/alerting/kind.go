@@ -166,6 +166,14 @@ const KindAMLHoldEvalFailed Kind = "aml.hold_eval_failed"
 // principal. Attributes: phase (closed set) and sqlstate_class. Never the error text.
 const KindReconciliationSweepFailed Kind = "reconciliation.sweep_failed"
 
+// KindKYCResidenceIntoOpenMarket is the F5(b) (migration 0170) Kind: a reviewer recorded a KYC-verified residence in a
+// country the brand currently serves (the evidence that admits a player to deposits, casino play and sportsbook
+// wagering; there is no maker-checker on it, which is an OWNER decision). Raised in the SAME transaction as the review
+// and its market.residence_into_open_market audit row. Attributes are ids only (verification_id, brand_id,
+// request_id): NEVER the country. The discriminator is verification:<verification_id>, so one open alert per
+// determination and a re-review of the same row only adds an occurrence. Severity p2 is an ENGINEERING DEFAULT.
+const KindKYCResidenceIntoOpenMarket Kind = "kyc.residence_into_open_market"
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -253,6 +261,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindKYCSubmissionFailedTerminal, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("operation", "provider_id", "last_error_class", "outbox_id"),
+	},
+	KindKYCResidenceIntoOpenMarket: {
+		Kind: KindKYCResidenceIntoOpenMarket, Severity: SeverityP2, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("verification_id", "brand_id", "request_id"),
 	},
 	KindLaunchSuspensionExhausted: {
 		Kind: KindLaunchSuspensionExhausted, Severity: SeverityP1, Scope: ScopeKindPlatform,
