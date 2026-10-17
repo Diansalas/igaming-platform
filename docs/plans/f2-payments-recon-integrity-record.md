@@ -20,8 +20,10 @@ register, ADRs. ADR / registry / runbook proposals are in section 9.
 | F3a | The A5 tombstone branch refuses a payout reference that already carries a tombstone (vote-time check + `AlreadyPosted` backstop), typed error | SR5R-1 | IMPLEMENTED (MOCK) |
 | F3b | Standing finding `pay_payout_reversal_tombstone_but_paid` (migration 0167) | A5 R9 / LF-A5-1 (b) | IMPLEMENTED (MOCK); return-line semantics of a real PSP PROVIDER DEPENDENT |
 
-Migration numbers: **0167** used (`0167_payout_reversal_tombstone_paid_kind`, up and down). **0168 NOT used** (please
-register it as unused/free). F2a needs no migration (the seal columns exist since 0125).
+Migration numbers: **0167** used (`0167_payout_reversal_tombstone_paid_kind`, up and down) and removed from
+`internal/db/migrate.go` `reservedUnusedVersions` (the orchestrator's reservation commit `9378c91` says "if a listed version
+is later used, remove it"). **0168 NOT used**: it stays in the reserved-unused set (please keep it registered as unused or
+free it). F2a needs no migration (the seal columns exist since 0125). `migrate verify` on the merged tree: clean, no gaps.
 
 ## 2. Design
 
@@ -163,7 +165,9 @@ tracked through the mismatch's investigation status. The kind is in the staff-vi
    down refuses cursor evidence) of R3/R32 tests that never request an M2; those tests are untouched. No assertion changed.
 3. `internal/httpserver/payment_force_resolution_api_integration_test.go`: `newFRWorld` runs one genuine stream run for
    (tenant, `mock`) (same reason); `frWorld.statementRun()` helper. No assertion changed.
-4. MOCK statement source: bounded pages in time order (not reference order) and capped at `PeriodEnd` (content digests of
+4. `internal/db/migrate_test.go` `TestReservedUnusedVersions_ExactSet`: the expected set loses 167 (now a real migration),
+   exactly as the reservation rule requires; 168 and 169 stay.
+5. MOCK statement source: bounded pages in time order (not reference order) and capped at `PeriodEnd` (content digests of
    bounded MOCK imports change; no test pinned them).
 
 ## 4. Commands and results
@@ -177,7 +181,7 @@ scratch databases migrated from the source tree. Never CI, never staging. No rol
 | Format | `gofmt -l internal cmd` | clean |
 | Vet | `go vet ./...`; `go vet -tags integration ./...` | clean |
 | Lint | `golangci-lint run --allow-parallel-runners ./...` (v2.9.0) | 0 issues |
-| Lint (integration tag) | `golangci-lint run --allow-parallel-runners --build-tags integration ./internal/reconciliation/... ./internal/payments/... ./internal/httpserver/... ./cmd/...` | 0 issues in any F2/F3 file (the 646 reported are the pre-existing errcheck/staticcheck/unused backlog in other test files) |
+| Lint (integration tag) | `golangci-lint run --allow-parallel-runners --build-tags integration ./internal/reconciliation/... ./internal/payments/... ./internal/httpserver/... ./cmd/... ./internal/db/...` | 0 issues in any F2/F3 file (the 653 reported after the merge are the pre-existing errcheck/staticcheck/unused backlog in other test files) |
 | Unit | `go test -count=1 ./...` | 74 packages ok, 0 FAIL |
 | Reconciliation (integration) | `priv_test.sh -tags integration -count=1 -p 1 -v ./internal/reconciliation/...` | ok; 354 top-level PASS, 0 FAIL, 0 SKIP |
 | Reconciliation (-race) | `priv_test.sh -race -tags integration -count=1 -p 1 -timeout 2h ./internal/reconciliation/...` | ok, no DATA RACE |
@@ -187,14 +191,37 @@ scratch databases migrated from the source tree. Never CI, never staging. No rol
 
 ### 4.1 Payments
 
-PAYMENTS_PLACEHOLDER
+| Run (pre-merge, head `fb91815`/`8807c42`) | Command | Result |
+|---|---|---|
+| A11/A5/T8/M2/K3 subset | `priv_test.sh -tags integration -count=1 -p 1 -v -timeout 110m -run '^Test(A5\|T8\|F2e\|F3\|K3\|SL\|ParkBind\|H12\|R3\|R32\|A11\|PRH2\|Migration0115\|Migration0162\|Migration0163\|Migration0165\|M2\|S4B)' ./internal/payments/` | 181 PASS, 1 FAIL, 0 SKIP. The FAIL was this branch's own `TestF2e_M2_RefusedAfterAFailedOrTruncatedRunOrWhenStale`, compiled before its fixture was adapted to the lazy K3 statement run (commit `fb91815`); re-run alone afterwards: `-run '^TestF2e'` 6 PASS, 0 FAIL |
+| "a few letters" subset | `... -run '^Test(D7\|M4\|PostM4\|B11\|B12\|RV\|IWire\|DrainMerchant\|OrphanResolve\|Receipt\|RR\|Sweeper)' ./internal/payments/` | 318 PASS, 0 FAIL, 0 SKIP |
+| -race, new tests | `priv_test.sh -race -tags integration -count=1 -p 1 -v -run '^Test(F2e\|F3)' ./internal/payments/` | 19 PASS, 0 FAIL, no DATA RACE |
+| (history) first subset, eager K3 statement run | same as row 1 at `af18734` | 171 PASS, 8 FAIL: `TestK3_C9_*` (import count), `TestR3_*` x5 (run/import counts), `TestR32_Migration0127*` x2 (0160's down refuses cursor evidence). All caused by the then-EAGER world run; fixed by making it lazy (section 3 item 2), all PASS in row 1 |
+
+A full `./internal/payments` run (`-timeout 3h`, non-verbose) was started earlier and STOPPED by the agent harness's 2 h
+background limit before it reported (a non-verbose package prints nothing until it ends); it is not counted.
+
+### 4.2 After merging `origin/claude/focused-wright-jw88w9` (`9378c91`: F1, F5/F6, migrations 0166/0170, the 0167-0169 reservation)
+
+Private DB rebuilt from the merged tree (through 0170); `migrate verify`: clean, no gaps.
+
+| Run | Result |
+|---|---|
+| `./internal/reconciliation/...` (integration, -v) | ok; 354 PASS, 0 FAIL, 0 SKIP |
+| payments `-run '^Test(F2e\|F3\|A5\|T8\|K3_C4\|K3_C7\|K3_C9\|R3_\|R32)'` (-timeout 100m) | ok; 100 PASS, 0 FAIL, 0 SKIP (a first attempt without `-timeout` hit go test's default 10 min and is not counted) |
+| httpserver `-run 'TestForceResolution\|TestStaffRead\|Golden\|TestStaffRoutes\|PayoutReversal\|OpenAPI'` | ok; 88 PASS, 0 FAIL, 0 SKIP |
+| `./internal/db/ ./cmd/... ./internal/withdrawal/` (integration, -v) | 7 packages ok; 374 PASS, 0 FAIL, 1 SKIP (the anchor test, by design) |
+| unit `./internal/db/ ./cmd/...`; gofmt; vet (plain + integration); golangci-lint | ok / clean / clean / 0 issues (integration tag: 0 in F2/F3 files) |
+| `git diff origin/claude/focused-wright-jw88w9 --stat -- docs/governance` | EMPTY |
 
 ## 5. Mutation pass
 
 Script `f2_mutate.py` in the session scratchpad: a copy of the tree, one mutant at a time, the targeted test set, the private DB.
 60 mutants of the new logic (round 1: 60 written, 2 of them did not build: B2 and E6, rewritten as B2b and E6b). Round 1: 47
 killed, 11 survived, 2 unbuilt. Rounds 2/3: seven survivors killed by new tests (marked "round 2"), B2b and E6b killed.
-**Final: 60 valid mutants, 56 killed, 4 survived (A2, A5, A8 equivalent; C5 justified).**
+**Final: 60 valid mutants, 56 killed, 4 survived (A2, A5, A8 equivalent; C5 justified).** After the K3 world's statement run
+became lazy (section 3 item 2) the gate mutants E1-E5, E7, E9 were re-run: all killed (E7 needed its "other provider" case to
+make the world's run explicit first, commit `8807c42`).
 
 | id | mutant | result |
 |---|---|---|
