@@ -75,6 +75,7 @@ func TestF2e_M2_RefusedAfterAFailedOrTruncatedRunOrWhenStale(t *testing.T) {
 	t.Run("failed_after_success", func(t *testing.T) {
 		w := newK3World(t, k3Opts{base: 1})
 		_, a := w.ambiguousPayout(500)
+		w.ensureStatementRun()
 		time.Sleep(5 * time.Millisecond)
 		f2eRecordFailure(t, w.pool, w.f.tenantID, w.provider)
 		if _, err := f2eRequestM2(w, a.ID, ResolutionM2DeclareNotPaid); !errors.Is(err, ErrResolutionReconciliationNotCurrent) {
@@ -110,6 +111,7 @@ func TestF2e_M2_RefusedAfterAFailedOrTruncatedRunOrWhenStale(t *testing.T) {
 	t.Run("stale", func(t *testing.T) {
 		w := newK3World(t, k3Opts{base: 1})
 		_, a := w.ambiguousPayout(500)
+		w.ensureStatementRun()
 		w.svc = w.svc.WithStatementEvidenceMaxAge(time.Millisecond)
 		time.Sleep(20 * time.Millisecond)
 		if _, err := f2eRequestM2(w, a.ID, ResolutionM2DeclareNotPaid); !errors.Is(err, ErrResolutionReconciliationNotCurrent) {
