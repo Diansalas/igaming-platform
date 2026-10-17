@@ -322,12 +322,78 @@ func roleNeed(role string) string {
 	return ""
 }
 
+type platformStatusView struct {
+	commit, anchor    string
+	recorded, shapeOK bool
+	head, applied     int64
+}
+
 func (w *world) platformChecks() {
+	// SA-3: GET /v1/admin/platform/status (platform_status:read, platform admin only) reports the build commit, the
+	// highest applied migration and the database_environment anchor. One call, read by the three checks below.
+	var ps *platformStatusView
+	statusFetch := func(t *T) bool {
+		if ps != nil {
+			return true
+		}
+		r := t.acall("ADMIN", "GET", "/v1/admin/platform/status", nil)
+		if !t.expect(r, 200, "", "platform status") {
+			return false
+		}
+		m := r.obj()
+		head, hok := pickNum(m, "migrations", "head_version")
+		applied, aok := pickNum(m, "migrations", "applied_count")
+		rec, _ := pick(m, "database_environment", "recorded").(bool)
+		ps = &platformStatusView{commit: pickStr(m, "build", "commit"), anchor: pickStr(m, "database_environment", "anchor"), recorded: rec,
+			head: int64(head), applied: int64(applied), shapeOK: hok && aok}
+		if !ps.shapeOK || ps.commit == "" || ps.anchor == "" {
+			t.fail("platform status lacks build.commit, migrations or database_environment: %s", r.brief())
+			ps = nil
+			return false
+		}
+		return true
+	}
 	w.check("platform.version_evidence", func(t *T) {
-		t.skipManual("platform-api exposes no build/version endpoint; startup evidence is the `starting platform-api environment=...` log line and the ECS task image digest (README: CloudWatch queries). /readyz 200 proves the process is up with a reachable database")
+		if !statusFetch(t) {
+			return
+		}
+		if !reCommit.MatchString(ps.commit) {
+			t.fail("the running build reports no valid commit (%q): it was built without GIT_COMMIT and without a VCS stamp", ps.commit)
+			return
+		}
+		if w.cfg.ExpectCommit != "" && !strings.HasPrefix(ps.commit, w.cfg.ExpectCommit) && !strings.HasPrefix(w.cfg.ExpectCommit, ps.commit) {
+			t.fail("the running build reports commit %s, expected %s (EXPECT_COMMIT): wrong image deployed?", ps.commit, w.cfg.ExpectCommit)
+			return
+		}
+		t.pass("platform-api reports build commit %s%s", ps.commit, ifs(w.cfg.ExpectCommit != "", " (matches EXPECT_COMMIT)", "; EXPECT_COMMIT not set, validity only"))
 	})
 	w.check("platform.migration_head", func(t *T) {
-		t.skipManual("no HTTP surface reports the applied migration head; evidence is the migrate task log (`migrate status` / `migrate verify`, plan 6.1). The suite cannot read the database")
+		if !statusFetch(t) {
+			return
+		}
+		if ps.head <= 0 || ps.applied <= 0 {
+			t.fail("platform status reports migration head %d with %d applied versions: no migrations applied?", ps.head, ps.applied)
+			return
+		}
+		if w.cfg.ExpectMigrationHead > 0 && ps.head != w.cfg.ExpectMigrationHead {
+			t.fail("the database migration head is %d, expected %d (EXPECT_MIGRATION_HEAD): migrate task not run for this image?", ps.head, w.cfg.ExpectMigrationHead)
+			return
+		}
+		t.pass("applied migration head %d (%d versions recorded)%s", ps.head, ps.applied, ifs(w.cfg.ExpectMigrationHead > 0, " (matches EXPECT_MIGRATION_HEAD)", "; EXPECT_MIGRATION_HEAD not set, positive head only"))
+	})
+	w.check("platform.database_anchor", func(t *T) {
+		if !statusFetch(t) {
+			return
+		}
+		want := w.cfg.ExpectAnchor
+		if want == "" {
+			want = w.cfg.ExpectEnv
+		}
+		if !ps.recorded || ps.anchor != want {
+			t.fail("the database_environment anchor is %q (recorded=%v), expected %q (EXPECT_ANCHOR, default EXPECT_APP_ENV): plan 6.2 record-anchor not done or wrong database", ps.anchor, ps.recorded, want)
+			return
+		}
+		t.pass("database_environment anchor is %s, as expected", ps.anchor)
 	})
 	var view *readinessView
 	w.check("platform.launch_readiness", func(t *T) {
@@ -376,7 +442,7 @@ func (w *world) platformChecks() {
 			t.fail("the running process reports APP_ENV=%q, expected %q (EXPECT_APP_ENV): wrong stack?", view.env, w.cfg.ExpectEnv)
 			return
 		}
-		t.pass("platform-api reports environment=%s (matches EXPECT_APP_ENV); the database_environment anchor itself is read only by migrate/restore tooling", view.env)
+		t.pass("platform-api reports environment=%s (matches EXPECT_APP_ENV); the database anchor is asserted by platform.database_anchor", view.env)
 	})
 	w.check("platform.readiness_alerts_item", func(t *T) {
 		if !t.need("platform.launch_readiness") {

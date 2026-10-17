@@ -10,8 +10,9 @@ import (
 )
 
 // ErrEnvironmentAnchorMismatch: a production process is connected to a database whose
-// database_environment anchor (migration 0135) says development or test.
-var ErrEnvironmentAnchorMismatch = errors.New("db: refusing to start: production process on a database anchored as development/test")
+// database_environment anchor (migration 0135) says anything other than production (development,
+// test, staging, or any other recorded value).
+var ErrEnvironmentAnchorMismatch = errors.New("db: refusing to start: production process on a database whose database_environment anchor is not production")
 
 // ErrEnvironmentAnchorUnrecorded: a production process is connected to a database with no
 // database_environment row. The database reads that as production, but the launch gate (ADR 0115
@@ -42,8 +43,11 @@ func (p *Pool) ReadEnvironmentAnchor(ctx context.Context) (string, error) {
 	return env, nil
 }
 
-// VerifyEnvironmentAnchor (ADR 0115 S1, security LOW) refuses a PRODUCTION start (the guarded
-// environment, config.GuardEnvironment) against a database anchored as development or test, and
+// VerifyEnvironmentAnchor (ADR 0115 S1, security LOW; NA-6) refuses a PRODUCTION start (the guarded
+// environment, config.GuardEnvironment, which includes an unset APP_ENV) against a database whose
+// recorded anchor is anything other than exactly "production" (development, test, staging or any
+// other value; staging is NOT admitted: a legitimate staging process runs APP_ENV=staging, whose
+// guard is "staging", not "production"), and
 // REFUSES an unrecorded anchor (ErrEnvironmentAnchorUnrecorded; launch gate), and fails closed if
 // the anchor cannot be read in production. Outside production it checks nothing (no new friction
 // for dev / CI / test). It returns the anchor it read.
@@ -55,11 +59,11 @@ func VerifyEnvironmentAnchor(ctx context.Context, guardEnvironment string, r env
 	if err != nil {
 		return "", err
 	}
-	if anchor == "development" || anchor == "test" {
-		return anchor, fmt.Errorf("%w (anchor=%q)", ErrEnvironmentAnchorMismatch, anchor)
-	}
 	if anchor == "" {
 		return anchor, ErrEnvironmentAnchorUnrecorded
+	}
+	if anchor != "production" {
+		return anchor, fmt.Errorf("%w (anchor=%q)", ErrEnvironmentAnchorMismatch, anchor)
 	}
 	return anchor, nil
 }

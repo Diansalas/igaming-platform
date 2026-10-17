@@ -85,6 +85,7 @@ func TestVerifyEnvironmentAnchor_RealDatabase_FourStates(t *testing.T) {
 		{"production", nil},
 		{"development", ErrEnvironmentAnchorMismatch},
 		{"test", ErrEnvironmentAnchorMismatch},
+		{"staging", ErrEnvironmentAnchorMismatch}, // NA-6
 	}
 	for _, s := range states {
 		setAnchor(s.anchor)

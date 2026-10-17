@@ -192,10 +192,13 @@ releases a kill switch it did not engage (`setup.no_stale_containment` fails a r
 1. **Non-allow-listed networks get 403** (`health.edge_allowlist_403`): from a network outside `staging_access_cidrs`
    (for example a phone on mobile data) every `api_url`, `staging_url` and `backoffice_url` path returns 403 from the
    CloudFront viewer function; record it once.
-2. **Build/version and migration head** (`platform.version_evidence`, `platform.migration_head`): no HTTP surface
-   reports them. Evidence: the `migrate` task log (`migrate verify: all applied migrations verified clean`, the
-   `status` line, plan 6.1) and the `starting platform-api environment=staging` line below. The suite does show the
-   environment the process reports (`platform.environment_anchor`, via launch-readiness).
+2. **Build/version, migration head, database anchor** (`platform.version_evidence`, `platform.migration_head`,
+   `platform.database_anchor`): read from `GET /v1/admin/platform/status` (permission `platform_status:read`, platform
+   admin; the `ADMIN` actor; SKIP prerequisite when `ADMIN` is not configured). Optional exact expectations:
+   `EXPECT_COMMIT` (hex prefix), `EXPECT_MIGRATION_HEAD` (integer), `EXPECT_ANCHOR` (default: `EXPECT_APP_ENV`);
+   unset means shape only (valid commit, positive head, recorded anchor equal to the expected environment). Not yet run
+   against AWS. The `migrate` task log and the `starting platform-api environment=staging` line stay as corroborating
+   operator evidence. `platform.environment_anchor` still shows the environment the process reports (launch-readiness).
 3. **Alert delivery** (`alerting.delivery_to_receiver`, plan 10.1/10.2): `killswitch.engage_raises_alert` raises the
    durable p2 alert `payment.kill_switch_engaged`; the operator checks the HMAC-signed webhook arrived at the receiver
    and that nobody is e-mailed (the e-mail channel is MOCK). `R-ALERTS` passes only once p1 and p2 routes are approved.
