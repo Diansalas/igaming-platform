@@ -116,3 +116,21 @@ func TestRaiseDepositEscalationAlert_IsNoOpForPayoutAttempts(t *testing.T) {
 		t.Fatalf("a payout attempt must be a no-op, got %v", err)
 	}
 }
+
+// PAY-DEPOSIT-MISMATCH-ALERT-1: the deposit signal reasons are their own closed set (not terminal
+// dispute reasons, not escalations); an unknown reason is never echoed.
+func TestDepositSignalReasons_ClosedSet(t *testing.T) {
+	if len(depositSignalReasons) != 2 ||
+		alertReasonDepositMismatchedSuccessOnDeclined != "mismatched_success_on_declined_deposit" ||
+		alertReasonDepositMismatchedSuccessOnSucceeded != "mismatched_success_on_succeeded_deposit" {
+		t.Fatalf("deposit signal set changed: %v", depositSignalReasons)
+	}
+	for r := range depositSignalReasons {
+		if IsDepositDisputeTerminalReason(r) {
+			t.Errorf("%q must not be a terminal dispute reason (nothing is parked)", r)
+		}
+		if _, esc := depositEscalationReasons[r]; esc {
+			t.Errorf("%q must not be an escalation reason", r)
+		}
+	}
+}
