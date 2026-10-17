@@ -15,8 +15,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -40,26 +38,7 @@ func TestA5_Migration0163_DownRefusedWhileAMismatchResolutionExists(t *testing.T
 			steps++
 		}
 	}
-	// F4 (CHANGED FIXTURE): every E7 since migration 0169 records a withdrawal_gate_decisions row, and 0169's down
-	// refuses (WD095) while one exists, so the chain would stop there. On this THROWAWAY scratch database the owner
-	// removes them (append-only trigger lifted for that one statement, FORCE RLS lifted for the owner) so the down
-	// chain reaches 0163's own refusal, which is what this test pins.
-	if err := w.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		for _, q := range []string{
-			`ALTER TABLE withdrawal_gate_decisions DISABLE TRIGGER withdrawal_gate_decisions_immutable`,
-			`ALTER TABLE withdrawal_gate_decisions NO FORCE ROW LEVEL SECURITY`,
-			`DELETE FROM withdrawal_gate_decisions`,
-			`ALTER TABLE withdrawal_gate_decisions FORCE ROW LEVEL SECURITY`,
-			`ALTER TABLE withdrawal_gate_decisions ENABLE TRIGGER withdrawal_gate_decisions_immutable`,
-		} {
-			if _, err := tx.Exec(ctx, q); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("scratch owner: clear the 0169 decision rows: %v", err)
-	}
+	f4ScratchClearGateDecisions(t, w.pool) // F4 (CHANGED FIXTURE): see the helper.
 	_, err = w.pool.MigrateDown(context.Background(), dir, steps)
 	if err == nil || !strings.Contains(err.Error(), "MR099") {
 		t.Fatalf("0163 down must refuse MR099, got %v", err)

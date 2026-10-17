@@ -553,6 +553,30 @@ func TestF4_DB_RedispatchBackstop(t *testing.T) {
 	}
 }
 
+// f4ScratchClearGateDecisions is for a test that steps a THROWAWAY scratch database down from head to an older
+// migration: every E7 since 0169 records a withdrawal_gate_decisions row and 0169's down refuses (WD095) while one
+// exists, so the chain would stop at 0169 instead of reaching the down the test pins. The scratch owner removes the
+// rows (the append-only trigger and FORCE RLS lifted for that one statement, both restored in the same transaction).
+func f4ScratchClearGateDecisions(t *testing.T, pool *db.Pool) {
+	t.Helper()
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		for _, q := range []string{
+			`ALTER TABLE withdrawal_gate_decisions DISABLE TRIGGER withdrawal_gate_decisions_immutable`,
+			`ALTER TABLE withdrawal_gate_decisions NO FORCE ROW LEVEL SECURITY`,
+			`DELETE FROM withdrawal_gate_decisions`,
+			`ALTER TABLE withdrawal_gate_decisions FORCE ROW LEVEL SECURITY`,
+			`ALTER TABLE withdrawal_gate_decisions ENABLE TRIGGER withdrawal_gate_decisions_immutable`,
+		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("scratch owner: clear the 0169 decision rows: %v", err)
+	}
+}
+
 // f4AllowIfPayout records the fixture ALLOW (stage redispatch) when attemptID is a PAYOUT attempt; a deposit attempt
 // is untouched (0169 binds payouts only).
 func f4AllowIfPayout(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID) error {

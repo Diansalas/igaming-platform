@@ -1069,6 +1069,7 @@ func TestHSEC_HoldRelease_Migration0124DownRefusals(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("clear launch history on the scratch world: %v", err)
 		}
+		f4ScratchClearGateDecisions(t, h.pool) // F4: a later 0169 down refuses while decision rows exist.
 		dir := realMigrationsDir(t)
 		if _, err := h.pool.MigrateDown(context.Background(), dir, migrationsAbove(t, hsecMigrationVersion)); err != nil {
 			t.Fatalf("down above 0124 (empty): %v", err)
