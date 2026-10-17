@@ -8,11 +8,16 @@ Everything here is `IMPLEMENTED` against the local database and MOCK providers o
 Not edited (orchestrator single writer): `docs/governance/task-registry.md`, HANDOVER, progress, active-stage, the decision
 register, ADRs. ADR / registry / runbook proposals are in section 9.
 
+**Fix round (2026-10-17, after SRF2 / LFF2 below).** The orchestrator decided to close the SQL-only blinding (SRF2-1 / LFF2-1,
+SRF2-2 / LFF2-2) and the other findings now. Design in 2.8, results in 4.3, mutants in 5.1. Where a statement in sections 1-9
+was overstated or is superseded, it has been corrected in place and marked "(fix round)". Sections SRF2 and LFF2 are the
+reviewers' text, unchanged.
+
 ## 1. Deliverables and labels
 
 | # | Item | Origin | Label |
 |---|---|---|---|
-| F2a | Sealed cursor: the payment_statement cursor trusts only a run backed by a SEALED import of the same source whose HMAC seal verifies | SR11-1 via SR11-10 | IMPLEMENTED (MOCK); production startup refuses a registered source without keys |
+| F2a | Sealed cursor: the payment_statement cursor trusts only a run whose RUN seal verifies (migration 0168, fix round) and whose import, written by the same source, has an import seal that verifies | SR11-1 via SR11-10; SRF2-1/2/4, LFF2-1/2/4 | IMPLEMENTED (MOCK); production startup refuses a registered source without keys |
 | F2b | `cursor_anomaly` discriminator carries the unbacked-row count and a digest of their ids; audit row per sighting | SR11-11 | IMPLEMENTED |
 | F2c | Bounded-mode "missing provider record" (and ledger-join (a)) windowed by the attempt's last change, with a persisted-line exemption | LF-A11-1 | IMPLEMENTED (MOCK); legacy mode unchanged |
 | F2d | Per-provider settle lag (source declaration + safe default), completeness horizon `PeriodEnd = now - lag` enforced, time-ordered pages enforced, MOCK conforms; contract text and runbook | LF-A11-2 / LF-A11-6 | IMPLEMENTED (MOCK); real lag value PROVIDER DEPENDENT |
@@ -22,8 +27,14 @@ register, ADRs. ADR / registry / runbook proposals are in section 9.
 
 Migration numbers: **0167** used (`0167_payout_reversal_tombstone_paid_kind`, up and down) and removed from
 `internal/db/migrate.go` `reservedUnusedVersions` (the orchestrator's reservation commit `9378c91` says "if a listed version
-is later used, remove it"). **0168 NOT used**: it stays in the reserved-unused set (please keep it registered as unused or
-free it). F2a needs no migration (the seal columns exist since 0125). `migrate verify` on the merged tree: clean, no gaps.
+is later used, remove it"). **0168 used (fix round)**: `0168_reconciliation_run_seal` (up and down), removed from
+`reservedUnusedVersions`; the exact-set test now expects `{143..150, 159, 161, 169}`. `migrate verify` on the merged tree:
+clean, no gaps.
+
+Additional fix-round items: F2c exemption requires the exact amount and asset, and a `reversed` line becomes
+`pay_status_mismatch` (LFF2-5, LFF2-6). Every persisted line that can clear or confirm must come from a verifying import, lie
+inside that import's coverage and not be dated in the future (LFF2-5 / SRF2-3). The F2e evidence is read before the M2
+transaction opens (SRF2-5 / LFF2-7), and a future-dated failure row cannot block M2 (LFF2-3). All are IMPLEMENTED (MOCK).
 
 ## 2. Design
 
@@ -37,11 +48,12 @@ source (`source_label`, `is_mock`), carrying `import_seal` + `seal_kid`, whose s
 stored lines (`verifyImportSealInTx`, the reconciliation-side twin of `payoutinstrument.VerifyStatementImportInTx`, parity
 pinned by a test; the package still holds no key material: it uses the `statement.ImportSealVerifier` interface).
 
-- Every run row of the pair above that cursor (whatever its `run_at`/`coverage_end`) is unbacked: ignored, logged at Error,
-  audited (`reconciliation.payment_cursor_anomaly`) and alerted (F2b).
-- Bounded work: at most 64 candidate `coverage_end` values (newest first) and 4 sealed imports each are examined; when all 64
-  fail the run FAILS closed (`ErrPaymentCursorUnverifiable`, phase `cursor`, nothing fetched) rather than silently falling to
-  a zero cursor.
+- (Fix round: superseded by 2.8. The run row itself is now sealed and is the cursor's anchor.) Every run row of the pair
+  above that cursor (whatever its `run_at`/`coverage_end`) is unbacked: ignored, logged at Error, audited
+  (`reconciliation.payment_cursor_anomaly`) and alerted (F2b).
+- (Fix round: REMOVED, see 2.8. There is no candidate limit and no fail-closed state, and `ErrPaymentCursorUnverifiable` no
+  longer exists.) The original design examined at most 64 candidate `coverage_end` values, 4 sealed imports each, and
+  failed closed when all 64 failed. A flood of forged rows could therefore stop the stream (SRF2-4 / LFF2-4).
 - The stale-cursor re-check under the advisory lock uses the same sealed read (in the match snapshot).
 - Ingest seals with the same keys (`importSealerFor`).
 - Without any verifier (a non-production process without `PAYOUT_INSTRUMENT_KEYS`) the A11 rule (any backing import) applies
@@ -50,12 +62,13 @@ pinned by a test; the package still holds no key material: it uses the `statemen
   Production already requires the keys for any non-MOCK source (`payoutinstrument.VerifyStartup`) and refuses MOCK sources,
   so this is a belt-and-braces gate.
 
-Residuals (stated honestly; SR11-1 is NOT "forgery-proof"):
+Residuals (stated honestly):
 1. An attacker who can run code in the application process holds the key (the T6 class): out of scope of a seal.
-2. A forged run row naming the `coverage_end` of a GENUINE sealed import whose own match did not commit (a stale-cursor loser,
-   or a failed match, which already raised its own P1) moves the cursor to that import's end: it skips at most that one
-   fetched window, whose lines are stored. Closing this needs a seal on the run row itself (a new key-derivation label in
-   the B13 key module: security + architect decision, proposed in section 9).
+2. (Fix round: CLOSED.) The original text understated this case. A forged run row naming the `coverage_end` of a genuine
+   sealed import whose match never committed moved the cursor past that window. Holding the stream's advisory lock (any
+   session can) makes the match skip silently, so this was a repeatable SQL-only blinding of the whole stream, not "at most
+   one window" (SRF2-1 / LFF2-1). It is closed by the run seal (2.8): a run row that the application did not seal is never a
+   cursor. The skip and the stall are also loud now. Tests: `TestF2_SRF2_1_*`.
 3. Key rotation: a retired kid that the process no longer holds makes its imports unverifiable; the cursor falls back to an
    older verifying run (one re-fetched window, idempotent at import level) and `cursor_anomaly` fires once. Runbook updated.
 4. Relabelling a source resets its trusted cursor (label is part of the backing rule). Documented in the source contract.
@@ -77,7 +90,12 @@ opens a NEW alert. The audit row carries count, `newest_unbacked_run_id`, digest
   it: same operation, status `succeeded` or `reversed`, by provider reference, payout settlement reference or merchant
   reference. This covers the reverse latency case (provider line in window k, platform success in window k+1): the line was
   imported, so the provider has a record. A provider that never recorded the success (no line, or only a pending line) is
-  still reported ("never silently missing", tested both ways);
+  still reported ("never silently missing", tested both ways). (Fix round, LFF2-5 / LFF2-6: the exemption now needs a
+  USABLE line: an eligible import whose seal verifies when the process has keys, the line inside that import's coverage and
+  not after this run's coverage end, status `succeeded`, and amount AND asset equal to the attempt's. A usable succeeded line
+  with another amount or asset is `pay_amount_mismatch` / `pay_asset_mismatch` (`check=persisted_amount` /
+  `persisted_asset`). A usable `reversed` line is `pay_status_mismatch` (`check=persisted_reversed`). The read is bounded
+  (64 lines per candidate + 1), and passing that bound fails the run with `ErrPaymentEvidenceOverflow`.);
 - ledger-join (a) ("a succeeded attempt has exactly its posting") uses the same windowing in bounded mode, so an attempt that
   succeeds after the window of its `sentAt` is still checked once.
 Legacy (creation-dated, non-continuation) mode is unchanged (sentAt, no exemption); its pins pass unchanged.
@@ -105,14 +123,23 @@ Legacy (creation-dated, non-continuation) mode is unchanged (sentAt, no exemptio
 (`ErrResolutionReconciliationNotCurrent`, class precondition, HTTP 409 `force_resolve_precondition_failed`, the existing
 denied-audit path) and at execution (`refused_at_execution`, refusal code `reconciliation_not_current`, nothing posted)
 unless, for (tenant, attempt's provider):
-1. the newest stream-recorded run exists (a `payment_statement` run row, `run_at <= now()`, with a backing import; when the
-   service has import seal keys (`WithImportSealKeys`, wired in production from `PayoutInstruments`) the backing import must
-   be sealed by the stream and VERIFY; at most 16 newest rows examined);
-2. it is not truncated;
-3. no `reconciliation.sweep_run_failed` audit row for `payment_statement` and this provider id is newer than it;
-4. it is at most `DefaultStatementEvidenceMaxAge` (6 h, `WithStatementEvidenceMaxAge`) old (database clock).
+1. the newest stream-recorded run exists. This is a `payment_statement` run row with `run_at <= now()` and a backing import.
+   When the service has keys (`WithImportSealKeys`, wired in production from `PayoutInstruments`), the run must instead be the
+   newest one whose RUN seal verifies, whose import has the sealed shape, and whose import seal verifies. This lookup uses
+   keyset pages of 512 and has no row limit (fix round, SRF2-2 / LFF2-2). The original text said "sealed-import-backed, at
+   most 16 rows". That was overstated: a run row copied with `run_at = now()` was admitted (SRF2-2);
+2. it is not truncated (with keys: the SEALED `window_truncated`);
+3. no `reconciliation.sweep_run_failed` audit row for `payment_statement` and this provider id is newer than it. Fix round
+   (LFF2-3): the failure row must also satisfy `created_at <= now() + 5 min`, so a row dated in the future cannot block M2
+   for good;
+4. it is at most `DefaultStatementEvidenceMaxAge` (6 h, `WithStatementEvidenceMaxAge`) old (database clock; with keys, the
+   SEALED `run_at`).
 The evidence is read in its own short read-only tenant (system) transaction, because a platform-acting session cannot read
-`audit_log` (0112 acting fence). A forged failure row can only refuse. All existing M2 governance (proof-bound request and
+`audit_log` (0112 acting fence). A forged failure row can only refuse. Fix round (SRF2-5 / LFF2-7): this read happens
+BEFORE the M2 transaction opens, in `Request` and in `Decide` (approve). The result is carried on the context, and the
+in-transaction checks (submission and execution) apply it without opening a second pooled connection. A context with no
+pre-read evidence refuses (`reconEvidenceUnread`) and never falls back to an in-transaction read. The execution-time recheck
+therefore uses evidence read immediately before the execution transaction. All existing M2 governance (proof-bound request and
 approvals, four-eyes, registered-source rule, database guard) is unchanged; M4 is not gated (it rests on its own sealed
 evidence). Not added: a database restatement of the gate (the seal cannot be verified in SQL) - Go-only, like the
 source-registry rule it sits next to.
@@ -138,11 +165,74 @@ list + `pay_payout_reversal_tombstone_but_paid`; down refuses WD099 while such f
   (2) a K2 NET recovery of the withdrawn amount under the request's `withdrawal_failed` (E10) transaction on its wallet and
   asset (`netRecovery`, the M2 (d) / RR-1 rule; partial recovery does not clear);
 - unwindowed, every run, one finding per tombstone, P1 through the stream's existing mismatch alert.
+- (Fix round, LFF2-5 (b) / SRF2-3.) A clearing (return) line must also come from an import whose seal verifies when the
+  process has keys, lie inside that import's coverage, and not be dated beyond the database clock plus 5 minutes. A forged
+  return line dated 50 years ahead therefore no longer suppresses R9 for good. Raising is unchanged: any import, any amount.
 Why it is not a permanent false P1: a legitimate branch is one where the PSP really returned the money; either the PSP never
 reports the payout as succeeded (never raised: tested) or it reports the return (clears: tested), or the platform recovers
 from the player (clears: tested). Residual: an off-platform recovery has no clearing path (identical to M2 (d)); it is
 tracked through the mismatch's investigation status. The kind is in the staff-view vocabulary (`read.go`) and the OpenAPI
 `StaffReconciliationKind` enum.
+
+### 2.8 Fix round (SRF2 / LFF2): run seal, loud skip and stall, line eligibility, pre-read evidence
+
+1. **Run seal (SRF2-1/2, LFF2-1/2; migration 0168).**
+   - New HKDF label `b13-run-v1` in `payoutinstrument.Keys`, next to the import label `b13-import-v1`.
+   - `SealPaymentRun` / `VerifyPaymentRun` (HMAC-SHA256, constant-time compare) sign the canonical text
+     `statement.RunCanon` (domain tag `run`) over:
+     - run id, tenant, provider, stream;
+     - the import the run matched;
+     - that import's coverage start and end;
+     - `window_truncated`;
+     - `run_at` (truncated to microseconds before sealing, so the stored value round-trips).
+   - Migration 0168 adds `run_import_id`, `run_seal` and `run_seal_kid` to `reconciliation_runs`, with these constraints:
+     - CHECK all-or-none;
+     - CHECK shape: 64 lower-hex seal, kid pattern, stream `payment_statement`, provider and `coverage_end` not null;
+     - same-tenant FK `(run_import_id, tenant_id)` to `payment_statement_imports`;
+     - keyset index `reconciliation_runs_payment_sealed_cursor`.
+   - The down migration refuses while sealed runs exist.
+   - The application writes the seal in the run's own INSERT (`persistRun`). Reconciliation holds only the
+     `statement.RunSealer` / `RunSealVerifier` interfaces, never a key.
+   - With keys, a run row is the cursor (and M2 evidence) only if all of these hold:
+     - its run seal verifies;
+     - its import was written by this stream and source with the sealed coverage;
+     - that import's seal verifies over the import and all its lines.
+   - A forged row, or a row copied with a new id or `run_at`, never verifies. This includes the exact probe: a forged row at a
+     genuine import's `coverage_end` while the advisory lock is held.
+   - Without keys (non-production only) the A11 rule applies unchanged. Production refuses a registered source unless BOTH
+     verifiers are present (`VerifyPaymentCursorSealing`).
+2. **No fail-closed state, bounded anomaly read (SRF2-4 / LFF2-4).**
+   - The cursor reads candidate runs in keyset pages of 512 (newest first), with one HMAC per row. The import seal is
+     verified only for a row whose run seal already verified.
+   - There is no candidate limit and no fail-closed state. Forged rows cost a linear scan but can neither move nor stop the
+     stream. `ErrPaymentCursorUnverifiable` is removed.
+   - The anomaly set is the run rows that do not back the trusted cursor and are newer than it (`coverage_end` above it, or
+     `run_at` after the cursor run's). It is one `count(*)` plus at most 1000 rows read for the digest.
+3. **Loud skip, durable stall (SRF2-1 (b)(c)).**
+   - Every match skipped for lock contention or a stale cursor writes `reconciliation.payment_match_skipped` (target is the
+     import id) and a Warn log.
+   - Every sweep then checks for imports of this source above the trusted cursor that were fetched more than 30 minutes ago
+     (`MatchStallAfter`). Any such import raises the durable P1 phase `match_stalled` plus the audit row
+     `reconciliation.payment_match_stalled`.
+   - The window is never lost: the next sweep re-fetches from the unchanged trusted cursor and matches the new import.
+   - A held advisory lock therefore turns into a visible stall, not into blinding.
+4. **Clearing / confirming lines (LFF2-5 / SRF2-3).** A persisted line may clear or confirm (K3 S1-S6, M2 / M4 evidence,
+   R9 return, deposit reversal, F2c exemption) only if all of these hold:
+   - its import is D-4 eligible;
+   - its import's seal verifies when the process has keys (`importVerified`, cached per run);
+   - it lies inside its import's coverage;
+   - it is not dated beyond the database clock plus 5 minutes.
+
+   The F2c exemption bounds by this run's coverage end instead, because it is a check of the current window.
+
+   The clock bound replaced an earlier "not after this run's coverage end" bound for K3 / R9 / reversals. A backfill run over
+   an older window, or the MA020 Go-vs-SQL parity harness, must keep honouring genuine later evidence (`TestK3_C34-36`,
+   `TestR2_GY2*` and `TestMA020_Parity_*` failed with the run bound and pass with the clock bound).
+
+   The current import's own lines clear only if its seal verifies (`currentImportOK`). Raising is unchanged.
+5. **F2c amount / asset / reversed (LFF2-5 (3), LFF2-6).** See 2.3. The comment on `lastChangeAt` now states that `now()` is
+   the transaction start.
+6. **F2e (LFF2-3, SRF2-5 / LFF2-7, SRF2-2).** See 2.5.
 
 ## 3. Changed assertions and fixtures (nothing deleted or weakened)
 
@@ -169,6 +259,26 @@ tracked through the mismatch's investigation status. The kind is in the staff-vi
    exactly as the reservation rule requires; 168 and 169 stay.
 5. MOCK statement source: bounded pages in time order (not reference order) and capped at `PeriodEnd` (content digests of
    bounded MOCK imports change; no test pinned them).
+
+Fix round:
+
+6. `TestF2_SR11_10_SealedCursorIsPerSourceLabel`: the expected anomaly count for a genuine verifying run of ANOTHER label
+   changed from 1 to 0, and the test now fails when `unbacked != 0`. The old rule counted every run above the cursor. The new
+   rule counts only rows that do not back the cursor, and that run's seal verifies. The per-label cursor assertions are
+   unchanged.
+7. `TestF2_SR11_10_ForgedCandidateFloodFailsClosed` was REPLACED by `TestF2_SRF2_4_ForgedRunFloodNeitherMovesNorStopsTheStream`
+   (2000 forged rows). The old test pinned the fail-closed behaviour that SRF2-4 / LFF2-4 asked to remove. The new test
+   asserts these four things:
+   - the stream keeps working;
+   - the cursor advances only on genuine sealed runs;
+   - the anomaly count equals the number of forged rows;
+   - an alert opens.
+8. `ErrPaymentCursorUnverifiable` is removed, together with its runbook bullet.
+9. `TestReservedUnusedVersions_ExactSet` also loses 168: the set is now `{143..150, 159, 161, 169}`.
+10. `TestF2_VerifyPaymentCursorSealing`: a verifier that verifies imports but not runs now FAILS the production gate, so a
+    fake with both verifiers (`f2SealVerifyRuns`) was added for the passing case.
+11. `ImportKeys` (`PaymentStatementOptions`, `payment_sources.go`) is typed `statement.StreamSealKeys` (import + run sealer and
+    verifier). `*payoutinstrument.Keys` satisfies it, so callers are unchanged. The test fixtures were updated to the type.
 
 ## 4. Commands and results
 
@@ -288,19 +398,31 @@ make the world's run explicit first, commit `8807c42`).
 
 ## 6. Residuals and open items
 
-1. **SR11-1 is mitigated, not closed.** A forger inside the application process (holds the key) and the "genuine sealed import
-   whose match did not commit" case (2.1 residual 2) remain. Proposed next step: seal the run row (a run-cursor HMAC under a new
-   key-derivation label in the B13 key module plus a column: security + architect decision) and/or the cursor-independent
-   lookback re-match (SR11-1 option b). Keep SR11-1 OPEN (binding before the first non-MOCK source).
+1. **SR11-1 (fix round): the SQL-only half is closed.** This is the original task's half: an actor with SQL access, but not
+   the application's key, cannot blind or steer the stream. The original record said "mitigated", and its residual 2 was
+   understated (see 2.1).
+   - The run seal (0168) closes the probes that used to defeat it. Each is now refused and loud, with tests: SRF2-1 / LFF2-1
+     (held advisory lock plus a forged run at a genuine import's end) and SRF2-2 / LFF2-2 (a copied run row with
+     `run_at = now()`, for both the cursor and the M2 gate).
+   - Skip and stall are audited and alerted.
+   - A flood cannot stop the stream.
+
+   What is NOT closed, and is out of scope of any seal:
+   - an attacker running code in the application process (holds the key: the T6 class);
+   - deletion of genuine rows (the tables are append-only for the runtime role, but this is a database-privilege matter);
+   - a non-production process without keys, which still uses the A11 rule.
+
+   SR11-1 option (b), the lookback re-match, was not built: the run seal makes it unnecessary for the SQL-only threat.
 2. Without import keys (non-production) the cursor uses the A11 rule. Staging has no `PAYOUT_INSTRUMENT_KEYS` today (the
    acceptance check skips on it), so staging's MOCK stream runs in that mode. Production cannot (startup gate).
 3. LF-A11-1: mutant C5 (ledger-join (a) windowing) is not killed by a dedicated test (section 5). `lastChangeAt` uses
    `resolved_at` first; a succeeded attempt always has it.
 4. LF-A11-2/6: the real settle lag, record-time dating (contract item 7) and server-side paging stay PROVIDER DEPENDENT
    (conformance-test items for the first real source). The 15-minute default is a placeholder, not a vendor fact.
-5. F2e: the gate is Go-only (the seal cannot be verified in SQL; the registered-source rule next to it is Go-only too). The
-   evidence read uses a second pooled connection while the M2 transaction is open (staff-only and rare; a pool-saturation
-   note). The staff read model's `admissible_kinds` (ADR 0114) is shape-based and does not reflect the gate: a listed kind can
+5. F2e: the gate is Go-only (the seal cannot be verified in SQL; the registered-source rule next to it is Go-only too).
+   (Fix round: the evidence is now read BEFORE the M2 transaction opens, so there is no second pooled connection inside it;
+   this sentence used to say the opposite.) Between the pre-read and the commit there is a window of milliseconds in which a
+   new `sweep_run_failed` would not be seen. The next M2 sees it. The staff read model's `admissible_kinds` (ADR 0114) is shape-based and does not reflect the gate: a listed kind can
    still be refused with 409. A `cursor_anomaly` does not block M2 (otherwise a SQL-only forger with a far-future unbacked row
    could deny M2 forever); failure, truncation and staleness do.
 6. F3b: off-platform recovery has no clearing path (M2 (d) precedent). The PSP "return" is modelled as a `reversed` payout line
@@ -308,8 +430,21 @@ make the world's run explicit first, commit `8807c42`).
    the payload's `return_reference` is not read.
 7. F3a: a refused payout stays `submitted` with its hold and a foreign tombstone on its reference: an integrity case (409
    "investigate"); resolution through M2/M4 per its shape or the provider's own outcome.
-8. Migration 0168 unused. 0167 changes one CHECK; its down refuses while findings exist (WD099).
+8. (Fix round) Migration 0168 is used (the run seal). 0167 changes one CHECK, and its down refuses while findings exist
+   (WD099). 0168's down refuses while sealed runs exist.
 9. The full `./internal/payments` package was not run end to end in one invocation (stopped by the harness limit; see 4.1).
+10. (Fix round, NEW, for ledger-finance + security) The SQL function `payment_attempt_open_exposure` (MA020, migration 0119)
+    reads persisted reversal lines WITHOUT the seal / coverage / clock rule (a database function cannot verify an HMAC). Go
+    is now stricter than SQL only when a line is forged or out of coverage. The parity test (genuine fixtures only) passes.
+    A SQL-only actor can still plant a reversal line to make the SQL MA020 exposure read as closed. This is pre-existing,
+    not introduced here. Closing it needs either a sealed "verified line" marker the SQL can trust, or moving the check to Go.
+    That is an architect + security decision, and it is not built.
+11. (Fix round) The anomaly read is `count(*)` plus at most 1000 rows, and the cursor read is a linear scan over forged
+    sealed-looking rows (one HMAC each). A very large flood costs time, but it cannot change the result. If the flood ever
+    makes the read too slow, removing the forged rows is an owner-authorised, audited procedure (runbook). It is never a SQL
+    edit and never an agent action.
+12. (Fix round) Clock bound: a genuine line from a provider whose clock runs more than 5 minutes ahead is not clearing evidence
+    until the database clock catches up. It never raises falsely, and it clears on a later run.
 
 ## 7. Probes for security review
 
@@ -319,19 +454,56 @@ make the world's run explicit first, commit `8807c42`).
    plus a run row with the same `coverage_end`, before each of two sweeps. Expected and observed: the A11-mode cursor moves to
    the forgery (control); the sealed cursor does not; the deposit made after the genuine cursor is imported; a new durable
    `cursor_anomaly:n<k>:<digest>` P1 per new forgery and an audit row per sighting.
-2. Can forged rows exhaust or slow the cursor read? 64-candidate / 4-import bound, fail closed
-   (`TestF2_SR11_10_ForgedCandidateFloodFailsClosed`); line reads bounded (`LIMIT MaxPaymentStatementLines+1`).
+2. (Fix round) Can forged rows exhaust, slow down or stop the cursor read? There is no fail-closed state: keyset pages with
+   one HMAC per row, and an anomaly read of `count(*)` plus at most 1000 rows
+   (`TestF2_SRF2_4_ForgedRunFloodNeitherMovesNorStopsTheStream`, 2000 rows, as `igaming_runtime`). Line reads stay bounded
+   (`LIMIT MaxPaymentStatementLines+1`). The old 64-bound fail-closed test was replaced (section 3 item 7).
 3. Can production run with a non-verifying sealer? (`VerifyPaymentCursorSealing`, static pin of its position in `run()`.)
 4. `verifyImportSealInTx` vs `payoutinstrument.VerifyStatementImportInTx` parity (`TestF2_VerifyImportSealParityWithPayoutInstrument`);
    reconciliation holds no key (interface only).
 5. SR11-11: any change in the set of unbacked rows gives a new discriminator; always within the 160-character CHECK.
-6. F2e: can a SQL-only actor mint M2 evidence? No keys: a run row needs a backing import (`TestF2e_M2_UnbackedRunRowIsNotEvidence`).
-   Keys: the import must verify (`TestF2e_M2_WithKeys_OnlyASealedRunIsEvidence`, forged sealed-looking import refused). A forged
-   FAILURE row only refuses. Closed token 409 + denied audit row over HTTP (`refused_when_reconciliation_not_current`).
-7. **SR5R-1 exact probe** (`TestF3_SR5R1_PreExistingTombstoneOnThePayoutReference_Refused`): deposit-style tombstone (fresh
-   correlation, key `tombstone:<provider>:<ref>`) on a pending payout's reference; two grant holders decide: both refused (typed,
-   409), zero decisions, zero request-correlated tombstones, payout still submitted with its hold. Backstop:
-   `TestF3_SR5R1_BranchRefusesAnAlreadyPostedTombstone`. Specificity: another provider's tombstone on the same string does not block.
+6. F2e: can a SQL-only actor mint M2 evidence?
+   - Without keys (non-production only), a run row needs a backing import (`TestF2e_M2_UnbackedRunRowIsNotEvidence`). A copied
+     run row WOULD still count there.
+   - With keys, the run seal AND the import seal must verify (`TestF2e_M2_WithKeys_OnlyASealedRunIsEvidence`). Fix round:
+     `TestF2e_SRF2_2_CopiedRunRowNeverMakesTheEvidenceCurrent` copies the newest sealed run with `run_at = now()` after a
+     failure, after staleness, and after truncation (the truncated copy with `window_truncated = false`). All three stay
+     refused.
+   - A forged FAILURE row only refuses, and since LFF2-3 a failure row dated more than 5 minutes ahead is ignored
+     (`TestF2e_LFF2_3_FutureDatedFailureRowDoesNotBlockForever`, including the skew-tolerance control).
+   - Closed token 409 + denied audit row over HTTP (`refused_when_reconciliation_not_current`).
+   - Pre-read: `TestF2e_SRF2_5_EvidenceIsReadBeforeTheTransaction` (AST pin; a missing pre-read refuses).
+8. **(Fix round) SRF2-1 / LFF2-1 exact probe** (`TestF2_SRF2_1_AdvisoryLockOrphanPlusForgedRun_RefusedAndLoud`, 2 variants:
+   unsealed forged run and made-up seal): as `igaming_runtime`, hold `pg_advisory_lock(hashtextextended(
+   'reconciliation:payment_statement:'||tenant, 0))` in a separate session during a sweep (the match skips; a genuine sealed
+   import is left above the cursor), then forge one run row at that import's `coverage_end`.
+   - Expected and observed: the cursor does not move, and the next sweep re-fetches from the genuine cursor and matches the
+     deposit.
+   - The forgery is reported (`cursor_anomaly`).
+   - The skip is audited (`payment_match_skipped`).
+   - `TestF2_SRF2_1_HeldLockIsAVisibleStall`: a lock held past `matchStallAfter` raises `match_stalled` with an audit row.
+9. **(Fix round) SRF2-2 for the cursor** (`TestF2_SRF2_2_CopiedRunRowIsNeverTrustedAndIsReported`): a run row copied from
+   the newest sealed run (same seal, kid and import, new id and `run_at`) is never the cursor and is counted as unbacked.
+10. **(Fix round) LFF2-5 / SRF2-3 forged lines**:
+    - `TestF2_LFF2_5_ForgedUnsealedLineDoesNotExempt` (keyed and unkeyed; an amount-1 line and an unsealed line);
+    - `TestF3_R9_ForgedFutureReturnLineDoesNotSuppress` (a return line dated 50 years ahead);
+    - `TestF3_R9_WithKeysOnlyASealedReturnClears`;
+    - `TestF2fr_FutureDatedReversalNeverClears`;
+    - `TestF2fr_WithKeysOnlyASealedDepositReversalClears`.
+11. (Fix round) Key separation: the run label `b13-run-v1` is derived separately from the import label (`runseal_test.go`:
+    tampering with every field fails; an import key never verifies a run seal). `TestF2_RunCanonCoversEveryField`.
+12. (Fix round) Migration 0168: up/down/up snapshot, the CHECKs, the same-tenant FK, and the down refusing while sealed runs
+    exist (`TestMigration0168_UpDownUp_Constraints_DownRefusesSealedRuns`). The database checks shape only. It never trusts a
+    seal: verification is in Go.
+13. **SR5R-1 exact probe** (`TestF3_SR5R1_PreExistingTombstoneOnThePayoutReference_Refused`; was item 7): a deposit-style
+    tombstone (fresh correlation, key `tombstone:<provider>:<ref>`) is placed on a pending payout's reference, then two grant
+    holders decide. Result:
+    - both are refused (typed, 409);
+    - zero decisions are recorded and zero request-correlated tombstones exist;
+    - the payout is still submitted with its hold.
+
+    Backstop: `TestF3_SR5R1_BranchRefusesAnAlreadyPostedTombstone`. Specificity: another provider's tombstone on the same
+    string does not block.
 
 ## 8. Probes for ledger-finance review
 
@@ -352,31 +524,65 @@ make the world's run explicit first, commit `8807c42`).
    other-reference returns do not clear; a MOCK return is ineligible once a real import exists; a newer succeeded line
    re-raises; partial K2 recovery does not clear, full does; a foreign tombstone is never attributed.
 6. No new ledger write path: F2 adds none; F3a only refuses (rolls back) the existing branch; F3b is read plus findings.
-   `w.assertInvariants()` runs in the F3 tests.
+   `w.assertInvariants()` runs in the F3 tests. (Fix round: still true. The run seal adds columns to `reconciliation_runs`
+   only, and no ledger table or posting path changed.)
+7. (Fix round, answer to item 2 / LFF2-6) A `reversed` persisted line no longer exempts. It is reported as
+   `pay_status_mismatch` (`TestF2_LFF2_6_ReversedPersistedLineIsAStatusMismatch`). An exemption needs a usable `succeeded`
+   line with the exact amount and asset; otherwise the finding is `pay_amount_mismatch` / `pay_asset_mismatch`.
+8. (Fix round) Clearing evidence across K3 / M4 / R9 / reversals / F2c requires all of: a verifying import (with keys), the
+   line in coverage, and the line not dated in the future (clock + 5 min; F2c uses the run's coverage end). Is the 5-minute
+   tolerance (`PaymentCoverageMaxClockSkew`, already the coverage skew) acceptable? Residual 6.10: the SQL MA020 exposure
+   function does not apply this rule.
+9. (Fix round, LFF2-3) M2 unblocks on the next sealed, successful, non-truncated run at most 6 h old with no failure row after
+   it (future-dated rows beyond 5 min are ignored). Runbook step 8 states this.
 
 ## 9. Proposed registry / ADR / runbook text (for the orchestrator)
 
-- **SR11-1** (OPEN, HIGH, binding before the first non-MOCK source): add "F2 (SR11-10 IMPLEMENTED): the cursor trusts only a run
-  backed by a sealed import of the same source whose seal verifies; production refuses a registered source without keys; SQL-only
-  forgery of run plus import no longer blinds the stream (probe test). Residual: in-process key holder; a forged run naming a
-  genuine sealed import whose match did not commit (one window). Next: run-row seal or lookback re-match."
-- **SR11-10** -> `CLOSED (IMPLEMENTED against MOCK, F2)`. **SR11-11** -> `CLOSED (F2)`.
-- **LF-A11-1** -> `CLOSED as an engineering item (F2, IMPLEMENTED against MOCK)`; residual C5 disclosed.
-- **LF-A11-2** -> `PARTIALLY IMPLEMENTED (F2)`: settle lag + horizon enforced, contract updated; real lag and record-time dating
-  PROVIDER DEPENDENT. **LF-A11-6** -> `PARTIALLY IMPLEMENTED (F2)`: page order enforced; provider-side paging PROVIDER DEPENDENT.
-- **H-W1 second half / LF-A11-8** -> `CLOSED as an engineering item (F2e, IMPLEMENTED against MOCK)`; residuals 6.5.
-- **SR5R-1** -> `CLOSED (F3a)`. **A5 R9 / LF-A5-1 (b)** -> `CLOSED as an engineering item (F3b, migration 0167, IMPLEMENTED
-  against MOCK)`; R6 (real PSP return reporting) stays PROVIDER DEPENDENT.
-- Migration numbers: 0167 used; 0168 unused (free).
-- ADR 0095 addendum (text only): "F2: the payment_statement cursor is sealed (SR11-10); continuation statements are bounded by the
-  provider's settle-lag horizon and time-ordered pages; bounded-mode matching windows attempts by their last change; M2 is admitted
-  only while the provider's reconciliation is current. F3: the payout reversal tombstone branch refuses a reference that already
-  carries a tombstone; `pay_payout_reversal_tombstone_but_paid` is the branch's standing finding."
-- ADR 0101 addendum (text only): "M2 precondition (F2e): the provider's payment_statement reconciliation is current (last run
-  succeeded, not truncated, no later failure, <= 6 h; sealed evidence when the process has keys), at submission and execution
+(Corrected in the fix round. The first version of this section overstated SR11-1 ("no longer blinds the stream") and
+understated residual 2. The text below replaces it.)
+
+- **SR11-1** -> `CLOSED (F2 + fix round, IMPLEMENTED against MOCK)`. Proposed registry text: "The SQL-only blinding of the
+  payment_statement stream is closed. The application seals the import (0125) and the run row (0168, B13 label
+  `b13-run-v1`). The cursor and the M2 gate trust only a run whose run seal and import seal verify. The SRF2-1 / LFF2-1
+  probe (held advisory lock + forged run at a genuine import's end) and the SRF2-2 / LFF2-2 probes (copied run row) are
+  refused and loud. A skipped match is audited and a stalled one raises the durable P1 `match_stalled`. A flood cannot stop
+  the stream. Production refuses a registered source without both verifiers. Residual (out of scope of any seal): an
+  attacker running code in the application process (key holder), and non-production processes without keys (A11 rule)."
+  Condition: the probes pass in 4.3 (they do).
+- **SR11-10** -> `IMPLEMENTED (against MOCK; F2 + fix round run seal)`. **SR11-11** -> `CLOSED (F2)`.
+- **SRF2-1..5 / LFF2-1..7** -> addressed in the fix round (2.8). Proposed: CLOSED, pending the reviewers' re-check of this
+  record.
+- **LF-A11-1** -> `CLOSED as an engineering item (F2, IMPLEMENTED against MOCK)`; residual C5 disclosed; the exemption is
+  sealed, coverage-bounded and exact on amount and asset (LFF2-5/6).
+- **LF-A11-2** -> `PARTIALLY IMPLEMENTED (F2)`: settle lag + horizon enforced, contract updated; real lag and record-time
+  dating PROVIDER DEPENDENT. **LF-A11-6** -> `PARTIALLY IMPLEMENTED (F2)`: page order enforced; provider-side paging PROVIDER
+  DEPENDENT.
+- **H-W1 second half / LF-A11-8** -> `CLOSED as an engineering item (F2e + fix round, IMPLEMENTED against MOCK)`: sealed run
+  evidence, copied rows refused, future-dated failure rows ignored, evidence pre-read outside the M2 transaction. Residuals
+  6.5.
+- **SR5R-1** -> `CLOSED (F3a)`. **A5 R9 / LF-A5-1 (b)** -> `CLOSED as an engineering item (F3b + fix round, migration 0167,
+  IMPLEMENTED against MOCK)`: clearing lines are sealed, in coverage and not future-dated. R6 (real PSP return reporting)
+  stays PROVIDER DEPENDENT.
+- **NEW (proposed)**: MA020 SQL exposure function reads unverified reversal lines (residual 6.10): OPEN, MEDIUM, architect +
+  security + ledger-finance; pre-existing.
+- Migration numbers: 0167 and 0168 used. 0169 stays reserved and unused.
+- ADR 0095 addendum (text only): "F2: the payment_statement cursor is sealed: both the import and the run row carry an
+  application HMAC (SR11-10, 0168), and only verifying runs move it. Continuation statements are bounded by the provider's
+  settle-lag horizon and by time-ordered pages. Bounded-mode matching windows attempts by their last change. Clearing
+  evidence must be sealed, in coverage and not future-dated. M2 is admitted only while the provider's reconciliation is
+  current. F3: the payout reversal tombstone branch refuses a reference that already carries a tombstone, and
+  `pay_payout_reversal_tombstone_but_paid` is the branch's standing finding."
+- ADR proposal (B13 key module, security + architect): "new HKDF label `b13-run-v1` for payment_statement run seals; same
+  master keys and kid as imports; rotation as for imports (a retired kid the process no longer holds makes its runs
+  unverifiable, the cursor falls back to an older verifying run, one re-fetched window)."
+- ADR 0101 addendum (text only): "M2 precondition (F2e): the provider's payment_statement reconciliation is current (newest
+  SEALED run succeeded, not truncated, no later failure (failure rows more than 5 min in the future ignored), <= 6 h;
+  sealed evidence when the process has keys). The evidence is read before the M2 transaction, at submission and execution
   (`reconciliation_not_current`)."
-- Runbook: applied in `docs/runbooks/observability-and-alerting.md` (`cursor_anomaly`, `ErrPaymentCursorUnverifiable`, stuck-cursor
-  steps 1 and 5-8). Proposed addition for `pay_payout_reversal_tombstone_but_paid` (reconciliation kinds section of
+- Runbook: applied in `docs/runbooks/observability-and-alerting.md` (`cursor_anomaly` rewritten, new `match_stalled`, the
+  `ErrPaymentCursorUnverifiable` bullet removed, forged-row removal as an owner-authorised audited procedure only, step 8:
+  what unblocks M2). Also `docs/architecture/reconciliation-model.md` item 14 and `docs/plans/a11-payments-wiring-record.md`
+  section 3 item 9. Proposed addition for `pay_payout_reversal_tombstone_but_paid` (reconciliation kinds section of
   `operational-runbooks.md`): "P1. The PSP reports as paid a payout whose hold the reversal tombstone branch released (possible
   double payout). Ask the PSP for the return; a `reversed` statement line on the original reference clears it; otherwise recover
   from the player through K2 (compensating_entry debit, causation = the request's withdrawal_failed transaction); an off-platform

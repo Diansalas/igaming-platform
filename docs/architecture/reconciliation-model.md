@@ -326,7 +326,9 @@ flowchart LR
      that import's coverage and not after the run's coverage end, status `succeeded`, amount AND asset equal. A usable succeeded line with
      another amount or asset is reported as `pay_amount_mismatch` / `pay_asset_mismatch`; a usable `reversed` line as `pay_status_mismatch`
      (the provider reversed what the platform recorded as succeeded). Legacy (creation-dated) mode is unchanged. Every persisted line that
-     may CLEAR or CONFIRM anything (K3 / M2 / M4 / R9 clearing, deposit-reversal clearing) obeys the same seal and coverage rule.
+     may CLEAR or CONFIRM anything (K3 / M2 / M4 / R9 clearing, deposit-reversal clearing) obeys the same seal and coverage rule,
+     with the date bound taken from the database clock (not dated beyond now() + 5 minutes) instead of the run's coverage end,
+     so that a backfill run over an older window still honours genuine later evidence.
      (d) *Completeness horizon and paging (LF-A11-2 / LF-A11-6).* Each continuation request carries `Continuation = true` and
      `PeriodEnd = min(sweep end, now - settle lag)`; a statement whose CoverageEnd passes it is refused (nothing stored). The settle lag is the
      source's declaration (`statement.SettleLagDeclarer`, validated to [0, 7 days] at registry startup and per run), else 15 minutes for a
