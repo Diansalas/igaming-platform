@@ -43,6 +43,19 @@ const DepositSweepConsumerName = "bonus_deposit_sweep"
 // the next tick, from the watermark this tick DID advance to.
 const DepositSweepBatchSize = 500
 
+// DepositSweepLateCommitLookback bounds the trailing re-scan window
+// (BONUS-SWEEP-WATERMARK-SKEW-1). ledger_transactions.posted_at is
+// DEFAULT now() - the TRANSACTION START time (migration 0021), not the
+// commit time - so a deposit transaction that began before, but commits
+// after, a sweep that already advanced the (posted_at, id) watermark past
+// it would be invisible to a strictly-after-watermark scan forever. Every
+// tick therefore also re-examines deposits whose posted_at lies within
+// this window BEHIND the watermark and that have no Grant for any Offer
+// yet. A deposit transaction that stays open longer than this window
+// before committing is outside the guarantee (named residual; deposit
+// postings are short single-statement-group transactions).
+const DepositSweepLateCommitLookback = 15 * time.Minute
+
 type depositSweepWatermark struct {
 	LastProcessedLedgerTransactionID *uuid.UUID
 	LastProcessedPostedAt            *time.Time
@@ -130,6 +143,52 @@ func listUnprocessedDeposits(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 		var amt pgtype.Numeric
 		if err := rows.Scan(&e.LedgerTransactionID, &e.PostedAt, &e.BrandID, &e.PlayerAccountID, &e.WalletID, &e.AssetCode, &amt, &e.PaymentMethod); err != nil {
 			return nil, fmt.Errorf("bonus: scan unprocessed deposit: %w", err)
+		}
+		amount, err := numericToBigInt(amt)
+		if err != nil {
+			return nil, err
+		}
+		e.Amount = amount
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// listLateCommitDeposits returns deposits at or behind the watermark but
+// inside DepositSweepLateCommitLookback that have NO bonus_grants row yet
+// (trigger_reference = the deposit's ledger transaction id) - i.e. those a
+// strictly-after-watermark scan can no longer reach because their
+// transaction started before the watermark but committed after the sweep
+// that advanced it. Deposits that already hold a Grant are excluded in
+// SQL (they need no work), and anything returned is still idempotent at
+// the DB: the (tenant, campaign, offer_version, player, trigger_reference)
+// unique key resolves a repeat to ErrAlreadyGranted, never a second Grant.
+// Read-only; never moves the watermark.
+func listLateCommitDeposits(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, w depositSweepWatermark) ([]depositSweepEvent, error) {
+	if w.LastProcessedPostedAt == nil {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT lt.id, lt.posted_at, di.brand_id, di.player_account_id, di.wallet_id, di.asset_code, di.amount, di.payment_method
+		  FROM ledger_transactions lt
+		  JOIN deposit_intents di ON di.ledger_transaction_id = lt.id AND di.tenant_id = lt.tenant_id
+		 WHERE lt.tenant_id = $1 AND lt.transaction_type = 'deposit'
+		   AND (lt.posted_at, lt.id) <= ($2, $3)
+		   AND lt.posted_at > $2::timestamptz - make_interval(secs => $4)
+		   AND NOT EXISTS (SELECT 1 FROM bonus_grants g WHERE g.tenant_id = lt.tenant_id AND g.trigger_reference = lt.id::text)
+		 ORDER BY lt.posted_at ASC, lt.id ASC LIMIT $5`,
+		tenantID, *w.LastProcessedPostedAt, *w.LastProcessedLedgerTransactionID,
+		DepositSweepLateCommitLookback.Seconds(), DepositSweepBatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("bonus: list late-commit deposits: %w", err)
+	}
+	defer rows.Close()
+	var out []depositSweepEvent
+	for rows.Next() {
+		var e depositSweepEvent
+		var amt pgtype.Numeric
+		if err := rows.Scan(&e.LedgerTransactionID, &e.PostedAt, &e.BrandID, &e.PlayerAccountID, &e.WalletID, &e.AssetCode, &amt, &e.PaymentMethod); err != nil {
+			return nil, fmt.Errorf("bonus: scan late-commit deposit: %w", err)
 		}
 		amount, err := numericToBigInt(amt)
 		if err != nil {
@@ -412,10 +471,11 @@ func lookupDecimalExponent(ctx context.Context, tx pgx.Tx, assetCode string) (in
 // DepositSweepOutcome summarizes one RunDepositSweepForTenant call, for
 // the scheduler loop's own logging/audit trail.
 type DepositSweepOutcome struct {
-	EventsProcessed int
-	GrantsIssued    int
-	GrantsDenied    int
-	Skipped         []string // human-readable reasons a candidate was skipped (malformed reward_calculation, etc.) - diagnostic only
+	EventsProcessed           int
+	GrantsIssued              int
+	GrantsDenied              int
+	LateCommitEventsRescanned int      // events reached via the trailing late-commit window (BONUS-SWEEP-WATERMARK-SKEW-1), subset of EventsProcessed
+	Skipped                   []string // human-readable reasons a candidate was skipped (malformed reward_calculation, etc.) - diagnostic only
 }
 
 // RunDepositSweepForTenant is §7.18.2 item 1's own durable, primary
@@ -459,69 +519,91 @@ func RunDepositSweepForTenant(ctx context.Context, tx pgx.Tx, tenantID, actorID 
 	if err != nil {
 		return outcome, err
 	}
+	late, err := listLateCommitDeposits(ctx, tx, tenantID, w)
+	if err != nil {
+		return outcome, err
+	}
 
-	for _, event := range events {
+	// Late-commit deposits first (they are older in posted_at order). They
+	// never move the watermark: it already is, correctly, past them.
+	for _, event := range late {
 		outcome.EventsProcessed++
-		candidates, err := listDepositMatchableOfferVersions(ctx, tx, tenantID, event.BrandID, event.AssetCode, event.PostedAt)
-		if err != nil {
+		outcome.LateCommitEventsRescanned++
+		if err := processDepositSweepEvent(ctx, tx, tenantID, actorID, event, &outcome); err != nil {
 			return outcome, err
 		}
-		for _, c := range candidates {
-			matched, err := matchesDepositEligibility(ctx, tx, tenantID, event, c.OfferVersion)
-			if err != nil {
-				return outcome, err
-			}
-			if !matched {
-				continue
-			}
-			if c.OfferVersion.FirstDepositOnly {
-				if err := detectMultiAccountFirstDepositSignal(ctx, tx, tenantID, event, c.OfferID); err != nil {
-					return outcome, err
-				}
-			}
-			rateBP, cap, err := parsePercentageRewardCalculation(c.OfferVersion.RewardCalculation)
-			if err != nil {
-				outcome.Skipped = append(outcome.Skipped, fmt.Sprintf("offer_version=%s: %v", c.OfferVersion.ID, err))
-				if auditErr := audit.Record(ctx, tx, audit.Entry{
-					TenantID: tenantID, ActorType: audit.ActorSystem, Action: "bonus_deposit_sweep.malformed_reward_calculation_skipped",
-					TargetType: "bonus_offer_version", TargetID: c.OfferVersion.ID.String(), Outcome: audit.OutcomeFailure,
-					Metadata: map[string]any{"deposit_ledger_transaction_id": event.LedgerTransactionID.String(), "error": err.Error()},
-				}); auditErr != nil {
-					return outcome, auditErr
-				}
-				continue
-			}
-			exp, err := lookupDecimalExponent(ctx, tx, c.OfferVersion.RewardAssetCode)
-			if err != nil {
-				return outcome, err
-			}
-			g := Grant{
-				TenantID: tenantID, BrandID: event.BrandID, PlayerAccountID: event.PlayerAccountID, WalletID: event.WalletID,
-				CampaignID: c.CampaignID, CampaignVersionID: c.CampaignVersionID, OfferID: c.OfferID, OfferVersionID: c.OfferVersion.ID,
-				AssetCode: c.OfferVersion.RewardAssetCode, DecimalExponent: exp,
-				FundingSource: c.OfferVersion.FundingSource, FulfillmentDestination: c.OfferVersion.FulfillmentDestination,
-				FulfillmentOwner: c.FulfillmentOwner, TriggerReference: event.LedgerTransactionID.String(),
-				EligibilitySnapshot: []byte(fmt.Sprintf(`{"deposit_ledger_transaction_id":%q,"payment_method":%q}`, event.LedgerTransactionID, event.PaymentMethod)),
-				CreatedByActorType:  ActorSystem,
-			}
-			_, activateOutcome, err := IssueAndActivateDepositBonus(ctx, tx, DepositBonusParams{
-				Grant: g, DepositAmount: event.Amount, RateBP: rateBP, CapAmount: cap,
-				MinQualifying: c.OfferVersion.MinQualifyingAmount, MaxQualifying: c.OfferVersion.MaxQualifyingAmount,
-				ActorType: ActorSystem, ActorID: actorID,
-				WageringTimeLimit: c.OfferVersion.WageringTimeLimit,
-			})
-			if err != nil {
-				return outcome, fmt.Errorf("bonus: deposit sweep issue/activate (offer_version=%s, deposit_tx=%s): %w", c.OfferVersion.ID, event.LedgerTransactionID, err)
-			}
-			if activateOutcome.Allowed {
-				outcome.GrantsIssued++
-			} else {
-				outcome.GrantsDenied++
-			}
+	}
+	for _, event := range events {
+		outcome.EventsProcessed++
+		if err := processDepositSweepEvent(ctx, tx, tenantID, actorID, event, &outcome); err != nil {
+			return outcome, err
 		}
 		if err := advanceDepositSweepWatermark(ctx, tx, tenantID, DepositSweepConsumerName, event.LedgerTransactionID, event.PostedAt); err != nil {
 			return outcome, err
 		}
 	}
 	return outcome, nil
+}
+
+// processDepositSweepEvent evaluates one deposit against every matchable
+// Offer and issues/activates idempotently (see RunDepositSweepForTenant).
+func processDepositSweepEvent(ctx context.Context, tx pgx.Tx, tenantID, actorID uuid.UUID, event depositSweepEvent, outcome *DepositSweepOutcome) error {
+	candidates, err := listDepositMatchableOfferVersions(ctx, tx, tenantID, event.BrandID, event.AssetCode, event.PostedAt)
+	if err != nil {
+		return err
+	}
+	for _, c := range candidates {
+		matched, err := matchesDepositEligibility(ctx, tx, tenantID, event, c.OfferVersion)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			continue
+		}
+		if c.OfferVersion.FirstDepositOnly {
+			if err := detectMultiAccountFirstDepositSignal(ctx, tx, tenantID, event, c.OfferID); err != nil {
+				return err
+			}
+		}
+		rateBP, cap, err := parsePercentageRewardCalculation(c.OfferVersion.RewardCalculation)
+		if err != nil {
+			outcome.Skipped = append(outcome.Skipped, fmt.Sprintf("offer_version=%s: %v", c.OfferVersion.ID, err))
+			if auditErr := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "bonus_deposit_sweep.malformed_reward_calculation_skipped",
+				TargetType: "bonus_offer_version", TargetID: c.OfferVersion.ID.String(), Outcome: audit.OutcomeFailure,
+				Metadata: map[string]any{"deposit_ledger_transaction_id": event.LedgerTransactionID.String(), "error": err.Error()},
+			}); auditErr != nil {
+				return auditErr
+			}
+			continue
+		}
+		exp, err := lookupDecimalExponent(ctx, tx, c.OfferVersion.RewardAssetCode)
+		if err != nil {
+			return err
+		}
+		g := Grant{
+			TenantID: tenantID, BrandID: event.BrandID, PlayerAccountID: event.PlayerAccountID, WalletID: event.WalletID,
+			CampaignID: c.CampaignID, CampaignVersionID: c.CampaignVersionID, OfferID: c.OfferID, OfferVersionID: c.OfferVersion.ID,
+			AssetCode: c.OfferVersion.RewardAssetCode, DecimalExponent: exp,
+			FundingSource: c.OfferVersion.FundingSource, FulfillmentDestination: c.OfferVersion.FulfillmentDestination,
+			FulfillmentOwner: c.FulfillmentOwner, TriggerReference: event.LedgerTransactionID.String(),
+			EligibilitySnapshot: []byte(fmt.Sprintf(`{"deposit_ledger_transaction_id":%q,"payment_method":%q}`, event.LedgerTransactionID, event.PaymentMethod)),
+			CreatedByActorType:  ActorSystem,
+		}
+		_, activateOutcome, err := IssueAndActivateDepositBonus(ctx, tx, DepositBonusParams{
+			Grant: g, DepositAmount: event.Amount, RateBP: rateBP, CapAmount: cap,
+			MinQualifying: c.OfferVersion.MinQualifyingAmount, MaxQualifying: c.OfferVersion.MaxQualifyingAmount,
+			ActorType: ActorSystem, ActorID: actorID,
+			WageringTimeLimit: c.OfferVersion.WageringTimeLimit,
+		})
+		if err != nil {
+			return fmt.Errorf("bonus: deposit sweep issue/activate (offer_version=%s, deposit_tx=%s): %w", c.OfferVersion.ID, event.LedgerTransactionID, err)
+		}
+		if activateOutcome.Allowed {
+			outcome.GrantsIssued++
+		} else {
+			outcome.GrantsDenied++
+		}
+	}
+	return nil
 }
