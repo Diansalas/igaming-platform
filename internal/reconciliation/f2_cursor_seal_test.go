@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
 
@@ -22,6 +24,11 @@ func (f2SealVerify) VerifyStatementImport(statement.ImportSealInput, string, str
 	return nil
 }
 
+// f2SealVerifyRuns also verifies run seals (migration 0168): the only shape the startup gate accepts.
+type f2SealVerifyRuns struct{ f2SealVerify }
+
+func (f2SealVerifyRuns) VerifyPaymentRun(statement.RunSealInput, string, string) error { return nil }
+
 // F2 / SR11-10 startup gate: production with registered sources needs a sealer that also verifies.
 func TestF2_VerifyPaymentCursorSealing(t *testing.T) {
 	prev := DefaultImportSealer()
@@ -34,7 +41,8 @@ func TestF2_VerifyPaymentCursorSealing(t *testing.T) {
 	}{
 		{nil, true, 1, true},
 		{f2SealOnly{}, true, 1, true},
-		{f2SealVerify{}, true, 1, false},
+		{f2SealVerify{}, true, 1, true}, // imports only: run seals could not be verified (SRF2-1)
+		{f2SealVerifyRuns{}, true, 1, false},
 		{nil, true, 0, false},
 		{nil, false, 1, false},
 	}
@@ -138,5 +146,35 @@ func TestF2_ValidateBoundedWindow_HorizonAndOrder(t *testing.T) {
 	notTruncated.Truncated = false
 	if err := validateBoundedWindow(notTruncated, req, PaymentStatementOptions{Continuation: true}); err != nil {
 		t.Fatalf("a complete (non-truncated) window may list lines in any order: %v", err)
+	}
+}
+
+// SRF2-1: the run-seal canonical form covers every field the cursor and the M2 gate read, and is domain-separated
+// from the import canon.
+func TestF2_RunCanonCoversEveryField(t *testing.T) {
+	t0 := time.Date(2026, 10, 17, 1, 2, 3, 4000, time.UTC)
+	base := statement.RunSealInput{RunID: uuid.New(), TenantID: uuid.New(), ProviderID: "p", Stream: "payment_statement", ImportID: uuid.New(),
+		CoverageStart: t0, CoverageEnd: t0.Add(time.Hour), WindowTruncated: false, RunAt: t0.Add(2 * time.Hour)}
+	c0 := statement.RunCanon(base)
+	muts := []func(*statement.RunSealInput){
+		func(x *statement.RunSealInput) { x.RunID = uuid.New() },
+		func(x *statement.RunSealInput) { x.TenantID = uuid.New() },
+		func(x *statement.RunSealInput) { x.ProviderID = "q" },
+		func(x *statement.RunSealInput) { x.Stream = "casino_statement" },
+		func(x *statement.RunSealInput) { x.ImportID = uuid.New() },
+		func(x *statement.RunSealInput) { x.CoverageStart = x.CoverageStart.Add(time.Microsecond) },
+		func(x *statement.RunSealInput) { x.CoverageEnd = x.CoverageEnd.Add(time.Microsecond) },
+		func(x *statement.RunSealInput) { x.WindowTruncated = true },
+		func(x *statement.RunSealInput) { x.RunAt = x.RunAt.Add(time.Microsecond) },
+	}
+	for i, m := range muts {
+		x := base
+		m(&x)
+		if statement.RunCanon(x) == c0 {
+			t.Fatalf("field %d is not covered by the run canon", i)
+		}
+	}
+	if !strings.HasPrefix(c0, "3:run,") {
+		t.Fatalf("domain tag: %q", c0[:10])
 	}
 }

@@ -80,6 +80,45 @@ type ImportSealKeys interface {
 	ImportSealVerifier
 }
 
+// RunSealInput is one payment_statement run row as its seal reads it (F2 / SRF2-1, migration 0168): the run id,
+// tenant, provider, stream, the import the run matched, the import's coverage window, window_truncated and run_at.
+// Every column the cursor or the M2 reconciliation-currency gate reads is inside the seal.
+type RunSealInput struct {
+	RunID           uuid.UUID
+	TenantID        uuid.UUID
+	ProviderID      string
+	Stream          string
+	ImportID        uuid.UUID
+	CoverageStart   time.Time
+	CoverageEnd     time.Time
+	WindowTruncated bool
+	RunAt           time.Time
+}
+
+// RunSealer seals a run row (payoutinstrument.Keys); RunSealVerifier verifies one (constant time).
+type RunSealer interface {
+	SealPaymentRun(in RunSealInput) (seal, kid string, err error)
+}
+
+// RunSealVerifier verifies a stored run seal; any failure is an error.
+type RunSealVerifier interface {
+	VerifyPaymentRun(in RunSealInput, kid, seal string) error
+}
+
+// StreamSealKeys is everything the payment_statement stream needs from the key module: import and run seals.
+type StreamSealKeys interface {
+	ImportSealKeys
+	RunSealer
+	RunSealVerifier
+}
+
+// RunCanon is the canonical run-seal pre-image of in (domain tag "run").
+func RunCanon(in RunSealInput) string {
+	return canonJoin(sp("run"), sp(strings.ToLower(in.RunID.String())), sp(strings.ToLower(in.TenantID.String())), sp(in.ProviderID),
+		sp(in.Stream), sp(strings.ToLower(in.ImportID.String())), canonTime(in.CoverageStart), canonTime(in.CoverageEnd),
+		sp(strconv.FormatBool(in.WindowTruncated)), canonTime(in.RunAt))
+}
+
 func canonField(f *string) string {
 	if f == nil {
 		return "~"

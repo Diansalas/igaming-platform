@@ -937,6 +937,12 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 		if st.unbacked > 0 {
 			reportCursorAnomaly(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, st)
 		}
+		// SRF2-1 (c): a stored import of this source above the trusted cursor, fetched more than MatchStallAfter ago,
+		// means its match never committed (lock contention, a stale cursor, a failed match): a stalled stream. The
+		// next fetch re-covers the window from the unchanged cursor; the stall itself is reported, never silent.
+		if err := checkMatchStall(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, opts.basis, st); err != nil {
+			return fail("cursor", err)
+		}
 		// F2 / LF-A11-2: the completeness horizon. CoverageEnd may never pass now - settle lag
 		// (validateBoundedWindow refuses a statement that does), so the request asks for no more than that.
 		lag, err := paymentSettleLag(source)
@@ -1017,6 +1023,12 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 	}); err != nil {
 		out.Run = Run{}
 		return fail("match", err)
+	}
+
+	// SRF2-1 (c): a skipped match leaves the import it fetched without a run. It is audited explicitly (with the
+	// import) and logged; a repeated skip turns into the durable match_stalled P1 (checkMatchStall, next sweeps).
+	if out.Skipped && importID != uuid.Nil {
+		reportMatchSkipped(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, importID)
 	}
 
 	// R3-OBS-BOUND-1: a run that stopped at the per-run bound matched only the window the source vouched

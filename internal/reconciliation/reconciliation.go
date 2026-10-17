@@ -86,6 +86,11 @@ type Run struct {
 	// CoverageEnd is the cursor the next run continues from.
 	ProviderID      string
 	WindowTruncated bool
+	// ImportID, RunSeal and RunSealKID (migration 0168, F2 / SRF2-1): a payment_statement run written by a process
+	// with run-seal keys names the import it matched and carries the HMAC seal of the run; empty = unsealed.
+	ImportID   uuid.UUID
+	RunSeal    string
+	RunSealKID string
 }
 
 // Mismatch is one discrepancy a Run found, per
@@ -281,6 +286,14 @@ func persistRun(ctx context.Context, tx pgx.Tx, run Run, mismatches []Mismatch) 
 	// below 0152, e.g. the migration round-trip scratch databases).
 	var insertErr error
 	switch {
+	case run.ProviderID != "" && run.RunSeal != "":
+		// payment_statement with a run seal (migration 0168): the seal and the import it binds, in the same insert.
+		_, insertErr = tx.Exec(ctx,
+			`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status, coverage_end, provider_id, window_truncated,
+			                                  run_import_id, run_seal, run_seal_kid)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status, run.CoverageEnd, run.ProviderID, run.WindowTruncated,
+			run.ImportID, run.RunSeal, run.RunSealKID)
 	case run.ProviderID != "":
 		// payment_statement (migration 0160): the cursor columns are written in the run's own insert.
 		_, insertErr = tx.Exec(ctx,

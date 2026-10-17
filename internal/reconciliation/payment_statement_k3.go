@@ -500,22 +500,42 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 			if err != nil {
 				return fmt.Errorf("persisted statement lines: %w", err)
 			}
-			defer rows.Close()
+			var raw []*persistedLine
+			var inCov []bool
 			for rows.Next() {
 				read++
 				if read > lineCap {
+					rows.Close()
 					return fmt.Errorf("%w: more than %d persisted statement lines (%d per lookup key, %d keys) for provider %q; the run is refused, never truncated",
 						ErrPaymentEvidenceOverflow, lineCap, k3PersistedLinesPerKey, keys, m.provider)
 				}
 				l := &persistedLine{}
 				var amount string
-				if err := rows.Scan(&l.importID, &l.lineNo, &l.isMock, &l.kind, &l.ref, &l.merchant, &l.original, &l.status, &amount, &l.asset, &l.occurredAt); err != nil {
+				var cov bool
+				if err := rows.Scan(&l.importID, &l.lineNo, &l.isMock, &l.kind, &l.ref, &l.merchant, &l.original, &l.status, &amount, &l.asset, &l.occurredAt, &cov); err != nil {
+					rows.Close()
 					return err
 				}
 				if l.amount, err = parseBig(amount); err != nil {
+					rows.Close()
 					return err
 				}
-				l.eligible = e.clearEligible(l.isMock)
+				raw = append(raw, l)
+				inCov = append(inCov, cov)
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			for i, l := range raw {
+				// F2 / LFF2-5 / SRF2-3: a line may CLEAR or CONFIRM only when its import may (D-4), its import's seal
+				// verifies (with keys), it lies inside its import's coverage and not after this run's coverage end
+				// (a forged line dated decades ahead can never pre-empt a later genuine one). Raising is unchanged.
+				ok, err := m.importVerified(ctx, tx, l.importID)
+				if err != nil {
+					return err
+				}
+				l.eligible = e.clearEligible(l.isMock) && ok && inCov[i] && !l.occurredAt.After(m.ce)
 				// Overlapping imports repeat the same statement line: dedupe on the
 				// content key; keep the first copy, and make it eligible if any copy is.
 				k := strings.Join([]string{l.kind, l.ref, l.merchant, l.status, l.amount.String(), l.asset, l.occurredAt.UTC().Format(time.RFC3339Nano)}, "\x00")
@@ -533,11 +553,11 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 					e.byMerchant[l.merchant] = append(e.byMerchant[l.merchant], l)
 				}
 			}
-			return rows.Err()
+			return nil
 		}
 		if err := readLines(`
 			SELECT l.import_id, l.line_no, i.is_mock, l.kind, l.provider_reference, COALESCE(l.merchant_reference, ''),
-			       COALESCE(l.original_provider_reference, ''), l.status, l.amount::text, l.asset_code, l.occurred_at
+			       COALESCE(l.original_provider_reference, ''), l.status, l.amount::text, l.asset_code, l.occurred_at, (l.occurred_at >= i.coverage_start AND l.occurred_at <= i.coverage_end)
 			  FROM payment_statement_lines l
 			  JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
 			 WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind IN ('deposit', 'payout')
@@ -576,7 +596,7 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		if len(matched) > 0 {
 			if err := readLines(`
 				SELECT l.import_id, l.line_no, i.is_mock, l.kind, l.provider_reference, COALESCE(l.merchant_reference, ''),
-				       COALESCE(l.original_provider_reference, ''), l.status, l.amount::text, l.asset_code, l.occurred_at
+				       COALESCE(l.original_provider_reference, ''), l.status, l.amount::text, l.asset_code, l.occurred_at, (l.occurred_at >= i.coverage_start AND l.occurred_at <= i.coverage_end)
 				  FROM payment_statement_lines l
 				  JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
 				 WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind = 'payout'
@@ -604,29 +624,46 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		}
 	}
 	if len(need) > 0 {
+		// F2 / LFF2-5: only from imports whose seal verifies (with keys), inside the import's coverage and not after
+		// this run's coverage end.
 		rows, err = tx.Query(ctx, `
-			SELECT DISTINCT l.original_provider_reference
+			SELECT DISTINCT l.original_provider_reference, l.import_id
 			  FROM payment_statement_lines l
 			  JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
 			 WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind = 'deposit_reversal'
 			   AND l.status IN ('succeeded', 'reversed')
 			   AND l.original_provider_reference = ANY($3)
-			   AND (NOT i.is_mock OR NOT $4)`,
-			m.tenantID, m.provider, keysOf(need), e.hasRealImp)
+			   AND (NOT i.is_mock OR NOT $4)
+			   AND l.occurred_at >= i.coverage_start AND l.occurred_at <= i.coverage_end AND l.occurred_at <= $5`,
+			m.tenantID, m.provider, keysOf(need), e.hasRealImp, m.ce)
 		if err != nil {
 			return fmt.Errorf("persisted reversal lines: %w", err)
 		}
+		type origImport struct {
+			original string
+			importID uuid.UUID
+		}
+		var found []origImport
 		for rows.Next() {
-			var o string
-			if err := rows.Scan(&o); err != nil {
+			var o origImport
+			if err := rows.Scan(&o.original, &o.importID); err != nil {
 				rows.Close()
 				return err
 			}
-			e.reversalOriginal[o] = true
+			found = append(found, o)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
+		}
+		for _, o := range found {
+			ok, err := m.importVerified(ctx, tx, o.importID)
+			if err != nil {
+				return err
+			}
+			if ok {
+				e.reversalOriginal[o.original] = true
+			}
 		}
 	}
 	return nil
@@ -1161,4 +1198,25 @@ func (m *payMatcher) countM2Confirmation(ctx context.Context, a *payAttempt, l p
 	if paymentM2DeclaredPaidConfirmedTotal != nil {
 		paymentM2DeclaredPaidConfirmedTotal.Add(ctx, 1)
 	}
+}
+
+// importVerified reports whether import id may serve as clearing evidence as far as its seal goes: true without a
+// verifier (the A11 / no-keys mode), else whether its seal verifies over the import and all of its lines (F2 /
+// LFF2-5, SRF2-3). Cached per run.
+func (m *payMatcher) importVerified(ctx context.Context, tx pgx.Tx, id uuid.UUID) (bool, error) {
+	if m.verifier == nil {
+		return true, nil
+	}
+	if ok, seen := m.importOK[id]; seen {
+		return ok, nil
+	}
+	if m.importOK == nil {
+		m.importOK = map[uuid.UUID]bool{}
+	}
+	err := verifyImportSealInTx(ctx, tx, m.verifier, m.tenantID, id)
+	if err != nil && !errors.Is(err, errImportSealMismatch) {
+		return false, err
+	}
+	m.importOK[id] = err == nil
+	return err == nil, nil
 }

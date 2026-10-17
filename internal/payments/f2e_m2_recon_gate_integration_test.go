@@ -24,7 +24,7 @@ import (
 
 // k3StatementRun runs the REAL payment_statement stream once for (tenant, mock's provider) over the MOCK statement
 // source, in continuation mode (as the production scoped sweep does); keys seal the import when given.
-func k3StatementRun(t *testing.T, pool *db.Pool, tenantID uuid.UUID, mock *MockProvider, keys statement.ImportSealKeys) reconciliation.StreamOutcome {
+func k3StatementRun(t *testing.T, pool *db.Pool, tenantID uuid.UUID, mock *MockProvider, keys statement.StreamSealKeys) reconciliation.StreamOutcome {
 	t.Helper()
 	src := NewMockStatementSource(mock, MockCredentialResolver{})
 	now := time.Now()

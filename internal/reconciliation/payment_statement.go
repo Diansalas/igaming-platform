@@ -342,7 +342,7 @@ type PaymentStatementOptions struct {
 	// process-wide sealer (SetDefaultImportSealer), which also verifies when it implements
 	// statement.ImportSealVerifier (payoutinstrument.Keys does). With no verifier at all the cursor falls back to
 	// the A11 rule (any backing import); production refuses that configuration at startup.
-	ImportKeys statement.ImportSealKeys
+	ImportKeys statement.StreamSealKeys
 
 	// cursor, basis and truncated are internal to ReconcilePaymentStatementForTenant (the cursor it read, how it
 	// was read, and whether the validated statement was truncated).
@@ -829,6 +829,9 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 		r:          &sbRecorder{tenantID: tenantID},
 		bounded:    opts.Continuation,
 	}
+	if v := importVerifierFor(opts); v != nil {
+		m.verifier = v
+	}
 	lines, err := m.loadLines(ctx, tx, importID)
 	if err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: load payment statement lines: %w", err)
@@ -842,6 +845,9 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	}
 	if err := m.loadK3Evidence(ctx, tx, info.IsMock); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: load persisted payment evidence: %w", err)
+	}
+	if m.currentImportOK, err = m.importVerified(ctx, tx, importID); err != nil {
+		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: verify the run's import: %w", err)
 	}
 	m.matchLines(lines)
 	m.checkUnmatchedAttempts()
@@ -867,7 +873,7 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 
 	run := Run{
 		ID: uuid.New(), TenantID: tenantID, Stream: StreamPaymentStatement,
-		PeriodStart: info.CoverageStart, PeriodEnd: info.CoverageEnd, RunAt: time.Now().UTC(),
+		PeriodStart: info.CoverageStart, PeriodEnd: info.CoverageEnd, RunAt: time.Now().UTC().Truncate(time.Microsecond),
 		Status: StatusClean,
 		// The continuation cursor (migration 0160): written in the run's own insert, so it advances if and
 		// only if this match committed.
@@ -876,6 +882,20 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	mismatches := m.r.mismatches
 	if len(mismatches) > 0 {
 		run.Status = StatusMismatchesFound
+	}
+	// F2 / SRF2-1 (migration 0168): with run-seal keys the run row is sealed in its own INSERT, binding the import it
+	// matched, its coverage window, window_truncated and run_at. Only a sealed, verifying run is a cursor or M2
+	// evidence.
+	if sealer := runSealerFor(opts); sealer != nil {
+		seal, kid, err := sealer.SealPaymentRun(statement.RunSealInput{
+			RunID: run.ID, TenantID: tenantID, ProviderID: info.ProviderID, Stream: string(StreamPaymentStatement), ImportID: importID,
+			CoverageStart: info.CoverageStart.UTC().Truncate(time.Microsecond), CoverageEnd: info.CoverageEnd.UTC().Truncate(time.Microsecond),
+			WindowTruncated: opts.truncated, RunAt: run.RunAt,
+		})
+		if err != nil {
+			return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: seal payment statement run: %w", err)
+		}
+		run.ImportID, run.RunSeal, run.RunSealKID = importID, seal, kid
 	}
 	if err := persistRun(ctx, tx, run, mismatches); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, err
@@ -906,6 +926,10 @@ type payAttempt struct {
 	// lastChangeAt is the platform record time of the attempt's last state change (resolved_at for a terminal
 	// attempt, else updated_at): F2 / LF-A11-1's bounded-mode "missing provider record" window, the same
 	// semantics as a bounded statement's line time (the provider's record time of the line's last change).
+	// LFF2-6: resolved_at / updated_at are set with now(), i.e. the START of the transaction that recorded the
+	// change, not its commit: a success whose transaction opened before a window's horizon and committed after that
+	// run's snapshot is dated into a window that could not see it. Negligible with a real source's settle lag
+	// (minutes); disclosed for the MOCK (lag 0).
 	lastChangeAt        time.Time
 	ledgerTx            *uuid.UUID // deposit: payment_attempts.ledger_transaction_id
 	releaseTx           *uuid.UUID // payout: withdrawal_requests.release_ledger_transaction_id
@@ -972,6 +996,13 @@ type payMatcher struct {
 	// missingCandidates holds the attempts that rule still has to check against the persisted lines.
 	bounded           bool
 	missingCandidates []*payAttempt
+
+	// verifier (F2 / LFF2-5): with keys, persisted lines may clear or confirm only from imports whose seal verifies
+	// (importVerified, cached in importOK). nil = no keys (the A11 mode: every import counts as far as seals go).
+	verifier statement.ImportSealVerifier
+	importOK map[uuid.UUID]bool
+	// currentImportOK: this run's own import verifies (with keys); its reversal lines may then clear in-run.
+	currentImportOK bool
 }
 
 func (m *payMatcher) key(parts ...string) string {
@@ -1167,7 +1198,7 @@ func (m *payMatcher) matchLines(lines []payLine) {
 	// when its import may clear (a MOCK import clears only when no non-MOCK
 	// import exists for the tenant and provider); every ELIGIBLE persisted
 	// import's reversal lines clear too (S2/S3/S4).
-	if m.k3.clearEligible(m.k3.importIsMock) {
+	if m.k3.clearEligible(m.k3.importIsMock) && m.currentImportOK {
 		for _, l := range lines {
 			if l.kind == statement.PaymentLineDepositReversal && l.original != "" && reversalCompleted(l.status) {
 				m.reversalOriginals[l.original] = true
@@ -1623,11 +1654,18 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 
 // confirmMissingProviderRecords is the bounded-mode tail of the "missing provider record" rule (F2 /
 // LF-A11-1). A candidate is a succeeded attempt whose last change lies in this window and that no line of THIS
-// import matched. It is reported unless a persisted line of an ELIGIBLE import (D-4: non-MOCK, or no non-MOCK import
-// exists for the pair) of this provider already records it - same operation, status succeeded or reversed, by
-// provider reference, payout settlement reference or merchant reference. That spares the attempt whose provider line
-// was dated (and imported) in an EARLIER window than the platform's own record of the change (callback or poll
-// latency across a cut); it never spares an attempt the provider has no record of: "never silently missing".
+// import matched. It is resolved against the persisted lines of this provider that may serve as evidence
+// (usable: an ELIGIBLE (D-4) import, whose seal verifies when the process has keys (LFF2-5), the line inside its
+// import's coverage and not after this run's coverage end), same operation, by provider reference, payout
+// settlement reference or merchant reference:
+//
+//   - a usable `succeeded` line with the attempt's amount AND asset: the provider recorded the success in an
+//     earlier window (callback or poll latency across a cut): not reported;
+//   - a usable `succeeded` line with another amount or asset: pay_asset_mismatch / pay_amount_mismatch (LFF2-5 (3):
+//     never exempted);
+//   - a usable `reversed` line (and no matching succeeded one): the provider reversed what the platform recorded
+//     as succeeded: pay_status_mismatch (LFF2-6), never exempted;
+//   - anything else: pay_missing_provider_record ("never silently missing").
 func (m *payMatcher) confirmMissingProviderRecords(ctx context.Context, tx pgx.Tx) error {
 	if len(m.missingCandidates) == 0 {
 		return nil
@@ -1638,39 +1676,94 @@ func (m *payMatcher) confirmMissingProviderRecords(ctx context.Context, tx pgx.T
 		ids[i], ops[i], refs[i], settlements[i], merchants[i] = a.id, a.operation, a.providerRef, a.settlementRef, a.merchantRef
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT c.id FROM unnest($3::uuid[], $4::text[], $5::text[], $6::text[], $7::text[]) AS c(id, op, ref, settlement, merchant)
-		 WHERE EXISTS (
-		   SELECT 1 FROM payment_statement_lines l
-		     JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
-		    WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind = c.op AND l.status IN ('succeeded', 'reversed')
-		      AND (NOT i.is_mock OR NOT $8)
-		      AND ((c.ref <> '' AND l.provider_reference = c.ref)
-		        OR (c.settlement <> '' AND (l.provider_reference = c.settlement OR l.settlement_reference = c.settlement))
-		        OR (c.merchant <> '' AND l.merchant_reference = c.merchant)))`,
-		m.tenantID, m.provider, ids, ops, refs, settlements, merchants, m.k3.hasRealImp)
+		SELECT c.id, l.import_id, i.is_mock, l.status, l.amount::text, l.asset_code,
+		       (l.occurred_at >= i.coverage_start AND l.occurred_at <= i.coverage_end AND l.occurred_at <= $8)
+		  FROM unnest($3::uuid[], $4::text[], $5::text[], $6::text[], $7::text[]) AS c(id, op, ref, settlement, merchant)
+		  JOIN payment_statement_lines l ON l.tenant_id = $1 AND l.provider_id = $2 AND l.kind = c.op
+		                                AND l.status IN ('succeeded', 'reversed')
+		                                AND ((c.ref <> '' AND l.provider_reference = c.ref)
+		                                  OR (c.settlement <> '' AND (l.provider_reference = c.settlement OR l.settlement_reference = c.settlement))
+		                                  OR (c.merchant <> '' AND l.merchant_reference = c.merchant))
+		  JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
+		 ORDER BY c.id, l.import_id, l.line_no
+		 LIMIT $9`,
+		m.tenantID, m.provider, ids, ops, refs, settlements, merchants, m.ce, k3PersistedLinesPerKey*len(ids)+1)
 	if err != nil {
 		return err
 	}
-	evidenced := map[uuid.UUID]bool{}
+	type evidence struct {
+		importID uuid.UUID
+		isMock   bool
+		status   string
+		amount   *big.Int
+		asset    string
+		inCov    bool
+	}
+	byAttempt := map[uuid.UUID][]evidence{}
+	n := 0
 	for rows.Next() {
 		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var ev evidence
+		var amount string
+		if err := rows.Scan(&id, &ev.importID, &ev.isMock, &ev.status, &amount, &ev.asset, &ev.inCov); err != nil {
 			rows.Close()
 			return err
 		}
-		evidenced[id] = true
+		if ev.amount, err = parseBig(amount); err != nil {
+			rows.Close()
+			return err
+		}
+		n++
+		byAttempt[id] = append(byAttempt[id], ev)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	if n > k3PersistedLinesPerKey*len(ids) {
+		return fmt.Errorf("%w: more than %d persisted lines for %d missing-record candidates", ErrPaymentEvidenceOverflow, k3PersistedLinesPerKey*len(ids), len(ids))
+	}
 	for _, a := range m.missingCandidates {
-		if evidenced[a.id] {
-			continue
+		var exact, otherAmount, otherAsset, reversed bool
+		for _, ev := range byAttempt[a.id] {
+			if !ev.inCov || !m.k3.clearEligible(ev.isMock) {
+				continue
+			}
+			ok, err := m.importVerified(ctx, tx, ev.importID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			switch {
+			case ev.status == statement.PaymentStatusSucceeded && ev.asset == a.asset && ev.amount.Cmp(a.amount) == 0:
+				exact = true
+			case ev.status == statement.PaymentStatusSucceeded && ev.asset != a.asset:
+				otherAsset = true
+			case ev.status == statement.PaymentStatusSucceeded:
+				otherAmount = true
+			case ev.status == statement.PaymentStatusReversed:
+				reversed = true
+			}
 		}
 		k := m.key("attempt="+a.id.String(), "provider_reference="+orNone(a.providerRef))
-		m.r.add(MismatchKindPayMissingProviderRecord, k+" check=unmatched", "statement: a line for this attempt",
-			m.label+"no statement line (bounded: windowed by the attempt's last change, no persisted line); platform: "+a.render())
+		switch {
+		case exact:
+			continue
+		case otherAsset:
+			m.r.add(MismatchKindPayAssetMismatch, k+" check=persisted_asset", "platform: "+a.render(),
+				m.label+"an earlier statement line records this attempt with another asset (bounded: windowed by the attempt's last change)")
+		case otherAmount:
+			m.r.add(MismatchKindPayAmountMismatch, k+" check=persisted_amount", "platform: "+a.render(),
+				m.label+"an earlier statement line records this attempt with another amount (bounded: windowed by the attempt's last change)")
+		case reversed:
+			m.r.add(MismatchKindPayStatusMismatch, k+" check=persisted_reversed", "platform: "+a.render(),
+				m.label+"an earlier statement line records this attempt as reversed while the platform recorded it as succeeded")
+		default:
+			m.r.add(MismatchKindPayMissingProviderRecord, k+" check=unmatched", "statement: a line for this attempt",
+				m.label+"no statement line (bounded: windowed by the attempt's last change, no persisted line); platform: "+a.render())
+		}
 	}
 	return nil
 }

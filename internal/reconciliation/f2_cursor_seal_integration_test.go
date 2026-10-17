@@ -5,8 +5,8 @@ package reconciliation
 import (
 	"context"
 	"crypto/rand"
-	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -95,7 +95,7 @@ func f2AnomalyAlerts(t *testing.T, pool *db.Pool, tenantID uuid.UUID, provider s
 	return out
 }
 
-func f2SealedCursor(t *testing.T, w *payWorld, keys statement.ImportSealKeys, src statement.PaymentStatementSource) cursorState {
+func f2SealedCursor(t *testing.T, w *payWorld, keys statement.StreamSealKeys, src statement.PaymentStatementSource) cursorState {
 	t.Helper()
 	st, err := readPaymentCursorState(context.Background(), w.pool, w.f.tenantID, src.ProviderID(), cursorBasisFor(src, PaymentStatementOptions{ImportKeys: keys}))
 	if err != nil {
@@ -257,31 +257,68 @@ func (u unmarkedSource) Fetch(ctx context.Context, req statement.PaymentFetchReq
 	return u.inner.Fetch(ctx, req)
 }
 
-// Bound: a flood of forged run rows above the cursor cannot make the read unbounded or fall back to a zero
-// cursor silently: once the candidate limit is exhausted the run FAILS (P1), nothing fetched.
-func TestF2_SR11_10_ForgedCandidateFloodFailsClosed(t *testing.T) {
+// SRF2-4 / LFF2-4: a flood of forged run rows (unsealed, and with made-up seals naming the GENUINE import) can
+// neither move the cursor nor stop the stream (no fail-closed state any more: recoverable by design). The sweep keeps
+// continuing from the genuine sealed cursor, the anomaly is loud and carries the full count, and a later genuine run
+// moves the cursor as usual.
+func TestF2_SRF2_4_ForgedRunFloodNeitherMovesNorStopsTheStream(t *testing.T) {
 	w := newPayWorld(t)
 	rt := f2RuntimePool(t)
 	keys := f2Keys(t)
 	src := &recSource{provider: payProvA, fn: contiguousEmpty}
 	cfg := PaymentSweepConfig{Resolver: mapResolver{payProvA: src, payProvB: w.srcB}, AllowSynthetic: true, ImportKeys: keys}
 	scopedSweep(t, w.pool, w.f, cfg)
-	base := mustCursor(t, w.pool, w.f.tenantID, payProvA)
+	base := f2SealedCursor(t, w, keys, src)
+	if base.cursor.IsZero() || base.cursorRunID == uuid.Nil {
+		t.Fatalf("setup: a sealed cursor: %+v", base)
+	}
+	var genuineImport uuid.UUID
+	var genuineStart time.Time
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT run_import_id, period_start FROM reconciliation_runs WHERE id = $1`, base.cursorRunID).Scan(&genuineImport, &genuineStart)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const flood = 2000
 	if err := rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, status, coverage_end, provider_id, window_truncated)
+		// Half unsealed above the cursor, half with a made-up seal naming the genuine import (at its coverage_end and above).
+		if _, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, status, coverage_end, provider_id, window_truncated)
 			SELECT $1, 'payment_statement', $2::timestamptz, $2::timestamptz + g * interval '1 microsecond', 'clean', $2::timestamptz + g * interval '1 microsecond', $3, false
-			  FROM generate_series(1, $4) g`, w.f.tenantID, base, payProvA, cursorCandidateLimit)
+			  FROM generate_series(1, $4) g`, w.f.tenantID, base.cursor, payProvA, flood/2); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (tenant_id, stream, period_start, period_end, status, coverage_end, provider_id, window_truncated,
+			                                                        run_import_id, run_seal, run_seal_kid)
+			SELECT $1, 'payment_statement', $5, $2::timestamptz, 'clean', $2::timestamptz, $3, false, $6, md5(g::text) || md5(g::text), 'f2-test'
+			  FROM generate_series(1, $4) g`, w.f.tenantID, base.cursor, payProvA, flood/2, genuineStart, genuineImport)
 		return err
 	}); err != nil {
-		t.Fatalf("flood: %v", err)
+		t.Fatalf("flood as runtime: %v", err)
 	}
-	before := len(src.requests())
+	st := f2SealedCursor(t, w, keys, src)
+	if !st.cursor.Equal(base.cursor) || st.cursorRunID != base.cursorRunID {
+		t.Fatalf("the flood must not move the cursor: %+v vs %+v", st, base)
+	}
+	if st.unbacked != flood {
+		t.Fatalf("every forged row is counted (count(*), not the bounded read): %d, want %d", st.unbacked, flood)
+	}
 	a := outcomeFor(t, scopedSweep(t, w.pool, w.f, cfg), payProvA)
-	if !errors.Is(a.Err, ErrPaymentCursorUnverifiable) {
-		t.Fatalf("an exhausted candidate set must fail the run closed: %+v", a)
+	if a.Err != nil || a.Run.ID == uuid.Nil {
+		t.Fatalf("the stream keeps working under the flood: %+v", a)
 	}
-	if len(src.requests()) != before {
-		t.Fatal("nothing may be fetched on an unverifiable cursor")
+	reqs := src.requests()
+	if last := reqs[len(reqs)-1]; !last.ContinueFrom.Equal(base.cursor) {
+		t.Fatalf("the sweep continues from the genuine cursor %s, got %s", base.cursor, last.ContinueFrom)
+	}
+	found := false
+	for d := range f2AnomalyAlerts(t, w.pool, w.f.tenantID, payProvA) {
+		found = found || strings.Contains(d, ":cursor_anomaly:n"+strconv.Itoa(flood)+":")
+	}
+	if !found {
+		t.Fatal("the flood must be reported loudly with its full count")
+	}
+	if after := f2SealedCursor(t, w, keys, src); !after.cursor.After(base.cursor) {
+		t.Fatalf("the genuine run made under the flood moves the cursor: %s -> %s", base.cursor, after.cursor)
 	}
 }
 

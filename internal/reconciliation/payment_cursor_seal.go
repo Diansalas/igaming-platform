@@ -21,47 +21,62 @@ import (
 
 // F2 (platform-freeze work list): payment_statement stream integrity.
 //
-// SR11-1 via SR11-10 - the SEALED cursor. The continuation cursor of a (tenant, provider) pair selects what is
-// fetched, so a forged cursor silently blinds the pair. A11 required a backing import (same tenant, provider and
-// coverage_end); a SQL-only attacker could forge that import too. The platform already HMAC-seals every import in
-// its INSERT (SetDefaultImportSealer; the seal covers import id, tenant, provider, source label, is_mock,
-// coverage window, content and lines digest, fetched_at and the importing service), and the key never enters the
-// database. With a seal verifier available the cursor is therefore:
+// SR11-1 - the SEALED cursor. The continuation cursor of a (tenant, provider) pair selects what is fetched, so a
+// forged cursor silently blinds the pair. The runtime role may INSERT both reconciliation_runs and
+// payment_statement_imports, so neither row can be trusted on its own. The application therefore seals BOTH in their
+// own INSERTs with HMAC keys that never enter the database (payoutinstrument.Keys):
 //
-//	max(coverage_end) over payment_statement run rows of the pair (run_at <= now, coverage_end <= now) whose
-//	coverage_end equals that of a stored import of the same tenant and provider that
-//	  - carries a seal and a kid,
-//	  - was written by this stream (imported_by_service), by THIS source (source_label, is_mock), and
-//	  - VERIFIES under the configured keys over the import row and all of its stored lines.
+//   - the IMPORT seal (since 0125): import id, tenant, provider, source label, is_mock, coverage window, content and
+//     lines digest, fetched_at, importing service;
+//   - the RUN seal (migration 0168, SRF2-1 / LFF2-1): run id, tenant, provider, stream, the import the run matched
+//     (run_import_id), the import's coverage window, window_truncated, run_at.
 //
-// Every run row above that cursor (whatever its run_at or coverage_end) is unbacked: ignored, and reported by the
-// durable P1 cursor_anomaly, whose discriminator carries the unbacked-row count and a digest of their ids
-// (SR11-11), so a LATER forgery pages again instead of being absorbed into an alert that is already open.
+// With keys (a verifier) the cursor is the coverage_end of the newest payment_statement run row of the pair
+// (run_at and coverage_end not in the future) whose RUN seal verifies and whose named import was written by this
+// stream and THIS source (imported_by_service, source_label, is_mock), has the same coverage window, and whose
+// IMPORT seal verifies over the import row and all of its stored lines. A forged run row - also one naming a genuine
+// sealed import whose own match never committed (a match skipped by holding the stream's advisory lock, SRF2-1) - is
+// never a cursor. Candidates are read as a stream, newest first, checking the run seal in Go (one HMAC, no extra
+// read); there is no candidate limit and no fail-closed state: forged rows cost a linear scan and are reported, they
+// can neither move the cursor nor stop the stream (SRF2-4 / LFF2-4, recoverable by design).
 //
-// Without a verifier (a non-production process with no PAYOUT_INSTRUMENT_KEYS: imports are then stored unsealed)
-// the A11 rule applies unchanged (any backing import). Production cannot reach that mode with a registered
-// source: cmd/platform-api refuses to start the scoped sweep without a verifier (VerifyPaymentCursorSealing).
+// Run rows that do not back the cursor and are newer than it (coverage_end above it, or run_at after the cursor
+// run's) are reported by the durable P1 cursor_anomaly, whose discriminator carries their count and a digest of their
+// ids (SR11-11). The report reads at most anomalyRowsRead rows plus one count(*).
 //
-// Bounds (an attacker must not be able to make the read unbounded): at most cursorCandidateLimit distinct
-// coverage_end values are examined, newest first, with at most cursorImportsPerCandidate sealed imports each.
-// When every examined candidate fails and the limit was reached the read FAILS (ErrPaymentCursorUnverifiable,
-// a P1 failed run) rather than falling back to a zero cursor.
+// Without keys (a non-production process with no PAYOUT_INSTRUMENT_KEYS: nothing is sealed) the A11 rule applies
+// unchanged (any backing import). Production cannot reach that mode with a registered source:
+// VerifyPaymentCursorSealing refuses the start.
 
 const (
-	cursorCandidateLimit      = 64
-	cursorImportsPerCandidate = 4
+	// cursorRunsPerPage bounds one page of the streaming candidate read; cursorVerifiedPerPage is how many
+	// run-seal-verified candidates a page collects before their imports are checked.
+	cursorRunsPerPage     = 512
+	cursorVerifiedPerPage = 8
+	// anomalyRowsRead bounds the rows the anomaly report reads (the count is a separate count(*)).
+	anomalyRowsRead = 1000
 	// cursorAnomalyDiscMax mirrors the alerts.discriminator CHECK (migration 0110).
 	cursorAnomalyDiscMax = 160
 )
 
-// ErrPaymentCursorUnverifiable: no examined cursor candidate is backed by an import whose seal verifies, and the
-// candidate limit was reached. Fail closed: the run is a P1 failed run and nothing is fetched.
-var ErrPaymentCursorUnverifiable = errors.New("reconciliation: payment statement cursor: no sealed, verifying backing import among the newest run rows")
+// MatchStallAfter is how long a sealed import of the pair may sit above the trusted cursor (fetched, but its match
+// never committed: lock contention, a stale cursor or a failed match) before the stream raises the durable P1
+// match_stalled (SRF2-1 (c)): holding the stream's advisory lock becomes a visible stall, never a quiet one.
+const MatchStallAfter = 30 * time.Minute
+
+// matchStallAfter is MatchStallAfter; a variable ONLY so a test can shorten it.
+var matchStallAfter = MatchStallAfter
+
+// streamVerifier verifies both seals the cursor rests on (payoutinstrument.Keys implements it).
+type streamVerifier interface {
+	statement.ImportSealVerifier
+	statement.RunSealVerifier
+}
 
 // cursorBasis is what a cursor read needs to know about the source whose cursor it is.
 type cursorBasis struct {
 	// verifier is nil in the A11 fallback mode (no keys in this process).
-	verifier statement.ImportSealVerifier
+	verifier streamVerifier
 	label    string
 	isMock   bool
 }
@@ -69,7 +84,10 @@ type cursorBasis struct {
 // cursorState is one consistent read of a pair's cursor and of the run rows that do not back it.
 type cursorState struct {
 	cursor time.Time
-	// unbacked counts the run rows of the pair above the cursor that no verifying import backs.
+	// cursorRunAt / cursorRunID identify the run row the cursor rests on (sealed mode only).
+	cursorRunAt time.Time
+	cursorRunID uuid.UUID
+	// unbacked counts the run rows of the pair newer than the cursor that do not back it.
 	unbacked int
 	// unbackedDigest is the first 16 hex characters of SHA-256 over the sorted ids of those rows ("" when none).
 	unbackedDigest string
@@ -77,10 +95,11 @@ type cursorState struct {
 	newestUnbacked uuid.UUID
 	// sealed reports whether the cursor was read with seal verification (false = A11 fallback).
 	sealed bool
+	// examined counts the sealed-looking candidate run rows whose run seal did not verify (a flood indicator).
+	rejected int
 }
 
-// importKeysFor returns the keys the stream seals and verifies with: opts.ImportKeys, else the process-wide
-// sealer (and, when it can verify, the process-wide verifier).
+// importSealerFor returns the keys the stream seals imports with: opts.ImportKeys, else the process-wide sealer.
 func importSealerFor(opts PaymentStatementOptions) statement.ImportSealer {
 	if opts.ImportKeys != nil {
 		return opts.ImportKeys
@@ -88,29 +107,42 @@ func importSealerFor(opts PaymentStatementOptions) statement.ImportSealer {
 	return DefaultImportSealer()
 }
 
-func importVerifierFor(opts PaymentStatementOptions) statement.ImportSealVerifier {
+// runSealerFor returns the run sealer: opts.ImportKeys, else the process-wide sealer when it can seal runs.
+func runSealerFor(opts PaymentStatementOptions) statement.RunSealer {
 	if opts.ImportKeys != nil {
 		return opts.ImportKeys
 	}
-	if v, ok := DefaultImportSealer().(statement.ImportSealVerifier); ok {
+	if s, ok := DefaultImportSealer().(statement.RunSealer); ok {
+		return s
+	}
+	return nil
+}
+
+// importVerifierFor returns the verifier of both seals: opts.ImportKeys, else the process-wide sealer when it can
+// verify both (payoutinstrument.Keys); nil = the A11 fallback.
+func importVerifierFor(opts PaymentStatementOptions) streamVerifier {
+	if opts.ImportKeys != nil {
+		return opts.ImportKeys
+	}
+	if v, ok := DefaultImportSealer().(streamVerifier); ok {
 		return v
 	}
 	return nil
 }
 
-// DefaultCursorVerifierAvailable reports whether the process-wide sealer can also verify, i.e. whether the
-// scoped sweep reads SEALED cursors (F2 / SR11-10). cmd/platform-api refuses production startup otherwise.
+// DefaultCursorVerifierAvailable reports whether the process-wide sealer can also verify imports and runs, i.e.
+// whether the scoped sweep reads SEALED cursors. cmd/platform-api refuses production startup otherwise.
 func DefaultCursorVerifierAvailable() bool {
-	_, ok := DefaultImportSealer().(statement.ImportSealVerifier)
+	_, ok := DefaultImportSealer().(streamVerifier)
 	return ok
 }
 
-// ErrPaymentCursorSealingUnavailable: production with a registered payment statement source but no import seal
-// verifier. The scoped sweep would fall back to the A11 (forgeable) cursor; startup is refused instead.
+// ErrPaymentCursorSealingUnavailable: production with a registered payment statement source but no seal verifier.
+// The scoped sweep would fall back to the A11 (forgeable) cursor; startup is refused instead.
 var ErrPaymentCursorSealingUnavailable = errors.New("reconciliation: payment statement sources are registered but no import seal keys are configured (the continuation cursor cannot be verified; PAYOUT_INSTRUMENT_KEYS)")
 
 // VerifyPaymentCursorSealing is the startup gate (F2 / SR11-10): in production, a non-empty set of registered
-// payment statement sources requires the process-wide import sealer to verify seals as well.
+// payment statement sources requires the process-wide sealer to verify import and run seals as well.
 func VerifyPaymentCursorSealing(production bool, registeredSources int) error {
 	if production && registeredSources > 0 && !DefaultCursorVerifierAvailable() {
 		return ErrPaymentCursorSealingUnavailable
@@ -140,8 +172,22 @@ func readPaymentCursorState(ctx context.Context, pool *db.Pool, tenantID uuid.UU
 	return st, nil
 }
 
+// sealedRun is one candidate run row as the run seal reads it.
+type sealedRun struct {
+	in        statement.RunSealInput
+	seal, kid *string
+}
+
+// runSealVerifies reports whether r's stored run seal verifies under v.
+func runSealVerifies(v statement.RunSealVerifier, r sealedRun) bool {
+	if v == nil || r.seal == nil || r.kid == nil {
+		return false
+	}
+	return v.VerifyPaymentRun(r.in, *r.kid, *r.seal) == nil
+}
+
 // queryPaymentCursorState is the cursor read inside tx (the stream's read-only pre-fetch transaction, and again
-// under the advisory lock in the match transaction's snapshot).
+// under the advisory lock in the match transaction's snapshot). now() is the transaction start.
 func queryPaymentCursorState(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, b cursorBasis) (cursorState, error) {
 	st := cursorState{sealed: b.verifier != nil}
 	if b.verifier == nil {
@@ -159,81 +205,170 @@ func queryPaymentCursorState(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 		if prev != nil {
 			st.cursor = prev.UTC().Truncate(time.Microsecond)
 		}
-		return st, unbackedAbove(ctx, tx, tenantID, providerID, &st, true)
+		return st, anomalyRows(ctx, tx, tenantID, providerID, &st, nil)
 	}
 
-	rows, err := tx.Query(ctx,
-		`SELECT r.coverage_end FROM reconciliation_runs r
-		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL
-		    AND r.run_at <= now() AND r.coverage_end <= now()
-		  GROUP BY r.coverage_end
-		  ORDER BY r.coverage_end DESC
-		  LIMIT $4`, tenantID, string(StreamPaymentStatement), providerID, cursorCandidateLimit)
-	if err != nil {
-		return cursorState{}, fmt.Errorf("reconciliation: read payment statement cursor candidates: %w", err)
-	}
-	var candidates []time.Time
-	for rows.Next() {
-		var c time.Time
-		if err := rows.Scan(&c); err != nil {
-			rows.Close()
-			return cursorState{}, err
-		}
-		candidates = append(candidates, c)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return cursorState{}, err
-	}
-	found := false
-	for _, c := range candidates {
-		ok, err := sealedBackingImport(ctx, tx, tenantID, providerID, c, b)
+	// Sealed mode: page through the sealed-looking run rows, newest first (keyset paging), verify each run seal in Go,
+	// and check the imports of the verified ones. No limit and no fail-closed state: see the file comment.
+	var after *statement.RunSealInput
+	for {
+		scanned, verified, last, err := sealedRunPage(ctx, tx, tenantID, providerID, after, b.verifier)
 		if err != nil {
 			return cursorState{}, err
 		}
-		if ok {
-			st.cursor, found = c.UTC().Truncate(time.Microsecond), true
-			break
+		st.rejected += scanned - len(verified)
+		for _, r := range verified {
+			ok, err := runImportVerifies(ctx, tx, tenantID, providerID, r, b)
+			if err != nil {
+				return cursorState{}, err
+			}
+			if ok {
+				st.cursor = r.in.CoverageEnd.UTC().Truncate(time.Microsecond)
+				st.cursorRunAt, st.cursorRunID = r.in.RunAt.UTC().Truncate(time.Microsecond), r.in.RunID
+				return st, anomalyRows(ctx, tx, tenantID, providerID, &st, b.verifier)
+			}
 		}
+		if scanned < cursorRunsPerPage {
+			return st, anomalyRows(ctx, tx, tenantID, providerID, &st, b.verifier)
+		}
+		after = &last
 	}
-	if !found && len(candidates) >= cursorCandidateLimit {
-		return cursorState{}, fmt.Errorf("%w (%d candidates examined)", ErrPaymentCursorUnverifiable, len(candidates))
-	}
-	return st, unbackedAbove(ctx, tx, tenantID, providerID, &st, false)
 }
 
-// sealedBackingImport reports whether a stored import of the pair with coverage_end c was written by this stream
-// and source and carries a seal that verifies over the import and all of its stored lines.
-func sealedBackingImport(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, c time.Time, b cursorBasis) (bool, error) {
+// sealedRunPage reads one page of the pair's sealed-looking run rows (run_seal present, run_at and coverage_end not
+// in the future), ordered newest first by (coverage_end, run_at, id), strictly after the key `after`. It returns
+// how many rows it scanned, those whose run seal verifies (in order) and the key of the last row scanned.
+func sealedRunPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, after *statement.RunSealInput, v statement.RunSealVerifier) (int, []sealedRun, statement.RunSealInput, error) {
+	var aCE, aAt *time.Time
+	var aID *uuid.UUID
+	if after != nil {
+		aCE, aAt, aID = &after.CoverageEnd, &after.RunAt, &after.RunID
+	}
 	rows, err := tx.Query(ctx,
-		`SELECT id FROM payment_statement_imports
-		  WHERE tenant_id = $1 AND provider_id = $2 AND coverage_end = $3
-		    AND import_seal IS NOT NULL AND seal_kid IS NOT NULL
-		    AND imported_by_service = $4 AND source_label = $5 AND is_mock = $6
-		  ORDER BY fetched_at DESC, id
-		  LIMIT $7`, tenantID, providerID, c, ImportedByServicePaymentStatement, b.label, b.isMock, cursorImportsPerCandidate)
+		`SELECT r.id, r.run_import_id, r.period_start, r.coverage_end, COALESCE(r.window_truncated, false), r.run_at, r.run_seal, r.run_seal_kid
+		   FROM reconciliation_runs r
+		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.run_seal IS NOT NULL
+		    AND r.run_at <= now() AND r.coverage_end <= now()
+		    AND ($4::timestamptz IS NULL OR (r.coverage_end, r.run_at, r.id) < ($4, $5::timestamptz, $6::uuid))
+		  ORDER BY r.coverage_end DESC, r.run_at DESC, r.id DESC
+		  LIMIT $7`, tenantID, string(StreamPaymentStatement), providerID, aCE, aAt, aID, cursorRunsPerPage)
 	if err != nil {
-		return false, fmt.Errorf("reconciliation: read cursor backing imports: %w", err)
+		return 0, nil, statement.RunSealInput{}, fmt.Errorf("reconciliation: read payment statement cursor candidates: %w", err)
 	}
-	var ids []uuid.UUID
+	defer rows.Close()
+	var verified []sealedRun
+	var last statement.RunSealInput
+	n := 0
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return false, err
+		r := sealedRun{in: statement.RunSealInput{TenantID: tenantID, ProviderID: providerID, Stream: string(StreamPaymentStatement)}}
+		if err := rows.Scan(&r.in.RunID, &r.in.ImportID, &r.in.CoverageStart, &r.in.CoverageEnd, &r.in.WindowTruncated, &r.in.RunAt, &r.seal, &r.kid); err != nil {
+			return 0, nil, statement.RunSealInput{}, err
 		}
-		ids = append(ids, id)
+		n++
+		last = r.in
+		if runSealVerifies(v, r) {
+			verified = append(verified, r)
+		}
 	}
-	rows.Close()
+	return n, verified, last, rows.Err()
+}
+
+// runImportVerifies reports whether the import a (run-seal-verified) run names was written by this stream and source,
+// carries the run's coverage window, and has an import seal that verifies over the import and all of its lines.
+func runImportVerifies(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, r sealedRun, b cursorBasis) (bool, error) {
+	var ok bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM payment_statement_imports
+		                 WHERE id = $1 AND tenant_id = $2 AND provider_id = $3 AND coverage_start = $4 AND coverage_end = $5
+		                   AND import_seal IS NOT NULL AND seal_kid IS NOT NULL
+		                   AND imported_by_service = $6 AND source_label = $7 AND is_mock = $8)`,
+		r.in.ImportID, tenantID, providerID, r.in.CoverageStart, r.in.CoverageEnd, ImportedByServicePaymentStatement, b.label, b.isMock).Scan(&ok); err != nil {
+		return false, fmt.Errorf("reconciliation: read cursor backing import: %w", err)
+	}
+	if !ok {
+		return false, nil
+	}
+	return verifyImportSealInTx(ctx, tx, b.verifier, tenantID, r.in.ImportID) == nil, nil
+}
+
+// anomalyRows fills st's anomaly evidence: the run rows of the pair that do not back the cursor and are newer than
+// it. Sealed mode (v != nil): every row other than the cursor's own whose coverage_end is above the cursor or whose
+// run_at is after the cursor run's (so a COPIED row with run_at = now() at an old coverage_end, SRF2-2, is reported
+// too), minus any row whose run seal verifies (a genuine re-match of a window). A11 fallback (v == nil): the rows
+// above the cursor with no backing import at all (the A11 rule). The count is one count(*); at most anomalyRowsRead
+// rows are read for the digest and the newest id (SRF2-4 / LFF2-4: bounded).
+func anomalyRows(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, st *cursorState, v streamVerifier) error {
+	var floor, after *time.Time
+	if !st.cursor.IsZero() {
+		c := st.cursor
+		floor = &c
+	}
+	if v != nil && !st.cursorRunAt.IsZero() {
+		a := st.cursorRunAt
+		after = &a
+	}
+	const where = `r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL AND r.id <> $4
+		    AND (($5::timestamptz IS NULL OR r.coverage_end > $5) OR ($6::timestamptz IS NOT NULL AND r.run_at > $6))
+		    AND ($7 OR NOT EXISTS (SELECT 1 FROM payment_statement_imports i
+		                            WHERE i.tenant_id = r.tenant_id AND i.provider_id = r.provider_id AND i.coverage_end = r.coverage_end))`
+	args := []any{tenantID, string(StreamPaymentStatement), providerID, st.cursorRunID, floor, after, v != nil}
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM reconciliation_runs r WHERE `+where, args...).Scan(&total); err != nil {
+		return fmt.Errorf("reconciliation: count unbacked payment statement cursor rows: %w", err)
+	}
+	if total == 0 {
+		return nil
+	}
+	cols := `r.id, r.run_import_id, r.period_start, r.coverage_end, COALESCE(r.window_truncated, false), r.run_at, r.run_seal, r.run_seal_kid`
+	if v == nil {
+		// The A11 fallback reads no 0168 column (it also runs against schemas below 0168).
+		cols = `r.id, NULL::uuid, r.period_start, r.coverage_end, false, r.run_at, NULL::text, NULL::text`
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT `+cols+`
+		   FROM reconciliation_runs r WHERE `+where+`
+		  ORDER BY r.coverage_end DESC, r.id DESC
+		  LIMIT `+strconv.Itoa(anomalyRowsRead), args...)
+	if err != nil {
+		return fmt.Errorf("reconciliation: read unbacked payment statement cursor rows: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	genuine := 0
+	for rows.Next() {
+		r := sealedRun{in: statement.RunSealInput{TenantID: tenantID, ProviderID: providerID, Stream: string(StreamPaymentStatement)}}
+		var imp *uuid.UUID
+		if err := rows.Scan(&r.in.RunID, &imp, &r.in.CoverageStart, &r.in.CoverageEnd, &r.in.WindowTruncated, &r.in.RunAt, &r.seal, &r.kid); err != nil {
+			return err
+		}
+		if imp != nil {
+			r.in.ImportID = *imp
+		}
+		if v != nil && runSealVerifies(v, r) {
+			genuine++ // a sealed run of this process (e.g. a re-matched window): not an anomaly
+			continue
+		}
+		if st.newestUnbacked == uuid.Nil {
+			st.newestUnbacked = r.in.RunID
+		}
+		ids = append(ids, r.in.RunID.String())
+	}
 	if err := rows.Err(); err != nil {
-		return false, err
+		return err
 	}
-	for _, id := range ids {
-		if verifyImportSealInTx(ctx, tx, b.verifier, tenantID, id) == nil {
-			return true, nil
+	st.unbacked = total - genuine
+	if len(ids) > 0 {
+		sort.Strings(ids)
+		h := sha256.New()
+		h.Write([]byte(strconv.Itoa(st.unbacked)))
+		h.Write([]byte{0})
+		for _, id := range ids {
+			h.Write([]byte(id))
+			h.Write([]byte{0})
 		}
+		st.unbackedDigest = hex.EncodeToString(h.Sum(nil))[:16]
 	}
-	return false, nil
+	return nil
 }
 
 // errImportSealMismatch is verifyImportSealInTx's refusal (never surfaced: a candidate that does not verify is
@@ -290,56 +425,6 @@ func verifyImportSealInTx(ctx context.Context, tx pgx.Tx, v statement.ImportSeal
 	in.LinesDigest = statement.ImportLinesDigest(lines)
 	if err := v.VerifyStatementImport(in, *kid, *seal); err != nil {
 		return errImportSealMismatch
-	}
-	return nil
-}
-
-// unbackedAbove fills st's anomaly evidence: the run rows of the pair above the cursor that do not back it. In
-// the sealed mode that is EVERY row above the cursor (the cursor is the newest verifying candidate, and a row
-// beyond now or beyond the candidate limit cannot be trusted either); in the A11 fallback it is the rows with no
-// backing import at all (the A11 rule, unchanged).
-func unbackedAbove(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, st *cursorState, fallback bool) error {
-	var floor *time.Time
-	if !st.cursor.IsZero() {
-		c := st.cursor
-		floor = &c
-	}
-	rows, err := tx.Query(ctx,
-		`SELECT r.id, r.coverage_end FROM reconciliation_runs r
-		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL
-		    AND ($4::timestamptz IS NULL OR r.coverage_end > $4)
-		    AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM payment_statement_imports i
-		                                WHERE i.tenant_id = r.tenant_id AND i.provider_id = r.provider_id AND i.coverage_end = r.coverage_end))
-		  ORDER BY r.coverage_end DESC, r.id DESC`,
-		tenantID, string(StreamPaymentStatement), providerID, floor, fallback)
-	if err != nil {
-		return fmt.Errorf("reconciliation: read unbacked payment statement cursor rows: %w", err)
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id uuid.UUID
-		var ce time.Time
-		if err := rows.Scan(&id, &ce); err != nil {
-			return err
-		}
-		if st.newestUnbacked == uuid.Nil {
-			st.newestUnbacked = id
-		}
-		ids = append(ids, id.String())
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	st.unbacked = len(ids)
-	if len(ids) > 0 {
-		sort.Strings(ids)
-		h := sha256.New()
-		for _, id := range ids {
-			h.Write([]byte(id))
-			h.Write([]byte{0})
-		}
-		st.unbackedDigest = hex.EncodeToString(h.Sum(nil))[:16]
 	}
 	return nil
 }
@@ -408,4 +493,69 @@ func reportCursorAnomaly(ctx context.Context, pool *db.Pool, logger *slog.Logger
 		logger.Error("reconciliation sweep: failed to audit the cursor anomaly", "tenant_id", tenantID, "stream", stream, "error", auditErr)
 	}
 	raiseRunNotReconciledAs(ctx, pool, tenantID, stream, provider, "cursor_anomaly", cursorAnomalyPhase(provider, st))
+}
+
+// checkMatchStall reports a stalled pair (SRF2-1 (c)): an import of THIS source (sealed, when the cursor is read
+// sealed) whose coverage_end lies above the trusted cursor and that was fetched more than MatchStallAfter ago. Its
+// match never committed; holding the stream's advisory lock across sweeps produces exactly this. Durable P1
+// reconciliation.run_failed (phase match_stalled) plus an audit row; the run itself goes on.
+func checkMatchStall(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, provider, obsStatus string, b cursorBasis, st cursorState) error {
+	var floor *time.Time
+	if !st.cursor.IsZero() {
+		c := st.cursor
+		floor = &c
+	}
+	var n int
+	var oldest *time.Time
+	if err := pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*), min(fetched_at) FROM payment_statement_imports
+			  WHERE tenant_id = $1 AND provider_id = $2 AND imported_by_service = $3 AND source_label = $4 AND is_mock = $5
+			    AND ($6::timestamptz IS NULL OR coverage_end > $6)
+			    AND (NOT $7 OR import_seal IS NOT NULL)
+			    AND fetched_at < now() - make_interval(secs => $8)`,
+			tenantID, provider, ImportedByServicePaymentStatement, b.label, b.isMock, floor, b.verifier != nil, matchStallAfter.Seconds()).Scan(&n, &oldest)
+	}); err != nil {
+		return fmt.Errorf("reconciliation: read unmatched payment statement imports: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	stream := string(StreamPaymentStatement)
+	shown := discPart(provider)
+	if logger != nil {
+		logger.Error("reconciliation sweep: payment statement match STALLED (P1): imports above the trusted cursor were never matched",
+			"tenant_id", tenantID, "stream", stream, "provider_id", shown, "imports", n, "oldest_fetched_at", oldest)
+	}
+	if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.payment_match_stalled",
+			TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
+			Metadata: observationMetadata(obsStatus, map[string]any{"stream": stream, "provider_id": shown, "unmatched_imports": n,
+				"cursor": st.cursor.UTC().Format(time.RFC3339Nano), "severity": "P1"}),
+		})
+	}); auditErr != nil && logger != nil {
+		logger.Error("reconciliation sweep: failed to audit the match stall", "tenant_id", tenantID, "stream", stream, "error", auditErr)
+	}
+	raiseRunNotReconciled(ctx, pool, tenantID, stream, provider, "match_stalled")
+	return nil
+}
+
+// reportMatchSkipped audits a skipped match (lock contention or a stale cursor) that left importID without a run.
+func reportMatchSkipped(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, provider, obsStatus string, importID uuid.UUID) {
+	stream := string(StreamPaymentStatement)
+	shown := discPart(provider)
+	if logger != nil {
+		logger.Warn("reconciliation sweep: payment statement match SKIPPED; the import stays unmatched (the next sweep re-fetches from the cursor)",
+			"tenant_id", tenantID, "stream", stream, "provider_id", shown, "import_id", importID)
+	}
+	if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.payment_match_skipped",
+			TargetType: "payment_statement_import", TargetID: importID.String(), Outcome: audit.OutcomeFailure,
+			Metadata: observationMetadata(obsStatus, map[string]any{"stream": stream, "provider_id": shown, "import_id": importID.String()}),
+		})
+	}); auditErr != nil && logger != nil {
+		logger.Error("reconciliation sweep: failed to audit the skipped match", "tenant_id", tenantID, "stream", stream, "error", auditErr)
+	}
 }

@@ -74,7 +74,7 @@ type PaymentSweepConfig struct {
 	AllowSynthetic bool
 	// ImportKeys (F2 / SR11-10) seals the stream's imports and verifies the cursor's backing imports. nil = the
 	// process-wide sealer (cmd/platform-api installs payoutinstrument.Keys, which also verifies).
-	ImportKeys statement.ImportSealKeys
+	ImportKeys statement.StreamSealKeys
 }
 
 // paymentPlan is how the sweep runs the payment_statement stream: legacy (a flat source list, every source for
