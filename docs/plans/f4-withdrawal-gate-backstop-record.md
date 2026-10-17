@@ -56,8 +56,12 @@ the gate before `lockSubmittedRequest` (L1), then the existing chain; the decisi
 escalates; an allow records the decision row before the CAS). Pinned by `TestF4_Claim_GateRunsBeforeTheRowLock` (the
 gate is evaluated while another transaction holds the request's L1 lock) and by `TestB13B_Static_ClaimForDispatchOrder`.
 
-A request that became `approved` between the unlocked pre-read and the lock (no gate evaluated in this transaction) is
-refused as unavailable (retryable): nothing is claimed without a decision taken in the claim transaction.
+A NOT-ACTIVE tenant or brand is not refused by the pre-lock status call: the gate is skipped and the unchanged post-L1
+H-SEC-11 check refuses it with the same error and the same precedence as before (the claim still serializes on L1 with
+a governed hold release: `TestHSEC_HoldRelease_Concurrency_ExecuteVsSubmit` unchanged). Any other error of the pre-lock
+status call aborts. A request that became `approved`, or a subject that became active, between the unlocked pre-read
+and the lock (no gate evaluated in this transaction) is refused as unavailable (retryable): nothing is claimed without a
+decision taken in the claim transaction.
 
 ### 2.4 Outcomes
 
@@ -104,17 +108,30 @@ one decision row; a foreign tenant's claim of the id is `ErrNotFound` with zero 
   (the original assertion, unchanged code).
 - `internal/alerting/static_wiring_test.go` and `static_derived_raise_set_test.go`: `applyRedispatchGate` added to the
   reviewed raise helpers (reached only from the T2 / T12 InTx closures; raise is its last statement).
-- Fixtures that walk E7 / a payout T2 directly now record a fixture ALLOW decision first (they test the state machine,
-  not the gate): `internal/testsupport/wdpath` (Advance), `internal/withdrawal` (`f4ThenSubmit` at 11 call sites in 7
-  files), `internal/payments` (`payout_dispatch_integration_test.go` T2 race, `dep_ref_validate_integration_test.go`
-  seed, `b11_payout_unbound_hold_integration_test.go` legacy E7). Assertions unchanged.
+- Fixtures that walk E7 or a payout T2 / T12 directly now record a fixture ALLOW decision first (they test the state
+  machine, the evidence paths or reconciliation, not the gate). Assertions unchanged:
+  - `internal/testsupport/wdpath` (`Advance`, E7 step; skipped on a scratch schema older than 0169);
+  - `internal/withdrawal`: `f4ThenSubmit` / `f4AllowDispatch` (new `f4_dispatch_fixture_integration_test.go`) at the
+    E7 call sites of `a5_migration_0162`, `a5_payout_reversal_db`, `adr0113_state_machine` (3), `adversarial`,
+    `lockorder`, `replay_f7`, `withdrawal_integration` (2);
+  - `internal/payments`: wrappers `f4ClaimCreatedForSubmission`, `f4ResubmitAmbiguous`, `f4MarkSubmittedPending` (the
+    allow is recorded only for a PAYOUT attempt; a deposit attempt is untouched) in `pay_callback_mismatch_bind`,
+    `payout_dispatch_round3`, `payout_dispatch_round4`, `payout_security_round` (2), `receipt_drain_merchant_ref`,
+    `rvlf_i1_regression` (13 sites), `sweeper_loop`; direct recording in `payout_dispatch_integration_test.go` (T2
+    race), `dep_ref_validate` (seed), `b11_payout_unbound_hold` (legacy E7), `hsec_hold_resolution_db` (2 control
+    probes) and `hsec_hold_resolution_guard` (1);
+  - `internal/payments/b13b_destination_integration_test.go`: the two hand-built `&Orchestrator{...}` literals that
+    reach `ClaimForDispatch` carry `withdrawalGate: standard.New()` (NewOrchestrator's default; a nil gate refuses);
+  - `internal/httpserver`: `a5_payout_reversal_http` (E7) and `iwire_webhook_reversal_link` (payout T2) via
+    `f4RecordDispatchAllowHTTP`.
+- Scratch down-chain tests (`a5_amount_dispute` 0163, `m4_resolve1` 0125, `m4_integrity` 0127, `hsec_hold_resolution_db`
+  0124): before stepping a THROWAWAY scratch database from head below 0169, `f4ScratchClearGateDecisions` removes the
+  decision rows as the scratch owner (append-only trigger and FORCE RLS lifted for that statement, restored in the same
+  transaction; the 0124 test already clears launch history the same way). Otherwise 0169's own WD095 refusal stops the
+  chain first. The refusal codes those tests pin (MR099 etc.) are unchanged.
 - `internal/launchgov/closure_integration_test.go` `playerWithWallet`: activates the registered player (a withdrawal
   reaches `submitted` only for an active account, WD052; the A6 precedent in `closure_withdrawal_race`). Assertions
   unchanged.
-- `internal/payments/a5_amount_dispute_integration_test.go` `TestA5_Migration0163_DownRefused...`: before stepping
-  down from head to 0163, the scratch-database owner removes the 0169 decision rows (append-only trigger and FORCE RLS
-  lifted for that statement on the THROWAWAY database); otherwise 0169's own WD095 refusal stops the chain first. The
-  MR099 assertion is unchanged.
 - OpenAPI prose of `POST /v1/admin/withdrawals/{id}/submit`: 409 (held by the gate) and 503 (gate unavailable)
   described. No new response code, no new error code.
 
