@@ -35,6 +35,8 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	"internal/payments/alerts.go:raisePollContradictionAlert": true,
 	"internal/payments/alerts.go:raiseMultipleSuccessAlert":   true,
 	"internal/payments/alerts.go:raiseDepositEscalationAlert": true,
+	// PAY-DEPOSIT-MISMATCH-ALERT-1: raise-only deposit mismatch signal, called only from the receipt cells.
+	"internal/payments/alerts.go:raiseDepositSignalAlert": true,
 	// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the payout dispute / T14 / T16 raise.
 	"internal/payments/payout_alerts.go:raisePayoutDisputeAlert": true,
 	// PAY-RECEIPT-ANOMALY-APPLIED-1 (ADR 0095 section 45): the refused receipt attribution repair signal.
@@ -262,7 +264,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 	guarded := map[string]bool{
 		"alerting.RaiseGuarded": true, "raiseDepositParkAlert": true, "raisePollContradictionAlert": true,
 		"raiseMultipleSuccessAlert": true, "raiseLedgerRunAlerts": true, "raiseInTxMismatch": true, "alertAfterDispute": true,
-		"raiseSubmissionFailedTerminal": true, "raiseDepositEscalationAlert": true,
+		"raiseSubmissionFailedTerminal": true, "raiseDepositEscalationAlert": true, "raiseDepositSignalAlert": true,
 		"raisePayoutDisputeAlert": true, "payoutAlertAfterDispute": true,
 		"raiseReceiptRepairRefusedAlert": true, "raiseReceiptRepairAlertReason": true,
 		"payoutPostM4Cell": true, // ADR 0111 4.8 (F-1): its return value IS the raise

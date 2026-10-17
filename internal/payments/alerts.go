@@ -139,6 +139,41 @@ func raiseDepositEscalationAlert(ctx context.Context, tx pgx.Tx, attempt Payment
 	return alerting.RaiseGuarded(ctx, tx, depositParkAlert(attempt, providerIDOrEmpty(attempt), reason))
 }
 
+// PAY-DEPOSIT-MISMATCH-ALERT-1 (ADR 0095 section 42.8; raise only, the deposit twins of payout R-5/R-6).
+//
+// A provider success whose amount/asset differs from the deposit attempt's own, delivered to an
+// attempt that is already terminal: on a DECLINED deposit the provider captured money we did not
+// credit (capture without credit); on a SUCCEEDED deposit the provider evidence conflicts with what
+// was credited. Neither is a terminal reason (the attempt is not parked and does not change state),
+// so neither is in DepositDisputeTerminalReasons and alertReasonFor would map them to
+// "unclassified"; they have their own closed set. Same Kind (payment.webhook_integrity, no
+// migration), same discriminator shape as the other deposit raises. Attributes carry provider_id only.
+const (
+	alertReasonDepositMismatchedSuccessOnDeclined  = "mismatched_success_on_declined_deposit"
+	alertReasonDepositMismatchedSuccessOnSucceeded = "mismatched_success_on_succeeded_deposit"
+)
+
+// depositSignalReasons is the closed set of deposit alert reasons raised with no state change.
+var depositSignalReasons = map[string]struct{}{
+	alertReasonDepositMismatchedSuccessOnDeclined:  {},
+	alertReasonDepositMismatchedSuccessOnSucceeded: {},
+}
+
+// raiseDepositSignalAlert raises the durable P1 for a no-state-change deposit signal. A payout
+// attempt is a no-op (payouts have raisePayoutDisputeAlert). The reason is validated against the
+// closed set (anything else becomes "unclassified", never echoed). Same placement rule as the other
+// raises: the LAST statement of the cell, inside an alerting.InTx closure's tx.
+func raiseDepositSignalAlert(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, reason string) error {
+	if attempt.Operation != AttemptOperationDeposit {
+		return nil
+	}
+	if _, ok := depositSignalReasons[reason]; !ok {
+		slog.Default().Error("payments_alert_reason_unclassified")
+		reason = alertReasonUnclassified
+	}
+	return alerting.RaiseGuarded(ctx, tx, depositParkAlert(attempt, providerIDOrEmpty(attempt), reason))
+}
+
 func intentDiscriminator(intentID uuid.UUID) string { return "intent:" + intentID.String() }
 
 // raiseMultipleSuccessAlert raises payment.multiple_success_for_intent (ADR

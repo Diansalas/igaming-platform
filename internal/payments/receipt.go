@@ -964,7 +964,7 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// folded into "already applied". No state change (the attempt
 			// is already terminal and this specialist never auto-resolves
 			// a terminal contradiction) and no posting - the audit row, plus (R-6, payouts
-			// only) a raise-only P1.
+			// only) a raise-only P1 (deposits too: PAY-DEPOSIT-MISMATCH-ALERT-1).
 			if mismatched {
 				// PAY-PAYOUT-CALLBACK-AUDIT-2 (F-2 / LF L-3): the audit row is written once per NEW receipt,
 				// never per redelivery (the L-e precedent). The first delivery's row commits atomically with
@@ -979,6 +979,10 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				// the reference of an already-settled payout is a contradiction that must page like
 				// R-5. No state change, no release, no posting. The raise is the last statement of the
 				// cell, after the audit row; it is a no-op for a deposit.
+				if attempt.Operation == AttemptOperationDeposit {
+					// PAY-DEPOSIT-MISMATCH-ALERT-1 (raise only): conflicting evidence on a credited deposit.
+					return false, ResolutionAnomalyOther, raiseDepositSignalAlert(ctx, tx, attempt, alertReasonDepositMismatchedSuccessOnSucceeded)
+				}
 				return false, ResolutionAnomalyOther, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutMismatchedSuccessOnSucceeded)
 			}
 			// PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ADR 0095 section 42.8, LF M-1; raise only): a
@@ -1025,6 +1029,10 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				// candidate (the hold is already released), so it pages like T14. No state change,
 				// no release, no posting. The raise is the last statement of the cell, after the
 				// audit row; it is a no-op for a deposit.
+				if attempt.Operation == AttemptOperationDeposit {
+					// PAY-DEPOSIT-MISMATCH-ALERT-1 (raise only): money captured by the provider without credit.
+					return false, ResolutionAnomalyOther, raiseDepositSignalAlert(ctx, tx, attempt, alertReasonDepositMismatchedSuccessOnDeclined)
+				}
 				return false, ResolutionAnomalyOther, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutMismatchedSuccessOnDeclined)
 			}
 			if attempt.Operation != AttemptOperationDeposit {

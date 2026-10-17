@@ -82,8 +82,17 @@ func TestIWire_LF9_ConcurrentT10ReceiptsWithDetachedFlush_NoDoublePostingOneAler
 		if postings != 1 || cashBalance(t, pool, e.f) != 5000 {
 			t.Fatalf("succeeded: postings=%d balance=%d, want exactly one posting of 5000", postings, cashBalance(t, pool, e.f))
 		}
-		if len(parkAlerts) != 0 {
-			t.Fatalf("succeeded attempt must have no park alert, got %+v", parkAlerts)
+		// PAY-DEPOSIT-MISMATCH-ALERT-1 (deliberate change): a contradicting success that loses the race and
+		// lands AFTER the credited success is now the raise-only mismatched_success_on_succeeded_deposit
+		// signal. There must still be NO park (T10) alert, and no other alert than that one signal.
+		signal := "attempt:" + a.ID.String() + ":reason:" + alertReasonDepositMismatchedSuccessOnSucceeded
+		for _, r := range parkAlerts {
+			if r.Discriminator != signal {
+				t.Fatalf("succeeded attempt must have no park alert, got %+v", parkAlerts)
+			}
+		}
+		if len(parkAlerts) > 1 {
+			t.Fatalf("the signal must be ONE alert row, got %+v", parkAlerts)
 		}
 	case AttemptDisputed:
 		if postings != 0 || cashBalance(t, pool, e.f) != 0 {

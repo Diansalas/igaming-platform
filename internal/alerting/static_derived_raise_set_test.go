@@ -72,6 +72,7 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/alerts.go:alertAfterDispute":                     true,
 	"internal/payments/alerts.go:raiseDepositEscalationAlert":           true,
 	"internal/payments/alerts.go:raiseDepositParkAlert":                 true,
+	"internal/payments/alerts.go:raiseDepositSignalAlert":               true, // PAY-DEPOSIT-MISMATCH-ALERT-1 (receipt cells only)
 	"internal/payments/alerts.go:raiseMultipleSuccessAlert":             true,
 	"internal/payments/alerts.go:raisePollContradictionAlert":           true,
 	"internal/payments/drive.go:applyDepositCallResult":                 true,

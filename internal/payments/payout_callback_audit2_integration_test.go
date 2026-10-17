@@ -402,8 +402,11 @@ func TestCallbackAudit2_Deposit_OrphanedReceipt_Redelivered_AuditedOnce_Resolved
 		t.Fatalf("the orphaned deposit receipt must be resolved")
 	}
 	ca2AssertReceiptResolved(t, pool, f.tenantID, ref, 4999, res.Attempt.ID)
-	if rows := alertinject.ForSubject(t, pool, f.tenantID); len(rows) != 0 {
-		t.Fatalf("a deposit raises no alert today, got %+v", rows)
+	// PAY-DEPOSIT-MISMATCH-ALERT-1 (deliberate change from "a deposit raises no alert today"): the mismatched
+	// success on the succeeded deposit raises ONE raise-only P1 (the audit row is still written once).
+	rows := alertinject.ForSubject(t, pool, f.tenantID)
+	if len(rows) != 1 || rows[0].Discriminator != "attempt:"+res.Attempt.ID.String()+":reason:"+alertReasonDepositMismatchedSuccessOnSucceeded {
+		t.Fatalf("a mismatched success on a succeeded deposit raises exactly one signal alert, got %+v", rows)
 	}
 	if got := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID); got.State != AttemptSucceeded {
 		t.Fatalf("state changed to %s", got.State)
