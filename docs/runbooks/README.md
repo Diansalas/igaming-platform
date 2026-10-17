@@ -47,6 +47,11 @@ Operational incident runbooks now exist (Stage 9) — see:
   login and migration 0138, re-seeding staff, the `cmd/seed-admin` bootstrap and
   break-glass path until the S6 MFA reset exists, required database logging
   settings.
+- `aml-officer-bootstrap.md`, `aml-adjustment-approver-confidentiality.md` — A7: AML officer bootstrap; confidentiality duty of the adjustment approver.
+- `payout-instrument-keys.md` — payout instrument key families (ADR 0111).
+- `production-startup-database-config.md` — production database/startup configuration and role requirements.
+- `plat-rolesplit-staging-verification.md` — PLAT-ROLESPLIT-1 staging verification procedure (AWS-gated).
+- `developer-handover.md` — developer onboarding notes (see also `docs/HANDOVER.md`).
 - `self-hosted-runner.md` — PREPARED, NOT ACTIVE: Mac self-hosted CI runner
   plan for CI-BILLING-1 (paired with `.github/workflows/ci-selfhosted.yml`,
   manual dispatch only); no setup until the owner separately authorizes it.
