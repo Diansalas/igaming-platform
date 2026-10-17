@@ -86,12 +86,13 @@ type k3Opts struct {
 type k3World struct {
 	t    *testing.T
 	pool *db.Pool
-	// F2e: whether the world's genuine payment_statement run was made (lazily, before the first M2 request) or
-	// must never be made (k3Opts.noStatementRun).
-	statementRunDone, noStatementRun bool
 	f    payoutFixture
 	svc  *ManualResolutionService
 	reg  *StatementSourceRegistry
+
+	// F2e: whether the world's genuine payment_statement run was made (lazily, before the first M2 request) or
+	// must never be made (k3Opts.noStatementRun).
+	statementRunDone, noStatementRun bool
 
 	provider string
 	mock     *MockProvider
