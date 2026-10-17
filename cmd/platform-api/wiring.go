@@ -82,18 +82,54 @@ type mockWiring struct {
 	GeolocationCountry string
 }
 
+// testSupportRoutesGate is the SINGLE function every test-support seam in
+// this binary derives from (U-6, defence in depth over ADR 0085 §1): the
+// four httpserver.Deps route-enable flags (CasinoPlaySimulationEnabled,
+// PaymentsMockSettlementEnabled, AccountActivationTestSupportEnabled,
+// SportsbookSettlementSimulationEnabled, set in main.go) and
+// mockProviderWiring (which in turn sets Deps.KYCWebhookEnabled and every
+// MOCK resolver). test_support_gate_test.go pins, by AST, that no other
+// derivation exists.
+//
+// It is true only when BOTH:
+//   - cfg.TestSupportRoutesEnabled() (ADR 0085's two-layer gate:
+//     Environment != "production" AND TEST_SUPPORT_ENDPOINTS_ENABLED), and
+//   - cfg.GuardEnvironment() is one of the explicit non-production values
+//     "development" or "staging" - an ALLOW-list, not "!= production", so
+//     GuardEnvironment()=="production" (which includes a MISSING APP_ENV)
+//     and any value config.Load() would itself have rejected (an explicit
+//     empty APP_ENV, "test", a typo) are all off even for a Config that
+//     was constructed without going through Load().
+//
+// config.Load() already refuses production + test support, and the
+// synthetic-component guard (refuseSyntheticInProduction) already refuses
+// a missing APP_ENV before any route is built, so for a Load()-produced
+// Config this changes nothing reachable today: explicit development/
+// staging with the flag on keep the documented ADR 0085 behaviour. It
+// exists so that the route flags no longer depend on those earlier,
+// separately-maintained checks running first.
+func testSupportRoutesGate(cfg config.Config) bool {
+	switch cfg.GuardEnvironment() {
+	case "development", "staging":
+		return cfg.TestSupportRoutesEnabled()
+	default:
+		return false
+	}
+}
+
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
 // can be unit-tested for every {production, missing APP_ENV, staging,
 // development} x {flag on, off} combination.
 //
 // Stage 10.3 gate-W1 fix round (security S-4, code review #2): on top of
-// TestSupportRoutesEnabled() it also requires GuardEnvironment() !=
-// "production", so a MISSING APP_ENV (which TestSupportRoutesEnabled alone
-// reads as "development") can never wire a MOCK resolver or the KYC mock.
+// TestSupportRoutesEnabled() it also requires GuardEnvironment() to be an
+// explicit non-production value (via testSupportRoutesGate, U-6), so a
+// MISSING APP_ENV (which TestSupportRoutesEnabled alone reads as
+// "development") can never wire a MOCK resolver or the KYC mock.
 // Explicit staging/development keep the TestSupportRoutesEnabled
 // semantics unchanged.
 func mockProviderWiring(cfg config.Config) mockWiring {
-	testSupport := cfg.TestSupportRoutesEnabled() && cfg.GuardEnvironment() != "production"
+	testSupport := testSupportRoutesGate(cfg)
 	geolocationCountry := ""
 	if testSupport {
 		geolocationCountry = cfg.MockGeolocationCountry
