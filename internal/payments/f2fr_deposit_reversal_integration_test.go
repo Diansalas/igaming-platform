@@ -42,6 +42,40 @@ func (w *k3World) stmtRunKeyed(keys *payoutinstrument.Keys, src statement.Paymen
 	return ms
 }
 
+// f2frForgeReversal writes an UNSEALED MOCK import whose only line reverses ref, dated at, with coverage
+// [now - 1 h, coverageEnd].
+func f2frForgeReversal(w *k3World, ref string, at, coverageEnd time.Time) {
+	w.t.Helper()
+	w.tx(func(ctx context.Context, tx pgx.Tx) error {
+		imp := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_statement_imports
+			(id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at)
+			VALUES ($1, $2, $3, 'MOCK forged reversal', true, now() - interval '1 hour', $4, 1, $5, now())`, imp, w.f.tenantID, w.provider, coverageEnd, make([]byte, 32)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO payment_statement_lines (id, tenant_id, import_id, line_no, provider_id, kind, provider_reference,
+			original_provider_reference, status, amount, asset_code, occurred_at)
+			VALUES ($1, $2, $3, 0, $4, 'deposit_reversal', $5, $6, 'succeeded', 5000, 'EUR', $7)`,
+			uuid.New(), w.f.tenantID, imp, w.provider, "forged-rev-"+uuid.NewString(), ref, at)
+		return err
+	})
+}
+
+// Without keys (non-production): a reversal line dated 50 years ahead is never clearing evidence.
+func TestF2fr_FutureDatedReversalNeverClears(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	a := w.disputedDeposit(5000)
+	ref := *a.ProviderReference
+	w.requireOne(w.stmtRun(w.source(false, w.depositLine(ref, a.MerchantReference, statement.PaymentStatusSucceeded, 5000))),
+		reconciliation.MismatchKindPayCapturedUnposted, a.ID, "setup: raised")
+	future := time.Now().AddDate(50, 0, 0)
+	f2frForgeReversal(w, ref, future, future.Add(time.Hour))
+	w.requireOne(w.stmtRun(w.source(false)), reconciliation.MismatchKindPayCapturedUnposted, a.ID, "a future-dated reversal must not clear")
+	f2frForgeReversal(w, ref, time.Now().Add(-time.Minute), time.Now())
+	w.requireNone(w.stmtRun(w.source(false)), reconciliation.MismatchKindPayCapturedUnposted, a.ID,
+		"control: without keys an in-coverage MOCK reversal (no real import yet) clears, as before")
+}
+
 func TestF2fr_WithKeysOnlyASealedDepositReversalClears(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})
 	keys := f2eKeys(t)
@@ -51,19 +85,7 @@ func TestF2fr_WithKeysOnlyASealedDepositReversalClears(t *testing.T) {
 		reconciliation.MismatchKindPayCapturedUnposted, a.ID, "setup: raised")
 
 	// The forgery: an UNSEALED MOCK import whose only line reverses ref, inside its coverage.
-	w.tx(func(ctx context.Context, tx pgx.Tx) error {
-		imp := uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO payment_statement_imports
-			(id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at)
-			VALUES ($1, $2, $3, 'MOCK forged reversal', true, now() - interval '1 hour', now(), 1, $4, now())`, imp, w.f.tenantID, w.provider, make([]byte, 32)); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO payment_statement_lines (id, tenant_id, import_id, line_no, provider_id, kind, provider_reference,
-			original_provider_reference, status, amount, asset_code, occurred_at)
-			VALUES ($1, $2, $3, 0, $4, 'deposit_reversal', $5, $6, 'succeeded', 5000, 'EUR', now() - interval '1 minute')`,
-			uuid.New(), w.f.tenantID, imp, w.provider, "forged-rev-"+uuid.NewString(), ref)
-		return err
-	})
+	f2frForgeReversal(w, ref, time.Now().Add(-time.Minute), time.Now())
 	w.requireOne(w.stmtRunKeyed(keys, w.source(false)), reconciliation.MismatchKindPayCapturedUnposted, a.ID,
 		"an unsealed forged reversal must not clear when the process has keys")
 
