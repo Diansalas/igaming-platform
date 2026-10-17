@@ -107,6 +107,24 @@ flowchart LR
   (MA099) while any row of this kind exists (accepted by ledger-finance: once
   a finding exists, 0113 is effectively irreversible).
 
+#### 2.1b Kinds `player_wallet_negative_balance` / `payout_dispatched_while_wallet_negative` — C3 (closure ledger-finance review), F4-R2-NEGBAL-SQL detection — `IMPLEMENTED` (detective control)
+
+- **What it checks.** Inside the same `ledger_vs_projection` run (no scheduler change; `negative_balance.go`), ONE statement:
+  (a) every `player_cash` / `player_locked_cash` account of the tenant whose balance is below zero
+  (`credit_total < debit_total`, rebuilt from `ledger_entries` OR read from `wallet_balance_projection`): exactly the WD050 gate's
+  predicate (owner decision 13), open withdrawal holds NOT netted; (b) every `submitted` / `completed` withdrawal request on a
+  wallet that is negative now whose negative account was already negative at the request's dispatch instant (newest allowing
+  `withdrawal_gate_decisions.decided_at`, payout attempt `first_submitted_at` / `last_sent_at`; `updated_at` only for legacy rows).
+- **Keys**: (a) the ledger account id; (b) the withdrawal request id.
+- **Standing and unwindowed**; clears on the first run after the balance is >= 0. **Severity P1** (`reconciliation.ledger_projection_drift`,
+  discriminators `stream:ledger_wallet_negative` / `stream:ledger_payout_while_negative`). Fails closed on a blind read.
+- **Read-only.** Correction is the governed path (deposit, K2 credit, governed payout reversal), never a balance edit
+  (`payout-reversal-and-amount-dispute.md` section 4.1).
+- **Residual**: (b) attributes a chargeback by its posting transaction's START (`created_at`); one that started after the dispatch
+  instant is reported by (a) only.
+- **Migration**: 0174, a strict superset of 0167's CHECK list plus these two kinds; the down refuses (WD099) while a row of either kind
+  exists.
+
 ### 2.2 Wallet ↔ PSP — `BLUEPRINT`
 
 - **Reconciliation key**: `(provider_id, provider_tx_id)`, joined against

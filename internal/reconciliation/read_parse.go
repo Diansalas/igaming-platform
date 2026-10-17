@@ -72,7 +72,8 @@ func MismatchSubject(stream Stream, kind MismatchKind, key, expected string) *Su
 			return nil
 		}
 		switch kind {
-		case MismatchKindMissingProjection, MismatchKindBalanceMismatch:
+		case MismatchKindMissingProjection, MismatchKindBalanceMismatch, MismatchKindPlayerWalletNegativeBalance:
+			// C3: the negative-balance finding is keyed by the negative player ledger account.
 			return &SubjectRef{"ledger_account", key}
 		case MismatchKindLedgerUnlinkedManualAdjustment:
 			return &SubjectRef{"ledger_transaction", key}

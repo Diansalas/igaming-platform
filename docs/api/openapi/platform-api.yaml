@@ -12230,6 +12230,8 @@ components:
         - ledger_unlinked_manual_adjustment
         - withdrawal_hold_open_mismatch
         - withdrawal_request_ledger_link_invalid
+        - player_wallet_negative_balance
+        - payout_dispatched_while_wallet_negative
         - pay_missing_platform_record
         - pay_missing_provider_record
         - pay_amount_mismatch

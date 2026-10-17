@@ -43,23 +43,39 @@ const (
 	// (withdrawal_hold_open_mismatch, withdrawal_request_ledger_link_invalid) under ONE stable
 	// discriminator of the drift Kind, distinct from projection drift and from K2 (see the runbook).
 	discLedgerWithdrawalHold = "stream:ledger_withdrawal_hold"
+	// discLedgerWalletNegative and discLedgerPayoutWhileNegative are the C3 findings (negative_balance.go, migration
+	// 0174): a negative player wallet, and a payout dispatched while its wallet was negative. Distinct discriminators of
+	// the drift Kind, so neither is presented as projection drift and the payout finding never merges into the
+	// (more frequent) wallet finding's alert.
+	discLedgerWalletNegative      = "stream:ledger_wallet_negative"
+	discLedgerPayoutWhileNegative = "stream:ledger_payout_while_negative"
 )
 
-// splitLedgerMismatches separates the K2 unlinked-manual-adjustment findings
-// and the check-D withdrawal hold findings (ADR 0113 s4.4) from true projection
-// drift within one ledger_vs_projection run.
-func splitLedgerMismatches(ms []Mismatch) (drift, unlinked, holds int) {
+// ledgerRunCounts is one ledger_vs_projection run's findings split by alert discriminator.
+type ledgerRunCounts struct {
+	drift, unlinked, holds, negative, payoutWhileNegative int
+}
+
+// splitLedgerMismatches separates the K2 unlinked-manual-adjustment findings,
+// the check-D withdrawal hold findings (ADR 0113 s4.4) and the C3 negative
+// balance findings from true projection drift within one ledger_vs_projection run.
+func splitLedgerMismatches(ms []Mismatch) ledgerRunCounts {
+	var c ledgerRunCounts
 	for _, m := range ms {
 		switch m.MismatchKind {
 		case MismatchKindLedgerUnlinkedManualAdjustment:
-			unlinked++
+			c.unlinked++
 		case MismatchKindWithdrawalHoldOpenMismatch, MismatchKindWithdrawalRequestLedgerLinkInvalid:
-			holds++
+			c.holds++
+		case MismatchKindPlayerWalletNegativeBalance:
+			c.negative++
+		case MismatchKindPayoutDispatchedWhileWalletNegative:
+			c.payoutWhileNegative++
 		default:
-			drift++
+			c.drift++
 		}
 	}
-	return drift, unlinked, holds
+	return c
 }
 
 func mismatchAlert(kind alerting.Kind, tenantID uuid.UUID, discriminator string, runID uuid.UUID, count int, extra map[string]alerting.AttrValue) alerting.Alert {
@@ -72,26 +88,29 @@ func mismatchAlert(kind alerting.Kind, tenantID uuid.UUID, discriminator string,
 
 // raiseLedgerRunAlerts raises the in-tx P1s for one ledger_vs_projection run:
 // drift under discLedgerVsProjection, K2 unlinked adjustments under
-// discLedgerUnlinkedManualAdjustment and check D (ADR 0113 s4.4) under
-// discLedgerWithdrawalHold. Must be called inside the InTx closure,
+// discLedgerUnlinkedManualAdjustment, check D (ADR 0113 s4.4) under
+// discLedgerWithdrawalHold and the C3 negative balance findings under
+// discLedgerWalletNegative / discLedgerPayoutWhileNegative. Must be called inside the InTx closure,
 // as the last statement group before the closure returns.
 func raiseLedgerRunAlerts(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, run Run, acquired bool, ms []Mismatch) error {
 	if !acquired || run.Status != StatusMismatchesFound {
 		return nil
 	}
-	drift, unlinked, holds := splitLedgerMismatches(ms)
-	if drift > 0 {
-		if err := alerting.RaiseGuarded(ctx, tx, mismatchAlert(alerting.KindReconciliationLedgerProjectionDrift, tenantID, discLedgerVsProjection, run.ID, drift, nil)); err != nil {
-			return err
+	c := splitLedgerMismatches(ms)
+	for _, g := range []struct {
+		disc  string
+		count int
+	}{
+		{discLedgerVsProjection, c.drift},
+		{discLedgerUnlinkedManualAdjustment, c.unlinked},
+		{discLedgerWithdrawalHold, c.holds},
+		{discLedgerWalletNegative, c.negative},
+		{discLedgerPayoutWhileNegative, c.payoutWhileNegative},
+	} {
+		if g.count == 0 {
+			continue
 		}
-	}
-	if unlinked > 0 {
-		if err := alerting.RaiseGuarded(ctx, tx, mismatchAlert(alerting.KindReconciliationLedgerProjectionDrift, tenantID, discLedgerUnlinkedManualAdjustment, run.ID, unlinked, nil)); err != nil {
-			return err
-		}
-	}
-	if holds > 0 {
-		if err := alerting.RaiseGuarded(ctx, tx, mismatchAlert(alerting.KindReconciliationLedgerProjectionDrift, tenantID, discLedgerWithdrawalHold, run.ID, holds, nil)); err != nil {
+		if err := alerting.RaiseGuarded(ctx, tx, mismatchAlert(alerting.KindReconciliationLedgerProjectionDrift, tenantID, g.disc, run.ID, g.count, nil)); err != nil {
 			return err
 		}
 	}

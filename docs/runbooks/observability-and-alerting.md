@@ -445,6 +445,8 @@ remain the day-one signal for everything not listed here.
 | Ledger projection drift | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_vs_projection` | in the run tx |
 | **Unlinked manual adjustment (governance breach, NOT drift)** | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_unlinked_manual_adjustment` | in the run tx |
 | **Withdrawal hold invariant #12 / check A link rules (ADR 0113 check D, NOT projection drift)** | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_withdrawal_hold` | in the run tx |
+| **Negative player wallet (C3, migration 0174, NOT projection drift)** | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_wallet_negative` | in the run tx |
+| **Payout dispatched while its wallet was negative (C3, migration 0174, NOT projection drift)** | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_payout_while_negative` | in the run tx |
 | Sportsbook / casino-consistency mismatch | `reconciliation.sportsbook_settlement_mismatch` / `reconciliation.casino_consistency_mismatch` (p1) | `stream:sportsbook_settlement` / `stream:casino_consistency` | in the run tx |
 | Casino statement / payment statement mismatch (REPEATABLE READ) | `reconciliation.casino_statement_mismatch` / `reconciliation.payment_statement_mismatch` (p1) | `stream:casino_statement` / `stream:payment_statement:provider:<id>` | after the snapshot commits, detached |
 | A reconciliation run transaction failed | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
@@ -730,7 +732,7 @@ person is notified of anything.
 
 ### Runbook: `reconciliation.ledger_projection_drift`
 
-Two different findings share this Kind; the discriminator tells them apart.
+Several different findings share this Kind; the discriminator tells them apart.
 
 - `stream:ledger_vs_projection`: true projection drift, a P1 data-integrity incident (see the financial
   incident runbook).
@@ -747,6 +749,22 @@ Two different findings share this Kind; the discriminator tells them apart.
   means history, an owner `DISABLE TRIGGER`, or a defect: a P1 financial incident (ledger-finance + security);
   see operational runbook section 18. A run that could not read the tenant's rows (blind read) is NOT
   reported here: it fails and raises `reconciliation.run_failed` (`stream:ledger_vs_projection`).
+- `stream:ledger_wallet_negative` (C3, migration 0174): **a negative player wallet, not projection drift.**
+  Mismatch kind `player_wallet_negative_balance`, keyed by the negative `player_cash` / `player_locked_cash`
+  ledger account (`actual_value` carries the balance, the ledger and projection totals, the wallet and the
+  asset). The predicate is exactly the WD050 gate's (owner decision 13: credit_total < debit_total; open
+  withdrawal holds are NOT netted). Typical cause: a chargeback / deposit reversal posted against funds the
+  player already spent or holds in a pending withdrawal. The wallet is already blocked by the gate; the
+  finding exists so the receivable is worked, not forgotten. Staff response:
+  `payout-reversal-and-amount-dispute.md` section 4.1. It stops being reported on the first run after the
+  balance is >= 0.
+- `stream:ledger_payout_while_negative` (C3, migration 0174): **a payout was dispatched while its wallet was
+  negative: the WD050 gate was raced or bypassed.** Mismatch kind `payout_dispatched_while_wallet_negative`,
+  keyed by the withdrawal request (submitted or completed) whose dispatch instant (newest allowing dispatch
+  decision / payout attempt send) came after the negative-making posting. Money may have left against a
+  receivable: treat as a P1 financial incident (ledger-finance + payments). Staff response: section 4.1 of
+  the same runbook. Both C3 findings are read-only detection: the reconciliation job never posts, never
+  edits a balance and never touches the withdrawal; a blind read fails the run (`reconciliation.run_failed`).
 
 **How to investigate (both streams).** Do NOT rely on the alert's `run_id` attribute: it is the run that
 first raised the alert, and a repeat raise only adds an occurrence (which carries no attributes). Query
