@@ -1,5 +1,11 @@
 # iGaming Platform — Live Developer Handover
 
+## Current state (2026-10-17)
+
+> **This section supersedes "Current state (2026-10-16)" below where they differ.** Full detail: `docs/plans/platform-freeze-report-2026-10-17.md`; audit: `docs/plans/final-platform-audit-record.md`.
+
+Migration head 0170; F1-F6 merged (0165-0170). Provider-independent platform frozen for verification; local and hosted evidence in the freeze report. Providers MOCK, AWS OFF (plan ready, not started), no brand activated. Open items: report section 6. Runbooks: `docs/runbooks/README.md` (new: `withdrawal-dispatch-gate.md`). Next steps only on the owner's go: AWS staging against the freeze commit, then PSP integration.
+
 ## Current state (2026-10-16)
 
 > **This section supersedes "Current state (2026-10-15)" below and every older statement where they differ.** Full detail: `docs/plans/final-production-readiness-report-2026-10-16.md`.

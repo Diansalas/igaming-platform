@@ -1,5 +1,8 @@
 # Active Stage
 
+**Current-state entry 2026-10-17 (supersedes the 2026-10-16 entry; history is not rewritten).**
+Authoritative detail: `docs/plans/platform-freeze-report-2026-10-17.md`. Branch `claude/focused-wright-jw88w9`; migration head **0170** (0143-0150, 0159, 0161 reserved and unused). **Provider-independent platform FROZEN for verification: A1-A13 and F1-F6 done and reviewed; no A-class implementation remains.** Local verification (unit, integration, payments end to end, frontends, `migrate verify`, backup/restore drill 138/0 at 0170) and hosted CI recorded in the report. Providers MOCK; AWS OFF (staging plan/IaC prepared, NOT started, to run only against the freeze commit); no brand activated. **Next, only on the owner's go:** the single AWS staging deployment, then the provider-integration phase (PSP first).
+
 **Current-state entry 2026-10-16 (supersedes the 2026-10-15 entry and every older status note below where they differ; history is not rewritten).**
 Authoritative detail: `docs/plans/final-production-readiness-report-2026-10-16.md` (final report), `docs/HANDOVER.md` section "Current state (2026-10-16)" and the task registry.
 Branch `claude/focused-wright-jw88w9`; code head `0dc2680` (later commits are documentation only); migration head **0164** (0143-0150, 0159, 0161 reserved and unused); hosted CI on `0dc2680`: **27/27 checks green**.
