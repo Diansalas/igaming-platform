@@ -378,3 +378,17 @@ idempotency and replay intact, ledger balanced) are sound. The `security` specia
 | RF4-7 | NOT CHANGED, by decision: a repeated denial on an ALREADY-escalated T2 / T12 attempt only reschedules (no decision row, no audit, no new alert). Reason: the sweeper re-leases an escalated attempt on every backoff tick until a human acts, so one row per tick would grow without bound and say nothing new; the first denial is recorded (decision row, audit, alert). Readers must not read the `redispatch` row count as the number of evaluations. Pinned by `TestF4_Sweeper_T2_DenialEscalates_NeverResends` (second tick adds no row). |
 
 Changed assertions this round: `TestF4_DB_Catalog` (new BEFORE INSERT pin, new function in the SECURITY DEFINER / search_path set) and `TestMigration0169_UpDownUp_SnapshotAndDownRefusal` (the new trigger must exist after up). Both are F4's own tests and both are stricter. No existing test needed a fixture change for the new trigger: every governed payout attempt born `submitting` comes from T1p, which records the decision and performs E7 first. The direct `InsertSubmittingAttempt` fixtures in other tests are deposit attempts or run after the claim's own E7 (verified by the runs below).
+
+## 13. Final verification after the fix round and the merge with origin (tip 5c7ff9f: F2 0168, F3 0167)
+
+Numbering: 0167 (F3), 0168 (F2), 0169 (F4), 0170 (F5) all real; `reservedUnusedVersions` = {143..150, 159, 161},
+matched by `TestReservedUnusedVersions_ExactSet`. Private scratch database rebuilt at the merged head (`-count=1 -p 1`).
+
+| Command | Result |
+|---|---|
+| `gofmt -l`, `go vet ./...`, `go vet -tags integration ./...` | clean |
+| `golangci-lint run ./...` (2.9.0) | 0 issues |
+| `go test -count=1 ./...` | 75 packages ok, 0 FAIL |
+| `-tags integration -v -run 'TestF4\|TestMigration0169' ./internal/withdrawal/ ./internal/payments/` | 22/22 PASS (9 withdrawal incl. the 0169 up/down/up + catalog pins; 13 payments incl. RF4-1) |
+| `-tags integration ./internal/withdrawal/ ./internal/withdrawalgate/... ./internal/rg/ ./internal/risk/ ./internal/db/ ./internal/launchgov/ ./cmd/...` | all ok |
+| `-tags integration ./internal/reconciliation/ ./internal/alerting/...` | all ok |
