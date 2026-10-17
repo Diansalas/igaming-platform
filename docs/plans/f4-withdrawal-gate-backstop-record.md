@@ -409,3 +409,118 @@ their assertions are unchanged unless noted:
 - `internal/payments/payout_dispatch_round4_test.go` (N6 fallback reference): E7 and the attempt insert are now one
   transaction.
 - The full payments suite was still not run end to end, so payments remains `PARTIALLY VERIFIED` beyond the subsets.
+
+## 14. Independent security review, 2026-10-17
+
+Reviewer: `security` specialist. Scope: branch `f4-withdrawal-gate-backstop` at 2a69f6b (contains origin 5c7ff9f).
+Attacker models: (a) arbitrary SQL as `igaming_runtime` with any `app.*` settings it can set; (b) an insider with staff
+privileges using the governed routes. Method: read migration 0169 up / down, `dispatchgate.go`,
+`payout_withdrawal_gate.go`, the T1p / T2 / T12 diffs, the HTTP mapping, the alert Kind, `deploy/init-app-role.sql`,
+every changed fixture and assertion, sections 11-13; checked the catalog and the runtime role's privileges; ran
+throw-away probe tests (not committed, deleted) as the runtime role on a private scratch database
+(`f4s<ts>p<pid>x01`, dropped afterwards), MOCK providers, synthetic data. Not in scope: penetration testing, the risk
+rule engine and RG evaluation themselves (A6), the governance of the gate's inputs (see SF4-6), production
+configuration of roles.
+
+Commands (private database, `-tags integration -count=1 -p 1`):
+`-run 'TestF4|TestMigration0169|TestADR0113_HeaderFirstAttacks|TestKillSwitchPredicate_T1p|TestB13B_Static|TestSubmitWithdrawalHandler_F4|TestPollPayoutStatus_N6' ./internal/withdrawal/ ./internal/payments/ ./internal/httpserver/`
+all ok; `./internal/reconciliation/` run 5 times: 4 ok, 1 FAIL whose output was not captured (not reproduced in 4
+reruns; unattributed, recorded so nobody reads the package as never failing).
+
+### Probe results (runtime role)
+
+| Probe | Result |
+|---|---|
+| `INSERT ... ON CONFLICT DO UPDATE` on decisions | 42501 (no UPDATE grant) |
+| `SET session_replication_role = replica` | 42501 |
+| `ALTER TABLE ... DISABLE TRIGGER` on decisions / withdrawal_requests / payment_attempts; `NO FORCE ROW LEVEL SECURITY` | 42501 (not owner) |
+| `CREATE FUNCTION` / `CREATE OR REPLACE` of a guard helper in `public` | 42501 (no CREATE on schema) |
+| `CREATE TEMP TABLE withdrawal_gate_decisions` (pg_temp shadow) | 42501 (no TEMP); the functions also schema-qualify `public.` and pin search_path |
+| `COPY FROM` with a caller-chosen `id` / `decided_xact` | 0A000 (COPY FROM refused under RLS); the later E7 is WD053 |
+| Caller-chosen `id` / `decided_at` / `decided_xact` via INSERT | overwritten by the trigger (existing test, re-run) |
+| Multi-row E7 (`WHERE id = ANY(...)`) with an allow for only one request | WD053 (per-row guard) |
+| Allow recorded, then `app.tenant_id` switched to another tenant, then E7 | 0 rows (RLS); no transition |
+| Allow recorded, then `app.player_account_id` set, then E7 | 0 rows; no transition |
+| Two payout attempts born `submitting` in one T1p-shape transaction | 23505 `payment_attempts_one_per_withdrawal` |
+| Payout attempt born `created` for an approved request, fixture E7, then T2 without a re-dispatch allow | WD053 |
+| Forged `allowed = true` row by the runtime credential, then E7 | ADMITTED (R1, expected; see SF4-1) |
+| T2 denial (suspended) escalates; account reactivated; next tick | re-evaluated, allowed, RE-SENT (submit_count 1 -> 2), `escalated_at` still set (see SF4-3) |
+| `submitting -> submitting` claim_token / lease rewrite | admitted (same-state write; see SF4-4) |
+
+### Verified (no finding)
+
+- Table: FORCE RLS, staff/system scope (player session reads and writes nothing; foreign tenant reads nothing and
+  cannot write for a foreign request), owner `igaming`, runtime SELECT + INSERT only (no UPDATE / DELETE / TRUNCATE /
+  TRIGGER / REFERENCES), neither role superuser or BYPASSRLS. WD055 binds the owner too. `id`, `decided_at`,
+  `decided_xact` trigger-owned. WD054: dispatch row only for an `approved` request, re-dispatch row only for a
+  `submitted` request and a payout attempt of that request in the tenant; tenant filter in the trigger, in RLS and in
+  `withdrawal_dispatch_decision_ok`.
+- Guards: the only edge into `submitted` is E7 (0132; a request is born only `requested`); the only edges into a
+  payout `submitting` are the T1p INSERT (0101 permits INSERT in `created` or `submitting` only), T2 and T12, and all
+  three are guarded. `operation` and `withdrawal_request_id` are immutable (0101), so the WHEN clauses cannot be
+  side-stepped by changing them in the same UPDATE; a deposit cannot carry a withdrawal request (CHECK). Same-xact
+  freshness holds for subtransactions (verified by ledger-finance; not re-probed). No SECURITY DEFINER path writes
+  either state; triggers fire for every writer while enabled.
+- App: the gate fails closed on nil gate, evaluation error, zero-value or unrecognised decision, and on a request that
+  became `approved` / active between the pre-read and L1. A replayed claim is not re-evaluated and a foreign tenant's
+  claim is `ErrNotFound`. The allow row at T1p is written only after `gateEvaluated` and only from the evaluated
+  decision. `DispatchWithdraw` has exactly 2 production callers (static pin `b13b_static_test.go`).
+- HTTP: 409 `conflict` with a generic body (no WD050 / WD051, reason or status word; asserted by the test), 503 for
+  unavailable; gate and reason codes go to the server log and the audit row only. The submit route's
+  authentication / permission wiring is unchanged (the handler diff is the error mapping only).
+- Audit rows: staff-attributed (actor, IP, user agent, request id from `SubmitActor`) at T1p, system at T2 / T12;
+  metadata is codes, brand / wallet ids, asset, amount: no name, email, instrument or free text. Alert: closed
+  attributes (gate_code, regex-bounded reason_code, stage), internal-id discriminator (dedup), in_tx, raised last.
+- Changed assertions and fixtures: none weakened. `TestADR0113_HeaderFirstAttacks` keeps WD031 and adds WD053;
+  `TestKillSwitchPredicate_T1p_Payout_InsertSubmittingAttempt` is stricter (`ErrKillSwitchEngaged` instead of any
+  error); the B13-B order pin still pins the post-lock order and adds the F4 order. The reconciliation fixtures that now
+  perform the fixture E7 in the attempt's transaction reproduce the production T1p shape (E7 + attempt insert in one
+  transaction), which is closer to production than the previous two-transaction plant; they test reconciliation, not
+  the gate, and their assertions are unchanged. `wdpath` is imported only by tests.
+
+### Findings
+
+- **SF4-1 (Medium, residual; NOT blocking the freeze; LAUNCH-RELEVANT).** R1 confirmed by probe: the runtime
+  credential can insert an `allowed = true` row and perform E7 / T2 / T12 in the same transaction, so the backstop
+  defeats a code path that FORGETS the gate, not a malicious runtime credential. It still cannot forge the id / instant
+  / transaction, a cross-tenant row, a row for a request in the wrong state, or get past WD052 (account / wallet status)
+  or the existing E7 / attempt guards. On the "signed decision" question: a signature minted by a key that lives in the
+  same process / credential domain as `igaming_runtime` does not raise the bar against the attacker R1 describes (the
+  same compromise reaches the key); it only helps if the signer is a separate trust domain (a separate service or KMS /
+  HSM key the runtime cannot use for arbitrary payloads, verified in the database) - the same condition as the ADR 0110
+  actor-proof issuer. Recommendation: (1) keep `PARTIALLY IMPLEMENTED` and keep SR6 I-2, narrowed to R1 + R2, on the
+  launch risk list; (2) a signed decision is NOT required for the freeze; before real money the owner decides between
+  (a) a separate-trust-domain signer (reuse ADR 0110, do not invent a new mechanism) or (b) accepting R1 with a
+  DETECTIVE control: a scheduled job that re-evaluates the risk rules and RG status for every allow row against the
+  request's figures at `decided_at` and alerts on divergence. My recommendation for launch is (b) at minimum.
+- **SF4-2 (Low, SHOULD FIX before real money; non-blocking).** `withdrawal.RecordDispatchGateDecision` accepts any
+  `withdrawalgate.Decision`, and the fixtures show the one-line bypass (`Decision{Allowed: true}`). A future production
+  path that copies that pattern defeats the "forgotten gate" protection that is the backstop's whole value, and nothing
+  would catch it. Fix (small): a static test pinning the production callers of `RecordDispatchGateDecision` to the four
+  current sites (payout.go x2, payout_withdrawal_gate.go x2), like the existing `DispatchWithdraw` pin; optionally make
+  the allow obtainable only from `EvaluateDispatchGate` (an opaque evaluated-decision type).
+- **SF4-3 (Low, documentation accuracy + owner question).** Section 2.4 and R5 describe the T2 / T12 escalation as
+  sticky with no resend. Probe: after a WD-RG-1 denial escalates an attempt and the cause is cleared (account
+  reactivated), the next sweeper tick re-evaluates, allows and RE-SENDS, with `escalated_at` still set. This is the
+  pre-existing KYC pattern and is not a gate bypass (the gate is re-run and must allow), but `escalated_at` does not
+  mean "stopped", and a staff member who reactivates the account releases the parked payout without any payout action.
+  Fix: correct R5 / 2.4. Owner question (not blocking): whether a compliance-gate escalation should require an explicit
+  human release before a resend.
+- **SF4-4 (Info).** A `submitting -> submitting` same-state write (claim_token / lease rewrite) is admitted by 0101 and
+  not gated by 0169. No Withdraw follows it today (the sweeper routes `submitting` to QueryStatus only, and
+  `DispatchWithdraw` callers are pinned to 2). Keep that pin; any new re-lease-and-send path must go through T12.
+- **SF4-5 (Info).** A persistent gate failure at T2 / T12 is fail-closed but silent (log only, no alert), so payouts can
+  stall unnoticed. Availability, not a bypass; same class as ALERT-DELIVERY-1.
+- **SF4-6 (Info, scope limit).** Against an insider, the gate is only as strong as the governance of its inputs
+  (account / wallet status changes, risk-rule creation and removal). Whether those are four-eyes is NOT verified here;
+  it belongs in the launch review.
+- **SF4-7 (Info).** The HTTP F4 test asserts actor and gate code on the denied audit row but not IP / user agent /
+  request id (the code sets them). Optional hardening.
+
+### Verdict (security)
+
+**APPROVED for merge / the freeze**, with SF4-1 staying on the launch risk list (R1 + R2, narrowed SR6 I-2) and
+SF4-2 tracked as a should-fix before real money. SF4-3 to SF4-7 are non-blocking. This approval covers the code and
+design reviewed at 2a69f6b against the two attacker models above; it is not a statement that the withdrawal path is
+secure, and it does not replace the external testing a real-money launch needs. Launch authorization remains the
+human's decision.
