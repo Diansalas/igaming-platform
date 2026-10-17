@@ -275,7 +275,7 @@ func TestRVLF_P3_T13RejectsCreatedSibling(t *testing.T) {
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, res.Intent.ID); err != nil {
 			return err
 		}
-		return ClaimCreatedForSubmission(ctx, tx, childID, "mock-rv3", uuid.New(), "rv", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, childID, "mock-rv3", uuid.New(), "rv", time.Now().Add(time.Minute))
 	})
 	if claimErr == nil {
 		t.Errorf("H4: T2 claim of a cascade child must be refused once its intent has already succeeded - a second provider charge would otherwise follow")
@@ -493,7 +493,7 @@ func TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return ClaimCreatedForSubmission(ctx, tx, payoutAttemptID, "mock-m4", uuid.New(), "rv-m4", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, payoutAttemptID, "mock-m4", uuid.New(), "rv-m4", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("seed payout attempt: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestRVLF_F3_T2ClaimRefusesCreatedSiblingOfSucceededIntent(t *testing.T) {
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, res.Intent.ID); err != nil {
 			return err
 		}
-		return ClaimCreatedForSubmission(ctx, tx, strayID, "mock-f3-t2", uuid.New(), "rv-f3-t2", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, strayID, "mock-f3-t2", uuid.New(), "rv-f3-t2", time.Now().Add(time.Minute))
 	})
 	if claimErr == nil {
 		t.Errorf("F3/R2/N14: T2 must refuse to claim a 'created' sibling once ANY sibling of the same intent has succeeded")
@@ -823,7 +823,7 @@ func TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold(t *testing.T) {
 	// reached the provider) - claim it to 'submitting' as the real
 	// dispatch path would before any evidence arrives.
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-r4a", uuid.New(), "rv-r4a", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-r4a", uuid.New(), "rv-r4a", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim for submission: %v", err)
 	}
@@ -875,7 +875,7 @@ func TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles(t *testing.T) {
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4d")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-r4d", uuid.New(), "rv-r4d", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-r4d", uuid.New(), "rv-r4d", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim for submission: %v", err)
 	}
@@ -925,7 +925,7 @@ func TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly(t *testing.T) {
 	// A payout attempt, submitting, with its own provider_reference.
 	_, payoutAttempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4b-payout")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, payoutAttempt.ID, "mock-r4b", uuid.New(), "rv-r4b", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, payoutAttempt.ID, "mock-r4b", uuid.New(), "rv-r4b", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim payout for submission: %v", err)
 	}
@@ -1066,7 +1066,7 @@ func TestRVLF_L2_BridgeCascadeThenT13SecondCapture(t *testing.T) {
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return err
 		}
-		return ClaimCreatedForSubmission(ctx, tx, second.ID, "mock-l2", uuid.New(), "rv-l2", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, second.ID, "mock-l2", uuid.New(), "rv-l2", time.Now().Add(time.Minute))
 	})
 	if claimErr == nil {
 		t.Errorf("L2/H4: a rejected cascade child must never be claimable for submission")
@@ -1397,7 +1397,7 @@ func TestRVLF_C1_PreconditionTwoReferenceConflict_OnlyReachableViaReadCommittedR
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, seedB.Intent.ID); err != nil {
 			return err
 		}
-		return ClaimCreatedForSubmission(ctx, tx, attemptBID, "mock-c1race", uuid.New(), "rv-c1race-b", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, attemptBID, "mock-c1race", uuid.New(), "rv-c1race-b", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim attempt B: %v", err)
 	}
@@ -1424,7 +1424,7 @@ func TestRVLF_C1_PreconditionTwoReferenceConflict_OnlyReachableViaReadCommittedR
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, seedC.Intent.ID); err != nil {
 			return err
 		}
-		return ClaimCreatedForSubmission(ctx, tx, attemptCID, "mock-c1race", uuid.New(), "rv-c1race-c", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, attemptCID, "mock-c1race", uuid.New(), "rv-c1race-c", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim attempt C: %v", err)
 	}
@@ -1494,7 +1494,7 @@ func TestRVLF_N5c_CrossOperationAnomalyReceiptResolved(t *testing.T) {
 
 	_, payoutAttempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "n5c-payout")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, payoutAttempt.ID, "mock-n5c", uuid.New(), "rv-n5c", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, payoutAttempt.ID, "mock-n5c", uuid.New(), "rv-n5c", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim payout: %v", err)
 	}
@@ -1673,7 +1673,7 @@ func TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence(t *tes
 
 	wr, payoutAttempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "n3-payout")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, payoutAttempt.ID, "mock-n3", uuid.New(), "rv-n3", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, payoutAttempt.ID, "mock-n3", uuid.New(), "rv-n3", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim payout for submission: %v", err)
 	}
@@ -1758,7 +1758,7 @@ func TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes(t *testing.T) 
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "sm10")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-sm10", uuid.New(), "rv-sm10", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-sm10", uuid.New(), "rv-sm10", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim for submission: %v", err)
 	}
@@ -2120,7 +2120,7 @@ func TestRVLF_SecGapA2_SM1FallsBackToWithdrawalReference(t *testing.T) {
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "secgapa2")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-secgapa2", uuid.New(), "rv-secgapa2", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-secgapa2", uuid.New(), "rv-secgapa2", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim for submission: %v", err)
 	}

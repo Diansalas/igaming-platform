@@ -419,7 +419,7 @@ func TestPollPayoutStatus_N6_MismatchAgainstFallbackWithdrawalReference_Disputes
 	// attempt-level persistence fix, or any other path that left the
 	// attempt's own reference NULL).
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if err := withdrawal.MarkSubmittedPending(ctx, tx, wr.ID, "mock-r4-n6"); err != nil {
+		if err := f4MarkSubmittedPending(ctx, tx, wr.ID, "mock-r4-n6"); err != nil {
 			return err
 		}
 		return withdrawal.AttachProviderReference(ctx, tx, wr.ID, "n6-fallback-withdrawal-ref")

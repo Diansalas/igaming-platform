@@ -440,7 +440,7 @@ func TestPayoutDispatch_CT1_NotSentOnResendRoutesToAmbiguousNotCreated(t *testin
 	resendToken := uuid.New()
 	var resent PaymentAttempt
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if err := ResubmitAmbiguous(ctx, tx, ambiguous.ID, resendToken, "test-resend", time.Now().Add(time.Minute), 0); err != nil {
+		if err := f4ResubmitAmbiguous(ctx, tx, ambiguous.ID, resendToken, "test-resend", time.Now().Add(time.Minute), 0); err != nil {
 			return err
 		}
 		var err error

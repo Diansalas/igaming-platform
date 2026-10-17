@@ -553,6 +553,45 @@ func TestF4_DB_RedispatchBackstop(t *testing.T) {
 	}
 }
 
+// f4AllowIfPayout records the fixture ALLOW (stage redispatch) when attemptID is a PAYOUT attempt; a deposit attempt
+// is untouched (0169 binds payouts only).
+func f4AllowIfPayout(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID) error {
+	var wr *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT withdrawal_request_id FROM payment_attempts WHERE id = $1`, attemptID).Scan(&wr); err != nil {
+		return err
+	}
+	if wr == nil {
+		return nil
+	}
+	return f4RecordRedispatchAllow(ctx, tx, *wr, attemptID)
+}
+
+// f4ClaimCreatedForSubmission / f4ResubmitAmbiguous are the FIXTURE forms of the T2 / T12 CAS for tests that drive a
+// payout attempt directly (not through the sweeper): the fixture records the allowing re-dispatch decision migration
+// 0169 requires (WD053), then runs the unchanged CAS. The gate itself is tested in this file.
+func f4ClaimCreatedForSubmission(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, providerID string, claimToken uuid.UUID, leaseOwner string, leaseUntil time.Time) error {
+	if err := f4AllowIfPayout(ctx, tx, attemptID); err != nil {
+		return err
+	}
+	return ClaimCreatedForSubmission(ctx, tx, attemptID, providerID, claimToken, leaseOwner, leaseUntil)
+}
+
+func f4ResubmitAmbiguous(ctx context.Context, tx pgx.Tx, attemptID, claimToken uuid.UUID, leaseOwner string, leaseUntil time.Time, maxResubmits int) error {
+	if err := f4AllowIfPayout(ctx, tx, attemptID); err != nil {
+		return err
+	}
+	return ResubmitAmbiguous(ctx, tx, attemptID, claimToken, leaseOwner, leaseUntil, maxResubmits)
+}
+
+// f4MarkSubmittedPending is the FIXTURE form of E7 for tests that walk it directly: the allowing dispatch decision
+// first (WD053), then the unchanged writer.
+func f4MarkSubmittedPending(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, providerID string) error {
+	if err := f4RecordDispatchAllow(ctx, tx, requestID); err != nil {
+		return err
+	}
+	return withdrawal.MarkSubmittedPending(ctx, tx, requestID, providerID)
+}
+
 // f4RecordDispatchAllow is the FIXTURE step for a test that walks E7 directly (withdrawal.MarkSubmitted /
 // MarkSubmittedPending, not ClaimForDispatch): it records the allowing dispatch decision migration 0169 requires in the
 // transaction (WD053).

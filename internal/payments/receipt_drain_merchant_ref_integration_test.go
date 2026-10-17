@@ -291,7 +291,7 @@ func (e dmPayoutEnv) dmNewPayout(t *testing.T, orch *Orchestrator, key, provider
 	t.Helper()
 	wr, att := notSentPayoutAttempt(t, e.pool, orch, e.f, 5000, key)
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, att.ID, providerID, uuid.New(), "dm-"+key, time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, att.ID, providerID, uuid.New(), "dm-"+key, time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("claim: %v", err)
 	}

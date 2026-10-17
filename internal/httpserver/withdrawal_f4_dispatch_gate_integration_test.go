@@ -13,10 +13,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
+
+// f4RecordDispatchAllowHTTP is the FIXTURE step for a test that walks E7 (attemptID nil) or a payout T2 (attemptID set)
+// directly: it records the allowing WD-RG-1 decision migration 0169 requires in the transaction (WD053).
+func f4RecordDispatchAllowHTTP(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, attemptID *uuid.UUID) error {
+	wr, err := withdrawal.GetByID(ctx, tx, requestID)
+	if err != nil {
+		return err
+	}
+	stage := withdrawal.DispatchStageDispatch
+	if attemptID != nil {
+		stage = withdrawal.DispatchStageRedispatch
+	}
+	return withdrawal.RecordDispatchGateDecision(ctx, tx, wr, stage, attemptID, withdrawalgate.Decision{Allowed: true, Outcome: "allow"})
+}
 
 func TestSubmitWithdrawalHandler_F4_DispatchGateDenial_Is409_AndParks(t *testing.T) {
 	pool, issuer := testEnv(t)
