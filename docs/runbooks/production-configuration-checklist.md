@@ -51,7 +51,7 @@ is either a secret or noise).
   never write it; the owner cannot change it while the guard trigger is enabled), so no later mistake can turn the
   database into a "test" one. Verify: `SELECT environment, recorded_at, recorded_by FROM database_environment;`.
 - Startup check (launch gate, `IMPLEMENTED`): `platform-api` with `GuardEnvironment() = production` REFUSES to start when
-  the anchor says `development` / `test` (`db.ErrEnvironmentAnchorMismatch`), when NO anchor row is recorded
+  the anchor says anything other than `production`, including `staging`, `development` and `test` (`db.ErrEnvironmentAnchorMismatch`), when NO anchor row is recorded
   (`db.ErrEnvironmentAnchorUnrecorded`; the error text names the provisioning INSERT above), and when the anchor cannot be
   read (fail closed). A recorded `production` starts. Non-production guards (development, staging, test) check nothing, so
   dev / CI / staging need no anchor row. A refused start means the provisioning step below was skipped: run it, do not
