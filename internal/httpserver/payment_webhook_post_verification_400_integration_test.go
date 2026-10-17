@@ -190,6 +190,9 @@ func TestWebhook_ProviderMismatchAfterVerification_IsDisputedNotRejected(t *test
 	// attribute value, string-typed or otherwise.
 	for _, l := range captured() {
 		for k, v := range l.attrs {
+			if k == "request_id" { // server-generated random UUID; may contain "9999" by chance, cannot carry callback content
+				continue
+			}
 			s := fmt.Sprintf("%v", v)
 			if strings.Contains(s, "9999") || strings.Contains(s, providerRef) {
 				t.Errorf("log line %q field %q leaked mismatch content: %v", l.msg, k, v)
@@ -265,6 +268,11 @@ func TestWebhook_ReversalAmountMismatchAfterVerification_Maps400(t *testing.T) {
 	// amounts or the provider references in any attribute value.
 	for _, l := range captured() {
 		for k, v := range l.attrs {
+			// request_id is a server-generated random UUID: its hex digits can contain the short decimal amounts by
+			// chance (a ~1/1000 flake), and it cannot carry callback content. Every other attribute is still checked.
+			if k == "request_id" {
+				continue
+			}
 			s := fmt.Sprintf("%v", v)
 			if strings.Contains(s, fmt.Sprintf("%d", mismatchedAmount)) || strings.Contains(s, fmt.Sprintf("%d", depositAmount)) ||
 				strings.Contains(s, providerRef) || strings.Contains(s, "m12-reversal-ref") {
