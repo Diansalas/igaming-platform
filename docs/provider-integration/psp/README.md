@@ -23,6 +23,7 @@ credential and no account.
 
 | File | Content |
 |---|---|
+| `nuvei-compatibility-assessment-2026-10-17.md` | **Current Nuvei assessment** (search-summary evidence of the official docs; conditional viability; new gaps G-09/G-10 and finding N-1; decisions needed). |
 | `nuvei-evaluation.md` | Candidate evaluation: per-topic platform requirement vs Nuvei (all UNVERIFIED), fit/gap table, viability statement, alternatives, what to obtain from the vendor, UNVERIFIED registry (N-U01..). |
 | `provider-neutral-mapping.md` | Platform requirement -> what the PSP must supply -> how the neutral interface carries it -> gap, with concrete code paths. Includes the platform-side abstraction gaps found (G-01..). |
 | `conformance-plan.md` | Conformance specification a real adapter must pass: existing suites it maps to, new cases needed (PSP-C-nn), the A11 binding rows, SR11-1 / LF-A11-1 / 2 / 6 prerequisites. |
