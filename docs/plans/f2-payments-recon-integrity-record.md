@@ -156,9 +156,11 @@ tracked through the mismatch's investigation status. The kind is in the staff-vi
      (`horizonOf`): a contract-abiding source. The second sweep of `TestScoped_PerTenantIsolation` (same `now`) is now a
      skip (horizon not past the cursor) instead of an empty re-run; its assertion (no error for tenant 2) is unchanged.
    - `mustCursor` reads the A11-mode cursor through `readPaymentCursorState(..., cursorBasis{})` (helper moved; same rule).
-2. `internal/payments/k3_world_integration_test.go`: the K3 world runs ONE genuine payment_statement run (the real stream over
-   the world's MOCK provider, before any attempt exists: clean) unless `k3Opts.noStatementRun`, so the M2 tests keep
-   exercising M2 with honest evidence. No assertion changed.
+2. `internal/payments/k3_world_integration_test.go`: before the world's FIRST M2 request (`w.request` with an M2 kind) the
+   K3 world makes ONE genuine payment_statement run (`ensureStatementRun`: the real stream over the world's MOCK provider,
+   continuation mode) unless `k3Opts.noStatementRun`, so the M2 tests keep exercising M2 with honest evidence. Lazy on
+   purpose: a first, eager version (a run at world creation) changed the run/import counts and the migrate-down paths (0160's
+   down refuses cursor evidence) of R3/R32 tests that never request an M2; those tests are untouched. No assertion changed.
 3. `internal/httpserver/payment_force_resolution_api_integration_test.go`: `newFRWorld` runs one genuine stream run for
    (tenant, `mock`) (same reason); `frWorld.statementRun()` helper. No assertion changed.
 4. MOCK statement source: bounded pages in time order (not reference order) and capped at `PeriodEnd` (content digests of

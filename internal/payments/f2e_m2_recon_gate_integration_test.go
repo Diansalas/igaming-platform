@@ -84,6 +84,8 @@ func TestF2e_M2_RefusedAfterAFailedOrTruncatedRunOrWhenStale(t *testing.T) {
 		// Another provider's failure does not count.
 		w2 := newK3World(t, k3Opts{base: 1})
 		_, a2 := w2.ambiguousPayout(500)
+		w2.ensureStatementRun()
+		time.Sleep(5 * time.Millisecond)
 		f2eRecordFailure(t, w2.pool, w2.f.tenantID, "some-other-psp")
 		if _, err := f2eRequestM2(w2, a2.ID, ResolutionM2DeclareNotPaid); err != nil {
 			t.Fatalf("another provider's failure must not refuse: %v", err)
