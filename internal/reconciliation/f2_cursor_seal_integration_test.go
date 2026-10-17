@@ -228,7 +228,7 @@ func TestF2_SR11_10_SealedCursorIsPerSourceLabel(t *testing.T) {
 		t.Fatal("the genuine sealed run must set the cursor")
 	}
 	other := relabelled{recSource: src, label: "MOCK another payment statement (test-only)"}
-	if st := f2SealedCursor(t, w, keys, other); !st.cursor.IsZero() || st.unbacked != 1 {
+	if st := f2SealedCursor(t, w, keys, other); !st.cursor.IsZero() || st.unbacked != 0 { // 0168: the genuine run seal verifies, so it is no anomaly; it only cannot back ANOTHER source
 		t.Fatalf("another source's sealed import must not back this source's cursor: %+v", st)
 	}
 	// The same label from a source that is NOT Synthetic (is_mock differs): not this source's import.
