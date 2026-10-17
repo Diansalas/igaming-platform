@@ -19,7 +19,7 @@
 
 | Class | Items in main table (rows) | Of which IN FLIGHT |
 |---|---|---|
-| A | 20 | 14 (the in-flight set below) |
+| A | 21 (14 in flight + 7 new NA-1..NA-7) | 14 (the in-flight set below) |
 | B | 33 | 0 |
 | C | 14 | 0 |
 | D | 14 | 0 |
