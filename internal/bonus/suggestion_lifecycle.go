@@ -44,6 +44,16 @@ func ClaimSuggestionForReview(ctx context.Context, tx pgx.Tx, tenantID, suggesti
 	}); err != nil {
 		return Suggestion{}, err
 	}
+	// U-7: the claim is a staff mutation (Generated -> UnderReview, reviewer
+	// assigned) and is audited in the same transaction like DecideSuggestion
+	// (docs/security/security-architecture.md: bonus_suggestion review rows
+	// cover claim/edit/approve/reject).
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: reviewerID,
+		Action: "bonus_suggestion.claimed", TargetType: "bonus_suggestion", TargetID: suggestionID.String(), Outcome: audit.OutcomeSuccess,
+	}); err != nil {
+		return Suggestion{}, err
+	}
 	return updated, nil
 }
 
