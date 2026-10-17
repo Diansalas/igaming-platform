@@ -464,6 +464,34 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 	return regs
 }
 
+// buildProviderIDClaims lists every provider_id the bundle's adapters and
+// statement sources claim, per adapter family, for
+// providerkind.RefuseProviderIDCollisions (C-2 / S-2). Same-family components
+// (an adapter and its statement source) may share an id. The sportsbook mock
+// and the casino/sportsbook statement sources carry no provider id today; a
+// real sportsbook adapter must add its claim here.
+func buildProviderIDClaims(b providerBundle) []providerkind.IDClaim {
+	var claims []providerkind.IDClaim
+	for id := range b.paymentsAdapters() {
+		claims = append(claims, providerkind.IDClaim{Family: "payments", ID: id, Source: "payments/provider"})
+	}
+	if b.PaymentsStmt != nil {
+		claims = append(claims, providerkind.IDClaim{Family: "payments", ID: b.PaymentsStmt.ProviderID(), Source: "payments/statement_source"})
+	}
+	for id := range b.casinoAdapters() {
+		claims = append(claims, providerkind.IDClaim{Family: "casino", ID: id, Source: "casino/provider"})
+	}
+	for id := range b.kycAdapters() {
+		claims = append(claims, providerkind.IDClaim{Family: "kyc", ID: id, Source: "kyc/provider"})
+	}
+	return claims
+}
+
+// refuseProviderIDCollisions is the startup check (all environments).
+func refuseProviderIDCollisions(b providerBundle) error {
+	return providerkind.RefuseProviderIDCollisions(buildProviderIDClaims(b))
+}
+
 // validateWebhookSchemes runs every domain's registration-time scheme
 // validation (webhookauth.NewAdapterSchemeSet: a permitted declaration;
 // Synthetic only for the domain's own canonical MOCK, and only from an

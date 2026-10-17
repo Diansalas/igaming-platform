@@ -345,6 +345,48 @@ refused until a tombstone exists: ask the PSP to re-deliver the reversal
 callback (its verified handling writes the tombstone). This is an accepted
 operational cost; never work around it with a hand credit.
 
+**MA020 stranding case (migration 0175; closure ledger-finance C-3).** MA020 now clears ONLY on a *proof-bound*
+tombstone (`ledger_transactions.actor_proof_nonce IS NOT NULL`). Consider a deposit that was genuinely reversed by the
+PSP and never posted, whose tombstone key (`tombstone:<provider>:<ref>`) was already taken by an UNSIGNED row (a pre-0175
+tombstone, or a row planted by a stolen runtime credential on a provider the tenant had not yet used). The signed insert
+then only hits `AlreadyPosted`; the late original is still rejected (the reference is tombstoned) and the attempt sits in
+`disputed`, but the row has no nonce, so it never clears MA020 and **every manual CREDIT to that player stays refused**.
+Debits are unaffected. The money is with the PSP (refundable to the player), not lost in the ledger. Neither a PSP refund
+nor a re-delivered reversal callback helps. There is no in-app remedy.
+- Remedy: an **owner-governed correction** (owner/DDL role, outside the runtime role, recorded as a change under the
+  governance process) plus a **security incident**: an unsigned tombstone on a payment provider implies a runtime-credential
+  compromise or a pre-0175 residue. Rotate runtime credentials per section 15 and the incident-response runbook first.
+  Never hand-credit the player.
+- Detect (go-live gate, must return ZERO rows; also run periodically). Run as the owner/read-only reporting role, so RLS does
+  not hide rows (the runtime role must not be used: its view is tenant-scoped):
+
+```sql
+SELECT t.tenant_id, t.provider_id, t.provider_tx_id, t.id AS ledger_transaction_id, t.created_at
+FROM ledger_transactions t
+WHERE t.transaction_type = 'tombstone'
+  AND t.actor_proof_nonce IS NULL
+  AND t.provider_id IS NOT NULL
+  AND (EXISTS (SELECT 1 FROM payment_attempts a
+               WHERE a.tenant_id = t.tenant_id AND a.provider_id = t.provider_id)
+    OR EXISTS (SELECT 1 FROM payment_provider_events e
+               WHERE e.tenant_id = t.tenant_id AND e.provider_id = t.provider_id))
+ORDER BY t.tenant_id, t.provider_id, t.created_at;
+```
+
+  Any row is an unsigned tombstone on a provider that has payment rows in that tenant. Triage each: a payout tombstone is
+  not expected there (references are unique per tenant and provider across operations). For each row, check whether a
+  player with that deposit reference is stuck on MA020, then open the incident above.
+
+**Deposit-reversal webhook 500 with `payment_webhook_deposit_tombstone_proof_key_fault` (code `AP002` / `AP003`).**
+A verified deposit reversal could not be tombstoned because the actor-proof verifier refused the proof. The whole
+transaction (receipt included) rolled back, the PSP receives a generic retryable 500 and will redeliver; nothing is lost.
+- `AP002`: the signing kid (`ACTOR_PROOF_ACTIVE_KID`) is not `active` in `actorproof_private.actor_proof_keys`, or the
+  MAC does not verify: a rotation desync between the application config and the database key table (section 15).
+- `AP003`: the application clock is outside the database clock window (more than 5 s ahead, or the proof is expired):
+  fix NTP/clock on the app hosts.
+- Fix the key or the clock; the next PSP redelivery succeeds. No data repair is needed. Do not retire the old key until the
+  rotation is complete. (A missing issuer is the separate `payment_webhook_deposit_tombstone_proof_unavailable`, 503.)
+
 **Other `refused_at_execution` codes:** `asset_suspended` (goodwill in an
 asset that is not active, not platform-authorized, or not authorized for the
 tenant), `tenant_not_active` (goodwill for a suspended/closed tenant),
