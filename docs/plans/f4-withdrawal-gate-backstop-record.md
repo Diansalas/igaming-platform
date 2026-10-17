@@ -284,3 +284,84 @@ Ledger-finance:
 - Payments suite: `PARTIALLY VERIFIED` (subsets, section 5).
 - Not claimed: regulatory approval of the withdrawal policy; the policy choices (self-exclusion / time-out allowed,
   REVIEW refuses) are the A6 owner-reversible interpretations, applied unchanged at dispatch.
+
+## 11. Independent ledger-finance (and security-minded) review, 2026-10-17
+
+Reviewer: `ledger-finance` specialist. Scope: branch `f4-withdrawal-gate-backstop` at e2ab2a5. Method: read every
+caller of `DispatchWithdraw` / `ClaimCreatedForSubmission` / `ResubmitAmbiguous` / `InsertSubmittingAttempt`, migration
+0169 up/down, the catalog of the two guarded tables, the changed fixtures; ran tests on two private scratch databases
+(`-tags integration -count=1 -p 1`, MOCK providers, synthetic data; both databases dropped afterwards):
+`./internal/withdrawal/` ok (full package); `-run TestF4 ./internal/payments/` 12/12 PASS; `-run F4
+./internal/httpserver/` ok (incl. `TestSubmitWithdrawalHandler_F4_DispatchGateDenial_Is409_AndParks`). Plus a
+throw-away probe test (not committed) as the runtime role. The payments suite beyond `TestF4*` was NOT re-run by the
+reviewer (a wider `-run` attempt hit the 10-minute default timeout in `TestHSEC_HoldRelease_FreezeTrigger`'s fixture
+under concurrent load from other agents; not attributed to F4).
+
+Verified (no finding):
+- Every path to a NEW `Withdraw` call is gated: the only provider call site is `DispatchWithdraw` (payout.go), reached
+  from the HTTP submit after T1p and from `dispatchPayoutAttempt` after T2 / T12 only. `callProvider` requires the
+  attempt in `submitting` with the committed claim token; the only governed writers of `submitting` for a payout are
+  T1p (INSERT), T2 and T12 (`drive.go`'s T2 is deposit-only). QueryStatus, phase C, E9/E10, E5, M2, M3/M4, K3, A5
+  reversal and force-resolution are not gated (`TestF4_DB_TerminalEdgesAreNotGated`).
+- Lock order (ADR 0082 N1): T1p = unlocked pre-read -> status keys / brand FOR SHARE -> L0.4 (/L0.5) -> L1, identical
+  to the request path; T2 / T12 = L0.4 (/L0.5) -> L1 -> the pre-existing post-L1 chain. No SQL path takes the L0.4 key
+  after a withdrawal L1 (only 0135 and 0158 take it, neither under L1). The triggers take no lock. Concurrency probe
+  green; governed hold release vs submit (`TestHSEC_HoldRelease_Concurrency_ExecuteVsSubmit`) unchanged.
+- No denial moves money: T1p denial commits only decision row + staff audit + alert (hold unchanged, no attempt, no
+  KYC decision, ledger balanced, projection = rebuild, governed reject still releases); T2 / T12 denial escalates with
+  submit_count unchanged and no release; unavailable rolls back (503). Replays are not evaluated (1 evaluation, 1 row).
+- Backstop: savepoint-rolled-back allow does not satisfy WD053 (probe); an allow inside a RELEASED savepoint does
+  (top-level xact id: correct); another request's allow in the same transaction does not (WD053); a decision from an
+  earlier transaction does not; a `redispatch` row cannot satisfy E7 and vice versa (stage + attempt filter, and the
+  WD054 state checks make the two stages mutually exclusive per request state); tenant filter in both the RLS policy
+  and the predicate. Runtime role: `SET session_replication_role` 42501, `ALTER TABLE ... DISABLE TRIGGER` 42501 on
+  both tables (not owner), neither role is superuser / BYPASSRLS; grants SELECT + INSERT only. `zz` triggers fire last
+  (catalog confirmed). Down refuses WD095 while rows exist.
+- Alert Kind: closed attributes (gate_code, reason_code regex-bounded, stage), discriminator = internal ids only,
+  in_tx, p2 default. Audit metadata: codes, brand / wallet ids, asset, amount; no name, email, instrument detail. The
+  409 body carries no gate / reason code.
+- Changed assertions and fixtures: not weakened. `TestADR0113_HeaderFirstAttacks` keeps WD031 (with a forged row) and
+  adds WD053; the fixture allow rows sit before E7 / T2 only in tests of the state machine / evidence / reconciliation;
+  the HSEC control probes still expect the control to pass and the frozen variants still hit HR050 first.
+
+Findings:
+
+- **RF4-1 (Medium, MUST FIX before the freeze).** The backstop does not cover the third database edge into a
+  Withdraw-capable state: a payout attempt INSERTed directly in `submitting` (the T1p shape). Probe as the runtime role,
+  no decision row in the transaction: an INSERT for a `submitted` request with no attempt, and for an `approved`
+  request (no E7 at all, so the E7 guard never fires), are both ADMITTED by every immediate check; only the deferred
+  PI055 destination-snapshot check refuses at COMMIT, and that check is satisfiable by any path that writes the
+  snapshot (and does not apply to a legacy NULL-binding request). This is exactly the "forgotten gate" class the
+  backstop exists for (section 7 R1 says a bypassing path IS refused). Fix (small): a `zz` BEFORE INSERT trigger on
+  `payment_attempts` WHEN (`NEW.operation = 'payout' AND NEW.state = 'submitting'`) applying WD052
+  (`withdrawal_dispatch_rg_violation`) and WD053 (`withdrawal_dispatch_decision_ok(tenant, request, 'dispatch',
+  NULL)`); T1p already records the allow before E7 and the INSERT, so it is compatible. Prototyped by the reviewer on a
+  scratch database only (not committed): both probes then refuse WD053. Add it to the down, the catalog pin and a test
+  (INSERT without decision WD053; the T1p claim still passes). Optionally also refuse a payout INSERT for a request
+  that is not `submitted` in the same statement's view (closes the approved-request shape independently of F4).
+- **RF4-2 (Low, accepted for the freeze; owner / security decision before real money).** R1 (forged allow row by the
+  runtime credential). Same trust boundary as C-WD023 (0132): a compromised runtime credential is out of the
+  backstop's threat model, and it still cannot forge id / instant / xact, a cross-tenant row, or a row for a request in
+  the wrong state. Recommendation: keep labelled `PARTIALLY IMPLEMENTED`; add R1 to the launch risk list; if a signed
+  decision is ever built, reuse the actor-proof issuer (ADR 0110) rather than a new mechanism.
+- **RF4-3 (Low, accepted with a condition).** R2 (negative balance only in the application gate). Acceptable: after
+  approval the withdrawal's own amount sits in `player_withdrawal_hold`, so `player_cash` / `player_locked_cash` can go
+  negative only through an external event (chargeback) in the window between the gate read and the transition. Condition:
+  a tracked follow-up (not only this record) to add the clause to `withdrawal_dispatch_rg_violation` once the
+  reconciliation fixtures are funded, owned by payments-recon.
+- **RF4-4 (Low, accepted).** R3 status race: the window is one statement-to-commit of the claim; the RG half is read
+  under L0.4 and re-read by the trigger at the transition. Consistent with every other status read on the money path.
+- **RF4-5 (Low, fix when next touched).** `internal/risk/cumulative.go` (comment near line 123) still says no withdrawal
+  Risk call site exists; there are now two (request and dispatch). The F4 requirement that a future `withdrawal`
+  cumulative spec must exclude the request being dispatched (its hold is already posted in `player_cash` debits, so
+  counting it at dispatch double-counts) belongs in that comment next to the spec map, not only in section 9 here.
+- **RF4-6 (Info).** `TestF4_Claim_AccountSuspendedAfterApproval_Parks` asserts state, decision row and alert but not
+  hold / no attempt / ledger balance (the risk-flip test covers those for the same code path). Optional hardening.
+- **RF4-7 (Info).** A repeated denial on an ALREADY-escalated T2 / T12 attempt writes no decision row and no audit
+  (reschedule only). Acceptable (the first denial is recorded and alerted), noted so nobody reads the row count as the
+  number of evaluations.
+
+Verdict (ledger-finance): **NOT APPROVED as is; APPROVE once RF4-1 is fixed** (with its test). RF4-2, RF4-3 (with the
+follow-up item), RF4-4 accepted; RF4-5 to RF4-7 non-blocking. The money semantics (no denial moves money, hold intact,
+idempotency and replay intact, ledger balanced) are sound. The `security` specialist's own sign-off is still required
+(CLAUDE.md); this section does not replace it.
