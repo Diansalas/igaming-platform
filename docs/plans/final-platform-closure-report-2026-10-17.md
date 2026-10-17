@@ -3,7 +3,7 @@
 Scope: the provider-independent platform. Supersedes `platform-freeze-report-2026-10-17.md` where they differ. Nothing here is a legal, regulatory or licensing approval or a launch authorisation. All providers are MOCK. **No AWS resource was created or touched in this phase. No provider integration was started. No brand is activated.**
 
 ## 1. Freeze commit
-Branch `claude/focused-wright-jw88w9`. **Recommended freeze commit: the commit named in the registry row `PLATFORM-FREEZE-FINAL-2026-10-17`** (the last commit of the branch when this report was written; code identical to the verified tree, later commits are documentation/registry only). Migration head **0175** (reserved, never used: 0143–0150, 0159, 0161, pinned by test). Previous candidate `76187cc` is superseded.
+Branch `claude/focused-wright-jw88w9`. **Recommended freeze commit: `50eded5afe80ef00e01765827dba77a9f9627b20`** (hosted CI 27/27; every later commit on the branch is documentation/registry only — verify with `git diff 50eded5..HEAD --stat -- . ':!docs'`, which must be empty). Migration head **0175** (reserved, never used: 0143–0150, 0159, 0161, pinned by test). Previous candidate `76187cc` is superseded.
 
 ## 2. What the closure round did (all merged, each with a record in `docs/plans/`)
 | Item | Result | Migration |
@@ -23,7 +23,14 @@ Branch `claude/focused-wright-jw88w9`. **Recommended freeze commit: the commit n
 Reviews: security + ledger-finance independent, two rounds (records `closure-security-review-record.md`, `closure-ledger-finance-review-record.md`, `closure-security-rereview-record.md`, `closure-ledger-finance-rereview-record.md`): all **APPROVE WITH CONDITIONS**, no CRITICAL/HIGH; each condition is either closed (above) or classified below. Final whole-platform audit: `final-platform-audit-record.md` (earlier round, findings closed) plus the review rounds above on every later change.
 
 ## 3. Verification (final tree)
-See the registry row `PLATFORM-FREEZE-FINAL-2026-10-17` for the exact commit and counts: hosted CI 27/27 (incl. `-race` shards, lint), unit all packages, full local integration (all packages, httpserver, payments end to end), frontends (backoffice and b2c build + tests), `migrate verify` with the full down/up round trip at 0175, backup/restore/PITR drill at 0175. RPO 0 and RTO < 15 min are **not demonstrated**.
+| Check | Result |
+|---|---|
+| Hosted CI on `50eded5` | **27/27** (build-test-lint incl. golangci-lint, 16 `-race` integration shards, timing lane, evidence gate, frontends, images, infrastructure). Two lint-only failures on the way (`1a5b587`: deprecated `ast.Object`, unused helper in the new panic-guard test) were fixed in test code only |
+| Local, clean worktree at `1a5b587` (code identical to `50eded5` except that one test file's lint fix; its package test re-run green) | go build/vet clean; unit all packages 0 FAIL; integration all packages except httpserver/payments 74 ok, 0 FAIL; `internal/httpserver` integration ok (timing-sensitive tests pass on a quiet machine); `internal/payments` integration full, end to end, ok |
+| Frontends (final tree) | backoffice build + 688 tests; b2c build + 185 tests |
+| `migrate verify` at 0175 | up clean; 166 downs to zero and re-up clean |
+| Backup/restore/PITR drill at 0175 | **138 PASS / 0 FAIL** |
+| Notes | an intermediate local run, with several agents loading the machine, failed `TestINV_IO_1c` (a real analyzer hit: the new cursor helper's `Fetch` method name; renamed `NextBatch`) and 3 timing-lane tests (environmental contention; pass on the quiet re-run) | RPO 0 and RTO < 15 min are **not demonstrated**.
 
 ## 4. Remaining items, classified
 ### A — must close before technical freeze
