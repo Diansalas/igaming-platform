@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
@@ -41,9 +43,18 @@ const DefaultStatementEvidenceMaxAge = 6 * time.Hour
 // failureAuditSkew is the clock-skew tolerance on a failure row's created_at (LFF2-3).
 const failureAuditSkew = 5 * time.Minute
 
-// evidenceRunsPerPage bounds one page of the streaming run read (keyset paging, no overall limit: forged rows cost
-// a linear HMAC scan, they can never stop the read or become evidence).
+// evidenceRunsPerPage is the batch size of the streaming run read (ONE server-side cursor executed once, SRF2R-1:
+// never re-issued keyset pages, which re-scanned and re-sorted a flood on every page).
 const evidenceRunsPerPage = 512
+
+// EvidenceScanBudget bounds the run rows one provider's evidence read may scan (SRF2R-1). A genuine provider finds
+// its newest sealed run on the first row; rows before it are run rows whose seal does not verify (a flood). Past the
+// budget the gate REFUSES with evidence_scan_budget_exceeded (fail closed, never "current"), logged at Error; the
+// stream itself reports the same flood (cursor_anomaly / cursor_flood).
+const EvidenceScanBudget = 50000
+
+// evidenceScanBudget is EvidenceScanBudget; a variable ONLY so a test can shorten it.
+var evidenceScanBudget = EvidenceScanBudget
 
 // ErrResolutionReconciliationNotCurrent: the provider's payment_statement reconciliation is not current (no
 // successful run, the last run failed or was truncated, or it is stale). Closed token
@@ -60,6 +71,8 @@ const (
 	reconEvidenceTruncated = "last_run_truncated"
 	reconEvidenceStale     = "last_run_stale"
 	reconEvidenceUnread    = "evidence_not_read"
+	// reconEvidenceScanBudget: the evidence read stopped at EvidenceScanBudget rows (SRF2R-1, a run-row flood).
+	reconEvidenceScanBudget = "evidence_scan_budget_exceeded"
 )
 
 // WithStatementEvidenceMaxAge sets the evidence age (<= 0 restores the default).
@@ -109,15 +122,19 @@ func statementEvidenceRefusal(ctx context.Context, providerID *string) (string, 
 	return reason, nil
 }
 
-// preReadStatementEvidence reads the reconciliation-currency verdict of every provider the tenant has payment
-// attempts with, in its own short read-only tenant transaction, BEFORE the M2 transaction (SRF2-5 / LFF2-7).
-func (s *ManualResolutionService) preReadStatementEvidence(ctx context.Context, tenantID uuid.UUID) *reconEvidence {
+// preReadStatementEvidence reads the reconciliation-currency verdict in its own short read-only tenant transaction,
+// BEFORE the M2 transaction (SRF2-5 / LFF2-7). With attemptID set (Request) only that attempt's provider is read
+// (SRF2R-1 (c)); with uuid.Nil (Decide: the pending resolution, and so its attempt, is not visible to this system
+// session under 0115's RLS) every provider the tenant has payment attempts with. A provider not read is never
+// "current": statementEvidenceRefusal refuses it (no_successful_run), so narrowing can only refuse, never admit.
+func (s *ManualResolutionService) preReadStatementEvidence(ctx context.Context, tenantID, attemptID uuid.UUID) *reconEvidence {
 	ev := &reconEvidence{reasons: map[string]string{}}
 	if s == nil || s.pool == nil || tenantID == uuid.Nil {
 		return ev
 	}
 	err := s.pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT DISTINCT provider_id FROM payment_attempts WHERE tenant_id = $1 AND provider_id IS NOT NULL`, tenantID)
+		rows, err := tx.Query(ctx, `SELECT DISTINCT provider_id FROM payment_attempts
+			WHERE tenant_id = $1 AND provider_id IS NOT NULL AND ($2::uuid IS NULL OR id = $2)`, tenantID, nullUUID(attemptID))
 		if err != nil {
 			return err
 		}
@@ -158,13 +175,19 @@ type lastRun struct {
 func statementEvidenceRefusalInTx(ctx context.Context, tx pgx.Tx, keys *payoutinstrument.Keys, tenantID uuid.UUID, providerID string, maxAge time.Duration) (string, error) {
 	var last *lastRun
 	var err error
+	budgetHit := false
 	if keys == nil {
 		last, err = newestBackedRun(ctx, tx, tenantID, providerID)
 	} else {
-		last, err = newestSealedRun(ctx, tx, keys, tenantID, providerID)
+		last, budgetHit, err = newestSealedRun(ctx, tx, keys, tenantID, providerID)
 	}
 	if err != nil {
 		return "", err
+	}
+	if budgetHit {
+		slog.Default().Error("payments: M2 reconciliation evidence read stopped at its scan budget (run-row flood); M2 refused",
+			"tenant_id", tenantID, "provider_id", providerID, "budget", evidenceScanBudget)
+		return reconEvidenceScanBudget, nil
 	}
 	if last == nil {
 		return reconEvidenceNoRun, nil
@@ -213,21 +236,24 @@ func newestBackedRun(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, provide
 }
 
 // newestSealedRun is the keys rule: the newest run row (by run_at) whose run seal verifies and whose import - with
-// the run's coverage window, written by the stream - has a seal that verifies. Read in keyset pages, newest first.
-func newestSealedRun(ctx context.Context, tx pgx.Tx, keys *payoutinstrument.Keys, tenantID uuid.UUID, providerID string) (*lastRun, error) {
-	var afterAt *time.Time
-	var afterID *uuid.UUID
+// the run's coverage window, written by the stream - has a seal that verifies. Streamed newest first through ONE
+// server-side cursor; at most evidenceScanBudget rows are scanned (then budgetHit, and no run is returned).
+func newestSealedRun(ctx context.Context, tx pgx.Tx, keys *payoutinstrument.Keys, tenantID uuid.UUID, providerID string) (*lastRun, bool, error) {
+	cur, err := db.DeclareCursor(ctx, tx, "srf2r_m2_evidence_runs", `
+		SELECT r.id, r.run_import_id, r.period_start, r.coverage_end, COALESCE(r.window_truncated, false), r.run_at, r.run_seal, r.run_seal_kid
+		  FROM reconciliation_runs r
+		 WHERE r.tenant_id = $1 AND r.stream = 'payment_statement' AND r.provider_id = $2
+		   AND r.run_seal IS NOT NULL AND r.run_at <= now()
+		 ORDER BY r.run_at DESC, r.id DESC`, tenantID, providerID)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = cur.Close(ctx) }()
+	scanned := 0
 	for {
-		rows, err := tx.Query(ctx, `
-			SELECT r.id, r.run_import_id, r.period_start, r.coverage_end, COALESCE(r.window_truncated, false), r.run_at, r.run_seal, r.run_seal_kid
-			  FROM reconciliation_runs r
-			 WHERE r.tenant_id = $1 AND r.stream = 'payment_statement' AND r.provider_id = $2
-			   AND r.run_seal IS NOT NULL AND r.run_at <= now()
-			   AND ($3::timestamptz IS NULL OR (r.run_at, r.id) < ($3, $4::uuid))
-			 ORDER BY r.run_at DESC, r.id DESC
-			 LIMIT $5`, tenantID, providerID, afterAt, afterID, evidenceRunsPerPage)
+		rows, err := cur.Fetch(ctx, evidenceRunsPerPage)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		var verified []statement.RunSealInput
 		n := 0
@@ -236,34 +262,44 @@ func newestSealedRun(ctx context.Context, tx pgx.Tx, keys *payoutinstrument.Keys
 			var seal, kid string
 			if err := rows.Scan(&in.RunID, &in.ImportID, &in.CoverageStart, &in.CoverageEnd, &in.WindowTruncated, &in.RunAt, &seal, &kid); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, false, err
 			}
 			n++
-			at, id := in.RunAt, in.RunID
-			afterAt, afterID = &at, &id
 			if keys.VerifyPaymentRun(in, kid, seal) == nil {
 				verified = append(verified, in)
 			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
+		scanned += n
 		for _, in := range verified {
 			var shaped bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM payment_statement_imports
 				WHERE id = $1 AND tenant_id = $2 AND provider_id = $3 AND coverage_start = $4 AND coverage_end = $5 AND imported_by_service = $6)`,
 				in.ImportID, tenantID, providerID, in.CoverageStart, in.CoverageEnd, importedByServicePaymentStatement).Scan(&shaped); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if shaped && payoutinstrument.VerifyStatementImportInTx(ctx, tx, keys, tenantID, in.ImportID) == nil {
-				return &lastRun{runAt: in.RunAt, truncated: in.WindowTruncated}, nil
+				return &lastRun{runAt: in.RunAt, truncated: in.WindowTruncated}, false, nil
 			}
 		}
 		if n < evidenceRunsPerPage {
-			return nil, nil
+			return nil, false, nil
+		}
+		if scanned >= evidenceScanBudget {
+			return nil, true, nil
 		}
 	}
+}
+
+// nullUUID maps uuid.Nil to SQL NULL.
+func nullUUID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
 }
 
 // importedByServicePaymentStatement restates reconciliation.ImportedByServicePaymentStatement (this package

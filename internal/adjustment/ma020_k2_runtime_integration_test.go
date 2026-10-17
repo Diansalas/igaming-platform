@@ -260,10 +260,17 @@ func TestMA020_K2_BoundReasonsBlockUntilTombstone(t *testing.T) {
 	}
 }
 
-// R-MA-3: an eligible reversal line clears in the tenant session; the acting
-// session cannot read statement lines and stays refused (fail closed, the
-// documented acting-session residual: tombstone-only clearing there).
-func TestMA020_K2_ReversalLineClearsInTenantSessionOnly(t *testing.T) {
+// R-MA-3 as amended by migration 0172 (SRF2R-3 / residual 6.10, INTENTIONAL
+// BEHAVIOUR CHANGE, ledger-finance + orchestrator decision 2026-10-17). Before
+// 0172 this test was TestMA020_K2_ReversalLineClearsInTenantSessionOnly and
+// pinned that an eligible completed reversal line clears the SQL guard. A
+// statement line is runtime-writable and SQL cannot verify its seal, so since
+// 0172 ONLY a ledger tombstone clears in SQL: pending/declined lines never
+// cleared (C3, unchanged), and now a COMPLETED line does not clear either, in
+// the system shape, the tenant session and the acting session. A tombstone on
+// the reference clears in all three. Accepted operational cost: a reversal seen
+// only in a statement keeps manual credits blocked until a tombstone exists.
+func TestMA020_K2_ReversalLineNoLongerClears_OnlyATombstoneDoes(t *testing.T) {
 	rt := tempRevokeRuntimePool(t)
 	svc := NewService(rt)
 	w := newWorld(t, worldOpts{base: 1, authorizedAsset: true})
@@ -281,18 +288,87 @@ func TestMA020_K2_ReversalLineClearsInTenantSessionOnly(t *testing.T) {
 			t.Fatalf("tenant session, %s reversal line: want MA020, got %q", st, got)
 		}
 	}
+	// 0172: a completed (succeeded / reversed) reversal line no longer clears.
 	w.importLines(ma020Rev(x))
+	rv := ma020Rev(x)
+	rv.Status = statement.PaymentStatusReversed
+	w.importLines(rv)
+	if !sysExposure(t, rt, w) {
+		t.Fatal("system shape (0172): a completed reversal statement line must NOT clear the SQL guard")
+	}
+	for _, s := range []struct {
+		name            string
+		actor, approver staffMember
+	}{{"tenant", w.F1, w.F2}, {"acting", w.Acting, w.Acting2}} {
+		if got := creditOutcome(t, svc, w, s.actor, s.approver); got != "MA020" {
+			t.Fatalf("%s session (0172): a completed reversal line must not admit a credit, got %q", s.name, got)
+		}
+	}
+	// A ledger tombstone on the reference (what the verified reversal callback
+	// writes for a never-posted original) clears everywhere.
+	w.ma020Tombstone(x)
 	if sysExposure(t, rt, w) {
-		t.Fatal("system shape: an eligible reversal line must clear")
+		t.Fatal("system shape: a tombstone must clear")
 	}
 	if got := creditOutcome(t, svc, w, w.F1, w.F2); got != "" {
-		t.Fatalf("tenant session: want admitted, got %q", got)
+		t.Fatalf("tenant session after the tombstone: want admitted, got %q", got)
 	}
-	// FLIPPED deliberately by migration 0125 (see TestMA020_K2_RLSVisibilityPin):
-	// the acting session now sees the eligible reversal line, exactly as the
-	// tenant session does, so it clears there too.
 	if got := creditOutcome(t, svc, w, w.Acting, w.Acting2); got != "" {
-		t.Fatalf("acting session (0125: lines visible): want admitted, got %q", got)
+		t.Fatalf("acting session after the tombstone: want admitted, got %q", got)
+	}
+	w.assertInvariants()
+}
+
+// SRF2R-3 probe (the reviewer's attack): as the RUNTIME role, plant an UNSEALED
+// non-MOCK import holding a completed deposit_reversal line naming the parked
+// reference. Before 0172 the SQL guard read the exposure as closed and admitted
+// a manual credit (a double credit once the capture posts or is refunded).
+// Since 0172 the credit is refused (MA020) in both K2 sessions, nothing is
+// posted, and the ledger invariants hold.
+func TestMA020_SRF2R3_PlantedUnsealedReversalLineDoesNotOpenTheGuard(t *testing.T) {
+	rt := tempRevokeRuntimePool(t)
+	svc := NewService(rt)
+	w := newWorld(t, worldOpts{base: 1, authorizedAsset: true})
+	x := ma020Ref("plant")
+	w.park("multiple_success_for_intent", x, "")
+	for _, st := range []string{statement.PaymentStatusSucceeded, statement.PaymentStatusReversed} {
+		if err := rt.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+			var who string
+			if err := tx.QueryRow(ctx, `SELECT current_user`).Scan(&who); err != nil {
+				return err
+			}
+			if who != "igaming_runtime" {
+				t.Fatalf("the probe must write as the runtime role, got %s", who)
+			}
+			imp := uuid.New()
+			if _, err := tx.Exec(ctx, `INSERT INTO payment_statement_imports
+				(id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at)
+				VALUES ($1, $2, $3, 'planted', false, now() - interval '1 hour', now(), 1, $4, now())`, imp, w.Tenant, ma020Provider, make([]byte, 32)); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO payment_statement_lines (id, tenant_id, import_id, line_no, provider_id, kind, provider_reference,
+				original_provider_reference, status, amount, asset_code, occurred_at)
+				VALUES ($1, $2, $3, 0, $4, 'deposit_reversal', $5, $6, $7, 1, 'EUR', now() - interval '1 minute')`,
+				uuid.New(), w.Tenant, imp, ma020Provider, "planted-rev-"+uuid.NewString()[:12], x, st)
+			return err
+		}); err != nil {
+			t.Fatalf("plant as runtime: %v", err)
+		}
+		if !sysExposure(t, rt, w) {
+			t.Fatalf("a planted unsealed %s reversal line must not close the exposure", st)
+		}
+		before := w.adjustmentLedgerTxCount()
+		for _, s := range []struct {
+			name            string
+			actor, approver staffMember
+		}{{"tenant", w.F1, w.F2}, {"acting", w.Acting, w.Acting2}} {
+			if got := creditOutcome(t, svc, w, s.actor, s.approver); got != "MA020" {
+				t.Fatalf("%s session, planted %s line: want MA020, got %q", s.name, st, got)
+			}
+		}
+		if after := w.adjustmentLedgerTxCount(); after != before {
+			t.Fatalf("nothing may post: %d -> %d", before, after)
+		}
 	}
 	w.assertInvariants()
 }

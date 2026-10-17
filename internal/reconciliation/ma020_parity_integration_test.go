@@ -36,6 +36,18 @@ import (
 // K2 sessions cannot read the Y table, so the SQL fails closed), while Go
 // applies the X-only rule; there SQL must be true and Go => SQL. Each fixture
 // also pins its own expected value, so parity cannot pass with both sides wrong.
+//
+// INTENTIONAL BEHAVIOUR CHANGE (migration 0172, SRF2R-3 / residual 6.10): SQL
+// clears ONLY on a ledger tombstone; a deposit_reversal statement line (which
+// SQL cannot seal-verify) no longer clears there, while the Go detective rule
+// still clears on an eligible (with keys: sealed) completed reversal line. The
+// pinned relation is therefore:
+//
+//	SQL      == GoTomb (the Go rule with statement-line clearing removed)
+//	SQL-cleared  is a subset of  Go-cleared   (Go open => SQL open)
+//
+// Each fixture keeps the value it always pinned, except the named "cleared only
+// by a statement line" fixtures: OPEN in SQL now, still cleared in Go.
 
 const ma020Amount = int64(1000)
 
@@ -149,11 +161,15 @@ func ma020Succ(ref string) statement.PaymentStatementLine {
 
 func ma020Ref(tag string) string { return "ma020-" + tag + "-" + uuid.NewString()[:13] }
 
+// ma020Val is one deposit attempt's exposure: the SQL guard and the Go
+// detective rule (with statement-line clearing).
+type ma020Val struct{ sql, goFull bool }
+
 // ma020Parity evaluates both sides in one runtime-role snapshot and returns the
-// SQL value per deposit attempt.
-func ma020Parity(t *testing.T, rt *db.Pool, w *payWorld) map[uuid.UUID]bool {
+// SQL and Go values per deposit attempt.
+func ma020Parity(t *testing.T, rt *db.Pool, w *payWorld) map[uuid.UUID]ma020Val {
 	t.Helper()
-	out := map[uuid.UUID]bool{}
+	out := map[uuid.UUID]ma020Val{}
 	if err := rt.WithTenantSnapshot(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		m := &payMatcher{tenantID: w.f.tenantID, provider: payProvA, r: &sbRecorder{tenantID: w.f.tenantID}}
 		if err := m.loadPlatform(ctx, tx); err != nil {
@@ -163,6 +179,7 @@ func ma020Parity(t *testing.T, rt *db.Pool, w *payWorld) map[uuid.UUID]bool {
 			return err
 		}
 		m.matchLines(nil) // persisted eligible reversal originals -> reversalOriginals
+		lineCleared := m.reversalOriginals
 		var visibleY int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM payment_attempt_reference_evidence WHERE tenant_id = $1`, w.f.tenantID).Scan(&visibleY); err != nil {
 			return err
@@ -184,7 +201,13 @@ func ma020Parity(t *testing.T, rt *db.Pool, w *payWorld) map[uuid.UUID]bool {
 				}
 				continue
 			}
+			goFull := a.boundCapture() && m.capturedUnposted(a)
+			m.reversalOriginals = map[string]bool{} // 0172: only tombstones clear in SQL
 			goV := a.boundCapture() && m.capturedUnposted(a)
+			m.reversalOriginals = lineCleared
+			if goFull && !sqlV {
+				t.Errorf("SUBSET attempt %s reason=%q ref=%q: Go (detective) open but SQL cleared: SQL-cleared must be a subset of Go-cleared", a.id, a.terminalReason, a.providerRef)
+			}
 			_, hasY := m.k3.yRef[a.id]
 			if a.state == "disputed" && a.terminalReason == "poll_reference_mismatch" && a.providerRef != "" && !hasY {
 				// F-VIS asymmetry: SQL is stricter.
@@ -192,9 +215,9 @@ func ma020Parity(t *testing.T, rt *db.Pool, w *payWorld) map[uuid.UUID]bool {
 					t.Errorf("attempt %s: poll_reference_mismatch with no visible Y must be open in SQL (F-VIS), Go=%v", a.id, goV)
 				}
 			} else if goV != sqlV {
-				t.Errorf("PARITY attempt %s reason=%q ref=%q state=%s: Go=%v SQL=%v", a.id, a.terminalReason, a.providerRef, a.state, goV, sqlV)
+				t.Errorf("PARITY attempt %s reason=%q ref=%q state=%s: GoTomb=%v SQL=%v", a.id, a.terminalReason, a.providerRef, a.state, goV, sqlV)
 			}
-			out[a.id] = sqlV
+			out[a.id] = ma020Val{sql: sqlV, goFull: goFull}
 			if a.depositIntent != nil {
 				var player uuid.UUID
 				if err := tx.QueryRow(ctx, `SELECT player_account_id FROM deposit_intents WHERE id = $1`, *a.depositIntent).Scan(&player); err != nil {
@@ -219,16 +242,42 @@ func ma020Parity(t *testing.T, rt *db.Pool, w *payWorld) map[uuid.UUID]bool {
 	return out
 }
 
-func ma020Want(t *testing.T, got map[uuid.UUID]bool, want map[uuid.UUID]bool, names map[uuid.UUID]string) {
+// ma020Want pins, per fixture, the SQL guard value: want (the value pinned
+// since 0119), except for the fixtures named in lineOnly (cleared only by a
+// deposit_reversal statement line), which are OPEN in SQL since 0172 while the
+// Go detective rule still clears them (asserted). For every other fixture
+// ma020Parity already pins Go == SQL (bar F-VIS), so the Go value is pinned too.
+func ma020Want(t *testing.T, got map[uuid.UUID]ma020Val, want map[uuid.UUID]bool, names map[uuid.UUID]string, lineOnly ...string) {
 	t.Helper()
+	lo := map[string]bool{}
+	for _, n := range lineOnly {
+		lo[n] = true
+	}
+	seen := map[string]bool{}
 	for id, w := range want {
 		g, ok := got[id]
 		if !ok {
 			t.Errorf("%s (%s): attempt not loaded", names[id], id)
 			continue
 		}
-		if g != w {
-			t.Errorf("%s: SQL exposure=%v, want %v", names[id], g, w)
+		wantSQL := w
+		if lo[names[id]] {
+			seen[names[id]] = true
+			if w {
+				t.Errorf("%s: a lineOnly fixture must be one the Go rule clears", names[id])
+			}
+			if g.goFull {
+				t.Errorf("%s: the Go detective rule must still clear on the completed reversal line", names[id])
+			}
+			wantSQL = true
+		}
+		if g.sql != wantSQL {
+			t.Errorf("%s: SQL exposure=%v, want %v", names[id], g.sql, wantSQL)
+		}
+	}
+	for n := range lo {
+		if !seen[n] {
+			t.Errorf("lineOnly fixture %q not found", n)
 		}
 	}
 }
@@ -333,7 +382,7 @@ func TestMA020_Parity_XClearingAndScope(t *testing.T) {
 		t.Fatalf("payout park: %v", err)
 	}
 	got := ma020Parity(t, rt, w)
-	ma020Want(t, got, want, names)
+	ma020Want(t, got, want, names, "X reversed by a MOCK line, no real import (RC-3 eligible)", "X with a REVERSED-status reversal line (C3)")
 	if _, loaded := got[po]; loaded {
 		t.Fatal("a payout attempt must not be in the deposit parity set")
 	}
@@ -395,7 +444,7 @@ func TestMA020_Parity_YAttribution(t *testing.T) {
 	revs = append(revs, ma020Rev(xh))
 
 	w.ma020Import(t, false, revs...)
-	ma020Want(t, ma020Parity(t, rt, w), want, names)
+	ma020Want(t, ma020Parity(t, rt, w), want, names, "unheld Y reversed", "held Y, X reversed")
 }
 
 // G-Y2 (both evidenced: both must clear) and its one-sided variants, plus LF
@@ -440,7 +489,7 @@ func TestMA020_Parity_GY2(t *testing.T) {
 	lines = append(lines, ma020Succ(tx), ma020Succ(ty))
 	w.ma020Import(t, false, lines...)
 	w.ma020Tombstone(t, tx)
-	ma020Want(t, ma020Parity(t, rt, w), want, names)
+	ma020Want(t, ma020Parity(t, rt, w), want, names, gy2LineOnly...)
 	w.ma020Tombstone(t, ty)
 	want[func() uuid.UUID {
 		for id, n := range names {
@@ -451,8 +500,13 @@ func TestMA020_Parity_GY2(t *testing.T) {
 		t.Fatal("fixture lost")
 		return uuid.Nil
 	}()] = false
-	ma020Want(t, ma020Parity(t, rt, w), want, names)
+	ma020Want(t, ma020Parity(t, rt, w), want, names, gy2LineOnly...)
 }
+
+// gy2LineOnly are the TestMA020_Parity_GY2 fixtures cleared only by reversal
+// lines (open in SQL since 0172).
+var gy2LineOnly = []string{"both evidenced, both reversed", "only Y evidenced, Y reversed", "only X evidenced, X reversed",
+	"nothing evidenced, Y reversed", "X succeeded, Y only pending, X reversed (D-7)", "X succeeded, Y only declined, X reversed (D-7)"}
 
 // RC-3 in both orders: a MOCK line may clear (and evidence) only while no real
 // import exists for the tenant and provider.
@@ -463,11 +517,11 @@ func TestMA020_Parity_RC3MockVsRealImport(t *testing.T) {
 		x := ma020Ref("rc3a")
 		id := w.ma020Park(t, payments.TerminalReasonSyncAmountMismatch, x, "")
 		w.ma020Import(t, false, ma020Rev(x))
-		ma020Want(t, ma020Parity(t, rt, w), map[uuid.UUID]bool{id: false}, map[uuid.UUID]string{id: "MOCK reversal, no real import"})
+		ma020Want(t, ma020Parity(t, rt, w), map[uuid.UUID]bool{id: false}, map[uuid.UUID]string{id: "MOCK reversal, no real import"}, "MOCK reversal, no real import")
 		w.ma020Import(t, true, ma020Succ(ma020Ref("unrelated")))
 		ma020Want(t, ma020Parity(t, rt, w), map[uuid.UUID]bool{id: true}, map[uuid.UUID]string{id: "MOCK reversal after a real import exists"})
 		w.ma020Import(t, true, ma020Rev(x))
-		ma020Want(t, ma020Parity(t, rt, w), map[uuid.UUID]bool{id: false}, map[uuid.UUID]string{id: "real reversal"})
+		ma020Want(t, ma020Parity(t, rt, w), map[uuid.UUID]bool{id: false}, map[uuid.UUID]string{id: "real reversal"}, "real reversal")
 	})
 	t.Run("real import first, then a mock reversal", func(t *testing.T) {
 		w := newPayWorld(t)
@@ -484,7 +538,7 @@ func TestMA020_Parity_RC3MockVsRealImport(t *testing.T) {
 		w.ma020Import(t, true, ma020Succ(x))  // real: X evidenced
 		w.ma020Import(t, false, ma020Succ(y)) // MOCK: Y line ineligible
 		w.ma020Import(t, true, ma020Rev(y))   // real reversal on Y: X-or-Y rule clears
-		ma020Want(t, ma020Parity(t, rt, w), map[uuid.UUID]bool{id: false}, map[uuid.UUID]string{id: "Y evidenced only by ineligible MOCK line"})
+		ma020Want(t, ma020Parity(t, rt, w), map[uuid.UUID]bool{id: false}, map[uuid.UUID]string{id: "Y evidenced only by ineligible MOCK line"}, "Y evidenced only by ineligible MOCK line")
 	})
 }
 
@@ -503,7 +557,7 @@ func TestMA020_Parity_TenantIsolation(t *testing.T) {
 	w2.ma020Import(t, false, ma020Rev(y))
 	names := map[uuid.UUID]string{p: "tenant 1 park"}
 	ma020Want(t, ma020Parity(t, rt, w1), map[uuid.UUID]bool{p: true}, names)
-	ma020Want(t, ma020Parity(t, rt, w2), map[uuid.UUID]bool{p2: false}, map[uuid.UUID]string{p2: "tenant 2 park cleared by its own reversal"})
+	ma020Want(t, ma020Parity(t, rt, w2), map[uuid.UUID]bool{p2: false}, map[uuid.UUID]string{p2: "tenant 2 park cleared by its own reversal"}, "tenant 2 park cleared by its own reversal")
 	// Y is still attributable in tenant 1 (tenant 2's holder is not tenant 1's): a
 	// tenant-1 tombstone on Y clears tenant 1's park.
 	w1.ma020Tombstone(t, y)

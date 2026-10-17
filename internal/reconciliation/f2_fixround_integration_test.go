@@ -157,9 +157,10 @@ func TestF2_SRF2_1_AdvisoryLockOrphanPlusForgedRun_RefusedAndLoud(t *testing.T) 
 // SRF2-1 (c): holding the lock across sweeps is a visible stall: an import of the source above the trusted cursor,
 // older than the stall threshold, raises the durable match_stalled P1 and an audit row.
 func TestF2_SRF2_1_HeldLockIsAVisibleStall(t *testing.T) {
-	prev := matchStallAfter
+	prev, prevWait := matchStallAfter, matchStallLockWait
 	matchStallAfter = time.Millisecond
-	t.Cleanup(func() { matchStallAfter = prev })
+	matchStallLockWait = 100 * time.Millisecond // SRF2R-2: fixture only, the bounded wait for a held lock
+	t.Cleanup(func() { matchStallAfter, matchStallLockWait = prev, prevWait })
 	w := newPayWorld(t)
 	keys := f2Keys(t)
 	src := &recSource{provider: payProvA, fn: contiguousEmpty}
