@@ -136,7 +136,7 @@ guard (NOT ALLOWED ... `call:fmt.Sprint`) and 5 middleware subtests fail;
     248 pass, 0 fail (includes `TestIWire_PaymentWebhookPanic_*`,
     `TestIWire_CasinoCallbackPanic_*`,
     `TestRecordRequestIntegrityRefusal_PanicIsRecoveredAndSlotReleased`).
-  - `./internal/payments` full: PAYMENTS_RESULT_PLACEHOLDER
+  - `./internal/payments` full: 2304 pass, 0 fail, 0 skip (package elapsed 4231 s).
 - Private databases dropped after the runs.
 
 ## 5. Labels
