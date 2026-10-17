@@ -30,6 +30,14 @@ var publishedPlaceholderKeys = []string{
 	DevProviderCredentialFingerprintKeyPlaceholder, CIProviderCredentialFingerprintKeyPlaceholder,
 }
 
+// publishedJWTSigningSecrets are the JWT_SIGNING_SECRET values this repository publishes (.env.example and the CI
+// workflows). Load refuses them (as signing or previous secret) unless APP_ENV is explicitly "development": a
+// deployment that copied them would let anyone forge player and staff tokens.
+var publishedJWTSigningSecrets = []string{
+	"dev-only-secret-change-me-32-chars-min",
+	"ci-signing-secret-at-least-32-characters-long",
+}
+
 // loadStaffMFA reads the ADR 0119 S1 settings into cfg. Validation is
 // validateStaffMFA.
 func loadStaffMFA(cfg *Config) error {

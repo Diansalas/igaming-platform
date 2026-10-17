@@ -649,3 +649,26 @@ func TestLoad_KYCOutboxInterval(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad_PublishedJWTSecretsRefusedOutsideDevelopment(t *testing.T) {
+	for _, secret := range publishedJWTSigningSecrets {
+		for _, env := range []string{"", "staging", "production"} {
+			clearEnv(t)
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("JWT_SIGNING_SECRET", secret)
+			if env != "" {
+				t.Setenv("APP_ENV", env)
+			}
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "published placeholder") {
+				t.Fatalf("APP_ENV=%q: secret %q must be refused as a published placeholder, got %v", env, secret, err)
+			}
+		}
+		clearEnv(t)
+		t.Setenv("DATABASE_URL", "postgres://localhost/test")
+		t.Setenv("JWT_SIGNING_SECRET", secret)
+		t.Setenv("APP_ENV", "development")
+		if _, err := Load(); err != nil && strings.Contains(err.Error(), "published placeholder") {
+			t.Fatalf("explicit development must accept %q: %v", secret, err)
+		}
+	}
+}

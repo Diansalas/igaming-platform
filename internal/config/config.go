@@ -953,6 +953,13 @@ func Load() (Config, error) {
 	if len(cfg.JWTSigningSecret) < 32 {
 		return Config{}, fmt.Errorf("config: JWT_SIGNING_SECRET must be at least 32 characters")
 	}
+	if cfg.GuardEnvironment() != "development" {
+		for _, p := range publishedJWTSigningSecrets {
+			if cfg.JWTSigningSecret == p || cfg.JWTPreviousSecret == p {
+				return Config{}, fmt.Errorf("config: JWT_SIGNING_SECRET / JWT_PREVIOUS_SECRET is a published placeholder and is refused unless APP_ENV is explicitly \"development\"")
+			}
+		}
+	}
 	if cfg.JWTPreviousSecret != "" && len(cfg.JWTPreviousSecret) < 32 {
 		return Config{}, fmt.Errorf("config: JWT_PREVIOUS_SECRET must be at least 32 characters")
 	}
