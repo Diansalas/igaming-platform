@@ -628,6 +628,16 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, code, msg)
 			return
 		}
+		if errors.Is(err, payments.ErrDepositTombstoneProofUnavailable) {
+			// Closure security review F-1 (migration 0175): the tombstone branch of a verified deposit_reversal could not
+			// be signed (no actor-proof issuer / key). The whole transaction (receipt included) rolled back: answer a
+			// retryable 503 so the PSP redelivers once the key is back. Never a 200 without the tombstone (that would
+			// silently lose the reversal) and never a 4xx (the event is valid).
+			logger.Error("payment_webhook_deposit_tombstone_proof_unavailable", "provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			w.Header().Set("Retry-After", "1")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+			return
+		}
 		if errors.Is(err, payments.ErrDeferredReceiptCapExceeded) {
 			// ADR 0095 §6.1 step 5 / S95-C2(i): the unapplied-receipt cap
 			// for (tenant, provider) is already at or past the configured

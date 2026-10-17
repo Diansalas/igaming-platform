@@ -47,7 +47,7 @@ func attachDispatchAllowProof(ctx context.Context, tx pgx.Tx, wr WithdrawalReque
 		}
 	}
 	err := actorproof.Default().Attach(ctx, tx, actorproof.Claims{
-		Actor: actorproof.SystemActorDispatchGate, Scope: actorproof.ScopeSystem, Tenant: wr.TenantID,
+		Actor: actorproof.SystemActorDispatchGate(), Scope: actorproof.ScopeSystem, Tenant: wr.TenantID,
 		Operation: actorproof.OpDispatchGateAllow, Target: wr.ID.String(),
 		PayloadHash: dispatchAllowDigest(wr, stage, attemptID, riskOutcome, restriction),
 	})

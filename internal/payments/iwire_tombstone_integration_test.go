@@ -12,7 +12,7 @@ import (
 func iwSeedTombstone(t *testing.T, e *depRefEnv, ref string) {
 	t.Helper()
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := postDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, ref)
+		_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, ref)
 		return err
 	}); err != nil {
 		t.Fatalf("seed tombstone: %v", err)

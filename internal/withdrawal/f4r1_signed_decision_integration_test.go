@@ -34,7 +34,7 @@ func f4r1Digest(wr WithdrawalRequest, stage DispatchStage, attempt *uuid.UUID) s
 
 func f4r1Token(t *testing.T, f prooftest.Forger, tenant uuid.UUID, target, payload string) string {
 	t.Helper()
-	return f.Valid(t, actorproof.SystemActorDispatchGate, actorproof.ScopeSystem, tenant, actorproof.OpDispatchGateAllow, target, payload)
+	return f.Valid(t, actorproof.SystemActorDispatchGate(), actorproof.ScopeSystem, tenant, actorproof.OpDispatchGateAllow, target, payload)
 }
 
 // insertAllowRaw inserts an ALLOWED dispatch row with raw SQL (what a stolen runtime credential can do) after setting
@@ -137,11 +137,11 @@ func TestF4R1_ProofBindings_AnotherRequestAttemptTenantStageOperationScopeActor_
 		{"redispatch stage digest", f4r1Token(t, f, wr.TenantID, wr.ID.String(), f4r1Digest(wr, DispatchStageRedispatch, nil)), "AP004"},
 		{"digest bound to an attempt", f4r1Token(t, f, wr.TenantID, wr.ID.String(), f4r1Digest(wr, DispatchStageDispatch, &attempt)), "AP004"},
 		{"digest of a different amount", f4r1Token(t, f, wr.TenantID, wr.ID.String(), func() string { x := wr; x.Amount++; return f4r1Digest(x, DispatchStageDispatch, nil) }()), "AP004"},
-		{"another operation", f.Valid(t, actorproof.SystemActorDispatchGate, actorproof.ScopeSystem, wr.TenantID, "withdrawal_payout_reversal:decide", wr.ID.String(), good), "AP004"},
-		{"staff scope", f.Valid(t, actorproof.SystemActorDispatchGate, actorproof.ScopeTenant, wr.TenantID, actorproof.OpDispatchGateAllow, wr.ID.String(), good), "AP004"},
+		{"another operation", f.Valid(t, actorproof.SystemActorDispatchGate(), actorproof.ScopeSystem, wr.TenantID, "withdrawal_payout_reversal:decide", wr.ID.String(), good), "AP004"},
+		{"staff scope", f.Valid(t, actorproof.SystemActorDispatchGate(), actorproof.ScopeTenant, wr.TenantID, actorproof.OpDispatchGateAllow, wr.ID.String(), good), "AP004"},
 		{"another actor", f.Valid(t, uuid.New(), actorproof.ScopeSystem, wr.TenantID, actorproof.OpDispatchGateAllow, wr.ID.String(), good), "AP004"},
-		{"expired", f.Token(t, actorproof.SystemActorDispatchGate, actorproof.ScopeSystem, wr.TenantID, actorproof.OpDispatchGateAllow, wr.ID.String(), good, now-120, now-60), "AP003"},
-		{"lifetime over 60 s", f.Token(t, actorproof.SystemActorDispatchGate, actorproof.ScopeSystem, wr.TenantID, actorproof.OpDispatchGateAllow, wr.ID.String(), good, now, now+600), "AP003"},
+		{"expired", f.Token(t, actorproof.SystemActorDispatchGate(), actorproof.ScopeSystem, wr.TenantID, actorproof.OpDispatchGateAllow, wr.ID.String(), good, now-120, now-60), "AP003"},
+		{"lifetime over 60 s", f.Token(t, actorproof.SystemActorDispatchGate(), actorproof.ScopeSystem, wr.TenantID, actorproof.OpDispatchGateAllow, wr.ID.String(), good, now, now+600), "AP003"},
 	}
 	for _, c := range cases {
 		wantCode(t, c.name, w.rtTx(w.insertAllowRaw(c.tok, wr, "allow")), c.code)
@@ -153,7 +153,7 @@ func TestF4R1_ProofBindings_AnotherRequestAttemptTenantStageOperationScopeActor_
 			return err
 		}
 		_, err := tx.Exec(ctx, `SELECT actor_proof_require($1, 'system', $2, 'ledger_adjustment:approve', $3, $4)`,
-			actorproof.SystemActorDispatchGate, wr.TenantID, wr.ID.String(), good)
+			actorproof.SystemActorDispatchGate(), wr.TenantID, wr.ID.String(), good)
 		return err
 	}), "AP004")
 	// Every refusal above recorded nothing.

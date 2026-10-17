@@ -14,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkfix"
 )
 
@@ -354,9 +355,9 @@ func (w *world) postDepositFamily(amount int64) (dep, rev, tomb uuid.UUID) {
 			return err
 		}
 		rev = r.TransactionID
-		tb, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxTombstone, IdempotencyKey: pid + ":tomb:" + ref3,
-			ProviderID: &pid, ProviderTxID: &ref3, CorrelationID: uuid.New()})
-		tomb = tb.TransactionID
+		// Migration 0175: a deposit reversal tombstone on a payment provider is a signed system attestation bound to its
+		// reversal receipt; the fixture goes through the production writer.
+		tomb, err = payments.PlantVerifiedDepositReversalTombstone(ctx, tx, w.Tenant, pid, ref3)
 		return err
 	}); err != nil {
 		w.t.Fatalf("deposit family: %v", err)

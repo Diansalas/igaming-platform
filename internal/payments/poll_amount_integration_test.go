@@ -385,7 +385,7 @@ func TestPollTombstone_OnBoundReference_DisputesEvenWithAnEmptyEcho(t *testing.T
 			e := newDepRefEnv(t, pool, "mock-d1-tomb-"+strings.ReplaceAll(c.name, " ", ""))
 			a, ref := e.ambiguousBound(t, "d1-tomb")
 			if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := postDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, ref)
+				_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, ref)
 				return err
 			}); err != nil {
 				t.Fatalf("seed tombstone: %v", err)
@@ -990,7 +990,7 @@ func TestParkFaultInjection_PhaseC_RollsBackCompletelyThenRedrivesCleanly(t *tes
 		}, TerminalReasonProviderReferenceConflict},
 		{"reversal tombstone", func(e *depRefEnv) GateResult[DepositResult] {
 			if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := postDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, "fi-tomb-ref")
+				_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, "fi-tomb-ref")
 				return err
 			}); err != nil {
 				t.Fatalf("seed tombstone: %v", err)

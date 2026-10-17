@@ -243,10 +243,10 @@ func bcReal(offset int, lines ...statement.PaymentStatementLine) d2RealSource {
 func (w *bcWorld) bcTombstone(t *testing.T, provider, ref string) {
 	t.Helper()
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "tombstone:" + provider + ":" + ref, ProviderID: &provider, ProviderTxID: &ref, CorrelationID: uuid.New(),
-		})
+		// Migration 0175: a deposit-shaped tombstone on a payment provider is a signed attestation bound to a
+		// deposit_reversal receipt; the fixture goes through the production writer (bypassing only the integrity check
+		// the real callback path applies, which is what this robustness test needs).
+		_, err := payments.PlantVerifiedDepositReversalTombstone(ctx, tx, w.f.tenantID, provider, ref)
 		return err
 	}); err != nil {
 		t.Fatalf("tombstone: %v", err)

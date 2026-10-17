@@ -674,9 +674,9 @@ func TestA5_PayoutReversal_ReturnReferenceAlreadyHeld_Refused(t *testing.T) {
 	_, depRef := pendingDeposit(t, e.pool, w.orch, w.f.orchFixture, "a5-rr-dep-"+uuid.NewString()[:8], 700)
 	ledgerOnly := "a5-rr-ledger-" + uuid.NewString()[:8]
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		pid := e.pid
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: e.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "tombstone:" + pid + ":" + ledgerOnly, ProviderID: &pid, ProviderTxID: &ledgerOnly, CorrelationID: uuid.New()})
+		// Migration 0175: a deposit-shaped tombstone on a payment provider is the signed one a verified
+		// deposit_reversal writes (a raw one is refused, AP001).
+		_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, e.f.tenantID, e.pid, ledgerOnly)
 		return err
 	}); err != nil {
 		t.Fatal(err)

@@ -233,9 +233,8 @@ func (m *m4World) execute(p *b11Parked, kind ResolutionKind, ev M4Evidence) Reso
 func (m *m4World) tombstone(ref string) {
 	m.t.Helper()
 	m.tx(func(ctx context.Context, tx pgx.Tx) error {
-		pid := m.provider
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: m.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "m4-tomb:" + ref, ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New()})
+		// Migration 0175: a deposit-shaped tombstone on a payment provider is the signed one (a raw one is refused, AP001).
+		_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, m.f.tenantID, m.provider, ref)
 		return err
 	})
 }

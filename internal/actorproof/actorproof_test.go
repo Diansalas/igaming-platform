@@ -269,7 +269,50 @@ func staticOffenders(t *testing.T, root string, allowed map[string]bool) []strin
 			{"TestEnsureKeyHook", map[string]int{
 				filepath.Join("internal", "actorproof", "actorproof.go"):                1,
 				filepath.Join("internal", "withdrawal", "dispatchproof.go"):             1,
+				filepath.Join("internal", "payments", "deposit_tombstone_proof.go"):     1, // migration 0175
 				filepath.Join("internal", "actorproof", "prooftest", "dispatchhook.go"): 1}},
+			// Closure security review F-3: the dispatch-gate system claims (operation, actor, scope, the operation's
+			// literal and the actor's uuid) are built ONLY in actorproof.go (declaration / validation) and
+			// internal/withdrawal/dispatchproof.go (the one signer); the decision table is written ONLY by
+			// internal/withdrawal/dispatchgate.go (RecordDispatchGateDecision, itself pinned to four call sites).
+			{"OpDispatchGateAllow", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"):    3,
+				filepath.Join("internal", "withdrawal", "dispatchproof.go"): 1}},
+			{"SystemActorDispatchGate", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"):    1,
+				filepath.Join("internal", "withdrawal", "dispatchproof.go"): 1}},
+			{"withdrawal_dispatch_gate:", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"): 2}},
+			{"00000f4d1500", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"): 1}},
+			{"INSERT INTO withdrawal_gate_decisions", map[string]int{
+				filepath.Join("internal", "withdrawal", "dispatchgate.go"): 1}},
+			// Closure security review F-1 (migration 0175): the deposit-reversal-tombstone system claims are built ONLY in
+			// actorproof.go and internal/payments/deposit_tombstone_proof.go; the scope system ONLY there and in
+			// dispatchproof.go. The signing helper is called ONLY by postDepositReversalTombstone (orchestrator.go), whose
+			// callers are the tombstone branch of the verified reversal receipt (receipt.go) and the integration-only
+			// fixture (testsupport_tombstone_integration.go, build-tag pinned below).
+			{"OpDepositReversalTombstone", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"):            3,
+				filepath.Join("internal", "payments", "deposit_tombstone_proof.go"): 1}},
+			{"SystemActorDepositReversal", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"):            1,
+				filepath.Join("internal", "payments", "deposit_tombstone_proof.go"): 1}},
+			{"deposit_reversal_tombstone:", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"): 2}},
+			{"0000000de175", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"): 1}},
+			{"ScopeSystem", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"):            4,
+				filepath.Join("internal", "withdrawal", "dispatchproof.go"):         1,
+				filepath.Join("internal", "payments", "deposit_tombstone_proof.go"): 1}},
+			{"attachDepositTombstoneProof(", map[string]int{
+				filepath.Join("internal", "payments", "deposit_tombstone_proof.go"): 1,
+				filepath.Join("internal", "payments", "orchestrator.go"):            1}},
+			{"postDepositReversalTombstone(", map[string]int{
+				filepath.Join("internal", "payments", "orchestrator.go"):                      1,
+				filepath.Join("internal", "payments", "receipt.go"):                           1,
+				filepath.Join("internal", "payments", "testsupport_tombstone_integration.go"): 1}},
 		} {
 			if n := codeLines(src, pin.needle); n != pin.allow[rel] && n > 0 {
 				offenders = append(offenders, fmt.Sprintf("%s (%d code occurrence(s) of %s, allowed %d)", rel, n, pin.needle, pin.allow[rel]))
@@ -378,7 +421,7 @@ func TestStatic_WithdrawalSignsOnlyInDispatchProof(t *testing.T) {
 	if n := codeLines(src, ".Sign("); n != 0 {
 		t.Fatalf("dispatchproof.go must not call Sign directly, found %d", n)
 	}
-	for _, want := range []string{"actorproof.ScopeSystem", "actorproof.OpDispatchGateAllow", "actorproof.SystemActorDispatchGate"} {
+	for _, want := range []string{"actorproof.ScopeSystem", "actorproof.OpDispatchGateAllow", "actorproof.SystemActorDispatchGate()"} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("dispatchproof.go must sign the system dispatch-gate claims (missing %s)", want)
 		}
@@ -400,6 +443,64 @@ func TestStatic_WithdrawalSignsOnlyInDispatchProof(t *testing.T) {
 		if strings.Contains(string(fb), `"github.com/Diansalas/igaming-platform/internal/actorproof`) {
 			t.Fatalf("internal/withdrawal/%s must not import the issuer", n)
 		}
+	}
+}
+
+// TestStatic_DepositTombstoneSignedOnlyHere (migration 0175): deposit_tombstone_proof.go signs exactly once (one Attach, no
+// Sign), with the deposit-reversal-tombstone system claims only; the integration-only fixture carries the build tag (no
+// production binary contains it) and signs nothing itself.
+func TestStatic_DepositTombstoneSignedOnlyHere(t *testing.T) {
+	read := func(rel ...string) string {
+		b, err := os.ReadFile(filepath.Join(append([]string{"..", ".."}, rel...)...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	src := read("internal", "payments", "deposit_tombstone_proof.go")
+	if n := codeLines(src, ".Attach("); n != 1 {
+		t.Fatalf("deposit_tombstone_proof.go must contain exactly one Attach call, found %d", n)
+	}
+	if n := codeLines(src, ".Sign("); n != 0 {
+		t.Fatalf("deposit_tombstone_proof.go must not call Sign directly, found %d", n)
+	}
+	for _, want := range []string{"actorproof.ScopeSystem", "actorproof.OpDepositReversalTombstone", "actorproof.SystemActorDepositReversal()",
+		"Target: receiptID.String()"} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("deposit_tombstone_proof.go must sign the deposit tombstone system claims bound to the receipt (missing %s)", want)
+		}
+	}
+	fix := read("internal", "payments", "testsupport_tombstone_integration.go")
+	if !strings.HasPrefix(fix, "//go:build integration\n") {
+		t.Fatal("testsupport_tombstone_integration.go must carry the integration build tag on its first line")
+	}
+	for _, banned := range []string{".Attach(", ".Sign(", "actorproof"} {
+		if codeLines(fix, banned) != 0 {
+			t.Fatalf("the fixture must sign only through postDepositReversalTombstone (found %s)", banned)
+		}
+	}
+	// The verifier mirror: each system operation is admitted only for its own actor.
+	for _, c := range []struct {
+		op    string
+		actor uuid.UUID
+		ok    bool
+	}{
+		{OpDepositReversalTombstone, SystemActorDepositReversal(), true},
+		{OpDispatchGateAllow, SystemActorDispatchGate(), true},
+		{OpDepositReversalTombstone, SystemActorDispatchGate(), false},
+		{OpDispatchGateAllow, SystemActorDepositReversal(), false},
+		{"deposit_reversal_tombstone:other", SystemActorDepositReversal(), false},
+		{OpPayoutReversalDecide, SystemActorDepositReversal(), false},
+	} {
+		err := Claims{Actor: c.actor, Scope: ScopeSystem, Tenant: uuid.New(), Operation: c.op, Target: uuid.NewString(),
+			PayloadHash: strings.Repeat("a", 64)}.validate()
+		if (err == nil) != c.ok {
+			t.Fatalf("system claims %s by %s: want ok=%v, got %v", c.op, c.actor, c.ok, err)
+		}
+	}
+	if err := (Claims{Actor: SystemActorDepositReversal(), Scope: ScopeTenant, Tenant: uuid.New(), Operation: OpDepositReversalTombstone,
+		Target: uuid.NewString(), PayloadHash: strings.Repeat("a", 64)}).validate(); err == nil {
+		t.Fatal("the deposit tombstone operation must not be signable for a staff scope")
 	}
 }
 
@@ -427,15 +528,24 @@ func TestStatic_ScanIsNotVacuous(t *testing.T) {
 	// key-provisioning hook, are flagged; the pinned file is not.
 	write("internal/withdrawal/other.go", "package withdrawal\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
 	write("internal/payments/evilhook.go", "package payments\nvar _ = actorproof.TestEnsureKeyHook\n")
+	// Closure security review F-1 / F-3: a second builder of either system claim set, a second writer of the decision
+	// table, a raw operation literal and a second caller of the deposit tombstone writer are flagged.
+	write("internal/payments/evilclaim.go", "package payments\nvar _ = actorproof.OpDepositReversalTombstone\n")
+	write("internal/httpserver/evilgate.go", "package x\nvar _ = actorproof.SystemActorDispatchGate()\n")
+	write("internal/withdrawal/evilinsert.go", "package withdrawal\nconst q = `INSERT INTO withdrawal_gate_decisions (x) VALUES (1)`\n")
+	write("internal/risk/evilop.go", "package risk\nconst op = \"withdrawal_dispatch_gate:allow\"\n")
+	write("internal/payments/evilcaller.go", "package payments\nfunc f() { _, _ = postDepositReversalTombstone(nil, nil, x, p, r, id) }\n")
 	// The legitimate shapes must NOT be flagged.
 	write("internal/capability/proof.go", "package capability\n// TestSessionProofHook comment\nvar TestSessionProofHook func()\nfunc f() {\n\tif TestSessionProofHook != nil {\n\t\treturn TestSessionProofHook()\n\t}\n}\nfunc WithProofActor(ctx int) {}\n")
 	write("internal/httpserver/capability_routes.go", "package x\nfunc g() {\n\t_ = capability.WithProofActor(a)\n\t_ = capability.WithProofActor(b)\n}\n")
 	write("internal/adjustment/policy.go", "package a\nvar _ = PolicyCall{}\n")
-	write("internal/withdrawal/dispatchproof.go", "package withdrawal\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\nvar _ = actorproof.TestEnsureKeyHook\n")
+	write("internal/withdrawal/dispatchproof.go", "package withdrawal\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\nvar _ = actorproof.TestEnsureKeyHook\nvar _ = actorproof.Claims{Actor: actorproof.SystemActorDispatchGate(), Operation: actorproof.OpDispatchGateAllow}\n")
+	write("internal/withdrawal/dispatchgate.go", "package withdrawal\nconst q = `INSERT INTO withdrawal_gate_decisions (x) VALUES (1)`\n")
+	write("internal/payments/deposit_tombstone_proof.go", "package payments\nvar _ = actorproof.Claims{Actor: actorproof.SystemActorDepositReversal(), Operation: actorproof.OpDepositReversalTombstone}\n")
 	write("internal/adjustment/ok.go", "package ok\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
 	write("internal/wallet/y_test.go", "package y\nimport _ \"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest\"\n")
 	off := staticOffenders(t, root, staticAllowed)
-	if len(off) != 8 {
-		t.Fatalf("want exactly the 8 planted production offenders flagged (and no legitimate shape), got %v", off)
+	if len(off) != 13 {
+		t.Fatalf("want exactly the 13 planted production offenders flagged (and no legitimate shape), got %v", off)
 	}
 }

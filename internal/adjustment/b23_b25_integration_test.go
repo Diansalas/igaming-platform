@@ -12,6 +12,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/adjlinkfix"
 )
@@ -73,8 +74,9 @@ func contains(s, sub string) bool {
 func (w *world) tombstoneFor(providerID, ref string) {
 	w.t.Helper()
 	if err := w.pool.WithTenant(context.Background(), w.Tenant, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.Tenant, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: providerID + ":" + ref, ProviderID: &providerID, ProviderTxID: &ref, CorrelationID: uuid.New()})
+		// Migration 0175: the tombstone a verified deposit_reversal writes (signed, bound to its receipt); a raw one is
+		// refused (AP001) and would not clear MA020 anyway.
+		_, err := payments.PlantVerifiedDepositReversalTombstone(ctx, tx, w.Tenant, providerID, ref)
 		return err
 	}); err != nil {
 		w.t.Fatalf("tombstone: %v", err)

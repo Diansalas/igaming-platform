@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/adjustment"
-	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
 // MA020-SYNC-MISMATCH-1 end to end with B3 (PAY-CALLBACK-MISMATCH-BIND-1): a
@@ -55,9 +54,8 @@ func TestMA020_B3_CallbackMismatchParkBlocksK2Credit(t *testing.T) {
 	}
 	// The refund tombstone on the bound reference lifts the exposure.
 	w.tx(func(ctx context.Context, tx pgx.Tx) error {
-		p := w.provider
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: w.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "ma020-b3-tomb:" + ref, ProviderID: &p, ProviderTxID: &ref, CorrelationID: uuid.New()})
+		// Migration 0175: the signed tombstone a verified deposit_reversal writes (only it clears MA020).
+		_, err := PlantVerifiedDepositReversalTombstone(ctx, tx, w.f.tenantID, w.provider, ref)
 		return err
 	})
 	r, err := w.k2Service().Submit(k3Ctx(w.f3), w.k2Target(w.f3), credit, adjustment.Meta{RequestID: "ma020-b3"})
