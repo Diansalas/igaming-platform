@@ -303,22 +303,30 @@ flowchart LR
   12. **Non-active tenants are observed (PRH-2 R3, H-W1; owner decision 2026-10-05; `IMPLEMENTED` against MOCK; ADR 0095 §40.4, ADR 0101 §28.3).** The scheduler (`RunSweep`, `RunSweepTenants`) selects tenants with `status <> 'active'` (`suspended`, `closed`, and any later status) and runs for them ONLY (a) `ledger_vs_projection` (a non-active tenant's ledger still moves through staff M2 and the sweeper's evidence application, so its postings must not escape the hourly drift check; internal read, no credential) and (b) when at least one payment statement source is scheduled, `payment_statement`, per source, in the same three phases; findings, alerts and failure handling are the same as for an active tenant. `sportsbook_settlement`, `casino_consistency` and `casino_statement` stay active-only (deferred). Observation fetches with the tenant's still-active outbound credential: HD-CTF-10 (open). Observation work is unbounded (no budget or end condition): a real-PSP launch condition. Observation is read plus findings/alerts only: it cannot post to the ledger, change an attempt, withdrawal, intent or receipt, call a provider other than the statement READ, or create/execute a manual resolution (structurally: the package imports no payment orchestrator, adapter, withdrawal or resolution package; pinned by static and behavioural tests). A run for a non-active tenant is recognisable from its audit record (`non_active_tenant_observation: true`, `tenant_status`); the run row itself is unchanged (no migration). The payments sweeper remains resolution-only for these tenants and M2 on a closed tenant stays staff-gated (`platform_acting`, four-eyes). Residuals unchanged: real statement source `PROVIDER DEPENDENT`; R-S1; "scheduled is not last-run-succeeded"; alert delivery (ALERT-DELIVERY-1) `NOT IMPLEMENTED`.
   13. **Scoped per (tenant, provider), bounded and resumable (A11; `IMPLEMENTED` against MOCK; `docs/plans/a11-payments-wiring-record.md`).** The production loop (`RunSchedulerLoopScoped`) no longer runs every source for every tenant. For each tenant (active, or observed per item 12) it takes the providers the tenant has configured (`provider_capabilities` of any status, plus providers its payment attempts name) and resolves each through the process source registry (`cmd/platform-api/payment_statement_registry.go`, built from the same list as the M2 registry). A configured provider with no eligible source (none registered, a source for another provider id, or a Synthetic source where mocks are not allowed) is NOT reconciled: an audited failed run, a durable `reconciliation.run_failed` (phase `no_statement_source` / `source_not_eligible` / `scope`), the gauge `reconciliation_payment_unreconciled{reason}`, and no run row (never clean). This narrows R-S1. Each fetch is bounded (`RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`) and continues from a persisted per-(tenant, provider) cursor (`reconciliation_runs.coverage_end` of the last committed run, with `provider_id` and `window_truncated`, migration 0160): the statement must start exactly at the cursor, so no window is skipped or covered twice; a run that hits the bound is recorded truncated, alerted (phase `truncated`) and never counted as a success, and the next run continues. The statement source interface is read-only by construction (no transaction, no payment-provider handle) and every non-Synthetic source must attest a read-only credential (`statement.ReadOnlyAttested`); the real read/reporting-scoped credential is `PROVIDER DEPENDENT`. Still open: a per-sweep time budget and bounded concurrency; the observation lifetime of a closed tenant (HD-CTF-10). ("scheduled is not last-run-succeeded" for M2 is closed by item 14.)
   14. **Stream integrity (F2, platform-freeze work list; `IMPLEMENTED` against MOCK; `docs/plans/f2-payments-recon-integrity-record.md`).**
-     (a) *Sealed cursor (SR11-10 / SR11-1).* With import seal keys in the process (production refuses to start a registered source without
-     them, `reconciliation.VerifyPaymentCursorSealing`), the cursor is the newest run row of the pair (run_at and coverage_end not in the
-     future) whose coverage_end equals that of a stored import written by THIS stream and THIS source (`imported_by_service`, `source_label`,
-     `is_mock`) carrying a seal that VERIFIES over the import row and all its stored lines. A run row with an unsealed, wrongly sealed or
-     copied-seal import (a forgery by a SQL-only attacker) is ignored; at most 64 candidates are examined, then the run fails closed
-     (`ErrPaymentCursorUnverifiable`). Without keys (non-production only) the A11 rule (any backing import) applies. Residual: a forger who
-     can run code in the application process (holds the key), and a forged run row naming the coverage_end of a GENUINE sealed import whose
-     own match did not commit (a stale-cursor loser, or a failed match that already raised its own P1): that skips one fetched window.
-     (b) *Anomaly alert (SR11-11).* Rows above the trusted cursor raise `reconciliation.run_failed` with discriminator
+     (a) *Sealed cursor (SR11-10 / SR11-1, run seal migration 0168).* The application seals both rows the cursor rests on with keys
+     that never enter the database (payoutinstrument.Keys): the import (since 0125) and the RUN row (0168: run id, tenant, provider, stream,
+     the import it matched, the import's coverage window, window_truncated, run_at; written in the run's own INSERT). With keys (production
+     refuses to start a registered source without them, `reconciliation.VerifyPaymentCursorSealing`), the cursor is the newest run row whose
+     run seal verifies and whose named import was written by THIS stream and source with the same coverage window and has an import seal
+     that verifies over the import and all its lines. A forged or copied run row (also one naming a genuine sealed import whose match never
+     committed, e.g. after holding the stream's advisory lock) is never a cursor. Candidates are read in keyset pages and checked with one
+     HMAC each: no limit and no fail-closed state (forged rows cost a linear scan; they cannot stop the stream). A skipped match is audited
+     (`reconciliation.payment_match_skipped`) and an import of the source left above the cursor for 30 minutes raises the durable P1
+     `match_stalled`; the window is re-fetched from the unchanged cursor. Without keys (non-production only) the A11 rule (any backing
+     import) applies. Residual: an attacker running code in the application process (holds the key).
+     (b) *Anomaly alert (SR11-11).* Rows that do not back the trusted cursor and are newer than it (coverage_end above it, or run_at after
+     the cursor run's) raise `reconciliation.run_failed` with discriminator
      `stream:payment_statement:provider:<id>:cursor_anomaly:n<count>:<digest of their ids>` (the phase attribute stays `cursor_anomaly`) and an
      audit row `reconciliation.payment_cursor_anomaly` (count, newest unbacked run id, digest): an unchanged set re-occurs on one alert, a NEW
      forgery opens a new one.
      (c) *Bounded-mode matcher windowing (LF-A11-1).* In continuation mode a succeeded attempt is windowed by its own last change
      (`resolved_at`, else `updated_at`), the semantics of a bounded line's time, for both the `pay_missing_provider_record` rule and the
-     ledger-join (a) check; an attempt whose line an earlier import already holds (an eligible persisted payout/deposit line, succeeded or
-     reversed, on its reference, settlement reference or merchant reference) is not reported. Legacy (creation-dated) mode is unchanged.
+     ledger-join (a) check. An attempt whose success an earlier import already records is not reported: a persisted line of the same
+     operation on its reference, settlement reference or merchant reference, from an ELIGIBLE import whose seal verifies (with keys), inside
+     that import's coverage and not after the run's coverage end, status `succeeded`, amount AND asset equal. A usable succeeded line with
+     another amount or asset is reported as `pay_amount_mismatch` / `pay_asset_mismatch`; a usable `reversed` line as `pay_status_mismatch`
+     (the provider reversed what the platform recorded as succeeded). Legacy (creation-dated) mode is unchanged. Every persisted line that
+     may CLEAR or CONFIRM anything (K3 / M2 / M4 / R9 clearing, deposit-reversal clearing) obeys the same seal and coverage rule.
      (d) *Completeness horizon and paging (LF-A11-2 / LF-A11-6).* Each continuation request carries `Continuation = true` and
      `PeriodEnd = min(sweep end, now - settle lag)`; a statement whose CoverageEnd passes it is refused (nothing stored). The settle lag is the
      source's declaration (`statement.SettleLagDeclarer`, validated to [0, 7 days] at registry startup and per run), else 15 minutes for a
@@ -326,8 +334,10 @@ flowchart LR
      MOCK honours both. When the horizon has not passed the cursor the run is skipped (nothing fetched, not a failure).
      (e) *M2 gate (H-W1 second half, LF-A11-8).* Both M2 kinds are refused at submission (409 `force_resolve_precondition_failed`) and at
      execution (`refused_at_execution`, code `reconciliation_not_current`) unless the provider's payment_statement reconciliation is current:
-     its newest stream-recorded run (sealed-import-backed when the process has keys) exists, is not truncated, has no
-     `reconciliation.sweep_run_failed` for the provider audited after it, and is at most 6 h old. M4 is not gated by this rule.
+     its newest stream-recorded run exists (with keys: a run whose RUN seal verifies and whose import seal verifies; a copied or forged run
+     row is never evidence), its sealed window_truncated is false, no `reconciliation.sweep_run_failed` for the provider was audited after its
+     sealed run_at (and not more than 5 minutes in the future), and its sealed run_at is at most 6 h old. The evidence is read before the M2
+     transaction opens (no second pooled connection inside it). M4 is not gated by this rule.
   15. **Payout reversal tombstone standing finding (F3 / A5 R9, migration 0167; `IMPLEMENTED` against MOCK).** `pay_payout_reversal_tombstone_but_paid`:
      a withdrawal request carrying the A5 tombstone (a tombstone correlated to the request) for which ANY persisted import holds a succeeded
      payout line on the original reference or the request's attempts' merchant references. Unwindowed, every run. Clears only on PSP return

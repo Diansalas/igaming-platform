@@ -869,18 +869,26 @@ Discriminator `stream:payment_statement:provider:<id>:<phase>` (ONE open alert p
 - `source_not_eligible`: a source is registered but cannot vouch for this provider (it speaks for another provider id, or it is a MOCK source
   where mock components are not allowed). It is never fetched.
 - `scope`: the tenant's provider listing failed (database).
-- `cursor_anomaly` (SR11-1, SR11-10, SR11-11): run rows exist for the pair above its trusted cursor that no verifying import backs (with
-  import seal keys: an import written by this stream and source whose seal VERIFIES; without keys, non-production only: any import). They are
-  IGNORED by the cursor read (the stream keeps fetching from the genuine cursor) but are a forgery/corruption indicator: treat as a security
-  incident (who wrote `reconciliation_runs` / `payment_statement_imports`?), keep the rows as evidence, and do not resolve the alert until
-  security has reviewed. The discriminator ends `cursor_anomaly:n<count>:<digest>`: the digest covers the ids of the unbacked rows, so an
-  unchanged set re-occurs on ONE alert and a NEW forgery opens a NEW alert. Compare the digests in the audit rows
-  `reconciliation.payment_cursor_anomaly` (count, `newest_unbacked_run_id`, `unbacked_digest`, `sealed_cursor`) to tell a new forgery from a
-  known one. Benign one-off causes (still investigate): import keys newly configured on a stack whose history is unsealed (one alert, gone
-  after the first sealed run), a statement source relabelled, or a retired key id dropped from the process (its imports no longer verify).
-- `cursor` phase with `ErrPaymentCursorUnverifiable`: the newest 64 run rows of the pair are all unbacked: the run fails closed and fetches
-  nothing. Same security handling; the stream resumes when a genuine run row is again among the newest 64 (a deliberate fix is a governed
-  decision, never a SQL edit of the append-only tables).
+- `cursor_anomaly` (SR11-1, SR11-10, SR11-11, F2 fix round): run rows of the pair that do not back the trusted cursor and are newer than it
+  (coverage_end above it, or run_at after the cursor run's). With keys (production) a run row backs the cursor only if its RUN seal (migration
+  0168) verifies and the import it names was written by this stream and source and its IMPORT seal verifies; without keys (non-production
+  only) any backing import counts. The rows are IGNORED by the cursor read (the stream keeps fetching from the genuine cursor; a forged row can
+  neither move nor stop it) but they are a forgery/corruption indicator: treat as a security incident (who wrote `reconciliation_runs` /
+  `payment_statement_imports`?), keep the rows as evidence, and do not resolve the alert until security has reviewed. The discriminator ends
+  `cursor_anomaly:n<count>:<digest>`: the digest covers the count and the ids of the unbacked rows, so an unchanged set re-occurs on ONE alert
+  and a NEW forgery opens a NEW alert. Compare the audit rows `reconciliation.payment_cursor_anomaly` (count, `newest_unbacked_run_id`,
+  `unbacked_digest`, `sealed_cursor`). Benign one-off causes (still investigate): keys newly configured on a stack whose history is unsealed
+  (gone after the first sealed run), a statement source relabelled, a retired key id dropped from the process. Forged rows cost the read a
+  linear scan (the count is one `count(*)`, at most 1000 rows are read for the digest); there is no fail-closed state to recover from.
+  Removing forged rows is NEVER a SQL edit (the tables are append-only) and never an agent action: if their volume ever makes the read too
+  slow, the remedy is an owner-authorised, audited procedure decided by security + ledger-finance (for example a migration-recorded exclusion
+  of the named run ids).
+- `match_stalled` (SRF2-1 (c)): an import of this source lies above the trusted cursor and was fetched more than 30 minutes ago: its match
+  never committed (the match was skipped for lock contention or a stale cursor, or it failed). Every skipped match also writes an audit row
+  `reconciliation.payment_match_skipped` (with the import id). A held `reconciliation:payment_statement:<tenant>` advisory lock (any database
+  session can take one) produces exactly this: find the session holding it (`pg_locks` where `locktype = 'advisory'`), treat an unexpected
+  holder as a security incident. The window is not lost: every sweep re-fetches from the unchanged trusted cursor, and the alert stops once
+  a match commits and the cursor passes the stalled imports.
 - `truncated`: the run stopped at the per-run line bound (`RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`). The run matched only the window the
   source vouched for (`window_truncated=true` in `reconciliation_runs` and the audit row) and the next run continues from the persisted
   cursor (`reconciliation_runs.coverage_end` of the provider's last committed run). It is not a failure and not a clean claim; it clears
@@ -912,7 +920,9 @@ Symptom: `reconciliation.run_failed` (phase `fetch`, for one (tenant, provider))
 7. A run that is SKIPPED with "horizon not past the cursor" (Info log, no failure) is normal right after a settle lag was raised; it resolves
    by itself once now - lag passes the cursor.
 8. While the pair fails, M2 force-resolutions for that provider are refused (`reconciliation_not_current`, F2e): restore the stream first; do
-   not work around the gate.
+   not work around the gate. What unblocks M2 (LFF2-3): the next successful, non-truncated, SEALED run of the provider (at most 6 h old) with
+   no `reconciliation.sweep_run_failed` for the provider audited after it (a failure row dated more than 5 minutes in the future is ignored,
+   so a future-dated row cannot block M2 for good). A sustained backlog (every run truncated) also keeps M2 refused until it drains.
 
 ### Runbook: undelivered alerts (`AlertUndeliveredP1Old`, `alert_undelivered_*`)
 

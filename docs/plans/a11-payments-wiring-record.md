@@ -134,10 +134,10 @@ Open (not decided here):
    line / body cap on a large backlog, is refused on every run, and sticks the cursor. **Enforced in part (F2):** a truncated page must list its
    lines in non-decreasing `OccurredAt` order (`ErrPaymentStatementOutOfOrder` otherwise); the MOCK lists bounded pages in time order. Whether the
    provider pages server-side (rather than collect-then-page) cannot be checked by the platform (PROVIDER DEPENDENT).
-9. **Sealed imports (F2 / SR11-10).** The stream seals every import it writes; the cursor trusts only a run backed by an import of THIS source
-   (`source_label`, `is_mock`, `imported_by_service`) whose seal verifies. A real source must therefore keep a stable `Label()`: relabelling a
-   source resets its trusted cursor to the newest run under the new label (one `cursor_anomaly` alert, a re-fetch from that point). Production
-   refuses to start a registered source without import seal keys.
+9. **Sealed imports and runs (F2 / SR11-10, migration 0168).** The stream seals every import and every run row it writes; the cursor trusts
+   only a run whose run seal verifies and whose import, written by THIS source (`source_label`, `is_mock`, `imported_by_service`), has a seal
+   that verifies. A real source must therefore keep a stable `Label()`: relabelling a source resets its trusted cursor to the newest run under
+   the new label (a re-fetch from that point). Production refuses to start a registered source without the keys.
 
 ## 4. Migration numbers
 
