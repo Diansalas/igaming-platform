@@ -172,7 +172,12 @@ func (w *bcWorld) bcInvariants(t *testing.T) {
 		}
 		var err error
 		_, drift, err = RunLedgerVsProjection(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
+		if err != nil {
+			return err
+		}
 		drift = withoutPlantedUnlinkedHoldLegs(drift)
+		// C3 (migration 0174): this world plants payouts larger than the fixture deposit (unfunded holds).
+		drift, err = withoutUnfundedHoldFixtureNegatives(ctx, tx, drift)
 		return err
 	}); err != nil {
 		t.Fatal(err)

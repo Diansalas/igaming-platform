@@ -15,7 +15,7 @@ for the authenticated decider (A5 residual R1 closed for the decision rows; the 
 | A payout is parked `disputed` for `amount_asset_mismatch` / `callback_amount_asset_mismatch` and the provider has confirmed out of band what was paid | **Section 3: M2 with basis `provider_confirmed_out_of_band`** |
 | Same parks, provider returned the whole payout | Section 2 tombstone branch |
 | Partial or different-asset payout/return | **No exit.** It stays parked with its hold, P1 alert and audit. Owner design needed (A5 record 2c, 1h). Do not edit rows |
-| Player wallet negative after a chargeback/reversal | Section 4 |
+| Player wallet negative after a chargeback/reversal (incl. the C3 findings `player_wallet_negative_balance`, `payout_dispatched_while_wallet_negative`) | Section 4 / 4.1 |
 
 ## 2. Governed payout reversal
 
@@ -68,10 +68,43 @@ bootstrap, bonus eligibility, and withdrawals (WD050). Deposits, wins, rollbacks
 derived: it lifts as soon as the balance is >= 0 by a governed K2 credit (`operational-runbooks.md` section 11) or by the player's own
 deposit. A sticky block that survives a deposit is NOT built (owner question Q2). Never "fix" a balance by hand.
 
+### 4.1 Detection: the C3 standing findings (migration 0174)
+
+The gate is preventive and reads the balance before the claim's locks; a chargeback that commits inside that window (or between
+the claim and the provider send) is not seen by it. The hourly `ledger_vs_projection` reconciliation therefore reports, for every
+tenant, read-only:
+
+| Finding (`mismatch_kind`) | Alert discriminator (`reconciliation.ledger_projection_drift`, p1) | Meaning |
+|---|---|---|
+| `player_wallet_negative_balance` (key: the ledger account) | `stream:ledger_wallet_negative` | a `player_cash` / `player_locked_cash` balance is below zero (the gate's exact predicate; an open withdrawal hold does not offset it) |
+| `payout_dispatched_while_wallet_negative` (key: the withdrawal request) | `stream:ledger_payout_while_negative` | a submitted / completed payout was dispatched after the posting that made the wallet negative |
+
+A funded withdrawal hold never produces a finding (player_cash is checked >= the amount under lock when the hold is taken). One
+alert per tenant and discriminator; every hourly run adds an occurrence while the condition persists and records its rows on that
+run. Read the latest run's rows, not the alert's `run_id`.
+
+Staff response (the finding is resolved by the EXISTING governed paths, never by editing a balance, a projection or a ledger row):
+1. Identify the negative-making posting(s) on the account (deposit reversal / chargeback, other debits) and the player. Confirm the
+   wallet is blocked (WD050 refusals in the audit log); nothing else is needed to stop further play or withdrawals.
+2. For `payout_dispatched_while_wallet_negative`: check the payout attempt with the provider. If it has not settled, follow the
+   provider's recall / cancel process; a provider-confirmed return is recorded through the governed payout reversal (section 2),
+   which restores the hold to `player_cash` by a compensating posting. If it settled, the amount is a receivable: escalate to
+   finance (ledger-finance + payments). Do NOT force-resolve the attempt to "fix" the balance: M2 resolves the payout's state,
+   it is not a clawback.
+3. Recover the receivable by the player's own deposit or by a governed K2 credit (`operational-runbooks.md` section 11; reason
+   code, four-eyes above the threshold) when finance decides the amount is recovered or written off. A K2 credit to a player with
+   a disputed deposit can be refused by MA020 (`operational-runbooks.md`, `open_payment_exposure`) until the reversal tombstone
+   exists.
+4. Record the outcome (the compensating transaction id, the K2 request) in the incident record. The findings stop on the first
+   run after the balance is >= 0; resolve the alert (`POST /v1/admin/alerts/{id}/resolve`, platform admin) after that run is
+   clean. There is no staff mutation route for `reconciliation_mismatches` rows (the staff views are read-only); the rows of past
+   runs stay as the evidence. A collection that never succeeds is a finance write-off decision (owner), recorded through K2,
+   never a ledger edit.
+
 ## 5. Alerts and monitoring
 
 The tombstone branch raises a P1 last in its transaction. Check D (reconciliation) surfaces reversed-arm and orphan `withdrawal_reversed`
-findings. Delivery of any alert to a person depends on `alert-delivery-channels.md` (a route must exist; email is MOCK). Payout-dispute
+findings. The C3 findings (section 4.1) surface negative wallets and payouts dispatched while negative. Delivery of any alert to a person depends on `alert-delivery-channels.md` (a route must exist; email is MOCK). Payout-dispute
 and T14 specific alerts remain `NOT IMPLEMENTED` (PAY-PAYOUT-DISPUTE-ALERT-1).
 
 ## Standing finding: `pay_payout_reversal_tombstone_but_paid` (migration 0167)

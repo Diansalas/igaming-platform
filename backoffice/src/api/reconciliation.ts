@@ -20,8 +20,17 @@ export const RECON_STATUSES = ['open', 'investigating', 'resolved'] as const
 
 /** Closed kind vocabulary per stream (StaffReconciliationKind). */
 export const KINDS_BY_STREAM: Record<StaffStream, readonly string[]> = {
-  // withdrawal_hold_* are the ADR 0113 s4.4 check D kinds, recorded in the ledger_vs_projection run.
-  ledger_vs_projection: ['missing_projection', 'balance_mismatch', 'ledger_unlinked_manual_adjustment', 'withdrawal_hold_open_mismatch', 'withdrawal_request_ledger_link_invalid'],
+  // withdrawal_hold_* are the ADR 0113 s4.4 check D kinds, recorded in the ledger_vs_projection run; the last two are
+  // the C3 negative-balance findings (migration 0174), recorded in the same run.
+  ledger_vs_projection: [
+    'missing_projection',
+    'balance_mismatch',
+    'ledger_unlinked_manual_adjustment',
+    'withdrawal_hold_open_mismatch',
+    'withdrawal_request_ledger_link_invalid',
+    'player_wallet_negative_balance',
+    'payout_dispatched_while_wallet_negative',
+  ],
   payment_statement: [
     'pay_missing_platform_record',
     'pay_missing_provider_record',

@@ -221,6 +221,15 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 	}
 	mismatches = append(mismatches, holds...)
 
+	// C3 / F4-R2-NEGBAL-SQL detection (migration 0174): negative player wallets and payouts dispatched while the
+	// wallet was negative. Standing, unwindowed, ONE statement, read-only; fails closed on a blind read
+	// (negative_balance.go).
+	negatives, err := negativeBalanceFindings(ctx, tx, tenantID)
+	if err != nil {
+		return Run{}, nil, err
+	}
+	mismatches = append(mismatches, negatives...)
+
 	if len(mismatches) > 0 {
 		run.Status = StatusMismatchesFound
 	} else {

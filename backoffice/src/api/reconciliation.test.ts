@@ -33,6 +33,15 @@ describe('reconciliation api: UI-to-OpenAPI contract (ADR 0114 R2 and casino rou
     expect(CASINO_STREAMS).toEqual(['casino_consistency', 'casino_statement'])
   })
 
+  it('the C3 negative-balance kinds (migration 0174) are ledger_vs_projection kinds and nowhere else', () => {
+    const c3 = ['player_wallet_negative_balance', 'payout_dispatched_while_wallet_negative']
+    expect(KINDS_BY_STREAM.ledger_vs_projection).toEqual(expect.arrayContaining(c3))
+    expect(schemaEnum('StaffReconciliationKind')).toEqual(expect.arrayContaining(c3))
+    for (const [stream, kinds] of Object.entries(KINDS_BY_STREAM)) {
+      if (stream !== 'ledger_vs_projection') for (const k of c3) expect(kinds).not.toContain(k)
+    }
+  })
+
   it('the staff mismatch schema returns no stored key or diagnostic text; the casino one does (rendered as text only)', () => {
     const p = schemaProps('StaffReconciliationMismatch')
     for (const k of ['reconciliation_key', 'expected_value', 'actual_value', 'player_id']) expect(p).not.toContain(k)

@@ -137,6 +137,8 @@ var LedgerVsProjectionMismatchKinds = []MismatchKind{
 	MismatchKindMissingProjection, MismatchKindBalanceMismatch, MismatchKindLedgerUnlinkedManualAdjustment,
 	// ADR 0113 s4.4 check D (withdrawal hold, invariant #12): recorded in the ledger_vs_projection run (G5).
 	MismatchKindWithdrawalHoldOpenMismatch, MismatchKindWithdrawalRequestLedgerLinkInvalid,
+	// C3 / F4-R2-NEGBAL-SQL detection (migration 0174): recorded in the ledger_vs_projection run.
+	MismatchKindPlayerWalletNegativeBalance, MismatchKindPayoutDispatchedWhileWalletNegative,
 }
 
 // PaymentStatementMismatchKinds are the kinds the payment_statement stream records.

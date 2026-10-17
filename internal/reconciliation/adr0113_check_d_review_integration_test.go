@@ -15,6 +15,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/negbal"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/wdpath"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -89,9 +90,13 @@ func TestADR0113D_MultiAssetWallets_AndTheWalletKeyPath(t *testing.T) {
 	ctx := context.Background()
 	gbp := uuid.New()
 	if err := pool.WithTenant(ctx, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1, $2, $3, $4, 'GBP')`,
-			gbp, f.tenantID, f.brandID, f.playerAccountID)
-		return err
+		if _, err := tx.Exec(ctx, `INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1, $2, $3, $4, 'GBP')`,
+			gbp, f.tenantID, f.brandID, f.playerAccountID); err != nil {
+			return err
+		}
+		// C3 (migration 0174): fund the GBP wallet so its holds are FUNDED (healthy, as the EUR wallet's are from the
+		// fixture deposit). An unfunded hold leaves player_cash negative, which the WD050 gate and the C3 check report.
+		return negbal.Deposit(ctx, tx, f.tenantID, gbp, "GBP", 130)
 	}); err != nil {
 		t.Fatal(err)
 	}
