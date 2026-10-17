@@ -789,6 +789,10 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 			// (migration 0132): the probe is a LEGAL edge out of approved (E7 shape, provider_id set);
 			// approved -> cancelled is no longer an edge at all (WD021).
 			err := h.rt.WithTenant(context.Background(), h.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				// F4 (0169, WD053): the fixture records the allowing dispatch decision the E7 probe needs.
+				if e := f4RecordDispatchAllow(ctx, tx, wr.ID); e != nil {
+					return e
+				}
 				if _, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`, wr.ID); e != nil {
 					return e
 				}
@@ -1272,6 +1276,10 @@ func TestHSEC_HoldRelease_FreezeTrigger_UnreadableStatusFailsClosed(t *testing.T
 	try := func() error {
 		return h.rt.WithTenant(ctx, h.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			// ADR 0113: the probe is the legal E7 shape (approved -> cancelled is no longer an edge, WD021).
+			// F4 (0169, WD053): the fixture records the allowing dispatch decision the E7 probe needs.
+			if e := f4RecordDispatchAllow(ctx, tx, wr.ID); e != nil {
+				return e
+			}
 			if _, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`, wr.ID); e != nil {
 				return e
 			}

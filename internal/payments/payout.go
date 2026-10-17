@@ -433,30 +433,32 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		var gateDecision withdrawalgate.Decision
 		gateEvaluated := false
 		if pre.State == withdrawal.StateApproved {
-			if err := tenant.RequireActiveForPaymentInitiation(actx, tx, tenantID, pre.BrandID); err != nil {
-				return fmt.Errorf("payments: payout claim refused: %w", err)
+			// The status gate here takes the status keys (and the brand row) in the request-path order, before
+			// L0.4. A NOT-ACTIVE subject is not refused here: the gate is skipped and the unchanged post-L1
+			// H-SEC-11 check below refuses it exactly as before (same error, same precedence, the claim still
+			// serializes on L1 with a governed hold release). Any other error (a read failure) aborts.
+			statusErr := tenant.RequireActiveForPaymentInitiation(actx, tx, tenantID, pre.BrandID)
+			if statusErr != nil && !errors.Is(statusErr, tenant.ErrNotActiveForPaymentInitiation) {
+				return fmt.Errorf("payments: payout claim refused: %w", statusErr)
 			}
-			// B13-B (A-10): the method mismatch keeps its precedence over a gate decision (nothing written).
-			if pre.Bound() && bodyMethod != "" && bodyMethod != paymentMethod {
-				return ErrPaymentMethodMismatch
+			if statusErr == nil {
+				// B13-B (A-10): the method mismatch keeps its precedence over a gate decision (nothing written).
+				if pre.Bound() && bodyMethod != "" && bodyMethod != paymentMethod {
+					return ErrPaymentMethodMismatch
+				}
+				gateDecision, err = withdrawal.EvaluateDispatchGate(actx, tx, o.withdrawalGate, pre)
+				if err != nil {
+					// Fail closed and retryable: the whole claim rolls back (nothing written, the request stays
+					// `approved`, no provider call). A best-effort detached audit labels the refusal below.
+					return fmt.Errorf("%w: %w", ErrPayoutWithdrawalGateUnavailable, err)
+				}
+				gateEvaluated = true
 			}
-			gateDecision, err = withdrawal.EvaluateDispatchGate(actx, tx, o.withdrawalGate, pre)
-			if err != nil {
-				// Fail closed and retryable: the whole claim rolls back (nothing written, the request stays
-				// `approved`, no provider call). A best-effort detached audit labels the refusal below.
-				return fmt.Errorf("%w: %w", ErrPayoutWithdrawalGateUnavailable, err)
-			}
-			gateEvaluated = true
 		}
 
 		wr, err := withdrawal.LockApprovedForSubmission(actx, tx, requestID)
 		if err != nil {
 			return err
-		}
-		if !gateEvaluated {
-			// The request became `approved` between the unlocked pre-read and the lock (an approval committed in
-			// between): no gate decision was taken in this transaction, so nothing is claimed. Retryable.
-			return fmt.Errorf("%w: the request changed state during the claim, retry", ErrPayoutWithdrawalGateUnavailable)
 		}
 		// H-SEC-11: a payout claim (approved -> submitted, new attempt, new
 		// Withdraw) for a tenant or brand that is not 'active' is refused in
@@ -470,6 +472,13 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		// refused (400 at the handler) before any decision row, state change or attempt; nothing is written.
 		if wr.Bound() && bodyMethod != "" && bodyMethod != paymentMethod {
 			return ErrPaymentMethodMismatch
+		}
+
+		if !gateEvaluated {
+			// No gate decision was taken in this transaction although the request is `approved` and the subject
+			// active under L1 (an approval, or a reactivation, committed between the unlocked pre-read and the
+			// lock): nothing is claimed. Retryable.
+			return fmt.Errorf("%w: the request or its subject changed during the claim, retry", ErrPayoutWithdrawalGateUnavailable)
 		}
 
 		// F4: a WD-RG-1 denial at dispatch PARKS the payout in the existing safe state: the request stays
