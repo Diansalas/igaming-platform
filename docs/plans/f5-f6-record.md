@@ -311,3 +311,20 @@ reproduced SRF5-1.
 | SRF5-4 | Info | The Dockerfile expands `${GIT_COMMIT}` inside the `-ldflags` string; a value with spaces could add linker flags (e.g. another `-X`). | Only whoever controls the build arguments, i.e. already controls the build; `deploy.sh` forces 40-hex; runtime regex blocks response injection. | Optional hardening: validate `GIT_COMMIT` against `^[0-9a-f]{7,64}$|^unknown$` in the RUN step before `go build`. | No |
 
 Not re-verified here (accepted from the record, out of this review's run): the full-package suites in section 6, golangci-lint, backoffice vitest.
+
+## 10. Review follow-up: SRF5-1 and SRF5-4 closed
+
+* **SRF5-1 (`IMPLEMENTED`)**: `newReviewVerificationHandler` now evaluates the residence that is EFFECTIVE at the review: the one in the request, or,
+  for an `approved` review that records none, the stored one the `COALESCE` keeps (read in the same transaction). If that country is served it
+  writes `market.residence_into_open_market` again and raises `kyc.residence_into_open_market` with the same discriminator
+  `verification:<id>`, so the approval adds an occurrence to the open alert (a new alert if the first was resolved). A rejection, an approval with
+  no stored residence and an approval whose stored residence is in a closed country signal nothing. Test:
+  `TestKYC_ReviewResidenceAlert_ApprovalThatMakesAStoredResidenceEffective` (review_required + MT -> 1 audit row, 1 alert, 1 occurrence; then
+  approved with no residence -> 2 audit rows, 1 alert, 2 occurrences; plus the three no-signal cases). Runbook: `observability-and-alerting.md`
+  now says `review_required` is not "no effect" and the alert stays open until the verification is final; SRF5-3 is recorded there as a known limit.
+* **SRF5-4 (`IMPLEMENTED`, not built with docker here)**: the Dockerfile RUN step refuses any `GIT_COMMIT` that is not `unknown` or 7-40 lower-case
+  hex characters (pure `sh`: non-hex characters, including spaces and newlines, and bad lengths exit 1) before `-ldflags` is formed. The shell
+  condition was exercised against 10 values (valid short and 40-hex; spaces, `-X` injection, upper case, empty, short, newline, 41 characters refused).
+* Re-run (`-tags integration -count=1 -p 1`, fresh scratch database, dropped afterwards): `./internal/kyc/` 460/0/0; `./internal/marketgate/`
+  107/0/0; `./internal/alerting/...` 248/0/1; httpserver `-run KYC` 76/0/0; httpserver subset of section 6 549/0/0 (route freeze, OpenAPI, step-up,
+  capability, kill switch, platform status). gofmt clean, `go vet` plain and `-tags integration` clean, golangci-lint 0 issues.

@@ -278,14 +278,29 @@ func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
 				VerifiedResidenceCountry: req.VerifiedResidenceCountry,
 				IPAddress:                clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
-			if err != nil || req.VerifiedResidenceCountry == nil {
+			if err != nil {
 				return err
+			}
+			// SRF5-1: the country that becomes (or stays) effective at this review. A request that records one uses it. An
+			// `approved` review that records none keeps a previously recorded residence (COALESCE in ReviewVerification) and
+			// thereby makes it evidence, so the stored one is evaluated the same way and signalled again (same audit action,
+			// same discriminator: an occurrence on the open alert).
+			effectiveCountry := req.VerifiedResidenceCountry
+			if effectiveCountry == nil && result.Status == kyc.StatusApproved {
+				var stored *string
+				if qerr := tx.QueryRow(ctx, `SELECT verified_residence_country FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&stored); qerr != nil {
+					return fmt.Errorf("review: read stored residence: %w", qerr)
+				}
+				effectiveCountry = stored
+			}
+			if effectiveCountry == nil {
+				return nil
 			}
 			// SRME-1: the residence is the evidence that admits money and games. There is no maker-checker for KYC
 			// reviews, so a residence recorded in a country the brand currently serves writes an alert-able audit
 			// row in the SAME transaction (ids and a boolean only, never the country). If the market cannot be
 			// evaluated the whole review fails and nothing is written (fail closed; the reviewer retries).
-			served, merr := marketgate.CountryServedForAny(ctx, tx, tc.TenantID, result.BrandID, *req.VerifiedResidenceCountry)
+			served, merr := marketgate.CountryServedForAny(ctx, tx, tc.TenantID, result.BrandID, *effectiveCountry)
 			if merr != nil {
 				return fmt.Errorf("review: evaluate residence market: %w", merr)
 			}

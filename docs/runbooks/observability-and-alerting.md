@@ -819,6 +819,12 @@ observation (ledger drift, payment statement) is switched off while it persists.
 
 ### Runbook: `kyc.residence_into_open_market` (P2, per tenant; F5(b))
 
+**`review_required` is not "no effect", and the alert stays open until the verification is final.** A residence recorded on a
+`review_required` review becomes evidence only when a later `approved` review keeps it; that approval writes the audit action again and
+adds an occurrence to the same alert (SRF5-1). Do not acknowledge or resolve the alert while `new_status` is `review_required`; re-check
+at the approval. A residence recorded into a country the brand did not serve at the time raises nothing; if the brand later opens that
+country those players are admitted with no per-player alert (SRF5-3; the market opening is itself an audited governed action).
+
 Raised when a compliance reviewer records a KYC-verified residence (`verified_residence_country` on `POST /v1/admin/kyc/verifications/{id}/review`)
 in a country the brand currently serves for at least one gated operation (deposit, casino wagering, sportsbook wagering). That
 residence is the evidence that admits the player to money and games, and a residence determination has NO maker-checker today (an

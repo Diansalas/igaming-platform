@@ -804,6 +804,84 @@ func TestKYC_ReviewResidenceAlert_FailureModes(t *testing.T) {
 	})
 }
 
+// SRF5-1: a residence recorded on a non-terminal review_required review becomes evidence only when a later `approved`
+// review (with no residence of its own) keeps it. That approval must write the audit action again and add an occurrence to
+// the same alert; an approval with no stored residence, or a stored residence in a closed country, signals nothing.
+func TestKYC_ReviewResidenceAlert_ApprovalThatMakesAStoredResidenceEffective(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	openMarketFor(t, pool, tenant.ID, "MT")
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-srf51-pw-1")
+	tokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-srf51-pw-1")
+	enable := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-evidence-collection/verified_residence", http.MethodPut, tokens.AccessToken,
+		map[string]any{"active": true, "reason_code": "kyc-srf51-test"})
+	if enable.StatusCode != http.StatusOK {
+		t.Fatalf("enable collection: %d", enable.StatusCode)
+	}
+	enable.Body.Close()
+	newVerification := func() string {
+		player := mustRegisterPlayer(t, srv, brand.Slug)
+		verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+		var v map[string]any
+		decodeBody(t, verResp, &v)
+		return v["id"].(string)
+	}
+	review := func(id string, body map[string]any) {
+		t.Helper()
+		r := postJSON(t, srv, "/v1/admin/kyc/verifications/"+id+"/review", tokens.AccessToken, body)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("review %v: %d", body, r.StatusCode)
+		}
+	}
+	audits := func(id string) int {
+		return countTenantRows(t, pool, tenant.ID,
+			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'market.residence_into_open_market' AND target_id = '`+id+`'`, tenant.ID)
+	}
+	alertFor := func(id string) []alertinject.Row {
+		var out []alertinject.Row
+		for _, a := range alertinject.Find(alertinject.ForSubject(t, pool, tenant.ID), "kyc.residence_into_open_market") {
+			if a.Discriminator == "verification:"+id {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+
+	id := newVerification()
+	review(id, map[string]any{"status": "review_required", "reason": "look", "verified_residence_country": "MT"})
+	if a := alertFor(id); audits(id) != 1 || len(a) != 1 || a[0].Occurrences != 1 {
+		t.Fatalf("recording on review_required: want 1 audit row and 1 alert with 1 occurrence, got %d / %+v", audits(id), a)
+	}
+	review(id, map[string]any{"status": "approved", "reason": "ok"})
+	if a := alertFor(id); audits(id) != 2 || len(a) != 1 || a[0].Occurrences != 2 {
+		t.Fatalf("approval keeping the stored residence: want 2 audit rows and 1 alert with 2 occurrences, got %d / %+v", audits(id), a)
+	}
+
+	// An approval with no stored residence signals nothing.
+	none := newVerification()
+	review(none, map[string]any{"status": "approved", "reason": "ok"})
+	if audits(none) != 0 || len(alertFor(none)) != 0 {
+		t.Fatalf("approval without any residence must signal nothing: %d / %+v", audits(none), alertFor(none))
+	}
+	// A stored residence in a closed country signals nothing at approval either.
+	closed := newVerification()
+	review(closed, map[string]any{"status": "review_required", "reason": "look", "verified_residence_country": "US"})
+	review(closed, map[string]any{"status": "approved", "reason": "ok"})
+	if audits(closed) != 0 || len(alertFor(closed)) != 0 {
+		t.Fatalf("closed-country residence must signal nothing: %d / %+v", audits(closed), alertFor(closed))
+	}
+	// A rejection that keeps a stored residence does not make it effective: no signal.
+	rej := newVerification()
+	review(rej, map[string]any{"status": "review_required", "reason": "look", "verified_residence_country": "MT"})
+	review(rej, map[string]any{"status": "rejected", "reason": "no"})
+	if audits(rej) != 1 {
+		t.Fatalf("rejection must add no audit row, got %d", audits(rej))
+	}
+}
+
 type kycPlayerFixture struct {
 	playerID string
 	status   any
