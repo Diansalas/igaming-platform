@@ -162,13 +162,47 @@ the payout attempt backstop (WD053 without a decision, WD052 on a suspended acco
 409 with a generic body (no WD050 / reason / status in it), request `approved`, one decision row, one staff audit, one
 alert, no attempt, no ledger posting; after reactivation the same submit goes through.
 
-## 5. Commands and counts
+## 5. Commands and counts (final run, after merging origin/claude/focused-wright-jw88w9 tip 9378c91)
 
-(Filled in section 10 after the final runs.)
+Private scratch database only (`priv_db.sh` / `priv_test.sh`, database `f4<ts>p<pid>x01`, rebuilt at the merged head
+including 0166 and 0170), `-count=1 -p 1`, synthetic data, MOCK providers.
+
+| Command | Result |
+|---|---|
+| `gofmt -l .` | clean |
+| `go vet ./...` and `go vet -tags integration ./...` | clean |
+| `golangci-lint run ./...` (2.9.0) | 0 issues (the `-tags integration` run shows only pre-existing errcheck/staticcheck findings in older files; the new F4 files are clean) |
+| `go test -count=1 ./...` | 75 packages ok, 0 FAIL |
+| `-tags integration ./internal/withdrawal/ ./internal/withdrawalgate/... ./internal/rg/ ./internal/risk/ ./internal/db/ ./internal/launchgov/ ./cmd/...` | all ok (withdrawalgate has no test files) |
+| `-tags integration ./internal/reconciliation/ ./internal/alerting/...` | all ok (check D and payment-statement reconciliation included; alert Kind parity with the database included) |
+| `-tags integration -v -run 'F4\|Claim\|Payout\|Withdraw\|Sweeper\|Dispatch\|HSEC\|B13B\|M4_Migration\|A5\|T8\|R32\|RVLF\|K3_World\|DepRef\|Drain' ./internal/payments/` | ok: 450 top-level tests passed, 0 failed, 0 skipped (12 of them the new TestF4_*) |
+| `-tags integration -run 'Withdraw\|Submit\|Route\|Golden\|OpenAPI\|Staff\|Financial\|HSEC\|Stage3C\|Stage3D\|Payout\|A5\|T8\|Launch\|StepUp\|Freeze\|IWire\|PaymentForce' ./internal/httpserver/` | ok |
+| `-race -tags integration ./internal/withdrawal/` | ok, no race |
+| `-race -tags integration -run 'TestF4\|TestSubmitWithdrawalHandler_F4' ./internal/payments/ ./internal/httpserver/` | ok, no race |
+
+Before the merge, a wider payments sweep ran in two shards (`Payout|Withdraw|Claim|Sweeper|Dispatch|A5|T8|F4`: 264
+tests; `K3_World|K3_[A-H]|HSEC|B13B|B11|M4|H8|RGEnforce|Kill|Resolution|Refbind|Echo|IWire|B12|B5_|B3_|B6|B8|A7|Lock|Escalat|RVLF|Receipt|Drain|DepRef|Poll`:
+603 tests). Every failure they showed was an F4 fixture case listed in section 3 (fixed and re-run green). The full payments
+suite was NOT run end to end (it does not finish in this environment, as recorded for A6); payments is therefore
+`PARTIALLY VERIFIED` beyond the subsets above. `TestResolutionIsolation_FinancialDuringOutage` (httpserver, the known
+load-sensitive INV-POOL 400 ms bound) failed once at load average 15+, passed alone and in the final subset run.
 
 ## 6. Mutation pass
 
-(Filled in section 10.)
+Driver `docs/plans/f4-mutation-driver.py`, results `docs/plans/f4-mutation-results.tsv`. 34 hand-written single-site
+mutants (21 Go: T1p claim, `dispatchgate.go`, the T2 / T12 helpers, the orchestrator default, the HTTP mapping; 13 SQL in
+migration 0169), each run against the F4 suites of the affected package (`TestF4*` in withdrawal / payments,
+`TestSubmitWithdrawalHandler_F4` in httpserver; SQL mutants rebuild a second private database). **33 KILLED, 1
+SURVIVED.** Two mutants needed a corrected pattern on the first pass (a build error and a stale pattern after the
+pre-lock refactor) and were re-run; their final verdicts are in the table. The pass ran on the branch before the final
+merge with origin; the merge touched none of the mutated F4 files except by adding unrelated lines to `kind.go`.
+
+Survivor, justified: `t1p_not_evaluated_guard_off` (the `if !gateEvaluated` refusal after L1 disabled). It is reachable
+only when the request becomes `approved`, or its subject active, between the unlocked pre-read and the L1 lock of the
+same claim; no test can schedule that without a new hook inside the claim transaction. With the guard removed the
+unevaluated zero decision takes the denial branch and `RecordDispatchGateDecision` is refused by the
+`withdrawal_gate_decisions_outcome_shape` CHECK (empty gate code), so the claim still rolls back and nothing is sent: the
+mutant changes the error class (an internal 23514 instead of the retryable unavailable), not the outcome.
 
 ## 7. Residuals
 
@@ -242,6 +276,11 @@ Ledger-finance:
 7. Cumulative withdrawal risk rules still fail closed; if a cumulative spec for `withdrawal` is ever added, the request
    being dispatched must be excluded from its own usage (its hold is already posted).
 
-## 10. Verification
+## 10. Labels summary
 
-(Below.)
+- Dispatch re-evaluation (T1p, T2, T12): `IMPLEMENTED`, verified as in section 5.
+- Database backstop: `PARTIALLY IMPLEMENTED` (R1, R2).
+- Alert raise: `IMPLEMENTED`; delivery `NOT IMPLEMENTED` (ALERT-DELIVERY-1).
+- Payments suite: `PARTIALLY VERIFIED` (subsets, section 5).
+- Not claimed: regulatory approval of the withdrawal policy; the policy choices (self-exclusion / time-out allowed,
+  REVIEW refuses) are the A6 owner-reversible interpretations, applied unchanged at dispatch.
