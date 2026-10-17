@@ -254,3 +254,60 @@ F6
     a body with duplicate keys; compare `effective` with a direct row read for the tenant (and that a platform caller / other tenant's token is
     refused, unchanged `RequireTenantScope`).
 16. Kill-switch engage by tenant admin and by platform admin: the alert line carries each key once and the affected tenant id.
+
+## 9. Independent security review (security specialist, 2026-10-17)
+
+Scope: the six commits `1446bba..128397b` on `f5-kyc-residence-ops` (base `1f833ec`). Code-level and design-level review plus test runs;
+not a penetration test. Not in scope: the other agents' migrations 0166-0169, a docker build of the image (R5), alert delivery to a person
+(owner configuration), the maker-checker for residence determinations (owner decision D).
+
+**Verdict: APPROVE.** No blocking or launch-blocking finding. SRF5-1 is a Low detective-control gap that should be closed (code or
+runbook) before the residence alert is relied on as the compensating control for the missing maker-checker.
+
+### 9.1 Verification run (private scratch database `f5s20261017002042p9038x01`, runtime role, dropped afterwards)
+`-tags integration -count=1 -p 1`: `./internal/marketgate -run TestKYCResidence`, `./internal/alerting -run 'Migration0170|KindParity|Residence'`,
+`./internal/auth ./internal/buildinfo ./internal/db -run 'PlatformStatus|ResolveCommit|MigrationHead|Anchor'`, `./internal/httpserver -run
+'PlatformStatus|PlatformAlertCaller|ProviderCapability|Narrowed|ToWriteCapability|KillSwitch|ReviewResidence|StaffRoute|StepUp_GoldenTable|OpenAPI'`:
+all `ok`, 185 PASS, 0 FAIL, 1 SKIP (`TestVerifyEnvironmentAnchor_RealDatabase_FourStates`, pre-existing, unrelated). The fail-closed audit test
+(`TestPlatformStatus_FailsClosedWhenTheAuditRowCannotBeWritten`) ran (not skipped). One temporary probe test (not committed, file removed)
+reproduced SRF5-1.
+
+### 9.2 What was checked and holds
+* **F5(a)** The breaker predicate is now the exact complement of "decided and still good" for rows newer than the determination: rejected,
+  expired, review_required, decided unverified (`provider_reference IS NOT NULL`, identical to `orphanRowExclusionSQL`'s notion of a decision),
+  approved with lapsed `expires_at`. Non-breakers: pending (SRME-2 design), orphan intent rows, unexpired approved rows. Breakers are only rows
+  `(created_at, id) >` the determination row, and because "newer than B" implies "newer than any older A", an older determination can never
+  survive a breaker that removed a newer one (monotone; no fallback past a breaker). The provider-callback path cannot approve a staff-reviewed
+  `review_required` row (`applyForwardOnlyStatus`), so no provider-only path makes a determination effective. The latest-decided-row gate is
+  unchanged; DB error still fails closed; tenant scope assertion + RLS unchanged (`TestKYCResidence_TenantIsolation`, `..._DatabaseErrorFailsClosed`
+  pass). No over-breaking (orphan / within-expiry / older-row guards pass).
+* **F5(b)** Attributes are server-derived UUIDs plus `request_id`; the closed vocabulary is enforced in Go (unknown key is a validation failure)
+  and in the seeded `allowed_keys`; a hostile `X-Request-Id` is dropped, not failed (N-1), so request content cannot turn the raise into a
+  failure. Subject tenant is `tc.TenantID`. Swallowed failures retry through `RaiseDetached` on a detached context (a client disconnect cannot
+  cancel the retry) and end in the terminal `alerting.raise_failed` fallback; non-swallowable classes roll the review back (tested with 40P01).
+  A reviewer has no request-level lever to choose between those paths. Migration 0170 is seed-only; the down block's EXCEPTION handler rolls back
+  the trigger disable and the temporary policy with the refused DELETE.
+* **F6 SA-3** Three layers hold: `platform_status:read` only on `RolePlatformAdmin`, `platformAlertCaller` (`tc.TenantID == uuid.Nil`),
+  `staffRoute` session chain; class `none` matches the other platform reads; golden/static/step-up pins and OpenAPI agree. The audit row is
+  committed through `WithPlatformAdmin` before any read; failure returns a body-free 500. The response is a validated hex commit or `unknown`,
+  two integers and a closed anchor token: useful only for fingerprinting, and only to the most privileged role, audited. `ReadMigrationHead` runs
+  through the runtime pool (`WithoutTenant`), aggregates only; SELECT on `schema_migrations` is the pre-existing blanket grant
+  (`deploy/init-app-role.sql`, INSERT/UPDATE/DELETE revoked); this branch changes no grant. `deploy.sh` passes `IMAGE_TAG`, which it already
+  forces to 40-hex from a clean tree; `buildinfo` re-validates at runtime, so nothing hostile reaches a response.
+* **F6 SA-4** The context logger adds only `request_id` and `tenant_id` (`observability.LoggerFromContext`); the alert line carries both itself
+  (affected tenant) plus `changed_by` / `changed_by_scope`, so no correlation is lost; `reason_code` is a validated closed code. No new data.
+* **F6 SA-5** `effective` is the caller's own tenant-wide row (RLS transaction, `tc.TenantID`, brand NULL), the same data the caller just wrote;
+  no `settlement_behavior` / `callback_capabilities` / other-tenant data. Route keeps `RequireTenantScope` + critical step-up. Additive contract
+  (`id` unchanged; backoffice fields optional).
+* **Changed assertions** 222->223 routes (mutating 135 unchanged), read 87->88, golden row `none`: each matches exactly one new read route; the
+  KYC, kill-switch and marketgate test changes only add assertions. None weakened.
+
+### 9.3 Findings
+| ID | Severity | Finding | Concrete failure scenario | Recommendation | Blocks? |
+|---|---|---|---|---|---|
+| SRF5-1 | Low | The alert fires when the residence is RECORDED, not when it becomes EFFECTIVE. A residence can be recorded on a `review_required` review (non-terminal); a later `approved` review without `verified_residence_country` keeps it (`COALESCE`) and makes it evidence with no audit row, no alert and no occurrence. Likewise a second determination on the same still-`review_required` verification only adds an occurrence to an open or ACKNOWLEDGED alert (`findOpenAlert`: `state <> 'resolved'`). | Reproduced: review `review_required` + MT -> 1 audit row (`new_status` review_required), 1 alert, evidence none; then review `approved` (no residence) -> evidence `MT`, still 1 audit row, 1 alert, 1 occurrence. If the alert reviewer resolved or acknowledged the first alert as "not yet effective (review_required)", the admitting approval, possibly by the same reviewer, is unsignalled. | Either (code) also raise the Kind (same discriminator, or `verification:<id>:approved`) and write the audit action when an approval makes a row carrying a served-market residence effective, or (runbook, minimum) state that `new_status = review_required` is NOT "no effect": keep the alert unresolved until the verification is terminal and re-check on approval. Add a test for the review_required -> approved path. | No (non-blocking; fix before relying on the alert as the compensating control for owner decision D) |
+| SRF5-2 | Info | Swallowable-path durability window: the detached retry runs after commit in-process; a process crash between commit and `Flush` loses the alert (the audit row remains). | Requires a swallowable DB failure on the alert insert AND a crash in the next ~1 s; not request-inducible. | Accepted ADR 0102 residual; the audit action remains the record of truth. | No |
+| SRF5-3 | Info | `served` is evaluated at review time. A residence recorded into a closed country raises nothing; if the brand later opens that country, those players become admitted with no per-player alert. | Determination into a closed country, then a market-open policy change. | Pre-existing SRME-1 design; the market opening is itself an audited governed action. Record as a known limit in the runbook. | No |
+| SRF5-4 | Info | The Dockerfile expands `${GIT_COMMIT}` inside the `-ldflags` string; a value with spaces could add linker flags (e.g. another `-X`). | Only whoever controls the build arguments, i.e. already controls the build; `deploy.sh` forces 40-hex; runtime regex blocks response injection. | Optional hardening: validate `GIT_COMMIT` against `^[0-9a-f]{7,64}$|^unknown$` in the RUN step before `go build`. | No |
+
+Not re-verified here (accepted from the record, out of this review's run): the full-package suites in section 6, golangci-lint, backoffice vitest.
