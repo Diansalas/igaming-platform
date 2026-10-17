@@ -29,7 +29,7 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `withdrawal-dispatch-gate.md` — F4: withdrawal gate re-run at payout dispatch, `withdrawal_gate_decisions` backstop, symptoms and residuals.
 - `staff-lifecycle-and-mfa-recovery.md` — A13: joiner/mover/leaver, MFA reset and recovery, `cmd/seed-admin` break-glass.
 - `secrets-and-credential-rotation.md` — A13: inventory of every secret family and where its rotation procedure lives.
-- `test-database-hygiene.md` — A13: TEST-HYGIENE-1 scratch database policy (automatic reaper NOT IMPLEMENTED).
+- `test-database-hygiene.md` — A13: TEST-HYGIENE-1 scratch database policy (scratch-database reaper IMPLEMENTED in A13a).
 - Audit of this whole directory against the finish line: `docs/plans/a13-runbook-audit.md`.
 - `expand-contract-migrations.md` — forward-fix versus restore policy, pre-flight refusals, write-quiet window.
 - `load-and-soak-test-plan.md` — load/soak/chaos plan plus one small local smoke (`deploy/loadtest/`).
@@ -45,7 +45,7 @@ Operational incident runbooks now exist (Stage 9) — see:
   environment since S3).
 - `staff-mfa-s3-cutover.md` — ADR 0119 S3: deploy order of the two-step staff
   login and migration 0138, re-seeding staff, the `cmd/seed-admin` bootstrap and
-  break-glass path until the S6 MFA reset exists, required database logging
+  break-glass path (the S6 MFA reset now exists: `staff-lifecycle-and-mfa-recovery.md`), required database logging
   settings.
 - `aml-officer-bootstrap.md`, `aml-adjustment-approver-confidentiality.md` — A7: AML officer bootstrap; confidentiality duty of the adjustment approver.
 - `payout-instrument-keys.md` — payout instrument key families (ADR 0111).

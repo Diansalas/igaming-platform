@@ -569,6 +569,9 @@ AWS is **OFF**. Nothing is deployed; no deployment is authorized. Staging archit
 
 ## 29. OPEN SECURITY ITEMS
 
+> **Superseded status (2026-10-17):** the open-item lists in sections 29-33 are historical. Items closed since are listed in `docs/plans/final-closure-list-2026-10-17.md` Appendix A and the registry row `CLOSURE-APPENDIX-A-SUPERSEDED-2026-10-17`; the current open items and their classes (A-E) are in the final closure report. Do not treat a listed item as open without checking those.
+
+
 - THREAT-MODEL-ARBITRARY-SQL-1 residuals T3/H1, T4, T5, T8, T6, T7 (section 23). Deferred items need owner authorization before work.
 - TRIGGER-SEARCH-PATH-1 (+ `-UPGRADE`, `-0116`): **HIGH, launch blocker until deployed and verified** (0116 applied in every real-money environment, verification SQL passing, service connecting as `igaming_runtime`, no other TEMP/CREATE holder). Pinning the 0026..0113 functions is `NOT IMPLEMENTED` (defence in depth).
 - NULL-ARM-WRITE-1 (Medium; hardening before the second tenant/platform admin). STAFF-LIFECYCLE-1. MANUAL-ADJ-LINK-1 (blocks first real-money tenant). TENANT-STATUS-AUTHZ-1.
@@ -695,6 +698,9 @@ Snapshot 2026-10-05 (latest additions in registry row HUMAN-DECISIONS-ROUND3: th
 Software capability is not legal approval. None of the following is resolved by code: gambling licence decisions and jurisdictions beyond Anjouan; HQ-E1-1 (suspended/closed-tenant KYC submissions), HQ-E1-3 (jurisdiction deadlines), HQ-E1-4 (outbox retention) - HQ-E1-2 p2 is confirmed; HD-CTF-1..9 (closed-tenant player funds, ADR 0107, design only); HD-KYC-1..8 thresholds; HDR-J-7/8/9, HDR-M-1/2, HDR-SB-1; legal review residuals of HDR-J-1..6; K3 note retention (PII); data residency; the hosting provider's gambling AUP; continued use of an offboarded operator's merchant account for observation (HD-CTF-10 residual legal/contract question). Owner for all: human (legal/compliance counsel), not engineering.
 
 ## 33. CURRENT LAUNCH BLOCKERS
+
+> **Superseded status (2026-10-17):** the open-item lists in sections 29-33 are historical. Items closed since are listed in `docs/plans/final-closure-list-2026-10-17.md` Appendix A and the registry row `CLOSURE-APPENDIX-A-SUPERSEDED-2026-10-17`; the current open items and their classes (A-E) are in the final closure report. Do not treat a listed item as open without checking those.
+
 
 Real-money launch is **BLOCKED**. Summary (authoritative IDs in the task registry; see also the previous detailed snapshot below):
 1. No licence/legal approval and no jurisdiction decisions beyond Anjouan (32).
