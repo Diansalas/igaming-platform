@@ -392,3 +392,4 @@ matched by `TestReservedUnusedVersions_ExactSet`. Private scratch database rebui
 | `-tags integration -v -run 'TestF4\|TestMigration0169' ./internal/withdrawal/ ./internal/payments/` | 22/22 PASS (9 withdrawal incl. the 0169 up/down/up + catalog pins; 13 payments incl. RF4-1) |
 | `-tags integration ./internal/withdrawal/ ./internal/withdrawalgate/... ./internal/rg/ ./internal/risk/ ./internal/db/ ./internal/launchgov/ ./cmd/...` | all ok |
 | `-tags integration ./internal/reconciliation/ ./internal/alerting/...` | all ok |
+| `-tags integration -v -run 'F4\|Claim\|Payout\|Withdraw\|Sweeper\|Dispatch\|HSEC\|HoldRelease\|B13B\|B11\|M2\|M4\|A5\|T8\|R32\|RVLF\|K3\|DepRef\|Drain' ./internal/payments/` | ok: 640 top-level tests PASS, 0 FAIL, 0 SKIP |
