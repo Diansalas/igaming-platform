@@ -23,10 +23,16 @@ SELECT 'META|dbsettings|encoding=' || pg_encoding_to_char(encoding) || ' collate
   FROM pg_database WHERE datname = current_database();
 SELECT 'META|migration_head|' || COALESCE(max(version)::text, 'none') || '|count=' || count(*) FROM schema_migrations;
 
--- Owner decision 5 (ADR 0122 section 10): actor_proof_keys.secret is signing material. The baseline must never read it, so no
--- hash derived from it (even an md5 of a row text) is written into baseline.txt: for that one table the row text covers the NON-SECRET
--- columns only (kid, status, created_at, retired_at). The count is the number of key rows.
-SELECT 'META|actor_proof_kids|' || COALESCE((SELECT string_agg(kid || ':' || status, ',' ORDER BY kid) FROM public.actor_proof_keys), '');
+-- Owner decision 5 (ADR 0122 section 10) and F1 (migration 0166): actor_proof_keys.secret is signing material. The baseline must never read it,
+-- so no hash derived from it (even an md5 of a row text) is written into baseline.txt. Since migration 0166 the table lives in the schema
+-- actorproof_private, on which THIS role holds no privilege at all: the baseline then carries no key row line and no key ids (verify.sh asserts the
+-- key table's state as the OWNER role) - only the schema's STRUCTURE fingerprint (FP|actorproof_private_md5) and the privilege invariant
+-- (INV|actor_proof_key_reachable_by_non_owner). A database below 0166 (legacy layout) still has public.actor_proof_keys: its key ids and its
+-- row line (loop below) cover the NON-SECRET columns only (kid, status, created_at, retired_at).
+SELECT 'META|actor_proof_kids|' || COALESCE((xpath('/row/k/text()', query_to_xml(
+         CASE WHEN to_regclass('public.actor_proof_keys') IS NOT NULL
+              THEN 'SELECT string_agg(kid || '':'' || status, '','' ORDER BY kid) AS k FROM public.actor_proof_keys'
+              ELSE 'SELECT NULL::text AS k' END, false, true, '')))[1]::text, '');
 
 -- ---------------------------------------------------------------- exact row counts and content hashes
 SELECT 'TABLE|' || c.relname || '|' || COALESCE((xpath('/row/n/text()', x.r))[1]::text, 'ERR') || '|' || COALESCE((xpath('/row/h/text()', x.r))[1]::text, 'empty')
@@ -79,6 +85,24 @@ SELECT 'INV|tenant_tables_without_forced_rls_or_policy|' || count(*) FROM pg_cla
  WHERE c.relkind IN ('r', 'p')
    AND (NOT (c.relrowsecurity AND c.relforcerowsecurity)
         OR NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid));
+-- F1 (migration 0166): nobody but the owner (and its members / superusers) can reach the actor-proof key schema: no direct grant to anyone else
+-- (PUBLIC included) on actorproof_private or on a relation in it, and no other role with effective USAGE/CREATE on the schema or SELECT on a
+-- relation in it (e.g. through pg_read_all_data), and no function whose SQL-standard (BEGIN ATOMIC) body depends on a relation of it (SRF1-2: the
+-- two definer entry points use string bodies, so they record no such dependency). Read by OID from the catalog and the has_*_privilege functions
+-- (they need no access to the schema itself). 0 on a database below 0166. rekey-actor-proof.sh evaluates this same statement before it writes a key.
+SELECT 'INV|actor_proof_key_reachable_by_non_owner|' || (
+    (SELECT count(*) FROM pg_namespace n, LATERAL aclexplode(n.nspacl) a WHERE n.nspname = 'actorproof_private' AND a.grantee <> n.nspowner)
+  + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private', LATERAL aclexplode(c.relacl) a
+      WHERE a.grantee <> c.relowner)
+  + (SELECT count(*) FROM pg_attribute at JOIN pg_class c ON c.oid = at.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+      WHERE at.attacl IS NOT NULL)
+  + (SELECT count(*) FROM pg_namespace n JOIN pg_roles r ON NOT r.rolsuper AND r.oid <> n.nspowner AND r.rolname !~ '^pg_' AND NOT pg_has_role(r.oid, n.nspowner, 'MEMBER')
+      WHERE n.nspname = 'actorproof_private' AND (has_schema_privilege(r.oid, n.oid, 'USAGE') OR has_schema_privilege(r.oid, n.oid, 'CREATE')))
+  + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+       JOIN pg_roles r ON NOT r.rolsuper AND r.oid <> c.relowner AND r.rolname !~ '^pg_' AND NOT pg_has_role(r.oid, c.relowner, 'MEMBER')
+      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND has_table_privilege(r.oid, c.oid, 'SELECT'))
+  + (SELECT count(*) FROM pg_depend d JOIN pg_class c ON c.oid = d.refobjid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+      WHERE d.classid = 'pg_proc'::regclass AND d.refclassid = 'pg_class'::regclass));
 -- every non-internal trigger is enabled for ordinary sessions (origin mode 'O' or 'A'), none disabled
 SELECT 'INV|triggers_disabled|' || count(*) FROM pg_trigger t
   JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
@@ -153,6 +177,45 @@ SELECT 'FP|policies_md5|' || md5(string_agg(tablename || ':' || policyname || ':
 SELECT 'FP|constraints_md5|' || md5(string_agg(conrelid::regclass::text || ':' || conname || ':' || regexp_replace(pg_get_constraintdef(oid), '[()]', '', 'g'), ',' ORDER BY conrelid::regclass::text, conname))
        || '|count=' || count(*)
   FROM pg_constraint WHERE connamespace = 'public'::regnamespace;
+-- F1 (migration 0166): the STRUCTURE of the actor-proof key schema (never its rows): owner, ACLs by role name, relations, columns, defaults,
+-- constraints, indexes, triggers, policies, functions and types. After a logical restore it must equal the source's: the schema is recreated
+-- from deploy/backup/actorproof-private-schema.sql, so this line proves that DDL matches the migrations. count=0 below 0166.
+SELECT 'FP|actorproof_private_md5|' || md5(COALESCE(string_agg(x, ',' ORDER BY x), '')) || '|count=' || count(*) FROM (
+    SELECT 'schema:' || pg_get_userbyid(n.nspowner) || ':'
+           || COALESCE((SELECT string_agg(CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type, ';'
+                                          ORDER BY CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, a.privilege_type)
+                          FROM aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a), '') AS x
+      FROM pg_namespace n WHERE n.nspname = 'actorproof_private'
+    UNION ALL
+    SELECT 'rel:' || c.relname || ':' || c.relkind::text || ':' || c.relrowsecurity || ':' || c.relforcerowsecurity || ':' || pg_get_userbyid(c.relowner) || ':'
+           || COALESCE((SELECT string_agg(CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || '=' || a.privilege_type, ';'
+                                          ORDER BY CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, a.privilege_type)
+                          FROM aclexplode(COALESCE(c.relacl, acldefault((CASE c.relkind WHEN 'S' THEN 's' ELSE 'r' END)::"char", c.relowner))) a), '')
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+    UNION ALL
+    SELECT 'col:' || c.relname || '.' || at.attname || ':' || at.attnum || ':' || format_type(at.atttypid, at.atttypmod) || ':' || at.attnotnull || ':'
+           || COALESCE(pg_get_expr(d.adbin, d.adrelid), '') || ':' || COALESCE(at.attacl::text, '')
+      FROM pg_attribute at JOIN pg_class c ON c.oid = at.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+      LEFT JOIN pg_attrdef d ON d.adrelid = at.attrelid AND d.adnum = at.attnum
+     WHERE at.attnum > 0 AND NOT at.attisdropped
+    UNION ALL
+    SELECT 'con:' || c.relname || ':' || co.conname || ':' || pg_get_constraintdef(co.oid)
+      FROM pg_constraint co JOIN pg_class c ON c.oid = co.conrelid JOIN pg_namespace n ON n.oid = co.connamespace AND n.nspname = 'actorproof_private'
+    UNION ALL
+    SELECT 'idx:' || pg_get_indexdef(i.indexrelid)
+      FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+    UNION ALL
+    SELECT 'trg:' || c.relname || ':' || t.tgname || ':' || t.tgenabled::text || ':' || pg_get_triggerdef(t.oid)
+      FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+    UNION ALL
+    SELECT 'pol:' || c.relname || ':' || po.polname || ':' || po.polcmd::text || ':' || po.polpermissive
+      FROM pg_policy po JOIN pg_class c ON c.oid = po.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+    UNION ALL
+    SELECT 'fn:' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'actorproof_private'
+    UNION ALL
+    SELECT 'type:' || t.typname || ':' || t.typtype::text
+      FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace AND n.nspname = 'actorproof_private') q;
 SELECT 'FP|indexes_md5|' || md5(string_agg(tablename || ':' || indexname || ':' || indexdef, ',' ORDER BY tablename, indexname))
        || '|count=' || count(*)
   FROM pg_indexes WHERE schemaname = 'public';

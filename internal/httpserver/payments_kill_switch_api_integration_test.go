@@ -890,6 +890,23 @@ func TestPaymentsKillSwitchAPI_AuditRecordsPlatformTakeover(t *testing.T) {
 		t.Fatalf("platform takeover status = %d, body=%s", takeover.status, takeover.body)
 	}
 
+	// SA-4: over the whole HTTP stack, the tenant's engage and the platform takeover each emitted one alert line and
+	// every key appears once on it (no nil-UUID tenant_id from the platform caller's request context).
+	lines := alertLines(a.logBuf.String())
+	if len(lines) != 2 {
+		t.Fatalf("want 2 engaged-alert lines (tenant engage, platform takeover), got %d: %v", len(lines), lines)
+	}
+	for _, l := range lines {
+		for k, n := range logKeyCounts(l) {
+			if n != 1 {
+				t.Errorf("key %q appears %d times on the engaged-alert line %q", k, n, l)
+			}
+		}
+		if !strings.Contains(l, "tenant_id="+tenant.String()) || strings.Contains(l, uuid.Nil.String()) {
+			t.Errorf("tenant_id must be the affected tenant %s, never the nil UUID: %q", tenant, l)
+		}
+	}
+
 	meta := a.platformAuditMetadata(platAdmin, tenant, "payments_kill_switch.engage")
 	if meta["is_platform_takeover"] != true {
 		t.Errorf("is_platform_takeover = %v, want true", meta["is_platform_takeover"])

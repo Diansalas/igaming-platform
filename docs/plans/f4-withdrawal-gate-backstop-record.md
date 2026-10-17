@@ -96,9 +96,9 @@ one decision row; a foreign tenant's claim of the id is `ErrNotFound` with zero 
 
 ## 3. Changed assertions and fixtures (none weakened)
 
-- `internal/db/migrate.go` + `migrate_test.go` (`TestReservedUnusedVersions_ExactSet`): 166, 167, 168 added to
-  `reservedUnusedVersions` because 0169 lands before 0166-0168 (held by F1 and other freeze work). CHANGED ASSERTION.
-  MUST be removed again when those migrations merge (merge friction, section 8).
+- `internal/db/migrate.go` + `migrate_test.go` (`TestReservedUnusedVersions_ExactSet`): after the merge with the
+  upstream reservation of 0167-0169, 169 is REMOVED from `reservedUnusedVersions` (0169 is now a real migration; the
+  list's own rule). 0167 / 0168 stay reserved for F2 / F3. CHANGED ASSERTION (the expected set).
 - `internal/payments/b13b_static_test.go` `TestB13B_Static_ClaimForDispatchOrder`: the order list is now matched as a
   subsequence starting at the L1 lock (the F4 pre-lock block also calls `RequireActiveForPaymentInitiation`); the
   post-lock order it pins is unchanged, and an F4 order pin was added (status gate < WD-RG-1 gate < L1 < allow row <
@@ -204,7 +204,8 @@ alert, no attempt, no ledger posting; after reactivation the same submit goes th
 
 ## 8. Merge friction
 
-- `reservedUnusedVersions` / `TestReservedUnusedVersions_ExactSet`: remove 166-168 as the corresponding migrations land.
+- `reservedUnusedVersions` / `TestReservedUnusedVersions_ExactSet`: this branch drops 169 from the set; F2 / F3 drop
+  167 / 168 when they land (whoever merges second resolves the one-line conflict).
 - `deploy/init-app-role.sql`: new block at the end.
 - `internal/alerting/kind.go` + the two static wiring lists: shared lines.
 - `ClaimForDispatch` and the two sweeper claim transactions: F3 (payout tombstone follow-ups) may touch nearby code.

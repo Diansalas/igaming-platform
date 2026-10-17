@@ -187,6 +187,20 @@ BEGIN
 END
 $$;
 
+-- F1 (migration 0166): the key table lives in the OWNER-ONLY schema actorproof_private. The blanket grants above cover schema public only, so
+-- nothing here re-grants it; the denial (no USAGE, no table privilege) is still re-asserted on every run. Guarded: the schema does not exist
+-- before migration 0166.
+DO $$
+BEGIN
+    IF to_regnamespace('actorproof_private') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA actorproof_private FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA actorproof_private FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA actorproof_private FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON ALL FUNCTIONS IN SCHEMA actorproof_private FROM igaming_runtime';
+    END IF;
+END
+$$;
+
 -- ADR 0116 (migrations 0140-0142, AML holds / cases / four-eyes): every aml_* table is DEFINER-ONLY. The blanket backfill
 -- GRANT above ("ALL TABLES IN SCHEMA public") would re-grant the runtime role SELECT/INSERT/UPDATE/DELETE on them every time
 -- this idempotent script is re-run against an already-migrated database; migration 0141/0142 themselves run only once. The

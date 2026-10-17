@@ -168,9 +168,10 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// A5 (WITHDRAWAL-REVERSAL-1): +1 critical (POST /v1/admin/withdrawals/{id}/payout-reversal): critical 64.
 	// Owner decision 3 (SRME-1): POST /v1/admin/kyc/verifications/{id}/review became the classifier kycResidenceReviewClass: none-mutating 42 -> 41.
 	// A10c: +4 reads (attempt events, reconciliation single run, single mismatch, hold candidates): read 87; nothing mutating changes.
+	// F6 / SA-3: +1 read (GET /v1/admin/platform/status): read 88; nothing mutating changes.
 	if counts["critical"] != 64 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 41 || counts["read"] != 87 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 41 || counts["read"] != 88 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

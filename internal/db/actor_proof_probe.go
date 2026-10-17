@@ -6,7 +6,8 @@ import (
 )
 
 // ActorProofKeyActive reports whether kid is an ACTIVE verification key in the
-// owner-only actor_proof_keys table (migration 0120), through the SECURITY
+// owner-only key table (migration 0120; in the owner-only schema actorproof_private
+// since migration 0166), through the SECURITY
 // DEFINER probe actor_proof_key_active - the runtime role cannot SELECT the
 // table itself and the probe discloses no key material. It satisfies
 // actorproof.KeyChecker for the production startup gate

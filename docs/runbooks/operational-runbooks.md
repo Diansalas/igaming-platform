@@ -26,7 +26,13 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 4. Watch `/readyz` on new instances before shifting traffic; watch error
    rate/latency on the affected endpoints for at least one full request
    cycle of each mutating flow (deposit, bet, withdrawal) before declaring
-   the deploy complete.
+   the deploy complete. Confirm WHAT is running with `GET /v1/admin/platform/status`
+   (platform admin only, permission `platform_status:read`; F6 / SA-3): `build.commit` is the source commit the image was built
+   from (`unknown` means the image was built without `GIT_COMMIT`, which `deploy/aws/scripts/deploy.sh` always passes),
+   `migrations.head_version` / `applied_count` must equal the migrate task's `migrate status`, and
+   `database_environment.anchor` must be `production` (production) or `staging` (staging); `unrecorded` means the anchor
+   step of `production-configuration-checklist.md` was skipped. The read is audited (`platform.status_read`, no
+   tenant) and returns no connection detail, secret or tenant data.
 5. Roll out both frontends (`b2c`, `backoffice`) as static builds behind
    their own CDN/hosting target; these are independent of the API rollout
    and can be staged before or after it since the API is versioned
@@ -630,7 +636,14 @@ references): use the closed codes (basis, context, finding, reason) and the `evi
 
 **Tenant status changes and the gameplay status gate (ADR 0095 §40.5, migration 0118).** A change of `tenants.status` takes a per-tenant advisory lock exclusively and waits for in-flight casino and sportsbook postings; postings that start meanwhile wait behind it. Run status changes with `SET LOCAL lock_timeout = '5s'` in the same transaction and retry on a lock timeout. No `idle_in_transaction_session_timeout` is configured on the runtime role (confirmed absent in the repository and in the CI/dev database; deploy decision open): an idle-in-transaction session can block a status change, so investigate `pg_stat_activity` before retrying. **Stake returns on a non-active tenant are allowed (Q-GP-5, 2026-10-06, ADR 0095 §40.6, migration 0121):** a casino rollback of a posted bet, a sportsbook void of an open bet and a sportsbook void after settlement post normally on a suspended or closed tenant (once, idempotent, balanced); use them instead of any manual workaround. A new bet, a win or payout, a settlement with payout, a rollback of a posted win and a sportsbook rollback that would reopen a bet stay refused. **Do not compensate a stake with a manual adjustment while the stake return is still possible** (the provider rollback or the void would then refund the player a second time); a manual adjustment is a last resort only for a case where a stake WAS really debited and the stake-return path demonstrably cannot reach it (for example a posting refused for a mismatch the provider cannot correct), under four-eyes approval and with the original reference recorded in the reason. **A round is resolved as a whole:** never credit the stake by hand while a win of the same round stands (that pays stake AND win); either the win is reversed too (a compensating entry under four-eyes) or the stake is not returned. The player-facing casino rollback simulation route (mock, `CasinoPlaySimulationEnabled`) now also works on closed tenants. **Closing a tenant (Q-GP-1, 2026-10-06):** closure to `closed` is REFUSED (SQLSTATE GP020, `TENANT_CLOSE_BLOCKED_OPEN_ROUNDS`, HTTP 409 where a route exposes it, audit `tenant.status_change_refused_open_rounds` with counts only) while the tenant has open sportsbook bets. Approved sequence: settle each open bet normally while the tenant is active, or void it (also allowed while suspended), then close. A bet that must pay out cannot be settled with payout once the tenant is not active; settle it before suspending, or void it. Casino open rounds cannot be detected (no round-close or loss signal, Q-GP-6), so the guard does not cover them: confirm with the provider that no round is open before closing. Use `tenant.ChangeStatus` (audited, `SET LOCAL lock_timeout`), never a hand-written UPDATE. Rollback tombstones for never-seen originals are written while a tenant is suspended or closed on the orchestrator, staff-simulation and play-route paths only; the public casino webhook answers a non-active tenant with the uniform 401 before verification (Q-GP-3), so a provider rollback arriving there is not tombstoned except in the race window.
 
-## 15. Signed actor proof: keys, rotation and incidents (ADR 0110, migration 0120, PRH-2 R5)
+## 15. Signed actor proof: keys, rotation and incidents (ADR 0110, migrations 0120 and 0166, PRH-2 R5, F1)
+
+**Where the key lives (migration 0166, F1).** The verification copy is in `actorproof_private.actor_proof_keys`, a table in the
+OWNER-ONLY schema `actorproof_private`: no role but the migration owner (and a superuser) has any privilege on the schema or the
+table, not `igaming_runtime` and not `igaming_backup` (which therefore cannot read it even with a stolen credential, and pg_dump
+excludes the whole schema). The database reaches it only through the SECURITY DEFINER functions `actor_proof_require` (the
+verifier) and `actor_proof_key_active` (the startup probe). Every statement below names the schema explicitly; a statement against
+the old `public.actor_proof_keys` fails with "relation does not exist" on a migrated database.
 
 K2 manual adjustments, K3 manual payment resolutions, K1 capability grants (request, approve/reject, cancel, revoke) and
 financial policy changes (propose, approve/reject, cancel) are accepted by the database only with a proof signed by the application server (HMAC-SHA256) that names the actor, scope, tenant,
@@ -644,7 +657,8 @@ closed by this control.
 1. Generate a 32-byte (or longer) random secret in the secret store (for example `openssl rand -base64 48`). Never put
    it in source control, a ConfigMap, a ticket or a log.
 2. Choose a key id (`[A-Za-z0-9._-]{1,32}`, for example `ap-2026-10`).
-3. Run migrations (`/app/migrate up`) as the migration/owner role: this creates the empty owner-only tables.
+3. Run migrations (`/app/migrate up`) as the migration/owner role: this creates the empty owner-only key table (in the schema
+   `actorproof_private`, migration 0166) and the owner-only nonce table.
 4. As the migration/owner role (NOT `igaming_runtime`), insert the verification copy WITHOUT putting the secret in
    a statement text that the server can log. Before you start, confirm on the target server that
    `SHOW log_statement;` is NOT `mod` or `all`, that `log_min_duration_statement` is `-1` (or high enough not to
@@ -655,18 +669,19 @@ closed by this control.
    ```
    \set ap_kid ap-2026-10
    \set ap_hex `cat /dev/shm/ap-2026-10.hex`
-   INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, decode($2, 'hex')) \bind :ap_kid :ap_hex \g
+   INSERT INTO actorproof_private.actor_proof_keys (kid, secret) VALUES ($1, decode($2, 'hex')) \bind :ap_kid :ap_hex \g
    ```
    Do not type the secret into an interactive prompt that records history, do not use `psql -c "...secret..."`, and
    do not paste it into a ticket. `status` defaults to `active`. Verify without printing it:
-   `SELECT kid, status, octet_length(secret) FROM actor_proof_keys;`.
+   `SELECT kid, status, octet_length(secret) FROM actorproof_private.actor_proof_keys;`.
 5. Give the application the same secret: `ACTOR_PROOF_KEYS=ap-2026-10:<base64 secret>` and
    `ACTOR_PROOF_ACTIVE_KID=ap-2026-10`, from the secret store as environment variables.
 6. Start the application. In production it REFUSES to start unless the key is configured AND the database holds that
    kid as an active key (`actorproof: ... refusing to start`); fix the missing side, do not work around the gate.
 
-**After a logical restore (owner decision 5, ADR 0122 section 10).** Logical dumps never carry `actor_proof_keys.secret`, so a restored database has no key: governed writes
-answer `AP002` and a production `platform-api` refuses to start. Re-key it with `deploy/backup/rekey-actor-proof.sh` (this procedure's step 4, scripted, with a NEW kid; see
+**After a logical restore (owner decision 5, ADR 0122 section 10; F1).** Logical dumps never carry the schema `actorproof_private` (`backup.sh` excludes it and the backup
+role cannot read it), so a restored database has no key: `restore.sh` recreates the schema with an EMPTY key table from the reviewed DDL
+`deploy/backup/actorproof-private-schema.sql`, governed writes answer `AP002` and a production `platform-api` refuses to start. Re-key it with `deploy/backup/rekey-actor-proof.sh` (this procedure's step 4, scripted, with a NEW kid; see
 `backup-restore-dr.md` section 5b). Physical recovery (PITR/snapshot) keeps the live key.
 
 **Rotation (no downtime; two keys active during the overlap).**
@@ -678,7 +693,7 @@ answer `AP002` and a production `platform-api` refuses to start. Re-key it with 
    keep working.
 4. When no instance signs with the old kid (all rolled; allow at least 2 minutes: a proof lives 30 s and is capped at
    60 s), retire it as the owner role:
-   `UPDATE actor_proof_keys SET status='retired', retired_at=now() WHERE kid='ap-2026-10';`
+   `UPDATE actorproof_private.actor_proof_keys SET status='retired', retired_at=now() WHERE kid='ap-2026-10';`
    A proof under a retired kid is refused with `AP002`.
 5. Remove the old key from the application configuration at the next deploy.
 6. Nonce pruning (PLAN; not automated, no job exists yet). Each governed write leaves one small row. A nonce older
@@ -694,7 +709,7 @@ by the user. Also treat the incident as a possible application-host compromise (
 **Symptoms.**
 - `AP001` on every K2/K3 write: no proof was presented. The application has no key configured (non-production), or a
   code path writes a governed table without going through `internal/adjustment` / `internal/payments`.
-- `AP002`: the application key does not match any active `actor_proof_keys` row (not provisioned, retired, or the
+- `AP002`: the application key does not match any active `actorproof_private.actor_proof_keys` row (not provisioned, retired, or the
   secret differs). Compare kids; never print secrets.
 - `AP003`: clock skew between the application host and the database over 5 s, or a proof used more than 60 s after
   issue. Fix NTP.
@@ -704,11 +719,13 @@ by the user. Also treat the incident as a possible application-host compromise (
 
 **ECS role-init (`deploy/aws/sql/init-runtime-role.rds.sql`).** Run it with `psql --single-transaction -v
 ON_ERROR_STOP=1 -f ...` so a failure part-way cannot leave the runtime role half-provisioned (for example holding the
-blanket table grants but not yet the re-REVOKE on `actor_proof_keys` / `actor_proof_nonces`). The script is idempotent
-and re-asserts that REVOKE on every run. (The ECS role-init task command now does this: `deploy/aws/modules/ecs` runs `psql --single-transaction`, STAGING-PREP-1.)
+blanket table grants but not yet the re-REVOKE on `actor_proof_nonces` and on the schema `actorproof_private`). The script is idempotent
+and re-asserts those REVOKEs on every run. (The ECS role-init task command now does this: `deploy/aws/modules/ecs` runs `psql --single-transaction`, STAGING-PREP-1.)
 
-**Never:** read `actor_proof_keys` into a ticket or chat; grant the runtime role anything on `actor_proof_keys` or
-`actor_proof_nonces`; re-run `deploy/init-app-role.sql` expecting it to restore a grant (it re-asserts the revoke);
+**Never:** read `actorproof_private.actor_proof_keys` into a ticket or chat; grant the runtime role or the backup role anything on the
+schema `actorproof_private` or its table (`backup.sh` refuses to run if the backup role can reach it; the baseline invariant
+`INV|actor_proof_key_reachable_by_non_owner` and the staging-runner probe pack flag it), or the runtime role anything on `actor_proof_nonces`;
+move the key table back to `public` (that is migration 0166's down, dev/staging only: it gives the backup role the key again); re-run `deploy/init-app-role.sql` expecting it to restore a grant (it re-asserts the revoke);
 create a second signer; disable the `zz_actor_proof_guard` triggers.
 
 ## 16. Payment statement run refused: `ErrPaymentEvidenceInvisible` (ADR 0111 §19.3, RESOLVE-1 / r21)

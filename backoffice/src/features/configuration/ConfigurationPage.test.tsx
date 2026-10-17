@@ -54,6 +54,34 @@ describe('ConfigurationPage (tenant_admin)', () => {
     expect(screen.getAllByText(/Current configuration cannot be read back \(no read API\)/).length).toBe(2)
   })
 
+  it('payment capability: shows the effective stored configuration from the response, and warns when it differs', async () => {
+    signInAs({ role: 'tenant_admin' })
+    const effective = {
+      supported_fiat_currencies: ['USD'],
+      supported_crypto_assets: [],
+      supported_payment_methods: ['card'],
+      supported_countries: [],
+      supports_deposit: true,
+      supports_withdrawal: true,
+      supports_refund_reversal: false,
+      amount_limits: [],
+      priority: 1,
+      status: 'active',
+    }
+    let narrowed = false
+    server.use(http.put('/v1/admin/providers/:pid/capability', () => HttpResponse.json({ id: 'cap-eff-1', effective, narrowed })))
+    renderWithProviders(<ConfigurationPage />)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Save payment capability' }))
+    expect(await screen.findByText('cap-eff-1')).toBeInTheDocument()
+    expect(screen.getByText(/Stored \(effective\) payment methods:/)).toBeInTheDocument()
+    expect(screen.queryByText(/differs from what you sent/)).not.toBeInTheDocument()
+
+    narrowed = true
+    await user.click(screen.getByRole('button', { name: 'Save payment capability' }))
+    expect(await screen.findByText(/differs from what you sent/)).toBeInTheDocument()
+  })
+
   it('payment capability: shows a widening 400 verbatim with request id', async () => {
     signInAs({ role: 'tenant_admin' })
     server.use(

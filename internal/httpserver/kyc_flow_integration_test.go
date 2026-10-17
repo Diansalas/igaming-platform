@@ -33,6 +33,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -708,12 +709,182 @@ func TestKYC_ReviewResidenceIntoAnOpenMarketWritesAnAlertableAuditRow(t *testing
 	if strings.Contains(meta, "MT") {
 		t.Fatalf("the audit row must not carry the country: %s", meta)
 	}
+	// F5(b): the same transaction raised the durable alert kyc.residence_into_open_market (p2): one open alert
+	// per determination, ids only (never the country), the discriminator keyed on the verification.
+	residenceAlerts := func() []alertinject.Row {
+		return alertinject.Find(alertinject.ForSubject(t, pool, tenant.ID), "kyc.residence_into_open_market")
+	}
+	if rows := residenceAlerts(); len(rows) != 1 || rows[0].Discriminator != "verification:"+open || rows[0].Severity != "p2" ||
+		rows[0].State != "open" || rows[0].Occurrences != 1 {
+		t.Fatalf("residence into an open market: want exactly one open p2 alert keyed verification:%s, got %+v", open, rows)
+	} else {
+		a := rows[0].Attributes
+		if a["verification_id"] != open || a["brand_id"] != brand.ID.String() || len(a) < 2 || len(a) > 3 {
+			t.Fatalf("alert attributes must be ids only: %+v", a)
+		}
+		for k, v := range a {
+			if strings.Contains(strings.ToUpper(fmt.Sprint(v)), "MT") && k != "request_id" {
+				t.Fatalf("alert attribute %s must not carry the country: %v", k, v)
+			}
+		}
+	}
 	if n := count(review(map[string]any{"status": "approved", "reason": "ok", "verified_residence_country": "US"})); n != 0 {
 		t.Fatalf("residence into a closed country: want no row, got %d", n)
 	}
 	if n := count(review(map[string]any{"status": "approved", "reason": "ok"})); n != 0 {
 		t.Fatalf("a review without a residence: want no row, got %d", n)
 	}
+	if rows := residenceAlerts(); len(rows) != 1 {
+		t.Fatalf("a closed-country residence and a review without a residence must raise no alert; got %d alerts", len(rows))
+	}
+}
+
+// F5(b): the alert is part of the review's transaction. A swallowable in-tx alert failure (P0001) never aborts the
+// review and the mandatory detached retry still records the alert; a non-swallowable failure (deadlock class)
+// rolls the whole review back (no audit row, status unchanged), so a determination cannot commit without its signal.
+func TestKYC_ReviewResidenceAlert_FailureModes(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	body := map[string]any{"status": "approved", "reason": "ok", "verified_residence_country": "MT"}
+	setup := func(t *testing.T, pw string) (identity.Tenant, string, string, kycPlayerFixture) {
+		t.Helper()
+		tn := mustCreateTenant(t, pool)
+		br := mustCreateBrand(t, pool, tn)
+		openMarketFor(t, pool, tn.ID, "MT")
+		c := mustCreateStaff(t, pool, tn.ID, identity.StaffRoleCompliance, pw)
+		tok := mustLoginStaff(t, srv, tn.Slug, c.Email, pw)
+		en := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-evidence-collection/verified_residence", http.MethodPut, tok.AccessToken,
+			map[string]any{"active": true, "reason_code": "kyc-open-market-alert-failure-test"})
+		en.Body.Close()
+		if en.StatusCode != http.StatusOK {
+			t.Fatalf("enable collection: %d", en.StatusCode)
+		}
+		player := mustRegisterPlayer(t, srv, br.Slug)
+		verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+		var v map[string]any
+		decodeBody(t, verResp, &v)
+		return tn, tok.AccessToken, v["id"].(string), kycPlayerFixture{playerID: player.ID.String(), status: v["status"]}
+	}
+
+	t.Run("swallowable in-tx failure: review succeeds, detached retry records the alert", func(t *testing.T) {
+		tn, tok, id, _ := setup(t, "compliance-kyc-alertfail-pw-1")
+		alertinject.Install(t, pool, tn.ID, alertinject.InTxOnly, "P0001")
+		r := postJSON(t, srv, "/v1/admin/kyc/verifications/"+id+"/review", tok, body)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("review must succeed, got %d", r.StatusCode)
+		}
+		rows := alertinject.WaitUpTo(t, pool, tn.ID, 10*time.Second, func(rs []alertinject.Row) bool {
+			return len(alertinject.Find(rs, "kyc.residence_into_open_market")) > 0
+		})
+		got := alertinject.Find(rows, "kyc.residence_into_open_market")
+		if len(got) != 1 || got[0].Discriminator != "verification:"+id {
+			t.Fatalf("the detached retry must record exactly the one alert, got %+v", got)
+		}
+	})
+	t.Run("non-swallowable failure: the whole review rolls back", func(t *testing.T) {
+		tn, tok, id, fx := setup(t, "compliance-kyc-alertfail-pw-2")
+		alertinject.Install(t, pool, tn.ID, alertinject.Persistent, "40P01")
+		r := postJSON(t, srv, "/v1/admin/kyc/verifications/"+id+"/review", tok, body)
+		r.Body.Close()
+		if r.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("a non-swallowable alert failure must fail the review closed, got %d", r.StatusCode)
+		}
+		if n := countTenantRows(t, pool, tn.ID,
+			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'market.residence_into_open_market'`, tn.ID); n != 0 {
+			t.Fatalf("rolled-back review must leave no audit row, got %d", n)
+		}
+		list := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+fx.playerID, tok)
+		defer list.Body.Close()
+		var items []map[string]any
+		decodeBody(t, list, &items)
+		if len(items) != 1 || items[0]["status"] != fx.status {
+			t.Fatalf("verification status must be unchanged (%v), got %+v", fx.status, items)
+		}
+	})
+}
+
+// SRF5-1: a residence recorded on a non-terminal review_required review becomes evidence only when a later `approved`
+// review (with no residence of its own) keeps it. That approval must write the audit action again and add an occurrence to
+// the same alert; an approval with no stored residence, or a stored residence in a closed country, signals nothing.
+func TestKYC_ReviewResidenceAlert_ApprovalThatMakesAStoredResidenceEffective(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	openMarketFor(t, pool, tenant.ID, "MT")
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-srf51-pw-1")
+	tokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-srf51-pw-1")
+	enable := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-evidence-collection/verified_residence", http.MethodPut, tokens.AccessToken,
+		map[string]any{"active": true, "reason_code": "kyc-srf51-test"})
+	if enable.StatusCode != http.StatusOK {
+		t.Fatalf("enable collection: %d", enable.StatusCode)
+	}
+	enable.Body.Close()
+	newVerification := func() string {
+		player := mustRegisterPlayer(t, srv, brand.Slug)
+		verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+		var v map[string]any
+		decodeBody(t, verResp, &v)
+		return v["id"].(string)
+	}
+	review := func(id string, body map[string]any) {
+		t.Helper()
+		r := postJSON(t, srv, "/v1/admin/kyc/verifications/"+id+"/review", tokens.AccessToken, body)
+		r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("review %v: %d", body, r.StatusCode)
+		}
+	}
+	audits := func(id string) int {
+		return countTenantRows(t, pool, tenant.ID,
+			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'market.residence_into_open_market' AND target_id = '`+id+`'`, tenant.ID)
+	}
+	alertFor := func(id string) []alertinject.Row {
+		var out []alertinject.Row
+		for _, a := range alertinject.Find(alertinject.ForSubject(t, pool, tenant.ID), "kyc.residence_into_open_market") {
+			if a.Discriminator == "verification:"+id {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+
+	id := newVerification()
+	review(id, map[string]any{"status": "review_required", "reason": "look", "verified_residence_country": "MT"})
+	if a := alertFor(id); audits(id) != 1 || len(a) != 1 || a[0].Occurrences != 1 {
+		t.Fatalf("recording on review_required: want 1 audit row and 1 alert with 1 occurrence, got %d / %+v", audits(id), a)
+	}
+	review(id, map[string]any{"status": "approved", "reason": "ok"})
+	if a := alertFor(id); audits(id) != 2 || len(a) != 1 || a[0].Occurrences != 2 {
+		t.Fatalf("approval keeping the stored residence: want 2 audit rows and 1 alert with 2 occurrences, got %d / %+v", audits(id), a)
+	}
+
+	// An approval with no stored residence signals nothing.
+	none := newVerification()
+	review(none, map[string]any{"status": "approved", "reason": "ok"})
+	if audits(none) != 0 || len(alertFor(none)) != 0 {
+		t.Fatalf("approval without any residence must signal nothing: %d / %+v", audits(none), alertFor(none))
+	}
+	// A stored residence in a closed country signals nothing at approval either.
+	closed := newVerification()
+	review(closed, map[string]any{"status": "review_required", "reason": "look", "verified_residence_country": "US"})
+	review(closed, map[string]any{"status": "approved", "reason": "ok"})
+	if audits(closed) != 0 || len(alertFor(closed)) != 0 {
+		t.Fatalf("closed-country residence must signal nothing: %d / %+v", audits(closed), alertFor(closed))
+	}
+	// A rejection that keeps a stored residence does not make it effective: no signal.
+	rej := newVerification()
+	review(rej, map[string]any{"status": "review_required", "reason": "look", "verified_residence_country": "MT"})
+	review(rej, map[string]any{"status": "rejected", "reason": "no"})
+	if audits(rej) != 1 {
+		t.Fatalf("rejection must add no audit row, got %d", audits(rej))
+	}
+}
+
+type kycPlayerFixture struct {
+	playerID string
+	status   any
 }
 
 // --- 12b. Activation gate OFF: attempting a residence determination is a

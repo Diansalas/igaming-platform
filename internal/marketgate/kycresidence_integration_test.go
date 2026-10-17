@@ -214,6 +214,15 @@ func TestKYCResidence_NoVerifiedResidenceMeansNoEvidenceAndRefusal(t *testing.T)
 			{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour},
 			{status: "review_required", age: 2 * time.Hour},
 			{status: "approved", age: time.Hour}}},
+		// SRME-R2-1 (market-evidence-kyc-record.md section 12): the two remaining carry-forward cases.
+		{"SRME-R2-1 probe: approved MT, then decided unverified (provider reference), then approved without a new residence", []kycRow{
+			{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour},
+			{status: "unverified", age: 2 * time.Hour},
+			{status: "approved", age: time.Hour}}},
+		{"SRME-R2-1 probe: approved MT, then approved whose expires_at lapsed, then fresh approved without a new residence", []kycRow{
+			{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour},
+			{status: "approved", age: 2 * time.Hour, expiresIn: &past},
+			{status: "approved", age: time.Hour}}},
 		{"older rejected row carries a residence, newer approval has none", []kycRow{
 			{status: "rejected", country: "MT", age: 2 * time.Hour, setAge: 2 * time.Hour},
 			{status: "approved", age: time.Hour}}},
@@ -307,6 +316,35 @@ func TestKYCResidence_SelectionRules(t *testing.T) {
 		w.addKYC(t, pool, p, kycRow{status: "approved", age: time.Hour})
 		if !w.locate(pool, p.id).Known() {
 			t.Fatal("pending is not a break (routine re-verification)")
+		}
+	})
+	t.Run("an orphan intent row (no provider reference) between two approvals does not break the carry-forward", func(t *testing.T) {
+		p := w.seedPlayer(t, pool)
+		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: 4 * time.Hour, setAge: 4 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "unverified", orphan: true, age: 3 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "approved", age: time.Hour})
+		if !w.locate(pool, p.id).Known() {
+			t.Fatal("an undecided orphan is not a decision (SRME-R2-1 must not over-break)")
+		}
+	})
+	t.Run("an approved row still within its expiry between two approvals does not break the carry-forward", func(t *testing.T) {
+		p := w.seedPlayer(t, pool)
+		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: 4 * time.Hour, setAge: 4 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "approved", age: 3 * time.Hour, expiresIn: &future})
+		w.addKYC(t, pool, p, kycRow{status: "approved", age: time.Hour})
+		if !w.locate(pool, p.id).Known() {
+			t.Fatal("an unexpired approved row is not a break")
+		}
+	})
+	t.Run("a lapsed or decided-unverified row OLDER than the determination does not break it", func(t *testing.T) {
+		p := w.seedPlayer(t, pool)
+		past := -time.Hour
+		w.addKYC(t, pool, p, kycRow{status: "approved", age: 5 * time.Hour, expiresIn: &past})
+		w.addKYC(t, pool, p, kycRow{status: "unverified", age: 4 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "approved", country: "MT", age: 3 * time.Hour, setAge: 3 * time.Hour})
+		w.addKYC(t, pool, p, kycRow{status: "approved", age: time.Hour})
+		if !w.locate(pool, p.id).Known() {
+			t.Fatal("only rows NEWER than the determination row are breakers")
 		}
 	})
 	t.Run("approved re-verification without a new determination keeps the last determination", func(t *testing.T) {

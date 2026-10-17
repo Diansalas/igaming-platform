@@ -122,7 +122,7 @@ sq "ALTER ROLE igaming RESET log_statement_sample_rate"
 sq "ALTER ROLE igaming RESET log_min_duration_sample"
 ACTOR_PROOF_KEYS="$K1" run actor_clean_again 0 seed-actor-proof
 has actor_clean_again 'actor_proof_logging_safe\|PASS' "with the settings reset the write is allowed again"
-[ "$(bash "$H" psql -d igaming_platform_dev -c "SELECT count(*) FROM actor_proof_keys WHERE kid = 'stg-v1'")" = 1 ] && ok "exactly one stg-v1 actor_proof_keys row" || bad "unexpected stg-v1 actor_proof_keys rows"
+[ "$(bash "$H" psql -d igaming_platform_dev -c "SELECT count(*) FROM actorproof_private.actor_proof_keys WHERE kid = 'stg-v1'")" = 1 ] && ok "exactly one stg-v1 actorproof_private.actor_proof_keys row" || bad "unexpected stg-v1 actor_proof_keys rows"
 
 # ------------------------------------------------------------------ backup-restore-drill, probes, pitr-verify
 run drill 0 backup-restore-drill
@@ -132,13 +132,14 @@ has drill 'RESULT\|verify_restored\|PASS\|VERIFY RESULT: PASS' "verify.sh passed
 has drill 'RESULT\|restore_check_database_dropped\|PASS\|' "the restore-check database was dropped"
 [ "$(grep -c '^RESULT|probe_write_.*|PASS|' "${OUT}/drill.out")" = 15 ] && ok "15 write/escalation probes denied" || bad "expected 15 denied write probes"
 [ "$(grep -c '^RESULT|probe_abuse_.*|PASS|' "${OUT}/drill.out")" = 9 ] && ok "9 abuse probes denied" || bad "expected 9 denied abuse probes"
-has drill 'RESULT\|probe_pack_complete\|PASS\|all 24 probes ran' "the drill counted every probe"
+[ "$(grep -c '^RESULT|probe_key_.*|PASS|' "${OUT}/drill.out")" = 3 ] && ok "3 actor-proof key probes denied (F1)" || bad "expected 3 denied actor-proof key probes"
+has drill 'RESULT\|probe_pack_complete\|PASS\|all 27 probes ran' "the drill counted every probe"
 has drill '^PITR\|T_utc=[0-9T:.Z-]+' "T is printed"
 has drill '^PITR\|expected_digests=TABLE=[0-9a-f]{16};' "the baseline digests are printed"
 hasnt drill "BEGIN"" PRIVATE"" KEY" "private key text"
 DIG="$(sed -n 's/^PITR|expected_digests=//p' "${OUT}/drill.out" | head -1)"
 run probes 0 probe-backup-role
-has probes 'SUMMARY\|probe-backup-role\|pass=26\|fail=0' "26 passes (attributes + 15 + 9 + the completeness check)"
+has probes 'SUMMARY\|probe-backup-role\|pass=29\|fail=0' "29 passes (attributes + 15 + 9 + 3 + the completeness check)"
 sq "GRANT EXECUTE ON FUNCTION pg_advisory_lock(bigint) TO PUBLIC"
 run probes_unhardened 1 probe-backup-role EXPECT_HARDENING=applied
 has probes_unhardened 'probe_abuse_pg_advisory_lock\|FAIL' "an un-hardened primitive is a FAIL when hardening is expected"
@@ -150,12 +151,19 @@ sq "GRANT INSERT ON tenants TO igaming_backup"
 run probes_granted_insert 1 probe-backup-role
 has probes_granted_insert 'probe_write_insert_tenants\|FAIL\|' "a granted INSERT is a FAIL (SQLSTATE is not a privilege error, or the insert succeeded)"
 sq "REVOKE INSERT ON tenants FROM igaming_backup"
+# F1: a backup role that could reach the actor-proof key (USAGE on the schema + SELECT on the table) FAILS the key probe
+sq "GRANT USAGE ON SCHEMA actorproof_private TO igaming_backup"
+sq "GRANT SELECT ON actorproof_private.actor_proof_keys TO igaming_backup"
+run probes_key_granted 1 probe-backup-role
+has probes_key_granted 'probe_key_read_actor_proof_secret\|FAIL\|NOT denied' "a backup role that can read the signing key is a FAIL"
+sq "REVOKE SELECT ON actorproof_private.actor_proof_keys FROM igaming_backup"
+sq "REVOKE USAGE ON SCHEMA actorproof_private FROM igaming_backup"
 # a dead credential: nothing connects, so nothing may be reported as denied, and the run must not exit 0
 echo "not-the-backup-password" >"${OUT}/wrong-backup.pw"
 chmod 600 "${OUT}/wrong-backup.pw"
 run probes_noconn 1 probe-backup-role "RUNNER_BACKUP_PASSWORD_FILE=${OUT}/wrong-backup.pw"
-has probes_noconn 'probe_pack_complete\|FAIL\|only 0 of 24 probes ran' "a pack where no probe could connect FAILS (never a zero-PASS exit 0)"
-hasnt probes_noconn 'probe_(write|abuse)_[a-z_]+\|PASS\|' "a PASS for a probe that never ran"
+has probes_noconn 'probe_pack_complete\|FAIL\|only 0 of 27 probes ran' "a pack where no probe could connect FAILS (never a zero-PASS exit 0)"
+hasnt probes_noconn 'probe_(write|abuse|key)_[a-z_]+\|PASS\|' "a PASS for a probe that never ran"
 has probes_noconn 'SUMMARY\|probe-backup-role\|pass=0\|fail=[1-9]' "the summary shows pass=0 and a failure"
 
 bash "$H" clone >/dev/null

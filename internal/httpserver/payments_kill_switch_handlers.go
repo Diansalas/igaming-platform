@@ -403,6 +403,11 @@ func killSwitchReasonCodeValid(reason string) bool {
 // dedicated alert/notification subsystem - see
 // sportsbook_settlement_handlers.go's logSettlementIntegrityAlert, the same
 // pattern applied here). Never the request body, headers or token.
+//
+// The caller MUST pass the base logger (Deps.Logger), never the request-context logger
+// (observability.LoggerFromContext): the latter already carries request_id and tenant_id, so this line's own
+// tenant_id (the affected tenant) and request_id would be emitted a second time (SA-4,
+// docs/plans/staging-acceptance-suite-record.md). TestLogKillSwitchEngagedAlert_NoDuplicateKeys pins it.
 func logKillSwitchEngagedAlert(logger observabilityLogger, ks payments.KillSwitch, requestID string) {
 	logger.Error("payments_kill_switch_engaged_alert",
 		"tenant_id", ks.TenantID.String(),
@@ -778,7 +783,11 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			writeKillSwitchError(r.Context(), deps, w, c, "engage", "payment_kill_switch", "", err)
 			return
 		}
-		logKillSwitchEngagedAlert(c.logger, ks, c.requestID)
+		// SA-4: the alert line states the AFFECTED tenant (ks.TenantID) and the request id itself, so it is written
+		// through the BASE logger. c.logger is the request-context logger, which already carries request_id and
+		// tenant_id (the caller's own tenant: the nil UUID for a platform admin); through it the line carried
+		// both keys twice and a log query could not tell which tenant_id was meant.
+		logKillSwitchEngagedAlert(deps.Logger, ks, c.requestID)
 		// ADR 0102 row 8 (LF F10, LF test 10): the durable alert is raised
 		// POST-COMMIT ONLY, detached, in the engage's own scope. The engage
 		// row and its audit row are already committed; no failure of any
