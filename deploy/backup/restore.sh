@@ -31,9 +31,13 @@
 #   5. pg_restore --single-transaction --exit-on-error --no-owner --role=<owner>: ALL or NOTHING; data loads before any trigger or policy
 #      exists (the archive is pre-data/data/post-data). The data of `database_environment` is NOT restored (M4): the anchor of a restored
 #      database is BLANK, so a production start refuses until the owner records the right value deliberately
-#      The rows of `actor_proof_keys` are not restored either (owner decision 5, ADR 0122 section 10): a restored database has NO actor-proof key
+#      The rows of `actor_proof_keys` are not restored either (owner decision 5, ADR 0122 section 10): no TOC entry of the schema
+#      actorproof_private and no actor_proof_key* data entry (any schema) is ever restored, so a restored database has NO actor-proof key
 #      and fails closed on every governed write until deploy/backup/rekey-actor-proof.sh provisions a NEW one
-#   6. post-restore-grants.sql (database ACL, schema owner) and ANALYZE
+#   6. the actor-proof key schema (F1, migration 0166): a database at migration >= 0166 gets actorproof_private recreated EMPTY from the
+#      reviewed DDL actorproof-private-schema.sql (as the owner role); a LEGACY set (migration < 0166: the key table is still public) keeps
+#      its EMPTY public table, which `cmd/migrate up` later moves; any other state fails the restore
+#   7. post-restore-grants.sql (database ACL, schema owner) and ANALYZE
 # NOT done here: credentials, the anchor, the actor-proof re-key, `cmd/migrate verify`, the data comparison (verify.sh), reconciliation.
 #
 # Test hooks (drill only): RESTORE_TEST_FAULT=kill_midway terminates pg_restore part-way to prove the rollback; =swap_after_verify overwrites the
@@ -298,15 +302,22 @@ fi
 
 # ---- 6. all-or-nothing restore --------------------------------------------------------------------------------------
 # the environment anchor DATA is not restored (M4): select the TOC entries without it
-# Owner decision 5 (ADR 0122 section 10): the actor-proof signing secrets are NEVER restored either. A set made by this tool's backup.sh does not carry
-# them (the table is dumped EMPTY); a LEGACY set (made before the decision) does, and is treated as a signing-material-bearing artefact: its
-# actor_proof_keys rows are skipped here as well, so the restored database always starts with NO actor-proof key.
-APK_LEGACY=0
+# Owner decision 5 (ADR 0122 section 10) and F1 (migration 0166): the actor-proof signing secrets are NEVER restored either. A set made by this
+# tool's backup.sh carries nothing of the schema actorproof_private (backup.sh dumps with --exclude-schema and refuses a stream that has it).
+# A LEGACY set (made before the decision) carries the rows of public.actor_proof_keys; a set not made by backup.sh (e.g. a superuser dump) may
+# carry the whole private schema with its rows. Both are signing-material-bearing artefacts: every actor_proof_key* data entry (any schema) and
+# every TOC entry of the schema actorproof_private is skipped here, so the restored database always starts with NO actor-proof key.
+APK_LEGACY=0; APK_FOREIGN=0
 grep -q -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' "${WORK}/toc.txt" && APK_LEGACY=1
-grep -v -e ' TABLE DATA public database_environment ' "${WORK}/toc.txt" | grep -v -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' >"${WORK}/toc.filtered" || true
+grep -q -E '(^| )actorproof_private( |$)' "${WORK}/toc.txt" && APK_FOREIGN=1
+grep -v -e ' TABLE DATA public database_environment ' "${WORK}/toc.txt" | grep -v -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' \
+  | grep -v -E '(^| )actorproof_private( |$)' >"${WORK}/toc.filtered" || true
 SKIPPED=$(( $(grep -c . "${WORK}/toc.txt") - $(grep -c . "${WORK}/toc.filtered") ))
 if [ "$APK_LEGACY" -eq 1 ]; then
-  bk_log "WARNING: this set CARRIES actor_proof_keys data (a legacy set made before owner decision 5). The rows are skipped, but the set itself holds signing secrets: handle and retire it as a signing-key-bearing artefact (docs/runbooks/backup-restore-dr.md section 5a) and rotate the actor-proof key family"
+  bk_log "WARNING: this set CARRIES actor-proof key data (a legacy set made before owner decision 5, or a dump not made by backup.sh). The rows are skipped, but the set itself holds signing secrets: handle and retire it as a signing-key-bearing artefact (docs/runbooks/backup-restore-dr.md section 5a) and rotate the actor-proof key family"
+fi
+if [ "$APK_FOREIGN" -eq 1 ]; then
+  bk_log "WARNING: this set carries entries of the schema actorproof_private (it was NOT made by backup.sh, which excludes that schema). They are all skipped; the schema is recreated EMPTY from the reviewed DDL"
 fi
 T_RESTORE0="$(now_s)"
 if [ "${RESTORE_TEST_FAULT:-}" = "kill_midway" ]; then
@@ -346,6 +357,23 @@ if [ "$(role_sig)" != "$ROLESIG0" ]; then
 fi
 T_RESTORE1="$(now_s)"
 
+# ---- 6b. the actor-proof key schema (F1, migration 0166) ------------------------------------------------------------------
+# Decided from the RESTORED catalog, never from the archive's claims: at migration >= 0166 (version 166 recorded, no public key table) the
+# private schema is recreated EMPTY from the reviewed DDL (same catalog as the migrations; verify.sh compares FP|actorproof_private_md5); a
+# legacy database (< 0166) keeps its EMPTY public.actor_proof_keys (migrate up moves it). Anything else is refused.
+APK_STATE="$(PGDATABASE="$NEW_DB" bk_sql "SELECT CASE WHEN pg_catalog.to_regnamespace('actorproof_private') IS NOT NULL THEN 'unexpected_schema' WHEN pg_catalog.to_regclass('public.schema_migrations') IS NULL THEN 'no_schema_migrations' WHEN pg_catalog.to_regclass('public.actor_proof_keys') IS NOT NULL THEN CASE WHEN EXISTS (SELECT 1 FROM public.schema_migrations WHERE version >= 166) THEN 'public_table_after_0166' ELSE 'legacy' END WHEN EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = 166) THEN 'private' ELSE 'no_key_table' END")" \
+  || { bk_log "cannot inspect the restored database for the actor-proof key layout"; exit 3; }
+case "$APK_STATE" in
+  private)
+    PGDATABASE="$NEW_DB" PGOPTIONS="-c role=${OWNER_ROLE}" psql -X -q -At -1 -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/actorproof-private-schema.sql" >/dev/null 2>"${WORK}/apk.err" \
+      || { bk_log "actorproof-private-schema.sql failed: $(head -2 "${WORK}/apk.err" | tr '\n' ' ')"; exit 3; }
+    APK_NOTE="actorproof_private.actor_proof_keys recreated EMPTY from actorproof-private-schema.sql" ;;
+  legacy)
+    APK_NOTE="LEGACY layout (migration < 0166): public.actor_proof_keys restored EMPTY; cmd/migrate up moves it into actorproof_private" ;;
+  *)
+    bk_log "the restored database is in an unexpected actor-proof key state (${APK_STATE}); refusing"; exit 3 ;;
+esac
+
 # ---- 7. database-level privileges, statistics ------------------------------------------------------------------------
 PGDATABASE="$NEW_DB" PGOPTIONS="-c role=${OWNER_ROLE}" psql -X -q -At -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/post-restore-grants.sql" >/dev/null \
   || { bk_log "post-restore-grants.sql failed"; exit 3; }
@@ -356,7 +384,7 @@ fi
 T_END="$(now_s)"
 CREATED_DB=""   # success: keep it
 
-bk_log "restored into ${NEW_DB} (owner ${OWNER_ROLE}); source environment '${SRC_ENV}'; the environment anchor was NOT restored and actor_proof_keys holds NO key (${SKIPPED} TOC data entries skipped)"
+bk_log "restored into ${NEW_DB} (owner ${OWNER_ROLE}); source environment '${SRC_ENV}'; the environment anchor was NOT restored and the actor-proof key table holds NO key (${SKIPPED} TOC entries skipped; ${APK_NOTE})"
 echo "TIMING|restore_total_seconds|$(elapsed_s "$T0" "$T_END")"
 echo "TIMING|restore_integrity_and_decrypt_seconds|$(elapsed_s "$T0" "$T_CREATE")"
 echo "TIMING|restore_pg_restore_seconds|$(elapsed_s "$T_RESTORE0" "$T_RESTORE1")"

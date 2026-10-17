@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The denied-probe pack of the backup role (plan 5.3, ADR 0122 sections 3 and 5b): 15 write / escalation probes that MUST be denied,
-# then 9 abuse-primitive probes that harden-backup-surface.sql denies. SOURCED by modes/backup-restore-drill.sh, modes/pitr-verify.sh and
+# then 9 abuse-primitive probes that harden-backup-surface.sql denies, then 3 actor-proof KEY probes (F1, migration 0166, owner decision 5:
+# the backup credential must not be able to read, lock or plant anything in the owner-only schema actorproof_private; judged like the write
+# probes: only a privilege-denied SQLSTATE passes). SOURCED by modes/backup-restore-drill.sh, modes/pitr-verify.sh and
 # modes/probe-backup-role.sh. Every probe runs as igaming_backup (IAM database authentication on RDS) in its OWN connection:
 #   SET statement_timeout / SET lock_timeout (bounded: a probe that unexpectedly blocks cannot hang the task), then
 #   BEGIN READ WRITE; <statement>; ROLLBACK
@@ -44,6 +46,12 @@ RN_WRITE_PROBES=(
   "pg_read_file|*|SELECT pg_read_file('/etc/passwd')"
   "pg_reload_conf|*|SELECT pg_reload_conf()"
 )
+# F1 (migration 0166): the actor-proof signing key is out of the backup role's reach (no USAGE on the schema: 42501 before any table is named)
+RN_KEY_PROBES=(
+  "read_actor_proof_secret|*|SELECT secret FROM actorproof_private.actor_proof_keys"
+  "lock_actor_proof_keys|*|LOCK TABLE actorproof_private.actor_proof_keys IN ACCESS SHARE MODE"
+  "create_in_actorproof_private|*|CREATE TABLE actorproof_private.zz_backup_probe (a int)"
+)
 RN_ABUSE_PROBES=(
   "pg_advisory_lock|*|SELECT pg_advisory_lock(42)"
   "pg_advisory_lock_two_key|*|SELECT pg_advisory_lock(42, 43)"
@@ -80,7 +88,7 @@ rn_probe_verdict() {
       # SQLSTATE at exit 1 means the statement never reached the server's error path.
       if [ "$rc" = 1 ] && [ -z "$st" ]; then printf 'BLOCKED|the probe did not run (client exit 1, no SQLSTATE): %s' "$first"; return 0; fi
       if rn_probe_privilege_state "$st"; then printf 'PASS|denied (SQLSTATE %s)' "$st"; return 0; fi
-      if [ "$class" = write ]; then
+      if [ "$class" = write ] || [ "$class" = key ]; then
         printf 'FAIL|failed with SQLSTATE %s, which is not a privilege error: the error is raised only after the privilege check passed, so the role holds the privilege (or the probe is stale): %s' "${st:-unknown}" "$first"
       elif [ "$hard" = applied ] && [ "$st" != 42883 ] && [ "$st" != 0A000 ]; then
         # hardening is expected: an abuse primitive that got past the EXECUTE check (timeout 57014 / 55P03, anything else) is NOT denied (SRP3R-3)
@@ -99,7 +107,7 @@ rn_probe_verdict() {
   esac
 }
 
-# rn_run_probe <name> <database> <statement> <class> <expect_hardening>   (class: write | abuse)
+# rn_run_probe <name> <database> <statement> <class> <expect_hardening>   (class: write | abuse | key)
 rn_run_probe() {
   local name="$1" db="$2" stmt="$3" class="$4" hard="$5" err rc=0 v
   [ "$db" != '*' ] || db="$DB_NAME"
@@ -116,9 +124,10 @@ rn_run_probe() {
 rn_probe_pack() {
   local hard="${1:-applied}" p name db stmt
   RN_PROBE_RAN=0
-  RN_PROBE_EXPECTED=$(( ${#RN_WRITE_PROBES[@]} + ${#RN_ABUSE_PROBES[@]} ))
+  RN_PROBE_EXPECTED=$(( ${#RN_WRITE_PROBES[@]} + ${#RN_ABUSE_PROBES[@]} + ${#RN_KEY_PROBES[@]} ))
   for p in "${RN_WRITE_PROBES[@]}"; do IFS='|' read -r name db stmt <<<"$p"; rn_run_probe "$name" "$db" "$stmt" write "$hard"; done
   for p in "${RN_ABUSE_PROBES[@]}"; do IFS='|' read -r name db stmt <<<"$p"; rn_run_probe "$name" "$db" "$stmt" abuse "$hard"; done
+  for p in "${RN_KEY_PROBES[@]}"; do IFS='|' read -r name db stmt <<<"$p"; rn_run_probe "$name" "$db" "$stmt" key "$hard"; done
   if [ "$RN_PROBE_RAN" -eq "$RN_PROBE_EXPECTED" ]; then
     rn_result probe_pack_complete PASS "all ${RN_PROBE_EXPECTED} probes ran"
   else

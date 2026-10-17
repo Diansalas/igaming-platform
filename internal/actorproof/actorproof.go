@@ -7,7 +7,8 @@
 // requires, on every governed INSERT (and the initiator's cancel), a proof
 // signed by THIS process after the HTTP layer authenticated the principal and
 // authorised the action. The database verifies the HMAC with a key the runtime
-// role cannot read (actor_proof_keys, owner-only) and consumes the nonce
+// role cannot read (actorproof_private.actor_proof_keys: an owner-only schema since
+// migration 0166, which the backup role cannot read either) and consumes the nonce
 // (actor_proof_nonces, owner-only, UNIQUE).
 //
 // Wire format (v1), ASCII, '|' separated, 12 fields:

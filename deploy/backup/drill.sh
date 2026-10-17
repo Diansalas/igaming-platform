@@ -154,10 +154,10 @@ IGPW="$CANARY" CANARY_KID_V="$CANARY_KID" cl_super src "$SRC_PORT" -d "$DB" <<'S
 \getenv cn IGPW
 \getenv ck CANARY_KID_V
 SET ROLE igaming;
-INSERT INTO actor_proof_keys (kid, secret) VALUES (:'ck', convert_to(:'cn', 'UTF8'));
+INSERT INTO actorproof_private.actor_proof_keys (kid, secret) VALUES (:'ck', convert_to(:'cn', 'UTF8'));
 SQL
-SEED_AP_HEX="$(psql_as igaming "$OPF" "$SRC_PORT" "$DB" -c "SELECT encode(secret, 'hex') FROM actor_proof_keys WHERE kid <> '${CANARY_KID}' ORDER BY created_at LIMIT 1")"
-SRC_AP_KIDS="$(psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT string_agg(kid, ' ' ORDER BY kid) FROM actor_proof_keys")"
+SEED_AP_HEX="$(psql_as igaming "$OPF" "$SRC_PORT" "$DB" -c "SELECT encode(secret, 'hex') FROM actorproof_private.actor_proof_keys WHERE kid <> '${CANARY_KID}' ORDER BY created_at LIMIT 1")"
+SRC_AP_KIDS="$(psql_as igaming "$OPF" "$SRC_PORT" "$DB" -c "SELECT string_agg(kid, ' ' ORDER BY kid) FROM actorproof_private.actor_proof_keys")"   # the owner: the backup role cannot see even the kids (F1)
 SEED_AP_KID="$(printf '%s' "$SRC_AP_KIDS" | tr ' ' '\n' | grep -vx "$CANARY_KID" | head -1)"
 {
   printf '%s\n' "$CANARY" "$CANARY_HEX" "$(printf '%s' "$CANARY" | base64 -w0)"
@@ -168,14 +168,10 @@ SEED_AP_KID="$(printf '%s' "$SRC_AP_KIDS" | tr ' ' '\n' | grep -vx "$CANARY_KID"
   fi
 } >"${WORK}/canary.patterns"
 chmod 600 "${WORK}/canary.patterns"
-SRC_AP_ROWS="$(psql_as igaming "$OPF" "$SRC_PORT" "$DB" -c "SELECT count(*) FROM actor_proof_keys")"
+SRC_AP_ROWS="$(psql_as igaming "$OPF" "$SRC_PORT" "$DB" -c "SELECT count(*) FROM actorproof_private.actor_proof_keys")"
 if [ "$SRC_AP_ROWS" -ge 2 ] && [ -n "$SEED_AP_HEX" ] && [ "$(wc -l <"${WORK}/canary.patterns")" = 5 ]; then res source_holds_actor_proof_secrets_to_hunt PASS "the source has ${SRC_AP_ROWS} actor_proof_keys rows (kids: ${SRC_AP_KIDS}): the seed's platform key plus a planted canary; 5 search patterns (canary ASCII/hex/base64, platform key hex/base64) are held in the work dir"; else res source_holds_actor_proof_secrets_to_hunt FAIL "rows=${SRC_AP_ROWS} seed_hex_len=${#SEED_AP_HEX} kids=${SRC_AP_KIDS}"; fi
 # leak counter: occurrences of any pattern (-F fixed strings, -a binary as text) in the given files / stdin
 leaks() { { grep -a -h -c -F -f "${WORK}/canary.patterns" "$@" 2>/dev/null || true; } | awk '{n += $1} END {print n+0}'; }
-# CONTROL for recorded residual R1: the backup role keeps table-level SELECT on actor_proof_keys (pg_dump's LOCK TABLE needs it - a column-level grant was tried in this drill and broke the
-# dump), so a dump by that role WITHOUT the exclusion WOULD carry the secret. backup.sh's exclusion (verified on the stream) is therefore the control, and this proves the hunt sees a leak.
-BR_CTRL="$(PGPASSFILE="$BPF" pg_dump -h 127.0.0.1 -p "$SRC_PORT" -U igaming_backup -Fp -t public.actor_proof_keys "$DB" 2>/dev/null | leaks)"
-if [ "${BR_CTRL:-0}" -ge 2 ]; then res backup_role_dump_without_exclusion_would_carry_the_secret PASS "control: pg_dump as igaming_backup of actor_proof_keys WITHOUT --exclude-table-data has ${BR_CTRL} leaking lines (the role keeps table-level SELECT; residual R1: a stolen backup CREDENTIAL can read the key, which is why backup.sh's verified exclusion, the time-boxed/IAM credential and dumping from a clone matter)"; else res backup_role_dump_without_exclusion_would_carry_the_secret FAIL "leaks=${BR_CTRL}"; fi
 
 # ================================================================= phase 2: BACKUP-ROLE-1 proof
 section "2 BACKUP-ROLE-1: the problem, and the dedicated role"
@@ -192,7 +188,7 @@ fi
 rm -f "${WORK}/owner-rls.dump"
 if OUTP="$(dump_as igaming_runtime "$OPF" -f /dev/null 2>&1)"; then res runtime_role_dump_refused FAIL "runtime role dump unexpectedly succeeded"; else res runtime_role_dump_refused PASS "pg_dump as igaming_runtime FAILS: $(printf '%s' "$OUTP" | head -1 | cut -c1-120)"; fi
 # the backup role: complete and read-only
-dump_as igaming_backup "$BPF" --exclude-table-data=public.actor_proof_keys -f "${WORK}/probe.dump" >/dev/null 2>&1 && PROBE_ROWS="$(pg_restore -a -t ledger_entries -f - "${WORK}/probe.dump" | awk '/^COPY /{f=1;next} /^\\\.$/{f=0} f{n++} END{print n+0}')" || PROBE_ROWS=-1
+dump_as igaming_backup "$BPF" --exclude-schema=actorproof_private -f "${WORK}/probe.dump" >/dev/null 2>&1 && PROBE_ROWS="$(pg_restore -a -t ledger_entries -f - "${WORK}/probe.dump" | awk '/^COPY /{f=1;next} /^\\\.$/{f=0} f{n++} END{print n+0}')" || PROBE_ROWS=-1
 rm -f "${WORK}/probe.dump"
 if [ "$PROBE_ROWS" = "$ENTRIES" ]; then res backup_role_dump_complete PASS "pg_dump as igaming_backup holds all ${PROBE_ROWS} ledger_entries"; else res backup_role_dump_complete FAIL "backup role dump rows=${PROBE_ROWS} expected ${ENTRIES}"; fi
 write_denied=0; write_total=0
@@ -206,6 +202,40 @@ for stmt in "INSERT INTO tenants (id, name, slug, licensing_model, status) VALUE
   if psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "BEGIN READ WRITE; ${stmt}; COMMIT" >/dev/null 2>"${WORK}/probe.err"; then echo "NOT DENIED: ${stmt}" >>"${WORK}/probe.fail"; else write_denied=$((write_denied + 1)); fi
 done
 if [ "$write_denied" = "$write_total" ]; then res backup_role_cannot_write_or_escalate PASS "${write_total}/${write_total} probes denied (DML, DDL, TRUNCATE, TEMP, trigger disable, SET ROLE, replica mode, CREATE/ALTER ROLE, COPY PROGRAM, file read, reload conf)"; else res backup_role_cannot_write_or_escalate FAIL "$(cat "${WORK}/probe.fail" | tr '\n' ';')"; fi
+# ---- F1 (migration 0166, owner decision 5; SRBX-3 / residual R1): the backup CREDENTIAL cannot read the actor-proof signing key -------------------
+# The key table lives in the owner-only schema actorproof_private. Probed as igaming_backup: the 3 key probes of the staging runner's pack
+# (deploy/staging-runner/lib-probes.sh RN_KEY_PROBES) plus three more, each judged by SQLSTATE (only 42501 passes); the search_path detour; pg_dump of the
+# schema, of the table and of the whole database WITHOUT the exclusion (each must fail and print no secret); the privilege functions by OID; and no
+# SECURITY DEFINER function that reaches into the schema is executable by the role (it cannot learn even the key ids).
+# Positive control: the cluster superuser's dump of the same schema DOES carry the planted canary and the platform key (the hunt is not blind).
+key_denied=0; key_total=0; : >"${WORK}/key.fail"
+for stmt in "SELECT secret FROM actorproof_private.actor_proof_keys" "LOCK TABLE actorproof_private.actor_proof_keys IN ACCESS SHARE MODE" \
+            "CREATE TABLE actorproof_private.zz_backup_probe (a int)" "SELECT kid FROM actorproof_private.actor_proof_keys" \
+            "ALTER TABLE actorproof_private.actor_proof_keys OWNER TO igaming_backup" "GRANT USAGE ON SCHEMA actorproof_private TO igaming_backup"; do
+  key_total=$((key_total + 1))
+  if psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -v VERBOSITY=sqlstate -c "BEGIN READ WRITE; ${stmt}; ROLLBACK" >"${WORK}/key.out" 2>"${WORK}/key.err"; then echo "NOT DENIED: ${stmt}" >>"${WORK}/key.fail"
+  elif grep -qx 'ERROR:  42501' "${WORK}/key.err"; then key_denied=$((key_denied + 1)); else echo "OTHER: ${stmt}: $(head -1 "${WORK}/key.err")" >>"${WORK}/key.fail"; fi
+  [ "$(leaks "${WORK}/key.out" "${WORK}/key.err")" = 0 ] || echo "LEAK: ${stmt}" >>"${WORK}/key.fail"
+done
+# the search_path detour: a schema without USAGE is silently skipped, so the unqualified name does not resolve (and nothing leaks)
+if psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -v ON_ERROR_STOP=1 -c "SET search_path = actorproof_private, public" -c "SELECT secret FROM actor_proof_keys" >"${WORK}/key.out" 2>&1; then echo "NOT DENIED: search_path detour" >>"${WORK}/key.fail"; fi
+[ "$(leaks "${WORK}/key.out")" = 0 ] || echo "LEAK: search_path detour" >>"${WORK}/key.fail"
+for dargs in "-n actorproof_private" "-t actorproof_private.actor_proof_keys" "--schema-only" ""; do
+  # shellcheck disable=SC2086
+  if PGPASSFILE="$BPF" pg_dump -h 127.0.0.1 -p "$SRC_PORT" -U igaming_backup -Fp $dargs "$DB" >"${WORK}/key.dump" 2>"${WORK}/key.err"; then
+    # --schema-only needs no lock on data, but must still be refused: pg_dump locks every table it dumps, and it cannot even see into the schema
+    echo "pg_dump ${dargs:-<whole database>} SUCCEEDED as igaming_backup" >>"${WORK}/key.fail"
+  elif ! grep -q 'permission denied for schema actorproof_private' "${WORK}/key.err"; then echo "pg_dump ${dargs:-<whole database>}: other error $(head -1 "${WORK}/key.err")" >>"${WORK}/key.fail"; fi
+  [ "$(leaks "${WORK}/key.dump" "${WORK}/key.err")" = 0 ] || echo "LEAK: pg_dump ${dargs:-<whole database>}" >>"${WORK}/key.fail"
+done
+rm -f "${WORK}/key.dump" "${WORK}/key.out" "${WORK}/key.err"
+KEY_PRIV="$(psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT (has_schema_privilege(n.oid, 'USAGE') OR has_schema_privilege(n.oid, 'CREATE') OR has_table_privilege(c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(c.oid, 'SELECT,INSERT,UPDATE,REFERENCES'))::int FROM pg_namespace n JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'actor_proof_keys' WHERE n.nspname = 'actorproof_private'")"
+KEY_FUNCS="$(psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT count(*) FROM pg_proc p WHERE p.prosrc LIKE '%actorproof_private%' AND has_function_privilege(p.oid, 'EXECUTE')")"
+KEY_FUNCS_ALL="$(psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT count(*) FROM pg_proc p WHERE p.prosrc LIKE '%actorproof_private%'")"
+SU_CTRL="$(pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fp -n actorproof_private "$DB" | leaks)"
+if [ "$key_denied" = "$key_total" ] && [ ! -s "${WORK}/key.fail" ] && [ "$KEY_PRIV" = 0 ] && [ "$KEY_FUNCS" = 0 ] && [ "$KEY_FUNCS_ALL" = 2 ] && [ "${SU_CTRL:-0}" -ge 2 ]; then
+  res backup_role_cannot_read_actor_proof_key PASS "as igaming_backup: ${key_total}/${key_total} key probes denied with SQLSTATE 42501 (read secret, read kid, LOCK, CREATE in the schema, ALTER OWNER, GRANT USAGE to itself); the search_path detour does not resolve; pg_dump of the schema, the table, --schema-only and the whole database WITHOUT the exclusion all fail ('permission denied for schema actorproof_private') with 0 secret occurrences; no USAGE/CREATE/table/column privilege; of the ${KEY_FUNCS_ALL} functions that reach into the schema (actor_proof_require, actor_proof_key_active) the role may EXECUTE ${KEY_FUNCS}; positive control: the superuser's dump of the schema has ${SU_CTRL} leaking lines"
+else res backup_role_cannot_read_actor_proof_key FAIL "denied=${key_denied}/${key_total} priv=${KEY_PRIV} key_funcs=${KEY_FUNCS}/${KEY_FUNCS_ALL} su_ctrl=${SU_CTRL} $(tr '\n' ';' <"${WORK}/key.fail")"; fi
 ATTRS="$(psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -F, -c "SELECT rolsuper::int, rolbypassrls::int, rolcreatedb::int, rolcreaterole::int, rolreplication::int, rolconnlimit, (SELECT count(*) FROM pg_auth_members WHERE member = r.oid), rolvaliduntil IS NOT NULL FROM pg_roles r WHERE rolname = 'igaming_backup'")"
 if [ "$ATTRS" = "0,1,0,0,0,2,0,t" ]; then res backup_role_attributes PASS "NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION CONNECTION LIMIT 2, member of no role, VALID UNTIL set"; else res backup_role_attributes FAIL "attrs=${ATTRS}"; fi
 ( for i in 1 2; do psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT pg_sleep(6)" >/dev/null 2>&1 & done; sleep 2
@@ -286,25 +316,29 @@ for f in aml_screening_policy_set aml_screening_record aml_screening_list; do gr
 grep -q '^TRG|aml_screening_results|' "${PLAIN_DIR}/baseline.txt" || COV_MISSING="${COV_MISSING} TRG:aml_screening_results"
 if [ -z "$COV_MISSING" ]; then res baseline_covers_latest_migrations PASS "migration head ${BHEAD}; ${BTAB} tables hashed, incl. aml_screening_policies/results, alert_retention_runs, alerts, alert_deliveries with FORCE RLS, the AML SECURITY DEFINER functions' ACLs and their append-only triggers"; else res baseline_covers_latest_migrations FAIL "missing from the baseline:${COV_MISSING}"; fi
 if grep -q '"encryption": "none"' "${PLAIN_DIR}/manifest.json" && grep -q '"environment_anchor": "development"' "${PLAIN_DIR}/manifest.json" && [ -s "${PLAIN_DIR}/SHA256SUMS.sig" ] && grep -q ' manifest.json$' "${PLAIN_DIR}/SHA256SUMS"; then res plain_backup_manifest_is_truthful_and_signed PASS "manifest says encryption=none (synthetic override), environment_anchor=development; manifest.json is covered by the signed SHA256SUMS"; else res plain_backup_manifest_is_truthful_and_signed FAIL "$(cat "${PLAIN_DIR}/manifest.json" | head -12 | tr '\n' ' ')"; fi
-# ---- owner decision 5 (ADR 0122 section 10): the dump carries the actor_proof_keys STRUCTURE but none of its ROWS; no secret byte is anywhere in the set, manifest or logs
+# ---- owner decision 5 (ADR 0122 section 10) / F1: the dump carries NOTHING of the schema actorproof_private (no definition, no rows) and no actor_proof_key*
+# data entry in any schema; the verifier functions are there; no secret byte is anywhere in the set, manifest or logs
 APK_TOC="$(pg_restore --list "${PLAIN_DIR}/db.dump")"
-APK_STRUCT=0; APK_DATA_ENTRY=0
-grep -q ' TABLE public actor_proof_keys ' <<<"$APK_TOC" && APK_STRUCT=1
-grep -q ' TABLE DATA public actor_proof_keys ' <<<"$APK_TOC" && APK_DATA_ENTRY=1
+APK_SCHEMA_ENTRIES="$(grep -c -E '(^| )actorproof_private( |$)' <<<"$APK_TOC" || true)"
+APK_DATA_ENTRY="$(grep -c -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* ' <<<"$APK_TOC" || true)"
+APK_VERIFIER=0; grep -q ' FUNCTION public actor_proof_require(' <<<"$APK_TOC" && grep -q ' FUNCTION public actor_proof_key_active(' <<<"$APK_TOC" && APK_VERIFIER=1
 LEAK_DUMP="$(pg_restore -f - "${PLAIN_DIR}/db.dump" | leaks)"                 # the dump as SQL text (the custom format is compressed: grep the decompressed content)
 LEAK_RAW="$(leaks "${PLAIN_DIR}/db.dump")"                                   # and the raw bytes
 LEAK_SET="$(leaks "${PLAIN_DIR}/globals.sql" "${PLAIN_DIR}/baseline.txt" "${PLAIN_DIR}/manifest.json" "${PLAIN_DIR}/SHA256SUMS")"
 LEAK_LOG="$(printf '%s\n' "$BOUT" | leaks)"                                  # the backup run's own output
 LEAK_SRVLOG="$(leaks "${DRILL_ROOT}/src/server.log")"                        # the server log (incl. the audited statements of igaming_backup)
-# positive control: the SAME hunt finds both secrets in a dump taken WITHOUT the exclusion (so a zero above is a real zero, not a blind grep)
-CTRL_LEAKS="$(pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fp -t public.actor_proof_keys "$DB" | leaks)"
+# positive control: the SAME hunt finds both secrets in the superuser's dump of the private schema (so a zero above is a real zero, not a blind grep)
+CTRL_LEAKS="$(pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fp -n actorproof_private "$DB" | leaks)"
 BL_AP_LINE="$(grep '^TABLE|actor_proof_keys|' "${PLAIN_DIR}/baseline.txt" || true)"
 BL_AP_KIDS="$(grep '^META|actor_proof_kids|' "${PLAIN_DIR}/baseline.txt" | cut -d'|' -f3- || true)"
-if [ "$APK_STRUCT" = 1 ] && [ "$APK_DATA_ENTRY" = 0 ] && grep -q '"actor_proof_keys_data": "excluded"' "${PLAIN_DIR}/manifest.json" \
+BL_AP_INV="$(grep '^INV|actor_proof_key_reachable_by_non_owner|' "${PLAIN_DIR}/baseline.txt" || true)"
+BL_AP_FP="$(grep '^FP|actorproof_private_md5|' "${PLAIN_DIR}/baseline.txt" || true)"
+if [ "$APK_SCHEMA_ENTRIES" = 0 ] && [ "$APK_DATA_ENTRY" = 0 ] && [ "$APK_VERIFIER" = 1 ] && grep -q '"actor_proof_keys_data": "excluded"' "${PLAIN_DIR}/manifest.json" \
    && [ "$LEAK_DUMP" = 0 ] && [ "$LEAK_RAW" = 0 ] && [ "$LEAK_SET" = 0 ] && [ "$LEAK_LOG" = 0 ] && [ "$LEAK_SRVLOG" = 0 ] && [ "${CTRL_LEAKS:-0}" -ge 2 ] \
-   && [ "$BL_AP_LINE" = "TABLE|actor_proof_keys|${SRC_AP_ROWS}|$(printf '%s' "$BL_AP_LINE" | cut -d'|' -f4)" ] && [ -n "$BL_AP_KIDS" ]; then
-  res logical_dump_excludes_actor_proof_secret PASS "pg_restore --list: TABLE public actor_proof_keys present, TABLE DATA entry absent; manifest actor_proof_keys_data=excluded; the planted canary and the seed's platform key (ASCII/hex/base64) occur 0 times in the dump (SQL text ${LEAK_DUMP}, raw ${LEAK_RAW}), 0 in globals/baseline/manifest/SHA256SUMS (${LEAK_SET}), 0 in the backup run output (${LEAK_LOG}), 0 in the server log (${LEAK_SRVLOG}); positive control: an unexcluded dump of the same table has ${CTRL_LEAKS} leaking lines; baseline records only the count (${SRC_AP_ROWS}) and non-secret key ids (${BL_AP_KIDS})"
-else res logical_dump_excludes_actor_proof_secret FAIL "struct=${APK_STRUCT} data_entry=${APK_DATA_ENTRY} leaks dump=${LEAK_DUMP} raw=${LEAK_RAW} set=${LEAK_SET} log=${LEAK_LOG} srvlog=${LEAK_SRVLOG} control=${CTRL_LEAKS} baseline='${BL_AP_LINE}' kids='${BL_AP_KIDS}' manifest=$(grep actor_proof "${PLAIN_DIR}/manifest.json")"; fi
+   && [ -z "$BL_AP_LINE" ] && [ -z "$BL_AP_KIDS" ] \
+   && [ "$BL_AP_INV" = "INV|actor_proof_key_reachable_by_non_owner|0" ] && [ -n "$BL_AP_FP" ] && [ "${BL_AP_FP##*|count=}" != 0 ]; then
+  res logical_dump_excludes_actor_proof_secret PASS "pg_restore --list: 0 entries of the schema actorproof_private, 0 actor_proof_key* data entries, the verifier and the key probe present; manifest actor_proof_keys_data=excluded; the planted canary and the seed's platform key (ASCII/hex/base64) occur 0 times in the dump (SQL text ${LEAK_DUMP}, raw ${LEAK_RAW}), 0 in globals/baseline/manifest/SHA256SUMS (${LEAK_SET}), 0 in the backup run output (${LEAK_LOG}), 0 in the server log (${LEAK_SRVLOG}); positive control: the superuser's dump of the schema has ${CTRL_LEAKS} leaking lines; the baseline (taken by the backup role) holds no key row line and no key id at all, only the private schema's structure fingerprint (${BL_AP_FP#FP|}) and 0 non-owner paths to it"
+else res logical_dump_excludes_actor_proof_secret FAIL "schema_entries=${APK_SCHEMA_ENTRIES} data_entries=${APK_DATA_ENTRY} verifier=${APK_VERIFIER} leaks dump=${LEAK_DUMP} raw=${LEAK_RAW} set=${LEAK_SET} log=${LEAK_LOG} srvlog=${LEAK_SRVLOG} control=${CTRL_LEAKS} baseline='${BL_AP_LINE}' kids='${BL_AP_KIDS}' inv='${BL_AP_INV}' fp='${BL_AP_FP}' manifest=$(grep actor_proof "${PLAIN_DIR}/manifest.json")"; fi
 # encryption with an EPHEMERAL age key generated inside the drill root (no key material in the repository)
 age-keygen -o "${SECRETS}/age.key" >/dev/null 2>&1; chmod 600 "${SECRETS}/age.key"
 AGE_PUB="$(age-keygen -y "${SECRETS}/age.key")"
@@ -317,10 +351,10 @@ AGE_DEC="$(mktemp -d "${BACKUP_TMPDIR}/ap-dec.XXXXXX")"
 age -d -i "${SECRETS}/age.key" -o "${AGE_DEC}/db.dump" "${ENC_DIR}/db.dump.age" && age -d -i "${SECRETS}/age.key" -o "${AGE_DEC}/globals.sql" "${ENC_DIR}/globals.sql.age" \
   && age -d -i "${SECRETS}/age.key" -o "${AGE_DEC}/baseline.txt" "${ENC_DIR}/baseline.txt.age"
 ENC_LEAK="$(( $(pg_restore -f - "${AGE_DEC}/db.dump" | leaks) + $(leaks "${AGE_DEC}/db.dump" "${AGE_DEC}/globals.sql" "${AGE_DEC}/baseline.txt" "${ENC_DIR}/manifest.json" "${ENC_DIR}/SHA256SUMS") + $(printf '%s\n' "$EOUT" | leaks) ))"
-ENC_TOC_DATA="$(pg_restore --list "${AGE_DEC}/db.dump" | grep -c ' TABLE DATA public actor_proof_keys ' || true)"
+ENC_TOC_DATA="$(pg_restore --list "${AGE_DEC}/db.dump" | grep -c -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* |(^| )actorproof_private( |$)' || true)"
 rm -rf "$AGE_DEC"
 if [ "$ENC_LEAK" = 0 ] && [ "$ENC_TOC_DATA" = 0 ] && grep -q '"actor_proof_keys_data": "excluded"' "${ENC_DIR}/manifest.json"; then
-  res encrypted_dump_excludes_actor_proof_secret PASS "the age-encrypted set, decrypted: no TABLE DATA entry for actor_proof_keys and 0 occurrences of any planted/seeded secret form in db.dump (SQL text and raw), globals, baseline, manifest, SHA256SUMS or the backup output; the decrypted copy was removed"
+  res encrypted_dump_excludes_actor_proof_secret PASS "the age-encrypted set, decrypted: no actor_proof_key* data entry and no entry of the schema actorproof_private, and 0 occurrences of any planted/seeded secret form in db.dump (SQL text and raw), globals, baseline, manifest, SHA256SUMS or the backup output; the decrypted copy was removed"
 else res encrypted_dump_excludes_actor_proof_secret FAIL "leaks=${ENC_LEAK} data_entries=${ENC_TOC_DATA}"; fi
 
 # ---- H1: encryption fails closed, plaintext never at rest -----------------------------------------------------------
@@ -357,9 +391,27 @@ expect_refused backup_mistyped_age_recipient_fails_closed 'cannot encrypt to BAC
   env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_ENCRYPT_AGE_RECIPIENT="$BADR" "${SCRIPT_DIR}/backup.sh" --out-dir "$H1OUT" --label bad
 expect_refused backup_malformed_age_recipient_fails_closed 'not a well-formed age recipient' \
   env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_ENCRYPT_AGE_RECIPIENT="age1notarecipient" "${SCRIPT_DIR}/backup.sh" --out-dir "$H1OUT" --label bad
-# negative control for the exclusion (owner decision 5): with the exclusion removed (drill-only fault), the TOC check on the encrypted stream REFUSES the backup and keeps nothing
-expect_refused backup_with_actor_proof_rows_in_stream_is_refused 'carries the DATA of public.actor_proof_keys' \
+# negative controls for the exclusion (owner decision 5, F1): (a) with the exclusion removed (drill-only fault) the backup ROLE cannot dump the private schema at
+# all (no USAGE); (b) a backup role that WAS mis-granted the key (drill-only GRANT by the throwaway superuser) is refused by backup.sh's preflight; (c) with the
+# mis-grant AND the fault (which also skips that preflight) the dump stream does carry the key, and the TOC check on the encrypted stream REFUSES the backup and
+# keeps nothing. The mis-grant is removed right after.
+expect_refused backup_role_cannot_dump_actor_proof_schema_even_without_exclusion 'permission denied for schema actorproof_private' \
   env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_TEST_FAULT=include_actor_proof_keys BACKUP_ENCRYPT_AGE_RECIPIENT="$AGE_PUB" "${SCRIPT_DIR}/backup.sh" --out-dir "$H1OUT" --label apk
+cl_super src "$SRC_PORT" -d "$DB" -c "GRANT USAGE ON SCHEMA actorproof_private TO igaming_backup" -c "GRANT SELECT ON actorproof_private.actor_proof_keys TO igaming_backup" >/dev/null
+expect_refused backup_refused_when_backup_role_can_read_actor_proof_key 'can read the actor-proof signing key' \
+  env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_ENCRYPT_AGE_RECIPIENT="$AGE_PUB" "${SCRIPT_DIR}/backup.sh" --out-dir "$H1OUT" --label apkgrant
+expect_refused backup_with_actor_proof_rows_in_stream_is_refused 'carries the DATA of an actor_proof_keys table|carries entries of the schema actorproof_private' \
+  env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_TEST_FAULT=include_actor_proof_keys BACKUP_ENCRYPT_AGE_RECIPIENT="$AGE_PUB" "${SCRIPT_DIR}/backup.sh" --out-dir "$H1OUT" --label apkfault
+cl_super src "$SRC_PORT" -d "$DB" -c "REVOKE SELECT ON actorproof_private.actor_proof_keys FROM igaming_backup" -c "REVOKE USAGE ON SCHEMA actorproof_private FROM igaming_backup" >/dev/null
+[ "$(psql_as igaming_backup "$BPF" "$SRC_PORT" "$DB" -c "SELECT (has_schema_privilege(n.oid, 'USAGE') OR has_table_privilege(c.oid, 'SELECT'))::int FROM pg_namespace n JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'actor_proof_keys' WHERE n.nspname = 'actorproof_private'")" = 0 ] \
+  || bk_die "the drill's deliberate mis-grant on actorproof_private could not be removed"
+# SRF1-3: a role membership is refused outright (has_*_privilege does not see roles reachable only through SET ROLE; the backup role is NOINHERIT)
+cl_super src "$SRC_PORT" -d postgres -c "GRANT pg_read_all_data TO igaming_backup" >/dev/null
+expect_refused backup_refused_when_backup_role_is_a_member_of_a_role 'is a member of pg_read_all_data' \
+  env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_ENCRYPT_AGE_RECIPIENT="$AGE_PUB" "${SCRIPT_DIR}/backup.sh" --out-dir "$H1OUT" --label apkmember
+cl_super src "$SRC_PORT" -d postgres -c "REVOKE pg_read_all_data FROM igaming_backup" >/dev/null
+[ "$(cl_super src "$SRC_PORT" -d postgres -c "SELECT count(*) FROM pg_auth_members m JOIN pg_roles u ON u.oid = m.member WHERE u.rolname = 'igaming_backup'")" = 0 ] \
+  || bk_die "the drill's deliberate membership of igaming_backup could not be removed"
 expect_refused backup_unknown_gpg_key_fails_closed 'is not in the keyring|must be a FULL 40-hex' \
   env -u BACKUP_ALLOW_UNENCRYPTED BACKUP_ENCRYPT_GPG_RECIPIENT="0000000000000000000000000000000000000000" "${SCRIPT_DIR}/backup.sh" --out-dir "$H1OUT" --label bad
 expect_refused backup_short_gpg_id_refused 'must be a FULL 40-hex' \
@@ -513,32 +565,148 @@ SQL
 )"
   if grep -q 'AP00[0-9]' <<<"$out"; then grep -o 'AP00[0-9]' <<<"$out" | tail -1; elif grep -q FIRST_OK <<<"$out"; then echo OK; else echo "ERR:$(head -2 <<<"$out" | tr '\n' ' ')"; fi
 }
-RST_AP_ROWS="$(psql_as igaming "$OPF" "$SRC_PORT" "$RST_DB" -c 'SELECT count(*) FROM actor_proof_keys')"
+db_exists_early() { psql_as drill_restore "$RPF" "$SRC_PORT" postgres -c "SELECT count(*) FROM pg_database WHERE datname = '$1'"; }
+RST_AP_ROWS="$(psql_as igaming "$OPF" "$SRC_PORT" "$RST_DB" -c 'SELECT count(*) FROM actorproof_private.actor_proof_keys')"   # recreated EMPTY from actorproof-private-schema.sql
 RST_LEAKS="$(pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fp "$RST_DB" | leaks)"   # the WHOLE restored database as SQL text, unexcluded, as the cluster superuser
 PROBE_CTRL="$(ap_probe "$SRC_PORT" "$DB" "$CANARY_KID" "$CANARY_HEX")"                      # control: on the SOURCE the very same proof is accepted (the probe is not vacuous)
 PROBE_CTRL_REPLAY="$(ap_probe "$SRC_PORT" "$DB" "$CANARY_KID" "$CANARY_HEX" replay)"
 PROBE_CANARY="$(ap_probe "$SRC_PORT" "$RST_DB" "$CANARY_KID" "$CANARY_HEX")"
 PROBE_SEED="$(ap_probe "$SRC_PORT" "$RST_DB" "$SEED_AP_KID" "$SEED_AP_HEX")"
-if [ "$RST_AP_ROWS" = 0 ] && [ "$RST_LEAKS" = 0 ] && [ "$PROBE_CTRL" = OK ] && [ "$PROBE_CTRL_REPLAY" = AP005 ] && [ "$PROBE_CANARY" = AP002 ] && [ "$PROBE_SEED" = AP002 ] \
+if [ "$RST_AP_ROWS" = 0 ] && [ "$RST_LEAKS" = 0 ] && grep -q 'recreated EMPTY from actorproof-private-schema.sql' <<<"$ROUT" && grep -q 'CHK|equal_FP|PASS' "${WORK}/verify-logical.txt" && [ "$PROBE_CTRL" = OK ] && [ "$PROBE_CTRL_REPLAY" = AP005 ] && [ "$PROBE_CANARY" = AP002 ] && [ "$PROBE_SEED" = AP002 ] \
    && grep -q 'CHK|actor_proof_keys_empty_after_logical_restore|PASS' "${WORK}/verify-logical.txt" && grep -q "CHK|actor_proof_startup_gate_refuses_${CANARY_KID}|PASS" "${WORK}/verify-logical.txt" \
    && grep -q "CHK|actor_proof_startup_gate_refuses_${SEED_AP_KID}|PASS" "${WORK}/verify-logical.txt" && grep -q 'CHK|actor_proof_verifier_fails_closed|PASS' "${WORK}/verify-logical.txt"; then
-  res restored_database_has_no_actor_proof_secret_and_fails_closed PASS "restored ${RST_DB}: actor_proof_keys holds ${RST_AP_ROWS} rows and a pg_dump of the WHOLE database finds 0 occurrences of the canary or the platform key; a perfectly-formed proof signed with the source's canary key and with the source's platform key is refused with AP002 (control on the source: accepted, and its replay refused with AP005); verify.sh/restorecheck: empty table, the platform's production startup gate refuses both source kids, a well-formed proof is refused with AP002"
+  res restored_database_has_no_actor_proof_secret_and_fails_closed PASS "restored ${RST_DB}: the schema actorproof_private was recreated from the reviewed DDL (its structure fingerprint equals the source's: equal_FP PASS) and its actor_proof_keys holds ${RST_AP_ROWS} rows and a pg_dump of the WHOLE database finds 0 occurrences of the canary or the platform key; a perfectly-formed proof signed with the source's canary key and with the source's platform key is refused with AP002 (control on the source: accepted, and its replay refused with AP005); verify.sh/restorecheck: empty table, the platform's production startup gate refuses both source kids, a well-formed proof is refused with AP002"
 else res restored_database_has_no_actor_proof_secret_and_fails_closed FAIL "rows=${RST_AP_ROWS} leaks=${RST_LEAKS} control=${PROBE_CTRL}/${PROBE_CTRL_REPLAY} canary=${PROBE_CANARY} seed=${PROBE_SEED} $(grep -h 'actor_proof' "${WORK}/verify-logical.txt" | cut -c1-160 | tr '\n' ' ')"; fi
 # the restore's own output (the "NEXT" text) names the re-key step, and the restore output holds no secret
 if grep -q 'rekey-actor-proof.sh' <<<"$ROUT" && [ "$(printf '%s\n' "$ROUT" | leaks)" = 0 ]; then res restore_output_names_the_rekey_step_and_leaks_nothing PASS "restore.sh's closing instructions name deploy/backup/rekey-actor-proof.sh and the AP002 / refusal-to-start consequence; its output holds no secret form"; else res restore_output_names_the_rekey_step_and_leaks_nothing FAIL "$(printf '%s' "$ROUT" | tail -3 | tr '\n' ' ')"; fi
-# a LEGACY set (made before the decision: it carries the rows) is restored without them, with a warning (restore skips the data entry even from a validly signed old set)
+# SRF1-1 (the reviewer's reproduction): a validly signed set whose archive carries a GLOBAL default privilege of the owner (USAGE on new schemas and SELECT on
+# new tables for igaming_backup; pg_dump emits it as "DEFAULT ACL - ...", which restore.sh keeps) would hand the recreated key schema to the backup role. The
+# restore DDL's closing assertion refuses it: the restore fails (exit 3) and the database it created is dropped.
+cl_super src "$SRC_PORT" -d "$DB" -c "ALTER DEFAULT PRIVILEGES FOR ROLE igaming GRANT USAGE ON SCHEMAS TO igaming_backup" -c "ALTER DEFAULT PRIVILEGES FOR ROLE igaming GRANT SELECT ON TABLES TO igaming_backup" >/dev/null
+DA_OUT="$("${SCRIPT_DIR}/backup.sh" --out-dir "$BKUP" --label defacl 2>&1)" && DA_RC=0 || DA_RC=$?
+cl_super src "$SRC_PORT" -d "$DB" -c "ALTER DEFAULT PRIVILEGES FOR ROLE igaming REVOKE USAGE ON SCHEMAS FROM igaming_backup" -c "ALTER DEFAULT PRIVILEGES FOR ROLE igaming REVOKE SELECT ON TABLES FROM igaming_backup" >/dev/null
+DA_DIR="$(printf '%s\n' "$DA_OUT" | sed -n 's/^RUN_DIR=//p')"
+DA_TOC="$( [ -n "$DA_DIR" ] && pg_restore --list "${DA_DIR}/db.dump" | grep -c 'DEFAULT ACL - DEFAULT PRIVILEGES FOR' || true)"
+DA_ROUT="$( [ -n "$DA_DIR" ] && restore_run "$DA_DIR" defacl_db)" && DA_RRC=0 || DA_RRC=$?
+if [ "$DA_RC" = 0 ] && [ "${DA_TOC:-0}" -ge 1 ] && [ "$DA_RRC" -ne 0 ] && grep -q 'not owner-only' <<<"$DA_ROUT" && [ "$(db_exists_early defacl_db)" = 0 ]; then
+  res restore_refuses_key_schema_inheriting_a_default_privilege PASS "a signed set whose archive carries the owner's global default privileges for igaming_backup (${DA_TOC} DEFAULT ACL entries) is NOT restored: actorproof-private-schema.sql's closing assertion refuses the recreated key schema ('not owner-only'), exit ${DA_RRC}, the database was dropped"
+else res restore_refuses_key_schema_inheriting_a_default_privilege FAIL "backup_rc=${DA_RC} toc=${DA_TOC} restore_rc=${DA_RRC} $(printf '%s' "$DA_ROUT" | tail -2 | tr '\n' ' ')"; fi
+[ -z "$DA_DIR" ] || rm -rf "$DA_DIR"
+psql_as drill_restore "$RPF" "$SRC_PORT" postgres -c 'DROP DATABASE IF EXISTS defacl_db WITH (FORCE)' >/dev/null 2>&1 || true
+# a FOREIGN set (not made by backup.sh: a superuser dump of the source, which carries the whole schema actorproof_private WITH its rows) is restored without any of
+# it, with warnings; the private schema is recreated EMPTY from the reviewed DDL (restore skips every TOC entry of that schema, even from a validly signed set)
 cp -a "$PLAIN_DIR" "${BKUP}/legacy"
-pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fc -f "${BKUP}/legacy/db.dump" "$DB"       # NO exclusion: what an earlier version of backup.sh produced
-rehash_manifest "${BKUP}/legacy"; resign "${BKUP}/legacy"                                          # a validly re-sealed (signed) legacy set
-LEGACY_TOC_DATA="$(pg_restore --list "${BKUP}/legacy/db.dump" | grep -c ' TABLE DATA public actor_proof_keys ' || true)"
+pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fc -f "${BKUP}/legacy/db.dump" "$DB"       # NO exclusion, as the superuser
+rehash_manifest "${BKUP}/legacy"; resign "${BKUP}/legacy"                                          # a validly re-sealed (signed) set
+LEGACY_TOC_DATA="$(pg_restore --list "${BKUP}/legacy/db.dump" | grep -c ' TABLE DATA actorproof_private actor_proof_keys ' || true)"
 LOUT_LG="$(restore_run "${BKUP}/legacy" legacy_db)" && LGRC=0 || LGRC=$?
-LG_ROWS="$(psql_as igaming "$OPF" "$SRC_PORT" legacy_db -c 'SELECT count(*) FROM actor_proof_keys' 2>/dev/null || echo ERR)"
+LG_ROWS="$(psql_as igaming "$OPF" "$SRC_PORT" legacy_db -c 'SELECT count(*) FROM actorproof_private.actor_proof_keys' 2>/dev/null || echo ERR)"
 LG_LEAKS="$(pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fp legacy_db 2>/dev/null | leaks)"
-if [ "$LEGACY_TOC_DATA" = 1 ] && [ "$LGRC" -eq 0 ] && [ "$LG_ROWS" = 0 ] && [ "$LG_LEAKS" = 0 ] && grep -q 'legacy set' <<<"$LOUT_LG"; then
-  res legacy_set_with_actor_proof_rows_is_restored_without_them PASS "control: a validly signed set whose archive DOES carry the actor_proof_keys data (made before the decision) restores with a warning ('legacy set') and the rows are skipped: actor_proof_keys holds ${LG_ROWS} rows and a pg_dump of the restored database finds ${LG_LEAKS} secret occurrences"
+if [ "$LEGACY_TOC_DATA" = 1 ] && [ "$LGRC" -eq 0 ] && [ "$LG_ROWS" = 0 ] && [ "$LG_LEAKS" = 0 ] && grep -q 'legacy set' <<<"$LOUT_LG" && grep -q 'NOT made by backup.sh' <<<"$LOUT_LG"; then
+  res legacy_set_with_actor_proof_rows_is_restored_without_them PASS "control: a validly signed set whose archive DOES carry the schema actorproof_private with its rows (a superuser dump) restores with both warnings and none of it: the recreated actorproof_private.actor_proof_keys holds ${LG_ROWS} rows and a pg_dump of the restored database finds ${LG_LEAKS} secret occurrences"
 else res legacy_set_with_actor_proof_rows_is_restored_without_them FAIL "toc_data=${LEGACY_TOC_DATA} rc=${LGRC} rows=${LG_ROWS} leaks=${LG_LEAKS} $(printf '%s' "$LOUT_LG" | tail -2 | tr '\n' ' ')"; fi
 psql_as drill_restore "$RPF" "$SRC_PORT" postgres -c 'DROP DATABASE IF EXISTS legacy_db WITH (FORCE)' >/dev/null 2>&1 || true
 rm -rf "${BKUP}/legacy"
+# ---- F1 (migration 0166): a TRUE legacy database / set (migration < 0166: the key table, rows included, in schema public) ---------------------
+# A throwaway database is migrated to 0165 only, given the backup role's blanket grant (as init-backup-role.sql gives it) and two planted keys. Then:
+#   (1) migration 0166 up moves the rows into actorproof_private and strips the backup role's grant; down restores the 0165 catalog and the rows byte for
+#       byte (incl. the backup role's table-level SELECT, reconstructed from its SELECT on actor_proof_nonces); up again equals the first up;
+#   (2) its superuser dump at 0165 (what an old backup tool produced from an old database) is a validly re-sealed legacy set: restore.sh skips the rows,
+#       keeps the LEGACY layout (an EMPTY public.actor_proof_keys, no private schema) and `migrate up` then moves the empty table.
+LEG_DB=legacy_src
+mig_dir() { # <max version> -> a private copy of the migrations up to that version
+  local d="${WORK}/migrations-$1" f n
+  mkdir -p "$d"
+  for f in "${REPO_ROOT}"/migrations/*.sql; do n="$(basename "$f")"; if [ "$((10#${n:0:4}))" -le "$1" ]; then cp "$f" "$d/"; fi; done
+  printf '%s' "$d"
+}
+OWNER_PW="$(pw_of "${SECRETS}/pgpass" "$SRC_PORT" igaming)"
+leg_url() { printf 'postgres://igaming:%s@127.0.0.1:%s/%s?sslmode=disable' "$OWNER_PW" "$SRC_PORT" "$1"; }
+# catalog fingerprint of everything 0166 touches, by name (as the throwaway cluster's superuser)
+leg_snap() {
+  cl_super src "$SRC_PORT" -d "$1" -c "SELECT md5(string_agg(x, E'\n' ORDER BY x)) FROM (
+      SELECT 'ns:' || nspname || ':' || COALESCE(nspacl::text, '') AS x FROM pg_namespace WHERE nspname NOT LIKE 'pg\_%' AND nspname <> 'information_schema'
+      UNION ALL SELECT 'rel:' || n.nspname || '.' || c.relname || ':' || c.relkind::text || ':' || COALESCE(c.relacl::text, '') || ':' || c.relrowsecurity || ':' || c.relforcerowsecurity
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname LIKE 'actor_proof%'
+      UNION ALL SELECT 'col:' || c.relname || '.' || a.attname || ':' || a.attnum || ':' || format_type(a.atttypid, a.atttypmod) || ':' || a.attnotnull || ':' || COALESCE(a.attacl::text, '')
+        FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname = 'actor_proof_keys' AND a.attnum > 0 AND NOT a.attisdropped
+      UNION ALL SELECT 'fn:' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || '):' || md5(p.prosrc) || ':' || COALESCE(p.proacl::text, '') || ':'
+                       || COALESCE(array_to_string(p.proconfig, ','), '') || ':' || p.prosecdef
+        FROM pg_proc p WHERE p.proname LIKE 'actor_proof%'
+      UNION ALL SELECT 'con:' || c.relname || ':' || co.conname || ':' || pg_get_constraintdef(co.oid) FROM pg_constraint co JOIN pg_class c ON c.oid = co.conrelid WHERE c.relname = 'actor_proof_keys') q"
+}
+leg_keys() { # row count and md5 over every key row (kid, status, times, md5(secret)), wherever the table is
+  local tbl
+  tbl="$(cl_super src "$SRC_PORT" -d "$1" -c "SELECT COALESCE(to_regclass('actorproof_private.actor_proof_keys')::text, to_regclass('public.actor_proof_keys')::text)")"
+  cl_super src "$SRC_PORT" -d "$1" -c "SELECT count(*) || ':' || COALESCE(md5(string_agg(kid || '/' || status || '/' || created_at || '/' || COALESCE(retired_at::text, '') || '/' || md5(secret), ',' ORDER BY kid)), '') FROM ${tbl}"
+}
+leg_bk() { # does igaming_backup hold any privilege on the key table / its schema (by OID)?
+  cl_super src "$SRC_PORT" -d "$1" -c "SELECT (has_table_privilege('igaming_backup', c.oid, 'SELECT') OR (n.nspname <> 'public' AND has_schema_privilege('igaming_backup', n.oid, 'USAGE')))::int
+                                          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = 'actor_proof_keys' AND c.relkind = 'r'"
+}
+cl_super src "$SRC_PORT" -d postgres -c "CREATE DATABASE ${LEG_DB} OWNER igaming TEMPLATE template0" >/dev/null
+M165="$(mig_dir 165)"; M166="$(mig_dir 166)"
+DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M165" up >"${WORK}/leg-migrate.log" 2>&1 || { tail -5 "${WORK}/leg-migrate.log" >&2; bk_die "legacy database: migrate to 0165 failed"; }
+IGPW="$CANARY" CANARY_KID_V="$CANARY_KID" cl_super src "$SRC_PORT" -d "$LEG_DB" <<'SQL' >/dev/null
+\getenv cn IGPW
+\getenv ck CANARY_KID_V
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO igaming_backup;
+SET ROLE igaming;
+INSERT INTO public.actor_proof_keys (kid, secret) VALUES (:'ck', convert_to(:'cn', 'UTF8'));
+INSERT INTO public.actor_proof_keys (kid, secret, status, retired_at) VALUES ('ap-legacy-retired', decode(repeat('5a', 40), 'hex'), 'retired', now());
+SQL
+L_SNAP0="$(leg_snap "$LEG_DB")"; L_KEYS0="$(leg_keys "$LEG_DB")"; L_BK0="$(leg_bk "$LEG_DB")"
+# refusal: the backup role's SELECT on the key table differs from its SELECT on actor_proof_nonces (the down could not reconstruct it) -> APM01, nothing changed
+cl_super src "$SRC_PORT" -d "$LEG_DB" -c "REVOKE SELECT ON public.actor_proof_nonces FROM igaming_backup" >/dev/null
+L_MIS_SNAP="$(leg_snap "$LEG_DB")"
+L_MIS_OUT="$(DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" up 2>&1)" && L_MIS=0 || L_MIS=$?
+L_MIS_OK=0; [ "$L_MIS" -ne 0 ] && grep -q APM01 <<<"$L_MIS_OUT" && [ "$(leg_snap "$LEG_DB")" = "$L_MIS_SNAP" ] && [ "$(leg_keys "$LEG_DB")" = "$L_KEYS0" ] && L_MIS_OK=1
+cl_super src "$SRC_PORT" -d "$LEG_DB" -c "GRANT SELECT ON public.actor_proof_nonces TO igaming_backup" >/dev/null
+[ "$(leg_snap "$LEG_DB")" = "$L_SNAP0" ] || bk_die "legacy database: the grant fixture did not restore the 0165 catalog"
+DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" up >>"${WORK}/leg-migrate.log" 2>&1 && L_UP=0 || L_UP=$?
+L_SNAP1="$(leg_snap "$LEG_DB")"; L_KEYS1="$(leg_keys "$LEG_DB")"; L_BK1="$(leg_bk "$LEG_DB")"
+L_PUB1="$(cl_super src "$SRC_PORT" -d "$LEG_DB" -c "SELECT (to_regclass('public.actor_proof_keys') IS NULL AND to_regclass('actorproof_private.actor_proof_keys') IS NOT NULL)::int")"
+L_PROBE="$(ap_probe "$SRC_PORT" "$LEG_DB" "$CANARY_KID" "$CANARY_HEX")"                  # the moved key still verifies (as igaming_runtime)
+APP_ENV=development DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" -steps 1 down >>"${WORK}/leg-migrate.log" 2>&1 && L_DOWN=0 || L_DOWN=$?
+L_SNAP2="$(leg_snap "$LEG_DB")"; L_KEYS2="$(leg_keys "$LEG_DB")"; L_BK2="$(leg_bk "$LEG_DB")"
+DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" up >>"${WORK}/leg-migrate.log" 2>&1 && L_UP2=0 || L_UP2=$?
+L_SNAP3="$(leg_snap "$LEG_DB")"; L_KEYS3="$(leg_keys "$LEG_DB")"
+if [ "$L_MIS_OK" = 1 ] && [ "$L_UP" = 0 ] && [ "$L_DOWN" = 0 ] && [ "$L_UP2" = 0 ] && [ "$L_BK0" = 1 ] && [ "$L_BK1" = 0 ] && [ "$L_BK2" = 1 ] && [ "$L_PUB1" = 1 ] && [ "$L_PROBE" = OK ] \
+   && [ "${L_KEYS0%%:*}" = 2 ] && [ "$L_KEYS1" = "$L_KEYS0" ] && [ "$L_KEYS2" = "$L_KEYS0" ] && [ "$L_KEYS3" = "$L_KEYS0" ] \
+   && [ "$L_SNAP2" = "$L_SNAP0" ] && [ "$L_SNAP3" = "$L_SNAP1" ] && [ "$L_SNAP1" != "$L_SNAP0" ]; then
+  res migration_0166_up_down_up_on_a_backup_granted_database PASS "0165 database with the backup role's blanket SELECT and 2 key rows: up refused (APM01, nothing changed) while the backup role's SELECT on the key table differed from the one on actor_proof_nonces; then up moved the rows intact into actorproof_private (row digest unchanged) and removed every backup-role privilege on the key; the moved canary key still verifies a proof as igaming_runtime; down restored the 0165 catalog byte for byte (incl. igaming_backup's SELECT) with the rows intact; up again equals the first up"
+else res migration_0166_up_down_up_on_a_backup_granted_database FAIL "mismatch_refused=${L_MIS_OK} up=${L_UP} down=${L_DOWN} up2=${L_UP2} bk=${L_BK0}/${L_BK1}/${L_BK2} moved=${L_PUB1} probe=${L_PROBE} keys=${L_KEYS0}|${L_KEYS1}|${L_KEYS2}|${L_KEYS3} snap0=${L_SNAP0} snap1=${L_SNAP1} snap2=${L_SNAP2} snap3=${L_SNAP3} $(tail -3 "${WORK}/leg-migrate.log" | tr '\n' ' ')"; fi
+# SRF1-4: the "not owned by the migrating role" refusal. A second 0165 database whose key table belongs to the superuser (which grants igaming every privilege,
+# so the LOCK passes and the refusal itself is reached): 0166 up must refuse APM01 and record nothing.
+cl_super src "$SRC_PORT" -d postgres -c "CREATE DATABASE legacy_own OWNER igaming TEMPLATE template0" >/dev/null
+DATABASE_URL="$(leg_url legacy_own)" "${WORK}/migrate" -dir "$M165" up >>"${WORK}/leg-migrate.log" 2>&1 || bk_die "legacy_own: migrate to 0165 failed"
+cl_super src "$SRC_PORT" -d legacy_own -c "ALTER TABLE public.actor_proof_keys OWNER TO postgres" -c "GRANT ALL ON public.actor_proof_keys TO igaming" >/dev/null
+OWN_OUT="$(DATABASE_URL="$(leg_url legacy_own)" "${WORK}/migrate" -dir "$M166" up 2>&1)" && OWN_RC=0 || OWN_RC=$?
+OWN_166="$(cl_super src "$SRC_PORT" -d legacy_own -c "SELECT count(*) FROM schema_migrations WHERE version = 166")"
+OWN_NS="$(cl_super src "$SRC_PORT" -d legacy_own -c "SELECT (to_regnamespace('actorproof_private') IS NULL AND to_regclass('public.actor_proof_keys') IS NOT NULL)::int")"
+cl_super src "$SRC_PORT" -d postgres -c "DROP DATABASE IF EXISTS legacy_own WITH (FORCE)" >/dev/null 2>&1 || true
+if [ "$OWN_RC" -ne 0 ] && grep -q 'APM01' <<<"$OWN_OUT" && grep -q 'not owned by the migrating role' <<<"$OWN_OUT" && [ "$OWN_166" = 0 ] && [ "$OWN_NS" = 1 ]; then
+  res migration_0166_refuses_a_key_table_not_owned_by_the_migrating_role PASS "key table owned by another role (igaming holding every privilege on it): 0166 up refused APM01 'not owned by the migrating role', version 166 not recorded, the table still in public, no private schema"
+else res migration_0166_refuses_a_key_table_not_owned_by_the_migrating_role FAIL "rc=${OWN_RC} v166=${OWN_166} layout_unchanged=${OWN_NS} $(printf '%s' "$OWN_OUT" | tail -2 | tr '\n' ' ')"; fi
+# (2) back to 0165 for the legacy set, then dump it the way an old tool did (no exclusion) and re-seal it as a valid signed set
+APP_ENV=development DATABASE_URL="$(leg_url "$LEG_DB")" "${WORK}/migrate" -dir "$M166" -steps 1 down >>"${WORK}/leg-migrate.log" 2>&1 || bk_die "legacy database: migrate down to 0165 failed"
+cp -a "$PLAIN_DIR" "${BKUP}/legacy165"
+pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fc -f "${BKUP}/legacy165/db.dump" "$LEG_DB"
+rehash_manifest "${BKUP}/legacy165"; resign "${BKUP}/legacy165"
+L_TOC_DATA="$(pg_restore --list "${BKUP}/legacy165/db.dump" | grep -c ' TABLE DATA public actor_proof_keys ' || true)"
+L_ROUT="$(restore_run "${BKUP}/legacy165" legacy165_db)" && L_RRC=0 || L_RRC=$?
+L_RROWS="$(psql_as igaming "$OPF" "$SRC_PORT" legacy165_db -c 'SELECT count(*) FROM public.actor_proof_keys' 2>/dev/null || echo ERR)"
+L_RSCHEMA="$(psql_as igaming "$OPF" "$SRC_PORT" legacy165_db -c "SELECT (to_regnamespace('actorproof_private') IS NOT NULL)::int" 2>/dev/null || echo ERR)"
+L_RLEAKS="$(pg_dump -h "$(cl_sock src)" -p "$SRC_PORT" -U postgres -Fp legacy165_db 2>/dev/null | leaks)"
+DATABASE_URL="$(leg_url legacy165_db)" "${WORK}/migrate" -dir "${REPO_ROOT}/migrations" up >>"${WORK}/leg-migrate.log" 2>&1 && L_RUP=0 || L_RUP=$?
+L_RMOVED="$(psql_as igaming "$OPF" "$SRC_PORT" legacy165_db -c "SELECT (to_regclass('public.actor_proof_keys') IS NULL)::int || ':' || (SELECT count(*) FROM actorproof_private.actor_proof_keys)" 2>/dev/null || echo ERR)"
+if [ "$L_TOC_DATA" = 1 ] && [ "$L_RRC" = 0 ] && grep -q 'legacy set' <<<"$L_ROUT" && grep -q 'LEGACY layout' <<<"$L_ROUT" && [ "$L_RROWS" = 0 ] && [ "$L_RSCHEMA" = 0 ] \
+   && [ "$L_RLEAKS" = 0 ] && [ "$L_RUP" = 0 ] && [ "$L_RMOVED" = "1:0" ] && [ "$(printf '%s\n' "$L_ROUT" | leaks)" = 0 ]; then
+  res true_legacy_set_is_restored_without_rows_and_migrates PASS "a validly signed set dumped from a 0165 database (TABLE DATA public actor_proof_keys present) restores with the 'legacy set' warning in the LEGACY layout: public.actor_proof_keys EMPTY, no private schema, 0 secret occurrences in a superuser dump of the result; migrate up then moved the EMPTY table into actorproof_private"
+else res true_legacy_set_is_restored_without_rows_and_migrates FAIL "toc_data=${L_TOC_DATA} rc=${L_RRC} rows=${L_RROWS} schema=${L_RSCHEMA} leaks=${L_RLEAKS} up=${L_RUP} moved=${L_RMOVED} $(printf '%s' "$L_ROUT" | tail -2 | tr '\n' ' ')"; fi
+psql_as drill_restore "$RPF" "$SRC_PORT" postgres -c 'DROP DATABASE IF EXISTS legacy165_db WITH (FORCE)' >/dev/null 2>&1 || true
+cl_super src "$SRC_PORT" -d postgres -c "DROP DATABASE IF EXISTS legacy_src WITH (FORCE)" >/dev/null 2>&1 || true
+rm -rf "${BKUP}/legacy165" "$M165" "$M166"
 
 # the restore must state the source environment it believes it restores
 OUTP="$(RESTORE_EXPECT_SOURCE_ENVIRONMENT=production restore_run "$PLAIN_DIR" m4_db)" && RC=0 || RC=$?
@@ -569,7 +737,7 @@ NEWHEX_FILE="${SECRETS}/ap-rekey.hex"
 (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$NEWHEX_FILE"); chmod 600 "$NEWHEX_FILE"
 NEWHEX="$(cat "$NEWHEX_FILE")"
 rekey_run() { env REKEY_PGHOST=127.0.0.1 REKEY_PGPORT="$SRC_PORT" REKEY_PGDATABASE="${REKEY_DB:-$RST_DB}" REKEY_PGUSER="${REKEY_USER:-igaming}" REKEY_PGPASSFILE="$OPF" "${SCRIPT_DIR}/rekey-actor-proof.sh" "$@" 2>&1; }
-ap_rows() { psql_as igaming "$OPF" "$SRC_PORT" "$RST_DB" -c 'SELECT count(*) FROM actor_proof_keys'; }
+ap_rows() { psql_as igaming "$OPF" "$SRC_PORT" "$RST_DB" -c 'SELECT count(*) FROM actorproof_private.actor_proof_keys'; }
 REKEY_NEG=""
 # (1) the source's key id cannot be reused
 OUTP="$(rekey_run --kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE" --retired-kid "$SEED_AP_KID")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'equals a retired kid' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} reuse_of_retired_kid($RC)"
@@ -582,7 +750,7 @@ printf 'abcd' >"${SECRETS}/ap-short.hex"; chmod 600 "${SECRETS}/ap-short.hex"
 OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "${SECRETS}/ap-short.hex")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'even-length hex' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} short_secret($RC)"
 rm -f "${SECRETS}/ap-short.hex"
 # (4) not the table owner: the runtime role
-OUTP="$(REKEY_USER=igaming_runtime rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'cannot read public.actor_proof_keys' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} runtime_role($RC)"
+OUTP="$(REKEY_USER=igaming_runtime rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'cannot read actorproof_private.actor_proof_keys' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} runtime_role($RC)"
 # (5) statement logging that could capture the bound secret
 cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming SET log_statement = 'all'" >/dev/null
 OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'log_statement=all' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} statement_logging($RC)"
@@ -596,9 +764,13 @@ OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-f
 cl_super src "$SRC_PORT" -d postgres -c "ALTER ROLE igaming RESET log_statement_sample_rate" -c "ALTER ROLE igaming RESET log_min_duration_sample" >/dev/null
 # (7) no source kid named, and no --first-key
 OUTP="$(rekey_run --kid "$REKEY_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q -e '--retired-kid' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} no_retired_kid($RC)"
+# (7b) SRF1-1(b): the key schema is not owner-only (a grant to the backup role) -> refused before any secret is written
+cl_super src "$SRC_PORT" -d "$RST_DB" -c "GRANT USAGE ON SCHEMA actorproof_private TO igaming_backup" >/dev/null
+OUTP="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE")" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'NOT owner-only' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} not_owner_only($RC)"
+cl_super src "$SRC_PORT" -d "$RST_DB" -c "REVOKE USAGE ON SCHEMA actorproof_private FROM igaming_backup" >/dev/null
 # (8) verify.sh refuses to skip the actor-proof assertion after a LOGICAL restore
 OUTP="$(verify_run "$SRC_PORT" "$RST_DB" "${PLAIN_DIR}/baseline.txt" --expect-actor-proof skip 2>&1)" && RC=0 || RC=$?; { [ "$RC" -ne 0 ] && grep -q 'allowed only with --anchor-mode preserved' <<<"$OUTP"; } || REKEY_NEG="${REKEY_NEG} verify_skip($RC)"
-if [ -z "$REKEY_NEG" ] && [ "$(ap_rows)" = 0 ]; then res rekey_script_refuses_unsafe_use PASS "refused, table still empty: reuse of the source kid, a world-readable secret file, a too-short secret, a non-owner role (igaming_runtime), log_statement=all, log_transaction_sample_rate, sampled statement logging, no --retired-kid; and verify.sh refuses --expect-actor-proof skip after a logical restore"; else res rekey_script_refuses_unsafe_use FAIL "not refused:${REKEY_NEG} rows=$(ap_rows)"; fi
+if [ -z "$REKEY_NEG" ] && [ "$(ap_rows)" = 0 ]; then res rekey_script_refuses_unsafe_use PASS "refused, table still empty: reuse of the source kid, a world-readable secret file, a too-short secret, a non-owner role (igaming_runtime), log_statement=all, log_transaction_sample_rate, sampled statement logging, no --retired-kid, a key schema that is not owner-only (SRF1-1); and verify.sh refuses --expect-actor-proof skip after a logical restore"; else res rekey_script_refuses_unsafe_use FAIL "not refused:${REKEY_NEG} rows=$(ap_rows)"; fi
 # the real re-key
 LOGBYTES_RK="$(stat -c %s "${DRILL_ROOT}/src/server.log")"
 ROUT_RK="$(rekey_run --kid "$REKEY_KID" --retired-kid "$SEED_AP_KID" --secret-hex-file "$NEWHEX_FILE" --retired-kid "$CANARY_KID" --retired-kid "$SEED_AP_KID")" && RKRC=0 || RKRC=$?
@@ -628,7 +800,7 @@ RKB="$(BACKUP_PGDATABASE="$RST_DB" "${SCRIPT_DIR}/backup.sh" --out-dir "$BKUP" -
 RKB_DIR="$(printf '%s\n' "$RKB" | sed -n 's/^RUN_DIR=//p')"
 if [ "$RKBRC" -eq 0 ] && [ -d "$RKB_DIR" ]; then
   RKB_LEAK=$(( $(pg_restore -f - "${RKB_DIR}/db.dump" | grep -a -c -F -e "$NEWHEX" -e "$CANARY" || true) + $(grep -a -c -F -e "$NEWHEX" "${RKB_DIR}/db.dump" "${RKB_DIR}/globals.sql" "${RKB_DIR}/baseline.txt" "${RKB_DIR}/manifest.json" | awk -F: '{n += $NF} END {print n+0}') + $(printf '%s\n' "$RKB" | grep -a -c -F "$NEWHEX" || true) ))
-  if [ "$RKB_LEAK" = 0 ] && ! pg_restore --list "${RKB_DIR}/db.dump" | grep -q ' TABLE DATA public actor_proof_keys '; then res backup_of_rekeyed_database_excludes_the_new_secret PASS "a backup taken after the re-key has no actor_proof_keys data entry and 0 occurrences of the new secret in the dump (text and raw), globals, baseline, manifest or the run output"; else res backup_of_rekeyed_database_excludes_the_new_secret FAIL "leaks=${RKB_LEAK}"; fi
+  if [ "$RKB_LEAK" = 0 ] && ! pg_restore --list "${RKB_DIR}/db.dump" | grep -q -E ' TABLE DATA [^ ]+ actor_proof_key[^ ]* |(^| )actorproof_private( |$)'; then res backup_of_rekeyed_database_excludes_the_new_secret PASS "a backup taken after the re-key has no actor_proof_keys data entry, no entry of the schema actorproof_private and 0 occurrences of the new secret in the dump (text and raw), globals, baseline, manifest or the run output"; else res backup_of_rekeyed_database_excludes_the_new_secret FAIL "leaks=${RKB_LEAK}"; fi
 else res backup_of_rekeyed_database_excludes_the_new_secret FAIL "rc=${RKBRC} $(printf '%s' "$RKB" | tail -2 | tr '\n' ' ')"; fi
 [ -z "$RKB_DIR" ] || rm -rf "$RKB_DIR"
 rm -f "$NEWHEX_FILE"
