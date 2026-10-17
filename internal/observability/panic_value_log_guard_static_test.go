@@ -88,7 +88,23 @@ func panicValueUseViolations(fset *token.FileSet, rel string, file *ast.File) []
 	}
 
 	// Pass 1: every recover() call and the variables it binds.
-	var tracked []*ast.Object
+	// Identifiers are tracked by (enclosing declaration, name) instead of the deprecated ast.Object resolution; the
+	// scan is syntax-only, so a same-named identifier in the same declaration is treated as the recovered value (conservative).
+	type scopeVar struct {
+		block ast.Node
+		name  string
+		after token.Pos
+	}
+	var tracked []scopeVar
+	defining := map[*ast.Ident]bool{}
+	enclosingBlock := func(n ast.Node) ast.Node {
+		for p := parents[n]; p != nil; p = parents[p] {
+			if _, ok := p.(*ast.BlockStmt); ok {
+				return p
+			}
+		}
+		return file
+	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || !isRecoverCall(call) {
@@ -105,8 +121,9 @@ func panicValueUseViolations(fset *token.FileSet, rel string, file *ast.File) []
 					if id.Name == "_" {
 						return true
 					}
-					if p.Tok == token.DEFINE && id.Obj != nil {
-						tracked = append(tracked, id.Obj)
+					if p.Tok == token.DEFINE {
+						tracked = append(tracked, scopeVar{enclosingBlock(p), id.Name, p.End()})
+						defining[id] = true
 						return true
 					}
 				}
@@ -114,8 +131,9 @@ func panicValueUseViolations(fset *token.FileSet, rel string, file *ast.File) []
 			add(call, "recover-escape")
 			return true
 		case *ast.ValueSpec:
-			if len(p.Names) == 1 && p.Names[0].Obj != nil {
-				tracked = append(tracked, p.Names[0].Obj)
+			if len(p.Names) == 1 {
+				tracked = append(tracked, scopeVar{enclosingBlock(p), p.Names[0].Name, p.End()})
+				defining[p.Names[0]] = true
 				return true
 			}
 		}
@@ -125,18 +143,24 @@ func panicValueUseViolations(fset *token.FileSet, rel string, file *ast.File) []
 	if len(tracked) == 0 {
 		return out
 	}
-	isTracked := map[*ast.Object]bool{}
-	for _, o := range tracked {
-		isTracked[o] = true
-	}
 
 	// Pass 2: every use of a tracked variable.
 	ast.Inspect(file, func(n ast.Node) bool {
 		id, ok := n.(*ast.Ident)
-		if !ok || id.Obj == nil || !isTracked[id.Obj] {
+		if !ok || defining[id] {
 			return true
 		}
-		if decl, ok := id.Obj.Decl.(ast.Node); ok && isDefiningIdent(id, decl) {
+		inScope := false
+		for _, t := range tracked {
+			if t.name == id.Name && id.Pos() >= t.after && id.Pos() >= t.block.Pos() && id.End() <= t.block.End() {
+				inScope = true
+				break
+			}
+		}
+		if !inScope {
+			return true
+		}
+		if sel, ok := parents[id].(*ast.SelectorExpr); ok && sel.Sel == id {
 			return true
 		}
 		switch p := parents[id].(type) {
