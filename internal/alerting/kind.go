@@ -174,6 +174,14 @@ const KindReconciliationSweepFailed Kind = "reconciliation.sweep_failed"
 // (ALERT-DELIVERY-1 OPEN: nobody is paged).
 const KindWithdrawalPayoutGateDenied Kind = "withdrawal.payout_gate_denied"
 
+// KindWithdrawalPayoutGateUnavailable is the F4 residual (migration 0171, SF4-5) Kind: the WD-RG-1 gate could not decide at
+// a payout dispatch point and FAILED CLOSED (evaluation error, no gate wired, or the dispatch decision could not be signed):
+// at T1p on every such refusal, at T2 / T12 after repeated consecutive failures of the same attempt. No money moved and
+// nothing was sent; the payout is stalled. Raised detached (the claim rolled back). Attributes are closed codes only (stage,
+// cause). Dedup: one open alert per request / attempt (re-raises add occurrences). Severity p2 is an ENGINEERING DEFAULT
+// (ALERT-DELIVERY-1 OPEN: nobody is paged).
+const KindWithdrawalPayoutGateUnavailable Kind = "withdrawal.payout_gate_unavailable"
+
 // KindKYCResidenceIntoOpenMarket is the F5(b) (migration 0170) Kind: a reviewer recorded a KYC-verified residence in a
 // country the brand currently serves (the evidence that admits a player to deposits, casino play and sportsbook
 // wagering; there is no maker-checker on it, which is an OWNER decision). Raised in the SAME transaction as the review
@@ -301,6 +309,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindWithdrawalPayoutGateDenied, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("gate_code", "reason_code", "stage"),
+	},
+	KindWithdrawalPayoutGateUnavailable: {
+		Kind: KindWithdrawalPayoutGateUnavailable, Severity: SeverityP2, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeDetached,
+		AllowedKeys: keys("stage", "cause"),
 	},
 	KindReconciliationSweepFailed: {
 		Kind: KindReconciliationSweepFailed, Severity: SeverityP1, Scope: ScopeKindPlatform,

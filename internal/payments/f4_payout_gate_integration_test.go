@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
@@ -645,4 +646,82 @@ func f4RecordRedispatchAllow(ctx context.Context, tx pgx.Tx, requestID, attemptI
 		return err
 	}
 	return withdrawal.RecordDispatchGateDecision(ctx, tx, cur, withdrawal.DispatchStageRedispatch, &attemptID, withdrawalgate.Decision{Allowed: true, Outcome: "allow"})
+}
+
+// SF4-5 (F4 residual round 1, migration 0171): a gate that fails closed at T1p raises withdrawal.payout_gate_unavailable
+// (detached, dedup'd on the request), and a missing signing key is the same refusal with cause proof_unavailable.
+func TestF4R1_Claim_GateUnavailable_RaisesAlert_AndNoIssuerFailsClosed(t *testing.T) {
+	w := newF4World(t, "f4r1-unavail")
+	wr := approvedWithdrawal(t, w.pool, w.f, 300, "f4r1-unavail")
+	w.orch.WithWithdrawalGate(f4FailingGate{})
+	for i := 0; i < 2; i++ {
+		if _, err := w.claim(t, wr.ID); !errors.Is(err, ErrPayoutWithdrawalGateUnavailable) {
+			t.Fatalf("want unavailable, got %v", err)
+		}
+	}
+	unavailable := func(prefix string) int {
+		return w.count(t, `SELECT count(*) FROM alerts WHERE kind = 'withdrawal.payout_gate_unavailable' AND discriminator LIKE $1 AND state <> 'resolved'`, prefix+"%")
+	}
+	if n := unavailable("withdrawal:" + wr.ID.String()); n != 1 {
+		t.Fatalf("one open alert per request (dedup), got %d", n)
+	}
+	if n := w.count(t, `SELECT count(*) FROM alert_occurrences o JOIN alerts a ON a.id = o.alert_id WHERE a.kind = 'withdrawal.payout_gate_unavailable' AND a.discriminator = $1`, "withdrawal:"+wr.ID.String()+":gate_unavailable"); n != 2 {
+		t.Fatalf("both refusals are occurrences, got %d", n)
+	}
+
+	// Warm-up: one normal signed claim (provisions the key for this database and installs the test issuer).
+	warm := approvedWithdrawal(t, w.pool, w.f, 300, "f4r1-warm")
+	w.orch.WithWithdrawalGate(standard.New())
+	if _, err := w.claim(t, warm.ID); err != nil {
+		t.Fatalf("warm-up claim: %v", err)
+	}
+
+	// No issuer: the allow cannot be signed -> fail closed, retryable, nothing claimed, cause proof_unavailable.
+	w.orch.WithWithdrawalGate(standard.New())
+	saved := actorproof.Default()
+	actorproof.SetDefault(nil)
+	_, err := w.claim(t, wr.ID)
+	actorproof.SetDefault(saved)
+	if !errors.Is(err, ErrPayoutWithdrawalGateUnavailable) || !errors.Is(err, withdrawal.ErrDispatchProofUnavailable) {
+		t.Fatalf("no issuer: want ErrPayoutWithdrawalGateUnavailable wrapping ErrDispatchProofUnavailable, got %v", err)
+	}
+	if got := w.state(t, wr.ID); got.State != withdrawal.StateApproved || countAttempts(t, w.pool, w.f.tenantID, wr.ID) != 0 {
+		t.Fatalf("nothing claimed without a signed allow: %s", got.State)
+	}
+	if n := w.count(t, `SELECT count(*) FROM withdrawal_gate_decisions WHERE withdrawal_request_id = $1`, wr.ID); n != 0 {
+		t.Fatalf("no decision row without a signed allow, got %d", n)
+	}
+	if claim, err := w.claim(t, wr.ID); err != nil || claim.Request.State != withdrawal.StateSubmitted {
+		t.Fatalf("the retry with the issuer back goes through: %v", err)
+	}
+}
+
+// SF4-5 at T2: the alert is raised only after gateUnavailableAlertAfter CONSECUTIVE fail-closed ticks of the attempt; a
+// tick that decides resets the count.
+func TestF4R1_Sweeper_T2_GateUnavailable_AlertsAfterRepeatedFailures(t *testing.T) {
+	w := newF4World(t, "f4r1-t2")
+	_, attempt := notSentPayoutAttempt(t, w.pool, w.orch, w.f, 500, "f4r1-t2")
+	w.orch.WithWithdrawalGate(f4FailingGate{})
+	sw := w.sweeper()
+	disc := "payout_attempt:" + attempt.ID.String() + ":gate_unavailable"
+	open := func() int {
+		return w.count(t, `SELECT count(*) FROM alerts WHERE kind = 'withdrawal.payout_gate_unavailable' AND discriminator = $1`, disc)
+	}
+	for i := 1; i < gateUnavailableAlertAfter; i++ {
+		if err := sw.processPayoutAttempt(context.Background(), w.f.tenantID, attempt); !errors.Is(err, withdrawal.ErrGateUnavailable) {
+			t.Fatalf("tick %d: want a fail-closed error, got %v", i, err)
+		}
+		if open() != 0 {
+			t.Fatalf("no alert before %d consecutive failures (tick %d)", gateUnavailableAlertAfter, i)
+		}
+	}
+	if err := sw.processPayoutAttempt(context.Background(), w.f.tenantID, attempt); !errors.Is(err, withdrawal.ErrGateUnavailable) {
+		t.Fatalf("threshold tick: %v", err)
+	}
+	if open() != 1 {
+		t.Fatalf("the alert is raised at the threshold, got %d", open())
+	}
+	if got := w.reread(t, attempt.ID); got.State != AttemptCreated || got.SubmitCount != attempt.SubmitCount {
+		t.Fatalf("nothing was sent while failing closed: %s submits %d->%d", got.State, attempt.SubmitCount, got.SubmitCount)
+	}
 }

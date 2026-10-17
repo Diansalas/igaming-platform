@@ -19,7 +19,9 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
@@ -101,4 +104,64 @@ func applyRedispatchGate(ctx context.Context, tx pgx.Tx, wr withdrawal.Withdrawa
 		return false, err
 	}
 	return false, alerting.RaiseGuarded(ctx, tx, WithdrawalGateDeniedAlert(wr.TenantID, "payout_attempt:"+attempt.ID.String(), withdrawal.DispatchStageRedispatch, d))
+}
+
+// ---- SF4-5: a silent fail-closed gate raises a (throttled) alert -------------------------------------------------
+
+// gateUnavailableAlertAfter is the number of CONSECUTIVE fail-closed ticks of one attempt (T2 / T12) after which the
+// withdrawal.payout_gate_unavailable alert is raised. A single transient failure is retried silently; a persistent one
+// (a down risk engine, a missing signing key) must not stall payouts unnoticed. At T1p (a staff request) every
+// refusal raises. Both dedup on an open alert per request / attempt, so repeats only add occurrences (throttle).
+const gateUnavailableAlertAfter = 3
+
+var (
+	gateFailMu     sync.Mutex
+	gateFailCounts = map[uuid.UUID]int{} // attempt id -> consecutive fail-closed ticks (process-local, a throttle only)
+)
+
+const gateFailCountsMax = 4096
+
+// gateUnavailableCause maps an error wrapping withdrawal.ErrGateUnavailable to a closed cause code.
+func gateUnavailableCause(err error) string {
+	if errors.Is(err, withdrawal.ErrDispatchProofUnavailable) {
+		return "proof_unavailable"
+	}
+	return "evaluation_failed"
+}
+
+// WithdrawalGateUnavailableAlert builds the withdrawal.payout_gate_unavailable alert for subject ("withdrawal:<id>" at
+// T1p, "payout_attempt:<id>" at T2 / T12). Attributes are closed codes only.
+func WithdrawalGateUnavailableAlert(tenantID uuid.UUID, subject string, stage withdrawal.DispatchStage, cause string) alerting.Alert {
+	return alerting.Alert{
+		Kind: alerting.KindWithdrawalPayoutGateUnavailable, SubjectTenantID: tenantID,
+		Discriminator: subject + ":gate_unavailable",
+		Attributes:    map[string]alerting.AttrValue{"stage": string(stage), "cause": cause},
+	}
+}
+
+// raiseGateUnavailable raises the alert detached (the refused transaction rolled back); best effort, never surfaced.
+func raiseGateUnavailable(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, subject string, stage withdrawal.DispatchStage, cause string) {
+	_ = alerting.RaiseDetached(ctx, alerting.NewTenantRunner(pool, tenantID), WithdrawalGateUnavailableAlert(tenantID, subject, stage, cause))
+}
+
+// observeRedispatchGate counts consecutive fail-closed ticks of a T2 / T12 attempt and raises the alert at the threshold;
+// any tick that did not fail closed resets the count. It returns err unchanged.
+func (s *Sweeper) observeRedispatchGate(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt, err error) error {
+	if err == nil || !errors.Is(err, withdrawal.ErrGateUnavailable) {
+		gateFailMu.Lock()
+		delete(gateFailCounts, attempt.ID)
+		gateFailMu.Unlock()
+		return err
+	}
+	gateFailMu.Lock()
+	if len(gateFailCounts) >= gateFailCountsMax {
+		gateFailCounts = map[uuid.UUID]int{}
+	}
+	gateFailCounts[attempt.ID]++
+	n := gateFailCounts[attempt.ID]
+	gateFailMu.Unlock()
+	if n >= gateUnavailableAlertAfter {
+		raiseGateUnavailable(ctx, s.Pool, tenantID, "payout_attempt:"+attempt.ID.String(), withdrawal.DispatchStageRedispatch, gateUnavailableCause(err))
+	}
+	return err
 }

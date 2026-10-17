@@ -324,8 +324,9 @@ func TestADR0113_HeaderFirstAttacks(t *testing.T) {
 				return err
 			}
 			if forgeDecision {
-				if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_gate_decisions (tenant_id, withdrawal_request_id, stage, allowed)
-					VALUES ($1, $2, 'dispatch', true)`, w.f.tenantID, id); err != nil {
+				// F4 residual R1 (CHANGED, intentionally): a raw allow row is refused (AP001) without a signed proof, so the
+				// "decision present" arm records it through the real signer (the test probes WD031, not the proof).
+				if err := f4AllowDispatchNoLock(ctx, tx, id); err != nil {
 					return err
 				}
 			}

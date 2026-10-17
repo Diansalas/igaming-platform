@@ -264,12 +264,18 @@ func staticOffenders(t *testing.T, root string, allowed map[string]bool) []strin
 				filepath.Join("internal", "httpserver", "capability_routes.go"): 2}},
 			{"PolicyCall{", map[string]int{
 				filepath.Join("internal", "adjustment", "policy.go"): 1}},
+			// F4 residual R1: the key-provisioning hook of the dispatch-gate proof is declared in actorproof.go (1), read
+			// ONLY in internal/withdrawal/dispatchproof.go (1: the nil-checked load) and assigned ONLY in prooftest (1).
+			{"TestEnsureKeyHook", map[string]int{
+				filepath.Join("internal", "actorproof", "actorproof.go"):                1,
+				filepath.Join("internal", "withdrawal", "dispatchproof.go"):             1,
+				filepath.Join("internal", "actorproof", "prooftest", "dispatchhook.go"): 1}},
 		} {
 			if n := codeLines(src, pin.needle); n != pin.allow[rel] && n > 0 {
 				offenders = append(offenders, fmt.Sprintf("%s (%d code occurrence(s) of %s, allowed %d)", rel, n, pin.needle, pin.allow[rel]))
 			}
 		}
-		if strings.Contains(src, imp) && !allowed[dir] && !inProoftest {
+		if strings.Contains(src, imp) && !allowed[dir] && !staticAllowedFiles[filepath.ToSlash(rel)] && !inProoftest {
 			offenders = append(offenders, rel+" (imports actorproof)")
 		}
 		return nil
@@ -302,9 +308,19 @@ func codeLines(src, needle string) int {
 var prooftestImporters = map[string]bool{
 	filepath.Join("internal", "testsupport", "launchfix"):   true,
 	filepath.Join("internal", "testsupport", "launchdrive"): true,
+	// F4 residual R1: wdpath installs the dispatch-gate key hook (its E7 step records a signed fixture ALLOW).
+	filepath.Join("internal", "testsupport", "wdpath"): true,
 	// ADR 0115 S1: rgfix files the floor four-eyes flow (request / approve / apply proofs) for
 	// SYNTHETIC-NOT-LEGAL fixture floors; integration-tagged, pinned by the same fixture pin.
 	filepath.Join("internal", "testsupport", "rgfix"): true,
+}
+
+// staticAllowedFiles are the FILE-granular signer owners (the rest of their package may not import the issuer). F4
+// residual R1 (migration 0171): the WD-RG-1 dispatch gate ALLOW is a signed SYSTEM attestation; only this one file of
+// internal/withdrawal signs it (TestStatic_WithdrawalSignsOnlyInDispatchProof pins that it signs exactly once, and
+// RecordDispatchGateDecision, its only caller, is pinned to four production call sites). Security review mandatory.
+var staticAllowedFiles = map[string]bool{
+	"internal/withdrawal/dispatchproof.go": true,
 }
 
 var staticAllowed = map[string]bool{
@@ -348,6 +364,45 @@ func TestStatic_OnlyFourEyesPackagesSign(t *testing.T) {
 	}
 }
 
+// TestStatic_WithdrawalSignsOnlyInDispatchProof: dispatchproof.go signs exactly once (one Attach, no Sign), with the
+// system dispatch-gate claims only.
+func TestStatic_WithdrawalSignsOnlyInDispatchProof(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "internal", "withdrawal", "dispatchproof.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	if n := codeLines(src, ".Attach("); n != 1 {
+		t.Fatalf("dispatchproof.go must contain exactly one Attach call, found %d", n)
+	}
+	if n := codeLines(src, ".Sign("); n != 0 {
+		t.Fatalf("dispatchproof.go must not call Sign directly, found %d", n)
+	}
+	for _, want := range []string{"actorproof.ScopeSystem", "actorproof.OpDispatchGateAllow", "actorproof.SystemActorDispatchGate"} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("dispatchproof.go must sign the system dispatch-gate claims (missing %s)", want)
+		}
+	}
+	// Every other non-test file of internal/withdrawal stays free of the issuer.
+	ents, err := os.ReadDir(filepath.Join("..", "..", "internal", "withdrawal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") || n == "dispatchproof.go" {
+			continue
+		}
+		fb, err := os.ReadFile(filepath.Join("..", "..", "internal", "withdrawal", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(fb), `"github.com/Diansalas/igaming-platform/internal/actorproof`) {
+			t.Fatalf("internal/withdrawal/%s must not import the issuer", n)
+		}
+	}
+}
+
 // Non-vacuity: the scan flags a planted offender of each kind.
 func TestStatic_ScanIsNotVacuous(t *testing.T) {
 	root := t.TempDir()
@@ -368,14 +423,19 @@ func TestStatic_ScanIsNotVacuous(t *testing.T) {
 	write("internal/capability/extra.go", "package capability\nvar _ = TestSessionProofHook\n")
 	write("internal/httpserver/evil.go", "package x\nvar _ = WithProofActor(nil, 0)\n")
 	write("internal/adjustment/evil.go", "package a\nvar _ = PolicyCall{}\n")
+	// F4 residual R1: a SECOND file of internal/withdrawal importing the issuer, and a second reader of the
+	// key-provisioning hook, are flagged; the pinned file is not.
+	write("internal/withdrawal/other.go", "package withdrawal\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
+	write("internal/payments/evilhook.go", "package payments\nvar _ = actorproof.TestEnsureKeyHook\n")
 	// The legitimate shapes must NOT be flagged.
 	write("internal/capability/proof.go", "package capability\n// TestSessionProofHook comment\nvar TestSessionProofHook func()\nfunc f() {\n\tif TestSessionProofHook != nil {\n\t\treturn TestSessionProofHook()\n\t}\n}\nfunc WithProofActor(ctx int) {}\n")
 	write("internal/httpserver/capability_routes.go", "package x\nfunc g() {\n\t_ = capability.WithProofActor(a)\n\t_ = capability.WithProofActor(b)\n}\n")
 	write("internal/adjustment/policy.go", "package a\nvar _ = PolicyCall{}\n")
+	write("internal/withdrawal/dispatchproof.go", "package withdrawal\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\nvar _ = actorproof.TestEnsureKeyHook\n")
 	write("internal/adjustment/ok.go", "package ok\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
 	write("internal/wallet/y_test.go", "package y\nimport _ \"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest\"\n")
 	off := staticOffenders(t, root, staticAllowed)
-	if len(off) != 6 {
-		t.Fatalf("want exactly the 6 planted production offenders flagged (and no legitimate shape), got %v", off)
+	if len(off) != 8 {
+		t.Fatalf("want exactly the 8 planted production offenders flagged (and no legitimate shape), got %v", off)
 	}
 }

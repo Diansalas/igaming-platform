@@ -15,6 +15,9 @@ package withdrawal
 // (withdrawal_requests FOR UPDATE) of its transaction. RecordDispatchGateDecision runs after it (it inserts a row
 // whose FK takes KEY SHARE on the request row) and before the transition it authorizes.
 //
+// An ALLOW row is a SIGNED attestation of the application server (dispatchproof.go, migration 0171): without a proof
+// the database refuses the insert, so arbitrary SQL cannot forge one.
+//
 // The database (0169) refuses approved -> submitted (WD053) and a payout attempt's created|ambiguous -> submitting
 // (WD053) unless an ALLOWING decision row of the matching stage was recorded in THE SAME transaction and no denying
 // one was; it re-checks the account and wallet STATUS in SQL at the instant of the transition (WD052). The
@@ -113,6 +116,13 @@ func RecordDispatchGateDecision(ctx context.Context, tx pgx.Tx, wr WithdrawalReq
 	case "self_exclusion", "time_out":
 		ri := d.RestrictionInForce
 		restriction = &ri
+	}
+	if d.Allowed {
+		// F4 residual R1 (migration 0171): an ALLOW is a signed attestation, verified and consumed by the database in this
+		// insert (dispatchproof.go). A denial is not proof-bound (it only restricts).
+		if err := attachDispatchAllowProof(ctx, tx, wr, stage, attemptID, outcome, restriction); err != nil {
+			return fmt.Errorf("withdrawal: record dispatch gate decision: %w", err)
+		}
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO withdrawal_gate_decisions

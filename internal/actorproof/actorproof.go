@@ -127,7 +127,16 @@ const (
 	// decision's reason_code carries (withdrawal.PayoutReversal.Digest). Provable for scope tenant ONLY (the
 	// database trigger pins 'tenant'; the signer refuses every other scope).
 	OpPayoutReversalDecide = "withdrawal_payout_reversal:decide"
+
+	// F4 residual R1 (migration 0171): the WD-RG-1 dispatch gate ALLOW is an attestation of the platform itself, not of a
+	// staff member. Provable for scope ScopeSystem ONLY, with a tenant, for the fixed actor SystemActorDispatchGate. Target =
+	// the withdrawal request id; payload hash = the digest of the decision (withdrawal.dispatchAllowDigest), recomputed by the
+	// database from the inserted withdrawal_gate_decisions row and the request's immutable columns.
+	OpDispatchGateAllow = "withdrawal_dispatch_gate:allow"
 )
+
+// SystemActorDispatchGate is the fixed actor of OpDispatchGateAllow proofs (migration 0171 pins the same uuid).
+var SystemActorDispatchGate = uuid.MustParse("00000000-0000-0000-0000-00000f4d1500")
 
 // Scopes the database admits.
 const (
@@ -137,6 +146,9 @@ const (
 	// capability_grant: and financial_policy_change: operations and carries a
 	// NULL tenant (an empty tenant field on the wire).
 	ScopePlatform = "platform"
+	// ScopeSystem (migration 0171) is the platform's own attestation: provable ONLY for OpDispatchGateAllow, with a
+	// tenant, for SystemActorDispatchGate. No staff identity is involved.
+	ScopeSystem = "system"
 )
 
 // TargetNew is the target of a create whose id the database forces.
@@ -156,7 +168,7 @@ var (
 	hex64RE   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	opRE      = regexp.MustCompile(`^[a-z_]+:[a-z_]+$`)
 	targetRE  = regexp.MustCompile(`^(new|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
-	scopeSet  = map[string]bool{ScopeTenant: true, ScopePlatformActing: true, ScopePlatform: true}
+	scopeSet  = map[string]bool{ScopeTenant: true, ScopePlatformActing: true, ScopePlatform: true, ScopeSystem: true}
 	keyPairRE = regexp.MustCompile(`^([A-Za-z0-9._-]{1,32}):([A-Za-z0-9+/_=-]+)$`)
 )
 
@@ -190,6 +202,9 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: staff_lifecycle operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, payoutReversalOperationPrefix) && (c.Operation != OpPayoutReversalDecide || c.Scope != ScopeTenant):
 		return fmt.Errorf("%w: withdrawal_payout_reversal operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case (c.Scope == ScopeSystem || strings.HasPrefix(c.Operation, dispatchGateOperationPrefix)) &&
+		(c.Operation != OpDispatchGateAllow || c.Scope != ScopeSystem || c.Actor != SystemActorDispatchGate):
+		return fmt.Errorf("%w: system scope is provable only for %s by the dispatch gate system actor", ErrInvalidClaims, OpDispatchGateAllow)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):
@@ -207,6 +222,9 @@ func platformOperation(op string) bool {
 }
 
 const staffLifecycleOperationPrefix = "staff_lifecycle:"
+
+// dispatchGateOperationPrefix (migration 0171): the closed set is OpDispatchGateAllow, scope system.
+const dispatchGateOperationPrefix = "withdrawal_dispatch_gate:"
 
 // payoutReversalOperationPrefix (migration 0165): the closed set is OpPayoutReversalDecide, scope tenant.
 const payoutReversalOperationPrefix = "withdrawal_payout_reversal:"
@@ -437,6 +455,13 @@ func UUIDP(u *uuid.UUID) *string {
 	s := u.String()
 	return &s
 }
+
+// TestEnsureKeyHook is nil in production. Only internal/actorproof/prooftest (integration build tag) sets it, and only
+// internal/withdrawal/dispatchproof.go reads it (both pinned by TestStatic_OnlyFourEyesPackagesSign): before the system
+// dispatch-gate proof is signed it makes sure the process signing key is provisioned in the database the transaction runs
+// on, so fixtures and tests that drive the real dispatch paths need no per-site key setup. It cannot sign, alter a claim
+// or verify anything.
+var TestEnsureKeyHook func(ctx context.Context, tx pgx.Tx) error
 
 // ---- process-wide default ---------------------------------------------------
 
