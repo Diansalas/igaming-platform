@@ -42,6 +42,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
 
 // payoutAttemptClaimLease/payoutPhaseCTimeout mirror deposit_v2.go's
@@ -213,6 +214,50 @@ func recordPayoutKillSwitchHoldAudit(ctx context.Context, pool *db.Pool, tenantI
 	}
 }
 
+// ErrPayoutWithdrawalGateDenied (F4): the WD-RG-1 RG/risk gate, re-run at payout dispatch under the request-time
+// rules, refused. ClaimForDispatch returns it (wrapping a *withdrawal.GateDeniedError with the WD050 / WD051 code)
+// AFTER committing the denying decision row, the denial audit and the withdrawal.payout_gate_denied alert; the
+// request stays `approved` with its hold (no attempt, no provider call). Not retryable as such: a re-submit
+// re-evaluates the gate.
+var ErrPayoutWithdrawalGateDenied = errors.New("payments: payout dispatch refused by the withdrawal rg/risk gate")
+
+// ErrPayoutWithdrawalGateUnavailable (F4): the WD-RG-1 gate could not decide at payout dispatch (an evaluation
+// error, no gate wired, or the request changed state during the claim). Fail closed and retryable: the whole
+// claim rolls back, the request stays `approved`, nothing is sent.
+var ErrPayoutWithdrawalGateUnavailable = errors.New("payments: payout dispatch withdrawal rg/risk gate unavailable")
+
+// withdrawalGateDenialMetadata is the closed audit payload of a WD-RG-1 denial at a dispatch point: codes and the
+// request's own figures, never a person, an instrument detail or free text.
+func withdrawalGateDenialMetadata(wr withdrawal.WithdrawalRequest, stage withdrawal.DispatchStage, d withdrawalgate.Decision) map[string]any {
+	md := map[string]any{
+		"denied_by_withdrawal_gate": true, "gate_code": d.GateCode, "reason_code": d.Reason, "stage": string(stage),
+		"brand_id": wr.BrandID.String(), "wallet_id": wr.WalletID.String(), "asset_code": wr.AssetCode, "amount": wr.Amount,
+	}
+	if d.GateCode == withdrawal.GateCodeRisk {
+		md["risk_outcome"] = d.Outcome
+	}
+	return md
+}
+
+// recordPayoutGateUnavailableAudit labels a claim refused because the WD-RG-1 gate could not decide (F4). Like
+// recordPayoutKillSwitchHoldAudit: its OWN detached, bounded transaction (the claim rolled back), best-effort (a
+// failure is logged, never surfaced as a different error than the refusal itself).
+func recordPayoutGateUnavailableAudit(ctx context.Context, pool *db.Pool, tenantID, requestID uuid.UUID, actor SubmitActor) {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), payoutPhaseCTimeout)
+	defer cancel()
+	if err := pool.WithTenant(dctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+		return audit.Record(actx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
+			Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
+			Outcome: audit.OutcomeDenied, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
+			Metadata: map[string]any{"denied_by_withdrawal_gate_unavailable": true, "reason_code": "withdrawal_gate_unavailable", "stage": string(withdrawal.DispatchStageDispatch)},
+		})
+	}); err != nil {
+		slog.Default().Error("payments_payout_withdrawal_gate_unavailable_audit_failed",
+			"tenant_id", tenantID.String(), "withdrawal_request_id", requestID.String(), "error", err.Error())
+	}
+}
+
 // SubmitActor is the staff identity/request context ClaimForDispatch must
 // have to record the "which staff member triggered this payout" audit
 // entry INSIDE the T1p (or W-KYC-deny) transaction (B6, RV-PRH-I1 code
@@ -366,9 +411,51 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 	// destRefusal is set (and the closure returns nil, so the tx COMMITS) when the destination
 	// gate refuses: only the denial audit is written (ADR 0111 2.4).
 	var destRefusal error
+	// gateRefusal is set (and the closure returns nil, so the tx COMMITS) when the WD-RG-1 gate refuses at
+	// dispatch (F4): only the denying decision row, the denial audit and the alert are written; the request
+	// stays `approved` with its hold.
+	var gateRefusal *withdrawal.GateDeniedError
 	// Security L-2: the claim transaction opens through alerting.InTx so an INTEGRITY refusal can raise its P1 as the
 	// last statement of the transaction and flush after the commit (ADR 0102 7.7).
 	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
+		// F4 (A6 SR6 I-2): the WD-RG-1 RG/risk gate is RE-RUN here, under the request-time rules, BEFORE the L1
+		// row lock: its RG half takes the L0.4 person advisory lock and its risk half may take L0.5 (ADR 0082
+		// A7-N1: an advisory-taking gate runs before the first L1 parent lock). The order mirrors the request path
+		// exactly: the tenant/brand status gate (status keys SHARED, then the brand row), then the WD-RG-1 gate,
+		// then the row locks. The gate input is the request's IMMUTABLE columns (tenant, brand, account, wallet,
+		// asset, amount; 0026 immutable_fields), so an unlocked pre-read is sound. A request that is not
+		// `approved` is NOT evaluated (a replayed or concurrent claim of a submitted / terminal request never
+		// re-runs the gate): LockApprovedForSubmission below refuses it exactly as before.
+		pre, err := withdrawal.GetByID(actx, tx, requestID)
+		if err != nil {
+			return err
+		}
+		var gateDecision withdrawalgate.Decision
+		gateEvaluated := false
+		if pre.State == withdrawal.StateApproved {
+			// The status gate here takes the status keys (and the brand row) in the request-path order, before
+			// L0.4. A NOT-ACTIVE subject is not refused here: the gate is skipped and the unchanged post-L1
+			// H-SEC-11 check below refuses it exactly as before (same error, same precedence, the claim still
+			// serializes on L1 with a governed hold release). Any other error (a read failure) aborts.
+			statusErr := tenant.RequireActiveForPaymentInitiation(actx, tx, tenantID, pre.BrandID)
+			if statusErr != nil && !errors.Is(statusErr, tenant.ErrNotActiveForPaymentInitiation) {
+				return fmt.Errorf("payments: payout claim refused: %w", statusErr)
+			}
+			if statusErr == nil {
+				// B13-B (A-10): the method mismatch keeps its precedence over a gate decision (nothing written).
+				if pre.Bound() && bodyMethod != "" && bodyMethod != paymentMethod {
+					return ErrPaymentMethodMismatch
+				}
+				gateDecision, err = withdrawal.EvaluateDispatchGate(actx, tx, o.withdrawalGate, pre)
+				if err != nil {
+					// Fail closed and retryable: the whole claim rolls back (nothing written, the request stays
+					// `approved`, no provider call). A best-effort detached audit labels the refusal below.
+					return fmt.Errorf("%w: %w", ErrPayoutWithdrawalGateUnavailable, err)
+				}
+				gateEvaluated = true
+			}
+		}
+
 		wr, err := withdrawal.LockApprovedForSubmission(actx, tx, requestID)
 		if err != nil {
 			return err
@@ -385,6 +472,34 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		// refused (400 at the handler) before any decision row, state change or attempt; nothing is written.
 		if wr.Bound() && bodyMethod != "" && bodyMethod != paymentMethod {
 			return ErrPaymentMethodMismatch
+		}
+
+		if !gateEvaluated {
+			// No gate decision was taken in this transaction although the request is `approved` and the subject
+			// active under L1 (an approval, or a reactivation, committed between the unlocked pre-read and the
+			// lock): nothing is claimed. Retryable.
+			return fmt.Errorf("%w: the request or its subject changed during the claim, retry", ErrPayoutWithdrawalGateUnavailable)
+		}
+
+		// F4: a WD-RG-1 denial at dispatch PARKS the payout in the existing safe state: the request stays
+		// `approved` (hold in place, no attempt, no provider call, no KYC decision). The denying decision row,
+		// the staff-attributed denial audit and the alert commit; a staff member may re-submit once the cause is
+		// cleared (the gate is re-evaluated then) or reject the request (E5, the hold is released).
+		if !gateDecision.Allowed {
+			if err := withdrawal.RecordDispatchGateDecision(actx, tx, wr, withdrawal.DispatchStageDispatch, nil, gateDecision); err != nil {
+				return err
+			}
+			if err := audit.Record(actx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
+				Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
+				Outcome: audit.OutcomeDenied, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
+				Metadata: withdrawalGateDenialMetadata(wr, withdrawal.DispatchStageDispatch, gateDecision),
+			}); err != nil {
+				return err
+			}
+			gateRefusal = &withdrawal.GateDeniedError{GateCode: gateDecision.GateCode, Reason: gateDecision.Reason, Message: gateDecision.Message}
+			// raise last: nothing else touches the alert tables after this statement.
+			return alerting.RaiseGuarded(actx, tx, WithdrawalGateDeniedAlert(tenantID, "withdrawal:"+requestID.String(), withdrawal.DispatchStageDispatch, gateDecision))
 		}
 
 		decision, kycParams, err := evaluatePayoutGate(actx, tx, kycGate, wr)
@@ -500,8 +615,15 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			return err
 		}
 
-		if err := withdrawal.MarkSubmittedPending(actx, tx, requestID, routedCapability.ProviderID); err != nil {
+		// F4: the ALLOWING WD-RG-1 decision row, in the SAME transaction as the approved -> submitted transition
+		// it authorizes (migration 0169 refuses the transition without it: WD053; and re-checks the RG half in
+		// SQL: WD052). A rollback below discards it together with the claim.
+		if err := withdrawal.RecordDispatchGateDecision(actx, tx, wr, withdrawal.DispatchStageDispatch, nil, gateDecision); err != nil {
 			return err
+		}
+
+		if err := withdrawal.MarkSubmittedPending(actx, tx, requestID, routedCapability.ProviderID); err != nil {
+			return withdrawal.TranslateDispatchBackstopError(err)
 		}
 
 		attemptID := uuid.New()
@@ -566,9 +688,17 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		if errors.Is(err, ErrPayoutKillSwitchEngaged) {
 			recordPayoutKillSwitchHoldAudit(ctx, pool, tenantID, requestID, routedCapability.ProviderID, actor)
 		}
+		if errors.Is(err, ErrPayoutWithdrawalGateUnavailable) {
+			recordPayoutGateUnavailableAudit(ctx, pool, tenantID, requestID, actor)
+		}
 		return ClaimResult{}, err
 	}
 	pending.Flush(ctx) // post-commit only; the error path above returned before any Pending exists
+	if gateRefusal != nil {
+		// Returned only AFTER the commit above: the denying decision row, the audit and the alert are durable;
+		// the request is still `approved` with its hold, no attempt, no provider call.
+		return ClaimResult{}, fmt.Errorf("%w: %w", ErrPayoutWithdrawalGateDenied, gateRefusal)
+	}
 	if destRefusal != nil {
 		// Returned only AFTER the commit above: the denial audit is durable; the request is
 		// still `approved`, no attempt, no provider call.

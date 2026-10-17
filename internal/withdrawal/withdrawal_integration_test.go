@@ -470,7 +470,7 @@ func TestFullHappyPath_RequestPendingReviewApproveSubmitComplete(t *testing.T) {
 	}
 
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", "payout-ref-1")
+		return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", "payout-ref-1") })
 	})
 
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -642,7 +642,7 @@ func TestFail_PostSubmissionFailureRestoresPlayerCashBalance(t *testing.T) {
 		return err
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", "payout-ref-fail")
+		return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", "payout-ref-fail") })
 	})
 
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

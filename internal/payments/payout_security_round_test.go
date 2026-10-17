@@ -117,7 +117,7 @@ func TestPayoutResolveAudit_SM2_DisputeRecordsFailureOutcomeAndTerminalReason(t 
 	attemptID := uuid.New()
 	var attempt PaymentAttempt
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if err := withdrawal.MarkSubmittedPending(ctx, tx, wr.ID, "mock-sm2-b"); err != nil {
+		if err := f4MarkSubmittedPending(ctx, tx, wr.ID, "mock-sm2-b"); err != nil {
 			return err
 		}
 		if err := withdrawal.AttachProviderReference(ctx, tx, wr.ID, "sm2-b-ref"); err != nil {
@@ -336,7 +336,7 @@ func TestClaimBatch_SL2_SPC_StaleSnapshotNeverRelabelsALiveSubmittingLease(t *te
 	liveLeaseUntil := time.Now().Add(2 * time.Minute)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		// Step 2: a REAL T12 claim commit.
-		if err := ResubmitAmbiguous(ctx, tx, ambiguous.ID, uuid.New(), "sweeper-payout-resubmit", liveLeaseUntil, 0); err != nil {
+		if err := f4ResubmitAmbiguous(ctx, tx, ambiguous.ID, uuid.New(), "sweeper-payout-resubmit", liveLeaseUntil, 0); err != nil {
 			return err
 		}
 		// Step 3: the stale-snapshot reschedule artifact - next_action_at

@@ -1182,6 +1182,22 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "verification check is temporarily unavailable, please retry")
 			return
 		}
+		if errors.Is(err, payments.ErrPayoutWithdrawalGateDenied) {
+			// F4: the WD-RG-1 gate re-run at dispatch refused. The denying decision row, the audit and the alert
+			// are committed; the request stays `approved` with its hold. The gate and reason codes stay in the audit
+			// row and the server log (the same generic body as the request-time denial, SR6).
+			var denied *withdrawal.GateDeniedError
+			if errors.As(err, &denied) {
+				logger.Warn("submit_withdrawal_refused_by_withdrawal_gate", "tenant_id", tc.TenantID, "gate_code", denied.GateCode, "reason_code", denied.Reason)
+			}
+			apierror.Write(w, requestID, apierror.CodeConflict, "the withdrawal is held: the responsible-gaming and risk check refused dispatch; it stays approved")
+			return
+		}
+		if errors.Is(err, payments.ErrPayoutWithdrawalGateUnavailable) {
+			logger.Error("submit_withdrawal_withdrawal_gate_unavailable", "error", err)
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "the responsible-gaming and risk check is temporarily unavailable, please retry")
+			return
+		}
 		if errors.Is(err, withdrawal.ErrInvalidInput) {
 			apierror.Write(w, requestID, apierror.CodeValidation, "payment_method is required for this withdrawal")
 			return

@@ -55,8 +55,11 @@ func (w *bcWorld) rsPayout(t *testing.T, x string, wrAmount, attAmount int64, at
 	// ADR 0113 (migration 0132): the request is planted as E0 + E0b and walked to `submitted` through the
 	// Go writers as igaming_runtime (legacySubmittedWithdrawal); it used to be a free-standing hold leg
 	// plus a direct `submitted` INSERT, which the database now refuses (WD040 / WD025).
-	legacySubmittedWithdrawal(t, w.pool, w.f, wrID, wrAmount, "rs-wd-"+wrID.String(), payProvA, "rs-instr-"+wrID.String()[:8])
+	submit := legacyApprovedForT1p(t, w.pool, w.f, wrID, wrAmount, "rs-wd-"+wrID.String(), payProvA, "rs-instr-"+wrID.String()[:8]) // F4: E7 in the attempt's transaction
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := submit(ctx, tx); err != nil {
+			return err
+		}
 		if _, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{
 			ID: attemptID, TenantID: w.f.tenantID, Operation: payments.AttemptOperationPayout, WithdrawalRequestID: &wrID,
 			ProviderID: payProvA, PaymentMethod: "bank_transfer", AssetCode: attAsset, Amount: attAmount, Interactive: false,

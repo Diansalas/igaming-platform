@@ -18,6 +18,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -87,6 +88,10 @@ func TestKillSwitchPredicate_T1p_Payout_InsertSubmittingAttempt(t *testing.T) {
 
 	blockedWithdrawal := insertWithdrawalRequest(t, pool, f, "approved", nil, nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// F4 (0169, RF4-1): the T1p shape - the fixture's allowing dispatch decision and E7 in this transaction.
+		if err := f4MarkSubmittedPending(ctx, tx, blockedWithdrawal, "mock"); err != nil {
+			return err
+		}
 		_, err := InsertSubmittingAttempt(ctx, tx, NewSubmittingAttempt{
 			ID: uuid.New(), TenantID: f.tenantID, Operation: AttemptOperationPayout,
 			WithdrawalRequestID: &blockedWithdrawal, ProviderID: "mock", PaymentMethod: "bank_transfer", AssetCode: "EUR",
@@ -94,12 +99,17 @@ func TestKillSwitchPredicate_T1p_Payout_InsertSubmittingAttempt(t *testing.T) {
 		})
 		return err
 	})
-	if err == nil {
-		t.Fatal("expected InsertSubmittingAttempt (T1p, payout) to be refused for a matching engaged switch")
+	if !errors.Is(err, ErrKillSwitchEngaged) {
+		// F4: the fixture's E7 now runs first in the transaction, so the refusal is pinned to the switch itself.
+		t.Fatalf("expected InsertSubmittingAttempt (T1p, payout) to be refused by the matching engaged switch, got %v", err)
 	}
 
 	allowedWithdrawal := insertWithdrawalRequest(t, pool, f, "approved", nil, nil)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// F4 (0169, RF4-1): the T1p shape - the fixture's allowing dispatch decision and E7 in this transaction.
+		if err := f4MarkSubmittedPending(ctx, tx, allowedWithdrawal, "other-provider"); err != nil {
+			return err
+		}
 		_, err := InsertSubmittingAttempt(ctx, tx, NewSubmittingAttempt{
 			ID: uuid.New(), TenantID: f.tenantID, Operation: AttemptOperationPayout,
 			WithdrawalRequestID: &allowedWithdrawal, ProviderID: "other-provider", PaymentMethod: "bank_transfer", AssetCode: "EUR",

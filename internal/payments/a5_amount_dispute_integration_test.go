@@ -38,6 +38,7 @@ func TestA5_Migration0163_DownRefusedWhileAMismatchResolutionExists(t *testing.T
 			steps++
 		}
 	}
+	f4ScratchClearGateDecisions(t, w.pool) // F4 (CHANGED FIXTURE): see the helper.
 	_, err = w.pool.MigrateDown(context.Background(), dir, steps)
 	if err == nil || !strings.Contains(err.Error(), "MR099") {
 		t.Fatalf("0163 down must refuse MR099, got %v", err)

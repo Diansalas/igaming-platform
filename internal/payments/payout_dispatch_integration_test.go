@@ -474,6 +474,11 @@ func TestPayoutDispatch_NotSent_ReclaimNeverDoubleSends(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			results[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				// F4 (migration 0169, WD053): a payout T2 needs an allowing re-dispatch decision of the same
+				// transaction; the fixture records one (the gate itself is tested in f4_payout_gate_integration_test.go).
+				if err := f4RecordRedispatchAllow(ctx, tx, wr.ID, attempt.ID); err != nil {
+					return err
+				}
 				return ClaimCreatedForSubmission(ctx, tx, attempt.ID, claim.Capability.ProviderID, uuid.New(), "sweeper", time.Now().Add(time.Minute))
 			})
 		}(i)

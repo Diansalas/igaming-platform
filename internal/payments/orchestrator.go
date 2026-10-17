@@ -17,6 +17,8 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalgate/standard"
 )
 
 // defaultMaxCascadeDepth bounds how many distinct providers a single
@@ -74,6 +76,18 @@ type Orchestrator struct {
 	// every payout of a BOUND withdrawal (fail closed); only a legacy NULL-binding withdrawal on
 	// a Synthetic adapter proceeds without it.
 	destinations *payoutinstrument.Service
+	// withdrawalGate is the WD-RG-1 withdrawal RG/risk gate re-run at payout dispatch (F4, A6 SR6 I-2): T1p
+	// (ClaimForDispatch) and the sweeper's T2 / T12. NewOrchestrator sets the production gate
+	// (withdrawalgate/standard, the same gate the request path uses); WithWithdrawalGate replaces it (tests). Nil
+	// (an Orchestrator built some other way) refuses every dispatch, fail closed.
+	withdrawalGate withdrawalgate.Gate
+}
+
+// WithWithdrawalGate replaces the WD-RG-1 gate used at payout dispatch (tests inject spies and failing gates;
+// production keeps NewOrchestrator's standard gate). Returns o for chaining. A nil gate refuses every dispatch.
+func (o *Orchestrator) WithWithdrawalGate(g withdrawalgate.Gate) *Orchestrator {
+	o.withdrawalGate = g
+	return o
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
@@ -105,6 +119,7 @@ func NewOrchestrator(providers map[string]PaymentProvider, resolver WebhookCrede
 		webhookSchemes: mustPaymentsSchemeSet(providers),
 		breaker:        NewBreaker(),
 		echoFrozen:     frozen,
+		withdrawalGate: standard.New(),
 	}
 }
 

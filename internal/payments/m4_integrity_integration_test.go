@@ -812,6 +812,7 @@ func TestR32_Migration0127UpDownUp_WholeSchema(t *testing.T) {
 // r32DownTo0126 rolls back every migration above 0127 (none today), then 0127 itself.
 func r32DownTo0126(t *testing.T, m *m4World) error {
 	t.Helper()
+	f4ScratchClearGateDecisions(t, m.pool) // F4: a later 0169 down refuses while decision rows exist.
 	if n := migrationsAbove(t, r32MigrationVersion); n > 0 {
 		if _, err := m.pool.MigrateDown(context.Background(), realMigrationsDir(t), n); err != nil {
 			t.Fatalf("down above 0127 (empty): %v", err)

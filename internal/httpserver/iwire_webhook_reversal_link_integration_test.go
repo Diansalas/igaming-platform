@@ -58,6 +58,10 @@ func TestIWire_Webhook_ReversalLink_RaisesDetachedP1(t *testing.T) {
 		}); err != nil {
 			return err
 		}
+		// F4 (migration 0169, WD053): the fixture records the allowing re-dispatch decision a payout T2 needs.
+		if err := f4RecordDispatchAllowHTTP(ctx, tx, wr, &attemptID); err != nil {
+			return err
+		}
 		if err := payments.ClaimCreatedForSubmission(ctx, tx, attemptID, "mock", uuid.New(), "iw-rl", time.Now().Add(time.Minute)); err != nil {
 			return err
 		}

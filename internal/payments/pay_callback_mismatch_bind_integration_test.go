@@ -526,7 +526,7 @@ func seedPayoutAttemptLiveNoRef(t *testing.T, e *depRefEnv) PaymentAttempt {
 		}); err != nil {
 			return err
 		}
-		return ClaimCreatedForSubmission(ctx, tx, attemptID, e.id, uuid.New(), "b3-payout", time.Now().Add(time.Minute))
+		return f4ClaimCreatedForSubmission(ctx, tx, attemptID, e.id, uuid.New(), "b3-payout", time.Now().Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("seed payout attempt: %v", err)
 	}

@@ -135,7 +135,9 @@ func a5ScratchCompleted(t *testing.T, pool *db.Pool) WithdrawalRequest {
 		_, err = tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`, wr.ID)
 		return err
 	})
-	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return MarkSubmitted(ctx, tx, wr.ID, "a5psp", "out-"+ref) })
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmitted(ctx, tx, wr.ID, "a5psp", "out-"+ref) })
+	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error { return Complete(ctx, tx, wr.ID, "a5psp", ref) })
 	var got WithdrawalRequest
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

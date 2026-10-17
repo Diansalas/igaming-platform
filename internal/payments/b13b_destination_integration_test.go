@@ -439,7 +439,7 @@ func TestB13B_T1p_LegacyUnbound_SyntheticOnly(t *testing.T) {
 	}
 	// Same legacy shape against a non-Synthetic adapter value.
 	l2 := w.legacyApproved(500, "b13b-legacy-2")
-	real := &Orchestrator{providers: map[string]PaymentProvider{w.pid: unmarkedPaymentsAdapter{w.prov}}, breaker: NewBreaker(), destinations: w.svc}
+	real := &Orchestrator{providers: map[string]PaymentProvider{w.pid: unmarkedPaymentsAdapter{w.prov}}, breaker: NewBreaker(), destinations: w.svc, withdrawalGate: standard.New()}
 	if _, err := real.ClaimForDispatch(w.ctx(), w.pool, KYCEnforcementPayoutGate{}, w.f.tenantID, l2.ID, "bank_transfer", testSubmitActor()); !errors.Is(err, ErrPayoutDestinationNotUsable) {
 		t.Fatalf("legacy + non-Synthetic adapter: %v, want ErrPayoutDestinationNotUsable", err)
 	} else if g, _ := payoutinstrument.IsGateRefusal(err); g == nil || g.Reason != payoutinstrument.ReasonTierRefused {
@@ -479,7 +479,7 @@ func (b13bSandboxVerifier) Verify(context.Context, payoutinstrument.VerifyReques
 func TestB13B_T1p_NonSyntheticAdapter_TieringMatrix(t *testing.T) {
 	w := newB13bW(t, "e")
 	real := func(svc *payoutinstrument.Service) *Orchestrator {
-		return &Orchestrator{providers: map[string]PaymentProvider{w.pid: unmarkedPaymentsAdapter{w.prov}}, breaker: NewBreaker(), destinations: svc}
+		return &Orchestrator{providers: map[string]PaymentProvider{w.pid: unmarkedPaymentsAdapter{w.prov}}, breaker: NewBreaker(), destinations: svc, withdrawalGate: standard.New()}
 	}
 	// (1) bound to a MOCK (synthetic-source) instrument: refused for a non-Synthetic adapter - the verifier that
 	// produced it is Synthetic, so it is not "a registered non-Synthetic verifier".

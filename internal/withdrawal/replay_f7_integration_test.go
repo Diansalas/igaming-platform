@@ -45,7 +45,7 @@ func f7Submitted(t *testing.T, pool *db.Pool, f fixture, amount int64, key, payo
 		return err
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", payoutRef)
+		return f4ThenSubmit(ctx, tx, wr.ID, func() error { return MarkSubmitted(ctx, tx, wr.ID, "mockpsp", payoutRef) })
 	})
 	return wr
 }

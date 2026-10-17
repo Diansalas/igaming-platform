@@ -448,6 +448,14 @@ func TestR32_Migration0127_BackfillsExistingDestinationParks(t *testing.T) {
 		ADD CONSTRAINT kyc_enforcement_decisions_outcome_check CHECK (outcome IN ('not_required','passed','pending','failed','unavailable','review'))`); err != nil {
 		t.Fatalf("scratch CHECK widen: %v", err)
 	}
+	// F4 (CHANGED FIXTURE): the current claim code records a WD-RG-1 decision row (migration 0169), which this 0126
+	// schema does not have: a scratch-only stub table with no guard stands in for it while the fixture payouts are
+	// claimed, and is dropped before the up below re-creates the real one (the 0158 stub precedent of reconciliation's
+	// migration_0097 test). Not under test here.
+	if _, err := m.pool.Raw().Exec(context.Background(), `CREATE TABLE withdrawal_gate_decisions (tenant_id uuid, withdrawal_request_id uuid,
+		payment_attempt_id uuid, stage text, allowed boolean, gate_code text, reason_code text, risk_outcome text, restriction_in_force text)`); err != nil {
+		t.Fatalf("scratch 0169 stub: %v", err)
+	}
 	var parks []*b11Parked
 	for i, reason := range []string{r32Reason, TerminalReasonDestinationMismatch} {
 		wr, a := m.payout(int64(1180 + i))
@@ -465,6 +473,9 @@ func TestR32_Migration0127_BackfillsExistingDestinationParks(t *testing.T) {
 		ALTER TABLE kyc_enforcement_decisions DROP CONSTRAINT kyc_enforcement_decisions_outcome_check,
 		ADD CONSTRAINT kyc_enforcement_decisions_outcome_check CHECK (outcome IN ('not_required','passed','pending','failed','unavailable'))`); err != nil {
 		t.Fatalf("scratch CHECK restore: %v", err)
+	}
+	if _, err := m.pool.Raw().Exec(context.Background(), `DROP TABLE withdrawal_gate_decisions`); err != nil {
+		t.Fatalf("drop the scratch 0169 stub: %v", err)
 	}
 	if _, err := m.pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
 		t.Fatalf("up: %v", err)

@@ -122,6 +122,11 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/payout_destination.go:payoutDestinationEvidence":        true,
 	"internal/payments/payout_destination.go:payoutTerminalDestinationSignal":  true,
 	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairAlertReason": true,
+	// F4 (migration 0169): the WD-RG-1 re-dispatch denial. applyRedispatchGate takes the caller's tx and is called ONLY
+	// from the sweeper's T2 / T12 claim transactions (reclaimPayoutCreated, resubmitPayoutAmbiguous), which open through
+	// alerting.InTx and flush after the commit; the raise is its last statement, after the decision row, Escalate and the
+	// audit row. (The T1p denial raise is inside ClaimForDispatch's own InTx closure and is not in this set.)
+	"internal/payments/payout_withdrawal_gate.go:applyRedispatchGate": true,
 	// ADR 0111 section 4.8 / section 20 (F-1, post-M4 signal cells): payoutPostM4Cell is the ONE function that raises the
 	// success_after_m4_not_paid / contradiction_after_m4_paid P1. It reaches RaiseGuarded outside an InTx closure itself
 	// (it takes the caller's tx), so it is reviewed here; it is called ONLY from applyResolvedReceiptEvidence (webhook

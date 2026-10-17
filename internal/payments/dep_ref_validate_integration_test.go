@@ -471,6 +471,10 @@ func seedPayoutAttemptBoundTo(t *testing.T, pool *db.Pool, f orchFixture, provid
 		}); err != nil {
 			return err
 		}
+		// F4 (migration 0169, WD053): the fixture records the allowing re-dispatch decision a payout T2 needs.
+		if err := f4RecordRedispatchAllow(ctx, tx, wr, attemptID); err != nil {
+			return err
+		}
 		if err := ClaimCreatedForSubmission(ctx, tx, attemptID, providerID, uuid.New(), "dr-seed", time.Now().Add(time.Minute)); err != nil {
 			return err
 		}

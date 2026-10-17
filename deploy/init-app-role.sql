@@ -757,3 +757,16 @@ BEGIN
     END IF;
 END
 $$;
+
+-- F4 (migration 0169, WD-RG-1 dispatch backstop): withdrawal_gate_decisions is append-only. Its deny trigger (WD055)
+-- and FORCE RLS are the binding controls; this narrowing is defence in depth against the blanket backfill GRANT above
+-- (which would otherwise re-grant UPDATE / DELETE). SELECT and INSERT only. Applied only once 0169 exists (the
+-- to_regclass test). No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.withdrawal_gate_decisions') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_gate_decisions FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON withdrawal_gate_decisions TO igaming_runtime';
+    END IF;
+END
+$$;

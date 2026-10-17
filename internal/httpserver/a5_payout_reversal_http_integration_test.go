@@ -55,6 +55,10 @@ func TestA5HTTP_PayoutReversal_AuthorizationAndQuorum(t *testing.T) {
 		if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`, wr.ID); err != nil {
 			return err
 		}
+		// F4 (migration 0169, WD053): the fixture records the allowing dispatch decision E7 needs.
+		if err := f4RecordDispatchAllowHTTP(ctx, tx, wr.ID, nil); err != nil {
+			return err
+		}
 		if err := withdrawal.MarkSubmitted(ctx, tx, wr.ID, "mockpsp", "out-"+ref); err != nil {
 			return err
 		}

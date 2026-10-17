@@ -51,6 +51,9 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	// ADR 0116 S1 (migration 0141): the AML hold-evaluator failure alert, raised in-tx from aml.EvaluateHold inside the
 	// money-boundary gate's own transaction; its result is returned to the gate (never dropped, LF F4).
 	"internal/aml/hold_eval.go:raiseEvalFailed": true,
+	// F4 (migration 0169): the WD-RG-1 re-dispatch denial alert; reached only from the sweeper's T2 / T12 claim
+	// transactions, which open through alerting.InTx (payout_sweep.go). The raise is its last statement.
+	"internal/payments/payout_withdrawal_gate.go:applyRedispatchGate": true,
 }
 
 // evidence/run transaction owners that MUST contain an alerting.InTx call.

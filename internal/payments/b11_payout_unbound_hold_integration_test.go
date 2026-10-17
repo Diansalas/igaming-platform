@@ -1421,6 +1421,10 @@ func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testi
 		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
 		legacy := w.approveWithdrawal(120, "b11-legacy-"+uuid.NewString())
 		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			// F4 (migration 0169, WD053): the fixture records the allowing dispatch decision E7 needs.
+			if err := f4RecordDispatchAllow(ctx, tx, legacy.ID); err != nil {
+				return err
+			}
 			return withdrawal.MarkSubmitted(ctx, tx, legacy.ID, w.provider, "b11-legacy-instr-"+uuid.NewString()[:8])
 		})
 		w.b11Complete(legacy.ID, ref)

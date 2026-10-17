@@ -197,6 +197,10 @@ func TestHSEC_HoldRelease_ExecutingTransition_DatabaseRechecks(t *testing.T) {
 		h.activateTenant()
 		h.tx(func(ctx context.Context, tx pgx.Tx) error {
 			// ADR 0113 (migration 0132): the legal E7 shape (provider_id set; WD022 without it).
+			// F4 (0169, WD053): the fixture records the allowing dispatch decision the E7 probe needs.
+			if err := f4RecordDispatchAllow(ctx, tx, wr.ID); err != nil {
+				return err
+			}
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted', provider_id = 'hsr-p' WHERE id = $1`, wr.ID)
 			return err
 		})

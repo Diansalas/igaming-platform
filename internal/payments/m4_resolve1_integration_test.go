@@ -943,6 +943,7 @@ func TestM4_Migration0125UpDownUp_WholeSchema(t *testing.T) {
 // migration does not silently turn this into a down of the wrong version.
 func m4DownTo0125(t *testing.T, m *m4World) error {
 	t.Helper()
+	f4ScratchClearGateDecisions(t, m.pool) // F4 (CHANGED FIXTURE): see the helper.
 	if _, err := m.pool.MigrateDown(context.Background(), realMigrationsDir(t), migrationsAbove(t, m4MigrationVersion)); err != nil {
 		t.Fatalf("down above 0125 (empty): %v", err)
 	}

@@ -42,6 +42,29 @@ func legacySubmittedWithdrawal(t *testing.T, pool *db.Pool, f fixture, wrID uuid
 	wdpath.AdvanceAsRuntime(context.Background(), t, pool, f.tenantID, wrID, withdrawal.StateSubmitted, spec)
 }
 
+// legacyApprovedForT1p is legacySubmittedWithdrawal stopped at `approved`; the returned step performs E7 (with
+// wdpath's fixture ALLOW decision) inside the CALLER's transaction. F4 (migration 0169, ledger-finance RF4-1): a
+// payout attempt born `submitting` must be inserted in the SAME transaction as an allowing dispatch decision and
+// the E7 that makes the request `submitted` (the T1p shape), so a fixture that inserts the attempt runs this step
+// first in that transaction.
+func legacyApprovedForT1p(t *testing.T, pool *db.Pool, f fixture, wrID uuid.UUID, amount int64, idemKey, provider, instruction string) func(ctx context.Context, tx pgx.Tx) error {
+	t.Helper()
+	spec := wdpath.Spec{ID: wrID, TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		AssetCode: "EUR", Amount: amount, IdempotencyKey: idemKey, ProviderID: provider, ProviderReference: instruction}
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := wdpath.Plant(ctx, tx, spec)
+			return err
+		})
+	}); err != nil {
+		t.Fatalf("plant legacy withdrawal %s: %v", wrID, err)
+	}
+	wdpath.AdvanceAsRuntime(context.Background(), t, pool, f.tenantID, wrID, withdrawal.StateApproved, spec)
+	return func(ctx context.Context, tx pgx.Tx) error {
+		return wdpath.Advance(ctx, tx, wrID, withdrawal.StateSubmitted, spec)
+	}
+}
+
 // ownerTamperHoldLegs runs fn (which posts hold-account legs that NO withdrawal request names) with the
 // two 0132 hold-entry triggers disabled for fn only, inside the caller's OWNER transaction - an ADR
 // 0110 9.4 owner tamper plant reproducing history that the database now refuses to every session

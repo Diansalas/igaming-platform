@@ -418,24 +418,24 @@ func TestPollPayoutStatus_N6_MismatchAgainstFallbackWithdrawalReference_Disputes
 	// (simulating an attempt that reached ambiguous before the N1/R6
 	// attempt-level persistence fix, or any other path that left the
 	// attempt's own reference NULL).
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if err := withdrawal.MarkSubmittedPending(ctx, tx, wr.ID, "mock-r4-n6"); err != nil {
-			return err
-		}
-		return withdrawal.AttachProviderReference(ctx, tx, wr.ID, "n6-fallback-withdrawal-ref")
-	}); err != nil {
-		t.Fatalf("attach withdrawal-level reference: %v", err)
-	}
-	// Withdrawal must be `submitted` for AttachProviderReference to
-	// succeed and for PollPayoutStatus's own flow to apply - drive a
-	// normal claim now, on the SAME (now-submitted) withdrawal, is not
-	// possible (ClaimForDispatch requires `approved`). Instead, construct
-	// the attempt directly (via the same InsertSubmittingAttempt T1p uses)
-	// in the shape PollPayoutStatus expects: no attempt-level reference,
-	// submitting, expired lease.
 	attemptID := uuid.New()
 	var attempt PaymentAttempt
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := f4MarkSubmittedPending(ctx, tx, wr.ID, "mock-r4-n6"); err != nil {
+			return err
+		}
+		if err := withdrawal.AttachProviderReference(ctx, tx, wr.ID, "n6-fallback-withdrawal-ref"); err != nil {
+			return err
+		}
+		// Withdrawal must be `submitted` for AttachProviderReference to
+		// succeed and for PollPayoutStatus's own flow to apply - drive a
+		// normal claim now, on the SAME (now-submitted) withdrawal, is not
+		// possible (ClaimForDispatch requires `approved`). Instead, construct
+		// the attempt directly (via the same InsertSubmittingAttempt T1p uses)
+		// in the shape PollPayoutStatus expects: no attempt-level reference,
+		// submitting, expired lease.
+		// F4 (0169, RF4-1): the attempt born `submitting` is inserted in the SAME transaction as the fixture's
+		// allowing dispatch decision and E7 (the T1p shape); this used to be a second transaction.
 		var err error
 		attempt, err = InsertSubmittingAttempt(ctx, tx, NewSubmittingAttempt{
 			ID: attemptID, TenantID: f.tenantID, Operation: AttemptOperationPayout,

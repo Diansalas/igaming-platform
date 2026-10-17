@@ -54,16 +54,25 @@ func TestB13B_Static_ClaimForDispatchOrder(t *testing.T) {
 		"withdrawal.LockApprovedForSubmission(", "tenant.RequireActiveForPaymentInitiation(", "evaluatePayoutGate(",
 		"return fmt.Errorf(\"payments: route payout: %w\", routeErr)", "gatePayoutDestination(",
 	}
+	// F4 (CHANGED ASSERTION): the order is now matched as a subsequence starting at the L1 lock, because the F4
+	// pre-lock block (below) also calls tenant.RequireActiveForPaymentInitiation BEFORE the lock (the request-path
+	// order: status keys, then the WD-RG-1 gate's L0.4, then L1). The post-lock re-check this test pins is unchanged.
 	last := -1
 	for _, s := range order {
-		i := strings.Index(body, s)
+		i := strings.Index(body[last+1:], s)
 		if i < 0 {
-			t.Fatalf("ClaimForDispatch no longer contains %q", s)
+			t.Fatalf("ClaimForDispatch order broken at %q (absent after the previous step)", s)
 		}
-		if i < last {
-			t.Fatalf("ClaimForDispatch order broken at %q", s)
-		}
-		last = i
+		last += 1 + i
+	}
+	// F4: the pre-lock WD-RG-1 block: status gate, then the gate evaluation, then the L1 lock; the allowing decision
+	// row is recorded before approved -> submitted.
+	pre := strings.Index(body, "tenant.RequireActiveForPaymentInitiation(")
+	eval := strings.Index(body, "withdrawal.EvaluateDispatchGate(")
+	lock := strings.Index(body, "withdrawal.LockApprovedForSubmission(")
+	record := strings.LastIndex(body[:strings.Index(body, "withdrawal.MarkSubmittedPending(")], "withdrawal.RecordDispatchGateDecision(")
+	if pre < 0 || eval < 0 || pre >= eval || eval >= lock || record < 0 || record <= lock {
+		t.Fatalf("F4 order must be status gate(%d) < WD-RG-1 gate(%d) < L1 lock(%d) < allow decision row(%d) < submitted", pre, eval, lock, record)
 	}
 	gate := strings.Index(body, "gatePayoutDestination(")
 	mark := strings.Index(body, "withdrawal.MarkSubmittedPending(")

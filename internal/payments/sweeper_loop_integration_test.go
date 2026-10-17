@@ -165,7 +165,7 @@ func TestSweeperLoop_StaleClaimantCannotRevertFreshClaim_TokenCAS(t *testing.T) 
 	// ...and B re-claims it with a fresh token (T2).
 	tokenB := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ClaimCreatedForSubmission(ctx, tx, staleA.ID, *staleA.ProviderID, tokenB, "sweeper-payout-reclaim", timeNowPlus(payoutResubmitLease))
+		return f4ClaimCreatedForSubmission(ctx, tx, staleA.ID, *staleA.ProviderID, tokenB, "sweeper-payout-reclaim", timeNowPlus(payoutResubmitLease))
 	}); err != nil {
 		t.Fatalf("claim B: %v", err)
 	}
