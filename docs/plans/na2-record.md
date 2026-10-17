@@ -48,5 +48,21 @@ PAY-DEPOSIT-MISMATCH-ALERT-1: CLOSED (IMPLEMENTED). A provider success with mism
 `mismatched_success_on_declined_deposit`; on a SUCCEEDED deposit `mismatched_success_on_succeeded_deposit`; raise only, no state/ledger effect, no migration.
 ADR 0095 s42.8 hard gate satisfied for this item.
 
+## Other existing tests changed deliberately (behaviour intentionally changed; none weakened)
+- `internal/payments/payout_callback_audit2_integration_test.go` TestCallbackAudit2_Deposit_OrphanedReceipt_Redelivered_AuditedOnce_Resolved: the assertion
+  "a deposit raises no alert today" (0 rows) became "exactly one alert with the mismatched_success_on_succeeded_deposit discriminator". Audit-once, receipt
+  resolution, state and ledger assertions unchanged.
+- `internal/payments/iwire_lf9_integration_test.go` (LF9 race, succeeded branch): "no park alert" now permits exactly the one new
+  mismatched_success_on_succeeded_deposit signal row (a losing contradicting success landing after the credited success) and still fails on any other alert.
+  The disputed branch is unchanged.
+- `internal/alerting/static_wiring_test.go`, `static_derived_raise_set_test.go`: the reviewed-helper lists gained `raiseDepositSignalAlert` (called only from the
+  receipt cells, themselves already in the reviewed set); the B-1 / CR2-S4 / LF-F4 guards all stay in force and pass.
+
 ## Verification
-(see final section below)
+Private DB per run; all integration commands `-tags integration -count=1 -p 1`.
+- gofmt clean; go vet plain and -tags integration clean on internal/payments, internal/alerting, internal/httpserver.
+- payments `-run 'Callback|Receipt|Poll|Alert|Mismatch|Deposit'` (-timeout 50m): first run had exactly 2 failures (the two tests above, which asserted the old no-alert behaviour); after the
+  deliberate updates those two plus the new tests pass (-count=3: ok).
+- payments new/related subset (DepositMismatched*, DepositBenign*, DepositSignal*, R5_*, R6_*): all PASS (incl. payout R-5/R-6 unchanged).
+- internal/alerting full: first run failed only the two static wiring guards (new helper unlisted); after listing it, `-run Static` ok. (Full alerting package ~250s, all other tests passed.)
+- internal/httpserver `-run 'Webhook|IWire|Deposit'`: ok, including the new TestWebhook_DepositMismatchedSuccess_DeclinedAndSucceeded_RaiseOneP1.
