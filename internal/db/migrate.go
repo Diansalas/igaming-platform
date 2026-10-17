@@ -108,7 +108,7 @@ func findVersionGaps(migrations []migration) []string {
 // 0161 sit between 0158/0160 and 0160/0162. Only genuinely unused versions belong here (0158 is a real
 // migration and is NOT listed). A gap is tolerated ONLY for a version listed here; any other missing version
 // still fails `migrate verify`. If a listed version is later used, remove it from this list.
-var reservedUnusedVersions = map[int64]struct{}{143: {}, 144: {}, 145: {}, 146: {}, 147: {}, 148: {}, 149: {}, 150: {}, 159: {}, 161: {}}
+var reservedUnusedVersions = map[int64]struct{}{143: {}, 144: {}, 145: {}, 146: {}, 147: {}, 148: {}, 149: {}, 150: {}, 159: {}, 161: {}, 167: {}, 168: {}, 169: {}}
 
 func findVersionGapsExcluding(migrations []migration, reserved map[int64]struct{}) []string {
 	if len(migrations) == 0 {
