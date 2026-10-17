@@ -695,8 +695,11 @@ func (w *payWorld) payoutFixture(t *testing.T, provider, instruction, settlement
 	// ADR 0113 (migration 0132): the request is planted as E0 + E0b and walked to `submitted` through the
 	// Go writers as igaming_runtime (legacySubmittedWithdrawal); it used to be a free-standing hold leg
 	// plus a direct `submitted` INSERT, which the database now refuses (WD040 / WD025).
-	legacySubmittedWithdrawal(t, w.pool, w.f, wrID, amount, "wd-"+wrID.String(), provider, instruction)
+	submit := legacyApprovedForT1p(t, w.pool, w.f, wrID, amount, "wd-"+wrID.String(), provider, instruction) // F4: E7 in the attempt's transaction
 	err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := submit(ctx, tx); err != nil {
+			return err
+		}
 		if _, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{
 			ID: attemptID, TenantID: w.f.tenantID, Operation: payments.AttemptOperationPayout, WithdrawalRequestID: &wrID,
 			ProviderID: provider, PaymentMethod: "bank_transfer", AssetCode: "EUR", Amount: amount, Interactive: false,
