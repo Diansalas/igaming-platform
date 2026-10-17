@@ -73,3 +73,9 @@ deposit. A sticky block that survives a deposit is NOT built (owner question Q2)
 The tombstone branch raises a P1 last in its transaction. Check D (reconciliation) surfaces reversed-arm and orphan `withdrawal_reversed`
 findings. Delivery of any alert to a person depends on `alert-delivery-channels.md` (a route must exist; email is MOCK). Payout-dispute
 and T14 specific alerts remain `NOT IMPLEMENTED` (PAY-PAYOUT-DISPUTE-ALERT-1).
+
+## Standing finding: `pay_payout_reversal_tombstone_but_paid` (migration 0167)
+Raised by payment-statement reconciliation when a payout-reversal tombstone exists for a payout that the statement shows as paid
+(a late original arriving after the platform wrote the tombstone). It is a P1-class money finding: do not clear it by editing
+data. Use the governed payout-reversal/force-resolve flow (four-eyes, proof-bound decisions per ADR 0110 T8) and record the
+outcome on the finding. Return-line semantics for a real PSP are PROVIDER DEPENDENT.
