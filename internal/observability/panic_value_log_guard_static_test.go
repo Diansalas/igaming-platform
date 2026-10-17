@@ -195,24 +195,6 @@ func isNilIdent(e ast.Expr) bool {
 	return ok && id.Name == "nil"
 }
 
-func isDefiningIdent(id *ast.Ident, decl ast.Node) bool {
-	switch d := decl.(type) {
-	case *ast.AssignStmt:
-		for _, l := range d.Lhs {
-			if l == id {
-				return true
-			}
-		}
-	case *ast.ValueSpec:
-		for _, nm := range d.Names {
-			if nm == id {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func recvTypeName(e ast.Expr) string {
 	switch t := e.(type) {
 	case *ast.StarExpr:
