@@ -177,7 +177,9 @@ func (w *world) check(name string, fn func(t *T)) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				t.set(statusFail, "", "check panicked: %v", r)
+				// PANIC-LOG-VALUE-1: the report carries the panic TYPE only;
+				// a panic value can embed a response body or a credential.
+				t.set(statusFail, "", "check panicked (%s)", fmt.Sprintf("%T", r))
 			}
 		}()
 		fn(t)

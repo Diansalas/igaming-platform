@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -424,7 +425,7 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 	defer func() {
 		if rec := recover(); rec != nil {
 			requestID := observability.RequestIDFromContext(r.Context())
-			rt.logger.Error("webhook_admission_panic_recovered", "panic", rec, "domain", string(domain))
+			rt.logger.Error("webhook_admission_panic_recovered", "panic_code", "webhook_admission_preauth_panic", "panic_type", fmt.Sprintf("%T", rec), "domain", string(domain))
 			writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
 			rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPanic, observability.WebhookAdmissionStagePreAuth)
 			release, ok = nil, false
@@ -604,7 +605,7 @@ func (rt *webhookAdmissionRuntime) admitVerified(w http.ResponseWriter, r *http.
 	defer func() {
 		if rec := recover(); rec != nil {
 			requestID := observability.RequestIDFromContext(r.Context())
-			rt.logger.Error("webhook_admission_panic_recovered", "panic", rec, "domain", string(domain))
+			rt.logger.Error("webhook_admission_panic_recovered", "panic_code", "webhook_admission_verified_panic", "panic_type", fmt.Sprintf("%T", rec), "domain", string(domain))
 			writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
 			rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPanic, observability.WebhookAdmissionStageVerified)
 			release, ok = nil, false

@@ -203,9 +203,10 @@ func safeCall[T any](ctx context.Context, cc CallContext, fn AdapterCall[T]) (re
 			// SEC-8: record the panic value's TYPE only. The value itself
 			// (a string, an error, a vendor struct) can carry a credential,
 			// URL or vendor body and would otherwise flow into logs/audit
-			// via GateResult.Err (redactedReason passes it through).
+			// via GateResult.Err. adapterPanicError renders the type name
+			// only, and redactedReason allow-lists exactly that rendering.
 			var zero T
-			result, class, err = zero, ErrorClassAmbiguous, fmt.Errorf("payments: adapter panic recovered (%T)", r)
+			result, class, err = zero, ErrorClassAmbiguous, &adapterPanicError{typ: fmt.Sprintf("%T", r)}
 		}
 	}()
 	// PRH-I5: the CallContext also rides on ctx so a MOCK adapter can tag
@@ -214,11 +215,40 @@ func safeCall[T any](ctx context.Context, cc CallContext, fn AdapterCall[T]) (re
 	return fn(withCallContext(ctx, cc), cc)
 }
 
+// adapterPanicError is safeCall's own error for a recovered adapter panic
+// (SEC-8). It carries the panic value's TYPE name only - a Go type name
+// is program text, never runtime data - so its Error() is safe to render.
+type adapterPanicError struct{ typ string }
+
+func (e *adapterPanicError) Error() string {
+	return "payments: adapter panic recovered (" + e.typ + ")"
+}
+
+// redactedReasonSentinels is REDACTEDREASON-PASSTHROUGH-1's allow-list:
+// the platform's OWN sentinel errors that may reach redactedReason (from
+// the credential resolver or an in-package MOCK adapter/statement
+// source). For a match only the sentinel's fixed text is returned - never
+// err.Error(), so any context wrapped around the sentinel is dropped too.
+var redactedReasonSentinels = []error{
+	ErrProviderCallRefused,
+	ErrStatementFetchUnderTx,
+	providercred.ErrOutboundCredentialUnavailable,
+}
+
+// redactedAdapterErrorLabel is the generic label for every error that is
+// not a transport error, a context error, the gate's own panic error or
+// one of redactedReasonSentinels.
+const redactedAdapterErrorLabel = "adapter error (redacted)"
+
 // redactedReason returns an allow-listed description of err: for a
 // *url.Error (which embeds the request URL, including any query string
 // or userinfo), only the operation and a generic timeout/canceled/other
-// classification survive. No vendor response body, header or raw error
-// string ever passes through this function.
+// classification survive. A recovered adapter panic keeps its type name
+// only; one of redactedReasonSentinels yields that sentinel's own fixed
+// text; ANYTHING else yields redactedAdapterErrorLabel
+// (REDACTEDREASON-PASSTHROUGH-1). No vendor response body, header or raw
+// error string ever passes through this function - err.Error() is never
+// returned for an error this package did not itself construct.
 func redactedReason(err error) string {
 	if err == nil {
 		return ""
@@ -239,15 +269,18 @@ func redactedReason(err error) string {
 		return "timeout"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
-	default:
-		// Not a transport error and not one of our own sentinels above:
-		// still never echo it verbatim if it might carry a vendor body.
-		// The MOCK adapter's own errors are safe (defined in this
-		// package), so we allow those through unchanged; anything else
-		// gets a generic label. Since Error() strings from vendor SDKs
-		// are exactly what S95-C8(a) exists to keep out of logs, callers
-		// outside this package must never construct an error type that
-		// embeds vendor response bytes into Error().
-		return err.Error()
 	}
+	var perr *adapterPanicError
+	if errors.As(err, &perr) {
+		return perr.Error()
+	}
+	for _, sentinel := range redactedReasonSentinels {
+		if errors.Is(err, sentinel) {
+			return sentinel.Error()
+		}
+	}
+	// Not a transport error and not one of our own sentinels: never echo
+	// it - a vendor SDK's or a real adapter's Error() can embed response
+	// bytes, headers or a credential-bearing URL (S95-C8(a)).
+	return redactedAdapterErrorLabel
 }
