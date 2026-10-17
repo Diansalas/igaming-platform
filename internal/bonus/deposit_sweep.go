@@ -343,6 +343,25 @@ func matchesDepositEligibility(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		}
 	}
 	if ov.FirstDepositOnly {
+		// BONUS-FIRST-DEPOSIT-DOUBLE-GRANT-1: one FirstDepositOnly Grant per (tenant, player, offer), EVER. If ANY
+		// Grant row already exists for that triple - any offer version, any status including cancelled/forfeited/
+		// expired - the slot is consumed. A late-committing EARLIER deposit (NA-4 re-scan) therefore never receives a
+		// second Grant and never replaces the existing one (no retroactive swap: the Grant already issued, and every
+		// Progress entry hanging off it, stays attributed to the deposit it was issued for). A Grant for THIS
+		// deposit's own trigger_reference is an idempotent replay, not a consumed slot. Race-free for the sweep
+		// because it runs under the per-tenant advisory lock; migration 0173's partial unique index is the backstop.
+		var consumed bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM bonus_grants
+				 WHERE tenant_id = $1 AND player_account_id = $2 AND offer_id = $3 AND trigger_reference <> $4)`,
+			tenantID, event.PlayerAccountID, ov.OfferID, event.LedgerTransactionID.String(),
+		).Scan(&consumed); err != nil {
+			return false, fmt.Errorf("bonus: check first-deposit slot: %w", err)
+		}
+		if consumed {
+			return false, nil
+		}
 		first, err := isFirstDeposit(ctx, tx, tenantID, event.PlayerAccountID, event.LedgerTransactionID)
 		if err != nil {
 			return false, err

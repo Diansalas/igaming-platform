@@ -11,12 +11,14 @@ package bonus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
@@ -212,5 +214,156 @@ func TestRunDepositSweepForTenant_RescanSkipsAlreadyGrantedDeposits(t *testing.T
 	second := runSweepOnce(t, pool, f)
 	if second.EventsProcessed != 0 || second.GrantsDenied != 0 || second.GrantsIssued != 0 {
 		t.Fatalf("re-scan re-evaluated an already-granted deposit: %+v", second)
+	}
+}
+
+func grantCountForPlayerOffer(t *testing.T, pool *db.Pool, f lifecycleFixture, playerID, offerID uuid.UUID) int {
+	t.Helper()
+	var n int
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM bonus_grants WHERE tenant_id = $1 AND player_account_id = $2 AND offer_id = $3`, f.tenantID, playerID, offerID).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count grants for player/offer: %v", err)
+	}
+	return n
+}
+
+// BONUS-FIRST-DEPOSIT-DOUBLE-GRANT-1 (ledger-finance review condition C1):
+// after the NA-4 bounded re-scan, a late-committing EARLIER deposit also
+// qualified as "first deposit" (isFirstDeposit saw nothing earlier) and
+// received a second FirstDepositOnly Grant for the same player and offer.
+// SEMANTICS (no retroactive swap): the first deposit to be GRANTED holds
+// the one FirstDepositOnly Grant for (tenant, player, offer); a deposit
+// that commits late with an earlier posted_at never replaces or duplicates
+// it. Status is irrelevant (a cancelled/forfeited Grant still consumes it).
+func TestRunDepositSweepForTenant_LateEarlierDepositDoesNotGetSecondFirstDepositOnlyGrant(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedDepositMatchableOffer(t, pool, f, true, nil)
+	secondPlayer, secondWallet := seedSecondPlayerAccountSamePerson(t, pool, f)
+
+	// Warm-up on the OTHER account so shared ledger accounts exist and a
+	// watermark exists, without consuming secondPlayer's first deposit.
+	seedRawDeposit(t, pool, f, 1000, "card")
+	runSweepOnce(t, pool, f)
+	// Pre-create (committed) the second wallet's cash account so A and B do not contend on its uncommitted creation.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &secondWallet, ledger.AccountPlayerCash, f.assetCode)
+		return e
+	}); err != nil {
+		t.Fatalf("pre-create account: %v", err)
+	}
+
+	release := make(chan struct{})
+	posted, done := startSlowDeposit(t, pool, f, secondPlayer, secondWallet, 20000, release)
+	<-posted // A (the genuinely earliest deposit) has started but not posted
+
+	depositB := seedRawDepositForAccount(t, pool, f, secondPlayer, secondWallet, 30000, "card")
+	runSweepOnce(t, pool, f)
+	if got := grantCountFor(t, pool, f, depositB); got != 1 {
+		t.Fatalf("deposit B (first visible deposit): expected 1 grant, got %d", got)
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("slow deposit A: %v", err)
+	}
+	depositA := <-depositIDCh
+
+	for i := 0; i < 3; i++ { // late re-scan plus retries
+		runSweepOnce(t, pool, f)
+	}
+	if got := grantCountFor(t, pool, f, depositA); got != 0 {
+		t.Fatalf("BONUS-FIRST-DEPOSIT-DOUBLE-GRANT-1: late earlier deposit A received a second FirstDepositOnly grant (grants=%d, want 0)", got)
+	}
+	if got := grantCountForPlayerOffer(t, pool, f, secondPlayer, co.offerID); got != 1 {
+		t.Fatalf("expected exactly ONE FirstDepositOnly grant for (player, offer), got %d", got)
+	}
+}
+
+// Same late-commit scenario, NON-FirstDepositOnly offer: every deposit still earns its own Grant (the C1 fix must not
+// leak into offers without the first-deposit rule).
+func TestRunDepositSweepForTenant_LateEarlierDepositStillGrantedForNonFirstDepositOnlyOffer(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedDepositMatchableOffer(t, pool, f, false, nil)
+	secondPlayer, secondWallet := seedSecondPlayerAccountSamePerson(t, pool, f)
+	seedRawDeposit(t, pool, f, 1000, "card")
+	runSweepOnce(t, pool, f)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &secondWallet, ledger.AccountPlayerCash, f.assetCode)
+		return e
+	}); err != nil {
+		t.Fatalf("pre-create account: %v", err)
+	}
+	release := make(chan struct{})
+	posted, done := startSlowDeposit(t, pool, f, secondPlayer, secondWallet, 20000, release)
+	<-posted
+	depositB := seedRawDepositForAccount(t, pool, f, secondPlayer, secondWallet, 30000, "card")
+	runSweepOnce(t, pool, f)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("slow deposit A: %v", err)
+	}
+	depositA := <-depositIDCh
+	for i := 0; i < 3; i++ {
+		runSweepOnce(t, pool, f)
+	}
+	if a, b := grantCountFor(t, pool, f, depositA), grantCountFor(t, pool, f, depositB); a != 1 || b != 1 {
+		t.Fatalf("non-FirstDepositOnly offer must grant per deposit: A=%d B=%d", a, b)
+	}
+	if got := grantCountForPlayerOffer(t, pool, f, secondPlayer, co.offerID); got != 2 {
+		t.Fatalf("want 2 grants for (player, offer), got %d", got)
+	}
+}
+
+// Overlapping sweeps (no advisory lock: worst case) after a late earlier deposit: the application rule plus the 0173
+// backstop leave exactly ONE FirstDepositOnly Grant. A losing racer may only fail with unique_violation (23505).
+func TestRunDepositSweepForTenant_LateEarlierDepositOverlappingSweepsSingleFirstDepositGrant(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedDepositMatchableOffer(t, pool, f, true, nil)
+	secondPlayer, secondWallet := seedSecondPlayerAccountSamePerson(t, pool, f)
+	seedRawDeposit(t, pool, f, 1000, "card")
+	runSweepOnce(t, pool, f)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &secondWallet, ledger.AccountPlayerCash, f.assetCode)
+		return e
+	}); err != nil {
+		t.Fatalf("pre-create account: %v", err)
+	}
+	release := make(chan struct{})
+	posted, done := startSlowDeposit(t, pool, f, secondPlayer, secondWallet, 20000, release)
+	<-posted
+	seedRawDepositForAccount(t, pool, f, secondPlayer, secondWallet, 30000, "card")
+	runSweepOnce(t, pool, f)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("slow deposit A: %v", err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				_, e := RunDepositSweepForTenant(ctx, tx, f.tenantID, uuid.Nil)
+				return e
+			})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		var pgErr *pgconn.PgError
+		if e != nil && !(errors.As(e, &pgErr) && pgErr.Code == pgUniqueViolation) {
+			t.Fatalf("overlapping sweep failed with something other than unique_violation: %v", e)
+		}
+	}
+	runSweepOnce(t, pool, f) // retry
+	if got := grantCountForPlayerOffer(t, pool, f, secondPlayer, co.offerID); got != 1 {
+		t.Fatalf("expected exactly ONE FirstDepositOnly grant under overlapping sweeps, got %d", got)
 	}
 }
