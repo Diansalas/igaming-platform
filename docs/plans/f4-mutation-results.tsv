@@ -33,3 +33,7 @@ sql_insert_xact_not_forced	KILLED	./internal/withdrawal/ --- FAIL: TestF4_DB_Dec
 sql_insert_id_not_forced	KILLED	./internal/withdrawal/ --- FAIL: TestF4_DB_DecisionRows_AppendOnly_Shape_AndTriggerOwnedColumns (0.21s)
 sql_append_only_off	KILLED	migration failed to apply
 sql_e7_when_wrong_edge	KILLED	./internal/withdrawal/ --- FAIL: TestF4_DB_E7_NeedsAnAllowingDecisionOfTheSameTransaction (0.22s);--- FAIL: TestF4_DB_E7_RGBackstop (0.25s);--- FAIL: TestF4_DB_TerminalEdgesAreNotGated (0.55s)
+sql_insert_guard_decision_off	KILLED	./internal/payments/ --- FAIL: TestF4_DB_PayoutAttemptBornSubmitting_NeedsTheGatedT1p (3.86s)
+sql_insert_guard_state_off	KILLED	./internal/payments/ --- FAIL: TestF4_DB_PayoutAttemptBornSubmitting_NeedsTheGatedT1p (3.59s)
+sql_insert_guard_rg_off	KILLED	./internal/payments/ --- FAIL: TestF4_DB_PayoutAttemptBornSubmitting_NeedsTheGatedT1p (4.05s)
+sql_insert_guard_when_off	KILLED	./internal/payments/ --- FAIL: TestF4_DB_PayoutAttemptBornSubmitting_NeedsTheGatedT1p (3.34s)

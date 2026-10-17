@@ -7,7 +7,7 @@ WT = sys.argv[1]
 OUT = sys.argv[2]
 ONLY = set(sys.argv[3:])
 S = '/tmp/claude-0/-home-user-igaming-platform/82298384-cc24-5365-b2fc-220688ed9969/scratchpad'
-MUTDB = 'f420261016221123p14545x02'
+MUTDB = 'f420261017032452p14545x02'
 ENV = dict(os.environ, PRIV_DB=MUTDB, PRIV_SRC=WT)
 
 def gotest(pkg, run):
@@ -76,6 +76,10 @@ mutants = [
     ('sql_insert_id_not_forced', SQL, M, "    NEW.id := pg_catalog.gen_random_uuid();", "    NEW.id := COALESCE(NEW.id, pg_catalog.gen_random_uuid());", [WD]),
     ('sql_append_only_off', SQL, M, "CREATE TRIGGER withdrawal_gate_decisions_immutable BEFORE UPDATE OR DELETE ON withdrawal_gate_decisions", "CREATE TRIGGER withdrawal_gate_decisions_immutable BEFORE TRUNCATE ON withdrawal_gate_decisions", [WD]),
     ('sql_e7_when_wrong_edge', SQL, M, "    WHEN (OLD.state = 'approved' AND NEW.state = 'submitted')", "    WHEN (OLD.state = 'submitted' AND NEW.state = 'completed')", [WD]),
+    ('sql_insert_guard_decision_off', SQL, M, "       OR NOT public.withdrawal_dispatch_decision_ok(NEW.tenant_id, NEW.withdrawal_request_id, 'dispatch', NULL) THEN", "       OR false THEN", [PAY]),
+    ('sql_insert_guard_state_off', SQL, M, "    IF v_state IS DISTINCT FROM 'submitted'\n       OR NOT", "    IF false\n       OR NOT", [PAY]),
+    ('sql_insert_guard_rg_off', SQL, M, "    v_rg := public.withdrawal_dispatch_rg_violation(NEW.tenant_id, v_account, v_wallet);\n    IF v_rg IS NOT NULL THEN\n        RAISE EXCEPTION 'payment_attempts: a payout attempt born", "    v_rg := NULL;\n    IF v_rg IS NOT NULL THEN\n        RAISE EXCEPTION 'payment_attempts: a payout attempt born", [PAY]),
+    ('sql_insert_guard_when_off', SQL, M, "    WHEN (NEW.operation = 'payout' AND NEW.state = 'submitting')", "    WHEN (NEW.operation = 'payout' AND NEW.state = 'never')", [PAY]),
 ]
 
 results = []
