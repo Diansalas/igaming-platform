@@ -274,7 +274,8 @@ that decision) does, and so does every **physical** artefact (base backup, WAL a
 carries the password hashes. Treat a suspected exposure (lost or unencrypted set, leaked decryption identity or signing key, credential used outside the runner, an
 untrusted restore target) as a security incident and, without waiting for proof:
 
-1. **Rotate (re-key) the signed-actor-proof key family** after ANY suspected exposure of a legacy logical set, any physical copy, the **owner/migration credential**, or a backup
+1. **Rotate (re-key) the signed-actor-proof key family** after ANY suspected exposure of a legacy logical set, any physical copy, the **owner/migration credential or the
+   credential of any member of the owner role** (the restore loader role, on RDS the master user), or a backup
    credential used against a database still below migration 0166 (before 0166 it could read the key: residual R1). A current logical set and the backup credential of a
    migrated database cannot reach it (F1); check `backup.sh`'s preflight / the baseline invariant were green for the period in question. Follow `operational-runbooks.md` section 15 (emergency path: new kid, deploy, retire every older kid at once); in-flight proofs under
    the old key stop verifying, by design. Retire legacy sets rather than keep them (their baselines also hold an md5 over row text that includes the secret).

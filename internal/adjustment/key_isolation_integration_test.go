@@ -154,12 +154,20 @@ func TestKeyIsolation_Catalog(t *testing.T) {
 	if got := q(`SELECT string_agg(p.proname || ':' || p.prosecdef || ':' || array_to_string(p.proconfig, ';') || ':' || p.prorettype::regtype::text || ':'
 		|| (SELECT string_agg(CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, '+' ORDER BY CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END)
 		      FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a), ',' ORDER BY p.proname)
-		FROM pg_proc p WHERE p.prosrc LIKE '%actorproof_private%'`); got != "actor_proof_key_active:true:search_path=pg_catalog, public, pg_temp:boolean:igaming+igaming_runtime,actor_proof_require:true:search_path=pg_catalog, public, pg_temp:void:igaming+igaming_runtime" {
+		FROM pg_proc p WHERE (CASE WHEN p.prosqlbody IS NULL THEN p.prosrc ELSE pg_get_functiondef(p.oid) END) LIKE '%actorproof_private%'`); got != "actor_proof_key_active:true:search_path=pg_catalog, public, pg_temp:boolean:igaming+igaming_runtime,actor_proof_require:true:search_path=pg_catalog, public, pg_temp:void:igaming+igaming_runtime" {
 		t.Fatalf("functions reaching into actorproof_private:\n%s", got)
 	}
 	// ... and nothing still reads the old location
-	if got := q(`SELECT count(*)::text FROM pg_proc p WHERE p.prosrc LIKE '%public.actor_proof_keys%' OR p.prosrc ~ '[^.]\mactor_proof_keys\M'`); got != "0" {
+	if got := q(`SELECT count(*)::text FROM pg_proc p WHERE (CASE WHEN p.prosqlbody IS NULL THEN p.prosrc ELSE pg_get_functiondef(p.oid) END) LIKE '%public.actor_proof_keys%'
+		OR p.prosrc ~ '[^.]\mactor_proof_keys\M'`); got != "0" {
 		t.Fatalf("functions still naming public.actor_proof_keys (or an unqualified actor_proof_keys): %s", got)
+	}
+	// SRF1-2: a SQL-standard (BEGIN ATOMIC) body has an empty prosrc but records its dependency: no function may depend on the schema or a relation
+	// in it (the two entry points use string bodies, so they record none)
+	if got := q(`SELECT count(*)::text FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass
+		AND ((d.refclassid = 'pg_class'::regclass AND d.refobjid IN (SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'actorproof_private'))
+		  OR (d.refclassid = 'pg_namespace'::regclass AND d.refobjid = (SELECT oid FROM pg_namespace WHERE nspname = 'actorproof_private')))`); got != "0" {
+		t.Fatalf("functions with a recorded dependency on the key schema: %s", got)
 	}
 	// the backup role (when it exists) holds nothing on the schema / table and may not execute the reaching functions
 	if got := q(`SELECT COALESCE((SELECT (has_schema_privilege(r.oid, n.oid, 'USAGE') OR has_schema_privilege(r.oid, n.oid, 'CREATE')
@@ -479,6 +487,16 @@ func kiKeys(t *testing.T, pool *db.Pool) string {
 	return tbl + "|" + s
 }
 
+// kiAdminRole is the user of TEST_ADMIN_DATABASE_URL (an existing non-owner role of the test cluster; only named in a grant, never altered).
+func kiAdminRole(t *testing.T) string {
+	t.Helper()
+	pu, err := url.Parse(os.Getenv("TEST_ADMIN_DATABASE_URL"))
+	if err != nil || pu.User == nil || pu.User.Username() == "" {
+		t.Skip("TEST_ADMIN_DATABASE_URL not set")
+	}
+	return pgx.Identifier{pu.User.Username()}.Sanitize()
+}
+
 func kiExec(t *testing.T, pool *db.Pool, sql string) {
 	t.Helper()
 	if _, err := pool.Raw().Exec(context.Background(), sql); err != nil {
@@ -525,6 +543,13 @@ func TestMigration0166_UpDownUp_LegacyRows_Refusals(t *testing.T) {
 		{"a grant to PUBLIC", `GRANT SELECT ON public.actor_proof_keys TO PUBLIC`, `REVOKE SELECT ON public.actor_proof_keys FROM PUBLIC`},
 		{"a column grant", `GRANT SELECT (kid) ON public.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT (kid) ON public.actor_proof_keys FROM igaming_runtime`},
 		{"a dependent view", `CREATE VIEW public.zz_apk AS SELECT kid FROM public.actor_proof_keys`, `DROP VIEW public.zz_apk`},
+		// SRF1-2, the reviewer's reproduction: a SQL-standard body is a path to the secret that only pg_depend shows
+		{"a BEGIN ATOMIC function reading the secret (f1s_leak)",
+			`CREATE FUNCTION public.f1s_leak() RETURNS text LANGUAGE sql SECURITY DEFINER BEGIN ATOMIC SELECT encode(secret, 'hex') FROM public.actor_proof_keys LIMIT 1; END`,
+			`DROP FUNCTION public.f1s_leak()`},
+		// SRF1-1(d): a global DEFAULT PRIVILEGES entry of the owner would grant the NEW schema to another role; the post-move assertion refuses
+		{"a global default privilege on new schemas", `ALTER DEFAULT PRIVILEGES FOR ROLE igaming GRANT USAGE ON SCHEMAS TO ` + kiAdminRole(t),
+			`ALTER DEFAULT PRIVILEGES FOR ROLE igaming REVOKE USAGE ON SCHEMAS FROM ` + kiAdminRole(t)},
 	}
 	for _, r := range upRefusals {
 		kiExec(t, pool, r.plant)
@@ -626,6 +651,8 @@ func TestMigration0166_UpDownUp_LegacyRows_Refusals(t *testing.T) {
 		{"a column grant", `GRANT SELECT (kid) ON actorproof_private.actor_proof_keys TO igaming_runtime`, `REVOKE SELECT (kid) ON actorproof_private.actor_proof_keys FROM igaming_runtime`, true},
 		{"a dependent view", `CREATE VIEW public.zz_apk2 AS SELECT kid FROM actorproof_private.actor_proof_keys`, `DROP VIEW public.zz_apk2`, false},
 		{"public.actor_proof_keys exists again", `CREATE TABLE public.actor_proof_keys (a int)`, `DROP TABLE public.actor_proof_keys`, false},
+		{"a BEGIN ATOMIC function reading the secret", `CREATE FUNCTION public.zz_leak2() RETURNS text LANGUAGE sql SECURITY DEFINER BEGIN ATOMIC SELECT encode(secret, 'hex') FROM actorproof_private.actor_proof_keys LIMIT 1; END`,
+			`DROP FUNCTION public.zz_leak2()`, true},
 	}
 	keys1 := kiKeys(t, pool)
 	for _, r := range downRefusals {
@@ -706,7 +733,22 @@ func TestRestoreDDL_MatchesTheMigratedKeySchema(t *testing.T) {
 		}
 		sqlLines = append(sqlLines, l)
 	}
-	if _, err := restored.Raw().Exec(ctx, strings.Join(sqlLines, "\n")); err != nil {
+	ddl := strings.Join(sqlLines, "\n")
+	// SRF1-1, the reviewer's reproduction: a global DEFAULT PRIVILEGES entry of the owner (an archive can carry one; restore.sh keeps it) would grant
+	// the recreated schema and table to another role. The DDL's closing assertion must refuse it (APM03) and leave nothing behind (one transaction).
+	kiExec(t, restored, `ALTER DEFAULT PRIVILEGES FOR ROLE igaming GRANT USAGE ON SCHEMAS TO igaming_runtime`)
+	kiExec(t, restored, `ALTER DEFAULT PRIVILEGES FOR ROLE igaming GRANT SELECT ON TABLES TO igaming_runtime`)
+	_, err = restored.Raw().Exec(ctx, ddl)
+	if sqlstate(err) != "APM03" {
+		t.Fatalf("the restore DDL under an inherited default privilege: want APM03, got %v", err)
+	}
+	var left bool
+	if err := restored.Raw().QueryRow(ctx, `SELECT to_regnamespace('actorproof_private') IS NOT NULL`).Scan(&left); err != nil || left {
+		t.Fatalf("a refused restore DDL must leave no schema behind (left=%v, %v)", left, err)
+	}
+	kiExec(t, restored, `ALTER DEFAULT PRIVILEGES FOR ROLE igaming REVOKE USAGE ON SCHEMAS FROM igaming_runtime`)
+	kiExec(t, restored, `ALTER DEFAULT PRIVILEGES FOR ROLE igaming REVOKE SELECT ON TABLES FROM igaming_runtime`)
+	if _, err := restored.Raw().Exec(ctx, ddl); err != nil {
 		t.Fatalf("apply actorproof-private-schema.sql: %v", err)
 	}
 	if a, b := kiPrivateSnapshot(t, migrated), kiPrivateSnapshot(t, restored); a != b {

@@ -4,8 +4,8 @@
 -- Refuses (APM02; nothing is changed) while the previous state cannot be restored faithfully:
 --   * the key table is not where 0166 put it, or public.actor_proof_keys exists again;
 --   * the schema actorproof_private holds anything besides the key table (its index, constraints and row type): DROP SCHEMA would destroy it;
---   * the key table or the schema carries a grant to anyone other than the owner, or a column-level grant, or a view/rule/trigger/policy
---     depends on the table (0166 left none; something was added since, and the down cannot know what 0165's state of it would be).
+--   * the key table or the schema carries a grant to anyone other than the owner, or a column-level grant, or a view/rule/trigger/policy or a
+--     SQL-standard (BEGIN ATOMIC) function body depends on the table (0166 left none; something was added since, and the down cannot know what 0165's state of it would be).
 -- Otherwise the schema returns to 0165 byte for byte (whole-schema snapshot test): the table (rows included, never copied) moves back, the two
 -- function bodies below are 0139's and 0120's verbatim, and igaming_backup's table-level SELECT on the key table is restored exactly when it
 -- holds SELECT on actor_proof_nonces (0166 refused to run unless both were alike).
@@ -53,9 +53,10 @@ BEGIN
     END IF;
     SELECT count(*) INTO v_n FROM pg_catalog.pg_depend d
      WHERE d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = v_rel
-       AND d.classid IN ('pg_catalog.pg_rewrite'::regclass, 'pg_catalog.pg_trigger'::regclass, 'pg_catalog.pg_policy'::regclass);
+       AND d.classid IN ('pg_catalog.pg_rewrite'::regclass, 'pg_catalog.pg_trigger'::regclass, 'pg_catalog.pg_policy'::regclass,
+                         'pg_catalog.pg_proc'::regclass);
     IF v_n > 0 THEN
-        RAISE EXCEPTION 'migration 0166 down refused: % view/rule/trigger/policy object(s) depend on the key table; nothing was changed', v_n
+        RAISE EXCEPTION 'migration 0166 down refused: % view/rule/trigger/policy/function object(s) depend on the key table; nothing was changed', v_n
             USING ERRCODE = 'APM02';
     END IF;
 END;

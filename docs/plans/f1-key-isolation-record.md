@@ -126,6 +126,10 @@ controls (`backup_role_cannot_dump_actor_proof_schema_even_without_exclusion`, `
 - **Legacy sets** carry key rows (unchanged: filtered on restore, warned; retire them). A legacy baseline compared by the new `verify.sh` after a restore of a legacy set differs in the new FP/INV lines (tool-version mismatch; legacy sets are to be retired anyway).
 - **Mis-grant detection is at backup time** (preflight, INV) and in the probe packs, not continuous; a grant made and revoked between backups is not seen (pgaudit/log review on RDS: not proven).
 - **`restore.sh` legacy branch** trusts `schema_migrations` of the restored archive to choose the layout; a hostile signed archive could claim < 0166 to avoid the DDL step, but then the database has no private schema, every proof fails closed and `verify.sh`'s FP comparison fails against a >= 0166 baseline (fail closed, not a leak).
+- **SRF1-5 (accepted residual, pre-existing, not widened by F1):** a hostile but VALIDLY SIGNED archive runs arbitrary SQL as the owner role during `pg_restore`
+  (every TOC entry is executed): it could redefine `actor_proof_require` or set a role/database `search_path`. The trust root remains the backup signing key
+  (ADR 0122). F1's DDL comes from the repository, pins `search_path = pg_catalog` (SRF1-1) and asserts the recreated schema is owner-only; a pre-existing
+  `actorproof_private` is refused; `verify.sh` (FP/INV) runs before the re-key, and the re-key itself re-checks the isolation invariant.
 - **Not run:** RDS (rds_superuser owner, IAM token, parameter groups), Terraform, the full HTTP K2/K3 flow on a re-keyed restored database (SQL-level verifier + startup gate only, as before).
 
 ## 8. Probe lists
@@ -157,7 +161,7 @@ table keeps its columns, constraints, RLS flag (enabled, not forced, no policy) 
 functions, `actor_proof_require` and `actor_proof_key_active`, whose bodies changed only in the schema-qualified table reference; their `search_path` stays
 `pg_catalog, public, pg_temp` and their EXECUTE grants are unchanged. No other function, view or grant reaches the schema. Proof format and the AP001..AP005 rules
 are unchanged. Section 6 ("Where they must NOT live") now also excludes the backup role: it cannot read the key, so a stolen backup credential no longer yields it
-(T7 unchanged: the owner/migration role and a superuser still can). Evidence: docs/plans/f1-key-isolation-record.md.
+(T7 unchanged: the owner/migration role, members of the owner role - e.g. the restore loader role, on RDS the master user - and a superuser still can). Evidence: docs/plans/f1-key-isolation-record.md.
 ```
 
 **ADR 0122, amendment to section 10 (replaces item 5 of the 2026-10-16 amendment):**

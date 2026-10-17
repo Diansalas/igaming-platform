@@ -212,3 +212,37 @@ func TestRekeyScriptProperties(t *testing.T) {
 		}
 	}
 }
+
+// TestSecurityReviewF1Fixes pins the SRF1-1..3 fixes (docs/plans/f1-key-isolation-record.md section 10): the restore DDL pins its search_path and
+// ends by asserting the recreated key schema is owner-only; the re-key evaluates the baseline's own isolation invariant before writing a secret;
+// the backup refuses any role membership but rds_iam; migration 0166 refuses SQL-standard function bodies depending on the key table.
+func TestSecurityReviewF1Fixes(t *testing.T) {
+	ddl := stripComments(read(t, "deploy/backup/actorproof-private-schema.sql"))
+	if !strings.Contains(ddl, "SET search_path = pg_catalog;") || strings.Index(ddl, "SET search_path = pg_catalog;") > strings.Index(ddl, "CREATE SCHEMA") {
+		t.Error("actorproof-private-schema.sql must pin search_path = pg_catalog before it creates anything")
+	}
+	for _, want := range []string{"aclexplode(COALESCE(n.nspacl", "aclexplode(COALESCE(c.relacl", "at.attacl IS NOT NULL", "ERRCODE = 'APM03'"} {
+		if !strings.Contains(ddl, want) {
+			t.Errorf("actorproof-private-schema.sql lost the owner-only assertion element %q", want)
+		}
+	}
+	rk := stripComments(read(t, "deploy/backup/rekey-actor-proof.sh"))
+	iso := strings.Index(rk, `"INV|actor_proof_key_reachable_by_non_owner|0"`)
+	ins := strings.Index(rk, "INSERT INTO actorproof_private.actor_proof_keys")
+	if iso < 0 || ins < 0 || iso > ins || !strings.Contains(rk, `"${SCRIPT_DIR}/baseline.sql"`) {
+		t.Error("rekey-actor-proof.sh must evaluate baseline.sql's isolation invariant (and require 0) before the INSERT")
+	}
+	b := stripComments(read(t, "deploy/backup/backup.sh"))
+	if !strings.Contains(b, "FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid") || !strings.Contains(b, "g.rolname <> 'rds_iam'") {
+		t.Error("backup.sh must refuse any role membership of the backup role other than rds_iam")
+	}
+	bl := read(t, "deploy/backup/baseline.sql")
+	if !strings.Contains(bl, "d.classid = 'pg_proc'::regclass AND d.refclassid = 'pg_class'::regclass") {
+		t.Error("baseline.sql's isolation invariant must count SQL-standard function bodies depending on the key schema")
+	}
+	for _, f := range []string{"migrations/0166_actor_proof_key_isolation.up.sql", "migrations/0166_actor_proof_key_isolation.down.sql"} {
+		if !strings.Contains(read(t, f), "'pg_catalog.pg_proc'::regclass") {
+			t.Errorf("%s must refuse SQL-standard function bodies depending on the key table (pg_proc in the dependency classes)", f)
+		}
+	}
+}

@@ -23,10 +23,15 @@
 -- Proof semantics are unchanged: same token format, same AP001..AP005 rules and order, same nonce table (public.actor_proof_nonces holds no
 -- secret and stays where it is), same triggers. Nothing else reads the key table.
 --
--- REFUSALS (APM01; nothing is changed): the key table is missing (0120 not applied) or not owned by the migrating role; the schema already
--- exists; the table carries a grant to anyone other than its owner and igaming_backup's SELECT, or any column-level grant, or any dependent
--- view/rule/trigger/policy (an unexpected path to the secret: investigate first); igaming_backup's SELECT on the key table differs from its
--- SELECT on actor_proof_nonces (the blanket grant covers both alike; the down migration reconstructs the key grant from the nonce grant).
+-- REFUSALS (APM01; nothing is changed): the key table is not owned by the migrating role; the schema already exists; the table carries a grant
+-- to anyone other than its owner and igaming_backup's SELECT, or any column-level grant, or any dependent view/rule/trigger/policy or
+-- SQL-standard (BEGIN ATOMIC) function body (an unexpected path to the secret: investigate first); igaming_backup's SELECT on the key table differs
+-- from its SELECT on actor_proof_nonces (the blanket grant covers both alike; the down migration reconstructs the key grant from the nonce
+-- grant); after the move, the new schema or the table carries any non-owner ACL entry (e.g. inherited from a global DEFAULT PRIVILEGES entry).
+-- A database without the key table (0120 not applied) fails at the first LOCK TABLE (42P01), also changing nothing.
+--
+-- LOAD-BEARING (SRF1-3): the key table keeps RLS ENABLED with NO policy. A role reachable only through SET ROLE (e.g. pg_read_all_data granted
+-- NOINHERIT) has no BYPASSRLS and therefore reads 0 rows. Never add a policy, never disable RLS on it; the backup baseline's FP line pins the flag.
 --
 -- NOT changed / residual: the owner (migration) role and a superuser can still read the key (ADR 0110 section 9.4, T7). Physical base
 -- backups, snapshots, the WAL archive and PITR copies contain the table's data files and so the key (inside the cloud trust boundary;
@@ -67,9 +72,10 @@ BEGIN
     END IF;
     SELECT count(*) INTO v_n FROM pg_catalog.pg_depend d
      WHERE d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = v_rel
-       AND d.classid IN ('pg_catalog.pg_rewrite'::regclass, 'pg_catalog.pg_trigger'::regclass, 'pg_catalog.pg_policy'::regclass);
+       AND d.classid IN ('pg_catalog.pg_rewrite'::regclass, 'pg_catalog.pg_trigger'::regclass, 'pg_catalog.pg_policy'::regclass,
+                         'pg_catalog.pg_proc'::regclass);   -- pg_proc: SQL-standard (BEGIN ATOMIC) bodies record the table dependency (SRF1-2)
     IF v_n > 0 THEN
-        RAISE EXCEPTION 'migration 0166 refused: % view/rule/trigger/policy object(s) depend on public.actor_proof_keys (an unexpected path to the secret); investigate first', v_n
+        RAISE EXCEPTION 'migration 0166 refused: % view/rule/trigger/policy/function object(s) depend on public.actor_proof_keys (an unexpected path to the secret); investigate first', v_n
             USING ERRCODE = 'APM01';
     END IF;
     v_bk_keys := v_backup IS NOT NULL AND EXISTS (SELECT 1 FROM pg_catalog.pg_class c, LATERAL pg_catalog.aclexplode(c.relacl) a
@@ -103,6 +109,30 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON actorproof_private.actor_proof_keys FROM PUBLIC;
+
+-- SRF1-1(d): assert the isolation instead of assuming it. CREATE SCHEMA may inherit a global DEFAULT PRIVILEGES entry of the owner for a grantee
+-- other than the two roles revoked above; any non-owner ACL entry left on the schema, the table or a column refuses the migration.
+DO $$
+DECLARE
+    v_bad text;
+BEGIN
+    SELECT pg_catalog.string_agg(x, ', ') INTO v_bad FROM (
+        SELECT 'schema:' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee) END || ':' || a.privilege_type AS x
+          FROM pg_catalog.pg_namespace n, LATERAL pg_catalog.aclexplode(COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))) a
+         WHERE n.nspname = 'actorproof_private' AND a.grantee <> n.nspowner
+        UNION ALL
+        SELECT 'table:' || CASE a.grantee WHEN 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee) END || ':' || a.privilege_type
+          FROM pg_catalog.pg_class c, LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) a
+         WHERE c.oid = 'actorproof_private.actor_proof_keys'::regclass AND a.grantee <> c.relowner
+        UNION ALL
+        SELECT 'column:' || at.attname FROM pg_catalog.pg_attribute at
+         WHERE at.attrelid = 'actorproof_private.actor_proof_keys'::regclass AND at.attacl IS NOT NULL) q;
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'migration 0166 refused: the key schema is not owner-only after the move (%): a DEFAULT PRIVILEGES entry of the owner? investigate and remove it first',
+            v_bad USING ERRCODE = 'APM01';
+    END IF;
+END;
+$$;
 
 -- -------------------------------------------------------------------------
 -- The verifier: 0139's body verbatim except the key lookup, which reads actorproof_private.actor_proof_keys.

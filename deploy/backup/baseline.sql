@@ -87,8 +87,9 @@ SELECT 'INV|tenant_tables_without_forced_rls_or_policy|' || count(*) FROM pg_cla
         OR NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid));
 -- F1 (migration 0166): nobody but the owner (and its members / superusers) can reach the actor-proof key schema: no direct grant to anyone else
 -- (PUBLIC included) on actorproof_private or on a relation in it, and no other role with effective USAGE/CREATE on the schema or SELECT on a
--- relation in it (e.g. through pg_read_all_data). Read by OID from the catalog and the has_*_privilege functions (they need no access to the
--- schema itself). 0 on a database below 0166.
+-- relation in it (e.g. through pg_read_all_data), and no function whose SQL-standard (BEGIN ATOMIC) body depends on a relation of it (SRF1-2: the
+-- two definer entry points use string bodies, so they record no such dependency). Read by OID from the catalog and the has_*_privilege functions
+-- (they need no access to the schema itself). 0 on a database below 0166. rekey-actor-proof.sh evaluates this same statement before it writes a key.
 SELECT 'INV|actor_proof_key_reachable_by_non_owner|' || (
     (SELECT count(*) FROM pg_namespace n, LATERAL aclexplode(n.nspacl) a WHERE n.nspname = 'actorproof_private' AND a.grantee <> n.nspowner)
   + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private', LATERAL aclexplode(c.relacl) a
@@ -99,7 +100,9 @@ SELECT 'INV|actor_proof_key_reachable_by_non_owner|' || (
       WHERE n.nspname = 'actorproof_private' AND (has_schema_privilege(r.oid, n.oid, 'USAGE') OR has_schema_privilege(r.oid, n.oid, 'CREATE')))
   + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
        JOIN pg_roles r ON NOT r.rolsuper AND r.oid <> c.relowner AND r.rolname !~ '^pg_' AND NOT pg_has_role(r.oid, c.relowner, 'MEMBER')
-      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND has_table_privilege(r.oid, c.oid, 'SELECT')));
+      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND has_table_privilege(r.oid, c.oid, 'SELECT'))
+  + (SELECT count(*) FROM pg_depend d JOIN pg_class c ON c.oid = d.refobjid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'actorproof_private'
+      WHERE d.classid = 'pg_proc'::regclass AND d.refclassid = 'pg_class'::regclass));
 -- every non-internal trigger is enabled for ordinary sessions (origin mode 'O' or 'A'), none disabled
 SELECT 'INV|triggers_disabled|' || count(*) FROM pg_trigger t
   JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'

@@ -95,6 +95,16 @@ case "$LOGSTMT" in mod|all) bk_die "log_statement=${LOGSTMT}: the server could l
 [ "$AUTOEXP" = 0 ] || bk_die "auto_explain logs parameters (auto_explain.log_min_duration set and auto_explain.log_parameter_max_length not 0); disable it for this role. Nothing was written"
 [ "$PGAUDIT" = 0 ] || bk_die "pgaudit is active with pgaudit.log_parameter=on: the bound secret would be written to the audit log (CloudWatch on RDS); set pgaudit.log_parameter=off for this role/session. Nothing was written"
 
+# SRF1-1(b): the key schema must be OWNER-ONLY before a secret is written into it. This is the backup baseline's own isolation invariant
+# (INV|actor_proof_key_reachable_by_non_owner, read from baseline.sql, not a copy), evaluated here as the owner: no non-owner grant on the schema,
+# the table or a column, no other role with effective USAGE/CREATE/SELECT, no SQL-standard function body depending on the table. A restored
+# archive that carried a DEFAULT PRIVILEGES entry, or a hand-made grant, refuses the re-key instead of handing the new key to another role.
+ISO_SQL="$(sed -n '/^SELECT .INV|actor_proof_key_reachable_by_non_owner|/,/;$/p' "${SCRIPT_DIR}/baseline.sql")"
+[ -n "$ISO_SQL" ] || bk_die "cannot find the isolation invariant in baseline.sql; nothing was written"
+ISO="$(psql -X -q -At -v ON_ERROR_STOP=1 -c "$ISO_SQL" 2>/dev/null)" || bk_die "cannot evaluate the key-schema isolation invariant; nothing was written"
+[ "$ISO" = "INV|actor_proof_key_reachable_by_non_owner|0" ] \
+  || bk_die "the actor-proof key schema is NOT owner-only (${ISO##*|} non-owner path(s): a grant, a DEFAULT PRIVILEGES inheritance, a role membership or a dependent function). Investigate and remove it before provisioning a key (backup-restore-dr.md section 5b). Nothing was written"
+
 # the INSERT (atomic: the table is locked SHARE ROW EXCLUSIVE and the row is inserted only if the table is still EMPTY, so two concurrent runs cannot both provision): the secret travels as a bound PARAMETER (extended protocol), never in statement text and never in argv (psql reads the file itself)
 psql -X -q -At -v ON_ERROR_STOP=1 -v ap_kid="$KID" <<'SQL' >/dev/null
 \getenv ap_hex AP_SECRET_HEX
