@@ -36,9 +36,12 @@ import (
 // stream and THIS source (imported_by_service, source_label, is_mock), has the same coverage window, and whose
 // IMPORT seal verifies over the import row and all of its stored lines. A forged run row - also one naming a genuine
 // sealed import whose own match never committed (a match skipped by holding the stream's advisory lock, SRF2-1) - is
-// never a cursor. Candidates are read as a stream, newest first, checking the run seal in Go (one HMAC, no extra
-// read); there is no candidate limit and no fail-closed state: forged rows cost a linear scan and are reported, they
-// can neither move the cursor nor stop the stream (SRF2-4 / LFF2-4, recoverable by design).
+// never a cursor. Candidates are read as ONE stream (a server-side cursor executed once, SRF2R-1), newest first,
+// checking the run seal in Go (one HMAC, no extra read). Forged rows cost a linear scan and are reported; they can
+// never move the cursor. A flood larger than CursorScanBudget rows stops THIS read loud
+// (ErrPaymentCursorScanBudgetExceeded -> P1 cursor_flood) instead of making the sweep hang: nothing is trusted and
+// nothing is fetched, and the next run retries (SRF2-4 / LFF2-4 / SRF2R-1; removal of the forged rows is the
+// owner-authorised runbook procedure).
 //
 // Run rows that do not back the cursor and are newer than it (coverage_end above it, or run_at after the cursor
 // run's) are reported by the durable P1 cursor_anomaly, whose discriminator carries their count and a digest of their
@@ -49,10 +52,8 @@ import (
 // VerifyPaymentCursorSealing refuses the start.
 
 const (
-	// cursorRunsPerPage bounds one page of the streaming candidate read; cursorVerifiedPerPage is how many
-	// run-seal-verified candidates a page collects before their imports are checked.
-	cursorRunsPerPage     = 512
-	cursorVerifiedPerPage = 8
+	// cursorRunsPerPage is the batch size of the streaming candidate read (one server-side cursor, SRF2R-1).
+	cursorRunsPerPage = 512
 	// anomalyRowsRead bounds the rows the anomaly report reads (the count is a separate count(*)).
 	anomalyRowsRead = 1000
 	// cursorAnomalyDiscMax mirrors the alerts.discriminator CHECK (migration 0110).
@@ -66,6 +67,20 @@ const MatchStallAfter = 30 * time.Minute
 
 // matchStallAfter is MatchStallAfter; a variable ONLY so a test can shorten it.
 var matchStallAfter = MatchStallAfter
+
+// CursorScanBudget bounds the candidate run rows ONE sealed cursor read may scan (SRF2R-1). A genuine pair finds its
+// cursor on the first row (the newest verifying run); rows scanned before it are run rows whose seal does not verify
+// or whose import does not, i.e. a flood. Past the budget the read stops with ErrPaymentCursorScanBudgetExceeded: no
+// cursor is trusted (never a fail-open zero or partial cursor), the run fails loud (P1 phase cursor_flood) and the
+// next run retries. The same budget bounds the stall check's progress read.
+const CursorScanBudget = 50000
+
+// cursorScanBudget is CursorScanBudget; a variable ONLY so a test can shorten it.
+var cursorScanBudget = CursorScanBudget
+
+// ErrPaymentCursorScanBudgetExceeded: a sealed cursor read scanned CursorScanBudget candidate run rows without
+// finding a verifying cursor (SRF2R-1, a flood of forged sealed-looking run rows). The run fails as cursor_flood.
+var ErrPaymentCursorScanBudgetExceeded = errors.New("reconciliation: payment statement cursor scan budget exceeded (run row flood)")
 
 // streamVerifier verifies both seals the cursor rests on (payoutinstrument.Keys implements it).
 type streamVerifier interface {
@@ -95,8 +110,10 @@ type cursorState struct {
 	newestUnbacked uuid.UUID
 	// sealed reports whether the cursor was read with seal verification (false = A11 fallback).
 	sealed bool
-	// examined counts the sealed-looking candidate run rows whose run seal did not verify (a flood indicator).
+	// rejected counts the sealed-looking candidate run rows whose run seal did not verify (a flood indicator).
 	rejected int
+	// scanned counts every candidate run row the sealed read scanned (bounded by cursorScanBudget).
+	scanned int
 }
 
 // importSealerFor returns the keys the stream seals imports with: opts.ImportKeys, else the process-wide sealer.
@@ -176,6 +193,8 @@ func readPaymentCursorState(ctx context.Context, pool *db.Pool, tenantID uuid.UU
 type sealedRun struct {
 	in        statement.RunSealInput
 	seal, kid *string
+	// sealOK is set by sealedRunBatch: the run seal verifies.
+	sealOK bool
 }
 
 // runSealVerifies reports whether r's stored run seal verifies under v.
@@ -208,16 +227,32 @@ func queryPaymentCursorState(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 		return st, anomalyRows(ctx, tx, tenantID, providerID, &st, nil)
 	}
 
-	// Sealed mode: page through the sealed-looking run rows, newest first (keyset paging), verify each run seal in Go,
-	// and check the imports of the verified ones. No limit and no fail-closed state: see the file comment.
-	var after *statement.RunSealInput
+	// Sealed mode: stream the sealed-looking run rows, newest first, through ONE server-side cursor (SRF2R-1: the
+	// query is executed once, never re-issued per page), verify each run seal in Go, and check the imports of the
+	// verified ones. At most cursorScanBudget rows are scanned: past that the read stops with
+	// ErrPaymentCursorScanBudgetExceeded (no cursor is trusted, nothing is fetched; the run fails loud as cursor_flood
+	// and the next run retries). See the file comment.
+	cur, err := db.DeclareCursor(ctx, tx, "srf2r_payment_cursor_candidates",
+		`SELECT r.id, r.run_import_id, r.period_start, r.coverage_end, COALESCE(r.window_truncated, false), r.run_at, r.run_seal, r.run_seal_kid
+		   FROM reconciliation_runs r
+		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.run_seal IS NOT NULL
+		    AND r.run_at <= now() AND r.coverage_end <= now()
+		  ORDER BY r.coverage_end DESC, r.run_at DESC, r.id DESC`, tenantID, string(StreamPaymentStatement), providerID)
+	if err != nil {
+		return cursorState{}, fmt.Errorf("reconciliation: read payment statement cursor candidates: %w", err)
+	}
+	defer func() { _ = cur.Close(ctx) }()
 	for {
-		scanned, verified, last, err := sealedRunPage(ctx, tx, tenantID, providerID, after, b.verifier)
+		batch, err := sealedRunBatch(ctx, cur, tenantID, providerID, b.verifier)
 		if err != nil {
 			return cursorState{}, err
 		}
-		st.rejected += scanned - len(verified)
-		for _, r := range verified {
+		for _, r := range batch {
+			st.scanned++
+			if !r.sealOK {
+				st.rejected++
+				continue
+			}
 			ok, err := runImportVerifies(ctx, tx, tenantID, providerID, r, b)
 			if err != nil {
 				return cursorState{}, err
@@ -225,52 +260,43 @@ func queryPaymentCursorState(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 			if ok {
 				st.cursor = r.in.CoverageEnd.UTC().Truncate(time.Microsecond)
 				st.cursorRunAt, st.cursorRunID = r.in.RunAt.UTC().Truncate(time.Microsecond), r.in.RunID
+				if err := cur.Close(ctx); err != nil {
+					return cursorState{}, fmt.Errorf("reconciliation: close payment statement cursor candidates: %w", err)
+				}
 				return st, anomalyRows(ctx, tx, tenantID, providerID, &st, b.verifier)
 			}
 		}
-		if scanned < cursorRunsPerPage {
+		if len(batch) < cursorRunsPerPage {
+			if err := cur.Close(ctx); err != nil {
+				return cursorState{}, fmt.Errorf("reconciliation: close payment statement cursor candidates: %w", err)
+			}
 			return st, anomalyRows(ctx, tx, tenantID, providerID, &st, b.verifier)
 		}
-		after = &last
+		if st.scanned >= cursorScanBudget {
+			return st, fmt.Errorf("%w: %d candidate run rows scanned without a verifying cursor (%d run seals did not verify)",
+				ErrPaymentCursorScanBudgetExceeded, st.scanned, st.rejected)
+		}
 	}
 }
 
-// sealedRunPage reads one page of the pair's sealed-looking run rows (run_seal present, run_at and coverage_end not
-// in the future), ordered newest first by (coverage_end, run_at, id), strictly after the key `after`. It returns
-// how many rows it scanned, those whose run seal verifies (in order) and the key of the last row scanned.
-func sealedRunPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, after *statement.RunSealInput, v statement.RunSealVerifier) (int, []sealedRun, statement.RunSealInput, error) {
-	var aCE, aAt *time.Time
-	var aID *uuid.UUID
-	if after != nil {
-		aCE, aAt, aID = &after.CoverageEnd, &after.RunAt, &after.RunID
-	}
-	rows, err := tx.Query(ctx,
-		`SELECT r.id, r.run_import_id, r.period_start, r.coverage_end, COALESCE(r.window_truncated, false), r.run_at, r.run_seal, r.run_seal_kid
-		   FROM reconciliation_runs r
-		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.run_seal IS NOT NULL
-		    AND r.run_at <= now() AND r.coverage_end <= now()
-		    AND ($4::timestamptz IS NULL OR (r.coverage_end, r.run_at, r.id) < ($4, $5::timestamptz, $6::uuid))
-		  ORDER BY r.coverage_end DESC, r.run_at DESC, r.id DESC
-		  LIMIT $7`, tenantID, string(StreamPaymentStatement), providerID, aCE, aAt, aID, cursorRunsPerPage)
+// sealedRunBatch fetches the next batch (at most cursorRunsPerPage rows) of a candidate cursor, in order, each with
+// whether its run seal verifies under v.
+func sealedRunBatch(ctx context.Context, cur *db.ServerCursor, tenantID uuid.UUID, providerID string, v statement.RunSealVerifier) ([]sealedRun, error) {
+	rows, err := cur.Fetch(ctx, cursorRunsPerPage)
 	if err != nil {
-		return 0, nil, statement.RunSealInput{}, fmt.Errorf("reconciliation: read payment statement cursor candidates: %w", err)
+		return nil, fmt.Errorf("reconciliation: read payment statement run candidates: %w", err)
 	}
 	defer rows.Close()
-	var verified []sealedRun
-	var last statement.RunSealInput
-	n := 0
+	var batch []sealedRun
 	for rows.Next() {
 		r := sealedRun{in: statement.RunSealInput{TenantID: tenantID, ProviderID: providerID, Stream: string(StreamPaymentStatement)}}
 		if err := rows.Scan(&r.in.RunID, &r.in.ImportID, &r.in.CoverageStart, &r.in.CoverageEnd, &r.in.WindowTruncated, &r.in.RunAt, &r.seal, &r.kid); err != nil {
-			return 0, nil, statement.RunSealInput{}, err
+			return nil, err
 		}
-		n++
-		last = r.in
-		if runSealVerifies(v, r) {
-			verified = append(verified, r)
-		}
+		r.sealOK = runSealVerifies(v, r)
+		batch = append(batch, r)
 	}
-	return n, verified, last, rows.Err()
+	return batch, rows.Err()
 }
 
 // runImportVerifies reports whether the import a (run-seal-verified) run names was written by this stream and source,
@@ -495,50 +521,199 @@ func reportCursorAnomaly(ctx context.Context, pool *db.Pool, logger *slog.Logger
 	raiseRunNotReconciledAs(ctx, pool, tenantID, stream, provider, "cursor_anomaly", cursorAnomalyPhase(provider, st))
 }
 
-// checkMatchStall reports a stalled pair (SRF2-1 (c)): an import of THIS source (sealed, when the cursor is read
-// sealed) whose coverage_end lies above the trusted cursor and that was fetched more than MatchStallAfter ago. Its
-// match never committed; holding the stream's advisory lock across sweeps produces exactly this. Durable P1
-// reconciliation.run_failed (phase match_stalled) plus an audit row; the run itself goes on.
+// matchStallLockWait bounds how long checkMatchStall waits for the stream's advisory lock to be released (by
+// another instance's match in progress) before it re-evaluates and raises (SRF2R-2). A variable ONLY so a test can
+// shorten it.
+var matchStallLockWait = 15 * time.Second
+
+// matchStallLockPoll is the polling interval of that wait.
+const matchStallLockPoll = 50 * time.Millisecond
+
+// stallEvidence is one evaluation of the stall rule.
+type stallEvidence struct {
+	n      int
+	oldest *time.Time
+	// progressAt is the run_at of the newest committed run of this source that the rule accepts as progress (zero
+	// when none); budgetHit reports that the progress read stopped at cursorScanBudget (then nothing counts as
+	// progress: fail closed, the stall is raised).
+	progressAt time.Time
+	budgetHit  bool
+}
+
+// checkMatchStall reports a stalled pair (SRF2-1 (c), SRF2R-2). It runs at the END of every continuation sweep of the
+// pair (after this sweep's own match, whatever its outcome). An import of THIS source (sealed, when the cursor is read
+// sealed) whose coverage_end lies above the trusted cursor read at the start of the sweep, and that was fetched more
+// than MatchStallAfter ago, is STALLED only when no committed run of this source has a run_at after the import's
+// fetched_at: with keys, a run whose RUN seal verifies (only the application can write one) and whose import is of
+// this source; without keys (non-production), a run row backed by an import of this source (the A11 rule). Any such
+// run means the stream progressed after the fetch and the orphan window has been, or is being, re-covered: benign
+// multi-instance contention is not a stall. When the rule still finds a stalled import, the check waits (at most
+// matchStallLockWait, polling pg_locks, never taking the lock) for the stream's advisory lock to be released - another
+// instance's match may be committing right now - and evaluates once more. A continuously held lock commits no run, so
+// it still trips: durable P1 reconciliation.run_failed (phase match_stalled) plus an audit row.
 func checkMatchStall(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, provider, obsStatus string, b cursorBasis, st cursorState) error {
-	var floor *time.Time
-	if !st.cursor.IsZero() {
-		c := st.cursor
-		floor = &c
+	ev, err := evaluateMatchStall(ctx, pool, tenantID, provider, b, st)
+	if err != nil || ev.n == 0 {
+		return err
 	}
-	var n int
-	var oldest *time.Time
-	if err := pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT count(*), min(fetched_at) FROM payment_statement_imports
-			  WHERE tenant_id = $1 AND provider_id = $2 AND imported_by_service = $3 AND source_label = $4 AND is_mock = $5
-			    AND ($6::timestamptz IS NULL OR coverage_end > $6)
-			    AND (NOT $7 OR import_seal IS NOT NULL)
-			    AND fetched_at < now() - make_interval(secs => $8)`,
-			tenantID, provider, ImportedByServicePaymentStatement, b.label, b.isMock, floor, b.verifier != nil, matchStallAfter.Seconds()).Scan(&n, &oldest)
-	}); err != nil {
-		return fmt.Errorf("reconciliation: read unmatched payment statement imports: %w", err)
+	waited, err := waitStreamLockFree(ctx, pool, tenantID)
+	if err != nil {
+		return err
 	}
-	if n == 0 {
-		return nil
+	if ev, err = evaluateMatchStall(ctx, pool, tenantID, provider, b, st); err != nil || ev.n == 0 {
+		return err
 	}
 	stream := string(StreamPaymentStatement)
 	shown := discPart(provider)
+	progress := ""
+	if !ev.progressAt.IsZero() {
+		progress = ev.progressAt.UTC().Format(time.RFC3339Nano)
+	}
 	if logger != nil {
-		logger.Error("reconciliation sweep: payment statement match STALLED (P1): imports above the trusted cursor were never matched",
-			"tenant_id", tenantID, "stream", stream, "provider_id", shown, "imports", n, "oldest_fetched_at", oldest)
+		logger.Error("reconciliation sweep: payment statement match STALLED (P1): imports above the trusted cursor were never matched and no run committed since they were fetched",
+			"tenant_id", tenantID, "stream", stream, "provider_id", shown, "imports", ev.n, "oldest_fetched_at", ev.oldest,
+			"last_progress_run_at", progress, "progress_scan_budget_exceeded", ev.budgetHit, "lock_still_held", !waited)
 	}
 	if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.payment_match_stalled",
 			TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
-			Metadata: observationMetadata(obsStatus, map[string]any{"stream": stream, "provider_id": shown, "unmatched_imports": n,
-				"cursor": st.cursor.UTC().Format(time.RFC3339Nano), "severity": "P1"}),
+			Metadata: observationMetadata(obsStatus, map[string]any{"stream": stream, "provider_id": shown, "unmatched_imports": ev.n,
+				"cursor": st.cursor.UTC().Format(time.RFC3339Nano), "last_progress_run_at": progress,
+				"progress_scan_budget_exceeded": ev.budgetHit, "lock_still_held": !waited, "severity": "P1"}),
 		})
 	}); auditErr != nil && logger != nil {
 		logger.Error("reconciliation sweep: failed to audit the match stall", "tenant_id", tenantID, "stream", stream, "error", auditErr)
 	}
 	raiseRunNotReconciled(ctx, pool, tenantID, stream, provider, "match_stalled")
 	return nil
+}
+
+// evaluateMatchStall applies the stall rule once, in its own short read-only transaction.
+func evaluateMatchStall(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, provider string, b cursorBasis, st cursorState) (stallEvidence, error) {
+	var floor *time.Time
+	if !st.cursor.IsZero() {
+		c := st.cursor
+		floor = &c
+	}
+	const candidates = `FROM payment_statement_imports
+		  WHERE tenant_id = $1 AND provider_id = $2 AND imported_by_service = $3 AND source_label = $4 AND is_mock = $5
+		    AND ($6::timestamptz IS NULL OR coverage_end > $6)
+		    AND (NOT $7 OR import_seal IS NOT NULL)
+		    AND fetched_at < now() - make_interval(secs => $8)`
+	var ev stallEvidence
+	err := pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		args := []any{tenantID, provider, ImportedByServicePaymentStatement, b.label, b.isMock, floor, b.verifier != nil, matchStallAfter.Seconds()}
+		var minFetched *time.Time
+		if err := tx.QueryRow(ctx, `SELECT min(fetched_at) `+candidates, args...).Scan(&minFetched); err != nil {
+			return err
+		}
+		if minFetched == nil {
+			return nil
+		}
+		var err error
+		if ev.progressAt, ev.budgetHit, err = streamProgressAfter(ctx, tx, tenantID, provider, b, *minFetched); err != nil {
+			return err
+		}
+		var progress *time.Time
+		if !ev.progressAt.IsZero() {
+			p := ev.progressAt
+			progress = &p
+		}
+		return tx.QueryRow(ctx, `SELECT count(*), min(fetched_at) `+candidates+` AND ($9::timestamptz IS NULL OR fetched_at >= $9)`,
+			append(args, progress)...).Scan(&ev.n, &ev.oldest)
+	})
+	if err != nil {
+		return stallEvidence{}, fmt.Errorf("reconciliation: read unmatched payment statement imports: %w", err)
+	}
+	return ev, nil
+}
+
+// streamProgressAfter returns the run_at of the newest committed run of this source with run_at after `after` (and
+// not in the future) that counts as progress (see checkMatchStall), or zero. With keys the rows are streamed newest
+// first through one server-side cursor and the first whose run seal verifies wins; at most cursorScanBudget rows are
+// scanned, past that budgetHit is true and zero is returned (fail closed: nothing counts as progress).
+func streamProgressAfter(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, provider string, b cursorBasis, after time.Time) (time.Time, bool, error) {
+	if b.verifier == nil {
+		var at *time.Time
+		if err := tx.QueryRow(ctx,
+			`SELECT max(r.run_at) FROM reconciliation_runs r
+			  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL
+			    AND r.run_at > $4 AND r.run_at <= now()
+			    AND EXISTS (SELECT 1 FROM payment_statement_imports i
+			                 WHERE i.tenant_id = r.tenant_id AND i.provider_id = r.provider_id AND i.coverage_end = r.coverage_end
+			                   AND i.imported_by_service = $5 AND i.source_label = $6 AND i.is_mock = $7)`,
+			tenantID, string(StreamPaymentStatement), provider, after, ImportedByServicePaymentStatement, b.label, b.isMock).Scan(&at); err != nil {
+			return time.Time{}, false, err
+		}
+		if at == nil {
+			return time.Time{}, false, nil
+		}
+		return *at, false, nil
+	}
+	cur, err := db.DeclareCursor(ctx, tx, "srf2r_payment_stall_progress",
+		`SELECT r.id, r.run_import_id, r.period_start, r.coverage_end, COALESCE(r.window_truncated, false), r.run_at, r.run_seal, r.run_seal_kid
+		   FROM reconciliation_runs r
+		   JOIN payment_statement_imports i ON i.id = r.run_import_id AND i.tenant_id = r.tenant_id
+		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.run_seal IS NOT NULL
+		    AND r.run_at > $4 AND r.run_at <= now()
+		    AND i.provider_id = $3 AND i.imported_by_service = $5 AND i.source_label = $6 AND i.is_mock = $7
+		  ORDER BY r.run_at DESC, r.id DESC`,
+		tenantID, string(StreamPaymentStatement), provider, after, ImportedByServicePaymentStatement, b.label, b.isMock)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	defer func() { _ = cur.Close(ctx) }()
+	scanned := 0
+	for {
+		batch, err := sealedRunBatch(ctx, cur, tenantID, provider, b.verifier)
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		for _, r := range batch {
+			if r.sealOK {
+				return r.in.RunAt, false, nil
+			}
+		}
+		scanned += len(batch)
+		if len(batch) < cursorRunsPerPage {
+			return time.Time{}, false, nil
+		}
+		if scanned >= cursorScanBudget {
+			return time.Time{}, true, nil
+		}
+	}
+}
+
+// waitStreamLockFree waits, at most matchStallLockWait, until no session holds the payment_statement stream's advisory
+// lock of the tenant (read from pg_locks; the lock is never taken here, so no other instance's match is ever skipped
+// because of this check). It reports whether the lock was observed free.
+func waitStreamLockFree(ctx context.Context, pool *db.Pool, tenantID uuid.UUID) (bool, error) {
+	deadline := time.Now().Add(matchStallLockWait)
+	for {
+		var held bool
+		if err := pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM pg_locks l
+				                 WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+				                   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+				                   AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended('reconciliation:payment_statement:' || $1::text, 0))`,
+				tenantID).Scan(&held)
+		}); err != nil {
+			return false, fmt.Errorf("reconciliation: read the payment statement stream lock: %w", err)
+		}
+		if !held {
+			return true, nil
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(matchStallLockPoll):
+		}
+	}
 }
 
 // reportMatchSkipped audits a skipped match (lock contention or a stale cursor) that left importID without a run.

@@ -885,16 +885,28 @@ Discriminator `stream:payment_statement:provider:<id>:<phase>` (ONE open alert p
   and a NEW forgery opens a NEW alert. Compare the audit rows `reconciliation.payment_cursor_anomaly` (count, `newest_unbacked_run_id`,
   `unbacked_digest`, `sealed_cursor`). Benign one-off causes (still investigate): keys newly configured on a stack whose history is unsealed
   (gone after the first sealed run), a statement source relabelled, a retired key id dropped from the process. Forged rows cost the read a
-  linear scan (the count is one `count(*)`, at most 1000 rows are read for the digest); there is no fail-closed state to recover from.
+  linear scan (one server-side cursor read in index order, migration 0172; the count is one `count(*)`, at most 1000 rows are read for the
+  digest). A flood larger than the per-read scan budget (`CursorScanBudget`, 50 000 rows) becomes `cursor_flood` (below).
   Removing forged rows is NEVER a SQL edit (the tables are append-only) and never an agent action: if their volume ever makes the read too
   slow, the remedy is an owner-authorised, audited procedure decided by security + ledger-finance (for example a migration-recorded exclusion
   of the named run ids).
-- `match_stalled` (SRF2-1 (c)): an import of this source lies above the trusted cursor and was fetched more than 30 minutes ago: its match
-  never committed (the match was skipped for lock contention or a stale cursor, or it failed). Every skipped match also writes an audit row
-  `reconciliation.payment_match_skipped` (with the import id). A held `reconciliation:payment_statement:<tenant>` advisory lock (any database
-  session can take one) produces exactly this: find the session holding it (`pg_locks` where `locktype = 'advisory'`), treat an unexpected
-  holder as a security incident. The window is not lost: every sweep re-fetches from the unchanged trusted cursor, and the alert stops once
-  a match commits and the cursor passes the stalled imports.
+- `cursor_flood` (SRF2R-1; `reconciliation.run_failed` with phase `cursor_flood`, audit `reconciliation.sweep_run_failed` phase
+  `cursor_flood`): the sealed cursor read scanned `CursorScanBudget` candidate run rows without finding a verifying cursor, i.e. at least that
+  many sealed-looking run rows whose seal does not verify sit above the genuine cursor. The run failed BEFORE fetching (or, if the flood
+  appeared mid-sweep, its match rolled back): nothing was matched or trusted and the cursor did not move (never a zero or partial cursor).
+  Every following run fails the same way while the flood stands, so the pair is NOT reconciled and M2 force-resolutions for the provider are
+  refused (`evidence_scan_budget_exceeded` or `last_run_failed`). Treat as a security incident exactly like `cursor_anomaly` (the same
+  forgery at volume); recovery is the owner-authorised exclusion procedure above. Raising the budget is a reviewed code change.
+- `match_stalled` (SRF2-1 (c), SRF2R-2): an import of this source lies above the trusted cursor, was fetched more than 30 minutes ago, and NO
+  run of this source committed after its fetch (with keys: a run whose run seal verifies). The check runs at the END of every sweep, after
+  the sweep's own match, so a benign multi-instance contention loser (whose window the next committed run re-covers) is not a stall; when the
+  rule still finds a stalled import the check first waits (at most 15 s, reading `pg_locks`, never taking the lock) for an in-flight match of
+  another instance to commit. Every skipped match also writes an audit row `reconciliation.payment_match_skipped` (with the import id). A held
+  `reconciliation:payment_statement:<tenant>` advisory lock (any database session can take one) commits no run and produces exactly this;
+  the audit row `reconciliation.payment_match_stalled` then says `lock_still_held: true`: find the session holding it (`pg_locks` where
+  `locktype = 'advisory'`), treat an unexpected holder as a security incident. `progress_scan_budget_exceeded: true` means the progress read
+  met a run-row flood (see `cursor_flood`) and the stall was raised fail-closed. The window is not lost: every sweep re-fetches from the
+  unchanged trusted cursor, and the alert stops once a match commits and the cursor passes the stalled imports.
 - `truncated`: the run stopped at the per-run line bound (`RECONCILIATION_PAYMENT_STATEMENT_MAX_LINES`). The run matched only the window the
   source vouched for (`window_truncated=true` in `reconciliation_runs` and the audit row) and the next run continues from the persisted
   cursor (`reconciliation_runs.coverage_end` of the provider's last committed run). It is not a failure and not a clean claim; it clears

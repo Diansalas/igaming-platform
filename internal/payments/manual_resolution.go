@@ -541,7 +541,7 @@ func (s *ManualResolutionService) Request(ctx context.Context, target Resolution
 	if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid {
 		// F2e / SRF2-5: the reconciliation evidence is read BEFORE the M2 transaction opens and applied inside it
 		// after the guard-first INSERT (security F-2/F-3 ordering kept).
-		ctx = withReconEvidence(ctx, s.preReadStatementEvidence(ctx, target.tenantID))
+		ctx = withReconEvidence(ctx, s.preReadStatementEvidence(ctx, target.tenantID, in.AttemptID))
 	}
 	err := s.runSession(ctx, target, uuid.Nil, meta, func(ctx context.Context, tx pgx.Tx, call ResolutionCall) error {
 		var err error
@@ -800,7 +800,7 @@ func (s *ManualResolutionService) Decide(ctx context.Context, target ResolutionT
 	if in.Decision == ResolutionApprove {
 		// F2e / SRF2-5 / LFF2-7: the execution-time recheck uses evidence read BEFORE the transaction (no
 		// hold-and-wait on the pool after the L1 locks); an error only matters if the resolution is an M2.
-		ctx = withReconEvidence(ctx, s.preReadStatementEvidence(ctx, target.tenantID))
+		ctx = withReconEvidence(ctx, s.preReadStatementEvidence(ctx, target.tenantID, uuid.Nil))
 	}
 	err := s.runSession(ctx, target, id, meta, func(ctx context.Context, tx pgx.Tx, call ResolutionCall) error {
 		var err error

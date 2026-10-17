@@ -894,7 +894,7 @@ func runSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, i
 // transaction with the phase named, and logged at Error level. A refused
 // statement stores nothing. It never corrects anything and never touches
 // a balance, the ledger, an attempt, an intent or a receipt.
-func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.PaymentStatementSource, opts PaymentStatementOptions) StreamOutcome {
+func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.PaymentStatementSource, opts PaymentStatementOptions) (res StreamOutcome) {
 	var out StreamOutcome
 	stream := string(StreamPaymentStatement)
 	label, provider := "<none>", "<none>"
@@ -903,6 +903,11 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 		out.ProviderID = provider
 	}
 	fail := func(phase string, err error) StreamOutcome {
+		if errors.Is(err, ErrPaymentCursorScanBudgetExceeded) {
+			// SRF2R-1: a run-row flood stopped the cursor read at its budget. Its own phase, so the P1 says what
+			// happened; nothing was trusted or fetched, and the next run retries.
+			phase = "cursor_flood"
+		}
 		out.Err = fmt.Errorf("reconciliation: payment_statement %s phase: %w", phase, err)
 		if logger != nil {
 			logger.Error("reconciliation sweep: tenant run failed (P1)", "tenant_id", tenantID, "stream", stream,
@@ -937,12 +942,18 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 		if st.unbacked > 0 {
 			reportCursorAnomaly(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, st)
 		}
-		// SRF2-1 (c): a stored import of this source above the trusted cursor, fetched more than MatchStallAfter ago,
-		// means its match never committed (lock contention, a stale cursor, a failed match): a stalled stream. The
-		// next fetch re-covers the window from the unchanged cursor; the stall itself is reported, never silent.
-		if err := checkMatchStall(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, opts.basis, st); err != nil {
-			return fail("cursor", err)
-		}
+		// SRF2-1 (c) / SRF2R-2: a stored import of this source above the trusted cursor, fetched more than
+		// MatchStallAfter ago, with no run committed since its fetch, means its match never committed and nothing
+		// re-covered it (a held lock, repeated failures): a stalled stream. The next fetch re-covers the window from
+		// the unchanged cursor; the stall itself is reported, never silent.
+		// The check runs at the END of the sweep, after this sweep's own match (SRF2R-2: a run committed after an
+		// import's fetch - this sweep's or another instance's - means the stream progressed, not a stall).
+		stallState := st
+		defer func() {
+			if err := checkMatchStall(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, opts.basis, stallState); err != nil && res.Err == nil {
+				res = fail("match_stall_check", err)
+			}
+		}()
 		// F2 / LF-A11-2: the completeness horizon. CoverageEnd may never pass now - settle lag
 		// (validateBoundedWindow refuses a statement that does), so the request asks for no more than that.
 		lag, err := paymentSettleLag(source)
