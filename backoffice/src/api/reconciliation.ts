@@ -35,6 +35,7 @@ export const KINDS_BY_STREAM: Record<StaffStream, readonly string[]> = {
     'pay_declared_paid_unconfirmed',
     'pay_declared_not_paid_but_paid',
     'pay_declared_paid_compensated_but_paid',
+    'pay_payout_reversal_tombstone_but_paid',
   ],
   sportsbook_settlement: ['sb_locked_mismatch', 'sb_bet_net_mismatch', 'sb_orphan_ledger', 'sb_orphan_history', 'sb_status_mismatch', 'sb_mock_statement_mismatch'],
 }
