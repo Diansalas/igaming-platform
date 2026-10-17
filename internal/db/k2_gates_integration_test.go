@@ -75,7 +75,9 @@ var k2NonRLSBookkeepingTables = map[string]bool{
 	"schema_migrations": true,
 }
 
-// k2OwnerOnlyProofTables (PRH-2 R5, ADR 0110, migration 0120) are OWNER-ONLY:
+// k2OwnerOnlyProofTables (PRH-2 R5, ADR 0110, migration 0120) are OWNER-ONLY public tables (actor_proof_keys left schema public in
+// migration 0166, F1: it lives in the owner-only schema actorproof_private, covered by the key-isolation tests in
+// internal/adjustment/key_isolation_integration_test.go):
 // no privilege for PUBLIC or the runtime role, RLS enabled with no policy. They
 // are deliberately not FORCE RLS because the SECURITY DEFINER verifier runs as
 // the owner. THIS probe runs as the OWNER role (which RLS does not bind unless
@@ -83,7 +85,6 @@ var k2NonRLSBookkeepingTables = map[string]bool{
 // asserted by TestActorProof_RuntimeRoleCannotReadKeysNoncesOrMint and by the
 // has_table_privilege / pg_policies checks there.
 var k2OwnerOnlyProofTables = map[string]bool{
-	"actor_proof_keys":   true,
 	"actor_proof_nonces": true,
 }
 

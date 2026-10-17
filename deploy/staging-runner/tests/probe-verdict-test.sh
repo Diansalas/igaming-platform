@@ -60,9 +60,14 @@ expect "pg_hba rejection is not a privilege denial, connect probe" BLOCKED abuse
 expect "connect probe that connected" FAIL abuse applied 0 "" connect_postgres
 
 # completeness: the pack fails when fewer probes ran than expected
-RN_PROBE_RAN=0; RN_PROBE_EXPECTED=24
+RN_PROBE_RAN=0; RN_PROBE_EXPECTED=27
 if [ "$RN_PROBE_RAN" -ne "$RN_PROBE_EXPECTED" ]; then ok "completeness counters are comparable"; else bad "counters"; fi
-[ "${#RN_WRITE_PROBES[@]}" -eq 15 ] && [ "${#RN_ABUSE_PROBES[@]}" -eq 9 ] && ok "15 write and 9 abuse probes" || bad "unexpected probe counts"
+[ "${#RN_WRITE_PROBES[@]}" -eq 15 ] && [ "${#RN_ABUSE_PROBES[@]}" -eq 9 ] && [ "${#RN_KEY_PROBES[@]}" -eq 3 ] && ok "15 write, 9 abuse and 3 actor-proof key probes" || bad "unexpected probe counts"
+# F1: a key probe is judged like a write probe: only a privilege-denied SQLSTATE passes; a missing table (42P01: the probe is stale or the
+# schema moved) or a success is a FAIL, never a FINDING
+expect "key probe denied (no USAGE on actorproof_private)" PASS key applied 1 "ERROR:  42501" read_actor_proof_secret
+expect "key probe on a missing relation" FAIL key applied 1 "ERROR:  42P01" read_actor_proof_secret
+expect "key probe that succeeded" FAIL key refused 0 "" read_actor_proof_secret
 
 if [ "$fails" -ne 0 ]; then echo "${fails} probe verdict test(s) failed" >&2; exit 1; fi
 echo "probe verdict tests passed"

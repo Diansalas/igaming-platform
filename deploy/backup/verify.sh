@@ -20,7 +20,10 @@
 #   3. `cmd/migrate verify` (applied-migration checksums) as the owner.
 #   4. restorecheck as the runtime role: the platform's own ledger_vs_projection reconciliation per tenant (drift 0),
 #      real RLS behaviour, and the database_environment startup guard behaviour (see --expect-anchor).
-# Actor-proof key (owner decision 5, ADR 0122 section 10): a LOGICAL restore carries no actor-proof signing secret. --expect-actor-proof
+# Actor-proof key (owner decision 5, ADR 0122 section 10; F1, migration 0166): a LOGICAL restore carries no actor-proof signing secret. The key
+# table lives in the owner-only schema actorproof_private, which the backup role cannot read, so its state is read as the OWNER role
+# (VERIFY_OWNER_*: count and kid:status only, never the secret); its STRUCTURE is compared through the baseline's FP|actorproof_private_md5 line and
+# nobody else's access through INV|actor_proof_key_reachable_by_non_owner. --expect-actor-proof
 # (default: `unprovisioned` with --anchor-mode reset, `skip` with --anchor-mode preserved, i.e. physical recovery, which keeps the live key):
 #   unprovisioned  actor_proof_keys holds 0 rows, the platform's own startup probe says the configured kid is not an active key, and a proof
 #                  presented to the SQL verifier is refused with AP002 (fail closed). Run this right after the restore.
@@ -84,6 +87,19 @@ chk() { # name PASS|FAIL detail
   echo "CHK|$1|$2|$3"
   if [ "$2" = PASS ]; then PASSES=$((PASSES + 1)); else FAILS=$((FAILS + 1)); fi
 }
+# ap_owner_state: AP_ROWS (count) and AP_KIDS (kid:status,... sorted) of the actor-proof key table, read as the OWNER role (the backup role has no access
+# since migration 0166); the table is actorproof_private.actor_proof_keys, or public.actor_proof_keys on a legacy (< 0166) database. Never reads the secret.
+# A failure to read is a FAIL (AP_ROWS=ERR).
+ap_owner_state() {
+  local t out
+  AP_ROWS=ERR; AP_KIDS=""
+  t="$(PGUSER="$VERIFY_OWNER_PGUSER" PGPASSFILE="$VERIFY_OWNER_PGPASSFILE" psql -X -q -At -v ON_ERROR_STOP=1 -c "SELECT COALESCE(to_regclass('actorproof_private.actor_proof_keys')::text, to_regclass('public.actor_proof_keys')::text, 'none')" 2>/dev/null)" || t=""
+  case "$t" in actorproof_private.actor_proof_keys|actor_proof_keys|public.actor_proof_keys) ;; *) chk actor_proof_key_table_readable_by_owner FAIL "the owner cannot locate the actor-proof key table (got '${t}')"; return 0 ;; esac
+  [ "$t" = actor_proof_keys ] && t=public.actor_proof_keys
+  if out="$(PGUSER="$VERIFY_OWNER_PGUSER" PGPASSFILE="$VERIFY_OWNER_PGPASSFILE" psql -X -q -At -F '|' -v ON_ERROR_STOP=1 -c "SELECT count(*), COALESCE(string_agg(kid || ':' || status, ',' ORDER BY kid), '') FROM ${t}" 2>/dev/null)"; then
+    IFS='|' read -r AP_ROWS AP_KIDS <<<"$out"
+  else chk actor_proof_key_table_readable_by_owner FAIL "the owner cannot count ${t}"; fi
+}
 
 # ---- gate 1: baseline comparison (backup role, BYPASSRLS: sees every row) ----------------------------------------
 T0="$(now_s)"
@@ -100,8 +116,7 @@ if [ "$ANCHOR_MODE" = reset ]; then
   grep -v -e '^TABLE|database_environment|' -e '^TABLE|actor_proof_keys|' "$BASELINE" >"${WORK}/baseline.noanchor"; BASELINE_CMP="${WORK}/baseline.noanchor"
   grep -v -e '^TABLE|database_environment|' -e '^TABLE|actor_proof_keys|' "${WORK}/restored.txt" >"${WORK}/restored.noanchor"; RESTORED_CMP="${WORK}/restored.noanchor"
   # owner decision 5: the logical dump excludes the actor-proof signing secrets by design, so the table is NOT compared with the baseline; it is asserted instead
-  AP_ROWS="$(awk -F'|' '$1=="TABLE" && $2=="actor_proof_keys" {print $3}' "${WORK}/restored.txt")"
-  AP_KIDS="$(grep '^META|actor_proof_kids|' "${WORK}/restored.txt" | cut -d'|' -f3- || true)"
+  ap_owner_state
   case "$EXPECT_AP" in
     unprovisioned)
       if [ "$AP_ROWS" = 0 ] && [ -z "$AP_KIDS" ]; then chk actor_proof_keys_empty_after_logical_restore PASS "actor_proof_keys holds 0 rows: no actor-proof secret came back through the backup; the platform fails closed until deploy/backup/rekey-actor-proof.sh provisions a NEW key"
@@ -114,12 +129,15 @@ if [ "$ANCHOR_MODE" = reset ]; then
   esac
 else
   BASELINE_CMP="$BASELINE"; RESTORED_CMP="${WORK}/restored.txt"
-  # physical recovery (PITR / snapshot) lives inside the cloud trust boundary and keeps the live actor-proof key by design: it is compared like any other table
-  # (row count and a hash over the NON-secret columns), and the key rows must have survived
-  AP_B="$(awk -F'|' '$1=="TABLE" && $2=="actor_proof_keys" {print $3}' "$BASELINE")"; AP_R="$(awk -F'|' '$1=="TABLE" && $2=="actor_proof_keys" {print $3}' "${WORK}/restored.txt")"
-  if [ "${AP_B:-0}" -ge 1 ]; then
-    if [ "$AP_B" = "${AP_R:-}" ]; then chk actor_proof_keys_retained_by_physical_recovery PASS "${AP_R} actor-proof key row(s) recovered (physical recovery keeps the live key; only logical dumps exclude it)"; else chk actor_proof_keys_retained_by_physical_recovery FAIL "baseline ${AP_B} rows, recovered ${AP_R:-?}"; fi
-  fi
+  # physical recovery (PITR / snapshot) lives inside the cloud trust boundary and keeps the live actor-proof key by design. A legacy baseline (migration < 0166)
+  # still carries the key table's row count and a hash over its NON-secret columns, compared like any other table; since 0166 the backup role cannot see the
+  # table, so the key rows that must have survived are counted as the OWNER (and, with --actor-proof-kid, that kid must be an ACTIVE key)
+  AP_B="$(awk -F'|' '$1=="TABLE" && $2=="actor_proof_keys" {print $3}' "$BASELINE")"
+  ap_owner_state
+  if [ -n "$AP_B" ] && [ "$AP_B" != "$AP_ROWS" ]; then chk actor_proof_keys_retained_by_physical_recovery FAIL "baseline ${AP_B} rows, recovered ${AP_ROWS:-?}"
+  elif [ "${AP_ROWS:-0}" -ge 1 ] && { [ -z "$AP_KID" ] || case ",${AP_KIDS}," in *",${AP_KID}:active,"*) true ;; *) false ;; esac; }; then
+    chk actor_proof_keys_retained_by_physical_recovery PASS "${AP_ROWS} actor-proof key row(s) recovered (kids: ${AP_KIDS}; read as the owner) - physical recovery keeps the live key; only logical dumps exclude it"
+  else chk actor_proof_keys_retained_by_physical_recovery FAIL "recovered ${AP_ROWS:-?} key row(s) (kids: ${AP_KIDS:-none}); expected >= 1${AP_KID:+ with ${AP_KID} active}"; fi
 fi
 
 for kind in TABLE ROLE MEMBER DBACL SCHEMAACL ACL COLACL FUNCACL DEFACL TRG POL RLS FP; do

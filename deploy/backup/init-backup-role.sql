@@ -135,11 +135,23 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO igaming_backup;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM igaming_backup;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_backup;
 
--- NOTE (owner decision 5, ADR 0122 section 10): "everything" includes actor_proof_keys. The logical DUMP excludes that table's rows (--exclude-table-data) and the
--- baseline never reads the secret column, but the role keeps the table-level SELECT: pg_dump takes `LOCK TABLE ... IN ACCESS SHARE MODE` on every table it
--- dumps, including one whose data is excluded, and that lock needs table-level SELECT (a column-level grant was tried in the drill and pg_dump failed with
--- "permission denied for table actor_proof_keys"). So a stolen backup CREDENTIAL can still read the signing secret; that residual is recorded in
--- docs/plans/backup-exclude-actor-secret-record.md.
+-- NOTE (owner decision 5, ADR 0122 section 10; F1, migration 0166): "everything" is everything in schema PUBLIC. The actor-proof signing secrets
+-- are NOT there any more: migration 0166 moved actor_proof_keys into the owner-only schema actorproof_private, on which this role holds NO
+-- privilege (no USAGE, no table grant). backup.sh dumps with --exclude-schema=actorproof_private (pg_dump then neither locks nor reads it) and
+-- refuses to run if this role can reach that schema. The denial is re-asserted on every run (below); the role is given NOTHING actor-proof
+-- related (not even the key ids: verify.sh asserts the key table's state as the owner). (Before 0166 the role had table-level SELECT on
+-- public.actor_proof_keys - residual R1 of docs/plans/backup-exclude-actor-secret-record.md - because pg_dump's LOCK TABLE needs it; a
+-- column-level grant broke the dump.)
+DO $$
+BEGIN
+    IF to_regnamespace('actorproof_private') IS NOT NULL THEN
+        REVOKE ALL ON SCHEMA actorproof_private FROM igaming_backup;
+        REVOKE ALL ON ALL TABLES IN SCHEMA actorproof_private FROM igaming_backup;
+        REVOKE ALL ON ALL SEQUENCES IN SCHEMA actorproof_private FROM igaming_backup;
+        REVOKE ALL ON ALL FUNCTIONS IN SCHEMA actorproof_private FROM igaming_backup;
+    END IF;
+END
+$$;
 -- ... and on whatever the migration owner creates later. The migration owner is `igaming` by convention
 -- (on RDS: the master user; this file runs connected as that role there, so current_user is used).
 DO $$

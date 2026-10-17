@@ -217,7 +217,7 @@ func TestDropDatabaseOnlyOnValidatedNames(t *testing.T) {
 			if !strings.Contains(strings.ToUpper(line), "DROP DATABASE") {
 				continue
 			}
-			ok := strings.Contains(line, `${CREATED_DB}`) || strings.Contains(line, "igaming_restored") || strings.Contains(line, "${RST_DB}") || regexp.MustCompile(`DROP DATABASE (IF EXISTS )?(malsrc|mal_db|mal_ctl_db|trapsrc|sr2_pw|toctou_db|legacy_db)\b`).MatchString(line) // restore.sh's own rollback; drill's own copies
+			ok := strings.Contains(line, `${CREATED_DB}`) || strings.Contains(line, "igaming_restored") || strings.Contains(line, "${RST_DB}") || regexp.MustCompile(`DROP DATABASE (IF EXISTS )?(malsrc|mal_db|mal_ctl_db|trapsrc|sr2_pw|toctou_db|legacy_db|legacy_src|legacy165_db|legacy_own|defacl_db)\b`).MatchString(line) // restore.sh's own rollback; drill's own copies
 			if base(f) == "drill.sh" || base(f) == "restore.sh" {
 				if !ok {
 					t.Errorf("%s: DROP DATABASE on an unvalidated name: %q", f, strings.TrimSpace(line))

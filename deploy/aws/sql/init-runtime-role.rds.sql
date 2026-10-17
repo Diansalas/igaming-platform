@@ -199,3 +199,17 @@ BEGIN
     END IF;
 END
 $$;
+
+-- F1 (migration 0166): the key table lives in the OWNER-ONLY schema actorproof_private. The blanket grants above cover schema public only, so
+-- nothing here re-grants it; the denial (no USAGE, no table privilege) is still re-asserted on every run. Guarded: the schema does not exist
+-- before migration 0166.
+DO $$
+BEGIN
+    IF to_regnamespace('actorproof_private') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON SCHEMA actorproof_private FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA actorproof_private FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA actorproof_private FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON ALL FUNCTIONS IN SCHEMA actorproof_private FROM igaming_runtime';
+    END IF;
+END
+$$;

@@ -404,23 +404,28 @@ func TestActorProof_RuntimeRoleCannotReadKeysNoncesOrMint(t *testing.T) {
 		}
 		requireCode(t, err, "42501")
 	}
-	deny("read keys", `SELECT secret FROM actor_proof_keys`)
-	deny("read kids", `SELECT kid FROM actor_proof_keys`)
+	// F1 (migration 0166): the key table lives in the owner-only schema actorproof_private; the runtime role has no USAGE on it, so every
+	// statement naming it is refused with 42501 before the table is even resolved.
+	deny("read keys", `SELECT secret FROM actorproof_private.actor_proof_keys`)
+	deny("read kids", `SELECT kid FROM actorproof_private.actor_proof_keys`)
 	deny("read nonces", `SELECT nonce FROM actor_proof_nonces`)
-	deny("insert key", `INSERT INTO actor_proof_keys (kid, secret) VALUES ('rt-attacker', decode(repeat('ab', 32), 'hex'))`)
-	deny("update key", `UPDATE actor_proof_keys SET status = 'retired', retired_at = now()`)
-	deny("delete key", `DELETE FROM actor_proof_keys`)
+	deny("insert key", `INSERT INTO actorproof_private.actor_proof_keys (kid, secret) VALUES ('rt-attacker', decode(repeat('ab', 32), 'hex'))`)
+	deny("update key", `UPDATE actorproof_private.actor_proof_keys SET status = 'retired', retired_at = now()`)
+	deny("delete key", `DELETE FROM actorproof_private.actor_proof_keys`)
 	deny("insert nonce", `INSERT INTO actor_proof_nonces (nonce, kid, actor, scope, tenant, operation, target, payload_hash, expires_at, consumed_txid)
 		VALUES ('aaaaaaaaaaaaaaaaaaaaaa', 'k', gen_random_uuid(), 'tenant', gen_random_uuid(), 'a:b', 'new', repeat('0', 64), now(), 1)`)
 	deny("delete nonces (reset replay protection)", `DELETE FROM actor_proof_nonces`)
 	deny("truncate nonces", `TRUNCATE actor_proof_nonces`)
-	deny("truncate keys", `TRUNCATE actor_proof_keys`)
+	deny("truncate keys", `TRUNCATE actorproof_private.actor_proof_keys`)
 
 	// The tables carry no ACL entry for the runtime role and no policy at all.
 	var rtPriv bool
 	var pol int
 	if err := rt.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT has_table_privilege('igaming_runtime', 'actor_proof_keys', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+		// by OID: a name lookup in a schema without USAGE would itself be refused
+		if err := tx.QueryRow(ctx, `SELECT has_table_privilege('igaming_runtime', (SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = 'actorproof_private' AND c.relname = 'actor_proof_keys'), 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+			OR has_schema_privilege('igaming_runtime', (SELECT oid FROM pg_namespace WHERE nspname = 'actorproof_private'), 'USAGE,CREATE')
 			OR has_table_privilege('igaming_runtime', 'actor_proof_nonces', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')`).Scan(&rtPriv); err != nil {
 			return err
 		}
