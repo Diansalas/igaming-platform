@@ -72,6 +72,9 @@ type PaymentSweepConfig struct {
 	// AllowSynthetic admits a Synthetic (MOCK) source. The wiring sets it only where mock components are
 	// allowed (never in production).
 	AllowSynthetic bool
+	// ImportKeys (F2 / SR11-10) seals the stream's imports and verifies the cursor's backing imports. nil = the
+	// process-wide sealer (cmd/platform-api installs payoutinstrument.Keys, which also verifies).
+	ImportKeys statement.StreamSealKeys
 }
 
 // paymentPlan is how the sweep runs the payment_statement stream: legacy (a flat source list, every source for
@@ -196,71 +199,9 @@ func reconcilePaymentStreamsForTenant(ctx context.Context, pool *db.Pool, logger
 			continue
 		}
 		outs = append(outs, ReconcilePaymentStatementForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, tg.src,
-			PaymentStatementOptions{ObservationOnlyStatus: obsStatus, RunLineBound: plan.cfg.RunLineBound, Continuation: true}))
+			PaymentStatementOptions{ObservationOnlyStatus: obsStatus, RunLineBound: plan.cfg.RunLineBound, Continuation: true, ImportKeys: plan.cfg.ImportKeys}))
 	}
 	return outs
-}
-
-// readPaymentCursor returns the (tenant, provider) continuation cursor: the maximum validated coverage_end of
-// the payment_statement runs that COMMITTED for the pair (migration 0160), or the zero time when there is none.
-// Like casino_statement's anchor (A3 SR3B-3) it is read from the run records the stream itself writes under its
-// advisory lock, never from audit rows; the maximum is used, so a forged LOWER value cannot lower it (at worst
-// a window is re-matched, which is idempotent), and a row dated in the future or claiming coverage beyond
-// now + PaymentCoverageMaxClockSkew is ignored, so a forged HIGH value cannot move the cursor into the future
-// (residual, documented: a forged value inside that skew can skip at most that many minutes).
-func readPaymentCursor(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, providerID string) (time.Time, error) {
-	var cur time.Time
-	err := pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		cur, err = queryPaymentCursor(ctx, tx, tenantID, providerID)
-		return err
-	})
-	if err != nil {
-		return time.Time{}, err
-	}
-	return cur, nil
-}
-
-func queryPaymentCursor(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string) (time.Time, error) {
-	var prev *time.Time
-	if err := tx.QueryRow(ctx,
-		`SELECT max(r.coverage_end) FROM reconciliation_runs r
-		  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL
-		    AND r.run_at <= now() AND r.coverage_end <= now()
-		    AND EXISTS (SELECT 1 FROM payment_statement_imports i
-		                 WHERE i.tenant_id = r.tenant_id AND i.provider_id = r.provider_id AND i.coverage_end = r.coverage_end)`,
-		tenantID, string(StreamPaymentStatement), providerID).Scan(&prev); err != nil {
-		return time.Time{}, fmt.Errorf("reconciliation: read payment statement cursor: %w", err)
-	}
-	if prev == nil {
-		return time.Time{}, nil
-	}
-	return prev.UTC().Truncate(time.Microsecond), nil
-}
-
-// countUnbackedCursorRuns counts payment_statement run rows of the pair, above the backed cursor, that no stored
-// import backs (SR11-1). A genuine run's coverage_end always equals its import's (the import is committed in the
-// ingest transaction before the match writes the run), so such a row is a forgery or corruption: it is IGNORED by the
-// cursor read and reported by a durable alert (phase cursor_anomaly), never trusted.
-func countUnbackedCursorRuns(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, providerID string, cursor time.Time) (int, error) {
-	var n int
-	var floor *time.Time
-	if !cursor.IsZero() {
-		floor = &cursor
-	}
-	err := pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT count(*) FROM reconciliation_runs r
-			  WHERE r.tenant_id = $1 AND r.stream = $2 AND r.provider_id = $3 AND r.coverage_end IS NOT NULL
-			    AND ($4::timestamptz IS NULL OR r.coverage_end > $4)
-			    AND NOT EXISTS (SELECT 1 FROM payment_statement_imports i
-			                     WHERE i.tenant_id = r.tenant_id AND i.provider_id = r.provider_id AND i.coverage_end = r.coverage_end)`,
-			tenantID, string(StreamPaymentStatement), providerID, floor).Scan(&n)
-	})
-	if err != nil {
-		return 0, fmt.Errorf("reconciliation: count unbacked payment statement cursor rows: %w", err)
-	}
-	return n, nil
 }
 
 // errPaymentCursorStale means that, under the stream's advisory lock, the cursor is no longer the one this

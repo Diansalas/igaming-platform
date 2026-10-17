@@ -157,6 +157,13 @@ func raiseRunFailed(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, stre
 // occurrences. providerID is empty for a scope failure. Like raiseRunFailed it raises nothing when the sweep's
 // own context was cancelled (graceful shutdown).
 func raiseRunNotReconciled(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, stream, providerID, phase string) {
+	raiseRunNotReconciledAs(ctx, pool, tenantID, stream, providerID, phase, phase)
+}
+
+// raiseRunNotReconciledAs is raiseRunNotReconciled with a discriminator tail that may differ from the phase
+// attribute (F2 / SR11-11: the cursor_anomaly tail carries the unbacked-row count and digest, the phase
+// attribute stays "cursor_anomaly").
+func raiseRunNotReconciledAs(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, stream, providerID, phase, discTail string) {
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
@@ -164,7 +171,7 @@ func raiseRunNotReconciled(ctx context.Context, pool *db.Pool, tenantID uuid.UUI
 	if providerID != "" {
 		disc += ":provider:" + discPart(providerID)
 	}
-	disc += ":" + phase
+	disc += ":" + discTail
 	_ = alerting.RaiseDetached(ctx, alerting.NewTenantRunner(pool, tenantID), alerting.Alert{
 		Kind: alerting.KindReconciliationRunFailed, SubjectTenantID: tenantID, Discriminator: disc,
 		Attributes: map[string]alerting.AttrValue{"stream": stream, "phase": phase, "sqlstate_class": "58"},

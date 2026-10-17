@@ -2,8 +2,8 @@
 -- withdrawal RG/risk gate at PAYOUT DISPATCH.
 -- MONEY-PATH TRIGGERS: FOR `ledger-finance`, `security`, `code-reviewer`, `qa` REVIEW BEFORE MERGE.
 --
--- NUMBERING: 0169 (allocated by the orchestrator; 0167 and 0168 are reserved for F2 / F3, 0159 and 0161 stay
--- reserved and unused).
+-- NUMBERING: 0169 (allocated by the orchestrator, after F3 0167 and F2 0168; 0159 and 0161 stay reserved and
+-- unused).
 --
 -- SQLSTATE class "WD" (0131 WD010-012, 0132 WD020-043/WD098, 0162/0165 WD026-028/WD035/WD044/WD096-099). WD050
 -- and WD051 are the APPLICATION gate codes of WD-RG-1 (internal/withdrawalgate); they are not raised here. New:

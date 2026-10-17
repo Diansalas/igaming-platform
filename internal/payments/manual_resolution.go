@@ -478,6 +478,8 @@ type ManualResolutionService struct {
 	// importKeys verifies the statement-import seals an M4 rests on (ADR 0111
 	// 4.3). nil refuses every M4 (force_resolve_evidence_unsealed).
 	importKeys *payoutinstrument.Keys
+	// evidenceMaxAge is the M2 reconciliation-evidence age (F2e; 0 = DefaultStatementEvidenceMaxAge).
+	evidenceMaxAge time.Duration
 }
 
 // WithProofIssuer sets the issuer this service signs actor proofs with (default:
@@ -536,6 +538,11 @@ func (s *ManualResolutionService) Request(ctx context.Context, target Resolution
 		return ManualResolution{}, err
 	}
 	var out ManualResolution
+	if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid {
+		// F2e / SRF2-5: the reconciliation evidence is read BEFORE the M2 transaction opens and applied inside it
+		// after the guard-first INSERT (security F-2/F-3 ordering kept).
+		ctx = withReconEvidence(ctx, s.preReadStatementEvidence(ctx, target.tenantID))
+	}
 	err := s.runSession(ctx, target, uuid.Nil, meta, func(ctx context.Context, tx pgx.Tx, call ResolutionCall) error {
 		var err error
 		out, err = s.requestInTx(ctx, tx, call, in)
@@ -609,6 +616,18 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 		}
 		if !s.statementSourceRegistered(att.ProviderID) {
 			return ManualResolution{}, ErrResolutionNoStatementSource
+		}
+		// F2e / H-W1 second half: an M2 is admitted only while the provider's payment_statement reconciliation
+		// is current (its last run succeeded, recently; see manual_resolution_recon_gate.go). M4 rests on its own
+		// sealed evidence and is not gated here.
+		if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid {
+			reason, err := statementEvidenceRefusal(ctx, att.ProviderID)
+			if err != nil {
+				return ManualResolution{}, err
+			}
+			if reason != "" {
+				return ManualResolution{}, fmt.Errorf("%w: %s", ErrResolutionReconciliationNotCurrent, reason)
+			}
 		}
 		reqAttempt = att
 	}
@@ -778,6 +797,11 @@ var testHookResolutionBeforePost func(ctx context.Context, id uuid.UUID) error
 // Decide opens the caller's session and decides.
 func (s *ManualResolutionService) Decide(ctx context.Context, target ResolutionTarget, id uuid.UUID, in ResolutionDecisionInput, meta ResolutionMeta) (ResolutionOutcome, error) {
 	var out ResolutionOutcome
+	if in.Decision == ResolutionApprove {
+		// F2e / SRF2-5 / LFF2-7: the execution-time recheck uses evidence read BEFORE the transaction (no
+		// hold-and-wait on the pool after the L1 locks); an error only matters if the resolution is an M2.
+		ctx = withReconEvidence(ctx, s.preReadStatementEvidence(ctx, target.tenantID))
+	}
 	err := s.runSession(ctx, target, id, meta, func(ctx context.Context, tx pgx.Tx, call ResolutionCall) error {
 		var err error
 		out, err = s.decideInTx(ctx, tx, call, id, in)
@@ -931,6 +955,17 @@ func (s *ManualResolutionService) decideInTx(ctx context.Context, tx pgx.Tx, cal
 		refusal = "policy_disabled"
 	default:
 		refusal = s.executionRefusal(res, att, wr)
+	}
+	if refusal == "" && (res.Kind == ResolutionM2DeclarePaid || res.Kind == ResolutionM2DeclareNotPaid) {
+		// F2e / H-W1 second half: the same reconciliation-currency rule again at execution (a failure or a
+		// truncated run since the request refuses it; refused_at_execution, nothing posted).
+		reason, err := statementEvidenceRefusal(ctx, att.ProviderID)
+		if err != nil {
+			return ResolutionOutcome{}, err
+		}
+		if reason != "" {
+			refusal = resolutionRefusedReconNotCurrent
+		}
 	}
 	if refusal == "" && res.Kind.IsM4() {
 		// ADR 0111 4.5 steps 6-7 (S-2): re-evaluate the evidence FIRST, then
@@ -1373,7 +1408,7 @@ func ClassifyResolutionError(err error) ResolutionErrClass {
 		return ResolutionErrExpired
 	case errors.Is(err, ErrResolutionInvalidInput):
 		return ResolutionErrInvalid
-	case errors.Is(err, ErrResolutionNoStatementSource):
+	case errors.Is(err, ErrResolutionNoStatementSource), errors.Is(err, ErrResolutionReconciliationNotCurrent):
 		return ResolutionErrPrecondition
 	case errors.Is(err, ErrResolutionEvidenceUnsealed):
 		return ResolutionErrEvidenceUnsealed

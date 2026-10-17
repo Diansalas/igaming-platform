@@ -923,22 +923,45 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 	}
 
 	// Phase 0 (R3-OBS-BOUND-1, scoped sweep only): the persisted continuation cursor, read in its own short
-	// read transaction BEFORE the provider I/O (nothing is held across the fetch).
+	// read transaction BEFORE the provider I/O (nothing is held across the fetch). F2 / SR11-10: with a seal
+	// verifier the cursor is the newest run row backed by a SEALED import of this source that verifies.
 	if opts.Continuation && source != nil {
-		cursor, err := readPaymentCursor(ctx, pool, tenantID, provider)
+		opts.basis = cursorBasisFor(source, opts)
+		st, err := readPaymentCursorState(ctx, pool, tenantID, provider, opts.basis)
 		if err != nil {
 			return fail("cursor", err)
 		}
-		opts.cursor = cursor
-		// SR11-1: a run row above the backed cursor that no import backs is ignored by the cursor read; say so loudly.
-		if n, aerr := countUnbackedCursorRuns(ctx, pool, tenantID, provider, cursor); aerr != nil {
-			return fail("cursor", aerr)
-		} else if n > 0 {
+		opts.cursor = st.cursor
+		// SR11-1 / SR11-11: run rows above the trusted cursor are ignored; say so loudly, with a discriminator that
+		// changes whenever the set of such rows changes (a later forgery pages again).
+		if st.unbacked > 0 {
+			reportCursorAnomaly(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, st)
+		}
+		// SRF2-1 (c): a stored import of this source above the trusted cursor, fetched more than MatchStallAfter ago,
+		// means its match never committed (lock contention, a stale cursor, a failed match): a stalled stream. The
+		// next fetch re-covers the window from the unchanged cursor; the stall itself is reported, never silent.
+		if err := checkMatchStall(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, opts.basis, st); err != nil {
+			return fail("cursor", err)
+		}
+		// F2 / LF-A11-2: the completeness horizon. CoverageEnd may never pass now - settle lag
+		// (validateBoundedWindow refuses a statement that does), so the request asks for no more than that.
+		lag, err := paymentSettleLag(source)
+		if err != nil {
+			return fail("source", err)
+		}
+		if horizon := time.Now().UTC().Add(-lag); periodEnd.IsZero() || periodEnd.After(horizon) {
+			periodEnd = horizon
+		}
+		periodEnd = periodEnd.UTC().Truncate(time.Microsecond) // the database's precision, like the cursor
+		if !opts.cursor.IsZero() && !periodEnd.After(opts.cursor) {
+			// Nothing has settled past the cursor yet (a lag raised since the last run): nothing to fetch. Not a
+			// failure and not a clean claim; the next sweep continues from the same cursor.
+			out.Skipped = true
 			if logger != nil {
-				logger.Error("reconciliation sweep: payment statement cursor ANOMALY (P1): run rows with no backing import were ignored",
-					"tenant_id", tenantID, "stream", stream, "provider_id", provider, "rows", n)
+				logger.Info("reconciliation sweep: payment statement horizon not past the cursor; nothing to fetch",
+					"tenant_id", tenantID, "stream", stream, "provider_id", discPart(provider))
 			}
-			raiseRunNotReconciled(ctx, pool, tenantID, stream, provider, "cursor_anomaly")
+			return out
 		}
 	}
 
@@ -955,7 +978,7 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 	var reused bool
 	if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		importID, reused, err = IngestPaymentStatement(ctx, tx, tenantID, source, stmt, fetchedAt)
+		importID, reused, err = IngestPaymentStatementSealed(ctx, tx, tenantID, source, stmt, fetchedAt, importSealerFor(opts))
 		return err
 	}); err != nil {
 		return fail("ingest", err)
@@ -1000,6 +1023,12 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 	}); err != nil {
 		out.Run = Run{}
 		return fail("match", err)
+	}
+
+	// SRF2-1 (c): a skipped match leaves the import it fetched without a run. It is audited explicitly (with the
+	// import) and logged; a repeated skip turns into the durable match_stalled P1 (checkMatchStall, next sweeps).
+	if out.Skipped && importID != uuid.Nil {
+		reportMatchSkipped(ctx, pool, logger, tenantID, provider, opts.ObservationOnlyStatus, importID)
 	}
 
 	// R3-OBS-BOUND-1: a run that stopped at the per-run bound matched only the window the source vouched
