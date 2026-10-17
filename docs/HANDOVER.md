@@ -1,5 +1,11 @@
 # iGaming Platform — Live Developer Handover
 
+## Current state (2026-10-17, final closure)
+
+> **Supersedes the 2026-10-17 section below.** Detail: `docs/plans/final-platform-closure-report-2026-10-17.md`.
+
+Migration head 0175. Provider-independent platform frozen; no class-A item remains; residuals classified B/C/D/E in the report. Reviews: `docs/plans/closure-*-review-record.md`, `closure-*-rereview-record.md`. Runbooks: `docs/runbooks/README.md` (new: `withdrawal-dispatch-gate.md`; MA020 stranding and AP002/AP003 in `operational-runbooks.md`). Providers MOCK, AWS OFF (plan ready), no brand activated. Next steps only on the owner's go: AWS staging against the freeze commit, then PSP integration.
+
 ## Current state (2026-10-17)
 
 > **This section supersedes "Current state (2026-10-16)" below where they differ.** Full detail: `docs/plans/platform-freeze-report-2026-10-17.md`; audit: `docs/plans/final-platform-audit-record.md`.

@@ -1,5 +1,8 @@
 # Active Stage
 
+**Current-state entry 2026-10-17 (final closure; supersedes the earlier 2026-10-17 freeze entry).**
+Authoritative detail: `docs/plans/final-platform-closure-report-2026-10-17.md`. Migration head **0175**. **Provider-independent platform technically FROZEN: no class-A item remains** (F4 R1 closed for the SQL-only attacker, deposit tombstones proof-bound, statement-integrity items, jurisdiction TODOs, frontend exact money, audit proofs, detection of negative wallets, first-deposit backstop, namespace checks); accepted residuals B, provider-dependent C, AWS-dependent D and human/legal E are listed in the report. Providers MOCK; AWS OFF (plan ready, NOT started); no brand activated. **Next only on the owner's explicit go:** the single AWS staging deployment, then provider integration (PSP first).
+
 **Current-state entry 2026-10-17 (supersedes the 2026-10-16 entry; history is not rewritten).**
 Authoritative detail: `docs/plans/platform-freeze-report-2026-10-17.md`. Branch `claude/focused-wright-jw88w9`; migration head **0170** (0143-0150, 0159, 0161 reserved and unused). **Provider-independent platform FROZEN for verification: A1-A13 and F1-F6 done and reviewed; no A-class implementation remains.** Local verification (unit, integration, payments end to end, frontends, `migrate verify`, backup/restore drill 138/0 at 0170) and hosted CI recorded in the report. Providers MOCK; AWS OFF (staging plan/IaC prepared, NOT started, to run only against the freeze commit); no brand activated. **Next, only on the owner's go:** the single AWS staging deployment, then the provider-integration phase (PSP first).
 
