@@ -23,11 +23,14 @@
 
 SET LOCAL lock_timeout = '5s';
 
+-- The registry is FORCE RLS with no write policy (0177): the migration owner lifts FORCE for the INSERT only (inside this transaction).
+ALTER TABLE licensing_change_kinds NO FORCE ROW LEVEL SECURITY;
 INSERT INTO licensing_change_kinds (kind, platform_only, widening_approvals, approver_roles, description) VALUES
     ('licence_status_change', true, 2, ARRAY['platform_admin'], 'Set licences.status (widening iff it moves toward active, narrowing is single actor).'),
     ('licence_validity_dates_change', true, 2, ARRAY['platform_admin'], 'Set licences.issued_at / expires_at (widening iff expiry is later or cleared, or issue date earlier or cleared).'),
     ('licence_review_due_change', true, 2, ARRAY['platform_admin'], 'Set licences.review_due_at (widening iff postponed or cleared).'),
     ('licence_evidence_reference_change', true, 2, ARRAY['platform_admin'], 'Set licences.evidence_reference (neutral, never widening, single actor).');
+ALTER TABLE licensing_change_kinds FORCE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION licensing_change_classify(p_kind text, p jsonb,
     OUT widening boolean, OUT subject_tenant uuid, OUT subject_licence uuid)

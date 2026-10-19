@@ -28,6 +28,11 @@ type licRow struct {
 	Issued, Expires, Review, Evidence *string
 }
 
+// key is the comparable VALUE form (the struct holds pointers).
+func (r licRow) key() string {
+	return strings.Join([]string{r.Status, strOf(r.Issued), strOf(r.Expires), strOf(r.Review), strOf(r.Evidence)}, "|")
+}
+
 func (w *world) licRow(id uuid.UUID) licRow {
 	w.t.Helper()
 	var r licRow
@@ -139,11 +144,11 @@ func TestLifecycleKinds_DatabaseClassification_WideningNeedsTwoApprovals_Narrowi
 			if res.Executed || res.Request.Status != StatusRequested || res.Request.RequiredApprovals != 2 {
 				t.Fatalf("a widening change is filed with two required approvals: %+v", res.Request)
 			}
-			if got := w.licRow(id); got != before {
-				t.Fatalf("a filed widening change must change nothing: %+v -> %+v", before, got)
+			if got := w.licRow(id); got.key() != before.key() {
+				t.Fatalf("a filed widening change must change nothing: %s -> %s", before.key(), got.key())
 			}
 			first := w.mustApprove(w.ap1, res.Request.ID)
-			if first.Executed || w.licRow(id) != before {
+			if first.Executed || w.licRow(id).key() != before.key() {
 				t.Fatal("one approval must not execute a widening change")
 			}
 			second := w.mustApprove(w.ap2, res.Request.ID)
@@ -247,15 +252,19 @@ func TestLifecycle_GovernedTrigger_DirectRuntimeUpdateRefused(t *testing.T) {
 	id := w.newLicence()
 	for _, set := range []string{
 		`status = 'suspended'`, `status = 'active'`, `expires_at = DATE '2099-01-01'`, `issued_at = DATE '2020-01-01'`,
-		`review_due_at = DATE '2099-01-01'`, `evidence_reference = 'DIRECT'`, `licence_number = 'RENAMED'`,
-		`permitted_products = '["x"]'::jsonb`,
+		`review_due_at = DATE '2099-01-01'`, `evidence_reference = 'DIRECT'`,
+		`licence_number = 'RENAMED'`, `permitted_products = '["x"]'::jsonb`,
 	} {
 		err := w.rt.WithPlatformAdmin(context.Background(), w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE licences SET `+set+` WHERE id = $1`, id)
 			return err
 		})
-		if sqlstateOf(err) != "LC040" {
-			t.Errorf("runtime UPDATE %s: want LC040, got %v", set, err)
+		want := "LC040" // lifecycle columns: needs an executed change
+		if strings.HasPrefix(set, "licence_number") || strings.HasPrefix(set, "permitted_") {
+			want = "LC042" // identity columns: immutable for every role
+		}
+		if sqlstateOf(err) != want {
+			t.Errorf("runtime UPDATE %s: want %s, got %v", set, want, err)
 		}
 	}
 	if r := w.licRow(id); r.Status != "active" || r.Evidence != nil || r.Expires != nil {

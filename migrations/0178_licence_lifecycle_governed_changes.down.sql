@@ -136,7 +136,10 @@ CREATE POLICY licence_versions_platform_admin_insert ON licence_versions
 ALTER TABLE licence_versions ALTER COLUMN version_no TYPE integer;
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+    -- Only where the runtime role holds table access at all (the up revoked INSERT from a blanket grant); a database where it never
+    -- had any grant on the table must not gain one.
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime')
+       AND has_table_privilege('igaming_runtime', 'licence_versions', 'SELECT') THEN
         EXECUTE 'GRANT INSERT ON licence_versions TO igaming_runtime';
     END IF;
 END
@@ -145,8 +148,10 @@ $$;
 DROP TRIGGER zz_licensing_change_governed_upd ON licences;
 DROP FUNCTION licences_update_guard();
 
+ALTER TABLE licensing_change_kinds NO FORCE ROW LEVEL SECURITY;
 DELETE FROM licensing_change_kinds WHERE kind IN
     ('licence_status_change', 'licence_validity_dates_change', 'licence_review_due_change', 'licence_evidence_reference_change');
+ALTER TABLE licensing_change_kinds FORCE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION licensing_change_classify(p_kind text, p jsonb,
     OUT widening boolean, OUT subject_tenant uuid, OUT subject_licence uuid)
