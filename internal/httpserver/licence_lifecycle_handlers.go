@@ -35,6 +35,7 @@ type licenceVersionResponse struct {
 	Operation         string    `json:"operation"`
 	ChangedAt         string    `json:"changed_at"`
 	ChangedBy         *staffRef `json:"changed_by"`
+	ChangeRequestID   *string   `json:"change_request_id"`
 	Status            string    `json:"status"`
 	IssuedAt          *string   `json:"issued_at"`
 	ExpiresAt         *string   `json:"expires_at"`
@@ -250,6 +251,10 @@ func newListLicenceVersionsHandler(deps Deps) http.HandlerFunc {
 				ReviewDueAt: dateStringPtr(v.ReviewDueAt), EvidenceReference: evidencePtr(v.EvidenceReference), LicenceNumber: v.LicenceNumber}
 			platform := staffScopePlatform
 			item.ChangedBy = platformStaffViewer().optRef(&platform, v.ChangedBy)
+			if v.ChangeRequestID != nil {
+				cr := v.ChangeRequestID.String()
+				item.ChangeRequestID = &cr
+			}
 			resp = append(resp, item)
 		}
 		writeJSON(w, http.StatusOK, resp)

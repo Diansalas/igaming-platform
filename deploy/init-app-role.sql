@@ -675,6 +675,16 @@ BEGIN
 END
 $$;
 
+-- Migration 0179 (lic6, security re-review I-2): no code path deletes a licence, and the runtime role must not be able to (the
+-- blanket backfill GRANT above would re-grant DELETE). Re-asserted on every run.
+DO $$
+BEGIN
+    IF to_regclass('public.licences') IS NOT NULL THEN
+        EXECUTE 'REVOKE DELETE ON licences FROM igaming_runtime';
+    END IF;
+END
+$$;
+
 -- ADR 0115 S1 (migration 0135, RG limits schema): least-privilege, re-asserted on every run,
 -- mirroring migration 0135's own in-migration grant block. RLS (FORCE on the three RG tables) and
 -- the guard / deny triggers are the binding controls; these grants are defence in depth, narrower

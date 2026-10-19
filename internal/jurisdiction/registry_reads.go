@@ -87,6 +87,9 @@ func ListTenantJurisdictionConfigs(ctx context.Context, tx pgx.Tx, tenantID uuid
 	if err := assertPlatformScope(ctx, tx); err != nil {
 		return nil, 0, err
 	}
+	if _, err := tx.Exec(ctx, `SET TRANSACTION READ ONLY`); err != nil {
+		return nil, 0, fmt.Errorf("jurisdiction: set transaction read only: %w", err)
+	}
 	if tenantID == uuid.Nil {
 		return nil, 0, fmt.Errorf("%w: tenant id is required", ErrInvalidInput)
 	}

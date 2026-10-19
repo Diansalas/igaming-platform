@@ -21,6 +21,9 @@ func ListLicenceCeilingVersionsPage(ctx context.Context, tx pgx.Tx, licenceID uu
 	if err := assertPlatformScope(ctx, tx); err != nil {
 		return nil, 0, err
 	}
+	if err := setReadOnly(ctx, tx); err != nil {
+		return nil, 0, err
+	}
 	if licenceID == uuid.Nil {
 		return nil, 0, fmt.Errorf("%w: licence_id is required", ErrInvalidInput)
 	}
@@ -77,6 +80,9 @@ func ListLicenceCeilingVersionsPage(ctx context.Context, tx pgx.Tx, licenceID uu
 // currentOnly keeps only the open version of each key. tx MUST be platform-admin-scoped (no tenant GUC on entry).
 func ListTenantPolicyVersionsPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, countryCode string, currentOnly bool, limit, offset int) ([]PolicyRecord, int, error) {
 	if err := assertPlatformScope(ctx, tx); err != nil {
+		return nil, 0, err
+	}
+	if err := setReadOnly(ctx, tx); err != nil {
 		return nil, 0, err
 	}
 	if tenantID == uuid.Nil {
@@ -139,4 +145,13 @@ func ListTenantPolicyVersionsPage(ctx context.Context, tx pgx.Tx, tenantID uuid.
 	}
 	rows.Close()
 	return out, total, rows.Err()
+}
+
+// setReadOnly makes the rest of the transaction read-only (lic6 I-5): a read view can never write, whatever its caller does next.
+// Switching to read-only is allowed after earlier statements; the platform session setup has only set transaction-local settings.
+func setReadOnly(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SET TRANSACTION READ ONLY`); err != nil {
+		return fmt.Errorf("operatingmarket: set transaction read only: %w", err)
+	}
+	return nil
 }
