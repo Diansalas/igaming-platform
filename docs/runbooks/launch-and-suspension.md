@@ -57,7 +57,9 @@ sportsbook `brand_not_active`), initiate payments, and the payments sweeper with
 
 ## 3. Launching (activate)
 
-1. **Prepare configuration** (partner console / API; nothing here is code): jurisdiction configs in effect, KYC/AML/RG
+1. **Prepare configuration** (API; nothing here is code): jurisdiction configs in effect (since migration 0177:
+   `POST /v1/admin/licensing-changes` kind `tenant_jurisdiction_config_version`, two approvals for a first or widening
+   version; `licensing-change-approvals.md`), KYC/AML/RG
    rulesets set, allowed currencies active in the asset registry, payment methods and an approved provider credential
    handle, catalogue enabled, licence record entered by the responsible human. Market rows: `market-blocking-configuration.md`. RG floors and the
    enforcement switch: `rg-enforcement-activation.md`. AML officers: `aml-officer-bootstrap.md`. Containment after launch: `kill-switch-and-containment.md`.

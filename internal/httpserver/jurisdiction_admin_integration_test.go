@@ -87,12 +87,25 @@ func TestJurisdictionRegistryAPI_CreateAndListOverHTTP(t *testing.T) {
 	var created jurisdictionResponse
 	decodeBody(t, resp, &created)
 
+	// INTENTIONAL BEHAVIOUR CHANGE (migration 0177, G-2): the route files a licence_create change (202); the licence exists
+	// only after two other Persons approve it.
+	ensureLicensingProofs(t)
+	licenceNumber := "HTTP-LIC-" + uuid.NewString()[:8]
 	resp = sendAssetJSON(t, srv.URL+"/v1/admin/licences", http.MethodPost, token, map[string]any{
-		"jurisdiction_id": created.ID, "licensee": "platform", "licence_number": "HTTP-LIC-1", "reason_code": "onboarding"})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("expected 201 creating a licence, got %d", resp.StatusCode)
+		"jurisdiction_id": created.ID, "licensee": "platform", "licence_number": licenceNumber, "reason_code": "onboarding"})
+	done := executeFiledChange(t, srv, pool, resp)
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/licences", http.MethodGet, token, nil)
+	var licences []licenceResponse
+	decodeBody(t, resp, &licences)
+	foundLicence := false
+	for _, l := range licences {
+		if l.LicenceNumber == licenceNumber && l.ID == done.Outcome["licence_id"] {
+			foundLicence = true
+		}
 	}
-	resp.Body.Close()
+	if !foundLicence {
+		t.Fatalf("the executed licence %s must be listed", licenceNumber)
+	}
 
 	resp = sendAssetJSON(t, srv.URL+"/v1/admin/jurisdictions", http.MethodGet, token, nil)
 	if resp.StatusCode != http.StatusOK {

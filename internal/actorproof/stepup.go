@@ -65,6 +65,14 @@ var StepUpOperations = map[string]stepup.Class{
 	// or releases a hold on the tombstone branch); the route POST /v1/admin/withdrawals/{id}/payout-reversal is
 	// critical in the golden table.
 	OpPayoutReversalDecide: stepup.Critical,
+	// Migration 0177 (MKT-DUAL-1): filing a licensing / jurisdiction change, approving one and executing one (the final
+	// approver, or the requester of a single-actor narrowing change, executes it) are critical; the reject and cancel
+	// operations are protective and absent. The routes POST /v1/admin/licensing-changes and .../{changeID}/approve, and the
+	// two legacy routes that now file a change (POST /v1/admin/licences, PUT /v1/admin/tenants/{tenantID}/licence), are
+	// critical in the golden table.
+	OpLicensingChangeRequest: stepup.Critical,
+	OpLicensingChangeApprove: stepup.Critical,
+	OpLicensingChangeExecute: stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4

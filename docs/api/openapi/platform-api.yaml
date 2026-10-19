@@ -6355,17 +6355,18 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
     post:
-      summary: Create a licence (platform-wide reference row, FK'd to a jurisdiction)
+      summary: File a licence creation (licence_create licensing change; MKT-DUAL-1)
       description: >
-        Requires jurisdiction_registry:manage (platform_admin only).
-        `status` always starts `active`; status, dates, review date and
-        evidence reference change only through the lifecycle endpoints below.
-        Not four-eyes gated. Requires reason_code,
-        recorded on an audit entry with tenant_id NULL. An unknown
-        jurisdiction_id returns 400 (jurisdiction.ErrInvalidInput wrapping
-        the foreign-key violation), never 404 - this registry's write path
-        never distinguishes "not found" from "invalid input" the way
-        AssignTenantLicence below does.
+        Requires jurisdiction_registry:manage (platform_admin only) and licensing_change:request. Since migration 0177
+        (licensing audit G-2) this route no longer writes the licence: the request body is unchanged, but it files a
+        `licence_create` licensing change and answers 202 with the change request. The licence is created only when two
+        approvals by distinct Persons (neither the requester's Person) are recorded through
+        POST /v1/admin/licensing-changes/{changeID}/approve (signed actor proof, ADR 0110); the database refuses any other
+        runtime INSERT into licences (LC040). `status` of the created licence is `active`. An unknown jurisdiction_id
+        returns 400. reason_code must be a code (1..64 characters of [A-Za-z0-9_.:-]). Step-up: critical. A licensing
+        change record is not a legal or regulatory authorisation.
+        `status` always starts `active`; status, dates, review date and evidence reference change only through the
+        lifecycle endpoints below (PUT /v1/admin/licences/{licenceID}/...).
       security:
         - bearerAuth: []
       requestBody:
@@ -6389,20 +6390,24 @@ paths:
                 reason_code: { type: string }
               required: [jurisdiction_id, licensee, licence_number, reason_code]
       responses:
-        "201":
-          description: Licence created, status=active
+        "202":
+          description: The licence_create change request was filed (status requested; nothing is created yet)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Licence"
+                $ref: "#/components/schemas/LicensingChangeResponse"
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
   /v1/admin/jurisdiction-resolution-active:
     get:
       summary: List the caller's own tenant's jurisdiction-resolution-active facts
@@ -6740,32 +6745,19 @@ paths:
           $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/licence:
     put:
-      summary: Bind (or unassign) the licence a tenant actually operates under
+      summary: Bind (or unassign) the licence a tenant actually operates under (governed, MKT-DUAL-1)
       description: >
-        Requires tenant_licence:assign (platform_admin only). Deliberately
-        separate from tenant:write (name/slug/licensing_model
-        provisioning) and from jurisdiction_registry:manage (which only
-        creates jurisdictions/licences REFERENCE rows, never binds a live
-        tenant to one) - binding a live tenant to a licence determines
-        which jurisdiction's rules govern that tenant's operations. The
-        tenant is always taken from the path, never the body; a
-        platform_admin may target any tenant (canActOnTenant always allows
-        a nil-tenant/platform-scoped caller - a 403 here is latent today
-        since no other role holds this permission, but is enforced
-        regardless, closing a risk should that ever change).
-
-
-        `licence_id` is a three-state field, not a plain optional string:
-        the JSON key MUST be present. An absent key returns 400 ("licence_id
-        is required; send null to unassign"). A JSON `null` unassigns the
-        tenant's current licence. A UUID string assigns that licence,
-        subject to: the licence must exist and have status `active`
-        (400 otherwise), and its `licensee` must match the tenant's own
-        `licensing_model` (enforced by the database's composite foreign
-        key, surfaced here as 400). An unknown tenantID returns 404
-        (jurisdiction.ErrNotFound) - the only ErrNotFound producer in this
-        registry's write surface, unlike the 400-only jurisdictions/
-        licences creation paths above.
+        Requires tenant_licence:assign (platform_admin only) and licensing_change:request. The tenant is always taken from
+        the path, never the body. `licence_id` is a three-state field: the JSON key MUST be present (an absent key returns
+        400). Since migration 0177 (licensing audit G-2) the request body is unchanged but the write is governed:
+        a UUID (bind or rebind: widening) files a `tenant_licence_bind` licensing change and answers 202 with the change
+        request; the binding happens only when two approvals by distinct Persons (neither the requester's Person) are
+        recorded through POST /v1/admin/licensing-changes/{changeID}/approve. The refusals the binding would hit are
+        answered when filing, as before: unknown licence, a licence whose status is not `active`, a licensee that does not
+        match the tenant's `licensing_model`, or an exclusive (tenant-licensee) licence already bound to another tenant
+        return 400; an unknown tenantID returns 404. A JSON `null` (unbind: narrowing, fail closed) files a
+        `tenant_licence_unbind` change that executes in the same transaction (single actor with a reason code) and answers
+        200 with the previous response shape. Step-up: critical. Not a legal or regulatory authorisation.
       security:
         - bearerAuth: []
       parameters:
@@ -6781,11 +6773,17 @@ paths:
               $ref: "#/components/schemas/AssignTenantLicenceRequest"
       responses:
         "200":
-          description: Licence bound (or unassigned)
+          description: Licence unassigned (the tenant_licence_unbind change executed)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantLicenceAssignment"
+        "202":
+          description: The tenant_licence_bind change request was filed (nothing is bound yet)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
@@ -6802,8 +6800,270 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+
+  # --- Licensing / jurisdiction change requests (migration 0177, MKT-DUAL-1) ---
+  #
+  # The generic two-person approval primitive for licensing and jurisdiction configuration writes. Kinds (closed):
+  # licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version,
+  # tenant_jurisdiction_config_version. The DATABASE classifies each change: WIDENING (open / enable / bind / create)
+  # needs 2 approvals by distinct Persons, neither the requester's, each at most 24 h old at execution, by ACTIVE
+  # platform_admin staff (interim answer to HDR-M-1); NARROWING (close / disable / unbind / narrow) filed by a
+  # platform_admin executes in the same transaction (single actor with a reason code); narrowing filed by tenant staff
+  # needs one platform approval. Every request, approval, reject, cancel and execution carries a signed actor proof
+  # (ADR 0110). Not a legal or regulatory authorisation.
+  /v1/admin/licensing-changes:
+    post:
+      summary: File a licensing / jurisdiction change (licensing_change:request)
+      description: >
+        Requires licensing_change:request. platform_admin files any kind (plus the kind's own permission:
+        jurisdiction_registry:manage for licence_create, tenant_licence:assign for bind / unbind,
+        operating_market_ceiling:manage for licence_ceiling_version); tenant_admin and compliance file
+        operating_policy_version (compliance for the tenant rung, tenant_admin for the brand / operation rungs) and
+        compliance tenant_jurisdiction_config_version, for their OWN tenant only (another tenant's id is a 404). The
+        payload shape is per kind (see LicensingChangeCreateRequest); unknown fields are refused. A narrowing change filed
+        by a platform_admin is executed in the same call (201 with executed true). An identical open request is 409
+        LICENSING_CHANGE_DUPLICATE_PENDING. Step-up: critical. No actor-proof issuer: 500, nothing written.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LicensingChangeCreateRequest"
+      responses:
+        "201":
+          description: The change request (executed true when a single-actor narrowing change executed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: The payload names a tenant the caller cannot act on, or an unknown tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+    get:
+      summary: List licensing change requests (licensing_change:read)
+      description: >
+        Requires licensing_change:read. A platform_admin sees every request; tenant staff see the requests about their
+        own tenant only (row-level security on subject_tenant_id). A tenant caller never sees a platform actor's staff
+        id (ADR 0114 H1: null). Newest first.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}:
+    get:
+      summary: Read one licensing change request with its approvals (licensing_change:read)
+      description: >
+        Requires licensing_change:read. A tenant caller reads only requests about its own tenant; anything else is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request, or one the caller may not see
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}/approve:
+    post:
+      summary: Approve a licensing change; the final approval executes it (licensing_change:approve)
+      description: >
+        Requires licensing_change:approve: platform_admin ONLY (interim, HDR-M-1). The requester's staff account and every
+        account of the requester's Person are refused (409 LICENSING_CHANGE_SELF_APPROVAL); a second approval by the same
+        Person is 409 LICENSING_CHANGE_ALREADY_DECIDED. When the approval is the final one required, the same transaction
+        executes the change: the database re-checks the approvals (distinct eligible Persons, at most 24 h old), expiry and
+        the classification, then the governed write runs with its own audit. Enough Persons but an approval older than the
+        window is 409 LICENSING_CHANGE_APPROVALS_STALE (nothing recorded). A domain refusal at execution (for example the
+        licence ceiling) is 409 LICENSING_CHANGE_REFUSED and nothing is recorded. Step-up: critical.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LicensingDecisionRequest"
+      responses:
+        "200":
+          description: The approval was recorded (executed true when it executed the change)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}/reject:
+    post:
+      summary: Reject an open licensing change (licensing_change:approve)
+      description: >
+        Requires licensing_change:approve (platform_admin ONLY). Never the requester's Person. Protective: no step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LicensingDecisionRequest"
+      responses:
+        "200":
+          description: The request was rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}/cancel:
+    post:
+      summary: Cancel an open licensing change (its requester only; licensing_change:request)
+      description: >
+        Requires licensing_change:request; only the requester may cancel (403 otherwise). Protective: no step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The request was cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request, or one the caller may not see
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
 
   # --- Jurisdiction Evidence Collection Activation (Stage 4I Phase B) ---
   #
@@ -11767,6 +12027,107 @@ components:
           description: Required key. Omit entirely -> 400. `null` -> unassign. UUID string -> assign.
         reason_code: { type: string }
       required: [licence_id, reason_code]
+    LicensingChangeCreateRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        A licensing / jurisdiction change. `payload` is per kind, every key required, unknown keys refused:
+        licence_create {jurisdiction_id, licensee, licence_number, permitted_products, permitted_markets};
+        tenant_licence_bind {tenant_id, licence_id}; tenant_licence_unbind {tenant_id};
+        licence_ceiling_version {licence_id, country_code, state, status, authorization_reference};
+        operating_policy_version {tenant_id, scope, brand_id, operation_code, product_code, country_code, state, status,
+        authorization_reference}; tenant_jurisdiction_config_version {tenant_id, jurisdiction_id, action (set | close),
+        kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, reporting_ruleset_id, allowed_currencies, allowed_payment_methods,
+        geo_block_list} (for close every content field is null). No legal value is implied by any field.
+      properties:
+        kind:
+          type: string
+          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version]
+        payload:
+          type: object
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+        note:
+          type: string
+          maxLength: 1000
+      required: [kind, payload, reason_code]
+    LicensingDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+      required: [reason_code]
+    LicensingChangeApproval:
+      type: object
+      properties:
+        approver_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for a tenant caller (a platform approver's staff id is never shown to a tenant, ADR 0114 H1).
+        reason_code: { type: string }
+        decided_at: { type: string, format: date-time }
+      required: [approver_id, reason_code, decided_at]
+    LicensingChange:
+      type: object
+      description: >
+        A licensing change request (append-only; content immutable). `widening` and `required_approvals` are computed by
+        the database. Platform actor staff ids are null for a tenant caller (ADR 0114 H1).
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        payload: { type: object }
+        payload_hash: { type: string }
+        reason_code: { type: string }
+        note: { type: string, nullable: true }
+        widening: { type: boolean }
+        required_approvals: { type: integer }
+        subject_tenant_id: { type: string, format: uuid, nullable: true }
+        subject_licence_id: { type: string, format: uuid, nullable: true }
+        requested_by: { type: string, format: uuid, nullable: true }
+        requested_scope: { type: string, enum: [platform, tenant] }
+        status: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        decided_by: { type: string, format: uuid, nullable: true }
+        decided_at: { type: string, format: date-time, nullable: true }
+        decision_reason_code: { type: string, nullable: true }
+        executed_by: { type: string, format: uuid, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/LicensingChangeApproval"
+      required: [id, kind, payload, payload_hash, reason_code, widening, required_approvals, requested_scope, status, created_at, expires_at, approvals]
+    LicensingChangeDisclaimer:
+      type: string
+      enum:
+        - "A licensing change record is a decision recorded by named staff. It is not a legal or regulatory authorisation and does not determine whether any licence or jurisdiction permits operation."
+    LicensingChangeResponse:
+      type: object
+      properties:
+        change_request:
+          $ref: "#/components/schemas/LicensingChange"
+        executed: { type: boolean }
+        outcome:
+          type: object
+          description: Ids of the rows the executed change wrote (present only when executed).
+        disclaimer:
+          $ref: "#/components/schemas/LicensingChangeDisclaimer"
+      required: [disclaimer, change_request, executed]
+    LicensingChangeListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LicensingChange"
+        disclaimer:
+          $ref: "#/components/schemas/LicensingChangeDisclaimer"
+      required: [disclaimer, items]
     TenantLicenceAssignment:
       type: object
       description: >
@@ -11779,6 +12140,10 @@ components:
           format: uuid
           nullable: true
           description: Null when no licence is currently assigned.
+        change_request_id:
+          type: string
+          format: uuid
+          description: The executed tenant_licence_unbind licensing change (migration 0177).
       required: [tenant_id, licence_id]
     PlayerResidence:
       type: object
@@ -14069,6 +14434,17 @@ components:
             - RG_IDENTITY_REVIEW
             - RG_PROOF_REFUSED
             - RG_UNAVAILABLE
+            - LICENSING_CHANGE_SELF_APPROVAL
+            - LICENSING_CHANGE_NOT_PENDING
+            - LICENSING_CHANGE_ALREADY_DECIDED
+            - LICENSING_CHANGE_DUPLICATE_PENDING
+            - LICENSING_CHANGE_APPROVALS_STALE
+            - LICENSING_CHANGE_REFUSED
+            - LICENSING_CHANGE_GUARD_REFUSED
+            - LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT
+            - LICENSING_CHANGE_PROOF_REFUSED
+            - LICENSING_CHANGE_NO_PERSON
+            - LICENSING_CHANGE_UNAVAILABLE
             - mfa_enrolment_required
             - mfa_locked
             - invalid_mfa_code
@@ -14801,6 +15177,34 @@ components:
         sportsbook bets) refuse a closure and leave the request pending; LAUNCH_RETRYABLE_LOCK_TIMEOUT is retryable (nothing was recorded); LAUNCH_REFUSED_AT_EXECUTION (the approval is recorded,
         execution was refused; check_codes carries the refusal code); LAUNCH_GUARD_REFUSED (another database guard; check_codes carries the LA code). The message is a fixed sentence; no
         message states a legal conclusion.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LicensingChangeUnavailable:
+      description: 503 LICENSING_CHANGE_UNAVAILABLE. The licensing change service is not wired in this process; nothing was read or written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LicensingChangeForbidden:
+      description: >
+        403. FORBIDDEN (the caller's role lacks the static or the kind's permission, a tenant session asked for a
+        platform-only kind, an acting session, or a non-requester cancelling), LICENSING_CHANGE_PROOF_REFUSED (the ADR 0110
+        actor proof guard, AP0xx), or LICENSING_CHANGE_NO_PERSON (the staff account has no readable Person: four-eyes
+        cannot be evaluated, fail closed).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LicensingChangeConflict:
+      description: >
+        409. LICENSING_CHANGE_SELF_APPROVAL (the requester or another account of the requester's Person),
+        LICENSING_CHANGE_NOT_PENDING (decided, executed, cancelled or expired), LICENSING_CHANGE_ALREADY_DECIDED (this
+        Person already approved), LICENSING_CHANGE_DUPLICATE_PENDING (an identical open request), LICENSING_CHANGE_APPROVALS_STALE
+        (an approval older than the 24 h window), LICENSING_CHANGE_REFUSED (the domain writer refused, for example the
+        licence ceiling), LICENSING_CHANGE_GUARD_REFUSED (a database guard LC0xx), LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT
+        (retry). Nothing is recorded.
       content:
         application/json:
           schema:

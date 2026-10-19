@@ -230,11 +230,42 @@ func contains(s []string, x string) bool {
 // setRuleset edits the tenant's jurisdiction configuration (tenant scope, owner pool as a fixture).
 func (w *world) setRuleset(tenantID, jid uuid.UUID, col string, val *string) {
 	w.t.Helper()
+	w.newConfigVersion(tenantID, jid, col, val)
+}
+
+// newConfigVersion replaces one column of the tenant's open jurisdiction configuration. Since migration 0177 the table is
+// append-only (an in-place edit is LC041), so the fixture closes the open version and appends a copy with col = val, in one
+// owner transaction (the documented owner fixture path; the runtime path is the licensing change executor).
+func (w *world) newConfigVersion(tenantID, jid uuid.UUID, col string, val any) {
+	w.t.Helper()
+	cols := []string{"kyc_ruleset_id", "aml_ruleset_id", "rg_ruleset_id", "reporting_ruleset_id", "allowed_currencies", "allowed_payment_methods", "geo_block_list"}
+	sel := make([]string, len(cols))
+	found := false
+	for i, c := range cols {
+		sel[i] = c
+		if c == col {
+			sel[i] = "$4"
+			if strings.HasPrefix(c, "allowed_") || c == "geo_block_list" {
+				sel[i] = "$4::jsonb"
+			}
+			found = true
+		}
+	}
+	if !found {
+		w.t.Fatalf("newConfigVersion: unknown column %s", col)
+	}
 	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenant_jurisdiction_configs SET `+col+` = $1 WHERE tenant_id = $2 AND jurisdiction_id = $3`, val, tenantID, jid)
+		var old uuid.UUID
+		if err := tx.QueryRow(ctx, `UPDATE tenant_jurisdiction_configs SET effective_to = now() WHERE tenant_id = $1 AND jurisdiction_id = $2 AND effective_to IS NULL RETURNING id`,
+			tenantID, jid).Scan(&old); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, `+strings.Join(cols, ", ")+`, effective_from)
+			SELECT tenant_id, jurisdiction_id, `+strings.Join(sel, ", ")+`, now() FROM tenant_jurisdiction_configs WHERE id = $3 AND tenant_id = $1 AND jurisdiction_id = $2`,
+			tenantID, jid, old, val)
 		return err
 	}); err != nil {
-		w.t.Fatalf("edit jurisdiction config: %v", err)
+		w.t.Fatalf("new jurisdiction config version: %v", err)
 	}
 }
 

@@ -170,9 +170,10 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// A10c: +4 reads (attempt events, reconciliation single run, single mismatch, hold candidates): read 87; nothing mutating changes.
 	// F6 / SA-3: +1 read (GET /v1/admin/platform/status): read 88; nothing mutating changes.
 	// Licensing slice 1 (migration 0176): +4 critical (PUT licence status / validity-dates / review-due / evidence-reference), +1 read (GET licence versions): critical 68, read 89.
-	if counts["critical"] != 68 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// Licensing slice 2 (migration 0177): +2 critical (POST licensing-changes, approve), +2 none-mutating (reject, cancel), +2 reads: critical 70, none-mutating 43, read 91.
+	if counts["critical"] != 70 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 41 || counts["read"] != 89 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 43 || counts["read"] != 91 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

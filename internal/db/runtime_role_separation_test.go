@@ -181,8 +181,25 @@ func TestRuntimeRole_OrdinaryDMLIsGenuinelyRLSScoped(t *testing.T) {
 	tenantB := createTestTenant(t, primary)
 	jurisdiction := createTestJurisdiction(t, primary)
 
+	// INTENTIONAL BEHAVIOUR CHANGE (migration 0177, licensing audit G-9): tenant_jurisdiction_configs is no longer an
+	// ordinary tenant-scoped write. Its 0005 FOR ALL tenant policy let any tenant session rewrite the configuration that
+	// launch hard precondition H-3 reads; a runtime write now needs an executed licensing change of the same transaction
+	// (LC040, the governed executor). This test therefore proves the runtime role is REFUSED the tenant-scope write, seeds
+	// the two rows through the owner's documented fixture path, and keeps every read-isolation assertion below unchanged
+	// (they are what this test is about: RLS is genuinely enforced for the runtime role).
+	err := runtime.WithTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id) VALUES ($1, $2, 'runtime-direct-write')`,
+			tenantA, jurisdiction,
+		)
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || (pgErr.Code != "LC040" && pgErr.Code != "42501") {
+		t.Fatalf("a tenant-scope runtime write to tenant_jurisdiction_configs must be refused (LC040 / 42501), got %v", err)
+	}
 	seed := func(tenantID uuid.UUID, rulesetID string) {
-		err := runtime.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		err := primary.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx,
 				`INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id) VALUES ($1, $2, $3)`,
 				tenantID, jurisdiction, rulesetID,
@@ -190,17 +207,14 @@ func TestRuntimeRole_OrdinaryDMLIsGenuinelyRLSScoped(t *testing.T) {
 			return err
 		})
 		if err != nil {
-			t.Fatalf("runtime role failed to seed tenant_jurisdiction_configs for %s: %v", tenantID, err)
+			t.Fatalf("owner fixture failed to seed tenant_jurisdiction_configs for %s: %v", tenantID, err)
 		}
 	}
-	// Seeded via the RUNTIME role itself, proving it can perform ordinary
-	// application writes, not merely that some other, more privileged
-	// role can.
 	seed(tenantA, "runtime-role-tenant-a")
 	seed(tenantB, "runtime-role-tenant-b")
 
 	var ownRuleset string
-	err := runtime.WithTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
+	err = runtime.WithTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT kyc_ruleset_id FROM tenant_jurisdiction_configs WHERE tenant_id = $1`, tenantA).Scan(&ownRuleset)
 	})
 	if err != nil {

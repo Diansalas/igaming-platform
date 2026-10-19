@@ -749,6 +749,25 @@ const (
 	PermLaunchAuthorisationRead    Permission = "launch_authorisation:read"
 )
 
+// Migration 0177 (MKT-DUAL-1, licensing / jurisdiction maker-checker). STATIC route-level authority,
+// deliberately not grantable through any capability catalogue and never usable in an acting session. The
+// controls that matter (the closed kind registry, widening = two approvals by distinct staff AND distinct
+// Persons other than the requester's, approvals at most 24 h old, signed actor proofs, the governed-table
+// guard) are the database's and internal/licensingchange's, whatever the role. INTERIM (HDR-M-1 pending):
+// only platform_admin approves.
+//
+//   - PermLicensingChangeRequest: file / cancel a change. platform_admin (any kind, platform scope);
+//     tenant_admin and compliance for the tenant-requestable kinds of their OWN tenant only (the kind's own
+//     operating-market permission is checked too; the database refuses a platform-only kind or a foreign
+//     subject from a tenant session).
+//   - PermLicensingChangeApprove: approve or reject. platform_admin ONLY.
+//   - PermLicensingChangeRead: read requests and approvals (a tenant reads the ones about itself).
+const (
+	PermLicensingChangeRequest Permission = "licensing_change:request"
+	PermLicensingChangeApprove Permission = "licensing_change:approve"
+	PermLicensingChangeRead    Permission = "licensing_change:read"
+)
+
 // ADR 0115 slice S2 (RG limits write APIs). STATIC route-level authority; the controls that matter
 // (tighten-only operator rows, floor four-eyes by distinct staff AND Person, signed actor proofs,
 // player-confirm of increases) are the database's and internal/rg's, whatever the role.
@@ -887,6 +906,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermWithdrawalHoldResolutionRequest, PermWithdrawalHoldResolutionApprove, PermWithdrawalHoldResolutionRead,
 		// ADR 0112 slice 3 (6.1): platform_admin is the ONLY holder of :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationApprove, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// Migration 0177 (MKT-DUAL-1): platform_admin is the ONLY holder of :approve (interim, HDR-M-1).
+		PermLicensingChangeRequest, PermLicensingChangeApprove, PermLicensingChangeRead,
 		// ADR 0115 S2: jurisdiction-floor change requests (platform_admin ONLY; four-eyes is the database's).
 		PermRGFloorRead, PermRGFloorRequest, PermRGFloorDecide,
 		// ADR 0116 s6 (A7): the static half of the AML officer gates; the aml_officer grant + acting session are the authority.
@@ -1003,6 +1024,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ADR 0112 slice 3 (6.1): request and suspend for the tenant's OWN brands, plus read.
 		// Never :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// Migration 0177: request (own tenant, tenant-requestable kinds) and read; never :approve.
+		PermLicensingChangeRequest, PermLicensingChangeRead,
 		// ADR 0115 S2: read a player's RG limits and the config in force; never write.
 		PermRGLimitRead, PermRGConfigRead,
 	),
@@ -1081,6 +1104,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ADR 0112 slice 3 (6.1): compliance may request and suspend for its tenant's own
 		// brands and read; never :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// Migration 0177: request (own tenant, tenant-requestable kinds) and read; never :approve.
+		PermLicensingChangeRequest, PermLicensingChangeRead,
 		// ADR 0115 S2: compliance is the sole writer of operator RG bounds and of limit changes on a
 		// player's request (decreases only until ADR 0017 step-up ships).
 		PermRGLimitRead, PermRGLimitWriteOnPlayerRequest, PermRGConfigRead, PermRGConfigWrite,

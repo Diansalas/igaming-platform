@@ -61,7 +61,9 @@ func (w *world) policy(tenantID uuid.UUID, p operatingmarket.CreateOperatingCoun
 		p.AuthorizationReference = "compliance-ref"
 	}
 	p.Actor = operatingmarket.ActorContext{ActorID: w.ops.Requester, ReasonCode: "a8-readiness-test"}
-	if err := w.rt.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// Owner fixture path: since migration 0177 a runtime write of operating_country_policies needs an executed licensing
+	// change of the same transaction (LC040); this readiness test is about the reader, not the governed writer.
+	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := operatingmarket.CreateOperatingCountryPolicyVersion(ctx, tx, p)
 		return err
 	}); err != nil {
