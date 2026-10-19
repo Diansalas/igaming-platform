@@ -38,6 +38,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 )
 
 // DefaultPendingCap is the engineering anti-abuse bound on a player's open pending changes
@@ -277,21 +278,31 @@ func tenantJurisdiction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*st
 			return nil, fmt.Errorf("rg: clear player scope: %w", err)
 		}
 	}
-	var code *string
-	err := tx.QueryRow(ctx, `SELECT j.code FROM tenants t JOIN licences l ON l.id = t.licence_id
-		JOIN jurisdictions j ON j.id = l.jurisdiction_id WHERE t.id = $1`, tenantID).Scan(&code)
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
 	if player != "" {
 		if _, rerr := tx.Exec(ctx, `SELECT set_config('app.player_account_id', $1, true)`, player); rerr != nil {
 			return nil, fmt.Errorf("rg: restore player scope: %w", rerr)
 		}
 	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, fmt.Errorf("rg: tenant jurisdiction: %w", err)
 	}
-	return code, nil
+	switch chain.Outcome {
+	case jurisdiction.LicensingResolved:
+		code := chain.JurisdictionCode
+		return &code, nil
+	case jurisdiction.LicensingNoLicence:
+		// Unchanged: no licence = no configuration (nil). With enforcement ON this
+		// is rg_config_missing (fail closed); with it off players set limits with
+		// no ceiling (G2 in docs/plans/licensing-audit-enforcement.md, readiness
+		// R-RG-CONFIG covers activation).
+		return nil, nil
+	default:
+		// licence_invalid (tenant not visible / dangling licence): previously
+		// folded into "no configuration" (fail-open for limit ceilings); now an
+		// error, so the caller refuses.
+		return nil, fmt.Errorf("rg: tenant licensing chain unusable: %s", chain.InvalidReason)
+	}
 }
 
 // ComposedConfig is the read-time composition of the configuration in force (strictest / UNION / OR),

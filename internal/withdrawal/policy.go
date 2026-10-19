@@ -67,10 +67,11 @@ const defaultRequiredApprovals = 2
 // resolves to a set of jurisdictions via tenant_jurisdiction_configs,
 // and a tenant can serve several at once - see
 // docs/architecture/15-jurisdiction-and-licensing-model.md). A
-// jurisdiction-scoped withdrawal_policies row can be written today and
-// will simply never match until that assignment exists - a documented
-// open decision (docs/architecture/withdrawal-policy-configuration.md),
-// not a bug in this function.
+// jurisdiction-scoped withdrawal_policies row can NOT be written today: a
+// CHECK constraint rejects it (TestWithdrawalPolicies_JurisdictionScopedRowIsRejectedByCheck),
+// so none can exist to "never match". The parameter stays only for forward
+// compatibility until a per-withdrawal jurisdiction assignment exists
+// (docs/plans/licensing-audit-enforcement.md G16).
 //
 // Selection prefers the most specific matching row - an exact brand_id
 // match over a tenant-wide NULL, then an exact jurisdiction_code match

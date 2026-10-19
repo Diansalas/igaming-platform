@@ -650,9 +650,8 @@ func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []s
 	}
 	// SR6R-1 (same gap as the activation guard): enforcement reads the LICENCE jurisdiction, which the request's
 	// JurisdictionIDs need not contain. Add it to the set, and fail when the tenant has none.
-	var licJur *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT l.jurisdiction_id FROM tenants t LEFT JOIN licences l ON l.id = t.licence_id WHERE t.id = $1`,
-		in.Subject.TenantID).Scan(&licJur); err != nil {
+	licJur, lerr := licenceJurisdiction(ctx, tx, in.Subject.TenantID)
+	if lerr != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
 	if licJur == nil {
@@ -856,9 +855,8 @@ func RGActivationReadiness(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, b
 	// licences.jurisdiction_id), not from the market configuration. The guard must be at least as strict as enforcement,
 	// so the licence jurisdiction joins the set (floors required there too), and a tenant with no licence jurisdiction is
 	// refused: every action of such a tenant would be rg_config_missing.
-	var licJur *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT l.jurisdiction_id FROM tenants t LEFT JOIN licences l ON l.id = t.licence_id WHERE t.id = $1`,
-		tenantID).Scan(&licJur); err != nil {
+	licJur, lerr := licenceJurisdiction(ctx, tx, tenantID)
+	if lerr != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
 	if licJur == nil {
@@ -875,4 +873,24 @@ func RGActivationReadiness(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, b
 		return ck(CheckRGConfig, ResultFail, "no_currency")
 	}
 	return rgFloorChecks(ctx, tx, EvalInput{Subject: Subject{TenantID: tenantID, BrandID: brandID}, JurisdictionIDs: ids}, currencies, now)
+}
+
+// licenceJurisdiction is the readiness view of the shared operator-side chain
+// (jurisdiction.ResolveLicensingChain): the licence jurisdiction id, nil when no
+// licence is bound (the caller reports it as a failing check), and an error when
+// the chain is unusable or unreadable (the caller reports not_evaluable).
+func licenceJurisdiction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*uuid.UUID, error) {
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	switch chain.Outcome {
+	case jurisdiction.LicensingResolved:
+		id := chain.JurisdictionID
+		return &id, nil
+	case jurisdiction.LicensingNoLicence:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("launchgov: tenant licensing chain unusable: %s", chain.InvalidReason)
+	}
 }

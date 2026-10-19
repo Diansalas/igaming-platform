@@ -216,10 +216,19 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 		var brandID, walletID uuid.UUID
 		var marketGuard marketgate.Guard
 		marketDenied := false
+		statusDenied := false
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
 				return err
+			}
+			// G4: tenant/brand status gate BEFORE the wallet get-or-create, so a
+			// suspended/closed/not-active tenant or brand creates no wallet.
+			if code, serr := casino.CheckLaunchStatusGate(ctx, tx, tc.TenantID, account.BrandID, playerAccountID, req.AssetCode, casino.GameMode(req.Mode)); serr != nil {
+				return fmt.Errorf("launch: status gate: %w", serr)
+			} else if code != "" {
+				statusDenied = true // commit the denial audit row; create nothing
+				return nil
 			}
 			marketGuard = deps.MarketGate.Guard(marketgate.Request{
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID,
@@ -240,6 +249,11 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			brandID, walletID = account.BrandID, wl.ID
 			return nil
 		})
+		if err == nil && statusDenied {
+			logger.Warn("casino_launch_refused_tenant_or_brand_not_active")
+			apierror.Write(w, requestID, apierror.CodeTenantOrBrandNotActive, "games are not available right now")
+			return
+		}
 		if err == nil && marketDenied {
 			logger.Warn("casino_launch_refused_market_not_available")
 			apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
@@ -306,7 +320,7 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			// category this event exists to make alertable - see
 			// docs/runbooks/observability-and-alerting.md.
 			if result.DenialCode != casino.DenialCodeJurisdictionUnresolved && result.DenialCode != casino.DenialCodeJurisdictionBlocked &&
-				result.DenialCode != casino.DenialCodeMarketNotAvailable {
+				result.DenialCode != casino.DenialCodeMarketNotAvailable && result.DenialCode != casino.DenialCodeTenantOrBrandNotActive {
 				logger.Warn("casino_launch_policy_blocked", "reason_code", result.DenialCode)
 			}
 			writeCasinoLaunchDenial(w, requestID, result)
@@ -351,6 +365,10 @@ func writeCasinoLaunchDenial(w http.ResponseWriter, requestID string, result cas
 	// way) shares the handler's ONE generic response, byte for byte.
 	if result.DenialCode == casino.DenialCodeMarketNotAvailable {
 		apierror.Write(w, requestID, apierror.CodeMarketNotAvailable, marketgate.PlayerMessage)
+		return
+	}
+	if result.DenialCode == casino.DenialCodeTenantOrBrandNotActive {
+		apierror.Write(w, requestID, apierror.CodeTenantOrBrandNotActive, "games are not available right now")
 		return
 	}
 	if result.DenialCode == casino.DenialCodeJurisdictionUnresolved || result.DenialCode == casino.DenialCodeJurisdictionBlocked {

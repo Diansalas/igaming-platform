@@ -32,6 +32,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // bootstrapRequestIDPattern is ADR 0103 §3.1's own request_id charset,
@@ -310,6 +311,29 @@ func upsertProviderPlayerRef(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 // frozen jurisdiction on every bet. Returns ("", nil) when every gate
 // passes.
 func (o *Orchestrator) bootstrapGateDenialReason(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, session LaunchSession) (string, error) {
+	// G4: a token minted while the tenant/brand was active must not be
+	// consumed after it stopped being active. Tenant key then brand key, as
+	// postBet. A non-active status is a definitive denial; any error fails closed.
+	//
+	// Test seam: the orchestrator built with WithUngatedMarketOpenForTests (never
+	// in production, pinned by TestProductionCodeNeverUsesTheUngatedSentinels) skips
+	// this check, because some migration-pinned scratch databases (schema 0111) do
+	// not have the status-gate functions yet.
+	if !o.marketOpenUngated {
+		if err := tenant.RequireActiveForGameplay(ctx, tx, tenantID); err != nil {
+			if errors.Is(err, tenant.ErrNotActiveForGameplay) {
+				return "tenant_not_active", nil
+			}
+			return "", fmt.Errorf("casino: bootstrap tenant status check: %w", err)
+		}
+		if err := tenant.RequireBrandActiveForGameplay(ctx, tx, tenantID, session.BrandID); err != nil {
+			if errors.Is(err, tenant.ErrBrandNotActiveForGameplay) {
+				return "brand_not_active", nil
+			}
+			return "", fmt.Errorf("casino: bootstrap brand status check: %w", err)
+		}
+	}
+
 	game, err := GetGameByID(ctx, tx, session.GameID)
 	if err != nil {
 		return "", err

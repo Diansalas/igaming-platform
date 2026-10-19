@@ -297,6 +297,21 @@ deliberately left untouched - see "Known gaps" below):
   response, but jurisdiction/geo-blocking is a distinct category from
   the RG/Risk policy category this event exists to make alertable).
   Field: `reason_code`.
+- **`casino_launch_refused_tenant_or_brand_not_active`**
+  (`internal/httpserver/casino_handlers.go`, licensing enforcement slice
+  3, G4) - WARN, a casino launch (real or demo) was refused because the
+  tenant or the player's brand is not `active`. Also written as the
+  audit action `casino.launch_denied_by_status`. Nothing was minted and
+  no wallet was created. Expected after a suspension; an unexpected
+  burst for an `active` brand means the status read is failing.
+- **`kyc_enforcement_dormant`** (`internal/kyc/enforcement.go`,
+  licensing enforcement slice 3, G9) - WARN, once per process per
+  (tenant, operation, reason): a KYC decision defaulted to
+  `not_required` because the tenant has no licence bound
+  (`no_licence_bound`) or no active policy exists
+  (`no_active_policy`). It is a default-ALLOW signal, not an error, and
+  changes no decision. Fields: `tenant_id`, `operation`, `reason`.
+  Follow-up read: `kyc.ListDormantJurisdictionTriggers`.
 
 ## 2. Minimum alert-rule list (to configure once a real backend exists)
 

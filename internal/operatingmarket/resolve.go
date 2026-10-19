@@ -245,15 +245,17 @@ func resolve(ctx context.Context, q ReadOnlyQuerier, p Query) (resolution, error
 	}
 
 	// --- STEP 1: the ceiling. Unconditional, evaluated first, always. ---
-	var licenceID *uuid.UUID
-	err = q.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, p.TenantID).Scan(&licenceID)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && licenceID == nil) {
-		res.outcome = OutcomeLicensingUnknown
-		return res, nil
-	}
+	// Shared operator-side chain (jurisdiction.ResolveLicensingChain): every state
+	// other than resolved is licensing_unknown here (fail closed), as before.
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, q, p.TenantID)
 	if err != nil {
 		return resolution{}, fmt.Errorf("operatingmarket: read tenant licence: %w", err)
 	}
+	if chain.Outcome != jurisdiction.LicensingResolved {
+		res.outcome = OutcomeLicensingUnknown
+		return res, nil
+	}
+	licenceID := &chain.LicenceID
 	res.licenceID = *licenceID
 
 	validity, err := jurisdiction.EvaluateLicenceValidity(ctx, q, *licenceID, p.AsOf)

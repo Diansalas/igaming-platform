@@ -43,8 +43,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +55,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 )
 
 // PolicyVersion is EvaluateEnforcement's own compiled-in logic version,
@@ -388,6 +391,7 @@ func evaluateEnforcementReads(ctx context.Context, tx pgx.Tx, params Enforcement
 			// possibly have been activated for this tenant (activation is
 			// inherently jurisdiction-keyed) - not_required, not
 			// unavailable. Distinct from a genuine query error above.
+			signalKYCDormant(params.TenantID, params.Operation, "no_licence_bound")
 			return notRequiredDecision(params.Operation, "tenant has no licence bound"), nil
 		}
 		return evaluateDepositThreshold(ctx, tx, params, licensingJurisdictionID)
@@ -397,6 +401,7 @@ func evaluateEnforcementReads(ctx context.Context, tx pgx.Tx, params Enforcement
 			return unavailableDecision("jurisdiction_unresolved"), nil
 		}
 		if !hasLicence {
+			signalKYCDormant(params.TenantID, params.Operation, "no_licence_bound")
 			return notRequiredDecision(params.Operation, "tenant has no licence bound"), nil
 		}
 		return evaluatePlayTrigger(ctx, tx, params, licensingJurisdictionID)
@@ -413,6 +418,25 @@ func unavailableDecision(code string) EnforcementDecision {
 		Message:       "kyc enforcement evaluation could not complete",
 		PolicyVersion: PolicyVersion,
 	}
+}
+
+// kycDormantSignalled remembers which (tenant, operation, reason) was already
+// reported, so the signal is once per process per key and never a per-request
+// log flood.
+var kycDormantSignalled sync.Map
+
+// signalKYCDormant is the G9 operator signal (licensing enforcement slice 3):
+// a KYC decision of not_required because the tenant has NO licence bound or NO
+// active policy is a default-allow, and a live operator must be able to see
+// it. It changes no decision. Logged at WARN once per process per key as
+// kyc_enforcement_dormant (see docs/runbooks/observability-and-alerting.md);
+// ListDormantJurisdictionTriggers remains the platform-admin read.
+func signalKYCDormant(tenantID uuid.UUID, op EnforcementOperation, reason string) {
+	key := tenantID.String() + "|" + string(op) + "|" + reason
+	if _, loaded := kycDormantSignalled.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	slog.Default().Warn("kyc_enforcement_dormant", "tenant_id", tenantID.String(), "operation", string(op), "reason", reason)
 }
 
 func notRequiredDecision(op EnforcementOperation, message string) EnforcementDecision {
@@ -433,18 +457,24 @@ func notRequiredDecision(op EnforcementOperation, message string) EnforcementDec
 // MUST treat these three cases differently (§2.6(c)): "no licence" is
 // not_required, a query failure is unavailable - never conflated.
 func resolveLicensingJurisdictionID(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (uuid.UUID, bool, error) {
-	var licenceID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil {
-		return uuid.Nil, false, fmt.Errorf("kyc: read tenant licence: %w", err)
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("kyc: %w", err)
 	}
-	if licenceID == nil {
+	switch chain.Outcome {
+	case jurisdiction.LicensingResolved:
+		return chain.JurisdictionID, true, nil
+	case jurisdiction.LicensingNoLicence:
+		// KNOWN GAP G9 (licensing enforcement slice 3): "no licence" is still
+		// not_required for the caller (behaviour unchanged, dormant by design);
+		// it is now an explicit, separately detectable state, surfaced by the
+		// launch-readiness item R-KYC-ENFORCEMENT-DORMANT.
 		return uuid.Nil, false, nil
+	default:
+		// licence_invalid: the chain cannot be relied on. Fail closed (an
+		// error becomes unavailable), never not_required.
+		return uuid.Nil, false, fmt.Errorf("kyc: tenant licensing chain unusable: %s", chain.InvalidReason)
 	}
-	var jurisdictionID uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT jurisdiction_id FROM licences WHERE id = $1`, *licenceID).Scan(&jurisdictionID); err != nil {
-		return uuid.Nil, false, fmt.Errorf("kyc: read licence jurisdiction: %w", err)
-	}
-	return jurisdictionID, true, nil
 }
 
 // latestVerificationState is the §2.6(a)/(b) read: the single latest row,
@@ -734,6 +764,7 @@ func evaluateDepositThreshold(ctx context.Context, tx pgx.Tx, params Enforcement
 		return unavailableDecision("policy_lookup_failed"), nil
 	}
 	if len(policies) == 0 {
+		signalKYCDormant(params.TenantID, params.Operation, "no_active_policy")
 		return EnforcementDecision{
 			Outcome:       OutcomeNotRequired,
 			Allowed:       true,
@@ -848,6 +879,7 @@ func evaluatePlayTrigger(ctx context.Context, tx pgx.Tx, params EnforcementParam
 		return unavailableDecision("policy_lookup_failed"), nil
 	}
 	if !found {
+		signalKYCDormant(params.TenantID, params.Operation, "no_active_policy")
 		return EnforcementDecision{
 			Outcome:       OutcomeNotRequired,
 			Allowed:       true,

@@ -2454,6 +2454,9 @@ paths:
         (the same body for an unknown game id, so a refused market learns nothing about the catalogue) and
         mints nothing. The RG, risk and jurisdiction-blocklist denials, provider/capability errors and the
         remaining launch behaviour are pre-existing documentation debt, not introduced by A8.
+        Licensing enforcement slice 3 (G4): before the market gate and before the wallet get-or-create, the tenant
+        and the player's brand must both be `active`; otherwise `409 TENANT_OR_BRAND_NOT_ACTIVE` (real AND demo
+        mode: a demo launch still creates a wallet and a wallet-bound session) and nothing is minted or created.
       security:
         - bearerAuth: []
       parameters:
@@ -2491,6 +2494,8 @@ paths:
           $ref: "#/components/responses/MarketNotAvailable"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: The tenant or the player's brand is not active (`TENANT_OR_BRAND_NOT_ACTIVE`); nothing was minted or created
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -4973,6 +4978,14 @@ paths:
         §8's own recorded open decision). A rule is immutable after
         creation except for status/description/effective_until - a
         policy change is a new rule, never an edit.
+        Licensing enforcement slice 3 (G6/G7): two authoring refusals, both
+        `400` with a stable code in the message. `operation_not_evaluated`: a
+        `deposit` rule is refused because no deposit path evaluates risk rules.
+        `jurisdiction_scope_unsupported`: a rule with a `jurisdiction_code` is
+        refused for every operation, because no player-scoped jurisdiction can
+        be resolved today and every evaluator would refuse every request of the
+        operation (including every withdrawal and dispatch). Existing rows are
+        not touched.
       security:
         - bearerAuth: []
       requestBody:

@@ -143,6 +143,10 @@ const (
 	// generic "not available in your region" response and never logs it
 	// as an RG/Risk policy block.
 	DenialCodeMarketNotAvailable = "market_not_available"
+	// DenialCodeTenantOrBrandNotActive is reported when the tenant or the
+	// player's brand is not 'active' (pending_launch, suspended, closed) at
+	// launch time (licensing enforcement slice 3, G4). Nothing is minted.
+	DenialCodeTenantOrBrandNotActive = "tenant_or_brand_not_active"
 )
 
 // Sentinel errors.

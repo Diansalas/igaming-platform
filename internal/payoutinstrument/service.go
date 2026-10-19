@@ -15,6 +15,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 )
 
 // Service errors. The registration refusals are mapped to ONE generic player
@@ -532,17 +533,20 @@ func (s *Service) auditIntegrity(ctx context.Context, db TxRunner, tenantID, ins
 }
 
 func maxAgeFor(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*time.Duration, error) {
-	var licenceID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil {
-		return nil, fmt.Errorf("payoutinstrument: read tenant licence: %w", err)
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("payoutinstrument: %w", err)
 	}
-	if licenceID == nil {
-		return nil, nil
+	switch chain.Outcome {
+	case jurisdiction.LicensingResolved:
+	case jurisdiction.LicensingNoLicence:
+		return nil, nil // unchanged: no licence = no jurisdiction freshness window configured
+	default:
+		return nil, fmt.Errorf("payoutinstrument: tenant licensing chain unusable: %s", chain.InvalidReason)
 	}
 	var secs *float64
-	err := tx.QueryRow(ctx, `SELECT extract(epoch FROM m.max_age)::float8
-		FROM licences l JOIN payout_instrument_verification_max_age m ON m.jurisdiction_id = l.jurisdiction_id
-		WHERE l.id = $1`, *licenceID).Scan(&secs)
+	err = tx.QueryRow(ctx, `SELECT extract(epoch FROM m.max_age)::float8
+		FROM payout_instrument_verification_max_age m WHERE m.jurisdiction_id = $1`, chain.JurisdictionID).Scan(&secs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
