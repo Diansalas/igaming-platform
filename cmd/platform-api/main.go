@@ -28,6 +28,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/marketgate"
@@ -666,6 +667,16 @@ func run() error {
 		rg.RunEnumerationReconciliationSchedulerLoop(ctx, pool, logger, cfg.RGEnumerationSweepInterval, cfg.RGEnumerationStalledThreshold)
 	}()
 
+	// Licensing slice 1 (audit G-5, migration 0176): the READ-ONLY licence expiry / review sweep. Hourly; raises
+	// licence.expired (p1) / licence.expiring (p2) alerts with the affected tenant/brand ids. It never suspends
+	// anything (auto-suspension is a pending human decision); the runtime market-gate refusal stays the enforcement.
+	var licenceSweepWG sync.WaitGroup
+	licenceSweepWG.Add(1)
+	go func() {
+		defer licenceSweepWG.Done()
+		jurisdiction.RunLicenceSweepLoop(ctx, pool, logger, jurisdiction.LicenceSweepInterval)
+	}()
+
 	// Stage 4H-B1 Wave 3 Phase 3 (bonus-engine): the three Bonus Engine
 	// scheduled jobs ledger-accounting-model.md §7.18.2/§7.18.4 and the
 	// Grant-expiry dependency-map entry specify - each had zero live
@@ -840,6 +851,17 @@ func run() error {
 	case <-rgSweepDone:
 	case <-time.After(10 * time.Second):
 		logger.Error("self-exclusion enumeration reconciliation scheduler did not stop within the shutdown timeout")
+	}
+
+	licenceSweepDone := make(chan struct{})
+	go func() {
+		licenceSweepWG.Wait()
+		close(licenceSweepDone)
+	}()
+	select {
+	case <-licenceSweepDone:
+	case <-time.After(10 * time.Second):
+		logger.Error("licence expiry sweep did not stop within the shutdown timeout")
 	}
 
 	// Identical bounded-wait treatment for the three Bonus Engine

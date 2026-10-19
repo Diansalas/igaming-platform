@@ -183,7 +183,7 @@ func ck(code, result, detail string) Check {
 
 // configChecks evaluates the tenant-data checks inside the caller's read-only transaction. Every
 // query failure degrades its own check to not_evaluable.
-func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []Check {
+func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) ([]Check, error) {
 	var out []Check
 	now := s.now()
 	type cfg struct {
@@ -241,7 +241,11 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	}
 
 	// R-LIC-VALID: only a licence-backed basis is evaluable.
-	out = append(out, s.licenceCheck(ctx, tx, in, now))
+	lc, lerr := s.licenceCheck(ctx, tx, in, now)
+	if lerr != nil {
+		return nil, lerr
+	}
+	out = append(out, lc)
 
 	// R-RULESETS
 	switch {
@@ -365,7 +369,7 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	// R-MARKET-CONFIG (A8)
 	out = append(out, s.marketConfigCheck(ctx, tx, in, now))
 	out = append(out, s.amlChecks(ctx, tx, in)...)
-	return out
+	return out, nil
 }
 
 // marketConfigCheck is R-MARKET-CONFIG (A8): the operating-market gate (internal/marketgate)
@@ -396,18 +400,24 @@ func (s *Service) marketConfigCheck(ctx context.Context, tx pgx.Tx, in EvalInput
 }
 
 // licenceCheck is R-LIC-VALID: licence-backed basis => EvaluateLicenceValidity at the evaluation time.
-func (s *Service) licenceCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) Check {
+//
+// G-12 (licensing slice 1): a licence READ ERROR now REFUSES (the error is returned and the whole evaluation fails
+// closed) instead of recording an acknowledgeable not_evaluable "read_error" check. This aligns the code with ADR 0112
+// section 8.5 ("unreadable ... licence ... refuses"); before this change only H-2's earlier read of the same row made
+// that true in practice. An invalid licence (suspended, expired, not yet issued, unbound, not found) stays an
+// acknowledgeable "fail" (ADR 0112 5.2); whether it should hard-block is a pending human decision (L-22 / G-8).
+func (s *Service) licenceCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) (Check, error) {
 	if in.Licensing == nil || in.Licensing.LicenceID == nil {
-		return ck(CheckLicenceValid, ResultNotEvaluable, "not_licence_backed")
+		return ck(CheckLicenceValid, ResultNotEvaluable, "not_licence_backed"), nil
 	}
 	v, err := jurisdiction.EvaluateLicenceValidity(ctx, tx, *in.Licensing.LicenceID, now)
 	if err != nil {
-		return ck(CheckLicenceValid, ResultNotEvaluable, "read_error")
+		return Check{}, fmt.Errorf("launchgov: read licence for R-LIC-VALID: %w", err)
 	}
 	if v == jurisdiction.LicenceValid {
-		return ck(CheckLicenceValid, ResultPass, "ok")
+		return ck(CheckLicenceValid, ResultPass, "ok"), nil
 	}
-	return ck(CheckLicenceValid, ResultFail, "licence_"+string(v))
+	return ck(CheckLicenceValid, ResultFail, "licence_"+string(v)), nil
 }
 
 // providerTierCheck is R-PROVIDER-TIER: the running process's registered components are

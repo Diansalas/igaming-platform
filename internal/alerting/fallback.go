@@ -125,3 +125,48 @@ func raiseSweepFailedAs(ctx context.Context, pool *db.Pool, phase, sqlstateClass
 	raiseFailed(dctx, pool, a.Kind, class)
 	return lastErr
 }
+
+// raiseLicenceSweepAs performs the validated RaiseLicenceSweep (licence_sweep.go) under the alert_dispatcher
+// platform-service identity, with the same bounded detached retry and terminal fallback as raiseSweepFailedAs. It
+// lives here because this file is one of the two allowed to use db.ServiceAlertDispatcher. The Kinds it can write are
+// exactly the two the migration 0176 dispatcher policies name.
+func raiseLicenceSweepAs(ctx context.Context, pool *db.Pool, a Alert) error {
+	dctx, cancel := detachedCtx(ctx)
+	defer cancel()
+	if pool == nil {
+		recordRaiseFailure(dctx, a.Kind, "detached")
+		return errors.New("alerting: RaiseLicenceSweep: no pool")
+	}
+	v, err := a.validate()
+	if err != nil {
+		recordRaiseFailure(dctx, a.Kind, "detached")
+		raiseFailed(dctx, pool, a.Kind, sqlstateClassGoValidation)
+		return err
+	}
+	attrsJSON, err := json.Marshal(v.attrs)
+	if err != nil {
+		recordRaiseFailure(dctx, a.Kind, "detached")
+		return fmt.Errorf("alerting: marshal attributes: %w", err)
+	}
+	clock := clockFromContext(dctx)
+	var lastErr error
+	for attempt, wait := range flushBackoff {
+		if attempt > 0 {
+			clock.Sleep(dctx, wait)
+		}
+		lastErr = pool.WithPlatformService(dctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
+			return insertOrAttachOccurrence(ctx, tx, a, attrsJSON)
+		})
+		if lastErr == nil {
+			return nil
+		}
+	}
+	class, _ := classifySQLState(lastErr)
+	if class == "" {
+		class = sqlstateClassUnknown
+	}
+	recordRaiseFailure(dctx, a.Kind, "detached")
+	slog.Default().Error("alert_raise_detached_exhausted", "kind", a.Kind, "sqlstate_class", class)
+	raiseFailed(dctx, pool, a.Kind, class)
+	return lastErr
+}

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -166,6 +167,12 @@ type licenceResponse struct {
 	PermittedProducts []string `json:"permitted_products"`
 	PermittedMarkets  []string `json:"permitted_markets"`
 	CreatedAt         string   `json:"created_at"`
+	// Lifecycle fields (migration 0176); null when not recorded.
+	IssuedAt          *string `json:"issued_at"`
+	ExpiresAt         *string `json:"expires_at"`
+	ReviewDueAt       *string `json:"review_due_at"`
+	EvidenceReference *string `json:"licence_evidence_reference"`
+	UpdatedAt         string  `json:"updated_at"`
 }
 
 func toLicenceResponse(l jurisdiction.Licence) licenceResponse {
@@ -174,7 +181,24 @@ func toLicenceResponse(l jurisdiction.Licence) licenceResponse {
 		LicenceNumber: l.LicenceNumber, Status: l.Status,
 		PermittedProducts: l.PermittedProducts, PermittedMarkets: l.PermittedMarkets,
 		CreatedAt: l.CreatedAt.Format(rfc3339),
+		IssuedAt:  dateStringPtr(l.IssuedAt), ExpiresAt: dateStringPtr(l.ExpiresAt), ReviewDueAt: dateStringPtr(l.ReviewDueAt),
+		EvidenceReference: evidencePtr(l.EvidenceReference), UpdatedAt: l.UpdatedAt.Format(rfc3339),
 	}
+}
+
+func dateStringPtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Format("2006-01-02")
+	return &s
+}
+
+func evidencePtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 type createLicenceRequest struct {
