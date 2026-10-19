@@ -110,8 +110,12 @@ func TestLicenceLifecycle_StatusChange_AuditedVersionedAndClassified(t *testing.
 		t.Fatalf("before/after = %v / %v", before, after)
 	}
 
+	// 0179 (security L-1): this is an owner-path write (no executed licensing change in the
+	// transaction), so the history row carries NO actor and NO request id; that pair of NULLs is the
+	// owner-path marker. Governed writes are attributed from the executed request, see
+	// internal/licensingchange TestHardeningL1_*.
 	vs := lcVersions(t, pool, f, l.ID)
-	if len(vs) != 2 || vs[0].Operation != "insert" || vs[1].Operation != "update" || vs[1].Status != "suspended" || vs[1].ChangedBy == nil || *vs[1].ChangedBy != f.platformAdmin {
+	if len(vs) != 2 || vs[0].Operation != "insert" || vs[1].Operation != "update" || vs[1].Status != "suspended" || vs[1].ChangedBy != nil || vs[1].ChangeRequestID != nil {
 		t.Fatalf("versions = %+v", vs)
 	}
 
