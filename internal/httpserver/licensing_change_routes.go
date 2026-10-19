@@ -24,7 +24,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
@@ -145,11 +144,8 @@ func licensingChangeErrorCode(err error) (apierror.Code, string) {
 func writeLicensingChangeError(w http.ResponseWriter, c licensingCall, op string, err error) {
 	code, msg := licensingChangeErrorCode(err)
 	if code == apierror.CodeInternal {
-		if errors.Is(err, licensingchange.ErrProofUnavailable) || errors.Is(err, actorproof.ErrNoIssuer) || errors.Is(err, actorproof.ErrStepUpMissing) {
-			c.logger.Error("licensing change: governed write refused (fail closed)", "op", op, "error", err)
-		} else {
-			c.logger.Error("licensing change: unexpected error", "op", op, "error", err)
-		}
+		// A missing actor-proof issuer or a step-up backstop failure lands here too: fail closed, nothing was written.
+		c.logger.Error("licensing change: refused with an internal error (fail closed)", "op", op, "error", err)
 	}
 	apierror.Write(w, c.requestID, code, msg)
 }
