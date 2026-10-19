@@ -313,11 +313,14 @@ func SetLicenceEvidenceReference(ctx context.Context, tx pgx.Tx, id uuid.UUID, r
 
 // LicenceVersion mirrors one licence_versions row.
 type LicenceVersion struct {
-	LicenceID         uuid.UUID
-	VersionNo         int
-	Operation         string
-	ChangedAt         time.Time
-	ChangedBy         *uuid.UUID
+	LicenceID uuid.UUID
+	VersionNo int
+	Operation string
+	ChangedAt time.Time
+	ChangedBy *uuid.UUID
+	// ChangeRequestID is the executed licensing change that authorised the change (migration 0179); nil for a baseline row and for an
+	// owner-path write.
+	ChangeRequestID   *uuid.UUID
 	Status            string
 	IssuedAt          *time.Time
 	ExpiresAt         *time.Time
@@ -337,7 +340,7 @@ func ListLicenceVersions(ctx context.Context, tx pgx.Tx, id uuid.UUID) ([]Licenc
 	if _, err := readLicence(ctx, tx, id); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT licence_id, version_no, operation, changed_at, changed_by, status, issued_at, expires_at,
+	rows, err := tx.Query(ctx, `SELECT licence_id, version_no, operation, changed_at, changed_by, change_request_id, status, issued_at, expires_at,
 		review_due_at, COALESCE(evidence_reference, ''), licence_number FROM licence_versions WHERE licence_id = $1 ORDER BY version_no`, id)
 	if err != nil {
 		return nil, fmt.Errorf("jurisdiction: list licence versions: %w", err)
@@ -346,7 +349,7 @@ func ListLicenceVersions(ctx context.Context, tx pgx.Tx, id uuid.UUID) ([]Licenc
 	var out []LicenceVersion
 	for rows.Next() {
 		var v LicenceVersion
-		if err := rows.Scan(&v.LicenceID, &v.VersionNo, &v.Operation, &v.ChangedAt, &v.ChangedBy, &v.Status, &v.IssuedAt,
+		if err := rows.Scan(&v.LicenceID, &v.VersionNo, &v.Operation, &v.ChangedAt, &v.ChangedBy, &v.ChangeRequestID, &v.Status, &v.IssuedAt,
 			&v.ExpiresAt, &v.ReviewDueAt, &v.EvidenceReference, &v.LicenceNumber); err != nil {
 			return nil, fmt.Errorf("jurisdiction: scan licence version: %w", err)
 		}

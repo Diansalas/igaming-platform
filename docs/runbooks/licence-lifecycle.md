@@ -72,9 +72,21 @@ accept the gap. A licence bound to NO tenant is not reported (residual: reading 
 ## Read APIs (platform admin, `jurisdiction_registry:read`, step-up none)
 
 `GET /v1/admin/jurisdictions` and `/{id}`; `GET /v1/admin/licences` and `/{id}` (each with `tenant_ids`, the tenants bound to it);
-`GET /v1/admin/licences/{id}/versions`; `GET /v1/admin/licence-country-ceilings?licence_id=`; `GET
+`GET /v1/admin/licences/{id}/versions` (each row carries `changed_by` and `change_request_id`, taken from the authorising request; both null for a baseline row and for an owner-path write); `GET /v1/admin/licence-country-ceilings?licence_id=`; `GET
 /v1/admin/operating-country-policies?tenant_id=`; `GET /v1/admin/tenants/{id}/jurisdiction-configs`. The three new lists are paginated
 (`?limit=` default 50 max 200, `?offset=`). They show stored versions, not a market-permission decision.
+
+## Break-glass: the actor-proof issuer is unavailable (operator-only procedure)
+
+Every licence change (even a suspension) needs a signed actor proof, so while the proof issuer or its key is unavailable the API
+answers 500 and writes nothing (fail closed). This is **not** an invitation to bypass governance: do first what the platform still
+does without the API, the market gate already refuses by date and status at runtime. If a suspension truly cannot wait, the only
+path is the database **owner** credential (migration / provisioning role), which is outside the application runtime and outside this
+runbook's authority: it is used only by the operator who holds that credential under the company's own break-glass process, with a
+second person present, a written reason, and the change ticket. The owner path writes the lifecycle columns directly (the identity
+columns stay immutable even for the owner); it leaves `licence_versions` rows with `changed_by` and `change_request_id` both NULL, which
+is the marker that no governed request authorised the change. Afterwards record the same change through the API once the issuer is
+back, or file the incident. No new access is created by this note; never use the runtime role for this.
 
 ## Pending human decisions (exact questions)
 
