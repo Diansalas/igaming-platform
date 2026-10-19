@@ -76,11 +76,14 @@ func newReadsWorld(t *testing.T, pw string) *readsWorld {
 	})
 	// One enabled-then-disabled ceiling history for the licence (owner path, through the real writer).
 	actor := operatingmarket.ActorContext{ActorID: w.adminID, IPAddress: "127.0.0.1", RequestID: "reads", ReasonCode: "reads_fixture"}
+	// Each version is written in its OWN transaction: closing a version opened in the same transaction would set effective_to = now()
+	// equal to effective_from and trip the writer's CHECK (reported as ErrConcurrentPolicyWrite).
 	ownerPlatform(func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := operatingmarket.CreateLicenceCountryCeilingVersion(ctx, tx, operatingmarket.CreateLicenceCountryCeilingVersionParams{
-			LicenceID: licID, CountryCode: "MT", State: operatingmarket.StateEnabled, Status: operatingmarket.StatusActive, AuthorizationReference: "REF-MT", Actor: actor}); err != nil {
-			return err
-		}
+		_, err := operatingmarket.CreateLicenceCountryCeilingVersion(ctx, tx, operatingmarket.CreateLicenceCountryCeilingVersionParams{
+			LicenceID: licID, CountryCode: "MT", State: operatingmarket.StateEnabled, Status: operatingmarket.StatusActive, AuthorizationReference: "REF-MT", Actor: actor})
+		return err
+	})
+	ownerPlatform(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := operatingmarket.CreateLicenceCountryCeilingVersion(ctx, tx, operatingmarket.CreateLicenceCountryCeilingVersionParams{
 			LicenceID: licID, CountryCode: "MT", State: operatingmarket.StateDisabled, Status: operatingmarket.StatusActive, Actor: actor})
 		return err
