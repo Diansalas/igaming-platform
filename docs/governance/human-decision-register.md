@@ -87,6 +87,7 @@ Columns: `ID | Question | Current Decision | Status | Blocks | Owner`. Mirrored 
 | HD-KYC-1..8 | KYC thresholds (ADR 0096 s4) | none | OPEN | KYC-ENFORCE-1 completion | legal/compliance + owner |
 | HD-CTF-1..9 | Closed-tenant player-funds policy (ADR 0107 s12) | none; mechanism DESIGN ONLY | OPEN | Any closed-tenant funds mechanism | legal/compliance + owner |
 | HDR-J-7/8/9, HDR-M-1/2 | Jurisdiction items (ADR 0044, stage-4i-exit-register) | none | OPEN | Jurisdiction go-live | legal/compliance |
+| LIC-Q1..Q25 | Licensing/jurisdiction decision requests (2026-10-19): `docs/plans/licensing-owner-decision-requests.md`. HDR-M-1 has an INTERIM implementation (two distinct platform_admin Persons for widening licensing changes, ADR 0123); it is not an answer. Interim safe behaviours are listed per question. | ADR 0123 interim | OPEN (awaiting owner/compliance) | Brand 1 activation (Q1-Q11); second jurisdiction / B2B (Q17-Q25) | legal/compliance |
 | HDR-SB-1 | Sportsbook go-live gate (ADR 0083 s8.2) | none | OPEN | Sportsbook go-live | legal/compliance + owner |
 | HDR-J-1..6 residuals | Legal-review residuals | answered in ADR 0042 with residuals | OPEN (residual) | - | legal |
 | K3 note retention | PII retention for K3 resolution notes | none | OPEN | Production | legal + security |
