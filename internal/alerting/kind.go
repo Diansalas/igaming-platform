@@ -190,6 +190,25 @@ const KindWithdrawalPayoutGateUnavailable Kind = "withdrawal.payout_gate_unavail
 // determination and a re-review of the same row only adds an occurrence. Severity p2 is an ENGINEERING DEFAULT.
 const KindKYCResidenceIntoOpenMarket Kind = "kyc.residence_into_open_market"
 
+// KindLicenceExpired (p1) and KindLicenceExpiring (p2) are the licensing slice 1 (migration 0176) Kinds raised by the
+// read-only licence expiry / review sweep (internal/jurisdiction.RunLicenceSweepLoop): a licence in use by at least one
+// tenant has expired (status 'expired', or expires_at reached under EvaluateLicenceValidity) or will reach expires_at /
+// review_due_at within the warning window. Platform-scoped and subjectless (a licence can be shared by many tenants), raised ONLY by
+// RaiseLicenceSweep under the alert_dispatcher platform-service identity. Attributes are ids, counts and dates only
+// (tenant_ids / brand_ids are bounded comma-separated id lists; the exact counts are separate attributes). Severities are ENGINEERING
+// DEFAULTS pending the owner decision on recipients (ALERT-DELIVERY-1 OPEN: nobody is paged). The sweep never suspends
+// a brand or a licence.
+const (
+	KindLicenceExpired  Kind = "licence.expired"
+	KindLicenceExpiring Kind = "licence.expiring"
+)
+
+func licenceKind(k Kind, sev Severity) KindDef {
+	return KindDef{Kind: k, Severity: sev, Scope: ScopeKindPlatform, RequiresSubject: false, InTxRaisableByTenant: false,
+		RaiseMode:   RaiseModeDetached,
+		AllowedKeys: keys("licence_id", "trigger", "expires_at", "review_due_at", "tenant_count", "brand_count", "tenant_ids", "brand_ids", "truncated")}
+}
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -320,6 +339,8 @@ var kindDefs = map[Kind]KindDef{
 		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,
 		AllowedKeys: keys("phase", "sqlstate_class"),
 	},
+	KindLicenceExpired:  licenceKind(KindLicenceExpired, SeverityP1),
+	KindLicenceExpiring: licenceKind(KindLicenceExpiring, SeverityP2),
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,

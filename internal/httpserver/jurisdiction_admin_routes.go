@@ -41,6 +41,21 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/admin/licences",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateLicenceHandler(deps))))
 
+	// --- Licence lifecycle (licensing slice 1, migration 0176) ---
+	//
+	// PLATFORM-ONLY, PermJurisdictionRegistryManage, step-up critical on every write. Single actor in this slice
+	// (maker-checker for widening changes is slice 2); the licence id comes from the path.
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/status",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceStatusHandler(deps))))
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/validity-dates",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceValidityDatesHandler(deps))))
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/review-due",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceReviewDueHandler(deps))))
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/evidence-reference",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceEvidenceReferenceHandler(deps))))
+	mux.Handle("GET /v1/admin/licences/{licenceID}/versions",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListLicenceVersionsHandler(deps))))
+
 	// --- Tenant-scoped resolution-active fact (item B-6) ---
 
 	mux.Handle("GET /v1/admin/jurisdiction-resolution-active",

@@ -165,7 +165,10 @@ func TestKinds_ScopeSubjectConsistency(t *testing.T) {
 			KindStaffPlatformBreakGlassUsed: true,
 			// A9 (migration 0156): the reconciliation scheduler's sweep-failure Kind (no tenant, no platform-admin
 			// principal; raised only under the alert_dispatcher identity by RaiseSweepFailed).
-			KindReconciliationSweepFailed: true}
+			KindReconciliationSweepFailed: true,
+			// Licensing slice 1 (migration 0176): the licence expiry / review sweep Kinds (a licence may be shared by
+			// many tenants; raised only under the alert_dispatcher identity by RaiseLicenceSweep).
+			KindLicenceExpired: true, KindLicenceExpiring: true}
 		if def.Scope == ScopeKindPlatform && !def.RequiresSubject && !subjectless[k] {
 			t.Errorf("platform kind %q (non-meta) must RequireSubject", k)
 		}

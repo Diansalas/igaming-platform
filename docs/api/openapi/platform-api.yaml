@@ -6358,9 +6358,9 @@ paths:
       summary: Create a licence (platform-wide reference row, FK'd to a jurisdiction)
       description: >
         Requires jurisdiction_registry:manage (platform_admin only).
-        `status` always starts `active` - no status-transition endpoint
-        exists yet (a disclosed, deliberate scope limit: no current
-        consumer needs one). Not four-eyes gated. Requires reason_code,
+        `status` always starts `active`; status, dates, review date and
+        evidence reference change only through the lifecycle endpoints below.
+        Not four-eyes gated. Requires reason_code,
         recorded on an audit entry with tenant_id NULL. An unknown
         jurisdiction_id returns 400 (jurisdiction.ErrInvalidInput wrapping
         the foreign-key violation), never 404 - this registry's write path
@@ -6474,6 +6474,268 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}/status:
+    put:
+      summary: Set a licence status (regulator suspension, expiry, reinstatement)
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Single actor in this slice: there is NO maker-checker yet, so a WIDENING
+        change (reinstate, later expiry) is single-actor plus step-up until the
+        approval primitive lands (residual G-1/G-2); narrowing changes are
+        single-actor by design (the fail-closed direction). The response
+        `change_kind` (widening, narrowing, neutral) is the class a later
+        approval step will route on.
+
+        The vocabulary is `active`, `suspended`, `expired` only. A regulator
+        revocation is recorded as `expired` with a reason code (a distinct
+        `revoked` status is a pending human decision). Setting the current
+        status again returns 400. A suspended or expired licence makes the
+        runtime market gate refuse registration, deposit, casino launch and
+        sportsbook wagering for every tenant bound to it, on the next request.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [active, suspended, expired] }
+                reason_code: { type: string }
+              required: [status, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}/validity-dates:
+    put:
+      summary: Set the licence issue and expiry dates
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Single actor in this slice: there is NO maker-checker yet, so a WIDENING
+        change (reinstate, later expiry) is single-actor plus step-up until the
+        approval primitive lands (residual G-1/G-2); narrowing changes are
+        single-actor by design (the fail-closed direction). The response
+        `change_kind` (widening, narrowing, neutral) is the class a later
+        approval step will route on.
+
+        Both keys are required; `null` clears. Dates are UTC calendar dates
+        (YYYY-MM-DD). `expires_at` must be after `issued_at` when both are set.
+        The boundary is the platform predicate's (EvaluateLicenceValidity): a
+        licence is not valid on its own `expires_at` date and is valid on its
+        `issued_at` date (confirming this with compliance is a pending human
+        item).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                issued_at: { type: string, format: date, nullable: true }
+                expires_at: { type: string, format: date, nullable: true }
+                reason_code: { type: string }
+              required: [issued_at, expires_at, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}/review-due:
+    put:
+      summary: Set the licence review due date
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Single actor in this slice: there is NO maker-checker yet, so a WIDENING
+        change (reinstate, later expiry) is single-actor plus step-up until the
+        approval primitive lands (residual G-1/G-2); narrowing changes are
+        single-actor by design (the fail-closed direction). The response
+        `change_kind` (widening, narrowing, neutral) is the class a later
+        approval step will route on.
+
+        `review_due_at` is required; `null` clears. It is read by the licence
+        expiry/review sweep (alert `licence.expiring`) and gates nothing at
+        runtime.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                review_due_at: { type: string, format: date, nullable: true }
+                reason_code: { type: string }
+              required: [review_due_at, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}/evidence-reference:
+    put:
+      summary: Set the opaque licence evidence reference
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Single actor in this slice: there is NO maker-checker yet, so a WIDENING
+        change (reinstate, later expiry) is single-actor plus step-up until the
+        approval primitive lands (residual G-1/G-2); narrowing changes are
+        single-actor by design (the fail-closed direction). The response
+        `change_kind` (widening, narrowing, neutral) is the class a later
+        approval step will route on.
+
+        `licence_evidence_reference` is required; `null` clears. It is an opaque,
+        business-supplied reference (1..200 characters, no control characters,
+        no "@") to evidence held elsewhere. The platform never fabricates one
+        and stores no document. (The JSON key is not `evidence_reference` only
+        because a static guard reserves that literal for the payments M4
+        reference, ADR 0114 S0; the database column is `evidence_reference`.)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                licence_evidence_reference: { type: string, nullable: true, minLength: 1, maxLength: 200 }
+                reason_code: { type: string }
+              required: [licence_evidence_reference, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}/versions:
+    get:
+      summary: Read a licence's append-only change history
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only). One row
+        per insert or change of any tracked column (status, dates, review date,
+        evidence reference, number, products, markets), oldest first, written
+        by a database trigger whoever made the change. `changed_by` is the
+        platform-admin principal of the writing session (null for a baseline
+        row) and goes through the staff-identity redaction helper.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The licence history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LicenceVersion"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/licence:
@@ -11427,15 +11689,15 @@ components:
       type: object
       description: >
         A platform-wide `licences` registry row (migration 0002, Stage 4I
-        item B-1), FK'd to a Jurisdiction. `status` always starts `active`
-        - no status-transition endpoint exists yet (a disclosed, deliberate
-        scope limit; see registry_admin.go's own doc comment).
+        item B-1; lifecycle fields migration 0176), FK'd to a Jurisdiction.
+        `status` starts `active` and changes only through the audited
+        lifecycle endpoints. Lifecycle fields are null when not recorded.
       properties:
         id: { type: string, format: uuid }
         jurisdiction_id: { type: string, format: uuid }
         licensee: { type: string, enum: [platform, tenant] }
         licence_number: { type: string }
-        status: { type: string }
+        status: { type: string, enum: [active, suspended, expired] }
         permitted_products:
           type: array
           items: { type: string }
@@ -11443,7 +11705,33 @@ components:
           type: array
           items: { type: string }
         created_at: { type: string, format: date-time }
-      required: [id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at]
+        issued_at: { type: string, format: date, nullable: true }
+        expires_at: { type: string, format: date, nullable: true }
+        review_due_at: { type: string, format: date, nullable: true }
+        licence_evidence_reference: { type: string, nullable: true }
+        updated_at: { type: string, format: date-time }
+      required: [id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at,
+                 issued_at, expires_at, review_due_at, licence_evidence_reference, updated_at]
+    LicenceChange:
+      type: object
+      properties:
+        licence: { $ref: "#/components/schemas/Licence" }
+        change_kind: { type: string, enum: [widening, narrowing, neutral] }
+      required: [licence, change_kind]
+    LicenceVersion:
+      type: object
+      properties:
+        version_no: { type: integer, minimum: 1 }
+        operation: { type: string, enum: [baseline, insert, update] }
+        changed_at: { type: string, format: date-time }
+        changed_by: { type: string, format: uuid, nullable: true }
+        status: { type: string }
+        issued_at: { type: string, format: date, nullable: true }
+        expires_at: { type: string, format: date, nullable: true }
+        review_due_at: { type: string, format: date, nullable: true }
+        licence_evidence_reference: { type: string, nullable: true }
+        licence_number: { type: string }
+      required: [version_no, operation, changed_at, changed_by, status, issued_at, expires_at, review_due_at, licence_evidence_reference, licence_number]
     JurisdictionResolutionActive:
       type: object
       description: >
