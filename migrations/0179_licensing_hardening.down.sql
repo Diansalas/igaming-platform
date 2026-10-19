@@ -3,8 +3,14 @@
 SET LOCAL lock_timeout = '5s';
 
 DO $$
+DECLARE
+    v_any boolean;
 BEGIN
-    IF EXISTS (SELECT 1 FROM licence_versions WHERE change_request_id IS NOT NULL) THEN
+    -- FORCE RLS hides every row from a session without the platform GUCs (the migration session): lift it for this count only.
+    ALTER TABLE licence_versions NO FORCE ROW LEVEL SECURITY;
+    SELECT EXISTS (SELECT 1 FROM licence_versions WHERE change_request_id IS NOT NULL) INTO v_any;
+    ALTER TABLE licence_versions FORCE ROW LEVEL SECURITY;
+    IF v_any THEN
         RAISE EXCEPTION 'migration 0179 down refused: licence_versions rows carry a change_request_id' USING ERRCODE = 'LC095';
     END IF;
 END

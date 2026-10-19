@@ -178,18 +178,25 @@ func TestHardeningI1_GovernanceGuardsFireLast(t *testing.T) {
 	for _, x := range all {
 		byTable[x.table] = append(byTable[x.table], x.name)
 	}
+	// Pre-existing zz_ guards that legitimately sit next to the licensing guards, enumerated from pg_trigger on the migrated
+	// database. zz_launch_status_governed / zz_launch_status_insert_guard (ADR 0112, migration 0128) are the launch-status graph
+	// guards on tenants / brands: they validate a status move and raise (LA-class); they sort BEFORE zz_licensing_* ('la' < 'li'),
+	// and the licensing guard on tenants only inspects licence_id, which they do not touch. Any other zz_ trigger is unknown and fails.
+	allowedOtherZZ := map[string]bool{"zz_launch_status_governed": true, "zz_launch_status_insert_guard": true}
 	for _, table := range []string{"licences", "tenants", "tenant_jurisdiction_configs", "licence_country_ceilings", "operating_country_policies"} {
 		names := byTable[table]
 		if len(names) == 0 {
 			t.Fatalf("%s has no BEFORE row triggers at all", table)
 		}
+		// The property: NOTHING fires after the licensing guard (so no later trigger can alter the row it already judged).
 		last := names[len(names)-1]
 		if !strings.HasPrefix(last, "zz_licensing_change_governed") {
 			t.Errorf("%s: the last BEFORE row trigger is %q, want a zz_licensing_change_governed* guard (all: %v)", table, last, names)
 		}
-		for _, n := range names[:len(names)-1] {
-			if strings.HasPrefix(n, "zz_") && !strings.HasPrefix(n, "zz_licensing_change_governed") {
-				t.Errorf("%s: trigger %q sorts among the guards; it must sort before them", table, n)
+		// Every other zz_ trigger must be a known pure guard and must sort before the licensing guard.
+		for _, n := range names {
+			if strings.HasPrefix(n, "zz_") && !strings.HasPrefix(n, "zz_licensing_change_governed") && !allowedOtherZZ[n] {
+				t.Errorf("%s: unknown zz_ trigger %q (not in the reviewed allow-list %v); all: %v", table, n, allowedOtherZZ, names)
 			}
 		}
 	}
