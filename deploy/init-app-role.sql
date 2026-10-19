@@ -638,6 +638,33 @@ BEGIN
 END
 $$;
 
+-- Migration 0177 (MKT-DUAL-1, licensing / jurisdiction maker-checker): least-privilege, re-asserted on every run,
+-- mirroring migration 0177's own in-migration grant block. RLS (FORCE on all three), the guard triggers (proof-bound state
+-- machine, append-only) are the binding controls; these grants are defence in depth, narrower than the blanket backfill
+-- GRANT above (which would otherwise re-grant UPDATE / DELETE):
+--   licensing_change_kinds     - the closed kind registry: SELECT only (written by migrations only).
+--   licensing_change_requests  - SELECT/INSERT, and UPDATE on the eight state columns only (request content is immutable;
+--                                the guard re-derives every state column). Never DELETE or TRUNCATE.
+--   licensing_change_approvals - append-only: SELECT/INSERT only.
+-- No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.licensing_change_kinds') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON licensing_change_kinds FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON licensing_change_kinds TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.licensing_change_requests') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON licensing_change_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON licensing_change_requests TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, decided_by, decided_by_person_id, decided_at, decision_reason_code, executed_by, executed_at, executed_txid) ON licensing_change_requests TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.licensing_change_approvals') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON licensing_change_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON licensing_change_approvals TO igaming_runtime';
+    END IF;
+END
+$$;
+
 -- ADR 0115 S1 (migration 0135, RG limits schema): least-privilege, re-asserted on every run,
 -- mirroring migration 0135's own in-migration grant block. RLS (FORCE on the three RG tables) and
 -- the guard / deny triggers are the binding controls; these grants are defence in depth, narrower

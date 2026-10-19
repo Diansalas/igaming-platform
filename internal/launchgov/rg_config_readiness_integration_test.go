@@ -117,20 +117,9 @@ func TestReadiness_RGConfig_EveryAllowedCurrencyNeedsFloors(t *testing.T) {
 	jid := w.jurisdiction(tid)
 	w.licence(tid, jid, "platform", "active")
 	code := w.jurCode(jid)
-	// allow a second currency in the tenant's jurisdiction configuration
-	if err := w.owner.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenant_jurisdiction_configs SET allowed_currencies = '["EUR","USD"]' WHERE tenant_id = $1 AND jurisdiction_id = $2`, tid, jid)
-		return err
-	}); err != nil {
-		// the table may be append-only: insert a later row instead
-		if err2 := w.owner.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
-			_, e := tx.Exec(ctx, `INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, allowed_currencies, allowed_payment_methods, effective_from)
-				VALUES ($1, $2, 'kyc2', 'aml2', 'rg2', '["EUR","USD"]', '["card"]', now() - interval '1 minute')`, tid, jid)
-			return e
-		}); err2 != nil {
-			t.Skipf("cannot widen the allowed currencies in this fixture: %v / %v", err, err2)
-		}
-	}
+	// allow a second currency in the tenant's jurisdiction configuration (since migration 0177 the table is append-only:
+	// a new version, not an in-place edit; the previous fallback would now skip, and a skip is not evidence)
+	w.newConfigVersion(tid, jid, "allowed_currencies", `["EUR","USD"]`)
 	brandSub := launchgov.Subject{TenantID: tid, BrandID: &brand}
 	rgfix.Activate(t, w.owner, tid, nil, rgfix.Staff(t, w.owner, tid))
 	for _, k := range []string{"deposit", "loss", "wager"} {

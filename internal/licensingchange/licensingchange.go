@@ -121,7 +121,9 @@ type GuardError struct {
 	Message string
 }
 
-func (e *GuardError) Error() string { return fmt.Sprintf("licensingchange: database guard %s: %s", e.Code, e.Message) }
+func (e *GuardError) Error() string {
+	return fmt.Sprintf("licensingchange: database guard %s: %s", e.Code, e.Message)
+}
 
 // GuardCode returns the SQLSTATE of a GuardError, or "".
 func GuardCode(err error) string {
@@ -135,7 +137,9 @@ func GuardCode(err error) string {
 // DomainError wraps a refusal of the domain writer (jurisdiction / operatingmarket sentinels stay reachable with errors.Is).
 type DomainError struct{ Err error }
 
-func (e *DomainError) Error() string { return "licensingchange: refused by the domain writer: " + e.Err.Error() }
+func (e *DomainError) Error() string {
+	return "licensingchange: refused by the domain writer: " + e.Err.Error()
+}
 func (e *DomainError) Unwrap() error { return e.Err }
 
 // Actor is the authenticated principal, built by the caller from the verified token (never from a body).

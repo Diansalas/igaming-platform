@@ -74,9 +74,6 @@ func validateActor(a Actor) error {
 		if a.TenantID != uuid.Nil {
 			return fmt.Errorf("%w: a platform actor carries no tenant", ErrForbidden)
 		}
-		if a.Role != string(auth.RolePlatformAdmin) {
-			return fmt.Errorf("%w: only platform_admin acts from the platform scope", ErrForbidden)
-		}
 	case ScopeTenant:
 		if a.TenantID == uuid.Nil {
 			return fmt.Errorf("%w: a tenant actor needs its tenant", ErrForbidden)
