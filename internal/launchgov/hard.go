@@ -116,6 +116,7 @@ func (s *Service) assess(ctx context.Context, in EvalInput) (assessment, error) 
 				return err
 			}
 			a.Failures = append(a.Failures, f...)
+			in.live = &a.Readiness
 			cc, err := s.configChecks(ctx, tx, in)
 			if err != nil {
 				return err

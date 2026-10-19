@@ -261,16 +261,18 @@ type launchReadinessDTO struct {
 	NonPassingCheckCodes []string `json:"non_passing_check_codes"`
 	// Counts and Balances are live display data of R-PLAYER-FUNDS (not hashed); Balances are
 	// DECIMAL STRINGS per asset (never a JSON number).
-	Counts   map[string]int64  `json:"counts,omitempty"`
-	Balances map[string]string `json:"balances,omitempty"`
-	Notices  []string          `json:"notices,omitempty"`
+	Counts map[string]int64 `json:"counts,omitempty"`
+	// Refs are rule ids (ids only) behind R-RISK-RULES-LEGACY (lic7); live display data, not hashed.
+	Refs     map[string][]string `json:"refs,omitempty"`
+	Balances map[string]string   `json:"balances,omitempty"`
+	Notices  []string            `json:"notices,omitempty"`
 }
 
 func toLaunchReadinessDTO(r launchgov.Readiness) launchReadinessDTO {
 	d := launchReadinessDTO{
 		Version: r.Version, ComputedAt: r.ComputedAt.UTC().Format(time.RFC3339), Environment: r.Environment,
 		Checks: []launchCheckDTO{}, ReadinessHash: r.Hash(), NonPassingCheckCodes: r.NonPassing(),
-		Counts: r.Info, Balances: r.Balances, Notices: r.Notices,
+		Counts: r.Info, Refs: r.Refs, Balances: r.Balances, Notices: r.Notices,
 	}
 	if d.NonPassingCheckCodes == nil {
 		d.NonPassingCheckCodes = []string{}
