@@ -24,6 +24,7 @@ credential and no account.
 | File | Content |
 |---|---|
 | `nuvei-compatibility-assessment-2026-10-17.md` | **Current Nuvei assessment** (search-summary evidence of the official docs; conditional viability; new gaps G-09/G-10 and finding N-1; decisions needed). |
+| `psp-final-recommendation-2026-10-19.md`, `nuvei-verified-matrix.md`, `adyen-verified-matrix.md` | **Phase 1B result (official documentation read):** final recommendation, kill tests, decision matrix, work split, human action; per-provider A..Z matrices with page URLs and quotes. |
 | `nuvei-verification-matrix-2026-10-18.md`, `nuvei-test-account-request-2026-10-18.md`, `alternative-psp-adyen-assessment-2026-10-18.md`, `psp-decision-matrix-2026-10-18.md` | **Phase 1B (documentation blocked):** A..Z verification matrix ready to execute, the test-account request text, the alternative PSP plan (Adyen) and the provisional decision matrix. |
 | `nuvei-evaluation.md` | Candidate evaluation: per-topic platform requirement vs Nuvei (all UNVERIFIED), fit/gap table, viability statement, alternatives, what to obtain from the vendor, UNVERIFIED registry (N-U01..). |
 | `provider-neutral-mapping.md` | Platform requirement -> what the PSP must supply -> how the neutral interface carries it -> gap, with concrete code paths. Includes the platform-side abstraction gaps found (G-01..). |

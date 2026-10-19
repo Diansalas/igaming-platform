@@ -1,3 +1,5 @@
+> **SUPERSEDED by `psp-final-recommendation-2026-10-19.md` (official documentation now read).**
+
 # PSP decision matrix (provisional) — Nuvei vs Adyen, 2026-10-18
 
 **Provisional, not final.** The official documentation of both could not be read (network policy), so no cell is `VERIFIED`. Cells marked (S) come from web-search summaries of official pages; (H) from model knowledge. The classification is therefore **provisional** and must be re-issued after the A..Z verification.

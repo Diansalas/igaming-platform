@@ -1,3 +1,5 @@
+> **SUPERSEDED by `nuvei-verified-matrix.md` (documentation read).** Kept for the verification rules.
+
 # Nuvei documentation verification matrix (PSP phase 1B, 2026-10-18)
 
 Status: **READY TO EXECUTE, NOT EXECUTED: the official documentation could not be read.** Nothing below is `VERIFIED`.

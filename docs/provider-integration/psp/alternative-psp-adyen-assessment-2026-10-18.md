@@ -1,3 +1,5 @@
+> **SUPERSEDED by `adyen-verified-matrix.md` and `psp-final-recommendation-2026-10-19.md`.**
+
 # Alternative PSP assessment: Adyen (PSP phase 1B, 2026-10-18)
 
 Status: **SELECTION + VERIFICATION PLAN ONLY. Nothing is verified; the documentation host is blocked.** No adapter, no sign-up, no credential, no agreement.

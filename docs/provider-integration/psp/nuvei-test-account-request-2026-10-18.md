@@ -27,7 +27,8 @@ Status: **PREPARED, NOT SENT.** No sign-up, no agreement, no credential exists. 
 > 4. A server-side **transaction status query** by transaction id and by our own client reference, returning status, amount and currency.
 > 5. Reporting for reconciliation: report types, programmatic API availability, SFTP delivery, record-time field, ordering, delivery lag, and a **read-only** credential for report retrieval.
 > 6. Confirmation of whether merchants operating under an Anjouan gaming licence are eligible, the markets/currencies/methods available to such merchants, and what additional documentation your onboarding requires.
-> 7. Written sandbox terms. We do not intend to enter any commercial agreement at this stage.
+> 7. Please also confirm: (a) whether REST 2.0 is production-ready for new integrations, its GA date and the legacy REST deprecation outlook; (b) that our site can be set to SHA-256-only for DMNs (MD5 disabled), and how the checksum parameter is delivered (HTTP method, content type, encoding); (c) the mapping between `ppp_TransactionID` and the `transactionId` accepted by `getTransactionDetails`; (d) the retry schedule for DMNs/webhooks and the REST 2.0 timestamp tolerance and the exact H+T combination; (e) which scheme signs the result of a `/payout` call; (f) whether a UPO is bound to its `userTokenId`, can be edited or deleted, and whether a payout with another customer's UPO is refused; (g) which payout methods/countries accept merchant-supplied account details per payout (SEPA, Pix, local banks); (h) the identification of a final chargeback debit; (i) a read-only credential for report retrieval.
+> 8. Written sandbox terms. We do not intend to enter any commercial agreement at this stage.
 
 ## 3. What I will do with the result
 Store credentials only as `providercred` handles (never in source/docs/chat), run the A..Z verification against the official pages, then the conformance suite (`conformance-plan.md`) against the sandbox.
