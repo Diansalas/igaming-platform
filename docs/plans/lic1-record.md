@@ -124,7 +124,18 @@ Run results: see section 8.
 
 ## 8. Verification evidence
 
-(Filled in at commit time; see the final report.)
+Private database `lic1…` (dropped afterwards), agent run, synthetic data only:
+
+- `gofmt -l` clean; `go vet` plain and `-tags integration` clean on touched packages and `./cmd/...`.
+- `go test ./internal/... ./cmd/...` (unit): all green (after the sweep stopped reading launch status, `internal/tenant` static pins are green).
+- Integration, all `ok`: `internal/jurisdiction`, `internal/operatingmarket` (incl. the two migration-0076 down-chain tests, see section 3 item 4), `internal/alerting` (full package),
+  `internal/launchgov`, `internal/db` (migration pins), `internal/marketgate`, `internal/tenant`, `internal/stagingseed`, `cmd/...`,
+  `internal/httpserver` (1046 s, run with `-skip TestResolutionIsolation_`).
+- **Not green, not caused by this slice:** `TestResolutionIsolation_OneTenantStoreOutage` / `_MultipleTenantsOutage` / `_FinancialDuringOutage` / `_ConnectionExhaustion` fail with
+  "a pooled transaction stayed open ... (> 400ms)". They fail identically on the unmodified integration branch checkout (`812faf6`) on this loaded machine (timing threshold), so they were skipped in the
+  full httpserver run. A default `go test` of `internal/httpserver` with the integration tag also exceeds the 10-minute default timeout; use `-timeout 50m`.
+- Not run: `internal/reconciliation` integration (not touched by this slice; the first combined run was cut off by the httpserver timeout before reaching it), Back Office vitest (no frontend change).
+- No mutation run was done for the new rules (G-8 hard code, G-12 refusal, boundary): recommend the `qa` specialist mutates `ClassifyLicenceForSweep` (`!today.Before` to `today.After`), `licensingFailures` (drop the new block) and `licenceCheck` (swallow the error).
 
 ## 9. What the orchestrator must do to merge
 
