@@ -25,7 +25,7 @@ export function LicencesPage() {
     (l) => (status === '' || l.status === status) && (needle === '' || `${l.licence_number} ${code.get(l.jurisdiction_id) ?? ''}`.toLowerCase().includes(needle)),
   )
   const columns: Column<LicenceDetail>[] = [
-    { key: 'number', header: 'Licence number (as supplied)', render: (l) => <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/licences/${l.id}`}>{l.licence_number}</Link> },
+    { key: 'number', header: 'Licence number (as supplied)', render: (l) => <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/licences/${encodeURIComponent(l.id)}`}>{l.licence_number}</Link> },
     { key: 'jur', header: 'Jurisdiction', render: (l) => code.get(l.jurisdiction_id) ?? 'Unknown' },
     { key: 'licensee', header: 'Licensee', render: (l) => licenseeLabel(l.licensee) },
     { key: 'status', header: 'Status', render: (l) => <LicenceStatusBadge status={l.status} /> },

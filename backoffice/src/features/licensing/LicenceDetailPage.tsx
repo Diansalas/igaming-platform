@@ -79,7 +79,7 @@ export function LicenceDetailPage() {
           <div>
             <dt className="text-slate-500">Jurisdiction</dt>
             <dd className="mt-1">
-              <Link className="text-brand-700 hover:underline" to={`/licensing/jurisdictions/${l.jurisdiction_id}`}>{jur.data ? `${jur.data.code} - ${jur.data.name}` : short(l.jurisdiction_id)}</Link>
+              <Link className="text-brand-700 hover:underline" to={`/licensing/jurisdictions/${encodeURIComponent(l.jurisdiction_id)}`}>{jur.data ? `${jur.data.code} - ${jur.data.name}` : short(l.jurisdiction_id)}</Link>
             </dd>
           </div>
           <div>
@@ -133,7 +133,7 @@ export function LicenceDetailPage() {
           <ul className="flex flex-col gap-1 text-sm">
             {l.tenant_ids.map((t) => (
               <li key={t}>
-                <Link className="font-mono text-xs text-brand-700 hover:underline" to={`/licensing/tenants/${t}`}>{t}</Link>
+                <Link className="font-mono text-xs text-brand-700 hover:underline" to={`/licensing/tenants/${encodeURIComponent(t)}`}>{t}</Link>
               </li>
             ))}
           </ul>

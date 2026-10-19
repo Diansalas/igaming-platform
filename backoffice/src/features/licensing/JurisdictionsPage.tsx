@@ -15,7 +15,7 @@ export function JurisdictionsPage() {
   const needle = q.trim().toLowerCase()
   const rows = (list.data ?? []).filter((j) => needle === '' || `${j.code} ${j.name} ${j.regulatory_body ?? ''}`.toLowerCase().includes(needle))
   const columns: Column<Jurisdiction>[] = [
-    { key: 'code', header: 'Code', render: (j) => <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/jurisdictions/${j.id}`}>{j.code}</Link> },
+    { key: 'code', header: 'Code', render: (j) => <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/jurisdictions/${encodeURIComponent(j.id)}`}>{j.code}</Link> },
     { key: 'name', header: 'Name', render: (j) => j.name },
     { key: 'body', header: 'Regulatory body (as recorded)', render: (j) => j.regulatory_body || 'Not recorded' },
     { key: 'created', header: 'Recorded', render: (j) => when(j.created_at) },
@@ -65,7 +65,7 @@ export function JurisdictionDetailPage() {
           <ul className="flex flex-col gap-1 text-sm">
             {mine.map((l) => (
               <li key={l.id} className="flex items-center gap-2">
-                <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/licences/${l.id}`}>{l.licence_number}</Link>
+                <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/licences/${encodeURIComponent(l.id)}`}>{l.licence_number}</Link>
                 <LicenceStatusBadge status={l.status} />
               </li>
             ))}

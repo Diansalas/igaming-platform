@@ -748,6 +748,14 @@ func (c launchCall) readiness(r launchgov.Readiness) launchReadinessDTO {
 // request. The hash is computed over the full readiness server-side, so redaction cannot change it.
 func coarsenForTenant(d *launchReadinessDTO) {
 	d.Environment = "redacted"
+	// lic7 security F1: rule ids and the legacy-rule counts are risk-configuration data; tenant compliance /
+	// finance roles deliberately lack risk_config:read, so the readiness read must not hand them over.
+	d.Refs = nil
+	for k := range d.Counts {
+		if strings.HasPrefix(k, "risk_rules_legacy") {
+			delete(d.Counts, k)
+		}
+	}
 	for i := range d.Checks {
 		switch d.Checks[i].Code {
 		case launchgov.CheckProviderTier, launchgov.CheckAlerts:

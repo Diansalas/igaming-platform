@@ -186,7 +186,7 @@ export function classifyFiling(body: unknown): FilingResult {
   if (isObject(body) && isObject(body.licence) && typeof body.change_kind === 'string') {
     return { kind: 'applied', change: body as unknown as LicenceChange }
   }
-  if (isObject(body) && typeof body.tenant_id === 'string' && 'licence_id' in body) {
+  if (isObject(body) && typeof body.tenant_id === 'string' && body.licence_id === null) {
     return { kind: 'unbound', assignment: body as unknown as TenantLicenceAssignment }
   }
   return { kind: 'unconfirmed' }

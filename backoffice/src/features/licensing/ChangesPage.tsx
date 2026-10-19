@@ -35,7 +35,7 @@ export function ChangesPage() {
     retry: false,
   })
   const columns: Column<LicensingChange>[] = [
-    { key: 'filed', header: 'Filed', render: (c) => <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/changes/${c.id}`}>{when(c.created_at)}</Link> },
+    { key: 'filed', header: 'Filed', render: (c) => <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/changes/${encodeURIComponent(c.id)}`}>{when(c.created_at)}</Link> },
     { key: 'kind', header: 'Kind', render: (c) => kindLabel(c.kind) },
     { key: 'status', header: 'Status', render: (c) => <ChangeStatusBadge status={c.status} /> },
     { key: 'class', header: 'Class', render: (c) => (c.widening ? 'Widening' : 'Narrowing or neutral') },
