@@ -480,7 +480,10 @@ $$ LANGUAGE plpgsql
 
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+    -- Only when the role actually holds the privilege: a REVOKE on a role with no ACL entry would materialise the default owner ACL
+    -- on the table and make the down migration unable to restore the 0177 ACL byte for byte.
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime')
+       AND has_table_privilege('igaming_runtime', 'licence_versions', 'INSERT') THEN
         EXECUTE 'REVOKE INSERT ON licence_versions FROM igaming_runtime';
     END IF;
 END

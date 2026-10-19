@@ -392,6 +392,28 @@ func TestMigration0178_UpDownUp_SnapshotAndDownRefusal(t *testing.T) {
 		t.Fatalf("0178 down: %v", err)
 	}
 	if got := schemaSnapshot(t, pool); got != before {
+		bl, gl := strings.Split(before, "\n"), strings.Split(got, "\n")
+		in := func(set []string, l string) bool {
+			for _, x := range set {
+				if x == l {
+					return true
+				}
+			}
+			return false
+		}
+		shown := 0
+		for _, l := range bl {
+			if !in(gl, l) && shown < 8 {
+				t.Logf("only in the 0177 snapshot: %.300s", l)
+				shown++
+			}
+		}
+		for _, l := range gl {
+			if !in(bl, l) && shown < 16 {
+				t.Logf("only after down: %.300s", l)
+				shown++
+			}
+		}
 		t.Fatal("0178 down must restore the 0177 schema byte for byte")
 	}
 	if _, err := pool.MigrateUp(ctx, full); err != nil {
