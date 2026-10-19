@@ -2,7 +2,7 @@
 
 - **Scope:** the generic two-person approval primitive for licensing and jurisdiction configuration (migration 0177,
   `internal/licensingchange`; MKT-DUAL-1; licensing audit gaps G-1, G-2, G-9; triage L-10, L-24, L-25).
-- **Status:** IMPLEMENTED (API only; no Back Office page yet, audit G-10). The approver roles and count are an INTERIM answer to
+- **Status:** IMPLEMENTED (API and Back Office licensing section, lic5; filing of ceiling/policy/jurisdiction-config changes is API-only; audit G-10 closed except that). The approver roles and count are an INTERIM answer to
   HDR-M-1 (section 7).
 - **Not a legal authorisation.** An executed change is a decision recorded by named staff. It does not decide whether a licence is
   valid or whether any jurisdiction permits operation. Never enter a value (country, licence number, ruleset id, authorisation
