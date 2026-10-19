@@ -108,7 +108,7 @@ func TestReadiness_RiskRulesLegacy_PassFailTenantIsolationAndPlatformScope(t *te
 	}
 
 	// fail arm (a): jurisdiction-scoped withdrawal rule of tenant A
-	jr := w.legacyRule(&a, risk.OperationWithdrawal, "KM-ANJ")
+	jr := w.legacyRule(&a, risk.OperationWithdrawal, w.jurCode(ja))
 	r = w.readinessOf(subA, ja)
 	wantLic7(t, "jurisdiction-scoped rule", lic7CheckOf(t, r, launchgov.CheckRiskRulesLegacy), launchgov.ResultFail, "jurisdiction_scoped_rules_present")
 	if r.Info[launchgov.InfoRiskLegacyJurisdictionScoped] != 1 || r.Info[launchgov.InfoRiskLegacyDepositOperation] != 0 {
@@ -141,7 +141,7 @@ func TestReadiness_RiskRulesLegacy_PassFailTenantIsolationAndPlatformScope(t *te
 	wantLic7(t, "deposit rule expired", lic7CheckOf(t, w.readinessOf(subA, ja), launchgov.CheckRiskRulesLegacy), launchgov.ResultPass, "ok")
 
 	// platform-wide rules apply to every tenant
-	pr := w.legacyRule(nil, risk.OperationCasinoBet, "KM-ANJ")
+	pr := w.legacyRule(nil, risk.OperationCasinoBet, w.jurCode(ja))
 	for name, c := range map[string]struct {
 		sub launchgov.Subject
 		jid uuid.UUID
@@ -162,7 +162,8 @@ func TestReadiness_RiskRulesLegacy_ChangesTheHashAndIsAcknowledgeableNotHard(t *
 	w := newScratchWorld(t)
 	a := w.activeTenant()
 	ja := w.jurisdiction(a)
-	sub := launchgov.Subject{TenantID: a}
+	brand := w.pendingBrand(a) // a request needs a legal transition: pending_launch -> active
+	sub := launchgov.Subject{TenantID: a, BrandID: &brand}
 	before := w.readinessOf(sub, ja)
 	if before.Version != launchgov.SnapshotVersion || launchgov.SnapshotVersion != 6 {
 		t.Fatalf("snapshot version %d", before.Version)
@@ -284,7 +285,8 @@ func TestReadiness_KYCPolicy_DormantItemIsAcknowledgeableNotHard(t *testing.T) {
 	a := w.activeTenant()
 	ja := w.jurisdiction(a)
 	w.licence(a, ja, "platform", "active")
-	sub := launchgov.Subject{TenantID: a}
+	brand := w.pendingBrand(a) // a request needs a legal transition: pending_launch -> active
+	sub := launchgov.Subject{TenantID: a, BrandID: &brand}
 	in := w.activation(sub, ja)
 	found := false
 	for _, c := range in.AcknowledgedCheckCodes {
