@@ -260,3 +260,42 @@ func (w *world) rtTenantInt(tenantID uuid.UUID, sql string, args ...any) int {
 	}
 	return n
 }
+
+// Payload tampering after an approval: the content cannot change (LC012, even for the owner), an approval proof bound to any
+// other payload hash is refused (AP004), and the execution writes exactly the approved payload.
+func TestSQL_PayloadTamperedAfterApproval_Refused(t *testing.T) {
+	w := newWorld(t)
+	jid := w.jurisdiction()
+	number := "LC-TAMPER-" + uuid.NewString()[:6]
+	r := w.mustRequest(w.req, KindLicenceCreate, LicenceCreatePayload{JurisdictionID: jid, Licensee: "platform", LicenceNumber: number}, "licence_granted").Request
+	w.mustApprove(w.ap1, r.ID)
+	err := w.owner.WithPlatformAdmin(context.Background(), w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE licensing_change_requests SET payload = jsonb_set(payload, '{licence_number}', '"TAMPERED"') WHERE id = $1`, r.ID)
+		return err
+	})
+	if pgCode(err) != "LC012" {
+		t.Fatalf("a payload change after an approval must be LC012, got %v", err)
+	}
+	good := prooftest.ProcessForger(t, w.ownerURL)
+	tampered := strings.Repeat("cd", 32)
+	err = w.rtPlatform(w.ops.Approver2, func(ctx context.Context, tx pgx.Tx) error {
+		if err := setProof(ctx, tx, good.Valid(t, w.ops.Approver2, "platform", uuid.Nil, actorproof.OpLicensingChangeApprove, r.ID.String(), tampered)); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO licensing_change_approvals (request_id, reason_code) VALUES ($1, 'ok')`, r.ID)
+		return err
+	})
+	if pgCode(err) != "AP004" {
+		t.Fatalf("an approval proof for another payload hash must be AP004, got %v", err)
+	}
+	done := w.mustApprove(w.ap2, r.ID)
+	if !done.Executed {
+		t.Fatal("the genuine second approval executes")
+	}
+	if n := w.ownerInt(`SELECT count(*) FROM licences WHERE licence_number = $1`, number); n != 1 {
+		t.Fatalf("the executed licence must carry the approved number, got %d", n)
+	}
+	if n := w.ownerInt(`SELECT count(*) FROM licences WHERE licence_number = 'TAMPERED'`); n != 0 {
+		t.Fatal("a tampered payload must never be written")
+	}
+}
