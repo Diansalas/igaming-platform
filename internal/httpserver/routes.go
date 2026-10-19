@@ -188,5 +188,7 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerPayoutInstrumentRoutes(mux, deps)
 	// ADR 0112 slice 4: launch authorisation (tenant and brand status governance).
 	registerLaunchAuthorisationRoutes(mux, deps)
+	// Migration 0177 (MKT-DUAL-1): licensing / jurisdiction change requests (two-person approval primitive).
+	registerLicensingChangeRoutes(mux, deps)
 	registerAMLRoutes(mux, deps)
 }

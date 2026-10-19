@@ -84,6 +84,32 @@ func TestLaunchCodes_LiteralsAndStatuses(t *testing.T) {
 	}
 }
 
+// Migration 0177: the closed LICENSING_CHANGE_* codes keep their literal strings and statuses.
+func TestLicensingChangeCodes_LiteralsAndStatuses(t *testing.T) {
+	cases := []struct {
+		code    Code
+		literal string
+		status  int
+	}{
+		{CodeLicensingChangeSelfApproval, "LICENSING_CHANGE_SELF_APPROVAL", 409},
+		{CodeLicensingChangeNotPending, "LICENSING_CHANGE_NOT_PENDING", 409},
+		{CodeLicensingChangeAlreadyDecided, "LICENSING_CHANGE_ALREADY_DECIDED", 409},
+		{CodeLicensingChangeDuplicatePending, "LICENSING_CHANGE_DUPLICATE_PENDING", 409},
+		{CodeLicensingChangeApprovalsStale, "LICENSING_CHANGE_APPROVALS_STALE", 409},
+		{CodeLicensingChangeRefused, "LICENSING_CHANGE_REFUSED", 409},
+		{CodeLicensingChangeGuardRefused, "LICENSING_CHANGE_GUARD_REFUSED", 409},
+		{CodeLicensingChangeRetryableLockWait, "LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT", 409},
+		{CodeLicensingChangeProofRefused, "LICENSING_CHANGE_PROOF_REFUSED", 403},
+		{CodeLicensingChangeNoPerson, "LICENSING_CHANGE_NO_PERSON", 403},
+		{CodeLicensingChangeUnavailable, "LICENSING_CHANGE_UNAVAILABLE", 503},
+	}
+	for _, tc := range cases {
+		if string(tc.code) != tc.literal || Status(tc.code) != tc.status {
+			t.Errorf("%s: literal %q status %d (want %d)", tc.literal, tc.code, Status(tc.code), tc.status)
+		}
+	}
+}
+
 // ADR 0115 slice S2: the closed RG_* codes keep their literal strings and statuses.
 func TestRGCodes_LiteralsAndStatuses(t *testing.T) {
 	cases := []struct {

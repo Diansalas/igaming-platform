@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
+	"github.com/Diansalas/igaming-platform/internal/licensingchange"
 	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
@@ -202,6 +203,13 @@ type Deps struct {
 	// LAUNCH_AUTHORISATION_UNAVAILABLE and write nothing (the repository's nil-means-disabled
 	// convention, fail closed); cmd/platform-api always sets it.
 	LaunchAuthorisation *launchgov.Service
+
+	// LicensingChanges is the migration 0177 licensing / jurisdiction change service (MKT-DUAL-1): the only runtime writer
+	// of licences, tenants.licence_id, licence_country_ceilings, operating_country_policies and tenant_jurisdiction_configs
+	// (the database refuses any other runtime write, LC040). cmd/platform-api always sets it. When nil and DB is set,
+	// NewWithAdmission builds one over DB that signs with the process actor-proof issuer (actorproof.Default()): with no
+	// issuer every governed write still fails closed (500, nothing written). Nil with no DB makes the routes answer 503.
+	LicensingChanges *licensingchange.Service
 
 	// AML is the ADR 0116 officer service behind the AML routes (aml_routes.go). nil makes every AML route answer 503: there
 	// is no fallback and no bypass. Production wiring passes *aml.Service, built with the process actor-proof issuer (nil in
@@ -499,6 +507,11 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	// admission call in this package a no-op, preserving pre-PRH-I4
 	// behaviour exactly.
 	deps.webhookAdmission = newWebhookAdmission(deps.WebhookAdmission, deps.DB, deps.Logger)
+	if deps.LicensingChanges == nil && deps.DB != nil {
+		if svc, err := licensingchange.New(licensingchange.Config{Pool: deps.DB}); err == nil {
+			deps.LicensingChanges = svc
+		}
+	}
 	admissionRuntime := WebhookAdmissionRuntime{rt: deps.webhookAdmission}
 
 	mux.HandleFunc("GET /healthz", livezHandler)
