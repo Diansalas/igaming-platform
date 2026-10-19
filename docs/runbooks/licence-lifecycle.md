@@ -20,13 +20,15 @@ characters, no "@") to a document held elsewhere; the document is never stored h
 
 ## Interim rules (no human answer assumed)
 
-1. **Single actor plus step-up for every lifecycle write.** There is NO maker-checker in this slice. The service classifies
-   every change as `widening` (set `active` again, later `expires_at`, cleared expiry, earlier `issued_at`, postponed or cleared
-   review date), `narrowing` (suspend, expire, earlier `expires_at`, a newly set expiry, later `issued_at`, a review date set or brought
-   forward) or `neutral` (evidence reference). The class is returned in the response and recorded in the audit row so the approval
-   step planned for slice 2 can route widening changes without reclassifying. **Residual G-1/G-2:** until that lands, a widening
-   change (for example reinstating a suspended licence) needs only one platform admin with a fresh second factor. Treat every
-   reinstatement and every expiry extension as a change to be confirmed by a second person out of band, and look at the audit rows.
+1. **Widening needs two approvals; narrowing stays single actor plus step-up** (migration 0178; this replaces the slice 1 interim
+   rule). The DATABASE classifies every change as `widening` (set `active` again, later `expires_at`, cleared expiry, earlier or
+   cleared `issued_at`, postponed or cleared review date), `narrowing` (suspend, expire, earlier `expires_at`, a newly set expiry,
+   later `issued_at`, a review date set or brought forward) or `neutral` (evidence reference). A widening PUT answers **202** with
+   the licensing change request; two other platform admins (distinct Persons, neither the requester's) approve it through
+   `POST /v1/admin/licensing-changes/{id}/approve` (see `licensing-change-approvals.md`) and only then does the licence change.
+   A narrowing or neutral PUT executes at once (200) and the response carries `change_kind` and `change_request_id`. The
+   request bodies are unchanged; `reason_code` must now be a code (1..64 characters of `[A-Za-z0-9_.:-]`). With fewer than three
+   platform-admin Persons a widening change cannot be completed (HDR-M-1 interim).
 2. **Narrowing stays single-actor by design.** A suspension must be recordable immediately and is the fail-closed direction.
 3. **Status vocabulary is `active`, `suspended`, `expired` only.** A regulator **revocation** is recorded as `expired` with
    reason code `regulator_revocation` and the regulator reference as the evidence reference. A distinct `revoked` status is a pending
@@ -49,7 +51,7 @@ characters, no "@") to a document held elsewhere; the document is never stored h
    Withdrawals are not market-gated: players can still withdraw.
 3. Brands and tenants stay `active` in launch governance. If the business wants them suspended too (for example to stop
    registration pages and staff operations), suspend each through the launch-governance suspend action (`launch-and-suspension.md`).
-4. Reinstatement is `{"status":"active"}` with a reason code. It is a widening change (see interim rule 1).
+4. Reinstatement is `{"status":"active"}` with a reason code. It is a widening change: it is filed (202) and needs two approvals (see interim rule 1).
 5. The history of every step is in `GET /v1/admin/licences/{id}/versions` and the audit log (`jurisdiction_registry.licence_status_set`).
 
 ## Expiry and review sweep
@@ -60,6 +62,19 @@ Hourly, read-only. `licence.expired` (P1) when the status is `expired` or `expir
 and brand ids (every tenant and brand bound to the licence, whatever its launch status: a closed tenant can appear, because the
 sweep deliberately does not read launch status). Nobody is paged until a human configures an alert route (`alert-delivery-channels.md`); until then the alerts are
 durable rows only, visible at `GET /v1/admin/alerts`. See the runbook section in `observability-and-alerting.md`.
+
+**Sweep self-monitoring (migration 0178).** `licence.sweep_failed` (P1) is raised when the tenant listing fails, a tenant read
+fails or an alert write fails (phase `list_tenants`, `tenant_read`, `raise`): the safety net did not run completely, investigate
+before relying on the absence of `licence.expired`. `licence.unmonitored` (P2) lists a licence bound to a tenant that records no
+`expires_at` and has no more specific alert (a licence with no expiry is never in `licence.expiring`); record the expiry, or
+accept the gap. A licence bound to NO tenant is not reported (residual: reading unbound licences needs a security decision).
+
+## Read APIs (platform admin, `jurisdiction_registry:read`, step-up none)
+
+`GET /v1/admin/jurisdictions` and `/{id}`; `GET /v1/admin/licences` and `/{id}` (each with `tenant_ids`, the tenants bound to it);
+`GET /v1/admin/licences/{id}/versions`; `GET /v1/admin/licence-country-ceilings?licence_id=`; `GET
+/v1/admin/operating-country-policies?tenant_id=`; `GET /v1/admin/tenants/{id}/jurisdiction-configs`. The three new lists are paginated
+(`?limit=` default 50 max 200, `?offset=`). They show stored versions, not a market-permission decision.
 
 ## Pending human decisions (exact questions)
 

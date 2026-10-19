@@ -168,7 +168,9 @@ func TestKinds_ScopeSubjectConsistency(t *testing.T) {
 			KindReconciliationSweepFailed: true,
 			// Licensing slice 1 (migration 0176): the licence expiry / review sweep Kinds (a licence may be shared by
 			// many tenants; raised only under the alert_dispatcher identity by RaiseLicenceSweep).
-			KindLicenceExpired: true, KindLicenceExpiring: true}
+			KindLicenceExpired: true, KindLicenceExpiring: true,
+			// Migration 0178 (security review F-3): the sweep's own failure and the unmonitored-licence Kinds.
+			KindLicenceUnmonitored: true, KindLicenceSweepFailed: true}
 		if def.Scope == ScopeKindPlatform && !def.RequiresSubject && !subjectless[k] {
 			t.Errorf("platform kind %q (non-meta) must RequireSubject", k)
 		}

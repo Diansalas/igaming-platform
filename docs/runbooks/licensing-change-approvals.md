@@ -17,6 +17,10 @@
 | `tenant_licence_unbind` | `tenants.licence_id = NULL` | - | always |
 | `licence_ceiling_version` | a `licence_country_ceilings` version | `enabled` + `active` | `disabled`, or `withdrawn` |
 | `operating_policy_version` | an `operating_country_policies` version | `enabled` + `active`; `withdrawn` at the brand / operation rung (absence there inherits) | `disabled` at any rung; `withdrawn` at the tenant rung |
+| `licence_status_change` (0178) | `licences.status` | toward `active` (reinstate; also from an unrecognised status) | toward `suspended` / `expired` |
+| `licence_validity_dates_change` (0178) | `licences.issued_at` / `expires_at` | a later or cleared `expires_at`; an earlier or cleared `issued_at` (any widening component makes the whole change widening) | a newly set or earlier `expires_at`; a later `issued_at` |
+| `licence_review_due_change` (0178) | `licences.review_due_at` | postponed or cleared | set (from none) or brought forward |
+| `licence_evidence_reference_change` (0178) | `licences.evidence_reference` | never | always (neutral, single actor) |
 | `tenant_jurisdiction_config_version` | close + append a `tenant_jurisdiction_configs` version, or close it | a first version; any ruleset id change; an added currency or payment method; a removed geo block | only removing currencies / payment methods, adding geo blocks, same ruleset ids; or `close` |
 
 The DATABASE classifies each change (`licensing_change_classify`); the caller cannot choose. A narrowing change filed by a
@@ -24,8 +28,16 @@ platform admin executes in the same call. A change filed by tenant staff (compli
 configuration; tenant admin: brand / operation-rung policy; own tenant only) needs one platform approval if narrowing and two if
 widening. Tenant staff never approve.
 
-Not governed by this slice: licence status, dates and evidence (the licence-lifecycle slice); licence unbind / suspend stay single
-actor (fail-closed direction).
+Since migration 0178 the licence lifecycle writes (`PUT /v1/admin/licences/{id}/status | validity-dates | review-due |
+evidence-reference`) are kinds of this primitive with unchanged request bodies: a widening request answers **202** with the change
+request and needs two approvals; a narrowing or neutral request executes at once (**200**, single actor plus step-up). A request
+that changes nothing (the licence already has that status / date / reference) is refused 400 and stores nothing. The database also
+guards the `licences` table itself (`licences_update_guard`): the identity columns (jurisdiction, licensee, number, permitted
+products / markets) can never change at runtime (`LC042`), and any other runtime UPDATE needs an executed request of the matching
+kind in the same transaction (`LC040`), widening ones holding their approvals. A platform GUC alone authorises nothing. Licence
+unbind stays single actor (fail-closed direction). An open request of the tenant class no longer blocks the identical request of
+the platform class (`LICENSING_CHANGE_DUPLICATE_PENDING` is per requester class). A tenant-filed brand-rung policy naming a brand
+that is not the tenant's own is refused at filing as not found.
 
 ## 2. Rules the system enforces
 
@@ -91,9 +103,9 @@ connects as the owner; the governed-write guard admits the owner, the same docum
 production (`APP_ENV` and the `database_environment` anchor, unchanged). Never point them at production; production changes use
 section 3.
 
-## 6. Extension (licence-lifecycle slice)
+## 6. Extension
 
-A new kind (for example licence reinstate / extend expiry, both widening) needs: a `licensing_change_kinds` row, a
+(The licence lifecycle slice used this recipe in migration 0178.) A new kind needs: a `licensing_change_kinds` row, a
 `licensing_change_classify` branch and a `licensing_change_row_matches` branch plus a governed-write trigger on the table it
 writes (one migration), and a `kindSpec` registered in `internal/licensingchange` with `register()`. Until all exist the kind fails
 closed. Narrowing kinds (suspend) stay single-actor.

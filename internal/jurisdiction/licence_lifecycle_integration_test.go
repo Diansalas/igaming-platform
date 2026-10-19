@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -494,4 +495,122 @@ func TestLicenceSweep_RealAlertWrite_DedupsPerLicenceAcrossPasses(t *testing.T) 
 			t.Fatalf("unexpected attribute %q", k)
 		}
 	}
+}
+
+// ---- security review F-3 (migration 0178): the sweep reports its own failure and what it cannot monitor ----
+
+type failedRaise struct {
+	phase string
+	n     int
+}
+
+func captureSweepFailed(t *testing.T) *[]failedRaise {
+	t.Helper()
+	var got []failedRaise
+	old := raiseSweepFailed
+	t.Cleanup(func() { raiseSweepFailed = old })
+	raiseSweepFailed = func(_ context.Context, _ *db.Pool, phase string, n int) error {
+		got = append(got, failedRaise{phase, n})
+		return nil
+	}
+	return &got
+}
+
+// A tenant-listing failure raises licence.sweep_failed (phase list_tenants) and still returns the error.
+func TestLicenceSweep_ListFailure_RaisesSweepFailed(t *testing.T) {
+	live := testPool(t)
+	_ = live
+	broken, err := db.Connect(context.Background(), os.Getenv("TEST_DATABASE_URL"), 2, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken.Close() // every transaction on it now fails
+	failed := captureSweepFailed(t)
+	captureRaises(t)
+	if _, err := RunLicenceSweepOnce(context.Background(), broken, nil, time.Now().UTC()); err == nil {
+		t.Fatal("a failed tenant listing must return an error")
+	}
+	if len(*failed) != 1 || (*failed)[0].phase != alerting.LicenceSweepPhaseListTenants {
+		t.Fatalf("sweep_failed raises = %+v, want one list_tenants", *failed)
+	}
+}
+
+// A failed alert write counts as a RaiseError and raises licence.sweep_failed (phase raise).
+func TestLicenceSweep_RaiseFailure_RaisesSweepFailed(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	l := newLifecycleLicence(t, pool, f)
+	if err := lcDo(t, pool, f, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := SetLicenceStatus(ctx, tx, l.ID, "expired", lcActor("regulator_revocation"))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sweepTenant(t, pool, f, l)
+	old := raiseLicenceAlert
+	t.Cleanup(func() { raiseLicenceAlert = old })
+	raiseLicenceAlert = func(context.Context, *db.Pool, alerting.Kind, uuid.UUID, map[string]alerting.AttrValue) error {
+		return errors.New("alert store unavailable")
+	}
+	failed := captureSweepFailed(t)
+	res, err := RunLicenceSweepOnce(context.Background(), pool, nil, time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC))
+	if err != nil || res.RaiseErrors < 1 {
+		t.Fatalf("result %+v err %v", res, err)
+	}
+	found := false
+	for _, r := range *failed {
+		if r.phase == alerting.LicenceSweepPhaseRaise && r.n == res.RaiseErrors {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sweep_failed raises = %+v, want phase raise with %d", *failed, res.RaiseErrors)
+	}
+}
+
+// A bound licence with NO expires_at is reported as licence.unmonitored (ids only), once; a licence with an expiry, and one that
+// already has a more specific alert, are not.
+func TestLicenceSweep_UnmonitoredLicence_Reported(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	noExpiry := newLifecycleLicence(t, pool, f)
+	withExpiry := newLifecycleLicence(t, pool, f)
+	revoked := newLifecycleLicence(t, pool, f) // expired by status, no expires_at: already a licence.expired
+	if err := lcDo(t, pool, f, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := SetLicenceValidityDates(ctx, tx, withExpiry.ID, nil, dayPtr(2030, 1, 1), lcActor("licence_issued")); err != nil {
+			return err
+		}
+		_, err := SetLicenceStatus(ctx, tx, revoked.ID, "expired", lcActor("regulator_revocation"))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tNo, _ := sweepTenant(t, pool, f, noExpiry)
+	sweepTenant(t, pool, f, withExpiry)
+	sweepTenant(t, pool, f, revoked)
+	got := captureRaises(t)
+	captureSweepFailed(t)
+	if _, err := RunLicenceSweepOnce(context.Background(), pool, nil, now); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[uuid.UUID][]raised{}
+	for _, r := range *got {
+		byID[r.id] = append(byID[r.id], r)
+	}
+	n := byID[noExpiry.ID]
+	if len(n) != 1 || n[0].kind != alerting.KindLicenceUnmonitored || n[0].attrs["trigger"] != TriggerNoExpiryRecorded || n[0].attrs["tenant_ids"] != tNo.String() {
+		t.Fatalf("unmonitored alert = %+v", n)
+	}
+	if len(byID[withExpiry.ID]) != 0 {
+		t.Fatalf("a licence with an expiry must not be reported: %+v", byID[withExpiry.ID])
+	}
+	if r := byID[revoked.ID]; len(r) != 1 || r[0].kind != alerting.KindLicenceExpired {
+		t.Fatalf("a licence with a more specific alert is reported once as that alert: %+v", r)
+	}
+}
+
+func dayPtr(y int, m time.Month, d int) *time.Time {
+	t := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	return &t
 }

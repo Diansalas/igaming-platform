@@ -17,25 +17,29 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 )
 
-// The Go kind registry is exactly the migration 0177 seed of licensing_change_kinds (a new kind needs both, plus the SQL
-// classify / row-match branches: the extension hook).
+// The Go kind registry is exactly the seeds of licensing_change_kinds in migrations 0177 and 0178 (a new kind needs both, plus the
+// SQL classify / row-match branches: the extension hook).
 func TestKinds_MatchTheMigrationRegistry(t *testing.T) {
-	b, err := os.ReadFile("../../migrations/0177_licensing_change_approvals.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed := string(b)[strings.Index(string(b), "INSERT INTO licensing_change_kinds"):]
-	seed = seed[:strings.Index(seed, ";")]
 	var sqlKinds []string
-	for _, m := range regexp.MustCompile(`\('([a-z_]+)', (true|false), `).FindAllStringSubmatch(seed, -1) {
-		sqlKinds = append(sqlKinds, m[1])
-		spec, ok := kinds[Kind(m[1])]
-		if !ok {
-			t.Errorf("kind %s is seeded but not registered in Go", m[1])
-			continue
+	approvals := 0
+	for _, f := range []string{"0177_licensing_change_approvals.up.sql", "0178_licence_lifecycle_governed_changes.up.sql"} {
+		b, err := os.ReadFile("../../migrations/" + f)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if spec.platformOnly != (m[2] == "true") {
-			t.Errorf("kind %s: platform_only differs between SQL (%s) and Go (%v)", m[1], m[2], spec.platformOnly)
+		seed := string(b)[strings.Index(string(b), "INSERT INTO licensing_change_kinds"):]
+		seed = seed[:strings.Index(seed, ";")]
+		approvals += strings.Count(seed, "2, ARRAY['platform_admin']")
+		for _, m := range regexp.MustCompile(`\('([a-z_]+)', (true|false), `).FindAllStringSubmatch(seed, -1) {
+			sqlKinds = append(sqlKinds, m[1])
+			spec, ok := kinds[Kind(m[1])]
+			if !ok {
+				t.Errorf("kind %s is seeded but not registered in Go", m[1])
+				continue
+			}
+			if spec.platformOnly != (m[2] == "true") {
+				t.Errorf("kind %s: platform_only differs between SQL (%s) and Go (%v)", m[1], m[2], spec.platformOnly)
+			}
 		}
 	}
 	var goKinds []string
@@ -44,12 +48,12 @@ func TestKinds_MatchTheMigrationRegistry(t *testing.T) {
 	}
 	sort.Strings(sqlKinds)
 	sort.Strings(goKinds)
-	if strings.Join(sqlKinds, ",") != strings.Join(goKinds, ",") || len(goKinds) != 6 {
-		t.Fatalf("Go kinds %v and SQL kinds %v must be the same six", goKinds, sqlKinds)
+	if strings.Join(sqlKinds, ",") != strings.Join(goKinds, ",") || len(goKinds) != 10 {
+		t.Fatalf("Go kinds %v and SQL kinds %v must be the same ten (six from 0177, four lifecycle kinds from 0178)", goKinds, sqlKinds)
 	}
 	// Every SQL seed row is approved by platform_admin and needs two approvals (the interim HDR-M-1 answer).
-	if n := strings.Count(seed, "2, ARRAY['platform_admin']"); n != 6 {
-		t.Fatalf("every kind must seed widening_approvals 2 and approver_roles {platform_admin} (interim HDR-M-1), found %d", n)
+	if approvals != 10 {
+		t.Fatalf("every kind must seed widening_approvals 2 and approver_roles {platform_admin} (interim HDR-M-1), found %d", approvals)
 	}
 }
 

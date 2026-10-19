@@ -269,8 +269,10 @@ func TestStaffRoutes_EveryMutatingRouteClassified(t *testing.T) {
 	// F6 / SA-3: +GET /v1/admin/platform/status (1 read) = 223 routes, 135 mutating.
 	// Licensing slice 1 (migration 0176): +4 licence lifecycle PUTs, +1 GET licence versions = 228 routes, 139 mutating.
 	// Licensing slice 2 (migration 0177, MKT-DUAL-1): +6 licensing change routes (2 reads, 4 mutating) = 234 routes, 143 mutating.
-	if mutating != 143 || len(staffRouteGolden) != 234 {
-		t.Errorf("golden table: %d routes, %d mutating; pinned 234 and 143", len(staffRouteGolden), mutating)
+	// lic4 slice 4a: +5 platform reads (jurisdiction by id, licence by id, licence country ceilings, operating country policies,
+	// tenant jurisdiction configs) = 239 routes, 143 mutating (the lifecycle PUTs keep their routes).
+	if mutating != 143 || len(staffRouteGolden) != 239 {
+		t.Errorf("golden table: %d routes, %d mutating; pinned 239 and 143", len(staffRouteGolden), mutating)
 	}
 }
 

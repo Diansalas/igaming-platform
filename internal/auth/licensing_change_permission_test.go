@@ -27,3 +27,15 @@ func TestLicensingChangePermissions_RoleMatrix(t *testing.T) {
 		t.Fatal("permission strings drifted from migration 0177")
 	}
 }
+
+// lic4 slice 4a: the registry read permission is platform_admin ONLY.
+func TestJurisdictionRegistryReadPermission_PlatformAdminOnly(t *testing.T) {
+	if string(PermJurisdictionRegistryRead) != "jurisdiction_registry:read" {
+		t.Fatal("permission string drifted")
+	}
+	for _, role := range append(append([]Role(nil), allRoles...), "", "unknown", "PLATFORM_ADMIN", RolePlayer) {
+		if got, want := RoleHasPermission(role, PermJurisdictionRegistryRead), role == RolePlatformAdmin; got != want {
+			t.Errorf("role %q jurisdiction_registry:read = %v, want %v", role, got, want)
+		}
+	}
+}

@@ -457,6 +457,23 @@ func init() {
 			if err != nil {
 				return err
 			}
+			// F-4 (security review): a TENANT session's brand-rung policy must name a brand of its own tenant. Checked now, under the
+			// requester's RLS, so approvers never see it; a foreign or unknown brand is answered as not found. A platform requester
+			// cannot read tenant brands, so only the tenant session is checked here (the composite FK refuses a foreign brand at execution).
+			if p.BrandID != nil {
+				var tenantSession, own bool
+				if err := tx.QueryRow(ctx, `SELECT NULLIF(current_setting('app.tenant_id', true), '') IS NOT NULL`).Scan(&tenantSession); err != nil {
+					return err
+				}
+				if tenantSession {
+					if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM brands WHERE id = $1 AND tenant_id = $2)`, *p.BrandID, p.TenantID).Scan(&own); err != nil {
+						return err
+					}
+					if !own {
+						return &DomainError{Err: fmt.Errorf("%w: unknown brand_id %s", jurisdiction.ErrNotFound, *p.BrandID)}
+					}
+				}
+			}
 			// Enabling needs a bound licence whose ceiling enables the country (the 0076 trigger is authoritative at
 			// execution; this is the early, diagnosable answer).
 			if p.State == string(operatingmarket.StateEnabled) && p.Status == string(operatingmarket.StatusActive) {
