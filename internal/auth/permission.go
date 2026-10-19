@@ -766,6 +766,12 @@ const (
 	PermLicensingChangeRequest Permission = "licensing_change:request"
 	PermLicensingChangeApprove Permission = "licensing_change:approve"
 	PermLicensingChangeRead    Permission = "licensing_change:read"
+
+	// PermJurisdictionRegistryRead (lic4 slice 4a): the READ half of the platform jurisdiction / licence registry and of the
+	// platform-wide read views a Back Office needs (jurisdictions, licences with their bound tenants, licence country
+	// ceilings, a tenant's operating-country policies and jurisdiction configurations). platform_admin ONLY (the same role set
+	// that holds PermJurisdictionRegistryManage); never granted to a tenant role.
+	PermJurisdictionRegistryRead Permission = "jurisdiction_registry:read"
 )
 
 // ADR 0115 slice S2 (RG limits write APIs). STATIC route-level authority; the controls that matter
@@ -908,6 +914,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationApprove, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 		// Migration 0177 (MKT-DUAL-1): platform_admin is the ONLY holder of :approve (interim, HDR-M-1).
 		PermLicensingChangeRequest, PermLicensingChangeApprove, PermLicensingChangeRead,
+		// lic4 slice 4a: platform-wide registry reads (platform_admin ONLY).
+		PermJurisdictionRegistryRead,
 		// ADR 0115 S2: jurisdiction-floor change requests (platform_admin ONLY; four-eyes is the database's).
 		PermRGFloorRead, PermRGFloorRequest, PermRGFloorDecide,
 		// ADR 0116 s6 (A7): the static half of the AML officer gates; the aml_officer grant + acting session are the authority.

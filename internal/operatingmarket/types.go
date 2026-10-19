@@ -69,8 +69,8 @@ const PolicyVersion = "stage-4i-e.v3"
 
 var (
 	ErrInvalidInput = errors.New("operatingmarket: invalid input")
-	// ErrNotFound is RESERVED: no function in this package currently
-	// returns it (flagged in the Phase E fix round's P3 review). Left
+	// ErrNotFound is returned by the platform read views (admin_reads.go, lic4 slice 4a) for an unknown licence or tenant;
+	// before that it was RESERVED: no function in this package returned it (flagged in the Phase E fix round's P3 review). Left
 	// declared rather than removed - a future read-by-id admin surface
 	// (e.g. reading one specific CeilingRecord/PolicyRecord version by its
 	// id, as opposed to today's list-by-key surfaces) is the obvious,

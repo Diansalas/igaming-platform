@@ -271,18 +271,26 @@ func newListLicencesHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		var list []jurisdiction.Licence
+		var bound map[uuid.UUID][]uuid.UUID
 		err = deps.DB.WithPlatformAdmin(r.Context(), actor.ActorID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			list, err = jurisdiction.ListLicences(ctx, tx)
+			if list, err = jurisdiction.ListLicences(ctx, tx); err != nil {
+				return err
+			}
+			ids := make([]uuid.UUID, 0, len(list))
+			for _, l := range list {
+				ids = append(ids, l.ID)
+			}
+			bound, err = jurisdiction.LicenceBoundTenantIDs(ctx, tx, ids)
 			return err
 		})
 		if err != nil {
 			writeJurisdictionRegistryError(w, requestID, logger, "list_licences", err)
 			return
 		}
-		resp := make([]licenceResponse, 0, len(list))
+		resp := make([]licenceDetailResponse, 0, len(list))
 		for _, l := range list {
-			resp = append(resp, toLicenceResponse(l))
+			resp = append(resp, toLicenceDetail(l, bound[l.ID]))
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}

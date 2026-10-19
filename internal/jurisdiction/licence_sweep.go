@@ -12,6 +12,16 @@ package jurisdiction
 //   - licence.expiring (p2): not expired, and expires_at or review_due_at falls on or before today + the warning
 //     window (an already-overdue review also counts).
 //
+// Security review F-3 (migration 0178): the sweep also reports on ITSELF and on what it cannot monitor:
+//
+//   - licence.sweep_failed (p1): the tenant listing failed (phase list_tenants), at least one tenant read failed (tenant_read),
+//     or at least one alert write failed (raise). Raised under the alert_dispatcher identity; if THAT write also fails it is
+//     logged only (nothing else can be written).
+//   - licence.unmonitored (p2): a licence bound to a tenant that records NO expires_at and has no more specific alert in this
+//     pass (a licence with no expiry is never in licence.expiring). Ids only. A licence bound to NO tenant is NOT reported:
+//     reading unbound licences needs a new read path (a service-identity RLS policy on licences) that is a security decision,
+//     recorded as a residual in docs/plans/lic4-widening-and-reads-record.md.
+//
 // The affected tenant and brand ids are attributes (ids only, bounded). Every tenant and brand bound to the licence is
 // listed whatever its launch status: the sweep deliberately does not read tenants.status / brands.status (those readers
 // are a reviewed, closed set, ADR 0112 LF7-LF9), so a closed tenant can appear in the list (documented residual). It NEVER suspends a brand, tenant or licence,
@@ -91,8 +101,15 @@ type LicenceSweepResult struct {
 	RaiseErrors  int
 }
 
-// raiseLicenceAlert is a test seam (production value: alerting.RaiseLicenceSweep).
-var raiseLicenceAlert = alerting.RaiseLicenceSweep
+// raiseLicenceAlert and raiseSweepFailed are test seams (production values: alerting.RaiseLicenceSweep and
+// alerting.RaiseLicenceSweepFailed).
+var (
+	raiseLicenceAlert = alerting.RaiseLicenceSweep
+	raiseSweepFailed  = alerting.RaiseLicenceSweepFailed
+)
+
+// TriggerNoExpiryRecorded is the licence.unmonitored trigger.
+const TriggerNoExpiryRecorded = "no_expiry_recorded"
 
 type licenceAgg struct {
 	status      string
@@ -124,6 +141,9 @@ func RunLicenceSweepOnce(ctx context.Context, pool *db.Pool, logger *slog.Logger
 		return rows.Err()
 	})
 	if err != nil {
+		if rerr := raiseSweepFailed(ctx, pool, alerting.LicenceSweepPhaseListTenants, 1); rerr != nil && logger != nil {
+			logger.Error("licence_sweep_failure_alert_not_written", "phase", alerting.LicenceSweepPhaseListTenants)
+		}
 		return res, fmt.Errorf("jurisdiction: licence sweep: list tenants: %w", err)
 	}
 
@@ -178,6 +198,9 @@ func RunLicenceSweepOnce(ctx context.Context, pool *db.Pool, logger *slog.Logger
 	for _, id := range ids {
 		a := aggs[id]
 		kind, trigger := ClassifyLicenceForSweep(a.status, a.expiresAt, a.reviewDueAt, now, LicenceExpiryWarningWindowDays)
+		if kind == "" && a.expiresAt == nil {
+			kind, trigger = alerting.KindLicenceUnmonitored, TriggerNoExpiryRecorded
+		}
 		if kind == "" {
 			continue
 		}
@@ -189,6 +212,17 @@ func RunLicenceSweepOnce(ctx context.Context, pool *db.Pool, logger *slog.Logger
 			if logger != nil {
 				logger.Error("licence_sweep_alert_not_written", "licence_id", id, "kind", string(kind))
 			}
+		}
+	}
+	for _, p := range []struct {
+		phase string
+		n     int
+	}{{alerting.LicenceSweepPhaseTenantRead, res.TenantErrors}, {alerting.LicenceSweepPhaseRaise, res.RaiseErrors}} {
+		if p.n == 0 {
+			continue
+		}
+		if err := raiseSweepFailed(ctx, pool, p.phase, p.n); err != nil && logger != nil {
+			logger.Error("licence_sweep_failure_alert_not_written", "phase", p.phase)
 		}
 	}
 	return res, nil

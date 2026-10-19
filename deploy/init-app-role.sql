@@ -665,6 +665,16 @@ BEGIN
 END
 $$;
 
+-- Migration 0178 (lic4 slice 4a, security review F-2): licence_versions is written ONLY by the licences trigger (a SECURITY
+-- DEFINER function); the runtime role keeps SELECT, never INSERT (the blanket backfill GRANT above would re-grant it).
+DO $$
+BEGIN
+    IF to_regclass('public.licence_versions') IS NOT NULL THEN
+        EXECUTE 'REVOKE INSERT ON licence_versions FROM igaming_runtime';
+    END IF;
+END
+$$;
+
 -- ADR 0115 S1 (migration 0135, RG limits schema): least-privilege, re-asserted on every run,
 -- mirroring migration 0135's own in-migration grant block. RLS (FORCE on the three RG tables) and
 -- the guard / deny triggers are the binding controls; these grants are defence in depth, narrower

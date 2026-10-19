@@ -12,6 +12,10 @@
 //	licence_ceiling_version              append a licence_country_ceilings version           widening iff enabled + active
 //	operating_policy_version             append an operating_country_policies version       widening iff enabled + active, or a
 //	                                                                                         withdrawal at an inheriting rung
+//	licence_status_change                set licences.status                                  widening iff toward active (0178)
+//	licence_validity_dates_change        set issued_at / expires_at                           widening iff later / cleared expiry or earlier / cleared issue (0178)
+//	licence_review_due_change            set review_due_at                                    widening iff postponed or cleared (0178)
+//	licence_evidence_reference_change    set evidence_reference                               never widening (0178)
 //	tenant_jurisdiction_config_version   set / close a tenant_jurisdiction_configs version   narrowing iff it only removes
 //	                                                                                         currencies / methods, adds geo blocks,
 //	                                                                                         keeps the ruleset ids, or closes
@@ -59,6 +63,16 @@ const (
 	KindLicenceCeilingVersion           Kind = "licence_ceiling_version"
 	KindOperatingPolicyVersion          Kind = "operating_policy_version"
 	KindTenantJurisdictionConfigVersion Kind = "tenant_jurisdiction_config_version"
+)
+
+// The licence lifecycle kinds (migration 0178, lic4 slice 4a). Widening (reinstate to active, extend or clear expires_at, issue
+// date earlier or cleared, postponed or cleared review date) needs the kind's approvals; narrowing and the evidence reference
+// execute in the requester's own transaction.
+const (
+	KindLicenceStatusChange            Kind = "licence_status_change"
+	KindLicenceValidityDatesChange     Kind = "licence_validity_dates_change"
+	KindLicenceReviewDueChange         Kind = "licence_review_due_change"
+	KindLicenceEvidenceReferenceChange Kind = "licence_evidence_reference_change"
 )
 
 // Request statuses (migration 0177).

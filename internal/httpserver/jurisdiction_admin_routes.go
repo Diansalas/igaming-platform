@@ -31,13 +31,24 @@ import (
 func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	// --- Platform-wide registries ---
 
+	// Reads (lic4 slice 4a): PermJurisdictionRegistryRead (platform_admin), step-up none.
 	mux.Handle("GET /v1/admin/jurisdictions",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListJurisdictionsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListJurisdictionsHandler(deps))))
+	mux.Handle("GET /v1/admin/jurisdictions/{jurisdictionID}",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newGetJurisdictionHandler(deps))))
 	mux.Handle("POST /v1/admin/jurisdictions",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateJurisdictionHandler(deps))))
 
 	mux.Handle("GET /v1/admin/licences",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListLicencesHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListLicencesHandler(deps))))
+	mux.Handle("GET /v1/admin/licences/{licenceID}",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newGetLicenceHandler(deps))))
+	mux.Handle("GET /v1/admin/licence-country-ceilings",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListLicenceCountryCeilingsHandler(deps))))
+	mux.Handle("GET /v1/admin/operating-country-policies",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListOperatingCountryPoliciesHandler(deps))))
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/jurisdiction-configs",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListTenantJurisdictionConfigsHandler(deps))))
 	mux.Handle("POST /v1/admin/licences",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateLicenceHandler(deps))))
 
@@ -54,7 +65,7 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("PUT /v1/admin/licences/{licenceID}/evidence-reference",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceEvidenceReferenceHandler(deps))))
 	mux.Handle("GET /v1/admin/licences/{licenceID}/versions",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListLicenceVersionsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListLicenceVersionsHandler(deps))))
 
 	// --- Tenant-scoped resolution-active fact (item B-6) ---
 

@@ -201,6 +201,12 @@ const KindKYCResidenceIntoOpenMarket Kind = "kyc.residence_into_open_market"
 const (
 	KindLicenceExpired  Kind = "licence.expired"
 	KindLicenceExpiring Kind = "licence.expiring"
+	// KindLicenceUnmonitored (p2, migration 0178, security review F-3): a licence in use by a tenant that the expiry / review
+	// sweep cannot monitor because it records no expires_at (trigger "no_expiry_recorded"). Ids only.
+	KindLicenceUnmonitored Kind = "licence.unmonitored"
+	// KindLicenceSweepFailed (p1, migration 0178, security review F-3): the licence sweep itself failed (phase "list_tenants",
+	// "tenant_read" or "raise"; error_count). The safety net did not run completely. Platform, subjectless, dispatcher-only.
+	KindLicenceSweepFailed Kind = "licence.sweep_failed"
 )
 
 func licenceKind(k Kind, sev Severity) KindDef {
@@ -339,8 +345,14 @@ var kindDefs = map[Kind]KindDef{
 		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,
 		AllowedKeys: keys("phase", "sqlstate_class"),
 	},
-	KindLicenceExpired:  licenceKind(KindLicenceExpired, SeverityP1),
-	KindLicenceExpiring: licenceKind(KindLicenceExpiring, SeverityP2),
+	KindLicenceExpired:     licenceKind(KindLicenceExpired, SeverityP1),
+	KindLicenceExpiring:    licenceKind(KindLicenceExpiring, SeverityP2),
+	KindLicenceUnmonitored: licenceKind(KindLicenceUnmonitored, SeverityP2),
+	KindLicenceSweepFailed: {
+		Kind: KindLicenceSweepFailed, Severity: SeverityP1, Scope: ScopeKindPlatform,
+		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,
+		AllowedKeys: keys("phase", "error_count"),
+	},
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,

@@ -3,8 +3,8 @@ package httpserver
 // Licensing slice 1 (docs/plans/lic1-record.md): the licence lifecycle write API. Platform-admin only
 // (PermJurisdictionRegistryManage, no RequireTenantScope), step-up critical on every write, reason code required,
 // audited with before/after in the same transaction (jurisdiction.SetLicence*). The licence id comes from the path;
-// no tenant id is read from anywhere. NO maker-checker in this slice: widening changes are single-actor + step-up
-// (residual G-1/G-2, owned by slice 2); the response carries the change_kind so a client can see which class applied.
+// no tenant id is read from anywhere. SINCE MIGRATION 0178 (lic4 slice 4a) every write is a licensing change: widening ones
+// need two approvals (202), narrowing / neutral ones execute at once (200); the 200 response carries the change_kind.
 
 import (
 	"bytes"
@@ -18,6 +18,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/licensingchange"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
@@ -25,6 +26,8 @@ import (
 type licenceChangeResponse struct {
 	Licence    licenceResponse `json:"licence"`
 	ChangeKind string          `json:"change_kind"`
+	// ChangeRequestID is the executed licensing change (migration 0178).
+	ChangeRequestID string `json:"change_request_id,omitempty"`
 }
 
 type licenceVersionResponse struct {
@@ -59,46 +62,63 @@ func parseRequiredNullableDate(raw json.RawMessage) (*time.Time, bool) {
 	return &t, true
 }
 
-// licenceLifecycleHandler factors the shared shape: path id, body decode, reason code, platform tx, response.
-func licenceLifecycleHandler[B any](deps Deps, action string, reason func(*B) string, validate func(*B, *validation.Errors),
-	apply func(ctx context.Context, tx pgx.Tx, id uuid.UUID, b *B, actor jurisdiction.ActorContext) (jurisdiction.LicenceChange, error)) http.HandlerFunc {
+// licenceLifecycleHandler factors the shared shape: path id, body decode, reason code, then a licensing change (lic4 slice 4a,
+// migration 0178). The DATABASE classifies the change against the current licence: a WIDENING change (reinstate, extend or
+// clear expiry, earlier or cleared issue date, postponed or cleared review date) is filed and answers 202 with the change
+// request (two approvals by distinct Persons execute it through POST /v1/admin/licensing-changes/{id}/approve); a NARROWING or
+// neutral change executes in the same transaction (single actor + step-up) and answers 200 with the previous response shape.
+func licenceLifecycleHandler[B any](deps Deps, action string, kind licensingchange.Kind, reason func(*B) string, validate func(*B, *validation.Errors),
+	payload func(id uuid.UUID, b *B) any) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
+		c, ok := beginLicensingCall(deps, w, r)
+		if !ok {
+			return
+		}
 		id, err := uuid.Parse(r.PathValue("licenceID"))
 		if err != nil || id == uuid.Nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "licenceID must be a valid UUID")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "licenceID must be a valid UUID")
 			return
 		}
 		var body B
 		if err := decodeJSON(r, &body); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
 		v := validation.New()
 		v.RequireNonEmpty("reason_code", reason(&body))
 		validate(&body, v)
 		if v.HasErrors() {
-			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			apierror.Write(w, c.requestID, apierror.CodeValidation, v.Error())
 			return
 		}
-		actor, err := jurisdictionActorFromRequest(r, reason(&body))
+		raw, err := json.Marshal(payload(id, &body))
 		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
-		var res jurisdiction.LicenceChange
-		err = deps.DB.WithPlatformAdmin(r.Context(), actor.ActorID, func(ctx context.Context, tx pgx.Tx) error {
+		res, err := c.svc.Request(r.Context(), c.actor, licensingchange.RequestInput{Kind: kind, Payload: raw, ReasonCode: reason(&body)})
+		if err != nil {
+			writeLicensingChangeError(w, c, action, err)
+			return
+		}
+		if !res.Executed {
+			writeJSON(w, http.StatusAccepted, toLicensingChangeResponse(res, c.viewer))
+			return
+		}
+		var l jurisdiction.Licence
+		err = deps.DB.WithPlatformAdmin(r.Context(), c.actor.StaffID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			res, err = apply(ctx, tx, id, &body, actor)
+			l, err = jurisdiction.GetLicence(ctx, tx, id)
 			return err
 		})
 		if err != nil {
-			writeJurisdictionRegistryError(w, requestID, logger, action, err)
+			c.logger.Error("licence lifecycle: re-read after an executed change failed", "op", action, "error", err)
+			apierror.Write(w, c.requestID, apierror.CodeInternal, "the change was executed but the licence could not be read back")
 			return
 		}
-		writeJSON(w, http.StatusOK, licenceChangeResponse{Licence: toLicenceResponse(res.Licence), ChangeKind: string(res.Kind)})
+		kindOut, _ := res.Outcome["change_kind"].(string)
+		resp := licenceChangeResponse{Licence: toLicenceResponse(l), ChangeKind: kindOut, ChangeRequestID: res.Request.ID.String()}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -109,13 +129,13 @@ type setLicenceStatusRequest struct {
 
 // newSetLicenceStatusHandler is PUT /v1/admin/licences/{licenceID}/status.
 func newSetLicenceStatusHandler(deps Deps) http.HandlerFunc {
-	return licenceLifecycleHandler(deps, "set_licence_status",
+	return licenceLifecycleHandler(deps, "set_licence_status", licensingchange.KindLicenceStatusChange,
 		func(b *setLicenceStatusRequest) string { return b.ReasonCode },
 		func(b *setLicenceStatusRequest, v *validation.Errors) {
 			v.RequireOneOf("status", b.Status, "active", "suspended", "expired")
 		},
-		func(ctx context.Context, tx pgx.Tx, id uuid.UUID, b *setLicenceStatusRequest, a jurisdiction.ActorContext) (jurisdiction.LicenceChange, error) {
-			return jurisdiction.SetLicenceStatus(ctx, tx, id, b.Status, a)
+		func(id uuid.UUID, b *setLicenceStatusRequest) any {
+			return licensingchange.LicenceStatusPayload{LicenceID: id, Status: b.Status}
 		})
 }
 
@@ -128,7 +148,7 @@ type setLicenceValidityDatesRequest struct {
 
 // newSetLicenceValidityDatesHandler is PUT /v1/admin/licences/{licenceID}/validity-dates.
 func newSetLicenceValidityDatesHandler(deps Deps) http.HandlerFunc {
-	return licenceLifecycleHandler(deps, "set_licence_validity_dates",
+	return licenceLifecycleHandler(deps, "set_licence_validity_dates", licensingchange.KindLicenceValidityDatesChange,
 		func(b *setLicenceValidityDatesRequest) string { return b.ReasonCode },
 		func(b *setLicenceValidityDatesRequest, v *validation.Errors) {
 			if _, ok := parseRequiredNullableDate(b.IssuedAt); !ok {
@@ -138,10 +158,10 @@ func newSetLicenceValidityDatesHandler(deps Deps) http.HandlerFunc {
 				v.Add("expires_at", "is required: a YYYY-MM-DD date or null")
 			}
 		},
-		func(ctx context.Context, tx pgx.Tx, id uuid.UUID, b *setLicenceValidityDatesRequest, a jurisdiction.ActorContext) (jurisdiction.LicenceChange, error) {
+		func(id uuid.UUID, b *setLicenceValidityDatesRequest) any {
 			issued, _ := parseRequiredNullableDate(b.IssuedAt)
 			expires, _ := parseRequiredNullableDate(b.ExpiresAt)
-			return jurisdiction.SetLicenceValidityDates(ctx, tx, id, issued, expires, a)
+			return licensingchange.LicenceValidityDatesPayload{LicenceID: id, IssuedAt: dateStringPtr(issued), ExpiresAt: dateStringPtr(expires)}
 		})
 }
 
@@ -152,16 +172,16 @@ type setLicenceReviewDueRequest struct {
 
 // newSetLicenceReviewDueHandler is PUT /v1/admin/licences/{licenceID}/review-due.
 func newSetLicenceReviewDueHandler(deps Deps) http.HandlerFunc {
-	return licenceLifecycleHandler(deps, "set_licence_review_due",
+	return licenceLifecycleHandler(deps, "set_licence_review_due", licensingchange.KindLicenceReviewDueChange,
 		func(b *setLicenceReviewDueRequest) string { return b.ReasonCode },
 		func(b *setLicenceReviewDueRequest, v *validation.Errors) {
 			if _, ok := parseRequiredNullableDate(b.ReviewDueAt); !ok {
 				v.Add("review_due_at", "is required: a YYYY-MM-DD date or null")
 			}
 		},
-		func(ctx context.Context, tx pgx.Tx, id uuid.UUID, b *setLicenceReviewDueRequest, a jurisdiction.ActorContext) (jurisdiction.LicenceChange, error) {
+		func(id uuid.UUID, b *setLicenceReviewDueRequest) any {
 			d, _ := parseRequiredNullableDate(b.ReviewDueAt)
-			return jurisdiction.SetLicenceReviewDue(ctx, tx, id, d, a)
+			return licensingchange.LicenceReviewDuePayload{LicenceID: id, ReviewDueAt: dateStringPtr(d)}
 		})
 }
 
@@ -185,16 +205,16 @@ func newSetLicenceEvidenceReferenceHandler(deps Deps) http.HandlerFunc {
 		}
 		return &s, true
 	}
-	return licenceLifecycleHandler(deps, "set_licence_evidence_reference",
+	return licenceLifecycleHandler(deps, "set_licence_evidence_reference", licensingchange.KindLicenceEvidenceReferenceChange,
 		func(b *setLicenceEvidenceReferenceRequest) string { return b.ReasonCode },
 		func(b *setLicenceEvidenceReferenceRequest, v *validation.Errors) {
 			if _, ok := parse(b.EvidenceReference); !ok {
 				v.Add("licence_evidence_reference", "is required: a string or null")
 			}
 		},
-		func(ctx context.Context, tx pgx.Tx, id uuid.UUID, b *setLicenceEvidenceReferenceRequest, a jurisdiction.ActorContext) (jurisdiction.LicenceChange, error) {
+		func(id uuid.UUID, b *setLicenceEvidenceReferenceRequest) any {
 			ref, _ := parse(b.EvidenceReference)
-			return jurisdiction.SetLicenceEvidenceReference(ctx, tx, id, ref, a)
+			return licensingchange.LicenceEvidenceReferencePayload{LicenceID: id, Reference: ref}
 		})
 }
 
