@@ -84,12 +84,18 @@
 
 ## 5. Verification run (private database `lic2...`, harness scripts)
 
-- Unit: `go test ./internal/actorproof ./internal/auth ./internal/apierror ./internal/licensingchange ./internal/httpserver ./internal/db` ok;
+- Unit: `go test ./...` (whole repository, no integration tag) ok, including `go test ./internal/db` (migration pins);
   `gofmt -l` clean; `go vet` (plain and `-tags integration`) clean on touched packages.
-- Integration (`-tags integration -count=1 -p 1`): `internal/licensingchange` (13 tests incl. migration up/down), `operatingmarket`,
-  `jurisdiction`, `db`, `stagingseed`, `cmd/seed-market`, `cmd/seed-staging-world`, `launchgov`, `rg`, `tenant`, `adjustment`, `aml`,
-  `bonus`, `identity`, `kyc`, `marketgate`, `payoutinstrument`, `casino`, `sportsbook`: ok. `payments` and `httpserver`: see the final
-  report (section 11).
+- Integration (`-tags integration -count=1 -p 1`), all ok: `internal/licensingchange` (14 tests incl. migration up / down),
+  `operatingmarket`, `jurisdiction`, `db`, `stagingseed`, `cmd/seed-market`, `cmd/seed-staging-world`, `launchgov`, `rg`, `tenant`,
+  `adjustment`, `aml`, `bonus`, `identity`, `kyc`, `marketgate`, `payoutinstrument`, `casino`, `sportsbook`.
+- `internal/payments`: the 46 tests of the three files that write governed tables (`b13b_destination`, `fpay_kyc`,
+  `kyc_gate_cutover`) ok. The full package did not finish inside the default 10 min (the database server was shared with another
+  worktree's payments run); a second full run was stopped by pid after 97 passing tests (0 failures) in favour of the targeted
+  run. A full run is still owed.
+- `internal/httpserver`: the subset `AssignTenantLicence|JurisdictionRegistry|JurisdictionResolution|LicensingChange|LaunchHTTP|
+  RGLimitsS2|RGEnforcement|RGOptions|RGStatus|RequestWithdrawalHandler|Market|OpenAPI|Staff` ok (every file that touches a governed
+  table or a licence route). The full package was not run.
 - NOT run: Back Office vitest (no frontend change); the full repository integration suite.
 
 ## 6. Extension hook for slice 1 (licence lifecycle, migration 0176)
