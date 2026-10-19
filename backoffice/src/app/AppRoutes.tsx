@@ -35,6 +35,13 @@ import { ReconciliationPage } from '../features/reconciliation/ReconciliationPag
 import { CapabilityGrantsPage } from '../features/capability/CapabilityGrantsPage'
 import { ForceResolutionsPage } from '../features/resolutions/ForceResolutionsPage'
 import { HoldResolutionsPage } from '../features/resolutions/HoldResolutionsPage'
+import { LicensingLayout } from '../features/licensing/LicensingLayout'
+import { JurisdictionDetailPage, JurisdictionsPage } from '../features/licensing/JurisdictionsPage'
+import { LicencesPage } from '../features/licensing/LicencesPage'
+import { LicenceDetailPage } from '../features/licensing/LicenceDetailPage'
+import { ChangesPage } from '../features/licensing/ChangesPage'
+import { ChangeDetailPage } from '../features/licensing/ChangeDetailPage'
+import { TenantLicensingPage } from '../features/licensing/TenantLicensingPage'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
 
@@ -80,6 +87,23 @@ export function AppRoutes() {
             </RequireNavPermission>
           }
         />
+        <Route
+          path="licensing"
+          element={
+            <RequireNavPermission permission="licensingRead">
+              <LicensingLayout />
+            </RequireNavPermission>
+          }
+        >
+          <Route index element={<Navigate to="jurisdictions" replace />} />
+          <Route path="jurisdictions" element={<JurisdictionsPage />} />
+          <Route path="jurisdictions/:jurisdictionId" element={<JurisdictionDetailPage />} />
+          <Route path="licences" element={<LicencesPage />} />
+          <Route path="licences/:licenceId" element={<LicenceDetailPage />} />
+          <Route path="changes" element={<ChangesPage />} />
+          <Route path="changes/:changeId" element={<ChangeDetailPage />} />
+          <Route path="tenants/:tenantId" element={<TenantLicensingPage />} />
+        </Route>
         <Route
           path="launch-queue"
           element={

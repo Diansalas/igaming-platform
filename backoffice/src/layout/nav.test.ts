@@ -62,11 +62,12 @@ describe('buildNavItems', () => {
       role: 'platform_admin',
       tenant_id: '00000000-0000-0000-0000-000000000000',
     }).map((i) => i.label)
+    // Licensing mirrors jurisdiction_registry:read / licensing_change:read (platform_admin only; lic5).
     // Launch Queue mirrors launch_authorisation:read for platform scope (ADR 0112).
     // Casino Catalogue mirrors PermCasinoCatalogueManage (platform_admin only).
     // Alerts mirrors alert:manage (platform_admin only; ADR 0114 S1).
     // AML mirrors aml_case:read (ADR 0116 A7); the ADR 0114 consoles follow.
-    expect(items).toEqual(['Tenants', 'Launch Queue', 'Alerts', 'Payment Kill Switch', 'AML', 'Parked Payments', 'Force Resolutions', 'Hold Release', 'Reconciliation', 'Capability Grants', 'Casino Catalogue', 'Platform Audit Log'])
+    expect(items).toEqual(['Tenants', 'Licensing', 'Launch Queue', 'Alerts', 'Payment Kill Switch', 'AML', 'Parked Payments', 'Force Resolutions', 'Hold Release', 'Reconciliation', 'Capability Grants', 'Casino Catalogue', 'Platform Audit Log'])
   })
 
   it('gives tenant_admin the Providers & Games configuration page but never the platform catalogue', () => {
@@ -87,5 +88,12 @@ describe('buildNavItems', () => {
     const items = buildNavItems({ ...baseClaims, role: 'finance' }).map((i) => i.label)
     expect(items).not.toContain('Providers & Games')
     expect(items).not.toContain('Casino Catalogue')
+  })
+
+  it('lic5: the Licensing entry appears for platform_admin only', () => {
+    const labels = (role: string, platform = false) =>
+      buildNavItems({ ...baseClaims, role, tenant_id: platform ? '00000000-0000-0000-0000-000000000000' : baseClaims.tenant_id }).map((i) => i.label)
+    expect(labels('platform_admin', true)).toContain('Licensing')
+    for (const r of ['tenant_admin', 'compliance', 'finance', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations']) expect(labels(r)).not.toContain('Licensing')
   })
 })

@@ -146,6 +146,19 @@ export interface NavPermissions {
   capabilityGrantRequest: boolean
   capabilityGrantApprove: boolean
   capabilityGrantRevoke: boolean
+  /**
+   * lic5: jurisdiction_registry:read and licensing_change:read (jurisdictions, licences, ceilings, tenant jurisdiction
+   * configuration and operating-country policies, the licensing change list). platform_admin ONLY. UI convenience only;
+   * the server re-checks every call.
+   */
+  licensingRead: boolean
+  /**
+   * lic5: licensing_change:request plus the kinds' own permissions (jurisdiction_registry:manage, tenant_licence:assign) -
+   * file a licence / binding / lifecycle change. platform_admin ONLY here (tenant staff file other kinds elsewhere).
+   */
+  licensingRequest: boolean
+  /** lic5: licensing_change:approve - platform_admin ONLY (interim HDR-M-1). The database decides distinct Persons. */
+  licensingApprove: boolean
 }
 
 const NONE: NavPermissions = {
@@ -192,6 +205,9 @@ const NONE: NavPermissions = {
   capabilityGrantRequest: false,
   capabilityGrantApprove: false,
   capabilityGrantRevoke: false,
+  licensingRead: false,
+  licensingRequest: false,
+  licensingApprove: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -250,6 +266,9 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     capabilityGrantRequest: true,
     capabilityGrantApprove: true,
     capabilityGrantRevoke: true,
+    licensingRead: true,
+    licensingRequest: true,
+    licensingApprove: true,
   },
   tenant_admin: {
     ...NONE,

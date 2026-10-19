@@ -19,6 +19,7 @@ export function buildNavItems(claims: StaffClaims | null): NavItem[] {
 
   if (isPlatformAdmin(claims)) {
     if (perms.tenants) items.push({ label: 'Tenants', to: '/tenants' })
+    if (perms.licensingRead) items.push({ label: 'Licensing', to: '/licensing' })
     if (perms.launchQueue) items.push({ label: 'Launch Queue', to: '/launch-queue' })
     if (perms.alertManage) items.push({ label: 'Alerts', to: '/alerts' })
     if (perms.killSwitch) items.push({ label: 'Payment Kill Switch', to: '/payment-kill-switch' })
