@@ -165,3 +165,7 @@ transitions, and the audit row. The tenant-visible history is `GET .../launch-st
 Real providers (all MOCK); a real alert recipient (ALERT-DELIVERY-1); licence continuous-expiry auto-flagging; a legal
 determination of any kind; the unclaimed-funds policy (HD-CTF-4); reopening a closed subject (HD-CTF-9). The ADR section
 13 notes list the remaining review conditions.
+
+## Re-read the live rule list before acknowledging R-RISK-RULES-LEGACY (lic7 security F4)
+
+The rule ids and counts shown with `R-RISK-RULES-LEGACY` are live display data and are NOT part of the readiness hash. A rule added after a request was filed, within the same detail category, does not make the request stale. Approvers must re-read the live list (platform staff only; tenant roles do not receive rule ids) at decision time before acknowledging.

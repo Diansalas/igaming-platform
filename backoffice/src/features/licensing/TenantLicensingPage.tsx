@@ -55,7 +55,7 @@ export function TenantLicensingPage() {
   const bound = (licences.data ?? []).find((l) => l.tenant_ids.includes(tenantId))
 
   const cfgCols: Column<TenantJurisdictionConfig>[] = [
-    { key: 'jur', header: 'Jurisdiction', render: (c) => <Link className="text-brand-700 hover:underline" to={`/licensing/jurisdictions/${c.jurisdiction_id}`}>{short(c.jurisdiction_id)}</Link> },
+    { key: 'jur', header: 'Jurisdiction', render: (c) => <Link className="text-brand-700 hover:underline" to={`/licensing/jurisdictions/${encodeURIComponent(c.jurisdiction_id)}`}>{short(c.jurisdiction_id)}</Link> },
     { key: 'kyc', header: 'KYC ruleset', render: (c) => c.kyc_ruleset_id ?? 'None' },
     { key: 'aml', header: 'AML ruleset', render: (c) => c.aml_ruleset_id ?? 'None' },
     { key: 'rg', header: 'RG ruleset', render: (c) => c.rg_ruleset_id ?? 'None' },
@@ -103,7 +103,7 @@ export function TenantLicensingPage() {
           <div className="flex flex-col gap-1 text-sm">
             <p>
               Bound to licence{' '}
-              <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/licences/${bound.id}`}>{bound.licence_number}</Link>{' '}
+              <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/licences/${encodeURIComponent(bound.id)}`}>{bound.licence_number}</Link>{' '}
               <LicenceStatusBadge status={bound.status} />
             </p>
             <p className="text-slate-600">{licenseeLabel(bound.licensee)}</p>
