@@ -79,6 +79,12 @@ export function TenantDetailPage() {
         </dl>
       </Card>
 
+      {perms.licensingRead && (
+        <Link to={`/licensing/tenants/${tenantId}`} className="text-sm font-medium text-brand-700 hover:underline">
+          Licence binding and jurisdiction configuration
+        </Link>
+      )}
+
       <LaunchPanel
         tenantId={tenantId}
         status={tenant.status}
