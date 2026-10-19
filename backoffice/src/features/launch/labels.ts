@@ -184,10 +184,27 @@ export const CHECK_TITLES: Record<string, string> = {
   'R-ALERTS': 'P1 alert routing has a recipient',
   'R-PLAYER-FUNDS': 'Player funds, open bets and held withdrawals',
   'R-RG-CONFIG': 'RG limit enforcement on, with compliance floors for every currency',
+  // Lic7 (snapshot version 6). Both are acknowledgeable, never blocking.
+  'R-RISK-RULES-LEGACY': 'Legacy risk rules (jurisdiction-scoped or deposit) present',
+  'R-KYC-POLICY': 'KYC enforcement policy active (otherwise KYC thresholds are dormant)',
   // ADR 0116 A7. Transaction monitoring is NOT IMPLEMENTED: its item always fails, on purpose.
   'R-AML-QUORUM': 'AML officer quorum (two distinct officers)',
   'R-AML-SCREENING': 'AML screening provider and policy configured',
   'R-AML-MONITORING': 'AML transaction monitoring (not implemented)',
+}
+
+/**
+ * Fixed explanatory text shown under a NON-PASSING lic7 item (the interim behaviour). Constants, never built from data.
+ */
+export const CHECK_NOTES: Record<string, string> = {
+  'R-RISK-RULES-LEGACY':
+    'Active stored risk rules that carry a jurisdiction, or that apply to deposits, exist. A jurisdiction-scoped rule makes the risk engine refuse every evaluation of its operation (no caller can supply a resolved jurisdiction), including withdrawals and payouts for a withdrawal rule. A deposit rule is stored but never evaluated. Disable the listed rules or acknowledge knowingly.',
+  'R-KYC-POLICY':
+    'No active KYC enforcement policy exists for the licensing jurisdiction, so KYC thresholds are dormant: cumulative-deposit and play checks resolve as not required. Only the withdrawal KYC rule and the verified-residence market gate still apply. Acknowledge knowingly; the software does not set any threshold.',
+}
+
+export function checkNote(code: string): string | undefined {
+  return CHECK_NOTES[code]
 }
 
 export function checkTitle(code: string): string {

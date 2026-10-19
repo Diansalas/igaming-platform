@@ -14304,7 +14304,7 @@ components:
     LaunchCheck:
       type: object
       properties:
-        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, R-RG-CONFIG (ADR 0115 S4-min: RG limit enforcement switched on with a compliance floor for every currency), or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; R-ALERTS (snapshot version 5) passes only when the alert dispatcher currently evaluates p1 and p2 routing as ready (an enabled, recipient-bearing step-0 platform route over a human-notification channel whose sink is wired and reports a person; not_evaluable without a routing source or while the evaluation is missing or stale; platform-wide routing, not per tenant); for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
+        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, R-RG-CONFIG (ADR 0115 S4-min: RG limit enforcement switched on with a compliance floor for every currency), R-RISK-RULES-LEGACY and R-KYC-POLICY (lic7, snapshot version 6, activate/reactivate/ratify; both ACKNOWLEDGEABLE, never hard preconditions: R-RISK-RULES-LEGACY fails (jurisdiction_scoped_rules_present, deposit_rules_present, both_present) when ACTIVE stored risk rules visible to the tenant (its own or platform-wide) carry a jurisdiction_code - such a rule refuses every evaluation of its operation because no caller can supply a resolved jurisdiction - or have operation deposit - never evaluated; counts in counts, rule ids in refs; R-KYC-POLICY fails (no_licence_jurisdiction, no_active_policy) when the tenant's licensing jurisdiction has no ACTIVE KYC enforcement policy, so KYC thresholds are dormant (not_required); it passes with ok or ok_partial_operations_dormant, per-operation active policy counts in counts; no threshold value is read or defaulted), or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; R-ALERTS (snapshot version 5) passes only when the alert dispatcher currently evaluates p1 and p2 routing as ready (an enabled, recipient-bearing step-0 platform route over a human-notification channel whose sink is wired and reports a person; not_evaluable without a routing source or while the evaluation is missing or stale; platform-wide routing, not per tenant); for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
         result: { type: string, enum: [pass, fail, not_evaluable], description: "not_evaluable is not pass" }
         detail_code: { type: string, description: "A closed detail code, never free text." }
       required: [code, result, detail_code]
@@ -14312,7 +14312,7 @@ components:
       type: object
       description: >
         The server-side informational readiness of a subject for an action. It proves configuration presence only. counts and balances are live display data of
-        R-PLAYER-FUNDS (not hashed); balances are DECIMAL STRINGS per asset. notices are fixed texts: closure shows the stranded-funds notice, a suspension shows the
+        R-PLAYER-FUNDS, R-RISK-RULES-LEGACY and R-KYC-POLICY (not hashed); refs are rule ids (ids only) behind R-RISK-RULES-LEGACY; balances are DECIMAL STRINGS per asset. notices are fixed texts: closure shows the stranded-funds notice, a suspension shows the
         inaccessible-not-stranded notice.
       properties:
         version: { type: integer }
@@ -14322,6 +14322,7 @@ components:
         readiness_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Pass back as seen_readiness_hash to approve." }
         non_passing_check_codes: { type: array, items: { type: string }, description: "Exactly the set a request must acknowledge." }
         counts: { type: object, additionalProperties: { type: integer, format: int64 } }
+        refs: { type: object, additionalProperties: { type: array, maxItems: 50, items: { type: string, format: uuid } }, description: "Rule ids only (R-RISK-RULES-LEGACY), at most 50 per key; the full count is in counts." }
         balances: { type: object, additionalProperties: { type: string, pattern: "^-?[0-9]+$" } }
         notices: { type: array, items: { type: string } }
       required: [version, computed_at, environment, checks, readiness_hash, non_passing_check_codes]

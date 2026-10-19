@@ -49,7 +49,8 @@ const (
 	// the three R-AML-* checks (A7). 3: R-MARKET-CONFIG (A8). 4 after this merge: the combined set. A request bound to an older
 	// readiness hash is stale and must be re-requested (the hash is recomputed over the current set at decision and at execution).
 	// 5: R-ALERTS no longer passes on the channel vocabulary alone; it needs an enabled, wired, human-notification route for p1 and p2.
-	SnapshotVersion = 5
+	// 6: R-RISK-RULES-LEGACY (ledger-finance condition C1) and R-KYC-POLICY (audit G9) join the activate/reactivate/ratify set.
+	SnapshotVersion = 6
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -69,6 +70,9 @@ type Readiness struct {
 	Checks      []Check   `json:"checks"`
 
 	Info map[string]int64 `json:"-"`
+	// Refs are live display data like Info: rule ids (ids only, never another column) behind R-RISK-RULES-LEGACY,
+	// keyed by Refs* constant and capped at MaxRefsPerKey each. Not hashed, not persisted.
+	Refs map[string][]string `json:"-"`
 	// Balances is the per-asset sum of the subject's players' wallet-account balances
 	// (credit_total - debit_total over the wallet-bound projection rows), as DECIMAL STRINGS:
 	// NUMERIC(38,0) sums never pass through int64 or float (an 18-exponent asset overflows
@@ -147,6 +151,9 @@ type EvalInput struct {
 	Action          string
 	Licensing       *LicensingRecord
 	JurisdictionIDs []uuid.UUID
+
+	// live is set by assess to the Readiness under construction so config checks can add Info / Refs display data.
+	live *Readiness
 }
 
 // checkSetFor returns whether an action evaluates the configuration checks and whether it
@@ -369,6 +376,8 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) ([]
 	// R-MARKET-CONFIG (A8)
 	out = append(out, s.marketConfigCheck(ctx, tx, in, now))
 	out = append(out, s.amlChecks(ctx, tx, in)...)
+	// Lic7: both write their live display data to the Readiness the caller is building (see assess).
+	out = append(out, s.riskRulesLegacyCheck(ctx, tx, in, in.live, now), s.kycPolicyCheck(ctx, tx, in, in.live))
 	return out, nil
 }
 
