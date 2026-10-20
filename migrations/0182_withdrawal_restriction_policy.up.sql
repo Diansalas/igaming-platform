@@ -634,8 +634,8 @@ ALTER TABLE withdrawal_gate_decisions ADD CONSTRAINT withdrawal_gate_decisions_o
 -- A WD056 refusal is a CONFIGURED hold_for_review / block of the cause named in reason_code (a default never refuses).
 ALTER TABLE withdrawal_gate_decisions ADD CONSTRAINT withdrawal_gate_decisions_wd056_shape CHECK (
     gate_code IS DISTINCT FROM 'WD056'
-    OR (restriction_policy_source = 'configured' AND restriction_cause IS NOT NULL AND reason_code = restriction_cause
-        AND restriction_action IN ('hold_for_review', 'block')));
+    OR COALESCE(restriction_policy_source = 'configured' AND restriction_cause IS NOT NULL AND reason_code = restriction_cause
+                AND restriction_action IN ('hold_for_review', 'block'), false));
 COMMENT ON COLUMN withdrawal_gate_decisions.restriction_policy_source IS '0182: provenance of the withdrawal restriction policy evaluated with this decision: configured, default_unconfigured (interim engineering default) or none (no restriction cause in force). NULL on rows written before 0182 or by a raw fixture.';
 
 -- =========================================================================
