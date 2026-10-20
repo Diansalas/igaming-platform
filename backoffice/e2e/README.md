@@ -52,14 +52,16 @@ Disk: `backoffice/node_modules` is symlinked from `/home/user/igaming-platform/b
 | `03-licence-lifecycle-approval` | widening status change filed -> "Pending approval"; requester cannot approve (UI hint AND server 409 LICENSING_CHANGE_SELF_APPROVAL via the API with the requester token); second account of requester's Person refused; first approval recorded (1 of 2, licence unchanged); second account of the first approver's Person refused; distinct third admin approves -> executed, licence row + history changed (verified in the DB) |
 | `04-reject-and-cancel` | reject by another person; requester cancel; licence unchanged, request closed (DB-verified) |
 | `05-narrowing-immediate` | suspend filed by a platform admin is applied at once |
-| `06-operating-basis` | `test.fixme` until an operating-basis route exists in `src/app/AppRoutes.tsx`; TODO selectors only |
+| `06-operating-basis` | (a) no-licence basis through nav + tenant picker + explicit dialog, "Pending approval", DB shows no row and API total 0 before approval, requester refused (hint + server 409), two distinct approvers activate it, DB row has `change_request_id`, detail shows 2 approvers; (b) platform-licence basis likewise; (c) withdraw is single actor and applied at once; (d) review: flag re-review applies at once, extend + clear flag is widening (pending, then two approvals via API); (e) tenant staff: nav hidden, UI denial, server 403 on `/v1/admin/operating-bases`, tenant filing refused with 4xx and nothing written; (f) empty review date keeps Submit disabled, unknown operation refused by the server and rendered; (g) past review date accepted as a narrowing review and shown "Review overdue: no longer permitting"; (h) step-up prompt forced (see below) |
+
+Step-up: `run.sh` starts the API with `STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS=60` (`E2E_STEPUP_SECONDS`; 60 s is the lowest value the server accepts, configuration can only tighten). Spec 06(h) ages the session past it (waits 70 s, `E2E_STEPUP_WAIT_MS`) and asserts the "Confirm it is you" prompt appears and the filing then succeeds. Setup helpers (`lib/api.ts`) create prerequisite bases through the real filing + two-approver API route, not by database shortcut.
 
 Each login uses one TOTP step; the replay rule (a step is usable once per factor) is handled by `lib/totp.ts`/`lib/world.ts`,
 which wait for the next 30 s step when a factor's window is used up, so runs can include waits.
 
 ## Not covered
 
-Filing of ceiling / policy / jurisdiction-config / tenant-bind kinds, validity/review/evidence lifecycle kinds, expiry (72 h) and
+Operating-basis: the market RESOLVER itself (no HTTP endpoint exposes it; "does not permit before approval" is evidenced by the absence of any operating_bases row and API total 0), partner_licence kind, brand/product-scoped bases, restricted products, 72 h expiry. Filing of ceiling / policy / jurisdiction-config / tenant-bind kinds, validity/review/evidence lifecycle kinds, expiry (72 h) and
 stale-approval (24 h) paths, step-up *prompt* on a stale session (the helper answers it if it appears; the freshly logged-in
 session did not need one in these runs), recovery codes, other Back Office sections, B2C, real providers, browsers other than
 Chromium, load. See `docs/plans/lic13-e2e-record.md`.

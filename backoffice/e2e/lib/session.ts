@@ -41,7 +41,7 @@ export async function loginAs(page: Page, key: string): Promise<Session> {
 }
 
 /** Clicks, and answers the step-up prompt ("Confirm it is you") if the server asks for one before `done` shows. */
-export async function clickWithStepUp(s: Session, click: () => Promise<void>, done: () => Promise<void>) {
+export async function clickWithStepUp(s: Session, click: () => Promise<void>, done: () => Promise<void>): Promise<boolean> {
   const dialog = s.page.getByRole('dialog', { name: /Confirm it is you/ })
   await click()
   const outcome = await Promise.race([
@@ -53,4 +53,5 @@ export async function clickWithStepUp(s: Session, click: () => Promise<void>, do
     await dialog.getByRole('button', { name: 'Verify' }).click()
     await done()
   }
+  return outcome === 'stepup'
 }

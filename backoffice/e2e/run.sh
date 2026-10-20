@@ -66,7 +66,7 @@ echo "e2e: seeding"
 node "$HERE/setup/seed.mjs" "$RUN_DIR/bin" "$E2E_WORLD_FILE"
 
 echo "e2e: starting platform-api on $E2E_API_URL"
-( exec env APP_ENV=development HTTP_ADDR="127.0.0.1:$API_PORT" DATABASE_URL="$RUNTIME_URL" AUTH_RATE_LIMIT_PER_MINUTE=1000 \
+( exec env APP_ENV=development HTTP_ADDR="127.0.0.1:$API_PORT" DATABASE_URL="$RUNTIME_URL" AUTH_RATE_LIMIT_PER_MINUTE=1000 STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS="${E2E_STEPUP_SECONDS:-60}" \
     OTEL_EXPORTER=stdout "$RUN_DIR/bin/platform-api" >"$RUN_DIR/api.log" 2>&1 ) &
 PIDS+=($!)
 for i in $(seq 1 60); do
