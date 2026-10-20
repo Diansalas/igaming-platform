@@ -42,7 +42,9 @@ import (
 // second Person to approve (residence_determination_checks.approval_required) and that has none yet is PENDING and is NOT
 // evidence: it is excluded from the candidate set, so the read falls back to an older approved determination that is still
 // valid, or to "no evidence" (the caller refuses). The policy mode is snapshotted on each determination when it is made, so the
-// default (no policy, mode none) leaves every determination exactly as effective as before the migration; a determination with
+// S3: the check also records the COUNTRY it was made for; a check whose country differs from the verification's current country is
+// not trusted either (a determination changed under an existing check can never inherit its approval; the database also refuses
+// such a change, kyc_verifications_residence_guard). The default (no policy, mode none) leaves every determination exactly as effective as before the migration; a determination with
 // no check row (made before the migration) is likewise unchanged. Pending fails closed.
 //
 // Anything else - no row, no determination, an unverified / pending / review /
@@ -86,7 +88,8 @@ func ReadMarketResidenceEvidence(ctx context.Context, q RowQuerier, tenantID, pl
 		                 SELECT 1 FROM residence_determination_checks rc
 		                  WHERE rc.tenant_id = $1 AND rc.verification_id = kv.id
 		                    AND rc.determined_at = kv.verified_residence_set_at
-		                    AND rc.approval_required AND rc.approved_at IS NULL)
+		                    AND ((rc.approval_required AND rc.approved_at IS NULL)
+		                         OR rc.country IS DISTINCT FROM kv.verified_residence_country))
 		           AND NOT EXISTS (
 		                 SELECT 1 FROM kyc_verifications brk
 		                  WHERE brk.tenant_id = $1 AND brk.player_account_id = $2

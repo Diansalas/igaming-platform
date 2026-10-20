@@ -84,8 +84,19 @@ var k2NonRLSBookkeepingTables = map[string]bool{
 // FORCEd), so it sees them; the runtime role cannot read them at all, which is
 // asserted by TestActorProof_RuntimeRoleCannotReadKeysNoncesOrMint and by the
 // has_table_privilege / pg_policies checks there.
+//
+// lic18 (migration 0181): four more tables of the same shape. The residence maker-checker tables and the screening worker heartbeat
+// are written only by OWNER-run SECURITY DEFINER functions, so they are RLS-enabled and NOT FORCEd (a FORCEd table would need a
+// role-specific owner policy, which the KYC worker catalogue gate forbids). The runtime role has no privilege on the heartbeat
+// table and the three residence tables, except SELECT on residence_determination_checks, which is tenant-RLS-scoped (asserted by
+// TestResidenceMakerChecker_RuntimeCannotWriteTheTablesDirectly and TestResidenceMakerChecker_TenantIsolation). Only this
+// owner-run probe sees their rows.
 var k2OwnerOnlyProofTables = map[string]bool{
-	"actor_proof_nonces": true,
+	"actor_proof_nonces":                  true,
+	"residence_approval_policies":         true,
+	"residence_approval_policy_approvals": true,
+	"residence_determination_checks":      true,
+	"screening_worker_heartbeats":         true,
 }
 
 // k2ActingCannotSeeLicencesExceptOwn: licences is on the §6.2 reference

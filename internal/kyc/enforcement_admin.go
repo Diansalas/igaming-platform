@@ -107,6 +107,8 @@ func CreateEnforcementPolicy(ctx context.Context, tx pgx.Tx, p CreateEnforcement
 			"licensing_jurisdiction_id": p.LicensingJurisdictionID.String(),
 			"trigger_type":              p.TriggerType,
 			"reason_code":               p.ReasonCode,
+			// lic18 L6: the AFTER state of the row (what was authored), not only who and why.
+			"after": policyAfterState(p.TriggerType, "draft", p.ThresholdMinorUnits, p.AssetCode, p.RequiredTier, p.PlayOperation, p.LegalReviewReference != "", nil),
 		},
 	}
 	if m := p.Audit; m != nil {
@@ -157,6 +159,12 @@ func transitionEnforcementPolicyMeta(ctx context.Context, tx pgx.Tx, id uuid.UUI
 		md := map[string]any{"from_status": fromStatus, "to_status": toStatus, "reason_code": meta.ReasonCode}
 		if successorID != nil {
 			md["successor_policy_id"] = successorID.String()
+		}
+		// lic18 L6: the AFTER state of the row, read in the same transaction after the update.
+		if after, aerr := readPolicyAfterState(ctx, tx, id); aerr == nil {
+			md["after"] = after
+		} else {
+			return fmt.Errorf("kyc: audit after-state: %w", aerr)
 		}
 		entry.Metadata = md
 	}
@@ -271,6 +279,52 @@ func setActingPrincipal(ctx context.Context, tx pgx.Tx, principalID uuid.UUID) e
 	}
 	if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, principalID.String()); err != nil {
 		return fmt.Errorf("kyc: set acting principal: %w", err)
+	}
+	return nil
+}
+
+// policyAfterState is the audit "after" object of a policy row: the rule's values, never free text.
+func policyAfterState(trigger, status string, threshold, asset, tier, play *string, hasLegalRef bool, successor *string) map[string]any {
+	m := map[string]any{"trigger_type": trigger, "status": status, "has_legal_review_reference": hasLegalRef}
+	for k, v := range map[string]*string{"threshold_minor_units": threshold, "asset_code": asset, "required_tier": tier, "play_operation": play, "successor_policy_id": successor} {
+		if v != nil {
+			m[k] = *v
+		}
+	}
+	return m
+}
+
+func readPolicyAfterState(ctx context.Context, tx pgx.Tx, id uuid.UUID) (map[string]any, error) {
+	var trigger, status string
+	var threshold, asset, tier, play, legal, successor *string
+	if err := tx.QueryRow(ctx, `SELECT trigger_type, status, threshold_minor_units::text, asset_code, required_tier, play_operation,
+			legal_review_reference, superseded_by_policy_id::text FROM kyc_enforcement_policies WHERE id = $1`, id).
+		Scan(&trigger, &status, &threshold, &asset, &tier, &play, &legal, &successor); err != nil {
+		return nil, err
+	}
+	return policyAfterState(trigger, status, threshold, asset, tier, play, legal != nil && *legal != "", successor), nil
+}
+
+// ErrPolicyPersonNotDistinct: the acting platform administrator is the same Person as the policy's author (lic18 S4). The database
+// four-eyes rule compares staff accounts; two accounts of one Person would satisfy it, so this compares Persons.
+var ErrPolicyPersonNotDistinct = errors.New("kyc: four-eyes: the activating administrator is the same Person as the policy's author")
+
+// requirePersonDistinctFromAuthor refuses when the acting principal and the author of policy id are linked to the same Person.
+// Where either staff account has no Person link the check cannot compare and the database's per-account rule alone applies
+// (recorded limit: staff_users.person_id is optional). It runs BEFORE the transition so nothing is written on a refusal.
+func requirePersonDistinctFromAuthor(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	actor, err := assertPlatformAdminScope(ctx, tx)
+	if err != nil {
+		return err
+	}
+	var same bool
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT a.person_id FROM staff_users a WHERE a.id = $2)
+			= (SELECT c.person_id FROM kyc_enforcement_policies p JOIN staff_users c ON c.id = p.created_by_actor_id WHERE p.id = $1), false)`,
+		id, actor).Scan(&same); err != nil {
+		return fmt.Errorf("kyc: person-distinct check: %w", err)
+	}
+	if same {
+		return ErrPolicyPersonNotDistinct
 	}
 	return nil
 }

@@ -24,6 +24,7 @@ func TestReadMarketResidenceEvidence_ExcludesPendingDeterminations(t *testing.T)
 		"residence_determination_checks rc",
 		"rc.determined_at = kv.verified_residence_set_at",
 		"rc.approval_required AND rc.approved_at IS NULL",
+		"rc.country IS DISTINCT FROM kv.verified_residence_country",
 		"rc.tenant_id = $1",
 	} {
 		if !strings.Contains(body, need) {

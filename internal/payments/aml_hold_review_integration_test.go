@@ -179,3 +179,39 @@ func TestAMLHold_SweeperT12_EvaluatorFailure_ReschedulesNeverEscalates(t *testin
 		t.Fatalf("the request is not terminal: %s", got.State)
 	}
 }
+
+func heldProbeNoHoldRow(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID, aml.Operation) (bool, error) {
+	return true, nil
+}
+
+// lic18 (ledger-finance H-1 e): a hold that exists ONLY because the automatic screening gate is waiting (the probe says held, no
+// officer hold row exists) PARKS the payout claim: the request stays approved, the funds hold stays, no attempt, retryable. It must
+// not be the terminal DenyForCompliance rejection that releases the funds to cash.
+func TestAMLHold_PayoutClaim_ScreeningOnlyHold_ParksNotRejects(t *testing.T) {
+	pool := testPool(t)
+	amlProofs(t)
+	f, orch, provider := fpOrch(t, pool, "mock-aml-screening-park")
+	wr := approvedWithdrawal(t, pool, f, 2_000, "aml-claim-screening-park")
+	cashBefore := cashBalance(t, pool, f.orchFixture)
+
+	restore := aml.SetHoldProbeForTest(heldProbeNoHoldRow)
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	restore()
+	if !errors.Is(err, ErrPayoutKYCUnavailable) {
+		t.Fatalf("a waiting screening gate must park the claim (retryable unavailable), got claim=%+v err=%v", claim, err)
+	}
+	if got := fpReqState(t, pool, f, wr.ID); got.State != withdrawal.StateApproved {
+		t.Fatalf("the staff-approved request must stay approved, got %s", got.State)
+	}
+	if after := cashBalance(t, pool, f.orchFixture); after != cashBefore {
+		t.Fatalf("the funds hold must stay: cash %d -> %d", cashBefore, after)
+	}
+	if countAttempts(t, pool, f.tenantID, wr.ID) != 0 || provider.AttemptCount() != 0 {
+		t.Fatal("no attempt and no provider call while parked")
+	}
+	// The screening completes (no hold any more): the same request is claimed.
+	retry, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	if err != nil || retry.Denied {
+		t.Fatalf("after the screening resolves the claim must go through: %+v %v", retry, err)
+	}
+}

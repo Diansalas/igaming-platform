@@ -127,6 +127,8 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 		// migration 0181 (lic10, G1): the trigger policy, the officer request read and the worker API.
 		"aml_screening_trigger_policy_set": true, "aml_screening_trigger_policy_effective": true, "aml_screening_request_list": true,
 		"aml_screening_enqueue_due": true, "aml_screening_request_claim": true, "aml_screening_request_finish": true,
+		// lic18: the trapped-person count (a count only, session-tenant bound).
+		"aml_screening_gate_overdue": true,
 	}
 	// SECURITY DEFINER but NOT executable by the runtime role: the erasure check (until the HD-RET-1 job is its caller, security F5)
 	// and the platform-grantee liveness helper (reachable only through the owner-run definer chain, security F1/F3).
@@ -193,7 +195,9 @@ func TestCatalog_EveryOfficerFunctionAuthorisesFirst(t *testing.T) {
 		"aml_screening_policy_effective": true, "aml_readiness": true,
 		// migration 0181: the trigger policy reader and the worker API are proof-less, session-tenant-bound (the worker is not an officer).
 		"aml_screening_trigger_policy_effective": true, "aml_screening_enqueue_due": true, "aml_screening_request_claim": true,
-		"aml_screening_request_finish": true}
+		"aml_screening_request_finish": true,
+		// lic18: the trapped-person count (a count only, session-tenant bound, proof-less like the worker API).
+		"aml_screening_gate_overdue": true}
 	for _, r := range rows {
 		name, src := r[0].(string), r[1].(string)
 		if name == "aml_platform_grantee_live" {

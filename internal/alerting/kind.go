@@ -165,6 +165,13 @@ const KindAMLHoldEvalFailed Kind = "aml.hold_eval_failed"
 // p2 is an ENGINEERING DEFAULT (ALERT-DELIVERY-1 OPEN: nobody is paged).
 const KindAMLScreeningAttention Kind = "aml.screening_attention"
 
+// KindAMLScreeningGateTrapped is the lic18 (migration 0181, ledger-finance H-1 f) Kind: one or more persons have been HELD at the
+// automatic-screening withdrawal gate for longer than the policy's alert threshold, so funds may be trapped. The only attribute is
+// the COUNT of persons (never an id). One open alert per tenant (re-raises add occurrences). Severity p1 is an ENGINEERING DEFAULT
+// (ALERT-DELIVERY-1 OPEN: nobody is paged unless a route exists). Raised by the screening worker's pass, so a DEAD worker cannot
+// raise it (recorded residual).
+const KindAMLScreeningGateTrapped Kind = "aml.screening_gate_trapped"
+
 // KindReconciliationSweepFailed is the A9 (migration 0156) platform, subjectless P1 Kind: the reconciliation
 // scheduler could not LIST tenants (phase list_active or list_non_active; R3-LISTING-FAILURE-LOG-ONLY-1) or a
 // whole sweep panicked (phase panic), so no tenant was (fully) reconciled in that sweep. Per-tenant failures
@@ -341,6 +348,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindAMLScreeningAttention, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("request_id", "reason", "trigger"),
+	},
+	KindAMLScreeningGateTrapped: {
+		Kind: KindAMLScreeningGateTrapped, Severity: SeverityP1, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("persons"),
 	},
 	KindWithdrawalPayoutGateDenied: {
 		Kind: KindWithdrawalPayoutGateDenied, Severity: SeverityP2, Scope: ScopeKindPlatform,

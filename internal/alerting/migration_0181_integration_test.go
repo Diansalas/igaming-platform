@@ -41,7 +41,7 @@ func TestMigration0181_SeedRoundTripAndDownRefusal(t *testing.T) {
 		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname IN
 				('residence_approval_policies', 'residence_approval_policy_approvals', 'residence_determination_checks',
-				 'aml_screening_trigger_policies', 'aml_screening_requests')`).Scan(&n)
+				 'aml_screening_trigger_policies', 'aml_screening_requests', 'screening_worker_heartbeats')`).Scan(&n)
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -56,14 +56,22 @@ func TestMigration0181_SeedRoundTripAndDownRefusal(t *testing.T) {
 			t.Fatalf("the payload must never allow a person, list or match key: %v", keys)
 		}
 	}
-	if tables() != 5 {
-		t.Fatalf("0181 must create 5 tables, found %d", tables())
+	if tables() != 6 {
+		t.Fatalf("0181 must create 6 tables, found %d", tables())
+	}
+	// lic18: the second Kind, the trapped-person alert (p1, a count only).
+	var gsev string
+	var gkeys []string
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT severity, allowed_keys FROM alert_kinds WHERE kind = 'aml.screening_gate_trapped'`).Scan(&gsev, &gkeys)
+	}); err != nil || gsev != "p1" || strings.Join(gkeys, ",") != "persons" {
+		t.Fatalf("gate_trapped seed row = %q %v err=%v", gsev, gkeys, err)
 	}
 	if _, err := pool.MigrateDown(ctx, dir, 1); err != nil {
 		t.Fatalf("down on an empty database: %v", err)
 	}
 	if n, _, _ := kindRow(); n != 0 || tables() != 0 {
-		t.Fatal("down must remove the Kind and all five tables")
+		t.Fatal("down must remove the Kind and all six tables")
 	}
 	if applied, err := pool.MigrateUp(ctx, dir); err != nil || len(applied) != 1 || applied[0] != 181 {
 		t.Fatalf("re-up: %v %v", applied, err)
@@ -85,10 +93,34 @@ func TestMigration0181_SeedRoundTripAndDownRefusal(t *testing.T) {
 		t.Fatalf("seed alert: %v", err)
 	}
 	_, err := pool.MigrateDown(ctx, dir, 1)
-	if err == nil || !strings.Contains(err.Error(), "alerts of kind aml.screening_attention exist") {
+	if err == nil || !strings.Contains(err.Error(), "alerts of kind aml.screening_attention or aml.screening_gate_trapped exist") {
 		t.Fatalf("down must refuse while an alert of the Kind exists, got %v", err)
 	}
-	if n, _, _ := kindRow(); n != 1 || tables() != 5 {
+	if n, _, _ := kindRow(); n != 1 || tables() != 6 {
 		t.Fatal("a refused down must leave the Kind and the tables in place")
+	}
+}
+
+// lic18: an alert of the second Kind alone also blocks the down migration.
+func TestMigration0181_DownRefusesWhileAGateTrappedAlertExists(t *testing.T) {
+	pool, dir := scratchThroughVersion(t, "m181_gt", 181)
+	ctx := context.Background()
+	admin := ownerAdmin(t, pool)
+	tenantID := uuid.New()
+	if err := pool.WithPlatformAdmin(ctx, admin, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $2, 'own_licence', 'active')`,
+			tenantID, "m181g-"+tenantID.String()[:8])
+		return err
+	}); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO alerts (kind, discriminator, subject_tenant_id, attributes) VALUES ('aml.screening_gate_trapped', 'tenant:x', $1, '{"persons": 1}'::jsonb)`, tenantID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed alert: %v", err)
+	}
+	if _, err := pool.MigrateDown(ctx, dir, 1); err == nil || !strings.Contains(err.Error(), "aml.screening_gate_trapped exist") {
+		t.Fatalf("down must refuse while a gate_trapped alert exists, got %v", err)
 	}
 }

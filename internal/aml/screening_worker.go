@@ -53,7 +53,7 @@ type ScreeningWorkerConfig struct {
 
 // DefaultScreeningWorkerConfig returns the engineering recommendations.
 func DefaultScreeningWorkerConfig() ScreeningWorkerConfig {
-	return ScreeningWorkerConfig{EnqueueBatch: 100, ClaimBatch: 20, TenantCap: 500, Lease: 2 * time.Minute, CallTimeout: 10 * time.Second,
+	return ScreeningWorkerConfig{EnqueueBatch: 100, ClaimBatch: 4, TenantCap: 500, Lease: 2 * time.Minute, CallTimeout: 10 * time.Second,
 		PhaseTimeout: 5 * time.Second, MaxAttempts: 5, BackoffBase: 30 * time.Second, BackoffCap: 30 * time.Minute}
 }
 
@@ -97,8 +97,10 @@ func (w *ScreeningWorker) ValidateForLoop() error {
 		return errors.New("aml: screening worker batch sizes out of range")
 	case c.CallTimeout <= 0 || c.PhaseTimeout <= 0 || c.MaxAttempts < 1 || c.BackoffBase <= 0 || c.BackoffCap < c.BackoffBase:
 		return errors.New("aml: screening worker timeouts, attempts and backoff must be positive")
-	case c.Lease < 2*(2*c.PhaseTimeout+c.CallTimeout)+5*time.Second:
-		return errors.New("aml: screening worker lease is shorter than phases A, B and C twice over")
+	case c.Lease < time.Duration(c.ClaimBatch)*(3*c.PhaseTimeout+c.CallTimeout)+5*time.Second:
+		// L7: every claimed item must be finishable (phase A, the call, phase C with its detached 2x bound) before the LAST item's
+		// lease can lapse, otherwise later items of a batch are burned (their attempts counted) before they are even started.
+		return errors.New("aml: screening worker lease is shorter than the whole claimed batch (batch x (phase A + call + phase C))")
 	case c.Lease < 5*time.Second || c.Lease > time.Hour:
 		return errors.New("aml: screening worker lease out of range")
 	}
@@ -107,7 +109,7 @@ func (w *ScreeningWorker) ValidateForLoop() error {
 
 // PassStats is what one pass did (counts only; no identifier).
 type PassStats struct {
-	Tenants, Enqueued, Claimed, Done, NeedsOfficer, Retried, Terminal, Lost, Errors int
+	Tenants, Enqueued, Claimed, Done, NeedsOfficer, Retried, Terminal, Lost, Errors, Trapped int
 }
 
 // finishPlan is the pure decision of how to end one claimed request.
@@ -159,6 +161,7 @@ type claimedRequest struct {
 // RunPass runs one pass over the active tenants. It never panics out and never returns an identifier.
 func (w *ScreeningWorker) RunPass(ctx context.Context) PassStats {
 	var st PassStats
+	w.heartbeat(ctx)
 	tenants, err := w.activeTenants(ctx)
 	if err != nil {
 		st.Errors++
@@ -173,6 +176,53 @@ func (w *ScreeningWorker) RunPass(ctx context.Context) PassStats {
 		w.passTenant(ctx, tid, &st)
 	}
 	return st
+}
+
+// heartbeat reports this worker's provider to the database (screening_worker_heartbeat). A withdrawal gate can be configured only
+// while a worker has reported in recently, so the gate cannot be enabled where no worker runs (production starts none).
+func (w *ScreeningWorker) heartbeat(ctx context.Context) {
+	synthetic := w.Provider.ID() == MockProviderID // informational: the only provider in the tree is the MOCK
+	pctx, cancel := w.phase(ctx)
+	defer cancel()
+	if err := w.Pool.WithoutTenant(pctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `SELECT screening_worker_heartbeat($1, $2)`, w.Provider.ID(), synthetic)
+		return e
+	}); err != nil {
+		w.logErr("heartbeat failed")
+	}
+}
+
+// alertTrapped raises aml.screening_gate_trapped when persons have been held at the withdrawal gate longer than the policy's alert
+// threshold (H-1 f). The attribute is a COUNT only. A worker that is down cannot raise it: the residual is recorded in lic18.
+func (w *ScreeningWorker) alertTrapped(ctx context.Context, tenantID uuid.UUID, st *PassStats) {
+	var n int
+	pctx, cancel := w.phase(ctx)
+	err := w.Pool.WithTenant(pctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT aml_screening_gate_overdue($1, 5000)`, tenantID).Scan(&n)
+	})
+	cancel()
+	if err != nil {
+		st.Errors++
+		w.logErr("overdue check failed")
+		return
+	}
+	if n == 0 {
+		return
+	}
+	st.Trapped += n
+	cctx, cancel2 := context.WithTimeout(context.WithoutCancel(ctx), 2*w.Config.PhaseTimeout)
+	defer cancel2()
+	pending, aerr := alerting.InTx(cctx, alerting.NewTenantRunner(w.Pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
+			Kind: alerting.KindAMLScreeningGateTrapped, SubjectTenantID: tenantID, Discriminator: "tenant:" + tenantID.String(),
+			Attributes: map[string]alerting.AttrValue{"persons": n},
+		})
+	})
+	defer pending.Flush(cctx)
+	if aerr != nil {
+		st.Errors++
+		w.logErr("trapped alert failed")
+	}
 }
 
 func (w *ScreeningWorker) activeTenants(ctx context.Context) ([]uuid.UUID, error) {
@@ -246,6 +296,7 @@ func (w *ScreeningWorker) passTenant(ctx context.Context, tenantID uuid.UUID, st
 		st.Claimed++
 		w.processRequest(ctx, tenantID, c, st)
 	}
+	w.alertTrapped(ctx, tenantID, st)
 }
 
 // processRequest runs phases A, B and C for one claimed request.

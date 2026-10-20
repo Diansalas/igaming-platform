@@ -1,6 +1,7 @@
 package aml
 
 import (
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"os"
 	"regexp"
 	"strings"
@@ -82,6 +83,24 @@ func TestScreeningWorker_ValidateForLoop(t *testing.T) {
 	}
 }
 
+// lic18 L7: the lease must cover the WHOLE claimed batch (batch x (phase A + call + phase C)), and the default configuration does.
+func TestScreeningWorker_ValidateForLoop_LeaseCoversTheClaimedBatch(t *testing.T) {
+	mk := func(mut func(c *ScreeningWorkerConfig)) *ScreeningWorker {
+		c := DefaultScreeningWorkerConfig()
+		mut(&c)
+		return &ScreeningWorker{Pool: &db.Pool{}, Provider: NewMockScreeningProvider(), Keys: MockSubjectKeys{}, Config: c}
+	}
+	if err := mk(func(*ScreeningWorkerConfig) {}).ValidateForLoop(); err != nil {
+		t.Fatalf("the default configuration must be startable: %v", err)
+	}
+	if err := mk(func(c *ScreeningWorkerConfig) { c.ClaimBatch = 20 }).ValidateForLoop(); err == nil {
+		t.Fatal("a batch of 20 does not fit a 2 minute lease: must be refused")
+	}
+	if err := mk(func(c *ScreeningWorkerConfig) { c.ClaimBatch = 20; c.Lease = 20 * time.Minute }).ValidateForLoop(); err != nil {
+		t.Fatalf("a lease that covers the batch is accepted: %v", err)
+	}
+}
+
 // Static pins of the worker's boundaries (the behaviour is proven by the integration tests).
 func TestScreeningWorker_Static_Boundaries(t *testing.T) {
 	b, err := os.ReadFile("screening_worker.go")
@@ -113,8 +132,10 @@ func TestScreeningWorker_Static_Boundaries(t *testing.T) {
 	if call < 0 || a < 0 || endA < 0 || a+endA > call {
 		t.Error("the provider call must come after the phase A transaction closure has ended")
 	}
-	c := strings.Index(code, "alerting.InTx(")
-	if c < call {
+	// lic18: heartbeat and the trapped-person sweep also use alerting.InTx, before the pass loop; the finish transaction
+	// is the InTx that follows the provider call.
+	c := strings.Index(code[call:], "alerting.InTx(")
+	if c < 0 {
 		t.Error("phase C (the finish transaction) must come after the provider call")
 	}
 	// No identifier reaches a log line: log calls carry only fixed text.
@@ -130,9 +151,9 @@ func TestScreeningWorker_Static_Boundaries(t *testing.T) {
 }
 
 func TestSetTriggerPolicyInput_Validate(t *testing.T) {
-	base := SetTriggerPolicyInput{JurisdictionID: [16]byte{1}, Events: []TriggerEvent{EventRegistration}, GateWithdrawal: true,
-		EffectiveFrom: time.Now(), LegalReviewReference: "REF-1", ReasonCode: "policy_review"}
-	if ev, err := base.validate(); err != nil || len(ev) != 1 {
+	base := SetTriggerPolicyInput{JurisdictionID: [16]byte{1}, Events: []TriggerEvent{EventRegistration, EventScheduled}, GateWithdrawal: true,
+		GateAlertAfter: time.Hour, EffectiveFrom: time.Now(), LegalReviewReference: "REF-1", ReasonCode: "policy_review"}
+	if ev, err := base.validate(); err != nil || len(ev) != 2 {
 		t.Fatalf("valid input refused: %v", err)
 	}
 	dup := base
@@ -145,6 +166,12 @@ func TestSetTriggerPolicyInput_Validate(t *testing.T) {
 		"unknown event":                      func(i *SetTriggerPolicyInput) { i.Events = []TriggerEvent{"first_deposit"} },
 		"withdrawal_request is not an event": func(i *SetTriggerPolicyInput) { i.Events = []TriggerEvent{"withdrawal_request"} },
 		"gate with no events":                func(i *SetTriggerPolicyInput) { i.Events = nil },
+		"gate without the scheduled event":   func(i *SetTriggerPolicyInput) { i.Events = []TriggerEvent{EventRegistration} },
+		"gate without an alert threshold":    func(i *SetTriggerPolicyInput) { i.GateAlertAfter = 0 },
+		"alert threshold below a minute":     func(i *SetTriggerPolicyInput) { i.GateAlertAfter = 30 * time.Second },
+		"alert threshold above 30 days":      func(i *SetTriggerPolicyInput) { i.GateAlertAfter = 31 * 24 * time.Hour },
+		"effective_from in the past":         func(i *SetTriggerPolicyInput) { i.EffectiveFrom = time.Now().Add(-time.Hour) },
+		"effective_from beyond 30 days":      func(i *SetTriggerPolicyInput) { i.EffectiveFrom = time.Now().Add(31 * 24 * time.Hour) },
 		"no effective time":                  func(i *SetTriggerPolicyInput) { i.EffectiveFrom = time.Time{} },
 		"no legal reference":                 func(i *SetTriggerPolicyInput) { i.LegalReviewReference = "" },
 		"padded legal reference":             func(i *SetTriggerPolicyInput) { i.LegalReviewReference = " x " },
@@ -160,7 +187,7 @@ func TestSetTriggerPolicyInput_Validate(t *testing.T) {
 	}
 	// No events and no gate is a legal explicit "nothing triggers" version.
 	none := base
-	none.Events, none.GateWithdrawal = nil, false
+	none.Events, none.GateWithdrawal, none.GateAlertAfter = nil, false, 0
 	if _, err := none.validate(); err != nil {
 		t.Errorf("an explicit empty, ungated policy must be valid: %v", err)
 	}

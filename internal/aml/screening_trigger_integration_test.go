@@ -77,13 +77,43 @@ func newTrigWorld(t *testing.T, rescreen time.Duration, grace time.Duration) *tr
 	return &trigWorld{amlWorld: w, q: q, svc: svc, jur: j, prov: &countingProvider{inner: aml.NewMockScreeningProvider()}}
 }
 
+// heartbeat reports the MOCK worker in, exactly as a worker pass does: a withdrawal gate is refused while no worker has reported.
+func (tw *trigWorld) heartbeat() {
+	tw.t.Helper()
+	if err := tw.RT.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT screening_worker_heartbeat($1, true)`, tw.prov.ID())
+		return err
+	}); err != nil {
+		tw.t.Fatalf("heartbeat: %v", err)
+	}
+}
+
+// setTrigger authors a version. A gating version needs the scheduled event, an alert threshold and a reporting worker (lic18, H-1):
+// the helper supplies them, so the existing scenarios keep their meaning.
 func (tw *trigWorld) setTrigger(events []aml.TriggerEvent, gate bool, from time.Time) {
 	tw.t.Helper()
-	if _, err := tw.svc.SetScreeningTriggerPolicy(context.Background(), tw.q.Officers[0].Actor, aml.SetTriggerPolicyInput{
-		JurisdictionID: tw.jur, Events: events, GateWithdrawal: gate, EffectiveFrom: from,
-		LegalReviewReference: "TEST FIXTURE REF - NOT LEGAL ADVICE", ReasonCode: "fixture_trigger"}); err != nil {
+	if err := tw.setTriggerErr(events, gate, from); err != nil {
 		tw.t.Fatalf("trigger policy: %v", err)
 	}
+}
+
+func (tw *trigWorld) setTriggerErr(events []aml.TriggerEvent, gate bool, from time.Time) error {
+	tw.t.Helper()
+	in := aml.SetTriggerPolicyInput{JurisdictionID: tw.jur, Events: events, GateWithdrawal: gate, EffectiveFrom: from,
+		LegalReviewReference: "TEST FIXTURE REF - NOT LEGAL ADVICE", ReasonCode: "fixture_trigger"}
+	if gate {
+		tw.heartbeat()
+		in.GateAlertAfter = time.Hour
+		has := false
+		for _, e := range events {
+			has = has || e == aml.EventScheduled
+		}
+		if !has {
+			in.Events = append(append([]aml.TriggerEvent{}, events...), aml.EventScheduled)
+		}
+	}
+	_, err := tw.svc.SetScreeningTriggerPolicy(context.Background(), tw.q.Officers[0].Actor, in)
+	return err
 }
 
 func (tw *trigWorld) worker() *aml.ScreeningWorker {
@@ -150,8 +180,8 @@ func TestTriggerPolicy_Authoring_IsGovernedLikeTheScreeningPolicy(t *testing.T) 
 	w, q, svc := platformWorld(t)
 	j := w.jurisdiction()
 	a := q.Officers[0].Actor
-	in := aml.SetTriggerPolicyInput{JurisdictionID: j, Events: []aml.TriggerEvent{aml.EventRegistration}, GateWithdrawal: true, EffectiveFrom: time.Now().Add(-time.Minute),
-		LegalReviewReference: "TEST FIXTURE REF", ReasonCode: "fixture_trigger"}
+	in := aml.SetTriggerPolicyInput{JurisdictionID: j, Events: []aml.TriggerEvent{aml.EventRegistration, aml.EventScheduled}, GateWithdrawal: true,
+		GateAlertAfter: time.Hour, EffectiveFrom: time.Now().Add(-time.Minute), LegalReviewReference: "TEST FIXTURE REF", ReasonCode: "fixture_trigger"}
 	// Unconfigured: nil, never a default.
 	if p, err := svc.EffectiveScreeningTriggerPolicy(ctx, a, j); err != nil || p != nil {
 		t.Fatalf("unconfigured must be nil: %+v %v", p, err)
@@ -168,16 +198,33 @@ func TestTriggerPolicy_Authoring_IsGovernedLikeTheScreeningPolicy(t *testing.T) 
 	if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
+	// lic18 H-1 (a): a withdrawal gate is refused while no screening worker has reported in. (The heartbeat table is database-wide:
+	// the fixture empties it first, as the owner.)
+	if err := w.Owner.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `DELETE FROM screening_worker_heartbeats`)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SetScreeningTriggerPolicy(ctx, a, in); !errors.Is(err, aml.ErrInvalidInput) {
+		t.Fatalf("no worker heartbeat: %v, want ErrInvalidInput", err)
+	}
+	if err := w.RT.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `SELECT screening_worker_heartbeat('mock-screening', true)`)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := svc.SetScreeningTriggerPolicy(ctx, a, in); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	p, err := svc.EffectiveScreeningTriggerPolicy(ctx, a, j)
-	if err != nil || p == nil || !p.GateWithdrawal || len(p.Events) != 1 || p.Events[0] != aml.EventRegistration {
+	if err != nil || p == nil || !p.GateWithdrawal || len(p.Events) != 2 || p.GateAlertAfter != time.Hour {
 		t.Fatalf("effective: %+v %v", p, err)
 	}
 	// A NEWER version wins; an explicit empty ungated version is "nothing triggers".
 	empty := in
-	empty.Events, empty.GateWithdrawal = nil, false
+	empty.Events, empty.GateWithdrawal, empty.GateAlertAfter = nil, false, 0
 	if _, err := svc.SetScreeningTriggerPolicy(ctx, a, empty); err != nil {
 		t.Fatal(err)
 	}
@@ -383,8 +430,15 @@ func TestGate_ProviderUnavailable_FailsClosedForWithdrawal(t *testing.T) {
 		wk.RunPass(ctx)
 		time.Sleep(50 * time.Millisecond)
 	}
-	if r := tw.requests(p.PersonID); len(r) != 1 || r[0].Status != "failed_terminal" {
-		t.Fatalf("request: %+v", r)
+	// lic18: a gating policy now always carries the scheduled event, so the registration request AND the scheduled one both fail.
+	r := tw.requests(p.PersonID)
+	if len(r) < 1 {
+		t.Fatalf("no request: %+v", r)
+	}
+	for _, x := range r {
+		if x.Status != "failed_terminal" {
+			t.Fatalf("every request must end failed_terminal: %+v", r)
+		}
 	}
 	if !tw.heldFor(p, aml.OpWithdrawal) {
 		t.Fatal("a required screening that failed terminally must keep the withdrawal held (fail closed)")
@@ -504,11 +558,12 @@ func TestQueue_ClaimTokenCAS_StaleWorkerCannotFinishAReclaimedRequest(t *testing
 	if len(second) != 1 || second[0].attempts != 2 || second[0].token == first[0].token {
 		t.Fatalf("an expired lease is reclaimed under a NEW token: %+v", second)
 	}
+	tw.heartbeat() // a clear is accepted only from a provider that has a fresh worker heartbeat (lic18, S2)
 	finish := func(token uuid.UUID) (bool, string) {
 		var applied bool
 		var status string
 		if err := tw.tenantTx(func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, 'mock-screening', NULL, $4, now(), 0)`,
+			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, 'mock-screening', 'ref-1', $4, now(), 0)`,
 				tw.Tenant, first[0].id, token, strings.Repeat("c", 64)).Scan(&applied, &status)
 		}); err != nil {
 			t.Fatal(err)

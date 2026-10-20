@@ -192,4 +192,5 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerLicensingChangeRoutes(mux, deps)
 	registerWithdrawalRestrictionPolicyRoutes(mux, deps)
 	registerAMLRoutes(mux, deps)
+	registerAMLScreeningRoutes(mux, deps)
 }

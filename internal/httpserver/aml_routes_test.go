@@ -84,6 +84,18 @@ func (f *fakeAML) FlagSAR(_ context.Context, a aml.Actor, _ uuid.UUID, _ int, _ 
 func (f *fakeAML) Propose(_ context.Context, a aml.Actor, _ uuid.UUID, _ int, _ aml.ProposeInput) (aml.Proposal, error) {
 	return aml.Proposal{Seq: 2, ContentHash: strings.Repeat("a", 64)}, f.rec("Propose", a)
 }
+func (f *fakeAML) SetScreeningTriggerPolicy(_ context.Context, a aml.Actor, _ aml.SetTriggerPolicyInput) (uuid.UUID, error) {
+	return uuid.New(), f.rec("SetScreeningTriggerPolicy", a)
+}
+func (f *fakeAML) EffectiveScreeningTriggerPolicy(_ context.Context, a aml.Actor, _ uuid.UUID) (*aml.TriggerPolicy, error) {
+	return nil, f.rec("EffectiveScreeningTriggerPolicy", a)
+}
+func (f *fakeAML) ListScreeningRequests(_ context.Context, a aml.Actor, _ uuid.UUID) ([]aml.ScreeningRequestRow, error) {
+	return nil, f.rec("ListScreeningRequests", a)
+}
+func (f *fakeAML) ResolveScreeningRequest(_ context.Context, a aml.Actor, _, _ uuid.UUID, _ aml.ResolveScreeningInput) (aml.ScreeningRecorded, error) {
+	return aml.ScreeningRecorded{ResultID: uuid.New()}, f.rec("ResolveScreeningRequest", a)
+}
 func (f *fakeAML) Approve(_ context.Context, a aml.Actor, _ uuid.UUID, _ int, _, _ string) (int, error) {
 	return 4, f.rec("Approve", a)
 }

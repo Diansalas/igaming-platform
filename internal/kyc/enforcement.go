@@ -349,6 +349,16 @@ func composeHold(ctx context.Context, tx pgx.Tx, params EnforcementParams, kycDe
 // fault. Every other decision, including a definite hold, is returned unchanged. The hold verdict is kept so the AML-scoped
 // decision log still records the evaluator error.
 func (d EnforcementDecision) RetryableOnHoldEvalFailure() EnforcementDecision {
+	// lic18 (ledger-finance H-1 e): a hold that exists ONLY because a required automatic screening is outstanding, stale or failed
+	// (no officer-placed hold) is a waiting state: the approved withdrawal parks (unavailable: approved stays approved, the hold
+	// on the funds stays, retryable 503 / sweeper reschedule) instead of being rejected. An officer-placed hold still denies.
+	if d.Hold.Held && d.Hold.ScreeningOnly && !d.Hold.EvalFailed && (d.KYCOutcome == OutcomePassed || d.KYCOutcome == OutcomeNotRequired) {
+		u := unavailableDecision("screening")
+		u.Hold = d.Hold
+		u.KYCOutcome = d.KYCOutcome
+		u.TrueOutcome = OutcomeHeld
+		return u
+	}
 	if !d.Hold.EvalFailed || d.Hold.Held {
 		return d
 	}
