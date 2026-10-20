@@ -569,20 +569,32 @@ func TestLic11_LockOrder_PolicyChangeVsRequest(t *testing.T) {
 	t.Run("request_first", func(t *testing.T) {
 		w := newA13(t)
 		l11SetLicence(t, w.owner, w.f.tenantID, l11Suspended)
-		reqTx, err := w.rt.Raw().Begin(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer reqTx.Rollback(ctx) //nolint:errcheck
-		if _, err := reqTx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, w.f.tenantID.String()); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := RequestWithdrawal(ctx, reqTx, baseParams(w.f, "l11-lo-2", 500)); err != nil {
-			t.Fatalf("request (default allow): %v", err)
-		}
+		// The request runs in its own WithTenant transaction (the production shape) and holds it open until released.
+		reqReady, reqRelease, reqDone := make(chan int, 1), make(chan struct{}), make(chan error, 1)
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(reqRelease) }) }
+		defer release()
+		go func() {
+			reqDone <- w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+				if _, err := RequestWithdrawal(ctx, tx, baseParams(w.f, "l11-lo-2", 500)); err != nil {
+					return err
+				}
+				var p int
+				if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&p); err != nil {
+					return err
+				}
+				reqReady <- p
+				<-reqRelease
+				return nil
+			})
+		}()
 		var reqPID int
-		if err := reqTx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&reqPID); err != nil {
-			t.Fatal(err)
+		select {
+		case reqPID = <-reqReady:
+		case err := <-reqDone:
+			t.Fatalf("request (default allow): %v", err)
+		case <-time.After(loLockWaitTimeout):
+			t.Fatal("the request did not reach its hold")
 		}
 		done := make(chan error, 1)
 		finished := make(chan struct{})
@@ -620,7 +632,8 @@ func TestLic11_LockOrder_PolicyChangeVsRequest(t *testing.T) {
 			t.Fatal("the policy writer must not complete while the request holds the tenant key SHARED")
 		default:
 		}
-		if err := reqTx.Commit(ctx); err != nil {
+		release()
+		if err := <-reqDone; err != nil {
 			t.Fatalf("the request commits under the policy it read: %v", err)
 		}
 		if err := <-done; err != nil || loIsDeadlock(err) {
