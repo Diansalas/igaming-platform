@@ -39,3 +39,18 @@ func TestJurisdictionRegistryReadPermission_PlatformAdminOnly(t *testing.T) {
 		}
 	}
 }
+
+// lic10 (L-20): the KYC enforcement policy authoring permissions are platform_admin ONLY, for every other role, the
+// empty role and look-alikes (the table is platform-wide configuration; no tenant role may author it).
+func TestKYCEnforcementPolicyPermissions_PlatformAdminOnly(t *testing.T) {
+	if string(PermKYCEnforcementPolicyManage) != "kyc_enforcement_policy:manage" || string(PermKYCEnforcementPolicyRead) != "kyc_enforcement_policy:read" {
+		t.Fatal("permission string drifted")
+	}
+	for _, perm := range []Permission{PermKYCEnforcementPolicyManage, PermKYCEnforcementPolicyRead} {
+		for _, role := range append(append([]Role(nil), allRoles...), "", "unknown", "PLATFORM_ADMIN", RolePlayer) {
+			if got, want := RoleHasPermission(role, perm), role == RolePlatformAdmin; got != want {
+				t.Errorf("role %q %s = %v, want %v", role, perm, got, want)
+			}
+		}
+	}
+}

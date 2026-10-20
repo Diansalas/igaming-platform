@@ -524,6 +524,7 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	registerRGRoutes(mux, deps)
 	registerCredentialRoutes(mux, deps)
 	registerKYCRoutes(mux, deps)
+	registerKYCEnforcementPolicyRoutes(mux, deps)
 	registerRiskRoutes(mux, deps)
 	registerAssetRegistryRoutes(mux, deps)
 	registerBonusRoutes(mux, deps)

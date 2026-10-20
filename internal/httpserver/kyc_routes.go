@@ -53,3 +53,19 @@ func registerKYCRoutes(mux *http.ServeMux, deps Deps) {
 		mux.HandleFunc("POST /v1/webhooks/kyc/{tenantSlug}/{providerID}", newKYCWebhookHandler(deps))
 	}
 }
+
+// registerKYCEnforcementPolicyRoutes wires the lic10 (L-20) KYC enforcement policy authoring surface. PLATFORM-ONLY
+// (platform_admin), deliberately NOT wrapped in RequireTenantScope (a platform token carries no tenant), step-up critical on
+// every write. See kyc_enforcement_policy_handlers.go for what the routes refuse by design.
+func registerKYCEnforcementPolicyRoutes(mux *http.ServeMux, deps Deps) {
+	mux.Handle("GET /v1/admin/kyc/enforcement-policies",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermKYCEnforcementPolicyRead)(newListKYCEnforcementPoliciesHandler(deps))))
+	mux.Handle("POST /v1/admin/kyc/enforcement-policies",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermKYCEnforcementPolicyManage)(newCreateKYCEnforcementPolicyHandler(deps))))
+	mux.Handle("POST /v1/admin/kyc/enforcement-policies/{policyID}/activate",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermKYCEnforcementPolicyManage)(newActivateKYCEnforcementPolicyHandler(deps))))
+	mux.Handle("POST /v1/admin/kyc/enforcement-policies/{policyID}/withdraw",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermKYCEnforcementPolicyManage)(newWithdrawKYCEnforcementPolicyHandler(deps))))
+	mux.Handle("POST /v1/admin/kyc/enforcement-policies/{policyID}/supersede",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermKYCEnforcementPolicyManage)(newSupersedeKYCEnforcementPolicyHandler(deps))))
+}

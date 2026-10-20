@@ -391,6 +391,14 @@ const (
 	// only.
 	PermKYCEnforcementDecisionRead Permission = "kyc_enforcement_decision:read"
 
+	// PermKYCEnforcementPolicyManage / PermKYCEnforcementPolicyRead (lic10, L-20): author, activate, supersede and
+	// withdraw the PLATFORM-WIDE kyc_enforcement_policies rows (one set per licence jurisdiction), and read them.
+	// platform_admin ONLY, like every other platform-wide registry write; never a tenant role (the table is platform
+	// configuration, not tenant data). The four-eyes (creator versus activator) is the database's, not this
+	// permission's: holding it never lets one principal both author and activate a row.
+	PermKYCEnforcementPolicyManage Permission = "kyc_enforcement_policy:manage"
+	PermKYCEnforcementPolicyRead   Permission = "kyc_enforcement_policy:read"
+
 	// PermPlayerResidenceRead gates reading a player's declared or verified
 	// residence VALUE on a staff-facing surface (presence/provenance fields
 	// are NOT gated by this - they ride on PermVerificationRead/PermPlayerRead
@@ -883,6 +891,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// RoleTenantAdmin, even though RoleTenantAdmin holds the broader
 		// PermVerificationRead.
 		PermKYCEnforcementDecisionRead,
+		// lic10 (L-20): platform-wide KYC enforcement policy authoring; platform_admin only.
+		PermKYCEnforcementPolicyManage, PermKYCEnforcementPolicyRead,
 		// PRH-I1 (ADR 0095 §10.4/§10.5): platform reach over every
 		// tenant's kill switches, through the same route family
 		// RoleTenantAdmin uses for its own tenant (canActOnTenant).

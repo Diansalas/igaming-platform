@@ -10421,6 +10421,122 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies:
+    get:
+      summary: List KYC enforcement policies (platform-wide configuration)
+      description: >
+        kyc_enforcement_policy:read (platform_admin only; a tenant-scoped token is refused 403). lic10 (L-20). Lists the platform-wide kyc_enforcement_policies rows newest first (at most 500), optionally filtered by licensing_jurisdiction_id and status. The platform ships NO policy and NO threshold: with no active row for a jurisdiction KYC enforcement is dormant for it (ADR 0096). Responses are Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: licensing_jurisdiction_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [draft, active, withdrawn] } }
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/KYCEnforcementPolicy" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      summary: Author a KYC enforcement policy as a DRAFT
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). Creates a DRAFT only: a draft governs nothing. It becomes active only when a DIFFERENT platform administrator than the author activates it (the database trigger of migration 0100 enforces this; nothing here can bypass it). Only the evaluator-wired trigger types are accepted: `cumulative_deposit` (threshold_minor_units, a positive integer string in minor units, plus asset_code) and `play` (play_operation casino_play or sportsbook_play, nothing else); `edd_amount` and `registration_tier` are NOT IMPLEMENTED and refused. `legal_review_reference` (an opaque reference to the human legal review that supplied the value) and `reason_code` (1..64 characters of [A-Za-z0-9_.:-]) are required. Every value is supplied by the caller: the platform ships no default. Audited (kyc_enforcement_policy.created) with the reason code, IP, user agent and request id in the same transaction. 400 for a malformed or unknown value (including an unknown licensing_jurisdiction_id or asset_code). A draft may coexist with an active policy of the same key; the conflict is raised at activation.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicyCreateRequest" }
+      responses:
+        "201":
+          description: The draft policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies/{policyID}/activate:
+    post:
+      summary: Activate a draft KYC enforcement policy (four-eyes)
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). draft to active. The acting administrator must differ from the policy's author (403, enforced by the database); a trigger type the evaluator does not consult cannot be activated (409); a second active policy for the same enforcement key is refused (409, use supersede). A policy that is not a draft is 409. Audited (kyc_enforcement_policy.activated) with the reason code and request evidence.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicyReasonRequest" }
+      responses:
+        "200":
+          description: The activated policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies/{policyID}/withdraw:
+    post:
+      summary: Withdraw a never-activated (draft) KYC enforcement policy
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). draft to withdrawn only. An ACTIVE policy is never switched off without a successor (migration 0103, security F3: enforcement is not silently disabled): use supersede. A policy that is not a draft is 409. Audited (kyc_enforcement_policy.withdrawn).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicyReasonRequest" }
+      responses:
+        "200":
+          description: The withdrawn policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies/{policyID}/supersede:
+    post:
+      summary: Replace an ACTIVE KYC enforcement policy with an activated draft successor
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). {policyID} is the ACTIVE policy being replaced; successor_policy_id is a DRAFT of the same enforcement key (same jurisdiction, trigger type, play operation and asset). One transaction withdraws the old policy naming the successor and activates the successor. The acting administrator must differ from BOTH policies' authors (403, enforced by the database). Responds with the successor (now active). This is the only way an active policy stops being enforced. Audited on both rows.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicySupersedeRequest" }
+      responses:
+        "200":
+          description: The successor policy (active)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
   /v1/admin/tenants/{tenantID}/staff/{staffID}/display-name:
     patch:
       summary: Set a tenant staff member's display name
@@ -11991,6 +12107,48 @@ components:
         decisions: { type: array, items: { $ref: "#/components/schemas/KYCEnforcementDecision" } }
         next_before: { type: string, description: "Omitted on an empty page. Pass it back unchanged as next_before." }
       required: [decisions]
+    KYCEnforcementPolicy:
+      type: object
+      description: One platform-wide KYC enforcement policy row (lic10, L-20).
+      properties:
+        id: { type: string, format: uuid }
+        licensing_jurisdiction_id: { type: string, format: uuid }
+        trigger_type: { type: string, enum: [cumulative_deposit, edd_amount, registration_tier, play] }
+        status: { type: string, enum: [draft, active, withdrawn] }
+        threshold_minor_units: { type: string, nullable: true, description: Positive integer in minor units of asset_code; cumulative_deposit only. }
+        asset_code: { type: string, nullable: true }
+        required_tier: { type: string, nullable: true }
+        play_operation: { type: string, nullable: true, enum: [casino_play, sportsbook_play] }
+        effective_from: { type: string, format: date-time }
+        legal_review_reference: { type: string, nullable: true }
+        reason_code: { type: string }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string, format: uuid, nullable: true, description: The authoring platform administrator (platform viewers only). }
+        successor_policy_id: { type: string, format: uuid, nullable: true, description: Set on a policy withdrawn by supersession. }
+      required: [id, licensing_jurisdiction_id, trigger_type, status, effective_from, reason_code, created_at]
+    KYCEnforcementPolicyCreateRequest:
+      type: object
+      description: Every value is supplied by the caller; the platform ships no default. Unknown fields are refused.
+      properties:
+        licensing_jurisdiction_id: { type: string, format: uuid }
+        trigger_type: { type: string, enum: [cumulative_deposit, play] }
+        threshold_minor_units: { type: string, nullable: true, description: "Positive integer string, 1..38 digits; required for cumulative_deposit, refused for play." }
+        asset_code: { type: string, nullable: true, description: Required for cumulative_deposit; must be a registered asset. }
+        play_operation: { type: string, nullable: true, enum: [casino_play, sportsbook_play], description: Required for play. }
+        legal_review_reference: { type: string, description: "1..200 characters, no surrounding space or control characters." }
+        reason_code: { type: string }
+      required: [licensing_jurisdiction_id, trigger_type, legal_review_reference, reason_code]
+    KYCEnforcementPolicyReasonRequest:
+      type: object
+      properties:
+        reason_code: { type: string }
+      required: [reason_code]
+    KYCEnforcementPolicySupersedeRequest:
+      type: object
+      properties:
+        successor_policy_id: { type: string, format: uuid }
+        reason_code: { type: string }
+      required: [successor_policy_id, reason_code]
     StaffDisplayNameRequest:
       type: object
       additionalProperties: false
