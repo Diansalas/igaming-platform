@@ -67,7 +67,16 @@ export function LimitsCard({
   const attempt = useAttemptKey();
 
   // A kind whose rulebook cannot be completed (unavailable_reason) is not offered; time-out and self-exclusion are separate cards.
-  const offered = options.limits.filter((o) => !o.unavailable_reason);
+  // lic28: an unavailable kind with protective_only periods can still take a FIRST limit or a LOWER value (the server always accepts both);
+  // raising or removing a limit of such a kind is never offered.
+  const offered = options.limits.filter(
+    (o) =>
+      !o.unavailable_reason ||
+      (o.protective_only && o.allowed_periods.length > 0),
+  );
+  const isUnavailableKind = (k: string) =>
+    options.limits.some((o) => o.kind === k && !!o.unavailable_reason);
+  const [lowerAmount, setLowerAmount] = useState<Record<string, string>>({});
   const unavailable = options.limits.filter((o) => !!o.unavailable_reason);
   const [kind, setKind] = useState<RgKind>(offered[0]?.kind ?? "deposit");
   const option: RgLimitOption | undefined = offered.find(
@@ -132,11 +141,15 @@ export function LimitsCard({
     },
   });
 
-  function submit(value: string | null, forPeriod: RgPeriod) {
+  function submit(
+    value: string | null,
+    forPeriod: RgPeriod,
+    forKind: RgKind = kind,
+  ) {
     setLocalError(null);
     setResult(null);
     setMutationReset();
-    setMutation.mutate({ kind, period: forPeriod, value });
+    setMutation.mutate({ kind: forKind, period: forPeriod, value });
   }
   function setMutationReset() {
     setMutation.reset();
@@ -152,7 +165,32 @@ export function LimitsCard({
       setLocalError("Enter a positive amount (up to the currency’s decimals).");
       return;
     }
+    if (
+      option?.protective_only &&
+      existing?.value &&
+      !minorGreater(existing.value, minor)
+    ) {
+      setLocalError(
+        "For this limit you can only enter an amount lower than your current limit right now.",
+      );
+      return;
+    }
     submit(minor, effectivePeriod);
+  }
+
+  function onLower(l: {
+    kind: string;
+    period?: string | null;
+    value?: string | null;
+  }) {
+    const key = `${l.kind}|${l.period}`;
+    const m = (lowerAmount[key] ?? "").trim();
+    const v = m === "" ? null : majorToMinorString(m, assetCode);
+    if (v === null || !l.value || !minorGreater(l.value, v)) {
+      setLocalError("Enter an amount lower than your current limit.");
+      return;
+    }
+    submit(v, l.period as RgPeriod, l.kind as RgKind);
   }
 
   const rows = (limitsQuery.data?.limits ?? []).filter(
@@ -175,13 +213,11 @@ export function LimitsCard({
             role="note"
             className="rounded-md border border-amber-200 bg-amber-50 p-3 text-amber-900"
           >
-            Setting or changing{" "}
-            {unavailable
-              .map((o) => (KIND_LABELS[o.kind] ?? o.kind).toLowerCase())
-              .join(", ")}{" "}
-            limits is not available right now. Your existing limits stay in
-            force, you can still lower them, and the time-out and self-exclusion
-            tools below are unaffected.
+            Raising or removing a limit is not available right now for:{" "}
+            {unavailable.map((o) => KIND_LABELS[o.kind] ?? o.kind).join(", ")}.
+            You can still lower an existing limit or set a first one where the
+            form below offers it. Your existing limits stay in force, and the
+            time-out and self-exclusion tools below are unaffected.
           </p>
         )}
         {offered.length > 0 && offered.every((o) => !o.config_in_force) && (
@@ -274,20 +310,58 @@ export function LimitsCard({
                       </Button>
                     </div>
                   )}
-                  {l.has_value && !p && l.period && (
-                    <div>
-                      <Button
-                        variant="ghost"
-                        disabled={setMutation.isPending}
-                        onClick={() => {
-                          setKind(l.kind as RgKind);
-                          submit(null, l.period as RgPeriod);
-                        }}
-                      >
-                        Remove limit
-                      </Button>
-                    </div>
-                  )}
+                  {l.has_value &&
+                    !p &&
+                    l.period &&
+                    isUnavailableKind(l.kind) &&
+                    l.value && (
+                      <div className="flex flex-wrap items-end gap-2">
+                        <label className="flex flex-col gap-1">
+                          <span className="text-slate-600">
+                            Lower to ({assetCode})
+                          </span>
+                          <TextInput
+                            aria-label={`Lower ${KIND_LABELS[l.kind] ?? l.kind} ${PERIOD_LABELS[l.period ?? ""] ?? l.period} limit`}
+                            inputMode="decimal"
+                            value={lowerAmount[`${l.kind}|${l.period}`] ?? ""}
+                            onChange={(e) =>
+                              setLowerAmount({
+                                ...lowerAmount,
+                                [`${l.kind}|${l.period}`]: e.target.value,
+                              })
+                            }
+                          />
+                        </label>
+                        <Button
+                          variant="secondary"
+                          disabled={setMutation.isPending}
+                          onClick={() => onLower(l)}
+                        >
+                          Lower limit
+                        </Button>
+                      </div>
+                    )}
+                  {l.has_value &&
+                    !p &&
+                    l.period &&
+                    !isUnavailableKind(l.kind) && (
+                      <div>
+                        <Button
+                          variant="ghost"
+                          disabled={setMutation.isPending}
+                          onClick={() => {
+                            setKind(l.kind as RgKind);
+                            submit(
+                              null,
+                              l.period as RgPeriod,
+                              l.kind as RgKind,
+                            );
+                          }}
+                        >
+                          Remove limit
+                        </Button>
+                      </div>
+                    )}
                 </li>
               );
             })}
@@ -366,17 +440,24 @@ export function LimitsCard({
                   </li>
                 )}
                 <li>Lowering a limit takes effect immediately.</li>
-                <li>
-                  Raising or removing a limit only takes effect after a
-                  cooling-off period
-                  {option.increase_cooldown_seconds
-                    ? ` of ${formatSeconds(option.increase_cooldown_seconds)}`
-                    : ""}
-                  , and you may be asked to confirm it.
-                </li>
+                {option.protective_only ? (
+                  <li>
+                    Right now you can only set a first limit or a lower one for
+                    this limit; raising or removing it is not available.
+                  </li>
+                ) : (
+                  <li>
+                    Raising or removing a limit only takes effect after a
+                    cooling-off period
+                    {option.increase_cooldown_seconds
+                      ? ` of ${formatSeconds(option.increase_cooldown_seconds)}`
+                      : ""}
+                    , and you may be asked to confirm it.
+                  </li>
+                )}
               </ul>
             )}
-            {isIncrease && (
+            {isIncrease && !option?.protective_only && (
               <p role="note" className="text-amber-800">
                 This is higher than your current limit, so it will not take
                 effect immediately.

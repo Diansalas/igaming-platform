@@ -16108,7 +16108,13 @@ components:
           description: >
             lic27a. Present when a jurisdiction the tenant relies on has no floor for this kind (missing_floor) or relied-on jurisdictions disagree on
             calendar_tz / week_start (calendar_conflict). config_in_force is false, allowed_periods is empty and no ceiling is offered: do not offer limit
-            setting for this kind. Increases, removals and confirms stay refused server-side. time_out_hours and self_exclusion_days are always returned.
+            setting for this kind except as protective_only. Increases, removals and confirms stay refused server-side. time_out_hours and self_exclusion_days are always returned.
+        protective_only:
+          type: boolean
+          description: >
+            lic28. With unavailable_reason: allowed_periods lists only the periods of the relied-on jurisdictions that have a floor; they may be used for a
+            FIRST limit or a LOWER value (always accepted by the server). No ceiling or cooldown is offered; an increase or removal is refused.
+            Note: a calendar_conflict makes the account-level usage read of that kind fail closed (it never weakens protection); money-path enforcement uses one jurisdiction per scope and is not affected.
       required: [kind, config_in_force, mandatory, allowed_periods, ceiling, increase_cooldown_seconds]
     RGOptions:
       type: object

@@ -628,8 +628,8 @@ func wantUnavailableOptions(t *testing.T, o rg.Options, reason string, kinds ...
 				continue
 			}
 			found = true
-			if l.UnavailableReason != reason || l.ConfigInForce || len(l.AllowedPeriods) != 0 || l.Ceiling != nil || l.IncreaseCooldownSeconds != nil {
-				t.Fatalf("kind %s must be unavailable (%s) and offer nothing: %+v", k, reason, l)
+			if l.UnavailableReason != reason || !l.ProtectiveOnly || l.ConfigInForce || l.Ceiling != nil || l.IncreaseCooldownSeconds != nil {
+				t.Fatalf("kind %s must be unavailable (%s), protective-only, with no ceiling or cooldown: %+v", k, reason, l)
 			}
 		}
 		if !found {
@@ -726,5 +726,95 @@ func TestLic27a_ConfirmRefusedInSQL_WhileAReliedJurisdictionHasNoFloor(t *testin
 	}
 	if _, err := rawConfirm(tBad, pBad, idBad); sqlstateOf(err) != "RL023" {
 		t.Fatalf("a confirm with a relied-on jurisdiction lacking a floor must be RL023 in SQL, got %v", err)
+	}
+}
+
+func optionOf(t *testing.T, o rg.Options, k rg.ControlKind) rg.LimitOption {
+	t.Helper()
+	for _, l := range o.Limits {
+		if l.Kind == k {
+			return l
+		}
+	}
+	t.Fatalf("kind %s missing", k)
+	return rg.LimitOption{}
+}
+
+// lic28 (F-1): for an unavailable kind the options carry the PROTECTIVE periods (the union of the periods of the relied-on jurisdictions that
+// have a floor), and the server accepts a first limit and a decrease for it while an increase, a removal and a confirm stay refused.
+func TestLic28_ProtectiveOnly_FirstLimitAndDecreaseAccepted_IncreaseRemovalRefused(t *testing.T) {
+	w := newWorld(t)
+	jl, jc := w.jurisdiction(), w.jurisdiction() // jc: no floor
+	w.rgFloors(jl, map[string]string{"wager": "1000"}, "00:00:02", false)
+	tid := w.tenant("under_platform_licence")
+	b := w.brand(tid)
+	w.licence(jl, "platform", tid)
+	w.widen(KindOperatingBasisSet, noLicence(tid, nil, jc, 30), "documented_basis")
+	p := w.seedResident(tid, b, bCountry)
+	c := rgPlayerCalls{w, tid, p}
+	var o rg.Options
+	if err := w.rt.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
+		var e error
+		o, e = rg.ReadOptions(ctx, tx, tid, p.id, eur)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantUnavailableOptions(t, o, rg.OptionUnavailableMissingFloor, rg.ControlWager)
+	w24 := optionOf(t, o, rg.ControlWager)
+	if len(w24.AllowedPeriods) != len(rg.PeriodKinds) {
+		t.Fatalf("the protective periods are those of the jurisdiction that has a floor: %v", w24.AllowedPeriods)
+	}
+	for _, k := range []rg.ControlKind{rg.ControlDeposit, rg.ControlLoss} {
+		if l := optionOf(t, o, k); l.UnavailableReason == "" || len(l.AllowedPeriods) != len(rg.PeriodKinds) {
+			t.Fatalf("%s: %+v", k, l)
+		}
+	}
+	// First limit (initial) on an offered period, then a decrease: accepted at once. The ceiling of the floored jurisdiction still applies.
+	if _, err := c.set(rg.ControlWager, w24.AllowedPeriods[0], str("5000")); err == nil {
+		t.Fatal("the ceiling of the jurisdiction that has a floor keeps applying to a first limit")
+	}
+	if r, err := c.set(rg.ControlWager, w24.AllowedPeriods[0], str("500")); err != nil || r.Change.ChangeKind != rg.ChangeInitial {
+		t.Fatalf("a first protective limit must be accepted: %+v / %v", r.Change, err)
+	}
+	if r, err := c.set(rg.ControlWager, w24.AllowedPeriods[0], str("300")); err != nil || r.Change.ChangeKind != rg.ChangeDecrease {
+		t.Fatalf("a decrease must be accepted: %+v / %v", r.Change, err)
+	}
+	_, err := c.set(rg.ControlWager, w24.AllowedPeriods[0], str("400"))
+	wantRefusal(t, "increase", err, rg.RefusedConfigMissing)
+	_, err = c.set(rg.ControlWager, w24.AllowedPeriods[0], nil)
+	wantRefusal(t, "removal", err, rg.RefusedConfigMissing)
+}
+
+// A calendar conflict also leaves the protective periods and the first-limit / decrease paths open.
+func TestLic28_CalendarConflict_ProtectivePeriodsAndWritesStillWork(t *testing.T) {
+	w := newWorld(t)
+	ja, jb := w.jurisdiction(), w.jurisdiction()
+	w.rgFloorsTZ(ja, nil, "00:00:02", false, "UTC")
+	w.rgFloorsTZ(jb, nil, "00:00:02", false, "Etc/GMT+5")
+	tid := w.tenant("under_platform_licence")
+	b := w.brand(tid)
+	w.licence(ja, "platform", tid)
+	w.widen(KindOperatingBasisSet, noLicence(tid, nil, jb, 30), "documented_basis")
+	p := w.seedResident(tid, b, bCountry)
+	c := rgPlayerCalls{w, tid, p}
+	var o rg.Options
+	if err := w.rt.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
+		var e error
+		o, e = rg.ReadOptions(ctx, tx, tid, p.id, eur)
+		return e
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantUnavailableOptions(t, o, rg.OptionUnavailableCalendarConflict, rg.ControlDeposit)
+	l := optionOf(t, o, rg.ControlDeposit)
+	if len(l.AllowedPeriods) != len(rg.PeriodKinds) {
+		t.Fatalf("protective periods under a calendar conflict: %v", l.AllowedPeriods)
+	}
+	if _, err := c.set(rg.ControlDeposit, l.AllowedPeriods[0], str("50")); err != nil {
+		t.Fatalf("a first limit is accepted under a calendar conflict: %v", err)
+	}
+	if r, err := c.set(rg.ControlDeposit, l.AllowedPeriods[0], str("40")); err != nil || r.Change.ChangeKind != rg.ChangeDecrease {
+		t.Fatalf("a decrease is accepted under a calendar conflict: %+v / %v", r.Change, err)
 	}
 }
