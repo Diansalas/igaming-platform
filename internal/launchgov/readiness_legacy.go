@@ -2,6 +2,7 @@ package launchgov
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,6 +31,12 @@ const (
 
 	RefsRiskLegacyJurisdictionScoped = "risk_rules_legacy_jurisdiction_scoped"
 	RefsRiskLegacyDepositOperation   = "risk_rules_legacy_deposit_operation"
+
+	// lic23 (SN-1): the number of jurisdictions R-KYC-POLICY evaluated (licence + approved bases), and the jurisdiction ids with no
+	// active policy at all (the check fails) or with some operation dormant (ok_partial_operations_dormant).
+	InfoKYCJurisdictionsEvaluated = "kyc_policy_jurisdictions_evaluated"
+	RefsKYCDormantJurisdictions   = "kyc_policy_dormant_jurisdictions"
+	RefsKYCPartialJurisdictions   = "kyc_policy_partial_jurisdictions"
 
 	// MaxRefsPerKey bounds the rule ids returned per Refs key; the Info count is always the full count.
 	MaxRefsPerKey = 50
@@ -155,7 +162,8 @@ func riskRulesLegacyFrom(rules []riskLegacyRule, r *Readiness) Check {
 }
 
 // kycPolicyCheck is R-KYC-POLICY (audit G9, ADR 0096 s3.2). KYC thresholds are read from kyc_enforcement_policies
-// keyed by the tenant's LICENCE jurisdiction (never a player signal). With no licence bound, or with no ACTIVE policy
+// keyed by a jurisdiction (never a player signal): lic23 (SN-1) evaluates the tenant's LICENCE jurisdiction AND the jurisdictions of
+// its approved operating bases, each separately; the check fails when any of them has no active policy. With no licence bound, or with no ACTIVE policy
 // for that jurisdiction, every evaluation resolves not_required (dormant): no cumulative-deposit threshold and no play
 // gate applies. Only the structural rule "a withdrawal needs a passed KYC" and the market gate's verified-residence
 // precondition remain. Launching an active tenant in that state is a default-allow the approver must see.
@@ -174,15 +182,20 @@ func (s *Service) kycPolicyCheck(ctx context.Context, tx pgx.Tx, in EvalInput, r
 	if err != nil {
 		return ck(CheckKYCPolicy, ResultNotEvaluable, "read_error")
 	}
-	var deposit, casino, sports int64
-	jid, err := licenceJurisdiction(ctx, sp, in.Subject.TenantID)
-	if err == nil && jid != nil {
+	// lic23 (SN-1): the set of jurisdictions whose rulebook can govern a scope of this tenant: its licence jurisdiction UNION the
+	// jurisdictions of its approved, in-force operating bases (a basis-governed scope uses the basis jurisdiction's KYC policies,
+	// lic14). Each one is checked.
+	var perJur []kycJurisdictionCounts
+	jurs, err := governedJurisdictions(ctx, sp, in.Subject.TenantID)
+	for i := 0; err == nil && i < len(jurs); i++ {
+		c := kycJurisdictionCounts{ID: jurs[i]}
 		err = sp.QueryRow(ctx, `
 			SELECT count(*) FILTER (WHERE trigger_type = 'cumulative_deposit'),
 			       count(*) FILTER (WHERE trigger_type = 'play' AND play_operation = 'casino_play'),
 			       count(*) FILTER (WHERE trigger_type = 'play' AND play_operation = 'sportsbook_play')
 			  FROM kyc_enforcement_policies
-			 WHERE licensing_jurisdiction_id = $1 AND status = 'active'`, *jid).Scan(&deposit, &casino, &sports)
+			 WHERE licensing_jurisdiction_id = $1 AND status = 'active'`, jurs[i]).Scan(&c.Deposit, &c.Casino, &c.Sports)
+		perJur = append(perJur, c)
 	}
 	if err != nil {
 		_ = sp.Rollback(ctx)
@@ -191,15 +204,112 @@ func (s *Service) kycPolicyCheck(ctx context.Context, tx pgx.Tx, in EvalInput, r
 	if err := sp.Commit(ctx); err != nil {
 		return ck(CheckKYCPolicy, ResultNotEvaluable, "read_error")
 	}
+	check, dormant, partial := kycPolicyFromSet(perJur)
 	if r != nil {
 		if r.Info == nil {
 			r.Info = map[string]int64{}
 		}
-		r.Info[InfoKYCActiveDeposit] = deposit
-		r.Info[InfoKYCActiveCasinoPlay] = casino
-		r.Info[InfoKYCActiveSportsbookPlay] = sports
+		// The Info counts are the MINIMUM over the evaluated jurisdictions (so any dormant jurisdiction shows as 0); with one
+		// jurisdiction (the licence-only tenant) they are exactly that jurisdiction's counts, as before.
+		var dep, cas, spo int64
+		for i, c := range perJur {
+			if i == 0 || c.Deposit < dep {
+				dep = c.Deposit
+			}
+			if i == 0 || c.Casino < cas {
+				cas = c.Casino
+			}
+			if i == 0 || c.Sports < spo {
+				spo = c.Sports
+			}
+		}
+		r.Info[InfoKYCActiveDeposit], r.Info[InfoKYCActiveCasinoPlay], r.Info[InfoKYCActiveSportsbookPlay] = dep, cas, spo
+		r.Info[InfoKYCJurisdictionsEvaluated] = int64(len(perJur))
+		if len(dormant) > 0 || len(partial) > 0 {
+			if r.Refs == nil {
+				r.Refs = map[string][]string{}
+			}
+			if len(dormant) > 0 {
+				r.Refs[RefsKYCDormantJurisdictions] = capIDs(dormant)
+			}
+			if len(partial) > 0 {
+				r.Refs[RefsKYCPartialJurisdictions] = capIDs(partial)
+			}
+		}
 	}
-	return kycPolicyFrom(jid != nil, deposit, casino, sports)
+	return check
+}
+
+// kycJurisdictionCounts is the number of ACTIVE policies per evaluated operation for one jurisdiction.
+type kycJurisdictionCounts struct {
+	ID                      uuid.UUID
+	Deposit, Casino, Sports int64
+}
+
+// kycPolicyFromSet is the pure aggregate (unit-tested without a database): the check fails when the set is empty or when ANY
+// jurisdiction has no active policy for any evaluated operation; it passes (partial) when every jurisdiction has at least one but
+// some operation is dormant somewhere; otherwise ok. dormant / partial list the jurisdiction ids (display data) per class.
+func kycPolicyFromSet(perJur []kycJurisdictionCounts) (check Check, dormant, partial []string) {
+	if len(perJur) == 0 {
+		return kycPolicyFrom(false, 0, 0, 0), nil, nil
+	}
+	worst := ""
+	for _, c := range perJur {
+		switch kycPolicyFrom(true, c.Deposit, c.Casino, c.Sports).DetailCode {
+		case "no_active_policy":
+			dormant = append(dormant, c.ID.String())
+			worst = "no_active_policy"
+		case "ok_partial_operations_dormant":
+			partial = append(partial, c.ID.String())
+			if worst == "" {
+				worst = "ok_partial_operations_dormant"
+			}
+		}
+	}
+	switch worst {
+	case "no_active_policy":
+		return ck(CheckKYCPolicy, ResultFail, "no_active_policy"), dormant, partial
+	case "ok_partial_operations_dormant":
+		return ck(CheckKYCPolicy, ResultPass, "ok_partial_operations_dormant"), dormant, partial
+	}
+	return ck(CheckKYCPolicy, ResultPass, "ok"), nil, nil
+}
+
+// governedJurisdictions is the set {the tenant's licence jurisdiction} UNION {the jurisdictions of its approved (executed change
+// request), active, in-force operating bases; a licence basis resolves through its licence}. A basis whose jurisdiction cannot be
+// read is an ERROR (not_evaluable), never an omission. Order: licence first, then by id.
+func governedJurisdictions(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]uuid.UUID, error) {
+	var out []uuid.UUID
+	seen := map[uuid.UUID]bool{}
+	lic, err := licenceJurisdiction(ctx, tx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if lic != nil {
+		out, seen[*lic] = append(out, *lic), true
+	}
+	rows, err := tx.Query(ctx, `SELECT DISTINCT COALESCE(b.jurisdiction_id, bl.jurisdiction_id)
+		  FROM operating_bases b LEFT JOIN licences bl ON bl.id = b.licence_id
+		 WHERE b.tenant_id = $1 AND b.status = 'active' AND b.change_request_id IS NOT NULL
+		   AND b.effective_from <= clock_timestamp() AND (b.effective_to IS NULL OR b.effective_to > clock_timestamp())
+		 ORDER BY 1`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var j *uuid.UUID
+		if err := rows.Scan(&j); err != nil {
+			return nil, err
+		}
+		if j == nil {
+			return nil, fmt.Errorf("launchgov: an operating basis has no readable jurisdiction")
+		}
+		if !seen[*j] {
+			out, seen[*j] = append(out, *j), true
+		}
+	}
+	return out, rows.Err()
 }
 
 // kycPolicyFrom is the pure part (unit-tested without a database).

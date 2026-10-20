@@ -126,13 +126,13 @@ func (m *MockScreeningProvider) answer(in ScreeningRequest, ref string) (Screeni
 		return ScreeningResult{}, ErrProviderRateLimited
 	case strings.HasPrefix(ref, MockMarkerConfirmed) && has(ListSanctions):
 		base.Outcome = OutcomeConfirmed
-		base.Matches = []ScreeningMatch{{List: ListSanctions, VendorMatchRef: "mock-match-1", Category: "synthetic"}}
+		base.Matches = []ScreeningMatch{{List: ListSanctions, VendorMatchRef: "mock-match-" + strings.TrimLeft(ref, "ABCDEFGHIJKLMNOPQRSTUVWXYZ-"), Category: "synthetic"}}
 	case strings.HasPrefix(ref, MockMarkerSanction) && has(ListSanctions):
 		base.Outcome = OutcomePotentialMatch
-		base.Matches = []ScreeningMatch{{List: ListSanctions, VendorMatchRef: "mock-match-1", Category: "synthetic"}}
+		base.Matches = []ScreeningMatch{{List: ListSanctions, VendorMatchRef: "mock-match-" + strings.TrimLeft(ref, "ABCDEFGHIJKLMNOPQRSTUVWXYZ-"), Category: "synthetic"}}
 	case strings.HasPrefix(ref, MockMarkerPEP) && has(ListPEP):
 		base.Outcome = OutcomePotentialMatch
-		base.Matches = []ScreeningMatch{{List: ListPEP, VendorMatchRef: "mock-match-1", Category: "synthetic"}}
+		base.Matches = []ScreeningMatch{{List: ListPEP, VendorMatchRef: "mock-match-" + strings.TrimLeft(ref, "ABCDEFGHIJKLMNOPQRSTUVWXYZ-"), Category: "synthetic"}}
 	default:
 		base.Outcome = OutcomeClear
 	}

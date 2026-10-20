@@ -510,10 +510,12 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			return fmt.Errorf("%w: the request or its subject changed during the claim, retry", ErrPayoutWithdrawalGateUnavailable)
 		}
 
-		// F4: a WD-RG-1 denial at dispatch PARKS the payout in the existing safe state: the request stays
-		// `approved` (hold in place, no attempt, no provider call, no KYC decision). The denying decision row,
-		// the staff-attributed denial audit and the alert commit; a staff member may re-submit once the cause is
-		// cleared (the gate is re-evaluated then) or reject the request (E5, the hold is released).
+		// F4: a dispatch-gate denial (WD-RG-1, or the lic11 withdrawal restriction policy, WD056) PARKS the payout in the existing
+		// safe state: the request stays `approved` (hold in place, no attempt, no provider call; this gate runs BEFORE the KYC /
+		// AML decision, so none is taken). The denying decision row, the staff-attributed denial audit and the alert commit; a
+		// staff member may re-submit once the cause is cleared (the gate is re-evaluated then) or reject the request (E5, the
+		// hold is released). The KYC / AML decision that follows parks too when only an outstanding automatic screening holds
+		// the person (lic18); see the screening-parked counter of the sweeper summary (lic23 N-9).
 		if !gateDecision.Allowed {
 			if err := withdrawal.RecordDispatchGateDecision(actx, tx, wr, withdrawal.DispatchStageDispatch, nil, gateDecision); err != nil {
 				return err

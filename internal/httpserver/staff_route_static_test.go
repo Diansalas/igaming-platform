@@ -274,9 +274,10 @@ func TestStaffRoutes_EveryMutatingRouteClassified(t *testing.T) {
 	// lic9 (migration 0180): +2 platform reads (operating bases list and get); filing uses the existing POST /v1/admin/licensing-changes.
 	// lic10 (L-20): +GET and +4 POST KYC enforcement policy routes (1 read, 4 mutating) = 244 routes, 147 mutating.
 	// lic10 (migration 0181, G8/Q21): +2 reads, +3 mutating residence maker-checker routes = 249 routes, 150 mutating; merged with lic9: 251 routes.
-	if mutating != 156 || len(staffRouteGolden) != 263 {
-		t.Errorf("golden table: %d routes, %d mutating; pinned 263 and 156", len(staffRouteGolden), mutating)
+	if mutating != 157 || len(staffRouteGolden) != 264 {
+		t.Errorf("golden table: %d routes, %d mutating; pinned 264 and 157", len(staffRouteGolden), mutating)
 		// lic11 (migration 0182): +8 withdrawal restriction policy routes (4 reads, 4 mutating): 259 routes, 154 mutating (summed with lic9 and lic10).
+		// lic23 (N-4): +1 mutating (POST .../requests/replace): 264 routes, 157 mutating.
 		// lic18: +2 reads, +2 mutating AML screening trigger-policy and officer-resolution routes: 263 routes, 156 mutating.
 	}
 }
