@@ -69,15 +69,21 @@ func ReadOptions(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, 
 	if err != nil {
 		return Options{}, err
 	}
-	jur, err := tenantJurisdiction(ctx, tx, tenantID)
+	sel, err := tenantReliance(ctx, tx, tenantID)
 	if err != nil {
 		return Options{}, err
 	}
 	out := Options{AssetCode: asset, EnforcementEnabled: on, SelfExclusionDays: append([]int(nil), DefaultSelfExclusionDays...)}
 	for _, k := range []ControlKind{ControlDeposit, ControlLoss, ControlWager} {
-		cfg, err := readUsageConfigFor(ctx, tx, jur, tenantID, acct.BrandID, k, &asset, nil)
+		cfg, err := readUsageConfigFor(ctx, tx, sel, tenantID, acct.BrandID, k, &asset, nil)
 		if err != nil {
 			return Options{}, err
+		}
+		if cfg.MissingFloors {
+			// lic25: a tenant with an approved basis must not be shown a partial truth (the options of the jurisdictions that do have a
+			// floor) while another jurisdiction it relies on has none: refused, never "no configuration". Limit setting, time-outs and
+			// self-exclusion do not depend on this read.
+			return Options{}, refuse(RefusedConfigMissing, "a jurisdiction the tenant relies on has no "+string(k)+" floor in force")
 		}
 		o := LimitOption{Kind: k, ConfigInForce: cfg.Found, Mandatory: cfg.Mandatory, Ceiling: cfg.Ceiling, Scope: cfg.Scope,
 			IncreaseCooldownSeconds: cfg.CooldownSeconds, AllowedPeriods: cfg.AllowedPeriods}
@@ -86,7 +92,7 @@ func ReadOptions(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, 
 		}
 		out.Limits = append(out.Limits, o)
 	}
-	to, err := composeConfig(ctx, tx, jur, tenantID, acct.BrandID, ControlTimeOut, nil)
+	to, err := composeConfig(ctx, tx, sel, tenantID, acct.BrandID, ControlTimeOut, nil)
 	if err != nil {
 		return Options{}, err
 	}

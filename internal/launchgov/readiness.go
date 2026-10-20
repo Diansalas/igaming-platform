@@ -15,7 +15,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/marketgate"
-	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 )
 
@@ -625,7 +624,8 @@ func cfgs2currencies(raw [][]byte) []string {
 //
 //   - RG limit enforcement is switched ON for it (a tenant-wide activation row, or for a brand subject a row
 //     of that brand): rg_enforcement_activations, migration 0158;
-//   - for EVERY allowed currency of the referenced jurisdictions, a compliance floor is in force (not absent,
+//   - for EVERY allowed currency of the referenced jurisdictions AND of every jurisdiction the tenant relies on (lic25: its licence
+//     jurisdiction and the jurisdictions of its approved operating bases), a compliance floor is in force (not absent,
 //     not a synthetic row outside dev/test) for the deposit, loss and wager kinds, composed for the subject's
 //     tenant and brand; and
 //   - no session-duration control is enabled or mandatory (session enforcement is NOT BUILT: a
@@ -671,42 +671,35 @@ func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []s
 	if !activated {
 		return ck(CheckRGConfig, ResultFail, "enforcement_not_enabled")
 	}
-	// SR6R-1 (same gap as the activation guard): enforcement reads the LICENCE jurisdiction, which the request's
-	// JurisdictionIDs need not contain. Add it to the set, and fail when the tenant has none.
-	licJur, lerr := licenceJurisdiction(ctx, tx, in.Subject.TenantID)
-	if lerr != nil {
+	// SR6R-1 / lic25: limit selection follows EVERY jurisdiction the tenant relies on, which the request's JurisdictionIDs need not
+	// contain: its LICENCE jurisdiction and the jurisdictions of its approved, in-force operating bases (a basis-governed scope uses the
+	// basis jurisdiction's floors; account-level limit setting uses the strictest fold of all of them). All join the set, and a
+	// tenant that relies on none (no licence, no approved basis) fails: every action of it would be rg_config_missing.
+	gov, gerr := governedJurisdictions(ctx, tx, in.Subject.TenantID)
+	if gerr != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
-	if licJur == nil {
+	if len(gov) == 0 {
 		return ck(CheckRGConfig, ResultFail, "no_licence_jurisdiction")
 	}
-	in.JurisdictionIDs = append([]uuid.UUID(nil), in.JurisdictionIDs...)
-	have := false
-	for _, j := range in.JurisdictionIDs {
-		if j == *licJur {
-			have = true
+	in.JurisdictionIDs = unionIDs(in.JurisdictionIDs, gov)
+	return rgFloorChecks(ctx, tx, in, currencies, now)
+}
+
+// unionIDs appends to base (copied) the ids of extra that it does not hold yet.
+func unionIDs(base, extra []uuid.UUID) []uuid.UUID {
+	out := append([]uuid.UUID(nil), base...)
+	seen := map[uuid.UUID]bool{}
+	for _, id := range out {
+		seen[id] = true
+	}
+	for _, id := range extra {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
 		}
 	}
-	if !have {
-		in.JurisdictionIDs = append(in.JurisdictionIDs, *licJur)
-	}
-	c := rgFloorChecks(ctx, tx, in, currencies, now)
-	if c.Result != ResultPass {
-		return c
-	}
-	// lic23 (SN-3, ACKNOWLEDGEABLE note): RG floors, ceilings and limit options are selected by the tenant's LICENCE jurisdiction
-	// (internal/rg tenantJurisdiction; migration 0135's ceiling trigger). They are not yet scope-aware (country of the player,
-	// governing basis), so for a tenant that also has approved operating bases the floors checked above are the licence
-	// jurisdiction's, which may be weaker than a basis jurisdiction's. This is surfaced as a non-passing, acknowledgeable result
-	// (no new check, so SnapshotVersion is unchanged) until RG selection follows the governing basis like KYC does.
-	has, herr := operatingmarket.TenantHasApprovedBasis(ctx, tx, in.Subject.TenantID, now)
-	if herr != nil {
-		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
-	}
-	if has {
-		return ck(CheckRGConfig, ResultFail, "bases_present_licence_rulebook_only")
-	}
-	return c
+	return out
 }
 
 // rgFloorChecks is the part of R-RG-CONFIG that does not depend on the activation row: a compliance floor in force
@@ -890,20 +883,18 @@ func RGActivationReadiness(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, b
 	if rows.Err() != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
-	// SR6R-1: enforcement (rg.EvaluateAction) reads its floors from the LICENCE jurisdiction (tenants.licence_id ->
-	// licences.jurisdiction_id), not from the market configuration. The guard must be at least as strict as enforcement,
-	// so the licence jurisdiction joins the set (floors required there too), and a tenant with no licence jurisdiction is
-	// refused: every action of such a tenant would be rg_config_missing.
-	licJur, lerr := licenceJurisdiction(ctx, tx, tenantID)
-	if lerr != nil {
+	// SR6R-1 / lic25: enforcement and limit setting read their floors from every jurisdiction the tenant relies on (the licence
+	// jurisdiction, and the jurisdictions of its approved operating bases), not from the market configuration. The guard must be at least
+	// as strict as enforcement, so all of them join the set (floors required there too), and a tenant that relies on none is refused:
+	// every action of such a tenant would be rg_config_missing.
+	gov, gerr := governedJurisdictions(ctx, tx, tenantID)
+	if gerr != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
-	if licJur == nil {
+	if len(gov) == 0 {
 		return ck(CheckRGConfig, ResultFail, "no_licence_jurisdiction")
 	}
-	if !seen[*licJur] {
-		ids = append(ids, *licJur)
-	}
+	ids = unionIDs(ids, gov)
 	if len(raw) == 0 {
 		return ck(CheckRGConfig, ResultFail, "no_jurisdiction_referenced")
 	}

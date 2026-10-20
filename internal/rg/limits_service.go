@@ -38,8 +38,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
-	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
-	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // DefaultPendingCap is the engineering anti-abuse bound on a player's open pending changes
@@ -266,58 +264,6 @@ func loadAccount(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID) 
 	return playerAcct{ID: a.ID, TenantID: a.TenantID, BrandID: a.BrandID, PersonID: a.PersonID, Status: string(a.Status)}, nil
 }
 
-// A player session cannot read tenants / licences (their RLS keys on app.player_account_id being
-// unset), so, exactly as the migration-0135 trigger does (the 0121 / 0130 technique), the player GUC is
-// cleared for this one read and restored; the tenant id is the session's own.
-func tenantJurisdiction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*string, error) {
-	var player string
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(current_setting('app.player_account_id', true), '')`).Scan(&player); err != nil {
-		return nil, fmt.Errorf("rg: read player scope: %w", err)
-	}
-	if player != "" {
-		if _, err := tx.Exec(ctx, `SELECT set_config('app.player_account_id', '', true)`); err != nil {
-			return nil, fmt.Errorf("rg: clear player scope: %w", err)
-		}
-	}
-	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
-	// lic14 (H-1): a tenant with NO licence but with an approved operating basis must not read as "no configuration" (no ceiling,
-	// default-allow): the read happens while the player scope is cleared, as the bases are tenant-scoped rows.
-	hasBasis := false
-	if err == nil && chain.Outcome == jurisdiction.LicensingNoLicence {
-		var asOf time.Time
-		if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err == nil {
-			hasBasis, err = operatingmarket.TenantHasApprovedBasis(ctx, tx, tenantID, asOf)
-		}
-	}
-	if player != "" {
-		if _, rerr := tx.Exec(ctx, `SELECT set_config('app.player_account_id', $1, true)`, player); rerr != nil {
-			return nil, fmt.Errorf("rg: restore player scope: %w", rerr)
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("rg: tenant jurisdiction: %w", err)
-	}
-	switch chain.Outcome {
-	case jurisdiction.LicensingResolved:
-		code := chain.JurisdictionCode
-		return &code, nil
-	case jurisdiction.LicensingNoLicence:
-		if hasBasis {
-			return nil, fmt.Errorf("rg: tenant has an operating basis but no licence jurisdiction: the RG rulebook cannot be selected (fail closed, lic14)")
-		}
-		// Unchanged: no licence = no configuration (nil). With enforcement ON this
-		// is rg_config_missing (fail closed); with it off players set limits with
-		// no ceiling (G2 in docs/plans/licensing-audit-enforcement.md, readiness
-		// R-RG-CONFIG covers activation).
-		return nil, nil
-	default:
-		// licence_invalid (tenant not visible / dangling licence): previously
-		// folded into "no configuration" (fail-open for limit ceilings); now an
-		// error, so the caller refuses.
-		return nil, fmt.Errorf("rg: tenant licensing chain unusable: %s", chain.InvalidReason)
-	}
-}
-
 // ComposedConfig is the read-time composition of the configuration in force (strictest / UNION / OR),
 // as the SQL function rg_limit_config_compose returns it.
 type ComposedConfig struct {
@@ -330,37 +276,32 @@ type ComposedConfig struct {
 	Scope                string
 	AllowedDurationsAny  bool
 	AllowedDurationsSecs []int64
+	// MissingFloors (lic25): see UsageConfig.MissingFloors.
+	MissingFloors bool
 }
 
-func (l *Limits) compose(ctx context.Context, tx pgx.Tx, jur *string, tenantID, brandID uuid.UUID, kind ControlKind, asset *string) (ComposedConfig, error) {
-	return composeConfig(ctx, tx, jur, tenantID, brandID, kind, asset)
+func (l *Limits) compose(ctx context.Context, tx pgx.Tx, sel cfgSel, tenantID, brandID uuid.UUID, kind ControlKind, asset *string) (ComposedConfig, error) {
+	return composeConfig(ctx, tx, sel, tenantID, brandID, kind, asset)
 }
 
 // composeConfig is compose without the receiver (it uses no service state); the read-only options of the player's
-// RG screen (options.go) call it too.
-func composeConfig(ctx context.Context, tx pgx.Tx, jur *string, tenantID, brandID uuid.UUID, kind ControlKind, asset *string) (ComposedConfig, error) {
-	if jur == nil {
-		return ComposedConfig{}, nil
+// RG screen (options.go) call it too. sel names the jurisdictions to compose (lic25: the strictest fold of all of them).
+func composeConfig(ctx context.Context, tx pgx.Tx, sel cfgSel, tenantID, brandID uuid.UUID, kind ControlKind, asset *string) (ComposedConfig, error) {
+	if len(sel.Codes) == 0 {
+		return ComposedConfig{MissingFloors: sel.Strict && sel.Incomplete}, nil
 	}
-	var c ComposedConfig
-	var enabled, mandatory, none, anyDur *bool
-	var scope *string
-	err := tx.QueryRow(ctx, `SELECT found, version_ids, enabled, mandatory, ceiling::text, ceiling_none, allowed_periods, scope,
-			allowed_durations_any,
-			(SELECT array_agg(extract(epoch FROM x)::bigint ORDER BY x) FROM unnest(allowed_durations) AS x)
-		FROM rg_limit_config_compose($1, $2, $3, $4, $5, clock_timestamp())`,
-		*jur, tenantID, brandID, string(kind), asset,
-	).Scan(&c.Found, &c.VersionIDs, &enabled, &mandatory, &c.Ceiling, &none, &c.AllowedPeriods, &scope, &anyDur, &c.AllowedDurationsSecs)
+	r, missing, _, err := readCombined(ctx, tx, sel, tenantID, brandID, kind, asset, nil)
 	if err != nil {
-		return ComposedConfig{}, fmt.Errorf("rg: compose configuration: %w", err)
+		return ComposedConfig{}, err
 	}
-	if !c.Found {
-		return ComposedConfig{}, nil
+	if !r.Found {
+		return ComposedConfig{MissingFloors: missing}, nil
 	}
-	c.Enabled, c.Mandatory = deref(enabled), deref(mandatory)
-	c.CeilingNone, c.AllowedDurationsAny = deref(none), deref(anyDur)
-	if scope != nil {
-		c.Scope = *scope
+	c := ComposedConfig{Found: true, VersionIDs: r.VersionIDs, Enabled: deref(r.Enabled), Mandatory: deref(r.Mandatory), Ceiling: r.Ceiling,
+		CeilingNone: deref(r.CeilingNone), AllowedPeriods: r.Periods, AllowedDurationsAny: deref(r.DurationsAny),
+		AllowedDurationsSecs: r.DurationsSecs, MissingFloors: missing}
+	if r.Scope != nil {
+		c.Scope = *r.Scope
 	}
 	return c, nil
 }
@@ -517,7 +458,7 @@ func (l *Limits) apply(ctx context.Context, tx pgx.Tx, c changeCtx) (res ChangeR
 		return replayOrMismatch(prior, c.hash)
 	}
 
-	jur, err := tenantJurisdiction(ctx, tx, c.acct.TenantID)
+	sel, err := tenantReliance(ctx, tx, c.acct.TenantID)
 	if err != nil {
 		return ChangeResult{}, err
 	}
@@ -525,7 +466,7 @@ func (l *Limits) apply(ctx context.Context, tx pgx.Tx, c changeCtx) (res ChangeR
 	scope := LimitScopeAccount
 	if c.supersedes == nil {
 		value = c.in.Value
-		cfg, err = l.compose(ctx, tx, jur, c.acct.TenantID, c.acct.BrandID, c.in.Kind, c.in.AssetCode)
+		cfg, err = l.compose(ctx, tx, sel, c.acct.TenantID, c.acct.BrandID, c.in.Kind, c.in.AssetCode)
 		if err != nil {
 			return ChangeResult{}, err
 		}
@@ -536,7 +477,8 @@ func (l *Limits) apply(ctx context.Context, tx pgx.Tx, c changeCtx) (res ChangeR
 	key := c.limitKey(scope)
 
 	for attempt := 0; ; attempt++ {
-		cp := ClassifyParams{Key: key, BrandID: c.acct.BrandID, JurisdictionCode: jur, Value: value, Source: c.source}
+		cp := ClassifyParams{Key: key, BrandID: c.acct.BrandID, JurisdictionCodes: nonNilCodes(sel.Codes), JurisdictionIncomplete: sel.Strict && sel.Incomplete,
+			Value: value, Source: c.source}
 		if c.supersedes != nil {
 			id, intent := c.supersedes.ID, c.intent
 			cp.Supersedes, cp.Intent = &id, &intent
@@ -562,6 +504,17 @@ func (l *Limits) apply(ctx context.Context, tx pgx.Tx, c changeCtx) (res ChangeR
 			}
 		}
 		if cl.ChangeKind == ChangeConfirm {
+			// lic25: a confirm completes an INCREASE or a removal; it is refused while a relied-on jurisdiction has no floor in force
+			// (the same rule the classification applies to the request itself). A cancel and a decrease are never refused for it.
+			if sel.Strict {
+				ccfg, cerr := l.compose(ctx, tx, sel, c.acct.TenantID, c.acct.BrandID, c.supersedes.Kind, c.supersedes.AssetCode)
+				if cerr != nil {
+					return ChangeResult{}, cerr
+				}
+				if ccfg.MissingFloors {
+					return ChangeResult{}, refuse(RefusedConfigMissing, "")
+				}
+			}
 			// Security F1: a confirm LOOSENS the limit. A person-level limit is not confirmable from an
 			// account under identity review, and only the account that made the request confirms it.
 			if key.Scope == LimitScopeTenantPerson && c.acct.Status == "identity_review_required" {
@@ -885,4 +838,11 @@ func CurrentLimits(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID
 		out = append(out, st)
 	}
 	return out, rows.Err()
+}
+
+func nonNilCodes(c []string) []string {
+	if c == nil {
+		return []string{}
+	}
+	return c
 }
