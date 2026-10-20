@@ -299,17 +299,17 @@ func TestMigration0100_PlatformServiceScopeCannotWritePolicy(t *testing.T) {
 func TestMigration0100_GenuinePlatformAdminCanWriteAndProvenanceMatches(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	principal := uuid.New()
+	principal := polAdmin(t, pool)
 
 	var id uuid.UUID
 	var createdBy uuid.UUID
 	err := pool.WithPlatformAdmin(context.Background(), principal, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'test', 'platform_admin', $2)
-			RETURNING id, created_by_actor_id`,
-			jurisdictionID, principal).Scan(&id, &createdBy)
+		var err error
+		id, err = rawDraftPolicy(ctx, tx, principal, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, "", "test")
+		if err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT created_by_actor_id FROM kyc_enforcement_policies WHERE id = $1`, id).Scan(&createdBy)
 	})
 	if err != nil {
 		t.Fatalf("expected a genuine platform-admin write to succeed, got: %v", err)
@@ -396,25 +396,13 @@ func TestMigration0100_DecisionsTableAppendOnly(t *testing.T) {
 func TestMigration0100_PolicyLifecycleTransitions(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator := uuid.New()
-	activator := uuid.New()
+	creator, activator, withdrawer := polAdmin(t, pool), polAdmin(t, pool), polAdmin(t, pool)
 
-	var id uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'legal-ref-1', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, creator).Scan(&id)
-	})
-	if err != nil {
-		t.Fatalf("seed draft policy: %v", err)
-	}
+	id := rawDraft(t, pool, creator, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, "legal-ref-1")
 
 	// Same-principal activation must be refused (four-eyes).
-	err = pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1`, id)
-		return err
+	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
+		return rawTransition(ctx, tx, creator, id, "draft", "active", nil)
 	})
 	if err == nil {
 		t.Fatal("expected the creator activating their own draft to be refused (four-eyes)")
@@ -422,8 +410,7 @@ func TestMigration0100_PolicyLifecycleTransitions(t *testing.T) {
 
 	// A different principal activating succeeds.
 	err = pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1`, id)
-		return err
+		return rawTransition(ctx, tx, activator, id, "draft", "active", nil)
 	})
 	if err != nil {
 		t.Fatalf("expected a different principal's activation to succeed: %v", err)
@@ -438,37 +425,22 @@ func TestMigration0100_PolicyLifecycleTransitions(t *testing.T) {
 		t.Fatal("expected active -> draft to be refused")
 	}
 
-	// Security F3 (ADR 0096 §17.3, migration 0103): active -> withdrawn
-	// with NO superseded_by_policy_id is refused, even by a different
-	// principal.
-	withdrawer := uuid.New()
+	// Security F3 (ADR 0096 section 17.3, migration 0103): active -> withdrawn with NO superseded_by_policy_id is refused, even
+	// by a different principal.
 	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'withdrawn' WHERE id = $1`, id)
-		return err
+		return rawTransition(ctx, tx, withdrawer, id, "active", "withdrawn", nil)
 	})
 	if err == nil {
 		t.Fatal("expected active -> withdrawn with no superseded_by_policy_id to be refused (security F3)")
 	}
 
-	// active -> withdrawn WITH a genuine, active, key-matching successor
-	// named in the SAME transaction succeeds.
-	var successorID uuid.UUID
-	err = pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 200, 'EUR', 'legal-ref-2', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, creator).Scan(&successorID)
-	})
-	if err != nil {
-		t.Fatalf("seed successor draft policy: %v", err)
-	}
+	// active -> withdrawn WITH a genuine, active, key-matching successor named in the SAME transaction succeeds.
+	successorID := rawDraft(t, pool, creator, jurisdictionID, "cumulative_deposit", "200", "EUR", nil, nil, "legal-ref-2")
 	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'withdrawn', superseded_by_policy_id = $2 WHERE id = $1`, id, successorID); err != nil {
+		if err := rawTransition(ctx, tx, withdrawer, id, "active", "withdrawn", &successorID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1`, successorID)
-		return err
+		return rawTransition(ctx, tx, withdrawer, successorID, "draft", "active", nil)
 	})
 	if err != nil {
 		t.Fatalf("expected active -> withdrawn with a genuine same-transaction successor to succeed: %v", err)
@@ -492,28 +464,18 @@ func TestMigration0100_PolicyLifecycleTransitions(t *testing.T) {
 func TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator, activator := uuid.New(), uuid.New()
+	creator, activator := polAdmin(t, pool), polAdmin(t, pool)
 
-	var oldID uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'legal-ref-old', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, creator).Scan(&oldID)
-	})
-	if err != nil {
-		t.Fatalf("seed draft policy: %v", err)
-	}
+	oldID := rawDraft(t, pool, creator, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, "legal-ref-old")
 	if err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
-		return ActivateEnforcementPolicy(ctx, tx, oldID)
+		return ActivateEnforcementPolicy(ctx, tx, oldID, pol("fixture_activate"))
 	}); err != nil {
 		t.Fatalf("activate old policy: %v", err)
 	}
 
-	withdrawer, newCreator, newActivator := uuid.New(), uuid.New(), uuid.New()
+	withdrawer, newCreator, newActivator := polAdmin(t, pool), polAdmin(t, pool), polAdmin(t, pool)
 	var newID uuid.UUID
-	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		newID, err = SupersedeEnforcementPolicy(ctx, tx, SupersedeEnforcementPolicyParams{
 			WithdrawID: oldID, WithdrawFromStatus: "active", WithdrawnBy: withdrawer,
@@ -522,7 +484,7 @@ func TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement(t *test
 				ThresholdMinorUnits: strPtr("200000"), AssetCode: strPtr("EUR"),
 				LegalReviewReference: "legal-ref-new", ReasonCode: "test",
 			},
-			CreatedBy: newCreator, ActivatedBy: newActivator,
+			CreatedBy: newCreator, ActivatedBy: newActivator, Proof: polSigner, ReasonCode: "fixture_supersede",
 		})
 		return err
 	})
@@ -555,27 +517,17 @@ func TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement(t *test
 func TestSupersedeEnforcementPolicy_RollsBackAtomically(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator, activator := uuid.New(), uuid.New()
+	creator, activator := polAdmin(t, pool), polAdmin(t, pool)
 
-	var oldID uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'legal-ref-old2', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, creator).Scan(&oldID)
-	})
-	if err != nil {
-		t.Fatalf("seed draft policy: %v", err)
-	}
+	oldID := rawDraft(t, pool, creator, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, "legal-ref-old2")
 	if err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
-		return ActivateEnforcementPolicy(ctx, tx, oldID)
+		return ActivateEnforcementPolicy(ctx, tx, oldID, pol("fixture_activate"))
 	}); err != nil {
 		t.Fatalf("activate old policy: %v", err)
 	}
 
-	withdrawer := uuid.New()
-	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
+	withdrawer := polAdmin(t, pool)
+	err := pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := SupersedeEnforcementPolicy(ctx, tx, SupersedeEnforcementPolicyParams{
 			WithdrawID: oldID, WithdrawFromStatus: "active", WithdrawnBy: withdrawer,
 			NewPolicy: CreateEnforcementPolicyParams{
@@ -586,7 +538,7 @@ func TestSupersedeEnforcementPolicy_RollsBackAtomically(t *testing.T) {
 			// Same principal creates and activates - the four-eyes trigger
 			// must refuse this, and the whole transaction (including the
 			// withdrawal of oldID) must roll back with it.
-			CreatedBy: withdrawer, ActivatedBy: withdrawer,
+			CreatedBy: withdrawer, ActivatedBy: withdrawer, Proof: polSigner, ReasonCode: "fixture_supersede",
 		})
 		return err
 	})
@@ -612,25 +564,18 @@ func TestSupersedeEnforcementPolicy_RollsBackAtomically(t *testing.T) {
 func TestMigration0100_ActivatingUnwiredTriggerTypeRefused(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator := uuid.New()
+	creator, activator := polAdmin(t, pool), polAdmin(t, pool)
 
-	var id uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, required_tier, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'registration_tier', 'draft', 'basic', 'legal-ref-2', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, creator).Scan(&id)
-	})
-	if err != nil {
-		t.Fatalf("seed draft registration_tier policy: %v", err)
-	}
+	id := rawDraft(t, pool, creator, jurisdictionID, "registration_tier", nil, nil, "basic", nil, "legal-ref-2")
 
-	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1`, id)
-		return err
+	// A valid proof by a different Person: it is the evaluator-wired rule that must refuse, not the proof.
+	err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
+		return rawTransition(ctx, tx, activator, id, "draft", "active", nil)
 	})
 	if err == nil {
 		t.Fatal("expected activating a registration_tier (evaluator-unwired) row to be refused")
+	}
+	if !strings.Contains(err.Error(), "evaluator-wired") {
+		t.Fatalf("the refusal must be the evaluator-wired rule, got: %v", err)
 	}
 }

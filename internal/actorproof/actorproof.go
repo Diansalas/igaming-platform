@@ -168,6 +168,14 @@ const (
 	OpWithdrawalRestrictionReject  = "withdrawal_restriction_policy:reject"
 	OpWithdrawalRestrictionCancel  = "withdrawal_restriction_policy:cancel"
 	OpWithdrawalRestrictionExecute = "withdrawal_restriction_policy:execute"
+
+	// lic19 (migration 0185, S4): the KYC enforcement policy writes (kyc_enforcement_policies). Provable for scope platform (NULL
+	// tenant) only; the operation set is closed in lockstep with actor_proof_require. Supersede is the withdrawal of an ACTIVE
+	// policy naming its successor (the successor's own activation is an activate proof).
+	OpKYCPolicyCreate    = "kyc_enforcement_policy:create"
+	OpKYCPolicyActivate  = "kyc_enforcement_policy:activate"
+	OpKYCPolicyWithdraw  = "kyc_enforcement_policy:withdraw"
+	OpKYCPolicySupersede = "kyc_enforcement_policy:supersede"
 )
 
 // The fixed system actors (the SQL verifier pins the same uuids). Unexported values behind functions (closure security
@@ -248,6 +256,8 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: licensing_change operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, withdrawalRestrictionOperationPrefix) && !withdrawalRestrictionOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: withdrawal_restriction_policy operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, kycPolicyOperationPrefix) && !kycPolicyOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: kyc_enforcement_policy operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, staffLifecycleOperationPrefix) && !staffLifecycleOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: staff_lifecycle operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, payoutReversalOperationPrefix) && (c.Operation != OpPayoutReversalDecide || c.Scope != ScopeTenant):
@@ -270,7 +280,19 @@ func platformOperation(op string) bool {
 	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:") ||
 		strings.HasPrefix(op, launchOperationPrefix) || strings.HasPrefix(op, rgConfigOperationPrefix) ||
 		strings.HasPrefix(op, staffLifecycleOperationPrefix) || strings.HasPrefix(op, licensingChangeOperationPrefix) ||
-		strings.HasPrefix(op, withdrawalRestrictionOperationPrefix)
+		strings.HasPrefix(op, withdrawalRestrictionOperationPrefix) || strings.HasPrefix(op, kycPolicyOperationPrefix)
+}
+
+const kycPolicyOperationPrefix = "kyc_enforcement_policy:"
+
+// kycPolicyOperationAdmitted mirrors migration 0185's actor_proof_require block: the closed kyc_enforcement_policy operation
+// set, scope platform only.
+func kycPolicyOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpKYCPolicyCreate, OpKYCPolicyActivate, OpKYCPolicyWithdraw, OpKYCPolicySupersede:
+		return scope == ScopePlatform
+	}
+	return false
 }
 
 const withdrawalRestrictionOperationPrefix = "withdrawal_restriction_policy:"

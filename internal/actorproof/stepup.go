@@ -83,6 +83,11 @@ var StepUpOperations = map[string]stepup.Class{
 	// lic11 (migration 0182): filing, approving and executing a withdrawal restriction policy change (reject / cancel are
 	// protective). The routes POST /v1/admin/withdrawal-restriction-policy-changes and .../{changeID}/approve are critical
 	// in the golden table.
+	// lic19 (migration 0185): every KYC enforcement policy write is critical (the routes are critical in the golden table).
+	OpKYCPolicyCreate:              stepup.Critical,
+	OpKYCPolicyActivate:            stepup.Critical,
+	OpKYCPolicyWithdraw:            stepup.Critical,
+	OpKYCPolicySupersede:           stepup.Critical,
 	OpWithdrawalRestrictionRequest: stepup.Critical,
 	OpWithdrawalRestrictionApprove: stepup.Critical,
 	OpWithdrawalRestrictionExecute: stepup.Critical,

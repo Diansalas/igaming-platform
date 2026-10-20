@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/kycpolfix/seed"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 )
 
@@ -65,21 +66,9 @@ func (w *world) seedResident(tid, brand uuid.UUID, country string) resident {
 // depositPolicy activates a cumulative-deposit KYC policy for the jurisdiction (two principals: creator and activator).
 func (w *world) depositPolicy(jid uuid.UUID) {
 	w.t.Helper()
-	var id uuid.UUID
 	thr, asset := "100000", "EUR"
-	if err := w.rt.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		id, err = kyc.CreateEnforcementPolicy(ctx, tx, kyc.CreateEnforcementPolicyParams{LicensingJurisdictionID: jid, TriggerType: "cumulative_deposit",
-			ThresholdMinorUnits: &thr, AssetCode: &asset, LegalReviewReference: "test-legal-ref", ReasonCode: "test"})
-		return err
-	}); err != nil {
-		w.t.Fatal(err)
-	}
-	if err := w.rt.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		return kyc.ActivateEnforcementPolicy(ctx, tx, id)
-	}); err != nil {
-		w.t.Fatal(err)
-	}
+	seed.Active(w.t, w.rt, kyc.CreateEnforcementPolicyParams{LicensingJurisdictionID: jid, TriggerType: "cumulative_deposit",
+		ThresholdMinorUnits: &thr, AssetCode: &asset, LegalReviewReference: "test-legal-ref", ReasonCode: "test"})
 }
 
 func (w *world) kycDeposit(tid, brand uuid.UUID, p resident) kyc.EnforcementDecision {

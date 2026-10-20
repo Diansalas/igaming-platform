@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/kycpolfix/seed"
 )
 
 // spyKYCGate is the mutation-kill instrument for "reject Amount <= 0
@@ -65,7 +67,6 @@ func seedActiveDepositEnforcementPolicy(t *testing.T, pool *db.Pool, thresholdMi
 	t.Helper()
 	jurisdictionID := uuid.New()
 	creator := uuid.New()
-	activator := uuid.New()
 
 	if err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'PRH-I1 cutover test jurisdiction')`,
@@ -75,30 +76,8 @@ func seedActiveDepositEnforcementPolicy(t *testing.T, pool *db.Pool, thresholdMi
 		t.Fatalf("seed jurisdiction: %v", err)
 	}
 
-	var policyID uuid.UUID
-	if err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code,
-				 legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', $2, $3, 'LR-PRH-I1', 'prh-i1-cutover-test', 'platform_admin', $4)
-			RETURNING id`, jurisdictionID, thresholdMinorUnits, assetCode, creator).Scan(&policyID)
-	}); err != nil {
-		t.Fatalf("seed draft enforcement policy: %v", err)
-	}
-
-	if err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1 AND status = 'draft'`, policyID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			t.Fatalf("expected to activate exactly 1 policy row, activated %d", tag.RowsAffected())
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("activate enforcement policy: %v", err)
-	}
+	seed.Active(t, pool, kyc.CreateEnforcementPolicyParams{LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
+		ThresholdMinorUnits: &thresholdMinorUnits, AssetCode: &assetCode, LegalReviewReference: "LR-PRH-I1", ReasonCode: "prh-i1-cutover-test"})
 	return jurisdictionID
 }
 

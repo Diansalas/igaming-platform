@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/kycpolicyproof"
 )
 
 // ErrTransactionScope is returned when tx is not a genuinely
@@ -54,6 +55,30 @@ type CreateEnforcementPolicyParams struct {
 	ReasonCode              string
 	// Audit carries the request evidence (IP, user agent, request id) the admin route supplies; nil for library callers.
 	Audit *AuditMeta
+	// Proof signs the ADR 0110 proof the database requires for a creation (lic19, S4). Required: nil is refused before any write.
+	Proof PolicyProof
+}
+
+// PolicyContent and PolicyTransition are what the proofs are bound to (defined in the leaf signer package).
+type (
+	PolicyContent    = kycpolicyproof.PolicyContent
+	PolicyTransition = kycpolicyproof.PolicyTransition
+)
+
+// PolicyProof signs and attaches the ADR 0110 proof for one policy write (lic19, S4). kyc does not import the issuer: the
+// implementation lives in internal/kycpolicyproof (a pinned signer owner). The actor is the platform-admin principal of tx.
+type PolicyProof interface {
+	AttachCreate(ctx context.Context, tx pgx.Tx, actor uuid.UUID, c PolicyContent) error
+	AttachTransition(ctx context.Context, tx pgx.Tx, actor uuid.UUID, t PolicyTransition) error
+}
+
+// ErrPolicyProofRequired: a policy write was attempted without a proof signer. The database would refuse it anyway.
+var ErrPolicyProofRequired = errors.New("kyc: a signed actor proof is required for a policy write (no proof signer supplied)")
+
+// PolicyWrite carries the proof signer and the reason code of a transition.
+type PolicyWrite struct {
+	Proof      PolicyProof
+	ReasonCode string
 }
 
 // AuditMeta is the request evidence an HTTP caller adds to the audit record of a policy write (CLAUDE.md: every mutating
@@ -63,6 +88,16 @@ type AuditMeta struct {
 	IPAddress  string
 	UserAgent  string
 	RequestID  string
+	// Proof signs the proof of a status change (lic19, S4); ReasonCode above is the reason code the proof is bound to.
+	Proof PolicyProof
+}
+
+// write is the proof-carrying view of the evidence for a transition.
+func (m *AuditMeta) write() PolicyWrite {
+	if m == nil {
+		return PolicyWrite{}
+	}
+	return PolicyWrite{Proof: m.Proof, ReasonCode: m.ReasonCode}
 }
 
 // CreateEnforcementPolicy authors a new DRAFT kyc_enforcement_policies
@@ -79,7 +114,16 @@ func CreateEnforcementPolicy(ctx context.Context, tx pgx.Tx, p CreateEnforcement
 	if strings.TrimSpace(p.ReasonCode) == "" {
 		return uuid.Nil, fmt.Errorf("%w: reason_code is required", ErrPolicyInvalidInput)
 	}
+	if p.Proof == nil {
+		return uuid.Nil, ErrPolicyProofRequired
+	}
 
+	// The proof is attached right before the write it covers; the database trigger consumes it in this transaction.
+	if err := p.Proof.AttachCreate(ctx, tx, principal, PolicyContent{LicensingJurisdictionID: p.LicensingJurisdictionID, TriggerType: p.TriggerType,
+		ThresholdMinorUnits: p.ThresholdMinorUnits, AssetCode: p.AssetCode, RequiredTier: p.RequiredTier, PlayOperation: p.PlayOperation,
+		LegalReviewReference: p.LegalReviewReference, ReasonCode: p.ReasonCode}); err != nil {
+		return uuid.Nil, fmt.Errorf("kyc: attach proof: %w", err)
+	}
 	var id uuid.UUID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO kyc_enforcement_policies
@@ -128,15 +172,28 @@ func CreateEnforcementPolicy(ctx context.Context, tx pgx.Tx, p CreateEnforcement
 // illegal - this function adds no duplicate business logic, only the
 // audit record. successorID is NULL for every transition except
 // active->withdrawn done via SupersedeEnforcementPolicy.
-func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string, successorID *uuid.UUID) error {
-	return transitionEnforcementPolicyMeta(ctx, tx, id, fromStatus, toStatus, action, successorID, nil)
+func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string, successorID *uuid.UUID, w PolicyWrite) error {
+	return transitionEnforcementPolicyMeta(ctx, tx, id, fromStatus, toStatus, action, successorID, nil, w)
 }
 
 // transitionEnforcementPolicyMeta is transitionEnforcementPolicy with optional request evidence (the admin routes).
-func transitionEnforcementPolicyMeta(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string, successorID *uuid.UUID, meta *AuditMeta) error {
+func transitionEnforcementPolicyMeta(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string, successorID *uuid.UUID, meta *AuditMeta, w PolicyWrite) error {
 	principal, err := assertPlatformAdminScope(ctx, tx)
 	if err != nil {
 		return err
+	}
+	if w.Proof == nil {
+		return ErrPolicyProofRequired
+	}
+	if !ValidPolicyReasonCode(w.ReasonCode) {
+		return fmt.Errorf("%w: reason_code must be a code of 1..64 characters [A-Za-z0-9_.:-]", ErrPolicyInvalidInput)
+	}
+	// The reason code travels in a single-use transaction-local setting the trigger folds into the verified hash.
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.kyc_policy_reason_code', $1, true)`, w.ReasonCode); err != nil {
+		return fmt.Errorf("kyc: set reason code: %w", err)
+	}
+	if err := w.Proof.AttachTransition(ctx, tx, principal, PolicyTransition{ID: id, From: fromStatus, To: toStatus, Successor: successorID, ReasonCode: w.ReasonCode}); err != nil {
+		return fmt.Errorf("kyc: attach proof: %w", err)
 	}
 	tag, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = $1, superseded_by_policy_id = $4 WHERE id = $2 AND status = $3`, toStatus, id, fromStatus, successorID)
 	if err != nil {
@@ -175,8 +232,8 @@ func transitionEnforcementPolicyMeta(ctx context.Context, tx pgx.Tx, id uuid.UUI
 // by a DIFFERENT platform-admin principal than the one who created the
 // row (migration 0100's lifecycle trigger enforces this at the
 // database).
-func ActivateEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-	return transitionEnforcementPolicy(ctx, tx, id, "draft", "active", "kyc_enforcement_policy.activated", nil)
+func ActivateEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, w PolicyWrite) error {
+	return transitionEnforcementPolicy(ctx, tx, id, "draft", "active", "kyc_enforcement_policy.activated", nil, w)
 }
 
 // WithdrawEnforcementPolicy withdraws a draft or active row, WITHOUT
@@ -192,8 +249,8 @@ func ActivateEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID) err
 // standalone way to withdraw an active policy and leave the key with no
 // active successor; SupersedeEnforcementPolicy below is the only path
 // the database accepts for that transition.
-func WithdrawEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus string) error {
-	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn", nil)
+func WithdrawEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus string, w PolicyWrite) error {
+	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn", nil, w)
 }
 
 // withdrawEnforcementPolicyWithSuccessor is SupersedeEnforcementPolicy's
@@ -201,8 +258,8 @@ func WithdrawEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fro
 // that transitions the row to 'withdrawn'. Migration 0103's deferred
 // constraint trigger confirms, at commit time, that successorID is by
 // then 'active' and shares the withdrawn row's enforcement key.
-func withdrawEnforcementPolicyWithSuccessor(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus string, successorID uuid.UUID) error {
-	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn", &successorID)
+func withdrawEnforcementPolicyWithSuccessor(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus string, successorID uuid.UUID, w PolicyWrite) error {
+	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn", &successorID, w)
 }
 
 // SupersedeEnforcementPolicyParams is SupersedeEnforcementPolicy's input.
@@ -222,6 +279,9 @@ type SupersedeEnforcementPolicyParams struct {
 	// ActivatedBy is the principal activating the replacement - must
 	// differ from CreatedBy (migration 0100's trigger enforces this).
 	ActivatedBy uuid.UUID
+	// Proof signs the three steps (lic19, S4); ReasonCode is the reason of the withdrawal and the activation.
+	Proof      PolicyProof
+	ReasonCode string
 }
 
 // SupersedeEnforcementPolicy withdraws an existing policy row and
@@ -249,6 +309,9 @@ func SupersedeEnforcementPolicy(ctx context.Context, tx pgx.Tx, p SupersedeEnfor
 	if err := setActingPrincipal(ctx, tx, p.CreatedBy); err != nil {
 		return uuid.Nil, err
 	}
+	if p.NewPolicy.Proof == nil {
+		p.NewPolicy.Proof = p.Proof
+	}
 	newID, err := CreateEnforcementPolicy(ctx, tx, p.NewPolicy)
 	if err != nil {
 		return uuid.Nil, err
@@ -257,14 +320,14 @@ func SupersedeEnforcementPolicy(ctx context.Context, tx pgx.Tx, p SupersedeEnfor
 	if err := setActingPrincipal(ctx, tx, p.WithdrawnBy); err != nil {
 		return uuid.Nil, err
 	}
-	if err := withdrawEnforcementPolicyWithSuccessor(ctx, tx, p.WithdrawID, p.WithdrawFromStatus, newID); err != nil {
+	if err := withdrawEnforcementPolicyWithSuccessor(ctx, tx, p.WithdrawID, p.WithdrawFromStatus, newID, PolicyWrite{Proof: p.Proof, ReasonCode: p.ReasonCode}); err != nil {
 		return uuid.Nil, err
 	}
 
 	if err := setActingPrincipal(ctx, tx, p.ActivatedBy); err != nil {
 		return uuid.Nil, err
 	}
-	if err := ActivateEnforcementPolicy(ctx, tx, newID); err != nil {
+	if err := ActivateEnforcementPolicy(ctx, tx, newID, PolicyWrite{Proof: p.Proof, ReasonCode: p.ReasonCode}); err != nil {
 		return uuid.Nil, err
 	}
 	return newID, nil
@@ -303,28 +366,4 @@ func readPolicyAfterState(ctx context.Context, tx pgx.Tx, id uuid.UUID) (map[str
 		return nil, err
 	}
 	return policyAfterState(trigger, status, threshold, asset, tier, play, legal != nil && *legal != "", successor), nil
-}
-
-// ErrPolicyPersonNotDistinct: the acting platform administrator is the same Person as the policy's author (lic18 S4). The database
-// four-eyes rule compares staff accounts; two accounts of one Person would satisfy it, so this compares Persons.
-var ErrPolicyPersonNotDistinct = errors.New("kyc: four-eyes: the activating administrator is the same Person as the policy's author")
-
-// requirePersonDistinctFromAuthor refuses when the acting principal and the author of policy id are linked to the same Person.
-// Where either staff account has no Person link the check cannot compare and the database's per-account rule alone applies
-// (recorded limit: staff_users.person_id is optional). It runs BEFORE the transition so nothing is written on a refusal.
-func requirePersonDistinctFromAuthor(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-	actor, err := assertPlatformAdminScope(ctx, tx)
-	if err != nil {
-		return err
-	}
-	var same bool
-	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT a.person_id FROM staff_users a WHERE a.id = $2)
-			= (SELECT c.person_id FROM kyc_enforcement_policies p JOIN staff_users c ON c.id = p.created_by_actor_id WHERE p.id = $1), false)`,
-		id, actor).Scan(&same); err != nil {
-		return fmt.Errorf("kyc: person-distinct check: %w", err)
-	}
-	if same {
-		return ErrPolicyPersonNotDistinct
-	}
-	return nil
 }

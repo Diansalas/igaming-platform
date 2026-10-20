@@ -41,6 +41,9 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 		// lic11 (migration 0182): filing, approving and executing a withdrawal restriction policy change.
 		"withdrawal_restriction_policy:request": stepup.Critical, "withdrawal_restriction_policy:approve": stepup.Critical,
 		"withdrawal_restriction_policy:execute": stepup.Critical,
+		// lic19 (migration 0185): every KYC enforcement policy write.
+		"kyc_enforcement_policy:create": stepup.Critical, "kyc_enforcement_policy:activate": stepup.Critical,
+		"kyc_enforcement_policy:withdraw": stepup.Critical, "kyc_enforcement_policy:supersede": stepup.Critical,
 	}
 	if len(StepUpOperations) != len(want) {
 		t.Fatalf("registry has %d operations, ADR 0119 section 9.1 pins %d", len(StepUpOperations), len(want))

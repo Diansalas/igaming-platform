@@ -27,6 +27,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/kycpolicyproof"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
@@ -93,8 +94,9 @@ func writeKYCPolicyError(w http.ResponseWriter, c kycEnfReq, op string, err erro
 	case errors.Is(err, kyc.ErrNotFound):
 		apierror.Write(w, c.requestID, apierror.CodeNotFound, "enforcement policy not found")
 		return
-	case errors.Is(err, kyc.ErrPolicyPersonNotDistinct):
-		apierror.Write(w, c.requestID, apierror.CodeForbidden, "four-eyes: a different platform administrator than the policy's author must make this change")
+	case errors.Is(err, kyc.ErrPolicyProofRequired):
+		c.logger.Error("kyc enforcement policy write without a proof signer", "op", op)
+		apierror.Write(w, c.requestID, apierror.CodeInternal, "failed to change the enforcement policy")
 		return
 	case errors.Is(err, kyc.ErrPolicyInvalidInput):
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "the policy is not in the state this action needs")
@@ -103,6 +105,10 @@ func writeKYCPolicyError(w http.ResponseWriter, c kycEnfReq, op string, err erro
 	switch kyc.ClassifyPolicyError(err) {
 	case kyc.PolicyFailureFourEyes:
 		apierror.Write(w, c.requestID, apierror.CodeForbidden, "four-eyes: a different platform administrator than the policy's author must make this change")
+	case kyc.PolicyFailureNoPerson:
+		apierror.Write(w, c.requestID, apierror.CodeForbidden, "the administrator or the policy's author is not linked to a Person, so four-eyes cannot be established")
+	case kyc.PolicyFailureProof:
+		apierror.Write(w, c.requestID, apierror.CodeForbidden, "the signed actor proof was rejected")
 	case kyc.PolicyFailureNotWired:
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "this trigger type is not evaluator-wired and cannot be activated")
 	case kyc.PolicyFailureNeedsSuccess:
@@ -202,6 +208,7 @@ func newCreateKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 			LicensingJurisdictionID: jur, TriggerType: req.TriggerType, ThresholdMinorUnits: req.ThresholdMinorUnits, AssetCode: req.AssetCode,
 			PlayOperation: req.PlayOperation, LegalReviewReference: req.LegalReviewReference, ReasonCode: req.ReasonCode,
 			Audit: &kyc.AuditMeta{ReasonCode: req.ReasonCode, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID},
+			Proof: kycpolicyproof.Signer{},
 		}
 		if err := kyc.ValidatePolicyInput(params); err != nil {
 			apierror.Write(w, c.requestID, apierror.CodeValidation, err.Error())
@@ -286,7 +293,7 @@ func newActivateKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		meta := &kyc.AuditMeta{ReasonCode: reason, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID}
+		meta := &kyc.AuditMeta{ReasonCode: reason, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID, Proof: kycpolicyproof.Signer{}}
 		runKYCPolicyTransition(deps, w, r, c, "activate", id, meta, func(ctx context.Context, tx pgx.Tx) error {
 			return kyc.ActivateEnforcementPolicyAudited(ctx, tx, id, meta)
 		})
@@ -309,7 +316,7 @@ func newWithdrawKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		meta := &kyc.AuditMeta{ReasonCode: reason, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID}
+		meta := &kyc.AuditMeta{ReasonCode: reason, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID, Proof: kycpolicyproof.Signer{}}
 		runKYCPolicyTransition(deps, w, r, c, "withdraw", id, meta, func(ctx context.Context, tx pgx.Tx) error {
 			return kyc.WithdrawDraftEnforcementPolicyAudited(ctx, tx, id, meta)
 		})
@@ -342,7 +349,7 @@ func newSupersedeKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, c.requestID, apierror.CodeValidation, "reason_code must be a code of 1..64 characters [A-Za-z0-9_.:-]")
 			return
 		}
-		meta := &kyc.AuditMeta{ReasonCode: req.ReasonCode, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID}
+		meta := &kyc.AuditMeta{ReasonCode: req.ReasonCode, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID, Proof: kycpolicyproof.Signer{}}
 		runKYCPolicyTransition(deps, w, r, c, "supersede", succ, meta, func(ctx context.Context, tx pgx.Tx) error {
 			return kyc.SupersedeEnforcementPolicyWithDraft(ctx, tx, id, succ, meta)
 		})

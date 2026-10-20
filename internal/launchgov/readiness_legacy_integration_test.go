@@ -13,6 +13,8 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/risk"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/kycpolfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/kycpolfix/seed"
 )
 
 // Lic7: R-RISK-RULES-LEGACY (ledger-finance condition C1) and R-KYC-POLICY (audit G9). Every readiness read below runs through
@@ -209,19 +211,7 @@ func (w *world) kycPolicy(jid uuid.UUID, trigger string, playOp *string) uuid.UU
 		th, asset := "100000", "EUR"
 		p.ThresholdMinorUnits, p.AssetCode = &th, &asset
 	}
-	var id uuid.UUID
-	if err := w.owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		id, err = kyc.CreateEnforcementPolicy(ctx, tx, p)
-		return err
-	}); err != nil {
-		w.t.Fatalf("create kyc policy: %v", err)
-	}
-	if err := w.owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		return kyc.ActivateEnforcementPolicy(ctx, tx, id)
-	}); err != nil {
-		w.t.Fatalf("activate kyc policy: %v", err)
-	}
+	id := seed.Active(w.t, w.owner, p)
 	return id
 }
 
@@ -246,12 +236,7 @@ func TestReadiness_KYCPolicy_DormantUntilAnActivePolicyExistsForTheLicenceJurisd
 	// a DRAFT policy is not active: still dormant
 	casino, sports := "casino_play", "sportsbook_play"
 	draft := kyc.CreateEnforcementPolicyParams{LicensingJurisdictionID: ja, TriggerType: "play", PlayOperation: &casino, LegalReviewReference: "x", ReasonCode: "lic7_test"}
-	if err := w.owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := kyc.CreateEnforcementPolicy(ctx, tx, draft)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seed.Draft(t, w.owner, kycpolfix.Admin(t, w.owner), draft)
 	wantLic7(t, "draft only", lic7CheckOf(t, w.readinessOf(subA, ja), launchgov.CheckKYCPolicy), launchgov.ResultFail, "no_active_policy")
 
 	// another jurisdiction's active policy does not count for tenant A; tenant B (that jurisdiction) is satisfied
