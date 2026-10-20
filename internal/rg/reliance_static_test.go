@@ -59,8 +59,8 @@ func TestLic25_Static_EnforcementUsesTheScopedSelection_AndAccountLevelReadsTheR
 		}
 	}
 	// Both selections run inside the clear/restore wrapper.
-	if strings.Count(rel, "withPlayerScopeCleared(ctx, tx, func() error {") < 3 {
-		t.Error("tenantReliance, scopedSelection and licenceCodeOf must each clear and restore the player scope")
+	if strings.Count(rel, "withPlayerScopeCleared(ctx, tx, func() error {") < 2 {
+		t.Error("tenantReliance and scopedSelection must each clear and restore the player scope")
 	}
 }
 

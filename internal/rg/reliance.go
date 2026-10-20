@@ -97,16 +97,6 @@ func licenceCode(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*string, e
 	}
 }
 
-// licenceCodeOf is licenceCode for a tx whose player scope is not cleared yet.
-func licenceCodeOf(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (code *string, err error) {
-	err = withPlayerScopeCleared(ctx, tx, func() error {
-		var e error
-		code, e = licenceCode(ctx, tx, tenantID)
-		return e
-	})
-	return code, err
-}
-
 // tenantReliance returns the set of every jurisdiction the tenant relies on: the licence jurisdiction plus the jurisdictions of its
 // approved, active, in-force operating bases. The tenant id is the session's own (asserted by every read).
 func tenantReliance(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (cfgSel, error) {
