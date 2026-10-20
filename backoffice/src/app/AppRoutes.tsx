@@ -30,6 +30,7 @@ import { KillSwitchPage } from '../features/killswitch/KillSwitchPage'
 import { LaunchQueuePage } from '../features/launch/LaunchQueuePage'
 import { AmlPage } from '../features/aml/AmlPage'
 import { CaseDetailPage } from '../features/aml/CaseDetailPage'
+import { ScreeningPage } from '../features/aml/ScreeningPage'
 import { ParkedPaymentsPage } from '../features/payments/ParkedPaymentsPage'
 import { ReconciliationPage } from '../features/reconciliation/ReconciliationPage'
 import { CapabilityGrantsPage } from '../features/capability/CapabilityGrantsPage'
@@ -194,6 +195,14 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission="amlRead">
               <AmlPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="aml/screening"
+          element={
+            <RequireNavPermission permission="amlRead">
+              <ScreeningPage />
             </RequireNavPermission>
           }
         />

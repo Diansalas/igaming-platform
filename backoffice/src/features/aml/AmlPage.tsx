@@ -49,6 +49,9 @@ export function AmlPage() {
     <div className="flex flex-col gap-4">
       <PageHeader title="AML" description="Cases and holds. Officer access only; every action is checked and logged by the server." />
       <ConfidentialityBanner />
+      <p className="text-sm">
+        <Link className="text-brand-700 hover:underline" to="/aml/screening">Automatic screening: trigger policy and screening requests</Link>
+      </p>
       {picker}
       {tenantId === '' && <p className="text-sm text-slate-500">Choose a tenant to work its AML queue.</p>}
       {tenantId !== '' && (
