@@ -104,3 +104,13 @@ bash <scratchpad>/priv_test.sh -tags integration -count=1 -p 1 ./internal/licens
 go test ./...
 ```
 `TestMigration0183_UpDownUp_Snapshot` bases on 0182 and tolerates its absence, so it needs no change when lic11 merges.
+
+## 9. Verification run by the author (private DB, dropped)
+
+PASS: `licensingchange`, `operatingmarket`, `launchgov`, `marketgate`, `kyc`, `rg`, `payoutinstrument`, `casino`, `sportsbook`, `withdrawal`,
+`jurisdiction`. `internal/db`: two failures that are NOT from this slice and concern lic10's `residence_*` tables only
+(`TestK2G1_ActingSessionRowVisibilityMatchesAllowlist`, `TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31`:
+`residence_approval_policies`, `residence_approval_policy_approvals`, `residence_determination_checks` are on neither allowlist); they need
+lic10/integ-a to extend those pins. `payments`: no test failed, but the package did not finish inside a 45 minute `-timeout` (stopped in
+`TestM4_Scope_DBAndGo`); INCONCLUSIVE, please run it on your side. Unit tests of the touched packages pass; `go vet` plain and
+`-tags integration` clean.
