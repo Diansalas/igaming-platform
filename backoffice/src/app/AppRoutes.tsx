@@ -44,6 +44,14 @@ import { ChangeDetailPage } from '../features/licensing/ChangeDetailPage'
 import { OperatingBasesPage, TenantOperatingBasesPage } from '../features/licensing/OperatingBasesPage'
 import { OperatingBasisDetailPage } from '../features/licensing/OperatingBasisDetailPage'
 import { TenantLicensingPage } from '../features/licensing/TenantLicensingPage'
+import { KycPoliciesPage } from '../features/policies/KycPoliciesPage'
+import { ResidencePage } from '../features/policies/ResidencePage'
+import {
+  WithdrawalRestrictionChangeDetailPage,
+  WithdrawalRestrictionChangesPage,
+  WithdrawalRestrictionTenantPage,
+  WithdrawalRestrictionsHome,
+} from '../features/policies/WithdrawalRestrictionPages'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
 
@@ -109,6 +117,54 @@ export function AppRoutes() {
           <Route path="changes/:changeId" element={<ChangeDetailPage />} />
           <Route path="tenants/:tenantId" element={<TenantLicensingPage />} />
         </Route>
+        <Route
+          path="kyc-policies"
+          element={
+            <RequireNavPermission permission="kycPolicyRead">
+              <KycPoliciesPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="residence-approval"
+          element={
+            <RequireNavPermission permission="residencePolicyRead">
+              <ResidencePage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions"
+          element={
+            <RequireNavPermission permission="wrpRead">
+              <WithdrawalRestrictionsHome />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions/tenants/:tenantId"
+          element={
+            <RequireNavPermission permission="wrpRead">
+              <WithdrawalRestrictionTenantPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions/changes"
+          element={
+            <RequireNavPermission permission="wrpChange">
+              <WithdrawalRestrictionChangesPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions/changes/:changeId"
+          element={
+            <RequireNavPermission permission="wrpChange">
+              <WithdrawalRestrictionChangeDetailPage />
+            </RequireNavPermission>
+          }
+        />
         <Route
           path="launch-queue"
           element={

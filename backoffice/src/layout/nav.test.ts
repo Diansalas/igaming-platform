@@ -67,7 +67,7 @@ describe('buildNavItems', () => {
     // Casino Catalogue mirrors PermCasinoCatalogueManage (platform_admin only).
     // Alerts mirrors alert:manage (platform_admin only; ADR 0114 S1).
     // AML mirrors aml_case:read (ADR 0116 A7); the ADR 0114 consoles follow.
-    expect(items).toEqual(['Tenants', 'Licensing', 'Launch Queue', 'Alerts', 'Payment Kill Switch', 'AML', 'Parked Payments', 'Force Resolutions', 'Hold Release', 'Reconciliation', 'Capability Grants', 'Casino Catalogue', 'Platform Audit Log'])
+    expect(items).toEqual(['Tenants', 'Licensing', 'KYC Policies', 'Withdrawal Restrictions', 'Launch Queue', 'Alerts', 'Payment Kill Switch', 'AML', 'Parked Payments', 'Force Resolutions', 'Hold Release', 'Reconciliation', 'Capability Grants', 'Casino Catalogue', 'Platform Audit Log'])
   })
 
   it('gives tenant_admin the Providers & Games configuration page but never the platform catalogue', () => {
@@ -81,7 +81,7 @@ describe('buildNavItems', () => {
     const items = buildNavItems({ ...baseClaims, role: 'compliance' }).map((i) => i.label)
     // 'My Tenant': own-tenant read since ADR 0112 slice 6 (b) (brand discovery for the launch panel).
     // 'AML' mirrors aml_case:read (compliance and platform_admin only; ADR 0116 A7).
-    expect(items).toEqual(['My Tenant', 'Players', 'KYC', 'AML', 'Responsible Gaming', 'Bonus', 'Parked Payments', 'Force Resolutions', 'Reconciliation', 'Capability Grants', 'Sportsbook', 'Casino', 'Audit Log'])
+    expect(items).toEqual(['My Tenant', 'Players', 'KYC', 'Residence Approval', 'AML', 'Responsible Gaming', 'Bonus', 'Withdrawal Restrictions', 'Parked Payments', 'Force Resolutions', 'Reconciliation', 'Capability Grants', 'Sportsbook', 'Casino', 'Audit Log'])
   })
 
   it('never gives finance configuration or catalogue pages', () => {
@@ -95,5 +95,16 @@ describe('buildNavItems', () => {
       buildNavItems({ ...baseClaims, role, tenant_id: platform ? '00000000-0000-0000-0000-000000000000' : baseClaims.tenant_id }).map((i) => i.label)
     expect(labels('platform_admin', true)).toContain('Licensing')
     for (const r of ['tenant_admin', 'compliance', 'finance', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations']) expect(labels(r)).not.toContain('Licensing')
+  })
+
+  it('lic16: the policy entries appear for exactly the roles the server permits (UI hint only)', () => {
+    const labels = (role: string, platform = false) =>
+      buildNavItems({ ...baseClaims, role, tenant_id: platform ? '00000000-0000-0000-0000-000000000000' : baseClaims.tenant_id }).map((i) => i.label)
+    const NEW = ['KYC Policies', 'Residence Approval', 'Withdrawal Restrictions']
+    const only = (items: string[]) => items.filter((l) => NEW.includes(l))
+    expect(only(labels('platform_admin', true))).toEqual(['KYC Policies', 'Withdrawal Restrictions'])
+    expect(only(labels('tenant_admin'))).toEqual(['Residence Approval', 'Withdrawal Restrictions'])
+    expect(only(labels('compliance'))).toEqual(['Residence Approval', 'Withdrawal Restrictions'])
+    for (const r of ['finance', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations']) expect(only(labels(r))).toEqual([])
   })
 })
