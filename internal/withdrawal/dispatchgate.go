@@ -171,6 +171,19 @@ func RecordDispatchGateDecision(ctx context.Context, tx pgx.Tx, wr WithdrawalReq
 			rAction = &a
 		}
 	}
+	if d.Restriction == nil {
+		// No provenance: a fixture decision, or a schema older than 0182 (lic17: the up / down / up migration tests), where the
+		// 0182 columns do not exist. Omitting them is the same row as naming them with NULLs on a 0182+ schema.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_gate_decisions
+			     (tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code, risk_outcome, restriction_in_force)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			wr.TenantID, wr.ID, attemptID, string(stage), d.Allowed, gateCode, reason, outcome, restriction,
+		); err != nil {
+			return fmt.Errorf("withdrawal: record dispatch gate decision: %w", err)
+		}
+		return nil
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO withdrawal_gate_decisions
 		     (tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code, risk_outcome, restriction_in_force,

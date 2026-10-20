@@ -297,3 +297,15 @@ func TestLic11_Static_Placement(t *testing.T) {
 		t.Fatal("the restriction provenance must be assigned after the gate returns")
 	}
 }
+
+// lic17: on a schema older than 0182 (no policy can exist) the decision is the pre-0182 behaviour and carries NO provenance,
+// so RecordDispatchGateDecision writes the pre-0182 column list; it never refuses.
+func TestLic17_SchemaAbsent_NoProvenance(t *testing.T) {
+	d := RestrictionDecision{Stage: RestrictionStageDispatch, Action: RestrictionAllow, Source: RestrictionSourceNone, SchemaAbsent: true}
+	if d.Provenance() != nil || d.Refuses() || d.assertRecordable() != nil {
+		t.Fatalf("schema-absent decision: %+v", d)
+	}
+	if (RestrictionDecision{Stage: RestrictionStageDispatch, Action: RestrictionAllow, Source: RestrictionSourceNone}).Provenance() == nil {
+		t.Fatal("a 0182+ decision always carries provenance")
+	}
+}

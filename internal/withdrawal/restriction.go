@@ -147,6 +147,9 @@ type RestrictionDecision struct {
 	// LicenceUnknown: the licences relied on could not be evaluated and the tenant has NO policy row, so the decision is the
 	// interim default (allow) with licence state unknown. With a policy row an evaluation failure is an error instead.
 	LicenceUnknown bool
+	// SchemaAbsent: the database predates migration 0182 (no policy can exist; the up / down / up migration tests). The
+	// decision is the pre-0182 behaviour and carries no provenance (the 0182 columns do not exist).
+	SchemaAbsent bool
 }
 
 // LicenceStateUnknown is the recorded licence state when the reliance could not be evaluated (lic17 F-4).
@@ -157,6 +160,9 @@ func (d RestrictionDecision) Refuses() bool { return d.Action != RestrictionAllo
 
 // Provenance is the recordable form (withdrawal_gate_decisions columns, audit metadata).
 func (d RestrictionDecision) Provenance() *withdrawalgate.RestrictionProvenance {
+	if d.SchemaAbsent {
+		return nil
+	}
 	return &withdrawalgate.RestrictionProvenance{Source: d.Source, SetVersion: d.SetVersion, Cause: string(d.DecidingCause), Action: string(d.Action)}
 }
 
@@ -377,6 +383,21 @@ func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.
 	}
 	if tenantID == uuid.Nil {
 		return RestrictionDecision{}, fmt.Errorf("%w: tenant id is required", ErrInvalidInput)
+	}
+	// A schema older than migration 0182 has no policy at all (the up / down / up migration tests run the request path on a
+	// rolled-back schema; lic14 tolerates a pre-0180 schema the same way): 0182 creates the policy table and the functions
+	// together, so with NEITHER present no configured restriction can exist and the decision is exactly the pre-0182 behaviour
+	// (no evaluation, allow, source none). A partial schema (the table without the function, or the reverse) fails closed.
+	var fnPresent, tablePresent bool
+	if err := tx.QueryRow(ctx, `SELECT to_regprocedure('public.withdrawal_restriction_set_version(uuid)') IS NOT NULL,
+		to_regclass('public.withdrawal_restriction_policies') IS NOT NULL`).Scan(&fnPresent, &tablePresent); err != nil {
+		return RestrictionDecision{}, fmt.Errorf("withdrawal: probe the restriction policy schema: %w", err)
+	}
+	if fnPresent != tablePresent {
+		return RestrictionDecision{}, errors.New("withdrawal: the restriction policy schema is partial (table and function disagree)")
+	}
+	if !fnPresent {
+		return RestrictionDecision{Stage: stage, Action: RestrictionAllow, Source: RestrictionSourceNone, SchemaAbsent: true}, nil
 	}
 	// The set version first, through the session-bound function (0184 M-3: a mis-scoped session is an error here, never
 	// "nothing configured").
