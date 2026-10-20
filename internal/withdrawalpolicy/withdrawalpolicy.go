@@ -265,11 +265,15 @@ func ActionRank(s string) int {
 	return -1
 }
 
-// IsWidening mirrors withdrawal_restriction_is_widening (the database stays authoritative): the new action is less strict
-// than the current effective action at any stage.
+// IsWidening mirrors withdrawal_restriction_is_widening (migration 0184; the database stays authoritative): the new action is
+// less strict than the current effective action at any stage, OR (lic17 F-2) the new action is allow while the source at any
+// stage is still default_unconfigured (the first configured allow is a decision to allow: four-eyes).
 func IsWidening(newAction string, current []StageEffect) bool {
 	for _, st := range current {
 		if ActionRank(newAction) < ActionRank(st.Action) {
+			return true
+		}
+		if newAction == ActionAllow && st.Source == SourceDefault {
 			return true
 		}
 	}

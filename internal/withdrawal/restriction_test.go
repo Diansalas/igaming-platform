@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,33 +14,114 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
 
-// lic11: every licence state maps to exactly one cause (or none for a valid licence); an unknown state fails closed.
-func TestLic11_LicenceCause_Mapping(t *testing.T) {
+// lic11 / lic17 (M-2): every licence validity maps to exactly one cause, none (valid) or UNKNOWN (the row is not visible / not
+// bound: a readability statement, never licence_missing). CHANGED ASSERTION (lic17 M-2, intentional): LicenceNotFound and the
+// LicensingInvalid chain were licence_missing before; they are now "unknown" (fail closed with a policy, allow+unknown without).
+func TestLic11_ValidityCause_Mapping(t *testing.T) {
 	for _, c := range []struct {
-		chain    jurisdiction.LicensingOutcome
 		validity jurisdiction.LicenceValidity
 		want     RestrictionCause
+		unknown  bool
 	}{
-		{jurisdiction.LicensingResolved, jurisdiction.LicenceValid, ""},
-		{jurisdiction.LicensingResolved, jurisdiction.LicenceSuspended, CauseLicenceSuspended},
-		{jurisdiction.LicensingResolved, jurisdiction.LicenceStatusExpired, CauseLicenceExpired},
-		{jurisdiction.LicensingResolved, jurisdiction.LicenceDateExpired, CauseLicenceExpired},
-		{jurisdiction.LicensingResolved, jurisdiction.LicenceNotYetIssued, CauseLicenceNotYetIssued},
-		{jurisdiction.LicensingResolved, jurisdiction.LicenceNotFound, CauseLicenceMissing},
-		{jurisdiction.LicensingResolved, jurisdiction.LicenceNotBound, CauseLicenceMissing},
-		{jurisdiction.LicensingNoLicence, "", CauseLicenceMissing},
-		{jurisdiction.LicensingInvalid, "", CauseLicenceMissing},
+		{jurisdiction.LicenceValid, "", false},
+		{jurisdiction.LicenceSuspended, CauseLicenceSuspended, false},
+		{jurisdiction.LicenceStatusExpired, CauseLicenceExpired, false},
+		{jurisdiction.LicenceDateExpired, CauseLicenceExpired, false},
+		{jurisdiction.LicenceNotYetIssued, CauseLicenceNotYetIssued, false},
+		{jurisdiction.LicenceNotFound, "", true},
+		{jurisdiction.LicenceNotBound, "", true},
 	} {
-		got, state, err := licenceCause(c.chain, c.validity)
-		if err != nil || got != c.want || state == "" {
-			t.Fatalf("%s/%s: want %q, got %q (state %q, err %v)", c.chain, c.validity, c.want, got, state, err)
+		got, unk, err := validityCause(c.validity)
+		if err != nil || got != c.want || unk != c.unknown {
+			t.Fatalf("%s: want %q unknown=%v, got %q unknown=%v err=%v", c.validity, c.want, c.unknown, got, unk, err)
 		}
 	}
-	if _, _, err := licenceCause(jurisdiction.LicensingResolved, "revoked"); !errors.Is(err, ErrRestrictionUnknownLicenceState) {
+	if _, _, err := validityCause("revoked"); !errors.Is(err, ErrRestrictionUnknownLicenceState) {
 		t.Fatalf("an unknown licence state must fail closed, got %v", err)
 	}
-	if _, _, err := licenceCause("mystery", jurisdiction.LicenceValid); !errors.Is(err, ErrRestrictionUnknownLicenceState) {
-		t.Fatalf("an unknown chain outcome must fail closed, got %v", err)
+}
+
+// lic17 F-4 static pin: validityCause covers EVERY jurisdiction.LicenceValidity constant declared in licence_validity.go, and the
+// licences.status vocabulary the validity evaluation maps (active / suspended / expired) is the only one any migration declares.
+func TestLic17_Static_ValidityCauseCoversEveryValidityAndStatus(t *testing.T) {
+	src := readSrc(t, "internal/jurisdiction/licence_validity.go")
+	consts := regexp.MustCompile(`(?m)^\s+Licence\w+\s+LicenceValidity = "([a-z_]+)"`).FindAllStringSubmatch(src, -1)
+	if len(consts) < 7 {
+		t.Fatalf("expected the LicenceValidity constants, found %d", len(consts))
+	}
+	for _, m := range consts {
+		if _, _, err := validityCause(jurisdiction.LicenceValidity(m[1])); err != nil {
+			t.Errorf("validityCause does not cover %q: %v", m[1], err)
+		}
+	}
+	for _, st := range []string{`case "suspended":`, `case "expired":`, `case "active":`} {
+		if !strings.Contains(src, st) {
+			t.Errorf("EvaluateLicenceValidity no longer maps %s", st)
+		}
+	}
+	ents, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusDecl := regexp.MustCompile(`(?is)(CREATE TABLE licences\b.*?status[^,]*CHECK \(status IN \(([^)]*)\)\))|(ALTER TABLE licences[^;]*status[^;]*CHECK[^;]*)`)
+	found := 0
+	for _, e := range ents {
+		if !strings.HasSuffix(e.Name(), ".up.sql") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("..", "..", "migrations", e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range statusDecl.FindAllStringSubmatch(string(b), -1) {
+			found++
+			if m[2] != "" && strings.ReplaceAll(m[2], " ", "") != "'active','suspended','expired'" {
+				t.Errorf("%s declares a licences.status vocabulary %s the restriction policy does not map", e.Name(), m[2])
+			}
+			if m[3] != "" {
+				t.Errorf("%s alters the licences.status CHECK: re-check validityCause and EvaluateLicenceValidity", e.Name())
+			}
+		}
+	}
+	if found == 0 {
+		t.Fatal("the licences.status declaration was not found (the scan is vacuous)")
+	}
+}
+
+// lic17 F-1: the reliance -> causes mapping. A tenant with NO licence and NO basis keeps licence_missing; a documented
+// no-licence basis alone contributes nothing; every relied licence counts (a suspended basis licence with a valid tenant
+// licence yields licence_suspended); an unreadable licence makes the whole reliance unknown.
+func TestLic17_ReliedCauses(t *testing.T) {
+	id := func() uuid.UUID { return uuid.New() }
+	causes, unk, err := reliedCauses(licenceReliance{})
+	if err != nil || unk || len(causes) != 1 || causes[CauseLicenceMissing] == "" {
+		t.Fatalf("no licence, no basis: licence_missing, got %v %v %v", causes, unk, err)
+	}
+	causes, unk, err = reliedCauses(licenceReliance{hasBasis: true})
+	if err != nil || unk || len(causes) != 0 {
+		t.Fatalf("documented basis only: no cause, got %v %v %v", causes, unk, err)
+	}
+	causes, unk, err = reliedCauses(licenceReliance{hasBasis: true, licences: []reliedLicence{
+		{id(), jurisdiction.LicenceValid}, {id(), jurisdiction.LicenceSuspended}, {id(), jurisdiction.LicenceDateExpired}}})
+	if err != nil || unk || len(causes) != 2 || causes[CauseLicenceSuspended] != "suspended" || causes[CauseLicenceExpired] != "date_expired" {
+		t.Fatalf("every relied licence counts, got %v %v %v", causes, unk, err)
+	}
+	if _, unk, _ = reliedCauses(licenceReliance{licences: []reliedLicence{{id(), jurisdiction.LicenceNotFound}}}); !unk {
+		t.Fatal("an unreadable licence is unknown")
+	}
+	if _, unk, _ = reliedCauses(licenceReliance{unknown: true}); !unk {
+		t.Fatal("an unreadable tenant licence binding is unknown (never licence_missing)")
+	}
+	if _, _, err = reliedCauses(licenceReliance{licences: []reliedLicence{{id(), "mystery"}}}); err == nil {
+		t.Fatal("an unmapped validity is an error")
+	}
+	// Strictest-wins happens in combine, over causes evaluated in the fixed ConfigurableCauses order.
+	d := combine(RestrictionStageDispatch, 3, "valid", []effective{
+		{cause: CauseLicenceSuspended, state: "suspended", action: RestrictionHoldForReview, source: RestrictionSourceConfigured},
+		{cause: CauseLicenceExpired, state: "date_expired", action: RestrictionBlock, source: RestrictionSourceConfigured},
+	})
+	if d.Action != RestrictionBlock || d.DecidingCause != CauseLicenceExpired || d.LicenceState != "date_expired" {
+		t.Fatalf("strictest wins with its own licence state: %+v", d)
 	}
 }
 

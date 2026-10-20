@@ -20,6 +20,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
@@ -66,6 +68,12 @@ func (s *Sweeper) withdrawalGate() withdrawalgate.Gate {
 // read is sound. An evaluation failure is an error wrapping withdrawal.ErrGateUnavailable: the caller's
 // transaction rolls back and the attempt is retried on a later tick (never a send).
 func (s *Sweeper) evaluateRedispatchGate(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt) (withdrawalgate.Decision, error) {
+	// lic17 F-3 / L-1: the tenant status gate key SHARED first (ADR 0082: status keys before L0.4 and before every row lock,
+	// the request-path position). A withdrawal restriction policy change takes the same key EXCLUSIVE, so the policy set
+	// version and the effective action this tick reads are one consistent version (never half a change).
+	if err := tenant.ShareStatusGateKey(ctx, tx, attempt.TenantID); err != nil {
+		return withdrawalgate.Decision{}, fmt.Errorf("payments: take the tenant status key (re-dispatch): %w", err)
+	}
 	pre, err := withdrawal.GetByID(ctx, tx, *attempt.WithdrawalRequestID)
 	if err != nil {
 		return withdrawalgate.Decision{}, err

@@ -76,6 +76,19 @@ func GameplayStatus(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (string,
 	return status, nil
 }
 
+// ShareStatusGateKey takes the per-tenant status gate key SHARED (migration 0118) for the rest of tx, WITHOUT reading or judging
+// the status (lic17 F-3: the payout re-dispatch claim takes it in the ADR 0082 status-key position so a withdrawal restriction
+// policy change, which takes the key EXCLUSIVE, serialises with it). Re-entrant; held to the end of tx.
+func ShareStatusGateKey(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("%w: no tenant id", ErrNotActiveForGameplay)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(public.tenant_status_gate_key($1))`, tenantID); err != nil {
+		return fmt.Errorf("tenant: take status gate lock: %w", err)
+	}
+	return nil
+}
+
 // ErrBrandNotActiveForGameplay is returned by RequireBrandActiveForGameplay
 // when the brand is pending_launch, suspended, closed, any other non-'active'
 // status, its row is not visible, it belongs to another tenant, or no brand id
