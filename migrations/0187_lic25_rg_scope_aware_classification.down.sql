@@ -189,5 +189,5 @@ BEGIN
 END
 $$;
 
-DROP FUNCTION rg_limit_change_classify_set(uuid, uuid, uuid, uuid, text[], boolean, text, text, text, text, numeric, uuid, text, text, timestamptz);
+DROP FUNCTION rg_limit_change_classify_set(uuid, uuid, uuid, uuid, text[], boolean, boolean, text, text, text, text, numeric, uuid, text, text, timestamptz);
 DROP FUNCTION rg_basis_jurisdictions(uuid, timestamptz);

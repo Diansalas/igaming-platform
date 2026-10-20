@@ -178,9 +178,18 @@ func TestHardening_H1_RGOptions_FailClosedForBasisTenantWithoutLicence(t *testin
 	withBasis := w.tenant("under_platform_licence")
 	wb := w.brand(withBasis)
 	w.widen(KindOperatingBasisSet, noLicence(withBasis, nil, w.jurisdiction(), 30), "documented_basis")
-	if err := read(withBasis, w.seedResident(withBasis, wb, bCountry)); err == nil {
-		t.Fatal("an approved basis without a licence jurisdiction must fail closed for RG")
+	// lic27a (declared change of this pin, intent preserved: no silent weaker options): the read is no longer refused as a whole (a
+	// refusal hid the always-available time-out and self-exclusion tools from the player); every limit kind is marked unavailable and
+	// offers nothing, never "no configuration" with the whole vocabulary open.
+	var o rg.Options
+	if err := w.rt.WithTenant(context.Background(), withBasis, func(ctx context.Context, tx pgx.Tx) error {
+		var e error
+		o, e = rg.ReadOptions(ctx, tx, withBasis, w.seedResident(withBasis, wb, bCountry).id, "EUR")
+		return e
+	}); err != nil {
+		t.Fatalf("the options of a basis tenant are served with the limit kinds unavailable: %v", err)
 	}
+	wantUnavailableOptions(t, o, rg.OptionUnavailableMissingFloor, rg.ControlDeposit, rg.ControlLoss, rg.ControlWager)
 }
 
 // ---- M-1: no bare close ------------------------------------------------------------------------------------------------------

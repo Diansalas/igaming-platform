@@ -28,6 +28,8 @@ type rgLimitOptionResponse struct {
 	Ceiling                 *string  `json:"ceiling"`
 	Scope                   string   `json:"scope,omitempty"`
 	IncreaseCooldownSeconds *int64   `json:"increase_cooldown_seconds"`
+	// UnavailableReason (lic27a): missing_floor | calendar_conflict. Absent when the kind's options are offered.
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 type rgOptionsResponse struct {
@@ -48,7 +50,7 @@ func toRGOptionsResponse(o rg.Options) rgOptionsResponse {
 			periods = append(periods, string(p))
 		}
 		resp.Limits = append(resp.Limits, rgLimitOptionResponse{Kind: string(l.Kind), ConfigInForce: l.ConfigInForce, Mandatory: l.Mandatory,
-			AllowedPeriods: periods, Ceiling: l.Ceiling, Scope: string(l.Scope), IncreaseCooldownSeconds: l.IncreaseCooldownSeconds})
+			AllowedPeriods: periods, Ceiling: l.Ceiling, Scope: string(l.Scope), IncreaseCooldownSeconds: l.IncreaseCooldownSeconds, UnavailableReason: l.UnavailableReason})
 	}
 	if resp.TimeOutHours == nil {
 		resp.TimeOutHours = []int{}

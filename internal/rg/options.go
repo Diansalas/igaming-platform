@@ -18,6 +18,7 @@ package rg
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/google/uuid"
@@ -41,7 +42,18 @@ type LimitOption struct {
 	Ceiling                 *string
 	Scope                   LimitScope
 	IncreaseCooldownSeconds *int64
+	// UnavailableReason (lic27a) is non-empty when the limit options of this kind cannot be offered because the rulebook of a jurisdiction the
+	// tenant relies on is incomplete (missing_floor) or ambiguous (calendar_conflict). ConfigInForce is then false and nothing is offered:
+	// no periods, no ceiling. The write path stays fail-closed for increases, removals and confirms; the protective options of Options
+	// (time-out, self-exclusion) are always returned.
+	UnavailableReason string
 }
+
+// Reasons a limit kind is unavailable in Options.
+const (
+	OptionUnavailableMissingFloor     = "missing_floor"
+	OptionUnavailableCalendarConflict = "calendar_conflict"
+)
 
 // Options is everything the player's RG screen needs from the server for one asset.
 type Options struct {
@@ -76,14 +88,19 @@ func ReadOptions(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, 
 	out := Options{AssetCode: asset, EnforcementEnabled: on, SelfExclusionDays: append([]int(nil), DefaultSelfExclusionDays...)}
 	for _, k := range []ControlKind{ControlDeposit, ControlLoss, ControlWager} {
 		cfg, err := readUsageConfigFor(ctx, tx, sel, tenantID, acct.BrandID, k, &asset, nil)
+		if errors.Is(err, errCalendarConflict) {
+			out.Limits = append(out.Limits, LimitOption{Kind: k, AllowedPeriods: []PeriodKind{}, UnavailableReason: OptionUnavailableCalendarConflict})
+			continue
+		}
 		if err != nil {
 			return Options{}, err
 		}
 		if cfg.MissingFloors {
-			// lic25: a tenant with an approved basis must not be shown a partial truth (the options of the jurisdictions that do have a
-			// floor) while another jurisdiction it relies on has none: refused, never "no configuration". Limit setting, time-outs and
-			// self-exclusion do not depend on this read.
-			return Options{}, refuse(RefusedConfigMissing, "a jurisdiction the tenant relies on has no "+string(k)+" floor in force")
+			// lic25/lic27a: a tenant with an approved basis must not be shown a partial truth (the options of the jurisdictions that do have a
+			// floor) while another jurisdiction it relies on has none: the kind is marked unavailable, never "no configuration". Time-out and
+			// self-exclusion are protective and are returned regardless; the write path still refuses increases, removals and confirms.
+			out.Limits = append(out.Limits, LimitOption{Kind: k, AllowedPeriods: []PeriodKind{}, UnavailableReason: OptionUnavailableMissingFloor})
+			continue
 		}
 		o := LimitOption{Kind: k, ConfigInForce: cfg.Found, Mandatory: cfg.Mandatory, Ceiling: cfg.Ceiling, Scope: cfg.Scope,
 			IncreaseCooldownSeconds: cfg.CooldownSeconds, AllowedPeriods: cfg.AllowedPeriods}

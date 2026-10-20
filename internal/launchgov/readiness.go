@@ -751,6 +751,66 @@ func rgFloorChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []st
 			}
 		}
 	}
+	if c := rgCalendarAgreement(ctx, tx, in, currencies, now); c.Result != ResultPass {
+		return c
+	}
+	return ck(CheckRGConfig, ResultPass, "ok")
+}
+
+// rgCalendarAgreement (lic27a, S-1): the jurisdictions a tenant with approved operating bases relies on (licence UNION bases) must agree
+// on calendar_tz and week_start for every kind and currency; they cannot be ordered, so the account-level usage read fails closed on a
+// disagreement and activation must not pass in that state. Only the relied-on set is compared (a licence-only tenant has one member, so it
+// is unchanged). Fail `calendar_conflict`; a read failure is not_evaluable.
+func rgCalendarAgreement(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []string, now time.Time) Check {
+	gov, err := governedJurisdictions(ctx, tx, in.Subject.TenantID)
+	if err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	if len(gov) < 2 {
+		return ck(CheckRGConfig, ResultPass, "ok")
+	}
+	rows, err := tx.Query(ctx, `SELECT code FROM jurisdictions WHERE id = ANY($1) ORDER BY code`, gov)
+	if err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	var codes []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			rows.Close()
+			return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+		}
+		codes = append(codes, c)
+	}
+	rows.Close()
+	if rows.Err() != nil || len(codes) != len(gov) {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	for _, cur := range currencies {
+		for _, kind := range []string{"deposit", "loss", "wager"} {
+			var tz *string
+			var ws *int16
+			for _, code := range codes {
+				var found bool
+				var t *string
+				var w *int16
+				if err := tx.QueryRow(ctx, `SELECT found, calendar_tz, week_start FROM rg_limit_config_compose($1, $2, $3, $4, $5, $6)`,
+					code, in.Subject.TenantID, in.Subject.BrandID, kind, cur, now).Scan(&found, &t, &w); err != nil {
+					return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+				}
+				if !found {
+					continue // reported as floor_missing_<kind> by the floor loop
+				}
+				if tz == nil && ws == nil {
+					tz, ws = t, w
+					continue
+				}
+				if (t != nil && tz != nil && *t != *tz) || (w != nil && ws != nil && *w != *ws) {
+					return ck(CheckRGConfig, ResultFail, "calendar_conflict")
+				}
+			}
+		}
+	}
 	return ck(CheckRGConfig, ResultPass, "ok")
 }
 

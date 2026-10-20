@@ -16102,6 +16102,13 @@ components:
         ceiling: { type: string, nullable: true, description: "NUMERIC(38,0) minor units, a decimal string; null = none" }
         scope: { type: string, enum: [account, tenant_person] }
         increase_cooldown_seconds: { type: integer, format: int64, nullable: true }
+        unavailable_reason:
+          type: string
+          enum: [missing_floor, calendar_conflict]
+          description: >
+            lic27a. Present when a jurisdiction the tenant relies on has no floor for this kind (missing_floor) or relied-on jurisdictions disagree on
+            calendar_tz / week_start (calendar_conflict). config_in_force is false, allowed_periods is empty and no ceiling is offered: do not offer limit
+            setting for this kind. Increases, removals and confirms stay refused server-side. time_out_hours and self_exclusion_days are always returned.
       required: [kind, config_in_force, mandatory, allowed_periods, ceiling, increase_cooldown_seconds]
     RGOptions:
       type: object

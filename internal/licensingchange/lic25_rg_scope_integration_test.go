@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/launchgov"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/rgfix"
 )
@@ -47,10 +48,16 @@ func (w *world) jurCode(jid uuid.UUID) string {
 // cooldown is a postgres interval; reconfirm sets increase_requires_reconfirmation.
 func (w *world) rgFloors(jid uuid.UUID, ceilings map[string]string, cooldown string, reconfirm bool) {
 	w.t.Helper()
+	w.rgFloorsTZ(jid, ceilings, cooldown, reconfirm, "UTC")
+}
+
+// rgFloorsTZ is rgFloors with the floors' calendar_tz (lic27a: relied-on jurisdictions that disagree on it cannot be folded).
+func (w *world) rgFloorsTZ(jid uuid.UUID, ceilings map[string]string, cooldown string, reconfirm bool, tz string) {
+	w.t.Helper()
 	rgfix.EnsureTestEnvironment(w.t, w.ownerURL)
 	code := w.jurCode(jid)
 	for _, kind := range []string{"deposit", "loss", "wager"} {
-		over := rgfix.Spec{"increase_cooldown": cooldown, "increase_requires_reconfirmation": reconfirm}
+		over := rgfix.Spec{"increase_cooldown": cooldown, "increase_requires_reconfirmation": reconfirm, "calendar_tz": tz}
 		if c := ceilings[kind]; c != "" {
 			over["ceiling"], over["ceiling_none"] = c, false
 		}
@@ -375,13 +382,17 @@ func TestLic25_BasisOnlyTenant_TimeOutAndLimitsWork_ReadOptionsStillFailClosed(t
 	}
 	_, err := c.set(rg.ControlDeposit, rg.PeriodRolling24h, str("200"))
 	wantRefusal(t, "increase with no floor anywhere", err, rg.RefusedConfigMissing)
-	// The existing lic14 pin stays: the options of a basis tenant whose rulebook cannot be completed are refused, never "no config".
+	// lic27a (S-1): the options are no longer refused as a whole. Every limit kind is marked unavailable (nothing is offered, never a silent
+	// weaker option) and the protective options are returned.
+	var unavail rg.Options
 	if err := w.rt.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
-		_, e := rg.ReadOptions(ctx, tx, tid, c.p.id, eur)
+		var e error
+		unavail, e = rg.ReadOptions(ctx, tx, tid, c.p.id, eur)
 		return e
-	}); err == nil {
-		t.Fatal("options of a basis tenant with a relied jurisdiction without a floor must fail closed")
+	}); err != nil {
+		t.Fatalf("options of a basis tenant with a relied-on jurisdiction without a floor must still be served: %v", err)
 	}
+	wantUnavailableOptions(t, unavail, rg.OptionUnavailableMissingFloor, rg.ControlDeposit, rg.ControlLoss, rg.ControlWager)
 	// With floors everywhere the options are served and show the strictest ceiling.
 	w.rgFloors(jb, map[string]string{"deposit": "300"}, "00:00:02", false)
 	var opts rg.Options
@@ -603,4 +614,117 @@ func TestLic25_Scoped_BrandSpecificBasis(t *testing.T) {
 	w.wantDenied("the brand with its own basis row", d, err, rg.CodeDepositLimitReached, "100")
 	d, err = w.rgEval(tid, brandA, w.seedResident(tid, brandA, bCountry), rg.ActionDeposit, 150)
 	w.wantAllowed("the other brand has no row and falls back to the tenant licence", d, err)
+}
+
+func wantUnavailableOptions(t *testing.T, o rg.Options, reason string, kinds ...rg.ControlKind) {
+	t.Helper()
+	if len(o.TimeOutHours) == 0 || len(o.SelfExclusionDays) == 0 {
+		t.Fatalf("time-out and self-exclusion options are protective and always returned: %+v", o)
+	}
+	for _, k := range kinds {
+		found := false
+		for _, l := range o.Limits {
+			if l.Kind != k {
+				continue
+			}
+			found = true
+			if l.UnavailableReason != reason || l.ConfigInForce || len(l.AllowedPeriods) != 0 || l.Ceiling != nil || l.IncreaseCooldownSeconds != nil {
+				t.Fatalf("kind %s must be unavailable (%s) and offer nothing: %+v", k, reason, l)
+			}
+		}
+		if !found {
+			t.Fatalf("kind %s missing from the options", k)
+		}
+	}
+}
+
+// lic27a (S-1): relied-on jurisdictions that disagree on calendar_tz cannot be folded; the kind is marked unavailable (calendar_conflict),
+// the other kinds and the protective options are served, and activation / readiness cannot pass.
+func TestLic27a_CalendarConflict_OptionsAndReadiness(t *testing.T) {
+	w := newWorld(t)
+	ja, jb := w.jurisdiction(), w.jurisdiction()
+	tid := w.tenant("under_platform_licence")
+	b := w.brand(tid)
+	w.licence(ja, "platform", tid)
+	set := TenantJurisdictionConfigPayload{TenantID: tid, JurisdictionID: ja, Action: ConfigActionSet, KYCRulesetID: sp("kyc-1"),
+		AMLRulesetID: sp("aml-1"), RGRulesetID: sp("rg-1"), AllowedCurrencies: []string{eur}, AllowedPaymentMethods: []string{"card"}, GeoBlockList: []string{}}
+	first := w.mustRequest(w.req, KindTenantJurisdictionConfigVersion, set, "configuration_initial")
+	w.mustApprove(w.ap1, first.Request.ID)
+	w.mustApprove(w.ap2, first.Request.ID)
+	w.rgFloorsTZ(ja, nil, "00:00:02", false, "UTC")
+	w.rgFloorsTZ(jb, nil, "00:00:02", false, "Etc/GMT+5")
+	w.widen(KindOperatingBasisSet, noLicence(tid, nil, jb, 30), "documented_basis")
+	p := w.seedResident(tid, b, bCountry)
+	var o rg.Options
+	if err := w.rt.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
+		var e error
+		o, e = rg.ReadOptions(ctx, tx, tid, p.id, eur)
+		return e
+	}); err != nil {
+		t.Fatalf("a calendar disagreement must not refuse the whole options read: %v", err)
+	}
+	wantUnavailableOptions(t, o, rg.OptionUnavailableCalendarConflict, rg.ControlDeposit, rg.ControlLoss, rg.ControlWager)
+	rgfix.Activate(t, w.owner, tid, nil, rgfix.Staff(t, w.owner, tid))
+	check := func() launchgov.Check {
+		var c launchgov.Check
+		if err := w.rt.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
+			c = launchgov.RGActivationReadiness(ctx, tx, tid, nil, w.dbNow())
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if c := check(); c.Result != launchgov.ResultFail || c.DetailCode != "calendar_conflict" {
+		t.Fatalf("the activation guard must fail on a calendar disagreement: %+v", c)
+	}
+	// Agreement restored by a new floor row in jb: the guard passes.
+	w.rgFloorsTZ(jb, nil, "00:00:02", false, "UTC")
+	if c := check(); c.Result != launchgov.ResultPass {
+		t.Fatalf("with agreeing calendars the guard passes: %+v", c)
+	}
+}
+
+// lic27a (S-2): the SQL classification itself refuses a confirm while a relied-on jurisdiction has no floor (not only the Go layer).
+func TestLic27a_ConfirmRefusedInSQL_WhileAReliedJurisdictionHasNoFloor(t *testing.T) {
+	w := newWorld(t)
+	jl, jc := w.jurisdiction(), w.jurisdiction() // jc: no floor
+	w.rgFloors(jl, map[string]string{"wager": "1000"}, "00:00:02", true)
+	build := func(withBasis bool) (uuid.UUID, resident, uuid.UUID) {
+		tid := w.tenant("under_platform_licence")
+		b := w.brand(tid)
+		w.licence(jl, "platform", tid)
+		p := w.seedResident(tid, b, bCountry)
+		c := rgPlayerCalls{w, tid, p}
+		if _, err := c.set(rg.ControlWager, rg.PeriodRolling24h, str("50")); err != nil {
+			t.Fatal(err)
+		}
+		pend, err := c.set(rg.ControlWager, rg.PeriodRolling24h, str("70"))
+		if err != nil || !pend.Change.Pending() {
+			t.Fatalf("setup: %+v / %v", pend.Change, err)
+		}
+		if withBasis {
+			w.widen(KindOperatingBasisSet, noLicence(tid, nil, jc, 30), "documented_basis")
+		}
+		return tid, p, pend.Change.ID
+	}
+	rawConfirm := func(tid uuid.UUID, p resident, pending uuid.UUID) (string, error) {
+		var kind string
+		err := w.rt.WithPlayerScope(context.Background(), tid, p.id, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `INSERT INTO player_rg_limit_changes
+				(tenant_id, player_account_id, scope, control_kind, asset_code, period_kind, change_kind, supersedes_change_id, source, reason_code, idempotency_key, request_hash)
+				VALUES ($1, $2, 'account', 'wager', 'EUR', 'rolling_24h', 'confirm', $3, 'player_self_service', 'lic27a_test', $4, $5)
+				RETURNING change_kind`, tid, p.id, pending, uuid.NewString(), strings.Repeat("b", 64)).Scan(&kind)
+		})
+		return kind, err
+	}
+	tOK, pOK, idOK := build(false)
+	tBad, pBad, idBad := build(true)
+	time.Sleep(2200 * time.Millisecond)
+	if k, err := rawConfirm(tOK, pOK, idOK); err != nil || k != "confirm" {
+		t.Fatalf("control: a tenant with no approved basis confirms exactly as before: %v %v", k, err)
+	}
+	if _, err := rawConfirm(tBad, pBad, idBad); sqlstateOf(err) != "RL023" {
+		t.Fatalf("a confirm with a relied-on jurisdiction lacking a floor must be RL023 in SQL, got %v", err)
+	}
 }

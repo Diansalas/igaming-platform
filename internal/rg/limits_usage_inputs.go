@@ -20,6 +20,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// errCalendarConflict: relied-on jurisdictions disagree on calendar_tz / week_start; the windows cannot be selected (fail closed).
+var errCalendarConflict = errors.New("rg: relied-on jurisdictions disagree on calendar_tz / week_start; the windows cannot be selected (fail closed)")
+
 // UsageConfig is the composed configuration for one (tenant, brand, kind, asset), as
 // rg_limit_config_compose returns it (strictest / UNION / OR). Found is false when no floor is in
 // force (rg_config_missing in S4).
@@ -94,7 +97,7 @@ func readUsageConfigFor(ctx context.Context, tx pgx.Tx, sel cfgSel, tenantID, br
 		return UsageConfig{}, fmt.Errorf("rg: read usage configuration: %w", err)
 	}
 	if tzConflict {
-		return UsageConfig{}, errors.New("rg: relied-on jurisdictions disagree on calendar_tz / week_start; the windows cannot be selected (fail closed)")
+		return UsageConfig{}, errCalendarConflict
 	}
 	cfg.MissingFloors = missing
 	if !r.Found {
