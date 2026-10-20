@@ -93,11 +93,14 @@ func EvaluateDispatchGate(ctx context.Context, tx pgx.Tx, gate withdrawalgate.Ga
 	for _, f := range opts {
 		f(&o)
 	}
-	rd, err := EvaluateRestriction(ctx, tx, wr.TenantID, o.stage)
+	rd, err := EvaluateRestriction(ctx, tx, wr.TenantID, wr.BrandID, o.stage)
 	if err != nil {
 		return withdrawalgate.Decision{}, err
 	}
 	if rd.Refuses() {
+		if err := rd.assertRecordable(); err != nil {
+			return withdrawalgate.Decision{}, err
+		}
 		return rd.DispatchDenial(), nil
 	}
 	d, err := gate.Evaluate(ctx, tx, withdrawalgate.Input{
@@ -168,14 +171,17 @@ func RecordDispatchGateDecision(ctx context.Context, tx pgx.Tx, wr WithdrawalReq
 			rAction = &a
 		}
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO withdrawal_gate_decisions
-		     (tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code, risk_outcome, restriction_in_force,
-		      restriction_policy_source, restriction_policy_set_version, restriction_cause, restriction_action)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		wr.TenantID, wr.ID, attemptID, string(stage), d.Allowed, gateCode, reason, outcome, restriction,
-		rSource, rSetVersion, rCause, rAction,
-	); err != nil {
+	// No provenance (d.Restriction nil): a fixture decision, or a migration test's scratch schema older than 0182 (lic17),
+	// where the 0182 columns do not exist. Naming only the pre-0182 columns is the same row as NULLs on a 0182+ schema.
+	cols := `tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code, risk_outcome, restriction_in_force`
+	vals := `$1, $2, $3, $4, $5, $6, $7, $8, $9`
+	args := []any{wr.TenantID, wr.ID, attemptID, string(stage), d.Allowed, gateCode, reason, outcome, restriction}
+	if d.Restriction != nil {
+		cols += `, restriction_policy_source, restriction_policy_set_version, restriction_cause, restriction_action`
+		vals += `, $10, $11, $12, $13`
+		args = append(args, rSource, rSetVersion, rCause, rAction)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_gate_decisions (`+cols+`) VALUES (`+vals+`)`, args...); err != nil {
 		return fmt.Errorf("withdrawal: record dispatch gate decision: %w", err)
 	}
 	return nil

@@ -155,12 +155,27 @@ type wrpCauseJSON struct {
 	Notice             string         `json:"notice,omitempty"`
 }
 
+type wrpActionSemanticJSON struct {
+	Action  string `json:"action"`
+	Meaning string `json:"meaning"`
+}
+
+type wrpParkedJSON struct {
+	Visible           bool    `json:"visible"`
+	Count             int64   `json:"count"`
+	OldestParkedSince *string `json:"oldest_parked_since"`
+	OldestAgeSeconds  *int64  `json:"oldest_age_seconds"`
+	Note              string  `json:"note"`
+}
+
 type wrpEffectiveResponse struct {
-	TenantID   string         `json:"tenant_id"`
-	SetVersion int64          `json:"set_version"`
-	Configured bool           `json:"configured"`
-	Causes     []wrpCauseJSON `json:"causes"`
-	Disclaimer string         `json:"disclaimer"`
+	TenantID        string                  `json:"tenant_id"`
+	SetVersion      int64                   `json:"set_version"`
+	Configured      bool                    `json:"configured"`
+	Causes          []wrpCauseJSON          `json:"causes"`
+	ActionSemantics []wrpActionSemanticJSON `json:"action_semantics"`
+	Parked          wrpParkedJSON           `json:"parked"`
+	Disclaimer      string                  `json:"disclaimer"`
 }
 
 type wrpVersionJSON struct {
@@ -269,7 +284,12 @@ func newWRPEffectiveHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		out := wrpEffectiveResponse{TenantID: view.TenantID.String(), SetVersion: view.SetVersion, Configured: view.Configured,
-			Causes: []wrpCauseJSON{}, Disclaimer: view.Disclaimer}
+			Causes: []wrpCauseJSON{}, ActionSemantics: []wrpActionSemanticJSON{}, Disclaimer: view.Disclaimer,
+			Parked: wrpParkedJSON{Visible: view.Parked.Visible, Count: view.Parked.Count, OldestParkedSince: timePtrString(view.Parked.OldestParkedSince),
+				OldestAgeSeconds: view.Parked.OldestAgeSeconds, Note: view.Parked.Note}}
+		for _, as := range view.ActionSemantics {
+			out.ActionSemantics = append(out.ActionSemantics, wrpActionSemanticJSON{Action: as.Action, Meaning: as.Meaning})
+		}
 		for _, cv := range view.Causes {
 			cj := wrpCauseJSON{Cause: cv.Cause, Class: cv.Class, Configurable: cv.Configurable, Evaluated: cv.Evaluated,
 				GoverningReference: cv.GoverningReference, CurrentBehaviour: cv.CurrentBehaviour, Stages: []wrpStageJSON{},

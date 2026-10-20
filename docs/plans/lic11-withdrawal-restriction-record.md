@@ -1,5 +1,10 @@
 # lic11 record: governed per-tenant withdrawal restriction policy (migration 0182)
 
+> **lic17 (migration 0184) supersedes parts of this record:** every licence relied on is evaluated (F-1); an unreadable licence is
+> `unknown`, not `licence_missing` (F-4 / M-2); the first configured `allow` is four-eyes (F-2); the policy functions are session
+> bound (M-3); `hold_for_review` is a park with no per-withdrawal release, and the earlier "reject the parked request" exit was
+> wrong (M-1). See `docs/plans/lic17-record.md`.
+
 - **Author:** `ledger-finance` specialist. **Worktree:** `.claude/worktrees/lic11`, branch `lic11-withdrawal-restriction-policy`
   from `claude/licensing-jurisdiction-completion` at `ea3c379`. **Migration:** 0182 (assigned).
 - **STEP 1 analysis (written before any code):** `docs/plans/lic11-withdrawal-restriction-analysis.md`.

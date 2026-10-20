@@ -52,6 +52,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 	"github.com/Diansalas/igaming-platform/internal/withdrawalgate"
 )
 
@@ -140,15 +141,28 @@ type RestrictionDecision struct {
 	PolicyVersion int64
 	// SetVersion is the tenant's policy set version at evaluation (0 = nothing configured for the tenant).
 	SetVersion int64
-	// LicenceState is the licence evaluation behind a licence cause (jurisdiction.LicenceValidity or a chain outcome).
+	// LicenceState is the licence evaluation behind the deciding cause (a jurisdiction.LicenceValidity value), or
+	// LicenceStateUnknown when the licences relied on could not be evaluated (lic17 F-4 / M-2).
 	LicenceState string
+	// LicenceUnknown: the licences relied on could not be evaluated and the tenant has NO policy row, so the decision is the
+	// interim default (allow) with licence state unknown. With a policy row an evaluation failure is an error instead.
+	LicenceUnknown bool
+	// SchemaAbsent: set ONLY under the test-only pre-0182 marker (a migration test's scratch database predates 0182). The
+	// decision is the pre-0182 behaviour and carries no provenance (the 0182 columns do not exist there).
+	SchemaAbsent bool
 }
+
+// LicenceStateUnknown is the recorded licence state when the reliance could not be evaluated (lic17 F-4).
+const LicenceStateUnknown = "unknown"
 
 // Refuses reports whether the decision holds or blocks.
 func (d RestrictionDecision) Refuses() bool { return d.Action != RestrictionAllow }
 
 // Provenance is the recordable form (withdrawal_gate_decisions columns, audit metadata).
 func (d RestrictionDecision) Provenance() *withdrawalgate.RestrictionProvenance {
+	if d.SchemaAbsent {
+		return nil
+	}
 	return &withdrawalgate.RestrictionProvenance{Source: d.Source, SetVersion: d.SetVersion, Cause: string(d.DecidingCause), Action: string(d.Action)}
 }
 
@@ -158,8 +172,10 @@ func (d RestrictionDecision) AuditMetadata() map[string]any {
 		"restriction_stage": string(d.Stage), "restriction_action": string(d.Action),
 		"restriction_policy_source": d.Source, "restriction_policy_set_version": d.SetVersion,
 	}
-	if d.DecidingCause != "" {
-		md["restriction_cause"] = string(d.DecidingCause)
+	if d.DecidingCause != "" || d.LicenceUnknown {
+		if d.DecidingCause != "" {
+			md["restriction_cause"] = string(d.DecidingCause)
+		}
 		md["restriction_licence_state"] = d.LicenceState
 	}
 	if d.PolicyID != nil {
@@ -167,6 +183,24 @@ func (d RestrictionDecision) AuditMetadata() map[string]any {
 		md["restriction_policy_version"] = d.PolicyVersion
 	}
 	return md
+}
+
+// assertRecordable (lic17 L-2) checks that a REFUSING decision has the WD056 shape the database enforces
+// (withdrawal_gate_decisions_wd056_shape, 0182): source configured, a configurable deciding cause (the reason code), action
+// hold_for_review or block. Only a configured row may refuse; a refusing DEFAULT would mean the cause registry was changed to
+// a non-allow default without the review this path needs (the 0182 registry defaults are all allow). The refusal then fails
+// closed and diagnosable (ErrGateUnavailable) instead of writing a malformed decision row or blocking on an unreviewed default.
+// A non-refusing decision is always recordable.
+func (d RestrictionDecision) assertRecordable() error {
+	if !d.Refuses() {
+		return nil
+	}
+	if d.Source != RestrictionSourceConfigured || d.DecidingCause == "" || !IsConfigurableCause(d.DecidingCause) ||
+		(d.Action != RestrictionHoldForReview && d.Action != RestrictionBlock) {
+		return fmt.Errorf("%w: a restriction refusal (source %q, cause %q, action %q) has no recordable WD056 shape",
+			ErrGateUnavailable, d.Source, d.DecidingCause, d.Action)
+	}
+	return nil
 }
 
 // DispatchDenial is the WD056 gate decision a refusing restriction decision becomes at a dispatch point (Reason = the
@@ -182,34 +216,29 @@ func (d RestrictionDecision) DispatchDenial() withdrawalgate.Decision {
 // ErrRestrictionUnknownLicenceState: the licence evaluation returned a state this package does not map (fail closed).
 var ErrRestrictionUnknownLicenceState = errors.New("withdrawal: unknown licence state for the restriction policy")
 
-// licenceCause maps the shared licensing chain + validity to a cause ("" when the licence is valid).
-func licenceCause(chain jurisdiction.LicensingOutcome, validity jurisdiction.LicenceValidity) (RestrictionCause, string, error) {
-	switch chain {
-	case jurisdiction.LicensingNoLicence:
-		return CauseLicenceMissing, string(jurisdiction.LicenceNotBound), nil
-	case jurisdiction.LicensingInvalid:
-		return CauseLicenceMissing, string(jurisdiction.LicenceNotFound), nil
-	case jurisdiction.LicensingResolved:
-	default:
-		return "", "", fmt.Errorf("%w: chain outcome %q", ErrRestrictionUnknownLicenceState, chain)
-	}
-	switch validity {
+// validityCause maps a licence validity to a cause ("" when the licence is valid). unknown is true for a validity that is not a
+// statement about the licence but about its readability (LicenceNotFound: the row is not visible, lic17 M-2) or a missing
+// binding passed in by mistake (LicenceNotBound): the caller treats it as "could not evaluate", never as licence_missing. Any
+// value outside the closed set is an error. A static test pins that every jurisdiction.LicenceValidity constant is covered.
+func validityCause(v jurisdiction.LicenceValidity) (cause RestrictionCause, unknown bool, err error) {
+	switch v {
 	case jurisdiction.LicenceValid:
-		return "", string(validity), nil
+		return "", false, nil
 	case jurisdiction.LicenceSuspended:
-		return CauseLicenceSuspended, string(validity), nil
+		return CauseLicenceSuspended, false, nil
 	case jurisdiction.LicenceStatusExpired, jurisdiction.LicenceDateExpired:
-		return CauseLicenceExpired, string(validity), nil
+		return CauseLicenceExpired, false, nil
 	case jurisdiction.LicenceNotYetIssued:
-		return CauseLicenceNotYetIssued, string(validity), nil
-	case jurisdiction.LicenceNotBound, jurisdiction.LicenceNotFound:
-		return CauseLicenceMissing, string(validity), nil
+		return CauseLicenceNotYetIssued, false, nil
+	case jurisdiction.LicenceNotFound, jurisdiction.LicenceNotBound:
+		return "", true, nil
 	}
-	return "", "", fmt.Errorf("%w: %q", ErrRestrictionUnknownLicenceState, validity)
+	return "", false, fmt.Errorf("%w: %q", ErrRestrictionUnknownLicenceState, v)
 }
 
 // effective is one cause's resolution.
 type effective struct {
+	state    string // the licence validity behind the cause
 	cause    RestrictionCause
 	action   RestrictionAction
 	source   string
@@ -232,6 +261,9 @@ func combine(stage RestrictionStage, setVersion int64, licenceState string, effs
 	if best >= 0 {
 		e := effs[best]
 		d.Action, d.DecidingCause, d.Source, d.PolicyID, d.PolicyVersion = e.action, e.cause, e.source, e.policyID, e.version
+		if e.state != "" {
+			d.LicenceState = e.state
+		}
 	}
 	return d
 }
@@ -240,18 +272,110 @@ func combine(stage RestrictionStage, setVersion int64, licenceState string, effs
 // half-open semantics). A package variable only so a unit test can pin it; production never assigns it.
 var restrictionClock = time.Now
 
-// EvaluateRestriction resolves the withdrawal restriction policy of tenantID at stage inside tx (a tenant-scoped session:
-// the policy rows, the tenant row and its own licence are visible). It writes nothing and takes no lock. Any error wraps
-// ErrGateUnavailable (fail closed, retryable).
-func EvaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stage RestrictionStage) (RestrictionDecision, error) {
-	d, err := evaluateRestriction(ctx, tx, tenantID, stage)
+// EvaluateRestriction resolves the withdrawal restriction policy of tenantID (and brandID, whose operating bases count) at stage
+// inside tx (a tenant-scoped session: the policy rows, the tenant row, its own licence and the licences of its bases are visible).
+// It writes nothing and takes no lock. Any error wraps ErrGateUnavailable (fail closed, retryable).
+func EvaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, stage RestrictionStage) (RestrictionDecision, error) {
+	d, err := evaluateRestriction(ctx, tx, tenantID, brandID, stage)
 	if err != nil {
 		return RestrictionDecision{}, fmt.Errorf("%w: restriction policy: %w", ErrGateUnavailable, err)
 	}
 	return d, nil
 }
 
-func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stage RestrictionStage) (RestrictionDecision, error) {
+// reliedLicence is one licence the tenant relies on and its evaluated validity.
+type reliedLicence struct {
+	id       uuid.UUID
+	validity jurisdiction.LicenceValidity
+}
+
+// licenceReliance is what the tenant (and brand) relies on (lic17 F-1).
+type licenceReliance struct {
+	licences []reliedLicence
+	hasBasis bool
+	unknown  bool // something relied on could not be evaluated (M-2 / F-4)
+}
+
+// evaluateReliance reads, in a SAVEPOINT (a failing read must not abort the caller's transaction, F-4), every licence the tenant
+// relies on: tenants.licence_id and the licences named by its approved, active, in-force licence bases (tenant-wide or of the
+// brand), each evaluated with jurisdiction.EvaluateLicenceValidity (the single implementation, INV-M-5). An unreadable licence
+// (LicensingInvalid chain, LicenceNotFound) is unknown, never licence_missing (M-2).
+func evaluateReliance(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, asOf time.Time) (rel licenceReliance, err error) {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return licenceReliance{}, fmt.Errorf("withdrawal: open the licence reliance savepoint: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = sp.Rollback(ctx)
+			return
+		}
+		err = sp.Commit(ctx)
+	}()
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, sp, tenantID)
+	if err != nil {
+		return licenceReliance{}, err
+	}
+	var ids []uuid.UUID
+	switch chain.Outcome {
+	case jurisdiction.LicensingResolved:
+		ids = append(ids, chain.LicenceID)
+	case jurisdiction.LicensingNoLicence:
+	default:
+		rel.unknown = true // the tenant row or its licence is not readable in this session
+	}
+	bases, err := operatingmarket.TenantBasisReliance(ctx, sp, tenantID, brandID, asOf)
+	if err != nil {
+		return licenceReliance{}, err
+	}
+	rel.hasBasis = bases.HasBasis
+	for _, id := range bases.Licences {
+		dup := false
+		for _, have := range ids {
+			dup = dup || have == id
+		}
+		if !dup {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range ids {
+		v, err := jurisdiction.EvaluateLicenceValidity(ctx, sp, id, asOf)
+		if err != nil {
+			return licenceReliance{}, err
+		}
+		rel.licences = append(rel.licences, reliedLicence{id: id, validity: v})
+	}
+	return rel, nil
+}
+
+// reliedCauses maps the reliance to causes in the fixed ConfigurableCauses order (strictest-wins happens in combine). A tenant
+// with NO licence and NO basis keeps the pre-lic17 cause licence_missing; a tenant whose only reliance is a documented
+// no-licence basis contributes no licence cause. unknown is true when any relied licence could not be evaluated.
+func reliedCauses(rel licenceReliance) (causes map[RestrictionCause]string, unknown bool, err error) {
+	causes = map[RestrictionCause]string{}
+	unknown = rel.unknown
+	for _, l := range rel.licences {
+		c, unk, err := validityCause(l.validity)
+		if err != nil {
+			return nil, false, err
+		}
+		if unk {
+			unknown = true
+			continue
+		}
+		if c != "" {
+			if _, have := causes[c]; !have {
+				causes[c] = string(l.validity)
+			}
+		}
+	}
+	if len(rel.licences) == 0 && !rel.hasBasis && !rel.unknown {
+		causes[CauseLicenceMissing] = string(jurisdiction.LicenceNotBound)
+	}
+	return causes, unknown, nil
+}
+
+func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, stage RestrictionStage) (RestrictionDecision, error) {
 	switch stage {
 	case RestrictionStageRequest, RestrictionStageDispatch, RestrictionStageRedispatch:
 	default:
@@ -260,31 +384,49 @@ func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, sta
 	if tenantID == uuid.Nil {
 		return RestrictionDecision{}, fmt.Errorf("%w: tenant id is required", ErrInvalidInput)
 	}
-	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
-	if err != nil {
-		return RestrictionDecision{}, err
+	// TEST-ONLY: a migration up / down / up test drives a scratch database whose schema predates 0182 (no policy table, no
+	// functions). Only test code of this package can set the marker (the key type is unexported and the setter lives in a
+	// _test.go file; TestLic17_Static_Pre0182MarkerIsTestOnly pins it). Production never probes the schema: a missing function
+	// is an error (fail closed).
+	if pre0182SchemaForTest(ctx) {
+		return RestrictionDecision{Stage: stage, Action: RestrictionAllow, Source: RestrictionSourceNone, SchemaAbsent: true}, nil
 	}
-	if chain.Outcome == jurisdiction.LicensingInvalid && chain.InvalidReason == jurisdiction.LicensingInvalidTenantNotVisible {
-		// Every gate session sees its own tenant row: an invisible one is a mis-scoped session, never "no licence".
-		return RestrictionDecision{}, errors.New("withdrawal: the tenant row is not visible to the restriction policy evaluation")
-	}
-	validity := jurisdiction.LicenceValid
-	if chain.Outcome == jurisdiction.LicensingResolved {
-		if validity, err = jurisdiction.EvaluateLicenceValidity(ctx, tx, chain.LicenceID, restrictionClock().UTC()); err != nil {
-			return RestrictionDecision{}, err
-		}
-	}
-	cause, licenceState, err := licenceCause(chain.Outcome, validity)
-	if err != nil {
-		return RestrictionDecision{}, err
-	}
+	// The set version first, through the session-bound function (0184 M-3: a mis-scoped session is an error here, never
+	// "nothing configured").
 	var setVersion int64
 	if err := tx.QueryRow(ctx, `SELECT withdrawal_restriction_set_version($1)`, tenantID).Scan(&setVersion); err != nil {
 		return RestrictionDecision{}, fmt.Errorf("withdrawal: read restriction policy set version: %w", err)
 	}
+	rel, relErr := evaluateReliance(ctx, tx, tenantID, brandID, restrictionClock().UTC())
+	var causes map[RestrictionCause]string
+	unknown := relErr != nil
+	if relErr == nil {
+		var mapErr error
+		causes, unknown, mapErr = reliedCauses(rel)
+		if mapErr != nil {
+			relErr, unknown = mapErr, true
+		}
+	}
+	if unknown {
+		if setVersion > 0 {
+			// A configured policy exists: never guess (fail closed, retryable).
+			if relErr == nil {
+				relErr = errors.New("withdrawal: a licence the tenant relies on could not be evaluated")
+			}
+			return RestrictionDecision{}, relErr
+		}
+		// lic17 F-4 / M-2: no policy row at all, so the answer is the interim default whatever the licence state; record that
+		// the licence state was unknown instead of turning a read problem into a 503 (the behaviour before 0182 never read it).
+		return RestrictionDecision{Stage: stage, Action: RestrictionAllow, Source: RestrictionSourceDefault, SetVersion: 0,
+			LicenceState: LicenceStateUnknown, LicenceUnknown: true}, nil
+	}
 	var effs []effective
-	if cause != "" {
-		e := effective{cause: cause}
+	for _, cause := range ConfigurableCauses {
+		state, ok := causes[cause]
+		if !ok {
+			continue
+		}
+		e := effective{cause: cause, state: state}
 		var action string
 		var version *int64
 		if err := tx.QueryRow(ctx, `SELECT action, source, policy_id, set_version FROM withdrawal_restriction_effective($1, $2, $3)`,
@@ -300,7 +442,7 @@ func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, sta
 		}
 		effs = append(effs, e)
 	}
-	return combine(stage, setVersion, licenceState, effs), nil
+	return combine(stage, setVersion, string(jurisdiction.LicenceValid), effs), nil
 }
 
 // evaluateRequestRestriction runs the policy for a NEW request (after H-SEC-11, before the WD-RG-1 gate). A configured
@@ -308,8 +450,11 @@ func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, sta
 // every existing caller already commit a gate denial's audit and answer the player generically. Otherwise it returns the
 // decision for the request's audit.
 func evaluateRequestRestriction(ctx context.Context, tx pgx.Tx, p RequestParams) (RestrictionDecision, error) {
-	rd, err := EvaluateRestriction(ctx, tx, p.TenantID, RestrictionStageRequest)
+	rd, err := EvaluateRestriction(ctx, tx, p.TenantID, p.BrandID, RestrictionStageRequest)
 	if err != nil {
+		return RestrictionDecision{}, err
+	}
+	if err := rd.assertRecordable(); err != nil {
 		return RestrictionDecision{}, err
 	}
 	if rd.Action != RestrictionBlock {
@@ -345,4 +490,13 @@ func auditRequestRestriction(ctx context.Context, tx pgx.Tx, p RequestParams, re
 		return fmt.Errorf("withdrawal: audit restriction policy: %w", err)
 	}
 	return nil
+}
+
+// pre0182SchemaKey is the TEST-ONLY context marker of a scratch database older than migration 0182. Unexported: no other
+// package can set it, and this package's production code only reads it (pinned by a static test).
+type pre0182SchemaKey struct{}
+
+func pre0182SchemaForTest(ctx context.Context) bool {
+	v, _ := ctx.Value(pre0182SchemaKey{}).(bool)
+	return v
 }

@@ -20,9 +20,29 @@ func TestIsWidening_Matrix(t *testing.T) {
 	cur := func(actions ...string) []StageEffect {
 		var out []StageEffect
 		for i, a := range actions {
-			out = append(out, StageEffect{Stage: Stages[i], Action: a})
+			out = append(out, StageEffect{Stage: Stages[i], Action: a, Source: SourceConfigured})
 		}
 		return out
+	}
+	def := func(actions ...string) []StageEffect {
+		out := cur(actions...)
+		for i := range out {
+			out[i].Source = SourceDefault
+		}
+		return out
+	}
+	// lic17 F-2 (migration 0184): the FIRST configured allow over the interim default is widening (four-eyes); a tightening
+	// over the default stays single actor.
+	if !IsWidening(ActionAllow, def("allow", "allow", "allow")) {
+		t.Fatal("a first configured allow over the default must be widening")
+	}
+	if IsWidening(ActionBlock, def("allow", "allow", "allow")) || IsWidening(ActionHoldForReview, def("allow", "allow", "allow")) {
+		t.Fatal("a tightening over the default stays single actor")
+	}
+	mixed := cur("allow", "allow", "allow")
+	mixed[2].Source = SourceDefault
+	if !IsWidening(ActionAllow, mixed) {
+		t.Fatal("a default at ANY stage makes an allow widening")
 	}
 	for _, c := range []struct {
 		next    string
@@ -31,7 +51,7 @@ func TestIsWidening_Matrix(t *testing.T) {
 	}{
 		{ActionBlock, cur("allow", "allow", "allow"), false},         // tightening: single actor
 		{ActionHoldForReview, cur("allow", "allow", "allow"), false}, // tightening
-		{ActionAllow, cur("allow", "allow", "allow"), false},         // pinning the same action: single actor
+		{ActionAllow, cur("allow", "allow", "allow"), false},         // re-pinning a CONFIGURED allow: single actor
 		{ActionAllow, cur("block", "block", "block"), true},          // loosening: two approvers
 		{ActionHoldForReview, cur("block", "block", "block"), true},  // loosening
 		{ActionAllow, cur("hold_for_review", "hold_for_review", "hold_for_review"), true},

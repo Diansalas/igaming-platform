@@ -13373,9 +13373,31 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WithdrawalRestrictionPolicyCause"
+        action_semantics:
+          type: array
+          description: "lic17 M-1: the plain meaning of each action (closed text). hold_for_review is a PARK, not a review queue: this policy has no per-withdrawal release."
+          items:
+            type: object
+            properties:
+              action: { type: string, enum: [allow, hold_for_review, block] }
+              meaning: { type: string }
+            required: [action, meaning]
+        parked:
+          type: object
+          description: >-
+            lic17 M-1: the tenant's open (approved / submitted) withdrawals whose latest dispatch gate decision is a WD056
+            refusal, with the earliest WD056 refusal among them. visible is false for a platform caller (the decision rows are
+            tenant-scoped): use the withdrawal.payout_gate_denied alerts with gate_code WD056 instead.
+          properties:
+            visible: { type: boolean }
+            count: { type: integer, minimum: 0 }
+            oldest_parked_since: { type: string, format: date-time, nullable: true }
+            oldest_age_seconds: { type: integer, minimum: 0, nullable: true }
+            note: { type: string }
+          required: [visible, count, oldest_parked_since, oldest_age_seconds, note]
         disclaimer:
           $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
-      required: [tenant_id, set_version, configured, causes, disclaimer]
+      required: [tenant_id, set_version, configured, causes, action_semantics, parked, disclaimer]
     WithdrawalRestrictionPolicyVersion:
       type: object
       properties:
