@@ -70,7 +70,9 @@ func (s *Sweeper) evaluateRedispatchGate(ctx context.Context, tx pgx.Tx, attempt
 	if err != nil {
 		return withdrawalgate.Decision{}, err
 	}
-	return withdrawal.EvaluateDispatchGate(ctx, tx, s.withdrawalGate(), pre)
+	// lic11: the tenant's withdrawal restriction policy is evaluated at the RE-DISPATCH stage (a configured hold_for_review or
+	// block becomes a WD056 denial: escalate, like every gate denial here).
+	return withdrawal.EvaluateDispatchGate(ctx, tx, s.withdrawalGate(), pre, withdrawal.AtRedispatch())
 }
 
 // applyRedispatchGate finishes the T2 / T12 gate step AFTER the L1 lock (wr is the locked, `submitted` request).

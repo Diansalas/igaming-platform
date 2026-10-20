@@ -377,6 +377,9 @@ var staticAllowed = map[string]bool{
 	// Migration 0177 (MKT-DUAL-1): the licensing change service signs request / approve / reject / cancel / execute proofs
 	// for the authenticated principal (security review mandatory).
 	filepath.Join("internal", "licensingchange"): true,
+	// Migration 0182 (lic11): the withdrawal restriction policy service signs request / approve / reject / cancel / execute
+	// proofs for the authenticated platform principal (security review mandatory).
+	filepath.Join("internal", "withdrawalpolicy"): true,
 	// ADR 0116 S3 (migrations 0140-0142): the AML officer service signs hold / case / four-eyes proofs for the authenticated
 	// officer (security review mandatory). The fixture package builds officers through the K1 flow and signs nothing itself.
 	filepath.Join("internal", "aml"): true,

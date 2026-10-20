@@ -774,6 +774,20 @@ const (
 	PermJurisdictionRegistryRead Permission = "jurisdiction_registry:read"
 )
 
+// lic11 (migration 0182): the governed per-tenant withdrawal restriction policy. STATIC route-level authority; the
+// controls that matter (closed cause registry, widening = two approvals by distinct staff AND distinct Persons other than
+// the requester's, approvals at most 24 h old, signed actor proofs, append-only versions, the governed-write guard) are
+// the database's and internal/withdrawalpolicy's, whatever the role.
+//
+//   - PermWithdrawalRestrictionPolicyChange: request / approve / reject / cancel a policy change. platform_admin ONLY
+//     (platform scope; a tenant never writes its own withdrawal restriction policy).
+//   - PermWithdrawalRestrictionPolicyRead: read the effective policy, its versions and (platform only) the change
+//     requests. platform_admin (every tenant), tenant_admin and compliance (their OWN tenant, read-only).
+const (
+	PermWithdrawalRestrictionPolicyChange Permission = "withdrawal_restriction_policy:change"
+	PermWithdrawalRestrictionPolicyRead   Permission = "withdrawal_restriction_policy:read"
+)
+
 // ADR 0115 slice S2 (RG limits write APIs). STATIC route-level authority; the controls that matter
 // (tighten-only operator rows, floor four-eyes by distinct staff AND Person, signed actor proofs,
 // player-confirm of increases) are the database's and internal/rg's, whatever the role.
@@ -914,6 +928,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationApprove, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 		// Migration 0177 (MKT-DUAL-1): platform_admin is the ONLY holder of :approve (interim, HDR-M-1).
 		PermLicensingChangeRequest, PermLicensingChangeApprove, PermLicensingChangeRead,
+		// lic11 (migration 0182): platform_admin is the ONLY writer of withdrawal restriction policies.
+		PermWithdrawalRestrictionPolicyChange, PermWithdrawalRestrictionPolicyRead,
 		// lic4 slice 4a: platform-wide registry reads (platform_admin ONLY).
 		PermJurisdictionRegistryRead,
 		// ADR 0115 S2: jurisdiction-floor change requests (platform_admin ONLY; four-eyes is the database's).
@@ -1034,6 +1050,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 		// Migration 0177: request (own tenant, tenant-requestable kinds) and read; never :approve.
 		PermLicensingChangeRequest, PermLicensingChangeRead,
+		// lic11 (migration 0182): read the tenant's OWN withdrawal restriction policy; never change it.
+		PermWithdrawalRestrictionPolicyRead,
 		// ADR 0115 S2: read a player's RG limits and the config in force; never write.
 		PermRGLimitRead, PermRGConfigRead,
 	),
@@ -1114,6 +1132,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
 		// Migration 0177: request (own tenant, tenant-requestable kinds) and read; never :approve.
 		PermLicensingChangeRequest, PermLicensingChangeRead,
+		// lic11 (migration 0182): read the tenant's OWN withdrawal restriction policy; never change it.
+		PermWithdrawalRestrictionPolicyRead,
 		// ADR 0115 S2: compliance is the sole writer of operator RG bounds and of limit changes on a
 		// player's request (decreases only until ADR 0017 step-up ships).
 		PermRGLimitRead, PermRGLimitWriteOnPlayerRequest, PermRGConfigRead, PermRGConfigWrite,
