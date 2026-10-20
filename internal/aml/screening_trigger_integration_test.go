@@ -332,7 +332,8 @@ func TestGate_WithdrawalHeldUntilAFreshCompletedClear_DepositsNeverGated(t *test
 	tw := newTrigWorld(t, 3*time.Second, time.Hour)
 	// An EXISTING player (registered before the trigger policy) is not held during the backfill grace.
 	existing := tw.player()
-	tw.setTrigger([]aml.TriggerEvent{aml.EventRegistration, aml.EventScheduled}, true, time.Now().Add(-time.Second))
+	time.Sleep(1500 * time.Millisecond) // the policy must take effect strictly AFTER the existing person registered
+	tw.setTrigger([]aml.TriggerEvent{aml.EventRegistration, aml.EventScheduled}, true, time.Now().Add(-500*time.Millisecond))
 	if tw.heldFor(existing, aml.OpWithdrawal) {
 		t.Fatal("an existing person inside the backfill grace must not be held")
 	}
