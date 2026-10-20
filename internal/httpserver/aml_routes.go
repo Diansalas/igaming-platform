@@ -61,6 +61,7 @@ type AMLOfficerAPI interface {
 	EffectiveScreeningTriggerPolicy(ctx context.Context, a aml.Actor, jurisdictionID uuid.UUID) (*aml.TriggerPolicy, error)
 	ListScreeningRequests(ctx context.Context, a aml.Actor, personID uuid.UUID) ([]aml.ScreeningRequestRow, error)
 	ResolveScreeningRequest(ctx context.Context, a aml.Actor, personID, requestID uuid.UUID, in aml.ResolveScreeningInput) (aml.ScreeningRecorded, error)
+	ReplaceScreeningRequest(ctx context.Context, a aml.Actor, personID uuid.UUID, requestID *uuid.UUID, reasonCode string) (aml.ReplaceScreeningResult, error)
 }
 
 var _ AMLOfficerAPI = (*aml.Service)(nil)

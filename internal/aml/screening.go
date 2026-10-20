@@ -133,6 +133,10 @@ type ScreeningResult struct {
 	ErrorCode         ScreeningErrorCode
 	ProviderReference string
 	ScreenedAt        time.Time
+	// matchRefs (lic23, N-2) is set by Orchestrator.callProvider for a match outcome: the sorted "list:vendor-match-reference" pairs, only
+	// when EVERY match carries a reference. The automatic worker turns it into a keyed pseudonymous fingerprint immediately and never
+	// stores or logs the references themselves.
+	matchRefs []string
 }
 
 // ScreeningProvider is OUR vendor-agnostic contract (SumSub / Veriff / Jumio-shaped vendors are mapped onto it by an adapter).

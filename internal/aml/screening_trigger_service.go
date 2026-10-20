@@ -26,6 +26,8 @@ import (
 const (
 	OpProofScreeningTriggerPolicySet = actorproof.OpAMLScreeningTriggerPolicySet
 	OpProofScreeningRequestRead      = "aml_screening_request:read"
+	// lic23 (N-4): cancel a stale pending / claimed request and queue a replacement (or queue one for a person with none).
+	OpProofScreeningRequestReplace = "aml_screening_request:replace"
 )
 
 // TriggerEvent is an event that can trigger an automatic screening. The vocabulary is closed (the table CHECK is the authority).
@@ -131,6 +133,11 @@ func (s *Service) SetScreeningTriggerPolicy(ctx context.Context, a Actor, in Set
 	if err != nil {
 		return uuid.Nil, err
 	}
+	// lic23 SN-5: the production binary refuses a withdrawal gate before any proof is signed. The database refuses it too (the
+	// non-forgeable environment anchor); this is the second, independent refusal.
+	if in.GateWithdrawal && s.cfg.Environment == "production" {
+		return uuid.Nil, fmt.Errorf("%w: a withdrawal gate cannot be enabled in a production environment (no screening provider is permitted there)", ErrInvalidInput)
+	}
 	if events == nil {
 		events = []string{} // an empty set is a non-NULL empty array (nil would be sent as SQL NULL and refused)
 	}
@@ -204,6 +211,7 @@ const (
 	RequestDone           RequestStatus = "done"
 	RequestNeedsOfficer   RequestStatus = "needs_officer"
 	RequestFailedTerminal RequestStatus = "failed_terminal"
+	RequestCancelled      RequestStatus = "cancelled"
 )
 
 // ScreeningRequestRow is one automatic screening request as an officer reads it. A needs_officer request is RESOLVED when an
@@ -312,4 +320,39 @@ func (s *Service) ResolveScreeningRequest(ctx context.Context, a Actor, personID
 		SubjectRef: hex.EncodeToString(sum[:]), Lists: in.Lists, Outcome: in.Outcome, MatchLists: matches, ScreenedAt: time.Now(),
 		Decision: d.Action, HoldReasonCode: d.ReasonCode}
 	return s.RecordScreening(ctx, a, rec)
+}
+
+// ReplaceScreeningResult is what a replacement queued.
+type ReplaceScreeningResult struct {
+	NewRequestID       uuid.UUID
+	CancelledRequestID *uuid.UUID
+}
+
+// ReplaceScreeningRequest is the officer's governed way to un-stick a person whose automatic screening is not progressing
+// (lic23, N-4): with requestID it CANCELS that stale pending / claimed request and queues a replacement for the worker; with a nil
+// requestID it queues a request for a person who has none. Officer quorum, owner scope and a signed proof are checked by the
+// database (aml_screening_request_replace). A request stuck on a match or a terminal failure is resolved, not replaced.
+func (s *Service) ReplaceScreeningRequest(ctx context.Context, a Actor, personID uuid.UUID, requestID *uuid.UUID, reasonCode string) (ReplaceScreeningResult, error) {
+	if personID == uuid.Nil || !ValidReasonCode(reasonCode) {
+		return ReplaceScreeningResult{}, fmt.Errorf("%w: person id and a reason code are required", ErrInvalidInput)
+	}
+	var out ReplaceScreeningResult
+	err := s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
+		target, reqText := actorproof.TargetNew, ""
+		if requestID != nil {
+			target, reqText = requestID.String(), requestID.String()
+		}
+		hash := actorproof.Digest(tenantStr(a.TenantID), actorproof.S(personID.String()), actorproof.SP(reqText), actorproof.S(reasonCode))
+		if err := s.attachProof(ctx, tx, a, OpProofScreeningRequestReplace, target, hash); err != nil {
+			return err
+		}
+		var cancelled *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT o_new_request_id, o_cancelled_request_id FROM aml_screening_request_replace($1, $2, $3, $4)`,
+			a.TenantID, personID, requestID, reasonCode).Scan(&out.NewRequestID, &cancelled); err != nil {
+			return err
+		}
+		out.CancelledRequestID = cancelled
+		return nil
+	})
+	return out, err
 }
