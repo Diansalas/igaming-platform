@@ -93,6 +93,13 @@ var staffRouteGolden = map[string]string{
 	"GET /v1/admin/kyc/enforcement-decisions":                         "none",
 	// lic10 (L-20): KYC enforcement policy authoring. Platform-admin only; every write is critical (loosening or tightening a
 	// KYC control is a security decision); reads none. The four-eyes (author versus activator) is the database's.
+	// lic10 (migration 0181, G8/Q21): the residence determination maker-checker. Filing a policy change only tightens or files a
+	// pending request (protective: none); both approvals loosen a control (critical, mirrored by actorproof.StepUpOperations).
+	"GET /v1/admin/tenants/{tenantID}/residence-approval-policy":                                  "none",
+	"POST /v1/admin/tenants/{tenantID}/residence-approval-policy":                                 "none",
+	"POST /v1/admin/tenants/{tenantID}/residence-approval-policy/{policyID}/approvals":            "critical",
+	"GET /v1/admin/kyc/residence-determinations/pending":                                          "none",
+	"POST /v1/admin/kyc/verifications/{id}/residence-approval":                                    "critical",
 	"GET /v1/admin/kyc/enforcement-policies":                                                      "none",
 	"POST /v1/admin/kyc/enforcement-policies":                                                     "critical",
 	"POST /v1/admin/kyc/enforcement-policies/{policyID}/activate":                                 "critical",

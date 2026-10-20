@@ -37,6 +37,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
+	"github.com/Diansalas/igaming-platform/internal/residenceapproval"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
@@ -473,6 +474,12 @@ func run() error {
 		return fmt.Errorf("aml: %w", err)
 	}
 
+	// Migration 0181 (lic10, audit G8 / Q21): the residence determination maker-checker service. Same process issuer.
+	residenceApproval, err := residenceapproval.New(residenceapproval.Config{Pool: pool, Proofs: actorProofIssuer})
+	if err != nil {
+		return fmt.Errorf("residence approval: %w", err)
+	}
+
 	// Migration 0177 (MKT-DUAL-1): the licensing / jurisdiction change service (the only runtime writer of licences,
 	// tenants.licence_id, licence_country_ceilings, operating_country_policies and tenant_jurisdiction_configs). Same
 	// process issuer as the other governed writers.
@@ -485,6 +492,7 @@ func run() error {
 		LaunchAuthorisation:         launchAuthorisation,
 		LicensingChanges:            licensingChanges,
 		AML:                         amlService,
+		ResidenceApproval:           residenceApproval,
 		AlertRouting:                alertDispatcher,
 		PayoutInstruments:           payoutInstruments,
 		AlertRoutingProduction:      cfg.GuardEnvironment() == "production",

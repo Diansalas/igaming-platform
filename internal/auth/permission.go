@@ -399,6 +399,14 @@ const (
 	PermKYCEnforcementPolicyManage Permission = "kyc_enforcement_policy:manage"
 	PermKYCEnforcementPolicyRead   Permission = "kyc_enforcement_policy:read"
 
+	// PermResidenceApprovalPolicyManage / PermResidenceApprovalPolicyRead (lic10, migration 0181, audit G8 / owner question Q21):
+	// file and approve a change of a tenant's residence determination maker-checker mode (none | into_open_market | all), and
+	// read it. Manage: compliance (its own tenant) and platform_admin (through the acting session of ADR 0099, which the database
+	// refuses without an in-force grant for exactly that tenant). Read: also tenant_admin. The controls that matter (stricter
+	// is one actor, less strict needs two approvals by distinct Persons, signed actor proofs) are the database's, whatever the role.
+	PermResidenceApprovalPolicyManage Permission = "residence_approval_policy:manage"
+	PermResidenceApprovalPolicyRead   Permission = "residence_approval_policy:read"
+
 	// PermPlayerResidenceRead gates reading a player's declared or verified
 	// residence VALUE on a staff-facing surface (presence/provenance fields
 	// are NOT gated by this - they ride on PermVerificationRead/PermPlayerRead
@@ -893,6 +901,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermKYCEnforcementDecisionRead,
 		// lic10 (L-20): platform-wide KYC enforcement policy authoring; platform_admin only.
 		PermKYCEnforcementPolicyManage, PermKYCEnforcementPolicyRead,
+		// lic10 (migration 0181): residence maker-checker policy, through the acting session only.
+		PermResidenceApprovalPolicyManage, PermResidenceApprovalPolicyRead,
 		// PRH-I1 (ADR 0095 §10.4/§10.5): platform reach over every
 		// tenant's kill switches, through the same route family
 		// RoleTenantAdmin uses for its own tenant (canActOnTenant).
@@ -956,6 +966,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	// staff and approve withdrawals, that requires two separate role
 	// grants on two separate accounts, never one role bundling both.
 	RoleTenantAdmin: permSet(
+		PermResidenceApprovalPolicyRead, // lic10 (migration 0181): read-only visibility of its own tenant's residence maker-checker mode
 		PermTenantRead, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
 		PermStaffRead, // ADR 0119 S5 + S6: own tenant only (the routes enforce the tenant)
@@ -1081,6 +1092,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 4F: the sole grantee of PermVerificationReview, plus
 		// read visibility - see both permissions' own doc comments.
 		PermVerificationRead, PermVerificationReview,
+		// lic10 (migration 0181): the residence determination maker-checker policy of its OWN tenant.
+		PermResidenceApprovalPolicyManage, PermResidenceApprovalPolicyRead,
 		// Stage 4I Phase B: the sole grantee of PermPlayerResidenceRead and
 		// PermJurisdictionEvidenceCollectionActivate - see both
 		// permissions' own doc comments for why they sit with Compliance

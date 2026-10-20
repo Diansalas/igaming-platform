@@ -64,15 +64,15 @@ func toKYCEnforcementPolicyResponse(p kyc.EnforcementPolicy) kycEnforcementPolic
 	return r
 }
 
-// kycPolicyCall is the shared preamble: the authenticated platform principal (server-side), request id, logger.
-type kycPolicyCall struct {
+// kycEnfReq is the shared preamble: the authenticated platform principal (server-side), request id, logger.
+type kycEnfReq struct {
 	requestID string
 	logger    interface{ Error(msg string, args ...any) }
 	staffID   uuid.UUID
 }
 
-func beginKYCPolicyCall(deps Deps, w http.ResponseWriter, r *http.Request) (kycPolicyCall, bool) {
-	c := kycPolicyCall{requestID: observability.RequestIDFromContext(r.Context()), logger: observability.LoggerFromContext(r.Context(), deps.Logger)}
+func beginKYCEnfReq(deps Deps, w http.ResponseWriter, r *http.Request) (kycEnfReq, bool) {
+	c := kycEnfReq{requestID: observability.RequestIDFromContext(r.Context()), logger: observability.LoggerFromContext(r.Context(), deps.Logger)}
 	tc, err := tenant.FromContext(r.Context())
 	if err != nil {
 		apierror.Write(w, c.requestID, apierror.CodeUnauthorized, "no authenticated context")
@@ -88,7 +88,7 @@ func beginKYCPolicyCall(deps Deps, w http.ResponseWriter, r *http.Request) (kycP
 }
 
 // writeKYCPolicyError maps a library/database refusal to a closed code and a fixed sentence (never the database text).
-func writeKYCPolicyError(w http.ResponseWriter, c kycPolicyCall, op string, err error) {
+func writeKYCPolicyError(w http.ResponseWriter, c kycEnfReq, op string, err error) {
 	switch {
 	case errors.Is(err, kyc.ErrNotFound):
 		apierror.Write(w, c.requestID, apierror.CodeNotFound, "enforcement policy not found")
@@ -130,7 +130,7 @@ func pathPolicyID(w http.ResponseWriter, r *http.Request, requestID string) (uui
 // newListKYCEnforcementPoliciesHandler is GET /v1/admin/kyc/enforcement-policies[?licensing_jurisdiction_id=&status=].
 func newListKYCEnforcementPoliciesHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, ok := beginKYCPolicyCall(deps, w, r)
+		c, ok := beginKYCEnfReq(deps, w, r)
 		if !ok {
 			return
 		}
@@ -181,7 +181,7 @@ type createKYCEnforcementPolicyRequest struct {
 // newCreateKYCEnforcementPolicyHandler is POST /v1/admin/kyc/enforcement-policies: authors a DRAFT.
 func newCreateKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, ok := beginKYCPolicyCall(deps, w, r)
+		c, ok := beginKYCEnfReq(deps, w, r)
 		if !ok {
 			return
 		}
@@ -232,7 +232,7 @@ type kycEnforcementPolicySupersedeRequest struct {
 }
 
 // runKYCPolicyTransition runs one transition in a platform-admin transaction and answers with the read-back policy.
-func runKYCPolicyTransition(deps Deps, w http.ResponseWriter, r *http.Request, c kycPolicyCall, op string, id uuid.UUID, meta *kyc.AuditMeta,
+func runKYCPolicyTransition(deps Deps, w http.ResponseWriter, r *http.Request, c kycEnfReq, op string, id uuid.UUID, meta *kyc.AuditMeta,
 	run func(ctx context.Context, tx pgx.Tx) error) {
 	var out kyc.EnforcementPolicy
 	err := deps.DB.WithPlatformAdmin(r.Context(), c.staffID, func(ctx context.Context, tx pgx.Tx) error {
@@ -251,7 +251,7 @@ func runKYCPolicyTransition(deps Deps, w http.ResponseWriter, r *http.Request, c
 	writeJSON(w, http.StatusOK, toKYCEnforcementPolicyResponse(out))
 }
 
-func decodeReason(w http.ResponseWriter, r *http.Request, c kycPolicyCall) (string, bool) {
+func decodeReason(w http.ResponseWriter, r *http.Request, c kycEnfReq) (string, bool) {
 	var req kycEnforcementPolicyReasonRequest
 	if err := decodeJSONStrict(r, &req); err != nil {
 		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
@@ -271,7 +271,7 @@ func kycPolicyReasonOK(s string) bool { return kyc.ValidPolicyReasonCode(s) }
 // policy's own author (four-eyes) and a trigger type the evaluator does not consult.
 func newActivateKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, ok := beginKYCPolicyCall(deps, w, r)
+		c, ok := beginKYCEnfReq(deps, w, r)
 		if !ok {
 			return
 		}
@@ -294,7 +294,7 @@ func newActivateKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 // active policy is never switched off without a successor (use .../supersede).
 func newWithdrawKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, ok := beginKYCPolicyCall(deps, w, r)
+		c, ok := beginKYCEnfReq(deps, w, r)
 		if !ok {
 			return
 		}
@@ -317,7 +317,7 @@ func newWithdrawKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 // policy {policyID} by the DRAFT successor_policy_id, atomically. The acting administrator must differ from both authors.
 func newSupersedeKYCEnforcementPolicyHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, ok := beginKYCPolicyCall(deps, w, r)
+		c, ok := beginKYCEnfReq(deps, w, r)
 		if !ok {
 			return
 		}

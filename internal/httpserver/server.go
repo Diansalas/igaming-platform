@@ -29,6 +29,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/residenceapproval"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 )
 
@@ -215,6 +216,12 @@ type Deps struct {
 	// is no fallback and no bypass. Production wiring passes *aml.Service, built with the process actor-proof issuer (nil in
 	// non-production leaves every governed AML write failing closed with ErrProofUnavailable).
 	AML AMLOfficerAPI
+
+	// ResidenceApproval is the lic10 (migration 0181) residence determination maker-checker service behind the policy and
+	// approval routes (residence_approval_routes.go). cmd/platform-api sets it; when nil and DB is set, NewWithAdmission builds
+	// one over DB that signs with the process actor-proof issuer (with no issuer every governed write fails closed). Nil with
+	// no DB makes the routes answer 503.
+	ResidenceApproval ResidenceApprovalAPI
 
 	// PersonResolver is Stage 4E's identity-resolution boundary, consulted
 	// by newRegisterHandler BEFORE a Person is ever created - unlike
@@ -512,6 +519,11 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 			deps.LicensingChanges = svc
 		}
 	}
+	if deps.ResidenceApproval == nil && deps.DB != nil {
+		if svc, err := residenceapproval.New(residenceapproval.Config{Pool: deps.DB}); err == nil {
+			deps.ResidenceApproval = svc
+		}
+	}
 	admissionRuntime := WebhookAdmissionRuntime{rt: deps.webhookAdmission}
 
 	mux.HandleFunc("GET /healthz", livezHandler)
@@ -525,6 +537,7 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	registerCredentialRoutes(mux, deps)
 	registerKYCRoutes(mux, deps)
 	registerKYCEnforcementPolicyRoutes(mux, deps)
+	registerResidenceApprovalRoutes(mux, deps)
 	registerRiskRoutes(mux, deps)
 	registerAssetRegistryRoutes(mux, deps)
 	registerBonusRoutes(mux, deps)

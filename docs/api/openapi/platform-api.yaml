@@ -10537,6 +10537,133 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
         "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/residence-approval-policy:
+    get:
+      summary: Read a tenant's residence determination maker-checker policy
+      description: >
+        residence_approval_policy:read (compliance of the tenant, tenant_admin of the tenant, platform_admin through the acting session of ADR 0099). lic10, migration 0181 (audit G8, owner question Q21). `effective_mode` is the mode in force: `none` (a single reviewer's determination is market evidence at once; this is the state of every tenant until a policy is configured and is TODAY'S behaviour), `into_open_market` (a determination into a market the brand serves needs a second, distinct Person) or `all` (every determination does). `versions` is the history, newest first (at most 200). A foreign tenant is 404. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      summary: File a change of a tenant's residence maker-checker mode
+      description: >
+        residence_approval_policy:manage (compliance of the tenant; platform_admin through the acting session). Step-up none: filing only tightens or files a request that changes nothing until approved. lic10, migration 0181. The DATABASE compares `mode` with the mode in force (the caller never states the previous mode): a STRICTER mode (none, then into_open_market, then all) is active at once and answers 200 (one actor); a LESS strict mode is filed PENDING and answers 202, and takes effect only after two approvals by two distinct Persons, neither the requester's (POST .../{policyID}/approvals). The same mode as in force is 409. A pending request is only valid against the mode it was filed against: if the mode changed since, it must be refiled (409 at approval). The mode applies to FUTURE determinations; each determination snapshots the mode in force when it is made. Needs a signed actor proof (ADR 0110); `reason_code` is a code (1..64 characters of [A-Za-z0-9_.:-]). The platform ships NO policy: nothing changes for a tenant that never calls this.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyRequest" }
+      responses:
+        "200":
+          description: A stricter mode, executed at once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyChange" }
+        "202":
+          description: A less strict mode, filed pending (two approvals needed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/residence-approval-policy/{policyID}/approvals:
+    post:
+      summary: Approve a pending (less strict) residence maker-checker mode change
+      description: >
+        residence_approval_policy:manage AND step-up `critical`. lic10, migration 0181. Records one approval; the approval that reaches the required count (2) activates the policy in the same transaction. The requester (staff account or Person) may not approve (403 four-eyes); one Person approves once (409); an approver must be linked to a Person (403). A policy that is not pending, or whose recorded previous mode is no longer the mode in force, is 409 (refile it). Needs a signed actor proof bound to the policy id and reason.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResidenceReasonRequest" }
+      responses:
+        "200":
+          description: The approval was recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyApproval" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/kyc/residence-determinations/pending:
+    get:
+      summary: Residence determinations waiting for a second Person
+      description: >
+        verification:read, tenant-scoped sessions only (a platform token is refused 403). lic10, migration 0181. Lists the CURRENT determinations that the tenant's policy required a second Person for and that have none, oldest first (at most 200). A pending determination is NOT market evidence. A determination replaced by a newer one is not listed. The list carries ids and times only: never the country (reading the residence value is its own permission). `determined_at` must be passed back unchanged to approve the determination.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Pending determinations
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PendingResidenceApproval" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/verifications/{id}/residence-approval:
+    post:
+      summary: Approve one residence determination as the second Person
+      description: >
+        verification:review (compliance), tenant-scoped sessions only, AND step-up `critical`. lic10, migration 0181. Makes the determination market evidence. Bound to the exact `determined_at` listed for it: a newer determination makes the approval 404. The approver must be a different staff account AND a different, linked Person than the determiner (403 four-eyes). A determination that needs no approval, or already has one, is 409. Needs a signed actor proof. Audited as kyc.residence_determination_approved with ids only: never the country.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResidenceDeterminationApprovalRequest" }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verification_id: { type: string, format: uuid }
+                  status: { type: string, enum: [approved] }
+                required: [verification_id, status]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /v1/admin/tenants/{tenantID}/staff/{staffID}/display-name:
     patch:
       summary: Set a tenant staff member's display name
@@ -12149,6 +12276,70 @@ components:
         successor_policy_id: { type: string, format: uuid }
         reason_code: { type: string }
       required: [successor_policy_id, reason_code]
+    ResidenceApprovalPolicyRequest:
+      type: object
+      properties:
+        mode: { type: string, enum: [none, into_open_market, all] }
+        reason_code: { type: string }
+      required: [mode, reason_code]
+    ResidenceApprovalPolicyChange:
+      type: object
+      properties:
+        policy_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, pending] }
+        required_approvals: { type: integer, description: "0 for a stricter change (active at once), 2 for a less strict one." }
+        previous_mode: { type: string, enum: [none, into_open_market, all] }
+        requested_mode: { type: string, enum: [none, into_open_market, all] }
+      required: [policy_id, status, required_approvals, previous_mode, requested_mode]
+    ResidenceReasonRequest:
+      type: object
+      properties:
+        reason_code: { type: string }
+      required: [reason_code]
+    ResidenceApprovalPolicyApproval:
+      type: object
+      properties:
+        status: { type: string, enum: [active, pending] }
+        approvals: { type: integer }
+        required_approvals: { type: integer }
+      required: [status, approvals, required_approvals]
+    ResidenceApprovalPolicy:
+      type: object
+      properties:
+        effective_mode: { type: string, enum: [none, into_open_market, all] }
+        versions:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              mode: { type: string, enum: [none, into_open_market, all] }
+              previous_mode: { type: string, enum: [none, into_open_market, all] }
+              status: { type: string, enum: [pending, active] }
+              required_approvals: { type: integer }
+              approvals: { type: integer }
+              reason_code: { type: string }
+              requested_by: { type: string, format: uuid, nullable: true }
+              requested_at: { type: string, format: date-time }
+              activated_at: { type: string, format: date-time, nullable: true }
+            required: [id, mode, previous_mode, status, required_approvals, approvals, reason_code, requested_at]
+      required: [effective_mode, versions]
+    PendingResidenceApproval:
+      type: object
+      properties:
+        verification_id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid }
+        determined_at: { type: string, format: date-time, description: Microsecond precision; pass back unchanged. }
+        determined_by: { type: string, format: uuid, nullable: true }
+        policy_mode: { type: string, enum: [into_open_market, all] }
+      required: [verification_id, player_account_id, brand_id, determined_at, policy_mode]
+    ResidenceDeterminationApprovalRequest:
+      type: object
+      properties:
+        determined_at: { type: string, format: date-time }
+        reason_code: { type: string }
+      required: [determined_at, reason_code]
     StaffDisplayNameRequest:
       type: object
       additionalProperties: false
