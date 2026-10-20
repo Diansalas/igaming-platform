@@ -159,6 +159,26 @@ export interface NavPermissions {
   licensingRequest: boolean
   /** lic5: licensing_change:approve - platform_admin ONLY (interim HDR-M-1). The database decides distinct Persons. */
   licensingApprove: boolean
+  /**
+   * lic16: kyc_enforcement_policy:read / :manage (lic10 L-20). platform_admin ONLY; a tenant token is refused. UI convenience only;
+   * the database enforces that the activating administrator differs from the author.
+   */
+  kycPolicyRead: boolean
+  kycPolicyManage: boolean
+  /**
+   * lic16: residence_approval_policy:read (tenant_admin, compliance; tenant-scoped sessions only, a platform token is refused) and
+   * residence_approval_policy:manage plus verification:review (compliance only). residenceQueue mirrors verification:read for the
+   * pending-determinations queue. UI convenience only.
+   */
+  residencePolicyRead: boolean
+  residencePolicyManage: boolean
+  residenceQueue: boolean
+  /**
+   * lic16: withdrawal_restriction_policy:read (platform_admin any tenant; tenant_admin and compliance their own) and
+   * withdrawal_restriction_policy:change (platform_admin ONLY; also the only role that may read the change list).
+   */
+  wrpRead: boolean
+  wrpChange: boolean
 }
 
 const NONE: NavPermissions = {
@@ -208,6 +228,13 @@ const NONE: NavPermissions = {
   licensingRead: false,
   licensingRequest: false,
   licensingApprove: false,
+  kycPolicyRead: false,
+  kycPolicyManage: false,
+  residencePolicyRead: false,
+  residencePolicyManage: false,
+  residenceQueue: false,
+  wrpRead: false,
+  wrpChange: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -269,6 +296,10 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     licensingRead: true,
     licensingRequest: true,
     licensingApprove: true,
+    kycPolicyRead: true,
+    kycPolicyManage: true,
+    wrpRead: true,
+    wrpChange: true,
   },
   tenant_admin: {
     ...NONE,
@@ -293,9 +324,12 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     capabilityGrants: true,
     capabilityGrantRequest: true,
     capabilityGrantRevoke: true,
+    residencePolicyRead: true,
+    residenceQueue: true,
+    wrpRead: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, ownTenant: true, staffRead: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, amlRead: true, amlWork: true, amlApprove: true, amlHolds: true, reconciliation: true, capabilityGrants: true },
+  compliance: { ...NONE, ownTenant: true, staffRead: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true, launchRead: true, launchRequest: true, launchSuspend: true, amlRead: true, amlWork: true, amlApprove: true, amlHolds: true, reconciliation: true, capabilityGrants: true, residencePolicyRead: true, residencePolicyManage: true, residenceQueue: true, wrpRead: true },
   finance: {
     ...NONE,
     withdrawals: true,
