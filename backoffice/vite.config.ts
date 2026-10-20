@@ -27,5 +27,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     css: true,
+    // The Playwright real-stack specs (e2e/) are run by e2e/run.sh, never by vitest.
+    exclude: ['**/node_modules/**', '**/dist/**', 'e2e/**'],
   },
 })

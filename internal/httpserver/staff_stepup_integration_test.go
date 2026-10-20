@@ -178,7 +178,7 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// lic10 (migration 0181): +2 critical (policy approvals, determination approval), +1 none-mutating (POST policy), +2 reads: critical 76, none-mutating 44, read 99.
 	if counts["critical"] != 78 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 44 || counts["read"] != 101 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 46 || counts["read"] != 105 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {
