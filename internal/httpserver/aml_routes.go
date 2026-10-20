@@ -56,6 +56,11 @@ type AMLOfficerAPI interface {
 	FlagSAR(ctx context.Context, a aml.Actor, caseID uuid.UUID, expectedSeq int, reasonCode string) (int, error)
 	Propose(ctx context.Context, a aml.Actor, caseID uuid.UUID, expectedSeq int, in aml.ProposeInput) (aml.Proposal, error)
 	Approve(ctx context.Context, a aml.Actor, caseID uuid.UUID, proposalSeq int, contentHash, reasonCode string) (int, error)
+	// lic18 (migration 0181): the automatic-screening trigger policy and the officer resolution of system-found requests.
+	SetScreeningTriggerPolicy(ctx context.Context, a aml.Actor, in aml.SetTriggerPolicyInput) (uuid.UUID, error)
+	EffectiveScreeningTriggerPolicy(ctx context.Context, a aml.Actor, jurisdictionID uuid.UUID) (*aml.TriggerPolicy, error)
+	ListScreeningRequests(ctx context.Context, a aml.Actor, personID uuid.UUID) ([]aml.ScreeningRequestRow, error)
+	ResolveScreeningRequest(ctx context.Context, a aml.Actor, personID, requestID uuid.UUID, in aml.ResolveScreeningInput) (aml.ScreeningRecorded, error)
 }
 
 var _ AMLOfficerAPI = (*aml.Service)(nil)

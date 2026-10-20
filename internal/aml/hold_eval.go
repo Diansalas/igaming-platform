@@ -31,6 +31,11 @@ type HoldVerdict struct {
 	EvalFailed bool
 	// HoldID is the matched hold when Held and the lookup succeeded; uuid.Nil otherwise.
 	HoldID uuid.UUID
+	// ScreeningOnly (lic18, ledger-finance H-1 e): the operation is held ONLY by the automatic-screening gate (an outstanding,
+	// stale or failed required screening, or a system-found match no officer has resolved) and NO officer-placed hold exists. It
+	// is a waiting state, not a compliance finding: a payout claim must PARK (the approved request and its funds hold stay, the
+	// claim is retried) instead of rejecting the withdrawal. It is set only when the hold lookup SUCCEEDED and found none.
+	ScreeningOnly bool
 }
 
 // Denied reports whether the operation must be refused.
@@ -81,8 +86,12 @@ func evaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID 
 	v := HoldVerdict{Held: true}
 	// The matched hold id is evidence for the AML-scoped decision log. Its lookup is best effort: the operation is
 	// already denied, so a failure here changes nothing but the evidence.
-	if id, mErr := matchHold(ctx, tx, tenantID, personID, accountID, op); mErr == nil {
-		v.HoldID = id
+	if id, found, mErr := matchHold(ctx, tx, tenantID, personID, accountID, op); mErr == nil {
+		if found {
+			v.HoldID = id
+		} else {
+			v.ScreeningOnly = true
+		}
 	}
 	return v, nil
 }
@@ -170,21 +179,22 @@ func holdProbeResult(results []*pgconn.Result, held *bool) error {
 	return nil
 }
 
-func matchHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (uuid.UUID, error) {
+func matchHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (uuid.UUID, bool, error) {
 	var id *uuid.UUID
 	sp, err := tx.Begin(ctx)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, false, err
 	}
 	qErr := sp.QueryRow(ctx, `SELECT aml_hold_match($1, $2, $3, $4)`, tenantID, personID, accountID, string(op)).Scan(&id)
 	_ = sp.Rollback(ctx)
 	if qErr != nil {
-		return uuid.Nil, qErr
+		return uuid.Nil, false, qErr
 	}
 	if id == nil {
-		return uuid.Nil, fmt.Errorf("aml: hold vanished between the probe and the match")
+		// The probe said held, the match found no hold row: the screening gate (or a hold lifted in between).
+		return uuid.Nil, false, nil
 	}
-	return *id, nil
+	return *id, true, nil
 }
 
 // raiseEvalFailed raises aml.hold_eval_failed in the caller's transaction and RETURNS the alerting layer's result: it

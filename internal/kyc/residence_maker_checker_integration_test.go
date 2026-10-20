@@ -15,10 +15,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/residenceapproval"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/staffsv"
 )
 
 func rmService(t *testing.T, pool *db.Pool) *residenceapproval.Service {
@@ -351,5 +354,88 @@ func TestResidenceMakerChecker_TenantIsolation(t *testing.T) {
 	}
 	if err := svc.ApproveDetermination(context.Background(), rmActor(b, rb), v, pend[0].DeterminedAt, "cross"); err == nil {
 		t.Fatal("tenant b's staff must not approve tenant a's determination")
+	}
+}
+
+// lic18 L4: only a compliance-role staff member of the tenant can approve a determination (the role is re-checked by the database).
+func TestResidenceMakerChecker_L4_ApprovalNeedsTheComplianceRole(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	enableVerifiedResidenceCollection(t, pool, f.tenantID)
+	svc := rmService(t, pool)
+	r1 := seedComplianceStaff(t, pool, f)
+	rmSetAll(t, svc, f, r1, residenceapproval.ModeAll)
+	v := seedVerification(t, pool, f)
+	if err := rmDetermine(t, pool, f, v, r1, "MT", nil); err != nil {
+		t.Fatal(err)
+	}
+	pend := rmPending(t, pool, f)
+	if len(pend) != 1 {
+		t.Fatalf("pending = %+v", pend)
+	}
+	var admin uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		p, err := staffsv.PersonIfRequired(ctx, tx, string(identity.StaffRoleTenantAdmin))
+		if err != nil {
+			return err
+		}
+		s, err := identity.CreateStaffUser(ctx, tx, f.tenantID, "admin-"+uuid.NewString()+"@example.com", "hash", identity.StaffRoleTenantAdmin, p)
+		admin = s.ID
+		return err
+	}); err != nil {
+		t.Fatalf("seed tenant admin: %v", err)
+	}
+	if err := svc.ApproveDetermination(context.Background(), rmActor(f, admin), v, pend[0].DeterminedAt, "second_check"); err == nil {
+		t.Fatal("a non-compliance staff member must not approve a residence determination (L4)")
+	}
+	if _, ok := rmEvidence(t, pool, f); ok {
+		t.Fatal("still pending after the refused approval")
+	}
+}
+
+// lic18 S3: once a determination is approved, the residence columns cannot be changed under it. A change under an unchanged
+// set_at is refused by the database; a genuine new determination (set_at advances) gets its OWN check row and is pending again.
+func TestResidenceMakerChecker_S3_CountryCannotChangeUnderAnApprovedCheck(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	enableVerifiedResidenceCollection(t, pool, f.tenantID)
+	svc := rmService(t, pool)
+	r1, r2 := seedComplianceStaff(t, pool, f), seedComplianceStaff(t, pool, f)
+	rmSetAll(t, svc, f, r1, residenceapproval.ModeAll)
+	v := seedVerification(t, pool, f)
+	if err := rmDetermine(t, pool, f, v, r1, "MT", nil); err != nil {
+		t.Fatal(err)
+	}
+	pend := rmPending(t, pool, f)
+	if len(pend) != 1 {
+		t.Fatalf("pending = %+v", pend)
+	}
+	if err := svc.ApproveDetermination(context.Background(), rmActor(f, r2), v, pend[0].DeterminedAt, "second_check"); err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := rmEvidence(t, pool, f); !ok || c != "MT" {
+		t.Fatalf("evidence = %q %v", c, ok)
+	}
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE kyc_verifications SET verified_residence_country = 'DE' WHERE id = $1`, v)
+		return err
+	})
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || pe.Code != "RD005" {
+		t.Fatalf("changing the country under an unchanged determination time: %v, want RD005", err)
+	}
+	if c, ok := rmEvidence(t, pool, f); !ok || c != "MT" {
+		t.Fatalf("the refused change must leave the evidence: %q %v", c, ok)
+	}
+	// A new determination written as a plain UPDATE with an advanced time is a NEW determination: pending again, so no evidence.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE kyc_verifications SET verified_residence_country = 'DE', verified_residence_set_at = clock_timestamp() WHERE id = $1`, v)
+		return err
+	}); err != nil {
+		t.Logf("a plain UPDATE that advances the time is refused (%v): acceptable, the new determination must go through ReviewVerification", err)
+		return
+	}
+	if c, ok := rmEvidence(t, pool, f); ok {
+		t.Fatalf("a new determination must be pending (no evidence), got %q", c)
 	}
 }

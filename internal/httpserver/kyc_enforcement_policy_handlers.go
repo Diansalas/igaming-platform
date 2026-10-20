@@ -93,6 +93,9 @@ func writeKYCPolicyError(w http.ResponseWriter, c kycEnfReq, op string, err erro
 	case errors.Is(err, kyc.ErrNotFound):
 		apierror.Write(w, c.requestID, apierror.CodeNotFound, "enforcement policy not found")
 		return
+	case errors.Is(err, kyc.ErrPolicyPersonNotDistinct):
+		apierror.Write(w, c.requestID, apierror.CodeForbidden, "four-eyes: a different platform administrator than the policy's author must make this change")
+		return
 	case errors.Is(err, kyc.ErrPolicyInvalidInput):
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "the policy is not in the state this action needs")
 		return

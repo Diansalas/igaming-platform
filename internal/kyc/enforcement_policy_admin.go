@@ -115,6 +115,12 @@ func SupersedeEnforcementPolicyWithDraft(ctx context.Context, tx pgx.Tx, oldID, 
 	if oldID == uuid.Nil || successorID == uuid.Nil || oldID == successorID {
 		return fmt.Errorf("%w: a distinct active policy and draft successor are required", ErrPolicyInvalidInput)
 	}
+	if err := requirePersonDistinctFromAuthor(ctx, tx, oldID); err != nil {
+		return err
+	}
+	if err := requirePersonDistinctFromAuthor(ctx, tx, successorID); err != nil {
+		return err
+	}
 	if err := transitionEnforcementPolicyMeta(ctx, tx, oldID, "active", "withdrawn", "kyc_enforcement_policy.withdrawn", &successorID, meta); err != nil {
 		return err
 	}
@@ -123,6 +129,9 @@ func SupersedeEnforcementPolicyWithDraft(ctx context.Context, tx pgx.Tx, oldID, 
 
 // ActivateEnforcementPolicyAudited is ActivateEnforcementPolicy with request evidence on the audit record.
 func ActivateEnforcementPolicyAudited(ctx context.Context, tx pgx.Tx, id uuid.UUID, meta *AuditMeta) error {
+	if err := requirePersonDistinctFromAuthor(ctx, tx, id); err != nil {
+		return err
+	}
 	return transitionEnforcementPolicyMeta(ctx, tx, id, "draft", "active", "kyc_enforcement_policy.activated", nil, meta)
 }
 

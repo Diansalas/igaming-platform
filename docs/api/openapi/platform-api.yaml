@@ -10855,7 +10855,7 @@ paths:
     post:
       summary: Activate a draft KYC enforcement policy (four-eyes)
       description: >
-        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). draft to active. The acting administrator must differ from the policy's author (403, enforced by the database); a trigger type the evaluator does not consult cannot be activated (409); a second active policy for the same enforcement key is refused (409, use supersede). A policy that is not a draft is 409. Audited (kyc_enforcement_policy.activated) with the reason code and request evidence.
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). draft to active. The acting administrator must differ from the policy's author (403, enforced by the database); a trigger type the evaluator does not consult cannot be activated (409); a second active policy for the same enforcement key is refused (409, use supersede). A policy that is not a draft is 409. Audited (kyc_enforcement_policy.activated) with the reason code and request evidence. lic18 (security S4): the acting administrator must also be a different PERSON than the author where both staff accounts are linked to a Person (403; accounts without a Person link are compared by account only, the database rule). The audit record carries the after state of the row. NOT BUILT: a signed actor proof on these writes (no existing proof operation fits a platform-scoped KYC policy write; see docs/plans/lic18-record.md).
       security:
         - bearerAuth: []
       parameters:
@@ -10905,7 +10905,7 @@ paths:
     post:
       summary: Replace an ACTIVE KYC enforcement policy with an activated draft successor
       description: >
-        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). {policyID} is the ACTIVE policy being replaced; successor_policy_id is a DRAFT of the same enforcement key (same jurisdiction, trigger type, play operation and asset). One transaction withdraws the old policy naming the successor and activates the successor. The acting administrator must differ from BOTH policies' authors (403, enforced by the database). Responds with the successor (now active). This is the only way an active policy stops being enforced. Audited on both rows.
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). {policyID} is the ACTIVE policy being replaced; successor_policy_id is a DRAFT of the same enforcement key (same jurisdiction, trigger type, play operation and asset). One transaction withdraws the old policy naming the successor and activates the successor. The acting administrator must differ from BOTH policies' authors (403, enforced by the database). Responds with the successor (now active). This is the only way an active policy stops being enforced. Audited on both rows. lic18 (security S4): the acting administrator must also be a different PERSON than the author where both staff accounts are linked to a Person (403; accounts without a Person link are compared by account only, the database rule). The audit record carries the after state of the row. NOT BUILT: a signed actor proof on these writes (no existing proof operation fits a platform-scoped KYC policy write; see docs/plans/lic18-record.md).
       security:
         - bearerAuth: []
       parameters:
@@ -10926,6 +10926,118 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
         "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/screening/trigger-policy:
+    get:
+      summary: Read the automatic AML screening trigger policy in force for a jurisdiction
+      description: >
+        aml:case:read (AML officer of the tenant, in-force grant re-checked by the database). lic18, migration 0181. `configured=false` means no policy: nothing triggers automatically and nothing gates a withdrawal (the platform ships NO policy). `gate_alert_after_seconds` is set iff `gate_withdrawal`. Tenant-scoped; a foreign tenant is 404. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: jurisdiction_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The policy in force
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AMLScreeningTriggerPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      summary: Author the next version of the automatic AML screening trigger policy
+      description: >
+        aml:hold:manage AND step-up `critical`; platform_acting AML officer only (the same rule as the screening policy); needs a signed actor proof (ADR 0110) bound to the whole request. lic18, migration 0181. Appends an immutable VERSION; versions are never edited. Refusals (all 4xx, nothing is written): `gate_withdrawal=true` needs the `scheduled` event (otherwise a clear goes stale unattended), a `gate_alert_after_seconds` of 60..2592000 (the threshold after which a held person raises the `aml.screening_gate_trapped` alert), a screening policy for the jurisdiction, and a screening worker that has recorded a fresh heartbeat (the production binary does not start one: a gate cannot be enabled without a running worker and provider, PROVIDER DEPENDENT). `effective_from` may not be in the past (2 minutes of clock skew allowed) nor more than 30 days ahead, so a version can neither rewrite history nor reset the grace of persons already gated (clears are counted from the FIRST gating version). The platform ships NO grace or re-screen interval; both are configuration.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AMLScreeningTriggerPolicyRequest" }
+      responses:
+        "201":
+          description: The new version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy_id: { type: string, format: uuid }
+                required: [policy_id]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests:
+    get:
+      summary: List a person's automatic AML screening requests
+      description: >
+        aml:case:read (AML officer of the tenant). lic18, migration 0181. Newest first, at most 200. `resolved` is true when a later non-error screening result for the same person exists under the request's key. A request in `needs_officer` or `failed_terminal` that is not resolved holds the person's withdrawals until an officer resolves it. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: personID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AMLScreeningRequest" } }
+                required: [items]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution:
+    post:
+      summary: Resolve a stuck automatic AML screening request (officer)
+      description: >
+        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic18, migration 0181. Only a request in `needs_officer` or `failed_terminal` that is not yet resolved can be resolved; the resolution is recorded through the same governed screening record as any officer screening, under the request's own idempotency key, bound to this person and trigger. `outcome` `clear` needs the lists screened and clears the person only if no match is newer; `potential_match` and `confirmed` place a hold. A SANCTIONS-class (sanctions list) request can only be resolved by a recorded match, never by an officer clear (a clear needs a provider reference). An `error` outcome never resolves. Replays are idempotent (`replayed=true`).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: personID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AMLScreeningResolutionRequest" }
+      responses:
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result_id: { type: string, format: uuid }
+                  hold_id: { type: string, format: uuid }
+                  replayed: { type: boolean }
+                required: [result_id, replayed]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /v1/admin/tenants/{tenantID}/residence-approval-policy:
     get:
       summary: Read a tenant's residence determination maker-checker policy
@@ -12665,6 +12777,49 @@ components:
         successor_policy_id: { type: string, format: uuid }
         reason_code: { type: string }
       required: [successor_policy_id, reason_code]
+    AMLScreeningTriggerPolicy:
+      type: object
+      properties:
+        configured: { type: boolean }
+        events: { type: array, items: { type: string, enum: [registration, kyc_approval, scheduled] } }
+        gate_withdrawal: { type: boolean }
+        gate_alert_after_seconds: { type: integer, format: int64, nullable: true }
+        effective_from: { type: string, format: date-time, nullable: true }
+      required: [configured, events, gate_withdrawal]
+    AMLScreeningTriggerPolicyRequest:
+      type: object
+      properties:
+        jurisdiction_id: { type: string, format: uuid }
+        events: { type: array, items: { type: string, enum: [registration, kyc_approval, scheduled] } }
+        gate_withdrawal: { type: boolean }
+        gate_alert_after_seconds: { type: integer, format: int64, description: "Required (60..2592000) with gate_withdrawal, refused without it." }
+        effective_from: { type: string, format: date-time }
+        legal_review_reference: { type: string }
+        reason_code: { type: string }
+      required: [jurisdiction_id, events, gate_withdrawal, effective_from, legal_review_reference, reason_code]
+    AMLScreeningRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        trigger: { type: string }
+        idempotency_key: { type: string }
+        status: { type: string, enum: [pending, claimed, done, needs_officer, failed_terminal] }
+        attempts: { type: integer }
+        outcome: { type: string }
+        match_lists: { type: array, items: { type: string } }
+        last_error_code: { type: string }
+        completed_at: { type: string, format: date-time }
+        resolved: { type: boolean }
+        created_at: { type: string, format: date-time }
+      required: [id, trigger, idempotency_key, status, attempts, resolved, created_at]
+    AMLScreeningResolutionRequest:
+      type: object
+      properties:
+        outcome: { type: string, enum: [clear, potential_match, confirmed, error] }
+        lists: { type: array, items: { type: string } }
+        match_lists: { type: array, items: { type: string } }
+        reason_code: { type: string }
+      required: [outcome, reason_code]
     ResidenceApprovalPolicyRequest:
       type: object
       properties:

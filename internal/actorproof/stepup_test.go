@@ -31,6 +31,7 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 		"staff_lifecycle:request": stepup.Critical, "staff_lifecycle:approve": stepup.Critical,
 		// ADR 0116 A7: AML hold lift and the proposal / approval halves of an AML four-eyes action.
 		"aml_hold:lift": stepup.Critical, "aml_case:propose": stepup.Critical, "aml_case:approve": stepup.Critical,
+		"aml_screening_trigger_policy:set": stepup.Critical,
 		// ADR 0110 T8 (migration 0165): each half of a four-eyes payout reversal.
 		"withdrawal_payout_reversal:decide": stepup.Critical,
 		// Migration 0177 (MKT-DUAL-1): filing, approving and executing a licensing / jurisdiction change.

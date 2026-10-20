@@ -86,11 +86,23 @@ func TestRetryableOnHoldEvalFailure(t *testing.T) {
 		"eval fault, kyc pending":      {EnforcementDecision{Outcome: OutcomePending, KYCOutcome: OutcomePending, Hold: aml.HoldVerdict{EvalFailed: true}}, false},
 		"definite hold":                {EnforcementDecision{Outcome: OutcomePending, KYCOutcome: OutcomePassed, Hold: aml.HoldVerdict{Held: true}}, false},
 		"no fault":                     {EnforcementDecision{Outcome: OutcomePassed, KYCOutcome: OutcomePassed, Allowed: true}, false},
+		// lic18 (H-1 e): a hold that exists only because a required screening is outstanding PARKS; an officer hold still denies.
+		"screening-only hold, kyc passed":       {EnforcementDecision{Outcome: OutcomePending, KYCOutcome: OutcomePassed, Hold: aml.HoldVerdict{Held: true, ScreeningOnly: true}}, true},
+		"screening-only hold, kyc not required": {EnforcementDecision{Outcome: OutcomePending, KYCOutcome: OutcomeNotRequired, Hold: aml.HoldVerdict{Held: true, ScreeningOnly: true}}, true},
+		"screening-only hold, kyc failed":       {EnforcementDecision{Outcome: OutcomeFailed, KYCOutcome: OutcomeFailed, Hold: aml.HoldVerdict{Held: true, ScreeningOnly: true}}, false},
+		"screening-only hold, kyc pending":      {EnforcementDecision{Outcome: OutcomePending, KYCOutcome: OutcomePending, Hold: aml.HoldVerdict{Held: true, ScreeningOnly: true}}, false},
+		"officer hold plus the flag is a bug":   {EnforcementDecision{Outcome: OutcomePending, KYCOutcome: OutcomePassed, Hold: aml.HoldVerdict{Held: true, ScreeningOnly: false}}, false},
 	}
 	for name, c := range cases {
 		got := c.in.RetryableOnHoldEvalFailure()
 		if (got.Outcome == OutcomeUnavailable) != c.want {
 			t.Errorf("%s: converted=%v want %v (%+v)", name, got.Outcome == OutcomeUnavailable, c.want, got)
+		}
+		if c.want && c.in.Hold.ScreeningOnly {
+			if got.Code != "kyc_unavailable:screening" || got.TrueOutcome != OutcomeHeld || got.Allowed {
+				t.Errorf("%s: a parked screening hold must be generic, denied and recorded as held: %+v", name, got)
+			}
+			continue
 		}
 		if c.want && got.Code != "kyc_unavailable:evaluator" {
 			// The code reaches the tenant-visible audit reason_code: it must be generic (no hold / AML wording).

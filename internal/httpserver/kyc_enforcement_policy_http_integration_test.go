@@ -157,8 +157,11 @@ func TestKYCEnforcementPolicyAPI_ActiveCannotBeSwitchedOff_SupersedeNeedsThirdAd
 func TestKYCEnforcementPolicyAPI_DraftWithdraw_Validation_UnwiredTypes_Authorization(t *testing.T) {
 	w := kycPolicySetup(t)
 	d := w.createDeposit(t, w.tokA, "5")
-	// A draft that was never active can be withdrawn.
-	if resp := w.do(t, w.tokA, http.MethodPost, "/v1/admin/kyc/enforcement-policies/"+d.ID+"/withdraw", map[string]any{"reason_code": "mistake"}); resp.StatusCode != http.StatusOK {
+	// A draft that was never active can be withdrawn, but (migration 0100: four-eyes on every withdrawal) not by its own author.
+	if resp := w.do(t, w.tokA, http.MethodPost, "/v1/admin/kyc/enforcement-policies/"+d.ID+"/withdraw", map[string]any{"reason_code": "mistake"}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("author withdrawing their own draft: %d, want 403 (database four-eyes)", resp.StatusCode)
+	}
+	if resp := w.do(t, w.tokB, http.MethodPost, "/v1/admin/kyc/enforcement-policies/"+d.ID+"/withdraw", map[string]any{"reason_code": "mistake"}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("draft withdraw: %d", resp.StatusCode)
 	}
 	create := func(body map[string]any) int {
@@ -217,5 +220,48 @@ func TestKYCEnforcementPolicyAPI_DraftWithdraw_Validation_UnwiredTypes_Authoriza
 	// An unknown policy id is a 404, never a 500.
 	if got := w.do(t, w.tokB, http.MethodPost, "/v1/admin/kyc/enforcement-policies/"+uuid.NewString()+"/activate", map[string]any{"reason_code": "x"}).StatusCode; got != http.StatusConflict && got != http.StatusNotFound {
 		t.Errorf("unknown policy: %d", got)
+	}
+}
+
+// lic18 S4 / L6: two staff accounts of ONE Person cannot make and activate the same policy (the database rule compares accounts);
+// the audit rows carry the AFTER state.
+func TestKYCEnforcementPolicyAPI_PersonDistinctFourEyes_AndAuditAfterState(t *testing.T) {
+	w := kycPolicySetup(t)
+	pool := w.pool
+	person := uuid.New()
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := mustCreateStaffWithPerson(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "kycpol-pw-c", &person)
+	d := mustCreateStaffWithPerson(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "kycpol-pw-d", &person)
+	tokC := mustLoginStaff(t, w.srv, "", c.Email, "kycpol-pw-c").AccessToken
+	tokD := mustLoginStaff(t, w.srv, "", d.Email, "kycpol-pw-d").AccessToken
+	p := w.createDeposit(t, tokC, "250000")
+	act := "/v1/admin/kyc/enforcement-policies/" + p.ID + "/activate"
+	if resp := w.do(t, tokD, http.MethodPost, act, map[string]any{"reason_code": "activate_test"}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a second account of the author's Person: %d, want 403", resp.StatusCode)
+	}
+	resp := w.do(t, w.tokB, http.MethodGet, "/v1/admin/kyc/enforcement-policies?licensing_jurisdiction_id="+w.jurisdiction+"&status=draft", nil)
+	var list []kycEnforcementPolicyResponse
+	decodeBody(t, resp, &list)
+	if len(list) != 1 || list[0].Status != "draft" {
+		t.Fatalf("the refused activation must leave the draft: %+v", list)
+	}
+	if resp := w.do(t, w.tokB, http.MethodPost, act, map[string]any{"reason_code": "activate_test"}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("a different Person activates: %d", resp.StatusCode)
+	}
+	var withAfter int
+	if err := launchfix.OwnerPool(t).WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE target_type = 'kyc_enforcement_policy' AND target_id = $1
+			AND action IN ('kyc_enforcement_policy.created', 'kyc_enforcement_policy.activated')
+			AND metadata -> 'after' ->> 'trigger_type' = 'cumulative_deposit' AND metadata -> 'after' ->> 'threshold_minor_units' = '250000'`, p.ID).Scan(&withAfter)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if withAfter != 2 {
+		t.Fatalf("audit rows carrying the after state: %d, want 2", withAfter)
 	}
 }

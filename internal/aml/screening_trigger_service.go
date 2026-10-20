@@ -8,6 +8,8 @@ package aml
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -22,7 +24,7 @@ import (
 
 // Proof operation names of migration 0181 (aml_authorize requires ^aml_[a-z_]+:[a-z_]+$).
 const (
-	OpProofScreeningTriggerPolicySet = "aml_screening_trigger_policy:set"
+	OpProofScreeningTriggerPolicySet = actorproof.OpAMLScreeningTriggerPolicySet
 	OpProofScreeningRequestRead      = "aml_screening_request:read"
 )
 
@@ -45,6 +47,8 @@ func (e TriggerEvent) Valid() bool {
 type TriggerPolicy struct {
 	Events         []TriggerEvent
 	GateWithdrawal bool
+	// GateAlertAfter: a held person raises the aml.screening_gate_trapped alert after this long (set iff GateWithdrawal).
+	GateAlertAfter time.Duration
 	EffectiveFrom  time.Time
 }
 
@@ -55,7 +59,11 @@ type SetTriggerPolicyInput struct {
 	Events         []TriggerEvent
 	// GateWithdrawal: withdrawal and payout are HELD (the indistinguishable account_review) while a required screening is
 	// outstanding: no fresh completed clear, or a system-found match no officer has recorded. Needs at least one event.
-	GateWithdrawal       bool
+	GateWithdrawal bool
+	// GateAlertAfter is REQUIRED with GateWithdrawal (60 seconds to 30 days, whole seconds; no default) and refused without it.
+	GateAlertAfter time.Duration
+	// EffectiveFrom: now (2 minutes tolerance for clock skew) up to 30 days ahead. A past date would wipe prior clears and reset the
+	// grace, so the database refuses it.
 	EffectiveFrom        time.Time
 	LegalReviewReference string
 	ReasonCode           string
@@ -85,8 +93,23 @@ func (in SetTriggerPolicyInput) validate() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if in.GateWithdrawal && len(events) == 0 {
-		return nil, fmt.Errorf("%w: a withdrawal gate needs at least one trigger event (nothing else would ever produce a result)", ErrInvalidInput)
+	if in.GateWithdrawal {
+		scheduled := false
+		for _, e := range events {
+			scheduled = scheduled || e == string(EventScheduled)
+		}
+		if !scheduled {
+			return nil, fmt.Errorf("%w: a withdrawal gate needs the scheduled re-screen event (otherwise a clear goes stale unattended)", ErrInvalidInput)
+		}
+		if in.GateAlertAfter < time.Minute || in.GateAlertAfter > 30*24*time.Hour || in.GateAlertAfter%time.Second != 0 {
+			return nil, fmt.Errorf("%w: gate_alert_after must be whole seconds between 60 seconds and 30 days", ErrInvalidInput)
+		}
+	} else if in.GateAlertAfter != 0 {
+		return nil, fmt.Errorf("%w: gate_alert_after belongs to a gating policy only", ErrInvalidInput)
+	}
+	now := time.Now()
+	if in.EffectiveFrom.Before(now.Add(-2*time.Minute)) || in.EffectiveFrom.After(now.Add(30*24*time.Hour)) {
+		return nil, fmt.Errorf("%w: effective_from must be between now (2 minutes tolerance) and 30 days ahead", ErrInvalidInput)
 	}
 	ref := strings.TrimSpace(in.LegalReviewReference)
 	if ref == "" || len(in.LegalReviewReference) > 200 || ref != in.LegalReviewReference {
@@ -114,13 +137,19 @@ func (s *Service) SetScreeningTriggerPolicy(ctx context.Context, a Actor, in Set
 	var id uuid.UUID
 	from := in.EffectiveFrom.UTC().Truncate(time.Microsecond)
 	err = s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {
+		var alertSecs *int64
+		alertText := ""
+		if in.GateWithdrawal {
+			n := int64(in.GateAlertAfter / time.Second)
+			alertSecs, alertText = &n, fmt.Sprint(n)
+		}
 		hash := actorproof.Digest(tenantStr(a.TenantID), actorproof.S(in.JurisdictionID.String()), actorproof.S(strings.Join(events, ",")),
-			actorproof.S(fmt.Sprint(in.GateWithdrawal)), actorproof.TS(&from), actorproof.S(in.LegalReviewReference), actorproof.S(in.ReasonCode))
+			actorproof.S(fmt.Sprint(in.GateWithdrawal)), actorproof.SP(alertText), actorproof.TS(&from), actorproof.S(in.LegalReviewReference), actorproof.S(in.ReasonCode))
 		if err := s.attachProof(ctx, tx, a, OpProofScreeningTriggerPolicySet, actorproof.TargetNew, hash); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `SELECT aml_screening_trigger_policy_set($1, $2, $3::text[], $4, $5, $6, $7)`,
-			a.TenantID, in.JurisdictionID, events, in.GateWithdrawal, from, in.LegalReviewReference, in.ReasonCode).Scan(&id)
+		return tx.QueryRow(ctx, `SELECT aml_screening_trigger_policy_set($1, $2, $3::text[], $4, $5, $6, $7, $8)`,
+			a.TenantID, in.JurisdictionID, events, in.GateWithdrawal, alertSecs, from, in.LegalReviewReference, in.ReasonCode).Scan(&id)
 	})
 	return id, err
 }
@@ -146,9 +175,10 @@ func ReadEffectiveTriggerPolicy(ctx context.Context, tx pgx.Tx, tenantID, jurisd
 	var id uuid.UUID
 	var events []string
 	var gate bool
+	var alertSecs *int64
 	var from time.Time
-	err := tx.QueryRow(ctx, `SELECT policy_id, events, gate_withdrawal, effective_from FROM aml_screening_trigger_policy_effective($1, $2)`,
-		tenantID, jurisdictionID).Scan(&id, &events, &gate, &from)
+	err := tx.QueryRow(ctx, `SELECT policy_id, events, gate_withdrawal, gate_alert_after_seconds, effective_from FROM aml_screening_trigger_policy_effective($1, $2)`,
+		tenantID, jurisdictionID).Scan(&id, &events, &gate, &alertSecs, &from)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -156,6 +186,9 @@ func ReadEffectiveTriggerPolicy(ctx context.Context, tx pgx.Tx, tenantID, jurisd
 		return nil, classify(err)
 	}
 	p := &TriggerPolicy{GateWithdrawal: gate, EffectiveFrom: from}
+	if alertSecs != nil {
+		p.GateAlertAfter = time.Duration(*alertSecs) * time.Second
+	}
 	for _, e := range events {
 		p.Events = append(p.Events, TriggerEvent(e))
 	}
@@ -227,4 +260,56 @@ func (s *Service) ListScreeningRequests(ctx context.Context, a Actor, personID u
 		return rows.Err()
 	})
 	return out, err
+}
+
+// ResolveScreeningInput is an officer's resolution of a system-found screening request.
+type ResolveScreeningInput struct {
+	// Outcome: clear, potential_match or confirmed. An error can never resolve a request.
+	Outcome    ScreeningOutcome
+	Lists      []ListType
+	MatchLists []ListType
+	ReasonCode string
+}
+
+// ResolveScreeningRequest records the officer's result for a needs_officer or failed_terminal request UNDER THE REQUEST'S
+// idempotency key (aml_screening_record, proof-bound): the same quorum, proof and hold rules as any officer screening record. The
+// database additionally binds the key to the request's person and trigger, refuses an `error`, and refuses to resolve a
+// SANCTIONS-class match with a clear (it must be recorded as a match: a hold lifted only by four-eyes). The hold decision is
+// derived from the outcome by the same pure Decide() the orchestrator uses; the caller cannot choose it. Nothing here talks to a
+// provider: the result is officer-attested (provider id officer-manual, a pseudonymous reference derived from the request id).
+func (s *Service) ResolveScreeningRequest(ctx context.Context, a Actor, personID, requestID uuid.UUID, in ResolveScreeningInput) (ScreeningRecorded, error) {
+	if personID == uuid.Nil || requestID == uuid.Nil || !ValidReasonCode(in.ReasonCode) {
+		return ScreeningRecorded{}, fmt.Errorf("%w: person, request and reason code are required", ErrInvalidInput)
+	}
+	switch in.Outcome {
+	case OutcomeClear, OutcomePotentialMatch, OutcomeConfirmed:
+	default:
+		return ScreeningRecorded{}, fmt.Errorf("%w: outcome %q cannot resolve a request", ErrInvalidInput, in.Outcome)
+	}
+	rows, err := s.ListScreeningRequests(ctx, a, personID)
+	if err != nil {
+		return ScreeningRecorded{}, err
+	}
+	var req *ScreeningRequestRow
+	for i := range rows {
+		if rows[i].ID == requestID {
+			req = &rows[i]
+		}
+	}
+	if req == nil {
+		return ScreeningRecorded{}, ErrNotFound
+	}
+	if (req.Status != RequestNeedsOfficer && req.Status != RequestFailedTerminal) || req.Resolved {
+		return ScreeningRecorded{}, fmt.Errorf("%w: the request is not awaiting an officer", ErrIllegalTransition)
+	}
+	var matches []ListType
+	if in.Outcome != OutcomeClear {
+		matches = in.MatchLists
+	}
+	d := Decide(time.Now(), nil, time.Now(), in.Outcome, matches)
+	sum := sha256.Sum256([]byte("officer-resolution:v1:" + requestID.String()))
+	rec := RecordScreeningInput{PersonID: personID, IdempotencyKey: req.IdempotencyKey, Trigger: req.Trigger, ProviderID: "officer-manual",
+		SubjectRef: hex.EncodeToString(sum[:]), Lists: in.Lists, Outcome: in.Outcome, MatchLists: matches, ScreenedAt: time.Now(),
+		Decision: d.Action, HoldReasonCode: d.ReasonCode}
+	return s.RecordScreening(ctx, a, rec)
 }
