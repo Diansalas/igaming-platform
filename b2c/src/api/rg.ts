@@ -39,6 +39,8 @@ export interface RgLimitOption {
   increase_cooldown_seconds: number | null
   /** Present when this kind's limit options cannot be offered (a relied-on jurisdiction has no floor, or calendars disagree). */
   unavailable_reason?: 'missing_floor' | 'calendar_conflict'
+  /** With unavailable_reason: allowed_periods are usable only for a first limit or a lower value. */
+  protective_only?: boolean
 }
 
 export interface RgOptions {

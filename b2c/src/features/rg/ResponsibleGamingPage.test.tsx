@@ -607,7 +607,7 @@ describe("ResponsibleGamingPage", () => {
     expect(await screen.findByText("Take a time-out")).toBeInTheDocument();
     expect(screen.getByText("Self-exclusion")).toBeInTheDocument();
     expect(screen.getByRole("note")).toHaveTextContent(
-      /not available right now/,
+      /is not available right now/,
     );
     expect(screen.queryByLabelText("Limit kind")).not.toBeInTheDocument();
     expect(
@@ -652,5 +652,155 @@ describe("ResponsibleGamingPage", () => {
     expect(kind).toHaveTextContent(/Deposit/);
     expect(kind).not.toHaveTextContent(/Loss/);
     expect(screen.getByText("Take a time-out")).toBeInTheDocument();
+  });
+
+  const protectiveOptions = () =>
+    HttpResponse.json({
+      asset_code: "USD",
+      limit_enforcement_enabled: true,
+      limits: [
+        {
+          kind: "wager",
+          config_in_force: false,
+          mandatory: false,
+          allowed_periods: ["rolling_24h", "rolling_7d"],
+          ceiling: null,
+          increase_cooldown_seconds: null,
+          unavailable_reason: "missing_floor",
+          protective_only: true,
+        },
+      ],
+      time_out_hours: [1],
+      self_exclusion_days: [7],
+      self_exclusion_indefinite_allowed: true,
+    });
+
+  it("lic28: lowers an existing limit of an unavailable kind, with no remove or raise control", async () => {
+    signIn();
+    const seen: Array<Record<string, unknown>> = [];
+    server.use(
+      http.get("/v1/me/rg/options", protectiveOptions),
+      http.get("/v1/me/rg/limits", () =>
+        HttpResponse.json({
+          limits: [
+            {
+              kind: "wager",
+              scope: "account",
+              asset_code: "USD",
+              period: "rolling_24h",
+              has_value: true,
+              value: "10000",
+            },
+          ],
+          history: [],
+        }),
+      ),
+      http.post("/v1/me/rg/limits", async ({ request }) => {
+        seen.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json(change({ value: "5000" }), { status: 201 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<ResponsibleGamingPage />);
+    expect(await screen.findByText("100.00 USD")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Remove limit" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(
+      /Raising or removing a limit is not available right now for: Wager/,
+    );
+    // A value that is not lower is refused locally.
+    await user.type(screen.getByLabelText(/Lower Wager .* limit/), "150");
+    await user.click(screen.getByRole("button", { name: "Lower limit" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/lower than/);
+    expect(seen).toHaveLength(0);
+    await user.clear(screen.getByLabelText(/Lower Wager .* limit/));
+    await user.type(screen.getByLabelText(/Lower Wager .* limit/), "50");
+    await user.click(screen.getByRole("button", { name: "Lower limit" }));
+    expect(
+      await screen.findByText(/Your limit is now 50\.00 USD/),
+    ).toBeInTheDocument();
+    expect(seen).toEqual([
+      {
+        kind: "wager",
+        asset_code: "USD",
+        period: "rolling_24h",
+        value: "5000",
+      },
+    ]);
+  });
+
+  it("lic28: sets a first protective limit of an unavailable kind and never offers a raise", async () => {
+    signIn();
+    const seen: Array<Record<string, unknown>> = [];
+    server.use(
+      http.get("/v1/me/rg/options", protectiveOptions),
+      http.post("/v1/me/rg/limits", async ({ request }) => {
+        seen.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json(change({ value: "2500" }), { status: 201 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<ResponsibleGamingPage />);
+    await screen.findByLabelText("Limit kind");
+    expect(screen.getByLabelText("Limit period")).toHaveTextContent(
+      /24 hours|Rolling|24/i,
+    );
+    expect(
+      screen.getByText(/only set a first limit or a lower one/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cooling-off/)).not.toBeInTheDocument();
+    await user.selectOptions(
+      screen.getByLabelText("Limit period"),
+      "rolling_7d",
+    );
+    await user.type(screen.getByLabelText("Limit amount"), "25");
+    await user.click(screen.getByRole("button", { name: "Set limit" }));
+    expect(
+      await screen.findByText(/Your limit is now 25\.00 USD/),
+    ).toBeInTheDocument();
+    expect(seen).toEqual([
+      { kind: "wager", asset_code: "USD", period: "rolling_7d", value: "2500" },
+    ]);
+  });
+
+  it("lic28: refuses locally a value that would raise an existing limit of an unavailable kind", async () => {
+    signIn();
+    let posted = 0;
+    server.use(
+      http.get("/v1/me/rg/options", protectiveOptions),
+      http.get("/v1/me/rg/limits", () =>
+        HttpResponse.json({
+          limits: [
+            {
+              kind: "wager",
+              scope: "account",
+              asset_code: "USD",
+              period: "rolling_24h",
+              has_value: true,
+              value: "10000",
+            },
+          ],
+          history: [],
+        }),
+      ),
+      http.post("/v1/me/rg/limits", () => {
+        posted++;
+        return HttpResponse.json(change({ value: "1" }), { status: 201 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<ResponsibleGamingPage />);
+    await screen.findByText("100.00 USD");
+    await user.selectOptions(
+      screen.getByLabelText("Limit period"),
+      "rolling_24h",
+    );
+    await user.type(screen.getByLabelText("Limit amount"), "500");
+    await user.click(screen.getByRole("button", { name: "Set limit" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /lower than your current limit/,
+    );
+    expect(posted).toBe(0);
   });
 });

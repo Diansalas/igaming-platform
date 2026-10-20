@@ -47,6 +47,10 @@ type LimitOption struct {
 	// no periods, no ceiling. The write path stays fail-closed for increases, removals and confirms; the protective options of Options
 	// (time-out, self-exclusion) are always returned.
 	UnavailableReason string
+	// ProtectiveOnly (lic28) accompanies UnavailableReason: AllowedPeriods then lists only the periods of the relied-on jurisdictions that DO
+	// have a floor (their union), for a FIRST limit or a LOWER value, both of which the server always accepts (initial and decrease are never
+	// refused for an incomplete rulebook). Nothing else is offered: no ceiling, no cooldown; increases, removals and confirms stay refused.
+	ProtectiveOnly bool
 }
 
 // Reasons a limit kind is unavailable in Options.
@@ -89,7 +93,12 @@ func ReadOptions(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, 
 	for _, k := range []ControlKind{ControlDeposit, ControlLoss, ControlWager} {
 		cfg, err := readUsageConfigFor(ctx, tx, sel, tenantID, acct.BrandID, k, &asset, nil)
 		if errors.Is(err, errCalendarConflict) {
-			out.Limits = append(out.Limits, LimitOption{Kind: k, AllowedPeriods: []PeriodKind{}, UnavailableReason: OptionUnavailableCalendarConflict})
+			// composeConfig does not read calendar_tz / week_start, so the periods of the members are still known.
+			cc, cerr := composeConfig(ctx, tx, sel, tenantID, acct.BrandID, k, &asset)
+			if cerr != nil {
+				return Options{}, cerr
+			}
+			out.Limits = append(out.Limits, protectiveOption(k, OptionUnavailableCalendarConflict, cc.AllowedPeriods))
 			continue
 		}
 		if err != nil {
@@ -99,7 +108,11 @@ func ReadOptions(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, 
 			// lic25/lic27a: a tenant with an approved basis must not be shown a partial truth (the options of the jurisdictions that do have a
 			// floor) while another jurisdiction it relies on has none: the kind is marked unavailable, never "no configuration". Time-out and
 			// self-exclusion are protective and are returned regardless; the write path still refuses increases, removals and confirms.
-			out.Limits = append(out.Limits, LimitOption{Kind: k, AllowedPeriods: []PeriodKind{}, UnavailableReason: OptionUnavailableMissingFloor})
+			periods := make([]string, 0, len(cfg.AllowedPeriods))
+			for _, p := range cfg.AllowedPeriods {
+				periods = append(periods, string(p))
+			}
+			out.Limits = append(out.Limits, protectiveOption(k, OptionUnavailableMissingFloor, periods))
 			continue
 		}
 		o := LimitOption{Kind: k, ConfigInForce: cfg.Found, Mandatory: cfg.Mandatory, Ceiling: cfg.Ceiling, Scope: cfg.Scope,
@@ -133,4 +146,13 @@ func timeOutHours(c ComposedConfig) []int {
 		return []int{}
 	}
 	return hours
+}
+
+// protectiveOption is the limit option of an unavailable kind: only the periods that exist in the jurisdictions that do have a floor.
+func protectiveOption(k ControlKind, reason string, periods []string) LimitOption {
+	o := LimitOption{Kind: k, AllowedPeriods: []PeriodKind{}, UnavailableReason: reason, ProtectiveOnly: true}
+	for _, p := range periods {
+		o.AllowedPeriods = append(o.AllowedPeriods, PeriodKind(p))
+	}
+	return o
 }
