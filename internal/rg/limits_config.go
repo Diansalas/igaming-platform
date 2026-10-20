@@ -14,8 +14,8 @@ package rg
 //     (triggers RL003..RL008); this file maps their refusals and audits the denial. The ADR's "Go
 //     layer" tighten-only check is this audited mapping of the same SQL function's refusal: Go does
 //     not re-implement the comparison.
-//   - jurisdiction_code of an operator row is derived from the tenant licence, never taken from the
-//     request; tenant_id is the session's.
+//   - jurisdiction_code of an operator row is derived server-side from the jurisdictions the tenant relies on (licence and approved
+//     operating bases), never taken from the request; tenant_id is the session's.
 
 import (
 	"bytes"
@@ -548,7 +548,10 @@ type OperatorConfigInput struct {
 	Meta              RequestMeta
 }
 
-// WriteOperatorConfig appends a tenant (or brand) operator row. The database refuses a row that
+// WriteOperatorConfig appends a tenant (or brand) operator row under EVERY jurisdiction the tenant relies on (lic25: the licence
+// jurisdiction and the jurisdictions of its approved operating bases), all or nothing: an operator bound is the tenant's own choice for
+// all of its markets, and the database tightens-only against each jurisdiction's floor separately, so a bound that loosens ANY relied-on
+// floor is refused as a whole. The row of the first jurisdiction (by code) is returned. The database refuses a row that
 // loosens a restrictive field or narrows an option set of the floor / tenant row in force (RL004), a
 // row with no floor in force (RL005), a backdated row (RL003) and a synthetic row outside dev/test
 // (RL008).
@@ -556,23 +559,52 @@ func (l *Limits) WriteOperatorConfig(ctx context.Context, tx pgx.Tx, in Operator
 	if err := in.Content.Validate(); err != nil {
 		return ConfigRow{}, err
 	}
-	jur, err := tenantJurisdiction(ctx, tx, in.TenantID)
+	sel, err := tenantReliance(ctx, tx, in.TenantID)
 	if err != nil {
 		return ConfigRow{}, err
 	}
-	if jur == nil {
+	if len(sel.Codes) == 0 {
+		if sel.Strict {
+			return ConfigRow{}, refuse(RefusedNoFloor, "the tenant's operating bases name no resolvable jurisdiction")
+		}
 		return ConfigRow{}, refuse(RefusedNoFloor, "the tenant has no licence jurisdiction")
+	}
+	if sel.Incomplete {
+		return ConfigRow{}, refuse(RefusedNoFloor, "a jurisdiction the tenant relies on cannot be resolved")
 	}
 	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`, writeLockTimeout); err != nil {
 		return ConfigRow{}, fmt.Errorf("rg: set lock_timeout: %w", err)
 	}
+	// One outer savepoint: either every relied-on jurisdiction gets the row or none does, whatever the caller then does with tx.
+	outer, err := tx.Begin(ctx)
+	if err != nil {
+		return ConfigRow{}, fmt.Errorf("rg: open savepoint: %w", err)
+	}
+	var first ConfigRow
+	for i, code := range sel.Codes {
+		row, werr := l.writeOperatorRowFor(ctx, outer, in, code)
+		if werr != nil {
+			_ = outer.Rollback(ctx)
+			return ConfigRow{}, werr
+		}
+		if i == 0 {
+			first = row
+		}
+	}
+	if err := outer.Commit(ctx); err != nil {
+		return ConfigRow{}, fmt.Errorf("rg: release savepoint: %w", err)
+	}
+	return first, nil
+}
+
+func (l *Limits) writeOperatorRowFor(ctx context.Context, tx pgx.Tx, in OperatorConfigInput, jur string) (ConfigRow, error) {
 	tenant := in.TenantID
 	// The advisory scope lock of config writers (ADR 0115 3.3: writer-only, never co-held with L0.x / L1+).
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('rg_limit_configs'), hashtext($1::text))`,
-		fmt.Sprintf("%s|%s|%s", *jur, tenant, in.Content.ControlKind)); err != nil {
+		fmt.Sprintf("%s|%s|%s", jur, tenant, in.Content.ControlKind)); err != nil {
 		return ConfigRow{}, MapDBError(err)
 	}
-	before, err := l.exactScopeBefore(ctx, tx, *jur, &tenant, in.BrandID, in.Content.ControlKind, in.Content.AssetCode)
+	before, err := l.exactScopeBefore(ctx, tx, jur, &tenant, in.BrandID, in.Content.ControlKind, in.Content.AssetCode)
 	if err != nil {
 		return ConfigRow{}, err
 	}
@@ -580,7 +612,7 @@ func (l *Limits) WriteOperatorConfig(ctx context.Context, tx pgx.Tx, in Operator
 	if err != nil {
 		return ConfigRow{}, fmt.Errorf("rg: open savepoint: %w", err)
 	}
-	id, err := insertConfigRow(ctx, sp, in.Content.Row(*jur, &tenant, in.BrandID), nil)
+	id, err := insertConfigRow(ctx, sp, in.Content.Row(jur, &tenant, in.BrandID), nil)
 	if err != nil {
 		_ = sp.Rollback(ctx)
 		return ConfigRow{}, MapDBError(err)
@@ -597,7 +629,7 @@ func (l *Limits) WriteOperatorConfig(ctx context.Context, tx pgx.Tx, in Operator
 		TargetType: "rg_limit_config", TargetID: id.String(), Outcome: audit.OutcomeSuccess,
 		IPAddress: in.Meta.IPAddress, UserAgent: in.Meta.UserAgent, RequestID: in.Meta.RequestID,
 		Metadata: map[string]any{
-			"jurisdiction_code": *jur, "control_kind": string(stored.Content.ControlKind), "asset_code": stored.Content.AssetCode,
+			"jurisdiction_code": jur, "control_kind": string(stored.Content.ControlKind), "asset_code": stored.Content.AssetCode,
 			"brand_id": in.BrandID, "before": before, "after": configAuditView(stored), "reason_code": stored.Content.ReasonCode,
 			"attestation_ref": stored.Content.AttestationRef,
 		},

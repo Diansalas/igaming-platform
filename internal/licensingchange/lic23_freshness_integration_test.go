@@ -197,9 +197,10 @@ func TestLic23_SN4_LicenceExclusivityHoldsForABlindSession(t *testing.T) {
 	}
 }
 
-// SN-3: RG floors follow the LICENCE jurisdiction only; a tenant that also has approved operating bases gets an ACKNOWLEDGEABLE
-// (non-passing) R-RG-CONFIG until RG selection follows the governing basis. A licence-only tenant is unchanged.
-func TestLic23_SN3_RGConfigReadiness_BasesPresentIsAnAcknowledgeableNote(t *testing.T) {
+// SN-3 (lic23) -> lic25: R-RG-CONFIG evaluates the floors of EVERY jurisdiction the tenant relies on (licence plus approved bases)
+// instead of the interim acknowledgeable note `bases_present_licence_rulebook_only` (declared pin change: that detail code no longer
+// exists; the check now fails with floor_missing_<kind> exactly when a relied-on jurisdiction has no floor, and passes when all have).
+func TestLic23_SN3_RGConfigReadiness_EvaluatesEveryReliedJurisdiction(t *testing.T) {
 	w := newWorld(t)
 	ja, jb := w.jurisdiction(), w.jurisdiction()
 	tid := w.tenant("under_platform_licence")
@@ -209,22 +210,9 @@ func TestLic23_SN3_RGConfigReadiness_BasesPresentIsAnAcknowledgeableNote(t *test
 	first := w.mustRequest(w.req, KindTenantJurisdictionConfigVersion, set, "configuration_initial")
 	w.mustApprove(w.ap1, first.Request.ID)
 	w.mustApprove(w.ap2, first.Request.ID)
-	var code string
-	if err := w.owner.WithPlatformAdmin(context.Background(), w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT code FROM jurisdictions WHERE id = $1`, ja).Scan(&code)
-	}); err != nil {
-		t.Fatal(err)
-	}
 	rgfix.EnsureTestEnvironment(t, w.ownerURL)
 	rgfix.Activate(t, w.owner, tid, nil, rgfix.Staff(t, w.owner, tid))
-	for _, kind := range []string{"deposit", "loss", "wager"} {
-		if err := w.owner.WithPlatformAdmin(context.Background(), w.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := rgfix.InsertFloor(ctx, tx, rgfix.EnforcedFloor(code, kind, "EUR", nil), rgfix.DefaultSteps())
-			return err
-		}); err != nil {
-			t.Fatalf("floor %s: %v", kind, err)
-		}
-	}
+	w.rgFloors(ja, nil, "00:00:02", false)
 	svc, err := launchgov.New(launchgov.Config{Pool: w.rt, Environment: "test"})
 	if err != nil {
 		t.Fatal(err)
@@ -244,11 +232,58 @@ func TestLic23_SN3_RGConfigReadiness_BasesPresentIsAnAcknowledgeableNote(t *test
 		t.Fatal("no R-RG-CONFIG check")
 		return launchgov.Check{}
 	}
+	activation := func() launchgov.Check {
+		var c launchgov.Check
+		if err := w.rt.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
+			c = launchgov.RGActivationReadiness(ctx, tx, tid, nil, w.dbNow())
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
 	if c := rg(); c.Result != launchgov.ResultPass || c.DetailCode != "ok" {
 		t.Fatalf("a licence-only tenant with floors in force passes: %+v", c)
 	}
+	// An approved basis in a jurisdiction WITHOUT floors: the check (and the activation guard) fail on the missing floor, not on a note.
 	w.widen(KindOperatingBasisSet, noLicence(tid, nil, jb, 30), "documented_basis")
-	if c := rg(); c.Result != launchgov.ResultFail || c.DetailCode != "bases_present_licence_rulebook_only" {
-		t.Fatalf("with an approved basis the check is an acknowledgeable non-pass: %+v", c)
+	for name, c := range map[string]launchgov.Check{"readiness": rg(), "activation guard": activation()} {
+		if c.Result != launchgov.ResultFail || c.DetailCode != "floor_missing_deposit" {
+			t.Fatalf("%s with a relied-on basis jurisdiction lacking floors: %+v", name, c)
+		}
+	}
+	// Floors in the basis jurisdiction too: pass.
+	w.rgFloors(jb, nil, "00:00:02", false)
+	for name, c := range map[string]launchgov.Check{"readiness": rg(), "activation guard": activation()} {
+		if c.Result != launchgov.ResultPass || c.DetailCode != "ok" {
+			t.Fatalf("%s with floors in every relied-on jurisdiction: %+v", name, c)
+		}
+	}
+	// Mutation guard of the test itself: a basis-only tenant (no licence) is now evaluated, no longer `no_licence_jurisdiction`.
+	only := w.tenant("under_platform_licence")
+	w.widen(KindOperatingBasisSet, noLicence(only, nil, jb, 30), "documented_basis")
+	setB := TenantJurisdictionConfigPayload{TenantID: only, JurisdictionID: jb, Action: ConfigActionSet, KYCRulesetID: sp("kyc-1"),
+		AMLRulesetID: sp("aml-1"), RGRulesetID: sp("rg-1"), AllowedCurrencies: []string{"EUR"}, AllowedPaymentMethods: []string{"card"}, GeoBlockList: []string{}}
+	fb := w.mustRequest(w.req, KindTenantJurisdictionConfigVersion, setB, "configuration_initial")
+	w.mustApprove(w.ap1, fb.Request.ID)
+	w.mustApprove(w.ap2, fb.Request.ID)
+	rgfix.Activate(t, w.owner, only, nil, rgfix.Staff(t, w.owner, only))
+	if err := w.rt.WithTenant(context.Background(), only, func(ctx context.Context, tx pgx.Tx) error {
+		if c := launchgov.RGActivationReadiness(ctx, tx, only, nil, w.dbNow()); c.Result != launchgov.ResultPass || c.DetailCode != "ok" {
+			t.Fatalf("a basis-only tenant whose basis jurisdiction has floors passes the activation guard: %+v", c)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// No licence and no approved basis: unchanged.
+	none := w.tenant("under_platform_licence")
+	if err := w.rt.WithTenant(context.Background(), none, func(ctx context.Context, tx pgx.Tx) error {
+		if c := launchgov.RGActivationReadiness(ctx, tx, none, nil, w.dbNow()); c.DetailCode != "no_licence_jurisdiction" && c.DetailCode != "no_jurisdiction_referenced" {
+			t.Fatalf("no licence and no basis: %+v", c)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

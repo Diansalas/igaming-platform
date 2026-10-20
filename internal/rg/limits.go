@@ -178,14 +178,18 @@ func RealizedLimit(ctx context.Context, tx pgx.Tx, k LimitKey, at *time.Time) (R
 // ClassifyParams is the input of ClassifyLimitChange. Value nil means a removal; Supersedes and
 // Intent name a cancel_pending / confirm.
 type ClassifyParams struct {
-	Key              LimitKey
-	BrandID          uuid.UUID
-	JurisdictionCode *string
-	Value            *string
-	Supersedes       *uuid.UUID
-	Intent           *ChangeKind
-	Source           ChangeSource
-	At               *time.Time
+	Key     LimitKey
+	BrandID uuid.UUID
+	// JurisdictionCode is the single jurisdiction (pre-lic25 callers). JurisdictionCodes, when non-nil, is the SET of relied-on
+	// jurisdictions (lic25; the strictest fold decides) and takes precedence; JurisdictionIncomplete marks an unresolvable one.
+	JurisdictionCode       *string
+	JurisdictionCodes      []string
+	JurisdictionIncomplete bool
+	Value                  *string
+	Supersedes             *uuid.UUID
+	Intent                 *ChangeKind
+	Source                 ChangeSource
+	At                     *time.Time
 }
 
 // Classification is what the database decides for a change at an instant.
@@ -208,10 +212,17 @@ func ClassifyLimitChange(ctx context.Context, tx pgx.Tx, p ClassifyParams) (Clas
 		s := string(*p.Intent)
 		intent = &s
 	}
+	codes := p.JurisdictionCodes
+	if codes == nil {
+		codes = []string{}
+		if p.JurisdictionCode != nil {
+			codes = []string{*p.JurisdictionCode}
+		}
+	}
 	err := tx.QueryRow(ctx, `SELECT change_kind, effective_at, requires_confirmation, value::text, config_version_ids
-		FROM rg_limit_change_classify($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::numeric, $11, $12, $13,
-		                              COALESCE($14::timestamptz, clock_timestamp()))`,
-		p.Key.TenantID, p.Key.PlayerAccountID, p.Key.PersonID, p.BrandID, p.JurisdictionCode,
+		FROM rg_limit_change_classify_set($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11::numeric, $12, $13, $14,
+		                                  COALESCE($15::timestamptz, clock_timestamp()))`,
+		p.Key.TenantID, p.Key.PlayerAccountID, p.Key.PersonID, p.BrandID, codes, p.JurisdictionIncomplete,
 		string(p.Key.Scope), string(p.Key.Kind), p.Key.AssetCode, p.Key.period(), p.Value,
 		p.Supersedes, intent, string(p.Source), p.At,
 	).Scan(&kind, &c.EffectiveAt, &c.RequiresConfirmation, &c.Value, &c.ConfigVersionIDs)

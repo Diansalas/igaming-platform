@@ -12,6 +12,7 @@ package rg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -43,6 +44,10 @@ type UsageConfig struct {
 	PostSessionBreakSeconds    *int64
 	ConcurrentChainAggregation *bool
 	PendingIntentTTLSeconds    *int64 // nil = none attested (or not a deposit row)
+
+	// MissingFloors (lic25) is true for a tenant with an approved operating basis when a jurisdiction it relies on has no floor in
+	// force (or cannot be resolved): the configuration read is then partial, and an increase or removal fails closed.
+	MissingFloors bool
 }
 
 // Windows returns the measurement windows of the allowed periods under this configuration's
@@ -62,65 +67,58 @@ func (c UsageConfig) Windows() []WindowSpec {
 	return out
 }
 
-// ReadUsageConfig composes the configuration in force at `at` (nil = now) for the tenant's licence
-// jurisdiction (derived server-side, never from a request).
+// ReadUsageConfig composes the configuration in force at `at` (nil = now) for the tenant: the strictest fold of every jurisdiction the
+// tenant relies on (the licence jurisdiction and its approved bases' jurisdictions; lic25), derived server-side, never from a request.
+// MissingFloors reports a relied-on jurisdiction without a floor (only for a tenant with an approved basis).
 func ReadUsageConfig(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, kind ControlKind, asset *string, at *time.Time) (UsageConfig, error) {
 	if err := usageGuard(ctx, tx, tenantID); err != nil {
 		return UsageConfig{}, err
 	}
-	jur, err := tenantJurisdiction(ctx, tx, tenantID)
+	sel, err := tenantReliance(ctx, tx, tenantID)
 	if err != nil {
 		return UsageConfig{}, err
 	}
-	return readUsageConfigFor(ctx, tx, jur, tenantID, brandID, kind, asset, at)
+	return readUsageConfigFor(ctx, tx, sel, tenantID, brandID, kind, asset, at)
 }
 
-// readUsageConfigFor is ReadUsageConfig after the scope guard and the jurisdiction lookup: EvaluateAction
-// does both once per action and composes several kinds with the one result (no behavioural difference).
-func readUsageConfigFor(ctx context.Context, tx pgx.Tx, jur *string, tenantID, brandID uuid.UUID, kind ControlKind, asset *string, at *time.Time) (UsageConfig, error) {
+// readUsageConfigFor is ReadUsageConfig after the scope guard and the jurisdiction selection: EvaluateAction selects the scope's one
+// jurisdiction once per action and composes several kinds with the one result (no behavioural difference).
+func readUsageConfigFor(ctx context.Context, tx pgx.Tx, sel cfgSel, tenantID, brandID uuid.UUID, kind ControlKind, asset *string, at *time.Time) (UsageConfig, error) {
 	cfg := UsageConfig{Kind: kind, AssetCode: asset}
-	if jur == nil {
+	if len(sel.Codes) == 0 {
+		cfg.MissingFloors = sel.Strict && sel.Incomplete
 		return cfg, nil
 	}
-	var err error
-	var enabled, mandatory, none, lossNeg, conc, ttlNone *bool
-	var scope *string
-	var periods []string
-	var tz *string
-	var ws *int16
-	var cooldown, brk, ttl *int64
-	var countBonus *bool
-	err = tx.QueryRow(ctx, `SELECT found, version_ids, enabled, mandatory, ceiling::text, ceiling_none, allowed_periods,
-			calendar_tz, week_start, extract(epoch FROM increase_cooldown)::bigint, scope, count_bonus_funded,
-			loss_may_go_negative, extract(epoch FROM post_session_break)::bigint, concurrent_chain_aggregation,
-			extract(epoch FROM pending_intent_ttl)::bigint, pending_intent_ttl_none
-		FROM rg_limit_config_compose($1, $2, $3, $4, $5, COALESCE($6::timestamptz, clock_timestamp()))`,
-		*jur, tenantID, brandID, string(kind), asset, at,
-	).Scan(&cfg.Found, &cfg.VersionIDs, &enabled, &mandatory, &cfg.Ceiling, &none, &periods, &tz, &ws, &cooldown,
-		&scope, &countBonus, &lossNeg, &brk, &conc, &ttl, &ttlNone)
+	r, missing, tzConflict, err := readCombined(ctx, tx, sel, tenantID, brandID, kind, asset, at)
 	if err != nil {
 		return UsageConfig{}, fmt.Errorf("rg: read usage configuration: %w", err)
 	}
-	if !cfg.Found {
-		return UsageConfig{Kind: kind, AssetCode: asset}, nil
+	if tzConflict {
+		return UsageConfig{}, errors.New("rg: relied-on jurisdictions disagree on calendar_tz / week_start; the windows cannot be selected (fail closed)")
 	}
-	cfg.Enabled, cfg.Mandatory, cfg.CeilingNone = deref(enabled), deref(mandatory), deref(none)
-	for _, p := range periods {
+	cfg.MissingFloors = missing
+	if !r.Found {
+		return cfg, nil
+	}
+	cfg.Found, cfg.VersionIDs = true, r.VersionIDs
+	cfg.Enabled, cfg.Mandatory, cfg.CeilingNone = deref(r.Enabled), deref(r.Mandatory), deref(r.CeilingNone)
+	cfg.Ceiling = r.Ceiling
+	for _, p := range r.Periods {
 		cfg.AllowedPeriods = append(cfg.AllowedPeriods, PeriodKind(p))
 	}
-	cfg.CalendarTZ = tz
-	if ws != nil {
-		v := int(*ws)
+	cfg.CalendarTZ = r.CalendarTZ
+	if r.WeekStart != nil {
+		v := int(*r.WeekStart)
 		cfg.WeekStart = &v
 	}
-	cfg.CooldownSeconds = cooldown
-	if scope != nil {
-		cfg.Scope = LimitScope(*scope)
+	cfg.CooldownSeconds = r.CooldownSecs
+	if r.Scope != nil {
+		cfg.Scope = LimitScope(*r.Scope)
 	}
-	cfg.CountBonusFunded, cfg.LossMayGoNegative = countBonus, lossNeg
-	cfg.PostSessionBreakSeconds, cfg.ConcurrentChainAggregation = brk, conc
-	if !deref(ttlNone) {
-		cfg.PendingIntentTTLSeconds = ttl
+	cfg.CountBonusFunded, cfg.LossMayGoNegative = r.CountBonus, r.LossNeg
+	cfg.PostSessionBreakSeconds, cfg.ConcurrentChainAggregation = r.BreakSecs, r.Concurrent
+	if !deref(r.TTLNone) {
+		cfg.PendingIntentTTLSeconds = r.TTLSecs
 	}
 	return cfg, nil
 }
