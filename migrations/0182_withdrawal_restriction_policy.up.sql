@@ -118,7 +118,15 @@ INSERT INTO withdrawal_restriction_causes (cause, cause_class, configurable, eva
 
 ALTER TABLE withdrawal_restriction_causes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE withdrawal_restriction_causes FORCE ROW LEVEL SECURITY;
-CREATE POLICY withdrawal_restriction_causes_read ON withdrawal_restriction_causes FOR SELECT USING (true);
+-- Readable by a platform session or any tenant session (the money paths, staff); never by a player or an acting session.
+CREATE POLICY withdrawal_restriction_causes_read ON withdrawal_restriction_causes FOR SELECT USING (
+    (NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+     OR NULLIF(current_setting('app.tenant_id', true), '') IS NOT NULL)
+    AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+    AND NOT financial_acting_gucs_present()
+);
+-- ADR 0099 acting fence (the 0177 licensing_change_kinds pattern): an acting session never reads the registry.
+CREATE POLICY acting_fence_select ON withdrawal_restriction_causes AS RESTRICTIVE FOR SELECT USING (NOT financial_acting_gucs_present());
 
 CREATE FUNCTION withdrawal_restriction_action_rank(p_action text) RETURNS int
     LANGUAGE sql IMMUTABLE
@@ -594,6 +602,15 @@ CREATE POLICY platform_scope_insert ON withdrawal_restriction_policy_approvals F
                 AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
                 AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
                 AND NOT financial_acting_gucs_present());
+
+-- ADR 0099 acting fence on the three tables (the 0177 pattern).
+CREATE POLICY acting_fence_select ON withdrawal_restriction_policies AS RESTRICTIVE FOR SELECT USING (NOT financial_acting_gucs_present());
+CREATE POLICY acting_fence_insert ON withdrawal_restriction_policies AS RESTRICTIVE FOR INSERT WITH CHECK (NOT financial_acting_gucs_present());
+CREATE POLICY acting_fence_select ON withdrawal_restriction_policy_changes AS RESTRICTIVE FOR SELECT USING (NOT financial_acting_gucs_present());
+CREATE POLICY acting_fence_insert ON withdrawal_restriction_policy_changes AS RESTRICTIVE FOR INSERT WITH CHECK (NOT financial_acting_gucs_present());
+CREATE POLICY acting_fence_update ON withdrawal_restriction_policy_changes AS RESTRICTIVE FOR UPDATE USING (NOT financial_acting_gucs_present()) WITH CHECK (NOT financial_acting_gucs_present());
+CREATE POLICY acting_fence_select ON withdrawal_restriction_policy_approvals AS RESTRICTIVE FOR SELECT USING (NOT financial_acting_gucs_present());
+CREATE POLICY acting_fence_insert ON withdrawal_restriction_policy_approvals AS RESTRICTIVE FOR INSERT WITH CHECK (NOT financial_acting_gucs_present());
 
 -- =========================================================================
 -- 5. withdrawal_gate_decisions: WD056 and the policy provenance (F4 semantics unchanged)

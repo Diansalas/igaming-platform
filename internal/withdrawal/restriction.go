@@ -323,11 +323,12 @@ func evaluateRequestRestriction(ctx context.Context, tx pgx.Tx, p RequestParams)
 		Message: "withdrawals are restricted for this tenant under its withdrawal restriction policy"}
 }
 
-// auditRequestRestriction records, in the request's transaction, a restriction cause that was in force when the request
-// was ACCEPTED (allow or hold_for_review). Nothing is written when no cause is in force (the request's own audit row
-// carries the provenance either way).
+// auditRequestRestriction records, in the request's transaction, a cause in force under a CONFIGURED policy when the
+// request was ACCEPTED (allow or hold_for_review). Under the default (or with no cause) nothing extra is written: the
+// default path writes exactly the rows it wrote before 0182, and the request's own withdrawal.requested audit row carries
+// the provenance (source, set version, cause and licence state) either way.
 func auditRequestRestriction(ctx context.Context, tx pgx.Tx, p RequestParams, requestID uuid.UUID, rd RestrictionDecision) error {
-	if rd.DecidingCause == "" {
+	if rd.DecidingCause == "" || rd.Source != RestrictionSourceConfigured {
 		return nil
 	}
 	action := "withdrawal.restriction_cause_in_force"
