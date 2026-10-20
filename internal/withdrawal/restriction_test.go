@@ -344,3 +344,54 @@ func TestLic17_Static_Pre0182MarkerIsTestOnly(t *testing.T) {
 		t.Fatalf("exactly one production use (the reader ctx.Value(pre0182SchemaKey{})), got %d", n)
 	}
 }
+
+// lic24: the cross-package pre-0182 hook is INTEGRATION-BUILD-ONLY. Across the repository's non-_test.go files:
+//   - SetPre0182SchemaForTest is defined exactly once, in a file whose FIRST line is `//go:build integration` (so no
+//     production binary contains it) and nothing but that file names it;
+//   - pre0182SchemaHook is written (Swap / Store) only in that file, and read (Load) exactly once, in restriction.go.
+//
+// Callers are _test.go files only.
+func TestLic24_Static_Pre0182HookIsIntegrationOnly(t *testing.T) {
+	root := filepath.Join("..", "..")
+	defs, loads := 0, 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".git" || d.Name() == "worktrees") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		src := string(b)
+		hookFile := filepath.Base(path) == "restriction_schema_hook_integration.go" && filepath.Base(filepath.Dir(path)) == "withdrawal"
+		if strings.Contains(src, "SetPre0182SchemaForTest") || strings.Contains(src, "pre0182SchemaHook.Swap(") || strings.Contains(src, "pre0182SchemaHook.Store(") {
+			if !hookFile {
+				t.Errorf("%s names or writes the integration-only pre-0182 hook", path)
+			} else if !strings.HasPrefix(src, "//go:build integration\n") {
+				t.Errorf("%s must start with //go:build integration", path)
+			}
+		}
+		if hookFile {
+			defs += strings.Count(src, "func SetPre0182SchemaForTest(")
+		}
+		if c := strings.Count(src, "pre0182SchemaHook.Load()"); c > 0 {
+			if filepath.Base(path) != "restriction.go" {
+				t.Errorf("%s reads the hook", path)
+			}
+			loads += c
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defs != 1 || loads != 1 {
+		t.Fatalf("exactly one integration-only setter and one reader, got %d / %d", defs, loads)
+	}
+}
