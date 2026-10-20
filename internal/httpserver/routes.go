@@ -190,5 +190,6 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerLaunchAuthorisationRoutes(mux, deps)
 	// Migration 0177 (MKT-DUAL-1): licensing / jurisdiction change requests (two-person approval primitive).
 	registerLicensingChangeRoutes(mux, deps)
+	registerWithdrawalRestrictionPolicyRoutes(mux, deps)
 	registerAMLRoutes(mux, deps)
 }

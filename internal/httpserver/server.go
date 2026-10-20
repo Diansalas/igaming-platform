@@ -30,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalpolicy"
 )
 
 // Deps are the dependencies routes need. Kept as one small struct so
@@ -210,6 +211,12 @@ type Deps struct {
 	// NewWithAdmission builds one over DB that signs with the process actor-proof issuer (actorproof.Default()): with no
 	// issuer every governed write still fails closed (500, nothing written). Nil with no DB makes the routes answer 503.
 	LicensingChanges *licensingchange.Service
+
+	// WithdrawalRestrictionPolicy is the lic11 (migration 0182) withdrawal restriction policy service: the only runtime
+	// writer of withdrawal_restriction_policies (the database refuses any other runtime write, WR040) and the operator read
+	// API. cmd/platform-api always sets it; when nil and DB is set, NewWithAdmission builds one over DB that signs with the
+	// process actor-proof issuer (no issuer: every governed write fails closed). Nil with no DB makes the routes answer 503.
+	WithdrawalRestrictionPolicy *withdrawalpolicy.Service
 
 	// AML is the ADR 0116 officer service behind the AML routes (aml_routes.go). nil makes every AML route answer 503: there
 	// is no fallback and no bypass. Production wiring passes *aml.Service, built with the process actor-proof issuer (nil in
@@ -510,6 +517,11 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	if deps.LicensingChanges == nil && deps.DB != nil {
 		if svc, err := licensingchange.New(licensingchange.Config{Pool: deps.DB}); err == nil {
 			deps.LicensingChanges = svc
+		}
+	}
+	if deps.WithdrawalRestrictionPolicy == nil && deps.DB != nil {
+		if svc, err := withdrawalpolicy.New(withdrawalpolicy.Config{Pool: deps.DB}); err == nil {
+			deps.WithdrawalRestrictionPolicy = svc
 		}
 	}
 	admissionRuntime := WebhookAdmissionRuntime{rt: deps.webhookAdmission}

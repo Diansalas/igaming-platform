@@ -73,6 +73,12 @@ var StepUpOperations = map[string]stepup.Class{
 	OpLicensingChangeRequest: stepup.Critical,
 	OpLicensingChangeApprove: stepup.Critical,
 	OpLicensingChangeExecute: stepup.Critical,
+	// lic11 (migration 0182): filing, approving and executing a withdrawal restriction policy change (reject / cancel are
+	// protective). The routes POST /v1/admin/withdrawal-restriction-policy-changes and .../{changeID}/approve are critical
+	// in the golden table.
+	OpWithdrawalRestrictionRequest: stepup.Critical,
+	OpWithdrawalRestrictionApprove: stepup.Critical,
+	OpWithdrawalRestrictionExecute: stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4
