@@ -110,13 +110,16 @@ export async function waitHeartbeat(timeoutMs = 60000) {
 // players and the MOCK marker
 
 /**
- * FIXTURE (owner role, synthetic): sets the vendor subject reference of a verification to a MOCK screening marker (SYNTH-SANCTION-... /
- * SYNTH-PEP-...), which is the only way the MOCK provider (internal/aml/screening_mock.go) is told to answer a match. The KYC MOCK provider
- * never produces such a reference itself. The real worker then reads it exactly as it would read a vendor reference.
+ * FIXTURE (owner role, synthetic): the MOCK screening provider (internal/aml/screening_mock.go) answers a match only for a vendor subject
+ * reference carrying a SYNTH- marker, and the KYC MOCK never produces one. A verification's provider_reference is immutable once set (0186), so
+ * the harness INSERTS one more, already-approved, synthetic verification row for the same person whose reference carries the marker. The real
+ * worker reads the person's latest vendor reference exactly as it would a vendor's. Called before the real verification is approved so the
+ * kyc_approval request sees the marker.
  */
 export function markVerification(t: WdTenant, verificationId: string, marker: 'SYNTH-SANCTION-' | 'SYNTH-PEP-') {
   const ref = `${marker}e2e${Date.now()}`
-  const out = sqlT(t.id, `UPDATE kyc_verifications SET provider_reference='${ref}' WHERE id='${verificationId}' RETURNING provider_reference`)
+  const out = sqlT(t.id, `INSERT INTO kyc_verifications (tenant_id, brand_id, player_account_id, person_id, status, provider_id, provider_reference)
+    SELECT tenant_id, brand_id, player_account_id, person_id, 'approved', provider_id, '${ref}' FROM kyc_verifications WHERE id='${verificationId}' RETURNING provider_reference`)
   expect(out).toBe(ref)
 }
 

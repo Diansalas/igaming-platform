@@ -263,8 +263,9 @@ test.describe.serial('10 AML screening: trigger policy, MOCK worker, officer res
     const kase = await call('POST', `/v1/admin/tenants/${T.id}/aml/cases`, await apiLogin('PA_C'), { person_id: Ps.personId, kind: 'manual', reason_code: 'e2e_case' })
     expect(kase.status).toBe(201)
     const detail = await call('GET', `/v1/admin/tenants/${T.id}/aml/cases/${kase.json.case_id}`, await apiLogin('PA_C'))
-    console.log('E2E-OBSERVED case detail keys', Object.keys(detail.json ?? {}).join(','), JSON.stringify(detail.json).slice(0, 300))
-    const seq = detail.json.last_seq ?? detail.json.case?.last_seq ?? 1
+    const tr = await call('POST', `/v1/admin/tenants/${T.id}/aml/cases/${kase.json.case_id}/transition`, await apiLogin('PA_C'), { expected_seq: detail.json.case.last_seq, to: 'in_review', reason_code: 'e2e_review' })
+    expect(tr.status).toBe(200)
+    const seq = tr.json.last_seq ?? detail.json.case.last_seq + 1
     const prop = await call('POST', `/v1/admin/tenants/${T.id}/aml/cases/${kase.json.case_id}/proposals`, await apiLogin('PA_C'), { expected_seq: seq, kind: 'lift_hold', hold_id: holdId, reason_code: 'e2e_lift_prop' })
     expect(prop.status).toBe(201)
     const self = await call('POST', `/v1/admin/tenants/${T.id}/aml/cases/${kase.json.case_id}/approvals`, await apiLogin('PA_C'), { proposal_seq: prop.json.proposal_seq, content_hash: prop.json.content_hash, reason_code: 'e2e_lift_self' })
@@ -288,6 +289,11 @@ test.describe.serial('10 AML screening: trigger policy, MOCK worker, officer res
     await submitResolve(D, d, () => expect(D.page.getByRole('status').filter({ hasText: /Recorded\. Result / })).toBeVisible())
     const cleared = (await screeningRequests(T, 'PA_C', Pp.personId)).find((r) => r.id === rp.id)!
     expect(cleared.resolved).toBe(true)
+    // the synthetic marker row is itself an approved verification, so it enqueued its own kyc_approval request (the same marker): clear it too, by API
+    for (const other of (await screeningRequests(T, 'PA_C', Pp.personId)).filter((r) => r.status === 'needs_officer' && !r.resolved)) {
+      const rr = await call('POST', `/v1/admin/tenants/${T.id}/screening/persons/${Pp.personId}/requests/${other.id}/resolution`, await apiLogin('PA_D'), { outcome: 'clear', lists: ['pep'], reason_code: 'e2e_pep_cleared' })
+      expect(rr.status).toBe(201)
+    }
     const sub = await submitWithdrawal(T, wdPp)
     expect(sub.status).toBeLessThan(300)
     expect(withdrawalState(T, wdPp)).toBe('submitted')
@@ -311,12 +317,12 @@ test.describe.serial('10 AML screening: trigger policy, MOCK worker, officer res
       const claim = runtimeSql(`${setup}\nSELECT * FROM aml_screening_request_claim('${T.id}', 4, 30);`)
       expect(claim.ok).toBe(false)
       expect(claim.sqlstate).toBe('AT002')
-      const fin = runtimeSql(`${setup}\nSELECT * FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL);`)
+      const fin = runtimeSql(`${setup}\nSELECT * FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL, NULL);`)
       expect(fin.ok).toBe(false)
       expect(fin.sqlstate).toBe('AT002')
     }
     // with the right tenant session but no claim token, finish applies nothing
-    const own = runtimeSql(`SELECT set_config('app.tenant_id', '${T.id}', false);\nSELECT o_applied FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL);`)
+    const own = runtimeSql(`SELECT set_config('app.tenant_id', '${T.id}', false);\nSELECT o_applied FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL, NULL);`)
     expect(own.ok).toBe(true)
     expect(own.out.split('\n').pop()).toBe('f')
 
@@ -341,9 +347,9 @@ test.describe.serial('10 AML screening: trigger policy, MOCK worker, officer res
     const psReq = (await screeningRequests(T, 'PA_C', Ps.personId)).find((r) => r.status === 'needs_officer' || r.resolved)!
     const c = await apiLogin('PA_C')
     const forged = await call('POST', `/v1/admin/tenants/${T.id}/screening/persons/${Pc.personId}/requests/${psReq.id}/resolution`, c, { outcome: 'clear', lists: ['pep'], reason_code: 'e2e_forged' })
-    expect([404, 409]).toContain(forged.status)
+    expect(forged.status).toBe(404)
     const forged2 = await call('POST', `/v1/admin/tenants/${T.id}/screening/persons/${Ps.personId}/requests/${(await screeningRequests(T, 'PA_C', Pc.personId))[0].id}/resolution`, await apiLogin('PA_C'), { outcome: 'clear', lists: ['pep'], reason_code: 'e2e_forged' })
-    expect([404, 409]).toContain(forged2.status)
+    expect(forged2.status).toBe(404)
     expect(snapshot()).toEqual(s0)
     console.log(`E2E-OBSERVED forged statuses: ${forged.status} ${JSON.stringify(forged.json)} / ${forged2.status} ${JSON.stringify(forged2.json)}`)
     void staffId
