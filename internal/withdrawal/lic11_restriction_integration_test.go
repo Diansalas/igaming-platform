@@ -477,8 +477,10 @@ func TestLic11_TenantIsolation_AndWriteScope(t *testing.T) {
 			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_restriction_policies (tenant_id, cause, action, reason_code) VALUES ($1, 'licence_suspended', 'allow', 'x')`, a.f.tenantID)
 			return err
 		})
-		if code := a13Code(err); code != "42501" {
-			t.Fatalf("a tenant session must not write a policy row (RLS), got %v", err)
+		// The guard fires before the RLS WITH CHECK: the runtime role is refused WR040 (no executed change visible), the
+		// owner (guard-exempt) by RLS (42501). Either way nothing is written.
+		if code := a13Code(err); code != "42501" && code != "WR040" {
+			t.Fatalf("a tenant session must not write a policy row, got %v", err)
 		}
 	}
 	err := a.owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
@@ -498,7 +500,9 @@ func TestLic11_TenantIsolation_AndWriteScope(t *testing.T) {
 	}
 }
 
-// APPEND-ONLY: a policy row is never updated or deleted, by any role (the guard binds the owner too).
+// APPEND-ONLY: a policy row is never updated or deleted. Under FORCE RLS no session has an UPDATE / DELETE policy, so the
+// statement reaches no row; the guard trigger (WR055) is the second layer and TRUNCATE (statement level) hits it directly.
+// Either way the row is unchanged.
 func TestLic11_Policy_AppendOnly(t *testing.T) {
 	w := newA13(t)
 	l11Policy(t, w.owner, w.f.tenantID, CauseLicenceMissing, RestrictionBlock)
@@ -506,13 +510,31 @@ func TestLic11_Policy_AppendOnly(t *testing.T) {
 		`UPDATE withdrawal_restriction_policies SET action = 'allow' WHERE tenant_id = $1`,
 		`DELETE FROM withdrawal_restriction_policies WHERE tenant_id = $1`,
 	} {
-		err := w.owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, sql, w.f.tenantID)
-			return err
-		})
-		if a13Code(err) != "WR055" {
-			t.Fatalf("%q: want WR055, got %v", sql, err)
+		for _, p := range []*db.Pool{w.owner, w.rt} {
+			err := p.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+				tag, err := tx.Exec(ctx, sql, w.f.tenantID)
+				if err == nil && tag.RowsAffected() != 0 {
+					return fmt.Errorf("%d rows affected", tag.RowsAffected())
+				}
+				return err
+			})
+			if err != nil && a13Code(err) != "WR055" && a13Code(err) != "42501" {
+				t.Fatalf("%q: want no row affected or WR055 / 42501, got %v", sql, err)
+			}
 		}
+	}
+	err := w.owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `TRUNCATE withdrawal_restriction_policies`)
+		return err
+	})
+	if a13Code(err) != "WR055" {
+		t.Fatalf("TRUNCATE must be WR055, got %v", err)
+	}
+	var action string
+	if err := w.owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT action FROM withdrawal_restriction_policies WHERE tenant_id = $1`, w.f.tenantID).Scan(&action)
+	}); err != nil || action != string(RestrictionBlock) {
+		t.Fatalf("the row must be unchanged, got %q %v", action, err)
 	}
 }
 

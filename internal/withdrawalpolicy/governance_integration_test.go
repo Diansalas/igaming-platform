@@ -224,8 +224,8 @@ func TestGovernance_WriteScope_AndGuards(t *testing.T) {
 		_, err := tx.Exec(ctx, `INSERT INTO withdrawal_restriction_policies (tenant_id, cause, action, reason_code) VALUES ($1, 'licence_suspended', 'allow', 'x')`, tn)
 		return err
 	})
-	if sqlstate(err) != "42501" {
-		t.Fatalf("RLS refuses a tenant write, got %v", err)
+	if c := sqlstate(err); c != "42501" && c != "WR040" {
+		t.Fatalf("a tenant session cannot write a policy row (guard WR040 before RLS), got %v", err)
 	}
 	if _, err := w.svc.Request(context.Background(), w.req, RequestInput{TenantID: tn, Cause: "tenant_suspended", Action: ActionAllow, ReasonCode: "x"}); !errors.Is(err, ErrNotConfigurable) {
 		t.Fatalf("tenant_suspended is owner-decided, got %v", err)
