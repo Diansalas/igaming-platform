@@ -204,7 +204,7 @@ export const CHECK_NOTES: Record<string, string> = {
   'R-KYC-POLICY':
     'No active KYC enforcement policy exists for the licensing jurisdiction, so KYC thresholds are dormant: cumulative-deposit and play checks resolve as not required. Only the withdrawal KYC rule and the verified-residence market gate still apply. Acknowledge knowingly; the software does not set any threshold.',
   'R-OPERATING-BASIS':
-    'An operating basis recorded for this tenant has a review that is overdue or due within 30 days. A basis is a recorded business decision, not proof of legality: once its review date has passed the market stops permitting until a review is recorded. Acknowledge knowingly; the software does not decide whether any basis is adequate.',
+    'An operating basis recorded for this tenant has a review that is overdue or due within 30 days. A basis is a recorded business decision, not proof of legality: once its review date has passed the market stops permitting until a review is recorded. Acknowledge knowingly; the software does not decide whether any basis is adequate. Review them under Licensing, Operating bases.',
 }
 
 export function checkNote(code: string): string | undefined {

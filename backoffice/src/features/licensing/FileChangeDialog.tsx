@@ -49,7 +49,7 @@ export function evidenceReferenceProblem(v: string): string | null {
   return null
 }
 
-function TenantPicker({ value, onChange, fixed }: { value: string; onChange: (id: string) => void; fixed?: string }) {
+export function TenantPicker({ value, onChange, fixed }: { value: string; onChange: (id: string) => void; fixed?: string }) {
   const [search, setSearch] = useState('')
   const q = useDebouncedValue(search, 250)
   const tenants = useQuery({ queryKey: ['licensing', 'tenant-picker', q], queryFn: () => listTenants({ q: q || undefined, limit: 50 }), enabled: !fixed, retry: false })

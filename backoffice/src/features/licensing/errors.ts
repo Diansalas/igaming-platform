@@ -39,6 +39,7 @@ export const LC_CODE_TEXT: Record<string, string> = {
   LC040: 'Governed data changes only through an executed request',
   LC041: 'The tenant jurisdiction configuration is append-only',
   LC042: 'Licence identity fields can never change',
+  LC043: 'The content is not valid for the current records (for example a licensee or kind mismatch, a licence bound to another tenant, or the basis changed since filing)',
 }
 const LC_CODE = /^LC0\d\d$/
 

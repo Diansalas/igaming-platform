@@ -120,6 +120,15 @@ export function TenantLicensingPage() {
         <p className="mt-2 text-xs text-slate-600">A binding is filed for approval by two different people and you choose the licence explicitly. The server refuses a licence whose licensee does not match the tenant's licensing model.</p>
       </Card>
 
+      <Card title="Operating bases">
+        <p className="text-sm text-slate-700">
+          The basis this tenant or one of its brands relies on for a country and operation (a licence held by the platform, the partner's own licence, or a documented decision without a licence). A basis is a recorded business decision, not legal proof.
+        </p>
+        <p className="mt-2 text-sm">
+          <Link className="font-medium text-brand-700 hover:underline" to={`/licensing/operating-bases/tenants/${encodeURIComponent(tenantId)}`}>Open operating bases of this tenant</Link>
+        </p>
+      </Card>
+
       <Card title="Tenant jurisdiction configurations (read-only)">
         {configs.error ? <LicensingErrorAlert error={configs.error} /> : null}
         <Table

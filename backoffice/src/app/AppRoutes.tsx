@@ -41,6 +41,8 @@ import { LicencesPage } from '../features/licensing/LicencesPage'
 import { LicenceDetailPage } from '../features/licensing/LicenceDetailPage'
 import { ChangesPage } from '../features/licensing/ChangesPage'
 import { ChangeDetailPage } from '../features/licensing/ChangeDetailPage'
+import { OperatingBasesPage, TenantOperatingBasesPage } from '../features/licensing/OperatingBasesPage'
+import { OperatingBasisDetailPage } from '../features/licensing/OperatingBasisDetailPage'
 import { TenantLicensingPage } from '../features/licensing/TenantLicensingPage'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
@@ -100,6 +102,9 @@ export function AppRoutes() {
           <Route path="jurisdictions/:jurisdictionId" element={<JurisdictionDetailPage />} />
           <Route path="licences" element={<LicencesPage />} />
           <Route path="licences/:licenceId" element={<LicenceDetailPage />} />
+          <Route path="operating-bases" element={<OperatingBasesPage />} />
+          <Route path="operating-bases/tenants/:tenantId" element={<TenantOperatingBasesPage />} />
+          <Route path="operating-bases/:basisId" element={<OperatingBasisDetailPage />} />
           <Route path="changes" element={<ChangesPage />} />
           <Route path="changes/:changeId" element={<ChangeDetailPage />} />
           <Route path="tenants/:tenantId" element={<TenantLicensingPage />} />
