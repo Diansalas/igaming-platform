@@ -685,6 +685,20 @@ BEGIN
 END
 $$;
 
+-- Migration 0180 (lic9, explicit operating bases): operating_bases is governed and append-only. The runtime role keeps SELECT and
+-- INSERT and UPDATE on the single column effective_to (the close of a replaced version), all admitted only by the governed-write
+-- guard (an executed licensing change request of this transaction, LC040); never DELETE, TRUNCATE or a blanket UPDATE (the blanket
+-- backfill GRANT above would otherwise re-grant them). Re-asserted on every run.
+DO $$
+BEGIN
+    IF to_regclass('public.operating_bases') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON operating_bases FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON operating_bases TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (effective_to) ON operating_bases TO igaming_runtime';
+    END IF;
+END
+$$;
+
 -- ADR 0115 S1 (migration 0135, RG limits schema): least-privilege, re-asserted on every run,
 -- mirroring migration 0135's own in-migration grant block. RLS (FORCE on the three RG tables) and
 -- the guard / deny triggers are the binding controls; these grants are defence in depth, narrower

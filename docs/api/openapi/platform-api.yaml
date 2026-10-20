@@ -6908,6 +6908,74 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admin/operating-bases:
+    get:
+      summary: List a tenant's operating bases (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. Read-only: the stored versions of the explicit
+        operating bases (platform_licence, partner_licence or no_licence_documented) of the tenant named by `tenant_id` (required;
+        the platform operator's explicit target, never taken from a tenant principal), newest first. `current=true` keeps only open
+        versions. Paginated with ?limit= (default 50, max 200) and ?offset=. A basis is a business decision recorded by named staff:
+        it is NOT a legal or regulatory authorisation and NOT a market-permission decision (the runtime gate resolves permission).
+        Bases are written only by filing a licensing change (kinds operating_basis_set, operating_basis_withdraw,
+        operating_basis_review_record). No basis ships with the platform. A tenant has no read API of its own (its resolver reads
+        its own rows under row-level security).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenant_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: country_code, in: query, required: false, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+        - { name: current, in: query, required: false, schema: { type: boolean } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: A page of operating basis versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatingBasisPage"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/operating-bases/{basisID}:
+    get:
+      summary: Get one operating basis version with its decision record (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. One stored version plus `decision`, derived from
+        the executed licensing change that created it: the requesting, executing and approving staff accounts (null for an
+        owner-path provisioning row, which the resolver does not accept as an approved basis). Not a legal position.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: basisID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The operating basis version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatingBasisDetail"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/jurisdiction-configs:
     get:
       summary: List a tenant's jurisdiction configuration versions (jurisdiction_registry:read)
@@ -7045,7 +7113,7 @@ paths:
   # The generic two-person approval primitive for licensing and jurisdiction configuration writes. Kinds (closed):
   # licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version,
   # tenant_jurisdiction_config_version, and (migration 0178) licence_status_change, licence_validity_dates_change,
-  # licence_review_due_change, licence_evidence_reference_change (the licence lifecycle writes). The DATABASE classifies each change: WIDENING (open / enable / bind / create)
+  # licence_review_due_change, licence_evidence_reference_change (the licence lifecycle writes), and (migration 0180) operating_basis_set (always widening), operating_basis_withdraw (always narrowing), operating_basis_review_record (widening iff the review date moves later or needs_rereview is cleared). The DATABASE classifies each change: WIDENING (open / enable / bind / create)
   # needs 2 approvals by distinct Persons, neither the requester's, each at most 24 h old at execution, by ACTIVE
   # platform_admin staff (interim answer to HDR-M-1); NARROWING (close / disable / unbind / narrow) filed by a
   # platform_admin executes in the same transaction (single actor with a reason code); narrowing filed by tenant staff
@@ -7057,7 +7125,7 @@ paths:
       description: >
         Requires licensing_change:request. platform_admin files any kind (plus the kind's own permission:
         jurisdiction_registry:manage for licence_create, tenant_licence:assign for bind / unbind,
-        operating_market_ceiling:manage for licence_ceiling_version); tenant_admin and compliance file
+        operating_market_ceiling:manage for licence_ceiling_version and the operating_basis_* kinds); tenant_admin and compliance file
         operating_policy_version (compliance for the tenant rung, tenant_admin for the brand / operation rungs) and
         compliance tenant_jurisdiction_config_version, for their OWN tenant only (another tenant's id is a 404). The
         payload shape is per kind (see LicensingChangeCreateRequest); unknown fields are refused. A narrowing change filed
@@ -12268,6 +12336,68 @@ components:
         offset: { type: integer }
         total: { type: integer }
       required: [items, limit, offset, total]
+    OperatingBasis:
+      description: >
+        An explicit operating basis version (migration 0180): which basis a tenant / brand relies on for a country and operation.
+        A recorded business decision, not a legal position.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid, nullable: true, description: "null = tenant-wide; a brand-specific row wins for that brand." }
+        country_code: { type: string }
+        operation_code: { type: string }
+        product_code: { type: string, nullable: true }
+        basis_kind: { type: string, enum: [platform_licence, partner_licence, no_licence_documented] }
+        licence_id: { type: string, format: uuid, nullable: true, description: "Required for the two licence kinds." }
+        jurisdiction_id: { type: string, format: uuid, nullable: true, description: "The jurisdiction whose regime a no_licence_documented basis relies on." }
+        determination_reference: { type: string, description: "Opaque document id of the recorded determination." }
+        determined_by_role: { type: string, description: "The responsible function, never a person's name." }
+        basis_evidence_reference: { type: string, nullable: true, description: "Opaque evidence reference of the determination (the evidence_reference column; named distinctly because no schema documents a bare evidence_reference field, ADR 0114 S0)." }
+        restrictions_note: { type: string, nullable: true }
+        restricted_product_codes: { type: array, items: { type: string } }
+        review_due_at: { type: string, format: date, nullable: true, description: "Required for no_licence_documented; the basis stops permitting the day after." }
+        needs_rereview: { type: boolean }
+        last_review_reference: { type: string, nullable: true }
+        status: { type: string, enum: [active, withdrawn] }
+        reason_code: { type: string }
+        policy_version: { type: string }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+        change_request_id: { type: string, format: uuid, nullable: true, description: "The executed licensing change that created this version (null only for an owner-path row, never an approved basis)." }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        disclaimer: { type: string }
+      required: [id, tenant_id, brand_id, country_code, operation_code, product_code, basis_kind, licence_id, jurisdiction_id,
+                 determination_reference, determined_by_role, basis_evidence_reference, restrictions_note, restricted_product_codes,
+                 review_due_at, needs_rereview, last_review_reference, status, reason_code, policy_version, effective_from,
+                 effective_to, change_request_id, created_by, created_at, disclaimer]
+    OperatingBasisDecision:
+      type: object
+      properties:
+        change_request_id: { type: string, format: uuid }
+        kind: { type: string }
+        reason_code: { type: string }
+        requested_by: { type: string, format: uuid, nullable: true }
+        executed_by: { type: string, format: uuid, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
+        approvals: { type: array, items: { type: object, properties: { approver_id: { type: string, format: uuid, nullable: true } }, required: [approver_id] } }
+      required: [change_request_id, kind, reason_code, requested_by, executed_by, executed_at, approvals]
+    OperatingBasisDetail:
+      allOf:
+        - $ref: "#/components/schemas/OperatingBasis"
+        - type: object
+          properties:
+            decision: { allOf: [{ $ref: "#/components/schemas/OperatingBasisDecision" }], nullable: true }
+          required: [decision]
+    OperatingBasisPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/OperatingBasis" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
     TenantJurisdictionConfig:
       type: object
       properties:
@@ -12360,11 +12490,16 @@ components:
         operating_policy_version {tenant_id, scope, brand_id, operation_code, product_code, country_code, state, status,
         authorization_reference}; tenant_jurisdiction_config_version {tenant_id, jurisdiction_id, action (set | close),
         kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, reporting_ruleset_id, allowed_currencies, allowed_payment_methods,
-        geo_block_list} (for close every content field is null). No legal value is implied by any field.
+        geo_block_list} (for close every content field is null);
+        operating_basis_set {tenant_id, brand_id, country_code, operation_code, product_code, basis_kind (platform_licence | partner_licence |
+        no_licence_documented), licence_id, jurisdiction_id, determination_reference, determined_by_role, basis_evidence_reference,
+        restrictions_note, restricted_product_codes, review_due_at}; operating_basis_withdraw {tenant_id, brand_id, country_code,
+        operation_code, product_code}; operating_basis_review_record {tenant_id, brand_id, country_code, operation_code, product_code,
+        review_due_at, needs_rereview, review_reference}. No legal value is implied by any field.
       properties:
         kind:
           type: string
-          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version, licence_status_change, licence_validity_dates_change, licence_review_due_change, licence_evidence_reference_change]
+          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version, licence_status_change, licence_validity_dates_change, licence_review_due_change, licence_evidence_reference_change, operating_basis_set, operating_basis_withdraw, operating_basis_review_record]
         payload:
           type: object
         reason_code:
@@ -14304,7 +14439,7 @@ components:
     LaunchCheck:
       type: object
       properties:
-        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, R-RG-CONFIG (ADR 0115 S4-min: RG limit enforcement switched on with a compliance floor for every currency), R-RISK-RULES-LEGACY and R-KYC-POLICY (lic7, snapshot version 6, activate/reactivate/ratify; both ACKNOWLEDGEABLE, never hard preconditions: R-RISK-RULES-LEGACY fails (jurisdiction_scoped_rules_present, deposit_rules_present, both_present) when ACTIVE stored risk rules visible to the tenant (its own or platform-wide) carry a jurisdiction_code - such a rule refuses every evaluation of its operation because no caller can supply a resolved jurisdiction - or have operation deposit - never evaluated; counts in counts, rule ids in refs; R-KYC-POLICY fails (no_licence_jurisdiction, no_active_policy) when the tenant's licensing jurisdiction has no ACTIVE KYC enforcement policy, so KYC thresholds are dormant (not_required); it passes with ok or ok_partial_operations_dormant, per-operation active policy counts in counts; no threshold value is read or defaulted), or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; R-ALERTS (snapshot version 5) passes only when the alert dispatcher currently evaluates p1 and p2 routing as ready (an enabled, recipient-bearing step-0 platform route over a human-notification channel whose sink is wired and reports a person; not_evaluable without a routing source or while the evaluation is missing or stale; platform-wide routing, not per tenant); for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
+        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, R-RG-CONFIG (ADR 0115 S4-min: RG limit enforcement switched on with a compliance floor for every currency), R-RISK-RULES-LEGACY and R-KYC-POLICY (lic7, snapshot version 6, activate/reactivate/ratify; both ACKNOWLEDGEABLE, never hard preconditions: R-RISK-RULES-LEGACY fails (jurisdiction_scoped_rules_present, deposit_rules_present, both_present) when ACTIVE stored risk rules visible to the tenant (its own or platform-wide) carry a jurisdiction_code - such a rule refuses every evaluation of its operation because no caller can supply a resolved jurisdiction - or have operation deposit - never evaluated; counts in counts, rule ids in refs; R-KYC-POLICY fails (no_licence_jurisdiction, no_active_policy) when the tenant's licensing jurisdiction has no ACTIVE KYC enforcement policy, so KYC thresholds are dormant (not_required); it passes with ok or ok_partial_operations_dormant, per-operation active policy counts in counts; no threshold value is read or defaulted), or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; R-ALERTS (snapshot version 5) passes only when the alert dispatcher currently evaluates p1 and p2 routing as ready (an enabled, recipient-bearing step-0 platform route over a human-notification channel whose sink is wired and reports a person; not_evaluable without a routing source or while the evaluation is missing or stale; platform-wide routing, not per tenant); for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform; and R-OPERATING-BASIS (lic9, snapshot version 7, activate/reactivate/ratify; ACKNOWLEDGEABLE, never a hard precondition, informational only: it is not a legal position and not a market decision) which reports, for the subject, how many countries with an enabled tenant-rung policy are governed by an EXPLICIT approved operating basis for registration, deposit and casino wagering (counts operating_basis_*) and whether any recorded basis review is overdue (review_overdue: the review date has passed or a re-review is required) or due within 30 days (review_due_soon); ok_some_via_licence_chain means at least one enabled country resolves through the tenant's own licence ceiling, the pre-lic9 model, and is not a failure; no_enabled_country means nothing to report" }
         result: { type: string, enum: [pass, fail, not_evaluable], description: "not_evaluable is not pass" }
         detail_code: { type: string, description: "A closed detail code, never free text." }
       required: [code, result, detail_code]
@@ -14312,7 +14447,7 @@ components:
       type: object
       description: >
         The server-side informational readiness of a subject for an action. It proves configuration presence only. counts and balances are live display data of
-        R-PLAYER-FUNDS, R-RISK-RULES-LEGACY and R-KYC-POLICY (not hashed); refs are rule ids (ids only) behind R-RISK-RULES-LEGACY; balances are DECIMAL STRINGS per asset. notices are fixed texts: closure shows the stranded-funds notice, a suspension shows the
+        R-PLAYER-FUNDS, R-RISK-RULES-LEGACY, R-KYC-POLICY and R-OPERATING-BASIS (not hashed); refs are rule ids (ids only) behind R-RISK-RULES-LEGACY and basis ids (ids only) behind R-OPERATING-BASIS (never shown to a tenant-scoped caller); balances are DECIMAL STRINGS per asset. notices are fixed texts: closure shows the stranded-funds notice, a suspension shows the
         inaccessible-not-stranded notice.
       properties:
         version: { type: integer }
@@ -14322,7 +14457,7 @@ components:
         readiness_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Pass back as seen_readiness_hash to approve." }
         non_passing_check_codes: { type: array, items: { type: string }, description: "Exactly the set a request must acknowledge." }
         counts: { type: object, additionalProperties: { type: integer, format: int64 } }
-        refs: { type: object, additionalProperties: { type: array, maxItems: 50, items: { type: string, format: uuid } }, description: "Rule ids only (R-RISK-RULES-LEGACY), at most 50 per key; the full count is in counts." }
+        refs: { type: object, additionalProperties: { type: array, maxItems: 50, items: { type: string, format: uuid } }, description: "Rule ids (R-RISK-RULES-LEGACY) and operating basis ids (R-OPERATING-BASIS: operating_basis_review_overdue, operating_basis_review_due_soon), ids only, at most 50 per key; the full count is in counts. Omitted for a tenant-scoped caller." }
         balances: { type: object, additionalProperties: { type: string, pattern: "^-?[0-9]+$" } }
         notices: { type: array, items: { type: string } }
       required: [version, computed_at, environment, checks, readiness_hash, non_passing_check_codes]

@@ -97,6 +97,8 @@ var staffRouteGolden = map[string]string{
 	"GET /v1/admin/licences":                                                                      "none",
 	"GET /v1/admin/licences/{licenceID}":                                                          "none",
 	"GET /v1/admin/licence-country-ceilings":                                                      "none",
+	"GET /v1/admin/operating-bases":                                                               "none",
+	"GET /v1/admin/operating-bases/{basisID}":                                                     "none",
 	"GET /v1/admin/operating-country-policies":                                                    "none",
 	"GET /v1/admin/tenants/{tenantID}/jurisdiction-configs":                                       "none",
 	"POST /v1/admin/licences":                                                                     "critical",

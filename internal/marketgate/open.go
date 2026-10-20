@@ -219,6 +219,29 @@ func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf
 	if rows.Err() != nil {
 		return in
 	}
+	rows.Close()
+	// lic9: a country governed by an explicit operating basis (a licence of the basis, or a documented no-licence determination) is
+	// decided by the resolver, not by the tenant's own licence ceiling: keep every country that has an active, approved, in-force
+	// basis row for the tenant (a superset is harmless - the resolver still decides; only dropping a permitted country would be a bug).
+	brows, err := tx.Query(ctx, `
+		SELECT DISTINCT country_code
+		  FROM operating_bases
+		 WHERE tenant_id = $1 AND status = 'active' AND change_request_id IS NOT NULL
+		   AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)`, tenantID, asOf)
+	if err != nil {
+		return in
+	}
+	defer brows.Close()
+	for brows.Next() {
+		var cc string
+		if brows.Scan(&cc) != nil {
+			return in
+		}
+		ok[cc] = true
+	}
+	if brows.Err() != nil {
+		return in
+	}
 	out := make([]string, 0, len(in))
 	for _, cc := range in {
 		if ok[cc] {

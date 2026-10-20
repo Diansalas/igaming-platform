@@ -21,6 +21,9 @@
 | `licence_validity_dates_change` (0178) | `licences.issued_at` / `expires_at` | a later or cleared `expires_at`; an earlier or cleared `issued_at` (any widening component makes the whole change widening) | a newly set or earlier `expires_at`; a later `issued_at` |
 | `licence_review_due_change` (0178) | `licences.review_due_at` | postponed or cleared | set (from none) or brought forward |
 | `licence_evidence_reference_change` (0178) | `licences.evidence_reference` | never | always (neutral, single actor) |
+| `operating_basis_set` (0180) | an `operating_bases` version (platform licence, partner licence or documented no-licence basis) | always | - |
+| `operating_basis_withdraw` (0180) | a withdrawn `operating_bases` version (the scope then relies on no basis and does NOT fall back) | - | always |
+| `operating_basis_review_record` (0180) | an `operating_bases` version with a new review date / re-review flag | a later review date, or clearing `needs_rereview` | an earlier or first review date, or setting `needs_rereview` |
 | `tenant_jurisdiction_config_version` | close + append a `tenant_jurisdiction_configs` version, or close it | a first version; any ruleset id change; an added currency or payment method; a removed geo block | only removing currencies / payment methods, adding geo blocks, same ruleset ids; or `close` |
 
 The DATABASE classifies each change (`licensing_change_classify`); the caller cannot choose. A narrowing change filed by a
@@ -51,7 +54,8 @@ that is not the tenant's own is refused at filing as not found.
   `licensing_change:{request,approve,reject,cancel,execute}`). No proof issuer: the call fails with 500 and nothing is written.
 - The governed tables accept a runtime write only inside the transaction that executed a matching request (`LC040`).
   `tenant_jurisdiction_configs` is append-only (`LC041`) with one open version per (tenant, jurisdiction); a tenant session can
-  read it, never write it.
+  read it, never write it. `operating_bases` (0180) is the same: INSERT and the `effective_to` close only inside the matching executed
+  request (`LC040`), `LC041` for any other change, and the guard stamps `change_request_id` / `created_by_actor_id` from the request.
 - Execution re-checks everything in one transaction: approvals (count, freshness, Person, role), expiry, the single-actor rule
   (requester, own transaction), and the classification against the state NOW (a change that would now widen is refused, `LC024`;
   file a new request). The domain writer then applies its own rules (licence ceiling, licensee vs licensing model, BYOL
@@ -105,7 +109,7 @@ section 3.
 
 ## 6. Extension
 
-(The licence lifecycle slice used this recipe in migration 0178.) A new kind needs: a `licensing_change_kinds` row, a
+(The licence lifecycle slice used this recipe in migration 0178, and the operating-basis kinds in migration 0180, see `operating-basis.md`.) A new kind needs: a `licensing_change_kinds` row, a
 `licensing_change_classify` branch and a `licensing_change_row_matches` branch plus a governed-write trigger on the table it
 writes (one migration), and a `kindSpec` registered in `internal/licensingchange` with `register()`. Until all exist the kind fails
 closed. Narrowing kinds (suspend) stay single-actor.
