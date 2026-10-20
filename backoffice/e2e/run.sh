@@ -58,6 +58,9 @@ set -a; . "$RUN_DIR/secrets.env"; set +a
 echo "e2e: building Go binaries"
 mkdir -p "$RUN_DIR/bin"
 ( cd "$REPO" && for c in platform-api seed-admin seed-staging-world; do go build -o "$RUN_DIR/bin/$c" "./cmd/$c"; done )
+# lic21 (additive): the test-only below-the-application-layer probe (runtime-role connection, real kyc/actorproof code).
+( cd "$REPO" && go build -o "$RUN_DIR/bin/e2e-dbprobe" ./backoffice/e2e/tools/dbprobe )
+export E2E_RUNTIME_DATABASE_URL="$RUNTIME_URL"
 
 echo "e2e: building Back Office"
 ( cd "$BO" && ./node_modules/.bin/tsc -b && ./node_modules/.bin/vite build --outDir "$RUN_DIR/dist" --emptyOutDir >/dev/null )
@@ -66,7 +69,7 @@ echo "e2e: seeding"
 node "$HERE/setup/seed.mjs" "$RUN_DIR/bin" "$E2E_WORLD_FILE"
 
 echo "e2e: starting platform-api on $E2E_API_URL"
-( exec env APP_ENV=development HTTP_ADDR="127.0.0.1:$API_PORT" DATABASE_URL="$RUNTIME_URL" AUTH_RATE_LIMIT_PER_MINUTE=1000 STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS="${E2E_STEPUP_SECONDS:-60}" \
+( exec env APP_ENV=development HTTP_ADDR="127.0.0.1:$API_PORT" DATABASE_URL="$RUNTIME_URL" AUTH_RATE_LIMIT_PER_MINUTE=1000 TEST_SUPPORT_ENDPOINTS_ENABLED=true MOCK_GEOLOCATION_COUNTRY=MT STAFF_STEP_UP_CRITICAL_MAX_AGE_SECONDS="${E2E_STEPUP_SECONDS:-60}" \
     OTEL_EXPORTER=stdout "$RUN_DIR/bin/platform-api" >"$RUN_DIR/api.log" 2>&1 ) &
 PIDS+=($!)
 for i in $(seq 1 60); do
