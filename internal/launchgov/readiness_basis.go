@@ -120,7 +120,7 @@ func operatingBasisFrom(countries []string, bases []operatingmarket.BasisRecord,
 		} else if b.ReviewDueAt != nil && b.ReviewDueAt.Sub(today) <= basisReviewSoonWindow {
 			soon = append(soon, b.ID.String())
 		}
-		if b.ProductCode != nil && !(b.OperationCode == basisOpWagering && *b.ProductCode == basisCoverageWagerProduct) {
+		if b.ProductCode != nil && (b.OperationCode != basisOpWagering || *b.ProductCode != basisCoverageWagerProduct) {
 			continue
 		}
 		if b.BrandID == nil && masked[b.CountryCode+"|"+b.OperationCode] {
