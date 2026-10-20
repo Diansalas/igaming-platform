@@ -30,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // r32ParkEvidence is the set "outcome/kind" of the attempt's park-evidence rows.
@@ -444,6 +445,11 @@ func TestR32_Migration0127_BackfillsExistingDestinationParks(t *testing.T) {
 	// fails closed and the decision-log CHECK no longer admits the public `review` outcome that a KYC `pending` now records.
 	// Neither is under test here: stub the hold read to "no hold" and re-admit `review` on this scratch schema only.
 	t.Cleanup(kyc.SetHoldEvaluatorForTest(kyc.NoHoldEvaluator))
+	// lic24: the same for the lic11 withdrawal restriction policy (migration 0182): on this 0126 schema the request and the
+	// payout claim of the fixture payouts answer the pre-0182 behaviour (no evaluation, no provenance columns). Integration
+	// builds only; restored before the up below, so everything after the up runs the full production gate.
+	restoreRestriction := withdrawal.SetPre0182SchemaForTest()
+	t.Cleanup(restoreRestriction)
 	if _, err := m.pool.Raw().Exec(context.Background(), `ALTER TABLE kyc_enforcement_decisions DROP CONSTRAINT kyc_enforcement_decisions_outcome_check,
 		ADD CONSTRAINT kyc_enforcement_decisions_outcome_check CHECK (outcome IN ('not_required','passed','pending','failed','unavailable','review'))`); err != nil {
 		t.Fatalf("scratch CHECK widen: %v", err)
@@ -477,6 +483,7 @@ func TestR32_Migration0127_BackfillsExistingDestinationParks(t *testing.T) {
 	if _, err := m.pool.Raw().Exec(context.Background(), `DROP TABLE withdrawal_gate_decisions`); err != nil {
 		t.Fatalf("drop the scratch 0169 stub: %v", err)
 	}
+	restoreRestriction()
 	if _, err := m.pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
 		t.Fatalf("up: %v", err)
 	}

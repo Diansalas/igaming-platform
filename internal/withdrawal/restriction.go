@@ -48,6 +48,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -533,7 +534,17 @@ func auditRequestRestriction(ctx context.Context, tx pgx.Tx, p RequestParams, re
 // package can set it, and this package's production code only reads it (pinned by a static test).
 type pre0182SchemaKey struct{}
 
+// pre0182SchemaHook is the cross-package form of the same TEST-ONLY marker (lic24): a migration test of ANOTHER package (e.g.
+// internal/payments) that drives the production request / dispatch path on a scratch schema older than 0182. Only
+// the setter in restriction_schema_hook_integration.go writes it, and that file exists ONLY in integration builds
+// (restriction_schema_hook_integration.go, `//go:build integration`, the internal/kyc hold_hook_integration.go precedent): in
+// every production binary nothing can set it, so it is constantly false. TestLic24_Static_Pre0182HookIsIntegrationOnly pins it.
+var pre0182SchemaHook atomic.Bool
+
 func pre0182SchemaForTest(ctx context.Context) bool {
+	if pre0182SchemaHook.Load() {
+		return true
+	}
 	v, _ := ctx.Value(pre0182SchemaKey{}).(bool)
 	return v
 }
