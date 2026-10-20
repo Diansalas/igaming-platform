@@ -308,7 +308,7 @@ func TestLic18_TrappedPersonRaisesTheAlert(t *testing.T) {
 	var n int
 	if err := tw.Owner.WithTenant(ctx, tw.Tenant, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM alerts WHERE kind = 'aml.screening_gate_trapped' AND subject_tenant_id = $1
-			AND NOT (attributes ? 'person_id') AND (attributes ->> 'persons')::int >= 1`, tw.Tenant).Scan(&n)
+			AND discriminator = 'worker:tenant:' || $1::text AND NOT (attributes ? 'person_id') AND (attributes ->> 'persons')::int >= 1`, tw.Tenant).Scan(&n)
 	}); err != nil || n < 1 {
 		t.Fatalf("trapped alerts = %d err=%v", n, err)
 	}

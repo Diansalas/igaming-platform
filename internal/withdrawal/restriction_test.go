@@ -385,18 +385,24 @@ func TestLic24_Static_Pre0182HookIsIntegrationOnly(t *testing.T) {
 		// restriction.go, and as .Swap(true) / .Store(prev) in the integration hook file.
 		isRestriction := filepath.Base(path) == "restriction.go" && filepath.Base(filepath.Dir(path)) == "withdrawal"
 		for _, line := range strings.Split(src, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "//") || !strings.Contains(line, "pre0182SchemaHook") {
+			trimmed := strings.TrimSpace(line)
+			// lic27b S-5: only PLAIN comments are skipped (a //go: directive is code-adjacent and is checked like code), and a code
+			// line must equal one of the allowed lines EXACTLY, so extra code on the same line cannot slip through.
+			if strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "//go:") {
+				continue
+			}
+			if !strings.Contains(line, "pre0182SchemaHook") {
 				continue
 			}
 			ok := false
 			switch {
 			case isRestriction:
-				ok = strings.HasPrefix(line, "var pre0182SchemaHook atomic.Bool") || strings.Contains(line, "if pre0182SchemaHook.Load() {")
+				ok = trimmed == "var pre0182SchemaHook atomic.Bool" || trimmed == "if pre0182SchemaHook.Load() {"
 			case hookFile:
-				ok = strings.Contains(line, "pre0182SchemaHook.Swap(true)") || strings.Contains(line, "pre0182SchemaHook.Store(prev)")
+				ok = trimmed == "prev := pre0182SchemaHook.Swap(true)" || trimmed == "return func() { pre0182SchemaHook.Store(prev) }"
 			}
 			if !ok {
-				t.Errorf("%s: unexpected use of pre0182SchemaHook: %q", path, strings.TrimSpace(line))
+				t.Errorf("%s: unexpected use of pre0182SchemaHook: %q", path, trimmed)
 			}
 		}
 		if c := strings.Count(src, "pre0182SchemaHook.Load()"); c > 0 {

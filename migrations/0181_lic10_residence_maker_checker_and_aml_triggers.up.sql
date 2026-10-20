@@ -803,6 +803,9 @@ CREATE TABLE aml_screening_requests (
     CHECK (status <> 'needs_officer' OR (outcome IN ('potential_match', 'confirmed') AND match_lists IS NOT NULL AND provider_id IS NOT NULL AND screened_at IS NOT NULL)),
     CHECK (status NOT IN ('pending', 'claimed', 'failed_terminal', 'cancelled') OR (outcome IS NULL AND match_lists IS NULL)),
     CHECK (status <> 'failed_terminal' OR last_error_code IS NOT NULL),
+    -- lic27b S-4: a confirmed outcome is a sanctions determination and is recorded against the sanctions list (the Go orchestrator always
+    -- adds it); a confirmed request that did not name it would be classed non-sanctions by the gate and by aml_screening_record.
+    CHECK (outcome IS DISTINCT FROM 'confirmed' OR 'sanctions' = ANY (match_lists)),
     CHECK (reviewed_from_request_id IS NULL OR (status = 'needs_officer' AND match_fingerprint IS NOT NULL)),
     CHECK (idempotency_key !~ '^repl:' OR (requested_by IS NOT NULL AND requested_by_person_id IS NOT NULL AND request_reason_code IS NOT NULL)),
     CHECK ((status = 'cancelled') = (cancelled_by IS NOT NULL AND cancelled_by_person_id IS NOT NULL AND cancel_reason_code IS NOT NULL)),
@@ -1643,16 +1646,24 @@ BEGIN
 END
 $$;
 
--- lic26 (N-9): the payments sweeper's read of the same parked state, with the AGE the alert needs. o_parked = persons whose latest
--- withdrawal_payout decision in the window is a screening-only hold (as above); o_overdue = those of them whose current unbroken run
--- of screening-only holds began more than the gating policy's gate_alert_after_seconds ago (0 when no policy gates withdrawals).
--- Counts only, session-tenant bound, proof-less. Index: aml_enforcement_decisions_tenant_op_decided (migration 0188).
+-- lic26 (N-9) / lic27b (LOW-1): the payments sweeper's independent read of the persons the screening gate holds. Only persons the gate
+-- STILL denies count (aml_screening_gate_denies), so a person whose screening cleared is not alerted because their last payout decision
+-- row still says "parked". o_parked = denied persons whose latest withdrawal_payout decision is a screening-only hold. o_overdue = denied
+-- persons gated for longer than the gating policy's gate_alert_after_seconds, measured from the earlier of the start of their current
+-- run of screening-only holds and the same anchor aml_screening_gate_overdue uses (the oldest unresolved request, else the first gating
+-- version), so a dead worker AND a person who never retried is still visible. The decision look-back is
+-- greatest(p_since window, 7 days, 2 x the LARGEST alert threshold), derived here so a threshold longer than the Go-side window cannot
+-- disable the alert. Scans at most 5000 persons. Counts only, session-tenant bound, proof-less.
+-- Index: aml_enforcement_decisions_tenant_op_decided (migration 0188).
 CREATE FUNCTION aml_screening_parked_overdue(p_tenant uuid, p_since timestamptz) RETURNS TABLE (o_parked integer, o_overdue integer)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_alert integer;
+    v_max   integer;
+    v_first timestamptz;
+    v_since timestamptz;
 BEGIN
     IF p_tenant IS NULL OR p_since IS NULL THEN
         RAISE EXCEPTION 'aml: invalid parked overdue arguments' USING ERRCODE = 'AT001';
@@ -1660,30 +1671,49 @@ BEGIN
     IF p_tenant IS DISTINCT FROM public.aml_session_tenant() THEN
         RAISE EXCEPTION 'aml: the session tenant is not the requested tenant' USING ERRCODE = 'AT002';
     END IF;
-    SELECT min(l.gate_alert_after_seconds) INTO v_alert
-      FROM (SELECT DISTINCT ON (tp.licensing_jurisdiction_id) tp.gate_withdrawal, tp.gate_alert_after_seconds
+    SELECT min(l.gate_alert_after_seconds), max(l.gate_alert_after_seconds), min(f.first_from) INTO v_alert, v_max, v_first
+      FROM (SELECT DISTINCT ON (tp.licensing_jurisdiction_id) tp.licensing_jurisdiction_id AS jur, tp.gate_withdrawal, tp.gate_alert_after_seconds
               FROM public.aml_screening_trigger_policies tp
              WHERE tp.tenant_id = p_tenant AND tp.effective_from <= pg_catalog.clock_timestamp()
              ORDER BY tp.licensing_jurisdiction_id, tp.created_at DESC, tp.id DESC) l
+      JOIN LATERAL (SELECT min(t2.effective_from) AS first_from FROM public.aml_screening_trigger_policies t2
+                     WHERE t2.tenant_id = p_tenant AND t2.licensing_jurisdiction_id = l.jur AND t2.gate_withdrawal) f ON true
      WHERE l.gate_withdrawal;
+    IF v_alert IS NULL THEN
+        RETURN QUERY SELECT 0, 0;  -- no policy gates withdrawals: nothing is held by the screening gate
+        RETURN;
+    END IF;
+    v_since := LEAST(p_since, pg_catalog.clock_timestamp()
+                 - GREATEST(interval '7 days', pg_catalog.make_interval(secs => 2 * v_max::double precision)));
     RETURN QUERY
-        WITH d AS (
+        WITH denied AS (
+            SELECT pa.person_id FROM (SELECT DISTINCT a.person_id FROM public.player_accounts a WHERE a.tenant_id = p_tenant LIMIT 5000) pa
+             WHERE public.aml_screening_gate_denies(p_tenant, pa.person_id, 'withdrawal')
+        ), d AS (
             SELECT x.person_id, x.decided_at, x.id,
                    (x.hold_outcome = 'held' AND x.hold_id IS NULL AND NOT x.allowed AND x.kyc_outcome IN ('passed', 'not_required')) AS parked
               FROM public.aml_enforcement_decisions x
-             WHERE x.tenant_id = p_tenant AND x.operation = 'withdrawal_payout' AND x.decided_at >= p_since
+             WHERE x.tenant_id = p_tenant AND x.operation = 'withdrawal_payout' AND x.decided_at >= v_since
+               AND x.person_id IN (SELECT person_id FROM denied)
         ), latest AS (
             SELECT DISTINCT ON (d.person_id) d.person_id, d.parked FROM d ORDER BY d.person_id, d.decided_at DESC, d.id DESC
-        ), runs AS (
-            SELECT l.person_id,
-                   (SELECT min(d2.decided_at) FROM d d2
-                     WHERE d2.person_id = l.person_id AND d2.parked
-                       AND d2.decided_at > COALESCE((SELECT max(d3.decided_at) FROM d d3 WHERE d3.person_id = l.person_id AND NOT d3.parked), '-infinity'::timestamptz)) AS run_start
-              FROM latest l WHERE l.parked
+        ), per AS (
+            SELECT n.person_id,
+                   COALESCE(l.parked, false) AS is_parked,
+                   CASE WHEN COALESCE(l.parked, false) THEN
+                        (SELECT min(d2.decided_at) FROM d d2
+                          WHERE d2.person_id = n.person_id AND d2.parked
+                            AND d2.decided_at > COALESCE((SELECT max(d3.decided_at) FROM d d3 WHERE d3.person_id = n.person_id AND NOT d3.parked), '-infinity'::timestamptz))
+                   END AS run_start,
+                   COALESCE((SELECT min(r.created_at) FROM public.aml_screening_requests r
+                              WHERE r.tenant_id = p_tenant AND r.person_id = n.person_id AND r.status NOT IN ('done', 'cancelled')
+                                AND NOT public.aml_screening_request_resolved(r.id)), v_first) AS anchor
+              FROM denied n LEFT JOIN latest l ON l.person_id = n.person_id
         )
-        SELECT (SELECT count(*)::integer FROM runs),
-               (SELECT count(*)::integer FROM runs r
-                 WHERE v_alert IS NOT NULL AND r.run_start < pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_alert::double precision));
+        SELECT (SELECT count(*)::integer FROM per WHERE per.is_parked),
+               (SELECT count(*)::integer FROM per
+                 WHERE LEAST(COALESCE(per.run_start, per.anchor), per.anchor)
+                       < pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_alert::double precision));
 END
 $$;
 
@@ -1746,6 +1776,18 @@ BEGIN
     END IF;
     -- lic26 F-4: a replacement keeps the ORIGINAL created_at, so replacing never resets the trapped-person alert clock; F-3: it records who
     -- queued it and why.
+    -- lic27b LOW-2: with no request named, the new row takes the age of the person's OLDEST unresolved request, else the first gating
+    -- version of the jurisdiction (the anchors aml_screening_gate_overdue uses), never "now", so queueing does not reset the alert clock.
+    IF v_created IS NULL THEN
+        SELECT COALESCE(
+                 (SELECT min(r.created_at) FROM public.aml_screening_requests r
+                   WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status NOT IN ('done', 'cancelled')
+                     AND NOT public.aml_screening_request_resolved(r.id)),
+                 (SELECT min(t2.effective_from) FROM public.aml_screening_trigger_policies t2
+                   WHERE t2.tenant_id = p_tenant AND t2.licensing_jurisdiction_id = v_jur AND t2.gate_withdrawal
+                     AND t2.effective_from <= pg_catalog.clock_timestamp()))
+          INTO v_created;
+    END IF;
     INSERT INTO public.aml_screening_requests (tenant_id, person_id, licensing_jurisdiction_id, trigger, idempotency_key, created_at,
                                                requested_by, requested_by_person_id, request_reason_code)
     VALUES (p_tenant, p_person, v_jur, 'scheduled', 'repl:' || p_person::text || ':' || gen_random_uuid()::text,
