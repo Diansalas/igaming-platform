@@ -781,6 +781,28 @@ func run() error {
 	}
 	// ---- PRH-2 E1: KYC submission outbox worker (end) ----
 
+	// ---- lic10 (audit G1, migration 0181): automatic AML screening worker (begin) ----
+	// Drains aml_screening_requests through the screening provider. MOCK ONLY: the process-wide synthetic-component guard already
+	// refuses production while the MOCK is registered, and the worker is additionally NOT started in production; a real screening
+	// vendor and a real per-tenant subject key resolver are PROVIDER DEPENDENT. With no trigger policy configured for any tenant
+	// the queue is empty and the worker does nothing. This is trigger plumbing: it is NOT transaction monitoring (R-AML-MONITORING
+	// stays failing).
+	var amlScreeningWG sync.WaitGroup
+	if cfg.GuardEnvironment() == "production" || providers.AMLScreening == nil {
+		logger.Info("aml screening worker not started: no screening provider is permitted in this environment (PROVIDER DEPENDENT)")
+	} else {
+		amlWorker := aml.NewScreeningWorker(pool, providers.AMLScreening, aml.MockSubjectKeys{})
+		if err := amlWorker.ValidateForLoop(); err != nil {
+			return fmt.Errorf("aml screening worker wiring: %w", err)
+		}
+		amlScreeningWG.Add(1)
+		go func() {
+			defer amlScreeningWG.Done()
+			aml.RunScreeningWorkerLoop(ctx, amlWorker, logger, 10*time.Second)
+		}()
+	}
+	// ---- lic10: automatic AML screening worker (end) ----
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -958,6 +980,19 @@ func run() error {
 		logger.Error("kyc outbox worker did not stop within the shutdown timeout")
 	}
 	// ---- PRH-2 E1: KYC outbox worker shutdown drain (end) ----
+
+	// lic10: the AML screening worker ends each request on its own bounded contexts; an item cut off mid-way is reclaimed when
+	// its lease expires, re-calling the provider with the SAME idempotency key.
+	amlScreeningDone := make(chan struct{})
+	go func() {
+		amlScreeningWG.Wait()
+		close(amlScreeningDone)
+	}()
+	select {
+	case <-amlScreeningDone:
+	case <-time.After(30 * time.Second):
+		logger.Error("aml screening worker did not stop within the shutdown timeout")
+	}
 
 	logger.Info("shutdown complete")
 	return nil
