@@ -20,10 +20,6 @@ func (p *neverPool) WithPrincipalScope(context.Context, uuid.UUID, uuid.UUID, db
 	p.called = true
 	return nil
 }
-func (p *neverPool) WithPlatformActingInTenant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, db.TxFunc) error {
-	p.called = true
-	return nil
-}
 
 func TestModes_ClosedAndOrdered(t *testing.T) {
 	if !(ModeNone.Rank() < ModeIntoOpenMarket.Rank() && ModeIntoOpenMarket.Rank() < ModeAll.Rank()) {
@@ -73,12 +69,9 @@ func TestService_RefusesBadInputBeforeAnyDatabaseWork(t *testing.T) {
 	if err := svc.ApproveDetermination(ctx, a, uuid.New(), time.Time{}, "r"); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("zero determined_at: %v", err)
 	}
-	// A determination is approved by a tenant staff session only (the verification rows are tenant RLS data).
-	acting := Actor{StaffID: uuid.New(), Scope: ScopePlatformActing, TenantID: uuid.New()}
-	if err := svc.ApproveDetermination(ctx, acting, uuid.New(), time.Now(), "r"); !errors.Is(err, ErrForbidden) {
-		t.Errorf("platform_acting approval of a determination: %v, want ErrForbidden", err)
-	}
-	for _, bad := range []Actor{{}, {StaffID: uuid.New(), Scope: ScopeTenant}, {StaffID: uuid.New(), TenantID: uuid.New(), Scope: "platform"}} {
+	// Only a tenant staff session exists: any other scope (including platform_acting, which is not built) is refused.
+	for _, bad := range []Actor{{}, {StaffID: uuid.New(), Scope: ScopeTenant}, {StaffID: uuid.New(), TenantID: uuid.New(), Scope: "platform"},
+		{StaffID: uuid.New(), TenantID: uuid.New(), Scope: "platform_acting"}} {
 		if _, err := svc.SetPolicy(ctx, bad, ModeAll, "r"); !errors.Is(err, ErrActorScope) {
 			t.Errorf("actor %+v: %v, want ErrActorScope", bad, err)
 		}

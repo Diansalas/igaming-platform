@@ -76,11 +76,8 @@ const (
 	OpDeterminationApprove = actorproof.OpResidenceDeterminationApprove
 )
 
-// Scopes of the acting staff member.
-const (
-	ScopeTenant         = actorproof.ScopeTenant
-	ScopePlatformActing = actorproof.ScopePlatformActing
-)
+// ScopeTenant is the only scope of this service.
+const ScopeTenant = actorproof.ScopeTenant
 
 var reasonCodeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
 
@@ -100,9 +97,9 @@ var (
 	ErrDuplicate        = errors.New("residenceapproval: already recorded")
 )
 
-// Actor is the authenticated staff member, resolved by the caller from the verified token (never from a request body). Scope
-// tenant: TenantID is the actor's own tenant. Scope platform_acting: TenantID is the route-validated target tenant (the acting
-// session re-validates the platform_admin and the in-force grant, migration 0112).
+// Actor is the authenticated TENANT staff member (role compliance), resolved by the caller from the verified token (never from a
+// request body); TenantID is the actor's own tenant. There is no platform_acting path (it would widen the ADR 0099 acting-session
+// allow-list; a platform-licensed tenant is run through its own compliance accounts).
 type Actor struct {
 	StaffID   uuid.UUID
 	Scope     string
@@ -113,7 +110,7 @@ type Actor struct {
 }
 
 func (a Actor) validate() error {
-	if a.StaffID == uuid.Nil || a.TenantID == uuid.Nil || (a.Scope != ScopeTenant && a.Scope != ScopePlatformActing) {
+	if a.StaffID == uuid.Nil || a.TenantID == uuid.Nil || a.Scope != ScopeTenant {
 		return ErrActorScope
 	}
 	return nil
@@ -122,7 +119,6 @@ func (a Actor) validate() error {
 // Pool is the database handle the service needs (satisfied by *db.Pool).
 type Pool interface {
 	WithPrincipalScope(ctx context.Context, tenantID, principalID uuid.UUID, fn db.TxFunc) error
-	WithPlatformActingInTenant(ctx context.Context, principalID, targetTenantID, requestID uuid.UUID, operation string, fn db.TxFunc) error
 }
 
 // Config wires a Service.
@@ -165,14 +161,7 @@ func (s *Service) runActor(ctx context.Context, a Actor, fn func(ctx context.Con
 		}
 		return fn(ctx, tx)
 	}
-	var err error
-	switch a.Scope {
-	case ScopeTenant:
-		err = s.cfg.Pool.WithPrincipalScope(ctx, a.TenantID, a.StaffID, wrapped)
-	case ScopePlatformActing:
-		err = s.cfg.Pool.WithPlatformActingInTenant(ctx, a.StaffID, a.TenantID, uuid.Nil, "residence_policy", wrapped)
-	}
-	return classify(err)
+	return classify(s.cfg.Pool.WithPrincipalScope(ctx, a.TenantID, a.StaffID, wrapped))
 }
 
 func (s *Service) attachProof(ctx context.Context, tx pgx.Tx, a Actor, op, target, hash string) error {
@@ -224,7 +213,7 @@ func (s *Service) SetPolicy(ctx context.Context, a Actor, mode Mode, reasonCode 
 			TargetType: "residence_approval_policy", TargetID: out.PolicyID.String(), Outcome: audit.OutcomeSuccess,
 			IPAddress: a.IPAddress, UserAgent: a.UserAgent, RequestID: a.RequestID,
 			Metadata: map[string]any{"previous_mode": prev, "requested_mode": string(mode), "status": out.Status,
-				"required_approvals": out.RequiredApprovals, "reason_code": reasonCode, "actor_scope": a.Scope},
+				"required_approvals": out.RequiredApprovals, "reason_code": reasonCode},
 		})
 	})
 	return out, err
@@ -258,7 +247,7 @@ func (s *Service) ApprovePolicy(ctx context.Context, a Actor, policyID uuid.UUID
 			TargetType: "residence_approval_policy", TargetID: policyID.String(), Outcome: audit.OutcomeSuccess,
 			IPAddress: a.IPAddress, UserAgent: a.UserAgent, RequestID: a.RequestID,
 			Metadata: map[string]any{"status": out.Status, "approvals": out.Approvals, "required_approvals": out.RequiredApprovals,
-				"reason_code": reasonCode, "actor_scope": a.Scope},
+				"reason_code": reasonCode},
 		})
 	})
 	return out, err
@@ -323,9 +312,6 @@ func (s *Service) ReadPolicy(ctx context.Context, a Actor) (Policy, error) {
 // saw (a later determination replaces it and makes the approval stale). Tenant scope only; the second Person must differ from the
 // determiner in staff account AND Person (the database refuses otherwise). The audit row carries ids only: never the country.
 func (s *Service) ApproveDetermination(ctx context.Context, a Actor, verificationID uuid.UUID, determinedAt time.Time, reasonCode string) error {
-	if a.Scope != ScopeTenant {
-		return fmt.Errorf("%w: only a tenant staff session approves a determination", ErrForbidden)
-	}
 	if verificationID == uuid.Nil || determinedAt.IsZero() || !ValidReasonCode(reasonCode) {
 		return fmt.Errorf("%w: verification, determined_at or reason code", ErrInvalidInput)
 	}

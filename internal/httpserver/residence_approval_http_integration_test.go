@@ -104,10 +104,10 @@ func TestResidenceApprovalPolicyAPI_DefaultNone_StricterAtOnce_LooserPending_Aut
 	if got := do(t1, http.MethodGet, srv.URL+"/v1/admin/tenants/"+other.ID.String()+"/residence-approval-policy", nil).StatusCode; got != http.StatusNotFound {
 		t.Fatalf("foreign tenant: %d, want 404", got)
 	}
-	// A platform admin with no acting grant for the tenant is refused by the database (never 200).
+	// A platform admin has no tenant and no acting path: refused (never 200).
 	pa := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "res-pw-pa")
 	tPA := mustLoginStaff(t, srv, "", pa.Email, "res-pw-pa").AccessToken
 	if got := do(tPA, http.MethodPost, base, map[string]any{"mode": "all", "reason_code": "x"}).StatusCode; got != http.StatusForbidden {
-		t.Fatalf("platform admin without an acting grant: %d, want 403", got)
+		t.Fatalf("platform admin: %d, want 403", got)
 	}
 }

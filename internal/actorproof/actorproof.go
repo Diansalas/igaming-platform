@@ -125,7 +125,7 @@ const (
 	// lic10 (migration 0181, audit G8 / owner question Q21): the residence determination maker-checker. residence_policy:set files
 	// a policy change (stricter: active at once; less strict: pending), residence_policy:approve is one of the two approvals of a
 	// less strict change, residence_determination:approve is the second Person's approval of one reviewer determination. Scope
-	// tenant or platform_acting (policy) / tenant only (determination); the database function re-checks the role.
+	// tenant only; the database function re-checks the role.
 	OpResidencePolicySet            = "residence_policy:set"
 	OpResidencePolicyApprove        = "residence_policy:approve"
 	OpResidenceDeterminationApprove = "residence_determination:approve"

@@ -10,9 +10,9 @@ package httpserver
 //
 // Step-up (ADR 0119 8.1): filing a change only tightens or files a request that changes nothing until approved (protective:
 // none); both approvals loosen a control (critical). The signer backstop (actorproof.StepUpOperations) registers exactly the
-// two approval operations. The target tenant of the policy routes is the path value only; a foreign tenant is 404. A platform
-// token acts through the ADR 0099 acting session (the database refuses it without an in-force grant for that tenant). The
-// static permissions are only the route gate: the DATABASE re-checks the role, the Person and the signed proof, and enforces
+// two approval operations. Every route is TENANT-scoped (a platform token carries no tenant and is refused 403; there is no
+// platform_acting path, which would widen the ADR 0099 acting-session allow-list). The target tenant of the policy routes is the
+// path value and must be the caller's own: a foreign tenant is 404. The static permissions are only the route gate: the DATABASE re-checks the role, the Person and the signed proof, and enforces
 // every four-eyes rule. Responses are Cache-Control: no-store; error bodies are fixed sentences.
 
 import (
@@ -44,11 +44,11 @@ var _ ResidenceApprovalAPI = (*residenceapproval.Service)(nil)
 
 func registerResidenceApprovalRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/residence-approval-policy",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermResidenceApprovalPolicyRead)(newResidencePolicyReadHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermResidenceApprovalPolicyRead)(newResidencePolicyReadHandler(deps)))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/residence-approval-policy",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermResidenceApprovalPolicyManage)(newResidencePolicySetHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermResidenceApprovalPolicyManage)(newResidencePolicySetHandler(deps)))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/residence-approval-policy/{policyID}/approvals",
-		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermResidenceApprovalPolicyManage)(newResidencePolicyApproveHandler(deps))))
+		staffRoute(deps, stepUpCritical, auth.RequireTenantScope(auth.RequirePermission(auth.PermResidenceApprovalPolicyManage)(newResidencePolicyApproveHandler(deps)))))
 	mux.Handle("GET /v1/admin/kyc/residence-determinations/pending",
 		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newPendingResidenceApprovalsHandler(deps)))))
 	mux.Handle("POST /v1/admin/kyc/verifications/{id}/residence-approval",
@@ -85,16 +85,14 @@ func beginResidencePolicyCall(deps Deps, w http.ResponseWriter, r *http.Request)
 		apierror.Write(w, c.requestID, apierror.CodeInvalidRequest, "invalid request")
 		return c, false
 	}
-	if !canActOnTenant(tc, target) {
+	if tc.TenantID == uuid.Nil || tc.TenantID != target {
+		// Only the tenant's own staff (a platform token carries no tenant and is refused by RequireTenantScope before this point);
+		// a foreign tenant is indistinguishable from an unknown one.
 		c.logger.Warn("residence_policy_denied", "reason", "foreign_tenant")
 		apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
 		return c, false
 	}
-	scope := residenceapproval.ScopeTenant
-	if tc.TenantID == uuid.Nil {
-		scope = residenceapproval.ScopePlatformActing
-	}
-	c.actor = residenceapproval.Actor{StaffID: staffID, Scope: scope, TenantID: target, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID}
+	c.actor = residenceapproval.Actor{StaffID: staffID, Scope: residenceapproval.ScopeTenant, TenantID: target, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID}
 	c.viewer = staffViewerOf(tc)
 	return c, true
 }

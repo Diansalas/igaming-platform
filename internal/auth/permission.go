@@ -401,8 +401,8 @@ const (
 
 	// PermResidenceApprovalPolicyManage / PermResidenceApprovalPolicyRead (lic10, migration 0181, audit G8 / owner question Q21):
 	// file and approve a change of a tenant's residence determination maker-checker mode (none | into_open_market | all), and
-	// read it. Manage: compliance (its own tenant) and platform_admin (through the acting session of ADR 0099, which the database
-	// refuses without an in-force grant for exactly that tenant). Read: also tenant_admin. The controls that matter (stricter
+	// read it. Manage: compliance (its own tenant) only; there is no platform_acting path
+	// (it would widen the ADR 0099 acting-session allow-list). Read: also tenant_admin. The controls that matter (stricter
 	// is one actor, less strict needs two approvals by distinct Persons, signed actor proofs) are the database's, whatever the role.
 	PermResidenceApprovalPolicyManage Permission = "residence_approval_policy:manage"
 	PermResidenceApprovalPolicyRead   Permission = "residence_approval_policy:read"
@@ -901,8 +901,6 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermKYCEnforcementDecisionRead,
 		// lic10 (L-20): platform-wide KYC enforcement policy authoring; platform_admin only.
 		PermKYCEnforcementPolicyManage, PermKYCEnforcementPolicyRead,
-		// lic10 (migration 0181): residence maker-checker policy, through the acting session only.
-		PermResidenceApprovalPolicyManage, PermResidenceApprovalPolicyRead,
 		// PRH-I1 (ADR 0095 §10.4/§10.5): platform reach over every
 		// tenant's kill switches, through the same route family
 		// RoleTenantAdmin uses for its own tenant (canActOnTenant).

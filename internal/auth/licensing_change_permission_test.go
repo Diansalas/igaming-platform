@@ -55,16 +55,16 @@ func TestKYCEnforcementPolicyPermissions_PlatformAdminOnly(t *testing.T) {
 	}
 }
 
-// lic10 (migration 0181): the residence maker-checker policy permissions. Manage: compliance and platform_admin only (the
-// latter through the acting session); Read: also tenant_admin; no other role, the empty role or a look-alike.
+// lic10 (migration 0181): the residence maker-checker policy permissions. Manage: compliance only; Read: also tenant_admin; no
+// other role (platform_admin included: there is no acting path), the empty role or a look-alike.
 func TestResidenceApprovalPolicyPermissions_Matrix(t *testing.T) {
 	if string(PermResidenceApprovalPolicyManage) != "residence_approval_policy:manage" || string(PermResidenceApprovalPolicyRead) != "residence_approval_policy:read" {
 		t.Fatal("permission string drifted")
 	}
-	pa, co, ta := RolePlatformAdmin, RoleCompliance, RoleTenantAdmin
+	co, ta := RoleCompliance, RoleTenantAdmin
 	for perm, allowed := range map[Permission]map[Role]bool{
-		PermResidenceApprovalPolicyManage: {pa: true, co: true},
-		PermResidenceApprovalPolicyRead:   {pa: true, co: true, ta: true},
+		PermResidenceApprovalPolicyManage: {co: true},
+		PermResidenceApprovalPolicyRead:   {co: true, ta: true},
 	} {
 		for _, role := range append(append([]Role(nil), allRoles...), "", "unknown", "COMPLIANCE", RolePlayer) {
 			if got, want := RoleHasPermission(role, perm), allowed[role]; got != want {

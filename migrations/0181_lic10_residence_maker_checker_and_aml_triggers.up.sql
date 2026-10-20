@@ -87,7 +87,7 @@ CREATE TABLE residence_approval_policies (
     payload_hash            TEXT NOT NULL CHECK (payload_hash ~ '^[0-9a-f]{64}$'),
     requested_by            UUID NOT NULL,
     requested_by_person_id  UUID NOT NULL,
-    requested_by_scope      TEXT NOT NULL CHECK (requested_by_scope IN ('tenant', 'platform_acting')),
+    requested_by_scope      TEXT NOT NULL CHECK (requested_by_scope = 'tenant'),
     requested_at            TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     activated_at            TIMESTAMPTZ NULL,
     UNIQUE (tenant_id, id),
@@ -106,7 +106,7 @@ CREATE TABLE residence_approval_policy_approvals (
     policy_id           UUID NOT NULL,
     approver            UUID NOT NULL,
     approver_person_id  UUID NOT NULL,
-    approver_scope      TEXT NOT NULL CHECK (approver_scope IN ('tenant', 'platform_acting')),
+    approver_scope      TEXT NOT NULL CHECK (approver_scope = 'tenant'),
     reason_code         TEXT NOT NULL CHECK (reason_code ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$'),
     approved_at         TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (policy_id, approver_person_id),
@@ -304,8 +304,10 @@ BEGIN
 END
 $$;
 
--- The actor check shared by the policy functions: tenant scope (role compliance) or platform_acting scope (role platform_admin),
--- for exactly p_tenant, with a linked Person and a valid signed proof for exactly this operation, target and payload.
+-- The actor check shared by the policy functions: a TENANT staff session (role compliance) of exactly p_tenant, with a linked
+-- Person and a valid signed proof for exactly this operation, target and payload. (A platform_acting path is NOT built: it would
+-- widen the acting-session allow-list of ADR 0099 / A-16; platform staff run a platform-licensed tenant through that tenant's own
+-- compliance accounts.)
 CREATE FUNCTION residence_authorize_policy_actor(p_tenant uuid, p_operation text, p_target text, p_hash text,
     OUT o_actor uuid, OUT o_scope text, OUT o_person_id uuid)
     RETURNS record
@@ -319,13 +321,13 @@ BEGIN
         RAISE EXCEPTION 'residence policy: authorisation arguments are required' USING ERRCODE = 'RD002';
     END IF;
     SELECT * INTO v FROM public.financial_actor_session();
-    IF v.scope NOT IN ('tenant', 'platform_acting') THEN
+    IF v.scope IS DISTINCT FROM 'tenant' THEN
         RAISE EXCEPTION 'residence policy: this session shape may not use residence policy functions' USING ERRCODE = 'RD001';
     END IF;
     IF v.tenant IS DISTINCT FROM p_tenant THEN
         RAISE EXCEPTION 'residence policy: the session tenant is not the requested tenant' USING ERRCODE = 'RD002';
     END IF;
-    IF (v.scope = 'tenant' AND v.role IS DISTINCT FROM 'compliance') OR (v.scope = 'platform_acting' AND v.role IS DISTINCT FROM 'platform_admin') THEN
+    IF v.role IS DISTINCT FROM 'compliance' THEN
         RAISE EXCEPTION 'residence policy: this role may not change the residence approval policy' USING ERRCODE = 'RD001';
     END IF;
     IF v.person_id IS NULL THEN
@@ -418,8 +420,8 @@ BEGIN
 END
 $$;
 
--- Reads the policy versions of a tenant (newest first) with the number of approvals recorded. No proof (a read); tenant or
--- platform_acting session bound to exactly p_tenant. Discloses no determination and no player.
+-- Reads the policy versions of a tenant (newest first) with the number of approvals recorded. No proof (a read); a tenant
+-- session bound to exactly p_tenant. Discloses no determination and no player.
 CREATE FUNCTION residence_policy_list(p_tenant uuid)
 RETURNS TABLE (o_policy_id uuid, o_mode text, o_previous_mode text, o_status text, o_required_approvals integer, o_approvals integer,
                o_reason_code text, o_requested_by uuid, o_requested_by_scope text, o_requested_at timestamptz, o_activated_at timestamptz,
@@ -431,7 +433,7 @@ DECLARE
     v record;
 BEGIN
     SELECT * INTO v FROM public.financial_actor_session();
-    IF v.scope NOT IN ('tenant', 'platform_acting') OR v.tenant IS DISTINCT FROM p_tenant THEN
+    IF v.scope IS DISTINCT FROM 'tenant' OR v.tenant IS DISTINCT FROM p_tenant THEN
         RAISE EXCEPTION 'residence policy: the session may not read this tenant''s policy' USING ERRCODE = 'RD002';
     END IF;
     RETURN QUERY

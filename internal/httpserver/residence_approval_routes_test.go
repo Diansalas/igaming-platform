@@ -45,15 +45,12 @@ func TestResidenceApprovalRoutes_GoldenAndRegistrationAreExact(t *testing.T) {
 		t.Fatalf("%d registrations, want %d", len(routes), len(residenceRoutes))
 	}
 	reg := string(src)
-	// The two determination routes are tenant-scoped (a platform token carries no tenant: the verification rows are tenant RLS
-	// data); the policy routes are NOT tenant-scope wrapped (a platform token acts through the acting session).
-	for _, line := range strings.Split(reg, "\n") {
-		if strings.Contains(line, `mux.Handle("`) && strings.Contains(line, "/v1/admin/tenants/{tenantID}/") && strings.Contains(line, "RequireTenantScope") {
-			t.Errorf("a policy route must not be tenant-scope wrapped: %s", line)
-		}
+	// Every route is tenant-scoped: a platform token carries no tenant, and there is no platform_acting path.
+	if c := strings.Count(reg, "auth.RequireTenantScope("); c != len(residenceRoutes) {
+		t.Errorf("RequireTenantScope on %d routes, want all %d", c, len(residenceRoutes))
 	}
-	if c := strings.Count(reg, "RequireTenantScope"); c != 2 {
-		t.Errorf("RequireTenantScope on %d routes, want exactly the two determination routes", c)
+	if strings.Contains(reg, "WithPlatformActingInTenant") || strings.Contains(reg, "ScopePlatformActing") {
+		t.Error("the residence maker-checker has no platform_acting path")
 	}
 	if !strings.Contains(reg, "auth.RequirePermission(auth.PermVerificationReview)(newApproveResidenceDeterminationHandler") {
 		t.Error("the determination approval must be gated by verification:review")
