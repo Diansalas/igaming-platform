@@ -29,7 +29,9 @@ func TestResidenceApprovalPolicyAPI_DefaultNone_StricterAtOnce_LooserPending_Aut
 	t3 := mustLoginStaff(t, srv, tnt.Slug, c3.Email, "res-pw-3").AccessToken
 	tTA := mustLoginStaff(t, srv, tnt.Slug, ta.Email, "res-pw-ta").AccessToken
 	base := srv.URL + "/v1/admin/tenants/" + tnt.ID.String() + "/residence-approval-policy"
-	do := func(tok, method, url string, body any) *http.Response { return sendAssetJSON(t, url, method, tok, body) }
+	do := func(tok, method, url string, body any) *http.Response {
+		return sendAssetJSON(t, url, method, tok, body)
+	}
 
 	// Default: mode none, no versions (today's behaviour), readable by compliance and tenant_admin.
 	for _, tok := range []string{t1, tTA} {
