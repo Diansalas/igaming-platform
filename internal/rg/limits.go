@@ -185,11 +185,13 @@ type ClassifyParams struct {
 	JurisdictionCode       *string
 	JurisdictionCodes      []string
 	JurisdictionIncomplete bool
-	Value                  *string
-	Supersedes             *uuid.UUID
-	Intent                 *ChangeKind
-	Source                 ChangeSource
-	At                     *time.Time
+	// JurisdictionStrict marks a tenant with an approved basis (a confirm is then refused while a relied-on jurisdiction has no floor).
+	JurisdictionStrict bool
+	Value              *string
+	Supersedes         *uuid.UUID
+	Intent             *ChangeKind
+	Source             ChangeSource
+	At                 *time.Time
 }
 
 // Classification is what the database decides for a change at an instant.
@@ -220,9 +222,9 @@ func ClassifyLimitChange(ctx context.Context, tx pgx.Tx, p ClassifyParams) (Clas
 		}
 	}
 	err := tx.QueryRow(ctx, `SELECT change_kind, effective_at, requires_confirmation, value::text, config_version_ids
-		FROM rg_limit_change_classify_set($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11::numeric, $12, $13, $14,
-		                                  COALESCE($15::timestamptz, clock_timestamp()))`,
-		p.Key.TenantID, p.Key.PlayerAccountID, p.Key.PersonID, p.BrandID, codes, p.JurisdictionIncomplete,
+		FROM rg_limit_change_classify_set($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12::numeric, $13, $14, $15,
+		                                  COALESCE($16::timestamptz, clock_timestamp()))`,
+		p.Key.TenantID, p.Key.PlayerAccountID, p.Key.PersonID, p.BrandID, codes, p.JurisdictionIncomplete, p.JurisdictionStrict,
 		string(p.Key.Scope), string(p.Key.Kind), p.Key.AssetCode, p.Key.period(), p.Value,
 		p.Supersedes, intent, string(p.Source), p.At,
 	).Scan(&kind, &c.EffectiveAt, &c.RequiresConfirmation, &c.Value, &c.ConfigVersionIDs)

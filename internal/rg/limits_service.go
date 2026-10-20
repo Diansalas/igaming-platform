@@ -477,7 +477,7 @@ func (l *Limits) apply(ctx context.Context, tx pgx.Tx, c changeCtx) (res ChangeR
 	key := c.limitKey(scope)
 
 	for attempt := 0; ; attempt++ {
-		cp := ClassifyParams{Key: key, BrandID: c.acct.BrandID, JurisdictionCodes: nonNilCodes(sel.Codes), JurisdictionIncomplete: sel.Strict && sel.Incomplete,
+		cp := ClassifyParams{Key: key, BrandID: c.acct.BrandID, JurisdictionCodes: nonNilCodes(sel.Codes), JurisdictionIncomplete: sel.Strict && sel.Incomplete, JurisdictionStrict: sel.Strict,
 			Value: value, Source: c.source}
 		if c.supersedes != nil {
 			id, intent := c.supersedes.ID, c.intent

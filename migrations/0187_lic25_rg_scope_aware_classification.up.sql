@@ -6,7 +6,7 @@
 --   1. rg_basis_jurisdictions(tenant, at): the jurisdiction codes of the tenant's approved, active, in-force operating bases (the same
 --      predicate as operatingmarket.TenantHasApprovedBasis), whether any exists, and whether every one resolved a code. Refuses (RL026)
 --      another tenant's id and a player-scoped session (never an empty "no basis" answer).
---   2. rg_limit_change_classify_set(... p_jurisdictions text[], p_incomplete ...): rg_limit_change_classify with a SET of jurisdictions. It
+--   2. rg_limit_change_classify_set(... p_jurisdictions text[], p_incomplete, p_strict ...): rg_limit_change_classify with a SET of jurisdictions. It
 --      composes each jurisdiction with rg_limit_config_compose and folds: the longest cooling-off, reconfirmation if any requires it,
 --      the union of the configuration version ids. An increase or removal is refused (RL023) when the set is empty, p_incomplete is
 --      set, or any member has no floor in force; initial values and decreases are never refused for that reason.
@@ -46,7 +46,7 @@ $$;
 -- 2. the set-aware classification (the 0135 body with the composition block replaced)
 -- Runs with the CALLER's row visibility.
 CREATE FUNCTION rg_limit_change_classify_set(
-    p_tenant uuid, p_account uuid, p_person uuid, p_brand uuid, p_jurisdictions text[], p_incomplete boolean,
+    p_tenant uuid, p_account uuid, p_person uuid, p_brand uuid, p_jurisdictions text[], p_incomplete boolean, p_strict boolean,
     p_scope text, p_kind text, p_asset text, p_period text, p_value numeric,
     p_supersedes uuid, p_intent text, p_source text, p_at timestamptz,
     OUT change_kind text, OUT effective_at timestamptz, OUT requires_confirmation boolean,
@@ -97,6 +97,19 @@ BEGIN
         END IF;
         IF p_source <> 'player_self_service' THEN
             RAISE EXCEPTION 'rg limit change: only the player may confirm' USING ERRCODE = 'RL022';
+        END IF;
+        -- lic27a (S-2): a confirm completes an increase / removal, so for a tenant with an approved basis (p_strict) it is refused like the
+        -- request itself while a relied-on jurisdiction has no floor in force (or the set is empty / incomplete). A tenant with no approved
+        -- basis (p_strict = false, including the 0135 wrapper) confirms exactly as before.
+        IF p_strict THEN
+            IF cardinality(COALESCE(p_jurisdictions, '{}'::text[])) = 0 OR p_incomplete THEN
+                RAISE EXCEPTION 'rg limit change: no RG configuration is in force for this limit; a confirm is refused' USING ERRCODE = 'RL023';
+            END IF;
+            FOREACH v_j IN ARRAY p_jurisdictions LOOP
+                IF NOT (SELECT f.found FROM public.rg_limit_config_compose(v_j, p_tenant, p_brand, p_kind, p_asset, p_at) f) THEN
+                    RAISE EXCEPTION 'rg limit change: no RG configuration is in force for this limit; a confirm is refused' USING ERRCODE = 'RL023';
+                END IF;
+            END LOOP;
         END IF;
         change_kind := 'confirm'; effective_at := p_at; requires_confirmation := false;
         value := v_latest.value; config_version_ids := v_latest.config_version_ids;
@@ -170,7 +183,7 @@ BEGIN
     SELECT s.change_kind, s.effective_at, s.requires_confirmation, s.value, s.config_version_ids
       INTO change_kind, effective_at, requires_confirmation, value, config_version_ids
       FROM public.rg_limit_change_classify_set(p_tenant, p_account, p_person, p_brand,
-               CASE WHEN p_jurisdiction IS NULL THEN '{}'::text[] ELSE ARRAY[p_jurisdiction] END, false,
+               CASE WHEN p_jurisdiction IS NULL THEN '{}'::text[] ELSE ARRAY[p_jurisdiction] END, false, false,
                p_scope, p_kind, p_asset, p_period, p_value, p_supersedes, p_intent, p_source, p_at) s;
 END
 $$;
@@ -262,7 +275,7 @@ BEGIN
     v_set := ARRAY(SELECT DISTINCT x FROM unnest(COALESCE(v_bas.codes, '{}'::text[])
                                                  || CASE WHEN v_jur IS NULL THEN '{}'::text[] ELSE ARRAY[v_jur] END) AS x ORDER BY x);
     v_incomplete := COALESCE(v_bas.has_basis, false) AND (NOT COALESCE(v_bas.complete, true) OR cardinality(v_set) = 0);
-    SELECT * INTO v_res FROM public.rg_limit_change_classify_set(NEW.tenant_id, NEW.player_account_id, NEW.person_id, NEW.brand_id, v_set, v_incomplete,
+    SELECT * INTO v_res FROM public.rg_limit_change_classify_set(NEW.tenant_id, NEW.player_account_id, NEW.person_id, NEW.brand_id, v_set, v_incomplete, COALESCE(v_bas.has_basis, false),
         NEW.scope, NEW.control_kind, NEW.asset_code, NEW.period_kind, NEW.value,
         NEW.supersedes_change_id, CASE WHEN NEW.supersedes_change_id IS NOT NULL THEN v_intent END, NEW.source, NEW.requested_at);
     PERFORM set_config('app.player_account_id', COALESCE(v_player, ''), true);

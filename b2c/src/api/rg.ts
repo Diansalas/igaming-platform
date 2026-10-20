@@ -37,6 +37,8 @@ export interface RgLimitOption {
   ceiling: string | null
   scope?: 'account' | 'tenant_person'
   increase_cooldown_seconds: number | null
+  /** Present when this kind's limit options cannot be offered (a relied-on jurisdiction has no floor, or calendars disagree). */
+  unavailable_reason?: 'missing_floor' | 'calendar_conflict'
 }
 
 export interface RgOptions {
