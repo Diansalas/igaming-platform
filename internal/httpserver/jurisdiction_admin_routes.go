@@ -47,6 +47,11 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListLicenceCountryCeilingsHandler(deps))))
 	mux.Handle("GET /v1/admin/operating-country-policies",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListOperatingCountryPoliciesHandler(deps))))
+	// lic9 (migration 0180): the explicit operating bases (platform_admin read; writes only through licensing changes).
+	mux.Handle("GET /v1/admin/operating-bases",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListOperatingBasesHandler(deps))))
+	mux.Handle("GET /v1/admin/operating-bases/{basisID}",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newGetOperatingBasisHandler(deps))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/jurisdiction-configs",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListTenantJurisdictionConfigsHandler(deps))))
 	mux.Handle("POST /v1/admin/licences",

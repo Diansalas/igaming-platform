@@ -165,7 +165,7 @@ func TestReadiness_RiskRulesLegacy_ChangesTheHashAndIsAcknowledgeableNotHard(t *
 	brand := w.pendingBrand(a) // a request needs a legal transition: pending_launch -> active
 	sub := launchgov.Subject{TenantID: a, BrandID: &brand}
 	before := w.readinessOf(sub, ja)
-	if before.Version != launchgov.SnapshotVersion || launchgov.SnapshotVersion != 6 {
+	if before.Version != launchgov.SnapshotVersion || launchgov.SnapshotVersion != 7 {
 		t.Fatalf("snapshot version %d", before.Version)
 	}
 	w.legacyRule(&a, risk.OperationDeposit, "")

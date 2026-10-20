@@ -32,6 +32,9 @@ const KIND_LABEL: Record<string, string> = {
   licence_validity_dates_change: 'Licence validity dates change',
   licence_review_due_change: 'Licence review-due change',
   licence_evidence_reference_change: 'Licence evidence reference change',
+  operating_basis_set: 'Set operating basis',
+  operating_basis_withdraw: 'Withdraw operating basis',
+  operating_basis_review_record: 'Record operating basis review',
 }
 const SAFE = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$/
 export function safeToken(v: unknown): string {

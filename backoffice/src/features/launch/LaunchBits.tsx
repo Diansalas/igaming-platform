@@ -180,13 +180,28 @@ export function ReadinessChecklist({ readiness, mode = 'other', acknowledged, on
               {needsAck && checkNote(c.code) && <p className="text-xs text-slate-600">{checkNote(c.code)}</p>}
               {needsAck && c.code === 'R-RISK-RULES-LEGACY' && (
                 <ul className="text-xs text-slate-600" aria-label="Legacy risk rule ids">
-                  {Object.entries(readiness.refs ?? {}).flatMap(([k, ids]) =>
+                  {Object.entries(readiness.refs ?? {})
+                    .filter(([k]) => k.startsWith('risk_rules_legacy'))
+                    .flatMap(([k, ids]) =>
                     ids.map((id) => (
                       <li key={`${k}-${id}`}>
                         {k.replace(/_/g, ' ')}: <span className="font-mono">{id}</span>
                       </li>
                     )),
                   )}
+                </ul>
+              )}
+              {needsAck && c.code === 'R-OPERATING-BASIS' && (
+                <ul className="text-xs text-slate-600" aria-label="Operating bases due for review">
+                  {Object.entries(readiness.refs ?? {})
+                    .filter(([k]) => k.startsWith('operating_basis_review'))
+                    .flatMap(([k, ids]) =>
+                      ids.map((id) => (
+                        <li key={`${k}-${id}`}>
+                          {k.replace(/_/g, ' ')}: <span className="font-mono">{id}</span>
+                        </li>
+                      )),
+                    )}
                 </ul>
               )}
               {needsAck && acknowledged && onToggleAck && (

@@ -20,6 +20,7 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `restore-from-backup.md` — restore procedure matching the local drill
   (`deploy/drill/backup-restore-drill.sh`), findings and measured dev-dataset numbers.
 - `launch-and-suspension.md` — ADR 0112 brand/tenant launch, suspension, reactivation, closure.
+- `operating-basis.md` — lic9: how an authorised admin adds, reviews and withdraws an operating basis (platform licence, partner licence, documented no-licence basis) per tenant / brand / country / operation with no release; what the evidence fields mean; country configuration is not legal proof; no value is shipped.
 - `licence-lifecycle.md` — licensing slice 1: recording a regulator suspension / expiry / renewal, evidence reference, history, the expiry sweep alerts, interim rules and pending decisions.
 - `incident-response-and-oncall.md` — TEMPLATE: no rota or recipient exists (ALERT-DELIVERY-1 open).
 - `kill-switch-and-containment.md` — A13: stop something now (payment kill switch engage/release, casino game status, market

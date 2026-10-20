@@ -262,7 +262,7 @@ type launchReadinessDTO struct {
 	// Counts and Balances are live display data of R-PLAYER-FUNDS (not hashed); Balances are
 	// DECIMAL STRINGS per asset (never a JSON number).
 	Counts map[string]int64 `json:"counts,omitempty"`
-	// Refs are rule ids (ids only) behind R-RISK-RULES-LEGACY (lic7); live display data, not hashed.
+	// Refs are rule ids behind R-RISK-RULES-LEGACY (lic7) and basis ids behind R-OPERATING-BASIS (lic9), ids only; live display data, not hashed.
 	Refs     map[string][]string `json:"refs,omitempty"`
 	Balances map[string]string   `json:"balances,omitempty"`
 	Notices  []string            `json:"notices,omitempty"`

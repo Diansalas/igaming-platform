@@ -16,6 +16,10 @@
 //	licence_validity_dates_change        set issued_at / expires_at                           widening iff later / cleared expiry or earlier / cleared issue (0178)
 //	licence_review_due_change            set review_due_at                                    widening iff postponed or cleared (0178)
 //	licence_evidence_reference_change    set evidence_reference                               never widening (0178)
+//	operating_basis_set                  set an operating_bases version (0180)                always widening
+//	operating_basis_withdraw             withdraw the active operating basis of a scope (0180) always narrowing
+//	operating_basis_review_record        record a review of an operating basis (0180)         widening iff the review date moves
+//	                                                                                         later or needs_rereview is cleared
 //	tenant_jurisdiction_config_version   set / close a tenant_jurisdiction_configs version   narrowing iff it only removes
 //	                                                                                         currencies / methods, adds geo blocks,
 //	                                                                                         keeps the ruleset ids, or closes

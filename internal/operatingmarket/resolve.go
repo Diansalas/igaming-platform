@@ -127,6 +127,12 @@ type resolution struct {
 	licenceValidity jurisdiction.LicenceValidity
 	ceilingReason   LicenceCeilingReason
 
+	// lic9: the explicit operating basis that governed this resolution (zero when none was configured for the scope).
+	basisID     uuid.UUID
+	basisKind   BasisKind
+	basisReason BasisReason
+	basisReview *time.Time
+
 	sourceScope         Scope
 	sourceVersionID     uuid.UUID
 	sourceEffectiveFrom time.Time
@@ -151,6 +157,8 @@ func (r resolution) toResult() Result {
 		productCode:           r.productCode,
 		licenceID:             r.licenceID,
 		licenceCeilingReason:  r.ceilingReason,
+		basisID:               r.basisID,
+		basisKind:             r.basisKind,
 		sourceScope:           r.sourceScope,
 		sourceVersionID:       r.sourceVersionID,
 		sourceEffectiveFrom:   r.sourceEffectiveFrom,
@@ -244,96 +252,51 @@ func resolve(ctx context.Context, q ReadOnlyQuerier, p Query) (resolution, error
 		}
 	}
 
-	// --- STEP 1: the ceiling. Unconditional, evaluated first, always. ---
-	// Shared operator-side chain (jurisdiction.ResolveLicensingChain): every state
-	// other than resolved is licensing_unknown here (fail closed), as before.
-	chain, err := jurisdiction.ResolveLicensingChain(ctx, q, p.TenantID)
+	// --- STEP 0 (lic9, migration 0180): the explicit OPERATING BASIS for this scope, if one is configured. ---
+	// No operating_bases row for (tenant, brand?, country, operation, product?) = the legacy ceiling below, exactly as before.
+	// A configured basis REPLACES the "which licence" question (or, for a documented no-licence basis, the licence question
+	// itself) but never the policy rungs of STEPS 2-4, which still must permit.
+	sel, err := selectBasis(ctx, q, p)
 	if err != nil {
-		return resolution{}, fmt.Errorf("operatingmarket: read tenant licence: %w", err)
+		return resolution{}, err
 	}
-	if chain.Outcome != jurisdiction.LicensingResolved {
-		res.outcome = OutcomeLicensingUnknown
-		return res, nil
-	}
-	licenceID := &chain.LicenceID
-	res.licenceID = *licenceID
-
-	validity, err := jurisdiction.EvaluateLicenceValidity(ctx, q, *licenceID, p.AsOf)
-	if err != nil {
-		return resolution{}, fmt.Errorf("operatingmarket: evaluate licence validity: %w", err)
-	}
-	res.licenceValidity = validity
-	switch validity {
-	case jurisdiction.LicenceNotFound, jurisdiction.LicenceNotBound:
-		res.outcome = OutcomeLicensingUnknown
-		return res, nil
-	case jurisdiction.LicenceSuspended:
-		res.outcome = OutcomeNotPermittedByLicence
-		res.ceilingReason = CeilingReasonLicenceSuspended
-		res.chain = append(res.chain, licenceChainStep(false, nil, res.ceilingReason))
-		return res, nil
-	case jurisdiction.LicenceStatusExpired, jurisdiction.LicenceDateExpired:
-		res.outcome = OutcomeNotPermittedByLicence
-		res.ceilingReason = CeilingReasonLicenceExpired
-		res.chain = append(res.chain, licenceChainStep(false, nil, res.ceilingReason))
-		return res, nil
-	case jurisdiction.LicenceNotYetIssued:
-		res.outcome = OutcomeNotPermittedByLicence
-		res.ceilingReason = CeilingReasonLicenceNotYetIssued
-		res.chain = append(res.chain, licenceChainStep(false, nil, res.ceilingReason))
-		return res, nil
-	case jurisdiction.LicenceValid:
-		// fall through
-	default:
-		return resolution{}, fmt.Errorf("%w: unrecognized licence validity %q", ErrInvalidInput, validity)
-	}
-
-	ceilingRows, err := queryWindowedRows(ctx, q, `
-		SELECT id, state, status, effective_from, effective_to, reason_code, COALESCE(authorization_reference, '')
-		  FROM licence_country_ceilings
-		 WHERE licence_id = $1 AND country_code = $2
-		   AND effective_from <= $3 AND (effective_to IS NULL OR effective_to > $3)
-		 ORDER BY effective_from DESC LIMIT 2`,
-		*licenceID, p.CountryCode, p.AsOf)
-	if err != nil {
-		return resolution{}, fmt.Errorf("operatingmarket: read licence ceiling: %w", err)
-	}
-	switch len(ceilingRows) {
-	case 2:
+	switch sel.state {
+	case basisSelNone:
+		// --- STEP 1: the ceiling. Unconditional, evaluated first, always. ---
+		// Shared operator-side chain (jurisdiction.ResolveLicensingChain): every state
+		// other than resolved is licensing_unknown here (fail closed), as before.
+		chain, err := jurisdiction.ResolveLicensingChain(ctx, q, p.TenantID)
+		if err != nil {
+			return resolution{}, fmt.Errorf("operatingmarket: read tenant licence: %w", err)
+		}
+		if chain.Outcome != jurisdiction.LicensingResolved {
+			res.outcome = OutcomeLicensingUnknown
+			return res, nil
+		}
+		if done, err := applyLicenceCeiling(ctx, q, p, &res, chain.LicenceID); err != nil || done {
+			return res, err
+		}
+	case basisSelConflict:
 		res.outcome = OutcomeConfigurationConflict
 		return res, nil
-	case 0:
-		res.outcome = OutcomeNotPermittedByLicence
-		res.ceilingReason = CeilingReasonNoCeilingRow
-		res.chain = append(res.chain, licenceChainStep(false, nil, res.ceilingReason))
-		return res, nil
-	}
-	ceilingRow := ceilingRows[0]
-	ceilingStatus, err := parseStatus(ceilingRow.status)
-	if err != nil {
+	case basisSelInvalid:
 		res.outcome = OutcomeInvalidConfiguration
 		return res, nil
-	}
-	if ceilingStatus == StatusWithdrawn {
-		res.outcome = OutcomeNotPermittedByLicence
-		res.ceilingReason = CeilingReasonCeilingWithdrawn
-		res.chain = append(res.chain, licenceChainStep(true, &ceilingRow, res.ceilingReason))
+	case basisSelBlocked:
+		res.outcome = OutcomeNotPermittedByBasis
+		res.basisReason = sel.reason
+		res.basisKind, res.basisID = sel.kind, sel.id
+		res.basisReview = sel.reviewDue
+		res.chain = append(res.chain, basisChainStep(sel))
 		return res, nil
+	case basisSelRow:
+		done, err := applyBasis(ctx, q, p, &res, sel)
+		if err != nil || done {
+			return res, err
+		}
+	default:
+		return resolution{}, fmt.Errorf("%w: unrecognized basis selection state", ErrInvalidInput)
 	}
-	ceilingState, err := parseState(ceilingRow.state)
-	if err != nil {
-		res.outcome = OutcomeInvalidConfiguration
-		return res, nil
-	}
-	if ceilingState == StateDisabled {
-		res.outcome = OutcomeNotPermittedByLicence
-		res.ceilingReason = CeilingReasonCountryDisabled
-		res.chain = append(res.chain, licenceChainStep(true, &ceilingRow, res.ceilingReason))
-		return res, nil
-	}
-	// Ceiling permits. Nothing below may exceed it, and no lower row can
-	// ever short-circuit this step.
-	res.chain = append(res.chain, licenceChainStep(true, &ceilingRow, CeilingReasonNone))
 
 	// --- STEP 2: tenant rung. Absence here is TERMINAL (ruling 5). ---
 	tenantRows, err := queryWindowedRows(ctx, q, `

@@ -232,6 +232,7 @@ func TestReadAPIs_NonPlatformPrincipalsRefused(t *testing.T) {
 		"/v1/admin/licences/" + w.licID + "/versions",
 		"/v1/admin/licence-country-ceilings?licence_id=" + w.licID,
 		"/v1/admin/operating-country-policies?tenant_id=" + w.tenantA.String(),
+		"/v1/admin/operating-bases?tenant_id=" + w.tenantA.String(), "/v1/admin/operating-bases/" + uuid.NewString(),
 		"/v1/admin/tenants/" + w.tenantA.String() + "/jurisdiction-configs",
 	}
 	for _, p := range paths {

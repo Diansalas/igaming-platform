@@ -474,11 +474,20 @@ func init() {
 					}
 				}
 			}
-			// Enabling needs a bound licence whose ceiling enables the country (the 0076 trigger is authoritative at
-			// execution; this is the early, diagnosable answer).
+			// Enabling needs either an approved, in-force operating basis for the country (lic9: the resolver then decides per brand
+			// and operation), or a bound licence whose ceiling enables the country (the 0076 trigger is authoritative at execution;
+			// this is the early, diagnosable answer).
 			if p.State == string(operatingmarket.StateEnabled) && p.Status == string(operatingmarket.StatusActive) {
+				var basis bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM operating_bases WHERE tenant_id = $1 AND country_code = $2
+					AND status = 'active' AND change_request_id IS NOT NULL AND effective_to IS NULL)`, p.TenantID, p.CountryCode).Scan(&basis); err != nil {
+					return err
+				}
+				if basis {
+					return nil
+				}
 				if licence == nil {
-					return &DomainError{Err: fmt.Errorf("%w: tenant has no licence bound; no country may be enabled for it", operatingmarket.ErrCeilingExceeded)}
+					return &DomainError{Err: fmt.Errorf("%w: tenant has no licence bound and no operating basis for %s; no country may be enabled for it", operatingmarket.ErrCeilingExceeded, p.CountryCode)}
 				}
 				var ok bool
 				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM licence_country_ceilings WHERE licence_id = $1 AND country_code = $2

@@ -17,6 +17,8 @@ func TestOpenAPI_LicenceRegistryReads_Documented(t *testing.T) {
 		{"/v1/admin/licences/{licenceID}/versions", "get"},
 		{"/v1/admin/licence-country-ceilings", "get"},
 		{"/v1/admin/operating-country-policies", "get"},
+		{"/v1/admin/operating-bases", "get"},
+		{"/v1/admin/operating-bases/{basisID}", "get"},
 		{"/v1/admin/tenants/{tenantID}/jurisdiction-configs", "get"},
 	} {
 		block := openAPIPathBlock(t, spec, c.path)
@@ -39,7 +41,7 @@ func TestOpenAPI_LicenceRegistryReads_Documented(t *testing.T) {
 			t.Errorf("PUT %s: the slice 1 single-actor text must be gone", p)
 		}
 	}
-	for _, k := range []string{"licence_status_change", "licence_validity_dates_change", "licence_review_due_change", "licence_evidence_reference_change"} {
+	for _, k := range []string{"licence_status_change", "licence_validity_dates_change", "licence_review_due_change", "licence_evidence_reference_change", "operating_basis_set", "operating_basis_withdraw", "operating_basis_review_record"} {
 		if !strings.Contains(spec, k) {
 			t.Errorf("the OpenAPI kind enum must list %s", k)
 		}

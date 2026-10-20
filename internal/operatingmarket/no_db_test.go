@@ -14,15 +14,16 @@ import (
 	"testing"
 )
 
-// TestPolicyVersion_IsPinnedToV3 guards PolicyVersion's literal value
+// TestPolicyVersion_IsPinnedToV4 guards PolicyVersion's literal value
 // against silent drift - nothing else in this package fails a build or a
 // test if this constant's value changes, so this is the sole regression
-// guard. Currently "stage-4i-e.v3" (ADR 0045 §18, finding F4 ONLY -
+// guard. Currently "stage-4i-e.v4" (lic9, migration 0180: STEP 0, the
+// explicit operating basis; v3 was ADR 0045 §18, finding F4 ONLY -
 // AMENDMENT-3 itself does not bump this constant, see types.go's own
-// comment).
-func TestPolicyVersion_IsPinnedToV3(t *testing.T) {
-	if PolicyVersion != "stage-4i-e.v3" {
-		t.Fatalf("expected PolicyVersion to be pinned to %q, got %q", "stage-4i-e.v3", PolicyVersion)
+// comment). INTENTIONAL CHANGE of the v3 pin: resolve() gained a step.
+func TestPolicyVersion_IsPinnedToV4(t *testing.T) {
+	if PolicyVersion != "stage-4i-e.v4" {
+		t.Fatalf("expected PolicyVersion to be pinned to %q, got %q", "stage-4i-e.v4", PolicyVersion)
 	}
 }
 

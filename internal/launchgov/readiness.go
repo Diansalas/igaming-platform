@@ -50,7 +50,8 @@ const (
 	// readiness hash is stale and must be re-requested (the hash is recomputed over the current set at decision and at execution).
 	// 5: R-ALERTS no longer passes on the channel vocabulary alone; it needs an enabled, wired, human-notification route for p1 and p2.
 	// 6: R-RISK-RULES-LEGACY (ledger-finance condition C1) and R-KYC-POLICY (audit G9) join the activate/reactivate/ratify set.
-	SnapshotVersion = 6
+	// 7: R-OPERATING-BASIS (lic9, migration 0180) joins the activate/reactivate/ratify set.
+	SnapshotVersion = 7
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -378,6 +379,8 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) ([]
 	out = append(out, s.amlChecks(ctx, tx, in)...)
 	// Lic7: both write their live display data to the Readiness the caller is building (see assess).
 	out = append(out, s.riskRulesLegacyCheck(ctx, tx, in, in.live, now), s.kycPolicyCheck(ctx, tx, in, in.live))
+	// Lic9: the explicit operating basis report (acknowledgeable, never a hard precondition); live display data as above.
+	out = append(out, s.operatingBasisCheck(ctx, tx, in, in.live, now))
 	return out, nil
 }
 

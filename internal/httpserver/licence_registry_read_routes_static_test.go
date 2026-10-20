@@ -17,12 +17,13 @@ func TestRegistryReadRoutes_AreGatedByTheReadPermissionOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(b)
-	re := regexp.MustCompile(`mux\.Handle\("GET (/v1/admin/(?:jurisdictions|licences|licence-country-ceilings|operating-country-policies|tenants/\{tenantID\}/jurisdiction-configs)[^"]*)",\s*\n\s*(staffRoute\([^\n]*)`)
+	re := regexp.MustCompile(`mux\.Handle\("GET (/v1/admin/(?:jurisdictions|licences|licence-country-ceilings|operating-country-policies|operating-bases|tenants/\{tenantID\}/jurisdiction-configs)[^"]*)",\s*\n\s*(staffRoute\([^\n]*)`)
 	ms := re.FindAllStringSubmatch(src, -1)
 	want := map[string]bool{
 		"/v1/admin/jurisdictions": true, "/v1/admin/jurisdictions/{jurisdictionID}": true,
 		"/v1/admin/licences": true, "/v1/admin/licences/{licenceID}": true, "/v1/admin/licences/{licenceID}/versions": true,
 		"/v1/admin/licence-country-ceilings": true, "/v1/admin/operating-country-policies": true,
+		"/v1/admin/operating-bases": true, "/v1/admin/operating-bases/{basisID}": true,
 		"/v1/admin/tenants/{tenantID}/jurisdiction-configs": true,
 	}
 	for _, m := range ms {
