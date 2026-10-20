@@ -16,6 +16,9 @@ export function LicensingLayout() {
         <NavLink to="/licensing/licences" className={tabClass}>
           Licences
         </NavLink>
+        <NavLink to="/licensing/operating-bases" className={tabClass}>
+          Operating bases
+        </NavLink>
         <NavLink to="/licensing/changes" className={tabClass}>
           Licensing changes
         </NavLink>

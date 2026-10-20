@@ -91,3 +91,66 @@ export function licensingReads(o: { licences?: LicenceDetail[]; changes?: Licens
     http.get('/v1/admin/operating-country-policies', () => HttpResponse.json(page([]))),
   )
 }
+
+// --- operating bases (lic12) ---
+import type { OperatingBasis, OperatingBasisDetail } from '../../api/operatingBases'
+import { localDate } from './basisRules'
+
+export const BAS1 = '50000000-0000-4000-8000-000000000001'
+export const BAS0 = '50000000-0000-4000-8000-000000000000'
+export const BRAND1 = '60000000-0000-4000-8000-000000000001'
+export const TEN_B = '30000000-0000-4000-8000-0000000000bb'
+
+/** A local calendar date n days from today, as YYYY-MM-DD. */
+export function daysFromToday(n: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() + n)
+  return localDate(d)
+}
+
+export const basis = (o: Partial<OperatingBasis> = {}): OperatingBasis => ({
+  id: BAS1,
+  tenant_id: TEN1,
+  brand_id: null,
+  country_code: 'ZZ',
+  operation_code: 'wagering',
+  product_code: null,
+  basis_kind: 'no_licence_documented',
+  licence_id: null,
+  jurisdiction_id: JUR1,
+  determination_reference: 'DOC-0001',
+  determined_by_role: 'head_of_compliance',
+  basis_evidence_reference: 'EVID-77',
+  restrictions_note: 'synthetic restriction',
+  restricted_product_codes: [],
+  review_due_at: daysFromToday(200),
+  needs_rereview: false,
+  last_review_reference: null,
+  status: 'active',
+  reason_code: 'initial_basis',
+  policy_version: 'stage-4i-e.v4',
+  effective_from: '2026-10-01T10:00:00Z',
+  effective_to: null,
+  change_request_id: CHG1,
+  created_by: OTHER,
+  created_at: '2026-10-01T10:00:00Z',
+  disclaimer: 'd',
+  ...o,
+})
+
+export const basisDetail = (o: Partial<OperatingBasisDetail> = {}): OperatingBasisDetail => ({
+  ...basis(),
+  decision: { change_request_id: CHG1, kind: 'operating_basis_set', reason_code: 'initial_basis', requested_by: OTHER, executed_by: THIRD, executed_at: '2026-10-01T10:00:00Z', approvals: [{ approver_id: THIRD }, { approver_id: ME }] },
+  ...o,
+})
+
+/** Installs read handlers for the operating-basis screens. Override per test with server.use. */
+export function basisReads(o: { items?: OperatingBasis[]; detail?: OperatingBasisDetail } = {}) {
+  const items = o.items ?? [basis()]
+  const detail = o.detail ?? basisDetail()
+  server.use(
+    http.get('/v1/admin/operating-bases', () => HttpResponse.json(page(items))),
+    http.get(`/v1/admin/operating-bases/${detail.id}`, () => HttpResponse.json(detail)),
+    http.get(`/v1/admin/tenants/${TEN1}/brands`, () => HttpResponse.json(page([{ id: BRAND1, tenant_id: TEN1, name: 'Brand One', slug: 'brand-one', status: 'active' }]))),
+  )
+}

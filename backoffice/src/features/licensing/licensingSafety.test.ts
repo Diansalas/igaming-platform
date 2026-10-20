@@ -37,3 +37,30 @@ describe('licensing source pins', () => {
     expect(dlg).toMatch(/const \[jurisdictionId, setJurisdictionId\] = useState\(''\)/)
   })
 })
+
+describe('operating basis source pins (lic12)', () => {
+  it('scans the new basis sources too (non-vacuous)', () => {
+    for (const f of ['BasisBits.tsx', 'BasisDialogs.tsx', 'OperatingBasesPage.tsx', 'OperatingBasisDetailPage.tsx', 'basisRules.ts', 'basisLabels.ts']) {
+      expect(all.map((a) => a.f), f).toContain(f)
+    }
+  })
+  it('the filing dialog preselects nothing: every choice starts empty', () => {
+    const dlg = all.find((a) => a.f === 'BasisDialogs.tsx')!.text
+    for (const re of [
+      /\[brandScope, setBrandScope\] = useState<'' \| 'tenant' \| 'brand'>\(''\)/,
+      /\[productScope, setProductScope\] = useState<'' \| 'all' \| 'one'>\(''\)/,
+      /\[kind, setKind\] = useState<BasisKind \| ''>\(''\)/,
+      /\[licenceId, setLicenceId\] = useState\(''\)/,
+      /\[jurisdictionId, setJurisdictionId\] = useState\(''\)/,
+      /\[reviewDue, setReviewDue\] = useState\(''\)/,
+      /\[flag, setFlag\] = useState<'' \| 'clear' \| 'flag'>\(''\)/,
+      /\[due, setDue\] = useState\(''\)/,
+    ]) expect(dlg).toMatch(re)
+  })
+  it('the no-licence notice is a fixed component with no dismiss control', () => {
+    const bits = all.find((a) => a.f === 'BasisBits.tsx')!.text
+    const notice = bits.slice(bits.indexOf('export function NoLicenceNotice'), bits.indexOf('export function BasisKindText'))
+    expect(notice).toContain('role="note"')
+    expect(notice).not.toMatch(/onClick|button|useState|dismiss|close/i)
+  })
+})

@@ -17,6 +17,7 @@ import { Card } from '../../components/Card'
 import { TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Modal } from '../../components/Modal'
+import { BasisPayloadSummary } from './BasisBits'
 import { ApprovalRules, ChangeStatusBadge, Disclaimer, LicensingErrorAlert, Pending, Success, short } from './LicensingBits'
 import { REASON_CODE_HELP, kindLabel, safeToken, when } from './labels'
 
@@ -153,6 +154,17 @@ export function ChangeDetailPage() {
         {c.status === 'executed' && <p className="mt-3 text-sm">Executed {when(c.executed_at)}.</p>}
         {c.decision_reason_code && <p className="mt-3 text-sm">Decision reason code: <span className="font-mono text-xs">{safeToken(c.decision_reason_code)}</span></p>}
       </Card>
+
+      {c.kind.startsWith('operating_basis_') && (
+        <Card title="Operating basis in words">
+          <BasisPayloadSummary kind={c.kind} payload={c.payload} />
+          {q.data?.outcome && typeof q.data.outcome.operating_basis_id === 'string' && /^[0-9a-fA-F-]{36}$/.test(q.data.outcome.operating_basis_id) && (
+            <p className="mt-2 text-sm">
+              <Link className="text-brand-700 hover:underline" to={`/licensing/operating-bases/${encodeURIComponent(q.data.outcome.operating_basis_id)}`}>Open the resulting basis version</Link>
+            </p>
+          )}
+        </Card>
+      )}
 
       <Card title="Content of the request (frozen at filing)">
         <pre aria-label="Request payload" className="overflow-x-auto rounded-md bg-surface-alt p-3 text-xs">{JSON.stringify(c.payload, null, 2)}</pre>
