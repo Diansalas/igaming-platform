@@ -201,7 +201,7 @@ func (s *Sweeper) reportScreeningParked(ctx context.Context, logger *slog.Logger
 	if overdue == 0 {
 		return
 	}
-	if aerr := aml.RaiseScreeningTrapped(ctx, s.Pool, tenantID, overdue, sweeperParkedAlertTimeout); aerr != nil {
+	if aerr := aml.RaiseScreeningTrapped(ctx, s.Pool, tenantID, "sweeper", overdue, sweeperParkedAlertTimeout); aerr != nil {
 		recordSweeperTenantFailure(ctx, "screening_parked_alert")
 		st.Errors++
 		if logger != nil {

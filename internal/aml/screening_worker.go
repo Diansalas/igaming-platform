@@ -230,21 +230,22 @@ func (w *ScreeningWorker) alertTrapped(ctx context.Context, tenantID uuid.UUID, 
 		return
 	}
 	st.Trapped += n
-	if err := RaiseScreeningTrapped(ctx, w.Pool, tenantID, n, 2*w.Config.PhaseTimeout); err != nil {
+	if err := RaiseScreeningTrapped(ctx, w.Pool, tenantID, "worker", n, 2*w.Config.PhaseTimeout); err != nil {
 		st.Errors++
 		w.logErr("trapped alert failed")
 	}
 }
 
-// RaiseScreeningTrapped raises aml.screening_gate_trapped for the tenant with the COUNT of persons (never an id). The alert is
+// RaiseScreeningTrapped raises (lic27b: source is "worker" or "sweeper" and is part of the discriminator, because 'persons' means
+// persons held by the gate longer than the threshold as the worker sees them, resp. as the sweeper's independent read sees them)  aml.screening_gate_trapped for the tenant with the COUNT of persons (never an id). The alert is
 // platform-routed (ScopeKindPlatform), so tenant staff and payments operators never see it (tipping-off). Shared by the screening
 // worker (persons held at the gate) and the payments sweeper (lic26 N-9: persons parked at the payout gate while the worker is dead).
-func RaiseScreeningTrapped(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, persons int, timeout time.Duration) error {
+func RaiseScreeningTrapped(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, source string, persons int, timeout time.Duration) error {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	pending, aerr := alerting.InTx(cctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
 		return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
-			Kind: alerting.KindAMLScreeningGateTrapped, SubjectTenantID: tenantID, Discriminator: "tenant:" + tenantID.String(),
+			Kind: alerting.KindAMLScreeningGateTrapped, SubjectTenantID: tenantID, Discriminator: source + ":tenant:" + tenantID.String(),
 			Attributes: map[string]alerting.AttrValue{"persons": persons},
 		})
 	})
@@ -539,7 +540,8 @@ func RunScreeningWorkerLoop(ctx context.Context, w *ScreeningWorker, logger *slo
 	}
 }
 
-// ScreeningParkedWindow is how far back the parked summary looks for the latest payout-gate decision of a person.
+// ScreeningParkedWindow is the MINIMUM look-back (advisory since lic27b: aml_screening_parked_overdue widens it to 2 x the largest
+// alert threshold, at least 7 days). How far back the parked summary looks for the latest payout-gate decision of a person.
 const ScreeningParkedWindow = 7 * 24 * time.Hour
 
 // ScreeningParkedSummary counts, for the tenant, the persons whose latest payout-gate decision in ScreeningParkedWindow was a

@@ -44,7 +44,7 @@ func seedParkedDecisions(t *testing.T, pool *db.Pool, f orchFixture, n int) (per
 func trappedAlerts(t *testing.T, pool *db.Pool, tenant uuid.UUID) (n int, attrs string) {
 	t.Helper()
 	if err := pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*), COALESCE(string_agg(attributes::text, ','), '') FROM alerts WHERE kind = 'aml.screening_gate_trapped' AND subject_tenant_id = $1`, tenant).Scan(&n, &attrs)
+		return tx.QueryRow(ctx, `SELECT count(*), COALESCE(string_agg(attributes::text, ','), '') FROM alerts WHERE kind = 'aml.screening_gate_trapped' AND subject_tenant_id = $1 AND discriminator = 'sweeper:tenant:' || $1::text`, tenant).Scan(&n, &attrs)
 	}); err != nil {
 		t.Fatalf("read alerts: %v", err)
 	}
@@ -63,8 +63,16 @@ func TestLic26_N9_ProductionSweepReadsAndLogsParkedCountsOnly(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
 	st := s.RunPass(context.Background(), logger, 0)
-	if st.Errors != 0 || st.ScreeningParked != 1 || st.ScreeningParkedOverdue != 0 {
-		t.Fatalf("one person parked, none overdue (no gating policy): %+v", st)
+	// lic27b: only persons the screening gate STILL denies count, and no policy gates withdrawals here, so the stale decision rows
+	// count for nothing (pin changed from "one person parked"): the real function ran without error and reported 0 / 0.
+	if st.Errors != 0 || st.ScreeningParked != 0 || st.ScreeningParkedOverdue != 0 {
+		t.Fatalf("no gating policy: nothing is parked by the screening gate: %+v", st)
+	}
+	// The count log line (parked > 0) is exercised through the injected read.
+	s.testScreeningParked = func(uuid.UUID) (int, int, error) { return 1, 0, nil }
+	buf.Reset()
+	if st := s.RunPass(context.Background(), logger, 0); st.ScreeningParked != 1 {
+		t.Fatalf("%+v", st)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "payouts parked for an outstanding AML screening") || !strings.Contains(out, "parked=1") {

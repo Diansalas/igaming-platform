@@ -119,6 +119,13 @@ func TestLic23_SN5_ServiceRefusesAGateInProduction(t *testing.T) {
 // N-4 / SN-5, database side: the environment guard itself, on scratch databases whose anchor is unrecorded / production / staging.
 func scratchThrough181(t *testing.T, prefix string) *db.Pool {
 	t.Helper()
+	pool, _ := scratchThrough(t, prefix, 181)
+	return pool
+}
+
+// scratchThrough migrates a scratch database through migration number max and returns the pool and the directory used.
+func scratchThrough(t *testing.T, prefix string, max int64) (*db.Pool, string) {
+	t.Helper()
 	src := filepath.Join("..", "..", "migrations")
 	dir := t.TempDir()
 	entries, err := os.ReadDir(src)
@@ -127,7 +134,7 @@ func scratchThrough181(t *testing.T, prefix string) *db.Pool {
 	}
 	for _, e := range entries {
 		n, perr := strconv.ParseInt(e.Name()[:4], 10, 64)
-		if perr != nil || n > 181 {
+		if perr != nil || n > max {
 			continue
 		}
 		b, _ := os.ReadFile(filepath.Join(src, e.Name()))
@@ -143,7 +150,7 @@ func scratchThrough181(t *testing.T, prefix string) *db.Pool {
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return pool
+	return pool, dir
 }
 
 func envOK(t *testing.T, pool *db.Pool) bool {
