@@ -81,8 +81,28 @@ type OperatingBasisReviewPayload struct {
 
 var roleCodeRE = regexp.MustCompile(`^[a-z][a-z0-9_.:-]{1,99}$`)
 
+// lic14 (L-5): the character classes the database CHECKs enforce (migration 0183): an opaque reference is one token, a note is
+// short plain text. Neither admits '@', a '+', brackets other than parentheses, or quotes other than the apostrophe.
+var (
+	refCharsetRE  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/#-]*$`)
+	noteCharsetRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 .,;:()/#_'-]*$`)
+	nonAlnumRE    = regexp.MustCompile(`[^0-9A-Za-z]`)
+	digitRunRE    = regexp.MustCompile(`[0-9]{9}`)
+)
+
 // lintRef normalises (trim-refusal) and lints one opaque reference / note.
 func lintRef(field string, s string, max int) (string, error) {
+	re := refCharsetRE
+	if field == "restrictions_note" {
+		re = noteCharsetRE
+	}
+	if !re.MatchString(s) || digitRunRE.MatchString(nonAlnumRE.ReplaceAllString(s, "")) {
+		return "", fmt.Errorf("%w: %s uses characters or digit runs the stored form does not allow (a single opaque token of letters, digits and . _ : / # -; a note may also hold spaces and , ; ( ) ')", ErrInvalidInput, field)
+	}
+	return lintRefBase(field, s, max)
+}
+
+func lintRefBase(field string, s string, max int) (string, error) {
 	if s != strings.TrimSpace(s) || s == "" || len(s) > max || strings.ContainsAny(s, "\x00\r\n\t") || strings.Contains(s, "@") {
 		return "", fmt.Errorf("%w: %s must be an opaque, trimmed value of 1..%d bytes without control characters or contact details", ErrInvalidInput, field, max)
 	}

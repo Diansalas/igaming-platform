@@ -95,6 +95,16 @@ func operatingBasisFrom(countries []string, bases []operatingmarket.BasisRecord,
 	covers := map[string]map[string]bool{}
 	var noLicence int64
 	var soon, overdue []string
+	// lic14 (L-3): the resolver prefers the subject brand's own row and a WITHDRAWN (or otherwise non-permitting) brand row MASKS the
+	// tenant-wide row, so a tenant-wide row never counts as coverage for an (country, operation) the subject brand has a row for.
+	masked := map[string]bool{}
+	if brand != nil {
+		for _, b := range bases {
+			if b.BrandID != nil && *b.BrandID == *brand && (b.ProductCode == nil || (b.OperationCode == basisOpWagering && *b.ProductCode == basisCoverageWagerProduct)) {
+				masked[b.CountryCode+"|"+b.OperationCode] = true
+			}
+		}
+	}
 	for _, b := range bases {
 		if b.Status != operatingmarket.StatusActive || b.ChangeRequestID == nil {
 			continue
@@ -111,6 +121,9 @@ func operatingBasisFrom(countries []string, bases []operatingmarket.BasisRecord,
 			soon = append(soon, b.ID.String())
 		}
 		if b.ProductCode != nil && !(b.OperationCode == basisOpWagering && *b.ProductCode == basisCoverageWagerProduct) {
+			continue
+		}
+		if b.BrandID == nil && masked[b.CountryCode+"|"+b.OperationCode] {
 			continue
 		}
 		if b.OperationCode == basisOpWagering && containsStr(b.RestrictedProductCodes, basisCoverageWagerProduct) {
