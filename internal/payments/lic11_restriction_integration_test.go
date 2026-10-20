@@ -9,6 +9,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -79,7 +80,7 @@ func TestLic11_T1p_Default_SubmitsAndRecordsTheProvenance(t *testing.T) {
 // the withdrawal.payout_gate_denied alert commit. The KYC gate never runs.
 func TestLic11_T1p_ConfiguredHoldOrBlock_Parks(t *testing.T) {
 	for _, action := range []string{"hold_for_review", "block"} {
-		w := newF4World(t, "l11-park-"+action)
+		w := newF4World(t, "l11-park-"+strings.ReplaceAll(action, "_", "-"))
 		l11PaySuspendLicence(t, w.pool, w.f.tenantID)
 		wr := approvedWithdrawal(t, w.pool, w.f, 500, "l11-park-"+action)
 		holdBefore := w.holdBalance(t)
@@ -166,10 +167,13 @@ func TestLic11_T1p_HardRestrictions_NotOverridable(t *testing.T) {
 		l11PaySuspendLicence(t, w.pool, w.f.tenantID)
 		l11PayPolicy(t, w.pool, w.f.tenantID, "licence_suspended", "allow")
 		wr := approvedWithdrawal(t, w.pool, w.f, 500, "l11-hard-ks")
-		w.tx(t, func(ctx context.Context, tx pgx.Tx) error {
+		principal := depositKillSwitchStaffPrincipal(t, w.pool, w.f.tenantID)
+		if err := w.pool.WithPrincipalScope(context.Background(), w.f.tenantID, principal, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := EngageKillSwitch(ctx, tx, w.f.tenantID, "*", KillSwitchOperationAny, "lic11-incident")
 			return err
-		})
+		}); err != nil {
+			t.Fatalf("engage the kill switch: %v", err)
+		}
 		if _, err := w.claim(t, wr.ID); !errors.Is(err, ErrPayoutKillSwitchEngaged) {
 			t.Fatalf("the kill switch still refuses, got %v", err)
 		}
@@ -183,7 +187,7 @@ func TestLic11_T1p_HardRestrictions_NotOverridable(t *testing.T) {
 // WD056 denying re-dispatch decision; with no policy the re-claim proceeds as before and records default_unconfigured.
 func TestLic11_T2_ConfiguredPolicyEscalates_DefaultProceeds(t *testing.T) {
 	for _, action := range []string{"hold_for_review", "block"} {
-		w := newF4World(t, "l11-t2-"+action)
+		w := newF4World(t, "l11-t2-"+strings.ReplaceAll(action, "_", "-"))
 		l11PaySuspendLicence(t, w.pool, w.f.tenantID)
 		wr, attempt := notSentPayoutAttempt(t, w.pool, w.orch, w.f, 500, "l11-t2-"+action)
 		l11PayPolicy(t, w.pool, w.f.tenantID, "licence_suspended", action)
