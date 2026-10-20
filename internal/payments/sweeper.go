@@ -43,10 +43,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
-	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -114,6 +112,9 @@ type Sweeper struct {
 
 	// testBeforeClaim is a fault-injection seam for tests only (nil in production).
 	testBeforeClaim func(tenantID uuid.UUID)
+	// testScreeningParked replaces the database read of the parked-screening counts (lic26 N-9): a fault-injection seam for tests
+	// only (nil in production).
+	testScreeningParked func(tenantID uuid.UUID) (parked, overdue int, err error)
 }
 
 // NewSweeper returns a Sweeper with §7.3's default bounds.
@@ -131,10 +132,6 @@ type SweepStats struct {
 	Claimed   int
 	Processed int
 	Errors    []error
-	// ScreeningParked (lic23 N-9): persons whose payout is PARKED right now only because a required automatic AML screening is
-	// outstanding (a screening-only hold at the payout gate, lic18). It is read here, by a loop that is not the screening worker, so
-	// a dead worker is visible as a growing count even though it can no longer raise its own alert.
-	ScreeningParked int
 }
 
 // RunOnce runs exactly one sweep pass over tenantIDs, in the given
@@ -146,13 +143,6 @@ type SweepStats struct {
 func (s *Sweeper) RunOnce(ctx context.Context, tenantIDs []uuid.UUID) SweepStats {
 	var stats SweepStats
 	for _, tenantID := range tenantIDs {
-		if err := s.Pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			n, _, err := aml.ScreeningParkedSummary(ctx, tx, tenantID)
-			stats.ScreeningParked += n
-			return err
-		}); err != nil && !isUndefinedFunction(err) { // a pre-0181 scratch schema (migration tests) has no summary function
-			stats.Errors = append(stats.Errors, fmt.Errorf("payments: sweeper screening-parked summary for tenant %s: %w", tenantID, err))
-		}
 		ids, err := s.claimBatch(ctx, tenantID)
 		if err != nil {
 			stats.Errors = append(stats.Errors, fmt.Errorf("payments: sweeper claim batch for tenant %s: %w", tenantID, err))
@@ -918,9 +908,3 @@ func (s *Sweeper) applyPollPending(ctx context.Context, tx pgx.Tx, intent Deposi
 // names a provider_id no longer present in the adapter registry - a
 // deploy/config mismatch, never expected in steady state.
 var ErrSweeperProviderNotRegistered = errors.New("payments: sweeper: provider not registered")
-
-// isUndefinedFunction reports SQLSTATE 42883 (the aml_screening_parked_summary function does not exist: a schema older than 0181).
-func isUndefinedFunction(err error) bool {
-	var pe *pgconn.PgError
-	return errors.As(err, &pe) && pe.Code == "42883"
-}

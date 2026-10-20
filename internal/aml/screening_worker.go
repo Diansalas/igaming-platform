@@ -32,7 +32,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -230,19 +230,26 @@ func (w *ScreeningWorker) alertTrapped(ctx context.Context, tenantID uuid.UUID, 
 		return
 	}
 	st.Trapped += n
-	cctx, cancel2 := context.WithTimeout(context.WithoutCancel(ctx), 2*w.Config.PhaseTimeout)
-	defer cancel2()
-	pending, aerr := alerting.InTx(cctx, alerting.NewTenantRunner(w.Pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
-		return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
-			Kind: alerting.KindAMLScreeningGateTrapped, SubjectTenantID: tenantID, Discriminator: "tenant:" + tenantID.String(),
-			Attributes: map[string]alerting.AttrValue{"persons": n},
-		})
-	})
-	defer pending.Flush(cctx)
-	if aerr != nil {
+	if err := RaiseScreeningTrapped(ctx, w.Pool, tenantID, n, 2*w.Config.PhaseTimeout); err != nil {
 		st.Errors++
 		w.logErr("trapped alert failed")
 	}
+}
+
+// RaiseScreeningTrapped raises aml.screening_gate_trapped for the tenant with the COUNT of persons (never an id). The alert is
+// platform-routed (ScopeKindPlatform), so tenant staff and payments operators never see it (tipping-off). Shared by the screening
+// worker (persons held at the gate) and the payments sweeper (lic26 N-9: persons parked at the payout gate while the worker is dead).
+func RaiseScreeningTrapped(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, persons int, timeout time.Duration) error {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	pending, aerr := alerting.InTx(cctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
+			Kind: alerting.KindAMLScreeningGateTrapped, SubjectTenantID: tenantID, Discriminator: "tenant:" + tenantID.String(),
+			Attributes: map[string]alerting.AttrValue{"persons": persons},
+		})
+	})
+	defer pending.Flush(cctx)
+	return aerr
 }
 
 func (w *ScreeningWorker) activeTenants(ctx context.Context) ([]uuid.UUID, error) {
@@ -402,7 +409,11 @@ func matchFingerprint(key []byte, pairs []string) string {
 		return ""
 	}
 	m := hmac.New(sha256.New, key)
-	m.Write([]byte("match-fp:v1:" + strings.Join(pairs, "\n")))
+	// lic26 F-2: each pair is length-prefixed, so no two different pair sets can produce the same byte string.
+	m.Write([]byte("match-fp:v2:"))
+	for _, p := range pairs {
+		m.Write([]byte(strconv.Itoa(len(p)) + ":" + p + ";"))
+	}
 	return hex.EncodeToString(m.Sum(nil))
 }
 
@@ -509,7 +520,13 @@ func RunScreeningWorkerLoop(ctx context.Context, w *ScreeningWorker, logger *slo
 				logger.Error("aml screening worker: recovered from panic in pass")
 			}
 		}()
-		w.RunPass(ctx)
+		st := w.RunPass(ctx)
+		// lic26 N-9: the pass summary is exported (counts only, never an identifier).
+		if logger != nil {
+			logger.Info("aml screening worker: pass", "tenants", st.Tenants, "enqueued", st.Enqueued, "claimed", st.Claimed, "done", st.Done,
+				"needs_officer", st.NeedsOfficer, "retried", st.Retried, "terminal", st.Terminal, "lost", st.Lost, "errors", st.Errors,
+				"trapped", st.Trapped, "parked_screening", st.ParkedScreening)
+		}
 	}
 	run()
 	for {
@@ -532,4 +549,12 @@ func ScreeningParkedSummary(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) 
 	err = tx.QueryRow(ctx, `SELECT o_persons, o_evaluations FROM aml_screening_parked_summary($1, clock_timestamp() - make_interval(secs => $2::double precision))`,
 		tenantID, ScreeningParkedWindow.Seconds()).Scan(&persons, &evaluations)
 	return persons, evaluations, err
+}
+
+// ScreeningParkedOverdue returns, for the tenant, the persons parked at the payout gate only for an outstanding screening and how
+// many of them have been parked longer than the gating policy's alert threshold (lic26 N-9). Counts only.
+func ScreeningParkedOverdue(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (parked, overdue int, err error) {
+	err = tx.QueryRow(ctx, `SELECT o_parked, o_overdue FROM aml_screening_parked_overdue($1, clock_timestamp() - make_interval(secs => $2::double precision))`,
+		tenantID, ScreeningParkedWindow.Seconds()).Scan(&parked, &overdue)
+	return parked, overdue, err
 }

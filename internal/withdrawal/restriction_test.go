@@ -380,6 +380,25 @@ func TestLic24_Static_Pre0182HookIsIntegrationOnly(t *testing.T) {
 		if hookFile {
 			defs += strings.Count(src, "func SetPre0182SchemaForTest(")
 		}
+		// lic26 F-6: the IDENTIFIER is pinned, not just the three method forms (CompareAndSwap, &pre0182SchemaHook, a copy or an alias
+		// would otherwise slip past). Comment lines are skipped; code may name it only as the declaration and the single Load in
+		// restriction.go, and as .Swap(true) / .Store(prev) in the integration hook file.
+		isRestriction := filepath.Base(path) == "restriction.go" && filepath.Base(filepath.Dir(path)) == "withdrawal"
+		for _, line := range strings.Split(src, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") || !strings.Contains(line, "pre0182SchemaHook") {
+				continue
+			}
+			ok := false
+			switch {
+			case isRestriction:
+				ok = strings.HasPrefix(line, "var pre0182SchemaHook atomic.Bool") || strings.Contains(line, "if pre0182SchemaHook.Load() {")
+			case hookFile:
+				ok = strings.Contains(line, "pre0182SchemaHook.Swap(true)") || strings.Contains(line, "pre0182SchemaHook.Store(prev)")
+			}
+			if !ok {
+				t.Errorf("%s: unexpected use of pre0182SchemaHook: %q", path, strings.TrimSpace(line))
+			}
+		}
 		if c := strings.Count(src, "pre0182SchemaHook.Load()"); c > 0 {
 			if filepath.Base(path) != "restriction.go" {
 				t.Errorf("%s reads the hook", path)

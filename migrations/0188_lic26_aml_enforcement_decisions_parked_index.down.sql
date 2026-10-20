@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS aml_enforcement_decisions_tenant_op_decided;

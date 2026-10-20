@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 
@@ -283,6 +284,8 @@ func dedupe(ls []ListType) []ListType {
 	return out
 }
 
+var vendorMatchRefRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
 // matchRefPairs returns the sorted "list:reference" pairs of the matches, or nil when any match carries no reference (then no
 // stable identity exists and a repeat of the match always needs an officer).
 func matchRefPairs(ms []ScreeningMatch) []string {
@@ -291,7 +294,8 @@ func matchRefPairs(ms []ScreeningMatch) []string {
 	}
 	out := make([]string, 0, len(ms))
 	for _, m := range ms {
-		if m.VendorMatchRef == "" {
+		// lic26 F-2: a reference outside the conservative alphabet gives no stable identity (fail-safe: an officer reviews it again).
+		if !vendorMatchRefRe.MatchString(m.VendorMatchRef) {
 			return nil
 		}
 		out = append(out, string(m.List)+":"+m.VendorMatchRef)
