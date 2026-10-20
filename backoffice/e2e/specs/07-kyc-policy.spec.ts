@@ -10,7 +10,7 @@ import {
   allPolicies, expectRefusalRendered, fillAuthor, openPolicies, policy, policyAudit, policyAuditActor, policyFingerprint, rowAction, rowFor, submitAction, submitAuthor,
 } from '../lib/kyc_policy'
 import { digest, signProof } from '../lib/kyc_proof'
-import { deposit, ensureMockPayments, ensureUnlinkedPlatformAdmin, kapi, newPlayer, reviewVerification, staffId, startVerification, tenantIdOf, type Player } from '../lib/kyc_world'
+import { deposit, ensureMockPayments, ensureUnlinkedPlatformAdmin, kapi, newPlayer, reviewVerification, staffId, startVerification, tenantIdOf, withdrawAllOperatingBases, type Player } from '../lib/kyc_world'
 import { loginAs, spaGoto, type Session } from '../lib/session'
 
 test.describe.configure({ mode: 'serial' })
@@ -40,6 +40,8 @@ test.beforeAll(async () => {
   test.setTimeout(240_000)
   await ensureUnlinkedPlatformAdmin('PA_U') // legacy platform admin with NO Person link (sanctioned fixture path, see lib/kyc_world.ts)
   await ensureMockPayments()
+  // an earlier spec in the same database may have left approved operating bases; with any, the evaluator takes another (fail-closed) route
+  await withdrawAllOperatingBases()
   expect(allPolicies()).toEqual([]) // the database is fresh: the platform ships no policy
 })
 

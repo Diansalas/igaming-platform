@@ -210,3 +210,32 @@ export function marketEvidence(tenant: string, player: string): { ok: boolean; c
   if (!m) throw new Error(`unexpected probe output: ${out}`)
   return { ok: m[1] === 'true', country: m[2] ?? '' }
 }
+
+/**
+ * Withdraws every ACTIVE operating basis of the synthetic tenant through the real filing route (withdrawal is a single-actor,
+ * always-narrowing change applied at once). Why: with ANY approved operating basis the KYC evaluator selects the rulebook from the
+ * player's verified residence and fails closed (kyc_unavailable:basis_scope_unavailable) for a player without one, which is a
+ * different control than the one spec 07 tests. Specs that ran earlier in the same database (06) leave bases behind, so spec 07
+ * starts from a tenant with none. Returns how many were withdrawn.
+ */
+export async function withdrawAllOperatingBases(): Promise<number> {
+  const t = tenantIdOf()
+  const rows = ownerRead(
+    { platformAdmin: platformAnchor() },
+    `SELECT coalesce(brand_id::text,'')||'|'||country_code||'|'||operation_code||'|'||coalesce(product_code,'') FROM operating_bases WHERE tenant_id = ${lit(t)} AND effective_to IS NULL AND status = 'active'`,
+  )
+    .split('\n')
+    .filter(Boolean)
+  if (rows.length === 0) return 0
+  const tok = await apiLogin('PA_D')
+  for (const r of rows) {
+    const [brand, country, operation, product] = r.split('|')
+    const res = await kapi('POST', '/v1/admin/licensing-changes', {
+      kind: 'operating_basis_withdraw',
+      reason_code: 'e2e_fixture_clear_bases',
+      payload: { tenant_id: t, brand_id: brand || null, country_code: country, operation_code: operation, product_code: product || null },
+    }, tok)
+    if (res.status !== 201 || res.json?.executed !== true) throw new Error(`withdraw basis ${country}/${operation}: ${res.status}`)
+  }
+  return rows.length
+}

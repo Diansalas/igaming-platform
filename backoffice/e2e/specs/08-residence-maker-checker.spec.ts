@@ -156,6 +156,13 @@ test('(e) BELOW the API (runtime role): the residence guards, the privileges and
     { name: 'UPDATE country to NULL (refused by a table CHECK before the trigger)', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = NULL WHERE id = ${lit(v1)}`, want: '23514' },
     { name: 'UPDATE country + source only', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = 'DE', verified_residence_source = 'reviewer_determination' WHERE id = ${lit(v1)}`, want: 'RD005' },
     { name: 'UPDATE country with a BACKDATED determination time', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = 'DE', verified_residence_set_at = verified_residence_set_at - interval '1 day' WHERE id = ${lit(v1)}`, want: 'RD005' },
+    { name: 'UPDATE country with a FUTURE-dated determination time (+1 day)', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = 'DE', verified_residence_source = 'reviewer_determination', verified_residence_set_by = ${lit(staffId('T_COMPLIANCE'))}, verified_residence_set_at = clock_timestamp() + interval '1 day' WHERE id = ${lit(v1)}`, want: 'RD005' },
+    // 1b. lic23 SN-6 / migration 0186: rewriting the verification so the evidence read ignores it (orphaning the newest verification) is refused
+    { name: 'UPDATE status approved -> pending (terminal status is final)', settings: tenantOnly, sql: `UPDATE kyc_verifications SET status = 'pending' WHERE id = ${lit(v1)}`, want: 'KV001' },
+    { name: 'UPDATE status approved -> review_required', settings: tenantOnly, sql: `UPDATE kyc_verifications SET status = 'review_required' WHERE id = ${lit(v1)}`, want: 'KV001' },
+    { name: 'UPDATE provider_reference to NULL (orphan the newest verification)', settings: tenantOnly, sql: `UPDATE kyc_verifications SET provider_reference = NULL WHERE id = ${lit(v1)}`, want: 'KV002' },
+    { name: 'UPDATE provider_reference to another value', settings: tenantOnly, sql: `UPDATE kyc_verifications SET provider_reference = 'forged-ref' WHERE id = ${lit(v1)}`, want: 'KV002' },
+    { name: 'UPDATE created_at (reorder the newest verification)', settings: tenantOnly, sql: `UPDATE kyc_verifications SET created_at = created_at - interval '1 day' WHERE id = ${lit(v1)}`, want: 'KV002' },
     // 2. direct writes to the residence tables: no privilege at all
     { name: 'INSERT residence_approval_policies', settings: tenantOnly, sql: `INSERT INTO residence_approval_policies (tenant_id) VALUES (${lit(tid)})`, want: '42501' },
     { name: 'UPDATE residence_approval_policies', settings: tenantOnly, sql: `UPDATE residence_approval_policies SET status = 'active'`, want: '42501' },
