@@ -72,7 +72,14 @@ func (s *Service) Effective(ctx context.Context, a Actor, tenantID uuid.UUID) (*
 			}
 		}
 		out.Causes = causes
-		return nil
+		out.ActionSemantics = ActionSemantics
+		if a.Scope != ScopeTenant {
+			out.Parked = ParkedSummary{Note: ParkedPlatformNote}
+			return nil
+		}
+		p, err := parkedSummary(ctx, tx, tenantID)
+		out.Parked = p
+		return err
 	})
 	if err != nil {
 		return nil, classify(err)
@@ -187,4 +194,30 @@ func nullableUUID(u uuid.UUID) *uuid.UUID {
 		return nil
 	}
 	return &u
+}
+
+// parkedSummary reads the tenant's open withdrawals whose latest dispatch gate decision is a WD056 refusal (lic17 M-1), in the
+// tenant's own session. "Parked since" is the earliest WD056 refusal recorded for the request.
+func parkedSummary(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (ParkedSummary, error) {
+	out := ParkedSummary{Visible: true, Note: ParkedTenantNote}
+	err := tx.QueryRow(ctx, `
+		WITH latest AS (
+			SELECT DISTINCT ON (d.withdrawal_request_id) d.withdrawal_request_id, d.allowed, d.gate_code
+			  FROM withdrawal_gate_decisions d
+			 WHERE d.tenant_id = $1
+			 ORDER BY d.withdrawal_request_id, d.decided_xact DESC, d.decided_at DESC
+		), parked AS (
+			SELECT (SELECT min(d2.decided_at) FROM withdrawal_gate_decisions d2
+			         WHERE d2.withdrawal_request_id = l.withdrawal_request_id AND d2.tenant_id = $1
+			           AND NOT d2.allowed AND d2.gate_code = 'WD056') AS since
+			  FROM latest l
+			  JOIN withdrawal_requests wr ON wr.id = l.withdrawal_request_id AND wr.tenant_id = $1
+			 WHERE NOT l.allowed AND l.gate_code = 'WD056' AND wr.state IN ('approved', 'submitted')
+		)
+		SELECT count(*), min(since), floor(EXTRACT(EPOCH FROM clock_timestamp() - min(since)))::bigint FROM parked`, tenantID).
+		Scan(&out.Count, &out.OldestParkedSince, &out.OldestAgeSeconds)
+	if err != nil {
+		return ParkedSummary{}, fmt.Errorf("withdrawalpolicy: read parked withdrawals: %w", err)
+	}
+	return out, nil
 }

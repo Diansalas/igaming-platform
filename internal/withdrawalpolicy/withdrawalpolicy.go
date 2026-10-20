@@ -241,8 +241,45 @@ type EffectiveView struct {
 	// Configured is true when at least one policy row exists for the tenant.
 	Configured bool
 	Causes     []CauseView
+	// ActionSemantics states plainly what each action does (lic17 M-1); the same closed text on every read.
+	ActionSemantics []ActionSemantic
+	// Parked summarises the tenant's withdrawals currently parked by a WD056 refusal (lic17 M-1).
+	Parked     ParkedSummary
 	Disclaimer string
 }
+
+// ActionSemantic is the plain meaning of one action.
+type ActionSemantic struct {
+	Action  string
+	Meaning string
+}
+
+// ActionSemantics is the closed, plain statement of the three actions (lic17 M-1, ledger-finance review). hold_for_review is a
+// PARK, not a review queue: there is no per-withdrawal release in this policy (an owner decision; see docs/plans/lic17-record.md).
+var ActionSemantics = []ActionSemantic{
+	{ActionAllow, "allow: the withdrawal proceeds at this stage. Every other gate (tenant / brand status, KYC, RG, risk, market, kill switch) still applies."},
+	{ActionHoldForReview, "hold_for_review: PARK, not a review queue. At the request stage the request is accepted and the amount moves to the player's withdrawal hold. At a payout dispatch point the payout is NOT sent (first dispatch: the request stays approved with its hold; sweeper re-dispatch: the attempt is escalated, no resend, no release) and the WD056 alert is raised. There is NO per-withdrawal release in this policy: the withdrawal moves again only when the cause clears (a re-submit, or the next sweeper tick, re-runs the gate) or the policy is widened by two distinct approvers. The amount stays on the player's withdrawal hold; it is not forfeited and not paid. For a non-active tenant or brand the governed release_hold_to_player (ADR 0111) returns an approved hold to the player; for an active tenant there is no such path today (residual, docs/plans/lic17-record.md)."},
+	{ActionBlock, "block: at the request stage the request is refused and nothing is held. At a payout dispatch point the same park as hold_for_review."},
+}
+
+// ParkedSummary counts the tenant's withdrawal requests that are still open (approved or submitted) and whose LATEST dispatch
+// gate decision is a WD056 refusal, with the earliest WD056 refusal among them (the park age). Visible is false for a platform
+// session: the decision rows are tenant-scoped (RLS); a platform operator uses the withdrawal.payout_gate_denied alerts
+// (attribute gate_code WD056; first_seen_at is the park start of each subject).
+type ParkedSummary struct {
+	Visible           bool
+	Count             int64
+	OldestParkedSince *time.Time
+	// OldestAgeSeconds is the age of OldestParkedSince at the database clock.
+	OldestAgeSeconds *int64
+	Note             string
+}
+
+// ParkedPlatformNote is ParkedSummary.Note for a platform session.
+const ParkedPlatformNote = "Not visible in a platform session (the gate decision rows are tenant-scoped). Use the withdrawal.payout_gate_denied alerts with gate_code WD056: one open alert per parked withdrawal or attempt, first_seen_at is when it was parked."
+
+// ParkedTenantNote is ParkedSummary.Note for a tenant session.
+const ParkedTenantNote = "Open withdrawals whose latest dispatch gate decision is a WD056 refusal. A parked withdrawal is NOT released by this policy; see the hold_for_review semantics."
 
 var reasonCodeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
 
