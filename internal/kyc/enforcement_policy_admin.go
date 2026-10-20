@@ -115,30 +115,21 @@ func SupersedeEnforcementPolicyWithDraft(ctx context.Context, tx pgx.Tx, oldID, 
 	if oldID == uuid.Nil || successorID == uuid.Nil || oldID == successorID {
 		return fmt.Errorf("%w: a distinct active policy and draft successor are required", ErrPolicyInvalidInput)
 	}
-	if err := requirePersonDistinctFromAuthor(ctx, tx, oldID); err != nil {
+	if err := transitionEnforcementPolicyMeta(ctx, tx, oldID, "active", "withdrawn", "kyc_enforcement_policy.withdrawn", &successorID, meta, meta.write()); err != nil {
 		return err
 	}
-	if err := requirePersonDistinctFromAuthor(ctx, tx, successorID); err != nil {
-		return err
-	}
-	if err := transitionEnforcementPolicyMeta(ctx, tx, oldID, "active", "withdrawn", "kyc_enforcement_policy.withdrawn", &successorID, meta); err != nil {
-		return err
-	}
-	return transitionEnforcementPolicyMeta(ctx, tx, successorID, "draft", "active", "kyc_enforcement_policy.activated", nil, meta)
+	return transitionEnforcementPolicyMeta(ctx, tx, successorID, "draft", "active", "kyc_enforcement_policy.activated", nil, meta, meta.write())
 }
 
 // ActivateEnforcementPolicyAudited is ActivateEnforcementPolicy with request evidence on the audit record.
 func ActivateEnforcementPolicyAudited(ctx context.Context, tx pgx.Tx, id uuid.UUID, meta *AuditMeta) error {
-	if err := requirePersonDistinctFromAuthor(ctx, tx, id); err != nil {
-		return err
-	}
-	return transitionEnforcementPolicyMeta(ctx, tx, id, "draft", "active", "kyc_enforcement_policy.activated", nil, meta)
+	return transitionEnforcementPolicyMeta(ctx, tx, id, "draft", "active", "kyc_enforcement_policy.activated", nil, meta, meta.write())
 }
 
 // WithdrawDraftEnforcementPolicyAudited withdraws a policy that was never activated (a draft). An ACTIVE policy cannot be
 // withdrawn this way: the database refuses it (migration 0103); use SupersedeEnforcementPolicyWithDraft.
 func WithdrawDraftEnforcementPolicyAudited(ctx context.Context, tx pgx.Tx, id uuid.UUID, meta *AuditMeta) error {
-	return transitionEnforcementPolicyMeta(ctx, tx, id, "draft", "withdrawn", "kyc_enforcement_policy.withdrawn", nil, meta)
+	return transitionEnforcementPolicyMeta(ctx, tx, id, "draft", "withdrawn", "kyc_enforcement_policy.withdrawn", nil, meta, meta.write())
 }
 
 // PolicyFailure is the closed classification of a database refusal of a policy write.
@@ -153,6 +144,8 @@ const (
 	PolicyFailureDuplicate    PolicyFailure = "active_policy_exists"
 	PolicyFailureUnknownRef   PolicyFailure = "unknown_reference"
 	PolicyFailureInvalid      PolicyFailure = "invalid_policy"
+	PolicyFailureNoPerson     PolicyFailure = "no_person_link"
+	PolicyFailureProof        PolicyFailure = "proof_rejected"
 	PolicyFailureOther        PolicyFailure = "other"
 )
 
@@ -169,6 +162,14 @@ func ClassifyPolicyError(err error) PolicyFailure {
 		return PolicyFailureOther
 	}
 	switch pe.Code {
+	case "KP002":
+		return PolicyFailureNoPerson
+	case "KP003":
+		return PolicyFailureFourEyes
+	case "KP001", "KP004":
+		return PolicyFailureInvalid
+	case "AP001", "AP002", "AP003", "AP004", "AP005":
+		return PolicyFailureProof
 	case "23505":
 		return PolicyFailureDuplicate
 	case "23503":

@@ -500,6 +500,7 @@ func TestK3_C9c_ReservedPrefixCatalogue(t *testing.T) {
 		"casino_callback_rejections.original_provider_tx_id": "same: casino rejection log",
 		"kyc_verifications.provider_reference":               "a KYC vendor reference, not a payment reference",
 		"aml_screening_results.provider_reference":           "a sanctions/PEP screening vendor reference (ADR 0116 S2, migration 0154), never a payment or ledger key",
+		"aml_screening_requests.provider_reference":          "the same screening vendor reference carried by the automatic screening queue (lic10 / lic18, migration 0181); it is stored for audit only (the screening gate and the officer list do not read it), is never a payment, ledger or settlement key, and is written only by aml_screening_request_finish from a screening provider result. Renaming was rejected: the catalogue does not forbid the name for non-payment vendor references (kyc_verifications and aml_screening_results carry the same exemption) and the column must stay parallel to aml_screening_results.provider_reference",
 	}
 	byName := []string{"payment_attempt_reference_evidence.reference"}
 	var cols []string

@@ -20,6 +20,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/kycpolfix/seed"
 )
 
 func mustLicenseCasinoTenant(t *testing.T, pool *db.Pool, f casinoFixture) uuid.UUID {
@@ -61,24 +62,10 @@ func mustSeedCasinoJurisdiction(t *testing.T, pool *db.Pool) uuid.UUID {
 func mustActiveCasinoPlayPolicy(t *testing.T, pool *db.Pool, jurisdictionID uuid.UUID) {
 	t.Helper()
 	playOp := "casino_play"
-	var id uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		id, err = kyc.CreateEnforcementPolicy(ctx, tx, kyc.CreateEnforcementPolicyParams{
-			LicensingJurisdictionID: jurisdictionID, TriggerType: "play", PlayOperation: &playOp,
-			LegalReviewReference: "test-legal-ref", ReasonCode: "test",
-		})
-		return err
+	seed.Active(t, pool, kyc.CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "play", PlayOperation: &playOp,
+		LegalReviewReference: "test-legal-ref", ReasonCode: "test",
 	})
-	if err != nil {
-		t.Fatalf("create play policy: %v", err)
-	}
-	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		return kyc.ActivateEnforcementPolicy(ctx, tx, id)
-	})
-	if err != nil {
-		t.Fatalf("activate play policy: %v", err)
-	}
 }
 
 func countRows(t *testing.T, pool *db.Pool, tenantID uuid.UUID, query string, args ...any) int {
