@@ -22,7 +22,13 @@ import (
 // forges the exact GUC shape of a real officer.
 
 var amlTables = []string{"aml_holds", "aml_hold_lifts", "aml_enforcement_decisions", "aml_alerts", "aml_cases", "aml_case_alerts", "aml_case_notes", "aml_case_events",
-	"aml_screening_policies", "aml_screening_results"} // migration 0154 (A7) added the last two
+	"aml_screening_policies", "aml_screening_results", // migration 0154 (A7)
+	"aml_screening_trigger_policies", "aml_screening_requests"} // migration 0181 (lic10, G1)
+
+// amlStateMachineTables are AML tables that are NOT append-only: the automatic screening queue is a guarded state machine
+// (aml_screening_requests_guard: terminal states are final, identity is immutable) that is never deleted or truncated. Every
+// other AML table is append-only.
+var amlStateMachineTables = map[string]bool{"aml_screening_requests": true}
 
 func TestRuntime_NoAccessToAMLTables_EvenWithForgedOfficerGUCs(t *testing.T) {
 	w := newWorld(t, "own_licence")
@@ -266,6 +272,9 @@ func TestAppendOnly_BindsTheOwner(t *testing.T) {
 			})
 			if tbl == "aml_hold_lifts" {
 				continue // no row yet; the TRUNCATE leg below still applies
+			}
+			if amlStateMachineTables[tbl] && strings.HasPrefix(stmt, "UPDATE") {
+				continue // a guarded state machine (migration 0181); its transitions are pinned in screening_trigger_integration_test.go
 			}
 			if pgCode(err) != "AM005" {
 				t.Errorf("%q must be AM005 for the owner, got %v", stmt, err)
