@@ -232,7 +232,11 @@ BEGIN
         -- Migration 0154 (A7): screening policy / record / list and the launch readiness reader.
         'aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)', 'aml_screening_policy_effective(uuid, uuid)',
         'aml_screening_record(uuid, uuid, text, text, text, text, text, text[], text, text[], text, timestamptz, text, text)',
-        'aml_screening_list(uuid, uuid)', 'aml_readiness(uuid, uuid[])'
+        'aml_screening_list(uuid, uuid)', 'aml_readiness(uuid, uuid[])',
+        -- Migration 0181 (lic10, G1): the automatic screening trigger policy, queue and worker API.
+        'aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, timestamptz, text, text)', 'aml_screening_trigger_policy_effective(uuid, uuid)',
+        'aml_screening_request_list(uuid, uuid)', 'aml_screening_enqueue_due(uuid, integer)', 'aml_screening_request_claim(uuid, integer, integer)',
+        'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer)'
     ] LOOP
         IF to_regprocedure('public.' || f) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
@@ -829,5 +833,31 @@ BEGIN
         EXECUTE 'REVOKE ALL ON withdrawal_gate_decisions FROM igaming_runtime';
         EXECUTE 'GRANT SELECT, INSERT ON withdrawal_gate_decisions TO igaming_runtime';
     END IF;
+END
+$$;
+
+-- Migration 0181 (lic10, G8/Q21): the residence determination maker-checker. The three tables are owner-written (SECURITY DEFINER
+-- functions); the runtime role keeps SELECT on residence_determination_checks ONLY (tenant RLS: the evidence read and the pending
+-- list) and EXECUTE on the four definer API functions. Re-asserted on every run because the blanket GRANT above would otherwise
+-- re-grant the tables. Guarded: nothing exists before the migrations ran.
+DO $$
+DECLARE
+    t text;
+    f text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['residence_approval_policies', 'residence_approval_policy_approvals', 'residence_determination_checks'] LOOP
+        IF to_regclass('public.' || t) IS NOT NULL THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t);
+        END IF;
+    END LOOP;
+    IF to_regclass('public.residence_determination_checks') IS NOT NULL THEN
+        GRANT SELECT ON residence_determination_checks TO igaming_runtime;
+    END IF;
+    FOREACH f IN ARRAY ARRAY['residence_policy_set(uuid, text, text)', 'residence_policy_approve(uuid, uuid, text)', 'residence_policy_list(uuid)',
+                             'residence_determination_approve(uuid, uuid, timestamptz, text)'] LOOP
+        IF to_regprocedure('public.' || f) IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
+        END IF;
+    END LOOP;
 END
 $$;

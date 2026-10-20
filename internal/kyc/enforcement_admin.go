@@ -52,6 +52,17 @@ type CreateEnforcementPolicyParams struct {
 	PlayOperation           *string
 	LegalReviewReference    string
 	ReasonCode              string
+	// Audit carries the request evidence (IP, user agent, request id) the admin route supplies; nil for library callers.
+	Audit *AuditMeta
+}
+
+// AuditMeta is the request evidence an HTTP caller adds to the audit record of a policy write (CLAUDE.md: every mutating
+// administrative action records the IP and a reason code). All fields are optional for non-HTTP callers.
+type AuditMeta struct {
+	ReasonCode string
+	IPAddress  string
+	UserAgent  string
+	RequestID  string
 }
 
 // CreateEnforcementPolicy authors a new DRAFT kyc_enforcement_policies
@@ -84,7 +95,7 @@ func CreateEnforcementPolicy(ctx context.Context, tx pgx.Tx, p CreateEnforcement
 		return uuid.Nil, fmt.Errorf("kyc: insert enforcement policy: %w", err)
 	}
 
-	if err := audit.Record(ctx, tx, audit.Entry{
+	entry := audit.Entry{
 		TenantID:   uuid.Nil,
 		ActorType:  audit.ActorStaff,
 		ActorID:    principal,
@@ -97,7 +108,11 @@ func CreateEnforcementPolicy(ctx context.Context, tx pgx.Tx, p CreateEnforcement
 			"trigger_type":              p.TriggerType,
 			"reason_code":               p.ReasonCode,
 		},
-	}); err != nil {
+	}
+	if m := p.Audit; m != nil {
+		entry.IPAddress, entry.UserAgent, entry.RequestID = m.IPAddress, m.UserAgent, m.RequestID
+	}
+	if err := audit.Record(ctx, tx, entry); err != nil {
 		return uuid.Nil, fmt.Errorf("kyc: audit: %w", err)
 	}
 	return id, nil
@@ -112,6 +127,11 @@ func CreateEnforcementPolicy(ctx context.Context, tx pgx.Tx, p CreateEnforcement
 // audit record. successorID is NULL for every transition except
 // active->withdrawn done via SupersedeEnforcementPolicy.
 func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string, successorID *uuid.UUID) error {
+	return transitionEnforcementPolicyMeta(ctx, tx, id, fromStatus, toStatus, action, successorID, nil)
+}
+
+// transitionEnforcementPolicyMeta is transitionEnforcementPolicy with optional request evidence (the admin routes).
+func transitionEnforcementPolicyMeta(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string, successorID *uuid.UUID, meta *AuditMeta) error {
 	principal, err := assertPlatformAdminScope(ctx, tx)
 	if err != nil {
 		return err
@@ -123,7 +143,7 @@ func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, f
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: policy %s is not in state %q", ErrPolicyInvalidInput, id, fromStatus)
 	}
-	return audit.Record(ctx, tx, audit.Entry{
+	entry := audit.Entry{
 		TenantID:   uuid.Nil,
 		ActorType:  audit.ActorStaff,
 		ActorID:    principal,
@@ -131,7 +151,16 @@ func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, f
 		TargetType: "kyc_enforcement_policy",
 		TargetID:   id.String(),
 		Outcome:    audit.OutcomeSuccess,
-	})
+	}
+	if meta != nil {
+		entry.IPAddress, entry.UserAgent, entry.RequestID = meta.IPAddress, meta.UserAgent, meta.RequestID
+		md := map[string]any{"from_status": fromStatus, "to_status": toStatus, "reason_code": meta.ReasonCode}
+		if successorID != nil {
+			md["successor_policy_id"] = successorID.String()
+		}
+		entry.Metadata = md
+	}
+	return audit.Record(ctx, tx, entry)
 }
 
 // ActivateEnforcementPolicy moves a draft row to active. Must be called

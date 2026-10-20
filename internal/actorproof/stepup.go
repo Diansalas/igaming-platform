@@ -70,9 +70,14 @@ var StepUpOperations = map[string]stepup.Class{
 	// operations are protective and absent. The routes POST /v1/admin/licensing-changes and .../{changeID}/approve, and the
 	// two legacy routes that now file a change (POST /v1/admin/licences, PUT /v1/admin/tenants/{tenantID}/licence), are
 	// critical in the golden table.
-	OpLicensingChangeRequest: stepup.Critical,
-	OpLicensingChangeApprove: stepup.Critical,
-	OpLicensingChangeExecute: stepup.Critical,
+	// lic10 (migration 0181): the two approval operations of the residence maker-checker loosen a control (an approval makes a
+	// determination market evidence, or relaxes the policy), so they are critical; residence_policy:set only tightens or files a
+	// pending request (protective) and is absent.
+	OpResidencePolicyApprove:        stepup.Critical,
+	OpResidenceDeterminationApprove: stepup.Critical,
+	OpLicensingChangeRequest:        stepup.Critical,
+	OpLicensingChangeApprove:        stepup.Critical,
+	OpLicensingChangeExecute:        stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4

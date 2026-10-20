@@ -121,6 +121,7 @@ var proofOperations = map[string]bool{
 	OpProofAlertRaise: true, OpProofCaseOpen: true, OpProofCaseRead: true, OpProofCaseTransition: true, OpProofCaseNote: true,
 	OpProofCaseFlagSAR: true, OpProofCasePropose: true, OpProofCaseApprove: true,
 	OpProofScreeningRecord: true, OpProofScreeningRead: true, OpProofScreeningPolicySet: true,
+	OpProofScreeningTriggerPolicySet: true, OpProofScreeningRequestRead: true,
 }
 
 // ProofOperations lists the AML proof operation names (for tests that mirror the verifier's admission rule).

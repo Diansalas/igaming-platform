@@ -158,6 +158,13 @@ func staffKind(k Kind, sev Severity, platform bool, allowed ...string) KindDef {
 // (ALERT-DELIVERY-1 OPEN: nobody is paged).
 const KindAMLHoldEvalFailed Kind = "aml.hold_eval_failed"
 
+// KindAMLScreeningAttention is the lic10 (migration 0181) Kind raised by the automatic AML screening worker: a request ended
+// in a state a human must look at, either a match awaiting an officer (reason match_review) or a request that failed terminally
+// (reason failed_terminal). Raised in the SAME transaction as the state change. Attributes are the request id, a closed reason
+// and the closed trigger name: NEVER the person, the list, the match or any vendor text (ADR 0116 s5.2, no tipping off). Severity
+// p2 is an ENGINEERING DEFAULT (ALERT-DELIVERY-1 OPEN: nobody is paged).
+const KindAMLScreeningAttention Kind = "aml.screening_attention"
+
 // KindReconciliationSweepFailed is the A9 (migration 0156) platform, subjectless P1 Kind: the reconciliation
 // scheduler could not LIST tenants (phase list_active or list_non_active; R3-LISTING-FAILURE-LOG-ONLY-1) or a
 // whole sweep panicked (phase panic), so no tenant was (fully) reconciled in that sweep. Per-tenant failures
@@ -329,6 +336,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindAMLHoldEvalFailed, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("operation"),
+	},
+	KindAMLScreeningAttention: {
+		Kind: KindAMLScreeningAttention, Severity: SeverityP2, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("request_id", "reason", "trigger"),
 	},
 	KindWithdrawalPayoutGateDenied: {
 		Kind: KindWithdrawalPayoutGateDenied, Severity: SeverityP2, Scope: ScopeKindPlatform,

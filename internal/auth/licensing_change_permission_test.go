@@ -39,3 +39,37 @@ func TestJurisdictionRegistryReadPermission_PlatformAdminOnly(t *testing.T) {
 		}
 	}
 }
+
+// lic10 (L-20): the KYC enforcement policy authoring permissions are platform_admin ONLY, for every other role, the
+// empty role and look-alikes (the table is platform-wide configuration; no tenant role may author it).
+func TestKYCEnforcementPolicyPermissions_PlatformAdminOnly(t *testing.T) {
+	if string(PermKYCEnforcementPolicyManage) != "kyc_enforcement_policy:manage" || string(PermKYCEnforcementPolicyRead) != "kyc_enforcement_policy:read" {
+		t.Fatal("permission string drifted")
+	}
+	for _, perm := range []Permission{PermKYCEnforcementPolicyManage, PermKYCEnforcementPolicyRead} {
+		for _, role := range append(append([]Role(nil), allRoles...), "", "unknown", "PLATFORM_ADMIN", RolePlayer) {
+			if got, want := RoleHasPermission(role, perm), role == RolePlatformAdmin; got != want {
+				t.Errorf("role %q %s = %v, want %v", role, perm, got, want)
+			}
+		}
+	}
+}
+
+// lic10 (migration 0181): the residence maker-checker policy permissions. Manage: compliance only; Read: also tenant_admin; no
+// other role (platform_admin included: there is no acting path), the empty role or a look-alike.
+func TestResidenceApprovalPolicyPermissions_Matrix(t *testing.T) {
+	if string(PermResidenceApprovalPolicyManage) != "residence_approval_policy:manage" || string(PermResidenceApprovalPolicyRead) != "residence_approval_policy:read" {
+		t.Fatal("permission string drifted")
+	}
+	co, ta := RoleCompliance, RoleTenantAdmin
+	for perm, allowed := range map[Permission]map[Role]bool{
+		PermResidenceApprovalPolicyManage: {co: true},
+		PermResidenceApprovalPolicyRead:   {co: true, ta: true},
+	} {
+		for _, role := range append(append([]Role(nil), allRoles...), "", "unknown", "COMPLIANCE", RolePlayer) {
+			if got, want := RoleHasPermission(role, perm), allowed[role]; got != want {
+				t.Errorf("role %q %s = %v, want %v", role, perm, got, want)
+			}
+		}
+	}
+}

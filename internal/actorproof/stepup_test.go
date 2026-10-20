@@ -35,6 +35,8 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 		"withdrawal_payout_reversal:decide": stepup.Critical,
 		// Migration 0177 (MKT-DUAL-1): filing, approving and executing a licensing / jurisdiction change.
 		"licensing_change:request": stepup.Critical, "licensing_change:approve": stepup.Critical, "licensing_change:execute": stepup.Critical,
+		// lic10 (migration 0181): the two approval halves of the residence determination maker-checker (the policy filing is protective).
+		"residence_policy:approve": stepup.Critical, "residence_determination:approve": stepup.Critical,
 	}
 	if len(StepUpOperations) != len(want) {
 		t.Fatalf("registry has %d operations, ADR 0119 section 9.1 pins %d", len(StepUpOperations), len(want))
@@ -48,7 +50,7 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 	for _, op := range []string{OpAdjustmentReject, OpAdjustmentCancel, OpResolutionReject, OpResolutionCancel, OpHoldResolutionReject,
 		OpHoldResolutionCancel, OpGrantReject, OpGrantCancel, OpPolicyReject, OpPolicyCancel, OpLaunchSuspend, OpLaunchCancel,
 		OpLaunchReject, OpRGConfigReject, OpRGConfigCancel, OpStaffLifecycleReject, OpStaffLifecycleCancel,
-		OpLicensingChangeReject, OpLicensingChangeCancel} {
+		OpLicensingChangeReject, OpLicensingChangeCancel, OpResidencePolicySet} {
 		if _, ok := StepUpOperations[op]; ok {
 			t.Errorf("%s is protective and must not require step-up", op)
 		}
