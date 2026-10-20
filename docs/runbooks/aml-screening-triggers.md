@@ -46,3 +46,10 @@ Alert kind `aml.screening_attention` (p2, platform scope, raised in the same tra
 - The tables are owner-only; the runtime role has EXECUTE on the API functions only.
 - The queue is not tenant-visible and no tenant audit row is written for screening results (no tipping off).
 - `launchgov.SnapshotVersion` is untouched: `R-AML-SCREENING` still counts only screening policies. A readiness detail for the trigger policy is a residual (proposed text in `docs/plans/lic10-record.md`).
+
+## lic26 additions
+
+- Replacing a stale request (`aml_screening_request_replace`) is refused while a worker's lease on it is still live; wait for the lease to expire. The replacement keeps the ORIGINAL age of the request, so the `aml.screening_gate_trapped` clock does not restart, and it records the officer, the officer's Person and the reason code on the new row.
+- The payments sweeper reports persons parked at the payout gate only for an outstanding screening (log line `payouts parked for an outstanding AML screening`, counts only) and raises the platform-routed `aml.screening_gate_trapped` alert (attribute `persons` only) once they have been parked longer than the gating policy's `gate_alert_after_seconds`. If that alert fires and the screening worker logs no `aml screening worker: pass` lines, the worker is down.
+- An officer-reviewed match carries forward to an identical re-flag only for four re-screen intervals (capped at 180 days) and only for the same outcome and lists; an upgraded match (for example potential to confirmed) always needs an officer.
+- Databases that applied migration 0181 before the lic26 edit must be rebuilt (see `docs/plans/lic26-record.md`).

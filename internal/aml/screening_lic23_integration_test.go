@@ -302,7 +302,8 @@ func TestLic23_N4_ReplaceStalePendingRequest_AndQueueForAPersonWithNone(t *testi
 	tw := newTrigWorld(t, 24*time.Hour, 0)
 	tw.setTrigger([]aml.TriggerEvent{aml.EventRegistration}, true, time.Now().Add(-time.Second))
 	A := tw.q.Officers[0].Actor
-	// A stale CLAIMED request: a dead worker claimed it with a long lease and will never finish it.
+	// A stale CLAIMED request: a dead worker claimed it and will never finish it (lic26 F-4: a replace needs the lease to have EXPIRED,
+	// so the lease is the 5 s minimum and the test waits it out; the pin changed from a 3600 s lease).
 	stale := tw.player()
 	var staleID string
 	for _, r := range tw.requests(stale.PersonID) {
@@ -310,7 +311,7 @@ func TestLic23_N4_ReplaceStalePendingRequest_AndQueueForAPersonWithNone(t *testi
 	}
 	if err := tw.tenantTx(func(ctx context.Context, tx pgx.Tx) error {
 		var n int
-		return tx.QueryRow(ctx, `SELECT count(*) FROM aml_screening_request_claim($1, 10, 3600)`, tw.Tenant).Scan(&n)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM aml_screening_request_claim($1, 10, 5)`, tw.Tenant).Scan(&n)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -321,6 +322,7 @@ func TestLic23_N4_ReplaceStalePendingRequest_AndQueueForAPersonWithNone(t *testi
 	}
 	// Replace: the request is cancelled (audit columns), a replacement is queued and the worker clears it.
 	rid := uuid.MustParse(staleID)
+	time.Sleep(6 * time.Second) // the dead worker's lease expires
 	res, err := tw.svc.ReplaceScreeningRequest(ctx, A, stale.PersonID, &rid, "stale_request")
 	if err != nil || res.CancelledRequestID == nil || *res.CancelledRequestID != rid {
 		t.Fatalf("replace: %+v %v", res, err)

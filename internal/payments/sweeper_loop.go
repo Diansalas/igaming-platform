@@ -39,6 +39,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Diansalas/igaming-platform/internal/aml"
 )
 
 // SweeperLoopDefaultInterval is ADR 0095 §7.3's RECOMMENDATION sweep tick
@@ -150,6 +152,62 @@ type SweepPassStats struct {
 	Processed int
 	Errors    int
 	Panics    int
+	// ScreeningParked / ScreeningParkedOverdue (lic26 N-9): persons whose payout is parked ONLY for an outstanding automatic AML
+	// screening, and those parked longer than the gating policy's alert threshold. Counts only, never an identifier.
+	ScreeningParked        int
+	ScreeningParkedOverdue int
+}
+
+// sweeperParkedAlertTimeout bounds the parked-screening read and the alert raise of one tenant.
+const sweeperParkedAlertTimeout = 5 * time.Second
+
+// reportScreeningParked (lic26 N-9) is the PRODUCTION observation of the persons parked at the payout gate only because a required
+// automatic AML screening is outstanding. It runs here, in a loop that is NOT the screening worker, so a DEAD worker (which can no
+// longer raise its own alert) shows as a growing parked count and, once a person has been parked longer than the gating policy's
+// gate_alert_after_seconds, as the p1 platform-routed aml.screening_gate_trapped alert. It is a read-only tenant transaction of its
+// own; the log line and the alert carry COUNTS only (no person, account or amount: tipping-off), and a failure never stops the sweep.
+func (s *Sweeper) reportScreeningParked(ctx context.Context, logger *slog.Logger, tenantID uuid.UUID, st *SweepPassStats) {
+	if ctx.Err() != nil {
+		return
+	}
+	var parked, overdue int
+	rctx, cancel := context.WithTimeout(ctx, sweeperParkedAlertTimeout)
+	err := s.guarded(func() error {
+		if s.testScreeningParked != nil {
+			var e error
+			parked, overdue, e = s.testScreeningParked(tenantID)
+			return e
+		}
+		return s.Pool.WithTenant(rctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			parked, overdue, e = aml.ScreeningParkedOverdue(ctx, tx, tenantID)
+			return e
+		})
+	})
+	cancel()
+	if err != nil {
+		recordSweeperTenantFailure(ctx, "screening_parked")
+		st.Errors++
+		if logger != nil {
+			logger.Error("payments sweeper: screening-parked summary failed", "tenant_id", tenantID)
+		}
+		return
+	}
+	st.ScreeningParked += parked
+	st.ScreeningParkedOverdue += overdue
+	if parked > 0 && logger != nil {
+		logger.Warn("payments sweeper: payouts parked for an outstanding AML screening", "tenant_id", tenantID, "parked", parked, "overdue", overdue)
+	}
+	if overdue == 0 {
+		return
+	}
+	if aerr := aml.RaiseScreeningTrapped(ctx, s.Pool, tenantID, overdue, sweeperParkedAlertTimeout); aerr != nil {
+		recordSweeperTenantFailure(ctx, "screening_parked_alert")
+		st.Errors++
+		if logger != nil {
+			logger.Error("payments sweeper: screening-parked alert failed", "tenant_id", tenantID)
+		}
+	}
 }
 
 // sweepTenantIDs lists EVERY tenant, whatever its status: a suspended or
@@ -210,6 +268,7 @@ func (s *Sweeper) sweepTenant(ctx context.Context, logger *slog.Logger, tenantID
 	if ctx.Err() != nil {
 		return // shutdown: do not claim on a dead context (H-CR-8)
 	}
+	s.reportScreeningParked(ctx, logger, tenantID, st)
 	var ids []uuid.UUID
 	if err := s.guarded(func() error {
 		if s.testBeforeClaim != nil {
@@ -323,6 +382,11 @@ func runSweeperLoop(ctx context.Context, s *Sweeper, logger *slog.Logger, ticks 
 		}()
 		st := s.RunPass(ctx, logger, pass)
 		pass++
+		if logger != nil && (st.ScreeningParked > 0 || st.Errors > 0) {
+			// lic26 N-9: the pass summary is exported, counts only.
+			logger.Info("payments sweeper: pass", "tenants", st.Tenants, "claimed", st.Claimed, "processed", st.Processed, "errors", st.Errors,
+				"panics", st.Panics, "screening_parked", st.ScreeningParked, "screening_parked_overdue", st.ScreeningParkedOverdue)
+		}
 		if st.Listed {
 			// A pass that could not even list tenants did not sweep: leave the gauge so a stalled-sweeper rule fires (H-CR-10).
 			sweeperLastPassUnix.Store(time.Now().Unix())
