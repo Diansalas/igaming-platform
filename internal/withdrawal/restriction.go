@@ -147,8 +147,8 @@ type RestrictionDecision struct {
 	// LicenceUnknown: the licences relied on could not be evaluated and the tenant has NO policy row, so the decision is the
 	// interim default (allow) with licence state unknown. With a policy row an evaluation failure is an error instead.
 	LicenceUnknown bool
-	// SchemaAbsent: the database predates migration 0182 (no policy can exist; the up / down / up migration tests). The
-	// decision is the pre-0182 behaviour and carries no provenance (the 0182 columns do not exist).
+	// SchemaAbsent: set ONLY under the test-only pre-0182 marker (a migration test's scratch database predates 0182). The
+	// decision is the pre-0182 behaviour and carries no provenance (the 0182 columns do not exist there).
 	SchemaAbsent bool
 }
 
@@ -384,19 +384,11 @@ func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.
 	if tenantID == uuid.Nil {
 		return RestrictionDecision{}, fmt.Errorf("%w: tenant id is required", ErrInvalidInput)
 	}
-	// A schema older than migration 0182 has no policy at all (the up / down / up migration tests run the request path on a
-	// rolled-back schema; lic14 tolerates a pre-0180 schema the same way): 0182 creates the policy table and the functions
-	// together, so with NEITHER present no configured restriction can exist and the decision is exactly the pre-0182 behaviour
-	// (no evaluation, allow, source none). A partial schema (the table without the function, or the reverse) fails closed.
-	var fnPresent, tablePresent bool
-	if err := tx.QueryRow(ctx, `SELECT to_regprocedure('public.withdrawal_restriction_set_version(uuid)') IS NOT NULL,
-		to_regclass('public.withdrawal_restriction_policies') IS NOT NULL`).Scan(&fnPresent, &tablePresent); err != nil {
-		return RestrictionDecision{}, fmt.Errorf("withdrawal: probe the restriction policy schema: %w", err)
-	}
-	if fnPresent != tablePresent {
-		return RestrictionDecision{}, errors.New("withdrawal: the restriction policy schema is partial (table and function disagree)")
-	}
-	if !fnPresent {
+	// TEST-ONLY: a migration up / down / up test drives a scratch database whose schema predates 0182 (no policy table, no
+	// functions). Only test code of this package can set the marker (the key type is unexported and the setter lives in a
+	// _test.go file; TestLic17_Static_Pre0182MarkerIsTestOnly pins it). Production never probes the schema: a missing function
+	// is an error (fail closed).
+	if pre0182SchemaForTest(ctx) {
 		return RestrictionDecision{Stage: stage, Action: RestrictionAllow, Source: RestrictionSourceNone, SchemaAbsent: true}, nil
 	}
 	// The set version first, through the session-bound function (0184 M-3: a mis-scoped session is an error here, never
@@ -498,4 +490,13 @@ func auditRequestRestriction(ctx context.Context, tx pgx.Tx, p RequestParams, re
 		return fmt.Errorf("withdrawal: audit restriction policy: %w", err)
 	}
 	return nil
+}
+
+// pre0182SchemaKey is the TEST-ONLY context marker of a scratch database older than migration 0182. Unexported: no other
+// package can set it, and this package's production code only reads it (pinned by a static test).
+type pre0182SchemaKey struct{}
+
+func pre0182SchemaForTest(ctx context.Context) bool {
+	v, _ := ctx.Value(pre0182SchemaKey{}).(bool)
+	return v
 }

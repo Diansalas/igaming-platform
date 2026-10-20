@@ -24,7 +24,7 @@ bases are all evaluated.
 | M-1: `hold_for_review` can strand funds | PARTIALLY IMPLEMENTED | IMPLEMENTED: the read API states the semantics plainly (`action_semantics`) and reports `parked` (count, `oldest_parked_since`, `oldest_age_seconds`) for a tenant caller. A platform caller gets `visible: false` and a pointer to the WD056 alerts, whose `first_seen_at` is the park start. The runbook states the only exits. NOT IMPLEMENTED: a governed per-withdrawal release, and an automatic age-threshold alert (residuals R-M1, R-M1b). Rationale in section 3. |
 | R-8: HTTP integration tests for the 8 routes | IMPLEMENTED | `TestLic17_R8_WithdrawalRestrictionPolicyHTTP_AuthzScopeValidation`: permission (403), scope / tenant isolation (404), step-up class (critical refuses a stale factor, none does not), request validation (400), domain refusals (409 codes), and the four-eyes flow over HTTP. |
 | F-5 / F-6 | NOT IMPLEMENTED (residual) | The coordinator did not provide the text of F-5 / F-6. They are recorded in section 5 as open residuals; nothing was guessed. |
-| Pre-0182 schema tolerance (found by the full `internal/withdrawal` run) | IMPLEMENTED | A lic11 defect, present on integ-b: the five migration up / down / up tests (0132, 0162, 0165, 0169, 0171) run `RequestWithdrawal` on a schema rolled back below 0182 and failed (`withdrawal_restriction_set_version` does not exist, then the 0182 provenance columns). Now the evaluation probes the policy table and function: if NEITHER exists, no policy can exist, so the result is the pre-0182 behaviour (`SchemaAbsent`, no provenance; `RecordDispatchGateDecision` writes the pre-0182 column list). A partial schema fails closed. This matches the lic14 precedent for pre-0180. |
+| Migration up / down / up tests on a pre-0182 schema (0132, 0162, 0165, 0169, 0171) | IMPLEMENTED | A lic11 defect, present on integ-b: the tests run `RequestWithdrawal` on a scratch database whose schema predates 0182 (`withdrawal_restriction_set_version(unknown) does not exist`). Following the existing test-side pattern (`f4AllowDispatch` probes `to_regclass` in TEST code), the shared test helper `requestWithdrawal` probes the schema with `markPre0182Schema` (a `_test.go` file). When NEITHER the policy table NOR the function exists, it passes a TEST-ONLY context marker (the unexported `pre0182SchemaKey`). The marker makes the evaluation answer the pre-0182 behaviour (`SchemaAbsent`, no provenance). Production never probes the schema: a missing function is an error (fail closed). `TestLic17_Static_Pre0182MarkerIsTestOnly` pins exactly one production use of the key (the reader). `RecordDispatchGateDecision` with a nil provenance (the F4 fixture decision) names only the pre-0182 columns. On a 0182+ schema that is the same row as naming the 0182 columns with NULLs, so the 0169 / 0171 tests' fixture insert works on their schemas. |
 | Runbook, OpenAPI | IMPLEMENTED | `docs/runbooks/withdrawal-restriction-policy.md` (sections 1a, 1b, 2, 3, 4, 5, 6); `docs/api/openapi/platform-api.yaml` (`action_semantics`, `parked`). No route was added or removed, so the route-freeze / golden tables are unchanged. |
 
 ## 2. Intentional behaviour changes (assertions changed, said plainly)
@@ -38,9 +38,9 @@ bases are all evaluated.
    removed.
 3. **lic11 runbook correction.** The lic11 runbook said a parked request could be "rejected (releases the hold)". That was
    WRONG: `withdrawal.Reject` accepts `pending_review` only. Corrected in runbook section 2 (see M-1).
-4. **Step-up golden pin (`TestStepUp_GoldenTable_EveryClassifiedRoute`).** Integ-b commit `9c415a4` summed lic11 into the
-   critical count only (78), but left none-mutating 44 / read 101 while its own comment says 46 / 105. The test failed on integ-b.
-   The pin now asserts 46 / 105, the documented composition. No route changed, and this is not a weakening: the counts are exact.
+4. **Step-up golden pin (`TestStepUp_GoldenTable_EveryClassifiedRoute`): NOT changed, per the coordinator's instruction.** The
+   coordinator sums it at merge (lic18 makes it 80 / 46 / 107). On lic17 alone, as on integ-b `5503334`, it FAILS: it asserts
+   none-mutating 44 / read 101, the routes give 46 / 105, and commit `9c415a4` summed only the critical count. lic17 adds no route.
 5. **`marketgate.AnyCountryPermits`** returns an error where it previously continued with the unfiltered list (L-4). Callers
    already treat an error as closed.
 6. **`withdrawal_restriction_set_version`** is now plpgsql (it was SQL), because it needs the scope assert.
@@ -87,12 +87,19 @@ Private scratch DB `lic17100507p2484x01` (harness `priv_db.sh` / `priv_test.sh`)
     holds the key SHARED, the writer waits, and both commit with no deadlock). Discrimination check: with the
     `ShareStatusGateKey` call disabled, both subtests FAIL; restored afterwards. Also
     `TestLic17_M1_ParkedSummary_AndHoldForReviewSemantics`.
-  - `internal/httpserver`: `TestLic17_R8_WithdrawalRestrictionPolicyHTTP_AuthzScopeValidation`; `TestStepUp_GoldenTable_EveryClassifiedRoute` (pin completed, PASS).
+  - `internal/httpserver`: `TestLic17_R8_WithdrawalRestrictionPolicyHTTP_AuthzScopeValidation`.
 - New unit tests: `TestLic17_Static_ValidityCauseCoversEveryValidityAndStatus`, `TestLic17_ReliedCauses`,
   `TestLic17_L2_RefusingDefaultIsNeverRecordable` (withdrawal); `TestLic17_L4_PrefilterByCeiling_ReturnsReadErrors` (marketgate);
   F-2 cases in `TestIsWidening_Matrix` (withdrawalpolicy).
-- Regression suites re-run on 0184: the lic11 suites (withdrawal, payments, withdrawalpolicy) and the lic14 hardening suites
-  (licensingchange). The full-package results are in the hand-back report.
+- Full integration packages on 0184. PASS: withdrawal, withdrawalpolicy, licensingchange, kyc, marketgate, operatingmarket,
+  rg, tenant. payments: everything passes except `TestK3_C9c_ReservedPrefixCatalogue`, a PRE-EXISTING lic10 / 0181 issue
+  (`aml_screening_requests.provider_reference` is not classified in the reserved-prefix pin); lic17 touches no AML code. The
+  earlier lic11 fixture panic (provider id with `_`) is fixed: no panic. httpserver: everything passes except
+  `TestStepUp_GoldenTable_EveryClassifiedRoute` (the pin above, left to the coordinator) and
+  `TestKYCEnforcementPolicyAPI_DraftWithdraw_Validation_UnwiredTypes_Authorization` (draft withdraw 403, a lic10 policy-authoring
+  route that lic17 does not touch: PRE-EXISTING). `TestResolutionIsolation_ConnectionExhaustion` and
+  `_FinancialDuringOutage` failed once on a timing bound under load (another test binary was running) and PASS when re-run
+  alone.
 
 Commands:
 ```

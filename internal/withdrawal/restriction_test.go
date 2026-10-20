@@ -2,6 +2,7 @@ package withdrawal
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -307,5 +308,39 @@ func TestLic17_SchemaAbsent_NoProvenance(t *testing.T) {
 	}
 	if (RestrictionDecision{Stage: RestrictionStageDispatch, Action: RestrictionAllow, Source: RestrictionSourceNone}).Provenance() == nil {
 		t.Fatal("a 0182+ decision always carries provenance")
+	}
+}
+
+// The pre-0182 marker is TEST-ONLY: no production (non-_test.go) file of the repository constructs pre0182SchemaKey{} except
+// the single reader in restriction.go, and nothing outside this package can (unexported).
+func TestLic17_Static_Pre0182MarkerIsTestOnly(t *testing.T) {
+	root := filepath.Join("..", "..")
+	n := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == "node_modules" || d.Name() == ".git" || d.Name() == "worktrees") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		c := strings.Count(string(b), "pre0182SchemaKey{}")
+		if c > 0 && filepath.Base(path) != "restriction.go" {
+			t.Errorf("%s constructs the test-only pre-0182 marker", path)
+		}
+		n += c
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("exactly one production use (the reader ctx.Value(pre0182SchemaKey{})), got %d", n)
 	}
 }
