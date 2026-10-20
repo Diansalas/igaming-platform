@@ -132,7 +132,12 @@ $$;
 
 DROP FUNCTION aml_screening_gate_overdue(uuid, integer);
 DROP FUNCTION aml_screening_gate_denies(uuid, uuid, text);
-DROP FUNCTION aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer);
+DROP FUNCTION aml_screening_parked_summary(uuid, timestamptz);
+DROP FUNCTION aml_screening_request_replace(uuid, uuid, uuid, text);
+DROP FUNCTION aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text);
+DROP FUNCTION aml_screening_review_cleared_at(uuid);
+DROP FUNCTION aml_screening_request_resolved(uuid);
+DROP FUNCTION aml_screening_gate_environment_ok();
 DROP FUNCTION aml_screening_request_claim(uuid, integer, integer);
 DROP FUNCTION aml_screening_enqueue_due(uuid, integer);
 DROP FUNCTION aml_screening_request_list(uuid, uuid);

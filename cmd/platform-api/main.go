@@ -470,7 +470,7 @@ func run() error {
 	}
 
 	// ADR 0116 (A7): the AML officer service behind the AML routes. Same process issuer as the other governed writers.
-	amlService, err := aml.New(aml.Config{Pool: pool, Proofs: actorProofIssuer})
+	amlService, err := aml.New(aml.Config{Pool: pool, Proofs: actorProofIssuer, Environment: cfg.GuardEnvironment()})
 	if err != nil {
 		return fmt.Errorf("aml: %w", err)
 	}

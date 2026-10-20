@@ -6,6 +6,7 @@ package httpserver
 //	POST /v1/admin/tenants/{tenantID}/screening/trigger-policy                               author the next VERSION (critical)
 //	GET  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests                  a person's automatic screening requests (none)
 //	POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution   the officer's resolution (critical)
+//	POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/replace          cancel a stale pending request and queue a replacement, or queue one for a person with none (critical; lic23 N-4)
 //
 // The paths deliberately do NOT sit under /aml/ (the A7 route pins count exactly the eleven /aml/ officer routes). Authority is the
 // AML officer model, unchanged: the static permission is only the route gate; the DATABASE re-checks the in-force aml_officer grant,
@@ -33,6 +34,8 @@ func registerAMLScreeningRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseRead)(amlHandler(deps, "screening_requests", amlScreeningRequests))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAMLHoldManage)(amlHandler(deps, "screening_resolve", amlScreeningResolve))))
+	mux.Handle("POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/replace",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAMLHoldManage)(amlHandler(deps, "screening_replace", amlScreeningReplace))))
 }
 
 type amlTriggerPolicyDTO struct {
@@ -190,6 +193,41 @@ func amlScreeningResolve(c amlCall) {
 	out := map[string]any{"result_id": res.ResultID.String(), "replayed": res.Replayed}
 	if res.HoldID != nil {
 		out["hold_id"] = res.HoldID.String()
+	}
+	writeJSON(c.w, http.StatusCreated, out)
+}
+
+type amlScreeningReplaceRequest struct {
+	RequestID  string `json:"request_id"`
+	ReasonCode string `json:"reason_code"`
+}
+
+func amlScreeningReplace(c amlCall) {
+	pid, ok := c.pathUUID("personID")
+	if !ok {
+		return
+	}
+	var req amlScreeningReplaceRequest
+	if !c.decode(&req) {
+		return
+	}
+	var rid *uuid.UUID
+	if req.RequestID != "" {
+		id, err := uuid.Parse(req.RequestID)
+		if err != nil || id == uuid.Nil {
+			c.badRequest()
+			return
+		}
+		rid = &id
+	}
+	res, err := c.svc.ReplaceScreeningRequest(c.r.Context(), c.actor, pid, rid, req.ReasonCode)
+	if err != nil {
+		c.fail("screening_replace", err)
+		return
+	}
+	out := map[string]any{"new_request_id": res.NewRequestID.String()}
+	if res.CancelledRequestID != nil {
+		out["cancelled_request_id"] = res.CancelledRequestID.String()
 	}
 	writeJSON(c.w, http.StatusCreated, out)
 }

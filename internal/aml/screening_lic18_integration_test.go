@@ -333,7 +333,7 @@ func TestLic18_FinishRefusesAClearWithoutReferenceOrHeartbeat(t *testing.T) {
 			}
 			var applied bool
 			var status string
-			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, $4, $5, $6, now(), 0)`,
+			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, $4, $5, $6, now(), 0, NULL)`,
 				tw.Tenant, id, token, provider, r, strings.Repeat("c", 64)).Scan(&applied, &status)
 		})
 	}

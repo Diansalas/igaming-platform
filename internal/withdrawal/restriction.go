@@ -32,14 +32,17 @@ package withdrawal
 // player's cash; re-submit re-evaluates; a policy change goes through the maker-checker). There is no per-withdrawal
 // override: none is invented here (record, D-4).
 //
-// Fail closed: a read error, an unknown licence status or an unknown cause is an error wrapping ErrGateUnavailable
-// (retryable; nothing is written, nothing is claimed, nothing is sent). A default never refuses.
+// Fail closed: a read error of the policy itself, an unknown licence status that could matter, or an unknown cause is an error
+// wrapping ErrGateUnavailable (retryable; nothing is written, nothing is claimed, nothing is sent). A default never refuses.
+// A licence state that cannot be READ is an error only when some configured cause could refuse at this stage (lic23 N-6): with no
+// policy row at all, or with every configured action at this stage "allow", the decision is allow with the licence state recorded
+// as unknown, exactly as before the policy existed.
 //
-// Lock order (ADR 0082): plain reads only. At R and T1p it runs after the H-SEC-11 status gate (tenant status key SHARED)
-// and before the WD-RG-1 gate (L0.4). A policy change takes the same tenant status key EXCLUSIVE before it writes (0182
-// guards), so a decision either sees the change or the change waits for the decision's transaction. At T2 / T12 it runs
-// before the L1 lock without the status key (the sweeper takes none today): one tick may still use the previous version;
-// the recorded set version says which.
+// Lock order (ADR 0082): plain reads only. At R, T1p, T2 and T12 it runs after the tenant status key is taken SHARED (R and T1p:
+// the H-SEC-11 status gate; T2 / T12: evaluateRedispatchGate, lic17 F-3) and before the WD-RG-1 gate (L0.4) and, at T2 / T12,
+// before the L1 row lock. A policy change takes the same tenant status key EXCLUSIVE before it writes (0182 guards), so a
+// decision either sees the change or the change waits for the decision's transaction: the set version it reads is one
+// consistent version. The recorded set version says which.
 
 import (
 	"context"
@@ -144,8 +147,9 @@ type RestrictionDecision struct {
 	// LicenceState is the licence evaluation behind the deciding cause (a jurisdiction.LicenceValidity value), or
 	// LicenceStateUnknown when the licences relied on could not be evaluated (lic17 F-4 / M-2).
 	LicenceState string
-	// LicenceUnknown: the licences relied on could not be evaluated and the tenant has NO policy row, so the decision is the
-	// interim default (allow) with licence state unknown. With a policy row an evaluation failure is an error instead.
+	// LicenceUnknown: the licences relied on could not be evaluated, so the licence state is recorded as unknown. The decision is
+	// allow when the tenant has NO policy row (the interim default) or when every configured cause is allow at this stage
+	// (lic23 N-6); when a configured cause could refuse, an evaluation failure is an error instead.
 	LicenceUnknown bool
 	// SchemaAbsent: set ONLY under the test-only pre-0182 marker (a migration test's scratch database predates 0182). The
 	// decision is the pre-0182 behaviour and carries no provenance (the 0182 columns do not exist there).
@@ -375,6 +379,29 @@ func reliedCauses(rel licenceReliance) (causes map[RestrictionCause]string, unkn
 	return causes, unknown, nil
 }
 
+// anyConfiguredCauseRefuses reports whether any configurable cause resolves to hold_for_review or block at the stage, and the
+// provenance source to record when none does ("configured" when any cause resolved from a configured row, else the default).
+func anyConfiguredCauseRefuses(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stage RestrictionStage) (source string, refuses bool, err error) {
+	source = RestrictionSourceDefault
+	for _, cause := range ConfigurableCauses {
+		var action, src string
+		if err := tx.QueryRow(ctx, `SELECT action, source FROM withdrawal_restriction_effective($1, $2, $3)`, tenantID, string(cause), string(stage)).Scan(&action, &src); err != nil {
+			return "", false, fmt.Errorf("withdrawal: resolve restriction policy: %w", err)
+		}
+		a := RestrictionAction(action)
+		if !a.Valid() || (src != RestrictionSourceConfigured && src != RestrictionSourceDefault) {
+			return "", false, fmt.Errorf("withdrawal: restriction policy resolved to an unknown action %q / source %q", action, src)
+		}
+		if a != RestrictionAllow {
+			return "", true, nil
+		}
+		if src == RestrictionSourceConfigured {
+			source = RestrictionSourceConfigured
+		}
+	}
+	return source, false, nil
+}
+
 func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, stage RestrictionStage) (RestrictionDecision, error) {
 	switch stage {
 	case RestrictionStageRequest, RestrictionStageDispatch, RestrictionStageRedispatch:
@@ -409,7 +436,17 @@ func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.
 	}
 	if unknown {
 		if setVersion > 0 {
-			// A configured policy exists: never guess (fail closed, retryable).
+			// A configured policy exists. lic23 N-6: the licence state is unknown, so ANY configurable cause might apply; if none of
+			// them could refuse at this stage (every effective action is allow) the unknown state cannot change the outcome and is
+			// recorded as such. Otherwise never guess (fail closed, retryable).
+			source, refuses, rerr := anyConfiguredCauseRefuses(ctx, tx, tenantID, stage)
+			if rerr != nil {
+				return RestrictionDecision{}, rerr
+			}
+			if !refuses {
+				return RestrictionDecision{Stage: stage, Action: RestrictionAllow, Source: source, SetVersion: setVersion,
+					LicenceState: LicenceStateUnknown, LicenceUnknown: true}, nil
+			}
 			if relErr == nil {
 				relErr = errors.New("withdrawal: a licence the tenant relies on could not be evaluated")
 			}

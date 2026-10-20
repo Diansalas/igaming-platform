@@ -11038,6 +11038,44 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/replace:
+    post:
+      summary: Cancel a stale pending screening request and queue a replacement, or queue one for a person who has none (officer)
+      description: >
+        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic23, migration 0181 (ledger-finance N-4). With `request_id` the request must be `pending` or `claimed` (a stale or poisoned one): it is CANCELLED (the officer, Person, reason code and the replacement id stay on the cancelled row) and a fresh request is queued for the screening worker. Without `request_id` a request is queued for a person who has none (409 when one is pending). A request stuck on a match or a terminal failure is RESOLVED, not replaced (409). 400 when no trigger policy gates withdrawals for the tenant (nothing to queue for). The replacement is screened by the worker like any request; nothing is cleared by this call.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: personID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                request_id: { type: string, format: uuid }
+                reason_code: { type: string }
+              required: [reason_code]
+      responses:
+        "201":
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  new_request_id: { type: string, format: uuid }
+                  cancelled_request_id: { type: string, format: uuid }
+                required: [new_request_id]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /v1/admin/tenants/{tenantID}/residence-approval-policy:
     get:
       summary: Read a tenant's residence determination maker-checker policy
@@ -12803,7 +12841,7 @@ components:
         id: { type: string, format: uuid }
         trigger: { type: string }
         idempotency_key: { type: string }
-        status: { type: string, enum: [pending, claimed, done, needs_officer, failed_terminal] }
+        status: { type: string, enum: [pending, claimed, done, needs_officer, failed_terminal, cancelled] }
         attempts: { type: integer }
         outcome: { type: string }
         match_lists: { type: array, items: { type: string } }
