@@ -108,6 +108,9 @@ func (s *Service) SetScreeningTriggerPolicy(ctx context.Context, a Actor, in Set
 	if err != nil {
 		return uuid.Nil, err
 	}
+	if events == nil {
+		events = []string{} // an empty set is a non-NULL empty array (nil would be sent as SQL NULL and refused)
+	}
 	var id uuid.UUID
 	from := in.EffectiveFrom.UTC().Truncate(time.Microsecond)
 	err = s.runActor(ctx, a, func(ctx context.Context, tx pgx.Tx) error {

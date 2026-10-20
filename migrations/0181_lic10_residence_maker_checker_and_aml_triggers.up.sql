@@ -140,7 +140,7 @@ CREATE TABLE residence_determination_checks (
 CREATE INDEX residence_determination_checks_pending ON residence_determination_checks (tenant_id, determined_at DESC)
     WHERE approval_required AND approved_at IS NULL;
 
--- RLS: enabled and FORCED; one OWNER policy per table (the definer functions run as the owner). Tenant sessions additionally
+-- RLS: enabled; the owner (definer functions) bypasses it, every other role is denied. Tenant sessions additionally
 -- READ their own determination checks (the evidence read and the pending list). No other policy, no write privilege.
 DO $$
 DECLARE
@@ -148,9 +148,12 @@ DECLARE
 BEGIN
     FOREACH t IN ARRAY ARRAY['residence_approval_policies', 'residence_approval_policy_approvals', 'residence_determination_checks'] LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
-        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+        -- ENABLE (not FORCE) and NO policy for the owner: the table owner (the role of the SECURITY DEFINER functions) is not
+        -- subject to RLS, every other role is denied by default and in addition holds no privilege. A role-specific permissive
+        -- owner policy would be satisfiable by the KYC worker identity's catalogue gate (internal/db
+        -- kyc_worker_catalogue_gate_integration_test.go) and is therefore not used; the same owner-access idiom as the licensing
+        -- tables. The tenant read policy below is unsatisfiable without app.tenant_id.
         EXECUTE format('REVOKE ALL ON %I FROM PUBLIC', t);
-        EXECUTE format($f$CREATE POLICY residence_owner_all ON %I FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)$f$, t);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
             EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t);
         END IF;
