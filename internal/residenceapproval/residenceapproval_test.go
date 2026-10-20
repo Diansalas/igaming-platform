@@ -22,7 +22,7 @@ func (p *neverPool) WithPrincipalScope(context.Context, uuid.UUID, uuid.UUID, db
 }
 
 func TestModes_ClosedAndOrdered(t *testing.T) {
-	if !(ModeNone.Rank() < ModeIntoOpenMarket.Rank() && ModeIntoOpenMarket.Rank() < ModeAll.Rank()) {
+	if ModeNone.Rank() >= ModeIntoOpenMarket.Rank() || ModeIntoOpenMarket.Rank() >= ModeAll.Rank() {
 		t.Fatal("strictness order must be none < into_open_market < all")
 	}
 	for _, m := range []Mode{"", "ALL", "open", "some", "none "} {

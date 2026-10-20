@@ -127,7 +127,7 @@ func TestLic17_ReliedCauses(t *testing.T) {
 }
 
 func TestLic11_ActionRank_IsTotalAndStrict(t *testing.T) {
-	if !(RestrictionAllow.Rank() < RestrictionHoldForReview.Rank() && RestrictionHoldForReview.Rank() < RestrictionBlock.Rank()) {
+	if RestrictionAllow.Rank() >= RestrictionHoldForReview.Rank() || RestrictionHoldForReview.Rank() >= RestrictionBlock.Rank() {
 		t.Fatal("allow < hold_for_review < block")
 	}
 	if RestrictionAction("override").Valid() || RestrictionAction("").Valid() {
@@ -280,7 +280,7 @@ func TestLic11_Static_Placement(t *testing.T) {
 	policy := strings.Index(body, "evaluateRequestRestriction(")
 	rg := strings.Index(body, "evaluateRGRiskGate(")
 	insert := strings.Index(body, "INSERT INTO withdrawal_requests")
-	if replay < 0 || status < 0 || policy < 0 || rg < 0 || !(replay < status && status < policy && policy < rg && rg < insert) {
+	if replay < 0 || status < 0 || policy < 0 || rg < 0 || replay >= status || status >= policy || policy >= rg || rg >= insert {
 		t.Fatalf("RequestWithdrawal order must be replay(%d) < H-SEC-11(%d) < restriction policy(%d) < WD-RG-1(%d) < insert(%d)", replay, status, policy, rg, insert)
 	}
 	dg := readSrc(t, "internal/withdrawal/dispatchgate.go")
@@ -290,7 +290,7 @@ func TestLic11_Static_Placement(t *testing.T) {
 	eval := strings.Index(fn, "EvaluateRestriction(")
 	refuse := strings.Index(fn, "return rd.DispatchDenial(), nil")
 	gate := strings.Index(fn, "gate.Evaluate(")
-	if nilCheck < 0 || eval < 0 || refuse < 0 || gate < 0 || !(nilCheck < eval && eval < refuse && refuse < gate) {
+	if nilCheck < 0 || eval < 0 || refuse < 0 || gate < 0 || nilCheck >= eval || eval >= refuse || refuse >= gate {
 		t.Fatalf("EvaluateDispatchGate order must be nil gate(%d) < policy(%d) < refusal return(%d) < gate(%d)", nilCheck, eval, refuse, gate)
 	}
 	// The provenance is set by us after the gate (a Gate implementation can never forge it).

@@ -44,7 +44,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err

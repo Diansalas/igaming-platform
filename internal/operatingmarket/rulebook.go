@@ -102,8 +102,7 @@ func ResolveRulebookJurisdiction(ctx context.Context, q ReadOnlyQuerier, p Ruleb
 	if p.OperationCode == "" {
 		return RulebookJurisdiction{}, fmt.Errorf("%w: operation_code is required", ErrInvalidInput)
 	}
-	sel, err := selectBasis(ctx, q, Query{TenantID: p.TenantID, BrandID: p.BrandID, CountryCode: p.CountryCode,
-		OperationCode: p.OperationCode, ProductCode: p.ProductCode, AsOf: p.AsOf})
+	sel, err := selectBasis(ctx, q, Query(p))
 	if err != nil {
 		return RulebookJurisdiction{}, err
 	}
