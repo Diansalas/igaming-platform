@@ -157,6 +157,14 @@ const (
 	OpLicensingChangeReject  = "licensing_change:reject"
 	OpLicensingChangeCancel  = "licensing_change:cancel"
 	OpLicensingChangeExecute = "licensing_change:execute"
+
+	// Migration 0182 (lic11): the withdrawal restriction policy maker-checker (internal/withdrawalpolicy). Provable for scope
+	// platform (NULL tenant on the wire) ONLY; the operation set is closed in lockstep with actor_proof_require.
+	OpWithdrawalRestrictionRequest = "withdrawal_restriction_policy:request"
+	OpWithdrawalRestrictionApprove = "withdrawal_restriction_policy:approve"
+	OpWithdrawalRestrictionReject  = "withdrawal_restriction_policy:reject"
+	OpWithdrawalRestrictionCancel  = "withdrawal_restriction_policy:cancel"
+	OpWithdrawalRestrictionExecute = "withdrawal_restriction_policy:execute"
 )
 
 // The fixed system actors (the SQL verifier pins the same uuids). Unexported values behind functions (closure security
@@ -235,6 +243,8 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: rg_limit_config operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, licensingChangeOperationPrefix) && !licensingChangeOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: licensing_change operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, withdrawalRestrictionOperationPrefix) && !withdrawalRestrictionOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: withdrawal_restriction_policy operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, staffLifecycleOperationPrefix) && !staffLifecycleOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: staff_lifecycle operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, payoutReversalOperationPrefix) && (c.Operation != OpPayoutReversalDecide || c.Scope != ScopeTenant):
@@ -256,7 +266,21 @@ func (c Claims) validate() error {
 func platformOperation(op string) bool {
 	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:") ||
 		strings.HasPrefix(op, launchOperationPrefix) || strings.HasPrefix(op, rgConfigOperationPrefix) ||
-		strings.HasPrefix(op, staffLifecycleOperationPrefix) || strings.HasPrefix(op, licensingChangeOperationPrefix)
+		strings.HasPrefix(op, staffLifecycleOperationPrefix) || strings.HasPrefix(op, licensingChangeOperationPrefix) ||
+		strings.HasPrefix(op, withdrawalRestrictionOperationPrefix)
+}
+
+const withdrawalRestrictionOperationPrefix = "withdrawal_restriction_policy:"
+
+// withdrawalRestrictionOperationAdmitted mirrors migration 0182's actor_proof_require block: the closed
+// withdrawal_restriction_policy operation set, scope platform only.
+func withdrawalRestrictionOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpWithdrawalRestrictionRequest, OpWithdrawalRestrictionApprove, OpWithdrawalRestrictionReject,
+		OpWithdrawalRestrictionCancel, OpWithdrawalRestrictionExecute:
+		return scope == ScopePlatform
+	}
+	return false
 }
 
 const licensingChangeOperationPrefix = "licensing_change:"

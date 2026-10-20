@@ -41,6 +41,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalpolicy"
 )
 
 func main() {
@@ -487,10 +488,17 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("licensing changes: %w", err)
 	}
+	// lic11 (migration 0182): the withdrawal restriction policy service (the only runtime writer of
+	// withdrawal_restriction_policies). Same process issuer as the other governed writers.
+	withdrawalRestrictionPolicy, err := withdrawalpolicy.New(withdrawalpolicy.Config{Pool: pool, Proofs: actorProofIssuer})
+	if err != nil {
+		return fmt.Errorf("withdrawal restriction policy: %w", err)
+	}
 
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
 		LaunchAuthorisation:         launchAuthorisation,
 		LicensingChanges:            licensingChanges,
+		WithdrawalRestrictionPolicy: withdrawalRestrictionPolicy,
 		AML:                         amlService,
 		ResidenceApproval:           residenceApproval,
 		AlertRouting:                alertDispatcher,

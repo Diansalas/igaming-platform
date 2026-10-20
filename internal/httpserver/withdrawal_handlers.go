@@ -1189,6 +1189,11 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			var denied *withdrawal.GateDeniedError
 			if errors.As(err, &denied) {
 				logger.Warn("submit_withdrawal_refused_by_withdrawal_gate", "tenant_id", tc.TenantID, "gate_code", denied.GateCode, "reason_code", denied.Reason)
+				if denied.GateCode == withdrawal.GateCodeRestriction {
+					// lic11 (migration 0182): the tenant's CONFIGURED withdrawal restriction policy holds the payout (staff surface).
+					apierror.Write(w, requestID, apierror.CodeConflict, "the withdrawal is held under the tenant's withdrawal restriction policy; it stays approved")
+					return
+				}
 			}
 			apierror.Write(w, requestID, apierror.CodeConflict, "the withdrawal is held: the responsible-gaming and risk check refused dispatch; it stays approved")
 			return

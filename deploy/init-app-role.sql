@@ -859,5 +859,34 @@ BEGIN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
         END IF;
     END LOOP;
+END $$;
+
+-- Migration 0182 (lic11, withdrawal restriction policy): least-privilege, re-asserted on every run, mirroring 0182's own grant
+-- block. FORCE RLS and the guard triggers (append-only, proof-bound maker-checker, WR040 governed write) are the binding
+-- controls; this narrowing is defence in depth against the blanket backfill GRANT above (UPDATE / DELETE):
+--   withdrawal_restriction_causes           - migration-written registry: SELECT only.
+--   withdrawal_restriction_policies         - append-only: SELECT/INSERT only.
+--   withdrawal_restriction_policy_changes   - SELECT/INSERT, UPDATE on the eight state columns only.
+--   withdrawal_restriction_policy_approvals - append-only: SELECT/INSERT only.
+-- No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.withdrawal_restriction_causes') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_causes FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON withdrawal_restriction_causes TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.withdrawal_restriction_policies') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_policies FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON withdrawal_restriction_policies TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.withdrawal_restriction_policy_changes') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_policy_changes FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON withdrawal_restriction_policy_changes TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, decided_by, decided_by_person_id, decided_at, decision_reason_code, executed_by, executed_at, executed_txid) ON withdrawal_restriction_policy_changes TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.withdrawal_restriction_policy_approvals') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_policy_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON withdrawal_restriction_policy_approvals TO igaming_runtime';
+    END IF;
 END
 $$;

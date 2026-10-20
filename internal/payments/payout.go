@@ -215,7 +215,8 @@ func recordPayoutKillSwitchHoldAudit(ctx context.Context, pool *db.Pool, tenantI
 }
 
 // ErrPayoutWithdrawalGateDenied (F4): the WD-RG-1 RG/risk gate, re-run at payout dispatch under the request-time
-// rules, refused. ClaimForDispatch returns it (wrapping a *withdrawal.GateDeniedError with the WD050 / WD051 code)
+// rules, refused (or, lic11 / migration 0182, the tenant's CONFIGURED withdrawal restriction policy held or blocked it:
+// WD056). ClaimForDispatch returns it (wrapping a *withdrawal.GateDeniedError with the WD050 / WD051 / WD056 code)
 // AFTER committing the denying decision row, the denial audit and the withdrawal.payout_gate_denied alert; the
 // request stays `approved` with its hold (no attempt, no provider call). Not retryable as such: a re-submit
 // re-evaluates the gate.
@@ -235,6 +236,34 @@ func withdrawalGateDenialMetadata(wr withdrawal.WithdrawalRequest, stage withdra
 	}
 	if d.GateCode == withdrawal.GateCodeRisk {
 		md["risk_outcome"] = d.Outcome
+	}
+	for k, v := range restrictionAuditKeys(d) {
+		md[k] = v
+	}
+	return md
+}
+
+// restrictionAuditKeys is the closed withdrawal restriction policy provenance (lic11, migration 0182) of a dispatch-point
+// decision, for its audit row: source (configured / default_unconfigured / none), the tenant's policy set version, and the
+// deciding cause and action when a cause was in force. Empty for a decision without provenance (a test fixture).
+func restrictionAuditKeys(d withdrawalgate.Decision) map[string]any {
+	p := d.Restriction
+	if p == nil {
+		return nil
+	}
+	md := map[string]any{"restriction_policy_source": p.Source, "restriction_policy_set_version": p.SetVersion, "restriction_action": p.Action}
+	if p.Cause != "" {
+		md["restriction_cause"] = p.Cause
+	}
+	return md
+}
+
+// claimSuccessMetadata is the T1p success audit payload: the provider and attempt, plus the restriction policy provenance
+// the dispatch decision was taken under (lic11).
+func claimSuccessMetadata(providerID string, attemptID uuid.UUID, d withdrawalgate.Decision) map[string]any {
+	md := map[string]any{"provider_id": providerID, "attempt_id": attemptID.String()}
+	for k, v := range restrictionAuditKeys(d) {
+		md[k] = v
 	}
 	return md
 }
@@ -677,7 +706,7 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
 			Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
 			Outcome: audit.OutcomeSuccess, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
-			Metadata: map[string]any{"provider_id": routedCapability.ProviderID, "attempt_id": attempt.ID.String()},
+			Metadata: claimSuccessMetadata(routedCapability.ProviderID, attempt.ID, gateDecision),
 		}); err != nil {
 			return err
 		}

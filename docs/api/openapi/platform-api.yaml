@@ -7389,6 +7389,327 @@ paths:
   # internal/jurisdiction.Resolve, which this phase leaves entirely
   # unchanged - evidence existing (or being collectible) does not
   # activate any regulatory jurisdiction decision.
+  /v1/admin/tenants/{tenantID}/withdrawal-restriction-policy:
+    get:
+      summary: Read a tenant's effective withdrawal restriction policy (withdrawal_restriction_policy:read)
+      description: >
+        lic11 (migration 0182). Requires withdrawal_restriction_policy:read. platform_admin reads any tenant; tenant_admin
+        and compliance read their OWN tenant only (another tenant is 404). Lists every registry cause: for a configurable
+        cause (licence state) the effective action per stage (request, dispatch, redispatch) with its source
+        (configured, or default_unconfigured = the INTERIM ENGINEERING DEFAULT, the behaviour before migration 0182) and
+        the UNCONFIGURED notice when no row is configured; for a non-configurable cause (tenant / brand status: ADR 0095
+        section 44 decisions 13-18; market closed: not evaluable) its governing reference and current behaviour. Not a legal
+        or regulatory authorisation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The effective policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyEffective"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown tenant, or one the caller may not read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/tenants/{tenantID}/withdrawal-restriction-policy/versions:
+    get:
+      summary: List a tenant's withdrawal restriction policy versions (withdrawal_restriction_policy:read)
+      description: >
+        Requires withdrawal_restriction_policy:read (a tenant reads its own). Append-only versions, newest first. A tenant
+        caller never sees a platform actor's staff id (ADR 0114 H1: null).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyVersions"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown tenant, or one the caller may not read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes:
+    post:
+      summary: File a withdrawal restriction policy change (withdrawal_restriction_policy:change)
+      description: >
+        lic11 (migration 0182). Requires withdrawal_restriction_policy:change: platform_admin ONLY (platform scope). The
+        database classifies the change: a TIGHTENING or equal change (the action is at least as strict as the effective
+        action at every stage; allow < hold_for_review < block) is single actor with a reason code and executes in the same
+        call (201 with executed true); a LOOSENING change needs two approvals by distinct Persons other than the
+        requester's. A non-configurable cause is 409 WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE; an open change for the
+        same tenant and cause is 409 WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING. Step-up: critical. No actor-proof
+        issuer: 500, nothing written.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeCreateRequest"
+      responses:
+        "201":
+          description: The change (executed true when a single-actor change executed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+    get:
+      summary: List withdrawal restriction policy changes (withdrawal_restriction_policy:read, platform only)
+      description: >
+        Requires withdrawal_restriction_policy:read and a platform session (change requests are platform records; a tenant
+        caller is 403). Newest first.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: The changes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}:
+    get:
+      summary: Read one withdrawal restriction policy change with its approvals (withdrawal_restriction_policy:read, platform only)
+      description: >
+        Requires withdrawal_restriction_policy:read and a platform session; anything else is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change, or one the caller may not see
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}/approve:
+    post:
+      summary: Approve a withdrawal restriction policy change; the final approval executes it (withdrawal_restriction_policy:change)
+      description: >
+        Requires withdrawal_restriction_policy:change (platform_admin ONLY). The requester's account and every account of the
+        requester's Person are refused (409 WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL); a second approval by the same
+        Person is 409 WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED. The final approval executes the change in the same
+        transaction (the database re-checks approvals, freshness, expiry and re-classifies under the tenant lock). Step-up:
+        critical.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawalRestrictionPolicyDecisionRequest"
+      responses:
+        "200":
+          description: The approval was recorded (executed true when it executed the change)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}/reject:
+    post:
+      summary: Reject an open withdrawal restriction policy change (withdrawal_restriction_policy:change)
+      description: >
+        Requires withdrawal_restriction_policy:change (platform_admin ONLY). Never the requester's Person. Protective: no
+        step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawalRestrictionPolicyDecisionRequest"
+      responses:
+        "200":
+          description: The change was rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}/cancel:
+    post:
+      summary: Cancel an open withdrawal restriction policy change (its requester only; withdrawal_restriction_policy:change)
+      description: >
+        Requires withdrawal_restriction_policy:change; only the requester may cancel (403 otherwise). Protective: no step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The change was cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
   /v1/admin/jurisdiction-evidence-collection:
     get:
       summary: List the caller's own tenant's evidence-collection-active facts
@@ -12858,6 +13179,148 @@ components:
           type: string
           maxLength: 1000
       required: [kind, payload, reason_code]
+    WithdrawalRestrictionPolicyDisclaimer:
+      type: string
+      enum:
+        - "A withdrawal restriction policy is an operator configuration recorded by named staff. It is not a legal or regulatory authorisation and does not determine what any licence or jurisdiction requires."
+    WithdrawalRestrictionPolicyStage:
+      type: object
+      properties:
+        stage: { type: string, enum: [request, dispatch, redispatch] }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        source: { type: string, enum: [configured, default_unconfigured] }
+        policy_id: { type: string, format: uuid, nullable: true }
+        set_version: { type: integer, nullable: true }
+      required: [stage, action, source, policy_id, set_version]
+    WithdrawalRestrictionPolicyCause:
+      type: object
+      properties:
+        cause: { type: string, enum: [licence_suspended, licence_expired, licence_not_yet_issued, licence_missing, tenant_suspended, tenant_closed, brand_suspended, brand_closed, market_closed] }
+        class: { type: string, enum: [licence, subject_status, market] }
+        configurable: { type: boolean }
+        evaluated: { type: boolean }
+        governing_reference: { type: string }
+        current_behaviour: { type: string }
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyStage"
+        unconfigured: { type: boolean }
+        notice: { type: string, description: "The UNCONFIGURED notice when the interim default is in force. Omitted otherwise." }
+      required: [cause, class, configurable, evaluated, governing_reference, current_behaviour, stages, unconfigured]
+    WithdrawalRestrictionPolicyEffective:
+      type: object
+      properties:
+        tenant_id: { type: string, format: uuid }
+        set_version: { type: integer, minimum: 0, description: "0 = nothing configured for the tenant" }
+        configured: { type: boolean }
+        causes:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyCause"
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [tenant_id, set_version, configured, causes, disclaimer]
+    WithdrawalRestrictionPolicyVersion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        cause: { type: string }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        set_version: { type: integer, minimum: 1 }
+        change_id: { type: string, format: uuid, nullable: true }
+        reason_code: { type: string }
+        created_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant caller (ADR 0114 H1) and for an owner-path row." }
+        created_at: { type: string, format: date-time }
+      required: [id, cause, action, set_version, change_id, reason_code, created_by, created_at]
+    WithdrawalRestrictionPolicyVersions:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyVersion"
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [items, disclaimer]
+    WithdrawalRestrictionPolicyChangeCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        tenant_id: { type: string, format: uuid }
+        cause: { type: string, enum: [licence_suspended, licence_expired, licence_not_yet_issued, licence_missing] }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+        note:
+          type: string
+          maxLength: 1000
+      required: [tenant_id, cause, action, reason_code]
+    WithdrawalRestrictionPolicyDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+      required: [reason_code]
+    WithdrawalRestrictionPolicyApproval:
+      type: object
+      properties:
+        approver_id: { type: string, format: uuid, nullable: true }
+        reason_code: { type: string }
+        decided_at: { type: string, format: date-time }
+      required: [approver_id, reason_code, decided_at]
+    WithdrawalRestrictionPolicyChange:
+      type: object
+      description: A withdrawal restriction policy change (append-only; content immutable; widening and required_approvals computed by the database).
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        cause: { type: string }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        reason_code: { type: string }
+        note: { type: string, nullable: true }
+        payload_hash: { type: string }
+        widening: { type: boolean }
+        required_approvals: { type: integer }
+        base_set_version: { type: integer, minimum: 0 }
+        requested_by: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        decided_by: { type: string, format: uuid, nullable: true }
+        decided_at: { type: string, format: date-time, nullable: true }
+        decision_reason_code: { type: string, nullable: true }
+        executed_by: { type: string, format: uuid, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyApproval"
+      required: [id, tenant_id, cause, action, reason_code, payload_hash, widening, required_approvals, base_set_version, status, created_at, expires_at, approvals]
+    WithdrawalRestrictionPolicyChangeResponse:
+      type: object
+      properties:
+        change:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyChange"
+        executed: { type: boolean }
+        policy:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyVersion"
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [change, executed, disclaimer]
+    WithdrawalRestrictionPolicyChangeListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyChange"
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [items, disclaimer]
     LicensingDecisionRequest:
       type: object
       additionalProperties: false
@@ -15252,6 +15715,17 @@ components:
             - LICENSING_CHANGE_PROOF_REFUSED
             - LICENSING_CHANGE_NO_PERSON
             - LICENSING_CHANGE_UNAVAILABLE
+            - WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL
+            - WITHDRAWAL_RESTRICTION_POLICY_NOT_PENDING
+            - WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED
+            - WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING
+            - WITHDRAWAL_RESTRICTION_POLICY_APPROVALS_STALE
+            - WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE
+            - WITHDRAWAL_RESTRICTION_POLICY_GUARD_REFUSED
+            - WITHDRAWAL_RESTRICTION_POLICY_RETRYABLE_LOCK_TIMEOUT
+            - WITHDRAWAL_RESTRICTION_POLICY_PROOF_REFUSED
+            - WITHDRAWAL_RESTRICTION_POLICY_NO_PERSON
+            - WITHDRAWAL_RESTRICTION_POLICY_UNAVAILABLE
             - mfa_enrolment_required
             - mfa_locked
             - invalid_mfa_code
@@ -15984,6 +16458,36 @@ components:
         sportsbook bets) refuse a closure and leave the request pending; LAUNCH_RETRYABLE_LOCK_TIMEOUT is retryable (nothing was recorded); LAUNCH_REFUSED_AT_EXECUTION (the approval is recorded,
         execution was refused; check_codes carries the refusal code); LAUNCH_GUARD_REFUSED (another database guard; check_codes carries the LA code). The message is a fixed sentence; no
         message states a legal conclusion.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WithdrawalRestrictionPolicyUnavailable:
+      description: 503 WITHDRAWAL_RESTRICTION_POLICY_UNAVAILABLE. The withdrawal restriction policy service is not wired in this process; nothing was read or written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WithdrawalRestrictionPolicyForbidden:
+      description: >
+        403. FORBIDDEN (the caller's role lacks the static permission, a tenant session asked for a write or a change
+        request, or a non-requester cancelling), WITHDRAWAL_RESTRICTION_POLICY_PROOF_REFUSED (the ADR 0110 actor proof guard,
+        AP0xx), or WITHDRAWAL_RESTRICTION_POLICY_NO_PERSON (the staff account has no readable Person: four-eyes cannot be
+        evaluated, fail closed).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WithdrawalRestrictionPolicyConflict:
+      description: >
+        409. WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL (the requester or another account of the requester's Person),
+        WITHDRAWAL_RESTRICTION_POLICY_NOT_PENDING (decided, executed, cancelled or expired),
+        WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED (this Person already approved),
+        WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING (an open change for the tenant and cause),
+        WITHDRAWAL_RESTRICTION_POLICY_APPROVALS_STALE (an approval older than the 24 h window),
+        WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE (an owner-decided or non-evaluable cause),
+        WITHDRAWAL_RESTRICTION_POLICY_GUARD_REFUSED (a database guard WR0xx / LC0xx),
+        WITHDRAWAL_RESTRICTION_POLICY_RETRYABLE_LOCK_TIMEOUT (retry). Nothing is recorded.
       content:
         application/json:
           schema:

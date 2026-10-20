@@ -486,6 +486,16 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: request refused: %w", err)
 	}
 
+	// lic11 (migration 0182): the tenant's withdrawal restriction policy (licence-state causes; restriction.go). Plain
+	// reads, under the status key H-SEC-11 just took SHARED, before the WD-RG-1 gate's L0.4. A CONFIGURED block writes its
+	// denial audit and returns a *GateDeniedError (WD056) the caller commits; allow and hold_for_review proceed and the
+	// provenance (configured / default_unconfigured / none, set version) goes on the request's audit. With no policy row
+	// the default is the behaviour before 0182 (allow).
+	restriction, rerr := evaluateRequestRestriction(ctx, tx, params)
+	if rerr != nil {
+		return WithdrawalRequest{}, rerr
+	}
+
 	// WD-RG-1 (owner decision 2026-10-15): the RG + RISK gate on a NEW request. It takes the L0.4 person
 	// lock, so it runs here - after the status gate, BEFORE the payout-instrument gate's FOR SHARE lock
 	// and every ledger lock (ADR 0082 R8, rv-prh-architect 4.1 forward note). A refusal writes its denial
@@ -659,6 +669,9 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		// WD-RG-1: a withdrawal is allowed during a self-exclusion / time-out (ADR 0115); the audit says so.
 		requestedMeta["rg_restriction_in_force"] = restrictionInForce
 	}
+	for k, v := range restriction.AuditMetadata() {
+		requestedMeta[k] = v
+	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID:   params.TenantID,
 		ActorType:  audit.ActorPlayer,
@@ -685,6 +698,11 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		},
 	}); err != nil {
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: audit: %w", err)
+	}
+
+	// lic11: a restriction cause in force at an ACCEPTED request (allow or hold_for_review) gets its own audit row.
+	if err := auditRequestRestriction(ctx, tx, params, requestID, restriction); err != nil {
+		return WithdrawalRequest{}, err
 	}
 
 	// ADR 0096 §3.6: on allow, the kyc_enforcement_decisions row commits

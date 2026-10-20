@@ -191,3 +191,29 @@ func TestWrite_SetsJSONContentType(t *testing.T) {
 		t.Errorf("expected JSON content type, got %q", ct)
 	}
 }
+
+// lic11 (migration 0182): the closed WITHDRAWAL_RESTRICTION_POLICY_* codes keep their literal strings and statuses.
+func TestWithdrawalRestrictionPolicyCodes_LiteralsAndStatuses(t *testing.T) {
+	cases := []struct {
+		code    Code
+		literal string
+		status  int
+	}{
+		{CodeWRPSelfApproval, "WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL", 409},
+		{CodeWRPNotPending, "WITHDRAWAL_RESTRICTION_POLICY_NOT_PENDING", 409},
+		{CodeWRPAlreadyDecided, "WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED", 409},
+		{CodeWRPDuplicatePending, "WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING", 409},
+		{CodeWRPApprovalsStale, "WITHDRAWAL_RESTRICTION_POLICY_APPROVALS_STALE", 409},
+		{CodeWRPNotConfigurable, "WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE", 409},
+		{CodeWRPGuardRefused, "WITHDRAWAL_RESTRICTION_POLICY_GUARD_REFUSED", 409},
+		{CodeWRPRetryableLockWait, "WITHDRAWAL_RESTRICTION_POLICY_RETRYABLE_LOCK_TIMEOUT", 409},
+		{CodeWRPProofRefused, "WITHDRAWAL_RESTRICTION_POLICY_PROOF_REFUSED", 403},
+		{CodeWRPNoPerson, "WITHDRAWAL_RESTRICTION_POLICY_NO_PERSON", 403},
+		{CodeWRPUnavailable, "WITHDRAWAL_RESTRICTION_POLICY_UNAVAILABLE", 503},
+	}
+	for _, tc := range cases {
+		if string(tc.code) != tc.literal || Status(tc.code) != tc.status {
+			t.Errorf("%s: literal %q status %d (want %d)", tc.literal, tc.code, Status(tc.code), tc.status)
+		}
+	}
+}

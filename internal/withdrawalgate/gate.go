@@ -24,6 +24,10 @@ const (
 	CodeRG = "WD050"
 	// CodeRisk: the risk evaluation returned DENY or REVIEW.
 	CodeRisk = "WD051"
+	// CodeRestriction (migration 0182, lic11): the tenant's CONFIGURED withdrawal restriction policy holds or blocks the
+	// withdrawal at a dispatch point because a restriction cause (a licence state) is in force. Never produced by a Gate
+	// implementation: internal/withdrawal evaluates the policy before the gate. A default never refuses.
+	CodeRestriction = "WD056"
 )
 
 // Input is the server-resolved identity and amount of a NEW withdrawal request. The payment method is not
@@ -47,6 +51,22 @@ type Decision struct {
 	Message            string
 	Outcome            string
 	RestrictionInForce string
+	// Restriction is the withdrawal restriction policy provenance evaluated WITH this decision (migration 0182). It is set
+	// by internal/withdrawal (EvaluateDispatchGate), never by a Gate implementation (any value a Gate returns is
+	// overwritten), and recorded on the withdrawal_gate_decisions row. nil only for a decision built by a test fixture.
+	Restriction *RestrictionProvenance
+}
+
+// RestrictionProvenance is the closed, recordable provenance of a withdrawal restriction policy evaluation.
+type RestrictionProvenance struct {
+	// Source is "configured", "default_unconfigured" (the interim engineering default) or "none" (no cause in force).
+	Source string
+	// SetVersion is the tenant's policy set version read by the evaluation (0 = nothing configured).
+	SetVersion int64
+	// Cause is the deciding cause ("" when Source is "none").
+	Cause string
+	// Action is the effective action of the deciding cause ("allow" when no cause is in force).
+	Action string
 }
 
 // Gate evaluates the RG and risk policy for a new withdrawal request inside the caller's transaction. It may
