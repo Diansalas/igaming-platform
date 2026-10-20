@@ -179,6 +179,24 @@ func (d RestrictionDecision) AuditMetadata() map[string]any {
 	return md
 }
 
+// assertRecordable (lic17 L-2) checks that a REFUSING decision has the WD056 shape the database enforces
+// (withdrawal_gate_decisions_wd056_shape, 0182): source configured, a configurable deciding cause (the reason code), action
+// hold_for_review or block. Only a configured row may refuse; a refusing DEFAULT would mean the cause registry was changed to
+// a non-allow default without the review this path needs (the 0182 registry defaults are all allow). The refusal then fails
+// closed and diagnosable (ErrGateUnavailable) instead of writing a malformed decision row or blocking on an unreviewed default.
+// A non-refusing decision is always recordable.
+func (d RestrictionDecision) assertRecordable() error {
+	if !d.Refuses() {
+		return nil
+	}
+	if d.Source != RestrictionSourceConfigured || d.DecidingCause == "" || !IsConfigurableCause(d.DecidingCause) ||
+		(d.Action != RestrictionHoldForReview && d.Action != RestrictionBlock) {
+		return fmt.Errorf("%w: a restriction refusal (source %q, cause %q, action %q) has no recordable WD056 shape",
+			ErrGateUnavailable, d.Source, d.DecidingCause, d.Action)
+	}
+	return nil
+}
+
 // DispatchDenial is the WD056 gate decision a refusing restriction decision becomes at a dispatch point (Reason = the
 // cause, the closed alert vocabulary; the action is in Restriction).
 func (d RestrictionDecision) DispatchDenial() withdrawalgate.Decision {
@@ -421,6 +439,9 @@ func evaluateRestriction(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.
 func evaluateRequestRestriction(ctx context.Context, tx pgx.Tx, p RequestParams) (RestrictionDecision, error) {
 	rd, err := EvaluateRestriction(ctx, tx, p.TenantID, p.BrandID, RestrictionStageRequest)
 	if err != nil {
+		return RestrictionDecision{}, err
+	}
+	if err := rd.assertRecordable(); err != nil {
 		return RestrictionDecision{}, err
 	}
 	if rd.Action != RestrictionBlock {

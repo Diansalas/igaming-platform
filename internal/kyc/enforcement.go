@@ -462,7 +462,33 @@ func notRequiredDecision(op EnforcementOperation, message string) EnforcementDec
 // residence country, operation): the basis row's jurisdiction, or its licence's. If the scope is unavailable (no verified
 // residence country, a basis that does not permit, no row and no licence) the result is a non-empty `unavailable` code: the
 // money / wager path is never default-allowed because a basis, not a licence, opened it.
+//
+// lic17 (L-3): operating_bases, the licence and the rulebook rows are tenant-scoped; under a player-scoped session
+// (app.player_account_id set) TenantHasApprovedBasis refuses (a player-scoped read would see no rows and look like "no basis").
+// Exactly as rg tenantJurisdiction (internal/rg/limits_service.go) and the 0121 / 0130 / 0135 technique, the player GUC is cleared
+// for these reads and restored afterwards; a restore failure is returned as an error (the caller fails closed). The tenant id is
+// still asserted against the session's own app.tenant_id by every read.
 func resolveEnforcementJurisdiction(ctx context.Context, tx pgx.Tx, params EnforcementParams) (jid uuid.UUID, hasLicence bool, unavailable string, err error) {
+	var player string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(current_setting('app.player_account_id', true), '')`).Scan(&player); err != nil {
+		return uuid.Nil, false, "", fmt.Errorf("kyc: read player scope: %w", err)
+	}
+	if player != "" {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.player_account_id', '', true)`); err != nil {
+			return uuid.Nil, false, "", fmt.Errorf("kyc: clear player scope: %w", err)
+		}
+	}
+	jid, hasLicence, unavailable, err = resolveEnforcementJurisdictionTenantScoped(ctx, tx, params)
+	if player != "" {
+		if _, rerr := tx.Exec(ctx, `SELECT set_config('app.player_account_id', $1, true)`, player); rerr != nil {
+			return uuid.Nil, false, "", fmt.Errorf("kyc: restore player scope: %w", rerr)
+		}
+	}
+	return jid, hasLicence, unavailable, err
+}
+
+// resolveEnforcementJurisdictionTenantScoped is resolveEnforcementJurisdiction with the player GUC already cleared.
+func resolveEnforcementJurisdictionTenantScoped(ctx context.Context, tx pgx.Tx, params EnforcementParams) (jid uuid.UUID, hasLicence bool, unavailable string, err error) {
 	var asOf time.Time
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err != nil {
 		return uuid.Nil, false, "", fmt.Errorf("kyc: read clock: %w", err)

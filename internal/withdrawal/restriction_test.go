@@ -193,6 +193,60 @@ func TestLic11_DispatchDenial_Shape(t *testing.T) {
 	}
 }
 
+// lic17 L-2: a refusing decision is recordable ONLY in the WD056 shape the database enforces (source configured, a
+// configurable cause as the reason, action hold_for_review / block). If the cause registry ever carried a non-allow DEFAULT,
+// combine would produce a refusing default_unconfigured decision; assertRecordable refuses it as ErrGateUnavailable (fail
+// closed, diagnosable) at every stage instead of writing a row that violates withdrawal_gate_decisions_wd056_shape.
+func TestLic17_L2_RefusingDefaultIsNeverRecordable(t *testing.T) {
+	stages := []RestrictionStage{RestrictionStageRequest, RestrictionStageDispatch, RestrictionStageRedispatch}
+	for _, st := range stages {
+		for _, a := range []RestrictionAction{RestrictionHoldForReview, RestrictionBlock} {
+			for _, c := range ConfigurableCauses {
+				d := combine(st, 0, "suspended", []effective{{cause: c, action: a, source: RestrictionSourceDefault}})
+				if !d.Refuses() || d.Source != RestrictionSourceDefault {
+					t.Fatalf("setup: %+v", d)
+				}
+				if err := d.assertRecordable(); !errors.Is(err, ErrGateUnavailable) {
+					t.Fatalf("%s %s %s: a refusing default must fail closed, got %v", st, c, a, err)
+				}
+				pid := uuid.New()
+				ok := combine(st, 1, "suspended", []effective{{cause: c, action: a, source: RestrictionSourceConfigured, policyID: &pid, version: 1}})
+				if err := ok.assertRecordable(); err != nil {
+					t.Fatalf("%s %s %s: a configured refusal is recordable: %v", st, c, a, err)
+				}
+				// The recordable refusal satisfies every term of wd056_shape.
+				g := ok.DispatchDenial()
+				if g.Restriction.Source != "configured" || g.Restriction.Cause == "" || g.Reason != g.Restriction.Cause ||
+					(g.Restriction.Action != "hold_for_review" && g.Restriction.Action != "block") {
+					t.Fatalf("%s %s %s: WD056 shape: %+v", st, c, a, g)
+				}
+			}
+		}
+		// Other malformed refusals: no cause; a non-configurable cause; a configured refusal from an unknown action.
+		for _, d := range []RestrictionDecision{
+			{Stage: st, Action: RestrictionBlock, Source: RestrictionSourceConfigured},
+			{Stage: st, Action: RestrictionBlock, Source: RestrictionSourceConfigured, DecidingCause: "tenant_suspended"},
+			{Stage: st, Action: "deny", Source: RestrictionSourceConfigured, DecidingCause: CauseLicenceSuspended},
+			{Stage: st, Action: RestrictionHoldForReview, Source: RestrictionSourceNone, DecidingCause: CauseLicenceSuspended},
+		} {
+			if err := d.assertRecordable(); !errors.Is(err, ErrGateUnavailable) {
+				t.Fatalf("%+v must not be recordable, got %v", d, err)
+			}
+		}
+		// Every non-refusing decision (including the F-4 unknown-licence default) is recordable.
+		for _, d := range []RestrictionDecision{
+			combine(st, 0, "valid", nil),
+			{Stage: st, Action: RestrictionAllow, Source: RestrictionSourceDefault, LicenceState: LicenceStateUnknown, LicenceUnknown: true},
+		} {
+			if err := d.assertRecordable(); err != nil {
+				t.Fatalf("%+v: %v", d, err)
+			}
+		}
+	}
+	// The 0182 registry defaults are all allow (pinned against the database by
+	// internal/withdrawalpolicy TestLic17_L2_RegistryDefaultsAreAllow), so the guard above is a tripwire, not a path in use today.
+}
+
 func TestLic11_ConfigurableCauses_Closed(t *testing.T) {
 	if len(ConfigurableCauses) != 4 {
 		t.Fatalf("exactly the four licence causes are configurable, got %v", ConfigurableCauses)

@@ -98,10 +98,8 @@ func EvaluateDispatchGate(ctx context.Context, tx pgx.Tx, gate withdrawalgate.Ga
 		return withdrawalgate.Decision{}, err
 	}
 	if rd.Refuses() {
-		if rd.Source != RestrictionSourceConfigured || rd.DecidingCause == "" {
-			// lic17 L-2: only a CONFIGURED hold / block may refuse (the WD056 row shape, 0182); a refusing default would be a
-			// registry change nobody reviewed for this path. Fail closed and diagnosable, never a malformed decision row.
-			return withdrawalgate.Decision{}, fmt.Errorf("%w: a restriction refusal from source %q cannot be recorded", ErrGateUnavailable, rd.Source)
+		if err := rd.assertRecordable(); err != nil {
+			return withdrawalgate.Decision{}, err
 		}
 		return rd.DispatchDenial(), nil
 	}
