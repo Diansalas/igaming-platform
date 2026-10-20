@@ -33,8 +33,8 @@ func TestMigration0183_UpDownUp_Snapshot(t *testing.T) {
 		t.Fatalf("0183 up: %v %v", applied, err)
 	}
 	up := schemaSnapshot(t, pool)
-	for _, want := range []string{"operating_bases_close_requires_successor", "tenants_licence_basis_exclusive", "operating_bases_definer_read",
-		"licences_definer_read", "operating_bases_ref_charset", "operating_bases_no_long_digit_runs"} {
+	for _, want := range []string{"operating_bases_close_requires_successor", "tenants_licence_basis_exclusive",
+		"operating_bases_ref_charset", "operating_bases_no_long_digit_runs"} {
 		if !strings.Contains(up, want) {
 			t.Fatalf("0183 up must create %q", want)
 		}

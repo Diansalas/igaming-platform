@@ -19,10 +19,10 @@ Software capability only; no value shipped; no legal position.
 ## 2. What changed
 
 - `migrations/0183_operating_basis_hardening.{up,down}.sql` (down restores the 0180 guard, conflict function and read policies byte for byte;
-  snapshot-tested). New objects: `operating_bases_close_requires_successor` (DEFERRABLE INITIALLY DEFERRED constraint trigger, SECURITY DEFINER,
-  pinned search_path), `tenants_licence_basis_exclusive` (SECURITY DEFINER), `operating_bases_licence_conflict` (now SECURITY DEFINER and
-  permanent), `operating_bases_definer_read` / `licences_definer_read` (SELECT policies gated by `pg_trigger_depth() > 0 AND
-  launch_is_table_owner()` so the definer functions see every tenant's rows in any session), the narrowed `licences_read` /
+  snapshot-tested). New objects: `operating_bases_close_requires_successor` (DEFERRABLE INITIALLY DEFERRED constraint trigger, pinned search_path),
+  `tenants_licence_basis_exclusive`, `operating_bases_licence_conflict` (now permanent). No SECURITY DEFINER function and no extra RLS policy
+  are added (an earlier draft had a definer-read policy; dropped because every write of `tenants.licence_id` and `operating_bases` is
+  already bound to the platform-admin session by RLS, and it would have changed the 0077 policy-count pin), the narrowed `licences_read` /
   `licence_country_ceilings_read`, and the CHECKs `operating_bases_ref_charset`, `_note_charset`, `_no_long_digit_runs`. The guard
   `operating_bases_governed_guard` is replaced: an owner UPDATE with no matching executed request is LC041 (INSERT keeps the provisioning
   path with NULL change request). SQLSTATE LC044 = close without successor.

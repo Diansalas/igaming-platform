@@ -127,6 +127,3 @@ AS $$
             OR EXISTS (SELECT 1 FROM public.operating_bases b WHERE b.licence_id = p_licence AND b.tenant_id <> p_tenant
                         AND b.effective_to IS NULL AND b.status = 'active'))
 $$;
-
-DROP POLICY licences_definer_read ON licences;
-DROP POLICY operating_bases_definer_read ON operating_bases;

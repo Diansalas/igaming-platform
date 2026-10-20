@@ -3,8 +3,8 @@
 --        successor row in the same scope with effective_from = the close time, checked by a DEFERRED constraint trigger (LC044).
 --   M-2 / R3  partner-licence exclusivity is permanent: a licensee=tenant licence is refused for a tenant if ANY other tenant has ever
 --        had an operating_bases row on it, and tenant_licence_bind (tenants.licence_id) is refused symmetrically; both take the same
---        advisory lock 'operating_bases:licence:<id>'. The checking functions are SECURITY DEFINER (pinned search_path) with a
---        trigger-depth-gated owner read policy, so they see every tenant's rows whatever session they run in.
+--        advisory lock 'operating_bases:licence:<id>'. Every write of tenants.licence_id and of operating_bases is already bound to
+--        the platform-admin session by row-level security, so the checking functions (pinned search_path) see every tenant's rows.
 --   L-1  licences_read / licence_country_ceilings_read admit a licence named by the reading tenant's own basis only if it is
 --        platform-licensee or not bound to / used by another tenant.
 --   L-5  DB-level character-class and digit-run CHECKs on the opaque references and the note (consistent with the Go lint).
@@ -12,14 +12,9 @@
 
 SET LOCAL lock_timeout = '5s';
 
--- ---- M-2: permanent exclusivity (replaces the 0180 function; adds the definer read paths) -------------------------------------
-CREATE POLICY operating_bases_definer_read ON operating_bases FOR SELECT
-    USING (pg_trigger_depth() > 0 AND launch_is_table_owner());
-CREATE POLICY licences_definer_read ON licences FOR SELECT
-    USING (pg_trigger_depth() > 0 AND launch_is_table_owner());
-
+-- ---- M-2: permanent exclusivity (replaces the 0180 function) ---------------------------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION operating_bases_licence_conflict(p_licence uuid, p_tenant uuid) RETURNS boolean
-    LANGUAGE sql STABLE SECURITY DEFINER
+    LANGUAGE sql STABLE
     SET search_path = pg_catalog, public, pg_temp
 AS $$
     SELECT EXISTS (SELECT 1 FROM public.licences l WHERE l.id = p_licence AND l.licensee = 'tenant')
@@ -28,7 +23,7 @@ AS $$
 $$;
 
 CREATE FUNCTION tenants_licence_basis_exclusive() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
+    LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
@@ -172,7 +167,7 @@ $$;
 
 
 CREATE FUNCTION operating_bases_close_requires_successor() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
+    LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN

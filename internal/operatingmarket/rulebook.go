@@ -66,6 +66,15 @@ func TenantHasApprovedBasis(ctx context.Context, q ReadOnlyQuerier, tenantID uui
 	if !inScope {
 		return false, fmt.Errorf("%w: transaction tenant scope does not match tenant %s", ErrTransactionScope, tenantID)
 	}
+	// A schema older than migration 0180 has no operating_bases table, so no basis can exist (the migration ledger guarantees the
+	// table in every deployed database; this keeps the rulebook consumers usable against an older schema in migration tests).
+	var present bool
+	if err := q.QueryRow(ctx, `SELECT to_regclass('public.operating_bases') IS NOT NULL`).Scan(&present); err != nil {
+		return false, fmt.Errorf("operatingmarket: probe operating_bases: %w", err)
+	}
+	if !present {
+		return false, nil
+	}
 	var has bool
 	if err := q.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM operating_bases
