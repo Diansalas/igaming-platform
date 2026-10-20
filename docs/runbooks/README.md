@@ -114,3 +114,6 @@ make test-integration    # RLS tenant-isolation + HTTP integration tests,
 See `docs/architecture/00-system-overview.md` for what "the foundation"
 currently covers, and `docs/active-stage.md` for what's deferred to later
 stages.
+- `residence-maker-checker.md` — lic10: configurable per-tenant second-Person approval of residence determinations (none / into_open_market / all), default unchanged, governance of the mode itself, pending is not evidence.
+- `aml-screening-triggers.md` — lic10: governed automatic screening triggers, the durable queue, the MOCK-only worker and the withdrawal/payout gate; NOT transaction monitoring.
+- `kyc-enforcement-policy-authoring.md` — lic10: the governed KYC enforcement policy routes (create draft, four-eyes activate, supersede), no shipped thresholds.
