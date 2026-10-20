@@ -135,3 +135,31 @@ func TestOperatingBasis_AcknowledgeableNotHard(t *testing.T) {
 		t.Fatal("a pass lists nothing and the result is part of the readiness hash")
 	}
 }
+
+// lic14 L-3: a WITHDRAWN row of the subject brand masks the tenant-wide row (the resolver prefers the brand row), so the tenant-wide
+// row is not coverage for the subject brand; a tenant-level subject (nil brand) ignores brand rows and is covered by tenant-wide rows.
+func TestOperatingBasisFrom_BrandRowMasksTenantWide_AndNilBrand(t *testing.T) {
+	now := time.Date(2027, 3, 10, 12, 0, 0, 0, time.UTC)
+	brand := uuid.New()
+	tenantWide := allOps("MT", nil)
+	withdrawn := allOps("MT", func(b *operatingmarket.BasisRecord) { b.BrandID = &brand; b.Status = operatingmarket.StatusWithdrawn })
+	bases := append(append([]operatingmarket.BasisRecord{}, tenantWide...), withdrawn...)
+
+	r := &Readiness{}
+	got := operatingBasisFrom([]string{"MT"}, bases, &brand, now, r)
+	if got.DetailCode != "ok_some_via_licence_chain" || r.Info[InfoBasisCountriesExplicit] != 0 {
+		t.Fatalf("withdrawn brand rows must mask the tenant-wide rows for that brand: %+v %v", got, r.Info)
+	}
+	r = &Readiness{}
+	got = operatingBasisFrom([]string{"MT"}, bases, nil, now, r)
+	if got.DetailCode != "ok" || r.Info[InfoBasisCountriesExplicit] != 1 {
+		t.Fatalf("a tenant-level subject (nil brand) is covered by the tenant-wide rows and ignores brand rows: %+v %v", got, r.Info)
+	}
+	// Another brand's masking row does not affect this brand.
+	other := uuid.New()
+	r = &Readiness{}
+	got = operatingBasisFrom([]string{"MT"}, bases, &other, now, r)
+	if got.DetailCode != "ok" {
+		t.Fatalf("another brand's row must not mask: %+v", got)
+	}
+}

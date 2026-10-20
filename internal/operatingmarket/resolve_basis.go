@@ -80,35 +80,37 @@ const (
 )
 
 type basisSelection struct {
-	state     basisSelState
-	reason    BasisReason
-	id        uuid.UUID
-	kind      BasisKind
-	licenceID uuid.UUID
-	status    Status
-	from      time.Time
-	to        *time.Time
-	reviewDue *time.Time
+	state        basisSelState
+	reason       BasisReason
+	id           uuid.UUID
+	kind         BasisKind
+	licenceID    uuid.UUID
+	jurisdiction uuid.UUID
+	status       Status
+	from         time.Time
+	to           *time.Time
+	reviewDue    *time.Time
 }
 
 type basisCandidate struct {
-	id          uuid.UUID
-	brandID     *uuid.UUID
-	productCode *string
-	kind        string
-	licenceID   *uuid.UUID
-	status      string
-	from        time.Time
-	to          *time.Time
-	reviewDue   *time.Time
-	rereview    bool
-	approved    bool
-	restricted  []string
+	id             uuid.UUID
+	brandID        *uuid.UUID
+	productCode    *string
+	kind           string
+	licenceID      *uuid.UUID
+	jurisdictionID *uuid.UUID
+	status         string
+	from           time.Time
+	to             *time.Time
+	reviewDue      *time.Time
+	rereview       bool
+	approved       bool
+	restricted     []string
 }
 
 func selectBasis(ctx context.Context, q ReadOnlyQuerier, p Query) (basisSelection, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, brand_id, product_code, basis_kind, licence_id, status, effective_from, effective_to,
+		SELECT id, brand_id, product_code, basis_kind, licence_id, jurisdiction_id, status, effective_from, effective_to,
 		       review_due_at, needs_rereview, change_request_id IS NOT NULL, restricted_product_codes
 		  FROM operating_bases
 		 WHERE tenant_id = $1 AND country_code = $2 AND operation_code = $3
@@ -123,7 +125,7 @@ func selectBasis(ctx context.Context, q ReadOnlyQuerier, p Query) (basisSelectio
 	var cands []basisCandidate
 	for rows.Next() {
 		var c basisCandidate
-		if err := rows.Scan(&c.id, &c.brandID, &c.productCode, &c.kind, &c.licenceID, &c.status, &c.from, &c.to,
+		if err := rows.Scan(&c.id, &c.brandID, &c.productCode, &c.kind, &c.licenceID, &c.jurisdictionID, &c.status, &c.from, &c.to,
 			&c.reviewDue, &c.rereview, &c.approved, &c.restricted); err != nil {
 			rows.Close()
 			return basisSelection{}, fmt.Errorf("operatingmarket: scan operating basis: %w", err)
@@ -162,6 +164,9 @@ func selectBasis(ctx context.Context, q ReadOnlyQuerier, p Query) (basisSelectio
 	if c.licenceID != nil {
 		sel.licenceID = *c.licenceID
 	}
+	if c.jurisdictionID != nil {
+		sel.jurisdiction = *c.jurisdictionID
+	}
 	blocked := func(r BasisReason) (basisSelection, error) {
 		sel.state, sel.reason = basisSelBlocked, r
 		return sel, nil
@@ -173,6 +178,10 @@ func selectBasis(ctx context.Context, q ReadOnlyQuerier, p Query) (basisSelectio
 		// Only an owner-path (provisioning / fixture) row has no executed change request: never an approved basis.
 		return blocked(BasisReasonNotApproved)
 	case p.ProductCode != nil && containsString(c.restricted, *p.ProductCode):
+		return blocked(BasisReasonProductRestricted)
+	case p.ProductCode == nil && p.OperationCode == "wagering" && len(c.restricted) > 0:
+		// lic14 L-4: a wagering question that names no product cannot prove it is outside the restricted products: refused
+		// (fail closed). Operations that are not product-specific (registration, deposit) are not affected.
 		return blocked(BasisReasonProductRestricted)
 	case c.rereview:
 		return blocked(BasisReasonNeedsRereview)

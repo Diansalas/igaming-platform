@@ -39,6 +39,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // DefaultPendingCap is the engineering anti-abuse bound on a player's open pending changes
@@ -279,6 +280,15 @@ func tenantJurisdiction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*st
 		}
 	}
 	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
+	// lic14 (H-1): a tenant with NO licence but with an approved operating basis must not read as "no configuration" (no ceiling,
+	// default-allow): the read happens while the player scope is cleared, as the bases are tenant-scoped rows.
+	hasBasis := false
+	if err == nil && chain.Outcome == jurisdiction.LicensingNoLicence {
+		var asOf time.Time
+		if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err == nil {
+			hasBasis, err = operatingmarket.TenantHasApprovedBasis(ctx, tx, tenantID, asOf)
+		}
+	}
 	if player != "" {
 		if _, rerr := tx.Exec(ctx, `SELECT set_config('app.player_account_id', $1, true)`, player); rerr != nil {
 			return nil, fmt.Errorf("rg: restore player scope: %w", rerr)
@@ -292,6 +302,9 @@ func tenantJurisdiction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*st
 		code := chain.JurisdictionCode
 		return &code, nil
 	case jurisdiction.LicensingNoLicence:
+		if hasBasis {
+			return nil, fmt.Errorf("rg: tenant has an operating basis but no licence jurisdiction: the RG rulebook cannot be selected (fail closed, lic14)")
+		}
 		// Unchanged: no licence = no configuration (nil). With enforcement ON this
 		// is rg_config_missing (fail closed); with it off players set limits with
 		// no ceiling (G2 in docs/plans/licensing-audit-enforcement.md, readiness

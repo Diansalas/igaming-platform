@@ -88,7 +88,10 @@ review is overdue or due within 30 days (ids only). See `launch-and-suspension.m
   migration.
 - Whether a particular country / operation may be run on a no-licence basis, and on what evidence, is a legal and business decision for
   the owner and counsel. The platform records the decision; it does not make or validate it.
-- The `jurisdiction_id` of a basis is recorded for the audit trail and for review; KYC thresholds, RG floors and reporting formats are
-  still selected from the tenant's licence jurisdiction (`tenants.licence_id`). A tenant that relies on a no-licence basis has no licence
-  jurisdiction: `R-KYC-POLICY` then reports `no_licence_jurisdiction` and KYC resolves not required until a rulebook selection by basis
-  jurisdiction is decided and built (see `docs/plans/lic9-operating-basis-record.md`, residuals).
+- **Rulebook selection (lic14, migration 0183).** KYC (deposit, casino and sportsbook play) selects its rulebook jurisdiction by the
+  governing basis of the player's scope (tenant, brand, verified-residence country, operation): the basis row's `jurisdiction_id`
+  (`no_licence_documented`) or the governing licence's jurisdiction. A tenant with NO approved basis behaves exactly as before. A tenant
+  WITH bases and no selectable scope (no verified residence, a basis that does not permit, no row and no licence) gets `unavailable`
+  (deny), never `not_required`. RG limits and the payout-instrument freshness window still read the tenant's licence jurisdiction; for a
+  tenant with an approved basis and NO licence they refuse (fail closed) instead of reading as "no configuration". See
+  `docs/plans/lic14-record.md`.

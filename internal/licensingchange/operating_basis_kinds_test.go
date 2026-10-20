@@ -116,3 +116,25 @@ func TestOperatingBasisKinds_ArePlatformOnly(t *testing.T) {
 		}
 	}
 }
+
+// lic14 L-5: the Go lint matches the stored character classes (an opaque token for references, short plain text for the note).
+func TestLintRef_CharacterClasses(t *testing.T) {
+	for _, ok := range []string{"DET-2027/04#7", "ref.1:a_b"} {
+		if _, err := lintRef("determination_reference", ok, 200); err != nil {
+			t.Errorf("%q must be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"DET 1", "DET+1", "a[b]", "ref 1234567890123", "1234-5678-9012", "name@x"} {
+		if _, err := lintRef("determination_reference", bad, 200); err == nil {
+			t.Errorf("%q must be refused", bad)
+		}
+	}
+	if _, err := lintRef("restrictions_note", "only registered players (see policy), no bonus", 1000); err != nil {
+		t.Errorf("a plain note must be accepted: %v", err)
+	}
+	for _, bad := range []string{"call [me]", "x@y.zz", "account 12345 67890 123", "line\nbreak", "use \"quotes\""} {
+		if _, err := lintRef("restrictions_note", bad, 1000); err == nil {
+			t.Errorf("note %q must be refused", bad)
+		}
+	}
+}

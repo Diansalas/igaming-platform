@@ -155,7 +155,7 @@ func basisRecordState(r BasisRecord) map[string]any {
 		"operation_code": r.OperationCode, "product_code": str(r.ProductCode), "basis_kind": string(r.Kind),
 		"licence_id": id(r.LicenceID), "jurisdiction_id": id(r.JurisdictionID),
 		"determination_reference": r.DeterminationReference, "determined_by_role": r.DeterminedByRole,
-		"evidence_reference": str(r.EvidenceReference), "restrictions_note": str(r.RestrictionsNote),
+		"evidence_reference": str(r.EvidenceReference), "has_restrictions_note": r.RestrictionsNote != nil,
 		"restricted_product_codes": r.RestrictedProductCodes, "review_due_at": due, "needs_rereview": r.NeedsRereview,
 		"last_review_reference": str(r.LastReviewReference), "status": string(r.Status), "reason_code": r.ReasonCode,
 		"policy_version": r.PolicyVersion, "effective_from": r.EffectiveFrom.Format(time.RFC3339Nano), "effective_to": to,

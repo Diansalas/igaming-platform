@@ -56,6 +56,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // PolicyVersion is EvaluateEnforcement's own compiled-in logic version,
@@ -379,12 +380,15 @@ func evaluateEnforcementReads(ctx context.Context, tx pgx.Tx, params Enforcement
 	case isWithdrawalOperation(params.Operation):
 		return evaluateWithdrawalStructuralRule(ctx, tx, params)
 	case params.Operation == EnforcementDeposit:
-		licensingJurisdictionID, hasLicence, err := resolveLicensingJurisdictionID(ctx, tx, params.TenantID)
+		licensingJurisdictionID, hasLicence, unavailable, err := resolveEnforcementJurisdiction(ctx, tx, params)
 		if err != nil {
 			// A genuine query error is a policy-lookup failure, not "no
 			// policy configured" - unavailable, never not_required
 			// (§2.6(c)).
 			return unavailableDecision("jurisdiction_unresolved"), nil
+		}
+		if unavailable != "" {
+			return unavailableDecision(unavailable), nil
 		}
 		if !hasLicence {
 			// No licence bound means no jurisdiction-keyed policy could
@@ -396,9 +400,12 @@ func evaluateEnforcementReads(ctx context.Context, tx pgx.Tx, params Enforcement
 		}
 		return evaluateDepositThreshold(ctx, tx, params, licensingJurisdictionID)
 	case isPlayOperation(params.Operation):
-		licensingJurisdictionID, hasLicence, err := resolveLicensingJurisdictionID(ctx, tx, params.TenantID)
+		licensingJurisdictionID, hasLicence, unavailable, err := resolveEnforcementJurisdiction(ctx, tx, params)
 		if err != nil {
 			return unavailableDecision("jurisdiction_unresolved"), nil
+		}
+		if unavailable != "" {
+			return unavailableDecision(unavailable), nil
 		}
 		if !hasLicence {
 			signalKYCDormant(params.TenantID, params.Operation, "no_licence_bound")
@@ -446,6 +453,68 @@ func notRequiredDecision(op EnforcementOperation, message string) EnforcementDec
 		Code:          "kyc_" + string(op) + ":not_required",
 		Message:       message,
 		PolicyVersion: PolicyVersion,
+	}
+}
+
+// resolveEnforcementJurisdiction is the lic14 (H-1) rulebook selection for a deposit or play decision. A tenant with NO approved,
+// active, in-force operating basis resolves exactly as before (resolveLicensingJurisdictionID: a tenant with no licence is
+// not_required). A tenant WITH bases selects the rulebook by the governing basis of the player's scope (tenant, brand, verified
+// residence country, operation): the basis row's jurisdiction, or its licence's. If the scope is unavailable (no verified
+// residence country, a basis that does not permit, no row and no licence) the result is a non-empty `unavailable` code: the
+// money / wager path is never default-allowed because a basis, not a licence, opened it.
+func resolveEnforcementJurisdiction(ctx context.Context, tx pgx.Tx, params EnforcementParams) (jid uuid.UUID, hasLicence bool, unavailable string, err error) {
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err != nil {
+		return uuid.Nil, false, "", fmt.Errorf("kyc: read clock: %w", err)
+	}
+	has, err := operatingmarket.TenantHasApprovedBasis(ctx, tx, params.TenantID, asOf)
+	if err != nil {
+		return uuid.Nil, false, "", fmt.Errorf("kyc: %w", err)
+	}
+	if !has {
+		jid, hasLicence, err = resolveLicensingJurisdictionID(ctx, tx, params.TenantID)
+		return jid, hasLicence, "", err
+	}
+	country, ok, err := ReadMarketResidenceEvidence(ctx, tx, params.TenantID, params.PlayerAccountID)
+	if err != nil {
+		return uuid.Nil, false, "", fmt.Errorf("kyc: %w", err)
+	}
+	if !ok {
+		return uuid.Nil, false, "basis_scope_unavailable", nil
+	}
+	q := operatingmarket.RulebookQuery{TenantID: params.TenantID, CountryCode: country, AsOf: asOf}
+	if params.BrandID != uuid.Nil {
+		b := params.BrandID
+		q.BrandID = &b
+	}
+	switch params.Operation {
+	case EnforcementDeposit:
+		q.OperationCode = "deposit"
+	case EnforcementCasinoPlay:
+		p := "casino"
+		q.OperationCode, q.ProductCode = "wagering", &p
+	case EnforcementSportsbookPlay:
+		p := "sportsbook"
+		q.OperationCode, q.ProductCode = "wagering", &p
+	default:
+		return uuid.Nil, false, "unhandled_operation", nil
+	}
+	rb, err := operatingmarket.ResolveRulebookJurisdiction(ctx, tx, q)
+	if err != nil {
+		return uuid.Nil, false, "", fmt.Errorf("kyc: %w", err)
+	}
+	switch rb.State {
+	case operatingmarket.RulebookBasis:
+		return rb.JurisdictionID, true, "", nil
+	case operatingmarket.RulebookLegacy:
+		// The scope has no row: the tenant's own licence governs, and a tenant with bases but no licence is never default-allow.
+		jid, hasLicence, err = resolveLicensingJurisdictionID(ctx, tx, params.TenantID)
+		if err == nil && !hasLicence {
+			return uuid.Nil, false, "basis_scope_unavailable", nil
+		}
+		return jid, hasLicence, "", err
+	default:
+		return uuid.Nil, false, rb.Reason, nil
 	}
 }
 

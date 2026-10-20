@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // Service errors. The registration refusals are mapped to ONE generic player
@@ -540,6 +541,18 @@ func maxAgeFor(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*time.Durati
 	switch chain.Outcome {
 	case jurisdiction.LicensingResolved:
 	case jurisdiction.LicensingNoLicence:
+		// lic14 (H-1): a tenant that has an approved operating basis but no licence must not read as "no freshness window".
+		var asOf time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err != nil {
+			return nil, fmt.Errorf("payoutinstrument: %w", err)
+		}
+		has, err := operatingmarket.TenantHasApprovedBasis(ctx, tx, tenantID, asOf)
+		if err != nil {
+			return nil, fmt.Errorf("payoutinstrument: %w", err)
+		}
+		if has {
+			return nil, fmt.Errorf("payoutinstrument: tenant has an operating basis but no licence jurisdiction: the freshness window cannot be selected (fail closed, lic14)")
+		}
 		return nil, nil // unchanged: no licence = no jurisdiction freshness window configured
 	default:
 		return nil, fmt.Errorf("payoutinstrument: tenant licensing chain unusable: %s", chain.InvalidReason)
