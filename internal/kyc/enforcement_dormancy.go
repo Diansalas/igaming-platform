@@ -42,32 +42,45 @@ type DormantJurisdictionTrigger struct {
 // platform-admin-only read in this codebase.
 func ListDormantJurisdictionTriggers(ctx context.Context, tx pgx.Tx) ([]DormantJurisdictionTrigger, error) {
 	rows, err := tx.Query(ctx, `
+		-- lic23 (SN-1): the jurisdictions whose rulebook can govern a LIVE tenant's scopes: the tenant's licence jurisdiction AND the
+		-- jurisdictions of its approved (executed change request), active, in-force operating bases (a licence basis through its
+		-- licence). A basis jurisdiction with no policy is exactly as dormant as a licence jurisdiction with none.
+		WITH governed(jurisdiction_id) AS (
+		    SELECT l.jurisdiction_id
+		      FROM tenants t JOIN licences l ON l.id = t.licence_id
+		     WHERE t.status = 'active'
+		    UNION
+		    SELECT COALESCE(b.jurisdiction_id, bl.jurisdiction_id)
+		      FROM tenants t
+		      JOIN operating_bases b ON b.tenant_id = t.id
+		      LEFT JOIN licences bl ON bl.id = b.licence_id
+		     WHERE t.status = 'active' AND b.status = 'active' AND b.change_request_id IS NOT NULL
+		       AND b.effective_from <= clock_timestamp() AND (b.effective_to IS NULL OR b.effective_to > clock_timestamp())
+		)
 		-- cumulative_deposit: one row per jurisdiction with a live tenant
 		-- and no active row for that trigger_type (asset-scoped policies
 		-- are collapsed to "dormant" only when NO asset has an active row -
 		-- KYC-FX-AGG-1's own per-asset reporting is a registered follow-up,
 		-- not built here).
-		SELECT DISTINCT l.jurisdiction_id, 'cumulative_deposit', ''
-		  FROM tenants t
-		  JOIN licences l ON l.id = t.licence_id
-		 WHERE t.status = 'active'
+		SELECT DISTINCT g.jurisdiction_id, 'cumulative_deposit', ''
+		  FROM governed g
+		 WHERE g.jurisdiction_id IS NOT NULL
 		   AND NOT EXISTS (
 		       SELECT 1 FROM kyc_enforcement_policies p
-		        WHERE p.licensing_jurisdiction_id = l.jurisdiction_id
+		        WHERE p.licensing_jurisdiction_id = g.jurisdiction_id
 		          AND p.trigger_type = 'cumulative_deposit'
 		          AND p.status = 'active'
 		 )
 		UNION ALL
 		-- play, reported separately per surface (casino_play/sportsbook_play)
 		-- - security condition 9 / code review B4.
-		SELECT DISTINCT l.jurisdiction_id, 'play', tt.play_operation
-		  FROM tenants t
-		  JOIN licences l ON l.id = t.licence_id
+		SELECT DISTINCT g.jurisdiction_id, 'play', tt.play_operation
+		  FROM governed g
 		 CROSS JOIN (VALUES ('casino_play'), ('sportsbook_play')) AS tt(play_operation)
-		 WHERE t.status = 'active'
+		 WHERE g.jurisdiction_id IS NOT NULL
 		   AND NOT EXISTS (
 		       SELECT 1 FROM kyc_enforcement_policies p
-		        WHERE p.licensing_jurisdiction_id = l.jurisdiction_id
+		        WHERE p.licensing_jurisdiction_id = g.jurisdiction_id
 		          AND p.trigger_type = 'play'
 		          AND p.play_operation = tt.play_operation
 		          AND p.status = 'active'

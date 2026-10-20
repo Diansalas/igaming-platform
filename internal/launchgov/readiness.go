@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/marketgate"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 )
 
@@ -689,7 +690,23 @@ func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []s
 	if !have {
 		in.JurisdictionIDs = append(in.JurisdictionIDs, *licJur)
 	}
-	return rgFloorChecks(ctx, tx, in, currencies, now)
+	c := rgFloorChecks(ctx, tx, in, currencies, now)
+	if c.Result != ResultPass {
+		return c
+	}
+	// lic23 (SN-3, ACKNOWLEDGEABLE note): RG floors, ceilings and limit options are selected by the tenant's LICENCE jurisdiction
+	// (internal/rg tenantJurisdiction; migration 0135's ceiling trigger). They are not yet scope-aware (country of the player,
+	// governing basis), so for a tenant that also has approved operating bases the floors checked above are the licence
+	// jurisdiction's, which may be weaker than a basis jurisdiction's. This is surfaced as a non-passing, acknowledgeable result
+	// (no new check, so SnapshotVersion is unchanged) until RG selection follows the governing basis like KYC does.
+	has, herr := operatingmarket.TenantHasApprovedBasis(ctx, tx, in.Subject.TenantID, now)
+	if herr != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	if has {
+		return ck(CheckRGConfig, ResultFail, "bases_present_licence_rulebook_only")
+	}
+	return c
 }
 
 // rgFloorChecks is the part of R-RG-CONFIG that does not depend on the activation row: a compliance floor in force

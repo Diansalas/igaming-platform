@@ -93,6 +93,9 @@ func (f *fakeAML) EffectiveScreeningTriggerPolicy(_ context.Context, a aml.Actor
 func (f *fakeAML) ListScreeningRequests(_ context.Context, a aml.Actor, _ uuid.UUID) ([]aml.ScreeningRequestRow, error) {
 	return nil, f.rec("ListScreeningRequests", a)
 }
+func (f *fakeAML) ReplaceScreeningRequest(_ context.Context, a aml.Actor, _ uuid.UUID, _ *uuid.UUID, _ string) (aml.ReplaceScreeningResult, error) {
+	return aml.ReplaceScreeningResult{NewRequestID: uuid.New()}, f.rec("ReplaceScreeningRequest", a)
+}
 func (f *fakeAML) ResolveScreeningRequest(_ context.Context, a aml.Actor, _, _ uuid.UUID, _ aml.ResolveScreeningInput) (aml.ScreeningRecorded, error) {
 	return aml.ScreeningRecorded{ResultID: uuid.New()}, f.rec("ResolveScreeningRequest", a)
 }

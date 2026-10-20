@@ -9,6 +9,7 @@ package aml_test
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/amlfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/rgfix"
 )
 
 type trigWorld struct {
@@ -66,6 +68,8 @@ func (w *amlWorld) bindLicence(j uuid.UUID) {
 // newTrigWorld: a platform-licensed tenant with a two-officer quorum, a licence in jurisdiction j and a screening policy.
 func newTrigWorld(t *testing.T, rescreen time.Duration, grace time.Duration) *trigWorld {
 	t.Helper()
+	// lic23 (N-4 / SN-5): a withdrawal gate and a worker result need the non-forgeable environment anchor to say test / development.
+	rgfix.EnsureTestEnvironment(t, os.Getenv("TEST_DATABASE_URL"))
 	w, q, svc := platformWorld(t)
 	j := w.jurisdiction()
 	w.bindLicence(j)
@@ -177,6 +181,7 @@ func (tw *trigWorld) heldFor(p player, op aml.Operation) bool {
 
 func TestTriggerPolicy_Authoring_IsGovernedLikeTheScreeningPolicy(t *testing.T) {
 	ctx := context.Background()
+	rgfix.EnsureTestEnvironment(t, os.Getenv("TEST_DATABASE_URL"))
 	w, q, svc := platformWorld(t)
 	j := w.jurisdiction()
 	a := q.Officers[0].Actor
@@ -563,7 +568,7 @@ func TestQueue_ClaimTokenCAS_StaleWorkerCannotFinishAReclaimedRequest(t *testing
 		var applied bool
 		var status string
 		if err := tw.tenantTx(func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, 'mock-screening', 'ref-1', $4, now(), 0)`,
+			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, 'mock-screening', 'ref-1', $4, now(), 0, NULL)`,
 				tw.Tenant, first[0].id, token, strings.Repeat("c", 64)).Scan(&applied, &status)
 		}); err != nil {
 			t.Fatal(err)

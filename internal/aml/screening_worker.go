@@ -26,9 +26,13 @@ package aml
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -110,6 +114,8 @@ func (w *ScreeningWorker) ValidateForLoop() error {
 // PassStats is what one pass did (counts only; no identifier).
 type PassStats struct {
 	Tenants, Enqueued, Claimed, Done, NeedsOfficer, Retried, Terminal, Lost, Errors, Trapped int
+	// ParkedScreening (lic23 N-9): persons whose payout is PARKED right now only because a required screening is outstanding.
+	ParkedScreening int
 }
 
 // finishPlan is the pure decision of how to end one claimed request.
@@ -189,6 +195,20 @@ func (w *ScreeningWorker) heartbeat(ctx context.Context) {
 		return e
 	}); err != nil {
 		w.logErr("heartbeat failed")
+	}
+}
+
+// countParked adds the tenant's screening-parked payout persons to the pass summary (a read; failures are counted, never fatal).
+func (w *ScreeningWorker) countParked(ctx context.Context, tenantID uuid.UUID, st *PassStats) {
+	pctx, cancel := w.phase(ctx)
+	defer cancel()
+	if err := w.Pool.WithTenant(pctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		n, _, err := ScreeningParkedSummary(ctx, tx, tenantID)
+		st.ParkedScreening += n
+		return err
+	}); err != nil {
+		st.Errors++
+		w.logErr("parked summary failed")
 	}
 }
 
@@ -296,6 +316,7 @@ func (w *ScreeningWorker) passTenant(ctx context.Context, tenantID uuid.UUID, st
 		st.Claimed++
 		w.processRequest(ctx, tenantID, c, st)
 	}
+	w.countParked(ctx, tenantID, st)
 	w.alertTrapped(ctx, tenantID, st)
 }
 
@@ -364,12 +385,25 @@ func (w *ScreeningWorker) processRequest(ctx context.Context, tenantID uuid.UUID
 	o := &Orchestrator{cfg: OrchestratorConfig{Provider: w.Provider, CallTimeout: w.Config.CallTimeout, Now: now}}
 	res, matches := o.callProvider(ctx, req)
 	plan := planFinish(res.Outcome, matches, res.ErrorCode, c.Attempts, w.Config)
-	w.finish(ctx, tenantID, c, plan, &providerFacts{id: w.Provider.ID(), ref: validProviderRef(res.ProviderReference), subject: subj, at: res.ScreenedAt}, st)
+	w.finish(ctx, tenantID, c, plan, &providerFacts{id: w.Provider.ID(), ref: validProviderRef(res.ProviderReference), subject: subj, at: res.ScreenedAt,
+		fingerprint: matchFingerprint(key, res.matchRefs)}, st)
 }
 
 type providerFacts struct {
 	id, ref, subject string
 	at               time.Time
+	fingerprint      string // lic23 N-2: keyed pseudonymous identity of the match ("" when the provider gave no stable references)
+}
+
+// matchFingerprint is HMAC-SHA256(tenant key, "match-fp:v1:" + the sorted list:reference pairs), hex. It is a pseudonym: the vendor's
+// match references are never stored (screening.go), only this value, so the same hit for the same person can be recognised later.
+func matchFingerprint(key []byte, pairs []string) string {
+	if len(pairs) == 0 || len(key) == 0 {
+		return ""
+	}
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte("match-fp:v1:" + strings.Join(pairs, "\n")))
+	return hex.EncodeToString(m.Sum(nil))
 }
 
 func (w *ScreeningWorker) now() time.Time {
@@ -385,7 +419,7 @@ func (w *ScreeningWorker) finish(ctx context.Context, tenantID uuid.UUID, c clai
 	if len(plan.MatchLists) > 0 {
 		matchArg = sortedLists(plan.MatchLists)
 	}
-	var errCode, provID, provRef, subj *string
+	var errCode, provID, provRef, subj, fp *string
 	var at *time.Time
 	if plan.ErrorCode != "" {
 		s := string(plan.ErrorCode)
@@ -400,21 +434,26 @@ func (w *ScreeningWorker) finish(ctx context.Context, tenantID uuid.UUID, c clai
 		}
 		s := f.subject
 		subj = &s
+		if f.fingerprint != "" {
+			fpv := f.fingerprint
+			fp = &fpv
+		}
 		t := f.at.UTC().Truncate(time.Microsecond)
 		at = &t
 	}
-	var applied bool
+	var applied, reviewed bool
 	var status string
 	// A detached, bounded context: a cancelled pass must still be able to END a request whose provider answer it holds.
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*w.Config.PhaseTimeout)
 	defer cancel()
 	pending, err := alerting.InTx(cctx, alerting.NewTenantRunner(w.Pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
-		applied, status = false, ""
-		if err := tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11)`,
-			tenantID, c.ID, c.ClaimToken, plan.Result, matchArg, errCode, provID, provRef, subj, at, int(plan.Backoff/time.Second)).Scan(&applied, &status); err != nil {
+		applied, reviewed, status = false, false, ""
+		if err := tx.QueryRow(ctx, `SELECT o_applied, o_status, o_reviewed FROM aml_screening_request_finish($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12)`,
+			tenantID, c.ID, c.ClaimToken, plan.Result, matchArg, errCode, provID, provRef, subj, at, int(plan.Backoff/time.Second), fp).Scan(&applied, &status, &reviewed); err != nil {
 			return err
 		}
-		if !applied || plan.Reason == "" {
+		// A match an officer already reviewed and cleared (same provider-stated identity) needs no attention alert.
+		if !applied || plan.Reason == "" || reviewed {
 			return nil
 		}
 		return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
@@ -481,4 +520,16 @@ func RunScreeningWorkerLoop(ctx context.Context, w *ScreeningWorker, logger *slo
 			run()
 		}
 	}
+}
+
+// ScreeningParkedWindow is how far back the parked summary looks for the latest payout-gate decision of a person.
+const ScreeningParkedWindow = 7 * 24 * time.Hour
+
+// ScreeningParkedSummary counts, for the tenant, the persons whose latest payout-gate decision in ScreeningParkedWindow was a
+// screening-only hold (the payout PARKED, lic18) and the number of such evaluations. Counts only. tx must be tenant-scoped. It is
+// read by the screening worker pass AND by the payments sweeper: a dead screening worker cannot report, the sweeper can.
+func ScreeningParkedSummary(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (persons, evaluations int, err error) {
+	err = tx.QueryRow(ctx, `SELECT o_persons, o_evaluations FROM aml_screening_parked_summary($1, clock_timestamp() - make_interval(secs => $2::double precision))`,
+		tenantID, ScreeningParkedWindow.Seconds()).Scan(&persons, &evaluations)
+	return persons, evaluations, err
 }

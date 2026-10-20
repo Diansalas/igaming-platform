@@ -50,8 +50,9 @@ DO $$
 BEGIN
     IF to_regclass('public.kyc_verifications') IS NULL OR to_regprocedure('public.financial_actor_session()') IS NULL
        OR to_regprocedure('public.actor_proof_require(uuid, text, uuid, text, text, text)') IS NULL
-       OR to_regclass('public.aml_screening_results') IS NULL OR to_regclass('public.operating_bases') IS NULL THEN
-        RAISE EXCEPTION 'migration 0181 pre-flight: migrations 0040, 0112, 0120 and 0154 are not applied' USING ERRCODE = 'RD098';
+       OR to_regclass('public.aml_screening_results') IS NULL OR to_regclass('public.operating_bases') IS NULL
+       OR to_regprocedure('public.rg_database_environment()') IS NULL THEN
+        RAISE EXCEPTION 'migration 0181 pre-flight: migrations 0040, 0112, 0120, 0135 and 0154 are not applied' USING ERRCODE = 'RD098';
     END IF;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace = 'public'::regnamespace
                 AND relname IN ('residence_approval_policies', 'residence_approval_policy_approvals', 'residence_determination_checks',
@@ -542,6 +543,11 @@ BEGIN
     IF NEW.verified_residence_set_at IS NULL OR NEW.verified_residence_set_by IS NULL OR NEW.verified_residence_country IS NULL THEN
         RETURN NEW;
     END IF;
+    -- lic23 SN-6: a determination is stamped by the database clock (ReviewVerification uses now()); a future-dated time would block
+    -- every later determination (RD005, the next one must be later). A small skew is tolerated.
+    IF NEW.verified_residence_set_at > pg_catalog.clock_timestamp() + interval '2 minutes' THEN
+        RAISE EXCEPTION 'residence determination: the determination time may not be in the future' USING ERRCODE = 'RD005';
+    END IF;
     v_mode := public.residence_policy_mode(NEW.tenant_id);
     v_flag := NULLIF(pg_catalog.current_setting('app.residence_into_open_market', true), '');
     PERFORM pg_catalog.set_config('app.residence_into_open_market', '', true);
@@ -572,6 +578,9 @@ AS $$
 BEGIN
     IF NEW.verified_residence_set_at IS NOT DISTINCT FROM OLD.verified_residence_set_at THEN
         RAISE EXCEPTION 'residence determination: the residence columns change only as a new determination (verified_residence_set_at must advance with them)' USING ERRCODE = 'RD005';
+    END IF;
+    IF NEW.verified_residence_set_at > pg_catalog.clock_timestamp() + interval '2 minutes' THEN
+        RAISE EXCEPTION 'residence determination: the determination time may not be in the future' USING ERRCODE = 'RD005';
     END IF;
     IF NEW.verified_residence_set_at IS NOT NULL AND OLD.verified_residence_set_at IS NOT NULL AND NEW.verified_residence_set_at <= OLD.verified_residence_set_at THEN
         RAISE EXCEPTION 'residence determination: a new determination must be later than the one it replaces' USING ERRCODE = 'RD005';
@@ -753,7 +762,7 @@ CREATE TABLE aml_screening_requests (
     licensing_jurisdiction_id UUID NOT NULL REFERENCES jurisdictions (id) ON DELETE RESTRICT,
     trigger                   TEXT NOT NULL CHECK (trigger IN ('registration', 'kyc_approval', 'scheduled')),
     idempotency_key           TEXT NOT NULL CHECK (idempotency_key ~ '^[A-Za-z0-9_.:-]{1,128}$'),
-    status                    TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'done', 'needs_officer', 'failed_terminal')),
+    status                    TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'done', 'needs_officer', 'failed_terminal', 'cancelled')),
     attempts                  INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     next_attempt_at           TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     claim_token               UUID NULL,
@@ -767,6 +776,16 @@ CREATE TABLE aml_screening_requests (
     subject_ref               TEXT NULL CHECK (subject_ref ~ '^[0-9a-f]{64}$'),
     screened_at               TIMESTAMPTZ NULL,
     completed_at              TIMESTAMPTZ NULL,
+    -- lic23 (N-2): the identity of the match as the provider states it (sha256 of the sorted list:vendor-match-reference pairs; NULL
+    -- when the provider gave no stable reference). A later match with the SAME fingerprint for the same person, whose earlier
+    -- occurrence an officer already reviewed and cleared, is recorded as reviewed_from_request_id instead of holding the person again.
+    match_fingerprint         TEXT NULL CHECK (match_fingerprint ~ '^[0-9a-f]{64}$'),
+    reviewed_from_request_id  UUID NULL,
+    -- lic23 (N-4): an officer's governed cancellation of a stale pending / claimed request (the replacement is a new request).
+    cancelled_by              UUID NULL,
+    cancelled_by_person_id    UUID NULL,
+    cancel_reason_code        TEXT NULL CHECK (cancel_reason_code ~ '^[a-z0-9_]{1,64}$'),
+    replaced_by_request_id    UUID NULL,
     created_at                TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at                TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (tenant_id, idempotency_key),
@@ -777,8 +796,13 @@ CREATE TABLE aml_screening_requests (
     -- FAIL CLOSED, in the database: only a COMPLETED clear is done; a match is never done; a failure is never an outcome.
     CHECK (status <> 'done' OR (outcome = 'clear' AND match_lists IS NULL AND provider_id IS NOT NULL AND screened_at IS NOT NULL)),
     CHECK (status <> 'needs_officer' OR (outcome IN ('potential_match', 'confirmed') AND match_lists IS NOT NULL AND provider_id IS NOT NULL AND screened_at IS NOT NULL)),
-    CHECK (status NOT IN ('pending', 'claimed', 'failed_terminal') OR (outcome IS NULL AND match_lists IS NULL)),
-    CHECK (status <> 'failed_terminal' OR last_error_code IS NOT NULL)
+    CHECK (status NOT IN ('pending', 'claimed', 'failed_terminal', 'cancelled') OR (outcome IS NULL AND match_lists IS NULL)),
+    CHECK (status <> 'failed_terminal' OR last_error_code IS NOT NULL),
+    CHECK (reviewed_from_request_id IS NULL OR (status = 'needs_officer' AND match_fingerprint IS NOT NULL)),
+    CHECK ((status = 'cancelled') = (cancelled_by IS NOT NULL AND cancelled_by_person_id IS NOT NULL AND cancel_reason_code IS NOT NULL)),
+    CHECK (status <> 'cancelled' OR (outcome IS NULL AND match_lists IS NULL AND completed_at IS NULL)),
+    FOREIGN KEY (tenant_id, reviewed_from_request_id) REFERENCES aml_screening_requests (tenant_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (tenant_id, replaced_by_request_id) REFERENCES aml_screening_requests (tenant_id, id) ON DELETE RESTRICT
 );
 CREATE INDEX aml_screening_requests_due ON aml_screening_requests (tenant_id, next_attempt_at) WHERE status IN ('pending', 'claimed');
 CREATE INDEX aml_screening_requests_person ON aml_screening_requests (tenant_id, person_id, status, completed_at DESC);
@@ -844,8 +868,13 @@ BEGIN
         RAISE EXCEPTION 'aml: the identity of a screening request is immutable' USING ERRCODE = 'AT005';
     END IF;
     -- Terminal states are final.
-    IF OLD.status IN ('done', 'needs_officer', 'failed_terminal') THEN
+    IF OLD.status IN ('done', 'needs_officer', 'failed_terminal', 'cancelled') THEN
         RAISE EXCEPTION 'aml: a % screening request is final', OLD.status USING ERRCODE = 'AT005';
+    END IF;
+    -- lic23 (N-4): a stale pending / claimed request is cancelled only by the governed officer function, which stamps the officer
+    -- columns and releases any lease in the same statement.
+    IF OLD.status IN ('pending', 'claimed') AND NEW.status = 'cancelled' AND NEW.attempts = OLD.attempts AND NEW.claim_token IS NULL THEN
+        RETURN NEW;
     END IF;
     IF OLD.status = 'pending' AND NEW.status = 'claimed' AND NEW.attempts = OLD.attempts + 1 THEN
         RETURN NEW;
@@ -865,6 +894,47 @@ END
 $$;
 CREATE TRIGGER aml_screening_requests_10_guard BEFORE INSERT OR UPDATE ON aml_screening_requests
     FOR EACH ROW EXECUTE FUNCTION aml_screening_requests_guard();
+
+-- lic23 helpers (owner-only, invoker; reached through the definer API functions and the gate).
+-- N-4 / SN-5: the NON-forgeable environment anchor (migration 0135). An unrecorded anchor reads as 'production', so a gate can be
+-- enabled (and a worker result accepted) only where the database owner recorded development, staging or test.
+CREATE FUNCTION aml_screening_gate_environment_ok() RETURNS boolean
+    LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$ SELECT public.rg_database_environment() IN ('development', 'staging', 'test') $$;
+
+-- SN-2: has an officer RESOLVED this system-found request? Reviewed automatically (lic23 N-2) counts; otherwise a non-error officer
+-- result under the request's key counts only if it was recorded AFTER the request completed and, for a sanctions-class request
+-- (confirmed, or a sanctions list), only if it is itself a sanctions match (a clear never resolves it).
+CREATE FUNCTION aml_screening_request_resolved(p_request uuid) RETURNS boolean
+    LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM public.aml_screening_requests r
+         WHERE r.id = p_request
+           AND (r.reviewed_from_request_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM public.aml_screening_results x
+                            WHERE x.tenant_id = r.tenant_id AND x.person_id = r.person_id AND x.idempotency_key = r.idempotency_key
+                              AND x.outcome <> 'error' AND (r.completed_at IS NULL OR x.recorded_at >= r.completed_at)
+                              AND (NOT (r.outcome = 'confirmed' OR COALESCE('sanctions' = ANY (r.match_lists), false))
+                                   OR x.outcome = 'confirmed' OR (x.outcome = 'potential_match' AND COALESCE('sanctions' = ANY (x.match_lists), false))))))
+$$;
+
+-- N-2: was this request's match REVIEWED AND CLEARED by an officer? A clear (never possible for a sanctions-class match), or a
+-- recorded match whose hold has since been LIFTED (a sanctions hold only by the proof-bound four-eyes approval, aml_hold_lift /
+-- aml_hold_lifts_guard). Returns the time from which the person counts as reviewed-cleared (NULL when not).
+CREATE FUNCTION aml_screening_review_cleared_at(p_request uuid) RETURNS timestamptz
+    LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT max(CASE WHEN x.outcome = 'clear' THEN x.recorded_at ELSE l.lifted_at END)
+      FROM public.aml_screening_requests r
+      JOIN public.aml_screening_results x ON x.tenant_id = r.tenant_id AND x.person_id = r.person_id AND x.idempotency_key = r.idempotency_key
+      LEFT JOIN public.aml_hold_lifts l ON l.tenant_id = x.tenant_id AND l.hold_id = x.hold_id
+     WHERE r.id = p_request AND x.outcome <> 'error' AND (r.completed_at IS NULL OR x.recorded_at >= r.completed_at)
+       AND (x.outcome = 'clear' OR (x.outcome IN ('potential_match', 'confirmed') AND l.id IS NOT NULL))
+$$;
 
 -- B3. Enqueue (internal; invoker, owner-only; always reached through a definer trigger or a definer API function)
 -- The jurisdictions a tenant's screening policies may be authored for: the one of its licence and those of its APPROVED, open operating
@@ -950,6 +1020,7 @@ DECLARE
     v_events text;
     v_cfg    boolean;
     v_tenant text;
+    v_off    boolean;
 BEGIN
     IF p_events IS NULL OR p_gate_withdrawal IS NULL OR p_jurisdiction IS NULL OR p_effective_from IS NULL THEN
         RAISE EXCEPTION 'aml: a trigger policy needs its jurisdiction, events, gate flag and effective time' USING ERRCODE = 'AT001';
@@ -978,16 +1049,30 @@ BEGIN
         IF NOT public.screening_worker_available() THEN
             RAISE EXCEPTION 'aml: no screening worker is running in this environment, so a withdrawal gate cannot be enabled (it would trap funds)' USING ERRCODE = 'AT004';
         END IF;
+        -- N-4 / SN-5: the heartbeat is forgeable by a holder of the runtime credential; the database environment anchor is not. A gate
+        -- cannot be enabled where the anchor says production or records nothing (an unrecorded anchor is production).
+        IF NOT public.aml_screening_gate_environment_ok() THEN
+            RAISE EXCEPTION 'aml: a withdrawal gate cannot be enabled in a database whose environment anchor is production or unrecorded' USING ERRCODE = 'AT004';
+        END IF;
     ELSIF p_gate_alert_after_seconds IS NOT NULL THEN
         RAISE EXCEPTION 'aml: gate_alert_after_seconds belongs to a gating policy only' USING ERRCODE = 'AT004';
     END IF;
+    -- N-1: a NON-gating version with no events (the way to switch a gate off) is allowed for any jurisdiction that already has a trigger
+    -- policy for this tenant, whatever the licence or operating bases are today: after a licence rebind or a basis closure the gate
+    -- loop still evaluates that jurisdiction, so it must stay possible to switch it off. Quorum, proof and the legal review reference
+    -- above still apply.
+    v_off := NOT p_gate_withdrawal AND v_events = ''
+             AND EXISTS (SELECT 1 FROM public.aml_screening_trigger_policies t WHERE t.tenant_id = p_tenant AND t.licensing_jurisdiction_id = p_jurisdiction);
+    IF NOT v_off THEN
     -- The policy jurisdiction must be one of the tenant's licence or approved operating bases.
     IF NOT EXISTS (SELECT 1 FROM public.aml_screening_jurisdictions(p_tenant) j WHERE j = p_jurisdiction) THEN
         RAISE EXCEPTION 'aml: the trigger policy jurisdiction must be the jurisdiction of the tenant''s licence or of an approved operating basis' USING ERRCODE = 'AT004';
     END IF;
     -- The lists, the re-screen interval and the backfill grace are the SCREENING POLICY's: it must exist first.
-    IF NOT EXISTS (SELECT 1 FROM public.aml_screening_policies sp WHERE sp.tenant_id = p_tenant AND sp.licensing_jurisdiction_id = p_jurisdiction) THEN
-        RAISE EXCEPTION 'aml: set the screening policy for this jurisdiction before its trigger policy' USING ERRCODE = 'AT004';
+    -- N-5: and it must be IN EFFECT at or before this version's effective time (a future-dated screening policy supplies no interval yet).
+    IF NOT EXISTS (SELECT 1 FROM public.aml_screening_policies sp WHERE sp.tenant_id = p_tenant AND sp.licensing_jurisdiction_id = p_jurisdiction
+                    AND sp.effective_from <= p_effective_from) THEN
+        RAISE EXCEPTION 'aml: set the screening policy for this jurisdiction, in effect at or before the trigger policy, first' USING ERRCODE = 'AT004';
     END IF;
     -- Same SR7-3 rule as the screening policy: the tenant must be configured to operate in the jurisdiction.
     v_tenant := pg_catalog.current_setting('app.tenant_id', true);
@@ -998,6 +1083,7 @@ BEGIN
     PERFORM pg_catalog.set_config('app.tenant_id', COALESCE(v_tenant, ''), true);
     IF NOT v_cfg THEN
         RAISE EXCEPTION 'aml: the tenant is not configured to operate in this jurisdiction' USING ERRCODE = 'AT004';
+    END IF;
     END IF;
     INSERT INTO public.aml_screening_trigger_policies (tenant_id, licensing_jurisdiction_id, events, gate_withdrawal, gate_alert_after_seconds, effective_from,
                                                        legal_review_reference, reason_code, created_by, created_by_person_id, created_by_scope)
@@ -1045,8 +1131,7 @@ BEGIN
     PERFORM public.aml_assert_row_scope(a.o_scope, public.aml_owner_scope_of_tenant(p_tenant));
     RETURN QUERY
         SELECT r.id, r.trigger, r.idempotency_key, r.status, r.attempts, r.outcome, r.match_lists, r.last_error_code, r.completed_at,
-               EXISTS (SELECT 1 FROM public.aml_screening_results x WHERE x.tenant_id = r.tenant_id AND x.person_id = r.person_id
-                          AND x.idempotency_key = r.idempotency_key AND x.outcome <> 'error'),
+               public.aml_screening_request_resolved(r.id),
                r.created_at
           FROM public.aml_screening_requests r
          WHERE r.tenant_id = p_tenant AND r.person_id = p_person
@@ -1088,7 +1173,10 @@ BEGIN
             CONTINUE;  -- no re-screen interval: nothing is due for this jurisdiction
         END IF;
         -- H-1 (d): clears count from the FIRST version of this jurisdiction's policy, so a new version never re-queues everyone.
-        SELECT min(tp.effective_from) INTO v_first FROM public.aml_screening_trigger_policies tp
+        -- lic23 N-3: the SAME baseline the gate uses (the first GATING version), so a person cleared under an earlier non-gating version is
+        -- re-enqueued exactly when the gate would hold them. A jurisdiction that never gated falls back to its first version.
+        SELECT COALESCE(min(tp.effective_from) FILTER (WHERE tp.gate_withdrawal), min(tp.effective_from)) INTO v_first
+          FROM public.aml_screening_trigger_policies tp
          WHERE tp.tenant_id = p_tenant AND tp.licensing_jurisdiction_id = v_tp.jur;
         v_bucket := pg_catalog.floor(pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) / v_sp.rescreen_interval_seconds)::bigint;
         INSERT INTO public.aml_screening_requests (tenant_id, person_id, licensing_jurisdiction_id, trigger, idempotency_key)
@@ -1159,19 +1247,26 @@ BEGIN
                     WHERE h.provider_id = p_provider AND h.last_seen_at > pg_catalog.clock_timestamp() - interval '10 minutes') THEN
         RAISE EXCEPTION 'aml: the provider is not the one a running screening worker reported' USING ERRCODE = 'AT001';
     END IF;
+    -- SN-5: the heartbeat alone is forgeable; a worker result (clear or match) is accepted only where the non-forgeable database
+    -- environment anchor is development, staging or test.
+    IF NOT public.aml_screening_gate_environment_ok() THEN
+        RAISE EXCEPTION 'aml: a worker screening result is not accepted in a database whose environment anchor is production or unrecorded' USING ERRCODE = 'AT004';
+    END IF;
 END
 $$;
 
 -- B4. Finish (claim-token CAS). p_result: clear | potential_match | confirmed | retry | terminal.
 CREATE FUNCTION aml_screening_request_finish(
     p_tenant uuid, p_id uuid, p_claim_token uuid, p_result text, p_match_lists text[], p_error_code text,
-    p_provider_id text, p_provider_reference text, p_subject_ref text, p_screened_at timestamptz, p_backoff_seconds integer
-) RETURNS TABLE (o_applied boolean, o_status text)
+    p_provider_id text, p_provider_reference text, p_subject_ref text, p_screened_at timestamptz, p_backoff_seconds integer,
+    p_match_fingerprint text
+) RETURNS TABLE (o_applied boolean, o_status text, o_reviewed boolean)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
-    v record;
+    v     record;
+    v_rev uuid;
 BEGIN
     IF p_tenant IS NULL OR p_id IS NULL OR p_claim_token IS NULL OR p_result IS NULL
        OR p_result NOT IN ('clear', 'potential_match', 'confirmed', 'retry', 'terminal') THEN
@@ -1185,7 +1280,7 @@ BEGIN
         RAISE EXCEPTION 'aml: screening request not found' USING ERRCODE = 'AT002';
     END IF;
     IF v.status <> 'claimed' OR v.claim_token IS DISTINCT FROM p_claim_token THEN
-        RETURN QUERY SELECT false, v.status;  -- someone else holds it, or it already ended: nothing is applied
+        RETURN QUERY SELECT false, v.status, false;  -- someone else holds it, or it already ended: nothing is applied
         RETURN;
     END IF;
     IF p_result = 'clear' THEN
@@ -1196,31 +1291,45 @@ BEGIN
         UPDATE public.aml_screening_requests SET status = 'done', outcome = 'clear', provider_id = p_provider_id, provider_reference = p_provider_reference,
                subject_ref = p_subject_ref, screened_at = p_screened_at, completed_at = pg_catalog.clock_timestamp(), claim_token = NULL, lease_until = NULL,
                last_error_code = NULL, updated_at = pg_catalog.clock_timestamp() WHERE id = p_id;
-        RETURN QUERY SELECT true, 'done'::text;
+        RETURN QUERY SELECT true, 'done'::text, false;
     ELSIF p_result IN ('potential_match', 'confirmed') THEN
         IF p_match_lists IS NULL OR p_provider_id IS NULL OR p_screened_at IS NULL THEN
             RAISE EXCEPTION 'aml: a match names its list, provider and time' USING ERRCODE = 'AT001';
         END IF;
         PERFORM public.aml_screening_assert_worker_provider(p_provider_id);
+        IF p_match_fingerprint IS NOT NULL AND p_match_fingerprint !~ '^[0-9a-f]{64}$' THEN
+            RAISE EXCEPTION 'aml: malformed match fingerprint' USING ERRCODE = 'AT001';
+        END IF;
+        -- lic23 N-2: the SAME match (same provider-stated identity) for the same person that an officer already REVIEWED AND CLEARED is
+        -- recorded as such instead of holding the person again for ever. A different or new hit still needs an officer.
+        v_rev := NULL;
+        IF p_match_fingerprint IS NOT NULL THEN
+            SELECT COALESCE(q.reviewed_from_request_id, q.id) INTO v_rev FROM public.aml_screening_requests q
+             WHERE q.tenant_id = p_tenant AND q.person_id = v.person_id AND q.id <> p_id AND q.status = 'needs_officer'
+               AND q.match_fingerprint = p_match_fingerprint
+               AND (q.reviewed_from_request_id IS NOT NULL OR public.aml_screening_review_cleared_at(q.id) IS NOT NULL)
+             ORDER BY q.completed_at DESC LIMIT 1;
+        END IF;
         UPDATE public.aml_screening_requests SET status = 'needs_officer', outcome = p_result, match_lists = p_match_lists, provider_id = p_provider_id,
                provider_reference = p_provider_reference, subject_ref = p_subject_ref, screened_at = p_screened_at,
+               match_fingerprint = p_match_fingerprint, reviewed_from_request_id = v_rev,
                completed_at = pg_catalog.clock_timestamp(), claim_token = NULL, lease_until = NULL, last_error_code = NULL,
                updated_at = pg_catalog.clock_timestamp() WHERE id = p_id;
-        RETURN QUERY SELECT true, 'needs_officer'::text;
+        RETURN QUERY SELECT true, 'needs_officer'::text, v_rev IS NOT NULL;
     ELSIF p_result = 'retry' THEN
         IF p_error_code IS NULL OR p_backoff_seconds IS NULL OR p_backoff_seconds < 0 OR p_backoff_seconds > 86400 THEN
             RAISE EXCEPTION 'aml: a retry names its error code and a bounded backoff' USING ERRCODE = 'AT001';
         END IF;
         UPDATE public.aml_screening_requests SET status = 'pending', next_attempt_at = pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => p_backoff_seconds::double precision),
                last_error_code = p_error_code, claim_token = NULL, lease_until = NULL, updated_at = pg_catalog.clock_timestamp() WHERE id = p_id;
-        RETURN QUERY SELECT true, 'pending'::text;
+        RETURN QUERY SELECT true, 'pending'::text, false;
     ELSE
         IF p_error_code IS NULL THEN
             RAISE EXCEPTION 'aml: a terminal failure names its error code' USING ERRCODE = 'AT001';
         END IF;
         UPDATE public.aml_screening_requests SET status = 'failed_terminal', last_error_code = p_error_code, completed_at = pg_catalog.clock_timestamp(),
                claim_token = NULL, lease_until = NULL, updated_at = pg_catalog.clock_timestamp() WHERE id = p_id;
-        RETURN QUERY SELECT true, 'failed_terminal'::text;
+        RETURN QUERY SELECT true, 'failed_terminal'::text, false;
     END IF;
 END
 $$;
@@ -1276,6 +1385,11 @@ BEGIN
         IF v_req.person_id <> p_person OR v_req.trigger <> p_trigger THEN
             RAISE EXCEPTION 'aml: the key belongs to a screening request of another person or trigger' USING ERRCODE = 'AM004';
         END IF;
+        -- SN-2: only a request that is waiting for an officer (a match, or a terminal failure) can be resolved by a record under its
+        -- key. A pending / claimed / done / cancelled request is not: a record there would pre-resolve a later result.
+        IF v_req.status NOT IN ('needs_officer', 'failed_terminal') THEN
+            RAISE EXCEPTION 'aml: the key belongs to a screening request that is not awaiting an officer' USING ERRCODE = 'AM004';
+        END IF;
         IF v_req.status = 'needs_officer' THEN
             IF p_outcome = 'error' THEN
                 RAISE EXCEPTION 'aml: an error result cannot resolve a match awaiting an officer' USING ERRCODE = 'AM004';
@@ -1286,6 +1400,10 @@ BEGIN
                 RAISE EXCEPTION 'aml: a sanctions-class match is resolved only by recording a sanctions match (a hold lifted by four-eyes), never by a clear' USING ERRCODE = 'AM006';
             END IF;
         END IF;
+    ELSIF p_idempotency_key ~ '^(reg|kyc|sched|repl):' THEN
+        -- SN-2: those key prefixes belong to the automatic screening queue; an officer record may not squat a key the system will use
+        -- (reg:<account>, kyc:<verification>, sched:<person>:<bucket>, repl:<person>:<id>).
+        RAISE EXCEPTION 'aml: this key prefix is reserved for the automatic screening queue' USING ERRCODE = 'AM004';
     END IF;
     IF p_decision <> 'none' THEN
         IF p_hold_reason_code IS NULL OR p_hold_reason_code !~ '^[a-z0-9_]{1,64}$' THEN
@@ -1336,11 +1454,11 @@ BEGIN
     -- L1 / S1: a match the system found and no officer has RESOLVED holds the person whatever the policy says now (a new version
     -- with the gate off, a licence rebind or a removed licence must not release it). A resolution is a NON-ERROR result of the same
     -- person under the request's key; an `error` never resolves.
+    -- SN-2: "resolved" is aml_screening_request_resolved (recorded after the request, and a sanctions-class match only by a sanctions
+    -- match); N-2: a re-flag of a match an officer already reviewed and cleared is resolved by that review.
     IF EXISTS (SELECT 1 FROM public.aml_screening_requests r
                 WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status = 'needs_officer'
-                  AND NOT EXISTS (SELECT 1 FROM public.aml_screening_results x
-                                   WHERE x.tenant_id = p_tenant AND x.person_id = r.person_id AND x.idempotency_key = r.idempotency_key
-                                     AND x.outcome <> 'error')) THEN
+                  AND NOT public.aml_screening_request_resolved(r.id)) THEN
         RETURN true;
     END IF;
     SELECT min(pa.created_at) INTO v_reg FROM public.player_accounts pa WHERE pa.tenant_id = p_tenant AND pa.person_id = p_person;
@@ -1374,13 +1492,21 @@ BEGIN
         IF v_reg < v_first AND pg_catalog.clock_timestamp() < v_first + pg_catalog.make_interval(secs => v_grace) THEN
             CONTINUE;
         END IF;
+        -- The latest match the system found that no earlier review covers (an auto-reviewed re-flag is not a new finding).
         SELECT max(r.completed_at) INTO v_last_match FROM public.aml_screening_requests r
-         WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status = 'needs_officer';
-        -- Only a FRESH COMPLETED CLEAR, NEWER than the latest match, satisfies the policy. A pending, retrying, failed, error or
-        -- stale result does not. Officer results are timed by the database clock (recorded_at), never by the officer's screened_at.
+         WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status = 'needs_officer' AND r.reviewed_from_request_id IS NULL;
+        -- Only a FRESH screening that cleared the person, NEWER than the latest match, satisfies the policy: a completed clear, an
+        -- auto-reviewed re-flag (N-2), an officer's clear, or an officer-recorded match whose hold was LIFTED (a sanctions hold only by
+        -- the proof-bound four-eyes approval) from the lift time. A pending, retrying, failed, error or stale result does not.
+        -- Officer results are timed by the database clock (recorded_at / lifted_at), never by the officer's screened_at.
         IF NOT EXISTS (
             SELECT 1 FROM public.aml_screening_requests r
              WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status = 'done' AND r.outcome = 'clear'
+               AND r.completed_at >= v_first AND (v_last_match IS NULL OR r.completed_at > v_last_match)
+               AND (v_interval IS NULL OR r.completed_at > pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_interval))
+            UNION ALL
+            SELECT 1 FROM public.aml_screening_requests r
+             WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status = 'needs_officer' AND r.reviewed_from_request_id IS NOT NULL
                AND r.completed_at >= v_first AND (v_last_match IS NULL OR r.completed_at > v_last_match)
                AND (v_interval IS NULL OR r.completed_at > pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_interval))
             UNION ALL
@@ -1388,6 +1514,12 @@ BEGIN
              WHERE x.tenant_id = p_tenant AND x.person_id = p_person AND x.outcome = 'clear'
                AND x.recorded_at >= v_first AND (v_last_match IS NULL OR x.recorded_at > v_last_match)
                AND (v_interval IS NULL OR x.recorded_at > pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_interval))
+            UNION ALL
+            SELECT 1 FROM public.aml_screening_results x
+              JOIN public.aml_hold_lifts l ON l.tenant_id = x.tenant_id AND l.hold_id = x.hold_id
+             WHERE x.tenant_id = p_tenant AND x.person_id = p_person AND x.outcome IN ('potential_match', 'confirmed')
+               AND l.lifted_at >= v_first AND (v_last_match IS NULL OR l.lifted_at > v_last_match)
+               AND (v_interval IS NULL OR l.lifted_at > pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_interval))
         ) THEN
             RETURN true;
         END IF;
@@ -1428,12 +1560,104 @@ BEGIN
         SELECT pa.person_id FROM (SELECT DISTINCT a.person_id FROM public.player_accounts a WHERE a.tenant_id = p_tenant LIMIT p_limit) pa
          WHERE public.aml_screening_gate_denies(p_tenant, pa.person_id, 'withdrawal')
            AND COALESCE((SELECT min(r.created_at) FROM public.aml_screening_requests r
-                          WHERE r.tenant_id = p_tenant AND r.person_id = pa.person_id AND r.status <> 'done'
-                            AND NOT EXISTS (SELECT 1 FROM public.aml_screening_results x WHERE x.tenant_id = p_tenant AND x.person_id = r.person_id
-                                             AND x.idempotency_key = r.idempotency_key AND x.outcome <> 'error')), v_first)
+                          WHERE r.tenant_id = p_tenant AND r.person_id = pa.person_id AND r.status NOT IN ('done', 'cancelled')
+                            AND NOT public.aml_screening_request_resolved(r.id)), v_first)
                < pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => v_alert::double precision)
     ) q;
     RETURN v_n;
+END
+$$;
+
+-- lic23 (N-9): how many persons are PARKED right now at the payout gate ONLY because a required automatic screening is outstanding
+-- (their latest withdrawal_payout enforcement decision in the window was a screening-only hold: held, no hold row, KYC passed or not
+-- required)? Counts only, session-tenant bound, proof-less. It is readable by a loop that is NOT the screening worker (the payments
+-- sweeper), so a dead screening worker shows as a growing parked count even though it can no longer raise its own alert.
+CREATE FUNCTION aml_screening_parked_summary(p_tenant uuid, p_since timestamptz) RETURNS TABLE (o_persons integer, o_evaluations integer)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF p_tenant IS NULL OR p_since IS NULL THEN
+        RAISE EXCEPTION 'aml: invalid parked summary arguments' USING ERRCODE = 'AT001';
+    END IF;
+    IF p_tenant IS DISTINCT FROM public.aml_session_tenant() THEN
+        RAISE EXCEPTION 'aml: the session tenant is not the requested tenant' USING ERRCODE = 'AT002';
+    END IF;
+    RETURN QUERY
+        WITH latest AS (
+            SELECT DISTINCT ON (d.person_id) d.person_id, d.hold_outcome, d.hold_id, d.kyc_outcome, d.allowed
+              FROM public.aml_enforcement_decisions d
+             WHERE d.tenant_id = p_tenant AND d.operation = 'withdrawal_payout' AND d.decided_at >= p_since
+             ORDER BY d.person_id, d.decided_at DESC, d.id DESC
+        )
+        SELECT (SELECT count(*)::integer FROM latest l
+                 WHERE l.hold_outcome = 'held' AND l.hold_id IS NULL AND NOT l.allowed AND l.kyc_outcome IN ('passed', 'not_required')),
+               (SELECT count(*)::integer FROM public.aml_enforcement_decisions d
+                 WHERE d.tenant_id = p_tenant AND d.operation = 'withdrawal_payout' AND d.decided_at >= p_since
+                   AND d.hold_outcome = 'held' AND d.hold_id IS NULL AND NOT d.allowed AND d.kyc_outcome IN ('passed', 'not_required'));
+END
+$$;
+
+-- lic23 (N-4): the officer's governed way to un-stick a person whose screening is not progressing: a stale pending / claimed request
+-- is CANCELLED and a fresh request is queued for the worker, or, for a person with NO request at all, a fresh request is queued.
+-- Officer quorum, owner scope, a signed actor proof and a reason code; the cancelled row keeps the officer columns and the id of its
+-- replacement (that IS the audit record), and the proof nonce is consumed. A request that is stuck on a match or a terminal failure
+-- is RESOLVED (aml_screening_record), never replaced.
+CREATE FUNCTION aml_screening_request_replace(p_tenant uuid, p_person uuid, p_request uuid, p_reason_code text)
+RETURNS TABLE (o_new_request_id uuid, o_cancelled_request_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    a      record;
+    v_req  record;
+    v_jur  uuid;
+    v_new  uuid;
+    v_owner text;
+BEGIN
+    IF p_person IS NULL OR p_reason_code IS NULL OR p_reason_code !~ '^[a-z0-9_]{1,64}$' THEN
+        RAISE EXCEPTION 'aml: a replacement needs a person and a reason code' USING ERRCODE = 'AT001';
+    END IF;
+    SELECT * INTO a FROM public.aml_authorize(p_tenant, 'aml_screening_request:replace', COALESCE(p_request::text, 'new'),
+        public.k2_sha256_hex(public.k2_canonical(p_tenant::text, p_person::text, p_request::text, p_reason_code)));
+    v_owner := public.aml_owner_scope_of_tenant(p_tenant);
+    IF public.aml_actor_owner_scope(a.o_scope) IS DISTINCT FROM v_owner THEN
+        RAISE EXCEPTION 'aml: the actor does not own this tenant''s AML scope' USING ERRCODE = 'AM002';
+    END IF;
+    PERFORM public.aml_assert_not_subject(a.o_person_id, p_person);
+    PERFORM public.aml_assert_quorum(p_tenant, v_owner);
+    PERFORM public.aml_person_lock(p_tenant, p_person);
+    IF p_request IS NOT NULL THEN
+        SELECT * INTO v_req FROM public.aml_screening_requests r WHERE r.id = p_request AND r.tenant_id = p_tenant AND r.person_id = p_person FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'aml: screening request not found' USING ERRCODE = 'AM040';
+        END IF;
+        IF v_req.status NOT IN ('pending', 'claimed') THEN
+            RAISE EXCEPTION 'aml: only a pending or claimed request is replaced; a match or a terminal failure is resolved' USING ERRCODE = 'AT003';
+        END IF;
+        v_jur := v_req.licensing_jurisdiction_id;
+    ELSE
+        IF EXISTS (SELECT 1 FROM public.aml_screening_requests r WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status IN ('pending', 'claimed')) THEN
+            RAISE EXCEPTION 'aml: the person has a pending request: name it to replace it' USING ERRCODE = 'AT003';
+        END IF;
+        SELECT l.jur INTO v_jur FROM (SELECT DISTINCT ON (tp.licensing_jurisdiction_id) tp.licensing_jurisdiction_id AS jur, tp.gate_withdrawal
+                                        FROM public.aml_screening_trigger_policies tp
+                                       WHERE tp.tenant_id = p_tenant AND tp.effective_from <= pg_catalog.clock_timestamp()
+                                       ORDER BY tp.licensing_jurisdiction_id, tp.created_at DESC, tp.id DESC) l
+         WHERE l.gate_withdrawal ORDER BY l.jur LIMIT 1;
+        IF v_jur IS NULL THEN
+            RAISE EXCEPTION 'aml: no trigger policy gates withdrawals for this tenant, so there is nothing to queue a screening for' USING ERRCODE = 'AT004';
+        END IF;
+    END IF;
+    INSERT INTO public.aml_screening_requests (tenant_id, person_id, licensing_jurisdiction_id, trigger, idempotency_key)
+    VALUES (p_tenant, p_person, v_jur, 'scheduled', 'repl:' || p_person::text || ':' || gen_random_uuid()::text)
+    RETURNING id INTO v_new;
+    IF p_request IS NOT NULL THEN
+        UPDATE public.aml_screening_requests SET status = 'cancelled', claim_token = NULL, lease_until = NULL, cancelled_by = a.o_actor,
+               cancelled_by_person_id = a.o_person_id, cancel_reason_code = p_reason_code, replaced_by_request_id = v_new,
+               updated_at = pg_catalog.clock_timestamp() WHERE id = p_request;
+    END IF;
+    RETURN QUERY SELECT v_new, p_request;
 END
 $$;
 
@@ -1467,7 +1691,8 @@ DECLARE
 BEGIN
     FOREACH f IN ARRAY ARRAY['aml_screening_trigger_policies_guard()', 'aml_screening_requests_guard()', 'aml_screening_enqueue(uuid, uuid, text, text)',
                              'aml_screening_gate_denies(uuid, uuid, text)', 'player_accounts_aml_enqueue()', 'kyc_verifications_aml_enqueue()',
-                             'aml_screening_jurisdictions(uuid)', 'aml_screening_assert_worker_provider(text)', 'screening_worker_available()'] LOOP
+                             'aml_screening_jurisdictions(uuid)', 'aml_screening_assert_worker_provider(text)', 'screening_worker_available()',
+                             'aml_screening_gate_environment_ok()', 'aml_screening_request_resolved(uuid)', 'aml_screening_review_cleared_at(uuid)'] LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
             EXECUTE format('REVOKE ALL ON FUNCTION %s FROM igaming_runtime', f);
@@ -1478,7 +1703,8 @@ BEGIN
         'aml_screening_gate_overdue(uuid, integer)', 'screening_worker_heartbeat(text, boolean)',
         'aml_screening_trigger_policy_effective(uuid, uuid)', 'aml_screening_request_list(uuid, uuid)',
         'aml_screening_enqueue_due(uuid, integer)', 'aml_screening_request_claim(uuid, integer, integer)',
-        'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer)'
+        'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text)',
+        'aml_screening_request_replace(uuid, uuid, uuid, text)', 'aml_screening_parked_summary(uuid, timestamptz)'
     ] LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN

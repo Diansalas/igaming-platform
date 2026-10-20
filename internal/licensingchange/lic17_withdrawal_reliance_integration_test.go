@@ -271,3 +271,45 @@ func TestLic17_L3_KYCEnforcementUnderPlayerScope(t *testing.T) {
 	}
 	wantKYC(t, "player scope, no residence", d, kyc.OutcomeUnavailable, false)
 }
+
+// lic23 N-6: an unreadable licence with configured policies fails closed only when some configured cause could refuse at the stage.
+// A tenant whose configured actions are all `allow` evaluates to allow with the licence state recorded as unknown (source
+// configured, the set version stated), not a 503; one configured block still fails closed.
+func TestLic23_N6_UnreadableLicence_AllConfiguredAllow_RecordsUnknownAndAllows(t *testing.T) {
+	w := newWorld(t)
+	j := w.jurisdiction()
+	shadow := `CREATE TEMP TABLE tenants (id uuid, licence_id uuid) ON COMMIT DROP`
+	eval := func(tid, b uuid.UUID) (withdrawal.RestrictionDecision, error) {
+		var d withdrawal.RestrictionDecision
+		fresh := connect(t, w.ownerURL)
+		err := fresh.WithTenant(context.Background(), tid, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, shadow); err != nil {
+				return err
+			}
+			var err error
+			d, err = withdrawal.EvaluateRestriction(ctx, tx, tid, b, withdrawal.RestrictionStageRequest)
+			return err
+		})
+		return d, err
+	}
+	tid := w.tenant("under_platform_licence")
+	b := w.brand(tid)
+	l := w.licence(j, "platform", uuid.Nil)
+	w.setCeiling(l, bCountry)
+	w.widen(KindOperatingBasisSet, licenceBasis("platform_licence", tid, nil, l, bCountry), "platform_licence_basis")
+	w.wrPolicy(tid, withdrawal.CauseLicenceSuspended, withdrawal.RestrictionAllow)
+	w.wrPolicy(tid, withdrawal.CauseLicenceMissing, withdrawal.RestrictionAllow)
+	d, err := eval(tid, b)
+	if err != nil {
+		t.Fatalf("every configured action is allow: must not fail: %v", err)
+	}
+	if d.Action != withdrawal.RestrictionAllow || d.Source != withdrawal.RestrictionSourceConfigured || !d.LicenceUnknown ||
+		d.LicenceState != withdrawal.LicenceStateUnknown || d.DecidingCause != "" || d.SetVersion != 2 {
+		t.Fatalf("allow / configured / unknown / set version 2, got %+v", d)
+	}
+	// One configured block at the stage and the unreadable state is no longer harmless.
+	w.wrPolicy(tid, withdrawal.CauseLicenceExpired, withdrawal.RestrictionBlock)
+	if _, err := eval(tid, b); !errors.Is(err, withdrawal.ErrGateUnavailable) {
+		t.Fatalf("a configured block: must fail closed, got %v", err)
+	}
+}
