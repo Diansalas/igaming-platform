@@ -139,7 +139,7 @@ export async function ensureTenantStaff(key: string, o: { role: string; person: 
   const person = o.person === 'new' ? randomUUID() : 'uuid' in o.person ? o.person.uuid : staffPerson(o.person.sameAs)
   const email = `${key.toLowerCase()}@${w.tenantSlug}.acceptance.invalid`
   ownerSql({ tenant: t }, `
-    INSERT INTO persons (id) SELECT ${lit(person)}::uuid WHERE NOT EXISTS (SELECT 1 FROM persons WHERE id = ${lit(person)}::uuid);
+    ${o.person === 'new' ? `INSERT INTO persons (id) VALUES (${lit(person)}::uuid);` : ''}
     INSERT INTO staff_users (tenant_id, email, password_hash, role, status, person_id)
       SELECT tenant_id, ${lit(email)}, password_hash, ${lit(o.role)}, 'active', ${lit(person)}::uuid FROM staff_users WHERE email = ${lit(like.email)}`)
   register(key, email, like.password, w.tenantSlug, o.role, person)

@@ -47,8 +47,7 @@ test.beforeAll(async () => {
   v2 = await startVerification(r2)
   r3 = await newPlayer('res-r3')
   v3 = await startVerification(r3)
-  const c = await apiLogin('T_COMPLIANCE')
-  for (const v of [v2, v3]) expect((await reviewVerification(c, v, 'approved')).status).toBe(200) // approved, NO residence yet
+  // v2 and v3 stay PENDING at the vendor; their review (approval plus residence) happens in test (h)
   const playerPerson = verification(v1).person
   expect(playerPerson).toMatch(/^[0-9a-f-]{36}$/)
   await ensureTenantStaff('T_CP', { role: 'compliance', person: { uuid: playerPerson } }) // a compliance account OF THE PLAYER'S OWN Person
@@ -154,7 +153,7 @@ test('(e) BELOW the API (runtime role): the residence guards, the privileges and
   const attempts: Array<{ name: string; settings: Record<string, string>; sql: string; want: string }> = [
     // 1. direct writes to the verification's residence columns without a new determination (S3 guard)
     { name: 'UPDATE country only', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = 'DE' WHERE id = ${lit(v1)}`, want: 'RD005' },
-    { name: 'UPDATE country to NULL', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = NULL WHERE id = ${lit(v1)}`, want: 'RD005' },
+    { name: 'UPDATE country to NULL (refused by a table CHECK before the trigger)', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = NULL WHERE id = ${lit(v1)}`, want: '23514' },
     { name: 'UPDATE country + source only', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = 'DE', verified_residence_source = 'reviewer_determination' WHERE id = ${lit(v1)}`, want: 'RD005' },
     { name: 'UPDATE country with a BACKDATED determination time', settings: tenantOnly, sql: `UPDATE kyc_verifications SET verified_residence_country = 'DE', verified_residence_set_at = verified_residence_set_at - interval '1 day' WHERE id = ${lit(v1)}`, want: 'RD005' },
     // 2. direct writes to the residence tables: no privilege at all
@@ -185,12 +184,14 @@ test('(e) BELOW the API (runtime role): the residence guards, the privileges and
     { name: 'valid proof, a STALE determination time (one microsecond off)', settings: asStaff('T_C2', { 'app.actor_proof': determinationApproveProof({ tenant: tid, actor: staffId('T_C2'), verification: v1, determinedAtMicro: bump(at), reason }) }), sql: approve(v1, bump(at)), want: 'RD040' },
   ]
   const outcomes: string[] = []
+  const wrong: string[] = []
   for (const a of attempts) {
     const r = runtimeTx(a.settings, a.sql)
     outcomes.push(`${a.name} -> ${r.sqlstate || 'NO ERROR'}`)
-    expect(r.sqlstate, a.name).toBe(a.want)
-    expect(fingerprint(v1), `${a.name}: the database must not change`).toBe(before)
+    if (r.sqlstate !== a.want) wrong.push(`${a.name}: want ${a.want}, got ${r.sqlstate || 'NO ERROR'}`)
+    if (fingerprint(v1) !== before) wrong.push(`${a.name}: the database changed`)
   }
+  expect(wrong).toEqual([])
 
   // CONTROL (rolled back): the identical call with a valid proof from a Person-distinct compliance officer succeeds. The refusals
   // above are therefore caused by the specific control each one targets, not by a broken probe.
