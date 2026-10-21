@@ -19,6 +19,7 @@ import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Table, type Column } from '../../components/Table'
 import { usePagination } from '../../components/usePagination'
 import { FILING_KIND_LABEL, FileChangeDialog, type FilingKind } from './FileChangeDialog'
+import { CeilingDialog } from './MarketDialogs'
 import { EvidenceNote, LicenceStatusBadge, LicensingErrorAlert, short } from './LicensingBits'
 import { dateText, licenseeLabel, safeToken, when } from './labels'
 
@@ -29,6 +30,7 @@ export function LicenceDetailPage() {
   const { claims } = useAuth()
   const perms = getNavPermissions(claims?.role)
   const [dialog, setDialog] = useState<FilingKind | null>(null)
+  const [ceilingDialog, setCeilingDialog] = useState<{ country: string } | null>(null)
   const [currentOnly, setCurrentOnly] = useState(true)
   const { limit, offset, setOffset, resetToFirstPage } = usePagination(20)
   const lic = useQuery({ queryKey: ['licensing', 'licence', licenceId], queryFn: () => getLicence(licenceId), enabled: !!licenceId, retry: false })
@@ -66,6 +68,9 @@ export function LicenceDetailPage() {
     { key: 'ver', header: 'Policy version', render: (c) => safeToken(c.policy_version) },
     { key: 'from', header: 'Effective from', render: (c) => when(c.effective_from) },
     { key: 'to', header: 'Effective to', render: (c) => (c.effective_to ? when(c.effective_to) : 'Open') },
+    ...(perms.licensingRequest
+      ? [{ key: 'act', header: '', render: (c: LicenceCountryCeiling) => (c.effective_to === null ? <Button variant="secondary" onClick={() => setCeilingDialog({ country: c.country_code })}>{`File a change for ${safeToken(c.country_code)}`}</Button> : null) }]
+      : []),
   ]
 
   return (
@@ -140,8 +145,13 @@ export function LicenceDetailPage() {
         )}
       </Card>
 
-      <Card title="Country ceilings (read-only)">
+      <Card title="Country ceilings">
         <p className="mb-2 text-xs text-slate-600">Stored ceiling versions only. This is not a decision about where operation is permitted; that is resolved by the runtime market gate.</p>
+        {perms.licensingRequest && (
+          <div className="mb-2">
+            <Button onClick={() => setCeilingDialog({ country: '' })}>File a country ceiling change</Button>
+          </div>
+        )}
         <div className="mb-2">
           <Checkbox label="Current versions only" checked={currentOnly} onChange={(e) => { setCurrentOnly(e.target.checked); resetToFirstPage() }} />
         </div>
@@ -163,6 +173,7 @@ export function LicenceDetailPage() {
 
       <Link to="/licensing/licences" className="text-sm text-brand-700 hover:underline">&larr; Back to licences</Link>
       {dialog && <FileChangeDialog initialKind={dialog} licence={l} onClose={() => setDialog(null)} />}
+      {ceilingDialog && <CeilingDialog licence={l} initialCountry={ceilingDialog.country} onClose={() => setCeilingDialog(null)} />}
     </div>
   )
 }

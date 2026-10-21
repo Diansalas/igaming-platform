@@ -117,8 +117,11 @@ describe('licences', () => {
     expect(seen[0].searchParams.get('licence_id')).toBe(LIC1)
     expect(seen[0].searchParams.get('current')).toBe('true')
     expect(await screen.findByText('Baseline')).toBeInTheDocument()
-    // the ceilings table is read-only: no action buttons in it
-    expect(screen.queryByRole('button', { name: /ceiling/i })).toBeNull()
+    // lic31: the ceilings are no longer read-only; the ONLY ceiling control is the explicit filing entry (it files a change for
+    // approval, it does not edit a row), plus one per-row entry for the current version
+    expect(screen.getAllByRole('button', { name: /ceiling/i })).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'File a country ceiling change' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'File a change for ZZ' })).toBeInTheDocument()
   })
 })
 

@@ -18,6 +18,7 @@ import { TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Modal } from '../../components/Modal'
 import { BasisPayloadSummary } from './BasisBits'
+import { MARKET_CHANGE_KINDS, MarketPayloadSummary } from './MarketBits'
 import { ApprovalRules, ChangeStatusBadge, Disclaimer, LicensingErrorAlert, Pending, Success, short } from './LicensingBits'
 import { REASON_CODE_HELP, kindLabel, safeToken, when } from './labels'
 
@@ -163,6 +164,12 @@ export function ChangeDetailPage() {
               <Link className="text-brand-700 hover:underline" to={`/licensing/operating-bases/${encodeURIComponent(q.data.outcome.operating_basis_id)}`}>Open the resulting basis version</Link>
             </p>
           )}
+        </Card>
+      )}
+
+      {MARKET_CHANGE_KINDS.includes(c.kind) && (
+        <Card title="Market configuration in words">
+          <MarketPayloadSummary kind={c.kind} payload={c.payload} widening={c.widening} />
         </Card>
       )}
 

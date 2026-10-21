@@ -19,6 +19,7 @@ import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Table, type Column } from '../../components/Table'
 import { usePagination } from '../../components/usePagination'
 import { FileChangeDialog, type FilingKind } from './FileChangeDialog'
+import { ConfigDialog, PolicyDialog } from './MarketDialogs'
 import { Disclaimer, LicenceStatusBadge, LicensingErrorAlert, short } from './LicensingBits'
 import { LICENSING_MODEL_LABEL, licenseeLabel, safeToken, when } from './labels'
 
@@ -29,6 +30,8 @@ export function TenantLicensingPage() {
   const { claims } = useAuth()
   const perms = getNavPermissions(claims?.role)
   const [dialog, setDialog] = useState<FilingKind | null>(null)
+  const [policyDialog, setPolicyDialog] = useState<{ initial?: OperatingCountryPolicy } | null>(null)
+  const [configDialog, setConfigDialog] = useState<{ jurisdictionId?: string; action?: 'set' | 'close' } | null>(null)
   const [currentOnly, setCurrentOnly] = useState(true)
   const cfgPage = usePagination(20)
   const polPage = usePagination(20)
@@ -65,6 +68,21 @@ export function TenantLicensingPage() {
     { key: 'geo', header: 'Geo blocks', render: (c) => list(c.geo_block_list) },
     { key: 'from', header: 'Effective from', render: (c) => when(c.effective_from) },
     { key: 'to', header: 'Effective to', render: (c) => (c.effective_to ? when(c.effective_to) : 'Open') },
+    ...(perms.licensingRequest
+      ? [
+          {
+            key: 'act',
+            header: '',
+            render: (c: TenantJurisdictionConfig) =>
+              c.effective_to === null ? (
+                <span className="flex gap-2">
+                  <Button variant="secondary" onClick={() => setConfigDialog({ jurisdictionId: c.jurisdiction_id, action: 'set' })}>{`Set a new version for ${short(c.jurisdiction_id)}`}</Button>
+                  <Button variant="secondary" onClick={() => setConfigDialog({ jurisdictionId: c.jurisdiction_id, action: 'close' })}>{`Close ${short(c.jurisdiction_id)}`}</Button>
+                </span>
+              ) : null,
+          },
+        ]
+      : []),
   ]
   const polCols: Column<OperatingCountryPolicy>[] = [
     { key: 'cc', header: 'Country', render: (p) => safeToken(p.country_code) },
@@ -76,6 +94,9 @@ export function TenantLicensingPage() {
     { key: 'reason', header: 'Reason code', render: (p) => safeToken(p.reason_code) },
     { key: 'from', header: 'Effective from', render: (p) => when(p.effective_from) },
     { key: 'to', header: 'Effective to', render: (p) => (p.effective_to ? when(p.effective_to) : 'Open') },
+    ...(perms.licensingRequest
+      ? [{ key: 'act', header: '', render: (p: OperatingCountryPolicy) => (p.effective_to === null ? <Button variant="secondary" onClick={() => setPolicyDialog({ initial: p })}>{`File a change for ${safeToken(p.country_code)} (${safeToken(p.scope)})`}</Button> : null) }]
+      : []),
   ]
 
   return (
@@ -129,7 +150,12 @@ export function TenantLicensingPage() {
         </p>
       </Card>
 
-      <Card title="Tenant jurisdiction configurations (read-only)">
+      <Card title="Tenant jurisdiction configurations">
+        {perms.licensingRequest && (
+          <div className="mb-2">
+            <Button onClick={() => setConfigDialog({})}>File a jurisdiction configuration change</Button>
+          </div>
+        )}
         {configs.error ? <LicensingErrorAlert error={configs.error} /> : null}
         <Table
           columns={cfgCols}
@@ -141,7 +167,12 @@ export function TenantLicensingPage() {
         />
       </Card>
 
-      <Card title="Operating-country policies (read-only)">
+      <Card title="Operating-country policies">
+        {perms.licensingRequest && (
+          <div className="mb-2">
+            <Button onClick={() => setPolicyDialog({})}>File an operating-country policy change</Button>
+          </div>
+        )}
         <p className="mb-2 text-xs text-slate-600">Stored policy versions only. This is not a decision about where the tenant may operate.</p>
         <div className="mb-2">
           <Checkbox label="Current versions only" checked={currentOnly} onChange={(e) => { setCurrentOnly(e.target.checked); polPage.resetToFirstPage() }} />
@@ -159,6 +190,8 @@ export function TenantLicensingPage() {
 
       <Link to={`/tenants/${tenantId}`} className="text-sm text-brand-700 hover:underline">&larr; Back to tenant</Link>
       {dialog && <FileChangeDialog initialKind={dialog} tenantId={tenantId} onClose={() => setDialog(null)} />}
+      {policyDialog && <PolicyDialog tenantId={tenantId} initial={policyDialog.initial} onClose={() => setPolicyDialog(null)} />}
+      {configDialog && <ConfigDialog tenantId={tenantId} configs={configs.data?.items ?? []} initialJurisdictionId={configDialog.jurisdictionId} initialAction={configDialog.action} onClose={() => setConfigDialog(null)} />}
     </div>
   )
 }
