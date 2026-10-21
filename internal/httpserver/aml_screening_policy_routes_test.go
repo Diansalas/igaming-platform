@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -32,7 +34,7 @@ func policyMux(f *fakeAML) (*http.ServeMux, string) {
 			h.ServeHTTP(w, r.WithContext(tenant.WithContext(r.Context(), tc)))
 		})
 	}
-	deps := Deps{AML: f}
+	deps := Deps{AML: f, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	m.Handle("GET /t/{tenantID}/policy", inject(amlHandler(deps, "p", amlScreeningPolicyRead)))
 	m.Handle("POST /t/{tenantID}/policy", inject(amlHandler(deps, "ps", amlScreeningPolicySet)))
 	return m, "/t/" + tid.String() + "/policy"

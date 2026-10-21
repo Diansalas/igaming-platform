@@ -120,6 +120,9 @@ type Sweeper struct {
 	// testScreeningScan replaces the database read of one keyset batch (lic29); tests only (nil in production).
 	testScreeningScan func(tenantID uuid.UUID, after *uuid.UUID) (aml.ParkedScan, error)
 
+	// testParkedStart replaces the random first cursor of a tenant's parked-screening cycle (lic30 M-2); tests only.
+	testParkedStart func() uuid.UUID
+
 	// parkedMu guards the per-tenant keyset cursor of the parked-screening scan and the consecutive-failure counter (lic29). In-memory
 	// and per instance: a restart starts a new cycle, which only repeats work.
 	parkedMu     sync.Mutex

@@ -46,6 +46,8 @@ func TestLic29_SweeperWalksTheKeysetCycleAndAlertsApart(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	s := newLoopSweeper(pool, newLoopProvider("mock-psp-lic29").orchestrator(), false, nil)
 	c1, c2 := uuid.New(), uuid.New()
+	start := uuid.New()
+	s.testParkedStart = func() uuid.UUID { return start } // lic30 M-2: the first read of a tenant starts at a random point, not at nil
 	var seen []*uuid.UUID
 	s.testScreeningScan = func(_ uuid.UUID, after *uuid.UUID) (aml.ParkedScan, error) {
 		seen = append(seen, after)
@@ -70,8 +72,8 @@ func TestLic29_SweeperWalksTheKeysetCycleAndAlertsApart(t *testing.T) {
 	if st.ScreeningParkedPartial || st.ScreeningParkedScanned != 3 {
 		t.Fatalf("pass 3 completes the cycle: %+v", st)
 	}
-	st = s.RunPass(context.Background(), nil, 0) // the next cycle starts again from the start
-	if len(seen) != 4 || seen[0] != nil || seen[1] == nil || *seen[1] != c1 || seen[2] == nil || *seen[2] != c2 || seen[3] != nil {
+	st = s.RunPass(context.Background(), nil, 0)                                                                                                         // the next cycle starts again from the start
+	if len(seen) != 4 || seen[0] == nil || *seen[0] != start || seen[1] == nil || *seen[1] != c1 || seen[2] == nil || *seen[2] != c2 || seen[3] != nil { // the 4th read follows a COMPLETED cycle, so it wraps to the beginning
 		t.Fatalf("the cursor must be carried from batch to batch and reset after the end: %v", seen)
 	}
 	got := alertsByDisc(t, pool, f.tenantID, "aml.screening_gate_trapped")

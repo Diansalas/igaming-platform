@@ -1602,7 +1602,13 @@ BEGIN
                      WHERE t2.tenant_id = p_tenant AND t2.licensing_jurisdiction_id = l.jur AND t2.gate_withdrawal) f ON true
      WHERE l.gate_withdrawal;
     IF v_alert IS NULL THEN
-        RETURN 0;
+        -- lic30 M-1: no policy gates withdrawals now, but a person with an unresolved needs_officer request is STILL denied (the always-on
+        -- hold at the top of aml_screening_gate_denies). Use the alert threshold of the LAST gating version, else the engineering
+        -- fallback of 86400 s (24 h; NOT a legal value) and keep scanning.
+        SELECT tp.gate_alert_after_seconds INTO v_alert FROM public.aml_screening_trigger_policies tp
+         WHERE tp.tenant_id = p_tenant AND tp.gate_withdrawal ORDER BY tp.created_at DESC, tp.id DESC LIMIT 1;
+        v_alert := COALESCE(v_alert, 86400);
+        v_first := pg_catalog.clock_timestamp();
     END IF;
     SELECT count(*)::integer INTO v_n FROM (
         SELECT pa.person_id FROM (SELECT DISTINCT a.person_id FROM public.player_accounts a WHERE a.tenant_id = p_tenant LIMIT p_limit) pa
@@ -1656,7 +1662,9 @@ $$;
 -- start of the person's current run of screening-only payout holds and the aml_screening_gate_overdue anchor (oldest unresolved request,
 -- else the first gating version), so a dead worker AND no retries is visible. The decision look-back is
 -- LEAST(p_since, now - GREATEST(7 days, 2 x the largest gating alert threshold)). Window functions, no per-person rescans of a
--- materialised set. Counts only, session-tenant bound, proof-less. Index: aml_enforcement_decisions_tenant_op_decided (migration 0188).
+-- materialised set. EVERY count is PER BATCH (lic30 I-1): the value of an alert raised from it is the number of overdue persons in the batch,
+-- not in the tenant; the next batches add theirs. A failed_terminal request counts with the officer bucket (it needs an officer).
+-- Counts only, session-tenant bound, proof-less. Index: aml_enforcement_decisions_tenant_op_decided (migration 0188).
 CREATE FUNCTION aml_screening_parked_overdue(p_tenant uuid, p_since timestamptz, p_after uuid, p_limit integer)
 RETURNS TABLE (o_parked integer, o_overdue integer, o_officer integer, o_officer_overdue integer, o_scanned integer, o_next uuid)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -1686,8 +1694,14 @@ BEGIN
                      WHERE t2.tenant_id = p_tenant AND t2.licensing_jurisdiction_id = l.jur AND t2.gate_withdrawal) f ON true
      WHERE l.gate_withdrawal;
     IF v_alert IS NULL THEN
-        RETURN QUERY SELECT 0, 0, 0, 0, 0, NULL::uuid;  -- no policy gates withdrawals: nothing is held by the screening gate
-        RETURN;
+        -- lic30 M-1: no policy gates withdrawals now, but a person with an unresolved needs_officer request is STILL denied by the always-on
+        -- hold, so the batch is still scanned (only the officer buckets can be non-zero). The threshold is that of the LAST gating version,
+        -- else the engineering fallback of 86400 s (24 h; NOT a legal value).
+        SELECT tp.gate_alert_after_seconds INTO v_alert FROM public.aml_screening_trigger_policies tp
+         WHERE tp.tenant_id = p_tenant AND tp.gate_withdrawal ORDER BY tp.created_at DESC, tp.id DESC LIMIT 1;
+        v_alert := COALESCE(v_alert, 86400);
+        v_max := v_alert;
+        v_first := pg_catalog.clock_timestamp();
     END IF;
     v_since := LEAST(p_since, pg_catalog.clock_timestamp()
                  - GREATEST(interval '7 days', pg_catalog.make_interval(secs => 2 * v_max::double precision)));
@@ -1722,7 +1736,7 @@ BEGIN
              WHERE r.tenant_id = p_tenant AND r.status NOT IN ('done', 'cancelled') AND r.person_id IN (SELECT person_id FROM denied)
         ), reqs AS (
             SELECT q.person_id, min(q.created_at) FILTER (WHERE NOT q.res) AS anchor,
-                   bool_or(q.status = 'needs_officer' AND NOT q.res) AS officer
+                   bool_or(q.status IN ('needs_officer', 'failed_terminal') AND NOT q.res) AS officer
               FROM rq q GROUP BY q.person_id
         ), per AS (
             SELECT n.person_id, COALESCE(r.is_parked, false) AS is_parked, r.run_start,

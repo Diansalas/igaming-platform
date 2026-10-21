@@ -27,6 +27,10 @@ var RefusalCodes = map[string]string{
 	"request_lease_live":                 "the request is being processed: its lease has not expired",
 	"person_has_pending_request":         "the person has a pending request: name it to replace it",
 	"no_gating_policy":                   "no trigger policy gates withdrawals for this tenant, so there is nothing to queue",
+	// screening policy (lic30)
+	"policy_effective_from_out_of_range":      "a screening policy takes effect between now (2 minutes tolerance) and 30 days ahead",
+	"rescreen_interval_below_floor":           "the re-screen interval is below the engineering safety floor of 3600 seconds",
+	"rescreen_interval_below_alert_threshold": "the re-screen interval is below twice the withdrawal gate alert threshold of the jurisdiction",
 	// screening policy (lic29)
 	"policy_loosening_refused": "the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); loosening needs a four-eyes path that is not built",
 }

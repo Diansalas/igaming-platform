@@ -187,7 +187,17 @@ func (s *Sweeper) reportScreeningParked(ctx context.Context, logger *slog.Logger
 	if s.parkedCursor == nil {
 		s.parkedCursor, s.parkedFails = map[uuid.UUID]*uuid.UUID{}, map[uuid.UUID]int{}
 	}
-	after := s.parkedCursor[tenantID]
+	after, started := s.parkedCursor[tenantID]
+	if !started {
+		// lic30 M-2: the cursor is in memory, so a restart loses it. Start from a RANDOM point instead of the beginning: a sweeper that
+		// restarts more often than a cycle takes would otherwise only ever observe the lowest person ids. The first leg runs from the
+		// random point to the end; the next pass starts from the beginning (cursor nil), so every person is covered after one wrap.
+		r := uuid.New()
+		if s.testParkedStart != nil {
+			r = s.testParkedStart()
+		}
+		after = &r
+	}
 	s.parkedMu.Unlock()
 
 	var sc aml.ParkedScan

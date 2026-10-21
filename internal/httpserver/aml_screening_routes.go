@@ -309,6 +309,11 @@ func amlScreeningPolicySet(c amlCall) {
 		c.badRequest()
 		return
 	}
+	// lic30 M-3: the engineering floor (same value as the service and the database) answers with its closed code, status 400.
+	if time.Duration(*req.RescreenIntervalSecond)*time.Second < aml.MinRescreenInterval {
+		apierror.WriteWithCheckCodes(c.w, c.requestID, apierror.CodeValidation, "invalid request", []string{"rescreen_interval_below_floor"})
+		return
+	}
 	in := aml.ScreeningPolicyInput{JurisdictionID: jur, RescreenInterval: time.Duration(*req.RescreenIntervalSecond) * time.Second,
 		BackfillGrace: time.Duration(*req.BackfillGraceSeconds) * time.Second, EffectiveFrom: from,
 		LegalReviewReference: req.LegalReviewReference, ReasonCode: req.ReasonCode}
