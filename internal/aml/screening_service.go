@@ -327,10 +327,25 @@ func (s *Service) SetScreeningPolicy(ctx context.Context, a Actor, in SetScreeni
 	return s.writeScreeningPolicy(ctx, a, in, "aml_screening_policy_set")
 }
 
+// MinRescreenInterval is the ENGINEERING safety floor of the re-screen interval over HTTP (lic30 M-3; NOT a legal value): below it every
+// clear expires within the hour (all withdrawals freeze behind the gate) and the scheduled enqueue floods. The database applies it too
+// (migration 0189), together with "at least twice the gate alert threshold of the jurisdiction", which Go cannot see.
+const MinRescreenInterval = time.Hour
+
 // AuthorScreeningPolicy (lic29) is what the HTTP route calls: the same authorisation and row as SetScreeningPolicy through the
 // database function aml_screening_policy_author (migration 0189), which additionally refuses a version that is LESS STRICT than the
 // latest one (a list removed, a longer re-screen interval or grace, an earlier effective time): loosening has no four-eyes path yet.
 func (s *Service) AuthorScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput) (uuid.UUID, error) {
+	// lic30: the same bounds the database applies (aml_screening_policy_author), refused before a proof is signed.
+	if in.EffectiveFrom.IsZero() {
+		return uuid.Nil, fmt.Errorf("%w: an effective time is required", ErrInvalidInput)
+	}
+	if now := time.Now(); in.EffectiveFrom.Before(now.Add(-2*time.Minute)) || in.EffectiveFrom.After(now.Add(30*24*time.Hour)) {
+		return uuid.Nil, coded("policy_effective_from_out_of_range", fmt.Errorf("%w: effective_from must be between now (2 minutes tolerance) and 30 days ahead", ErrInvalidInput))
+	}
+	if in.RescreenInterval < MinRescreenInterval {
+		return uuid.Nil, coded("rescreen_interval_below_floor", fmt.Errorf("%w: the re-screen interval is below the safety floor of %s", ErrInvalidInput, MinRescreenInterval))
+	}
 	return s.writeScreeningPolicy(ctx, a, in, "aml_screening_policy_author")
 }
 

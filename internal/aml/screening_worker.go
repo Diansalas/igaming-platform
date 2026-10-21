@@ -588,21 +588,3 @@ func ScreeningParkedScan(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, aft
 		tenantID, ScreeningParkedWindow.Seconds(), after, limit).Scan(&out.Parked, &out.Overdue, &out.Officer, &out.OfficerOverdue, &out.Scanned, &out.Next)
 	return out, err
 }
-
-// ScreeningParkedOverdue returns, for the tenant, the persons parked at the payout gate for want of a screening result and how many
-// of them are past the gating policy's alert threshold, over a COMPLETE cycle of batches (lic26 N-9, lic29). Counts only.
-func ScreeningParkedOverdue(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (parked, overdue int, err error) {
-	var after *uuid.UUID
-	for {
-		sc, e := ScreeningParkedScan(ctx, tx, tenantID, after, ParkedScanBatch)
-		if e != nil {
-			return 0, 0, e
-		}
-		parked += sc.Parked
-		overdue += sc.Overdue
-		if sc.Next == nil {
-			return parked, overdue, nil
-		}
-		after = sc.Next
-	}
-}

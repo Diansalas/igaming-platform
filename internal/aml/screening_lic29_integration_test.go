@@ -90,7 +90,9 @@ func TestLic29_ParkedScan_OfficerQueueIsCountedApartFromTheDeadWorkerSignal(t *t
 func TestLic29_ParkedScan_NoGatingPolicyAndBadArguments(t *testing.T) {
 	tw := newTrigWorld(t, 24*time.Hour, 0)
 	tw.player()
-	if sc := tw.scan(nil, 10); sc.Scanned != 0 || sc.Parked != 0 || sc.Next != nil {
+	// lic30 M-1: the batch is scanned even without a gating policy (an unresolved needs_officer person is still denied), so Scanned is the
+	// batch size; nobody here is denied, so every bucket is empty.
+	if sc := tw.scan(nil, 10); sc.Scanned != 1 || sc.Parked != 0 || sc.Overdue != 0 || sc.Officer != 0 || sc.OfficerOverdue != 0 || sc.Next != nil {
 		t.Fatalf("no gating policy: %+v", sc)
 	}
 	for _, limit := range []int{0, -1, 5001} {
@@ -129,13 +131,18 @@ func TestLic29_PolicyAuthor_TightensButNeverLoosens(t *testing.T) {
 	tw := newTrigWorld(t, 24*time.Hour, time.Hour) // the latest version: both lists, 24 h, grace 1 h, effective now-1h
 	A := tw.q.Officers[0].Actor
 	base := func() aml.SetScreeningPolicyInput { return policyInput(tw.jur, time.Now()) }
+	// lic30: the effective time is bounded to [now-2min, now+30d], so "earlier than the version in force" is tested against a version
+	// that took effect 30 s ago (same values; the unrouted setter writes it); 90 s ago is inside the bound.
+	if _, err := tw.svc.SetScreeningPolicy(ctx, A, policyInput(tw.jur, time.Now().Add(-30*time.Second))); err != nil {
+		t.Fatal(err)
+	}
 	before := policyCount(t, tw)
 
 	loosen := map[string]func(in *aml.SetScreeningPolicyInput){
 		"a list removed":              func(in *aml.SetScreeningPolicyInput) { in.Lists = []aml.ListType{aml.ListPEP} },
 		"a longer re-screen interval": func(in *aml.SetScreeningPolicyInput) { in.RescreenInterval = 25 * time.Hour },
 		"a longer backfill grace":     func(in *aml.SetScreeningPolicyInput) { in.BackfillGrace = 2 * time.Hour },
-		"an earlier effective time":   func(in *aml.SetScreeningPolicyInput) { in.EffectiveFrom = time.Now().Add(-3 * time.Hour) },
+		"an earlier effective time":   func(in *aml.SetScreeningPolicyInput) { in.EffectiveFrom = time.Now().Add(-90 * time.Second) },
 		"a shorter interval but a list": func(in *aml.SetScreeningPolicyInput) {
 			in.RescreenInterval = time.Hour
 			in.Lists = []aml.ListType{aml.ListSanctions}
