@@ -60,6 +60,8 @@ mkdir -p "$RUN_DIR/bin"
 ( cd "$REPO" && for c in platform-api seed-admin seed-staging-world; do go build -o "$RUN_DIR/bin/$c" "./cmd/$c"; done )
 # lic21 (additive): the test-only below-the-application-layer probe (runtime-role connection, real kyc/actorproof code).
 ( cd "$REPO" && go build -o "$RUN_DIR/bin/e2e-dbprobe" ./backoffice/e2e/tools/dbprobe )
+# lic32 (additive): the test-only market resolver probe (runtime-role connection, real operatingmarket resolver).
+( cd "$REPO" && go build -o "$RUN_DIR/bin/e2e-mcprobe" ./backoffice/e2e/tools/mcprobe )
 export E2E_RUNTIME_DATABASE_URL="$RUNTIME_URL"
 
 echo "e2e: building Back Office"
