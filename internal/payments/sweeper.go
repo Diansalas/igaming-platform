@@ -39,12 +39,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -115,6 +117,14 @@ type Sweeper struct {
 	// testScreeningParked replaces the database read of the parked-screening counts (lic26 N-9): a fault-injection seam for tests
 	// only (nil in production).
 	testScreeningParked func(tenantID uuid.UUID) (parked, overdue int, err error)
+	// testScreeningScan replaces the database read of one keyset batch (lic29); tests only (nil in production).
+	testScreeningScan func(tenantID uuid.UUID, after *uuid.UUID) (aml.ParkedScan, error)
+
+	// parkedMu guards the per-tenant keyset cursor of the parked-screening scan and the consecutive-failure counter (lic29). In-memory
+	// and per instance: a restart starts a new cycle, which only repeats work.
+	parkedMu     sync.Mutex
+	parkedCursor map[uuid.UUID]*uuid.UUID
+	parkedFails  map[uuid.UUID]int
 }
 
 // NewSweeper returns a Sweeper with §7.3's default bounds.

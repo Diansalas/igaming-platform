@@ -122,7 +122,7 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 		"aml_case_add_note": true, "aml_case_flag_sar": true, "aml_case_propose": true, "aml_case_approve": true, "aml_case_read": true,
 		"aml_case_events_list": true, "aml_case_notes_list": true, "aml_case_queue": true,
 		// migration 0154 (A7): screening policy / record / list and the launch readiness reader.
-		"aml_screening_policy_set": true, "aml_screening_policy_effective": true, "aml_screening_record": true, "aml_screening_list": true,
+		"aml_screening_policy_set": true, "aml_screening_policy_author": true, "aml_screening_policy_effective": true, "aml_screening_record": true, "aml_screening_list": true,
 		"aml_readiness": true,
 		// migration 0181 (lic10, G1): the trigger policy, the officer request read and the worker API.
 		"aml_screening_trigger_policy_set": true, "aml_screening_trigger_policy_effective": true, "aml_screening_request_list": true,

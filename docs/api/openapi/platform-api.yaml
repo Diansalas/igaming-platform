@@ -10951,7 +10951,7 @@ paths:
     post:
       summary: Author the next version of the automatic AML screening trigger policy
       description: >
-        aml:hold:manage AND step-up `critical`; platform_acting AML officer only (the same rule as the screening policy); needs a signed actor proof (ADR 0110) bound to the whole request. lic18, migration 0181. Appends an immutable VERSION; versions are never edited. Refusals (all 4xx, nothing is written): `gate_withdrawal=true` needs the `scheduled` event (otherwise a clear goes stale unattended), a `gate_alert_after_seconds` of 60..2592000 (the threshold after which a held person raises the `aml.screening_gate_trapped` alert), a screening policy for the jurisdiction, and a screening worker that has recorded a fresh heartbeat (the production binary does not start one: a gate cannot be enabled without a running worker and provider, PROVIDER DEPENDENT). `effective_from` may not be in the past (2 minutes of clock skew allowed) nor more than 30 days ahead, so a version can neither rewrite history nor reset the grace of persons already gated (clears are counted from the FIRST gating version). The platform ships NO grace or re-screen interval; both are configuration.
+        aml:hold:manage AND step-up `critical`; platform_acting AML officer only (the same rule as the screening policy); needs a signed actor proof (ADR 0110) bound to the whole request. lic18, migration 0181. Appends an immutable VERSION; versions are never edited. Refusals (all 4xx, nothing is written): `gate_withdrawal=true` needs the `scheduled` event (otherwise a clear goes stale unattended), a `gate_alert_after_seconds` of 60..2592000 (the threshold after which a held person raises the `aml.screening_gate_trapped` alert), a screening policy for the jurisdiction, and a screening worker that has recorded a fresh heartbeat (the production binary does not start one: a gate cannot be enabled without a running worker and provider, PROVIDER DEPENDENT). `effective_from` may not be in the past (2 minutes of clock skew allowed) nor more than 30 days ahead, so a version can neither rewrite history nor reset the grace of persons already gated (clears are counted from the FIRST gating version). The platform ships NO grace or re-screen interval; both are configuration. lic29: every refusal carries a closed code in `check_codes` (AMLScreeningRefusalCode): `screening_worker_heartbeat_missing`, `gate_environment_refused`, `gate_needs_scheduled_event`, `gate_needs_alert_threshold`, `alert_threshold_without_gate`, `effective_from_out_of_range`, `jurisdiction_not_in_scope`, `screening_policy_missing`, `tenant_not_in_jurisdiction`, `platform_officer_required`. The HTTP statuses are unchanged.
       security:
         - bearerAuth: []
       parameters:
@@ -10961,6 +10961,58 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/AMLScreeningTriggerPolicyRequest" }
+      responses:
+        "201":
+          description: The new version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy_id: { type: string, format: uuid }
+                required: [policy_id]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/policy:
+    get:
+      summary: Read the AML screening policy (re-screen interval, backfill grace, lists) in force for a jurisdiction
+      description: >
+        aml:case:read (AML officer of the tenant, in-force grant re-checked by the database). lic29. `configured=false` means no policy exists: the platform ships NO re-screen interval and NO grace, so nothing is defaulted. Tenant-scoped; a foreign tenant is 404. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: jurisdiction_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The policy in force
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AMLScreeningPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      summary: Author the next version of the AML screening policy (tighten-only)
+      description: >
+        aml:hold:manage AND step-up `critical`; platform_acting AML officer only; owner-scope officer quorum; a signed actor proof (ADR 0110) bound to the whole request; a legal review reference. lic29, migration 0189. Appends an immutable VERSION. TIGHTEN-ONLY: a version that removes a list, lengthens `rescreen_interval_seconds` or `backfill_grace_seconds`, or takes effect earlier than the latest version of the jurisdiction is refused with 409 and the closed code `policy_loosening_refused` in `check_codes` (loosening has no four-eyes path and is not available over HTTP; SR7-3). The first version of a jurisdiction has nothing to loosen. The jurisdiction must be one the tenant is configured to operate in (`tenant_not_in_jurisdiction`). Refusals carry a closed code in `check_codes` (see AMLScreeningRefusalCode).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AMLScreeningPolicyRequest" }
       responses:
         "201":
           description: The new version
@@ -11007,7 +11059,7 @@ paths:
     post:
       summary: Resolve a stuck automatic AML screening request (officer)
       description: >
-        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic18, migration 0181. Only a request in `needs_officer` or `failed_terminal` that is not yet resolved can be resolved; the resolution is recorded through the same governed screening record as any officer screening, under the request's own idempotency key, bound to this person and trigger. `outcome` `clear` needs the lists screened and clears the person only if no match is newer; `potential_match` and `confirmed` place a hold. A SANCTIONS-class (sanctions list) request can only be resolved by a recorded match, never by an officer clear (a clear needs a provider reference). An `error` outcome never resolves. Replays are idempotent (`replayed=true`).
+        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic18, migration 0181. Only a request in `needs_officer` or `failed_terminal` that is not yet resolved can be resolved; the resolution is recorded through the same governed screening record as any officer screening, under the request's own idempotency key, bound to this person and trigger. `outcome` `clear` needs the lists screened and clears the person only if no match is newer; `potential_match` and `confirmed` place a hold. A SANCTIONS-class (sanctions list) request can only be resolved by a recorded match, never by an officer clear (a clear needs a provider reference). An `error` outcome never resolves. Replays are idempotent (`replayed=true`). lic29: refusals carry a closed code in `check_codes` (AMLScreeningRefusalCode): `sanctions_clear_refused`, `sanctions_match_needs_hold`, `error_cannot_resolve`, `request_key_mismatch`, `request_not_awaiting_officer`, `key_prefix_reserved`. The HTTP statuses are unchanged.
       security:
         - bearerAuth: []
       parameters:
@@ -11042,7 +11094,7 @@ paths:
     post:
       summary: Cancel a stale pending screening request and queue a replacement, or queue one for a person who has none (officer)
       description: >
-        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic23, migration 0181 (ledger-finance N-4). With `request_id` the request must be `pending` or `claimed` (a stale or poisoned one): it is CANCELLED (the officer, Person, reason code and the replacement id stay on the cancelled row) and a fresh request is queued for the screening worker. Without `request_id` a request is queued for a person who has none (409 when one is pending). A request stuck on a match or a terminal failure is RESOLVED, not replaced (409). 400 when no trigger policy gates withdrawals for the tenant (nothing to queue for). The replacement is screened by the worker like any request; nothing is cleared by this call.
+        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic23, migration 0181 (ledger-finance N-4). With `request_id` the request must be `pending` or `claimed` (a stale or poisoned one): it is CANCELLED (the officer, Person, reason code and the replacement id stay on the cancelled row) and a fresh request is queued for the screening worker. Without `request_id` a request is queued for a person who has none (409 when one is pending). A request stuck on a match or a terminal failure is RESOLVED, not replaced (409). 400 when no trigger policy gates withdrawals for the tenant (nothing to queue for). The replacement is screened by the worker like any request; nothing is cleared by this call. lic29: a request whose worker lease has not expired is refused (409, `request_lease_live`); closed refusal codes in `check_codes`: `request_not_replaceable`, `request_lease_live`, `person_has_pending_request`, `no_gating_policy` (AMLScreeningRefusalCode). The HTTP statuses are unchanged.
       security:
         - bearerAuth: []
       parameters:
@@ -12835,6 +12887,77 @@ components:
         legal_review_reference: { type: string }
         reason_code: { type: string }
       required: [jurisdiction_id, events, gate_withdrawal, effective_from, legal_review_reference, reason_code]
+    AMLScreeningRefusalCode:
+      type: string
+      description: >
+        lic29. CLOSED, stable, machine-readable refusal code carried in `check_codes` of a 400 / 409 / 403 answer of the screening routes, next to the
+        generic code and the fixed sentence (the HTTP status of every refusal is unchanged). The Back Office maps the code to its own wording; the
+        database text is never returned. Codes: 
+        `platform_officer_required`: screening configuration is authored by a platform officer.
+        `effective_from_out_of_range`: a trigger policy takes effect between now (2 minutes tolerance) and 30 days ahead.
+        `gate_needs_scheduled_event`: a withdrawal gate needs the scheduled re-screen event.
+        `gate_needs_alert_threshold`: a withdrawal gate needs gate_alert_after_seconds.
+        `screening_worker_heartbeat_missing`: no screening worker has reported in, so a withdrawal gate cannot be enabled.
+        `gate_environment_refused`: a withdrawal gate cannot be enabled where the environment anchor is production or unrecorded.
+        `alert_threshold_without_gate`: gate_alert_after_seconds belongs to a gating policy only.
+        `jurisdiction_not_in_scope`: the jurisdiction is not that of the tenant's licence or of an approved operating basis.
+        `screening_policy_missing`: set the screening policy for this jurisdiction, in effect at or before the trigger policy, first.
+        `tenant_not_in_jurisdiction`: the tenant is not configured to operate in this jurisdiction.
+        `sanctions_clear_refused`: a sanctions-class match is resolved only by recording a sanctions match, never by a clear.
+        `sanctions_match_needs_hold`: a sanctions-class match is resolved only by a sanctions match that places a hold.
+        `error_cannot_resolve`: an error result cannot resolve a match awaiting an officer.
+        `request_key_mismatch`: the request belongs to another person or trigger.
+        `request_not_awaiting_officer`: the request is not awaiting an officer.
+        `key_prefix_reserved`: the idempotency key prefix is reserved for the automatic screening queue.
+        `request_not_replaceable`: only a pending or claimed request is replaced; a match or a terminal failure is resolved.
+        `request_lease_live`: the request is being processed: its lease has not expired.
+        `person_has_pending_request`: the person has a pending request: name it to replace it.
+        `no_gating_policy`: no trigger policy gates withdrawals for this tenant, so there is nothing to queue.
+        `policy_loosening_refused`: the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); loosening needs a four-eyes path that is not built.
+      enum:
+        - platform_officer_required
+        - effective_from_out_of_range
+        - gate_needs_scheduled_event
+        - gate_needs_alert_threshold
+        - screening_worker_heartbeat_missing
+        - gate_environment_refused
+        - alert_threshold_without_gate
+        - jurisdiction_not_in_scope
+        - screening_policy_missing
+        - tenant_not_in_jurisdiction
+        - sanctions_clear_refused
+        - sanctions_match_needs_hold
+        - error_cannot_resolve
+        - request_key_mismatch
+        - request_not_awaiting_officer
+        - key_prefix_reserved
+        - request_not_replaceable
+        - request_lease_live
+        - person_has_pending_request
+        - no_gating_policy
+        - policy_loosening_refused
+    AMLScreeningPolicy:
+      type: object
+      description: The screening policy in force for a jurisdiction. `configured=false` means NONE exists (the platform ships no re-screen interval and no grace).
+      properties:
+        configured: { type: boolean }
+        lists: { type: array, items: { type: string, enum: [sanctions, pep] } }
+        rescreen_interval_seconds: { type: integer, format: int64, nullable: true }
+        backfill_grace_seconds: { type: integer, format: int64, nullable: true }
+        effective_from: { type: string, format: date-time, nullable: true }
+      required: [configured, lists]
+    AMLScreeningPolicyRequest:
+      type: object
+      description: Every field is a human compliance decision. There is NO default: a missing `rescreen_interval_seconds` or `backfill_grace_seconds` is a 400 (an explicit 0 grace is a stated value).
+      properties:
+        jurisdiction_id: { type: string, format: uuid }
+        lists: { type: array, minItems: 1, maxItems: 2, items: { type: string, enum: [sanctions, pep] } }
+        rescreen_interval_seconds: { type: integer, format: int64, minimum: 1, maximum: 31536000 }
+        backfill_grace_seconds: { type: integer, format: int64, minimum: 0, maximum: 31536000 }
+        effective_from: { type: string, format: date-time }
+        legal_review_reference: { type: string }
+        reason_code: { type: string }
+      required: [jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds, effective_from, legal_review_reference, reason_code]
     AMLScreeningRequest:
       type: object
       properties:
@@ -15970,6 +16093,8 @@ components:
           description: >
             Set only by the launch authorisation routes: the closed H-n / R- / refusal / SQLSTATE codes of a refused precondition,
             acknowledgement, execution or database guard. Never free text.
+            lic29: the AML screening routes also use it for the closed refusal codes (AMLScreeningRefusalCode) and the generic AML
+            check codes (quorum_not_met, hold_refused, four_eyes_refused, stale, illegal_transition, guard_refused, note_refused).
           items:
             type: string
       required: [code, message]
@@ -16108,12 +16233,13 @@ components:
           description: >
             lic27a. Present when a jurisdiction the tenant relies on has no floor for this kind (missing_floor) or relied-on jurisdictions disagree on
             calendar_tz / week_start (calendar_conflict). config_in_force is false, allowed_periods is empty and no ceiling is offered: do not offer limit
-            setting for this kind except as protective_only. Increases, removals and confirms stay refused server-side. time_out_hours and self_exclusion_days are always returned.
+            setting for this kind except as protective_only. For missing_floor the server REFUSES increases, removals and confirms. For calendar_conflict the UI offers none of them and
+            play / the account usage read fail closed, but the server does NOT refuse an increase, removal or confirm on the write path (whether it should is an open owner decision). time_out_hours and self_exclusion_days are always returned.
         protective_only:
           type: boolean
           description: >
             lic28. With unavailable_reason: allowed_periods lists only the periods of the relied-on jurisdictions that have a floor; they may be used for a
-            FIRST limit or a LOWER value (always accepted by the server). No ceiling or cooldown is offered; an increase or removal is refused.
+            FIRST limit or a LOWER value (always accepted by the server). No ceiling or cooldown is offered; an increase or removal is refused by the server for missing_floor and merely not offered for calendar_conflict.
             Note: a calendar_conflict makes the account-level usage read of that kind fail closed (it never weakens protection); money-path enforcement uses one jurisdiction per scope and is not affected.
       required: [kind, config_in_force, mandatory, allowed_periods, ceiling, increase_cooldown_seconds]
     RGOptions:

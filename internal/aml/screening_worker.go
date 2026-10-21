@@ -553,10 +553,56 @@ func ScreeningParkedSummary(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) 
 	return persons, evaluations, err
 }
 
-// ScreeningParkedOverdue returns, for the tenant, the persons parked at the payout gate only for an outstanding screening and how
-// many of them have been parked longer than the gating policy's alert threshold (lic26 N-9). Counts only.
+// RaiseScreeningMonitorFailing raises aml.screening_attention with reason monitor_failing (no request id, no trigger): the parked-screening
+// read of the payments sweeper failed several passes in a row, so the trapped-funds alert is blind for this tenant (lic29). Platform-routed.
+func RaiseScreeningMonitorFailing(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, timeout time.Duration) error {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	pending, aerr := alerting.InTx(cctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		return alerting.RaiseGuarded(ctx, tx, alerting.Alert{
+			Kind: alerting.KindAMLScreeningAttention, SubjectTenantID: tenantID, Discriminator: "monitor:tenant:" + tenantID.String(),
+			Attributes: map[string]alerting.AttrValue{"reason": "monitor_failing"},
+		})
+	})
+	defer pending.Flush(cctx)
+	return aerr
+}
+
+// ParkedScan is one keyset batch of the parked / overdue read (lic29). Counts only, never an identifier. Parked / Overdue are persons
+// the screening gate holds for want of a screening RESULT (the dead-worker signal); Officer / OfficerOverdue are persons waiting for an
+// OFFICER (an unresolved needs_officer request), counted apart. Next is the cursor for the following batch; nil means this batch
+// reached the end of the person list (the cycle is complete).
+type ParkedScan struct {
+	Parked, Overdue, Officer, OfficerOverdue, Scanned int
+	Next                                              *uuid.UUID
+}
+
+// ParkedScanBatch is the default batch size of one sweeper pass. ENGINEERING value.
+const ParkedScanBatch = 500
+
+// ScreeningParkedScan reads one batch (after: the cursor, nil from the start). tx must be tenant-scoped.
+func ScreeningParkedScan(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, after *uuid.UUID, limit int) (ParkedScan, error) {
+	var out ParkedScan
+	err := tx.QueryRow(ctx, `SELECT o_parked, o_overdue, o_officer, o_officer_overdue, o_scanned, o_next
+		FROM aml_screening_parked_overdue($1, clock_timestamp() - make_interval(secs => $2::double precision), $3, $4)`,
+		tenantID, ScreeningParkedWindow.Seconds(), after, limit).Scan(&out.Parked, &out.Overdue, &out.Officer, &out.OfficerOverdue, &out.Scanned, &out.Next)
+	return out, err
+}
+
+// ScreeningParkedOverdue returns, for the tenant, the persons parked at the payout gate for want of a screening result and how many
+// of them are past the gating policy's alert threshold, over a COMPLETE cycle of batches (lic26 N-9, lic29). Counts only.
 func ScreeningParkedOverdue(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (parked, overdue int, err error) {
-	err = tx.QueryRow(ctx, `SELECT o_parked, o_overdue FROM aml_screening_parked_overdue($1, clock_timestamp() - make_interval(secs => $2::double precision))`,
-		tenantID, ScreeningParkedWindow.Seconds()).Scan(&parked, &overdue)
-	return parked, overdue, err
+	var after *uuid.UUID
+	for {
+		sc, e := ScreeningParkedScan(ctx, tx, tenantID, after, ParkedScanBatch)
+		if e != nil {
+			return 0, 0, e
+		}
+		parked += sc.Parked
+		overdue += sc.Overdue
+		if sc.Next == nil {
+			return parked, overdue, nil
+		}
+		after = sc.Next
+	}
 }

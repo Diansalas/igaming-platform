@@ -279,6 +279,10 @@ func (s *Service) EffectiveScreeningPolicy(ctx context.Context, a Actor, jurisdi
 	return p, err
 }
 
+// ScreeningPolicyInput is the name the HTTP layer uses for SetScreeningPolicyInput (the HTTP layer must not name the loosening-capable
+// setter, SR7-3, and the static pin searches for that identifier).
+type ScreeningPolicyInput = SetScreeningPolicyInput
+
 // SetScreeningPolicyInput is the next VERSION of a tenant's screening policy for one licensing jurisdiction. Every value is a
 // human compliance decision: there is no default, and the legal review reference is required.
 type SetScreeningPolicyInput struct {
@@ -318,8 +322,19 @@ func (in SetScreeningPolicyInput) validate() error {
 }
 
 // SetScreeningPolicy writes the next policy version. Platform officer (platform_acting) only, and only with the owner-scope
-// officer quorum met; the database refuses anything else.
+// officer quorum met; the database refuses anything else. NOT routed (SR7-3): it can loosen screening.
 func (s *Service) SetScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput) (uuid.UUID, error) {
+	return s.writeScreeningPolicy(ctx, a, in, "aml_screening_policy_set")
+}
+
+// AuthorScreeningPolicy (lic29) is what the HTTP route calls: the same authorisation and row as SetScreeningPolicy through the
+// database function aml_screening_policy_author (migration 0189), which additionally refuses a version that is LESS STRICT than the
+// latest one (a list removed, a longer re-screen interval or grace, an earlier effective time): loosening has no four-eyes path yet.
+func (s *Service) AuthorScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput) (uuid.UUID, error) {
+	return s.writeScreeningPolicy(ctx, a, in, "aml_screening_policy_author")
+}
+
+func (s *Service) writeScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput, fn string) (uuid.UUID, error) {
 	if err := in.validate(); err != nil {
 		return uuid.Nil, err
 	}
@@ -332,7 +347,7 @@ func (s *Service) SetScreeningPolicy(ctx context.Context, a Actor, in SetScreeni
 		if err := s.attachProof(ctx, tx, a, OpProofScreeningPolicySet, actorproof.TargetNew, hash); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `SELECT aml_screening_policy_set($1, $2, $3, $4, $5, $6, $7, $8)`,
+		return tx.QueryRow(ctx, `SELECT `+fn+`($1, $2, $3, $4, $5, $6, $7, $8)`,
 			a.TenantID, in.JurisdictionID, sortedLists(in.Lists), rescreen, grace, from, in.LegalReviewReference, in.ReasonCode).Scan(&id)
 	})
 	return id, err
