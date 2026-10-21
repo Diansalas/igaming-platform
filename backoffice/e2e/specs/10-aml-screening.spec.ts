@@ -70,10 +70,14 @@ test.describe.serial('10 AML screening: trigger policy, MOCK worker, officer res
       expect(Number(sql(`SELECT count(*) FROM screening_worker_heartbeats WHERE last_seen_at > clock_timestamp() - interval '10 minutes'`))).toBe(0)
       let d = await fillPolicy(C, { events: ['Registration', 'KYC approval', 'Scheduled re-screen'], gate: true, seconds: '600', reason: 'e2e_gate_try' })
       const posted = C.page.waitForResponse((r) => r.url().includes('/screening/trigger-policy') && r.request().method() === 'POST')
-      await submitPolicy(C, d, () => expect(d.getByRole('alert').filter({ hasText: 'The server rejected the policy as invalid.' })).toBeVisible())
-      // FINDING (recorded): the heartbeat guard (AT004) is mapped to ErrInvalidInput, so the server answers 400 validation_error, NOT the 409
-      // guard_refused that the lic20 screen's heartbeat wording (WORKER_REFUSAL) expects. The refusal is rendered, but as the generic invalid-input
-      // text, and the heartbeat is not named. The control below (same body accepted once a heartbeat exists) shows the heartbeat was the cause.
+      // lic32: INTENTIONAL change of this assertion. lic31 maps the closed check code `screening_worker_heartbeat_missing` (carried on the 400 in
+      // `check_codes`, lic29) to exact wording, so the screen now NAMES the missing worker; it used to show only the generic invalid-input text
+      // ('The server rejected the policy as invalid.'). Everything else below (400, validation_error, no WORKER_REFUSAL text, nothing written, the
+      // control accepted once a heartbeat exists) is unchanged. Spec 12(e) asserts the wire `check_codes` and the same wording.
+      await submitPolicy(C, d, () => expect(d.getByRole('alert').filter({ hasText: 'No screening worker has reported in, so a withdrawal gate cannot be enabled.' })).toBeVisible())
+      // FINDING (recorded, still true): the heartbeat guard (AT004) is mapped to ErrInvalidInput, so the server answers 400 validation_error, NOT the
+      // 409 guard_refused that the lic20 screen's heartbeat wording (WORKER_REFUSAL) expects. The control below (same body accepted once a heartbeat
+      // exists) shows the heartbeat was the cause.
       const resp = await posted
       expect(resp.status()).toBe(400)
       expect((await resp.json()).code).toBe('validation_error')
@@ -209,7 +213,9 @@ test.describe.serial('10 AML screening: trigger policy, MOCK worker, officer res
     await expect(row).toContainText('Sanctions list')
     let d = await fillResolve(C, row, { outcome: 'Clear (no match)', lists: ['Sanctions list'], reason: 'e2e_clear_try' })
     await expect(d.getByText('This request records a sanctions-list match. A clear will be refused by the server.')).toBeVisible()
-    await submitResolve(C, d, () => expect(d.getByRole('alert').filter({ hasText: 'The resolution was refused.' })).toBeVisible())
+    // lic32: INTENTIONAL change of this assertion (same cause as (a)): the server's closed check code `sanctions_clear_refused` is now rendered with
+    // its exact wording; the generic 409 text ('The resolution was refused.') is shown only when no closed code arrives. Nothing-changed checks below are unchanged.
+    await submitResolve(C, d, () => expect(d.getByRole('alert').filter({ hasText: 'A sanctions-list match is never cleared by an officer. It is resolved by recording the match, which places a hold.' })).toBeVisible())
     expect(counts(T)).toEqual(before) // nothing changed: no result, no hold, request unresolved
     expect(reqRow(T, rs.id)).toBe(rowBefore)
     await d.getByRole('button', { name: 'Cancel' }).click()
