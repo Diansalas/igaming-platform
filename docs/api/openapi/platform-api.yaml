@@ -12948,7 +12948,7 @@ components:
       required: [configured, lists]
     AMLScreeningPolicyRequest:
       type: object
-      description: Every field is a human compliance decision. There is NO default: a missing `rescreen_interval_seconds` or `backfill_grace_seconds` is a 400 (an explicit 0 grace is a stated value).
+      description: "Every field is a human compliance decision. There is NO default: a missing `rescreen_interval_seconds` or `backfill_grace_seconds` is a 400 (an explicit 0 grace is a stated value)."
       properties:
         jurisdiction_id: { type: string, format: uuid }
         lists: { type: array, minItems: 1, maxItems: 2, items: { type: string, enum: [sanctions, pep] } }
