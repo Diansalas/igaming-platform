@@ -2,6 +2,10 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { getJurisdiction, listJurisdictions, listLicences, type Jurisdiction } from '../../api/licensing'
+import { useAuth } from '../../auth/AuthContext'
+import { getNavPermissions } from '../../auth/permissions'
+import { Button } from '../../components/Button'
+import { JurisdictionDialog } from './MarketDialogs'
 import { Card } from '../../components/Card'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Table, type Column } from '../../components/Table'
@@ -11,6 +15,9 @@ import { when } from './labels'
 
 export function JurisdictionsPage() {
   const [q, setQ] = useState('')
+  const { claims } = useAuth()
+  const perms = getNavPermissions(claims?.role)
+  const [creating, setCreating] = useState(false)
   const list = useQuery({ queryKey: ['licensing', 'jurisdictions'], queryFn: listJurisdictions, retry: false })
   const needle = q.trim().toLowerCase()
   const rows = (list.data ?? []).filter((j) => needle === '' || `${j.code} ${j.name} ${j.regulatory_body ?? ''}`.toLowerCase().includes(needle))
@@ -23,8 +30,14 @@ export function JurisdictionsPage() {
   return (
     <div className="flex flex-col gap-3">
       <TextInput label="Filter jurisdictions" value={q} onChange={(e) => setQ(e.target.value)} autoComplete="off" />
+      {perms.licensingRequest && (
+        <div>
+          <Button onClick={() => setCreating(true)}>Create a jurisdiction</Button>
+        </div>
+      )}
       {list.error ? <LicensingErrorAlert error={list.error} /> : null}
       <Table columns={columns} rows={rows} getRowKey={(j) => j.id} isLoading={list.isLoading} emptyMessage="No jurisdictions are recorded." />
+      {creating && <JurisdictionDialog onClose={() => setCreating(false)} />}
     </div>
   )
 }

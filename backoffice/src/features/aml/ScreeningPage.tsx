@@ -22,7 +22,6 @@ import {
   type SetTriggerPolicyBody,
   type TriggerEvent,
 } from '../../api/amlScreening'
-import { listJurisdictions } from '../../api/licensing'
 import { useAuth } from '../../auth/AuthContext'
 import { isPlatformAdmin } from '../../auth/jwt'
 import { getNavPermissions } from '../../auth/permissions'
@@ -36,6 +35,8 @@ import { Table, type Column } from '../../components/Table'
 import { Note, OUTCOME_UNCONFIRMED } from '../policies/PolicyBits'
 import { Pending, Success } from '../licensing/LicensingBits'
 import { ConfidentialityBanner, shortId, useAmlTenant } from './AmlBits'
+import { JurisdictionInput, LEGAL_REF_MAX, ScreeningError, isLegalReference } from './ScreeningBits'
+import { ScreeningPolicyTab } from './ScreeningPolicyTab'
 import { describeScreeningError, type ScreeningOp } from './screeningErrors'
 import {
   EVENT_LABEL,
@@ -55,10 +56,6 @@ import {
   safeToken,
 } from './ScreeningLabels'
 
-const LEGAL_REF_MAX = 200
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/
-export const isLegalReference = (s: string) => s.length >= 1 && s.length <= LEGAL_REF_MAX && s === s.trim() && !CONTROL.test(s)
 const SECONDS_RE = /^[1-9][0-9]{0,6}$/
 // The text is already checked against SECONDS_RE (digits only, no leading zero), so JSON.parse yields an exact integer.
 const secondsValue = (s: string): number => JSON.parse(s) as number
@@ -68,18 +65,8 @@ export const secondsInRange = (s: string) => {
   return n >= GATE_ALERT_MIN_SECONDS && n <= GATE_ALERT_MAX_SECONDS
 }
 
-function ScreeningError({ error, op }: { error: unknown; op: ScreeningOp }) {
-  if (!error) return null
-  const v = describeScreeningError(error, op)
-  return (
-    <div role="alert" className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-      <p className="font-medium">{v.message}</p>
-      {v.requestId && <p className="mt-1 text-xs text-red-600">Request ID: {safeToken(v.requestId) === 'unprintable' ? 'unprintable' : v.requestId}</p>}
-    </div>
-  )
-}
-
-type Tab = 'policy' | 'requests'
+type Tab = 'policy' | 'screening_policy' | 'requests'
+const TAB_LABEL: Record<Tab, string> = { policy: 'Trigger policy', screening_policy: 'Screening policy', requests: 'Screening requests' }
 
 /**
  * AML screening (lic20): the trigger policy per tenant and jurisdiction, and the officer resolution of stuck screening requests.
@@ -93,7 +80,7 @@ export function ScreeningPage() {
   const [tab, setTab] = useState<Tab>('policy')
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title="AML Screening" description="Automatic screening trigger policy and officer resolution of screening requests." />
+      <PageHeader title="AML Screening" description="Automatic screening trigger policy, the screening policy (re-screen interval, grace, lists) and officer resolution of screening requests." />
       <p className="text-sm">
         <Link className="text-brand-700 hover:underline" to="/aml">Back to AML cases and holds</Link>
       </p>
@@ -104,7 +91,7 @@ export function ScreeningPage() {
       {tenantId !== '' && (
         <>
           <div role="tablist" aria-label="Screening sections" className="flex gap-2 border-b border-border">
-            {(['policy', 'requests'] as Tab[]).map((t) => (
+            {(['policy', 'screening_policy', 'requests'] as Tab[]).map((t) => (
               <button
                 key={t}
                 role="tab"
@@ -112,12 +99,14 @@ export function ScreeningPage() {
                 onClick={() => setTab(t)}
                 className={`px-3 py-2 text-sm font-medium ${tab === t ? 'border-b-2 border-brand-600 text-brand-700' : 'text-slate-500 hover:text-slate-700'}`}
               >
-                {t === 'policy' ? 'Trigger policy' : 'Screening requests'}
+                {TAB_LABEL[t]}
               </button>
             ))}
           </div>
           {tab === 'policy' ? (
             <PolicyTab tenantId={tenantId} canAuthor={perms.amlHolds && isPlatformAdmin(claims)} />
+          ) : tab === 'screening_policy' ? (
+            <ScreeningPolicyTab tenantId={tenantId} canAuthor={perms.amlHolds && isPlatformAdmin(claims)} />
           ) : (
             <RequestsTab tenantId={tenantId} canResolve={perms.amlHolds} />
           )}
@@ -125,21 +114,6 @@ export function ScreeningPage() {
       )}
     </div>
   )
-}
-
-function JurisdictionInput({ value, onChange, selectable }: { value: string; onChange: (v: string) => void; selectable: boolean }) {
-  const list = useQuery({ queryKey: ['aml', 'screening', 'jurisdictions'], queryFn: listJurisdictions, enabled: selectable, retry: false })
-  if (selectable && list.data) {
-    return (
-      <SelectField
-        label="Licence jurisdiction"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        options={[{ value: '', label: 'Choose a jurisdiction' }, ...list.data.map((j) => ({ value: j.id, label: `${safeToken(j.code)} - ${j.name}` }))]}
-      />
-    )
-  }
-  return <TextInput label="Jurisdiction id" value={value} onChange={(e) => onChange(e.target.value.trim())} autoComplete="off" help="The licensing jurisdiction (a UUID) whose trigger policy you want." />
 }
 
 function PolicyTab({ tenantId, canAuthor }: { tenantId: string; canAuthor: boolean }) {

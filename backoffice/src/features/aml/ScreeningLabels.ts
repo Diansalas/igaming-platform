@@ -23,7 +23,18 @@ export const HOLDS_WITHDRAWALS_NOTE =
   'A request in needs officer or failed terminal that is not resolved holds the person\'s withdrawals until an officer resolves it.'
 
 export const INTERVAL_GRACE_NOTE =
-  'The re-screen interval and the backfill grace are values of the jurisdiction\'s screening policy, not of this trigger policy. This API has no route to read or set them, so they cannot be shown or authored here, and a screening policy must already exist for the jurisdiction or the server refuses the trigger policy.'
+  'The re-screen interval and the backfill grace are values of the jurisdiction\'s screening policy, not of this trigger policy. Read and author them in the Screening policy section. A screening policy must already exist for the jurisdiction or the server refuses the trigger policy.'
+
+export const SCREENING_POLICY_NOTE =
+  'The screening policy says which lists are screened, how often a person is screened again (the re-screen interval) and how long a person who is already registered has before the first re-screen counts (the backfill grace). The platform ships NO value for any of them: every field is a decision recorded by named staff of your compliance function, supported by a legal review you reference. This is a software capability, not a regulatory approval.'
+
+export const POLICY_SAFETY_RULES = [
+  'Interval floor: the re-screen interval is at least 3600 seconds. This is an engineering safety floor of this software, not a legal value; below it every clear would expire within the hour and withdrawals would freeze.',
+  'Gate threshold: where a withdrawal gate is in force for the jurisdiction, the interval must also be at least twice the gate alert threshold.',
+  'Effective time: a version takes effect between now (2 minutes of clock skew are tolerated) and 30 days ahead.',
+  'Tighten only: a version can never be looser than the latest one. A list cannot be removed, the interval and the grace cannot be longer, and the effective time cannot be earlier. Loosening has no approval path and is refused.',
+  'A version is immutable. To change a policy, author the next version.',
+] as const
 
 export const EVENT_LABEL: Record<string, string> = {
   registration: 'Registration',

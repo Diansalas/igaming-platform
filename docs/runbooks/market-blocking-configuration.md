@@ -36,7 +36,7 @@ A freshly migrated database has no country rows, so **everything is refused**. T
 `POST /v1/admin/licensing-changes` with kind `licence_ceiling_version` or `operating_policy_version`, then two approvals by two
 other Persons for a widening change (enable; a withdrawal at the brand / operation rung). A disable, or a withdrawal at the tenant
 rung, executes immediately (single actor with a reason code). The database refuses any other runtime write (LC040). Procedure:
-`licensing-change-approvals.md`. There is still no Back Office page (`NOT IMPLEMENTED`, audit G-10). The table owner path
+`licensing-change-approvals.md`. Back Office filing dialogs exist since lic31 (licence page: country ceilings; tenant licensing page: operating-country policies and jurisdiction configurations; `PARTIALLY IMPLEMENTED`: mock-tested only, see `docs/plans/lic31-record.md`). The table owner path
 (`cmd/seed-market`, synthetic staging / development only, refuses production) is unchanged. Rules enforced by the package and by
 migration 0076:
 
