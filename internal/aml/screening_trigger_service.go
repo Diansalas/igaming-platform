@@ -101,17 +101,17 @@ func (in SetTriggerPolicyInput) validate() ([]string, error) {
 			scheduled = scheduled || e == string(EventScheduled)
 		}
 		if !scheduled {
-			return nil, fmt.Errorf("%w: a withdrawal gate needs the scheduled re-screen event (otherwise a clear goes stale unattended)", ErrInvalidInput)
+			return nil, coded("gate_needs_scheduled_event", fmt.Errorf("%w: a withdrawal gate needs the scheduled re-screen event (otherwise a clear goes stale unattended)", ErrInvalidInput))
 		}
 		if in.GateAlertAfter < time.Minute || in.GateAlertAfter > 30*24*time.Hour || in.GateAlertAfter%time.Second != 0 {
-			return nil, fmt.Errorf("%w: gate_alert_after must be whole seconds between 60 seconds and 30 days", ErrInvalidInput)
+			return nil, coded("gate_needs_alert_threshold", fmt.Errorf("%w: gate_alert_after must be whole seconds between 60 seconds and 30 days", ErrInvalidInput))
 		}
 	} else if in.GateAlertAfter != 0 {
-		return nil, fmt.Errorf("%w: gate_alert_after belongs to a gating policy only", ErrInvalidInput)
+		return nil, coded("alert_threshold_without_gate", fmt.Errorf("%w: gate_alert_after belongs to a gating policy only", ErrInvalidInput))
 	}
 	now := time.Now()
 	if in.EffectiveFrom.Before(now.Add(-2*time.Minute)) || in.EffectiveFrom.After(now.Add(30*24*time.Hour)) {
-		return nil, fmt.Errorf("%w: effective_from must be between now (2 minutes tolerance) and 30 days ahead", ErrInvalidInput)
+		return nil, coded("effective_from_out_of_range", fmt.Errorf("%w: effective_from must be between now (2 minutes tolerance) and 30 days ahead", ErrInvalidInput))
 	}
 	ref := strings.TrimSpace(in.LegalReviewReference)
 	if ref == "" || len(in.LegalReviewReference) > 200 || ref != in.LegalReviewReference {
@@ -136,7 +136,7 @@ func (s *Service) SetScreeningTriggerPolicy(ctx context.Context, a Actor, in Set
 	// lic23 SN-5: the production binary refuses a withdrawal gate before any proof is signed. The database refuses it too (the
 	// non-forgeable environment anchor); this is the second, independent refusal.
 	if in.GateWithdrawal && s.cfg.Environment == "production" {
-		return uuid.Nil, fmt.Errorf("%w: a withdrawal gate cannot be enabled in a production environment (no screening provider is permitted there)", ErrInvalidInput)
+		return uuid.Nil, coded("gate_environment_refused", fmt.Errorf("%w: a withdrawal gate cannot be enabled in a production environment (no screening provider is permitted there)", ErrInvalidInput))
 	}
 	if events == nil {
 		events = []string{} // an empty set is a non-NULL empty array (nil would be sent as SQL NULL and refused)

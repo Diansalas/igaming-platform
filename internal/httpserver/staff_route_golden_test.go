@@ -180,6 +180,8 @@ var staffRouteGolden = map[string]string{
 	"POST /v1/admin/tenants/{tenantID}/brands/{brandID}/suspend":                                     "none",
 	"GET /v1/admin/tenants/{tenantID}/screening/trigger-policy":                                      "none",
 	"POST /v1/admin/tenants/{tenantID}/screening/trigger-policy":                                     "critical",
+	"GET /v1/admin/tenants/{tenantID}/screening/policy":                                              "none",
+	"POST /v1/admin/tenants/{tenantID}/screening/policy":                                             "critical",
 	"GET /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests":                         "none",
 	"POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution": "critical",
 	"POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/replace":                "critical",

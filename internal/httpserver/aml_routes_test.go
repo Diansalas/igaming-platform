@@ -34,11 +34,12 @@ import (
 // TestStaffRoutes_DBFree_ChainOnEveryRoute; the step-up classes are pinned against the signer backstop below.
 
 type fakeAML struct {
-	calls   []string
-	actors  []aml.Actor
-	err     error
-	lastIn  aml.PlaceHoldInput
-	lastSeq int
+	calls      []string
+	actors     []aml.Actor
+	err        error
+	lastIn     aml.PlaceHoldInput
+	lastSeq    int
+	lastPolicy aml.ScreeningPolicyInput
 }
 
 func (f *fakeAML) rec(op string, a aml.Actor) error {
@@ -89,6 +90,13 @@ func (f *fakeAML) SetScreeningTriggerPolicy(_ context.Context, a aml.Actor, _ am
 }
 func (f *fakeAML) EffectiveScreeningTriggerPolicy(_ context.Context, a aml.Actor, _ uuid.UUID) (*aml.TriggerPolicy, error) {
 	return nil, f.rec("EffectiveScreeningTriggerPolicy", a)
+}
+func (f *fakeAML) AuthorScreeningPolicy(_ context.Context, a aml.Actor, in aml.ScreeningPolicyInput) (uuid.UUID, error) {
+	f.lastPolicy = in
+	return uuid.New(), f.rec("AuthorScreeningPolicy", a)
+}
+func (f *fakeAML) EffectiveScreeningPolicy(_ context.Context, a aml.Actor, _ uuid.UUID) (*aml.Policy, error) {
+	return nil, f.rec("EffectiveScreeningPolicy", a)
 }
 func (f *fakeAML) ListScreeningRequests(_ context.Context, a aml.Actor, _ uuid.UUID) ([]aml.ScreeningRequestRow, error) {
 	return nil, f.rec("ListScreeningRequests", a)

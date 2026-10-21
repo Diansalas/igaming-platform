@@ -156,31 +156,56 @@ type SweepPassStats struct {
 	// screening, and those parked longer than the gating policy's alert threshold. Counts only, never an identifier.
 	ScreeningParked        int
 	ScreeningParkedOverdue int
+	// lic29: persons waiting for an OFFICER (counted apart from the dead-worker signal above), the persons scanned this pass, whether
+	// the keyset cycle continues next pass, and how many tenants' reads failed.
+	ScreeningParkedOfficer        int
+	ScreeningParkedOfficerOverdue int
+	ScreeningParkedScanned        int
+	ScreeningParkedPartial        bool
+	ScreeningParkedReadFailures   int
 }
 
 // sweeperParkedAlertTimeout bounds the parked-screening read and the alert raise of one tenant.
 const sweeperParkedAlertTimeout = 5 * time.Second
 
-// reportScreeningParked (lic26 N-9) is the PRODUCTION observation of the persons parked at the payout gate only because a required
-// automatic AML screening is outstanding. It runs here, in a loop that is NOT the screening worker, so a DEAD worker (which can no
-// longer raise its own alert) shows as a growing parked count and, once a person has been parked longer than the gating policy's
-// gate_alert_after_seconds, as the p1 platform-routed aml.screening_gate_trapped alert. It is a read-only tenant transaction of its
-// own; the log line and the alert carry COUNTS only (no person, account or amount: tipping-off), and a failure never stops the sweep.
+// sweeperParkedFailAlertAfter is how many CONSECUTIVE passes the parked-screening read may fail for one tenant before an alert is
+// raised (lic29, security F-2): a monitor that can no longer see must not fail silently. ENGINEERING value.
+const sweeperParkedFailAlertAfter = 3
+
+// reportScreeningParked (lic26 N-9, lic29) is the PRODUCTION observation of the persons the automatic AML screening gate holds. It
+// runs here, in a loop that is NOT the screening worker, so a DEAD worker (which can no longer raise its own alert) is visible. One
+// pass reads ONE keyset batch (aml.ParkedScanBatch persons, in person_id order) from a per-tenant cursor, so every person is observed
+// once per cycle and a pass costs a bounded read; "partial" in the stats means the cycle continues next pass. Persons stuck for want
+// of a screening result and persons waiting for an OFFICER are counted and alerted APART (different source in the discriminator). The
+// read is its own tenant transaction; log lines and alerts carry COUNTS only (no person, account or amount: tipping-off), and a
+// failure never stops the sweep, but N consecutive failures raise aml.screening_attention (reason monitor_failing, platform-routed).
 func (s *Sweeper) reportScreeningParked(ctx context.Context, logger *slog.Logger, tenantID uuid.UUID, st *SweepPassStats) {
 	if ctx.Err() != nil {
 		return
 	}
-	var parked, overdue int
+	s.parkedMu.Lock()
+	if s.parkedCursor == nil {
+		s.parkedCursor, s.parkedFails = map[uuid.UUID]*uuid.UUID{}, map[uuid.UUID]int{}
+	}
+	after := s.parkedCursor[tenantID]
+	s.parkedMu.Unlock()
+
+	var sc aml.ParkedScan
 	rctx, cancel := context.WithTimeout(ctx, sweeperParkedAlertTimeout)
 	err := s.guarded(func() error {
-		if s.testScreeningParked != nil {
+		switch {
+		case s.testScreeningScan != nil:
 			var e error
-			parked, overdue, e = s.testScreeningParked(tenantID)
+			sc, e = s.testScreeningScan(tenantID, after)
+			return e
+		case s.testScreeningParked != nil:
+			p, o, e := s.testScreeningParked(tenantID)
+			sc = aml.ParkedScan{Parked: p, Overdue: o}
 			return e
 		}
 		return s.Pool.WithTenant(rctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var e error
-			parked, overdue, e = aml.ScreeningParkedOverdue(ctx, tx, tenantID)
+			sc, e = aml.ScreeningParkedScan(ctx, tx, tenantID, after, aml.ParkedScanBatch)
 			return e
 		})
 	})
@@ -188,24 +213,55 @@ func (s *Sweeper) reportScreeningParked(ctx context.Context, logger *slog.Logger
 	if err != nil {
 		recordSweeperTenantFailure(ctx, "screening_parked")
 		st.Errors++
+		st.ScreeningParkedReadFailures++
+		s.parkedMu.Lock()
+		s.parkedFails[tenantID]++
+		n := s.parkedFails[tenantID]
+		s.parkedMu.Unlock()
 		if logger != nil {
-			logger.Error("payments sweeper: screening-parked summary failed", "tenant_id", tenantID)
+			logger.Error("payments sweeper: screening-parked summary failed", "tenant_id", tenantID, "consecutive_failures", n)
+		}
+		if n >= sweeperParkedFailAlertAfter {
+			if aerr := aml.RaiseScreeningMonitorFailing(ctx, s.Pool, tenantID, sweeperParkedAlertTimeout); aerr != nil {
+				recordSweeperTenantFailure(ctx, "screening_parked_alert")
+				st.Errors++
+				if logger != nil {
+					logger.Error("payments sweeper: screening-monitor alert failed", "tenant_id", tenantID)
+				}
+			}
 		}
 		return
 	}
-	st.ScreeningParked += parked
-	st.ScreeningParkedOverdue += overdue
-	if parked > 0 && logger != nil {
-		logger.Warn("payments sweeper: payouts parked for an outstanding AML screening", "tenant_id", tenantID, "parked", parked, "overdue", overdue)
+	s.parkedMu.Lock()
+	s.parkedFails[tenantID] = 0
+	s.parkedCursor[tenantID] = sc.Next // nil: the cycle is complete, the next pass starts again from the start
+	s.parkedMu.Unlock()
+
+	st.ScreeningParked += sc.Parked
+	st.ScreeningParkedOverdue += sc.Overdue
+	st.ScreeningParkedOfficer += sc.Officer
+	st.ScreeningParkedOfficerOverdue += sc.OfficerOverdue
+	st.ScreeningParkedScanned += sc.Scanned
+	if sc.Next != nil {
+		st.ScreeningParkedPartial = true
 	}
-	if overdue == 0 {
-		return
+	if (sc.Parked > 0 || sc.Officer > 0) && logger != nil {
+		logger.Warn("payments sweeper: payouts parked for an outstanding AML screening", "tenant_id", tenantID, "parked", sc.Parked, "overdue", sc.Overdue,
+			"officer_queue", sc.Officer, "officer_overdue", sc.OfficerOverdue, "scanned", sc.Scanned, "partial", sc.Next != nil)
 	}
-	if aerr := aml.RaiseScreeningTrapped(ctx, s.Pool, tenantID, "sweeper", overdue, sweeperParkedAlertTimeout); aerr != nil {
-		recordSweeperTenantFailure(ctx, "screening_parked_alert")
-		st.Errors++
-		if logger != nil {
-			logger.Error("payments sweeper: screening-parked alert failed", "tenant_id", tenantID)
+	for _, a := range []struct {
+		source string
+		n      int
+	}{{"sweeper", sc.Overdue}, {"sweeper_officer", sc.OfficerOverdue}} {
+		if a.n == 0 {
+			continue
+		}
+		if aerr := aml.RaiseScreeningTrapped(ctx, s.Pool, tenantID, a.source, a.n, sweeperParkedAlertTimeout); aerr != nil {
+			recordSweeperTenantFailure(ctx, "screening_parked_alert")
+			st.Errors++
+			if logger != nil {
+				logger.Error("payments sweeper: screening-parked alert failed", "tenant_id", tenantID)
+			}
 		}
 	}
 }
@@ -385,7 +441,10 @@ func runSweeperLoop(ctx context.Context, s *Sweeper, logger *slog.Logger, ticks 
 		if logger != nil && (st.ScreeningParked > 0 || st.Errors > 0) {
 			// lic26 N-9: the pass summary is exported, counts only.
 			logger.Info("payments sweeper: pass", "tenants", st.Tenants, "claimed", st.Claimed, "processed", st.Processed, "errors", st.Errors,
-				"panics", st.Panics, "screening_parked", st.ScreeningParked, "screening_parked_overdue", st.ScreeningParkedOverdue)
+				"panics", st.Panics, "screening_parked", st.ScreeningParked, "screening_parked_overdue", st.ScreeningParkedOverdue,
+				"screening_officer_queue", st.ScreeningParkedOfficer, "screening_officer_overdue", st.ScreeningParkedOfficerOverdue,
+				"screening_scanned", st.ScreeningParkedScanned, "screening_partial", st.ScreeningParkedPartial,
+				"screening_read_failures", st.ScreeningParkedReadFailures)
 		}
 		if st.Listed {
 			// A pass that could not even list tenants did not sweep: leave the gauge so a stalled-sweeper rule fires (H-CR-10).

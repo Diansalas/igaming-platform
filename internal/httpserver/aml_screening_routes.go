@@ -4,6 +4,8 @@ package httpserver
 //
 //	GET  /v1/admin/tenants/{tenantID}/screening/trigger-policy?jurisdiction_id=              the policy in force (none)
 //	POST /v1/admin/tenants/{tenantID}/screening/trigger-policy                               author the next VERSION (critical)
+//	GET  /v1/admin/tenants/{tenantID}/screening/policy?jurisdiction_id=                      the screening policy in force (none; lic29)
+//	POST /v1/admin/tenants/{tenantID}/screening/policy                                       author the next VERSION, tighten-only (critical; lic29)
 //	GET  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests                  a person's automatic screening requests (none)
 //	POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution   the officer's resolution (critical)
 //	POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/replace          cancel a stale pending request and queue a replacement, or queue one for a person with none (critical; lic23 N-4)
@@ -22,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Diansalas/igaming-platform/internal/aml"
+	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 )
 
@@ -30,6 +33,10 @@ func registerAMLScreeningRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseRead)(amlHandler(deps, "trigger_policy_read", amlTriggerPolicyRead))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/screening/trigger-policy",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAMLHoldManage)(amlHandler(deps, "trigger_policy_set", amlTriggerPolicySet))))
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/screening/policy",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseRead)(amlHandler(deps, "screening_policy_read", amlScreeningPolicyRead))))
+	mux.Handle("POST /v1/admin/tenants/{tenantID}/screening/policy",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAMLHoldManage)(amlHandler(deps, "screening_policy_set", amlScreeningPolicySet))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseRead)(amlHandler(deps, "screening_requests", amlScreeningRequests))))
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution",
@@ -107,7 +114,8 @@ func amlTriggerPolicySet(c amlCall) {
 	if req.GateWithdrawal {
 		in.GateAlertAfter = time.Duration(req.GateAlertAfterSeconds) * time.Second
 	} else if req.GateAlertAfterSeconds != 0 {
-		c.badRequest()
+		// lic29: the same closed code the service and the database use for this refusal (status unchanged: 400).
+		apierror.WriteWithCheckCodes(c.w, c.requestID, apierror.CodeValidation, "invalid request", []string{"alert_threshold_without_gate"})
 		return
 	}
 	id, err := c.svc.SetScreeningTriggerPolicy(c.r.Context(), c.actor, in)
@@ -230,4 +238,87 @@ func amlScreeningReplace(c amlCall) {
 		out["cancelled_request_id"] = res.CancelledRequestID.String()
 	}
 	writeJSON(c.w, http.StatusCreated, out)
+}
+
+// ---- the screening policy (lic29) ---------------------------------------------------------------------------------------------
+//
+// The policy carries the re-screen interval and the backfill grace the withdrawal gate counts from. The platform ships NO value for
+// either: every field of a version is a human compliance decision (a legal review reference is required) and the read returns
+// configured=false when none exists. Authoring is platform_acting only, quorum, signed critical-class proof (the DATABASE checks all
+// three) and TIGHTEN-ONLY (aml_screening_policy_author, migration 0189): a version that removes a list, lengthens the interval or the
+// grace, or takes effect earlier than the latest version is refused with the closed code policy_loosening_refused, because loosening
+// has no four-eyes path (SR7-3) and is not exposed over HTTP.
+
+type amlScreeningPolicyDTO struct {
+	Configured             bool     `json:"configured"`
+	Lists                  []string `json:"lists"`
+	RescreenIntervalSecond *int64   `json:"rescreen_interval_seconds"`
+	BackfillGraceSeconds   *int64   `json:"backfill_grace_seconds"`
+	EffectiveFrom          *string  `json:"effective_from"`
+}
+
+func amlScreeningPolicyRead(c amlCall) {
+	jur, err := uuid.Parse(c.r.URL.Query().Get("jurisdiction_id"))
+	if err != nil || jur == uuid.Nil {
+		c.badRequest()
+		return
+	}
+	p, err := c.svc.EffectiveScreeningPolicy(c.r.Context(), c.actor, jur)
+	if err != nil {
+		c.fail("screening_policy_read", err)
+		return
+	}
+	out := amlScreeningPolicyDTO{Lists: []string{}}
+	if p != nil {
+		out.Configured = true
+		for _, l := range p.Lists {
+			out.Lists = append(out.Lists, string(l))
+		}
+		r, g := int64(p.RescreenInterval/time.Second), int64(p.BackfillGrace/time.Second)
+		out.RescreenIntervalSecond, out.BackfillGraceSeconds = &r, &g
+		t := amlTime(p.EffectiveFrom)
+		out.EffectiveFrom = &t
+	}
+	writeJSON(c.w, http.StatusOK, out)
+}
+
+type amlScreeningPolicyRequest struct {
+	JurisdictionID         string   `json:"jurisdiction_id"`
+	Lists                  []string `json:"lists"`
+	RescreenIntervalSecond *int64   `json:"rescreen_interval_seconds"`
+	BackfillGraceSeconds   *int64   `json:"backfill_grace_seconds"`
+	EffectiveFrom          string   `json:"effective_from"`
+	LegalReviewReference   string   `json:"legal_review_reference"`
+	ReasonCode             string   `json:"reason_code"`
+}
+
+func amlScreeningPolicySet(c amlCall) {
+	var req amlScreeningPolicyRequest
+	if !c.decode(&req) {
+		return
+	}
+	jur, err := uuid.Parse(req.JurisdictionID)
+	if err != nil || jur == uuid.Nil {
+		c.badRequest()
+		return
+	}
+	from, err := time.Parse(time.RFC3339, req.EffectiveFrom)
+	// No defaults: both durations must be stated (a missing field is a 400, never zero).
+	if err != nil || req.RescreenIntervalSecond == nil || req.BackfillGraceSeconds == nil || *req.RescreenIntervalSecond < 1 || *req.BackfillGraceSeconds < 0 ||
+		*req.RescreenIntervalSecond > 31536000 || *req.BackfillGraceSeconds > 31536000 {
+		c.badRequest()
+		return
+	}
+	in := aml.ScreeningPolicyInput{JurisdictionID: jur, RescreenInterval: time.Duration(*req.RescreenIntervalSecond) * time.Second,
+		BackfillGrace: time.Duration(*req.BackfillGraceSeconds) * time.Second, EffectiveFrom: from,
+		LegalReviewReference: req.LegalReviewReference, ReasonCode: req.ReasonCode}
+	for _, l := range req.Lists {
+		in.Lists = append(in.Lists, aml.ListType(l))
+	}
+	id, err := c.svc.AuthorScreeningPolicy(c.r.Context(), c.actor, in)
+	if err != nil {
+		c.fail("screening_policy_set", err)
+		return
+	}
+	writeJSON(c.w, http.StatusCreated, map[string]any{"policy_id": id.String()})
 }

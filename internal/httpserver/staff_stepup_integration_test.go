@@ -179,9 +179,10 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// lic18: +2 critical (screening trigger-policy set, officer resolution), +2 reads: critical 80, none-mutating 46, read 107. The
 	// integ-b merge left the none-mutating and read pins at the lic10-only values (44 / 101) although the comments above sum to 46 / 105.
 	// lic23: +1 critical (POST .../screening/persons/{personID}/requests/replace): critical 81.
-	if counts["critical"] != 81 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// lic29: +1 critical (POST .../screening/policy), +1 read (GET .../screening/policy): critical 82, read 108.
+	if counts["critical"] != 82 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 46 || counts["read"] != 107 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 46 || counts["read"] != 108 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

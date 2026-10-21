@@ -135,8 +135,19 @@ func (a Actor) validate() error {
 	return nil
 }
 
-// classify maps a database error to a service error.
+// classify maps a database error to a service error. lic29: a refusal that carries a closed HINT code keeps it (RefusalCode).
 func classify(err error) error {
+	out := classifyBase(err)
+	var pe *pgconn.PgError
+	if out != nil && errors.As(err, &pe) {
+		if _, ok := RefusalCodes[pe.Hint]; ok && pe.Hint != "" {
+			return &refusalError{code: pe.Hint, err: out}
+		}
+	}
+	return out
+}
+
+func classifyBase(err error) error {
 	if err == nil {
 		return nil
 	}

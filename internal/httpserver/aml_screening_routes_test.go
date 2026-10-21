@@ -21,6 +21,8 @@ import (
 var amlScreeningRoutes = map[string]string{
 	"GET /v1/admin/tenants/{tenantID}/screening/trigger-policy":                                      "none",
 	"POST /v1/admin/tenants/{tenantID}/screening/trigger-policy":                                     "critical",
+	"GET /v1/admin/tenants/{tenantID}/screening/policy":                                              "none",
+	"POST /v1/admin/tenants/{tenantID}/screening/policy":                                             "critical",
 	"GET /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests":                         "none",
 	"POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution": "critical",
 	"POST /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/replace":                "critical",
@@ -52,11 +54,11 @@ func TestAMLScreeningRoutes_GoldenRegistrationAndPermissionsAreExact(t *testing.
 		t.Fatalf("%d registrations, want %d", got, len(amlScreeningRoutes))
 	}
 	// Every write is step-up critical behind the hold-manage permission; every read is step-up none behind case-read.
-	if c := strings.Count(src, "staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAMLHoldManage)"); c != 3 {
-		t.Errorf("%d critical routes behind PermAMLHoldManage, want 3", c)
+	if c := strings.Count(src, "staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermAMLHoldManage)"); c != 4 {
+		t.Errorf("%d critical routes behind PermAMLHoldManage, want 4", c)
 	}
-	if c := strings.Count(src, "staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseRead)"); c != 2 {
-		t.Errorf("%d read routes behind PermAMLCaseRead, want 2", c)
+	if c := strings.Count(src, "staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermAMLCaseRead)"); c != 3 {
+		t.Errorf("%d read routes behind PermAMLCaseRead, want 3", c)
 	}
 }
 

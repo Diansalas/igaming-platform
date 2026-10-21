@@ -62,6 +62,10 @@ type AMLOfficerAPI interface {
 	ListScreeningRequests(ctx context.Context, a aml.Actor, personID uuid.UUID) ([]aml.ScreeningRequestRow, error)
 	ResolveScreeningRequest(ctx context.Context, a aml.Actor, personID, requestID uuid.UUID, in aml.ResolveScreeningInput) (aml.ScreeningRecorded, error)
 	ReplaceScreeningRequest(ctx context.Context, a aml.Actor, personID uuid.UUID, requestID *uuid.UUID, reasonCode string) (aml.ReplaceScreeningResult, error)
+	// lic29: the screening policy (rescreen interval, backfill grace, lists). The route authors through AuthorScreeningPolicy, which
+	// is TIGHTEN-ONLY in the database (SR7-3); the loosening-capable setter is deliberately NOT part of this interface.
+	AuthorScreeningPolicy(ctx context.Context, a aml.Actor, in aml.ScreeningPolicyInput) (uuid.UUID, error)
+	EffectiveScreeningPolicy(ctx context.Context, a aml.Actor, jurisdictionID uuid.UUID) (*aml.Policy, error)
 }
 
 var _ AMLOfficerAPI = (*aml.Service)(nil)
@@ -159,6 +163,15 @@ func amlActorFrom(tc tenant.Context, r *http.Request, requestID string) (aml.Act
 // amlErrorCode maps an aml error to the closed API code, a fixed sentence and one closed check code. Pure, so the whole table
 // is unit-tested without a database. The database message text is never copied into a response.
 func amlErrorCode(err error) (apierror.Code, string, []string) {
+	code, msg, checks := amlErrorCodeBase(err)
+	// lic29: the closed refusal code (a stable machine-readable string for the Back Office); the status and sentence are unchanged.
+	if rc := aml.RefusalCode(err); rc != "" && code != apierror.CodeInternal {
+		checks = append(checks, rc)
+	}
+	return code, msg, checks
+}
+
+func amlErrorCodeBase(err error) (apierror.Code, string, []string) {
 	switch {
 	case errors.Is(err, aml.ErrNotFound):
 		return apierror.CodeNotFound, "not found", nil
