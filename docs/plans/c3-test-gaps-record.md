@@ -10,7 +10,7 @@ country or jurisdiction.
 |---|---|
 | Go integration tests, `internal/licensingchange/c3_*` (16 tests) | IMPLEMENTED (16/16 pass, also under `-race` for the concurrency/clock ones) |
 | Go integration tests through HTTP, `internal/httpserver/c3_licensing_gaps_integration_test.go` (6 tests) | IMPLEMENTED (6/6 pass; concurrency also under `-race`) |
-| Playwright `13-market-config-gaps` (12 tests) | see "Playwright results" (filled from the actual run) |
+| Playwright `13-market-config-gaps` (12 tests) | IMPLEMENTED (12/12 pass in the final full run) |
 | Placeholders "awaiting C1 merge" | FILLED after the C1 merge (no `fixme` left): i1 ceiling_not_enabled_for_country, i2 duplicate_jurisdiction_code, i3 currency_not_active_asset (each: wire status + generic code + exact `check_codes` + exact UI wording + nothing stored), Go wire test for five more codes, i4 platform_officer_required |
 | Product defects found | none that required product code to change; four findings below (F1-F4), none fixed (tests only) |
 
@@ -85,8 +85,22 @@ bash priv_test.sh -tags integration -count=1 -p 1 ./internal/licensingchange/   
 go vet -tags integration ./internal/licensingchange/ ./internal/httpserver/ ; gofmt -l -> clean
 go test -count=1 ./internal/licensingchange/ ./internal/httpserver/ ./internal/actorproof/... ./internal/auth/... ./internal/rg/ -> ok
 E2E_SPEC=13- bash backoffice/e2e/run.sh (fresh DB, before the C1 merge, 8 tests) -> run.sh exit=0 (8 passed, 4 fixme)
+bash backoffice/e2e/run.sh (FULL, specs 01-13, fresh DB c3_e2e4, tip of this branch) -> run.sh exit=0, 80 passed, 0 failed, 0 skipped, 0 fixme (47.8 min)
 ```
 
 ## Playwright results
 
-(filled below from the actual full run)
+Final FULL run (specs 01-13, fresh private database, tip of this branch after the C1 merge): **80 passed, 0 failed, 0 skipped, 0 fixme** (47.8 min, `run.sh` exit 0).
+Specs 01-12: 68 passed (unchanged count; spec 11 with its two intentional wording assertions); spec 13: 12 passed ((a) to (h) = 8, (i1) to (i4) = 4).
+
+History, not hidden: (1) spec 13 alone, before the C1 merge: 6 passed + (a) failed on a SQL operator-precedence slip in my helper, (e) failed on re-opening the same URL (cached
+query); both fixed, 8/8 on a fresh DB. (2) first FULL run after the C1 merge and the placeholder fill: 77 passed, 3 failed, all in spec 13 and all test-side: (a) and (b)
+used countries SE and FI which spec 06 had already given an operating basis on the shared synthetic tenant (resolver `not_permitted_by_basis` instead of `permitted`), and
+(i4) looked the tenant compliance grantee up with a platform-scoped query (tenant staff rows are RLS tenant-scoped). Fixed (countries EE and LT, `sqlT`), then the final
+full run above. The C1 fill is NOT weakened: the exact wording strings in spec 13 are copied, not imported.
+
+Not run: other browsers (Chromium only), a real provider.
+
+## Cleanup
+
+Private databases `c3_main`, `c3_e2e1` to `c3_e2e4` dropped; `run.sh` removed its run directory and the `node_modules` symlink.
