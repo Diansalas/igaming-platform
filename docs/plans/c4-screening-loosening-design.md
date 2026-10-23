@@ -121,3 +121,13 @@ not a way to move a policy in a gated tenant of a production-anchored database. 
 - The cooling period is counted from FILING; approvals made inside it are allowed but the executing approval is refused and rolled back (approve again afterwards).
 - "Loosening" is measured against the LATEST version only (the in-force comparison of the tighten-only route is not repeated for the governed path).
 - The trigger policy is not covered (D4). The break-glass setter is not removed (D7).
+
+## 7. Review fixes (security and ledger-finance reviews, applied in place to 0190)
+
+1. Officer controls (SEC HIGH-1): requester, every counted approver and the executor hold an in-force platform `aml_officer` grant on the tenant and the owner-scope quorum
+   holds; non-officer approvals are refused when recorded (a trigger on `licensing_change_approvals` for the two kinds) and not counted at execution. Narrowing configure stays open.
+2. Sanctions list never removed (LF H-1, safe default). 3. Every dimension looser or equal (LF M-2). 4. Effective time is the later of the offset and the cooling period (SEC MEDIUM-1).
+5. Capability advisory lock in validation and execution (SEC LOW-1). 6. The policy guard bounds the effective time to [executed_at, executed_at + 30 d + 1 min] and fixes the reason code (SEC LOW-2).
+7. A longer backfill grace is refused once the previous grace has run out while a gate exists (LF M-1 guard); the retro-release by a longer interval stays D10 (runbook section "Retroactive effect").
+Updated decisions: D2 (the effective time now also waits the cooling period), D3 (the sanctions list is closed by default; relaxing it is owner + compliance and needs per-clear
+screened-lists recording and a gate subset check first), D10 (retroactive release by a longer interval).

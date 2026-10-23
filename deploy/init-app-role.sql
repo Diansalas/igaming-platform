@@ -244,7 +244,9 @@ BEGIN
         -- Migration 0190 (c4): the governed screening-policy loosening executors and helpers (platform principal sessions only; the
         -- executors also need an executed licensing change request of this transaction).
         'screening_loosening_state(uuid)', 'screening_policy_loosen_assert(jsonb, timestamptz)',
-        'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)'
+        'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)',
+        'screening_loosening_officer_ok(uuid, uuid, uuid)', 'screening_loosening_officers_assert(uuid, uuid, uuid)',
+        'screening_loosening_approvers_assert(uuid, uuid, uuid, uuid)'
     ] LOOP
         IF to_regprocedure('public.' || f) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
