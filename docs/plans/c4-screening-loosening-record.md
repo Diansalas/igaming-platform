@@ -37,6 +37,16 @@ re-verified byte for byte). Merged `integ-c` at 889bdff first (clean; its `licen
 
 Kept as LAUNCH BLOCKERS, not changed: D4 (trigger-policy loosening is a single officer chain) and D7 (the unrouted `aml_screening_policy_set` break-glass stays reachable).
 
+## 0b. Second review round (both re-reviews: acceptable as the inert mechanism with these items) - fixes in place in 0190
+
+| Item | Fix | Test; mutation proof |
+|---|---|---|
+| LF N-1 (blocked enabling) grace guard at execution time | Evaluated at the EFFECTIVE time: the validator uses now + the later of the offset and the cooling period (request and execution), and the platform branch of `aml_screening_policies_guard` repeats it (defence in depth). Runbook wording corrected. | `TestC4_GraceGuard_IsEvaluatedAtTheEffectiveTime` (the reviewer's scenario: grace runs out in about 1 h, offset 3 h: refused; offset 30 min: allowed; table guard forged-insert legs). Both the validator mutation and the guard mutation are killed (file-based, the test builds scratch databases from the migration). |
+| LF N-2 reconciliation runnable | `screening_loosening_reconcile()`: read-only definer, platform_admin session only (inside), search_path pinned, ids and kinds only, runtime EXECUTE. Runbook updated. | `TestC4_Reconciliation_CleanStateAndSeededMismatches` (clean tenant: nothing; owner-forged: request without row, orphan policy row, orphan settings row; tenant principal LC030, no principal LC001). Two mutations killed. |
+| SEC LOW-A own-licence tenants | New closed code `loosening_not_supported_for_tenant_licensing_model`, raised before the quorum read; own-licence tenants are OUT OF SCOPE until D5 and the quorum read are designed. In `aml.RefusalCodes`, OpenAPI enum, Back Office wording, drift pins. | `TestC4_OwnLicenceTenant_IsRefusedWithAClosedCode`; mutation killed. |
+| LF L-1 audit | The outcome and the audit row carry `previous_*` (latest created, unchanged names) AND `in_force_*` (in force at execution). | `TestC4_Audit_CarriesBothThePreviousAndTheInForceVersion` (a pending future-dated version); mutation killed. |
+| SEC info oracle | The officer helpers are runtime-executable definer functions that tell whether a staff id is an officer of a tenant. A one-line session check was trivially safe, so it was ADDED: a platform session is required, else `LC001` (the callers are all platform sessions; tests stay green). | `TestC4_OfficerHelpers_NeedAPlatformSession`; mutation killed. |
+
 ## 1. What was built
 
 Migration `0190_c4_screening_policy_governed_loosening.{up,down}.sql`, minimal by construction: the 0180 classifier body is NOT copied; `licensing_change_classify`
@@ -63,22 +73,26 @@ request lifetime 72 h, signed proof on request, approve and execute (existing st
 
 The tighten path is unchanged: `POST .../screening/policy` (0189) is untouched and still refuses loosening (`policy_loosening_refused`, its description now points at the governed request).
 
-## 2. Verification (commands actually run after the review fixes; private database `c4scr`, rebuilt from the final migration set)
+## 2. Verification (commands actually run after the SECOND review round; private database `c4scr`, rebuilt from the final migration set)
 
-Environment: PostgreSQL 16 local, runtime role `igaming_runtime` (non-superuser, non-BYPASSRLS, asserted by the test world), private database only. Disk filled once during the
-work (ENOSPC): `go clean -cache` was run, as the brief allows.
+Environment: PostgreSQL 16 local, runtime role `igaming_runtime` (non-superuser, non-BYPASSRLS, asserted by the test world), private databases only. `integ-c` was merged first (clean).
 
 | Command | Result |
 |---|---|
-| `PRIV_DB=c4scr PRIV_SRC=<worktree> bash priv_test.sh -tags integration -count=1 -p 1 ./internal/licensingchange` (all 0177-0183 and 0190 tests; includes migration 0190 up/down/up byte for byte and the `LC095` down refusal) | ok (101.6 s) |
-| same, `./internal/aml` (full package: unchanged 0189 / lic29 / lic30 tests, the catalogue and static pins) | ok (255.3 s) |
-| same, `./internal/httpserver -run 'Licensing\|Screening\|AML\|Staff\|StepUp\|OpenAPI\|Route\|Mutation\|C1\|C2'` | ok (529.1 s). A first run of the same subset had ONE failure, my own HTTP test, which needed officer grants for the three fixture operators after fix 1; fixed and the whole subset re-run |
-| same, `./cmd/migrate ./internal/db` | ok (2.5 s, 55.6 s) |
+| `PRIV_DB=c4scr PRIV_SRC=<worktree> bash priv_test.sh -tags integration -count=1 -p 1 ./internal/licensingchange` (includes migration 0190 up/down/up byte for byte and the `LC095` down refusal) | ok (92.8 s) |
+| same, `./internal/aml` (full package) | ok (247.6 s) |
+| same, `./internal/httpserver -run 'Licensing\|Screening\|AML\|Staff\|StepUp\|OpenAPI\|Route\|Mutation\|C1\|C2'` | ok (500.5 s) |
+| same, `./cmd/migrate ./internal/db` | ok (2.0 s, 50.0 s) |
 | `go test -count=1 ./...` (unit, no integration tag) | 79 packages ok, none failed |
-| `go vet ./...` | clean |
-| `gofmt -l` on every touched or new Go file | no output |
-| backoffice `npx vitest run src/features/licensing src/features/aml` | 16 files, 275 tests passed; `npx tsc --noEmit` clean |
-| `python3 yaml.safe_load` of `docs/api/openapi/platform-api.yaml` | ok |
+| `go vet ./...`; `gofmt -l` on touched Go files | clean; no output |
+| backoffice `npx vitest run src/features/licensing src/features/aml`; `npx tsc --noEmit` | 16 files, 276 tests passed; tsc clean |
+| `python3 yaml.safe_load` of the OpenAPI document | ok |
+| **Playwright spec 12 (`E2E_SPEC=12-screening-policy bash backoffice/e2e/run.sh`, fresh private database, real `cmd/platform-api`, Chromium)** | **7 passed, 0 failed, 0 skipped, 7 total** (3.6 min). This covers the changed `policy_loosening_refused` wording of round 1 (the mirrored string in `e2e/lib/sp_ui.ts`, test (d)). |
+
+Mutation proofs of this round (each killed by the named test, then restored): reconciliation ignoring a mismatch, skipping orphan policy rows (`TestC4_Reconciliation_...`);
+own-licence check removed (`TestC4_OwnLicenceTenant_...`); in-force fields = latest (`TestC4_Audit_...`); officer helper without the session check (`TestC4_OfficerHelpers_...`);
+grace check at execution time instead of the effective time in the validator, and the table-guard grace check removed (`TestC4_GraceGuard_...`, mutated in the migration file because the test
+builds scratch databases from it). Two first runs of the last two mutations showed a false "ok" because they were applied to the live private database, which that test does not use.
 
 New tests: `internal/licensingchange/screening_loosening_integration_test.go` (21 tests after the review round, adding officer controls x2, the sanctions closure, the capability lock race, the effective-time window, the policy guard bounds and the grace guard; originally 14: unconfigured and disabled refusals, per-tenant isolation of the capability, end to end with audit
 and before/after, self approval, the requester's other account, single approver, duplicate approvals by account and by Person, `not_a_loosening` and `no_screening_policy_to_loosen`
@@ -152,7 +166,7 @@ The six changes below are from the first round and stand.
 | D2 | Cooling period: whether one exists, its length, and what it counts from. Since the review round the cooling period is also the minimum delay between the DECISION and the new version taking effect (a window to author a stricter counter-version). | none (0 is a stated value); a period from filing (built, 0..71 h); a period from the first approval (needs a change); longer than 71 h (needs a primitive change) | A non-zero period; the value is the owner's. No default is shipped. |
 | D3 | Which dimensions may ever be loosened | interval and grace (built) with the sanctions list CLOSED by default (`sanctions_list_removal_refused`); the pep list removable (built); relaxing the sanctions closure | Keep the sanctions closure. Relaxing it is an owner + compliance decision and first needs (a) the screened lists recorded on every clear and (b) a gate subset check (a clear counts only if it covered the lists now required); neither exists. |
 | D4 | Must loosening the trigger policy (fewer events, gate off) also need two Persons? | leave on the critical officer route; add a governed kind; make the route tighten-only | Add a governed kind with the same primitive (separate slice) before the first production tenant. |
-| D5 | Who approves, how many | platform_admin x 2 (interim HDR-M-1, built); a separate compliance approver role; 3 for list removal | Keep the interim until HDR-M-1 is answered. |
+| D5 | Who approves, how many. Own-licence tenants are out of scope until this and the quorum read (platform grants vs a `tenant` owner scope) are designed. | platform_admin x 2 (interim HDR-M-1, built); a separate compliance approver role; 3 for list removal | Keep the interim until HDR-M-1 is answered. |
 | D6 | Jurisdiction-specific floors instead of the 3600 s engineering floor | keep; per-jurisdiction floor table | Keep until legal provides values. Never invent them. |
 | D7 | Fate of the unrouted `aml_screening_policy_set` | keep (break-glass by an officer quorum); revoke the runtime `EXECUTE` (one migration) | Revoke once D1 is decided and (b) is in use; until then document the break-glass. |
 | D8 | Tell the tenant when its policy is loosened | no (built); read-only notice | Decide with compliance; tipping-off rules differ by jurisdiction. |
@@ -170,7 +184,7 @@ the evidence reference naming the decision record. The production gate stays off
 
 *Decision (proposed).* A screening policy version that is less strict than the latest version of its tenant and jurisdiction (a list removed, a longer re-screen interval, a longer backfill
 grace) is authored only by the licensing change kind `aml_screening_policy_loosen`: two distinct platform_admin Persons, signed proofs (ADR 0110), approvals at most 24 h old, a 72 h request lifetime,
-the engineering floors of 0189, the AML officer controls (the requester, each counted approver and the executor hold an in-force platform `aml_officer` grant and the owner-scope quorum holds), a version that is looser or equal in every dimension, never removing the sanctions list, never extending an expired backfill grace, an effective time of execution plus the later of 0..30 days and the cooling period, and execution in the transaction of the final approval. The capability is a per-tenant, append-only setting
+the engineering floors of 0189, the AML officer controls (the requester, each counted approver and the executor hold an in-force platform `aml_officer` grant and the owner-scope quorum holds), a version that is looser or equal in every dimension, never removing the sanctions list, never extending a backfill grace that will have run out by the time the version takes effect (checked in the validator and in the table guard), tenants that hold their own licence out of scope, an effective time of execution plus the later of 0..30 days and the cooling period, and execution in the transaction of the final approval. The capability is a per-tenant, append-only setting
 (`aml_screening_loosening_settings`) changed by the kind `aml_screening_loosening_configure` (widening when it enables loosening or shortens the cooling period). With no setting the
 capability is off and every loosening is refused. The cooling period is configuration, counted from filing, never defaulted. The route stays tighten-only. The withdrawal gate and its production
 guard (non-production environment anchor, worker heartbeat) are not touched; a loosening never writes a trigger policy and is refused where a gate exists in a database whose anchor is not
@@ -178,6 +192,8 @@ development, staging or test.
 
 *Consequences.* Loosening has one audited, two-person path once enabled; it is inert until the owner decides D1 to D3. The trigger policy and the unrouted setter remain open (D4, D7). A later
 migration touching `licensing_change_classify` must preserve the wrapper. Enabling the capability for any tenant requires a recorded owner decision and the `security` and `ledger-finance` reviews.
+
+*Scope.* Tenants that hold their own licence are out of scope (`loosening_not_supported_for_tenant_licensing_model`). The grace guard is evaluated at the effective time. A reconciliation function exists (`screening_loosening_reconcile()`).
 
 *Retroactivity.* A loosening applies to withdrawals already waiting at their next gate claim; a longer interval revives expired clears (owner decision D10, not prevented), a longer expired grace is refused.
 
@@ -199,5 +215,6 @@ migration touching `licensing_change_classify` must preserve the wrapper. Enabli
 | C4-D4-TRIGGER-POLICY-LOOSENING | owner + security | OPEN, LAUNCH BLOCKER. Trigger policy (fewer events, gate off) is a single-officer critical route, not two Persons. RECOMMENDATION: governed kind before the first production tenant. |
 | C4-D5-D9-REMAINING | owner | OPEN. Approver population (D5), jurisdiction floors (D6), fate of the unrouted `aml_screening_policy_set` (D7, LAUNCH BLOCKER together with D4), tenant notification (D8), Back Office filing form (D9). |
 | C4-D10-RETRO-RELEASE | owner + ledger-finance | OPEN. A longer re-screen interval revives expired clears of waiting withdrawals at their next gate claim. Follow-up: pin the policy id on payout decisions. |
+| C4-OWN-LICENCE-TENANTS-OUT-OF-SCOPE | owner + security | Own-licence tenants are refused (`loosening_not_supported_for_tenant_licensing_model`) until D5 and the quorum read are designed. |
 | C4-SECURITY-REVIEW-0190 | security | OPEN, BLOCKING. New SECURITY DEFINER functions, a new guard on `aml_screening_policies`, wrapped `licensing_change_classify`. |
 | C4-LEDGER-REVIEW-0190 | ledger-finance | OPEN. Effect of a loosened interval or grace on the payout gate; confirm nothing here can enable the gate. |

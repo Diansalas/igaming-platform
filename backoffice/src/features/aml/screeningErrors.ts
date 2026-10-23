@@ -50,6 +50,7 @@ export const REFUSAL_TEXT: Record<string, string> = {
   officer_quorum_not_met: 'The AML officer quorum of this tenant (at least two different people with an in-force officer grant) is not met, so no screening policy loosening can be filed, approved or executed.',
   sanctions_list_removal_refused: 'The sanctions list is never removed through the governed loosening. This is a fixed safety default of the software; changing it is an owner and compliance decision.',
   loosening_mixes_tightening: 'The version tightens one setting while loosening another. A loosening request must be looser or equal in every setting. Tighten first on the screening policy form, then file the loosening.',
+  loosening_not_supported_for_tenant_licensing_model: 'Governed loosening of the screening policy is not available for a tenant that holds its own licence. This is out of scope for now; nothing was changed.',
   grace_extension_after_expiry_refused: 'The backfill grace of the withdrawal gate has already run out and a longer grace would re-open it. The software refuses to extend it.',
   loosening_cooling_period: 'The cooling period of this loosening request has not elapsed yet. The period is counted from the filing of the request; approve again once it has passed.',
 }

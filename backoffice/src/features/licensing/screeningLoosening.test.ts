@@ -14,7 +14,7 @@ describe('screening loosening kinds in the generic licensing change screens', ()
     expect(values).toContain('aml_screening_policy_loosen')
     expect(values).toContain('aml_screening_loosening_configure')
   })
-  it.each(['loosening_not_configured', 'loosening_disabled', 'no_screening_policy_to_loosen', 'not_a_loosening', 'loosening_cooling_period', 'officer_grant_required', 'officer_quorum_not_met', 'sanctions_list_removal_refused', 'loosening_mixes_tightening', 'grace_extension_after_expiry_refused', 'gate_environment_refused', 'rescreen_interval_below_floor'])(
+  it.each(['loosening_not_configured', 'loosening_disabled', 'no_screening_policy_to_loosen', 'not_a_loosening', 'loosening_cooling_period', 'officer_grant_required', 'officer_quorum_not_met', 'sanctions_list_removal_refused', 'loosening_mixes_tightening', 'grace_extension_after_expiry_refused', 'loosening_not_supported_for_tenant_licensing_model', 'gate_environment_refused', 'rescreen_interval_below_floor'])(
     'shows the UI-owned wording of the closed code %s on a guard refusal and never the server message',
     (code) => {
       const v = describeLicensingError(new ApiError('LICENSING_CHANGE_GUARD_REFUSED' as never, 'RAW SERVER MESSAGE', 409, 'req-1', ['LC050', code]))

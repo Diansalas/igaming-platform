@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -1410,5 +1411,269 @@ func TestC4_GraceExtensionAfterExpiry_IsRefused(t *testing.T) {
 	// Keeping the grace and lengthening the interval is allowed (the interval retro-release stays an owner decision, D10).
 	if done := l.widen(KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 60), "screening_loosening_decision"); !done.Executed {
 		t.Fatal("an interval-only loosening is allowed")
+	}
+}
+
+// ---- second review round (ledger-finance N-1, N-2, L-1; security LOW-A, info) ---------------------------------------------------------
+
+// forgeExecutedRequest inserts (committed, owner path, the request guard off for the one statement) an EXECUTED request of the given kind about the
+// tenant, with no rows written for it: a fixture for the reconciliation and the guard tests only.
+func (l *lw) forgeExecutedRequest(kind, payloadJSON string) uuid.UUID {
+	l.t.Helper()
+	var id uuid.UUID
+	if err := l.owner.WithPlatformAdmin(context.Background(), l.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `ALTER TABLE licensing_change_requests DISABLE TRIGGER licensing_change_requests_guard`); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO licensing_change_requests (kind, payload, payload_hash, reason_code, widening, required_approvals, requested_by, requested_by_person_id,
+				requested_scope, status, created_at, created_txid, expires_at, executed_by, executed_at, executed_txid)
+			VALUES ($1, $2::jsonb, encode(sha256(gen_random_uuid()::text::bytea), 'hex'), 'x', true, 2, $3, $4, 'platform', 'executed', now(), txid_current(), now() + interval '1 day', $5, now(), txid_current())
+			RETURNING id`, kind, payloadJSON, l.req.StaffID, l.ops.Persons[0], l.ap2.StaffID).Scan(&id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `ALTER TABLE licensing_change_requests ENABLE TRIGGER licensing_change_requests_guard`)
+		return err
+	}); err != nil {
+		l.t.Fatalf("forge request: %v", err)
+	}
+	return id
+}
+
+type reconRow struct {
+	Problem, Kind string
+	Request       uuid.UUID
+	Tenant        uuid.UUID
+}
+
+func (l *lw) reconcile(staff uuid.UUID) ([]reconRow, error) {
+	var out []reconRow
+	err := l.rtPlatform(staff, func(ctx context.Context, tx pgx.Tx) error {
+		out = nil
+		rows, err := tx.Query(ctx, `SELECT o_problem, o_kind, o_request_id, o_tenant_id FROM screening_loosening_reconcile()`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r reconRow
+			if err := rows.Scan(&r.Problem, &r.Kind, &r.Request, &r.Tenant); err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+func (l *lw) reconcileFor(tenant uuid.UUID) []reconRow {
+	l.t.Helper()
+	all, err := l.reconcile(l.ops.Requester)
+	if err != nil {
+		l.t.Fatalf("reconcile: %v", err)
+	}
+	var out []reconRow
+	for _, r := range all {
+		if r.Tenant == tenant {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// LF N-2: the reconciliation is a function a platform_admin can run, returns nothing for a clean tenant and names every mismatch the owner forges.
+func TestC4_Reconciliation_CleanStateAndSeededMismatches(t *testing.T) {
+	l := newLW(t)
+	l.enable(l.tenant, 0)
+	l.widen(KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 7200), "screening_loosening_decision")
+	if got := l.reconcileFor(l.tenant); len(got) != 0 {
+		t.Fatalf("a clean tenant reconciles to nothing, got %+v", got)
+	}
+	// Seeded mismatches (committed, forged by the owner): (A) an executed loosen request with no policy row, (B) an executed configure request
+	// with no settings row, (C) a platform policy row pointing at B (not a loosen request), (D) a settings row pointing at A (not a configure one).
+	payloadJSON := `{"tenant_id":"` + l.tenant.String() + `","jurisdiction_id":"` + l.jur.String() + `"}`
+	a := l.forgeExecutedRequest("aml_screening_policy_loosen", payloadJSON)
+	b := l.forgeExecutedRequest("aml_screening_loosening_configure", payloadJSON)
+	l.ownerTenant(func(ctx context.Context, tx pgx.Tx) error {
+		for _, stmt := range []string{`ALTER TABLE aml_screening_policies DISABLE TRIGGER aml_screening_policies_10_guard`, `ALTER TABLE aml_screening_loosening_settings DISABLE TRIGGER aml_screening_loosening_settings_10_guard`} {
+			if _, err := tx.Exec(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO aml_screening_policies (tenant_id, licensing_jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds, effective_from,
+				legal_review_reference, reason_code, created_by, created_by_person_id, created_by_scope, change_request_id)
+			VALUES ($1, $2, '{pep}', 99999, 0, now(), 'R', 'governed_loosening', $3, $4, 'platform', $5)`, l.tenant, l.jur, l.ap2.StaffID, l.ops.Persons[2], b); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO aml_screening_loosening_settings (tenant_id, enabled, cooling_seconds, evidence_reference, reason_code, change_request_id, created_by, created_by_person_id)
+			VALUES ($1, true, 0, 'E', 'x', $2, $3, $4)`, l.tenant, a, l.ap2.StaffID, l.ops.Persons[2]); err != nil {
+			return err
+		}
+		for _, stmt := range []string{`ALTER TABLE aml_screening_policies ENABLE TRIGGER aml_screening_policies_10_guard`, `ALTER TABLE aml_screening_loosening_settings ENABLE TRIGGER aml_screening_loosening_settings_10_guard`} {
+			if _, err := tx.Exec(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	got := map[string]bool{}
+	for _, r := range l.reconcileFor(l.tenant) {
+		got[r.Problem+"|"+r.Request.String()] = true
+	}
+	for _, want := range []string{"executed_request_without_exactly_one_row|" + a.String(), "executed_request_without_exactly_one_row|" + b.String(),
+		"policy_row_without_executed_request|" + b.String(), "settings_row_without_executed_request|" + a.String()} {
+		if !got[want] {
+			t.Fatalf("missing %s in %v", want, got)
+		}
+	}
+	// Only a platform_admin session may run it; a tenant principal and a session with no principal are refused; nothing but ids is returned.
+	staff := l.tenantStaff(l.tenant, string(auth.RoleTenantAdmin))
+	err := l.rt.WithPrincipalScope(context.Background(), l.tenant, staff.StaffID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT * FROM screening_loosening_reconcile()`)
+		return err
+	})
+	if pgCode(err) != "LC030" {
+		t.Fatalf("tenant principal: %v", err)
+	}
+	err = l.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT * FROM screening_loosening_reconcile()`)
+		return err
+	})
+	if pgCode(err) != "LC001" {
+		t.Fatalf("no principal: %v", err)
+	}
+}
+
+// SEC LOW-A: own-licence tenants are out of scope; refused with a closed code BEFORE the quorum read, and nothing widens.
+func TestC4_OwnLicenceTenant_IsRefusedWithAClosedCode(t *testing.T) {
+	l := newLW(t)
+	own := l.world.tenant("own_licence")
+	_, err := l.request(KindAMLScreeningLooseningConfigure, l.cfgPayload(own, true, 0))
+	wantHint(t, err, "loosening_not_supported_for_tenant_licensing_model", "enabling for an own-licence tenant")
+	if len(l.settings(own)) != 0 {
+		t.Fatal("nothing is configured")
+	}
+	// Disabling remains a narrowing; an unconfigured own-licence tenant has nothing to disable (unchanged), so the request is invalid, not widened.
+	if _, err := l.request(KindAMLScreeningLooseningConfigure, l.cfgPayload(own, false, 0)); GuardCode(err) != "LC010" {
+		t.Fatalf("disabling an unconfigured capability: %v", err)
+	}
+}
+
+// SEC info: the officer helpers need a platform session (no oracle for a tenant principal or a bare runtime session).
+func TestC4_OfficerHelpers_NeedAPlatformSession(t *testing.T) {
+	l := newLW(t)
+	staff := l.tenantStaff(l.tenant, string(auth.RoleTenantAdmin))
+	probe := func(run func(fn func(ctx context.Context, tx pgx.Tx) error) error) {
+		for _, sql := range []string{`SELECT screening_loosening_officer_ok($1, $2, $3)`, `SELECT screening_loosening_officers_assert($1, $2, $3)`} {
+			err := run(func(ctx context.Context, tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, sql, l.tenant, l.ap1.StaffID, l.ops.Persons[1])
+				return err
+			})
+			if pgCode(err) != "LC001" {
+				t.Fatalf("%s: want LC001, got %v", sql, err)
+			}
+		}
+	}
+	probe(func(fn func(ctx context.Context, tx pgx.Tx) error) error {
+		return l.rt.WithPrincipalScope(context.Background(), l.tenant, staff.StaffID, fn)
+	})
+	probe(func(fn func(ctx context.Context, tx pgx.Tx) error) error {
+		return l.rt.WithoutTenant(context.Background(), fn)
+	})
+	// A platform session works (the helper answers).
+	var ok bool
+	if err := l.rtPlatform(l.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT screening_loosening_officer_ok($1, $2, $3)`, l.tenant, l.ap1.StaffID, l.ops.Persons[1]).Scan(&ok)
+	}); err != nil || !ok {
+		t.Fatalf("a platform session reads it: %v %v", ok, err)
+	}
+}
+
+// LF L-1: the audit outcome carries the latest-created version (previous_*) AND the version in force at execution (in_force_*).
+func TestC4_Audit_CarriesBothThePreviousAndTheInForceVersion(t *testing.T) {
+	l := newLW(t)
+	l.enable(l.tenant, 0)
+	// A pending (future-dated) second version: the latest created is not the one in force.
+	l.ownerTenant(func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `ALTER TABLE aml_screening_policies DISABLE TRIGGER aml_screening_policies_10_guard`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO aml_screening_policies (tenant_id, licensing_jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds,
+				effective_from, legal_review_reference, reason_code, created_by, created_by_person_id, created_by_scope)
+			VALUES ($1, $2, '{pep,sanctions}', 10000, $3, now() + interval '1 day', 'TEST FIXTURE REF', 'fixture', $4, $5, 'platform_acting')`, l.tenant, l.jur, fixtureGrace, l.ops.Requester, l.ops.Persons[0]); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `ALTER TABLE aml_screening_policies ENABLE TRIGGER aml_screening_policies_10_guard`)
+		return err
+	})
+	done := l.widen(KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, fixtureGrace), "screening_loosening_decision")
+	var md []byte
+	if err := l.owner.WithPlatformAdmin(context.Background(), l.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE action = 'aml.screening_policy_loosened' AND target_id = $1`, done.Request.ID.String()).Scan(&md)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]map[string]any
+	_ = json.Unmarshal(md, &m)
+	out := m["outcome"]
+	if out["previous_rescreen_interval_seconds"] != float64(10000) || out["in_force_rescreen_interval_seconds"] != float64(fixtureInterval) ||
+		out["in_force_policy_id"] == nil || out["previous_policy_id"] == out["in_force_policy_id"] {
+		t.Fatalf("previous (latest created) and in force differ and are both recorded: %s", md)
+	}
+}
+
+// LF N-1: the grace guard is evaluated at the EFFECTIVE time. The reviewer's scenario: the old grace runs out in about an hour, a longer grace
+// with an offset of three hours would take effect after it ran out: refused (at filing, and by the table guard when the validator is bypassed).
+func TestC4_GraceGuard_IsEvaluatedAtTheEffectiveTime(t *testing.T) {
+	w := scratchWorld(t, "c4graceeff_", "staging")
+	l := lwOn(w)
+	l.enable(l.tenant, 0)
+	l.seedPolicy(l.tenant, l.jur, "{pep,sanctions}", fixtureInterval, 7200) // grace 2 h ...
+	l.seedTrigger(true, 1800)                                               // ... gate took effect 1 h ago: the grace runs out in about 1 h
+	late := l.loosenPayload(fixtureInterval, 14400)
+	late.EffectiveOffsetSeconds = 3 * 3600
+	_, err := l.request(KindAMLScreeningPolicyLoosen, late)
+	wantHint(t, err, "grace_extension_after_expiry_refused", "taking effect after the old grace ran out")
+	// Taking effect before it runs out is allowed (the grace is still open): offset 30 minutes.
+	soon := l.loosenPayload(fixtureInterval, 14400)
+	soon.EffectiveOffsetSeconds = 1800
+	if done := l.widen(KindAMLScreeningPolicyLoosen, soon, "screening_loosening_decision"); !done.Executed {
+		t.Fatal("an extension that takes effect while the grace is open is allowed")
+	}
+	// The table guard says the same when the validator is bypassed: forge an executed request and insert a row taking effect after the boundary.
+	l.seedPolicy(l.tenant, l.jur, "{pep,sanctions}", fixtureInterval, 7200)
+	forged := func(effective string) error {
+		payloadJSON := `{"tenant_id":"` + l.tenant.String() + `","jurisdiction_id":"` + l.jur.String() + `","lists":["pep","sanctions"],"rescreen_interval_seconds":` + fmt.Sprint(fixtureInterval) +
+			`,"backfill_grace_seconds":14400,"effective_offset_seconds":0,"legal_review_reference":"R","evidence_reference":"E"}`
+		var out error
+		fixErr := l.owner.WithPlatformAdmin(context.Background(), l.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `ALTER TABLE licensing_change_requests DISABLE TRIGGER licensing_change_requests_guard`); err != nil {
+				return err
+			}
+			var req uuid.UUID
+			if err := tx.QueryRow(ctx, `INSERT INTO licensing_change_requests (kind, payload, payload_hash, reason_code, widening, required_approvals, requested_by, requested_by_person_id,
+					requested_scope, status, created_at, created_txid, expires_at, executed_by, executed_at, executed_txid)
+				VALUES ('aml_screening_policy_loosen', $1::jsonb, repeat('1', 64), 'x', true, 2, $2, $3, 'platform', 'executed', now(), txid_current(), now() + interval '1 day', $4, now(), txid_current())
+				RETURNING id`, payloadJSON, l.req.StaffID, l.ops.Persons[0], l.ap2.StaffID).Scan(&req); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, l.tenant.String()); err != nil {
+				return err
+			}
+			_, out = tx.Exec(ctx, `INSERT INTO aml_screening_policies (tenant_id, licensing_jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds, effective_from,
+					legal_review_reference, reason_code, created_by, created_by_person_id, created_by_scope, change_request_id)
+				VALUES ($1, $2, '{pep,sanctions}', $3, 14400, `+effective+`, 'R', 'governed_loosening', $4, $5, 'platform', $6)`, l.tenant, l.jur, fixtureInterval, l.ap2.StaffID, l.ops.Persons[2], req)
+			return errors.New("rollback")
+		})
+		if out == nil && fixErr != nil && fixErr.Error() != "rollback" {
+			t.Fatalf("fixture: %v", fixErr)
+		}
+		return out
+	}
+	if err := forged(`now() + interval '20 minutes'`); err != nil {
+		t.Fatalf("control (inside the grace): %v", err)
+	}
+	if err := forged(`now() + interval '3 hours'`); pgCode(err) != "LC050" || !strings.Contains(err.Error(), "cannot be extended") {
+		t.Fatalf("the guard refuses a grace extension taking effect after the old grace ran out: %v", err)
 	}
 }
