@@ -41,7 +41,7 @@ export const spRows = (t: WdTenant) =>
 
 /** Exact UI wording of the closed refusal codes (copied, not imported: a change to the UI text must fail this spec on purpose). */
 export const WORDING = {
-  policy_loosening_refused: 'The new version is less strict than the latest one: a list was removed, the re-screen interval or the grace is longer, or it takes effect earlier. Loosening has no approval path and is not available here. Nothing was changed.',
+  policy_loosening_refused: 'The new version is less strict than the latest one: a list was removed, the re-screen interval or the grace is longer, or it takes effect earlier. This form only tightens. Loosening is a separate two-person request in the licensing changes area, and it is refused unless a platform administrator has switched that capability on for this tenant. Nothing was changed.',
   policy_effective_from_out_of_range: 'A screening policy takes effect between now (2 minutes of clock skew are tolerated) and 30 days ahead. The chosen time is outside that window. Nothing was changed.',
   rescreen_interval_below_alert_threshold: 'The re-screen interval is below twice the withdrawal gate alert threshold of this jurisdiction. Lengthen the interval, or change the gate threshold first. Nothing was changed.',
   screening_worker_heartbeat_missing: 'No screening worker has reported in, so a withdrawal gate cannot be enabled. A gate with no working worker would trap player funds. The production platform starts no screening worker, by design. Nothing was changed.',

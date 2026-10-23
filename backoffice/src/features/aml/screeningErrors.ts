@@ -41,7 +41,12 @@ export const REFUSAL_TEXT: Record<string, string> = {
   policy_effective_from_out_of_range: 'A screening policy takes effect between now (2 minutes of clock skew are tolerated) and 30 days ahead. The chosen time is outside that window.',
   rescreen_interval_below_floor: 'The re-screen interval is below the engineering safety floor of 3600 seconds. The floor is a safety limit of this software, not a legal value.',
   rescreen_interval_below_alert_threshold: 'The re-screen interval is below twice the withdrawal gate alert threshold of this jurisdiction. Lengthen the interval, or change the gate threshold first.',
-  policy_loosening_refused: 'The new version is less strict than the latest one: a list was removed, the re-screen interval or the grace is longer, or it takes effect earlier. Loosening has no approval path and is not available here.',
+  policy_loosening_refused: 'The new version is less strict than the latest one: a list was removed, the re-screen interval or the grace is longer, or it takes effect earlier. This form only tightens. Loosening is a separate two-person request in the licensing changes area, and it is refused unless a platform administrator has switched that capability on for this tenant.',
+  loosening_not_configured: 'Loosening the screening policy is not configured for this tenant. The capability is off until a platform administrator configures it through a two-person licensing change. Nothing is loosened by default.',
+  loosening_disabled: 'Loosening the screening policy is switched off for this tenant. A platform administrator must enable it through a two-person licensing change first.',
+  no_screening_policy_to_loosen: 'There is no screening policy version to loosen for this tenant and jurisdiction. The first version is authored on the screening policy form.',
+  not_a_loosening: 'The request is not less strict than the latest screening policy version. Use the screening policy form to tighten or keep it.',
+  loosening_cooling_period: 'The cooling period of this loosening request has not elapsed yet. The period is counted from the filing of the request; approve again once it has passed.',
 }
 
 const FORBIDDEN: Record<ScreeningOp, string> = {

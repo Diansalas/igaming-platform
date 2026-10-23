@@ -32,6 +32,8 @@ const KIND_LABEL: Record<string, string> = {
   licence_validity_dates_change: 'Licence validity dates change',
   licence_review_due_change: 'Licence review-due change',
   licence_evidence_reference_change: 'Licence evidence reference change',
+  aml_screening_policy_loosen: 'Screening policy loosening (AML)',
+  aml_screening_loosening_configure: 'Screening policy loosening capability (AML)',
   operating_basis_set: 'Set operating basis',
   operating_basis_withdraw: 'Withdraw operating basis',
   operating_basis_review_record: 'Record operating basis review',

@@ -31,8 +31,14 @@ var RefusalCodes = map[string]string{
 	"policy_effective_from_out_of_range":      "a screening policy takes effect between now (2 minutes tolerance) and 30 days ahead",
 	"rescreen_interval_below_floor":           "the re-screen interval is below the engineering safety floor of 3600 seconds",
 	"rescreen_interval_below_alert_threshold": "the re-screen interval is below twice the withdrawal gate alert threshold of the jurisdiction",
+	// governed screening policy loosening (c4, migration 0190; raised by the licensing change executor, answered by the licensing change routes)
+	"loosening_not_configured":      "screening policy loosening is not configured for this tenant (the capability is off until a platform administrator configures it)",
+	"loosening_disabled":            "screening policy loosening is disabled for this tenant",
+	"no_screening_policy_to_loosen": "there is no screening policy version to loosen; the first version is authored through the screening policy route",
+	"not_a_loosening":               "the version is not less strict than the latest one; use the screening policy route",
+	"loosening_cooling_period":      "the cooling period of the loosening, counted from the filing of the request, has not elapsed",
 	// screening policy (lic29)
-	"policy_loosening_refused": "the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); loosening needs a four-eyes path that is not built",
+	"policy_loosening_refused": "the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); this route only tightens, loosening is a governed licensing change request (aml_screening_policy_loosen) that is refused unless configured",
 }
 
 // refusalError carries the closed code next to the classified error; errors.Is / As still see the wrapped sentinel.

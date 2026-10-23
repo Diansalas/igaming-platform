@@ -193,7 +193,7 @@ function ScreeningPolicyDialog({
         {fromValid && effectiveOutsideWindow(fromDate!.getTime()) && <p role="status" className="text-sm text-amber-800">This time looks outside the window the server accepts (now to 30 days ahead). The server decides.</p>}
         {loosening.length > 0 && (
           <div role="alert" aria-label="Loosening refused" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-            <p className="font-medium">This version is looser than the policy in force and the server would refuse it. Loosening has no approval path.</p>
+            <p className="font-medium">This version is looser than the policy in force and this form would be refused. Loosening is a separate two-person request in the licensing changes area.</p>
             <ul className="mt-1 list-disc pl-5">
               {loosening.map((r) => (
                 <li key={r}>{r}</li>

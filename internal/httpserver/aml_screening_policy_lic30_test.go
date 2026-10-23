@@ -116,6 +116,13 @@ func TestLic30_RefusalCodesAreNotUsedOutsideTheAMLRoutes(t *testing.T) {
 		if strings.HasSuffix(slash, "internal/httpserver/aml_routes.go") || strings.Contains(slash, "internal/aml/") {
 			return nil
 		}
+		// c4 (migration 0190), INTENTIONAL pin change: the governed screening policy loosening is an AML-owned decision executed by the
+		// licensing change primitive, so its refusals reach the client through the licensing change routes. That one file may do exactly one
+		// thing with the table: test a database HINT for membership (aml.RefusalCodes[hint]); it never calls RefusalCode(...).
+		if strings.HasSuffix(slash, "internal/httpserver/licensing_change_routes.go") && !strings.Contains(src, "RefusalCode(") &&
+			strings.Count(src, "RefusalCodes") == 1 && strings.Contains(src, "aml.RefusalCodes[ge.Hint]") {
+			return nil
+		}
 		offenders = append(offenders, p)
 		return nil
 	})
