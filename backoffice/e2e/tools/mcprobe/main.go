@@ -4,7 +4,8 @@
 // It connects with the RUNTIME database role (the role platform-api uses; E2E_RUNTIME_DATABASE_URL) and calls the REAL market
 // resolver, which the Playwright specs cannot call from TypeScript (no HTTP endpoint exposes it):
 //
-//	resolve <tenant> <country> <operation>
+//	resolve <tenant> <country> <operation> [brand|-] [product|-]
+//	    (c3: the optional brand id and product code select the brand rung / the product-scoped operation rung; "-" = none)
 //	    runs operatingmarket.ResolveOperatingCountryPolicy (the single implementation of the decision, the one marketgate calls)
 //	    inside a tenant-scoped, rolled-back, read-only transaction at the DATABASE clock and prints "RESOLVE|<outcome>".
 //
@@ -36,8 +37,8 @@ func run(ctx context.Context, args []string) error {
 	if url == "" {
 		return errors.New("E2E_RUNTIME_DATABASE_URL is not set")
 	}
-	if len(args) != 4 || args[0] != "resolve" {
-		return errors.New("usage: resolve <tenant> <country> <operation>")
+	if len(args) < 4 || len(args) > 6 || args[0] != "resolve" {
+		return errors.New("usage: resolve <tenant> <country> <operation> [brand|-] [product|-]")
 	}
 	tenant, err := uuid.Parse(args[1])
 	if err != nil {
@@ -60,9 +61,19 @@ func run(ctx context.Context, args []string) error {
 	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return err
 	}
-	res, err := operatingmarket.ResolveOperatingCountryPolicy(ctx, tx, operatingmarket.Query{
-		TenantID: tenant, CountryCode: args[2], OperationCode: args[3], AsOf: now,
-	})
+	q := operatingmarket.Query{TenantID: tenant, CountryCode: args[2], OperationCode: args[3], AsOf: now}
+	if len(args) > 4 && args[4] != "-" {
+		b, err := uuid.Parse(args[4])
+		if err != nil {
+			return err
+		}
+		q.BrandID = &b
+	}
+	if len(args) > 5 && args[5] != "-" {
+		p := args[5]
+		q.ProductCode = &p
+	}
+	res, err := operatingmarket.ResolveOperatingCountryPolicy(ctx, tx, q)
 	if err != nil {
 		return err
 	}
