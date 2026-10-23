@@ -240,7 +240,11 @@ BEGIN
         'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text)',
         'aml_screening_request_replace(uuid, uuid, uuid, text)', 'aml_screening_parked_summary(uuid, timestamptz)', 'aml_screening_parked_overdue(uuid, timestamptz, uuid, integer)',
         -- Migration 0189 (lic29): the HTTP route's tighten-only screening policy author.
-        'aml_screening_policy_author(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)'
+        'aml_screening_policy_author(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)',
+        -- Migration 0190 (c4): the governed screening-policy loosening executors and helpers (platform principal sessions only; the
+        -- executors also need an executed licensing change request of this transaction).
+        'screening_loosening_state(uuid)', 'screening_policy_loosen_assert(jsonb, timestamptz)',
+        'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)'
     ] LOOP
         IF to_regprocedure('public.' || f) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);

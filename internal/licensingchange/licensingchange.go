@@ -23,6 +23,10 @@
 //	tenant_jurisdiction_config_version   set / close a tenant_jurisdiction_configs version   narrowing iff it only removes
 //	                                                                                         currencies / methods, adds geo blocks,
 //	                                                                                         keeps the ruleset ids, or closes
+//	aml_screening_policy_loosen          author a LESS strict screening policy version (0190) always widening; refused unless the
+//	                                                                                         tenant capability is configured + enabled
+//	aml_screening_loosening_configure    set the per-tenant loosening capability (0190)      widening iff it enables loosening or
+//	                                                                                         shortens the cooling period
 //
 // The database classifies (licensing_change_classify), never the caller. A WIDENING change needs the kind's approvals (2)
 // by distinct eligible Persons; a NARROWING change requested by a platform admin executes in the same transaction as its
@@ -137,6 +141,8 @@ var (
 type GuardError struct {
 	Code    string
 	Message string
+	// Hint is the closed refusal code of an LC050 screening loosening refusal (a member of the closed screening refusal table of the aml package); "" for every other guard.
+	Hint string
 }
 
 func (e *GuardError) Error() string {

@@ -23,7 +23,8 @@ import (
 
 var amlTables = []string{"aml_holds", "aml_hold_lifts", "aml_enforcement_decisions", "aml_alerts", "aml_cases", "aml_case_alerts", "aml_case_notes", "aml_case_events",
 	"aml_screening_policies", "aml_screening_results", // migration 0154 (A7)
-	"aml_screening_trigger_policies", "aml_screening_requests"} // migration 0181 (lic10, G1)
+	"aml_screening_trigger_policies", "aml_screening_requests", // migration 0181 (lic10, G1)
+	"aml_screening_loosening_settings"} // migration 0190 (c4): the per-tenant screening-policy loosening capability (append-only, owner-only; catalogue decision recorded in docs/plans/c4-screening-loosening-record.md)
 
 // amlStateMachineTables are AML tables that are NOT append-only: the automatic screening queue is a guarded state machine
 // (aml_screening_requests_guard: terminal states are final, identity is immutable) that is never deleted or truncated. Every
@@ -281,6 +282,12 @@ func TestAppendOnly_BindsTheOwner(t *testing.T) {
 			})
 			if tbl == "aml_hold_lifts" {
 				continue // no row yet; the TRUNCATE leg below still applies
+			}
+			if tbl == "aml_screening_loosening_settings" {
+				// c4 (0190): a row exists only through an executed two-person licensing change (internal/licensingchange); this package has no
+				// licensing change service. The UPDATE / DELETE refusal WITH a row is pinned in
+				// licensingchange.TestC4_ExecutorsAndGuards_NeedAnExecutedRequestOfThisTransaction; the TRUNCATE leg below still applies.
+				continue
 			}
 			if amlStateMachineTables[tbl] && strings.HasPrefix(stmt, "UPDATE") {
 				continue // a guarded state machine (migration 0181); its transitions are pinned in screening_trigger_integration_test.go

@@ -254,7 +254,11 @@ func classify(err error) error {
 	case pe.Code == "LC031" || pe.Code == "LC013":
 		return fmt.Errorf("%w: %s", ErrNotPending, pe.Message)
 	case len(pe.Code) == 5 && (pe.Code[:2] == "LC" || pe.Code[:2] == "AP"):
-		return &GuardError{Code: pe.Code, Message: pe.Message}
+		g := &GuardError{Code: pe.Code, Message: pe.Message}
+		if pe.Code == "LC050" {
+			g.Hint = pe.Hint
+		}
+		return g
 	}
 	return err
 }
