@@ -164,6 +164,10 @@ BEGIN
                AND (r.payload ->> 'rescreen_interval_seconds')::bigint = NEW.rescreen_interval_seconds
                AND (r.payload ->> 'backfill_grace_seconds')::bigint = NEW.backfill_grace_seconds
                AND r.payload ->> 'legal_review_reference' = NEW.legal_review_reference
+               -- the effective time lies between the execution and 30 days after it (a minute of slack for the statements between), and the
+               -- reason code is the fixed one: a platform-authored version can neither rewrite history nor sit unseen for ever
+               AND NEW.effective_from >= r.executed_at AND NEW.effective_from <= r.executed_at + interval '30 days 1 minute'
+               AND NEW.reason_code = 'governed_loosening'
                AND EXISTS (SELECT 1 FROM public.staff_users s WHERE s.id = NEW.created_by AND s.person_id = NEW.created_by_person_id AND s.tenant_id IS NULL)
         ) INTO v_ok;
         IF v_prev IS NOT NULL THEN
@@ -245,6 +249,7 @@ DECLARE
     v_prev     record;
     v_alert    bigint;
     v_gate     boolean;
+    v_firstgate timestamptz;
 BEGIN
     SELECT * INTO a FROM public.licensing_change_actor();
     IF a.scope <> 'platform' THEN
@@ -281,6 +286,9 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = v_tenant) OR NOT EXISTS (SELECT 1 FROM public.jurisdictions j WHERE j.id = v_jur) THEN
         RAISE EXCEPTION 'licensing change: unknown tenant or jurisdiction' USING ERRCODE = 'LC010';
     END IF;
+    -- c4 fix (security LOW-1): serialise with every change of this tenant's loosening capability BEFORE the capability is read, so a final
+    -- approval that waits behind a disable observes the disabled state (the same key as the configure classifier).
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('screening_loosening:' || v_tenant::text, 190));
     -- The 0189 engineering floor (not a legal value): loosening never goes below it.
     IF v_resc < 3600 THEN
         RAISE EXCEPTION 'aml: the re-screen interval is below the safety floor of 3600 seconds' USING ERRCODE = 'LC050', HINT = 'rescreen_interval_below_floor';
@@ -303,6 +311,8 @@ BEGIN
      WHERE tp.tenant_id = v_tenant AND tp.licensing_jurisdiction_id = v_jur AND tp.gate_withdrawal ORDER BY tp.created_at DESC, tp.id DESC LIMIT 1;
     SELECT tp.gate_withdrawal INTO v_gate FROM public.aml_screening_trigger_policies tp
      WHERE tp.tenant_id = v_tenant AND tp.licensing_jurisdiction_id = v_jur ORDER BY tp.created_at DESC, tp.id DESC LIMIT 1;
+    SELECT min(tp.effective_from) INTO v_firstgate FROM public.aml_screening_trigger_policies tp
+     WHERE tp.tenant_id = v_tenant AND tp.licensing_jurisdiction_id = v_jur AND tp.gate_withdrawal;
     PERFORM pg_catalog.set_config('app.tenant_id', COALESCE(v_prevten, ''), true);
 
     -- One literal HINT per refusal (the closed table aml.RefusalCodes is pinned against these literals).
@@ -312,6 +322,10 @@ BEGIN
     IF NOT v_enabled THEN
         RAISE EXCEPTION 'aml: screening policy loosening is disabled for this tenant' USING ERRCODE = 'LC050', HINT = 'loosening_disabled';
     END IF;
+    -- c4 fix (security HIGH-1): the acting platform admin must hold an in-force platform aml_officer grant on the tenant and the owner-scope
+    -- officer quorum must hold, as aml_authorize / aml_assert_quorum require of every other AML configuration change. (Raises
+    -- officer_grant_required / officer_quorum_not_met.)
+    PERFORM public.screening_loosening_officers_assert(v_tenant, a.actor, a.person_id);
     IF NOT v_cfg THEN
         RAISE EXCEPTION 'aml: the tenant is not configured to operate in this jurisdiction' USING ERRCODE = 'LC050', HINT = 'tenant_not_in_jurisdiction';
     END IF;
@@ -329,8 +343,121 @@ BEGIN
     IF v_lists @> v_prev.lists AND v_resc <= v_prev.rescreen_interval_seconds AND v_grace <= v_prev.backfill_grace_seconds THEN
         RAISE EXCEPTION 'aml: the version is not less strict than the latest one; use the screening policy route' USING ERRCODE = 'LC050', HINT = 'not_a_loosening';
     END IF;
+    -- c4 fix (ledger-finance M-2): EVERY dimension is looser or equal; a version that tightens one dimension while loosening another is
+    -- authored through the tighten-only route first.
+    IF NOT (v_lists <@ v_prev.lists AND v_resc >= v_prev.rescreen_interval_seconds AND v_grace >= v_prev.backfill_grace_seconds) THEN
+        RAISE EXCEPTION 'aml: the version tightens one dimension while loosening another' USING ERRCODE = 'LC050', HINT = 'loosening_mixes_tightening';
+    END IF;
+    -- c4 fix (ledger-finance H-1), a SAFE DEFAULT, not a business policy: the sanctions list is never removed by this path. Relaxing it is
+    -- an owner + compliance decision (record D3) that needs more control first.
+    IF 'sanctions' = ANY (v_prev.lists) AND NOT ('sanctions' = ANY (v_lists)) THEN
+        RAISE EXCEPTION 'aml: the sanctions list cannot be removed through the governed loosening' USING ERRCODE = 'LC050', HINT = 'sanctions_list_removal_refused';
+    END IF;
+    -- c4 fix (ledger-finance M-1), a SAFE GUARD: once the backfill grace of the gating policy has run out, a longer grace would re-open it for
+    -- persons registered before the gate (the gate counts the grace from the FIRST gating version). Refused; the retro-release of waiting
+    -- withdrawals by a longer re-screen interval remains an owner decision (D10).
+    IF v_firstgate IS NOT NULL AND v_grace > v_prev.backfill_grace_seconds
+       AND pg_catalog.clock_timestamp() >= v_firstgate + pg_catalog.make_interval(secs => v_prev.backfill_grace_seconds) THEN
+        RAISE EXCEPTION 'aml: the backfill grace of the withdrawal gate has expired and cannot be extended' USING ERRCODE = 'LC050', HINT = 'grace_extension_after_expiry_refused';
+    END IF;
     IF p_filed_at IS NOT NULL AND pg_catalog.clock_timestamp() < p_filed_at + pg_catalog.make_interval(secs => v_cool) THEN
         RAISE EXCEPTION 'aml: the cooling period of the loosening has not elapsed' USING ERRCODE = 'LC050', HINT = 'loosening_cooling_period';
+    END IF;
+END
+$$;
+
+-- c4 fix (security HIGH-1): the officer controls. A platform admin acts on AML configuration only with an in-force platform aml_officer grant
+-- on the tenant (the actor's own grant row, live-eligible: active platform_admin whose Person is the one captured by the grant request), and
+-- only while the owner-scope officer quorum (two distinct Persons) holds. Mirrors aml_authorize / aml_assert_quorum (0140). The grant tables
+-- are read in the platform shape, so the tenant setting is cleared around the read and restored.
+CREATE FUNCTION screening_loosening_officer_ok(p_tenant uuid, p_staff uuid, p_person uuid) RETURNS boolean
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_prev text := NULLIF(pg_catalog.current_setting('app.tenant_id', true), '');
+    v_ok   boolean;
+BEGIN
+    PERFORM pg_catalog.set_config('app.tenant_id', '', true);
+    SELECT EXISTS (
+        SELECT 1 FROM public.staff_capability_grants g
+          JOIN public.staff_capability_grant_requests gr ON gr.id = g.request_id
+         WHERE g.tenant_id = p_tenant AND g.grantee_staff_id = p_staff AND g.capability = 'aml_officer'
+           AND g.grantee_scope = 'platform' AND g.revoked_at IS NULL
+           AND g.valid_from <= pg_catalog.now() AND (g.valid_until IS NULL OR pg_catalog.now() < g.valid_until)
+           AND gr.grantee_person_id = p_person
+           AND public.aml_grant_eligible(p_tenant, p_staff, 'platform', gr.grantee_person_id)) INTO v_ok;
+    PERFORM pg_catalog.set_config('app.tenant_id', COALESCE(v_prev, ''), true);
+    RETURN COALESCE(v_ok, false);
+END
+$$;
+
+CREATE FUNCTION screening_loosening_officers_assert(p_tenant uuid, p_staff uuid, p_person uuid) RETURNS void
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_prev   text;
+    v_quorum integer;
+BEGIN
+    IF p_staff IS NULL OR p_person IS NULL OR NOT public.screening_loosening_officer_ok(p_tenant, p_staff, p_person) THEN
+        RAISE EXCEPTION 'aml: the actor does not hold an in-force aml_officer grant on this tenant' USING ERRCODE = 'LC050', HINT = 'officer_grant_required';
+    END IF;
+    v_prev := NULLIF(pg_catalog.current_setting('app.tenant_id', true), '');
+    PERFORM pg_catalog.set_config('app.tenant_id', '', true);
+    v_quorum := public.aml_officer_quorum(p_tenant, public.aml_owner_scope_of_tenant(p_tenant));
+    PERFORM pg_catalog.set_config('app.tenant_id', COALESCE(v_prev, ''), true);
+    IF v_quorum < 2 THEN
+        RAISE EXCEPTION 'aml: the officer quorum (at least 2 distinct Persons) is not met for this owner scope' USING ERRCODE = 'LC050', HINT = 'officer_quorum_not_met';
+    END IF;
+END
+$$;
+
+-- At execution: the requester, the executor and enough COUNTED approvers (fresh, distinct Persons, other than the requester) are officers.
+CREATE FUNCTION screening_loosening_approvers_assert(p_request uuid, p_tenant uuid, p_executor uuid, p_executor_person uuid) RETURNS void
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    r       public.licensing_change_requests%ROWTYPE;
+    v_count integer;
+BEGIN
+    SELECT * INTO r FROM public.licensing_change_requests q WHERE q.id = p_request;
+    PERFORM public.screening_loosening_officers_assert(p_tenant, r.requested_by, r.requested_by_person_id);
+    PERFORM public.screening_loosening_officers_assert(p_tenant, p_executor, p_executor_person);
+    SELECT count(DISTINCT x.approver_person_id) INTO v_count FROM (
+        SELECT a.approver_id, a.approver_person_id FROM public.licensing_change_approvals a
+         WHERE a.request_id = r.id AND a.payload_hash = r.payload_hash AND a.decided_at > pg_catalog.clock_timestamp() - interval '24 hours'
+           AND a.approver_person_id <> r.requested_by_person_id AND a.approver_id <> r.requested_by) x
+     WHERE public.screening_loosening_officer_ok(p_tenant, x.approver_id, x.approver_person_id);
+    IF v_count < r.required_approvals THEN
+        RAISE EXCEPTION 'aml: the request does not hold enough fresh approvals by aml officers' USING ERRCODE = 'LC050', HINT = 'officer_grant_required';
+    END IF;
+END
+$$;
+
+-- An approval of a widening request of the two kinds is recorded only from an officer (so a non-officer cannot even start the count).
+CREATE FUNCTION licensing_change_approvals_screening_officer() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    r public.licensing_change_requests%ROWTYPE;
+BEGIN
+    SELECT * INTO r FROM public.licensing_change_requests q WHERE q.id = NEW.request_id;
+    IF FOUND AND r.kind IN ('aml_screening_policy_loosen', 'aml_screening_loosening_configure') AND r.required_approvals > 0 THEN
+        PERFORM public.screening_loosening_officers_assert((r.payload ->> 'tenant_id')::uuid, NEW.approver_id, NEW.approver_person_id);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER licensing_change_approvals_screening_officer BEFORE INSERT ON licensing_change_approvals
+    FOR EACH ROW EXECUTE FUNCTION licensing_change_approvals_screening_officer();
+REVOKE ALL ON FUNCTION licensing_change_approvals_screening_officer() FROM PUBLIC;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+        EXECUTE 'REVOKE ALL ON FUNCTION licensing_change_approvals_screening_officer() FROM igaming_runtime';
     END IF;
 END
 $$;
@@ -350,6 +477,7 @@ DECLARE
     v_en     boolean;
     v_cool   bigint;
     st       record;
+    a        record;
 BEGIN
     IF p_kind = 'aml_screening_policy_loosen' THEN
         PERFORM public.screening_policy_loosen_assert(p, NULL);
@@ -380,6 +508,13 @@ BEGIN
         END IF;
         -- Enabling, or a SHORTER cooling period, makes loosening easier (widening). Disabling or a longer period is narrowing.
         widening := v_en AND (NOT st.o_enabled OR v_cool < st.o_cooling);
+        -- c4 fix (security HIGH-1): enabling loosening, or shortening its cooling period, is an AML configuration change: the acting platform admin
+        -- needs the in-force aml_officer grant and the owner-scope quorum must hold. Disabling or lengthening (narrowing) stays open to any
+        -- platform_admin (the fail-closed direction).
+        IF widening THEN
+            SELECT * INTO a FROM public.licensing_change_actor();
+            PERFORM public.screening_loosening_officers_assert(v_tenant, a.actor, a.person_id);
+        END IF;
         RETURN;
     END IF;
     SELECT b.widening, b.subject_tenant, b.subject_licence INTO widening, subject_tenant, subject_licence
@@ -414,6 +549,10 @@ BEGIN
         RAISE EXCEPTION 'licensing change: no executed aml_screening_loosening_configure request of this transaction and actor' USING ERRCODE = 'LC040';
     END IF;
     v_tenant := (r.payload ->> 'tenant_id')::uuid;
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('screening_loosening:' || v_tenant::text, 190));
+    IF r.required_approvals > 0 THEN
+        PERFORM public.screening_loosening_approvers_assert(r.id, v_tenant, a.actor, a.person_id);
+    END IF;
     v_en := (r.payload -> 'enabled') = 'true'::jsonb;
     v_cool := CASE WHEN v_en THEN (r.payload ->> 'cooling_seconds')::bigint END;
     v_prev := NULLIF(pg_catalog.current_setting('app.tenant_id', true), '');
@@ -443,6 +582,8 @@ DECLARE
     v_jur    uuid;
     v_from   timestamptz;
     v_lists  text[];
+    v_cool   bigint;
+    v_off    bigint;
 BEGIN
     SELECT * INTO a FROM public.licensing_change_actor();
     IF a.scope <> 'platform' OR a.role <> 'platform_admin' THEN
@@ -455,12 +596,20 @@ BEGIN
     END IF;
     v_tenant := (r.payload ->> 'tenant_id')::uuid;
     v_jur := (r.payload ->> 'jurisdiction_id')::uuid;
+    -- The capability lock first (the same key as the configure classifier and the validator), then the officer controls on the requester, the
+    -- counted approvers and this executor.
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('screening_loosening:' || v_tenant::text, 190));
+    PERFORM public.screening_loosening_approvers_assert(r.id, v_tenant, a.actor, a.person_id);
     -- Serialise with every other author of this tenant and jurisdiction (the 0189 lock key), then re-validate against the state NOW,
     -- including the cooling period measured from the filing time.
     PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(v_tenant::text || v_jur::text, 0));
     PERFORM public.screening_policy_loosen_assert(r.payload, r.created_at);
     SELECT ARRAY(SELECT pg_catalog.jsonb_array_elements_text(r.payload -> 'lists')) INTO v_lists;
-    v_from := pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => (r.payload ->> 'effective_offset_seconds')::bigint);
+    -- c4 fix (security MEDIUM-1): the version takes effect at least the cooling period after the decision (the later of the payload offset and
+    -- the cooling period), so a stricter counter-version can be authored in between.
+    SELECT s.o_cooling INTO v_cool FROM public.screening_loosening_state(v_tenant) s;
+    v_off := GREATEST((r.payload ->> 'effective_offset_seconds')::bigint, COALESCE(v_cool, 0));
+    v_from := pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => v_off);
     v_prev := NULLIF(pg_catalog.current_setting('app.tenant_id', true), '');
     PERFORM pg_catalog.set_config('app.tenant_id', v_tenant::text, true);
     SELECT p2.id, p2.lists, p2.rescreen_interval_seconds, p2.backfill_grace_seconds, p2.effective_from INTO v_old FROM public.aml_screening_policies p2
@@ -488,7 +637,9 @@ DECLARE
 BEGIN
     FOREACH f IN ARRAY ARRAY[
         'screening_loosening_state(uuid)', 'screening_policy_loosen_assert(jsonb, timestamptz)',
-        'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)'
+        'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)',
+        'screening_loosening_officer_ok(uuid, uuid, uuid)', 'screening_loosening_officers_assert(uuid, uuid, uuid)',
+        'screening_loosening_approvers_assert(uuid, uuid, uuid, uuid)'
     ] LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN

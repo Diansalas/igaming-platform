@@ -28,12 +28,17 @@ BEGIN
 END
 $$;
 
+DROP TRIGGER licensing_change_approvals_screening_officer ON licensing_change_approvals;
+DROP FUNCTION licensing_change_approvals_screening_officer();
 DROP FUNCTION screening_policy_loosen_apply(uuid);
 DROP FUNCTION screening_loosening_settings_apply(uuid);
 DROP FUNCTION licensing_change_classify(text, jsonb);
 ALTER FUNCTION licensing_change_classify_base(text, jsonb) RENAME TO licensing_change_classify;
 DROP FUNCTION screening_policy_loosen_assert(jsonb, timestamptz);
 DROP FUNCTION screening_loosening_state(uuid);
+DROP FUNCTION screening_loosening_approvers_assert(uuid, uuid, uuid, uuid);
+DROP FUNCTION screening_loosening_officers_assert(uuid, uuid, uuid);
+DROP FUNCTION screening_loosening_officer_ok(uuid, uuid, uuid);
 
 ALTER TABLE licensing_change_kinds NO FORCE ROW LEVEL SECURITY;
 DELETE FROM licensing_change_kinds WHERE kind IN ('aml_screening_policy_loosen', 'aml_screening_loosening_configure');

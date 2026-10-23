@@ -101,3 +101,50 @@ tenants are OWNER DECISIONS (`docs/plans/c4-screening-loosening-record.md`); not
 - **Tenant staff** never file, approve, see or read these requests (no tenant projection: they are AML configuration).
 - **Break-glass**: the unrouted `SetScreeningPolicy` path (0154) still exists and loosens without this flow (LIC30 L-3 residual). It is an
   operator action on the database only, not reachable over HTTP; using it needs an owner-recorded decision.
+
+### c4 review fixes (same migration 0190, edited in place; rebuild any database that applied the first version)
+
+- **AML officer controls apply.** The requester, every COUNTED approver and the executor of a loosening (and of a configure request that enables loosening
+  or shortens its cooling period) must hold an in-force PLATFORM `aml_officer` grant on the tenant (live-eligible: active `platform_admin`, same Person as
+  the grant request), and the owner-scope officer quorum (two distinct Persons) must hold. Refusals: `officer_grant_required`, `officer_quorum_not_met`.
+  An approval by a non-officer is refused when recorded; an approval by someone who lost standing before execution does not count (the request then cannot
+  be completed: cancel and refile). Disabling the capability or lengthening the cooling period stays open to any `platform_admin` (fail-closed direction).
+- **The sanctions list is never removed** through this path (`sanctions_list_removal_refused`): a SAFE DEFAULT, not a business policy. Relaxing it is an owner and
+  compliance decision (D3) that first needs the screened lists to be recorded per clear and a gate subset check.
+- **Every dimension looser or equal** (`loosening_mixes_tightening`): to tighten one setting and loosen another, tighten first on the screening policy form.
+- **Effective time**: the later of the payload offset and the tenant's cooling period after EXECUTION, so a stricter counter-version can be authored in between.
+- **Capability lock**: validation and execution take the `screening_loosening:<tenant>` advisory lock before reading the capability; a final approval waiting behind
+  a disable sees it disabled.
+
+#### Retroactive effect of a loosening (ledger-finance M-1) - READ BEFORE APPROVING ONE
+
+The payout and withdrawal gate evaluates the policy in force at the moment a withdrawal is claimed, not the policy in force when it was requested. Therefore a
+loosening that takes effect applies to withdrawals ALREADY WAITING at their next gate claim:
+- a LONGER re-screen interval makes clears that had expired fresh again WITHOUT any new screening (persons held only because their clear was stale are released);
+- a LONGER backfill grace re-opens a grace that had run out, for persons registered before the gate.
+Safe guard built: while the jurisdiction has a gating trigger policy, a longer backfill grace is refused once the previous grace has run out
+(`grace_extension_after_expiry_refused`). The retro-release by a longer interval is NOT prevented: it is owner decision D10 (`docs/plans/c4-screening-loosening-record.md`).
+Payout decisions do not record the policy id they were made under; recording it is a recorded follow-up, not part of c4.
+
+#### Reconciliation query (executed loosen requests against policy rows)
+
+Run as the database owner on a copy or in a maintenance window (both tables are FORCE RLS: use a platform-admin session, or the owner after `NO FORCE` in a
+non-production database). Expected result: no rows.
+
+```sql
+-- executed requests without exactly one policy row, and policy rows without an executed request
+SELECT r.id AS request_id, 'executed_without_policy_row' AS problem
+  FROM licensing_change_requests r
+ WHERE r.kind = 'aml_screening_policy_loosen' AND r.status = 'executed'
+   AND (SELECT count(*) FROM aml_screening_policies p WHERE p.change_request_id = r.id) <> 1
+UNION ALL
+SELECT p.change_request_id, 'policy_row_without_executed_request'
+  FROM aml_screening_policies p
+ WHERE p.created_by_scope = 'platform'
+   AND NOT EXISTS (SELECT 1 FROM licensing_change_requests r WHERE r.id = p.change_request_id AND r.kind = 'aml_screening_policy_loosen' AND r.status = 'executed');
+-- the same for the capability
+SELECT r.id, 'configure_executed_without_settings_row'
+  FROM licensing_change_requests r
+ WHERE r.kind = 'aml_screening_loosening_configure' AND r.status = 'executed'
+   AND (SELECT count(*) FROM aml_screening_loosening_settings s WHERE s.change_request_id = r.id) <> 1;
+```

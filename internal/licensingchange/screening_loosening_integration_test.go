@@ -23,6 +23,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/amlfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
@@ -43,9 +44,27 @@ func newLW(t *testing.T) *lw {
 	return lwOn(newWorld(t))
 }
 
-func lwOn(w *world) *lw {
+// newLWNoOfficers is a world in which NOBODY holds an aml_officer grant (the shape of three plain platform admins).
+func newLWNoOfficers(t *testing.T) *lw {
+	t.Helper()
+	return lwBuild(newWorld(t), false)
+}
+
+// lwOn builds the world with an officer grant (platform scope, one hour) for every fixture platform account, which is what the
+// governed loosening now requires of the requester, every counted approver and the executor (security HIGH-1).
+func lwOn(w *world) *lw { return lwBuild(w, true) }
+
+func lwBuild(w *world, officers bool) *lw {
 	w.t.Helper()
 	l := &lw{world: w, tenant: w.tenant("under_platform_licence"), jur: w.jurisdiction()}
+	if officers {
+		for _, a := range []Actor{w.req, w.ap1, w.ap2, w.ap3, w.reqTwin, w.ap1Twin} {
+			if a.StaffID == uuid.Nil {
+				continue
+			}
+			amlfix.GrantOfficerAs(w.t, w.owner, l.tenant, a.StaffID, "platform")
+		}
+	}
 	l.ownerTenant(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id) VALUES ($1, $2, 'k')`, l.tenant, l.jur)
 		return err
@@ -410,11 +429,21 @@ func TestC4_NotALoosening_IsRefused_TightenStaysOnTheFastPath(t *testing.T) {
 	if n := l.requestCount(KindAMLScreeningPolicyLoosen); n != 0 {
 		t.Fatalf("refusals leave no request: %d", n)
 	}
-	// Dropping a list is a loosening on its own.
-	r := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(fixtureInterval, fixtureGrace, "pep"), "screening_loosening_decision")
+	// Dropping a list is a loosening on its own, except the sanctions list, which this path never removes (a safe default).
+	_, err = l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(fixtureInterval, fixtureGrace, "pep"))
+	wantHint(t, err, "sanctions_list_removal_refused", "removing the sanctions list")
+	_, err = l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, fixtureGrace, "pep"))
+	wantHint(t, err, "sanctions_list_removal_refused", "removing the sanctions list while loosening the interval")
+	r := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(fixtureInterval, fixtureGrace, "sanctions"), "screening_loosening_decision")
 	if !r.Request.Widening {
-		t.Fatal("removing a list loosens")
+		t.Fatal("removing the pep list loosens")
 	}
+	// A mix of loosening and tightening is refused: every dimension must be looser or equal.
+	_, err = l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, fixtureGrace/2))
+	wantHint(t, err, "loosening_mixes_tightening", "longer interval but shorter grace")
+	l.seedPolicy(l.tenant, l.jur, "{pep}", fixtureInterval, fixtureGrace)
+	_, err = l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, fixtureGrace)) // adds the sanctions list back while loosening
+	wantHint(t, err, "loosening_mixes_tightening", "a list added while the interval is lengthened")
 }
 
 // ---- floors, window, caps ----------------------------------------------------------------------------------------------------
@@ -477,7 +506,7 @@ func TestC4_Loosening_NeverGoesBelowTheFloors_AndRespectsTheEffectiveWindow(t *t
 		t.Fatal("a payload with missing keys is invalid")
 	}
 	// Window: offset 0 is "at execution", the maximum is 30 days after it.
-	p := l.loosenPayload(20000, 7200)
+	p := l.loosenPayload(20000, fixtureGrace)
 	p.EffectiveOffsetSeconds = 2592000
 	l.widen(KindAMLScreeningPolicyLoosen, p, "screening_loosening_decision")
 	pol := l.policies()
@@ -552,7 +581,7 @@ func TestC4_StaleApprovals_AndExpiredRequests_AreRefused(t *testing.T) {
 	}
 
 	// An expired request (72 h) can no longer be approved.
-	e := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, 7200), "screening_loosening_decision").Request
+	e := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, fixtureGrace), "screening_loosening_decision").Request
 	l.age("licensing_change_requests", "licensing_change_requests_guard", `UPDATE licensing_change_requests SET expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, e.ID)
 	if _, err := l.approve(l.ap1, e.ID); !errors.Is(err, ErrNotPending) {
 		t.Fatalf("an expired request: %v", err)
@@ -985,6 +1014,8 @@ func TestMigration0190_UpDownUp_Snapshot_NoValueShips_DownRefusedWithData(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	amlfix.GrantOfficerAs(t, pool, tid, ops.Requester, "platform")
+	amlfix.GrantOfficerAs(t, pool, tid, ops.Approver1, "platform")
 	cool := int64(0)
 	if _, err := svc.Request(ctx, Actor{StaffID: ops.Requester, Scope: ScopePlatform, Role: string(auth.RolePlatformAdmin)},
 		RequestInput{Kind: KindAMLScreeningLooseningConfigure, Payload: payload(t, ScreeningLooseningConfigurePayload{TenantID: tid, Enabled: true, CoolingSeconds: &cool, EvidenceReference: "EVID-M0190"}),
@@ -1077,7 +1108,7 @@ func TestC4_ProductionAnchor_LooseningNeverEnablesTheGate_AndIsRefusedWhereAGate
 			if triggers() != 1 || gating() != 1 {
 				t.Fatal("fixture gate")
 			}
-			_, err := l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, 7200))
+			_, err := l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, fixtureGrace))
 			if tc.wantAfter != "" {
 				wantHint(t, err, tc.wantAfter, "a gate exists in a production-anchored database")
 				if n := l.requestCount(KindAMLScreeningPolicyLoosen); n != 0 || len(l.policies()) != 1 {
@@ -1086,7 +1117,7 @@ func TestC4_ProductionAnchor_LooseningNeverEnablesTheGate_AndIsRefusedWhereAGate
 				// With the gate switched off by a newer (non-gating) trigger version, the same loosening is allowed - and enables nothing.
 				l.seedTrigger(false, 0)
 			}
-			done := l.widen(KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, 7200), "screening_loosening_decision")
+			done := l.widen(KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, fixtureGrace), "screening_loosening_decision")
 			if !done.Executed || len(l.policies()) != 2 {
 				t.Fatalf("loosening %+v", done)
 			}
@@ -1134,4 +1165,250 @@ func TestC4_Migration_DoesNotTouchTheGateOrItsProductionGuard(t *testing.T) {
 func readFileT(t *testing.T, path string) ([]byte, error) {
 	t.Helper()
 	return os.ReadFile(path)
+}
+
+// ---- review fixes (security HIGH-1, LOW-1, LOW-2, MEDIUM-1; ledger-finance H-1, M-1, M-2) ------------------------------------------
+
+// HIGH-1: three plain platform admins with no aml_officer grant can neither enable the capability nor loosen; the controls the AML
+// routes require of an officer (a live grant on the tenant, the owner-scope quorum) apply to the requester, every counted approver and the
+// executor. The mechanism stays inert without them.
+func TestC4_OfficerControls_PlainPlatformAdminsCannotEnableOrLoosen(t *testing.T) {
+	l := newLWNoOfficers(t)
+	// Nobody is an officer: enabling is refused at filing.
+	_, err := l.request(KindAMLScreeningLooseningConfigure, l.cfgPayload(l.tenant, true, 0))
+	wantHint(t, err, "officer_grant_required", "a plain platform admin enabling the capability")
+	if len(l.settings(l.tenant)) != 0 {
+		t.Fatal("nothing is configured")
+	}
+	// The requester alone is an officer: the quorum (two distinct Persons) does not hold.
+	amlfix.GrantOfficerAs(t, l.owner, l.tenant, l.req.StaffID, "platform")
+	_, err = l.request(KindAMLScreeningLooseningConfigure, l.cfgPayload(l.tenant, true, 0))
+	wantHint(t, err, "officer_quorum_not_met", "one officer is not a quorum")
+	// Quorum met by the requester and ap1; the approval of a plain admin (ap2) is refused when it is recorded.
+	amlfix.GrantOfficerAs(t, l.owner, l.tenant, l.ap1.StaffID, "platform")
+	r := l.mustRequest(l.req, KindAMLScreeningLooseningConfigure, l.cfgPayload(l.tenant, true, 0), "loosening_enable_decision").Request
+	_, err = l.approve(l.ap2, r.ID)
+	wantHint(t, err, "officer_grant_required", "a non-officer approver")
+	if n := l.ownerInt(`SELECT count(*) FROM licensing_change_approvals WHERE request_id = $1`, r.ID); n != 0 {
+		t.Fatalf("the refused approval is not recorded: %d", n)
+	}
+	// Approvals by two officers execute it (ap2 becomes an officer).
+	amlfix.GrantOfficerAs(t, l.owner, l.tenant, l.ap2.StaffID, "platform")
+	l.mustApprove(l.ap1, r.ID)
+	if done := l.mustApprove(l.ap2, r.ID); !done.Executed {
+		t.Fatal("two officers enable the capability")
+	}
+	// Loosening needs the same: ap3 (a plain admin) cannot take part; a requester without a grant cannot file.
+	lr := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 7200), "screening_loosening_decision").Request
+	if _, err := l.approve(l.ap3, lr.ID); GuardCode(err) != "LC050" || hintOf(err) != "officer_grant_required" {
+		t.Fatalf("a non-officer approving a loosening: %v", err)
+	}
+	if _, err := l.svc.Request(context.Background(), l.ap3, RequestInput{Kind: KindAMLScreeningPolicyLoosen, Payload: payload(t, l.loosenPayload(20000, fixtureGrace)), ReasonCode: "screening_loosening_decision"}); hintOf(err) != "officer_grant_required" {
+		t.Fatalf("a non-officer filing a loosening: %v", err)
+	}
+	// Disabling (narrowing) stays open to any platform admin: the fail-closed direction.
+	if res, err := l.svc.Request(context.Background(), l.ap3, RequestInput{Kind: KindAMLScreeningLooseningConfigure, Payload: payload(t, l.cfgPayload(l.tenant, false, 0)), ReasonCode: "loosening_disable_decision"}); err != nil || !res.Executed {
+		t.Fatalf("any platform admin may disable: %+v %v", res, err)
+	}
+	if len(l.policies()) != 1 {
+		t.Fatal("no policy version was written by a non-officer path")
+	}
+}
+
+// HIGH-1 at execution: an approver who is an officer when approving but not when the final approval executes does not count.
+func TestC4_OfficerControls_ApproverLosingStandingBeforeExecutionDoesNotCount(t *testing.T) {
+	l := newLWNoOfficers(t)
+	for _, a := range []Actor{l.req, l.ap2, l.ap3} {
+		amlfix.GrantOfficerAs(t, l.owner, l.tenant, a.StaffID, "platform")
+	}
+	amlfix.GrantOfficerUntil(t, l.owner, l.tenant, l.ap1.StaffID, "platform", time.Now().Add(2500*time.Millisecond))
+	l.enable(l.tenant, 0) // ap1 and ap2 approve while ap1 is still an officer
+	r := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 7200), "screening_loosening_decision").Request
+	l.mustApprove(l.ap1, r.ID)
+	time.Sleep(2800 * time.Millisecond) // ap1's grant has expired
+	before := len(l.policies())
+	_, err := l.approve(l.ap2, r.ID)
+	wantHint(t, err, "officer_grant_required", "an approval by someone who is no longer an officer does not count")
+	if len(l.policies()) != before {
+		t.Fatal("nothing is written")
+	}
+	// The request cannot be completed by a third approver either (the expired approval still occupies one of the two counted places in Go's
+	// count, and the database refuses at execution): it is cancelled and refiled, like a stale approval.
+	if _, err := l.approve(l.ap3, r.ID); hintOf(err) != "officer_grant_required" {
+		t.Fatalf("a third approval cannot rescue it: %v", err)
+	}
+	if len(l.policies()) != before {
+		t.Fatal("nothing is written")
+	}
+	fresh := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(30000, 7200), "screening_loosening_decision").Request
+	l.mustApprove(l.ap2, fresh.ID)
+	if done := l.mustApprove(l.ap3, fresh.ID); !done.Executed {
+		t.Fatalf("two current officers execute a fresh request: %+v", done)
+	}
+}
+
+// LF H-1: the sanctions list is never removed (a safe default, not a business policy); the other dimensions are tested above.
+func TestC4_SanctionsListRemoval_IsRefusedEvenWithEverythingElseInOrder(t *testing.T) {
+	l := newLW(t)
+	l.enable(l.tenant, 0)
+	_, err := l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(20000, 7200, "pep"))
+	wantHint(t, err, "sanctions_list_removal_refused", "pep only")
+	// The SQL applies it when Go is bypassed.
+	body := `{"tenant_id":"` + l.tenant.String() + `","jurisdiction_id":"` + l.jur.String() + `","lists":["pep"],"rescreen_interval_seconds":20000,"backfill_grace_seconds":7200,"effective_offset_seconds":0,"legal_review_reference":"R","evidence_reference":"E"}`
+	err = l.rt.WithPlatformAdmin(context.Background(), l.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT widening FROM licensing_change_classify('aml_screening_policy_loosen', $1::jsonb)`, body)
+		return err
+	})
+	if pgCode(err) != "LC050" || !strings.Contains(err.Error(), "sanctions list cannot be removed") {
+		t.Fatalf("direct classify: %v", err)
+	}
+}
+
+// SEC LOW-1: the capability lock orders a final approval behind a disable that holds it first. Lock queue order: the disable queues first,
+// the final approval second; when the lock holder lets go the disable commits and the approval then observes DISABLED.
+func TestC4_CapabilityLock_AFinalApprovalWaitingBehindADisableObservesIt(t *testing.T) {
+	l := newLW(t)
+	l.enable(l.tenant, 0)
+	before := len(l.policies())
+	r := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 7200), "screening_loosening_decision").Request
+	l.mustApprove(l.ap1, r.ID)
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(release) }) }
+	defer letGo() // never leave the lock holder blocked if an assertion fails first
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = l.owner.WithPlatformAdmin(context.Background(), l.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('screening_loosening:' || $1::text, 190))`, l.tenant.String()); err != nil {
+				return err
+			}
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	var disableErr, approveErr error
+	var disabled *Result
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		disabled, disableErr = l.svc.Request(context.Background(), l.req, RequestInput{Kind: KindAMLScreeningLooseningConfigure,
+			Payload: payload(t, l.cfgPayload(l.tenant, false, 0)), ReasonCode: "loosening_disable_decision"})
+	}()
+	time.Sleep(500 * time.Millisecond) // the disable is queued on the lock first
+	go func() {
+		defer wg.Done()
+		_, approveErr = l.approve(l.ap2, r.ID)
+	}()
+	time.Sleep(500 * time.Millisecond)
+	if len(l.policies()) != before {
+		t.Fatal("the final approval must not run past the lock")
+	}
+	letGo()
+	wg.Wait()
+	if disableErr != nil || disabled == nil || !disabled.Executed {
+		t.Fatalf("the disable: %+v %v", disabled, disableErr)
+	}
+	wantHint(t, approveErr, "loosening_disabled", "the final approval after the disable")
+	if len(l.policies()) != before {
+		t.Fatal("no policy version after a disable")
+	}
+}
+
+// SEC MEDIUM-1: the version takes effect at least the cooling period after the decision, whatever the payload offset says.
+func TestC4_EffectiveTime_IsAtLeastTheCoolingPeriodAfterExecution(t *testing.T) {
+	l := newLW(t)
+	l.enable(l.tenant, 5)
+	r := l.mustRequest(l.req, KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 7200), "screening_loosening_decision").Request // offset 0
+	l.mustApprove(l.ap1, r.ID)
+	time.Sleep(5200 * time.Millisecond)
+	done := l.mustApprove(l.ap2, r.ID)
+	if !done.Executed {
+		t.Fatalf("not executed: %+v", done)
+	}
+	pol := l.policies()
+	if d := time.Until(pol[len(pol)-1].Effective); d < 4*time.Second || d > 6*time.Second {
+		t.Fatalf("effective_from must be about the cooling period (5 s) after the execution, got %s ahead", d)
+	}
+	// The payload offset wins when it is longer.
+	l2 := newLW(t)
+	l2.enable(l2.tenant, 1)
+	p := l2.loosenPayload(14400, 7200)
+	p.EffectiveOffsetSeconds = 600
+	r2 := l2.mustRequest(l2.req, KindAMLScreeningPolicyLoosen, p, "screening_loosening_decision").Request
+	l2.mustApprove(l2.ap1, r2.ID)
+	time.Sleep(1200 * time.Millisecond)
+	l2.mustApprove(l2.ap2, r2.ID)
+	pol = l2.policies()
+	if d := time.Until(pol[len(pol)-1].Effective); d < 9*time.Minute {
+		t.Fatalf("the longer offset wins: %s", d)
+	}
+}
+
+// SEC LOW-2: the platform branch of the policy guard also bounds the effective time to [executed_at, executed_at + 30 d] and fixes the reason
+// code. The executed request is forged by the owner (triggers off for the fixture only) so the guard is tested without the executor.
+func TestC4_PolicyGuard_BoundsTheEffectiveTimeAndTheReasonCode(t *testing.T) {
+	l := newLW(t)
+	try := func(effective, reason string) error {
+		var out error
+		fixtureErr := l.owner.WithPlatformAdmin(context.Background(), l.ops.Requester, func(ctx context.Context, tx pgx.Tx) error {
+			for _, stmt := range []string{`ALTER TABLE licensing_change_requests DISABLE TRIGGER licensing_change_requests_guard`} {
+				if _, err := tx.Exec(ctx, stmt); err != nil {
+					return err
+				}
+			}
+			var req uuid.UUID
+			payloadJSON := `{"tenant_id":"` + l.tenant.String() + `","jurisdiction_id":"` + l.jur.String() + `","lists":["pep","sanctions"],"rescreen_interval_seconds":14400,"backfill_grace_seconds":7200,"effective_offset_seconds":0,"legal_review_reference":"R","evidence_reference":"E"}`
+			if err := tx.QueryRow(ctx, `INSERT INTO licensing_change_requests (kind, payload, payload_hash, reason_code, widening, required_approvals, requested_by, requested_by_person_id,
+					requested_scope, status, created_at, created_txid, expires_at, executed_by, executed_at, executed_txid)
+				VALUES ('aml_screening_policy_loosen', $1::jsonb, repeat('0', 64), 'x', true, 2, $2, $3, 'platform', 'executed', now(), txid_current(), now() + interval '1 day', $4, now(), txid_current())
+				RETURNING id`, payloadJSON, l.req.StaffID, l.ops.Persons[0], l.ap2.StaffID).Scan(&req); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, l.tenant.String()); err != nil {
+				return err
+			}
+			_, out = tx.Exec(ctx, `INSERT INTO aml_screening_policies (tenant_id, licensing_jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds, effective_from,
+					legal_review_reference, reason_code, created_by, created_by_person_id, created_by_scope, change_request_id)
+				VALUES ($1, $2, '{pep,sanctions}', 14400, 7200, `+effective+`, 'R', $3, $4, $5, 'platform', $6)`, l.tenant, l.jur, reason, l.ap2.StaffID, l.ops.Persons[2], req)
+			return errors.New("rollback")
+		})
+		if out == nil && fixtureErr != nil && fixtureErr.Error() != "rollback" {
+			t.Fatalf("fixture: %v", fixtureErr)
+		}
+		return out
+	}
+	// The control: a lawful row of the same shape is admitted (so the refusals below are the bounds and nothing else).
+	if err := try(`now() + interval '1 hour'`, "governed_loosening"); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	for name, c := range map[string][2]string{
+		"before the execution": {`now() - interval '1 day'`, "governed_loosening"},
+		"beyond 30 days":       {`now() + interval '31 days'`, "governed_loosening"},
+		"another reason code":  {`now() + interval '1 hour'`, "something_else"},
+	} {
+		if err := try(c[0], c[1]); pgCode(err) != "LC040" {
+			t.Fatalf("%s: want LC040, got %v", name, err)
+		}
+	}
+}
+
+// LF M-1: once the backfill grace of the gating policy has run out, a longer grace is refused (it would re-open the grace for persons
+// registered before the gate). Anything else of a loosening still works. Staging anchor, so a fixture gate is admissible.
+func TestC4_GraceExtensionAfterExpiry_IsRefused(t *testing.T) {
+	w := scratchWorld(t, "c4grace_", "staging")
+	l := lwOn(w)
+	l.enable(l.tenant, 0)
+	l.seedPolicy(l.tenant, l.jur, "{pep,sanctions}", fixtureInterval, 60) // the grace is 60 s ...
+	l.seedTrigger(true, 7200)                                             // ... and the gate took effect an hour ago: expired
+	_, err := l.request(KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 3600))
+	wantHint(t, err, "grace_extension_after_expiry_refused", "a longer grace after the grace has run out")
+	// Keeping the grace and lengthening the interval is allowed (the interval retro-release stays an owner decision, D10).
+	if done := l.widen(KindAMLScreeningPolicyLoosen, l.loosenPayload(14400, 60), "screening_loosening_decision"); !done.Executed {
+		t.Fatal("an interval-only loosening is allowed")
+	}
 }

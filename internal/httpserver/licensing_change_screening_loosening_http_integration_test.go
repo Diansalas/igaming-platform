@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/amlfix"
 )
 
 // c4 (migration 0190): the governed screening policy loosening through the real HTTP stack as igaming_runtime. The two kinds ride the
@@ -22,6 +23,10 @@ func TestLicensingChangeHTTP_ScreeningLoosening_InertUntilConfigured_ThenTwoPers
 	w := newLHWorld(t)
 	tenantID := w.activeTenant()
 	jid := w.jurisdiction(tenantID)
+	// The AML officer controls apply to the requester and the approvers (c4 review fix): the three fixture operators hold platform grants.
+	for _, op := range []uuid.UUID{w.ops.Requester, w.ops.Approver1, w.ops.Approver2} {
+		amlfix.GrantOfficerAs(t, w.owner, tenantID, op, "platform")
+	}
 	// A first screening policy version (owner fixture; the guard is disabled for the one insert only).
 	if err := w.owner.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `ALTER TABLE aml_screening_policies DISABLE TRIGGER aml_screening_policies_10_guard`); err != nil {
