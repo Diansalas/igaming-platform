@@ -114,7 +114,9 @@ test('(c) operating-country policy: refused while no ceiling or basis exists (UI
   let d = await fillPolicy(A, { rung: 'tenant', country: CC, action: 'enable', ref: 'E2E-SYNTHETIC-POLICY-NL', reason: 'e2e_policy_enable' })
   await expect(classHint(d)).toContainText('widening')
   const posted = A.page.waitForResponse((r) => r.url().endsWith('/v1/admin/licensing-changes') && r.request().method() === 'POST')
-  await submitRefused(A, d, 'File policy change', /The change was refused by the domain rules/)
+  // INTENTIONAL (c3, after the C1 merge): the precheck refusal now carries the closed code ceiling_not_enabled_for_country and the UI renders its
+  // exact wording instead of the generic "refused by the domain rules" sentence. Status and generic code are unchanged (asserted below).
+  await submitRefused(A, d, 'File policy change', /has no enabled country ceiling for this country/)
   const resp = await posted
   const body = await resp.json()
   console.log(`[11 c] precheck refusal on the wire: status=${resp.status()} code=${body.code} check_codes=${JSON.stringify(body.check_codes ?? null)}`)
@@ -321,7 +323,8 @@ test('(e) jurisdiction creation: duplicate code refused; creation is single-acto
   await d2.getByLabel('Name', { exact: true }).fill('E2E duplicate attempt')
   await d2.getByLabel('Reason code', { exact: true }).fill('e2e_jur_dup')
   const dup = A.page.waitForResponse((r) => r.url().endsWith('/v1/admin/jurisdictions') && r.request().method() === 'POST')
-  await submitRefused(A, d2, 'Create jurisdiction', /rejected the request as invalid/)
+  // INTENTIONAL (c3, after the C1 merge): duplicate_jurisdiction_code now renders its exact wording instead of the generic invalid sentence
+  await submitRefused(A, d2, 'Create jurisdiction', /A jurisdiction with this code already exists/)
   const dr = await dup
   const db = await dr.json()
   console.log(`[11 e] duplicate code on the wire: status=${dr.status()} code=${db.code}`)

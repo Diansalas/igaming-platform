@@ -615,3 +615,86 @@ func (w *lhWorld) rtTenantPolicies(tid uuid.UUID) int {
 	}
 	return n
 }
+
+// ---- exact closed refusal codes (C1 merged) on the wire, for the refusals a Back Office user can reach -------------------------------
+// C1's own matrix (licensing_refusal_codes_integration_test.go) covers 16 codes; this pins the ones Playwright spec 13 renders, with the
+// SAME assertions the UI relies on: exact status, unchanged generic code, check_codes equal to exactly one closed code, nothing written.
+
+func (w *lhWorld) c3Counts() [6]int {
+	return [6]int{
+		w.c3OwnerInt(`SELECT count(*) FROM licensing_change_requests`),
+		w.c3OwnerInt(`SELECT count(*) FROM licensing_change_approvals`),
+		w.c3OwnerInt(`SELECT count(*) FROM jurisdictions`),
+		w.c3OwnerInt(`SELECT count(*) FROM licence_country_ceilings`),
+		w.c3OwnerInt(`SELECT count(*) FROM tenant_jurisdiction_configs`),
+		w.c3OwnerInt(`SELECT count(*) FROM audit_log`),
+	}
+}
+
+func TestC3HTTP_ClosedRefusalCodesOnTheWire_UIReachable(t *testing.T) {
+	w := newLHWorld(t)
+	bare := w.activeTenant() // no licence, no basis
+	licensed := w.activeTenant()
+	lid := w.c3Licence()
+	w.c3OwnerExec(`UPDATE tenants SET licence_id = $1 WHERE id = $2`, lid, licensed)
+	jid := uuid.New()
+	w.c3OwnerExec(`INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'c3 refusal')`, jid, "C3R-"+strings.ToUpper(jid.String()[:8]))
+	policy := func(tenant uuid.UUID, country string, brand any) map[string]any {
+		return map[string]any{"kind": "operating_policy_version", "reason_code": "c3_refusal", "payload": map[string]any{"tenant_id": tenant,
+			"scope": map[bool]string{true: "brand", false: "tenant"}[brand != nil], "brand_id": brand, "operation_code": nil, "product_code": nil,
+			"country_code": country, "state": "enabled", "status": "active", "authorization_reference": "TICKET-C3"}}
+	}
+	cases := []struct {
+		name   string
+		tok    func() string
+		path   string
+		body   map[string]any
+		status int
+		code   string
+		check  string
+	}{
+		{"ceiling not enabled for the country", w.tokReq, "/v1/admin/licensing-changes", policy(licensed, "GR", nil), 409, "LICENSING_CHANGE_REFUSED", "ceiling_not_enabled_for_country"},
+		{"tenant without licence or basis", w.tokReq, "/v1/admin/licensing-changes", policy(bare, "GR", nil), 409, "LICENSING_CHANGE_REFUSED", "tenant_without_licence_or_basis"},
+		{"currency is not an active asset", w.tokReq, "/v1/admin/licensing-changes", map[string]any{"kind": "tenant_jurisdiction_config_version", "reason_code": "c3_refusal",
+			"payload": map[string]any{"tenant_id": licensed, "jurisdiction_id": jid, "action": "set", "kyc_ruleset_id": nil, "aml_ruleset_id": nil, "rg_ruleset_id": nil,
+				"reporting_ruleset_id": nil, "allowed_currencies": []string{"ZZZ"}, "allowed_payment_methods": []string{"card"}, "geo_block_list": []string{}}}, 400, "validation_error", "currency_not_active_asset"},
+		{"unknown licence on a ceiling", w.tokReq, "/v1/admin/licensing-changes", c3CeilingBody(uuid.New(), "GR", "enabled", "active", "TICKET-C3", "c3_refusal"), 400, "validation_error", "licence_unknown"},
+	}
+	for _, c := range cases {
+		before := w.c3Counts()
+		r := w.do("POST", c.path, c.tok(), c.body)
+		if r.status != c.status || r.code(t) != c.code || len(r.checkCodes(t)) != 1 || r.checkCodes(t)[0] != c.check {
+			t.Errorf("%s: %d %s, want %d %s [%s]", c.name, r.status, r.body, c.status, c.code, c.check)
+		}
+		if w.c3Counts() != before {
+			t.Errorf("%s: a refused filing wrote something", c.name)
+		}
+	}
+	// duplicate jurisdiction code (the Back Office create dialog)
+	code := "C3D-" + strings.ToUpper(uuid.NewString()[:8])
+	if r := w.do("POST", "/v1/admin/jurisdictions", w.tokReq(), map[string]any{"code": code, "name": "first", "reason_code": "c3_dup"}); r.status != http.StatusCreated {
+		t.Fatalf("first create: %d %s", r.status, r.body)
+	}
+	before := w.c3Counts()
+	r := w.do("POST", "/v1/admin/jurisdictions", w.tokReq(), map[string]any{"code": code, "name": "again", "reason_code": "c3_dup"})
+	if r.status != http.StatusBadRequest || r.code(t) != "validation_error" || len(r.checkCodes(t)) != 1 || r.checkCodes(t)[0] != "duplicate_jurisdiction_code" || w.c3Counts() != before {
+		t.Errorf("duplicate jurisdiction code: %d %s", r.status, r.body)
+	}
+	// foreign brand by a tenant admin: byte-identical to an unknown brand, brand_not_owned, 4xx, nothing written
+	other := w.activeTenant()
+	foreign := w.activeBrand(other)
+	ta := w.staff(licensed, identity.StaffRoleTenantAdmin)
+	tok := w.tenantTok(licensed, ta, auth.RoleTenantAdmin)
+	before = w.c3Counts()
+	rf := w.do("POST", "/v1/admin/licensing-changes", tok, policy(licensed, "GR", foreign))
+	ru := w.do("POST", "/v1/admin/licensing-changes", tok, policy(licensed, "GR", uuid.New()))
+	if len(rf.checkCodes(t)) != 1 || rf.checkCodes(t)[0] != "brand_not_owned" || rf.status != ru.status || ru.checkCodes(t)[0] != "brand_not_owned" || w.c3Counts() != before {
+		t.Errorf("foreign brand %d %s vs unknown %d %s", rf.status, rf.body, ru.status, ru.body)
+	}
+	// an UNASSIGNED country code (valid shape, not an ISO-3166 assignment): observed, not assumed
+	ux := w.do("POST", "/v1/admin/licensing-changes", w.tokReq(), c3CeilingBody(lid, "XX", "enabled", "active", "TICKET-C3", "c3_refusal"))
+	t.Logf("OBSERVED unassigned country XX on a ceiling: %d %s", ux.status, ux.body)
+	if ux.status != http.StatusBadRequest || ux.code(t) != "validation_error" {
+		t.Errorf("an unassigned country code must be refused as 400 validation_error, got %d %s", ux.status, ux.body)
+	}
+}

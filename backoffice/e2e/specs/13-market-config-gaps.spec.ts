@@ -10,7 +10,7 @@
 //   (f) STALE UI: Approve clicked after the request was cancelled / executed meanwhile: the server's refusal is rendered, DB unchanged
 //   (g) tampered bodies / wrong ids / tenant staff on the real stack: refused, nothing written
 //   (h) CONCURRENT approvers on the real platform-api, several rounds
-//   (i) PLACEHOLDERS (test.fixme): exact closed codes for precheck refusals, awaiting the C1 merge
+//   (i) exact closed refusal codes of precheck failures (C1): wire code + the UI's exact wording; platform_officer_required on the real stack
 //
 // Clock control for (d)/(e) is lib/mc_gaps.ts shiftChange (private test database, owner path, see its comment). Each test uses its own
 // country / licence so the tests are independent and repeatable on a fresh database (README).
@@ -19,9 +19,13 @@ import { apiApprove, apiFile, apiLogin, syntheticLicenceId, tenantId } from '../
 import { createLicence, sql } from '../lib/db'
 import { decide } from '../lib/licensing'
 import {
-  ceilingBody, mcBrandId, mcCall, mcCeiling, mcCeilingVersions, mcChange, mcFileAndApprove, mcPolicy, mcResolve, policyBody,
+  ceilingBody, mcBrandId, mcCall, mcCeiling, mcCeilingVersions, mcChange, mcCreateJurisdictionApi, mcFileAndApprove, mcJurisdictionByCode, mcPolicy, mcPolicyAnyCount, mcResolve, policyBody,
 } from '../lib/mc_world'
-import { CEILING_TITLE, classHint, fillPolicy, openChangeLink, openLicencePage, openTenantPage, submitMarket } from '../lib/mc_ui'
+import { CEILING_TITLE, classHint, fillPolicy, openChangeLink, openLicencePage, openTenantPage, submitMarket, submitRefused } from '../lib/mc_ui'
+import { codesOf, spCount, thisMinute } from '../lib/sp_ui'
+import { configureTenantJurisdiction, jurisdictionId } from '../lib/wd_aml'
+import { call, createTenant } from '../lib/wd_world'
+import { loadWorld } from '../lib/world'
 import {
   auditCounts, ceilingAudit, changeFingerprint, fillScopedOperationPolicy, globalCounts, mcResolveScoped, productPolicy, shiftChange, staleApprove,
 } from '../lib/mc_gaps'
@@ -337,14 +341,88 @@ test('(h) CONCURRENT approvers on the real platform-api: exactly one execution p
   expect(rounds).toBeGreaterThanOrEqual(3)
 })
 
-// ---- (i) PLACEHOLDERS: the exact closed codes of the precheck refusals (slice C1 adds them) ----------------------------------------
-// Today the precheck refusal is 409 LICENSING_CHANGE_REFUSED with no check_codes (lic32 finding 8). C1 is adding closed refusal codes;
-// these tests are written AFTER that merge. They are fixme (reported as skipped), never silently dropped.
-test.describe('[awaiting C1 merge] exact closed refusal codes for precheck failures', () => {
-  test.fixme('[awaiting C1 merge] tenant policy enable with no ceiling and no operating basis: wire check_codes equals the closed code and the UI shows its exact wording', async () => {
-    // intended: POST operating_policy_version enable for a country with no ceiling/basis -> 409, check_codes == [<C1 code>], UI alert == mapped sentence, nothing stored
-  })
-  test.fixme('[awaiting C1 merge] unassigned (unknown) country code on a ceiling or policy filing: exact closed code, UI wording, nothing stored', async () => {})
-  test.fixme('[awaiting C1 merge] tenant jurisdiction configuration with a currency that is not an active asset: exact closed code, UI wording, nothing stored', async () => {})
-  test.fixme('[awaiting C1 merge] brand-rung policy naming a brand of another tenant: exact closed code (and still a not-found shape for tenant sessions), nothing stored', async () => {})
+// ---- (i) exact closed refusal codes of precheck failures (slice C1, merged): wire code AND the UI's exact fixed wording --------------------
+// The wording is copied here on purpose (not imported from licensingRefusal.ts): a change to the UI text must fail this spec.
+const REFUSAL_TEXT = {
+  ceiling_not_enabled_for_country: "The tenant's licence has no enabled country ceiling for this country (none is recorded, or it is disabled or withdrawn). A policy cannot enable a country that the licence ceiling does not enable. Record the ceiling first.",
+  duplicate_jurisdiction_code: 'A jurisdiction with this code already exists. Codes are unique; choose another code.',
+  currency_not_active_asset: 'Every allowed currency must be an active asset of the platform asset registry. At least one listed currency is not.',
+} as const
+
+test('(i1) policy enable with no ceiling: wire 409 LICENSING_CHANGE_REFUSED + ceiling_not_enabled_for_country, exact UI wording, nothing stored', async ({ browser }) => {
+  const TEN = tenantId(), CC = 'GR'
+  const A = await ctx(browser, 'PA_A')
+  await openTenantPage(A, TEN)
+  const n0 = globalCounts()
+  const d = await fillPolicy(A, { rung: 'tenant', country: CC, action: 'enable', ref: 'E2E-C3-REFUSAL', reason: 'e2e_refusal_ceiling' })
+  const posted = A.page.waitForResponse((r) => r.url().endsWith('/v1/admin/licensing-changes') && r.request().method() === 'POST' && r.status() !== 403)
+  await submitRefused(A, d, 'File policy change', new RegExp(REFUSAL_TEXT.ceiling_not_enabled_for_country.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  const body = await (await posted).json()
+  expect([body.code, body.check_codes]).toEqual(['LICENSING_CHANGE_REFUSED', ['ceiling_not_enabled_for_country']])
+  expect(globalCounts().requests).toBe(n0.requests)
+  expect(mcPolicyAnyCount(TEN, CC)).toBe(0)
+})
+
+test('(i2) duplicate jurisdiction code: wire 400 validation_error + duplicate_jurisdiction_code, exact UI wording, nothing stored', async ({ browser }) => {
+  const code = `E2E-C3-${Math.random().toString(16).slice(2, 8).toUpperCase()}`
+  expect((await mcCreateJurisdictionApi(code, 'E2E c3 original')).status).toBe(201)
+  const n0 = Number(sql(`SELECT count(*) FROM jurisdictions`))
+  const A = await ctx(browser, 'PA_A')
+  await spaGoto(A.page, '/licensing/jurisdictions')
+  await A.page.getByRole('button', { name: 'Create a jurisdiction' }).click()
+  const d = A.page.getByRole('dialog', { name: 'Create a jurisdiction' })
+  await d.getByLabel('Code', { exact: true }).fill(code)
+  await d.getByLabel('Name', { exact: true }).fill('E2E c3 duplicate attempt')
+  await d.getByLabel('Reason code', { exact: true }).fill('e2e_c3_dup')
+  const posted = A.page.waitForResponse((r) => r.url().endsWith('/v1/admin/jurisdictions') && r.request().method() === 'POST' && r.status() !== 403)
+  await submitRefused(A, d, 'Create jurisdiction', new RegExp(REFUSAL_TEXT.duplicate_jurisdiction_code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  const r = await posted
+  const body = await r.json()
+  expect([r.status(), body.code, body.check_codes]).toEqual([400, 'validation_error', ['duplicate_jurisdiction_code']])
+  expect(Number(sql(`SELECT count(*) FROM jurisdictions`))).toBe(n0)
+})
+
+test('(i3) tenant configuration with a currency that is not an active asset: wire 400 + currency_not_active_asset, exact UI wording, nothing stored', async ({ browser }) => {
+  const TEN = tenantId(), code = `E2E-C3-${Math.random().toString(16).slice(2, 8).toUpperCase()}`
+  expect((await mcCreateJurisdictionApi(code, 'E2E c3 currency')).status).toBe(201)
+  const J = mcJurisdictionByCode(code)
+  const A = await ctx(browser, 'PA_A')
+  await spaGoto(A.page, '/licensing/jurisdictions')
+  await openTenantPage(A, TEN)
+  const n0 = globalCounts()
+  await A.page.getByRole('button', { name: 'File a jurisdiction configuration change' }).click()
+  const d = A.page.getByRole('dialog', { name: 'File a tenant jurisdiction configuration change' })
+  await d.getByLabel('Action', { exact: true }).selectOption('set')
+  await d.getByLabel('Jurisdiction', { exact: true }).selectOption(J)
+  await d.getByLabel('Allowed currencies', { exact: true }).fill('ZZZ')
+  await d.getByLabel('Allowed payment methods', { exact: true }).fill('card')
+  await d.getByLabel('Geo block list', { exact: true }).fill('')
+  await d.getByLabel('Reason code', { exact: true }).fill('e2e_c3_currency')
+  const posted = A.page.waitForResponse((r) => r.url().endsWith('/v1/admin/licensing-changes') && r.request().method() === 'POST' && r.status() !== 403)
+  await submitRefused(A, d, 'File configuration change', new RegExp(REFUSAL_TEXT.currency_not_active_asset.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  const r = await posted
+  const body = await r.json()
+  expect([r.status(), body.code, body.check_codes]).toEqual([400, 'validation_error', ['currency_not_active_asset']])
+  expect(globalCounts().requests).toBe(n0.requests)
+})
+
+test('(i4) platform_officer_required on the real stack: a tenant compliance user with a tenant-scope aml_officer grant (tenant admin requests, platform admin approves) is refused 403 with that code, nothing written; the UI offers no authoring to that role', async ({ browser }) => {
+  const T = await createTenant('c3o')
+  await configureTenantJurisdiction(T)
+  const grantee = sql(`SELECT id FROM staff_users WHERE email = '${loadWorld().accounts['c3o_COMPLIANCE'].email}'`)
+  const rq = await call('POST', `/v1/admin/tenants/${T.id}/capability-grants/requests`, await apiLogin('c3o_TENANT_ADMIN'), { grantee_staff_id: grantee, capability: 'aml_officer', reason_code: 'e2e_c3_officer' })
+  expect(rq.status).toBe(201)
+  const ap = await call('POST', `/v1/admin/tenants/${T.id}/capability-grants/requests/${rq.json.id}/approve`, await apiLogin('PA_B'), { reason_code: 'e2e_c3_officer_ok' })
+  expect(ap.status).toBe(200)
+  const before = spCount(T)
+  const comp = await apiLogin('c3o_COMPLIANCE')
+  const body = { jurisdiction_id: jurisdictionId(), lists: ['sanctions', 'pep'], rescreen_interval_seconds: 86400, backfill_grace_seconds: 0, effective_from: thisMinute().toISOString(), legal_review_reference: 'E2E-SYNTHETIC-NOT-A-LEGAL-REVIEW', reason_code: 'e2e_c3_officer_try' }
+  const r = await call('POST', `/v1/admin/tenants/${T.id}/screening/policy`, comp, body)
+  expect([r.status, codesOf(r.json)]).toEqual([403, ['platform_officer_required']])
+  expect(spCount(T)).toBe(before)
+  const S = await ctx(browser, 'c3o_COMPLIANCE')
+  await S.page.getByRole('navigation').getByRole('link', { name: 'AML' }).click()
+  await S.page.getByRole('link', { name: 'Automatic screening: trigger policy and screening requests' }).click()
+  await S.page.getByRole('tab', { name: 'Screening policy' }).click()
+  await expect(S.page.getByRole('button', { name: 'Author next screening policy version' })).toHaveCount(0)
 })
