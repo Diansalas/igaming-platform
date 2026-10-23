@@ -150,7 +150,9 @@ func writeLicensingChangeError(w http.ResponseWriter, c licensingCall, op string
 	}
 	// c1: the closed licensing refusal code (licensingchange.ClosedRefusals) rides in check_codes; c4: an LC050 screening loosening
 	// refusal carries the closed screening code instead. The status, the API code and the sentence are unchanged. Never attached to an
-	// internal error or to an authorisation answer.
+	// internal error. Guard states LC001 / LC002 / LC020 / LC030 are database AUTHORISATION refusals (not the route's 403 gate): they
+	// are carried as 409 LICENSING_CHANGE_GUARD_REFUSED with a closed code (session_not_permitted, approver_not_eligible, ...), which
+	// names no tenant data. The route-level 403 forbidden answers carry none.
 	if code != apierror.CodeInternal {
 		if checks := licensingChangeCheckCodes(err); len(checks) > 0 {
 			apierror.WriteWithCheckCodes(w, c.requestID, code, msg, checks)

@@ -14,7 +14,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
-	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // reasonCodeRE is the reason-code format the database checks too (a code, never free text).
@@ -342,7 +341,7 @@ func (s *Service) execute(ctx context.Context, tx pgx.Tx, a Actor, req Request, 
 			return err
 		}
 		if pgErr(err) != nil {
-			return operatingmarket.ClassifyCommitError(err)
+			return triggerRefusal(err)
 		}
 		return &DomainError{Err: err}
 	}

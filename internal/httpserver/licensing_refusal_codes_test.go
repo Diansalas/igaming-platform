@@ -146,3 +146,24 @@ func TestWriteJurisdictionRegistryError_DuplicateCode(t *testing.T) {
 		t.Fatalf("a plain validation error stays uncoded: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// c1 LOW-3 end to end through the real classify: a trigger refusal reaching the writer is 409 LICENSING_CHANGE_REFUSED with its closed code
+// (it used to be 500 internal_error, nothing written either way).
+func TestWriteLicensingChangeError_TriggerRefusalIs409WithCode(t *testing.T) {
+	for msg, want := range map[string]string{
+		"policy exceeds the licence ceiling":                                 "policy_exceeds_permitted_scope",
+		"ocp_inherit_rung_close_requires_successor: close needs a successor": "policy_close_needs_successor",
+	} {
+		err := licensingchange.ClassifyDBError(&pgconn.PgError{Code: "P0001", Message: msg})
+		rec := httptest.NewRecorder()
+		writeLicensingChangeError(rec, licensingCall{requestID: "r", logger: nopLog{}}, "approve", err)
+		var body struct {
+			Code       string   `json:"code"`
+			CheckCodes []string `json:"check_codes"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != 409 || body.Code != "LICENSING_CHANGE_REFUSED" || strings.Join(body.CheckCodes, ",") != want || strings.Contains(rec.Body.String(), "ocp_") {
+			t.Errorf("%s: %d %s", msg, rec.Code, rec.Body)
+		}
+	}
+}

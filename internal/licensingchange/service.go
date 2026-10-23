@@ -14,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // Pool is the database handle the service needs (satisfied by *db.Pool).
@@ -260,5 +261,17 @@ func classify(err error) error {
 		}
 		return g
 	}
-	return err
+	// A deferred policy trigger refusal surfaces at COMMIT as a raw database error.
+	return triggerRefusal(err)
+}
+
+// triggerRefusal maps the operating-market trigger refusals (licence ceiling exceeded, an inheriting-rung close without a successor) to
+// the domain's own refusal, so they answer 409 LICENSING_CHANGE_REFUSED with their closed code instead of an internal error. Any
+// other error is returned unchanged (c1 LOW-3). The transaction has rolled back either way: nothing was written.
+func triggerRefusal(err error) error {
+	mapped := operatingmarket.ClassifyCommitError(err)
+	if errors.Is(mapped, operatingmarket.ErrCeilingExceeded) || errors.Is(mapped, operatingmarket.ErrPolicyCloseRequiresSuccessor) {
+		return &DomainError{Err: mapped}
+	}
+	return mapped
 }
