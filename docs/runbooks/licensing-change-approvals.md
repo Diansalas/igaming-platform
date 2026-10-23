@@ -114,6 +114,17 @@ section 3.
 writes (one migration), and a `kindSpec` registered in `internal/licensingchange` with `register()`. Until all exist the kind fails
 closed. Narrowing kinds (suspend) stay single-actor.
 
+## 6a. Screening policy loosening kinds (c4, migration 0190)
+
+Two platform-only kinds ride this primitive; the full procedure is in `docs/runbooks/aml-screening-triggers.md` ("c4 additions") and the
+design in `docs/plans/c4-screening-loosening-design.md`. `aml_screening_policy_loosen` is always widening and executes by writing the
+next screening policy version in the transaction of the final approval; `aml_screening_loosening_configure` sets the per-tenant
+capability (widening iff it enables loosening or shortens the cooling period). Refusals are `LICENSING_CHANGE_GUARD_REFUSED` (409)
+with `LC050` and ONE closed code in `check_codes` (`loosening_not_configured`, `loosening_disabled`, `no_screening_policy_to_loosen`,
+`not_a_loosening`, `loosening_cooling_period`, plus the existing `rescreen_interval_below_floor`, `rescreen_interval_below_alert_threshold`,
+`tenant_not_in_jurisdiction`, `policy_effective_from_out_of_range`, `gate_environment_refused`). The Back Office shows the two kinds on the
+generic list and detail pages (approve, reject, cancel work there); FILING them is API-only.
+
 ## 7. Pending human decisions (interim behaviour in force)
 
 - **HDR-M-1:** who approves licensing and market changes, and how many approvals. Interim: two approvals, ACTIVE `platform_admin`

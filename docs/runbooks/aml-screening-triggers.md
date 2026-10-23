@@ -69,3 +69,35 @@ Alert kind `aml.screening_attention` (p2, platform scope, raised in the same tra
 - **Restarts.** The sweeper's cursor is in memory. After a restart the first batch of each tenant starts at a RANDOM person and the cycle then wraps to the beginning, so a sweeper that restarts more often than a cycle still reaches every person with probability growing with each restart.
 - **Re-screen interval floor.** Over HTTP the interval must be at least 3600 s (`rescreen_interval_below_floor`) and, where a withdrawal gate exists for the jurisdiction, at least twice its `gate_alert_after_seconds` (`rescreen_interval_below_alert_threshold`). It is a safety guard against a fat-fingered value (a 60 s interval would expire every clear and freeze all withdrawals), not a legal value. Because the route is tighten-only, a value that is too SHORT cannot be undone over HTTP (see the backlog item in `docs/plans/lic30-record.md`): check the number before posting.
 - **Effective time.** A screening policy version takes effect between now (2 minutes tolerance) and 30 days ahead (`policy_effective_from_out_of_range`).
+
+## c4 additions (migration 0190): governed loosening of the screening policy
+
+**State: IMPLEMENTED as a mechanism, INERT by default.** No capability row, no cooling period and no value ships. Until a platform
+administrator configures the capability for a tenant through the two-person flow below, every loosening request is refused with the
+closed code `loosening_not_configured`, exactly as loosening was impossible before. Which cooling period, which loosenings and which
+tenants are OWNER DECISIONS (`docs/plans/c4-screening-loosening-record.md`); nothing here is a regulatory position.
+
+- **What counts as loosening** (the classifier of `aml_screening_policy_author`, 0189, read as written): against the LATEST version of the
+  tenant and jurisdiction, a list removed, a longer `rescreen_interval_seconds`, or a longer `backfill_grace_seconds`. The effective time is
+  not a loosening dimension of the governed path (it is `execution time + effective_offset_seconds`, 0..30 days, always inside the route's
+  window). The trigger policy (which events screen, whether a withdrawal gate exists) is NOT covered: see the record, section "Gap".
+- **Configure** (kind `aml_screening_loosening_configure`, payload `{tenant_id, enabled, cooling_seconds, evidence_reference}`): enabling or
+  shortening the cooling period is WIDENING (two distinct platform_admin Persons, requester never decides, approvals at most 24 h old,
+  request expires after 72 h); disabling or lengthening is NARROWING (one platform_admin, executes at once). `cooling_seconds` is 0..255600
+  (a request lives 72 h, so a longer period could never be met); 0 is a stated value, not a default. Versions are append-only in
+  `aml_screening_loosening_settings` (owner-only, FORCE RLS).
+- **Loosen** (kind `aml_screening_policy_loosen`, payload `{tenant_id, jurisdiction_id, lists, rescreen_interval_seconds,
+  backfill_grace_seconds, effective_offset_seconds, legal_review_reference, evidence_reference}` with the reason code on the request): two
+  Persons. At EVERY step the database re-checks: configured and enabled, tenant configured for the jurisdiction, a previous version exists,
+  it IS a loosening (otherwise use the screening policy route), the engineering floors of 0189 (interval at least 3600 s and at least twice
+  the gate alert threshold; one-year caps), and at execution the cooling period counted from the FILING time. The new
+  `aml_screening_policies` row (scope `platform`, `change_request_id` set) is written in the transaction of the final approval; the audit log
+  gets `aml.screening_policy_loosened` with before and after next to the three `licensing_change.*` rows. A refusal at execution rolls the
+  whole approval back (approve again after the cooling period; the first approver's approval stays valid for 24 h).
+- **Production.** Migration 0190 does not touch the withdrawal gate, the worker heartbeat or `aml_screening_gate_environment_ok()`; a loosening
+  never writes a trigger policy, and it is refused (`gate_environment_refused`) where the jurisdiction's latest trigger policy gates
+  withdrawals in a database whose environment anchor is not development / staging / test. Do not enable `gate_withdrawal` for a production
+  tenant; that stays the rule of the section above.
+- **Tenant staff** never file, approve, see or read these requests (no tenant projection: they are AML configuration).
+- **Break-glass**: the unrouted `SetScreeningPolicy` path (0154) still exists and loosens without this flow (LIC30 L-3 residual). It is an
+  operator action on the database only, not reachable over HTTP; using it needs an owner-recorded decision.
