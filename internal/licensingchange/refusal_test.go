@@ -155,3 +155,34 @@ func TestClosedRefusal_PrecheckSentinelsAndPrecedence(t *testing.T) {
 		t.Error("the markers must not match the plain sentinel")
 	}
 }
+
+// c1 LOW-3: the operating-market trigger refusals (raw database errors at the executor's statement or at COMMIT) are the domain's own
+// refusal (409 LICENSING_CHANGE_REFUSED at the HTTP layer) with their closed code, not an internal error.
+func TestClassify_OperatingMarketTriggerRefusalsAreDomainRefusals(t *testing.T) {
+	cases := map[string]struct {
+		msg      string
+		sentinel error
+		code     string
+	}{
+		"ceiling":   {"operating_country_policies: country cannot be enabled: no licence ceiling", operatingmarket.ErrCeilingExceeded, "policy_exceeds_permitted_scope"},
+		"ceiling 2": {"policy exceeds the licence ceiling", operatingmarket.ErrCeilingExceeded, "policy_exceeds_permitted_scope"},
+		"successor": {"ocp_inherit_rung_close_requires_successor: close needs a successor", operatingmarket.ErrPolicyCloseRequiresSuccessor, "policy_close_needs_successor"},
+	}
+	for name, c := range cases {
+		for how, err := range map[string]error{
+			"classify (commit)": classify(fmt.Errorf("commit: %w", &pgconn.PgError{Code: "P0001", Message: c.msg})),
+			"execute":           triggerRefusal(&pgconn.PgError{Code: "P0001", Message: c.msg}),
+		} {
+			var de *DomainError
+			if !errors.As(err, &de) || !errors.Is(err, c.sentinel) || ClosedRefusal(err) != c.code {
+				t.Errorf("%s/%s: %v (code %q)", name, how, err, ClosedRefusal(err))
+			}
+		}
+	}
+	// an unrelated database error stays raw (and so an internal error: fail closed)
+	raw := classify(&pgconn.PgError{Code: "P0001", Message: "something else"})
+	var de *DomainError
+	if errors.As(raw, &de) || ClosedRefusal(raw) != "" {
+		t.Errorf("unrelated error was reclassified: %v", raw)
+	}
+}
