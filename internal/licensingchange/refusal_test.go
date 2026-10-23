@@ -84,7 +84,7 @@ func TestRefuse_UnknownCodePanics(t *testing.T) {
 			t.Fatal("refuse must panic on a code outside the closed table")
 		}
 	}()
-	refuse("made_up", errors.New("x"))
+	_ = refuse("made_up", errors.New("x"))
 }
 
 // classify keeps its sentinels, and the guard errors that reach the HTTP layer carry the closed code of their SQLSTATE.

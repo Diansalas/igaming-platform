@@ -94,7 +94,7 @@ func TestWriteLicensingChangeError_CodeInCheckCodesStatusUnchanged(t *testing.T)
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
 			}
-			if strings.ToLower(body.Code) != strings.ToLower(c.api) && !(c.api == "internal_error" && body.Code == string(apierror.CodeInternal)) {
+			if !strings.EqualFold(body.Code, c.api) && !(c.api == "internal_error" && body.Code == string(apierror.CodeInternal)) {
 				t.Fatalf("code %q want %q", body.Code, c.api)
 			}
 			if strings.Join(body.CheckCodes, ",") != strings.Join(c.checks, ",") {
