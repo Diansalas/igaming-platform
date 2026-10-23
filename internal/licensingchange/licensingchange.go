@@ -153,7 +153,11 @@ func GuardCode(err error) string {
 }
 
 // DomainError wraps a refusal of the domain writer (jurisdiction / operatingmarket sentinels stay reachable with errors.Is).
-type DomainError struct{ Err error }
+type DomainError struct {
+	Err error
+	// Code is the closed refusal code (ClosedRefusals) a precheck attached, or "".
+	Code string
+}
 
 func (e *DomainError) Error() string {
 	return "licensingchange: refused by the domain writer: " + e.Err.Error()

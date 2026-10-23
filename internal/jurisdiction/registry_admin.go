@@ -97,6 +97,10 @@ type Jurisdiction struct {
 	CreatedAt   time.Time
 }
 
+// ErrDuplicateJurisdictionCode marks, next to ErrInvalidInput, a jurisdiction code that already exists (c1: the closed refusal
+// code duplicate_jurisdiction_code). Its text is empty on purpose: it only travels as a marker.
+var ErrDuplicateJurisdictionCode = errors.New("")
+
 // CreateJurisdictionParams is CreateJurisdiction's input.
 type CreateJurisdictionParams struct {
 	Code           string
@@ -148,7 +152,7 @@ func CreateJurisdiction(ctx context.Context, tx pgx.Tx, p CreateJurisdictionPara
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return Jurisdiction{}, fmt.Errorf("%w: jurisdiction code %q already exists", ErrInvalidInput, code)
+			return Jurisdiction{}, fmt.Errorf("%w: jurisdiction code %q already exists%w", ErrInvalidInput, code, ErrDuplicateJurisdictionCode)
 		}
 		return Jurisdiction{}, fmt.Errorf("jurisdiction: insert jurisdictions row: %w", err)
 	}

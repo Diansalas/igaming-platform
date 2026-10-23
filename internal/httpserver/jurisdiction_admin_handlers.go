@@ -53,6 +53,9 @@ func writeJurisdictionRegistryError(w http.ResponseWriter, requestID string, log
 	Error(msg string, args ...any)
 }, action string, err error) {
 	switch {
+	case errors.Is(err, jurisdiction.ErrDuplicateJurisdictionCode):
+		// c1: the closed refusal code (licensingchange.ClosedRefusals) for a duplicate code; status and sentence are unchanged.
+		apierror.WriteWithCheckCodes(w, requestID, apierror.CodeValidation, err.Error(), []string{"duplicate_jurisdiction_code"})
 	case errors.Is(err, jurisdiction.ErrInvalidInput):
 		apierror.Write(w, requestID, apierror.CodeValidation, err.Error())
 	case errors.Is(err, jurisdiction.ErrNotFound):

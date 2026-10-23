@@ -241,6 +241,20 @@ describe('licence country ceiling filing', () => {
     expect(document.body).not.toHaveTextContent('do-not-render')
   })
 
+  it('c1: a closed refusal code in check_codes is shown in its exact fixed wording; the status and generic code are unchanged', async () => {
+    tenantSetup()
+    server.use(http.post('/v1/admin/licensing-changes', () => refusal(400, 'validation_error', { check_codes: ['licence_unknown'] })))
+    renderWithProviders(<AppRoutes />, { route: `/licensing/licences/${LIC1}` })
+    const user = userEvent.setup()
+    const dlg = await openCeiling(user)
+    await fillCeiling(user, dlg, 'ZZ', 'disable')
+    await user.click(within(dlg).getByRole('button', { name: 'File ceiling change' }))
+    const alert = await within(dlg).findByRole('alert')
+    expect(alert).toHaveTextContent('The licence named in the request does not exist. Nothing was changed.')
+    expect(alert).toHaveTextContent('HTTP 400')
+    expect(document.body).not.toHaveTextContent('do-not-render')
+  })
+
   it('runs the step-up flow: first send refused step_up_required, code entered once, the SAME body re-sent exactly once', async () => {
     tenantSetup()
     const STEPPED = makeTestJwt({ ...PA, jti: 'stepped-market' })
@@ -539,6 +553,21 @@ describe('jurisdiction creation', () => {
     dlg = await openCreate(user)
     await fill()
     expect(await within(dlg).findByRole('alert')).toHaveTextContent(/does not hold the permission/)
+  })
+
+  it('c1: a duplicate code (400 plus duplicate_jurisdiction_code) is shown in exact words', async () => {
+    signInAs(PA)
+    licensingReads()
+    server.use(http.post('/v1/admin/jurisdictions', () => refusal(400, 'validation_error', { check_codes: ['duplicate_jurisdiction_code'] })))
+    renderWithProviders(<AppRoutes />, { route: '/licensing/jurisdictions' })
+    const user = userEvent.setup()
+    const dlg = await openCreate(user)
+    await user.type(within(dlg).getByLabelText('Code'), 'DUP')
+    await user.type(within(dlg).getByLabelText('Name'), 'Dup')
+    await user.type(within(dlg).getByLabelText('Reason code'), 'r_one')
+    await user.click(within(dlg).getByRole('button', { name: 'Create jurisdiction' }))
+    expect(await within(dlg).findByRole('alert')).toHaveTextContent('A jurisdiction with this code already exists. Codes are unique; choose another code. Nothing was changed.')
+    expect(document.body).not.toHaveTextContent('do-not-render')
   })
 
   it('hostile text in a created row renders as text', async () => {
