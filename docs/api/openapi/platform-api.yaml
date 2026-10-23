@@ -13066,6 +13066,7 @@ components:
         `officer_quorum_not_met`: the officer quorum (at least two distinct Persons) of the tenant's owner scope is not met.
         `sanctions_list_removal_refused`: the sanctions list is never removed through the governed loosening (a safe default; relaxing it is an owner and compliance decision).
         `loosening_mixes_tightening`: the version tightens one dimension while loosening another; every dimension must be looser or equal.
+        `loosening_not_supported_for_tenant_licensing_model`: governed loosening is not supported for a tenant that holds its own licence (out of scope until the approver model and the quorum read are designed).
         `grace_extension_after_expiry_refused`: the backfill grace of the withdrawal gate has expired and cannot be extended.
         The codes `policy_effective_from_out_of_range`, `rescreen_interval_below_floor`, `rescreen_interval_below_alert_threshold`, `tenant_not_in_jurisdiction` and `gate_environment_refused` are raised by the same path with the same meaning.
       enum:
@@ -13103,6 +13104,7 @@ components:
         - sanctions_list_removal_refused
         - loosening_mixes_tightening
         - grace_extension_after_expiry_refused
+        - loosening_not_supported_for_tenant_licensing_model
     AMLScreeningPolicy:
       type: object
       description: The screening policy in force for a jurisdiction. `configured=false` means NONE exists (the platform ships no re-screen interval and no grace).

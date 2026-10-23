@@ -145,6 +145,8 @@ DECLARE
     v_actor record;
     v_prev  text;
     v_ok    boolean;
+    v_pgrace bigint;
+    v_fgate  timestamptz;
 BEGIN
     IF NEW.created_by_scope = 'platform' THEN
         -- c4 (0190): a version authored by an executed aml_screening_policy_loosen licensing change of THIS transaction, whose payload
@@ -175,6 +177,15 @@ BEGIN
         END IF;
         IF NOT v_ok THEN
             RAISE EXCEPTION 'aml: a platform-authored policy version needs an executed aml_screening_policy_loosen licensing change of this transaction' USING ERRCODE = 'LC040';
+        END IF;
+        -- Defence in depth (c4 re-review LF N-1): a longer backfill grace may not take effect after the previous grace has run out.
+        SELECT p.backfill_grace_seconds INTO v_pgrace FROM public.aml_screening_policies p
+         WHERE p.tenant_id = NEW.tenant_id AND p.licensing_jurisdiction_id = NEW.licensing_jurisdiction_id ORDER BY p.created_at DESC, p.id DESC LIMIT 1;
+        SELECT min(tp.effective_from) INTO v_fgate FROM public.aml_screening_trigger_policies tp
+         WHERE tp.tenant_id = NEW.tenant_id AND tp.licensing_jurisdiction_id = NEW.licensing_jurisdiction_id AND tp.gate_withdrawal;
+        IF v_fgate IS NOT NULL AND v_pgrace IS NOT NULL AND NEW.backfill_grace_seconds > v_pgrace
+           AND NEW.effective_from >= v_fgate + pg_catalog.make_interval(secs => v_pgrace) THEN
+            RAISE EXCEPTION 'aml: the backfill grace of the withdrawal gate runs out before this version takes effect and cannot be extended' USING ERRCODE = 'LC050', HINT = 'grace_extension_after_expiry_refused';
         END IF;
         RETURN NEW;
     END IF;
@@ -356,8 +367,11 @@ BEGIN
     -- c4 fix (ledger-finance M-1), a SAFE GUARD: once the backfill grace of the gating policy has run out, a longer grace would re-open it for
     -- persons registered before the gate (the gate counts the grace from the FIRST gating version). Refused; the retro-release of waiting
     -- withdrawals by a longer re-screen interval remains an owner decision (D10).
+    -- (c4 re-review LF N-1: evaluated at the version's EFFECTIVE time, i.e. execution + the later of the offset and the cooling period, so a
+    -- grace that runs out before the new version takes effect cannot be extended either.)
     IF v_firstgate IS NOT NULL AND v_grace > v_prev.backfill_grace_seconds
-       AND pg_catalog.clock_timestamp() >= v_firstgate + pg_catalog.make_interval(secs => v_prev.backfill_grace_seconds) THEN
+       AND pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => GREATEST(v_off, COALESCE(v_cool, 0)))
+           >= v_firstgate + pg_catalog.make_interval(secs => v_prev.backfill_grace_seconds) THEN
         RAISE EXCEPTION 'aml: the backfill grace of the withdrawal gate has expired and cannot be extended' USING ERRCODE = 'LC050', HINT = 'grace_extension_after_expiry_refused';
     END IF;
     IF p_filed_at IS NOT NULL AND pg_catalog.clock_timestamp() < p_filed_at + pg_catalog.make_interval(secs => v_cool) THEN
@@ -378,6 +392,10 @@ DECLARE
     v_prev text := NULLIF(pg_catalog.current_setting('app.tenant_id', true), '');
     v_ok   boolean;
 BEGIN
+    -- c4 re-review (security info): a platform session is required, so this runtime-executable helper is no oracle for others.
+    IF (SELECT l.scope FROM public.licensing_change_actor() l) <> 'platform' THEN
+        RAISE EXCEPTION 'licensing change: a platform session is required' USING ERRCODE = 'LC001';
+    END IF;
     PERFORM pg_catalog.set_config('app.tenant_id', '', true);
     SELECT EXISTS (
         SELECT 1 FROM public.staff_capability_grants g
@@ -400,6 +418,14 @@ DECLARE
     v_prev   text;
     v_quorum integer;
 BEGIN
+    IF (SELECT l.scope FROM public.licensing_change_actor() l) <> 'platform' THEN
+        RAISE EXCEPTION 'licensing change: a platform session is required' USING ERRCODE = 'LC001';
+    END IF;
+    -- c4 re-review (security LOW-A): OWN-LICENCE tenants (owner scope 'tenant') are out of scope until D5 and the quorum read are designed; refused
+    -- explicitly, before the quorum, instead of dying on a quorum the platform grants cannot count.
+    IF public.aml_owner_scope_of_tenant(p_tenant) <> 'platform' THEN
+        RAISE EXCEPTION 'aml: governed loosening is not supported for a tenant that holds its own licence' USING ERRCODE = 'LC050', HINT = 'loosening_not_supported_for_tenant_licensing_model';
+    END IF;
     IF p_staff IS NULL OR p_person IS NULL OR NOT public.screening_loosening_officer_ok(p_tenant, p_staff, p_person) THEN
         RAISE EXCEPTION 'aml: the actor does not hold an in-force aml_officer grant on this tenant' USING ERRCODE = 'LC050', HINT = 'officer_grant_required';
     END IF;
@@ -459,6 +485,63 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
         EXECUTE 'REVOKE ALL ON FUNCTION licensing_change_approvals_screening_officer() FROM igaming_runtime';
     END IF;
+END
+$$;
+
+-- c4 re-review (LF N-2): the reconciliation of executed requests against the rows they must have written, runnable as documented. Read-only,
+-- platform_admin sessions only (checked inside), ids and kinds only. Reports executed loosen / configure requests without exactly one row and
+-- platform-authored rows without an executed request of their kind. The grant and policy tables are read tenant by tenant (their RLS).
+CREATE FUNCTION screening_loosening_reconcile(OUT o_problem text, OUT o_kind text, OUT o_request_id uuid, OUT o_tenant_id uuid)
+    RETURNS SETOF record
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    a        record;
+    v_prev   text;
+    v_reqs   jsonb;
+    v_ten    uuid[];
+    t        uuid;
+    q        record;
+    n        integer;
+BEGIN
+    SELECT * INTO a FROM public.licensing_change_actor();
+    IF a.scope <> 'platform' OR a.role <> 'platform_admin' THEN
+        RAISE EXCEPTION 'licensing change: reconciliation is for platform_admin sessions' USING ERRCODE = 'LC030';
+    END IF;
+    v_prev := NULLIF(pg_catalog.current_setting('app.tenant_id', true), '');
+    SELECT COALESCE(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('id', r.id, 'kind', r.kind, 'tenant', r.payload ->> 'tenant_id')), '[]'::jsonb) INTO v_reqs
+      FROM public.licensing_change_requests r WHERE r.status = 'executed' AND r.kind IN ('aml_screening_policy_loosen', 'aml_screening_loosening_configure');
+    SELECT COALESCE(pg_catalog.array_agg(x.id), ARRAY[]::uuid[]) INTO v_ten FROM public.tenants x;
+    FOREACH t IN ARRAY v_ten LOOP
+        PERFORM pg_catalog.set_config('app.tenant_id', t::text, true);
+        FOR q IN SELECT e ->> 'id' AS id, e ->> 'kind' AS kind FROM pg_catalog.jsonb_array_elements(v_reqs) e WHERE e ->> 'tenant' = t::text LOOP
+            IF q.kind = 'aml_screening_policy_loosen' THEN
+                SELECT count(*) INTO n FROM public.aml_screening_policies p WHERE p.change_request_id = q.id::uuid;
+            ELSE
+                SELECT count(*) INTO n FROM public.aml_screening_loosening_settings s WHERE s.change_request_id = q.id::uuid;
+            END IF;
+            IF n <> 1 THEN
+                o_problem := 'executed_request_without_exactly_one_row'; o_kind := q.kind; o_request_id := q.id::uuid; o_tenant_id := t;
+                RETURN NEXT;
+            END IF;
+        END LOOP;
+        FOR q IN SELECT p.change_request_id AS id FROM public.aml_screening_policies p
+                  WHERE p.created_by_scope = 'platform'
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements(v_reqs) e WHERE e ->> 'id' = p.change_request_id::text AND e ->> 'kind' = 'aml_screening_policy_loosen')
+        LOOP
+            o_problem := 'policy_row_without_executed_request'; o_kind := 'aml_screening_policy_loosen'; o_request_id := q.id; o_tenant_id := t;
+            RETURN NEXT;
+        END LOOP;
+        FOR q IN SELECT s.change_request_id AS id FROM public.aml_screening_loosening_settings s
+                  WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.jsonb_array_elements(v_reqs) e WHERE e ->> 'id' = s.change_request_id::text AND e ->> 'kind' = 'aml_screening_loosening_configure')
+        LOOP
+            o_problem := 'settings_row_without_executed_request'; o_kind := 'aml_screening_loosening_configure'; o_request_id := q.id; o_tenant_id := t;
+            RETURN NEXT;
+        END LOOP;
+    END LOOP;
+    PERFORM pg_catalog.set_config('app.tenant_id', COALESCE(v_prev, ''), true);
+    RETURN;
 END
 $$;
 
@@ -584,6 +667,7 @@ DECLARE
     v_lists  text[];
     v_cool   bigint;
     v_off    bigint;
+    v_inf    record;
 BEGIN
     SELECT * INTO a FROM public.licensing_change_actor();
     IF a.scope <> 'platform' OR a.role <> 'platform_admin' THEN
@@ -614,6 +698,10 @@ BEGIN
     PERFORM pg_catalog.set_config('app.tenant_id', v_tenant::text, true);
     SELECT p2.id, p2.lists, p2.rescreen_interval_seconds, p2.backfill_grace_seconds, p2.effective_from INTO v_old FROM public.aml_screening_policies p2
      WHERE p2.tenant_id = v_tenant AND p2.licensing_jurisdiction_id = v_jur ORDER BY p2.created_at DESC, p2.id DESC LIMIT 1;
+    -- c4 re-review (LF L-1): also the version IN FORCE now (the latest created may be pending).
+    SELECT p2.id, p2.lists, p2.rescreen_interval_seconds, p2.backfill_grace_seconds, p2.effective_from INTO v_inf FROM public.aml_screening_policies p2
+     WHERE p2.tenant_id = v_tenant AND p2.licensing_jurisdiction_id = v_jur AND p2.effective_from <= pg_catalog.clock_timestamp()
+     ORDER BY p2.created_at DESC, p2.id DESC LIMIT 1;
     INSERT INTO public.aml_screening_policies (tenant_id, licensing_jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds,
                                                effective_from, legal_review_reference, reason_code, created_by, created_by_person_id, created_by_scope, change_request_id)
     VALUES (v_tenant, v_jur, v_lists, (r.payload ->> 'rescreen_interval_seconds')::bigint, (r.payload ->> 'backfill_grace_seconds')::bigint,
@@ -623,6 +711,8 @@ BEGIN
     RETURN pg_catalog.jsonb_build_object('policy_id', v_id, 'tenant_id', v_tenant, 'jurisdiction_id', v_jur, 'effective_from', v_from,
         'previous_policy_id', v_old.id, 'previous_lists', v_old.lists, 'previous_rescreen_interval_seconds', v_old.rescreen_interval_seconds,
         'previous_backfill_grace_seconds', v_old.backfill_grace_seconds, 'previous_effective_from', v_old.effective_from,
+        'in_force_policy_id', v_inf.id, 'in_force_lists', v_inf.lists, 'in_force_rescreen_interval_seconds', v_inf.rescreen_interval_seconds,
+        'in_force_backfill_grace_seconds', v_inf.backfill_grace_seconds, 'in_force_effective_from', v_inf.effective_from,
         'lists', v_lists, 'rescreen_interval_seconds', (r.payload ->> 'rescreen_interval_seconds')::bigint,
         'backfill_grace_seconds', (r.payload ->> 'backfill_grace_seconds')::bigint);
 END
@@ -639,7 +729,7 @@ BEGIN
         'screening_loosening_state(uuid)', 'screening_policy_loosen_assert(jsonb, timestamptz)',
         'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)',
         'screening_loosening_officer_ok(uuid, uuid, uuid)', 'screening_loosening_officers_assert(uuid, uuid, uuid)',
-        'screening_loosening_approvers_assert(uuid, uuid, uuid, uuid)'
+        'screening_loosening_approvers_assert(uuid, uuid, uuid, uuid)', 'screening_loosening_reconcile()'
     ] LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN

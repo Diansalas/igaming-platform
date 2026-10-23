@@ -98,6 +98,7 @@ tenants are OWNER DECISIONS (`docs/plans/c4-screening-loosening-record.md`); not
   never writes a trigger policy, and it is refused (`gate_environment_refused`) where the jurisdiction's latest trigger policy gates
   withdrawals in a database whose environment anchor is not development / staging / test. Do not enable `gate_withdrawal` for a production
   tenant; that stays the rule of the section above.
+- **Own-licence tenants are OUT OF SCOPE** (`loosening_not_supported_for_tenant_licensing_model`): the quorum read cannot count the platform grants for them. Nothing was widened; supporting them needs D5 and the quorum read designed first.
 - **Tenant staff** never file, approve, see or read these requests (no tenant projection: they are AML configuration).
 - **Break-glass**: the unrouted `SetScreeningPolicy` path (0154) still exists and loosens without this flow (LIC30 L-3 residual). It is an
   operator action on the database only, not reachable over HTTP; using it needs an owner-recorded decision.
@@ -122,29 +123,18 @@ The payout and withdrawal gate evaluates the policy in force at the moment a wit
 loosening that takes effect applies to withdrawals ALREADY WAITING at their next gate claim:
 - a LONGER re-screen interval makes clears that had expired fresh again WITHOUT any new screening (persons held only because their clear was stale are released);
 - a LONGER backfill grace re-opens a grace that had run out, for persons registered before the gate.
-Safe guard built: while the jurisdiction has a gating trigger policy, a longer backfill grace is refused once the previous grace has run out
+Safe guard built: while the jurisdiction has a gating trigger policy, a longer backfill grace is refused when the previous grace has run out BY THE TIME THE NEW VERSION TAKES EFFECT (at the effective time, i.e. execution + the later of the offset and the cooling period; the table guard repeats the rule)
 (`grace_extension_after_expiry_refused`). The retro-release by a longer interval is NOT prevented: it is owner decision D10 (`docs/plans/c4-screening-loosening-record.md`).
 Payout decisions do not record the policy id they were made under; recording it is a recorded follow-up, not part of c4.
 
-#### Reconciliation query (executed loosen requests against policy rows)
+#### Reconciliation (executed loosen / configure requests against the rows they must have written)
 
-Run as the database owner on a copy or in a maintenance window (both tables are FORCE RLS: use a platform-admin session, or the owner after `NO FORCE` in a
-non-production database). Expected result: no rows.
+Run as a `platform_admin` session (no owner access and no `NO FORCE` needed; the function reads the RLS tables tenant by tenant and returns ids and kinds only):
 
 ```sql
--- executed requests without exactly one policy row, and policy rows without an executed request
-SELECT r.id AS request_id, 'executed_without_policy_row' AS problem
-  FROM licensing_change_requests r
- WHERE r.kind = 'aml_screening_policy_loosen' AND r.status = 'executed'
-   AND (SELECT count(*) FROM aml_screening_policies p WHERE p.change_request_id = r.id) <> 1
-UNION ALL
-SELECT p.change_request_id, 'policy_row_without_executed_request'
-  FROM aml_screening_policies p
- WHERE p.created_by_scope = 'platform'
-   AND NOT EXISTS (SELECT 1 FROM licensing_change_requests r WHERE r.id = p.change_request_id AND r.kind = 'aml_screening_policy_loosen' AND r.status = 'executed');
--- the same for the capability
-SELECT r.id, 'configure_executed_without_settings_row'
-  FROM licensing_change_requests r
- WHERE r.kind = 'aml_screening_loosening_configure' AND r.status = 'executed'
-   AND (SELECT count(*) FROM aml_screening_loosening_settings s WHERE s.change_request_id = r.id) <> 1;
+SELECT o_problem, o_kind, o_request_id, o_tenant_id FROM screening_loosening_reconcile();
 ```
+
+Expected result: NO rows. `executed_request_without_exactly_one_row` = an executed request whose policy / settings row is missing or duplicated;
+`policy_row_without_executed_request` and `settings_row_without_executed_request` = a platform-authored row that no executed request of its kind explains.
+Any row is an incident for `security` and `ledger-finance`. Any other session (tenant principal, no principal) is refused (`LC030` / `LC001`).

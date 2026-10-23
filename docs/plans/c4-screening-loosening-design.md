@@ -131,3 +131,11 @@ not a way to move a policy in a gated tenant of a production-anchored database. 
 7. A longer backfill grace is refused once the previous grace has run out while a gate exists (LF M-1 guard); the retro-release by a longer interval stays D10 (runbook section "Retroactive effect").
 Updated decisions: D2 (the effective time now also waits the cooling period), D3 (the sanctions list is closed by default; relaxing it is owner + compliance and needs per-clear
 screened-lists recording and a gate subset check first), D10 (retroactive release by a longer interval).
+
+## 8. Second review round (ledger-finance N-1, N-2, L-1; security LOW-A, info)
+
+- N-1: the grace guard is evaluated at the version's EFFECTIVE time (execution + the later of the offset and the cooling period) in the validator, and repeated in the platform branch of the policy guard.
+- N-2: `screening_loosening_reconcile()` (platform_admin sessions only, ids and kinds only) replaces the owner-only query.
+- LOW-A: own-licence tenants (owner scope `tenant`) are OUT OF SCOPE: `loosening_not_supported_for_tenant_licensing_model` is raised before the quorum read. Supporting them needs the approver model (D5) and a quorum read that counts the platform grants designed first; nothing was widened.
+- L-1: the audit outcome carries both `previous_*` (the latest created version) and `in_force_*` (the version in force at execution).
+- Info: `screening_loosening_officer_ok` and `_officers_assert` are runtime-executable SECURITY DEFINER helpers that answer whether a staff id holds an officer grant on a tenant: a possible oracle for any caller. They now require a platform session (otherwise `LC001`); a platform admin could already read grants, so nothing new is disclosed to them.
