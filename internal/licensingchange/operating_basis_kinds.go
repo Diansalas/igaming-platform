@@ -207,8 +207,8 @@ func init() {
 					return err
 				}
 				if clash {
-					return &DomainError{Err: fmt.Errorf("%w: the tenant's own licence already has a ceiling row for %s; a documented no-licence basis would be ambiguous (withdraw one of the two first)",
-						operatingmarket.ErrInvalidInput, p.CountryCode)}
+					return refuse("basis_clashes_with_licence_ceiling", fmt.Errorf("%w: the tenant's own licence already has a ceiling row for %s; a documented no-licence basis would be ambiguous (withdraw one of the two first)",
+						operatingmarket.ErrInvalidInput, p.CountryCode))
 				}
 			}
 			return nil

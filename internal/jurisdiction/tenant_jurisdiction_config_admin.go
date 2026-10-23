@@ -57,6 +57,10 @@ type TenantJurisdictionConfigContent struct {
 	GeoBlockList          []string
 }
 
+// ErrInactiveAsset marks, next to ErrInvalidInput, the refusal "an allowed currency is not an active asset" (c1: the closed
+// refusal code currency_not_active_asset). Its text is empty on purpose: it only travels as a marker, the message is ErrInvalidInput's.
+var ErrInactiveAsset = errors.New("")
+
 var (
 	rulesetIDRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 	paymentMethodRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_]{0,63}$`)
@@ -119,7 +123,7 @@ func ValidateTenantJurisdictionConfigContent(ctx context.Context, q pgx.Tx, c Te
 		return c, fmt.Errorf("jurisdiction: read assets: %w", err)
 	}
 	if active != len(c.AllowedCurrencies) {
-		return c, fmt.Errorf("%w: every allowed currency must be an active asset", ErrInvalidInput)
+		return c, fmt.Errorf("%w: every allowed currency must be an active asset%w", ErrInvalidInput, ErrInactiveAsset)
 	}
 	return c, nil
 }
