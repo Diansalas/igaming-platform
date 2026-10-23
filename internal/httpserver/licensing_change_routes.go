@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
@@ -147,7 +148,24 @@ func writeLicensingChangeError(w http.ResponseWriter, c licensingCall, op string
 		// A missing actor-proof issuer or a step-up backstop failure lands here too: fail closed, nothing was written.
 		c.logger.Error("licensing change: refused with an internal error (fail closed)", "op", op, "error", err)
 	}
+	if checks := licensingChangeCheckCodes(err); len(checks) > 0 {
+		apierror.WriteWithCheckCodes(w, c.requestID, code, msg, checks)
+		return
+	}
 	apierror.Write(w, c.requestID, code, msg)
+}
+
+// licensingChangeCheckCodes returns the closed refusal code of an LC050 screening loosening refusal (c4, migration 0190): the database
+// HINT, only when it is a member of the closed screening refusal table (anything else is dropped, never copied). Every other error carries none.
+func licensingChangeCheckCodes(err error) []string {
+	var ge *licensingchange.GuardError
+	if !errors.As(err, &ge) || ge.Code != "LC050" {
+		return nil
+	}
+	if _, ok := aml.RefusalCodes[ge.Hint]; !ok {
+		return nil
+	}
+	return []string{ge.Hint}
 }
 
 // ---- response shapes ------------------------------------------------------------------------------------------------

@@ -53,7 +53,8 @@ func TestLic29_RefusalCode_ClassificationKeepsTheStatusClassAndAddsTheCode(t *te
 func TestLic29_RefusalCodes_MatchTheMigrations(t *testing.T) {
 	re := regexp.MustCompile(`HINT = '([a-z0-9_]+)'`)
 	raised := map[string]bool{}
-	for _, name := range []string{"0181_lic10_residence_maker_checker_and_aml_triggers.up.sql", "0189_lic29_screening_policy_tighten_only_author.up.sql"} {
+	for _, name := range []string{"0181_lic10_residence_maker_checker_and_aml_triggers.up.sql", "0189_lic29_screening_policy_tighten_only_author.up.sql",
+		"0190_c4_screening_policy_governed_loosening.up.sql"} {
 		b, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		if err != nil {
 			t.Fatal(err)

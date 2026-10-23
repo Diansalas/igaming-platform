@@ -5,7 +5,8 @@
 //    a platform_acting AML officer, the owner-scope officer quorum and a signed actor proof (ADR 0110, produced server-side);
 //  - the platform ships NO re-screen interval and NO grace: every field of the request is a human decision, nothing is defaulted;
 //  - a version is TIGHTEN-ONLY (no list removed, no longer interval or grace, no earlier effective time) and loosening is not
-//    available over HTTP (409 policy_loosening_refused);
+//    available on this route (409 policy_loosening_refused); c4 (migration 0190): loosening is the separate two-person licensing
+//    change `aml_screening_policy_loosen` (API only, no filing form), refused until a platform administrator configures it;
 //  - the tenant is a PATH value only. No body carries a tenant, actor or proof.
 import { apiFetch, buildQuery } from './client'
 import { SCREENING_LISTS, UUID_RE, type ScreeningList } from './amlScreening'

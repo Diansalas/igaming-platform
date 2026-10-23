@@ -2,6 +2,7 @@
 // `code`, the HTTP status and the closed LC0xx check codes (when the server sends them) are the only server text used.
 import { ApiError, LICENSING_CHANGE_ERROR_CODES } from '../../api/types'
 import { STEP_UP_MESSAGES } from '../../auth/stepUpCoordinator'
+import { REFUSAL_TEXT } from '../aml/screeningErrors'
 import { safeToken } from './labels'
 
 const NOTHING = 'Nothing was changed.'
@@ -54,6 +55,9 @@ export interface LicensingErrorView {
 export function describeLicensingError(err: unknown): LicensingErrorView {
   if (!(err instanceof ApiError)) return { message: 'Something went wrong. Nothing was confirmed. Please try again.', lcCodes: [] }
   const lcCodes = err.checkCodes.filter((c) => LC_CODE.test(c)).map((code) => ({ code, text: LC_CODE_TEXT[code] ?? 'Reference code' }))
+  // c4: a screening loosening refusal carries one closed AML refusal code (aml.RefusalCodes); only the UI-owned wording is shown.
+  const screening = err.checkCodes.filter((c) => Object.prototype.hasOwnProperty.call(REFUSAL_TEXT, c)).map((code) => ({ code, text: REFUSAL_TEXT[code] }))
+  lcCodes.push(...screening)
   const base = { code: err.code as string, status: err.status, requestId: err.requestId, lcCodes }
   if (Object.prototype.hasOwnProperty.call(LICENSING_ERROR_MESSAGES, err.code)) {
     return { ...base, message: LICENSING_ERROR_MESSAGES[err.code as keyof typeof LICENSING_ERROR_MESSAGES] }

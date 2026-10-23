@@ -11003,7 +11003,7 @@ paths:
     post:
       summary: Author the next version of the AML screening policy (tighten-only)
       description: >
-        aml:hold:manage AND step-up `critical`; platform_acting AML officer only; owner-scope officer quorum; a signed actor proof (ADR 0110) bound to the whole request; a legal review reference. lic29, migration 0189. Appends an immutable VERSION. TIGHTEN-ONLY (against both the version in force and the latest): a version that removes a list, lengthens `rescreen_interval_seconds` or `backfill_grace_seconds`, or takes effect earlier than the latest version of the jurisdiction is refused with 409 and the closed code `policy_loosening_refused` in `check_codes` (loosening has no four-eyes path and is not available over HTTP; SR7-3). The first version of a jurisdiction has nothing to loosen. The jurisdiction must be one the tenant is configured to operate in (`tenant_not_in_jurisdiction`). Refusals carry a closed code in `check_codes` (see AMLScreeningRefusalCode).
+        aml:hold:manage AND step-up `critical`; platform_acting AML officer only; owner-scope officer quorum; a signed actor proof (ADR 0110) bound to the whole request; a legal review reference. lic29, migration 0189. Appends an immutable VERSION. TIGHTEN-ONLY (against both the version in force and the latest): a version that removes a list, lengthens `rescreen_interval_seconds` or `backfill_grace_seconds`, or takes effect earlier than the latest version of the jurisdiction is refused with 409 and the closed code `policy_loosening_refused` in `check_codes` (this route only tightens; loosening is the governed two-person licensing change `aml_screening_policy_loosen`, c4 migration 0190, which is refused until a platform administrator configures it; SR7-3). The first version of a jurisdiction has nothing to loosen. The jurisdiction must be one the tenant is configured to operate in (`tenant_not_in_jurisdiction`). Refusals carry a closed code in `check_codes` (see AMLScreeningRefusalCode).
       security:
         - bearerAuth: []
       parameters:
@@ -12913,7 +12913,14 @@ components:
         `request_lease_live`: the request is being processed: its lease has not expired.
         `person_has_pending_request`: the person has a pending request: name it to replace it.
         `no_gating_policy`: no trigger policy gates withdrawals for this tenant, so there is nothing to queue.
-        `policy_loosening_refused`: the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); loosening needs a four-eyes path that is not built.
+        `policy_loosening_refused`: the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); this route only tightens, loosening is a governed licensing change request (kind `aml_screening_policy_loosen`) that is refused unless configured.
+        c4 (migration 0190), carried in `check_codes` of a LICENSING_CHANGE_GUARD_REFUSED answer of the licensing change routes (the HTTP status is unchanged):
+        `loosening_not_configured`: screening policy loosening is not configured for this tenant (the capability is off until a platform administrator configures it).
+        `loosening_disabled`: screening policy loosening is disabled for this tenant.
+        `no_screening_policy_to_loosen`: there is no screening policy version to loosen; the first version is authored through the screening policy route.
+        `not_a_loosening`: the version is not less strict than the latest one; use the screening policy route.
+        `loosening_cooling_period`: the cooling period of the loosening, counted from the filing of the request, has not elapsed.
+        The codes `policy_effective_from_out_of_range`, `rescreen_interval_below_floor`, `rescreen_interval_below_alert_threshold`, `tenant_not_in_jurisdiction` and `gate_environment_refused` are raised by the same path with the same meaning.
       enum:
         - policy_effective_from_out_of_range
         - rescreen_interval_below_floor
@@ -12939,6 +12946,11 @@ components:
         - person_has_pending_request
         - no_gating_policy
         - policy_loosening_refused
+        - loosening_not_configured
+        - loosening_disabled
+        - no_screening_policy_to_loosen
+        - not_a_loosening
+        - loosening_cooling_period
     AMLScreeningPolicy:
       type: object
       description: The screening policy in force for a jurisdiction. `configured=false` means NONE exists (the platform ships no re-screen interval and no grace).
@@ -13484,11 +13496,18 @@ components:
         no_licence_documented), licence_id, jurisdiction_id, determination_reference, determined_by_role, basis_evidence_reference,
         restrictions_note, restricted_product_codes, review_due_at}; operating_basis_withdraw {tenant_id, brand_id, country_code,
         operation_code, product_code}; operating_basis_review_record {tenant_id, brand_id, country_code, operation_code, product_code,
-        review_due_at, needs_rereview, review_reference}. No legal value is implied by any field.
+        review_due_at, needs_rereview, review_reference}; (c4, migration 0190, PLATFORM ONLY, tenant staff may not request them)
+        aml_screening_policy_loosen {tenant_id, jurisdiction_id, lists (sorted, one or two of pep, sanctions), rescreen_interval_seconds,
+        backfill_grace_seconds, effective_offset_seconds (0..2592000, after execution), legal_review_reference, evidence_reference}: ALWAYS widening,
+        executes by writing the next screening policy version; refused (LICENSING_CHANGE_GUARD_REFUSED with a closed code in check_codes,
+        AMLScreeningRefusalCode) unless the tenant capability is configured and enabled, until its cooling period (from filing) has elapsed, and below the
+        engineering interval floor; aml_screening_loosening_configure {tenant_id, enabled, cooling_seconds (null when disabled), evidence_reference}:
+        widening iff it enables loosening or shortens the cooling period. No cooling period ships and loosening is OFF until a platform administrator
+        configures it. No legal value is implied by any field.
       properties:
         kind:
           type: string
-          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version, licence_status_change, licence_validity_dates_change, licence_review_due_change, licence_evidence_reference_change, operating_basis_set, operating_basis_withdraw, operating_basis_review_record]
+          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version, licence_status_change, licence_validity_dates_change, licence_review_due_change, licence_evidence_reference_change, operating_basis_set, operating_basis_withdraw, operating_basis_review_record, aml_screening_policy_loosen, aml_screening_loosening_configure]
         payload:
           type: object
         reason_code:

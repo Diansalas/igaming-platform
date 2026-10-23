@@ -334,7 +334,7 @@ const MinRescreenInterval = time.Hour
 
 // AuthorScreeningPolicy (lic29) is what the HTTP route calls: the same authorisation and row as SetScreeningPolicy through the
 // database function aml_screening_policy_author (migration 0189), which additionally refuses a version that is LESS STRICT than the
-// latest one (a list removed, a longer re-screen interval or grace, an earlier effective time): loosening has no four-eyes path yet.
+// latest one (a list removed, a longer re-screen interval or grace, an earlier effective time). Loosening is NOT done here: since migration 0190 (c4) it is the governed two-person licensing change aml_screening_policy_loosen (internal/licensingchange), inert until a platform administrator configures it.
 func (s *Service) AuthorScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput) (uuid.UUID, error) {
 	// lic30: the same bounds the database applies (aml_screening_policy_author), refused before a proof is signed.
 	if in.EffectiveFrom.IsZero() {
