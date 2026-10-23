@@ -3,6 +3,7 @@
 import { ApiError, LICENSING_CHANGE_ERROR_CODES } from '../../api/types'
 import { STEP_UP_MESSAGES } from '../../auth/stepUpCoordinator'
 import { safeToken } from './labels'
+import { licensingRefusalFor } from './licensingRefusal'
 
 const NOTHING = 'Nothing was changed.'
 
@@ -55,6 +56,9 @@ export function describeLicensingError(err: unknown): LicensingErrorView {
   if (!(err instanceof ApiError)) return { message: 'Something went wrong. Nothing was confirmed. Please try again.', lcCodes: [] }
   const lcCodes = err.checkCodes.filter((c) => LC_CODE.test(c)).map((code) => ({ code, text: LC_CODE_TEXT[code] ?? 'Reference code' }))
   const base = { code: err.code as string, status: err.status, requestId: err.requestId, lcCodes }
+  // c1: a closed refusal code (check_codes) selects the exact wording; the server text is never shown, and an unknown code falls through.
+  const exact = licensingRefusalFor(err.code, err.status, err.checkCodes)
+  if (exact) return { ...base, message: `${exact} ${NOTHING}` }
   if (Object.prototype.hasOwnProperty.call(LICENSING_ERROR_MESSAGES, err.code)) {
     return { ...base, message: LICENSING_ERROR_MESSAGES[err.code as keyof typeof LICENSING_ERROR_MESSAGES] }
   }

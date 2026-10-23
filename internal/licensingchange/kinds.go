@@ -176,7 +176,7 @@ func init() {
 				return err
 			}
 			if !ok {
-				return &DomainError{Err: fmt.Errorf("%w: unknown jurisdiction_id %s", jurisdiction.ErrInvalidInput, p.JurisdictionID)}
+				return refuse("jurisdiction_unknown", fmt.Errorf("%w: unknown jurisdiction_id %s", jurisdiction.ErrInvalidInput, p.JurisdictionID))
 			}
 			return nil
 		},
@@ -214,7 +214,7 @@ func precheckBind(ctx context.Context, tx pgx.Tx, tenantID, licenceID uuid.UUID)
 	var current *uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT licensing_model, licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&model, &current)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return &DomainError{Err: fmt.Errorf("%w: unknown tenant_id %s", jurisdiction.ErrNotFound, tenantID)}
+		return refuse("tenant_unknown", fmt.Errorf("%w: unknown tenant_id %s", jurisdiction.ErrNotFound, tenantID))
 	}
 	if err != nil {
 		return err
@@ -222,16 +222,16 @@ func precheckBind(ctx context.Context, tx pgx.Tx, tenantID, licenceID uuid.UUID)
 	var status, licensee string
 	err = tx.QueryRow(ctx, `SELECT status, licensee FROM licences WHERE id = $1`, licenceID).Scan(&status, &licensee)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return &DomainError{Err: fmt.Errorf("%w: unknown licence_id %s", jurisdiction.ErrInvalidInput, licenceID)}
+		return refuse("licence_unknown", fmt.Errorf("%w: unknown licence_id %s", jurisdiction.ErrInvalidInput, licenceID))
 	}
 	if err != nil {
 		return err
 	}
 	if status != "active" {
-		return &DomainError{Err: fmt.Errorf("%w: licence %s is not active (status=%s)", jurisdiction.ErrInvalidInput, licenceID, status)}
+		return refuse("licence_not_active", fmt.Errorf("%w: licence %s is not active (status=%s)", jurisdiction.ErrInvalidInput, licenceID, status))
 	}
 	if (model == "under_platform_licence") != (licensee == "platform") {
-		return &DomainError{Err: fmt.Errorf("%w: licence licensee does not match this tenant's licensing_model", jurisdiction.ErrInvalidInput)}
+		return refuse("licence_licensee_mismatch", fmt.Errorf("%w: licence licensee does not match this tenant's licensing_model", jurisdiction.ErrInvalidInput))
 	}
 	if licensee == "tenant" {
 		var other bool
@@ -239,7 +239,7 @@ func precheckBind(ctx context.Context, tx pgx.Tx, tenantID, licenceID uuid.UUID)
 			return err
 		}
 		if other {
-			return &DomainError{Err: fmt.Errorf("%w: licence is already exclusively bound to another tenant", jurisdiction.ErrInvalidInput)}
+			return refuse("licence_bound_to_other_tenant", fmt.Errorf("%w: licence is already exclusively bound to another tenant", jurisdiction.ErrInvalidInput))
 		}
 	}
 	return nil
@@ -295,7 +295,7 @@ func init() {
 				return err
 			}
 			if !ok {
-				return &DomainError{Err: fmt.Errorf("%w: unknown tenant_id %s", jurisdiction.ErrNotFound, p.TenantID)}
+				return refuse("tenant_unknown", fmt.Errorf("%w: unknown tenant_id %s", jurisdiction.ErrNotFound, p.TenantID))
 			}
 			return nil
 		},
@@ -376,7 +376,7 @@ func init() {
 				return err
 			}
 			if !ok {
-				return &DomainError{Err: fmt.Errorf("%w: unknown licence_id %s", operatingmarket.ErrInvalidInput, p.LicenceID)}
+				return refuse("licence_unknown", fmt.Errorf("%w: unknown licence_id %s", operatingmarket.ErrInvalidInput, p.LicenceID))
 			}
 			return nil
 		},
@@ -452,7 +452,7 @@ func init() {
 			var licence *uuid.UUID
 			err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, p.TenantID).Scan(&licence)
 			if errors.Is(err, pgx.ErrNoRows) {
-				return &DomainError{Err: fmt.Errorf("%w: unknown tenant_id %s", operatingmarket.ErrInvalidInput, p.TenantID)}
+				return refuse("tenant_unknown", fmt.Errorf("%w: unknown tenant_id %s", operatingmarket.ErrInvalidInput, p.TenantID))
 			}
 			if err != nil {
 				return err
@@ -470,7 +470,7 @@ func init() {
 						return err
 					}
 					if !own {
-						return &DomainError{Err: fmt.Errorf("%w: unknown brand_id %s", jurisdiction.ErrNotFound, *p.BrandID)}
+						return refuse("brand_not_owned", fmt.Errorf("%w: unknown brand_id %s", jurisdiction.ErrNotFound, *p.BrandID))
 					}
 				}
 			}
@@ -487,7 +487,7 @@ func init() {
 					return nil
 				}
 				if licence == nil {
-					return &DomainError{Err: fmt.Errorf("%w: tenant has no licence bound and no operating basis for %s; no country may be enabled for it", operatingmarket.ErrCeilingExceeded, p.CountryCode)}
+					return refuse("tenant_without_licence_or_basis", fmt.Errorf("%w: tenant has no licence bound and no operating basis for %s; no country may be enabled for it", operatingmarket.ErrCeilingExceeded, p.CountryCode))
 				}
 				var ok bool
 				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM licence_country_ceilings WHERE licence_id = $1 AND country_code = $2
@@ -495,7 +495,7 @@ func init() {
 					return err
 				}
 				if !ok {
-					return &DomainError{Err: fmt.Errorf("%w: country %s is not enabled by the tenant's licence ceiling", operatingmarket.ErrCeilingExceeded, p.CountryCode)}
+					return refuse("ceiling_not_enabled_for_country", fmt.Errorf("%w: country %s is not enabled by the tenant's licence ceiling", operatingmarket.ErrCeilingExceeded, p.CountryCode))
 				}
 			}
 			return nil
@@ -596,11 +596,18 @@ func init() {
 				p.TenantID, p.JurisdictionID).Scan(&tenantOK, &jurOK); err != nil {
 				return err
 			}
-			if !tenantOK || !jurOK {
-				return &DomainError{Err: fmt.Errorf("%w: unknown tenant or jurisdiction", jurisdiction.ErrInvalidInput)}
+			if !tenantOK {
+				return refuse("tenant_unknown", fmt.Errorf("%w: unknown tenant", jurisdiction.ErrInvalidInput))
+			}
+			if !jurOK {
+				return refuse("jurisdiction_unknown", fmt.Errorf("%w: unknown jurisdiction", jurisdiction.ErrInvalidInput))
 			}
 			if p.Action == ConfigActionSet {
 				if _, err := jurisdiction.ValidateTenantJurisdictionConfigContent(ctx, tx, p.content()); err != nil {
+					// The shape was validated by decode, so the only refusal left is a currency that is not an active asset.
+					if errors.Is(err, jurisdiction.ErrInactiveAsset) {
+						return refuse("currency_not_active_asset", err)
+					}
 					return &DomainError{Err: err}
 				}
 			}

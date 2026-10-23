@@ -147,6 +147,12 @@ func writeLicensingChangeError(w http.ResponseWriter, c licensingCall, op string
 		// A missing actor-proof issuer or a step-up backstop failure lands here too: fail closed, nothing was written.
 		c.logger.Error("licensing change: refused with an internal error (fail closed)", "op", op, "error", err)
 	}
+	// c1: the closed refusal code (licensingchange.ClosedRefusals) rides in check_codes; the status, the API code and the sentence are
+	// unchanged. Never attached to an internal error or to an authorisation answer.
+	if rc := licensingchange.ClosedRefusal(err); rc != "" && code != apierror.CodeInternal {
+		apierror.WriteWithCheckCodes(w, c.requestID, code, msg, []string{rc})
+		return
+	}
 	apierror.Write(w, c.requestID, code, msg)
 }
 

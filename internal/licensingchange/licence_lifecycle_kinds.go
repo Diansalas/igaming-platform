@@ -93,7 +93,7 @@ func currentLicence(ctx context.Context, tx pgx.Tx, id uuid.UUID) (status string
 	err = tx.QueryRow(ctx, `SELECT status, issued_at, expires_at, review_due_at, COALESCE(evidence_reference, '') FROM licences WHERE id = $1`, id).
 		Scan(&status, &issued, &expires, &review, &evidence)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil, nil, nil, "", &DomainError{Err: fmt.Errorf("%w: licence %s", jurisdiction.ErrNotFound, id)}
+		return "", nil, nil, nil, "", refuse("licence_unknown", fmt.Errorf("%w: licence %s", jurisdiction.ErrNotFound, id))
 	}
 	return
 }
@@ -132,7 +132,8 @@ func init() {
 				return err
 			}
 			if _, err := jurisdiction.ClassifyStatusChange(cur, p.Status); err != nil {
-				return &DomainError{Err: err}
+				// decode already holds the status to the vocabulary, so the only refusal left is "unchanged".
+				return refuse("licence_status_unchanged", err)
 			}
 			return nil
 		},
@@ -178,7 +179,7 @@ func init() {
 				return err
 			}
 			if _, err := jurisdiction.ClassifyValidityDatesChange(oi, oe, parseDatePtr(p.IssuedAt), parseDatePtr(p.ExpiresAt)); err != nil {
-				return &DomainError{Err: err}
+				return refuse("licence_validity_dates_unchanged", err)
 			}
 			return nil
 		},
@@ -218,7 +219,7 @@ func init() {
 				return err
 			}
 			if _, err := jurisdiction.ClassifyReviewDueChange(or, parseDatePtr(p.ReviewDueAt)); err != nil {
-				return &DomainError{Err: err}
+				return refuse("licence_review_due_unchanged", err)
 			}
 			return nil
 		},
@@ -261,7 +262,7 @@ func init() {
 				return err
 			}
 			if (p.Reference == nil && cur == "") || (p.Reference != nil && *p.Reference == cur) {
-				return &DomainError{Err: fmt.Errorf("%w: evidence_reference is unchanged", jurisdiction.ErrInvalidInput)}
+				return refuse("licence_evidence_reference_unchanged", fmt.Errorf("%w: evidence_reference is unchanged", jurisdiction.ErrInvalidInput))
 			}
 			return nil
 		},

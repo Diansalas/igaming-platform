@@ -12887,6 +12887,79 @@ components:
         legal_review_reference: { type: string }
         reason_code: { type: string }
       required: [jurisdiction_id, events, gate_withdrawal, effective_from, legal_review_reference, reason_code]
+    LicensingRefusalCode:
+      type: string
+      description: >
+        c1. CLOSED, stable, machine-readable refusal code carried in `check_codes` (one element) of a refused licensing change or tenant policy
+        request, next to the generic code and the fixed sentence. The HTTP status and the generic `code` (validation_error, not_found,
+        LICENSING_CHANGE_REFUSED, LICENSING_CHANGE_GUARD_REFUSED) of every refusal are UNCHANGED from before the code existed; the code says which
+        precondition failed. It is set by the filing routes (POST /v1/admin/licensing-changes and the licence, tenant licence and lifecycle routes
+        that file through it), by approve (execution refusals) and by POST /v1/admin/jurisdictions (`duplicate_jurisdiction_code`). A malformed
+        payload is a plain validation_error without a code. Database text is never returned. The list equals licensingchange.RefusalCodes and the
+        Back Office wording table (pinned by tests). Codes: 
+        `jurisdiction_unknown`: the jurisdiction does not exist.
+        `tenant_unknown`: the tenant does not exist.
+        `licence_unknown`: the licence does not exist.
+        `licence_not_active`: a licence that is not active cannot be bound to a tenant.
+        `licence_licensee_mismatch`: the licence's licensee does not match the tenant's licensing model.
+        `licence_bound_to_other_tenant`: a licence held by a tenant is exclusively bound to one tenant, and it is bound to another.
+        `brand_not_owned`: the brand is not a brand of the tenant (a foreign brand is indistinguishable from an unknown one).
+        `tenant_without_licence_or_basis`: the tenant has no licence bound and no operating basis for the country, so no country may be enabled for it.
+        `ceiling_not_enabled_for_country`: the tenant's licence has no enabled ceiling for the country (a missing ceiling and a disabled one are the same answer).
+        `basis_clashes_with_licence_ceiling`: the tenant's own licence already has a ceiling row for the country, so a documented no-licence basis would be ambiguous.
+        `currency_not_active_asset`: every allowed currency must be an active asset of the platform asset registry.
+        `licence_status_unchanged`: the licence already has this status.
+        `licence_validity_dates_unchanged`: the validity dates are unchanged.
+        `licence_review_due_unchanged`: the review date is unchanged.
+        `licence_evidence_reference_unchanged`: the evidence reference is unchanged.
+        `duplicate_jurisdiction_code`: a jurisdiction with this code already exists.
+        `policy_exceeds_permitted_scope`: the policy would exceed the licence ceiling, a higher scope's policy, or a broader in-force policy at the same scope.
+        `policy_close_needs_successor`: closing an in-force disabled policy at an inheriting rung requires an open successor version.
+        `session_not_permitted`: this session may not request or act on licensing changes.
+        `request_invalid`: the database refused the request as invalid or naming an unknown record.
+        `request_immutable`: a filed request cannot be edited.
+        `approvals_insufficient`: the request does not hold the required number of fresh approvals by distinct eligible people.
+        `single_actor_execution_only`: a single-actor change is executed only by its requester, in its own transaction.
+        `only_requester_cancels`: only the requester may cancel a request.
+        `change_now_widens`: the change now widens what is permitted; a new request is needed.
+        `approver_not_eligible`: only an eligible platform administrator decides a request.
+        `governed_write_needs_executed_request`: governed data changes only through an executed licensing change request.
+        `licence_identity_immutable`: licence identity fields can never change.
+        `operating_basis_write_refused`: the operating basis, licence or tenant records do not allow this write.
+        `closed_basis_needs_successor`: a closed operating basis version needs a successor version that starts when it ended.
+        `records_append_only`: licensing change records are append-only.
+      enum:
+        - jurisdiction_unknown
+        - tenant_unknown
+        - licence_unknown
+        - licence_not_active
+        - licence_licensee_mismatch
+        - licence_bound_to_other_tenant
+        - brand_not_owned
+        - tenant_without_licence_or_basis
+        - ceiling_not_enabled_for_country
+        - basis_clashes_with_licence_ceiling
+        - currency_not_active_asset
+        - licence_status_unchanged
+        - licence_validity_dates_unchanged
+        - licence_review_due_unchanged
+        - licence_evidence_reference_unchanged
+        - duplicate_jurisdiction_code
+        - policy_exceeds_permitted_scope
+        - policy_close_needs_successor
+        - session_not_permitted
+        - request_invalid
+        - request_immutable
+        - approvals_insufficient
+        - single_actor_execution_only
+        - only_requester_cancels
+        - change_now_widens
+        - approver_not_eligible
+        - governed_write_needs_executed_request
+        - licence_identity_immutable
+        - operating_basis_write_refused
+        - closed_basis_needs_successor
+        - records_append_only
     AMLScreeningRefusalCode:
       type: string
       description: >
@@ -16097,7 +16170,8 @@ components:
             Set only by the launch authorisation routes: the closed H-n / R- / refusal / SQLSTATE codes of a refused precondition,
             acknowledgement, execution or database guard. Never free text.
             lic29: the AML screening routes also use it for the closed refusal codes (AMLScreeningRefusalCode) and the generic AML
-            check codes (quorum_not_met, hold_refused, four_eyes_refused, stale, illegal_transition, guard_refused, note_refused).
+            check codes (quorum_not_met, hold_refused, four_eyes_refused, stale, illegal_transition, guard_refused, note_refused)
+            c1: the licensing change and tenant policy routes use it for one closed refusal code (LicensingRefusalCode), the status and generic code unchanged.
           items:
             type: string
       required: [code, message]
@@ -16872,7 +16946,8 @@ components:
         Person already approved), LICENSING_CHANGE_DUPLICATE_PENDING (an identical open request), LICENSING_CHANGE_APPROVALS_STALE
         (an approval older than the 24 h window), LICENSING_CHANGE_REFUSED (the domain writer refused, for example the
         licence ceiling), LICENSING_CHANGE_GUARD_REFUSED (a database guard LC0xx), LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT
-        (retry). Nothing is recorded.
+        (retry). c1: LICENSING_CHANGE_REFUSED and LICENSING_CHANGE_GUARD_REFUSED carry one closed code in `check_codes`
+        (LicensingRefusalCode) when the refusal is one the platform names. Nothing is recorded.
       content:
         application/json:
           schema:
