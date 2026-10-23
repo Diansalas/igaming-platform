@@ -25,6 +25,7 @@ import { CEILING_TITLE, classHint, fillPolicy, openChangeLink, openLicencePage, 
 import { codesOf, spCount, thisMinute } from '../lib/sp_ui'
 import { configureTenantJurisdiction, jurisdictionId } from '../lib/wd_aml'
 import { call, createTenant } from '../lib/wd_world'
+import { sqlT } from '../lib/wd_db'
 import { loadWorld } from '../lib/world'
 import {
   auditCounts, ceilingAudit, changeFingerprint, fillScopedOperationPolicy, globalCounts, mcResolveScoped, productPolicy, shiftChange, staleApprove,
@@ -45,9 +46,9 @@ async function fileCeiling(lic: string, country: string, token?: string): Promis
 const approveApi = async (key: string, id: string) => apiApprove(await apiLogin(key), id, 'e2e_c3_ok')
 
 test('(a) ceiling WITHDRAWAL through the UI: narrowing, one actor, applied at once; DB, real resolver and audit', async ({ browser }) => {
-  const LIC = syntheticLicenceId(), TEN = tenantId(), CC = 'SE'
-  await mcFileAndApprove(ceilingBody(LIC, CC, 'enable', 'E2E-C3-CEILING-SE'))
-  await mcFileAndApprove(policyBody({ tenant: TEN, scope: 'tenant', country: CC, kind: 'enable', ref: 'E2E-C3-POLICY-SE' }))
+  const LIC = syntheticLicenceId(), TEN = tenantId(), CC = 'EE'
+  await mcFileAndApprove(ceilingBody(LIC, CC, 'enable', 'E2E-C3-CEILING-EE'))
+  await mcFileAndApprove(policyBody({ tenant: TEN, scope: 'tenant', country: CC, kind: 'enable', ref: 'E2E-C3-POLICY-EE' }))
   for (const op of OPS) expect(mcResolve(TEN, CC, op)).toBe('permitted')
   expect(mcCeiling(LIC, CC)).toMatchObject({ state: 'enabled', status: 'active', versions: 1 })
 
@@ -76,9 +77,9 @@ test('(a) ceiling WITHDRAWAL through the UI: narrowing, one actor, applied at on
 })
 
 test('(b) brand rung through the UI: disable is narrowing and immediate, enable is widening with two distinct Persons, the real resolver follows', async ({ browser }) => {
-  const LIC = syntheticLicenceId(), TEN = tenantId(), CC = 'FI', brand = mcBrandId(TEN)
-  await mcFileAndApprove(ceilingBody(LIC, CC, 'enable', 'E2E-C3-CEILING-FI'))
-  await mcFileAndApprove(policyBody({ tenant: TEN, scope: 'tenant', country: CC, kind: 'enable', ref: 'E2E-C3-POLICY-FI' }))
+  const LIC = syntheticLicenceId(), TEN = tenantId(), CC = 'LT', brand = mcBrandId(TEN)
+  await mcFileAndApprove(ceilingBody(LIC, CC, 'enable', 'E2E-C3-CEILING-LT'))
+  await mcFileAndApprove(policyBody({ tenant: TEN, scope: 'tenant', country: CC, kind: 'enable', ref: 'E2E-C3-POLICY-LT' }))
   const key = { tenant: TEN, scope: 'brand' as const, country: CC, brand }
   expect(mcResolveScoped(TEN, CC, 'deposit', { brand })).toBe('permitted')
 
@@ -97,7 +98,7 @@ test('(b) brand rung through the UI: disable is narrowing and immediate, enable 
   // (2) enable at the brand rung: widening, pending, same-Person twins refused, two distinct Persons execute
   const A = await ctx(browser, 'PA_A')
   await openTenantPage(A, TEN)
-  d = await fillPolicy(A, { rung: 'brand', brandId: brand, country: CC, action: 'enable', ref: 'E2E-C3-BRAND-FI', reason: 'e2e_brand_enable' })
+  d = await fillPolicy(A, { rung: 'brand', brandId: brand, country: CC, action: 'enable', ref: 'E2E-C3-BRAND-LT', reason: 'e2e_brand_enable' })
   await expect(classHint(d)).toContainText('widening')
   await submitMarket(A, d, 'File policy change', /Pending approval\. Nothing has changed yet/)
   const en = await openChangeLink(A, d)
@@ -116,7 +117,7 @@ test('(b) brand rung through the UI: disable is narrowing and immediate, enable 
   const C = await ctx(browser, 'PA_C')
   await decide(C, en, 'approve', 'e2e_c3_two', () => expect(C.page.getByText('Approval recorded and the change was executed.')).toBeVisible())
   expect(mcChange(en)).toMatchObject({ status: 'executed', approvals: 2 })
-  expect(mcPolicy(key)).toMatchObject({ state: 'enabled', status: 'active', ref: 'E2E-C3-BRAND-FI', versions: 2 })
+  expect(mcPolicy(key)).toMatchObject({ state: 'enabled', status: 'active', ref: 'E2E-C3-BRAND-LT', versions: 2 })
   expect(mcResolveScoped(TEN, CC, 'deposit', { brand })).toBe('permitted')
   expect(auditCounts(en)).toEqual({ requested: 1, approved: 2, executed: 1, approve_denied: 1 }) // the A2 same-Person attempt is the one denied event
 })
@@ -409,9 +410,9 @@ test('(i3) tenant configuration with a currency that is not an active asset: wir
 test('(i4) platform_officer_required on the real stack: a tenant compliance user with a tenant-scope aml_officer grant (tenant admin requests, platform admin approves) is refused 403 with that code, nothing written; the UI offers no authoring to that role', async ({ browser }) => {
   const T = await createTenant('c3o')
   await configureTenantJurisdiction(T)
-  const grantee = sql(`SELECT id FROM staff_users WHERE email = '${loadWorld().accounts['c3o_COMPLIANCE'].email}'`)
-  const rq = await call('POST', `/v1/admin/tenants/${T.id}/capability-grants/requests`, await apiLogin('c3o_TENANT_ADMIN'), { grantee_staff_id: grantee, capability: 'aml_officer', reason_code: 'e2e_c3_officer' })
-  expect(rq.status).toBe(201)
+  const grantee = sqlT(T.id, `SELECT id FROM staff_users WHERE email = '${loadWorld().accounts['c3o_COMPLIANCE'].email}'`) // tenant staff rows are tenant-scoped (RLS)
+  const rq = await call('POST', `/v1/admin/tenants/${T.id}/capability-grants/requests`, await apiLogin('c3o_TENANT_ADMIN'), { grantee_staff_id: grantee, capability: 'aml_officer', reason_code: 'e2e_c3_officer', valid_until: new Date(Date.now() + 3 * 3600_000).toISOString() })
+  expect(rq.status, rq.text).toBe(201)
   const ap = await call('POST', `/v1/admin/tenants/${T.id}/capability-grants/requests/${rq.json.id}/approve`, await apiLogin('PA_B'), { reason_code: 'e2e_c3_officer_ok' })
   expect(ap.status).toBe(200)
   const before = spCount(T)
