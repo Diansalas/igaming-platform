@@ -788,6 +788,13 @@ const (
 	// ceilings, a tenant's operating-country policies and jurisdiction configurations). platform_admin ONLY (the same role set
 	// that holds PermJurisdictionRegistryManage); never granted to a tenant role.
 	PermJurisdictionRegistryRead Permission = "jurisdiction_registry:read"
+
+	// PermOperatingBasisTenantRead (c2): read the caller's OWN tenant's operating bases through the redacted, tenant-scoped
+	// projection (GET /v1/admin/tenant/operating-bases). tenant_admin and compliance ONLY (the roles that already read the tenant's
+	// own withdrawal restriction policy and licensing changes); never platform_admin (which has the platform routes under
+	// PermJurisdictionRegistryRead and no tenant), support, finance or any other role. Read-only: a basis is changed only by a
+	// licensing change. Deliberately NOT PermJurisdictionRegistryRead, which is platform-wide and never granted to a tenant role.
+	PermOperatingBasisTenantRead Permission = "operating_basis:tenant_read"
 )
 
 // lic11 (migration 0182): the governed per-tenant withdrawal restriction policy. STATIC route-level authority; the
@@ -1071,6 +1078,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLicensingChangeRequest, PermLicensingChangeRead,
 		// lic11 (migration 0182): read the tenant's OWN withdrawal restriction policy; never change it.
 		PermWithdrawalRestrictionPolicyRead,
+		// c2: read the tenant's OWN operating bases (redacted projection); never platform-wide.
+		PermOperatingBasisTenantRead,
 		// ADR 0115 S2: read a player's RG limits and the config in force; never write.
 		PermRGLimitRead, PermRGConfigRead,
 	),
@@ -1155,6 +1164,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLicensingChangeRequest, PermLicensingChangeRead,
 		// lic11 (migration 0182): read the tenant's OWN withdrawal restriction policy; never change it.
 		PermWithdrawalRestrictionPolicyRead,
+		// c2: read the tenant's OWN operating bases (redacted projection); never platform-wide.
+		PermOperatingBasisTenantRead,
 		// ADR 0115 S2: compliance is the sole writer of operator RG bounds and of limit changes on a
 		// player's request (decreases only until ADR 0017 step-up ships).
 		PermRGLimitRead, PermRGLimitWriteOnPlayerRequest, PermRGConfigRead, PermRGConfigWrite,

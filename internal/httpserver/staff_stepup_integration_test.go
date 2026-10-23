@@ -180,9 +180,10 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// integ-b merge left the none-mutating and read pins at the lic10-only values (44 / 101) although the comments above sum to 46 / 105.
 	// lic23: +1 critical (POST .../screening/persons/{personID}/requests/replace): critical 81.
 	// lic29: +1 critical (POST .../screening/policy), +1 read (GET .../screening/policy): critical 82, read 108.
+	// c2: +2 reads (GET /v1/admin/tenant/operating-bases and /{basisID}, tenant-scoped, step-up none): read 110.
 	if counts["critical"] != 82 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 46 || counts["read"] != 108 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 46 || counts["read"] != 110 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

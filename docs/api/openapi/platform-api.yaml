@@ -6918,8 +6918,8 @@ paths:
         versions. Paginated with ?limit= (default 50, max 200) and ?offset=. A basis is a business decision recorded by named staff:
         it is NOT a legal or regulatory authorisation and NOT a market-permission decision (the runtime gate resolves permission).
         Bases are written only by filing a licensing change (kinds operating_basis_set, operating_basis_withdraw,
-        operating_basis_review_record). No basis ships with the platform. A tenant has no read API of its own (its resolver reads
-        its own rows under row-level security).
+        operating_basis_review_record). No basis ships with the platform. A tenant reads only its OWN bases, through the redacted
+        projection at GET /v1/admin/tenant/operating-bases (c2).
       security:
         - bearerAuth: []
       parameters:
@@ -6966,6 +6966,75 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperatingBasisDetail"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenant/operating-bases:
+    get:
+      summary: List the caller's OWN tenant's operating bases, redacted (operating_basis:tenant_read)
+      description: >
+        Requires operating_basis:tenant_read (tenant_admin and compliance only) and a tenant-scoped token; a platform_admin token
+        (no tenant) is refused 403 and uses GET /v1/admin/operating-bases instead. Step-up none. Read-only. The tenant is ALWAYS the
+        authenticated context's: there is no tenant parameter (a supplied `tenant_id` query parameter is ignored, never honoured).
+        Row-level security independently limits the read to the caller's own rows. Returns the stored versions (open and closed,
+        active and withdrawn) newest first within country and operation; `current=true` keeps only open versions. `brand_id` filters
+        to one of the caller's brands; a brand that is unknown or belongs to another tenant is 404 (indistinguishable). Paginated
+        with ?limit= (default 50, max 200) and ?offset=. The projection is an allow-list (see TenantOperatingBasis): staff ids, the
+        decision record, change request id, reason code, determination / evidence / review references, the responsible role, the
+        restrictions note text, licence and jurisdiction ids and tenant_id are NOT returned. A basis is a recorded business
+        decision, not a legal authorisation and not a market-permission decision.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: brand_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: country_code, in: query, required: false, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+        - { name: current, in: query, required: false, schema: { type: boolean } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: A page of the caller's own operating basis versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantOperatingBasisPage"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenant/operating-bases/{basisID}:
+    get:
+      summary: Get one of the caller's OWN operating basis versions, redacted (operating_basis:tenant_read)
+      description: >
+        Requires operating_basis:tenant_read (tenant_admin and compliance only) and a tenant-scoped token. Step-up none. An unknown
+        id and another tenant's id are the same 404 (no existence oracle). No decision record is returned.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: basisID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The operating basis version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantOperatingBasis"
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
@@ -13456,6 +13525,44 @@ components:
       type: object
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/OperatingBasis" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
+    TenantOperatingBasis:
+      description: >
+        The tenant-visible projection of an operating basis version (c2), field by field. Returned: scope (brand_id, country_code,
+        operation_code, product_code), basis_kind, restricted_product_codes (closed registry codes), has_restrictions_note (whether
+        a note exists; the text is withheld), review_due_at, needs_rereview, status (active or withdrawn), is_current (open version),
+        policy_version, effective_from, effective_to, created_at, disclaimer. NOT returned (withheld by design, the platform marks
+        nothing in a basis row as tenant-visible): tenant_id, licence_id, jurisdiction_id, determination_reference,
+        determined_by_role, basis_evidence_reference, restrictions_note text, last_review_reference, reason_code,
+        change_request_id, created_by and any staff, requester, executor or approver identity.
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid, nullable: true, description: "null = tenant-wide; a brand-specific row wins for that brand." }
+        country_code: { type: string }
+        operation_code: { type: string }
+        product_code: { type: string, nullable: true }
+        basis_kind: { type: string, enum: [platform_licence, partner_licence, no_licence_documented] }
+        restricted_product_codes: { type: array, items: { type: string } }
+        has_restrictions_note: { type: boolean }
+        review_due_at: { type: string, format: date, nullable: true }
+        needs_rereview: { type: boolean }
+        status: { type: string, enum: [active, withdrawn] }
+        is_current: { type: boolean, description: "true for the open version of its scope; false for a superseded or closed version." }
+        policy_version: { type: string }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        disclaimer: { type: string }
+      required: [id, brand_id, country_code, operation_code, product_code, basis_kind, restricted_product_codes, has_restrictions_note, review_due_at, needs_rereview, status, is_current, policy_version, effective_from, effective_to, created_at, disclaimer]
+    TenantOperatingBasisPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TenantOperatingBasis" } }
         limit: { type: integer }
         offset: { type: integer }
         total: { type: integer }
