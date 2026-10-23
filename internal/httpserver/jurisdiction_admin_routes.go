@@ -52,6 +52,12 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListOperatingBasesHandler(deps))))
 	mux.Handle("GET /v1/admin/operating-bases/{basisID}",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newGetOperatingBasisHandler(deps))))
+	// c2: TENANT-scoped read of the caller's OWN operating bases (PermOperatingBasisTenantRead, RequireTenantScope; the tenant is the
+	// authenticated context's, there is no tenant parameter). Redacted projection; see tenant_operating_basis_read_handlers.go.
+	mux.Handle("GET /v1/admin/tenant/operating-bases",
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermOperatingBasisTenantRead)(newListOwnOperatingBasesHandler(deps)))))
+	mux.Handle("GET /v1/admin/tenant/operating-bases/{basisID}",
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermOperatingBasisTenantRead)(newGetOwnOperatingBasisHandler(deps)))))
 	mux.Handle("GET /v1/admin/tenants/{tenantID}/jurisdiction-configs",
 		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListTenantJurisdictionConfigsHandler(deps))))
 	mux.Handle("POST /v1/admin/licences",
