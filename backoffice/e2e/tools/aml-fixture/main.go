@@ -5,10 +5,12 @@
 // "development" or "test".
 //
 // Why it exists: the jurisdiction SCREENING policy (lists, re-screen interval, backfill grace) that a withdrawal-gating trigger policy
-// requires has no HTTP route and no Back Office screen (lic20 record, section 3). The only way to author it is the AML officer service
-// (aml.Service.SetScreeningPolicy). This tool calls exactly that service, as a real platform officer, over the RUNTIME database role,
-// signing the actor proof with the same configured proof key platform-api uses. Every database check (the in-force aml_officer grant,
-// the officer quorum of the owner scope, the signed proof, the tenant-jurisdiction rule) applies unchanged; nothing is bypassed.
+// requires is authored through the AML officer service. Since migration 0191 (d1, D7) the loosening-capable break-glass setter
+// (aml.Service.SetScreeningPolicy) is OWNER-ONLY and this tool no longer uses it: it calls aml.Service.AuthorScreeningPolicy, the SAME
+// tighten-only method the HTTP policy route uses (aml_screening_policy_author, migration 0189), as a real platform officer, over the
+// RUNTIME database role, signing the actor proof with the same configured proof key platform-api uses. Every database check (the
+// in-force aml_officer grant, the officer quorum of the owner scope, the signed proof, the tenant-jurisdiction rule, the tighten-only
+// rule and the engineering floors) applies unchanged; nothing is bypassed and no runtime privilege is needed beyond the route's own.
 //
 // Usage: aml-fixture screening-policy -tenant UUID -staff UUID -jurisdiction UUID -lists sanctions,pep -legal-ref REF
 // Env: DATABASE_URL (runtime role, private database), ACTOR_PROOF_KEYS, ACTOR_PROOF_ACTIVE_KID, APP_ENV.
@@ -84,9 +86,9 @@ func run(args []string) error {
 	for _, l := range strings.Split(*lists, ",") {
 		in.Lists = append(in.Lists, aml.ListType(strings.TrimSpace(l)))
 	}
-	id, err := svc.SetScreeningPolicy(ctx, aml.Actor{StaffID: sid, Scope: aml.ScopePlatformActing, TenantID: tid}, in)
+	id, err := svc.AuthorScreeningPolicy(ctx, aml.Actor{StaffID: sid, Scope: aml.ScopePlatformActing, TenantID: tid}, in)
 	if err != nil {
-		return fmt.Errorf("SetScreeningPolicy refused: %w", err)
+		return fmt.Errorf("AuthorScreeningPolicy refused: %w", err)
 	}
 	fmt.Println(id.String())
 	return nil

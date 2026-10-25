@@ -230,7 +230,8 @@ BEGIN
         'aml_case_approve(uuid, uuid, integer, text, text)', 'aml_case_read(uuid, uuid)', 'aml_case_events_list(uuid, uuid)',
         'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)',
         -- Migration 0154 (A7): screening policy / record / list and the launch readiness reader.
-        'aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)', 'aml_screening_policy_effective(uuid, uuid)',
+        -- (aml_screening_policy_set is NOT here since migration 0191 (d1, D7): the unrouted break-glass setter is owner-only.)
+        'aml_screening_policy_effective(uuid, uuid)',
         'aml_screening_record(uuid, uuid, text, text, text, text, text, text[], text, text[], text, timestamptz, text, text)',
         'aml_screening_list(uuid, uuid)', 'aml_readiness(uuid, uuid[])',
         -- Migration 0181 (lic10, G1): the automatic screening trigger policy, queue and worker API.
@@ -252,6 +253,12 @@ BEGIN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
         END IF;
     END LOOP;
+    -- Migration 0191 (d1, D7): the loosening-capable break-glass setter is OWNER-ONLY. Re-asserted on every run, because an older
+    -- deployment script (or a database restored from before 0191) granted it to the runtime role.
+    IF to_regprocedure('public.aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text) FROM igaming_runtime;
+    END IF;
     -- NOT granted until the HD-RET-1 erasure job exists as its caller (security F5): re-assert the revoke.
     IF to_regprocedure('public.aml_person_has_records(uuid, uuid)') IS NOT NULL THEN
         REVOKE ALL ON FUNCTION aml_person_has_records(uuid, uuid) FROM igaming_runtime;

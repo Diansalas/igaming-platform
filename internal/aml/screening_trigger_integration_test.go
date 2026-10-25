@@ -75,7 +75,7 @@ func newTrigWorld(t *testing.T, rescreen time.Duration, grace time.Duration) *tr
 	w.bindLicence(j)
 	in := policyInput(j, time.Now().Add(-time.Hour))
 	in.RescreenInterval, in.BackfillGrace = rescreen, grace
-	if _, err := svc.SetScreeningPolicy(context.Background(), q.Officers[0].Actor, in); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(context.Background(), q.Officers[0].Actor, in); err != nil {
 		t.Fatalf("screening policy: %v", err)
 	}
 	return &trigWorld{amlWorld: w, q: q, svc: svc, jur: j, prov: &countingProvider{inner: aml.NewMockScreeningProvider()}}
@@ -200,7 +200,7 @@ func TestTriggerPolicy_Authoring_IsGovernedLikeTheScreeningPolicy(t *testing.T) 
 	if _, err := svc.SetScreeningTriggerPolicy(ctx, a, in); !errors.Is(err, aml.ErrInvalidInput) {
 		t.Fatalf("no screening policy yet: %v, want ErrInvalidInput (AT004)", err)
 	}
-	if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	// lic18 H-1 (a): a withdrawal gate is refused while no screening worker has reported in. (The heartbeat table is database-wide:

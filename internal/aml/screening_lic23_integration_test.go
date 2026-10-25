@@ -87,7 +87,7 @@ func TestLic23_N5_ScreeningPolicyMustBeInEffectAtTheTriggerVersion(t *testing.T)
 	j := w.jurisdiction()
 	w.bindLicence(j)
 	A := q.Officers[0].Actor
-	if _, err := svc.SetScreeningPolicy(ctx, A, policyInput(j, time.Now().Add(20*time.Minute))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, A, policyInput(j, time.Now().Add(20*time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	in := aml.SetTriggerPolicyInput{JurisdictionID: j, Events: []aml.TriggerEvent{aml.EventRegistration}, EffectiveFrom: time.Now().Add(time.Minute),

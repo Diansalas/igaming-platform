@@ -259,7 +259,7 @@ func TestAppendOnly_BindsTheOwner(t *testing.T) {
 	// Migration 0154 (A7): a screening policy version and a screening result exist too, so the row-level append-only trigger is
 	// exercised for them (an UPDATE / DELETE that matches no row never fires a row trigger).
 	jur := c.jurisdiction()
-	if _, err := c.Svc.SetScreeningPolicy(bg, c.A(), policyInput(jur, time.Now().Add(-time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(bg, c.A(), policyInput(jur, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	// Migration 0181 (lic10): a trigger policy version and a screening request exist too (a registration after the policy

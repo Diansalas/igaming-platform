@@ -21,7 +21,7 @@
 
 ## 2. Configuring (platform officer, no code release)
 
-Order matters: licence bound to the tenant, tenant configured for the jurisdiction, **screening policy** (lists, re-screen interval, backfill grace; `aml_screening_policy_set`), then the **trigger policy** (`SetScreeningTriggerPolicy`, platform_acting officer, officer quorum of the owner scope, signed proof, legal review reference). The trigger policy must be for the jurisdiction of the tenant's licence and needs the screening policy to exist. There is no HTTP route or Back Office screen yet (library/service only).
+Order matters: licence bound to the tenant, tenant configured for the jurisdiction, **screening policy** (lists, re-screen interval, backfill grace; the routed tighten-only `aml_screening_policy_author`, first version or tightening), then the **trigger policy** (`SetScreeningTriggerPolicy`, platform_acting officer, officer quorum of the owner scope, signed proof, legal review reference). The trigger policy must be for the jurisdiction of the tenant's licence and needs the screening policy to exist. There is no HTTP route or Back Office screen yet (library/service only).
 
 - `events`: which of `registration`, `kyc_approval`, `scheduled` trigger a request. Empty means "nothing triggers" (an explicit version).
 - `gate_withdrawal`: when true, withdrawal and payout are HELD (the existing indistinguishable `account_review`) unless the person has a **fresh completed clear** (inside the screening policy's re-screen interval) or is inside the backfill grace (a person registered before the policy took effect). A pending, retrying, failed, error or stale result is not a clear. A system-found match no officer has recorded also holds. A gate with no events is refused (nothing would ever produce a result).
@@ -100,8 +100,8 @@ tenants are OWNER DECISIONS (`docs/plans/c4-screening-loosening-record.md`); not
   tenant; that stays the rule of the section above.
 - **Own-licence tenants are OUT OF SCOPE** (`loosening_not_supported_for_tenant_licensing_model`): the quorum read cannot count the platform grants for them. Nothing was widened; supporting them needs D5 and the quorum read designed first.
 - **Tenant staff** never file, approve, see or read these requests (no tenant projection: they are AML configuration).
-- **Break-glass**: the unrouted `SetScreeningPolicy` path (0154) still exists and loosens without this flow (LIC30 L-3 residual). It is an
-  operator action on the database only, not reachable over HTTP; using it needs an owner-recorded decision.
+- **Break-glass**: the unrouted `aml_screening_policy_set` (0154) can still loosen without this flow, but since migration 0191 (d1, D7) it is OWNER-ONLY
+  (see "d1 additions" at the end of this runbook); the runtime role can no longer execute it.
 
 ### c4 review fixes (same migration 0190, edited in place; rebuild any database that applied the first version)
 
@@ -138,3 +138,21 @@ SELECT o_problem, o_kind, o_request_id, o_tenant_id FROM screening_loosening_rec
 Expected result: NO rows. `executed_request_without_exactly_one_row` = an executed request whose policy / settings row is missing or duplicated;
 `policy_row_without_executed_request` and `settings_row_without_executed_request` = a platform-authored row that no executed request of its kind explains.
 Any row is an incident for `security` and `ledger-finance`. Any other session (tenant principal, no principal) is refused (`LC030` / `LC001`).
+
+## d1 additions (migrations 0191 and 0192): security closure before merge
+
+### D7: the break-glass setter is OWNER-ONLY (migration 0191)
+
+`aml_screening_policy_set` (0154) authors a screening policy version with NO tighten-only rule and NO second person: it can remove a list (including
+`sanctions`), lengthen the re-screen interval or the backfill grace. Since 0191 neither `igaming_runtime` nor PUBLIC can execute it (a call is `42501`);
+`deploy/init-app-role.sql` no longer grants it and re-asserts the revoke on every run. The runtime paths to the table are exactly two:
+`aml_screening_policy_author` (tighten-only, the HTTP route) and `screening_policy_loosen_apply` (the governed two-Person executor, refused without an executed
+request of the transaction). `TestD7_OnlyAllowListedRuntimeFunctionsWriteTheScreeningPolicies` enumerates, from the catalogue, every runtime-executable function that
+writes `aml_screening_policies` (directly, dynamically or through a call chain) and pins that list.
+
+**Owner path (documented, not a runtime path).** A database operator holding the table-owner role (the migration role, never the runtime credential) may call the
+setter. It still runs `aml_authorize`: the acting staff member needs an in-force platform `aml_officer` grant, the owner-scope officer quorum must hold, and a
+signed actor proof (`aml_screening_policy:set`, 60 s, single use) must be attached in the same transaction; the audit and the `created_by` columns record the officer.
+A loosening by this path is a recorded owner decision: file the decision record first, then run it, then verify with the reconciliation query above that no
+unexplained platform-authored row exists. In tests and in the end-to-end harness the fixture changes ACTOR (`amlfix.OwnerService` over the owner pool), never the
+assertion; the end-to-end `aml-fixture` tool uses the routed tighten-only `AuthorScreeningPolicy` (it only writes a first version).

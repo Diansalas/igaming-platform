@@ -133,7 +133,7 @@ func TestLic29_PolicyAuthor_TightensButNeverLoosens(t *testing.T) {
 	base := func() aml.SetScreeningPolicyInput { return policyInput(tw.jur, time.Now()) }
 	// lic30: the effective time is bounded to [now-2min, now+30d], so "earlier than the version in force" is tested against a version
 	// that took effect 30 s ago (same values; the unrouted setter writes it); 90 s ago is inside the bound.
-	if _, err := tw.svc.SetScreeningPolicy(ctx, A, policyInput(tw.jur, time.Now().Add(-30*time.Second))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, A, policyInput(tw.jur, time.Now().Add(-30*time.Second))); err != nil {
 		t.Fatal(err)
 	}
 	before := policyCount(t, tw)
@@ -175,7 +175,7 @@ func TestLic29_PolicyAuthor_TightensButNeverLoosens(t *testing.T) {
 	// The service-level setter (not routed) is unchanged: it still writes any version.
 	loose := base()
 	loose.RescreenInterval = 48 * time.Hour
-	if _, err := tw.svc.SetScreeningPolicy(ctx, A, loose); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, A, loose); err != nil {
 		t.Fatalf("the unrouted setter keeps its behaviour: %v", err)
 	}
 }

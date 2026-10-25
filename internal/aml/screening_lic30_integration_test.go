@@ -97,7 +97,7 @@ func TestLic30_M3_RescreenIntervalFloor(t *testing.T) {
 	}
 	// A longer interval is the loosening rule's business (the latest is 1 h); equal to twice the threshold is not above 1 h, so use the
 	// unrouted setter to move the latest version to 10 h first.
-	if _, err := tw.svc.SetScreeningPolicy(ctx, A, func() aml.SetScreeningPolicyInput { x := in(10 * time.Hour); return x }()); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, A, func() aml.SetScreeningPolicyInput { x := in(10 * time.Hour); return x }()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tw.svc.AuthorScreeningPolicy(ctx, A, in(2*time.Hour)); err != nil {
