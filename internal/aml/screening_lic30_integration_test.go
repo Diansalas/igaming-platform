@@ -23,9 +23,9 @@ import (
 func TestLic30_M1_OfficerQueueIsStillScannedWhenNoPolicyGatesWithdrawals(t *testing.T) {
 	ctx := context.Background()
 	tw := newTrigWorld(t, 24*time.Hour, 0)
-	tw.gate(60*time.Second, time.Now().Add(-110*time.Second)) // the last gating version: alert after 60 s
-	p, _ := tw.flagged(aml.MockMarkerPEP + "1")               // needs_officer, unresolved
-	tw.setTrigger([]aml.TriggerEvent{aml.EventRegistration}, false, time.Now())
+	tw.gate(60*time.Second, time.Now().Add(-110*time.Second))                        // the last gating version: alert after 60 s
+	p, _ := tw.flagged(aml.MockMarkerPEP + "1")                                      // needs_officer, unresolved
+	tw.setTriggerOwner([]aml.TriggerEvent{aml.EventRegistration}, false, time.Now()) // d1 D4: switching a gate off is the owner path now
 	if !tw.gateDenies(p) {
 		t.Fatal("fixture: an unresolved needs_officer request denies whatever the policy says now")
 	}

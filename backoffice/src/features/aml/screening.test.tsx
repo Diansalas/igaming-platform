@@ -164,6 +164,15 @@ describe('trigger policy view and authoring', () => {
     expect(within(dlg).getByRole('note', { name: 'Withdrawal gate warning' })).toHaveTextContent('TRAPS PLAYER FUNDS')
   })
 
+  it('d1 D4: the author form says it only tightens and points to the two-person request for a loosening', async () => {
+    const user = await openPolicyAsPlatform()
+    const dlg = await openAuthor(user)
+    const note = within(dlg).getByRole('note', { name: 'Tighten only' })
+    expect(note).toHaveTextContent('a withdrawal gate cannot be switched off')
+    expect(note).toHaveTextContent('separate two-person request')
+    expect(note).toHaveTextContent('refused unless a platform administrator has switched that capability on')
+  })
+
   async function fill(dlg: HTMLElement, user: ReturnType<typeof userEvent.setup>, o: { gate: 'on' | 'off'; secs?: string; events?: string[]; ack?: boolean }) {
     for (const e of o.events ?? []) await user.click(within(dlg).getByLabelText(e))
     await user.selectOptions(within(dlg).getByLabelText('Withdrawal gate'), o.gate)

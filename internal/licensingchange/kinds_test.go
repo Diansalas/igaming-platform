@@ -17,12 +17,12 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 )
 
-// The Go kind registry is exactly the seeds of licensing_change_kinds in migrations 0177, 0178, 0180 and 0190 (a new kind needs both, plus
+// The Go kind registry is exactly the seeds of licensing_change_kinds in migrations 0177, 0178, 0180, 0190 and 0191 (a new kind needs both, plus
 // the SQL classify / row-match branches: the extension hook).
 func TestKinds_MatchTheMigrationRegistry(t *testing.T) {
 	var sqlKinds []string
 	approvals := 0
-	for _, f := range []string{"0177_licensing_change_approvals.up.sql", "0178_licence_lifecycle_governed_changes.up.sql", "0180_operating_bases.up.sql", "0190_c4_screening_policy_governed_loosening.up.sql"} {
+	for _, f := range []string{"0177_licensing_change_approvals.up.sql", "0178_licence_lifecycle_governed_changes.up.sql", "0180_operating_bases.up.sql", "0190_c4_screening_policy_governed_loosening.up.sql", "0191_d1_screening_break_glass_and_trigger_loosening.up.sql"} {
 		b, err := os.ReadFile("../../migrations/" + f)
 		if err != nil {
 			t.Fatal(err)
@@ -48,11 +48,11 @@ func TestKinds_MatchTheMigrationRegistry(t *testing.T) {
 	}
 	sort.Strings(sqlKinds)
 	sort.Strings(goKinds)
-	if strings.Join(sqlKinds, ",") != strings.Join(goKinds, ",") || len(goKinds) != 15 {
-		t.Fatalf("Go kinds %v and SQL kinds %v must be the same fifteen (six from 0177, four lifecycle kinds from 0178, three operating-basis kinds from 0180, two screening loosening kinds from 0190)", goKinds, sqlKinds)
+	if strings.Join(sqlKinds, ",") != strings.Join(goKinds, ",") || len(goKinds) != 16 {
+		t.Fatalf("Go kinds %v and SQL kinds %v must be the same sixteen (six from 0177, four lifecycle kinds from 0178, three operating-basis kinds from 0180, two screening loosening kinds from 0190, the screening trigger policy loosening kind from 0191)", goKinds, sqlKinds)
 	}
 	// Every SQL seed row is approved by platform_admin and needs two approvals (the interim HDR-M-1 answer).
-	if approvals != 15 {
+	if approvals != 16 {
 		t.Fatalf("every kind must seed widening_approvals 2 and approver_roles {platform_admin} (interim HDR-M-1), found %d", approvals)
 	}
 }

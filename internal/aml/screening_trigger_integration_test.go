@@ -103,6 +103,13 @@ func (tw *trigWorld) setTrigger(events []aml.TriggerEvent, gate bool, from time.
 
 func (tw *trigWorld) setTriggerErr(events []aml.TriggerEvent, gate bool, from time.Time) error {
 	tw.t.Helper()
+	_, err := tw.svc.SetScreeningTriggerPolicy(context.Background(), tw.q.Officers[0].Actor, tw.triggerInput(events, gate, from))
+	return err
+}
+
+// triggerInput builds the version setTrigger authors. A gating version gets the heartbeat, the scheduled event and an alert threshold.
+func (tw *trigWorld) triggerInput(events []aml.TriggerEvent, gate bool, from time.Time) aml.SetTriggerPolicyInput {
+	tw.t.Helper()
 	in := aml.SetTriggerPolicyInput{JurisdictionID: tw.jur, Events: events, GateWithdrawal: gate, EffectiveFrom: from,
 		LegalReviewReference: "TEST FIXTURE REF - NOT LEGAL ADVICE", ReasonCode: "fixture_trigger"}
 	if gate {
@@ -116,7 +123,22 @@ func (tw *trigWorld) setTriggerErr(events []aml.TriggerEvent, gate bool, from ti
 			in.Events = append(append([]aml.TriggerEvent{}, events...), aml.EventScheduled)
 		}
 	}
-	_, err := tw.svc.SetScreeningTriggerPolicy(context.Background(), tw.q.Officers[0].Actor, in)
+	return in
+}
+
+// setTriggerOwner / setTriggerErrOwner author a version through the OWNER-ONLY break-glass setter (d1 D4, migration 0191): the fixtures that
+// LOOSEN the trigger policy (a gate switched off, events removed) change the ACTOR they run as (the table-owner pool), never the assertion they
+// make. The route (setTrigger) is tighten-only since 0191.
+func (tw *trigWorld) setTriggerOwner(events []aml.TriggerEvent, gate bool, from time.Time) {
+	tw.t.Helper()
+	if err := tw.setTriggerErrOwner(events, gate, from); err != nil {
+		tw.t.Fatalf("trigger policy (owner path): %v", err)
+	}
+}
+
+func (tw *trigWorld) setTriggerErrOwner(events []aml.TriggerEvent, gate bool, from time.Time) error {
+	tw.t.Helper()
+	_, err := ownerSvc(tw.t).OwnerSetScreeningTriggerPolicy(context.Background(), tw.q.Officers[0].Actor, tw.triggerInput(events, gate, from))
 	return err
 }
 
@@ -230,7 +252,11 @@ func TestTriggerPolicy_Authoring_IsGovernedLikeTheScreeningPolicy(t *testing.T) 
 	// A NEWER version wins; an explicit empty ungated version is "nothing triggers".
 	empty := in
 	empty.Events, empty.GateWithdrawal, empty.GateAlertAfter = nil, false, 0
-	if _, err := svc.SetScreeningTriggerPolicy(ctx, a, empty); err != nil {
+	// d1 (0191): the route refuses this loosening (a gate switched off, events removed); the OWNER path writes it (fixture actor change only).
+	if _, err := svc.SetScreeningTriggerPolicy(ctx, a, empty); aml.RefusalCode(err) != "trigger_policy_loosening_refused" {
+		t.Fatalf("the route must refuse switching a gate off with the closed code, got %v (%q)", err, aml.RefusalCode(err))
+	}
+	if _, err := ownerSvc(t).OwnerSetScreeningTriggerPolicy(ctx, a, empty); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := svc.EffectiveScreeningTriggerPolicy(ctx, a, j); p == nil || p.GateWithdrawal || len(p.Events) != 0 {

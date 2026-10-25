@@ -235,7 +235,8 @@ BEGIN
         'aml_screening_record(uuid, uuid, text, text, text, text, text, text[], text, text[], text, timestamptz, text, text)',
         'aml_screening_list(uuid, uuid)', 'aml_readiness(uuid, uuid[])',
         -- Migration 0181 (lic10, G1): the automatic screening trigger policy, queue and worker API.
-        'aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, bigint, timestamptz, text, text)', 'aml_screening_trigger_policy_effective(uuid, uuid)',
+        -- (aml_screening_trigger_policy_set is NOT here since migration 0191 (d1, D4): the loosening-capable setter is owner-only.)
+        'aml_screening_trigger_policy_effective(uuid, uuid)',
         'aml_screening_gate_overdue(uuid, integer)', 'screening_worker_heartbeat(text, boolean)',
         'aml_screening_request_list(uuid, uuid)', 'aml_screening_enqueue_due(uuid, integer)', 'aml_screening_request_claim(uuid, integer, integer)',
         'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text)',
@@ -247,17 +248,24 @@ BEGIN
         'screening_loosening_state(uuid)', 'screening_policy_loosen_assert(jsonb, timestamptz)',
         'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)',
         'screening_loosening_officer_ok(uuid, uuid, uuid)', 'screening_loosening_officers_assert(uuid, uuid, uuid)',
-        'screening_loosening_approvers_assert(uuid, uuid, uuid, uuid)', 'screening_loosening_reconcile()'
+        'screening_loosening_approvers_assert(uuid, uuid, uuid, uuid)', 'screening_loosening_reconcile()',
+        -- Migration 0191 (d1, D4): the tighten-only trigger policy author (the route) and the governed trigger-policy loosening validator / executor.
+        'aml_screening_trigger_policy_author(uuid, uuid, text[], boolean, bigint, timestamptz, text, text)',
+        'screening_trigger_loosen_assert(jsonb, timestamptz)', 'screening_trigger_loosen_apply(uuid)'
     ] LOOP
         IF to_regprocedure('public.' || f) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
         END IF;
     END LOOP;
-    -- Migration 0191 (d1, D7): the loosening-capable break-glass setter is OWNER-ONLY. Re-asserted on every run, because an older
+    -- Migration 0191 (d1, D7 and D4): the loosening-capable break-glass setters (screening policy and trigger policy) are OWNER-ONLY. Re-asserted on every run, because an older
     -- deployment script (or a database restored from before 0191) granted it to the runtime role.
     IF to_regprocedure('public.aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)') IS NOT NULL THEN
         REVOKE ALL ON FUNCTION aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text) FROM PUBLIC;
         REVOKE ALL ON FUNCTION aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text) FROM igaming_runtime;
+    END IF;
+    IF to_regprocedure('public.aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, bigint, timestamptz, text, text)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, bigint, timestamptz, text, text) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, bigint, timestamptz, text, text) FROM igaming_runtime;
     END IF;
     -- NOT granted until the HD-RET-1 erasure job exists as its caller (security F5): re-assert the revoke.
     IF to_regprocedure('public.aml_person_has_records(uuid, uuid)') IS NOT NULL THEN

@@ -125,10 +125,27 @@ func (in SetTriggerPolicyInput) validate() ([]string, error) {
 	return events, nil
 }
 
-// SetScreeningTriggerPolicy writes the next trigger policy version. Platform officer (platform_acting) only, with the owner-scope
-// officer quorum, an existing screening policy for the jurisdiction (the lists, the re-screen interval and the backfill grace are
-// that policy's values) and a jurisdiction that is the one of the tenant's licence; the database refuses anything else.
+// SetScreeningTriggerPolicy writes the next trigger policy version through the TIGHTEN-ONLY database function
+// aml_screening_trigger_policy_author (migration 0191, d1 D4): this is what the HTTP route calls. Platform officer (platform_acting)
+// only, with the owner-scope officer quorum, an existing screening policy for the jurisdiction (the lists, the re-screen interval and
+// the backfill grace are that policy's values) and a jurisdiction that is the one of the tenant's licence; the database refuses
+// anything else. It REFUSES a version that is less strict than the latest one or the one in force (an event removed, a withdrawal gate
+// switched off, a longer alert threshold, an earlier effective time) with the closed code trigger_policy_loosening_refused and changes
+// nothing: loosening the trigger policy is the governed two-Person licensing change aml_screening_trigger_policy_loosen
+// (internal/licensingchange), refused unless the tenant's loosening capability is configured.
 func (s *Service) SetScreeningTriggerPolicy(ctx context.Context, a Actor, in SetTriggerPolicyInput) (uuid.UUID, error) {
+	return s.writeTriggerPolicy(ctx, a, in, "aml_screening_trigger_policy_author")
+}
+
+// OwnerSetScreeningTriggerPolicy calls the OWNER-ONLY break-glass setter aml_screening_trigger_policy_set (0181), which has no strictness
+// rule and can loosen with one officer chain. Since migration 0191 the runtime role cannot execute it (42501): it works only over a
+// table-owner pool (a fixture or an owner-recorded operator action, docs/runbooks/aml-screening-triggers.md). It is NOT part of
+// AMLOfficerAPI and the HTTP layer must never reference it (a static test pins that).
+func (s *Service) OwnerSetScreeningTriggerPolicy(ctx context.Context, a Actor, in SetTriggerPolicyInput) (uuid.UUID, error) {
+	return s.writeTriggerPolicy(ctx, a, in, "aml_screening_trigger_policy_set")
+}
+
+func (s *Service) writeTriggerPolicy(ctx context.Context, a Actor, in SetTriggerPolicyInput, fn string) (uuid.UUID, error) {
 	events, err := in.validate()
 	if err != nil {
 		return uuid.Nil, err
@@ -155,7 +172,7 @@ func (s *Service) SetScreeningTriggerPolicy(ctx context.Context, a Actor, in Set
 		if err := s.attachProof(ctx, tx, a, OpProofScreeningTriggerPolicySet, actorproof.TargetNew, hash); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `SELECT aml_screening_trigger_policy_set($1, $2, $3::text[], $4, $5, $6, $7, $8)`,
+		return tx.QueryRow(ctx, `SELECT `+fn+`($1, $2, $3::text[], $4, $5, $6, $7, $8)`,
 			a.TenantID, in.JurisdictionID, events, in.GateWithdrawal, alertSecs, from, in.LegalReviewReference, in.ReasonCode).Scan(&id)
 	})
 	return id, err

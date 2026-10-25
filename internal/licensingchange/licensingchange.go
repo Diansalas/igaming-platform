@@ -27,6 +27,9 @@
 //	                                                                                         tenant capability is configured + enabled
 //	aml_screening_loosening_configure    set the per-tenant loosening capability (0190)      widening iff it enables loosening or
 //	                                                                                         shortens the cooling period
+//	aml_screening_trigger_policy_loosen  author a LESS strict screening TRIGGER policy    always widening; refused unless the tenant
+//	                                     version (0191): event removed, gate off, longer  capability is configured + enabled; never
+//	                                     alert threshold                                  enables a withdrawal gate
 //
 // The database classifies (licensing_change_classify), never the caller. A WIDENING change needs the kind's approvals (2)
 // by distinct eligible Persons; a NARROWING change requested by a platform admin executes in the same transaction as its

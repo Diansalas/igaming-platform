@@ -156,3 +156,34 @@ signed actor proof (`aml_screening_policy:set`, 60 s, single use) must be attach
 A loosening by this path is a recorded owner decision: file the decision record first, then run it, then verify with the reconciliation query above that no
 unexplained platform-authored row exists. In tests and in the end-to-end harness the fixture changes ACTOR (`amlfix.OwnerService` over the owner pool), never the
 assertion; the end-to-end `aml-fixture` tool uses the routed tighten-only `AuthorScreeningPolicy` (it only writes a first version).
+
+### D4: loosening the TRIGGER policy is a governed two-Person change (migration 0191)
+
+Until 0191, `POST /v1/admin/tenants/{id}/screening/trigger-policy` let ONE officer chain (quorum, critical step-up, signed proof, legal reference) remove events,
+switch `gate_withdrawal` OFF or lengthen `gate_alert_after_seconds`. What counts as LOOSENING is defined from the schema of `aml_screening_trigger_policies`,
+against the latest version AND the version in force:
+
+| Dimension | Looser | Stricter |
+|---|---|---|
+| `events` | a previous event is missing | an event is added |
+| `gate_withdrawal` | true to false (turning an existing gate OFF) | false to true (enabling a gate: guarded by the heartbeat and the environment anchor, unchanged) |
+| `gate_alert_after_seconds` (both versions gate) | longer | shorter |
+| `effective_from` | earlier than the version in force (route only) | |
+
+`legal_review_reference` and `reason_code` are provenance, not strictness.
+
+- **The route is tighten-only, enforced by the database.** It calls `aml_screening_trigger_policy_author` (0191): a loosening is refused with 409 and the closed code
+  `trigger_policy_loosening_refused`, nothing is written. The 0181 setter `aml_screening_trigger_policy_set` is OWNER-ONLY (runtime and PUBLIC lose EXECUTE; `42501`).
+  Owner path: same as D7 above (officer grant, quorum and signed proof are still checked; the Go method is `OwnerSetScreeningTriggerPolicy`, owner pool only).
+- **Governed loosening.** Licensing change kind `aml_screening_trigger_policy_loosen` under the SAME inert capability row as `aml_screening_policy_loosen`
+  (`aml_screening_loosening_settings`): no row = `loosening_not_configured`. It is always widening (two distinct `platform_admin` Persons; requester and the requester's
+  Person never decide; approvals at most 24 h old; request lifetime 72 h; signed proofs on request, approve, execute). The requester, every counted approver and the
+  executor hold an in-force platform `aml_officer` grant and the owner-scope officer quorum holds. It must be a loosening in at least one dimension and looser or equal in
+  all (`not_a_loosening`, `loosening_mixes_tightening`); a longer alert threshold must leave the screening policy interval at least twice the threshold
+  (`rescreen_interval_below_alert_threshold`). **It can never enable a gate** (`trigger_gate_enable_refused`, repeated by the table guard); a version that KEEPS a gate
+  (a longer threshold) is refused where the environment anchor is production or unrecorded (`gate_environment_refused`); switching a gate OFF only releases and works in
+  every environment. The new version is written by `screening_trigger_loosen_apply` in the transaction of the final approval, `effective_from` = execution + the later of the
+  payload offset and the cooling period, scope `platform`, `reason_code` fixed to `governed_loosening`; the audit log gets `aml.screening_trigger_policy_loosened` with
+  the previous and the in-force version next to the three `licensing_change.*` rows. `screening_loosening_reconcile()` also covers the new kind.
+- **Turning a gate off does not release a held match.** An unresolved system-found match, a sanctions hold, an officer hold, the kill switch and closed accounts hold
+  whatever the trigger policy says (`aml_screening_gate_denies` is unchanged in this respect).

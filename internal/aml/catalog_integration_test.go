@@ -125,15 +125,15 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 		"aml_screening_policy_author": true, "aml_screening_policy_effective": true, "aml_screening_record": true, "aml_screening_list": true,
 		"aml_readiness": true,
 		// migration 0181 (lic10, G1): the trigger policy, the officer request read and the worker API.
-		"aml_screening_trigger_policy_set": true, "aml_screening_trigger_policy_effective": true, "aml_screening_request_list": true,
+		"aml_screening_trigger_policy_author": true, "aml_screening_trigger_policy_effective": true, "aml_screening_request_list": true,
 		"aml_screening_enqueue_due": true, "aml_screening_request_claim": true, "aml_screening_request_finish": true,
 		// lic18: the trapped-person count (a count only, session-tenant bound). lic23: the officer replace (authorises first).
 		"aml_screening_gate_overdue": true, "aml_screening_request_replace": true, "aml_screening_parked_summary": true, "aml_screening_parked_overdue": true,
 	}
 	// SECURITY DEFINER but NOT executable by the runtime role: the erasure check (until the HD-RET-1 job is its caller, security F5)
 	// and the platform-grantee liveness helper (reachable only through the owner-run definer chain, security F1/F3).
-	// d1 (migration 0191, D7): the loosening-capable break-glass setter aml_screening_policy_set is OWNER-ONLY (pin moved here from apiRuntime).
-	definerNoRuntime := map[string]bool{"aml_person_has_records": true, "aml_platform_grantee_live": true, "aml_screening_policy_set": true}
+	// d1 (migration 0191, D7): the loosening-capable break-glass setter aml_screening_policy_set is OWNER-ONLY (pin moved here from apiRuntime); d1 D4 (0191): so is aml_screening_trigger_policy_set (the runtime route is the tighten-only aml_screening_trigger_policy_author).
+	definerNoRuntime := map[string]bool{"aml_person_has_records": true, "aml_platform_grantee_live": true, "aml_screening_policy_set": true, "aml_screening_trigger_policy_set": true}
 	owner := catalogQuery(t, w, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = 'public.aml_holds'::regclass`)[0][0].(string)
 	rows := catalogQuery(t, w, `SELECT p.oid::regprocedure::text, p.proname, p.prosecdef, coalesce(array_to_string(p.proconfig, ','), ''), pg_get_userbyid(p.proowner),
 			has_function_privilege('igaming_runtime', p.oid, 'EXECUTE'), has_function_privilege('public', p.oid, 'EXECUTE')

@@ -43,6 +43,10 @@ var RefusalCodes = map[string]string{
 	"loosening_mixes_tightening":                         "the version tightens one dimension while loosening another; every dimension must be looser or equal",
 	"loosening_not_supported_for_tenant_licensing_model": "governed loosening is not supported for a tenant that holds its own licence (out of scope until the approver model and the quorum read are designed)",
 	"grace_extension_after_expiry_refused":               "the backfill grace of the withdrawal gate has expired and cannot be extended",
+	// trigger policy (d1, migration 0191)
+	"trigger_policy_loosening_refused": "the new trigger policy version is less strict than the latest one or the one in force (an event removed, a withdrawal gate switched off, a longer alert threshold, or an earlier effective time); this route only tightens, loosening is a governed licensing change request (aml_screening_trigger_policy_loosen) that is refused unless configured",
+	"no_trigger_policy_to_loosen":      "there is no trigger policy version to loosen; the first version is authored through the trigger policy route",
+	"trigger_gate_enable_refused":      "a governed loosening never enables a withdrawal gate (a version that gates withdrawals needs the previous version to gate already)",
 	// screening policy (lic29)
 	"policy_loosening_refused": "the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); this route only tightens, loosening is a governed licensing change request (aml_screening_policy_loosen) that is refused unless configured",
 }

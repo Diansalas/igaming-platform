@@ -109,7 +109,7 @@ func TestLic26_F1_SanctionsRequestIsResolvedOnlyByASanctionsHold(t *testing.T) {
 		if !tw.gateDenies(p) || !tw.heldFor(p, aml.OpWithdrawal) {
 			t.Fatal("an unresolved sanctions-class request must still deny after a fresh-key officer clear")
 		}
-		tw.setTrigger(nil, false, time.Now()) // L1: a policy that no longer gates does not release it
+		tw.setTriggerOwner(nil, false, time.Now()) // L1: a policy that no longer gates does not release it (d1 D4: the owner path writes the gate-off version)
 		if !tw.heldFor(p, aml.OpWithdrawal) {
 			t.Fatal("the always-on hold for an unresolved sanctions match survives a gate-off policy version")
 		}

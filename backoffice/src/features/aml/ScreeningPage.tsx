@@ -41,6 +41,7 @@ import { describeScreeningError, type ScreeningOp } from './screeningErrors'
 import {
   EVENT_LABEL,
   GATE_WARNING,
+  TRIGGER_TIGHTEN_ONLY_NOTE,
   HOLDS_WITHDRAWALS_NOTE,
   INTERVAL_GRACE_NOTE,
   LIST_LABEL,
@@ -225,6 +226,7 @@ function PolicyDialog({ tenantId, jurisdictionId, onClose, onDone }: { tenantId:
         }}
       >
         <Note label="Withdrawal gate warning">{GATE_WARNING}</Note>
+        <Note label="Tighten only" tone="slate">{TRIGGER_TIGHTEN_ONLY_NOTE}</Note>
         <Note label="No policy shipped" tone="slate">{NO_POLICY_SHIPPED} A version is immutable; to change it, author another. A version needs a fresh second-factor check.</Note>
         <fieldset className="flex flex-col gap-1 text-sm">
           <legend className="font-medium text-slate-700">Events that trigger screening (choose none to trigger nothing)</legend>

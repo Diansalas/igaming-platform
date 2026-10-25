@@ -10,6 +10,10 @@ export const NO_POLICY_SHIPPED =
 export const GATE_WARNING =
   'WARNING: enabling the withdrawal gate while no working screening provider exists TRAPS PLAYER FUNDS. A gated withdrawal waits (parked) until screening clears the person, and with no working provider nothing can clear it. The platform refuses to enable a gate unless a screening worker has reported a recent heartbeat. That refusal is a safeguard, not permission: never enable a gate in production. Only the MOCK provider exists, and the production platform starts no screening worker.'
 
+// d1 (migration 0191, D4): the trigger policy form only tightens; the server refuses a loosening with the closed code trigger_policy_loosening_refused.
+export const TRIGGER_TIGHTEN_ONLY_NOTE =
+  'Tighten only: a version can never be less strict than the latest one or the one in force. An event cannot be removed, a withdrawal gate cannot be switched off, the alert threshold cannot be longer, and the effective time cannot be earlier. This form never loosens; loosening the trigger policy is a separate two-person request in the licensing changes area, and it is refused unless a platform administrator has switched that capability on for this tenant.'
+
 export const SERVER_ENFORCED_NOTE =
   'Enforced by the server, shown here for information. Writes need a fresh second-factor check (step-up), a signed proof bound to the exact request, an in-force AML officer grant and the officer quorum for the tenant. Authoring a trigger policy is for a platform administrator acting as an AML officer; resolving a request is for the owner-scope officer. This screen cannot grant or bypass any of that.'
 

@@ -105,7 +105,7 @@ func TestLic18_UnresolvedMatchHoldsEvenAfterTheGateIsSwitchedOff(t *testing.T) {
 	if !tw.heldFor(p, aml.OpWithdrawal) {
 		t.Fatal("a system-found match must hold")
 	}
-	tw.setTrigger(nil, false, time.Now().Add(-time.Second)) // the gate is switched off by a newer version
+	tw.setTriggerOwner(nil, false, time.Now().Add(-time.Second)) // the gate is switched off by a newer version (d1 D4: the owner path; the route is tighten-only)
 	if !tw.heldFor(p, aml.OpWithdrawal) {
 		t.Fatal("switching the gate off released an unresolved sanctions match (L1)")
 	}

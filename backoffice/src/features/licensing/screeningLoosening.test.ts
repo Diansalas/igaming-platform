@@ -10,11 +10,13 @@ describe('screening loosening kinds in the generic licensing change screens', ()
   it('labels both kinds and offers them in the kind filter', () => {
     expect(kindLabel('aml_screening_policy_loosen')).toBe('Screening policy loosening (AML)')
     expect(kindLabel('aml_screening_loosening_configure')).toBe('Screening policy loosening capability (AML)')
+    expect(kindLabel('aml_screening_trigger_policy_loosen')).toBe('Screening trigger policy loosening (AML)')
     const values = KIND_FILTER_OPTIONS.map((o) => o.value)
     expect(values).toContain('aml_screening_policy_loosen')
     expect(values).toContain('aml_screening_loosening_configure')
+    expect(values).toContain('aml_screening_trigger_policy_loosen')
   })
-  it.each(['loosening_not_configured', 'loosening_disabled', 'no_screening_policy_to_loosen', 'not_a_loosening', 'loosening_cooling_period', 'officer_grant_required', 'officer_quorum_not_met', 'sanctions_list_removal_refused', 'loosening_mixes_tightening', 'grace_extension_after_expiry_refused', 'loosening_not_supported_for_tenant_licensing_model', 'gate_environment_refused', 'rescreen_interval_below_floor'])(
+  it.each(['loosening_not_configured', 'loosening_disabled', 'no_screening_policy_to_loosen', 'not_a_loosening', 'loosening_cooling_period', 'officer_grant_required', 'officer_quorum_not_met', 'sanctions_list_removal_refused', 'loosening_mixes_tightening', 'grace_extension_after_expiry_refused', 'loosening_not_supported_for_tenant_licensing_model', 'gate_environment_refused', 'rescreen_interval_below_floor', 'trigger_policy_loosening_refused', 'no_trigger_policy_to_loosen', 'trigger_gate_enable_refused'])(
     'shows the UI-owned wording of the closed code %s on a guard refusal and never the server message',
     (code) => {
       const v = describeLicensingError(new ApiError('LICENSING_CHANGE_GUARD_REFUSED' as never, 'RAW SERVER MESSAGE', 409, 'req-1', ['LC050', code]))

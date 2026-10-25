@@ -34,6 +34,7 @@ const KIND_LABEL: Record<string, string> = {
   licence_evidence_reference_change: 'Licence evidence reference change',
   aml_screening_policy_loosen: 'Screening policy loosening (AML)',
   aml_screening_loosening_configure: 'Screening policy loosening capability (AML)',
+  aml_screening_trigger_policy_loosen: 'Screening trigger policy loosening (AML)',
   operating_basis_set: 'Set operating basis',
   operating_basis_withdraw: 'Withdraw operating basis',
   operating_basis_review_record: 'Record operating basis review',

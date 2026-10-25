@@ -266,7 +266,7 @@ func Service(t testing.TB, p aml.Pool) *aml.Service {
 
 // OwnerService builds an aml.Service over a TABLE-OWNER pool (TEST_DATABASE_URL, never the runtime role). It is the ONE sanctioned
 // way for a test or a fixture to reach the OWNER-ONLY break-glass writer that the runtime role cannot execute since migration 0191
-// (d1): aml.Service.SetScreeningPolicy (aml_screening_policy_set, which can LOOSEN the screening policy with one officer chain). The
+// (d1): the screening policy setter aml_screening_policy_set (which can LOOSEN the screening policy with one officer chain; SR7-3 keeps its Go method out of every production file but internal/aml) and the trigger policy setter aml_screening_trigger_policy_set. The
 // authorisation inside that function (officer grant, quorum, signed proof) is unchanged: only the database role that CALLS it differs. It refuses a pool whose session user is the
 // runtime role, so a fixture can never quietly fall back to a runtime path (which would now fail with 42501 anyway).
 func OwnerService(t testing.TB, ownerPool *db.Pool) *aml.Service {

@@ -1038,6 +1038,12 @@ func TestMigration0190_UpDownUp_Snapshot_NoValueShips_DownRefusedWithData(t *tes
 // = production). The service runs over the owner pool there (the governed paths are the same functions and guards).
 func scratchWorld(t *testing.T, prefix, anchor string) *world {
 	t.Helper()
+	return scratchWorldThrough(t, prefix, anchor, 190)
+}
+
+// scratchWorldThrough is scratchWorld migrated through the given migration (d1: 191 for the trigger policy loosening).
+func scratchWorldThrough(t *testing.T, prefix, anchor string, through int) *world {
+	t.Helper()
 	ctx := context.Background()
 	u := scratchdb.New(t, prefix)
 	pool, err := db.Connect(ctx, u, 12, 5*time.Second)
@@ -1045,7 +1051,7 @@ func scratchWorld(t *testing.T, prefix, anchor string) *world {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	full, _ := migrationsThrough(t, 190)
+	full, _ := migrationsThrough(t, through)
 	if _, err := pool.MigrateUp(ctx, full); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

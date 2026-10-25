@@ -125,6 +125,13 @@ with `LC050` and ONE closed code in `check_codes` (`loosening_not_configured`, `
 `tenant_not_in_jurisdiction`, `policy_effective_from_out_of_range`, `gate_environment_refused`). The Back Office shows the two kinds on the
 generic list and detail pages (approve, reject, cancel work there); FILING them is API-only.
 
+Migration 0191 (d1, D4) adds a THIRD kind on the same capability: `aml_screening_trigger_policy_loosen` (payload `{tenant_id, jurisdiction_id, events,
+gate_withdrawal, gate_alert_after_seconds, effective_offset_seconds, legal_review_reference, evidence_reference}`) loosens the screening TRIGGER policy (an event
+removed, a gate switched off, a longer alert threshold). Same rules as the policy kind (two distinct Persons, officer grants and owner-scope quorum for requester,
+counted approvers and executor, cooling period from filing, 24 h approval freshness, 72 h expiry) plus three closed codes: `trigger_policy_loosening_refused` (the
+trigger policy ROUTE refuses a loosening), `no_trigger_policy_to_loosen`, `trigger_gate_enable_refused` (a loosening never enables a gate). See "d1 additions" in
+`docs/runbooks/aml-screening-triggers.md`.
+
 ## 7. Pending human decisions (interim behaviour in force)
 
 - **HDR-M-1:** who approves licensing and market changes, and how many approvals. Interim: two approvals, ACTIVE `platform_admin`

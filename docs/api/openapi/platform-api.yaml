@@ -11018,9 +11018,9 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
     post:
-      summary: Author the next version of the automatic AML screening trigger policy
+      summary: Author the next version of the automatic AML screening trigger policy (tighten-only)
       description: >
-        aml:hold:manage AND step-up `critical`; platform_acting AML officer only (the same rule as the screening policy); needs a signed actor proof (ADR 0110) bound to the whole request. lic18, migration 0181. Appends an immutable VERSION; versions are never edited. Refusals (all 4xx, nothing is written): `gate_withdrawal=true` needs the `scheduled` event (otherwise a clear goes stale unattended), a `gate_alert_after_seconds` of 60..2592000 (the threshold after which a held person raises the `aml.screening_gate_trapped` alert), a screening policy for the jurisdiction, and a screening worker that has recorded a fresh heartbeat (the production binary does not start one: a gate cannot be enabled without a running worker and provider, PROVIDER DEPENDENT). `effective_from` may not be in the past (2 minutes of clock skew allowed) nor more than 30 days ahead, so a version can neither rewrite history nor reset the grace of persons already gated (clears are counted from the FIRST gating version). The platform ships NO grace or re-screen interval; both are configuration. lic29: every refusal carries a closed code in `check_codes` (AMLScreeningRefusalCode): `screening_worker_heartbeat_missing`, `gate_environment_refused`, `gate_needs_scheduled_event`, `gate_needs_alert_threshold`, `alert_threshold_without_gate`, `effective_from_out_of_range`, `jurisdiction_not_in_scope`, `screening_policy_missing`, `tenant_not_in_jurisdiction`, `platform_officer_required`. The HTTP statuses are unchanged.
+        aml:hold:manage AND step-up `critical`; platform_acting AML officer only (the same rule as the screening policy); needs a signed actor proof (ADR 0110) bound to the whole request. lic18, migration 0181. Appends an immutable VERSION; versions are never edited. d1 (migration 0191): TIGHTEN-ONLY, enforced by the database function this route calls (against both the latest version and the version in force): a version that removes an event, switches a gate off (`gate_withdrawal` true to false), lengthens `gate_alert_after_seconds` while the gate stays on, or takes effect earlier than the version in force is refused with 409 and the closed code `trigger_policy_loosening_refused` in `check_codes`; nothing is written. Loosening the trigger policy is a governed two-Person licensing change request (kind `aml_screening_trigger_policy_loosen`), refused unless the tenant's loosening capability is configured and enabled, and it can never enable a gate. Refusals (all 4xx, nothing is written): `gate_withdrawal=true` needs the `scheduled` event (otherwise a clear goes stale unattended), a `gate_alert_after_seconds` of 60..2592000 (the threshold after which a held person raises the `aml.screening_gate_trapped` alert), a screening policy for the jurisdiction, and a screening worker that has recorded a fresh heartbeat (the production binary does not start one: a gate cannot be enabled without a running worker and provider, PROVIDER DEPENDENT). `effective_from` may not be in the past (2 minutes of clock skew allowed) nor more than 30 days ahead, so a version can neither rewrite history nor reset the grace of persons already gated (clears are counted from the FIRST gating version). The platform ships NO grace or re-screen interval; both are configuration. lic29: every refusal carries a closed code in `check_codes` (AMLScreeningRefusalCode): `screening_worker_heartbeat_missing`, `gate_environment_refused`, `gate_needs_scheduled_event`, `gate_needs_alert_threshold`, `alert_threshold_without_gate`, `effective_from_out_of_range`, `jurisdiction_not_in_scope`, `screening_policy_missing`, `tenant_not_in_jurisdiction`, `platform_officer_required`. The HTTP statuses are unchanged.
       security:
         - bearerAuth: []
       parameters:
@@ -13068,6 +13068,10 @@ components:
         `loosening_mixes_tightening`: the version tightens one dimension while loosening another; every dimension must be looser or equal.
         `loosening_not_supported_for_tenant_licensing_model`: governed loosening is not supported for a tenant that holds its own licence (out of scope until the approver model and the quorum read are designed).
         `grace_extension_after_expiry_refused`: the backfill grace of the withdrawal gate has expired and cannot be extended.
+        d1 (migration 0191):
+        `trigger_policy_loosening_refused`: the new trigger policy version is less strict than the latest one or the one in force (an event removed, a withdrawal gate switched off, a longer alert threshold, or an earlier effective time); the trigger policy route only tightens, loosening is a governed licensing change request (kind `aml_screening_trigger_policy_loosen`) that is refused unless configured.
+        `no_trigger_policy_to_loosen`: there is no trigger policy version to loosen; the first version is authored through the trigger policy route.
+        `trigger_gate_enable_refused`: a governed loosening never enables a withdrawal gate (a version that gates withdrawals needs the previous version to gate already).
         The codes `policy_effective_from_out_of_range`, `rescreen_interval_below_floor`, `rescreen_interval_below_alert_threshold`, `tenant_not_in_jurisdiction` and `gate_environment_refused` are raised by the same path with the same meaning.
       enum:
         - policy_effective_from_out_of_range
@@ -13105,6 +13109,9 @@ components:
         - loosening_mixes_tightening
         - grace_extension_after_expiry_refused
         - loosening_not_supported_for_tenant_licensing_model
+        - trigger_policy_loosening_refused
+        - no_trigger_policy_to_loosen
+        - trigger_gate_enable_refused
     AMLScreeningPolicy:
       type: object
       description: The screening policy in force for a jurisdiction. `configured=false` means NONE exists (the platform ships no re-screen interval and no grace).
@@ -13695,11 +13702,16 @@ components:
         AMLScreeningRefusalCode) unless the tenant capability is configured and enabled, until its cooling period (from filing) has elapsed, and below the
         engineering interval floor; aml_screening_loosening_configure {tenant_id, enabled, cooling_seconds (null when disabled), evidence_reference}:
         widening iff it enables loosening or shortens the cooling period. No cooling period ships and loosening is OFF until a platform administrator
-        configures it. No legal value is implied by any field.
+        configures it. No legal value is implied by any field. (d1, migration 0191, PLATFORM ONLY) aml_screening_trigger_policy_loosen {tenant_id,
+        jurisdiction_id, events (sorted, distinct, any of kyc_approval, registration, scheduled; may be empty), gate_withdrawal, gate_alert_after_seconds
+        (60..2592000 when gate_withdrawal, else null), effective_offset_seconds (0..2592000, after execution), legal_review_reference, evidence_reference}:
+        LESSENS the screening trigger policy (an event removed, a gate switched off, a longer alert threshold while the gate stays on); ALWAYS widening
+        (two distinct platform_admin Persons, each an in-force aml_officer of the tenant, owner-scope officer quorum), gated by the SAME per-tenant
+        capability as the screening policy loosening, executes by writing the next trigger policy version, and can NEVER enable a withdrawal gate.
       properties:
         kind:
           type: string
-          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version, licence_status_change, licence_validity_dates_change, licence_review_due_change, licence_evidence_reference_change, operating_basis_set, operating_basis_withdraw, operating_basis_review_record, aml_screening_policy_loosen, aml_screening_loosening_configure]
+          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version, licence_status_change, licence_validity_dates_change, licence_review_due_change, licence_evidence_reference_change, operating_basis_set, operating_basis_withdraw, operating_basis_review_record, aml_screening_policy_loosen, aml_screening_loosening_configure, aml_screening_trigger_policy_loosen]
         payload:
           type: object
         reason_code:

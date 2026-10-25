@@ -41,12 +41,17 @@ func TestLic23_N1_GateOffVersionAllowedAfterTheJurisdictionLeavesTheTenantsScope
 	if err := tw.setTriggerErr([]aml.TriggerEvent{aml.EventRegistration}, true, time.Now()); !errors.Is(err, aml.ErrInvalidInput) {
 		t.Fatalf("a gate for a jurisdiction outside the current scope: %v, want ErrInvalidInput", err)
 	}
+	// d1 (0191, D4): the route is tighten-only, so any gate-OFF version is refused there with the closed code; the N-1 relief lives in the
+	// OWNER-ONLY setter and in the governed loosening (tested in internal/licensingchange). The assertions below run as the owner path.
+	if err := tw.setTriggerErr(nil, false, time.Now()); aml.RefusalCode(err) != "trigger_policy_loosening_refused" {
+		t.Fatalf("the route must refuse a gate-off version with the closed code: %v (%q)", err, aml.RefusalCode(err))
+	}
 	// ... and so is a gate-OFF version that still lists events (only the plain switch-off is relieved) ...
-	if err := tw.setTriggerErr([]aml.TriggerEvent{aml.EventRegistration}, false, time.Now()); !errors.Is(err, aml.ErrInvalidInput) {
+	if err := tw.setTriggerErrOwner([]aml.TriggerEvent{aml.EventRegistration}, false, time.Now()); !errors.Is(err, aml.ErrInvalidInput) {
 		t.Fatalf("a non-gating version with events outside the current scope: %v, want ErrInvalidInput", err)
 	}
 	// ... but the switch-off itself (no gate, no events) is allowed.
-	if err := tw.setTriggerErr(nil, false, time.Now()); err != nil {
+	if err := tw.setTriggerErrOwner(nil, false, time.Now()); err != nil {
 		t.Fatalf("the gate-off version must be allowed: %v", err)
 	}
 	if tw.heldFor(p, aml.OpWithdrawal) {

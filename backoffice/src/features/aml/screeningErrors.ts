@@ -53,6 +53,9 @@ export const REFUSAL_TEXT: Record<string, string> = {
   loosening_not_supported_for_tenant_licensing_model: 'Governed loosening of the screening policy is not available for a tenant that holds its own licence. This is out of scope for now; nothing was changed.',
   grace_extension_after_expiry_refused: 'The backfill grace of the withdrawal gate has already run out and a longer grace would re-open it. The software refuses to extend it.',
   loosening_cooling_period: 'The cooling period of this loosening request has not elapsed yet. The period is counted from the filing of the request; approve again once it has passed.',
+  trigger_policy_loosening_refused: 'The new trigger policy version is less strict than the latest one or the one in force: an event was removed, the withdrawal gate was switched off, the alert threshold is longer, or it takes effect earlier. This form only tightens. Loosening the trigger policy is a separate two-person request in the licensing changes area, and it is refused unless a platform administrator has switched that capability on for this tenant.',
+  no_trigger_policy_to_loosen: 'There is no trigger policy version to loosen for this tenant and jurisdiction. The first version is authored on the trigger policy form.',
+  trigger_gate_enable_refused: 'A loosening request never enables a withdrawal gate. Enabling a gate is done on the trigger policy form, which has its own safeguards.',
 }
 
 const FORBIDDEN: Record<ScreeningOp, string> = {
