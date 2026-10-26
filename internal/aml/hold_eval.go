@@ -46,6 +46,9 @@ func (v HoldVerdict) Denied() bool { return v.Held || v.EvalFailed }
 // code never assigns it.
 var holdProbe = probeHoldActive
 
+// holdMatch is the hold-id lookup after a positive probe; a package variable for the same reason as holdProbe (d1 LOW-3 fault injection).
+var holdMatch = matchHold
+
 // EvaluateHold is the AML enforcement read (ADR 0116 s5.1, L1 / C6): it asks aml_hold_active() whether an active hold
 // gates op for the person in the tenant, INSIDE the caller's transaction, with no I/O other than that single database
 // round trip. A failure of the read itself is NOT an error return: it is HoldVerdict{EvalFailed: true}, which every caller
@@ -83,15 +86,22 @@ func evaluateHold(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID 
 	if !held {
 		return HoldVerdict{}, nil
 	}
-	v := HoldVerdict{Held: true}
-	// The matched hold id is evidence for the AML-scoped decision log. Its lookup is best effort: the operation is
-	// already denied, so a failure here changes nothing but the evidence.
-	if id, found, mErr := matchHold(ctx, tx, tenantID, personID, accountID, op); mErr == nil {
-		if found {
-			v.HoldID = id
-		} else {
-			v.ScreeningOnly = true
+	// The matched hold id is evidence for the AML-scoped decision log AND the way to tell an officer hold from a screening-only wait.
+	// d1 (ledger-finance LOW-3): if the lookup ERRORS after the probe said held, the verdict is EvalFailed (a retryable, fail-closed
+	// deny, like a probe failure), NEVER a definite hold: a definite hold with ScreeningOnly unset makes the payout claim REJECT the
+	// withdrawal and return the funds. Only a lookup that SUCCEEDED and found no officer hold marks the hold ScreeningOnly.
+	id, found, mErr := holdMatch(ctx, tx, tenantID, personID, accountID, op)
+	if mErr != nil {
+		if !alertInTx {
+			return HoldVerdict{EvalFailed: true}, nil
 		}
+		return HoldVerdict{EvalFailed: true}, raiseEvalFailed(ctx, tx, tenantID, op)
+	}
+	v := HoldVerdict{Held: true}
+	if found {
+		v.HoldID = id
+	} else {
+		v.ScreeningOnly = true
 	}
 	return v, nil
 }

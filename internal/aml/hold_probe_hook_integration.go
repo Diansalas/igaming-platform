@@ -34,3 +34,13 @@ func SetHoldProbeForTest(f ProbeFunc) (restore func()) {
 func RealHoldProbeForTest(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (bool, error) {
 	return probeHoldActive(ctx, tx, tenantID, personID, accountID, op)
 }
+
+// MatchFunc replaces the hold-id lookup that follows a positive probe.
+type MatchFunc func(ctx context.Context, tx pgx.Tx, tenantID, personID, accountID uuid.UUID, op Operation) (uuid.UUID, bool, error)
+
+// SetHoldMatchForTest installs f as the hold-id lookup and returns the restore function (same rules as SetHoldProbeForTest).
+func SetHoldMatchForTest(f MatchFunc) (restore func()) {
+	prev := holdMatch
+	holdMatch = f
+	return func() { holdMatch = prev }
+}
