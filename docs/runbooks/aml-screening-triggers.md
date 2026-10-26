@@ -187,3 +187,35 @@ against the latest version AND the version in force:
   the previous and the in-force version next to the three `licensing_change.*` rows. `screening_loosening_reconcile()` also covers the new kind.
 - **Turning a gate off does not release a held match.** An unresolved system-found match, a sanctions hold, an officer hold, the kill switch and closed accounts hold
   whatever the trigger policy says (`aml_screening_gate_denies` is unchanged in this respect).
+
+### D10: a clear is only as fresh as when it was taken, and only for the lists it covered (migration 0192)
+
+**The defect that was closed.** The gate used to judge a clear by the re-screen interval of the policy in force when it was EVALUATED, and never looked at the lists the clear
+covered. A governed loosening (or the break-glass setter) that LENGTHENED the interval therefore made every expired clear fresh again and released withdrawals that were
+waiting behind the gate with no new screening, and a clear taken against `pep` only kept clearing a person once `sanctions` had been added to the policy.
+
+**Rules now (database-enforced, only ever stricter).**
+- Every clear records its provenance. `aml_screening_requests` (worker clears, matches, auto-reviewed re-flags) gets `screened_policy_id`, `screened_lists`,
+  `screened_interval_seconds`, written by `aml_screening_request_finish`, whose last argument is the policy version the worker screened under; the lists and the interval are READ
+  FROM THAT POLICY ROW (it must be a version of this tenant and of the request's jurisdiction that is in effect), never taken from the caller. `aml_screening_results`
+  (officer results) gets `screened_policy_id` and `screened_interval_seconds` stamped by `aml_screening_record` (the policy in force for the jurisdiction of the request the key resolves,
+  else the tenant policy with the SHORTEST interval: conservative) next to the `lists` the officer states. Rows stay append-only; a terminal request stays final.
+- `aml_screening_covers()`: a screening covers the person only if (1) its provenance is recorded, (2) its recorded lists are a superset of the lists now in force, (3) no policy version
+  since it lacked a list now in force (a list removed and re-added invalidates it), and (4) `now < screening time + LEAST(recorded interval, interval now in force)`. A longer interval
+  can never revive an expired clear; a shorter one tightens at once. The gate applies it to all four routes (worker clear, auto-reviewed re-flag, officer clear, officer match whose hold
+  was lifted); `aml_screening_enqueue_due` applies the same predicate, so persons whose clear no longer covers them are queued (its idempotency key now also names the policy version, so a
+  tightened policy can queue them again inside the same bucket).
+- Unchanged: unresolved matches, sanctions holds, officer holds, the kill switch and closed accounts hold as before; the backfill grace and the first-gating baseline are as in 0190; no
+  release path was added and no gate is enabled. A withdrawal already held for a stale clear stays held until the person is re-screened. No sanctions false-positive policy and no
+  withdrawal release policy is defined here.
+- The trapped-funds monitor (`aml_screening_gate_overdue`, `aml_screening_parked_overdue`) reads the gate: a newly stale person is counted from the oldest unresolved request, else from the first
+  gating version (so a dead worker shows at once), and leaves the count when the re-screen completes (`TestD10_NewlyStalePersons_...`).
+
+**Effect on existing (dev / staging) data.** Every clear written before 0192 has NO provenance and is not trusted. Under a gating trigger policy every person who relied on such a clear is denied
+at the gate (withdrawals wait) until the next scheduled enqueue pass queues a re-screen (`EnqueueBatch` persons per pass) and the worker records a clear with provenance. Nothing is deleted or rewritten
+(`TestD10_Upgrade_...` runs this on a database upgraded from 0191 with a legacy clear). No production database has a gate, so there is no production effect. The 0192 down is refused (`AT095`) once any
+provenance has been recorded.
+
+**Residual.** The worker names the policy version it screened under and the database validates that it is a version in effect for the request's jurisdiction; it cannot prove the provider was called with
+those lists (the worker API is runtime-callable, as the clear itself always was; the heartbeat and the environment anchor are the existing controls). A real provider needs a signed vendor attestation of the
+screened lists (PROVIDER DEPENDENT).

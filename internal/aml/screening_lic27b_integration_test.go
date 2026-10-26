@@ -149,10 +149,14 @@ func TestLic27b_S4_ConfirmedRequestMustNameTheSanctionsList(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	pid := tw.policyID()
 	upd := func(lists string) error {
 		return tw.Owner.WithTenant(context.Background(), tw.Tenant, func(ctx context.Context, tx pgx.Tx) error {
+			// d1 D10 (0192): a request that ends needs_officer / done must carry its screening provenance (a new CHECK), so the fixture states it;
+			// otherwise the PEP-only case below would fail on THAT check and no longer prove the sanctions rule.
 			_, e := tx.Exec(ctx, `UPDATE aml_screening_requests SET status = 'needs_officer', outcome = 'confirmed', match_lists = `+lists+`,
-				provider_id = 'mock', screened_at = now(), completed_at = now(), claim_token = NULL, lease_until = NULL WHERE id = $1`, id)
+				provider_id = 'mock', screened_at = now(), completed_at = now(), claim_token = NULL, lease_until = NULL,
+				screened_policy_id = $2, screened_lists = ARRAY['pep', 'sanctions'], screened_interval_seconds = 86400 WHERE id = $1`, id, pid)
 			return e
 		})
 	}

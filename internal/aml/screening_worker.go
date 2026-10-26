@@ -339,6 +339,7 @@ func (w *ScreeningWorker) processRequest(ctx context.Context, tenantID uuid.UUID
 	// Phase A: the lists (the screening policy's) and the vendor subject reference. A short tenant transaction.
 	var lists []ListType
 	var vendorRef string
+	var policyID uuid.UUID // d1 D10: the screening policy version this screening is made under (recorded with the clear)
 	pctx, cancel := w.phase(ctx)
 	err := w.Pool.WithTenant(pctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var ls []string
@@ -354,6 +355,7 @@ func (w *ScreeningWorker) processRequest(ctx context.Context, tenantID uuid.UUID
 			return err
 		}
 		lists = toLists(ls)
+		policyID = pid
 		// The KYC vendor's opaque subject reference (never a platform id). Attributes are BLOCKED on the Q6 privacy review.
 		qerr := tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications
 			WHERE tenant_id = $1 AND person_id = $2 AND provider_reference IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1`,
@@ -394,13 +396,14 @@ func (w *ScreeningWorker) processRequest(ctx context.Context, tenantID uuid.UUID
 	res, matches := o.callProvider(ctx, req)
 	plan := planFinish(res.Outcome, matches, res.ErrorCode, c.Attempts, w.Config)
 	w.finish(ctx, tenantID, c, plan, &providerFacts{id: w.Provider.ID(), ref: validProviderRef(res.ProviderReference), subject: subj, at: res.ScreenedAt,
-		fingerprint: matchFingerprint(key, res.matchRefs)}, st)
+		fingerprint: matchFingerprint(key, res.matchRefs), policy: policyID}, st)
 }
 
 type providerFacts struct {
 	id, ref, subject string
 	at               time.Time
-	fingerprint      string // lic23 N-2: keyed pseudonymous identity of the match ("" when the provider gave no stable references)
+	fingerprint      string    // lic23 N-2: keyed pseudonymous identity of the match ("" when the provider gave no stable references)
+	policy           uuid.UUID // d1 D10: the screening policy version the lists of this screening came from
 }
 
 // matchFingerprint is HMAC-SHA256(tenant key, "match-fp:v1:" + the sorted list:reference pairs), hex. It is a pseudonym: the vendor's
@@ -433,6 +436,7 @@ func (w *ScreeningWorker) finish(ctx context.Context, tenantID uuid.UUID, c clai
 	}
 	var errCode, provID, provRef, subj, fp *string
 	var at *time.Time
+	var policyArg *uuid.UUID // d1 D10: named for a clear or a match (the database refuses a clear without it); nil for a retry or a terminal failure
 	if plan.ErrorCode != "" {
 		s := string(plan.ErrorCode)
 		errCode = &s
@@ -452,6 +456,10 @@ func (w *ScreeningWorker) finish(ctx context.Context, tenantID uuid.UUID, c clai
 		}
 		t := f.at.UTC().Truncate(time.Microsecond)
 		at = &t
+		if f.policy != uuid.Nil {
+			pol := f.policy
+			policyArg = &pol
+		}
 	}
 	var applied, reviewed bool
 	var status string
@@ -460,8 +468,8 @@ func (w *ScreeningWorker) finish(ctx context.Context, tenantID uuid.UUID, c clai
 	defer cancel()
 	pending, err := alerting.InTx(cctx, alerting.NewTenantRunner(w.Pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
 		applied, reviewed, status = false, false, ""
-		if err := tx.QueryRow(ctx, `SELECT o_applied, o_status, o_reviewed FROM aml_screening_request_finish($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12)`,
-			tenantID, c.ID, c.ClaimToken, plan.Result, matchArg, errCode, provID, provRef, subj, at, int(plan.Backoff/time.Second), fp).Scan(&applied, &status, &reviewed); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT o_applied, o_status, o_reviewed FROM aml_screening_request_finish($1, $2, $3, $4, $5::text[], $6, $7, $8, $9, $10, $11, $12, $13)`,
+			tenantID, c.ID, c.ClaimToken, plan.Result, matchArg, errCode, provID, provRef, subj, at, int(plan.Backoff/time.Second), fp, policyArg).Scan(&applied, &status, &reviewed); err != nil {
 			return err
 		}
 		// A match an officer already reviewed and cleared (same provider-stated identity) needs no attention alert.

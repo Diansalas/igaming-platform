@@ -589,13 +589,14 @@ func TestQueue_ClaimTokenCAS_StaleWorkerCannotFinishAReclaimedRequest(t *testing
 	if len(second) != 1 || second[0].attempts != 2 || second[0].token == first[0].token {
 		t.Fatalf("an expired lease is reclaimed under a NEW token: %+v", second)
 	}
-	tw.heartbeat() // a clear is accepted only from a provider that has a fresh worker heartbeat (lic18, S2)
+	tw.heartbeat()       // a clear is accepted only from a provider that has a fresh worker heartbeat (lic18, S2)
+	pid := tw.policyID() // d1 D10: a clear names the screening policy version it was made under
 	finish := func(token uuid.UUID) (bool, string) {
 		var applied bool
 		var status string
 		if err := tw.tenantTx(func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, 'mock-screening', 'ref-1', $4, now(), 0, NULL)`,
-				tw.Tenant, first[0].id, token, strings.Repeat("c", 64)).Scan(&applied, &status)
+			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, 'mock-screening', 'ref-1', $4, now(), 0, NULL, $5)`,
+				tw.Tenant, first[0].id, token, strings.Repeat("c", 64), pid).Scan(&applied, &status)
 		}); err != nil {
 			t.Fatal(err)
 		}

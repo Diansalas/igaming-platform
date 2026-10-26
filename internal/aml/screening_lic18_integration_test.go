@@ -325,6 +325,7 @@ func TestLic18_FinishRefusesAClearWithoutReferenceOrHeartbeat(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	pid := tw.policyID() // d1 D10: a clear names the screening policy version it was made under
 	finish := func(provider, ref string) error {
 		return tw.tenantTx(func(ctx context.Context, tx pgx.Tx) error {
 			var r *string
@@ -333,8 +334,8 @@ func TestLic18_FinishRefusesAClearWithoutReferenceOrHeartbeat(t *testing.T) {
 			}
 			var applied bool
 			var status string
-			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, $4, $5, $6, now(), 0, NULL)`,
-				tw.Tenant, id, token, provider, r, strings.Repeat("c", 64)).Scan(&applied, &status)
+			return tx.QueryRow(ctx, `SELECT o_applied, o_status FROM aml_screening_request_finish($1, $2, $3, 'clear', NULL, NULL, $4, $5, $6, now(), 0, NULL, $7)`,
+				tw.Tenant, id, token, provider, r, strings.Repeat("c", 64), pid).Scan(&applied, &status)
 		})
 	}
 	tw.heartbeat()

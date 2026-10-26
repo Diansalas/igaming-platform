@@ -239,7 +239,8 @@ BEGIN
         'aml_screening_trigger_policy_effective(uuid, uuid)',
         'aml_screening_gate_overdue(uuid, integer)', 'screening_worker_heartbeat(text, boolean)',
         'aml_screening_request_list(uuid, uuid)', 'aml_screening_enqueue_due(uuid, integer)', 'aml_screening_request_claim(uuid, integer, integer)',
-        'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text)',
+        -- (migration 0192, d1 D10: the finish function takes the screening policy version as its last argument; the 12-argument form is gone.)
+        'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text, uuid)',
         'aml_screening_request_replace(uuid, uuid, uuid, text)', 'aml_screening_parked_summary(uuid, timestamptz)', 'aml_screening_parked_overdue(uuid, timestamptz, uuid, integer)',
         -- Migration 0189 (lic29): the HTTP route's tighten-only screening policy author.
         'aml_screening_policy_author(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)',
