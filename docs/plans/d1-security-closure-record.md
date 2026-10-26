@@ -89,7 +89,7 @@ The defect, reproduced BEFORE the fix on the 0191 schema and code (`go test -tag
 6. Unchanged: unresolved matches, sanctions holds, officer holds, kill switch, closed accounts, the backfill grace and first-gating baseline (0190), `aml_screening_gate_overdue` / `parked_overdue` bodies. No release path added (every conjunct is stricter than the old test).
 
 **Effect on existing dev data (stated plainly).** Every clear that exists before 0192 has no provenance and stops counting. Under a gating trigger policy those persons are denied at the gate until the scheduler queues a re-screen and the worker records a clear with provenance
-(`EnqueueBatch` persons per pass). Nothing is rewritten or deleted. No production database has a gate (the environment anchor forbids enabling it), so there is no production effect. `TestD10_Upgrade_LegacyClearsAreNotTrusted_...` proves it on a database upgraded from 0191 with a legacy clear.
+(the worker claims `ClaimBatch` 4 per tenant per 10 s pass, about 1 440 per hour per tenant, FIFO). Nothing is rewritten or deleted. No production database has a gate (the environment anchor forbids enabling it), so there is no production effect. `TestD10_Upgrade_LegacyClearsAreNotTrusted_...` proves it on a database upgraded from 0191 with a legacy clear.
 
 ## 3. Verification (private databases only: `d1sec`, `d1mut`, `d1base`; scratch databases by the tests)
 
@@ -237,7 +237,7 @@ Analysis of the survivors: (a) `covers: missing provenance trusted (interval def
 | A3 | D10 follow-up the owner raised in c4: pin the policy id on payout decisions (apply the policy in force at REQUEST time) | build later; accept the current rule (the stricter of recorded and current) | Accept the current rule; the pinning needs ledger-finance design and is not required for safety any more |
 | A4 | A real provider's attestation of the screened lists (section 6.3) | require it in the provider contract; accept the worker's statement | Require it before any non-MOCK provider |
 | A5 | D5 (approver population; own-licence tenants out of scope), D6 (jurisdiction floors replace the 3600 s engineering floor), D8 (tenant notification), D9 (filing form) of c4 | as c4 | Unchanged from the c4 record |
-| A6 | Capacity: the `EnqueueBatch`/pass size and monitor batch for a large tenant after a list is added (section 6.7) | measure; set per tenant configuration | Measure before any non-MOCK activation |
+| A6 | Capacity: the claim rate (`ClaimBatch`/pass), the `EnqueueBatch`/pass size and the monitor batch for a large tenant after a list is added (section 6.7) | measure; set per tenant configuration | Measure before any non-MOCK activation |
 | A7 | Whether the `effective_from` dimension should count as loosening on the trigger route (section 6.8) | keep (mirrors 0189); drop it for the trigger route | Keep |
 
 ## 8. Proposed governance text (for the orchestrator; nothing is decided here)
@@ -312,7 +312,7 @@ The payments full package exceeds 10 minutes (1215 tests), hence the targeted `-
 
 ### 9.5 Records only (no code change)
 
-1. **LF MEDIUM-1 capacity: ACTIVATION-BLOCKING follow-up.** The gate and `aml_screening_enqueue_due` evaluate the coverage predicate per candidate, and the scheduler enqueues only `EnqueueBatch` persons per pass. At about 10 000 covered persons a list addition makes everyone stale at once. Plan (also in the runbook, "Capacity"): keyset batching of the scheduler scan; an alert when enqueue fails or the due backlog exceeds a threshold; priority lanes (persons with a parked withdrawal first); a load test at the target tenant size. "No trigger gate may be enabled before this is done and the owner has accepted the capacity figures" is currently a PROCESS control only. `aml_screening_trigger_policy_author` still enables a gate in dev, staging and test; only production and unrecorded environments are refused (SN-5). No database switch was added (it would be a new configuration surface and a policy choice for the owner, not a trivial change). It is listed as the activation-blocking follow-up **CAPACITY-GATE-SWITCH**: a database-enforced, owner-recorded capacity acceptance that the author function checks before it accepts `gate_withdrawal = true`.
+1. **LF MEDIUM-1 capacity: ACTIVATION-BLOCKING follow-up.** The gate and `aml_screening_enqueue_due` evaluate the coverage predicate per candidate, and the real drain rate of the backlog is the worker claim rate (`ClaimBatch` 4 per tenant per 10 s pass, about 1 440 per hour per tenant, FIFO claim queue; the enqueue phase itself queues up to `EnqueueBatch` 100 per pass). At about 10 000 covered persons a list addition makes everyone stale at once. Ledger-finance measured at 10 000 persons per tenant under concurrent load: `aml_screening_gate_overdue` 4.6-5.8 s, `aml_screening_parked_overdue` 5.3 s, `aml_screening_enqueue_due` 1.0-2.5 s, against a 5 s `PhaseTimeout` (so the monitors can already exceed the phase timeout). Plan (also in the runbook, "Capacity"): keyset batching of the scheduler scan; an alert when enqueue fails or the due backlog exceeds a threshold; priority lanes (persons with a parked withdrawal first); a load test at the target tenant size. "No trigger gate may be enabled before this is done and the owner has accepted the capacity figures" is currently a PROCESS control only. `aml_screening_trigger_policy_author` still enables a gate in dev, staging and test; only production and unrecorded environments are refused (SN-5). No database switch was added (it would be a new configuration surface and a policy choice for the owner, not a trivial change). It is listed as the activation-blocking follow-up **CAPACITY-GATE-SWITCH**: a database-enforced, owner-recorded capacity acceptance that the author function checks before it accepts `gate_withdrawal = true`.
 2. **LF LOW-2** recorded in the runbook "Known limits".
 3. **Rolling deploy.** `aml_screening_request_finish` is 13-argument only; an old 12-argument caller gets `42883` during a rolling deploy. Deploy workers and database together (the screening worker is disabled everywhere today). Runbook note added.
 4. **I-4 `deploy/init-app-role.sql` grant drift** is a follow-up for the payments owner (not changed here).
@@ -372,3 +372,45 @@ Mutations (all KILLED, `r3_muts.log`): gate worker-clear bound without `claimed_
 ### 10.6 Pin changes
 
 None of the existing tests or pins changed in this round. Added: `screening_d1r3_integration_test.go`, migration files 0193. The static AML-migration list test needed no change (0193 uses no `AM` code).
+
+## 11. Round 4: ledger-finance R3-L1 (migration 0194)
+
+Not review-complete. 0192 and 0193 are pushed and untouched; migration 0194 is new and reversible. The screening mechanism is still DISABLED and INERT.
+
+### 11.1 Defect (reproduced before the fix)
+
+A policy version's `created_at` is fixed at INSERT. If its transaction stays open while a worker claims (`claimed_at` later), reads the old 1 h policy, screens and finishes, and the version then commits, its start (`created_at`) is before `claimed_at`; the 0193 bound excluded it. Once the clear went stale a lengthening revived it. Failing-before (`r4_before`, database at 0193): `TestD1R4_LateCommittingVersion_...` and `TestD1R4_AutoReviewedReflagRoute_LateCommittingVersionCounts` FAIL "the expired clear was REVIVED by a lengthening"; the other two tests (control, re-flag in flight) were green.
+
+### 11.2 Fix (migration 0194, commit c463ef2)
+
+- `aml_screening_since` gets a fifth argument `p_after_policy` (the claim policy of a worker screening). It counts versions in force that started after the lower bound OR were created after the claim policy IN VERSION ORDER, `(created_at, id) > (claim policy created_at, id)`, not by clock. An OR, so only stricter. The never-in-force exclusion rule is unchanged. A version not yet in force (`started` in the future) is not counted until it is.
+- Gate (worker-clear route and auto-reviewed re-flag route) and `aml_screening_enqueue_due` pass `r.claim_policy_id`; the officer routes pass `NULL::uuid` (unchanged behaviour). The 4-argument function is dropped (owner-only, nothing else called it); the new one has the same owner-only grants. `deploy/init-app-role.sql` is unchanged.
+- `COMMENT ON FUNCTION` on `aml_screening_since` and `aml_screening_covers` state what is guaranteed: a worker screening that has been older than the interval of any version in force that started after its screening began or was created after its policy snapshot is never covered again. NOT guaranteed: a version still uncommitted NOW is not seen (the clear stays fresh until it commits, by design); the provider's lists (PROVIDER DEPENDENT).
+- Cross-jurisdiction note: the gate does not filter requests by jurisdiction (as before); the version-order comparison uses `created_at`/`id` only, so it stays meaningful in time order.
+
+### 11.3 Tests and mutations (`internal/aml/screening_d1r4_integration_test.go`)
+
+| Test | Covers |
+|---|---|
+| `TestD1R4_LateCommittingVersion_StillCountsAgainstAWorkerClear` | held-open policy transaction (pool wrapper that holds the commit); worker clear under the old policy; commit; stale; lengthening does not revive; scheduler agrees |
+| `TestD1R4_VersionOrderIsNotClockOrder_AVersionCreatedBeforeTheClaimPolicyDoesNotCount` | control: no over-strictness |
+| `TestD1R4_AutoReviewedReflagRoute_VersionInForceDuringTheScreeningCounts` | closes the round-3 admitted gap (re-flag route, the 0193 bound) |
+| `TestD1R4_AutoReviewedReflagRoute_LateCommittingVersionCounts` | re-flag route, the 0194 bound |
+
+Mutations, all KILLED (`r4_muts.log`): version-order clause removed; worker-clear gate route ignores the claim policy; re-flag gate route ignores the claim policy; scheduler ignores it; tuple comparison reversed.
+
+### 11.4 Documentation
+
+§9.5 item 1, A6 and the runbook now state the claim rate as the drain rate and carry the reviewer's 10 000-person figures under concurrent load (gate_overdue 4.6-5.8 s, parked_overdue 5.3 s, enqueue_due 1.0-2.5 s, against a 5 s PhaseTimeout). The optional per-migration up/down/up pin in the migration tests was not added (no such per-migration pin file exists; the fingerprint equalities below are the evidence).
+
+### 11.5 Verification
+
+| Command | Result |
+|---|---|
+| `go test -tags integration -count=1 -p 1 ./internal/aml ./internal/licensingchange ./cmd/migrate ./internal/db` | all ok (aml 331.7 s, licensingchange 94.5 s, migrate 1.5 s, db 34.5 s) |
+| payments `-timeout 40m -run 'Lic26\|Lic29\|AML\|Aml\|Hold\|Screening\|Gate\|Sweep\|0115\|Parked'` | ok, 750.1 s |
+| httpserver subset (same `-run` as section 9.4) | ok, 423.5 s |
+| `go vet ./...`, `go vet -tags integration` (aml, licensingchange, payments, httpserver), `gofmt -l internal cmd`, `go test -count=1 ./...` | clean / all ok |
+| 0194 up/down/up; upgrade from a database at 0193; down 4 | upgraded-from-0193 fingerprint == clean setup; down 1 == the 0193 database byte for byte; up again == first up; down 4 == the 0190 database byte for byte |
+| Playwright, vitest | NOT re-run: database function bodies and docs only |
+
