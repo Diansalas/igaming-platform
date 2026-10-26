@@ -1,0 +1,48 @@
+# D1 security closure (D4, D7, D10) completion report (2026-10-26)
+
+Branch `claude/licensing-jurisdiction-completion` (pushed, no PR, NOT merged). Frozen baseline `1505a165e9152729b5df573211c80b1c0a35bc87` is an ancestor and untouched. **Migration head 0194** (previous reported head 0190; this slice added 0191-0194; the line started at 0175). All providers MOCK. The screening mechanism is INERT and DISABLED. Nothing here is a legal opinion, production readiness, real-provider validation or an AWS RPO/RTO claim.
+
+## 1. Commits
+- **Final code commit: `32e0909`** (all code, migrations, tests). Code history of the slice: D7 `de54493`, D4 `49bc3d2`, `3201446`, D10 `1ce4435`, `b71d880`, round 2 `d14de3e` `9016427`, round 3 `f29b615` (0193), round 4 `c463ef2` (0194), test-flake fix `32e0909`.
+- Everything after `32e0909` is documentation only (this report and registry rows); it does not change the code evidence below.
+- Record: `d1-security-closure-record.md` (sections 1-11).
+
+## 2. What closed
+- **D7:** runtime EXECUTE on the break-glass `aml_screening_policy_set` and `aml_screening_trigger_policy_set` revoked (0191). Runtime call = 42501. A catalogue test pins the only runtime-executable writers of the policy tables. Sanctions-list removal is refused on every runtime path. Owner path for administration documented in the runbook (no runtime privilege).
+- **D4:** loosening of the screening TRIGGER policy (event removed, gate on->off, longer alert threshold) now requires the governed licensing-change kind `aml_screening_trigger_policy_loosen` (two distinct Persons, officer grants + owner-scope quorum, signed proofs, 24 h freshness / 72 h expiry, DB-enforced, gated by the same unconfigured capability row); the HTTP route is tighten-only and returns closed code `trigger_policy_loosening_refused`. Loosening can never enable a withdrawal gate.
+- **D10:** every clear records policy version, lists and interval (0192); freshness = `LEAST(recorded interval, current interval, minimum interval of every version actually in force since the screening)` measured from the screening time; list-superset rule; legacy clears untrusted; claim-time policy binding; in-flight and late-committing versions counted (0193, 0194); `aml_hold_match` error is a retryable denial and never a rejection. Shorten-then-lengthen, in-flight and late-commit sequences no longer revive a stale clear or release a held withdrawal.
+
+## 3. Verification (exact, observed)
+| Gate | Evidence | Result |
+|---|---|---|
+| Hosted CI, final code commit | run 40277726206 on `32e0909` | 27/27 jobs success (lint, govulncheck on Go 1.26.10, all integration shards, frontend, infrastructure) |
+| Hosted CI, earlier slice commits | 40257242955 (`2e1d11a`), 40261803793 (`bc87c98`), 40266256837 (`9f409bd`) | each 27/27 success |
+| Full local integration, final commit | `priv_test.sh -tags integration -count=1 -p 1 -timeout 8h ./...` on `32e0909`, 2026-10-26 06:10-08:11 UTC | **exit 0, 82 packages ok, 0 FAIL**, 27 without test files (payments 4241 s, httpserver 1055 s, aml 334 s, licensingchange 106 s, payoutinstrument 44 s) |
+| Earlier full run, disclosed | same command on `9f409bd` | exit 1: 81 ok, 1 FAIL: `TestInstrumentBornPending` (payoutinstrument), a duplicate key on a fixture row |
+| Real-stack Playwright 01-13 | `backoffice/e2e/run.sh`, fresh private DB, real `cmd/platform-api`, Chromium, `32e0909`, 08:11-09:00 UTC | **exit 0, 80 passed, 0 failed, 0 skipped/fixme, 0 flaky**, 47.7 min (orchestrator-run) |
+| Migrations | clean setup + `verify`; down 19 (0194 -> 0175) then up then `verify`; DB built from migrations <= 0175 then `up` to 0194 + `verify` (on `9f409bd`; no migration changed in `32e0909`) | all OK, no version gaps, exit 0 |
+| Unit / vet / format | `go test -count=1 ./...`, `go vet ./...`, gofmt | clean (run by the slice and by CI) |
+
+The `TestInstrumentBornPending` failure: the test world's fingerprint is random per run and five fixture sites replace its first byte with a fixed prefix, colliding about once in 256 runs per site (about 4% per run in total). Inferred from the code and not reproduced with a forced value: it passed 3/3 alone, the whole package passed on re-run, and it passed in the earlier full run and in CI. It is unrelated to the screening changes (no file in the package is touched by them). Fixed in `32e0909` (test-only helper that never returns its input, plus a unit test), then the whole suite was re-run clean and CI re-run green. This was not waived.
+
+## 4. Independent review (no implementer was sole reviewer)
+- **Security (independent agent), four passes** (original D1, round 2, 0193, 0194), each re-running suites and writing its own probes as the runtime role. Final verdicts: **D7 acceptable, D4 acceptable, D10 acceptable**, no Critical/High/Medium open. Findings raised and closed: M-1 freshness from recording time (fixed), L-1 superseded policy naming (fixed), L-2 never-in-force version voiding clears (fixed), L-3 queue starvation (fixed). Info items stand (signing-key trust model ADR 0110, dev compose runs as owner but production refuses, 0191 down re-grants in dev/staging, I-4 init-app-role grant drift for payments owner).
+- **Ledger-finance (independent agent), four passes.** Raised HIGH-1 (shorten-then-lengthen revival), NEW-M1 (in-flight version), R3-L1 (late-committing version), LOW-3 (hold-lookup error turned into a rejection returning funds), MEDIUM-1 (capacity) and doc-honesty items: all code items fixed and re-verified with the reviewer's own real-gate probes. **0191 approved; 0192 + 0193 + 0194 signed from the money side.** Money paths fail closed: stale persons park, nothing is rejected, no ledger posting, monitors see them.
+- Caveats: code- and design-level reviews on a development database, not penetration tests or regulatory sign-off; reports exist as session transcripts, with findings and dispositions in the record.
+
+## 5. Remaining risks (activation-blocking unless stated)
+1. **CAPACITY (ACTIVATION-BLOCKING):** at 10,000 persons per tenant `gate_overdue` 4.6-5.8 s, `parked_overdue` 5.3 s, `enqueue_due` 1.0-2.5 s under concurrent load versus a 5 s phase timeout; claim drain about 1,440 per hour per tenant. Plan recorded (keyset batching, enqueue-failure alert, priority lanes, load test). **CAPACITY-GATE-SWITCH is NOT built:** "no gate until capacity is done and accepted" is a PROCESS control only; `aml_screening_trigger_policy_author` still enables a gate in dev, staging and test (production and unrecorded environments are refused).
+2. **Cross-jurisdiction over-strictness (Low, fails closed):** a clear from one jurisdiction stops counting for another when the other has a later-created shorter or list-dropping version; self-heals by re-screening, adds to capacity load. Fix proposed by ledger-finance (apply the version-order term only for the request's own jurisdiction); not built.
+3. **Provider attestation (PROVIDER DEPENDENT):** the database cannot prove a provider screened the recorded lists; `screened_at` is the worker's statement, bounded to 120 s tolerances (engineering constants, not legal values); a vendor serving cached results older than that is refused and stays held.
+4. **Collusion:** three colluding platform_admins can grant each other `aml_officer` and, if the capability were ever enabled, loosen. Same trust model as other officer controls; inert today.
+5. **Owner path** (table-owner role) can still call the setters and loosen; it is break-glass, documented, not a runtime path.
+6. Not yet done: policy id pinned on payout decisions (reconstruction possible but indirect); Back Office filing form for the loosening kinds; automated up/down/up pins for 0193/0194 (verified by hand and by fingerprint); a version not yet committed is invisible until it commits (documented).
+7. Rolling deploy: old 12-argument finish callers get 42883: deploy workers and database together.
+
+## 6. Owner decisions (separate from engineering)
+- **Blocks ACTIVATION of the screening mechanism, not this merge:** C4-LOOSEN-1 D1-D3, D5-D9 (wanted at all, cooling period, loosenable dimensions incl. sanctions list, approver population/own-licence model, jurisdiction floors, tenant notification, Back Office form); D10 retro-release policy for lengthening by a governed loosening; CAPACITY-GATE-SWITCH and accepted capacity figures; sanctions false-positive policy; withdrawal-release policy for held withdrawals (not invented); provider attestation design.
+- **D4 and D7 are now CLOSED technically** (governed two-Person path; runtime EXECUTE revoked); their earlier launch-blocker status is lifted, subject to the owner accepting the owner-path/break-glass procedure (A1).
+- **Blocks this merge:** only your approval of the branch (and acceptance of the risks above).
+
+## 7. Recommendation
+**READY FOR MY MERGE APPROVAL** on the evidence above: the three requested security gaps are closed in code with independent security and ledger-finance sign-off, hosted CI 27/27 on the final code commit, the full local integration suite clean on that commit (after one disclosed, root-caused, fixed test-data flake), orchestrator-run real-stack E2E 80/80, and migration up/down/upgrade verified through 0194. The screening mechanism remains disabled and inert; its owner and compliance decisions, the capacity work and CAPACITY-GATE-SWITCH block activation, not merge. Nothing has been merged. Nuvei, all real providers and AWS stay deferred. Next provider-independent item (not started): CAPACITY-GATE-SWITCH plus the capacity plan, then the Back Office filing form for the loosening kinds and the tenant operating-bases view.
