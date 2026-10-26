@@ -11,17 +11,25 @@
 --      interval in force: aml_screening_requests (written by the existing definer finish function; the lists and the interval are READ FROM THE
 --      POLICY ROW the caller names, never taken from the caller) and aml_screening_results (written by aml_screening_record; the lists are the
 --      officer's p_lists, the policy and the interval are stamped by the database). Append-only is unchanged (terminal requests are final).
---   2. aml_screening_covers(): a screening covers the person only if its provenance is recorded, its recorded lists are a SUPERSET of the lists
---      now in force, no policy version since it lacked a list now in force (a list removed and re-added invalidates it), and
---      now < screening time + LEAST(recorded interval, interval now in force). Lengthening the interval can never revive an expired clear;
---      shortening it still tightens at once. A screening with NO recorded provenance (every row written before this migration) is NOT trusted: the
---      person is not covered and is DUE for re-screening.
+--   2. aml_screening_covers() + aml_screening_since(): a screening covers the person only if (a) its provenance is recorded, (b) its recorded lists
+--      are a SUPERSET of the lists now in force, (c) no policy version that was ACTUALLY IN FORCE since the screening lacked a list now in force (a list
+--      removed and re-added invalidates it), and (d) its age is below LEAST(recorded interval, interval now in force, the SMALLEST interval of any version
+--      that came into force after the screening). Age runs from LEAST(completion/recording time on the database clock, the screening time stated by
+--      the provider / officer). A version "came into force" at GREATEST(effective_from, created_at); a version never counts if a later-created version
+--      took over at or before that moment (a pending version neutralised by a counter-version).
+--      GUARANTEED: once a screening has been older than ANY interval that was in force at some moment since it was taken, it never counts again; lengthening
+--      the interval (also after a shortening) can never revive it. NOT guaranteed: a screening that is still younger than every such interval is fresh
+--      (obviously), and a version that was never in force (neutralised before it took effect) is ignored on purpose. A screening with NO recorded provenance
+--      (every row written before this migration) is NOT trusted: the person is not covered and is DUE for re-screening.
 --   3. aml_screening_gate_denies applies it to all four routes by which a screening satisfies the policy (a worker clear, an auto-reviewed
---      re-flag, an officer clear, an officer match whose hold was lifted). aml_screening_enqueue_due uses the same predicate, so persons whose
---      clear no longer covers them are enqueued (the idempotency key now also names the policy version, so a tightened policy can queue again inside
---      the same re-screen bucket).
---   4. aml_screening_request_finish takes the policy version the worker screened under (new last argument). The 12-argument function is DROPPED: no
---      path can create an unprovenanced clear.
+--      re-flag, an officer clear, an officer match whose hold was lifted). aml_screening_enqueue_due uses the IDENTICAL predicate, so persons whose
+--      clear no longer covers them are enqueued (the idempotency key also names the policy version, so a tightened policy can queue again inside
+--      the same re-screen bucket; a key that already exists is excluded BEFORE the batch limit, so a permanently failed period does not starve others).
+--   4. aml_screening_request_finish takes the policy version the worker screened under (new last argument) and requires it to be the version in force
+--      at CLAIM time (aml_screening_request_claim stamps claim_policy_id and claimed_at). A clear / match is refused when its screened_at is more than
+--      120 s in the future or more than 120 s before the claim (engineering tolerances, not business values) and is NOT applied after its lease passed
+--      (the request is reclaimed and retried). The 12-argument function is DROPPED: no path can create an unprovenanced clear. Rolling deploy: old
+--      callers of the 12-argument finish get 42883; migrate and deploy the worker together.
 -- Unchanged on purpose: unresolved matches, sanctions holds, officer holds, the kill switch, closed accounts, the backfill grace and the first-gating
 -- baseline. A withdrawal already held for a stale clear stays held until the person is re-screened. NO sanctions false-positive policy and NO release
 -- policy is defined here; no gate is enabled.
@@ -38,7 +46,7 @@ BEGIN
        OR to_regprocedure('public.aml_screening_gate_denies(uuid, uuid, text)') IS NULL OR to_regclass('public.aml_screening_requests') IS NULL THEN
         RAISE EXCEPTION 'migration 0192 pre-flight: migration 0181 is not applied' USING ERRCODE = 'AT098';
     END IF;
-    IF to_regprocedure('public.aml_screening_covers(timestamptz, bigint, text[], double precision, text[], timestamptz)') IS NOT NULL
+    IF to_regprocedure('public.aml_screening_covers(timestamptz, bigint, text[], double precision, text[], bigint)') IS NOT NULL
        OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'public.aml_screening_requests'::regclass AND attname = 'screened_policy_id' AND NOT attisdropped) THEN
         RAISE EXCEPTION 'migration 0192 pre-flight: the screening provenance already exists' USING ERRCODE = 'AT098';
     END IF;
@@ -68,21 +76,42 @@ ALTER TABLE aml_screening_results ADD CONSTRAINT aml_screening_results_provenanc
     CHECK ((screened_policy_id IS NULL) = (screened_interval_seconds IS NULL));
 ALTER TABLE aml_screening_results ADD CONSTRAINT aml_screening_results_screened_policy_fk
     FOREIGN KEY (tenant_id, screened_policy_id) REFERENCES aml_screening_policies (tenant_id, id) ON DELETE RESTRICT;
+ALTER TABLE aml_screening_requests ADD COLUMN claimed_at TIMESTAMPTZ NULL, ADD COLUMN claim_policy_id UUID NULL;
+ALTER TABLE aml_screening_requests ADD CONSTRAINT aml_screening_requests_claim_policy_fk
+    FOREIGN KEY (tenant_id, claim_policy_id) REFERENCES aml_screening_policies (tenant_id, id) ON DELETE RESTRICT;
+COMMENT ON COLUMN aml_screening_requests.claim_policy_id IS '0192 (d1, SEC L-1): the screening policy version in force when the request was (last) claimed; a clear must name it.';
 COMMENT ON COLUMN aml_screening_requests.screened_policy_id IS '0192 (d1, D10): the screening policy version this clear / match was screened under (NULL = written before 0192: never trusted as a fresh clear).';
 COMMENT ON COLUMN aml_screening_results.screened_policy_id IS '0192 (d1, D10): the screening policy version in force when the officer result was recorded (NULL = written before 0192 or none in force: never trusted as a fresh clear).';
 
 -- =========================================================================
 -- 2. The coverage predicate (owner-only; reached through the gate and the scheduler)
 -- =========================================================================
-CREATE FUNCTION aml_screening_covers(p_at timestamptz, p_rec_interval bigint, p_rec_lists text[], p_cur_interval double precision, p_cur_lists text[], p_gap_since timestamptz)
+-- The smallest re-screen interval (seconds) among the policy versions of the jurisdiction that CAME INTO FORCE after p_at (and not after now), or 0 when
+-- one of them lacked a list in p_cur_lists (a list dropped since the screening). A version came into force at GREATEST(effective_from, created_at);
+-- it is ignored when a later-created version took over at or before that moment (it never governed anything). NULL = no such version.
+CREATE FUNCTION aml_screening_since(p_tenant uuid, p_jur uuid, p_at timestamptz, p_cur_lists text[]) RETURNS bigint
+    LANGUAGE sql VOLATILE
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT CASE WHEN COALESCE(pg_catalog.bool_or(NOT (v.lists @> COALESCE(p_cur_lists, ARRAY[]::text[]))), false) THEN 0
+                ELSE pg_catalog.min(v.rescreen_interval_seconds) END
+      FROM (SELECT sp.lists, sp.rescreen_interval_seconds, sp.created_at, GREATEST(sp.effective_from, sp.created_at) AS started
+              FROM public.aml_screening_policies sp
+             WHERE sp.tenant_id = p_tenant AND sp.licensing_jurisdiction_id = p_jur) v
+     WHERE v.started > p_at AND v.started <= pg_catalog.clock_timestamp()
+       AND NOT EXISTS (SELECT 1 FROM public.aml_screening_policies w
+                        WHERE w.tenant_id = p_tenant AND w.licensing_jurisdiction_id = p_jur AND w.created_at > v.created_at
+                          AND GREATEST(w.effective_from, w.created_at) <= v.started)
+$$;
+
+CREATE FUNCTION aml_screening_covers(p_at timestamptz, p_rec_interval bigint, p_rec_lists text[], p_cur_interval double precision, p_cur_lists text[], p_since bigint)
 RETURNS boolean
     LANGUAGE sql VOLATILE
     SET search_path = pg_catalog, public, pg_temp
 AS $$
     SELECT p_rec_interval IS NOT NULL AND p_rec_lists IS NOT NULL
        AND p_rec_lists @> COALESCE(p_cur_lists, ARRAY[]::text[])
-       AND (p_gap_since IS NULL OR p_at > p_gap_since)
-       AND p_at > pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => LEAST(p_rec_interval::double precision, COALESCE(p_cur_interval, p_rec_interval::double precision)))
+       AND p_at > pg_catalog.clock_timestamp() - pg_catalog.make_interval(secs => LEAST(p_rec_interval::double precision, p_cur_interval, p_since::double precision))
 $$;
 
 -- =========================================================================
@@ -102,7 +131,6 @@ DECLARE
     v_last_match timestamptz;
     v_sanc       boolean;
     v_lists      text[];
-    v_gap        timestamptz;
 BEGIN
     IF p_operation NOT IN ('withdrawal', 'payout') THEN
         RETURN false;
@@ -143,11 +171,6 @@ BEGIN
             v_grace := 0;
             v_lists := NULL;
         END IF;
-        -- d1 D10: the lists in force must never have been DROPPED since a clear was taken. The latest effective time of a version that lacked a
-        -- currently required list: a clear completed before it (the list was removed and re-added) is not valid.
-        SELECT max(gp.effective_from) INTO v_gap FROM public.aml_screening_policies gp
-         WHERE gp.tenant_id = p_tenant AND gp.licensing_jurisdiction_id = v_tp.jur AND gp.effective_from <= pg_catalog.clock_timestamp()
-           AND NOT (gp.lists @> COALESCE(v_lists, ARRAY[]::text[]));
         IF v_reg IS NULL THEN
             RETURN true;  -- an unknown person is never "screened"
         END IF;
@@ -172,17 +195,17 @@ BEGIN
             SELECT 1 FROM public.aml_screening_requests r
              WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status = 'done' AND r.outcome = 'clear'
                AND r.completed_at >= v_first AND (v_last_match IS NULL OR r.completed_at > v_last_match)
-               AND public.aml_screening_covers(r.completed_at, r.screened_interval_seconds, r.screened_lists, v_interval, v_lists, v_gap)
+               AND public.aml_screening_covers(LEAST(r.completed_at, r.screened_at), r.screened_interval_seconds, r.screened_lists, v_interval, v_lists, public.aml_screening_since(p_tenant, v_tp.jur, LEAST(r.completed_at, r.screened_at), v_lists))
             UNION ALL
             SELECT 1 FROM public.aml_screening_requests r
              WHERE r.tenant_id = p_tenant AND r.person_id = p_person AND r.status = 'needs_officer' AND r.reviewed_from_request_id IS NOT NULL
                AND r.completed_at >= v_first AND (v_last_match IS NULL OR r.completed_at > v_last_match)
-               AND public.aml_screening_covers(r.completed_at, r.screened_interval_seconds, r.screened_lists, v_interval, v_lists, v_gap)
+               AND public.aml_screening_covers(LEAST(r.completed_at, r.screened_at), r.screened_interval_seconds, r.screened_lists, v_interval, v_lists, public.aml_screening_since(p_tenant, v_tp.jur, LEAST(r.completed_at, r.screened_at), v_lists))
             UNION ALL
             SELECT 1 FROM public.aml_screening_results x
              WHERE x.tenant_id = p_tenant AND x.person_id = p_person AND x.outcome = 'clear' AND NOT v_sanc
                AND x.recorded_at >= v_first AND (v_last_match IS NULL OR x.recorded_at > v_last_match)
-               AND public.aml_screening_covers(x.recorded_at, x.screened_interval_seconds, x.lists, v_interval, v_lists, v_gap)
+               AND public.aml_screening_covers(LEAST(x.recorded_at, x.screened_at), x.screened_interval_seconds, x.lists, v_interval, v_lists, public.aml_screening_since(p_tenant, v_tp.jur, LEAST(x.recorded_at, x.screened_at), v_lists))
             UNION ALL
             SELECT 1 FROM public.aml_screening_results x
               JOIN public.aml_hold_lifts l ON l.tenant_id = x.tenant_id AND l.hold_id = x.hold_id
@@ -191,7 +214,7 @@ BEGIN
                AND l.lifted_at >= v_first AND (v_last_match IS NULL OR l.lifted_at > v_last_match)
                -- lic26 F-5: the rescreen interval runs from the SCREENING (recorded_at), not from the time the hold was lifted
                -- d1 D10: and only a screening that RECORDED its policy, its lists and its interval counts, and only while it still covers them
-               AND public.aml_screening_covers(x.recorded_at, x.screened_interval_seconds, x.lists, v_interval, v_lists, v_gap)
+               AND public.aml_screening_covers(LEAST(x.recorded_at, x.screened_at), x.screened_interval_seconds, x.lists, v_interval, v_lists, public.aml_screening_since(p_tenant, v_tp.jur, LEAST(x.recorded_at, x.screened_at), v_lists))
         ) THEN
             RETURN true;
         END IF;
@@ -211,7 +234,6 @@ DECLARE
     v_bucket   bigint;
     v_n        integer;
     v_total    integer := 0;
-    v_gap      timestamptz;
 BEGIN
     IF p_tenant IS NULL OR p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
         RAISE EXCEPTION 'aml: invalid scheduled enqueue arguments' USING ERRCODE = 'AT001';
@@ -239,10 +261,6 @@ BEGIN
         SELECT COALESCE(min(tp.effective_from) FILTER (WHERE tp.gate_withdrawal), min(tp.effective_from)) INTO v_first
           FROM public.aml_screening_trigger_policies tp
          WHERE tp.tenant_id = p_tenant AND tp.licensing_jurisdiction_id = v_tp.jur;
-        -- d1 D10: the same gap rule as the gate (a currently required list that a version since a clear lacked invalidates that clear).
-        SELECT max(gp.effective_from) INTO v_gap FROM public.aml_screening_policies gp
-         WHERE gp.tenant_id = p_tenant AND gp.licensing_jurisdiction_id = v_tp.jur AND gp.effective_from <= pg_catalog.clock_timestamp()
-           AND NOT (gp.lists @> COALESCE(v_sp.lists, ARRAY[]::text[]));
         v_bucket := pg_catalog.floor(pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) / v_sp.rescreen_interval_seconds)::bigint;
         -- d1 D10: a person is DUE unless a screening that recorded its policy, lists and interval still covers the lists and the interval in force
         -- (fresh under LEAST(recorded interval, current interval)). Legacy screenings with no recorded provenance never cover. The idempotency key
@@ -260,15 +278,19 @@ BEGIN
                        EXISTS (
                             SELECT 1 FROM public.aml_screening_requests r
                              WHERE r.tenant_id = p_tenant AND r.person_id = pa.person_id AND r.status IN ('done', 'needs_officer') AND r.completed_at >= v_first
-                               AND public.aml_screening_covers(r.completed_at, r.screened_interval_seconds, r.screened_lists, v_sp.rescreen_interval_seconds::double precision, v_sp.lists, v_gap)
+                               AND public.aml_screening_covers(LEAST(r.completed_at, r.screened_at), r.screened_interval_seconds, r.screened_lists, v_sp.rescreen_interval_seconds::double precision, v_sp.lists, public.aml_screening_since(p_tenant, v_tp.jur, LEAST(r.completed_at, r.screened_at), v_sp.lists))
                             UNION ALL
                             SELECT 1 FROM public.aml_screening_results x
                              WHERE x.tenant_id = p_tenant AND x.person_id = pa.person_id AND x.outcome <> 'error' AND x.recorded_at >= v_first
-                               AND public.aml_screening_covers(x.recorded_at, x.screened_interval_seconds, x.lists, v_sp.rescreen_interval_seconds::double precision, v_sp.lists, v_gap)) AS covered
+                               AND public.aml_screening_covers(LEAST(x.recorded_at, x.screened_at), x.screened_interval_seconds, x.lists, v_sp.rescreen_interval_seconds::double precision, v_sp.lists, public.aml_screening_since(p_tenant, v_tp.jur, LEAST(x.recorded_at, x.screened_at), v_sp.lists))) AS covered
                   FROM (SELECT DISTINCT a.person_id FROM public.player_accounts a WHERE a.tenant_id = p_tenant) pa
                ) c
          WHERE NOT c.covered
            AND NOT EXISTS (SELECT 1 FROM public.aml_screening_requests o WHERE o.tenant_id = p_tenant AND o.person_id = c.person_id AND o.status IN ('pending', 'claimed'))
+           -- d1 SEC L-3: a key that already exists (this person's period under this policy version already ran, e.g. failed terminally) is excluded
+           -- BEFORE the limit, so it cannot occupy the batch and starve the persons behind it.
+           AND NOT EXISTS (SELECT 1 FROM public.aml_screening_requests k WHERE k.tenant_id = p_tenant
+                            AND k.idempotency_key = 'sched:' || c.person_id::text || ':' || v_bucket::text || ':' || v_sp.id::text)
          ORDER BY c.last_any NULLS FIRST, c.person_id
          LIMIT (p_limit - v_total)
         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
@@ -277,6 +299,43 @@ BEGIN
         EXIT WHEN v_total >= p_limit;
     END LOOP;
     RETURN v_total;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION aml_screening_request_claim(p_tenant uuid, p_limit integer, p_lease_seconds integer)
+RETURNS TABLE (o_id uuid, o_person_id uuid, o_jurisdiction_id uuid, o_trigger text, o_idempotency_key text, o_attempts integer, o_claim_token uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF p_tenant IS NULL OR p_limit IS NULL OR p_limit < 1 OR p_limit > 200 OR p_lease_seconds IS NULL OR p_lease_seconds < 5 OR p_lease_seconds > 3600 THEN
+        RAISE EXCEPTION 'aml: invalid claim arguments' USING ERRCODE = 'AT001';
+    END IF;
+    IF p_tenant IS DISTINCT FROM public.aml_session_tenant() THEN
+        RAISE EXCEPTION 'aml: the session tenant is not the requested tenant' USING ERRCODE = 'AT002';
+    END IF;
+    RETURN QUERY
+        WITH due AS (
+            SELECT r.id AS rid FROM public.aml_screening_requests r
+             WHERE r.tenant_id = p_tenant
+               AND ((r.status = 'pending' AND r.next_attempt_at <= pg_catalog.clock_timestamp())
+                    OR (r.status = 'claimed' AND r.lease_until <= pg_catalog.clock_timestamp()))
+             ORDER BY r.next_attempt_at, r.id
+             LIMIT p_limit
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE public.aml_screening_requests u
+           SET status = 'claimed', attempts = u.attempts + 1, claim_token = gen_random_uuid(),
+               lease_until = pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => p_lease_seconds::double precision),
+               -- d1 SEC L-1 / M-1: the claim time and the screening policy version in force NOW (the version the finish must name)
+               claimed_at = pg_catalog.clock_timestamp(),
+               claim_policy_id = (SELECT sp.id FROM public.aml_screening_policies sp
+                                   WHERE sp.tenant_id = p_tenant AND sp.licensing_jurisdiction_id = u.licensing_jurisdiction_id
+                                     AND sp.effective_from <= pg_catalog.clock_timestamp() ORDER BY sp.created_at DESC, sp.id DESC LIMIT 1),
+               updated_at = pg_catalog.clock_timestamp()
+          FROM due
+         WHERE u.id = due.rid
+        RETURNING u.id, u.person_id, u.licensing_jurisdiction_id, u.trigger, u.idempotency_key, u.attempts, u.claim_token;
 END
 $$;
 
@@ -311,6 +370,12 @@ BEGIN
         RETURN QUERY SELECT false, v.status, false;  -- someone else holds it, or it already ended: nothing is applied
         RETURN;
     END IF;
+    -- d1 SEC M-1: a clear or a match finished AFTER its lease passed is not applied (the request is reclaimed and retried; a slow finish is
+    -- retried, not lost). A retry or a terminal failure never makes a person pass, so those are still applied.
+    IF p_result IN ('clear', 'potential_match', 'confirmed') AND v.lease_until <= pg_catalog.clock_timestamp() THEN
+        RETURN QUERY SELECT false, v.status, false;
+        RETURN;
+    END IF;
     IF p_result = 'clear' THEN
         IF p_match_lists IS NOT NULL OR p_provider_id IS NULL OR p_screened_at IS NULL OR p_provider_reference IS NULL THEN
             RAISE EXCEPTION 'aml: a clear carries no match and names its provider, its provider reference and time' USING ERRCODE = 'AT001';
@@ -319,6 +384,16 @@ BEGIN
         -- d1 D10: a clear (and a match, which may be auto-reviewed into a clear) records WHICH screening policy version it was screened under: the
         -- lists and the re-screen interval come from that row (never from the caller), and the row must be a version of this tenant and of the
         -- request's jurisdiction that is in effect.
+        -- d1 SEC M-1 / LOW-1: the screening cannot be stated to have happened in the future, or before this claim (engineering tolerances of 120 s,
+        -- not business values; a vendor answer older than that is not a fresh screening for this request).
+        IF p_screened_at > pg_catalog.clock_timestamp() + interval '120 seconds'
+           OR p_screened_at < COALESCE(v.claimed_at, pg_catalog.clock_timestamp()) - interval '120 seconds' THEN
+            RAISE EXCEPTION 'aml: the screening time is in the future or long before the claim' USING ERRCODE = 'AT001';
+        END IF;
+        -- d1 SEC L-1: the policy named is the version that was in force when the request was claimed (the version the lists came from).
+        IF v.claim_policy_id IS DISTINCT FROM p_policy_id THEN
+            RAISE EXCEPTION 'aml: the screening policy version is not the one in force when the request was claimed' USING ERRCODE = 'AT001';
+        END IF;
         IF p_policy_id IS NULL THEN
             RAISE EXCEPTION 'aml: a clear or a match names the screening policy version it was screened under' USING ERRCODE = 'AT001';
         END IF;
@@ -341,6 +416,16 @@ BEGIN
         -- d1 D10: a clear (and a match, which may be auto-reviewed into a clear) records WHICH screening policy version it was screened under: the
         -- lists and the re-screen interval come from that row (never from the caller), and the row must be a version of this tenant and of the
         -- request's jurisdiction that is in effect.
+        -- d1 SEC M-1 / LOW-1: the screening cannot be stated to have happened in the future, or before this claim (engineering tolerances of 120 s,
+        -- not business values; a vendor answer older than that is not a fresh screening for this request).
+        IF p_screened_at > pg_catalog.clock_timestamp() + interval '120 seconds'
+           OR p_screened_at < COALESCE(v.claimed_at, pg_catalog.clock_timestamp()) - interval '120 seconds' THEN
+            RAISE EXCEPTION 'aml: the screening time is in the future or long before the claim' USING ERRCODE = 'AT001';
+        END IF;
+        -- d1 SEC L-1: the policy named is the version that was in force when the request was claimed (the version the lists came from).
+        IF v.claim_policy_id IS DISTINCT FROM p_policy_id THEN
+            RAISE EXCEPTION 'aml: the screening policy version is not the one in force when the request was claimed' USING ERRCODE = 'AT001';
+        END IF;
         IF p_policy_id IS NULL THEN
             RAISE EXCEPTION 'aml: a clear or a match names the screening policy version it was screened under' USING ERRCODE = 'AT001';
         END IF;
@@ -443,6 +528,10 @@ BEGIN
         RETURN QUERY SELECT v_prior.id, v_prior.hold_id, true;
         RETURN;
     END IF;
+    -- d1 SEC M-1: an officer cannot state a screening in the future (120 s clock tolerance, not a business value); an OLD screened_at only shortens freshness.
+    IF p_screened_at > pg_catalog.clock_timestamp() + interval '120 seconds' THEN
+        RAISE EXCEPTION 'aml: the screening time is in the future' USING ERRCODE = 'AM004';
+    END IF;
     SELECT q.person_id, q.trigger, q.status, q.outcome, q.match_lists, q.licensing_jurisdiction_id INTO v_req
       FROM public.aml_screening_requests q WHERE q.tenant_id = p_tenant AND q.idempotency_key = p_idempotency_key;
     IF FOUND THEN
@@ -520,14 +609,16 @@ $$;
 -- =========================================================================
 -- 4. Grants (mirrored by deploy/init-app-role.sql)
 -- =========================================================================
-REVOKE ALL ON FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION aml_screening_since(uuid, uuid, timestamptz, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text, uuid) FROM PUBLIC;
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
-        EXECUTE 'REVOKE ALL ON FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], timestamptz) FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON FUNCTION aml_screening_since(uuid, uuid, timestamptz, text[]) FROM igaming_runtime';
+        EXECUTE 'REVOKE ALL ON FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], bigint) FROM igaming_runtime';
         EXECUTE 'GRANT EXECUTE ON FUNCTION aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text, uuid) TO igaming_runtime';
     END IF;
 END
 $$;
-COMMENT ON FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], timestamptz) IS '0192 (d1, D10): does a screening (time, RECORDED interval and lists) still cover the person under the interval and lists NOW in force? Fail closed: no provenance, a list missing, a list dropped since, or older than LEAST(recorded, current interval) is not covered.';
+COMMENT ON FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], bigint) IS '0192 (d1, D10): does a screening (time, RECORDED interval and lists) still cover the person under the interval and lists NOW in force? Fail closed: no provenance, a list missing, a list dropped since, or older than LEAST(recorded, current interval) is not covered.';

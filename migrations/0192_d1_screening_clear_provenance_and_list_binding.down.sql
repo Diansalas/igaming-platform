@@ -189,6 +189,38 @@ END
 $$;
 
 DROP FUNCTION aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text, uuid);
+CREATE OR REPLACE FUNCTION aml_screening_request_claim(p_tenant uuid, p_limit integer, p_lease_seconds integer)
+RETURNS TABLE (o_id uuid, o_person_id uuid, o_jurisdiction_id uuid, o_trigger text, o_idempotency_key text, o_attempts integer, o_claim_token uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+    IF p_tenant IS NULL OR p_limit IS NULL OR p_limit < 1 OR p_limit > 200 OR p_lease_seconds IS NULL OR p_lease_seconds < 5 OR p_lease_seconds > 3600 THEN
+        RAISE EXCEPTION 'aml: invalid claim arguments' USING ERRCODE = 'AT001';
+    END IF;
+    IF p_tenant IS DISTINCT FROM public.aml_session_tenant() THEN
+        RAISE EXCEPTION 'aml: the session tenant is not the requested tenant' USING ERRCODE = 'AT002';
+    END IF;
+    RETURN QUERY
+        WITH due AS (
+            SELECT r.id AS rid FROM public.aml_screening_requests r
+             WHERE r.tenant_id = p_tenant
+               AND ((r.status = 'pending' AND r.next_attempt_at <= pg_catalog.clock_timestamp())
+                    OR (r.status = 'claimed' AND r.lease_until <= pg_catalog.clock_timestamp()))
+             ORDER BY r.next_attempt_at, r.id
+             LIMIT p_limit
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE public.aml_screening_requests u
+           SET status = 'claimed', attempts = u.attempts + 1, claim_token = gen_random_uuid(),
+               lease_until = pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => p_lease_seconds::double precision),
+               updated_at = pg_catalog.clock_timestamp()
+          FROM due
+         WHERE u.id = due.rid
+        RETURNING u.id, u.person_id, u.licensing_jurisdiction_id, u.trigger, u.idempotency_key, u.attempts, u.claim_token;
+END
+$$;
+
 CREATE FUNCTION aml_screening_request_finish(
     p_tenant uuid, p_id uuid, p_claim_token uuid, p_result text, p_match_lists text[], p_error_code text,
     p_provider_id text, p_provider_reference text, p_subject_ref text, p_screened_at timestamptz, p_backoff_seconds integer,
@@ -392,10 +424,13 @@ BEGIN
 END
 $$;
 
-DROP FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], timestamptz);
+DROP FUNCTION aml_screening_since(uuid, uuid, timestamptz, text[]);
+DROP FUNCTION aml_screening_covers(timestamptz, bigint, text[], double precision, text[], bigint);
 ALTER TABLE aml_screening_results DROP CONSTRAINT aml_screening_results_screened_policy_fk;
 ALTER TABLE aml_screening_results DROP CONSTRAINT aml_screening_results_provenance_pair;
 ALTER TABLE aml_screening_results DROP COLUMN screened_interval_seconds, DROP COLUMN screened_policy_id;
+ALTER TABLE aml_screening_requests DROP CONSTRAINT aml_screening_requests_claim_policy_fk;
+ALTER TABLE aml_screening_requests DROP COLUMN claim_policy_id, DROP COLUMN claimed_at;
 ALTER TABLE aml_screening_requests DROP CONSTRAINT aml_screening_requests_provenance_required;
 ALTER TABLE aml_screening_requests DROP CONSTRAINT aml_screening_requests_screened_policy_fk;
 ALTER TABLE aml_screening_requests DROP CONSTRAINT aml_screening_requests_provenance_all_or_none;

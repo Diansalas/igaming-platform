@@ -121,10 +121,10 @@ tenants are OWNER DECISIONS (`docs/plans/c4-screening-loosening-record.md`); not
 
 The payout and withdrawal gate evaluates the policy in force at the moment a withdrawal is claimed, not the policy in force when it was requested. Therefore a
 loosening that takes effect applies to withdrawals ALREADY WAITING at their next gate claim:
-- a LONGER re-screen interval makes clears that had expired fresh again WITHOUT any new screening (persons held only because their clear was stale are released);
+- (SUPERSEDED by migration 0192, see "d1 additions": a longer interval no longer revives an expired clear.) A LONGER re-screen interval used to make clears that had expired fresh again WITHOUT any new screening;
 - a LONGER backfill grace re-opens a grace that had run out, for persons registered before the gate.
 Safe guard built: while the jurisdiction has a gating trigger policy, a longer backfill grace is refused when the previous grace has run out BY THE TIME THE NEW VERSION TAKES EFFECT (at the effective time, i.e. execution + the later of the offset and the cooling period; the table guard repeats the rule)
-(`grace_extension_after_expiry_refused`). The retro-release by a longer interval is NOT prevented: it is owner decision D10 (`docs/plans/c4-screening-loosening-record.md`).
+(`grace_extension_after_expiry_refused`). The retro-release by a longer interval is prevented since 0192 (previously: owner decision D10) (`docs/plans/c4-screening-loosening-record.md`).
 Payout decisions do not record the policy id they were made under; recording it is a recorded follow-up, not part of c4.
 
 #### Reconciliation (executed loosen / configure requests against the rows they must have written)
@@ -200,11 +200,18 @@ waiting behind the gate with no new screening, and a clear taken against `pep` o
   FROM THAT POLICY ROW (it must be a version of this tenant and of the request's jurisdiction that is in effect), never taken from the caller. `aml_screening_results`
   (officer results) gets `screened_policy_id` and `screened_interval_seconds` stamped by `aml_screening_record` (the policy in force for the jurisdiction of the request the key resolves,
   else the tenant policy with the SHORTEST interval: conservative) next to the `lists` the officer states. Rows stay append-only; a terminal request stays final.
-- `aml_screening_covers()`: a screening covers the person only if (1) its provenance is recorded, (2) its recorded lists are a superset of the lists now in force, (3) no policy version
-  since it lacked a list now in force (a list removed and re-added invalidates it), and (4) `now < screening time + LEAST(recorded interval, interval now in force)`. A longer interval
-  can never revive an expired clear; a shorter one tightens at once. The gate applies it to all four routes (worker clear, auto-reviewed re-flag, officer clear, officer match whose hold
-  was lifted); `aml_screening_enqueue_due` applies the same predicate, so persons whose clear no longer covers them are queued (its idempotency key now also names the policy version, so a
-  tightened policy can queue them again inside the same bucket).
+- `aml_screening_covers()` + `aml_screening_since()`: a screening covers the person only if (1) its provenance is recorded, (2) its recorded lists are a superset of the lists now in force,
+  (3) no policy version that was ACTUALLY IN FORCE since the screening lacked a list now in force (a list removed and re-added invalidates it), and (4) its age is below
+  `LEAST(recorded interval, interval now in force, the SMALLEST interval of any version that came into force after the screening)`. A version came into force at `GREATEST(effective_from, created_at)`;
+  a version that a later-created version superseded before it took effect never counts. Age runs from `LEAST(completion/recording time on the database clock, the screening time the provider or officer stated)`.
+  **Guaranteed:** once a screening has been older than any interval that was in force at some moment since it was taken, it never counts again, whatever interval is set later (lengthening, also after a
+  shortening, cannot revive it). **Not guaranteed:** a screening younger than every such interval is fresh (naturally); an interval that was never in force is ignored on purpose. The gate applies this to all four
+  routes (worker clear, auto-reviewed re-flag, officer clear, officer match whose hold was lifted); `aml_screening_enqueue_due` applies the IDENTICAL predicate, so expired clears are re-queued (its idempotency
+  key names the policy version, and an existing key is excluded before the batch limit so a permanently failed period cannot starve others).
+- Finish rules: the policy named at finish must be the version in force when the request was CLAIMED (`claim_policy_id`); `screened_at` more than 120 s in the future or 120 s before the claim is refused
+  (engineering tolerances, not business values); a clear or match finished after its lease passed is NOT applied (the request is reclaimed and retried; a slow finish is retried, not lost). If the screening
+  policy changes between a worker's claim and its policy read, the finish is refused and the request is retried after the lease. Officer results cannot state a screening more than 120 s in the future.
+- **Rolling deploy:** old callers of the 12-argument `aml_screening_request_finish` get `42883`; migrate and deploy the worker together.
 - Unchanged: unresolved matches, sanctions holds, officer holds, the kill switch and closed accounts hold as before; the backfill grace and the first-gating baseline are as in 0190; no
   release path was added and no gate is enabled. A withdrawal already held for a stale clear stays held until the person is re-screened. No sanctions false-positive policy and no
   withdrawal release policy is defined here.
@@ -219,3 +226,12 @@ provenance has been recorded.
 **Residual.** The worker names the policy version it screened under and the database validates that it is a version in effect for the request's jurisdiction; it cannot prove the provider was called with
 those lists (the worker API is runtime-callable, as the clear itself always was; the heartbeat and the environment anchor are the existing controls). A real provider needs a signed vendor attestation of the
 screened lists (PROVIDER DEPENDENT).
+
+**Capacity (ACTIVATION-BLOCKING engineering follow-up, not built here).** Measured by ledger-finance at 10 000 persons per tenant: `aml_screening_gate_overdue` 3.9-4.7 s, `aml_screening_parked_overdue` 4.2 s,
+`aml_screening_enqueue_due` 0.9-3 s, against a 5 s `PhaseTimeout`; an enqueue failure is only logged; the claim queue drains FIFO at about 1 440 requests per hour per tenant. Adding a list makes every person due at once.
+Plan before any non-MOCK activation: (1) keyset batching of the gate monitors and of `enqueue_due` (bounded work per call, cursor kept by the worker); (2) an alert (not only a log line) when the enqueue phase fails or times out;
+(3) priority lanes in the claim queue (persons with a pending withdrawal first, then oldest) and a configurable claim batch per tenant; (4) a load test at the target tenant size with the list-added burst. Until then the
+screening gate must not be enabled for a tenant of that size.
+
+**Known limits recorded by the reviews.** Payout decisions do not record the policy id they were made under (follow-up). An officer result recorded under a key that resolves no request is stamped with the policy
+of the jurisdiction with the SHORTEST interval (conservative). `deploy/init-app-role.sql` grant drift unrelated to this slice (review I-4) is a follow-up for the payments owner.

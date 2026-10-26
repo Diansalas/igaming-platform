@@ -124,7 +124,7 @@ func TestD10_CoveragePredicate_Matrix(t *testing.T) {
 		recL    any // recorded lists (nil = none)
 		curI    any // current interval seconds (nil = no policy)
 		curL    any
-		gapAgoS any // the gap version took effect this many seconds ago (nil = none)
+		sinceS  any // aml_screening_since: nil = no version came into force since; 0 = a version since lacked a list; n = the smallest interval since
 		covered bool
 	}
 	both, pep := "{pep,sanctions}", "{pep}"
@@ -142,18 +142,16 @@ func TestD10_CoveragePredicate_Matrix(t *testing.T) {
 		{"pep-only clear, sanctions now in force", 10, 3600, pep, 3600, both, nil, false},
 		{"both-lists clear, pep-only now in force", 10, 3600, both, 3600, pep, nil, true},
 		{"list order is irrelevant", 10, 3600, "{sanctions,pep}", 3600, "{pep,sanctions}", nil, true},
-		{"a list was dropped AFTER the clear and is required again", 100, 3600, both, 3600, both, 50, false},
-		{"the dropped-list version PRECEDES the clear", 100, 3600, both, 3600, both, 150, true},
+		{"a list was dropped since the clear (since = 0)", 100, 3600, both, 3600, both, 0, false},
+		{"a SHORTER version came into force since (60 s), the clear is older", 100, 7200, both, 7200, both, 60, false},
+		{"a shorter version came into force since (200 s), the clear is younger", 100, 7200, both, 7200, both, 200, true},
+		{"shorten then lengthen: the shortest interval since still binds", 3601, 7200, both, 7200, both, 3600, false},
 	}
 	for _, k := range cases {
 		var got bool
-		var gap any
-		if s, ok := k.gapAgoS.(int); ok {
-			gap = time.Now().Add(-time.Duration(s) * time.Second)
-		}
 		if err := w.Owner.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT aml_screening_covers(clock_timestamp() - make_interval(secs => $1::int), $2::bigint, $3::text[], $4::double precision, $5::text[], $6::timestamptz)`,
-				k.ageS, k.recI, k.recL, k.curI, k.curL, gap).Scan(&got)
+			return tx.QueryRow(ctx, `SELECT aml_screening_covers(clock_timestamp() - make_interval(secs => $1::int), $2::bigint, $3::text[], $4::double precision, $5::text[], $6::bigint)`,
+				k.ageS, k.recI, k.recL, k.curI, k.curL, k.sinceS).Scan(&got)
 		}); err != nil {
 			t.Fatalf("%s: %v", k.name, err)
 		}
