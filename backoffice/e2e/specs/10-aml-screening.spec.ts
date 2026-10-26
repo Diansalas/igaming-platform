@@ -323,12 +323,12 @@ test.describe.serial('10 AML screening: trigger policy, MOCK worker, officer res
       const claim = runtimeSql(`${setup}\nSELECT * FROM aml_screening_request_claim('${T.id}', 4, 30);`)
       expect(claim.ok).toBe(false)
       expect(claim.sqlstate).toBe('AT002')
-      const fin = runtimeSql(`${setup}\nSELECT * FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL, NULL);`)
+      const fin = runtimeSql(`${setup}\nSELECT * FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL, NULL, NULL);`)
       expect(fin.ok).toBe(false)
       expect(fin.sqlstate).toBe('AT002')
     }
     // with the right tenant session but no claim token, finish applies nothing
-    const own = runtimeSql(`SELECT set_config('app.tenant_id', '${T.id}', false);\nSELECT o_applied FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL, NULL);`)
+    const own = runtimeSql(`SELECT set_config('app.tenant_id', '${T.id}', false);\nSELECT o_applied FROM aml_screening_request_finish('${T.id}', '${reqId}', '${bogus}', 'clear', NULL, NULL, 'mock-screening', 'ref', 'subj', now(), NULL, NULL, NULL);`)
     expect(own.ok).toBe(true)
     expect(own.out.split('\n').pop()).toBe('f')
 
