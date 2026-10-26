@@ -210,7 +210,7 @@ Analysis of the survivors: (a) `covers: missing provenance trusted (interval def
 4. **Officer results.** `lists` are the officer's statement. The policy and interval are stamped by the database: the request's jurisdiction when the key resolves a request, else the tenant's policy with the SHORTEST interval (conservative, never looser); no policy in force at record time means no stamp and the result never counts as a fresh clear. A result recorded under a key that resolves nothing is not tied to a jurisdiction.
 5. **The no-gap rule** (round 2): only versions actually in force count; a version superseded by a later-created one before it took effect is ignored (SEC L-2). Still conservative in that a dropped-then-restored list needs a re-screen.
 6. **Time basis** (round 2): `LEAST(completion/recording, screened_at)`; a provider answer that is old on arrival ages from when it was screened, bounded to the claim window.
-7. **A burst on tightening.** Adding a list makes EVERY covered person stale at once: withdrawals wait and the trapped-funds monitor counts them from the first gating version (old) as soon as they are denied, until the scheduler (`EnqueueBatch` per pass) and the worker catch up. That is the correct, visible behaviour; capacity planning for a large tenant is an operations item.
+7. **A burst on tightening.** Adding a list makes EVERY covered person stale at once: withdrawals wait and the trapped-funds monitor counts them from the first gating version (old) as soon as they are denied, until the scheduler and the worker catch up. The enqueue phase queues up to `EnqueueBatch` (100) persons per pass, but the real drain rate is the worker's claim rate: `ClaimBatch` 4 per tenant per 10 s pass, about 1 440 requests per hour per tenant, from a FIFO claim queue. That is the correct, visible behaviour; capacity planning for a large tenant is an activation-blocking follow-up (section 9.5).
 8. **The route refuses back-dated tightenings.** The `effective_from` dimension (earlier than the version in force) can refuse a legitimate tightening submitted within the 2-minute clock tolerance right after another version; it mirrors the screening policy route (0189).
 9. **Own-licence tenants, the filing form and tenant visibility** stay as in c4 (out of scope, API only, none). The trigger kind inherits D5 (approver population = platform_admin x 2) and D8.
 10. **`NOT VALID` constraint.** `aml_screening_requests_provenance_required` is not validated against legacy rows by design (they are final and untrusted). A dump/restore keeps it NOT VALID.
@@ -312,7 +312,7 @@ The payments full package exceeds 10 minutes (1215 tests), hence the targeted `-
 
 ### 9.5 Records only (no code change)
 
-1. **LF MEDIUM-1 capacity: ACTIVATION-BLOCKING follow-up.** The gate and `aml_screening_enqueue_due` evaluate the coverage predicate per candidate, and the scheduler enqueues only `EnqueueBatch` persons per pass. At about 10 000 covered persons a list addition makes everyone stale at once. Plan (also in the runbook, "Capacity"): keyset batching of the scheduler scan; an alert when enqueue fails or the due backlog exceeds a threshold; priority lanes (persons with a parked withdrawal first); a load test at the target tenant size. No trigger gate may be enabled in any environment before this is done and the owner has accepted the capacity figures.
+1. **LF MEDIUM-1 capacity: ACTIVATION-BLOCKING follow-up.** The gate and `aml_screening_enqueue_due` evaluate the coverage predicate per candidate, and the scheduler enqueues only `EnqueueBatch` persons per pass. At about 10 000 covered persons a list addition makes everyone stale at once. Plan (also in the runbook, "Capacity"): keyset batching of the scheduler scan; an alert when enqueue fails or the due backlog exceeds a threshold; priority lanes (persons with a parked withdrawal first); a load test at the target tenant size. "No trigger gate may be enabled before this is done and the owner has accepted the capacity figures" is currently a PROCESS control only. `aml_screening_trigger_policy_author` still enables a gate in dev, staging and test; only production and unrecorded environments are refused (SN-5). No database switch was added (it would be a new configuration surface and a policy choice for the owner, not a trivial change). It is listed as the activation-blocking follow-up **CAPACITY-GATE-SWITCH**: a database-enforced, owner-recorded capacity acceptance that the author function checks before it accepts `gate_withdrawal = true`.
 2. **LF LOW-2** recorded in the runbook "Known limits".
 3. **Rolling deploy.** `aml_screening_request_finish` is 13-argument only; an old 12-argument caller gets `42883` during a rolling deploy. Deploy workers and database together (the screening worker is disabled everywhere today). Runbook note added.
 4. **I-4 `deploy/init-app-role.sql` grant drift** is a follow-up for the payments owner (not changed here).
@@ -323,3 +323,52 @@ The payments full package exceeds 10 minutes (1215 tests), hence the targeted `-
 2. The 120 s tolerances are engineering constants, not legal values; changing them is a migration.
 3. A finish after the lease is retried; with a provider slower than the lease this would repeat until the lease is lengthened (operations item; not yet in the runbook).
 4. Owner decisions O1 to O3 of section 7 are unchanged; the capacity decision above is new (owner must accept before any gate is enabled).
+
+## 10. Round 3: ledger-finance NEW-M1 (migration 0193)
+
+Not review-complete. 0192 is already pushed, so it was NOT edited again; migration 0193 is new and reversible. The screening mechanism is still DISABLED and INERT.
+
+### 10.1 Defect (reproduced before the fix)
+
+Claim under a 1 h policy; a 3 s version comes into force while the provider is working; the answer's `screened_at` is later than that version's start; the finish names the claim-time policy and is accepted with recorded interval 3600. `aml_screening_since` only looked at versions started after `LEAST(completed_at, screened_at)`, so the 3 s version was ignored for the freshness lower bound. After 3 s the clear is stale (current interval); a later lengthening to 1 h revived it. Failing-before test output (`r3_before`): `TestD1R3_PolicyChangeDuringInFlightScreening_...` FAIL "LF NEW-M1: a version that came into force during the in-flight screening was ignored; lengthening revived the expired clear". The two guard tests were green before and after.
+
+### 10.2 Fix (migration 0193, commit f29b615)
+
+- For a screening request (worker clear and auto-reviewed re-flag) the lower bound passed to `aml_screening_since` is `LEAST(claimed_at, completed_at, screened_at)`, the moment the policy snapshot was taken. The age of the clear still runs from `LEAST(completed_at, screened_at)`. Officer results (`aml_screening_results`) are unchanged: `LEAST(recorded_at, screened_at)`.
+- Gate (`aml_screening_gate_denies`, two request routes) and scheduler (`aml_screening_enqueue_due`) use the identical expression. `CREATE OR REPLACE` with unchanged signatures and attributes: no grant change, `deploy/init-app-role.sql` unchanged.
+- A version that started at or before `claimed_at` is part of the snapshot and does not count (the strict `started > p_at`). A version that started between the claim function's two clock reads is counted (conservative). A request with no `claimed_at` has no provenance and never covers.
+- `COMMENT ON FUNCTION` on `aml_screening_since`, `aml_screening_covers`, `aml_screening_gate_denies`, `aml_screening_enqueue_due` replaces the 0192 guarantee wording. The down restores the 0192 bodies and the 0192 comment of `covers`, and removes the other three comments.
+
+### 10.3 Tests and mutations
+
+| Test (`internal/aml/screening_d1r3_integration_test.go`) | Covers |
+|---|---|
+| `TestD1R3_PolicyChangeDuringInFlightScreening_AnExpiredClearIsNeverRevivedByALaterLengthening` | NEW-M1: version in force between claim and answer; stale; lengthening does not revive; the scheduler re-screens and that releases |
+| `TestD1R3_VersionsBeforeTheClaimDoNotCount_VersionsAfterTheFinishDo` | a version that ended before the claim does not invalidate the clear; one after the finish expires it for good |
+| `TestD1R3_OfficerResultPathUnchanged` | officer clear, shorter version after it, lengthening: still stale |
+
+A version starting EXACTLY at `claimed_at` cannot be produced by a test (a version's start is `GREATEST(effective_from, created_at)` and `created_at` is a later clock read); the strict boundary is covered by the "before the claim" test and is stated above. The auto-reviewed re-flag route of the gate uses the identical expression but has no test of its own, so no mutation targets it (honest gap).
+
+Mutations (all KILLED, `r3_muts.log`): gate worker-clear bound without `claimed_at` (killed by the in-flight test); scheduler bound without `claimed_at` (killed by the in-flight test, the re-screen step); an over-early bound that counts versions before the claim (killed by the before-the-claim test).
+
+### 10.4 Documentation corrections (no policy invented)
+
+- Section 9.5 item 1 and the runbook "Capacity" now say plainly that "no gate may be enabled until capacity is done and the owner accepts the figures" is currently a PROCESS control: `aml_screening_trigger_policy_author` still enables a gate in dev, staging and test, and only production and unrecorded environments are refused. No database switch was added (it is a new configuration surface and an owner decision, not trivial). Listed as the activation-blocking follow-up **CAPACITY-GATE-SWITCH** (a database-enforced, owner-recorded capacity acceptance checked by the author function before it accepts `gate_withdrawal = true`). Add it to the activation list in section 7 as A6's enforcement.
+- Section 6.7 and the runbook effect text corrected: the drain rate is the worker claim rate, `ClaimBatch` 4 per tenant per 10 s pass, about 1 440 per hour per tenant, FIFO claim queue, not `EnqueueBatch`.
+- Runbook known limits: livelock (a policy change between claim and finish gives `AT001` and a retry under the new version) and cached vendor results (older than 120 s before the claim are refused).
+
+### 10.5 Verification
+
+| Command | Result |
+|---|---|
+| `go test -tags integration -count=1 -p 1 ./internal/aml ./internal/licensingchange ./cmd/migrate ./internal/db` | all ok (aml 305.7 s, licensingchange 102.7 s, migrate 1.7 s, db 38.0 s) |
+| payments `-timeout 40m -run 'Lic26\|Lic29\|AML\|Aml\|Hold\|Screening\|Gate\|Sweep\|0115\|Parked'` | ok, 778.8 s |
+| httpserver subset (same `-run` as section 9.4) | ok, 426.0 s |
+| `go vet ./...`, `go vet -tags integration` (aml, licensingchange, payments, httpserver), `gofmt -l internal cmd`, `go test -count=1 ./...` | clean / all ok |
+| 0193 up/down/up and upgrade from a database at 0192 | upgraded-from-0192 fingerprint == clean setup; down 1 == the 0192 database byte for byte; up again == first up; down 3 == the 0190 database byte for byte; up 3 == first up |
+| Playwright 10 / 12, vitest | NOT re-run: no route, wording, OpenAPI or Back Office change in this round (database function bodies and documentation only) |
+
+
+### 10.6 Pin changes
+
+None of the existing tests or pins changed in this round. Added: `screening_d1r3_integration_test.go`, migration files 0193. The static AML-migration list test needed no change (0193 uses no `AM` code).

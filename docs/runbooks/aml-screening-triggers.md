@@ -219,7 +219,7 @@ waiting behind the gate with no new screening, and a clear taken against `pep` o
   gating version (so a dead worker shows at once), and leaves the count when the re-screen completes (`TestD10_NewlyStalePersons_...`).
 
 **Effect on existing (dev / staging) data.** Every clear written before 0192 has NO provenance and is not trusted. Under a gating trigger policy every person who relied on such a clear is denied
-at the gate (withdrawals wait) until the next scheduled enqueue pass queues a re-screen (`EnqueueBatch` persons per pass) and the worker records a clear with provenance. Nothing is deleted or rewritten
+at the gate (withdrawals wait) until the next scheduled enqueue pass queues a re-screen and the worker (4 claims per tenant per 10 s pass) records a clear with provenance. Nothing is deleted or rewritten
 (`TestD10_Upgrade_...` runs this on a database upgraded from 0191 with a legacy clear). No production database has a gate, so there is no production effect. The 0192 down is refused (`AT095`) once any
 provenance has been recorded.
 
@@ -231,7 +231,7 @@ screened lists (PROVIDER DEPENDENT).
 `aml_screening_enqueue_due` 0.9-3 s, against a 5 s `PhaseTimeout`; an enqueue failure is only logged; the claim queue drains FIFO at about 1 440 requests per hour per tenant. Adding a list makes every person due at once.
 Plan before any non-MOCK activation: (1) keyset batching of the gate monitors and of `enqueue_due` (bounded work per call, cursor kept by the worker); (2) an alert (not only a log line) when the enqueue phase fails or times out;
 (3) priority lanes in the claim queue (persons with a pending withdrawal first, then oldest) and a configurable claim batch per tenant; (4) a load test at the target tenant size with the list-added burst. Until then the
-screening gate must not be enabled for a tenant of that size.
+screening gate must not be enabled for a tenant of that size. This is a PROCESS control only: `aml_screening_trigger_policy_author` still enables a gate in dev, staging and test, and only production and unrecorded environments are refused. The database-enforced switch is the activation-blocking follow-up CAPACITY-GATE-SWITCH (not built). The real drain rate is `ClaimBatch` 4 per tenant per 10 s pass (about 1 440 per hour per tenant, FIFO), not `EnqueueBatch`.
 
 **Known limits recorded by the reviews.** Payout decisions do not record the policy id they were made under (follow-up). An officer result recorded under a key that resolves no request is stamped with the policy
-of the jurisdiction with the SHORTEST interval (conservative). `deploy/init-app-role.sql` grant drift unrelated to this slice (review I-4) is a follow-up for the payments owner.
+of the jurisdiction with the SHORTEST interval (conservative). `deploy/init-app-role.sql` grant drift unrelated to this slice (review I-4) is a follow-up for the payments owner. Livelock / cached vendor results: if the policy version in force changes between the claim and the finish, the finish is refused (`AT001`) and the request is retried under the new version (bounded by the retry budget); a vendor result whose `screened_at` is more than 120 s older than the claim (a cached or replayed answer) is refused, so a vendor that serves cached results older than that can never clear a person. Both are fail-closed; operations should alert on repeated `AT001` finishes. Migration 0193 (in-flight policy version): the freshness lower bound of a worker clear is the moment of its claim.
