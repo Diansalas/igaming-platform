@@ -14,7 +14,7 @@ production-enabled. Review status: **no `security` or `ledger-finance` review ha
 | D4: trigger-policy route tighten-only in the DATABASE (`aml_screening_trigger_policy_author`), 0181 setter owner-only | IMPLEMENTED |
 | D4: governed kind `aml_screening_trigger_policy_loosen` (0190 pattern), same inert capability row | IMPLEMENTED, INERT (capability not configured anywhere) |
 | D4: Back Office FILING form for the new kind | NOT IMPLEMENTED (API only, like the other two kinds); generic list/detail pages show it; the trigger form states it only tightens |
-| D10: provenance on every clear, `LEAST(recorded, current)` freshness, list superset + no-gap rule, legacy provenance untrusted, scheduler uses the same predicate | IMPLEMENTED |
+| D10: provenance on every clear, freshness bounded by `LEAST(recorded, current, smallest interval of any version in force since the screening)`, list superset, a version dropping a list invalidates (superseded by round 2, section 9), legacy provenance untrusted, scheduler uses the same predicate | IMPLEMENTED |
 | D10: a provider attestation of the lists actually screened | PROVIDER DEPENDENT (MOCK only); residual in section 6 |
 | Any cooling period, interval, grace, list rule, threshold, sanctions false-positive policy or withdrawal release policy | NOT CHOSEN (owner decisions, section 7) |
 | Real KYC/AML vendor, real PSP | NOT USED (all providers MOCK) |
@@ -83,9 +83,9 @@ The defect, reproduced BEFORE the fix on the 0191 schema and code (`go test -tag
 
 1. Provenance columns: `aml_screening_requests.screened_policy_id / screened_lists / screened_interval_seconds` (all-or-none CHECK, FK to the policy version, a NOT VALID CHECK that every request ending `done` or `needs_officer` carries it), `aml_screening_results.screened_policy_id / screened_interval_seconds` (pair CHECK, FK; `lists` already existed).
 2. `aml_screening_request_finish` takes the policy version as its LAST argument; the lists and the interval are read from THAT policy row (tenant, the request's jurisdiction, in effect), never from the caller. The 12-argument function is dropped. `aml_screening_record` stamps the policy in force (the request's jurisdiction if the key resolves a request, else the tenant policy with the shortest interval) and its interval; `lists` stay the officer's.
-3. `aml_screening_covers(at, recorded interval, recorded lists, current interval, current lists, gap since)`: provenance present AND recorded lists superset of the current lists AND no version since the screening lacked a currently required list AND `at > now - LEAST(recorded, current)`. Owner-only.
+3. SUPERSEDED BY ROUND 2 (section 9): the first round used `at > now - LEAST(recorded, current)` plus a separate gap rule. That let shorten-then-lengthen revive an expired clear (LF HIGH-1). Now `aml_screening_covers(at, recorded interval, recorded lists, current interval, current lists, since)`: provenance present AND recorded lists superset of the current lists AND `at > now - LEAST(recorded, current, since)`, where `since` comes from `aml_screening_since` (0 if an in-force version since the screening lacked a required list, else the smallest interval over versions in force since). Owner-only.
 4. `aml_screening_gate_denies` applies it to the four routes (worker clear, auto-reviewed re-flag, officer clear, officer match with a lifted hold). `aml_screening_enqueue_due` applies the same predicate (persons not covered are DUE) and its key now names the policy version.
-5. Time basis: the existing database clock (`completed_at` for requests, `recorded_at` for results), not the provider-supplied `screened_at` (forgeable by the caller); this is a deliberate departure from the literal wording `screened_at + ...` in the brief.
+5. Time basis (round 2): `LEAST(database completion/recording time, stated screened_at)`. A caller can make a result look OLDER (harmless) but not newer; finish refuses a `screened_at` more than 120 s in the future or before the claim (minus tolerance).
 6. Unchanged: unresolved matches, sanctions holds, officer holds, kill switch, closed accounts, the backfill grace and first-gating baseline (0190), `aml_screening_gate_overdue` / `parked_overdue` bodies. No release path added (every conjunct is stricter than the old test).
 
 **Effect on existing dev data (stated plainly).** Every clear that exists before 0192 has no provenance and stops counting. Under a gating trigger policy those persons are denied at the gate until the scheduler queues a re-screen and the worker records a clear with provenance
@@ -208,8 +208,8 @@ Analysis of the survivors: (a) `covers: missing provenance trusted (interval def
 2. **The owner path is real.** Whoever holds the table-owner role can call both setters (with officer grant, quorum and a fresh signed proof) and can obviously do anything else. It is documented as an owner-recorded decision with a reconciliation query; nothing technical stops an owner. The 0191 down re-grants both setters to the runtime role (dev/staging only; it is the pre-0191 state).
 3. **Provider attestation.** For a worker clear the database records the lists and interval of the policy version the worker NAMES (validated: this tenant, the request's jurisdiction, in effect) but cannot prove the provider was called with those lists. The worker API is runtime-callable (as the clear itself always was); the heartbeat and the environment anchor remain the controls. With a real provider this needs a signed vendor attestation of the lists actually screened (PROVIDER DEPENDENT). The MOCK answers per list it is given.
 4. **Officer results.** `lists` are the officer's statement. The policy and interval are stamped by the database: the request's jurisdiction when the key resolves a request, else the tenant's policy with the SHORTEST interval (conservative, never looser); no policy in force at record time means no stamp and the result never counts as a fresh clear. A result recorded under a key that resolves nothing is not tied to a jurisdiction.
-5. **The no-gap rule is conservative.** Any version with `effective_from <= now` that lacked a currently required list invalidates clears completed before it, including a version later superseded by a later-created one. The cost is at most one extra re-screen; the direction is fail closed.
-6. **Time basis.** Freshness is measured from the database clock at completion/recording, not from the provider/officer-supplied `screened_at` (which a caller controls). A provider answer that is old when it arrives is therefore treated as fresh from arrival.
+5. **The no-gap rule** (round 2): only versions actually in force count; a version superseded by a later-created one before it took effect is ignored (SEC L-2). Still conservative in that a dropped-then-restored list needs a re-screen.
+6. **Time basis** (round 2): `LEAST(completion/recording, screened_at)`; a provider answer that is old on arrival ages from when it was screened, bounded to the claim window.
 7. **A burst on tightening.** Adding a list makes EVERY covered person stale at once: withdrawals wait and the trapped-funds monitor counts them from the first gating version (old) as soon as they are denied, until the scheduler (`EnqueueBatch` per pass) and the worker catch up. That is the correct, visible behaviour; capacity planning for a large tenant is an operations item.
 8. **The route refuses back-dated tightenings.** The `effective_from` dimension (earlier than the version in force) can refuse a legitimate tightening submitted within the 2-minute clock tolerance right after another version; it mirrors the screening policy route (0189).
 9. **Own-licence tenants, the filing form and tenant visibility** stay as in c4 (out of scope, API only, none). The trigger kind inherits D5 (approver population = platform_admin x 2) and D8.
@@ -260,3 +260,66 @@ Analysis of the survivors: (a) `covers: missing provenance trusted (interval def
 | D1-D4-TRIGGER-LOOSENING-GOVERNED | identity-compliance | Trigger policy route tighten-only in the database; 0181 setter owner-only; governed kind `aml_screening_trigger_policy_loosen` under the c4 capability (INERT, no row). **IMPLEMENTED, INERT; security review PENDING.** Supersedes the OPEN state of C4-D4-TRIGGER-POLICY-LOOSENING for the software part; the capability decision (D1-D3) stays OPEN. |
 | D1-D10-FRESHNESS-LIST-BINDING | identity-compliance + ledger-finance | Provenance on every clear; `LEAST(recorded, current)`; list superset and no-gap rule; legacy clears untrusted; scheduler uses the same predicate (migration 0192). **IMPLEMENTED (MOCK provider); ledger-finance and security review PENDING; provider attestation of the lists PROVIDER DEPENDENT.** Supersedes the OPEN state of C4-D10-RETRO-RELEASE for the software part (pinning the policy id on payout decisions remains an optional follow-up, A3). |
 | D1-REVIEW-0191-0192 | security, ledger-finance | OPEN, BLOCKING. See M1, M2 of `docs/plans/d1-security-closure-record.md`. |
+
+## 9. Round 2: review findings addressed (security: D7, D4 acceptable, D10 acceptable after fixes; ledger-finance: 0191 approved, 0192 not signed off, HIGH-1)
+
+Nothing here is review-complete: both reviewers must re-check. Migration 0192 was edited in place (it was unpushed); 0191 is unchanged. The screening mechanism stays DISABLED and INERT (no capability row, no gate-enabling trigger policy shipped).
+
+### 9.1 Commits
+
+| SHA | Content |
+|---|---|
+| `d14de3e` | LF LOW-3 (money path): `hold_eval.go`, a `matchHold` error after a positive probe is EvalFailed (retryable, fail-closed), never a definite hold; fault-injection hook and test |
+| `9016427` | 0192 review fixes (HIGH-1, M-1/LOW-1, L-1, L-2, L-3), tests `TestD1R2_*`, runbook corrections |
+| (next) | this record section and the correction of the round-1 D10 text |
+
+### 9.2 Findings and fixes
+
+| Finding | Fix | Failing-before test (red on the round-1 code, green now) | Mutation (killed) |
+|---|---|---|---|
+| LF HIGH-1 shorten-then-lengthen revives an expired clear | New `aml_screening_since(tenant, jurisdiction, at, current lists)`: 0 if an in-force version since `at` lacked a required list, else the smallest interval over versions in force since `at`. `aml_screening_covers` takes it as the last argument and bounds age by `LEAST(recorded, current, since)`. Gate and scheduler use the identical predicate. A version counts only if actually in force. | `TestD1R2_ShortenThenLengthen_NeverRevivesAnExpiredClear_AParkedWithdrawalStaysParked`; matrix rows in `TestD10_CoveragePredicate_Matrix` | since ignored; smallest interval ignored |
+| SEC M-1 + LF LOW-1 time basis | Age runs from `LEAST(completed_at, screened_at)` (results: `LEAST(recorded_at, screened_at)`). Finish refuses `screened_at` more than 120 s ahead or earlier than claim time minus 120 s (`claimed_at` stamped by the claim function). A finish after the lease passed is not applied (the request is reclaimed and retried, not lost). The officer record function refuses a future `screened_at` (AM004). | `TestD1R2_ScreenedAt_FutureAndAncientAreRefused_...`, `TestD1R2_FinishAfterTheLease_IsNotApplied_AndTheRequestIsReclaimed`, `TestD1R2_OfficerResult_FutureScreenedAtIsRefused` | bounds removed; lease check removed; gate age from completion; future accepted |
+| SEC L-1 finish names a superseded policy | Claim stamps `claim_policy_id`; finish requires `p_policy_id = claim_policy_id` | `TestD1R2_FinishMustNameThePolicyInForceAtClaimTime` (P1 both lists, P2 pep only, finish naming P1 refused) | claim policy not required |
+| SEC L-2 gap scan counted versions never in force | Folded into `aml_screening_since`: a version is ignored if a later-created version started at or before its start | `TestD1R2_OnlyVersionsActuallyInForceCount_APendingNarrowingNeutralisedByACounterVersion` | not-in-force exclusion removed |
+| SEC L-3 enqueue starvation | `NOT EXISTS` on the computed idempotency key before the `LIMIT` | `TestD1R2_EnqueueDue_APermanentlyFailedPeriodDoesNotStarveOthers` (limit 1, three persons) | existing key not excluded |
+| LF LOW-3 hold lookup error | `evaluateHold` returns `EvalFailed` (plus the alert as for a probe failure) when `matchHold` errors after a positive probe; only a successful lookup sets `HoldID` / `ScreeningOnly` | `TestD1_Low3_HoldLookupErrorAfterPositiveProbe_IsRetryableEvalFailure_NeverADefiniteHold` (also asserts `RetryableOnHoldEvalFailure` yields unavailable) | lookup error ignored |
+
+Failing-before output is the "before" run of each new test on the unfixed code (all six listed `--- FAIL` with the messages quoted in the tests); the 10 mutations above were all KILLED.
+
+False claims corrected: the 0192 header, the runbook (`docs/runbooks/aml-screening-triggers.md`, retro-effect bullets) and sections 2 (D10 items 3 and 5), 6 (items 5 and 6) and 0 of this record previously said `LEAST(recorded, current)` and "database clock, not screened_at". They now state exactly what is and is not guaranteed.
+
+### 9.3 Pin changes (intentional; no assertion weakened or deleted)
+
+1. `TestD10_CoveragePredicate_Matrix`: rewritten for the new `aml_screening_covers` signature (extra `since` argument); every previous row is kept with `since = NULL`; new rows added (a SHORTER version since; shorten-then-lengthen).
+2. Signature string of `aml_screening_covers` in the grant, comment and pre-flight statements of 0192 (and the catalogue pins that name it).
+3. `aml_screening_request_claim` is now (re)defined by 0192 (stamps `claimed_at`, `claim_policy_id`); the 0192 down restores the 0181 body. `aml_screening_requests` gets two columns and an FK, dropped by the down.
+4. Tests that finish a claimed request now name the claim-time policy and a lease-valid screening time.
+
+### 9.4 Verification (private databases `d1sec`, `d1mut`, `d1base`, `d1e2e`; scratch databases created by the tests)
+
+| Command | Result |
+|---|---|
+| `go test -tags integration -count=1 -p 1 ./internal/aml ./internal/licensingchange ./cmd/migrate ./internal/db ./internal/launchgov ./internal/withdrawal ./internal/withdrawalpolicy ./internal/alerting` | all ok (aml 288.6 s, licensingchange 103.9 s, migrate 1.7 s, db 37.0 s, launchgov 61.0 s, withdrawal 53.7 s, withdrawalpolicy 1.6 s, alerting 246.6 s) |
+| `go test -tags integration -count=1 -p 1 -timeout 40m ./internal/payments -run 'Lic26\|Lic29\|AML\|Aml\|Hold\|Screening\|Gate\|Sweep\|0115\|Parked'` | ok, 746.1 s |
+| httpserver subset `-run 'Screening\|AML\|Licensing\|Staff\|StepUp\|OpenAPI\|Route\|Mutation\|D1\|C1\|C2\|Owner'` | ok, 418.4 s |
+| `go vet ./...`, `go vet -tags integration` (aml, licensingchange, payments, httpserver), `gofmt -l internal cmd` | clean |
+| `go test -count=1 ./...` | all ok, no failures |
+| vitest `src/features/licensing src/features/aml`; `tsc --noEmit` (backoffice) | 16 files / 280 tests passed; tsc clean |
+| 0191/0192 up, down 2, up; upgrade from a database at 0190 | schema fingerprint (functions, ACLs, comments, constraints, indexes, columns, kinds) of: upgraded-from-0190 == clean setup; down 2 == the 0190 database byte for byte; up again == first up |
+| Playwright spec 10 (worker path) and spec 12 | spec 10: 8 passed (12.2 min); spec 12: 7 passed (5.0 min) |
+
+The payments full package exceeds 10 minutes (1215 tests), hence the targeted `-run`.
+
+### 9.5 Records only (no code change)
+
+1. **LF MEDIUM-1 capacity: ACTIVATION-BLOCKING follow-up.** The gate and `aml_screening_enqueue_due` evaluate the coverage predicate per candidate, and the scheduler enqueues only `EnqueueBatch` persons per pass. At about 10 000 covered persons a list addition makes everyone stale at once. Plan (also in the runbook, "Capacity"): keyset batching of the scheduler scan; an alert when enqueue fails or the due backlog exceeds a threshold; priority lanes (persons with a parked withdrawal first); a load test at the target tenant size. No trigger gate may be enabled in any environment before this is done and the owner has accepted the capacity figures.
+2. **LF LOW-2** recorded in the runbook "Known limits".
+3. **Rolling deploy.** `aml_screening_request_finish` is 13-argument only; an old 12-argument caller gets `42883` during a rolling deploy. Deploy workers and database together (the screening worker is disabled everywhere today). Runbook note added.
+4. **I-4 `deploy/init-app-role.sql` grant drift** is a follow-up for the payments owner (not changed here).
+
+### 9.6 Residual risks added or changed
+
+1. Provider attestation of the screened lists remains PROVIDER DEPENDENT; the stated `screened_at` is bounded (120 s of claim and now) but is still the worker's statement.
+2. The 120 s tolerances are engineering constants, not legal values; changing them is a migration.
+3. A finish after the lease is retried; with a provider slower than the lease this would repeat until the lease is lengthened (operations item; not yet in the runbook).
+4. Owner decisions O1 to O3 of section 7 are unchanged; the capacity decision above is new (owner must accept before any gate is enabled).
