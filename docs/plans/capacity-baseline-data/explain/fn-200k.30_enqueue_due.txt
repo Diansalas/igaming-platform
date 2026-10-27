@@ -1,0 +1,137 @@
+NOTICE:  database "capa_explain_fn_200k" does not exist, skipping
+Pager usage is off.
+Output format is unaligned.
+Timing is off.
+persons= 200000  screening_policy_versions= 3  requests= 195991
+4MB
+128MB
+=== E3 enqueue_due candidate query, LIMIT 1000 (EXPLAIN ANALYZE of the INSERT, rolled back)
+BEGIN
+Insert on aml_screening_requests  (cost=4425530.25..4425552.75 rows=0 width=0) (actual time=32836.113..32836.134 rows=0 loops=1)
+  Conflict Resolution: NOTHING
+  Conflict Arbiter Indexes: aml_screening_requests_tenant_id_idempotency_key_key
+  Tuples Inserted: 1000
+  Conflicting Tuples: 0
+  Buffers: shared hit=2239759 read=15941 dirtied=3260 written=68, temp read=1083 written=1814
+  ->  Subquery Scan on "*SELECT*"  (cost=4425530.25..4425552.75 rows=1000 width=692) (actual time=32706.577..32709.367 rows=1000 loops=1)
+        Buffers: shared hit=2216108 read=13648 written=1, temp read=1083 written=1814
+        ->  Limit  (cost=4425530.25..4425532.75 rows=1000 width=152) (actual time=32706.537..32706.982 rows=1000 loops=1)
+              Buffers: shared hit=2216108 read=13648 written=1, temp read=1083 written=1814
+              ->  Sort  (cost=4425530.25..4425655.25 rows=50000 width=152) (actual time=32023.245..32023.560 rows=1000 loops=1)
+                    Sort Key: c.last_any NULLS FIRST, c.person_id
+                    Sort Method: top-N heapsort  Memory: 275kB
+                    Buffers: shared hit=2216108 read=13648 written=1, temp read=1083 written=1814
+                    ->  Nested Loop Anti Join  (cost=39083.91..4422788.81 rows=50000 width=152) (actual time=281.367..32011.469 rows=10094 loops=1)
+                          Join Filter: (o.person_id = c.person_id)
+                          Buffers: shared hit=2216108 read=13648 written=1, temp read=1083 written=1814
+                          ->  Hash Anti Join  (cost=39083.79..4421157.91 rows=50000 width=24) (actual time=281.120..31958.379 rows=10094 loops=1)
+                                Hash Cond: (((((('sched:'::text || (c.person_id)::text) || ':'::text) || '1482'::text) || ':'::text) || '72fdf599-a9c8-2128-507c-410bee4680e9'::text) = k.idempotency_key)
+                                Buffers: shared hit=2216106 read=13648 written=1, temp read=1083 written=1814
+                                ->  Subquery Scan on c  (cost=23658.76..4402111.88 rows=100000 width=24) (actual time=182.058..31826.769 rows=10094 loops=1)
+                                      Filter: (NOT c.covered)
+                                      Rows Removed by Filter: 189906
+                                      Buffers: shared hit=2212273 read=8105 written=1, temp read=551 written=1282
+                                      ->  Subquery Scan on pa  (cost=23658.76..4400111.88 rows=200000 width=25) (actual time=178.088..31798.380 rows=200000 loops=1)
+                                            Buffers: shared hit=2212273 read=8105 written=1, temp read=551 written=1282
+                                            ->  HashAggregate  (cost=23658.76..27611.88 rows=200000 width=16) (actual time=176.897..318.207 rows=200000 loops=1)
+                                                  Group Key: a.person_id
+                                                  Planned Partitions: 4  Batches: 5  Memory Usage: 10033kB  Disk Usage: 7048kB
+                                                  Buffers: shared hit=3846, temp read=551 written=1282
+                                                  InitPlan 3 (returns $2)
+                                                    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+                                                  ->  Seq Scan on player_accounts a  (cost=0.00..11346.00 rows=200000 width=16) (actual time=0.035..95.931 rows=200000 loops=1)
+                                                        Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $2)))
+                                                        Buffers: shared hit=3846
+                                            SubPlan 1
+                                              ->  Aggregate  (cost=12.76..12.77 rows=1 width=8) (actual time=0.022..0.022 rows=1 loops=200000)
+                                                    Buffers: shared hit=998822 read=2104
+                                                    ->  Append  (cost=0.42..12.75 rows=2 width=8) (actual time=0.012..0.021 rows=1 loops=200000)
+                                                          Buffers: shared hit=998822 read=2104
+                                                          ->  Result  (cost=0.42..4.45 rows=1 width=8) (actual time=0.012..0.012 rows=1 loops=200000)
+                                                                One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                                                Buffers: shared hit=597930 read=2071
+                                                                ->  Index Only Scan using aml_screening_requests_person on aml_screening_requests r  (cost=0.42..4.45 rows=1 width=8) (actual time=0.004..0.004 rows=1 loops=200000)
+                                                                      Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = pa.person_id) AND (completed_at >= '2026-08-28 17:14:54.879586+00'::timestamp with time zone))
+                                                                      Filter: (status = ANY ('{done,needs_officer}'::text[]))
+                                                                      Heap Fetches: 0
+                                                                      Buffers: shared hit=597930 read=2071
+                                                          ->  Result  (cost=0.28..8.30 rows=1 width=8) (actual time=0.009..0.009 rows=0 loops=200000)
+                                                                One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                                                Buffers: shared hit=400892 read=33
+                                                                ->  Index Scan using aml_screening_results_person on aml_screening_results x  (cost=0.28..8.30 rows=1 width=8) (actual time=0.001..0.001 rows=0 loops=200000)
+                                                                      Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = pa.person_id) AND (recorded_at >= '2026-08-28 17:14:54.879586+00'::timestamp with time zone))
+                                                                      Filter: (outcome <> 'error'::text)
+                                                                      Buffers: shared hit=400892 read=33
+                                            SubPlan 2
+                                              ->  Append  (cost=0.42..17.77 rows=2 width=4) (actual time=0.134..0.134 rows=1 loops=200000)
+                                                    Buffers: shared hit=1209605 read=6001 written=1
+                                                    ->  Result  (cost=0.42..8.95 rows=1 width=4) (actual time=0.133..0.133 rows=1 loops=200000)
+                                                          One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                                          Buffers: shared hit=1187564 read=6001 written=1
+                                                          ->  Index Scan using aml_screening_requests_person on aml_screening_requests r_1  (cost=0.42..8.95 rows=1 width=0) (actual time=0.126..0.126 rows=1 loops=200000)
+                                                                Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = pa.person_id) AND (completed_at >= '2026-08-28 17:14:54.879586+00'::timestamp with time zone))
+                                                                Filter: ((status = ANY ('{done,needs_officer}'::text[])) AND aml_screening_covers(LEAST(completed_at, screened_at), screened_interval_seconds, screened_lists, '1209600'::double precision, '{sanctions,pep}'::text[], aml_screening_since('070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid, '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid, LEAST(claimed_at, completed_at, screened_at), '{sanctions,pep}'::text[], claim_policy_id)))
+                                                                Rows Removed by Filter: 0
+                                                                Buffers: shared hit=1187564 read=6001 written=1
+                                                    ->  Result  (cost=0.28..8.80 rows=1 width=4) (actual time=0.018..0.018 rows=0 loops=10094)
+                                                          One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                                          Buffers: shared hit=22041
+                                                          ->  Index Scan using aml_screening_results_person on aml_screening_results x_1  (cost=0.28..8.80 rows=1 width=0) (actual time=0.010..0.010 rows=0 loops=10094)
+                                                                Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = pa.person_id) AND (recorded_at >= '2026-08-28 17:14:54.879586+00'::timestamp with time zone))
+                                                                Filter: ((outcome <> 'error'::text) AND aml_screening_covers(LEAST(recorded_at, screened_at), screened_interval_seconds, lists, '1209600'::double precision, '{sanctions,pep}'::text[], aml_screening_since('070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid, '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid, LEAST(recorded_at, screened_at), '{sanctions,pep}'::text[], NULL::uuid)))
+                                                                Rows Removed by Filter: 0
+                                                                Buffers: shared hit=22041
+                                ->  Hash  (cost=11826.14..11826.14 rows=195991 width=22) (actual time=98.920..98.923 rows=195991 loops=1)
+                                      Buckets: 131072  Batches: 2  Memory Usage: 6255kB
+                                      Buffers: shared hit=3833 read=5543, temp written=505
+                                      ->  Result  (cost=0.25..11826.14 rows=195991 width=22) (actual time=0.072..53.305 rows=195991 loops=1)
+                                            One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                            Buffers: shared hit=3833 read=5543
+                                            ->  Seq Scan on aml_screening_requests k  (cost=0.25..11826.14 rows=195991 width=22) (actual time=0.013..31.967 rows=195991 loops=1)
+                                                  Filter: (tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                                  Buffers: shared hit=3833 read=5543
+                          ->  Materialize  (cost=0.12..5.90 rows=1 width=16) (actual time=0.000..0.000 rows=0 loops=10094)
+                                Buffers: shared hit=2
+                                ->  Result  (cost=0.12..5.89 rows=1 width=16) (actual time=0.231..0.233 rows=0 loops=1)
+                                      One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                      Buffers: shared hit=2
+                                      ->  Index Scan using aml_screening_requests_due on aml_screening_requests o  (cost=0.12..5.89 rows=1 width=16) (actual time=0.012..0.013 rows=0 loops=1)
+                                            Index Cond: (tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                                            Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=57 read=1
+Planning Time: 0.960 ms
+Trigger for constraint aml_screening_requests_tenant_id_fkey: time=5.015 calls=1000
+Trigger for constraint aml_screening_requests_person_id_fkey: time=16.871 calls=1000
+Trigger for constraint aml_screening_requests_licensing_jurisdiction_id_fkey: time=4.516 calls=1000
+Trigger for constraint aml_screening_requests_tenant_id_reviewed_from_request_id_fkey: time=0.786 calls=1000
+Trigger for constraint aml_screening_requests_tenant_id_replaced_by_request_id_fkey: time=0.694 calls=1000
+Trigger for constraint aml_screening_requests_screened_policy_fk: time=0.701 calls=1000
+Trigger for constraint aml_screening_requests_claim_policy_fk: time=0.635 calls=1000
+Trigger aml_screening_requests_10_guard: time=18.341 calls=1000
+JIT:
+  Functions: 66
+  Options: Inlining true, Optimization true, Expressions true, Deforming true
+  Timing: Generation 3.818 ms, Inlining 67.115 ms, Optimization 362.906 ms, Emission 260.643 ms, Total 694.482 ms
+Execution Time: 32886.901 ms
+ROLLBACK
+=== END-TO-END: the real function (rolled back)
+Timing is on.
+BEGIN
+Time: 0.120 ms
+1000
+Time: 34090.368 ms (00:34.090)
+ROLLBACK
+Time: 0.377 ms
+BEGIN
+Time: 0.111 ms
+1000
+Time: 33557.746 ms (00:33.558)
+ROLLBACK
+Time: 0.244 ms
+BEGIN
+Time: 0.072 ms
+100
+Time: 33038.256 ms (00:33.038)
+ROLLBACK
+Time: 0.251 ms

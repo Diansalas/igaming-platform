@@ -1,0 +1,214 @@
+=== fn-1k start 17:22:49
+[17:22:51] fn fn-1k run 1 (loadavg 0.59 0.58 0.40)
+[17:23:48] fn fn-1k run 2 (loadavg 0.31 0.49 0.37)
+[17:24:44] fn fn-1k run 3 (loadavg 0.25 0.44 0.36)
+=== fn-1k end 17:25:41
+=== fn-50k start 17:25:41
+[17:25:42] fn fn-50k run 1 (loadavg 0.42 0.45 0.37)
+[17:30:15] fn fn-50k run 2 (loadavg 0.91 0.68 0.49)
+[17:34:46] fn fn-50k run 3 (loadavg 0.87 0.81 0.59)
+=== fn-50k end 17:39:13
+=== fn-10k-backlog start 17:39:13
+[17:39:14] fn fn-10k-backlog run 1 (loadavg 1.00 0.88 0.68)
+[17:41:13] fn fn-10k-backlog run 2 (loadavg 0.77 0.82 0.68)
+[17:43:13] fn fn-10k-backlog run 3 (loadavg 0.83 0.82 0.70)
+=== fn-10k-backlog end 17:45:15
+=== fn-10k-loaded start 17:45:15
+ERROR:  template database "capa_seed_fn_10k_loaded" does not exist
+FAILED fn-10k-loaded
+=== fn-10k-loaded end 17:45:15
+=== fn-200k start 17:45:15
+[17:45:17] fn fn-200k run 1 (loadavg 0.78 0.78 0.70)
+[17:58:53] fn fn-200k run 2 (loadavg 0.93 1.00 0.92)
+[18:12:24] fn fn-200k run 3 (loadavg 0.92 0.98 0.98)
+=== fn-200k end 18:25:48
+=== growth-v1 start 18:25:48
+[18:25:48] growth growth-v1 run 1 (loadavg 0.92 0.97 0.99)
+screeningbench: expected 2 arguments, got 3
+FAILED growth-v1
+=== end 18:25:56
+=== growth-v10 start 18:25:56
+[18:25:56] growth growth-v10 run 1 (loadavg 0.85 0.96 0.99)
+screeningbench: expected 2 arguments, got 3
+FAILED growth-v10
+=== end 18:26:04
+=== growth-v100 start 18:26:04
+[18:26:04] growth growth-v100 run 1 (loadavg 0.72 0.93 0.98)
+screeningbench: expected 2 arguments, got 3
+FAILED growth-v100
+=== end 18:26:11
+=== growth-v1000 start 18:26:11
+[18:26:12] growth growth-v1000 run 1 (loadavg 0.66 0.91 0.97)
+screeningbench: expected 2 arguments, got 3
+FAILED growth-v1000
+=== end 18:26:20
+CAMPAIGN_A_DONE
+[18:26:50] growth growth-v1 run 1 (loadavg 0.58 0.85 0.95)
+[18:27:17] growth growth-v1 run 2 (loadavg 0.50 0.81 0.93)
+[18:27:44] growth growth-v1 run 3 (loadavg 0.38 0.75 0.90)
+[18:28:12] growth growth-v10 run 1 (loadavg 0.33 0.70 0.89)
+[18:28:39] growth growth-v10 run 2 (loadavg 0.20 0.63 0.86)
+[18:29:05] growth growth-v10 run 3 (loadavg 0.28 0.62 0.84)
+[18:29:33] growth growth-v100 run 1 (loadavg 0.27 0.58 0.83)
+[18:30:01] growth growth-v100 run 2 (loadavg 0.37 0.58 0.82)
+[18:30:30] growth growth-v100 run 3 (loadavg 0.44 0.57 0.81)
+[18:30:58] growth growth-v1000 run 1 (loadavg 0.34 0.53 0.79)
+[18:32:18] growth growth-v1000 run 2 (loadavg 0.73 0.59 0.79)
+[18:33:36] growth growth-v1000 run 3 (loadavg 0.75 0.61 0.78)
+[18:34:56] fn fn-10k-loaded run 1 (loadavg 0.80 0.65 0.78)
+[18:36:57] fn fn-10k-loaded run 2 (loadavg 2.17 1.21 0.97)
+[18:38:55] fn fn-10k-loaded run 3 (loadavg 2.35 1.54 1.12)
+=== run-t1-l0 start 19:07:30
+[19:07:31] runpass run-t1-l0 run 1 (loadavg 1.01 0.99 0.97)
+[19:07:55] runpass run-t1-l0 run 2 (loadavg 0.66 0.91 0.94)
+[19:08:19] runpass run-t1-l0 run 3 (loadavg 0.47 0.85 0.92)
+=== run-t1-l0 end 19:08:43
+=== run-t1-l100 start 19:08:43
+[19:08:44] runpass run-t1-l100 run 1 (loadavg 0.31 0.78 0.90)
+[19:09:08] runpass run-t1-l100 run 2 (loadavg 0.20 0.71 0.87)
+[19:09:33] runpass run-t1-l100 run 3 (loadavg 0.13 0.65 0.85)
+=== run-t1-l100 end 19:09:58
+=== run-t1-l1s start 19:09:58
+[19:09:58] runpass run-t1-l1s run 1 (loadavg 0.36 0.67 0.85)
+[19:10:27] runpass run-t1-l1s run 2 (loadavg 0.50 0.67 0.84)
+[19:10:55] runpass run-t1-l1s run 3 (loadavg 0.38 0.62 0.82)
+=== run-t1-l1s end 19:11:23
+=== run-t1-l5s start 19:11:23
+[19:11:24] runpass run-t1-l5s run 1 (loadavg 0.25 0.57 0.80)
+[19:12:31] runpass run-t1-l5s run 2 (loadavg 0.08 0.45 0.73)
+[19:13:37] runpass run-t1-l5s run 3 (loadavg 0.10 0.37 0.69)
+=== run-t1-l5s end 19:14:44
+=== run-t1-hang start 19:14:44
+[19:14:45] runpass run-t1-hang run 1 (loadavg 0.07 0.31 0.64)
+[19:16:52] runpass run-t1-hang run 2 (loadavg 0.14 0.24 0.57)
+[19:18:59] runpass run-t1-hang run 3 (loadavg 0.12 0.18 0.51)
+=== run-t1-hang end 19:21:06
+=== run-t10-l0 start 19:21:06
+[19:21:06] runpass run-t10-l0 run 1 (loadavg 0.11 0.16 0.45)
+[19:21:49] runpass run-t10-l0 run 2 (loadavg 0.70 0.31 0.49)
+[19:22:32] runpass run-t10-l0 run 3 (loadavg 0.86 0.41 0.52)
+=== run-t10-l0 end 19:23:14
+=== run-t10-l100 start 19:23:14
+[19:23:15] runpass run-t10-l100 run 1 (loadavg 0.97 0.50 0.54)
+[19:24:09] runpass run-t10-l100 run 2 (loadavg 0.96 0.57 0.57)
+[19:25:01] runpass run-t10-l100 run 3 (loadavg 0.57 0.53 0.55)
+=== run-t10-l100 end 19:25:54
+=== run-t10-l1s start 19:25:54
+[19:25:55] runpass run-t10-l1s run 1 (loadavg 0.83 0.61 0.58)
+[19:27:44] runpass run-t10-l1s run 2 (loadavg 0.41 0.51 0.54)
+[19:29:34] runpass run-t10-l1s run 3 (loadavg 0.29 0.42 0.50)
+=== run-t10-l1s end 19:31:24
+=== run-t10-l5s start 19:31:24
+[19:31:25] runpass run-t10-l5s run 1 (loadavg 0.24 0.36 0.47)
+[19:33:28] runpass run-t10-l5s run 2 (loadavg 0.03 0.23 0.41)
+[19:35:31] runpass run-t10-l5s run 3 (loadavg 0.14 0.19 0.36)
+=== run-t10-l5s end 19:37:34
+=== run-t10-hang start 19:37:34
+[19:37:35] runpass run-t10-hang run 1 (loadavg 0.04 0.14 0.32)
+[19:39:38] runpass run-t10-hang run 2 (loadavg 0.00 0.08 0.27)
+[19:41:41] runpass run-t10-hang run 3 (loadavg 0.00 0.05 0.24)
+=== run-t10-hang end 19:43:43
+=== run-t100-l0 start 19:43:43
+[19:43:44] runpass run-t100-l0 run 1 (loadavg 0.07 0.05 0.21)
+[19:48:11] runpass run-t100-l0 run 2 (loadavg 1.05 0.64 0.43)
+[19:52:37] runpass run-t100-l0 run 3 (loadavg 0.92 0.84 0.57)
+=== run-t100-l0 end 19:57:02
+=== run-t100-l100 start 19:57:02
+[19:57:03] runpass run-t100-l100 run 1 (loadavg 1.08 0.96 0.69)
+[20:02:06] runpass run-t100-l100 run 2 (loadavg 0.90 0.94 0.76)
+[20:07:10] runpass run-t100-l100 run 3 (loadavg 0.92 0.92 0.82)
+=== run-t100-l100 end 20:12:13
+=== run-t100-l1s start 20:12:13
+[20:12:13] runpass run-t100-l1s run 1 (loadavg 0.85 0.85 0.82)
+[20:14:17] runpass run-t100-l1s run 2 (loadavg 0.38 0.65 0.75)
+[20:16:21] runpass run-t100-l1s run 3 (loadavg 0.35 0.56 0.70)
+=== run-t100-l1s end 20:18:24
+=== run-t100-l5s start 20:18:24
+[20:18:24] runpass run-t100-l5s run 1 (loadavg 0.39 0.51 0.67)
+[20:20:28] runpass run-t100-l5s run 2 (loadavg 0.25 0.39 0.60)
+[20:22:32] runpass run-t100-l5s run 3 (loadavg 0.09 0.29 0.53)
+=== run-t100-l5s end 20:24:35
+=== run-t100-hang start 20:24:35
+[20:24:36] runpass run-t100-hang run 1 (loadavg 0.15 0.24 0.48)
+[20:26:39] runpass run-t100-hang run 2 (loadavg 0.13 0.20 0.43)
+[20:28:43] runpass run-t100-hang run 3 (loadavg 0.02 0.13 0.37)
+=== run-t100-hang end 20:30:46
+=== run-t500-l0 start 20:30:46
+[20:30:50] runpass run-t500-l0 run 1 (loadavg 0.18 0.12 0.34)
+ERROR:  permission denied to terminate process
+DETAIL:  Only roles with privileges of the role whose process is being terminated or with privileges of the "pg_signal_backend" role may terminate this process.
+FAILED run-t500-l0
+=== run-t500-l0 end 20:40:53
+=== run-t500-l100 start 20:40:53
+[20:40:58] runpass run-t500-l100 run 1 (loadavg 1.07 0.96 0.71)
+[20:45:03] runpass run-t500-l100 run 2 (loadavg 0.80 0.87 0.74)
+[20:49:08] runpass run-t500-l100 run 3 (loadavg 0.86 0.85 0.75)
+=== run-t500-l100 end 20:53:12
+=== run-skew-l0 start 20:53:12
+[20:53:14] runpass run-skew-l0 run 1 (loadavg 0.85 0.87 0.79)
+[20:58:17] runpass run-skew-l0 run 2 (loadavg 0.92 0.94 0.85)
+[21:03:03] runpass run-skew-l0 run 3 (loadavg 1.00 0.99 0.91)
+=== run-skew-l0 end 21:07:19
+=== run-skew-l100 start 21:07:19
+[21:07:20] runpass run-skew-l100 run 1 (loadavg 1.22 1.08 0.97)
+[21:12:57] runpass run-skew-l100 run 2 (loadavg 0.66 0.82 0.89)
+=== runpass run-p10k-l0 start 21:31:20
+[21:31:21] runpass run-p10k-l0 run 1 (loadavg 0.83 0.32 0.17)
+[21:31:50] runpass run-p10k-l0 run 2 (loadavg 0.90 0.39 0.20)
+[21:32:20] runpass run-p10k-l0 run 3 (loadavg 0.94 0.45 0.22)
+=== run-p10k-l0 end 21:32:49
+=== stale stale-100-drain start 21:32:49
+[21:32:50] stale stale-100-drain run 1 (loadavg 0.90 0.48 0.24)
+[21:37:03] stale stale-100-drain run 2 (loadavg 0.14 0.26 0.20)
+[21:41:17] stale stale-100-drain run 3 (loadavg 0.06 0.12 0.15)
+=== stale-100-drain end 21:45:30
+=== stale stale-100-drain-gate start 21:45:30
+[21:45:30] stale stale-100-drain-gate run 1 (loadavg 0.03 0.06 0.11)
+[21:49:44] stale stale-100-drain-gate run 2 (loadavg 0.65 0.35 0.21)
+[21:53:57] stale stale-100-drain-gate run 3 (loadavg 0.38 0.32 0.23)
+=== stale-100-drain-gate end 21:58:10
+=== stale stale-2k-default start 21:58:10
+[21:58:10] stale stale-2k-default run 1 (loadavg 1.13 0.65 0.38)
+[22:01:20] stale stale-2k-default run 2 (loadavg 0.56 0.61 0.42)
+[22:04:30] stale stale-2k-default run 3 (loadavg 0.19 0.39 0.36)
+=== stale-2k-default end 22:07:39
+=== race race-control start 22:07:39
+[22:07:40] race race-control run 1 (loadavg 0.21 0.29 0.33)
+[22:09:11] race race-control run 2 (loadavg 0.05 0.21 0.29)
+[22:10:42] race race-control run 3 (loadavg 0.38 0.28 0.31)
+=== race-control end 22:12:13
+=== race race-policy-churn start 22:12:13
+[22:12:14] race race-policy-churn run 1 (loadavg 0.46 0.34 0.33)
+[22:13:45] race race-policy-churn run 2 (loadavg 0.85 0.50 0.39)
+[22:15:17] race race-policy-churn run 3 (loadavg 0.78 0.55 0.41)
+=== race-policy-churn end 22:16:47
+=== crash crash-kill start 22:16:47
+[22:16:48] crash crash-kill run 1 (loadavg 0.95 0.65 0.46)
+[22:20:23] crash crash-kill run 2 (loadavg 0.02 0.31 0.36)
+[22:23:57] crash crash-kill run 3 (loadavg 0.02 0.16 0.28)
+=== crash-kill end 22:27:32
+=== retry retry-storm start 22:27:32
+[22:27:33] retry retry-storm run 1 (loadavg 0.10 0.11 0.24)
+[22:37:35] retry retry-storm run 2 (loadavg 0.04 0.04 0.12)
+[22:47:37] retry retry-storm run 3 (loadavg 0.22 0.15 0.11)
+=== retry-storm end 22:57:39
+=== runpass run-t10-shared-pool start 22:57:39
+[22:57:39] runpass run-t10-shared-pool run 1 (loadavg 0.04 0.05 0.07)
+[22:58:54] runpass run-t10-shared-pool run 2 (loadavg 8.16 2.54 0.94)
+[23:00:19] runpass run-t10-shared-pool run 3 (loadavg 9.63 4.42 1.75)
+=== run-t10-shared-pool end 23:01:36
+=== runpass run-t10-ownerpool-gate start 23:01:36
+[23:01:36] runpass run-t10-ownerpool-gate run 1 (loadavg 10.94 6.03 2.52)
+[23:02:28] runpass run-t10-ownerpool-gate run 2 (loadavg 5.94 5.46 2.53)
+[23:03:21] runpass run-t10-ownerpool-gate run 3 (loadavg 4.55 5.14 2.58)
+=== run-t10-ownerpool-gate end 23:04:12
+=== runpass run-skew-l100 start 23:04:12
+[23:04:14] runpass run-skew-l100 run 1 (loadavg 2.92 4.58 2.53)
+[23:10:04] runpass run-skew-l100 run 2 (loadavg 0.82 1.93 1.96)
+[23:15:57] runpass run-skew-l100 run 3 (loadavg 0.71 1.04 1.54)
+=== run-skew-l100 end 23:21:46
+CAMPAIGN_D_DONE
+[23:24:30] runpass run-t500-l0 run 1 (loadavg 0.92 0.84 1.20)
+[23:34:35] runpass run-t500-l0 run 2 (loadavg 1.00 1.00 1.09)
+[23:44:40] runpass run-t500-l0 run 3 (loadavg 1.08 1.02 1.04)
+TDONE

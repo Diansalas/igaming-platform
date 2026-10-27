@@ -1,0 +1,50 @@
+date_utc=2026-10-27T17:22:49Z
+commit=c5b6546cc089bb1f29eb4827afc9b92647b80d62
+kernel=Linux 6.18.44-fc-v165
+cpus=4 model=Intel(R) Xeon(R) Processor @ 2.10GHz
+mem_total_mb=16091
+loadavg=0.29 0.52 0.38
+disk=252G total, 25G free
+PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+-- pg settings whose source is not 'default' (everything else is the compiled-in default):
+DateStyle=ISO, MDY  [configuration file]
+TimeZone=Etc/UTC  [configuration file]
+application_name=psql  [client]
+cluster_name=16/main  [configuration file]
+default_text_search_config=pg_catalog.english  [configuration file]
+dynamic_shared_memory_type=posix  [configuration file]
+lc_messages=C.UTF-8  [configuration file]
+lc_monetary=C.UTF-8  [configuration file]
+lc_numeric=C.UTF-8  [configuration file]
+lc_time=C.UTF-8  [configuration file]
+log_line_prefix=%m [%p] %q%u@%d   [configuration file]
+log_timezone=Etc/UTC  [configuration file]
+max_connections=100  [configuration file]
+max_wal_size=1GB  [configuration file]
+min_wal_size=80MB  [configuration file]
+port=5432  [configuration file]
+shared_buffers=128MB  [configuration file]
+ssl=on  [configuration file]
+ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem  [configuration file]
+ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key  [configuration file]
+-- settings relevant to the measurements:
+autovacuum=on
+default_statistics_target=100
+effective_cache_size=4GB
+fsync=on
+jit=on
+maintenance_work_mem=64MB
+max_connections=100
+max_parallel_workers_per_gather=2
+random_page_cost=4
+shared_buffers=128MB
+synchronous_commit=on
+track_io_timing=off
+work_mem=4MB
+-- processes using CPU right now (top 5):
+  PID %CPU COMMAND
+ 9765 10.7 bash
+  125  4.1 claude
+   84  0.1 environment-man
+    1  0.0 process_api
+  262  0.0 postgres

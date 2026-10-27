@@ -1,0 +1,109 @@
+NOTICE:  database "capa_explain_fn_10k" does not exist, skipping
+Pager usage is off.
+Output format is unaligned.
+Timing is off.
+persons= 10000  screening_policy_versions= 3  requests= 9797
+4MB
+128MB
+=== E4 gate_overdue outer: DISTINCT persons LIMIT 5000 + per-person function call (function internals are not visible; see E1)
+Subquery Scan on pa  (cost=592.26..1942.26 rows=1667 width=16) (actual time=28.226..5668.068 rows=232 loops=1)
+  Filter: aml_screening_gate_denies('070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid, pa.person_id, 'withdrawal'::text)
+  Rows Removed by Filter: 4768
+  Buffers: shared hit=90622 read=87
+  ->  Limit  (cost=592.26..642.26 rows=5000 width=16) (actual time=7.878..15.978 rows=5000 loops=1)
+        Buffers: shared hit=192
+        InitPlan 1 (returns $0)
+          ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+        ->  HashAggregate  (cost=592.00..692.00 rows=10000 width=16) (actual time=7.876..13.797 rows=5000 loops=1)
+              Group Key: a.person_id
+              Batches: 1  Memory Usage: 913kB
+              Buffers: shared hit=192
+              ->  Seq Scan on player_accounts a  (cost=0.00..567.00 rows=10000 width=16) (actual time=0.012..5.438 rows=10000 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $0)))
+                    Buffers: shared hit=192
+Planning Time: 0.181 ms
+Execution Time: 5668.491 ms
+=== E4b gate_overdue per-denied-person anchor subquery
+Aggregate  (cost=8.56..8.57 rows=1 width=8) (actual time=0.086..0.086 rows=1 loops=1)
+  Buffers: shared hit=3
+  ->  Result  (cost=0.29..8.56 rows=1 width=8) (actual time=0.085..0.085 rows=0 loops=1)
+        One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+        Buffers: shared hit=3
+        ->  Index Scan using aml_screening_requests_person on aml_screening_requests r  (cost=0.29..8.56 rows=1 width=8) (actual time=0.011..0.011 rows=0 loops=1)
+              Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = '003fb802-7a72-add8-7af9-db98481548ae'::uuid))
+              Filter: ((status <> ALL ('{done,cancelled}'::text[])) AND (NOT aml_screening_request_resolved(id)))
+              Rows Removed by Filter: 1
+              Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=3
+Planning Time: 0.167 ms
+Execution Time: 0.102 ms
+=== E5 parked_overdue: the batch (next 500 distinct persons after a cursor, person_id order)
+Limit  (cost=0.55..112.36 rows=500 width=16) (actual time=0.011..0.745 rows=500 loops=1)
+  Buffers: shared hit=504
+  InitPlan 1 (returns $0)
+    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+  ->  Result  (cost=0.29..1107.30 rows=4950 width=16) (actual time=0.011..0.706 rows=500 loops=1)
+        Buffers: shared hit=504
+        ->  Unique  (cost=0.29..1107.30 rows=4950 width=16) (actual time=0.010..0.654 rows=500 loops=1)
+              Buffers: shared hit=504
+              ->  Index Scan using idx_player_accounts_person on player_accounts a  (cost=0.29..1094.92 rows=4950 width=16) (actual time=0.009..0.539 rows=500 loops=1)
+                    Index Cond: (person_id > '80000000-0000-0000-0000-000000000000'::uuid)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $0)))
+                    Buffers: shared hit=504
+Planning Time: 0.117 ms
+Execution Time: 0.782 ms
+=== E5b parked_overdue: the aml_enforcement_decisions window read for denied persons
+Result  (cost=0.31..25.11 rows=44 width=41) (actual time=0.105..0.221 rows=20 loops=1)
+  One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+  Buffers: shared read=11
+  ->  Seq Scan on aml_enforcement_decisions x  (cost=0.31..24.89 rows=44 width=69) (actual time=0.018..0.129 rows=20 loops=1)
+        Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (operation = 'withdrawal_payout'::text) AND (person_id = ANY ('{003fb802-7a72-add8-7af9-db98481548ae,018422c4-871f-ba45-5330-b926ac62f17a,019e93e9-cbfe-a1ce-2080-e2b94a21d046,022b1edb-1d6b-e59e-b46f-597ddf11516a,024d6f56-6c0f-5f4a-262c-8bfe1adf157e,03164aec-48e6-a5a5-fda5-6122ef678a45,04c14927-e4bb-4079-9495-85e3f9f3e0a4,05452a7d-08a4-4ef0-9794-ca735a2e0878,055f7184-847b-574b-87c2-d8f381d5da88,0583af8a-6708-c891-bace-94ffa86de9ae,05d6fb00-da0a-8fc0-1160-faee7f833156,062a4984-6fa8-5d6c-f069-fc8b42a8d98f,075a0ebc-b138-6904-9e08-d09218437d54,075e3cd4-1b73-6d74-523d-55f1f203894d,086f0840-00b4-05a6-9754-b24c7910e7eb,08f2214f-9d6d-05aa-3fc2-01413398fda8,0910fd33-0f11-c8b3-b66c-4c3cc8ebaca9,0923bf0f-516d-a610-59d3-ab2b9eb52425,09a63123-ae37-ee8f-9dc0-2c9f1456f412,0bd941b0-4d79-6473-9be1-4fa190404457,0bf38c34-58d7-3a93-03f2-931e08d2acf1,0c33cfe7-98c7-4165-ffbd-80e2eb1adbd7}'::uuid[])) AND (decided_at >= (now() - '7 days'::interval)))
+        Rows Removed by Filter: 474
+        Buffers: shared read=11
+Planning:
+  Buffers: shared hit=104 read=10 dirtied=2
+Planning Time: 0.413 ms
+Execution Time: 0.233 ms
+=== E5c parked_overdue: open requests of denied persons
+Result  (cost=0.29..128.33 rows=1 width=30) (actual time=0.592..0.593 rows=1 loops=1)
+  One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+  Buffers: shared hit=65
+  ->  Index Scan using aml_screening_requests_person on aml_screening_requests r  (cost=0.29..128.08 rows=1 width=45) (actual time=0.047..0.048 rows=1 loops=1)
+        Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = ANY ('{003fb802-7a72-add8-7af9-db98481548ae,018422c4-871f-ba45-5330-b926ac62f17a,019e93e9-cbfe-a1ce-2080-e2b94a21d046,022b1edb-1d6b-e59e-b46f-597ddf11516a,024d6f56-6c0f-5f4a-262c-8bfe1adf157e,03164aec-48e6-a5a5-fda5-6122ef678a45,04c14927-e4bb-4079-9495-85e3f9f3e0a4,05452a7d-08a4-4ef0-9794-ca735a2e0878,055f7184-847b-574b-87c2-d8f381d5da88,0583af8a-6708-c891-bace-94ffa86de9ae,05d6fb00-da0a-8fc0-1160-faee7f833156,062a4984-6fa8-5d6c-f069-fc8b42a8d98f,075a0ebc-b138-6904-9e08-d09218437d54,075e3cd4-1b73-6d74-523d-55f1f203894d,086f0840-00b4-05a6-9754-b24c7910e7eb,08f2214f-9d6d-05aa-3fc2-01413398fda8,0910fd33-0f11-c8b3-b66c-4c3cc8ebaca9,0923bf0f-516d-a610-59d3-ab2b9eb52425,09a63123-ae37-ee8f-9dc0-2c9f1456f412,0bd941b0-4d79-6473-9be1-4fa190404457,0bf38c34-58d7-3a93-03f2-931e08d2acf1,0c33cfe7-98c7-4165-ffbd-80e2eb1adbd7}'::uuid[])))
+        Filter: (status <> ALL ('{done,cancelled}'::text[]))
+        Rows Removed by Filter: 13
+        Buffers: shared hit=58
+Planning:
+  Buffers: shared hit=1
+Planning Time: 0.111 ms
+Execution Time: 0.606 ms
+=== E6 parked_summary: latest decision per person in the 7-day window
+Unique  (cost=44.47..46.94 rows=247 width=69) (actual time=0.437..0.505 rows=247 loops=1)
+  Buffers: shared hit=11
+  ->  Sort  (cost=44.47..45.70 rows=494 width=69) (actual time=0.436..0.461 rows=494 loops=1)
+        Sort Key: person_id, decided_at DESC, id DESC
+        Sort Method: quicksort  Memory: 63kB
+        Buffers: shared hit=11
+        ->  Result  (cost=0.25..22.37 rows=494 width=69) (actual time=0.063..0.238 rows=494 loops=1)
+              One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+              Buffers: shared hit=11
+              ->  Seq Scan on aml_enforcement_decisions d  (cost=0.25..22.37 rows=494 width=69) (actual time=0.004..0.130 rows=494 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (operation = 'withdrawal_payout'::text) AND (decided_at >= (now() - '7 days'::interval)))
+                    Buffers: shared hit=11
+Planning Time: 0.070 ms
+Execution Time: 0.536 ms
+=== END-TO-END: real functions
+Timing is on.
+10|21|1|1|500|0ca19f99-a612-2a65-83a0-8c68d1f08267
+Time: 478.542 ms
+10|21|1|1|500|0ca19f99-a612-2a65-83a0-8c68d1f08267
+Time: 516.172 ms
+115|240|16|16|5000|7f80864b-ac30-d124-b526-dbad5a7c98dc
+Time: 5944.810 ms (00:05.945)
+256
+Time: 6141.829 ms (00:06.142)
+256
+Time: 5249.162 ms (00:05.249)
+247|494
+Time: 1.477 ms

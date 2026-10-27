@@ -1,0 +1,107 @@
+NOTICE:  database "capa_explain_fn_200k" does not exist, skipping
+Pager usage is off.
+Output format is unaligned.
+Timing is off.
+persons= 200000  screening_policy_versions= 3  requests= 195991
+4MB
+128MB
+=== E4 gate_overdue outer: DISTINCT persons LIMIT 5000 + per-person function call (function internals are not visible; see E1)
+Subquery Scan on pa  (cost=0.68..2016.78 rows=1667 width=16) (actual time=17.970..5156.371 rows=272 loops=1)
+  Filter: aml_screening_gate_denies('070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid, pa.person_id, 'withdrawal'::text)
+  Rows Removed by Filter: 4728
+  Buffers: shared hit=116159
+  ->  Limit  (cost=0.68..716.78 rows=5000 width=16) (actual time=0.014..25.531 rows=5000 loops=1)
+        Buffers: shared hit=5031
+        InitPlan 1 (returns $0)
+          ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+        ->  Unique  (cost=0.42..28644.31 rows=200000 width=16) (actual time=0.014..23.831 rows=5000 loops=1)
+              Buffers: shared hit=5031
+              ->  Index Scan using idx_player_accounts_person on player_accounts a  (cost=0.42..28144.31 rows=200000 width=16) (actual time=0.013..19.909 rows=5000 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $0)))
+                    Buffers: shared hit=5031
+Planning Time: 0.117 ms
+Execution Time: 5156.540 ms
+=== E4b gate_overdue per-denied-person anchor subquery
+Aggregate  (cost=8.69..8.70 rows=1 width=8) (actual time=0.149..0.149 rows=1 loops=1)
+  Buffers: shared hit=4
+  ->  Result  (cost=0.42..8.69 rows=1 width=8) (actual time=0.147..0.148 rows=0 loops=1)
+        One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+        Buffers: shared hit=4
+        ->  Index Scan using aml_screening_requests_person on aml_screening_requests r  (cost=0.42..8.69 rows=1 width=8) (actual time=0.015..0.016 rows=0 loops=1)
+              Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = '0007692d-0086-3034-f597-dcdf7f877575'::uuid))
+              Filter: ((status <> ALL ('{done,cancelled}'::text[])) AND (NOT aml_screening_request_resolved(id)))
+              Rows Removed by Filter: 1
+              Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=3
+Planning Time: 0.227 ms
+Execution Time: 0.172 ms
+=== E5 parked_overdue: the batch (next 500 distinct persons after a cursor, person_id order)
+Limit  (cost=0.68..112.79 rows=500 width=16) (actual time=0.087..1.440 rows=500 loops=1)
+  Buffers: shared hit=501 read=5
+  InitPlan 1 (returns $0)
+    ->  Result  (cost=0.00..0.26 rows=1 width=1) (never executed)
+  ->  Result  (cost=0.42..22198.79 rows=99000 width=16) (actual time=0.086..1.383 rows=500 loops=1)
+        Buffers: shared hit=501 read=5
+        ->  Unique  (cost=0.42..22198.79 rows=99000 width=16) (actual time=0.086..1.267 rows=500 loops=1)
+              Buffers: shared hit=501 read=5
+              ->  Index Scan using idx_player_accounts_person on player_accounts a  (cost=0.42..21951.29 rows=99000 width=16) (actual time=0.085..1.118 rows=500 loops=1)
+                    Index Cond: (person_id > '80000000-0000-0000-0000-000000000000'::uuid)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND ((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) OR ((tenant_id = (NULLIF(current_setting('app.acting_tenant_id'::text, true), ''::text))::uuid) AND $0)))
+                    Buffers: shared hit=501 read=5
+Planning Time: 0.171 ms
+Execution Time: 1.496 ms
+=== E5b parked_overdue: the aml_enforcement_decisions window read for denied persons
+Result  (cost=0.33..484.17 rows=62 width=41) (actual time=0.260..3.229 rows=32 loops=1)
+  One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+  Buffers: shared read=206
+  ->  Seq Scan on aml_enforcement_decisions x  (cost=0.33..483.86 rows=62 width=69) (actual time=0.179..3.134 rows=32 loops=1)
+        Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (operation = 'withdrawal_payout'::text) AND (person_id = ANY ('{0007692d-0086-3034-f597-dcdf7f877575,0007d25b-ff50-7596-d623-bcfd424e9f3f,000f8eab-f9ad-d883-020e-1de81f11e1fe,001239c9-79ac-dcb0-11e8-58fd188bd969,001ac2fb-b3c8-2641-7ed6-59de3e60cf6a,001bcc90-1ecd-316b-5e30-7e5c28e7ecb7,001fdbef-e120-4c60-38ac-3e632b760e89,0025e764-1e54-7c94-fd43-248457f344c1,002b2afb-2b64-e9fe-9e57-df9621646167,003d4e26-5c64-d9d9-fa00-92d6510657de,003fb802-7a72-add8-7af9-db98481548ae,004791c4-5e9d-c80a-902f-d2c886f5a3f5,00482e7c-60e7-3f4b-6cb3-6f70a1cf6bb1,004c7051-4496-7741-71d4-0917c596346b,00589652-597c-6cac-45be-7a1d4317e2b6,00589963-fe94-7d15-730d-419a3c192305,0059699d-46e6-8283-3a9b-a776e6530330,005ed0e2-c9fc-bb94-b2ae-d946eb2573f0,0060b918-e35c-25c0-1481-6e623e6ed459,006bfeb5-9910-cc65-13cb-bd289a6ce62c,006ff088-7eb6-b5c2-5bae-7d5cd48bff21,00702ac5-752d-5d96-12b6-96c26ddc8ef0,0071b5f8-3e48-2a28-696c-40150df03a0b,0073326c-274f-6833-9336-cce415838975,0078547e-5e13-2f7b-e7a0-47888dce718d,007f708c-ed39-128a-6ac8-1d8b486991e9,0086b451-5397-44e7-e14b-2ecd07b3b40c,008cc3a1-d0a1-a7b1-a57f-f951dae326b5,008e783b-8055-cd4c-375a-f23833271638,008f5b62-1e07-d765-6c5b-bb05b00e46a1,009894c6-3026-597a-27aa-f1d39d822ff5}'::uuid[])) AND (decided_at >= (now() - '7 days'::interval)))
+        Rows Removed by Filter: 10060
+        Buffers: shared read=206
+Planning:
+  Buffers: shared hit=105 read=9 dirtied=1
+Planning Time: 0.391 ms
+Execution Time: 3.249 ms
+=== E5c parked_overdue: open requests of denied persons
+Result  (cost=0.42..195.03 rows=1 width=30) (actual time=0.624..0.946 rows=2 loops=1)
+  One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+  Buffers: shared hit=126
+  ->  Index Scan using aml_screening_requests_person on aml_screening_requests r  (cost=0.42..194.78 rows=1 width=45) (actual time=0.051..0.094 rows=2 loops=1)
+        Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (person_id = ANY ('{0007692d-0086-3034-f597-dcdf7f877575,0007d25b-ff50-7596-d623-bcfd424e9f3f,000f8eab-f9ad-d883-020e-1de81f11e1fe,001239c9-79ac-dcb0-11e8-58fd188bd969,001ac2fb-b3c8-2641-7ed6-59de3e60cf6a,001bcc90-1ecd-316b-5e30-7e5c28e7ecb7,001fdbef-e120-4c60-38ac-3e632b760e89,0025e764-1e54-7c94-fd43-248457f344c1,002b2afb-2b64-e9fe-9e57-df9621646167,003d4e26-5c64-d9d9-fa00-92d6510657de,003fb802-7a72-add8-7af9-db98481548ae,004791c4-5e9d-c80a-902f-d2c886f5a3f5,00482e7c-60e7-3f4b-6cb3-6f70a1cf6bb1,004c7051-4496-7741-71d4-0917c596346b,00589652-597c-6cac-45be-7a1d4317e2b6,00589963-fe94-7d15-730d-419a3c192305,0059699d-46e6-8283-3a9b-a776e6530330,005ed0e2-c9fc-bb94-b2ae-d946eb2573f0,0060b918-e35c-25c0-1481-6e623e6ed459,006bfeb5-9910-cc65-13cb-bd289a6ce62c,006ff088-7eb6-b5c2-5bae-7d5cd48bff21,00702ac5-752d-5d96-12b6-96c26ddc8ef0,0071b5f8-3e48-2a28-696c-40150df03a0b,0073326c-274f-6833-9336-cce415838975,0078547e-5e13-2f7b-e7a0-47888dce718d,007f708c-ed39-128a-6ac8-1d8b486991e9,0086b451-5397-44e7-e14b-2ecd07b3b40c,008cc3a1-d0a1-a7b1-a57f-f951dae326b5,008e783b-8055-cd4c-375a-f23833271638,008f5b62-1e07-d765-6c5b-bb05b00e46a1,009894c6-3026-597a-27aa-f1d39d822ff5}'::uuid[])))
+        Filter: (status <> ALL ('{done,cancelled}'::text[]))
+        Rows Removed by Filter: 18
+        Buffers: shared hit=113
+Planning:
+  Buffers: shared hit=1
+Planning Time: 0.112 ms
+Execution Time: 0.966 ms
+=== E6 parked_summary: latest decision per person in the 7-day window
+Unique  (cost=1104.41..1154.87 rows=5046 width=69) (actual time=8.631..10.428 rows=5046 loops=1)
+  Buffers: shared hit=206
+  ->  Sort  (cost=1104.41..1129.64 rows=10091 width=69) (actual time=8.630..9.343 rows=10092 loops=1)
+        Sort Key: person_id, decided_at DESC, id DESC
+        Sort Method: quicksort  Memory: 1173kB
+        Buffers: shared hit=206
+        ->  Result  (cost=0.25..433.32 rows=10091 width=69) (actual time=0.086..4.520 rows=10092 loops=1)
+              One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+              Buffers: shared hit=206
+              ->  Seq Scan on aml_enforcement_decisions d  (cost=0.25..433.32 rows=10091 width=69) (actual time=0.005..3.169 rows=10092 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (operation = 'withdrawal_payout'::text) AND (decided_at >= (now() - '7 days'::interval)))
+                    Buffers: shared hit=206
+Planning Time: 0.080 ms
+Execution Time: 10.841 ms
+=== END-TO-END: real functions
+Timing is on.
+16|29|2|2|500|009ebd08-5283-7efd-d68d-7c4d42bdd940
+Time: 554.272 ms
+16|29|2|2|500|009ebd08-5283-7efd-d68d-7c4d42bdd940
+Time: 542.565 ms
+121|248|24|24|5000|0664dc6f-7475-a8a0-d895-e13d67e9ce5d
+Time: 4857.012 ms (00:04.857)
+272
+Time: 4826.020 ms (00:04.826)
+272
+Time: 5030.054 ms (00:05.030)
+5046|10092
+Time: 8.400 ms

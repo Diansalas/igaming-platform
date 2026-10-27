@@ -1,0 +1,66 @@
+NOTICE:  database "capa_explain_growth_v1000" does not exist, skipping
+Pager usage is off.
+Output format is unaligned.
+Timing is off.
+persons= 1000  screening_policy_versions= 1000  requests= 880
+4MB
+128MB
+=== E2 aml_screening_since body, p_at older than every version (worst case: every version qualifies as "later")
+Aggregate  (cost=2081.46..2081.47 rows=1 width=8) (actual time=72.589..72.591 rows=1 loops=1)
+  Buffers: shared hit=16033
+  ->  Result  (cost=0.53..2080.72 rows=99 width=53) (actual time=0.297..72.109 rows=1000 loops=1)
+        One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+        Buffers: shared hit=16033
+        ->  Nested Loop Anti Join  (cost=0.53..2080.72 rows=99 width=53) (actual time=0.207..71.848 rows=1000 loops=1)
+              Buffers: shared hit=16033
+              ->  Seq Scan on aml_screening_policies sp  (cost=0.00..64.50 rows=111 width=69) (actual time=0.005..0.533 rows=1000 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid) AND (GREATEST(effective_from, created_at) <= clock_timestamp()) AND (GREATEST(effective_from, created_at) > (now() - '100 days'::interval)))
+                    Buffers: shared hit=32
+              ->  Result  (cost=0.28..19.22 rows=111 width=16) (actual time=0.071..0.071 rows=0 loops=1000)
+                    One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                    Buffers: shared hit=16001
+                    ->  Index Only Scan using aml_screening_policies_effective on aml_screening_policies w  (cost=0.28..19.22 rows=111 width=16) (actual time=0.064..0.064 rows=0 loops=1000)
+                          Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid) AND (created_at > sp.created_at))
+                          Filter: (GREATEST(effective_from, created_at) <= GREATEST(sp.effective_from, sp.created_at))
+                          Rows Removed by Filter: 500
+                          Heap Fetches: 0
+                          Buffers: shared hit=16001
+Planning:
+  Buffers: shared hit=2
+Planning Time: 0.152 ms
+Execution Time: 72.626 ms
+=== E2b the same with p_at = 3 days ago (the realistic fresh-clear case)
+Aggregate  (cost=2081.46..2081.47 rows=1 width=8) (actual time=2.146..2.147 rows=1 loops=1)
+  Buffers: shared hit=785
+  ->  Result  (cost=0.53..2080.72 rows=99 width=53) (actual time=0.475..2.120 rows=47 loops=1)
+        One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+        Buffers: shared hit=785
+        ->  Nested Loop Anti Join  (cost=0.53..2080.72 rows=99 width=53) (actual time=0.368..2.005 rows=47 loops=1)
+              Buffers: shared hit=785
+              ->  Seq Scan on aml_screening_policies sp  (cost=0.00..64.50 rows=111 width=69) (actual time=0.236..0.261 rows=47 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid) AND (GREATEST(effective_from, created_at) <= clock_timestamp()) AND (GREATEST(effective_from, created_at) > (now() - '3 days'::interval)))
+                    Rows Removed by Filter: 953
+                    Buffers: shared hit=32
+              ->  Result  (cost=0.28..19.22 rows=111 width=16) (actual time=0.036..0.036 rows=0 loops=47)
+                    One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                    Buffers: shared hit=753
+                    ->  Index Only Scan using aml_screening_policies_effective on aml_screening_policies w  (cost=0.28..19.22 rows=111 width=16) (actual time=0.028..0.028 rows=0 loops=47)
+                          Index Cond: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid) AND (created_at > sp.created_at))
+                          Filter: (GREATEST(effective_from, created_at) <= GREATEST(sp.effective_from, sp.created_at))
+                          Rows Removed by Filter: 23
+                          Heap Fetches: 0
+                          Buffers: shared hit=753
+Planning:
+  Buffers: shared hit=2
+Planning Time: 0.283 ms
+Execution Time: 2.185 ms
+=== END-TO-END: the real function
+Timing is on.
+1209600
+Time: 73.807 ms
+1209600
+Time: 74.679 ms
+1209600
+Time: 2.648 ms
+1209600
+Time: 2.288 ms

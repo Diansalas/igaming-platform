@@ -1,0 +1,34 @@
+NOTICE:  database "capa_explain_fn_10k" does not exist, skipping
+Pager usage is off.
+Output format is unaligned.
+Timing is off.
+persons= 10000  screening_policy_versions= 3  requests= 9797
+4MB
+128MB
+=== E7 claim: the due CTE (SKIP LOCKED) with a pending backlog; rolled back
+BEGIN
+Limit  (cost=8.32..8.38 rows=2 width=30) (actual time=0.248..0.251 rows=4 loops=1)
+  Buffers: shared hit=39
+  ->  LockRows  (cost=8.32..8.38 rows=2 width=30) (actual time=0.246..0.249 rows=4 loops=1)
+        Buffers: shared hit=39
+        ->  Incremental Sort  (cost=8.32..8.36 rows=2 width=30) (actual time=0.243..0.243 rows=4 loops=1)
+              Sort Key: next_attempt_at, id
+              Presorted Key: next_attempt_at
+              Full-sort Groups: 1  Sort Method: quicksort  Average Memory: 26kB  Peak Memory: 26kB
+              Buffers: shared hit=35
+              ->  Result  (cost=0.28..8.31 rows=1 width=30) (actual time=0.166..0.228 rows=33 loops=1)
+                    One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                    Buffers: shared hit=35
+                    ->  Index Scan using aml_screening_requests_due on aml_screening_requests r  (cost=0.28..8.31 rows=1 width=30) (actual time=0.017..0.076 rows=33 loops=1)
+                          Index Cond: (tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                          Filter: (((status = 'pending'::text) AND (next_attempt_at <= clock_timestamp())) OR ((status = 'claimed'::text) AND (lease_until <= clock_timestamp())))
+                          Buffers: shared hit=35
+Planning:
+  Buffers: shared hit=5 read=1 dirtied=1
+Planning Time: 0.283 ms
+Execution Time: 0.284 ms
+Timing is on.
+4
+Time: 3.656 ms
+ROLLBACK
+Time: 0.305 ms

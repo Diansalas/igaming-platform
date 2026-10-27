@@ -1,0 +1,61 @@
+NOTICE:  database "capa_explain_fn_10k" does not exist, skipping
+Pager usage is off.
+Output format is unaligned.
+Timing is off.
+persons= 10000  screening_policy_versions= 3  requests= 9797
+4MB
+128MB
+=== E2 aml_screening_since body, p_at older than every version (worst case: every version qualifies as "later")
+Aggregate  (cost=2.71..2.72 rows=1 width=8) (actual time=0.171..0.172 rows=1 loops=1)
+  Buffers: shared hit=4
+  ->  Result  (cost=0.51..2.71 rows=1 width=53) (actual time=0.147..0.166 rows=3 loops=1)
+        One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+        Buffers: shared hit=4
+        ->  Nested Loop Anti Join  (cost=0.51..2.71 rows=1 width=53) (actual time=0.072..0.091 rows=3 loops=1)
+              Join Filter: ((w.created_at > sp.created_at) AND (GREATEST(w.effective_from, w.created_at) <= GREATEST(sp.effective_from, sp.created_at)))
+              Rows Removed by Join Filter: 9
+              Buffers: shared hit=4
+              ->  Seq Scan on aml_screening_policies sp  (cost=0.00..1.10 rows=1 width=69) (actual time=0.004..0.005 rows=3 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid) AND (GREATEST(effective_from, created_at) <= clock_timestamp()) AND (GREATEST(effective_from, created_at) > (now() - '100 days'::interval)))
+                    Buffers: shared hit=1
+              ->  Result  (cost=0.25..1.30 rows=3 width=16) (actual time=0.026..0.027 rows=3 loops=3)
+                    One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                    Buffers: shared hit=3
+                    ->  Seq Scan on aml_screening_policies w  (cost=0.25..1.30 rows=3 width=16) (actual time=0.001..0.001 rows=3 loops=3)
+                          Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid))
+                          Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=2
+Planning Time: 0.140 ms
+Execution Time: 0.196 ms
+=== E2b the same with p_at = 3 days ago (the realistic fresh-clear case)
+Aggregate  (cost=2.71..2.72 rows=1 width=8) (actual time=0.078..0.079 rows=1 loops=1)
+  Buffers: shared hit=1
+  ->  Result  (cost=0.51..2.71 rows=1 width=53) (actual time=0.077..0.078 rows=0 loops=1)
+        One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+        Buffers: shared hit=1
+        ->  Nested Loop Anti Join  (cost=0.51..2.71 rows=1 width=53) (actual time=0.004..0.004 rows=0 loops=1)
+              Join Filter: ((w.created_at > sp.created_at) AND (GREATEST(w.effective_from, w.created_at) <= GREATEST(sp.effective_from, sp.created_at)))
+              Buffers: shared hit=1
+              ->  Seq Scan on aml_screening_policies sp  (cost=0.00..1.10 rows=1 width=69) (actual time=0.004..0.004 rows=0 loops=1)
+                    Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid) AND (GREATEST(effective_from, created_at) <= clock_timestamp()) AND (GREATEST(effective_from, created_at) > (now() - '3 days'::interval)))
+                    Rows Removed by Filter: 3
+                    Buffers: shared hit=1
+              ->  Result  (cost=0.25..1.30 rows=3 width=16) (never executed)
+                    One-Time Filter: (aml_session_tenant() = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid)
+                    ->  Seq Scan on aml_screening_policies w  (cost=0.25..1.30 rows=3 width=16) (never executed)
+                          Filter: ((tenant_id = '070575d7-83b9-33c0-ae7a-a8b0d707402e'::uuid) AND (licensing_jurisdiction_id = '7bc54d83-12fb-8fd9-ffde-e5b4e90e81d8'::uuid))
+Planning:
+  Buffers: shared hit=2
+Planning Time: 0.118 ms
+Execution Time: 0.098 ms
+=== END-TO-END: the real function
+Timing is on.
+1209600
+Time: 0.585 ms
+1209600
+Time: 0.480 ms
+
+Time: 0.443 ms
+
+Time: 0.410 ms
