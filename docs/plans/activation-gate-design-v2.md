@@ -236,292 +236,366 @@ A test pins that a production-configured `platform-api` refuses to start against
 
 ## 4. Item 2: authorisation lifecycle (database-enforced)
 
-### 4.0 Evidence tables (DDL-level sketch; names are the proposal)
+### 4.0 Evidence tables, lock table, canonical encoding (v2.1)
 
-Every table below: owner `igaming`, `ENABLE` + `FORCE ROW LEVEL SECURITY`, `REVOKE ALL ... FROM PUBLIC, igaming_runtime`,
-append-only (`BEFORE UPDATE OR DELETE` row trigger and `BEFORE TRUNCATE` statement trigger calling `aml_deny_mutation()`, both
-`ALTER TABLE ... ENABLE ALWAYS TRIGGER`, s5.5), an `AFTER INSERT` chain trigger (s5.6), and a `BEFORE INSERT` admission guard.
-Tenant tables use the `aml_owner_session` policy (`tenant_id = aml_session_tenant()`, F3). Platform-level tables use one policy
-`TO <owner> USING (true) WITH CHECK (true)`, so no other role sees anything even if a privilege is granted by mistake.
+**Common rules for every evidence table:**
+- Owner `igaming`, `ENABLE` + `FORCE ROW LEVEL SECURITY`, **one policy `TO <owner> USING (true) WITH CHECK (true)`**.
+- **Platform-level, no tenant RLS predicate** (security H2, DB H2/H3). The runtime role has no privilege at all, so a tenant
+  predicate added no protection and made instance-wide reads silently return zero rows (fail open). Tenant isolation for reads is
+  enforced in the read functions (AT002).
+- `REVOKE ALL ... FROM PUBLIC, igaming_runtime`.
+- Append-only: deny triggers on UPDATE, DELETE and TRUNCATE, set `ENABLE ALWAYS`.
+- A BEFORE INSERT admission guard (ORIGIN).
+- An AFTER INSERT chain trigger (ORIGIN; it does no checking, s5.6).
+- `SET LOCAL lock_timeout = '5s'` in every migration that creates them (DB M9).
+
+**Canonical encoding** (security M4, DB M7), used by `row_sha256`, the inventory, adoption digests and the chain:
+- An **explicit column list** per table, never `row::text`.
+- Each field is encoded as `<octet_length>:<value>;`, so the encoding is length-prefixed and unambiguous.
+- Timestamps are `to_char(v AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`. Integers use `::text`. Booleans are `t`/`f`.
+  Arrays are sorted and each element is length-prefixed. NULL is encoded as `-1:;`.
+- Every hashing function pins `SET TimeZone = 'UTC'`, `SET DateStyle = 'ISO, YMD'`, `SET IntervalStyle = 'iso_8601'` and
+  `SET extra_float_digits = 3` in `proconfig`. No float column is hashed.
 
 ```sql
--- OWNER DECISIONS as configuration (s12). Append-only versions per anchored environment; the latest row wins; NO ROW SHIPS.
+-- Owner decisions as configuration. Append-only versions per anchored environment; the latest wins; NO ROW SHIPS.
 CREATE TABLE screening_gate_settings (
-    id                                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    environment                          text NOT NULL CHECK (environment IN ('development', 'staging', 'test')),  -- NOT production (I8, OD-G2)
-    max_validity_seconds                 bigint NOT NULL CHECK (max_validity_seconds > 0),                -- OD-G1 (no default)
-    expiry_warning_seconds               bigint NOT NULL CHECK (expiry_warning_seconds >= 0),             -- OD-G1
-    min_approvals                        integer NOT NULL CHECK (min_approvals BETWEEN 2 AND 5),          -- OD-G4 (>= the kind's)
-    capacity_report_required             boolean NOT NULL,                                                -- OD-G3
-    capacity_persons_cap_required        boolean NOT NULL,                                                -- OD-G3
-    compliance_reference_required        boolean NOT NULL,                                                -- OD-G4
-    instance_attestation_max_age_seconds bigint NOT NULL CHECK (instance_attestation_max_age_seconds > 0), -- OD-G8
-    worker_attestation_max_age_seconds   bigint NOT NULL CHECK (worker_attestation_max_age_seconds > 0),   -- OD-G9
-    evidence_reference                   text NOT NULL CHECK (evidence_reference ~ '^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,199}$'), -- the owner decision id
-    change_request_id                    uuid NOT NULL UNIQUE REFERENCES licensing_change_requests (id) ON DELETE RESTRICT,
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    seq bigint NOT NULL,                                            -- from screening_gate_event_seq (below)
+    environment text NOT NULL CHECK (environment IN ('development', 'staging', 'test')),   -- never production (I8)
+    tier text NOT NULL CHECK (tier IN ('S', 'N')),                  -- s19, OD-G0 (owner decision)
+    max_validity_seconds bigint NOT NULL CHECK (max_validity_seconds >= 3600),  -- OD-G1; 3600 = engineering floor (QA H-4)
+    expiry_warning_seconds bigint NOT NULL CHECK (expiry_warning_seconds >= 0),
+    capacity_report_required boolean NOT NULL, capacity_persons_cap_required boolean NOT NULL,  -- OD-G3
+    compliance_reference_required boolean NOT NULL,                 -- OD-G4
+    instance_attestation_max_age_seconds bigint NOT NULL CHECK (instance_attestation_max_age_seconds > 0),  -- OD-G8
+    instance_attestation_confirmations integer NOT NULL CHECK (instance_attestation_confirmations BETWEEN 1 AND 2), -- OD-G8
+    worker_attestation_max_age_seconds bigint NOT NULL CHECK (worker_attestation_max_age_seconds > 0),       -- OD-G9
+    freeze_max_seconds bigint NULL CHECK (freeze_max_seconds BETWEEN 60 AND 259200), -- OD-G7; NULL = structural cap 72 h
+    evidence_reference text NOT NULL CHECK (evidence_reference ~ '^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,199}$'),
+    change_request_id uuid NOT NULL UNIQUE REFERENCES licensing_change_requests (id) ON DELETE RESTRICT,
     created_by uuid NOT NULL, created_by_person_id uuid NOT NULL,
-    created_at                           timestamptz NOT NULL DEFAULT clock_timestamp()
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+-- NOTE (DB H1): no min_approvals column in v2.1. The count is PINNED to 2 (the kind row); see s6.1.
 
--- Owner-attested identity of THIS running instance (s4.7). Written only through screening_gate_instance_attest() by a member
--- of the NOLOGIN attestor role, never by the migration role or the runtime role.
+CREATE SEQUENCE screening_gate_event_seq;  -- owner-only; nextval called only AFTER the relevant lock row is held (s4.9),
+                                           -- so the order per lock scope equals the commit order (DB M3)
+
 CREATE TABLE screening_gate_instance_attestations (
-    id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    environment            text NOT NULL,          -- must equal rg_database_environment() at insert
-    system_identifier      numeric(20,0) NOT NULL, -- all of the following are CAPTURED by the function, never passed in
-    timeline_id            integer NOT NULL,       -- (pg_control_checkpoint()).timeline_id
-    database_oid           oid NOT NULL,
-    database_name          name NOT NULL,
-    postmaster_start_time  timestamptz NOT NULL,   -- pg_postmaster_start_time()
-    server_addr            inet NULL,              -- inet_server_addr() (NULL over a unix socket)
-    operator_reference     text NOT NULL,          -- change / incident ticket
-    valid_until            timestamptz NOT NULL,   -- attested_at + p_valid_seconds, capped by settings
-    attested_session_user  name NOT NULL,          -- session_user (the named operator login), never a shared account
-    attested_at            timestamptz NOT NULL DEFAULT clock_timestamp()
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), seq bigint NOT NULL,
+    environment text NOT NULL,
+    system_identifier bigint NOT NULL,          -- CAPTURED: (pg_control_system()).system_identifier
+    timeline_id integer NOT NULL,               -- CAPTURED: (pg_control_checkpoint()).timeline_id (primary only; s4.7)
+    database_oid oid NOT NULL, database_name name NOT NULL,
+    postmaster_start_time timestamptz NOT NULL, -- CAPTURED
+    server_addr inet NULL,                      -- CAPTURED; informational only (unreliable behind proxies; operations M3)
+    instance_label text NOT NULL,               -- operator-supplied instance id from the external inventory (operations M3)
+    checklist_reference text NOT NULL,          -- the completed no-clone checklist (operations M3)
+    operator_reference text NOT NULL,
+    valid_until timestamptz NOT NULL,
+    attested_session_user name NOT NULL,
+    attested_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+CREATE TABLE screening_gate_instance_attestation_confirmations (   -- the second attestor (staging; OD-G8)
+    attestation_id uuid NOT NULL REFERENCES screening_gate_instance_attestations (id) ON DELETE RESTRICT,
+    confirmed_session_user name NOT NULL, confirmed_at timestamptz NOT NULL DEFAULT clock_timestamp(), seq bigint NOT NULL,
+    PRIMARY KEY (attestation_id, confirmed_session_user)
+);                                         -- the guard refuses a confirmation by the attesting session_user
 
--- Owner-attested statement that a screening worker of provider P is deployed for this instance (s5.3, option A).
 CREATE TABLE screening_worker_attestations (
-    id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    provider_id            text NOT NULL CHECK (provider_id ~ '^[a-z0-9_.-]{1,64}$'),
-    synthetic              boolean NOT NULL,       -- must equal the heartbeat's flag; true only where the anchor is not production
-    deployment_reference   text NOT NULL,          -- release / deployment id of the worker
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), seq bigint NOT NULL,
+    provider_id text NOT NULL CHECK (provider_id ~ '^[a-z0-9_.-]{1,64}$'),
+    synthetic boolean NOT NULL, deployment_reference text NOT NULL,
     instance_attestation_id uuid NOT NULL REFERENCES screening_gate_instance_attestations (id) ON DELETE RESTRICT,
-    valid_until            timestamptz NOT NULL,
-    attested_session_user  name NOT NULL,
-    attested_at            timestamptz NOT NULL DEFAULT clock_timestamp()
-);
+    valid_until timestamptz NOT NULL, attested_session_user name NOT NULL,
+    attested_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);   -- current ONLY while its instance_attestation_id IS the current instance attestation (DB M5)
 
--- The authorisation itself (activation or adoption). Written only by the executors of the governed kinds (s6).
 CREATE TABLE screening_gate_authorisations (
-    id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id                   uuid NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
-    licensing_jurisdiction_id   uuid NOT NULL REFERENCES jurisdictions (id) ON DELETE RESTRICT,
-    mode                        text NOT NULL CHECK (mode IN ('activation', 'adoption')),
-    adopts_policy_id            uuid NULL,
-    environment                 text NOT NULL,           -- anchor value at execution (== payload, == live)
-    system_identifier           numeric(20,0) NOT NULL,  -- live value at execution (== payload)
-    database_oid                oid NOT NULL,
-    instance_attestation_id     uuid NOT NULL REFERENCES screening_gate_instance_attestations (id) ON DELETE RESTRICT,
-    worker_attestation_id       uuid NULL REFERENCES screening_worker_attestations (id) ON DELETE RESTRICT, -- NULL only for adoption
-    settings_id                 uuid NOT NULL REFERENCES screening_gate_settings (id) ON DELETE RESTRICT,
-    capacity_report_reference   text NULL,  capacity_report_sha256 text NULL CHECK (capacity_report_sha256 ~ '^[0-9a-f]{64}$'),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), seq bigint NOT NULL UNIQUE,
+    tenant_id uuid NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
+    licensing_jurisdiction_id uuid NOT NULL REFERENCES jurisdictions (id) ON DELETE RESTRICT,
+    mode text NOT NULL CHECK (mode IN ('activation', 'adoption')),
+    adopts_policy_id uuid NULL,
+    environment text NOT NULL, system_identifier bigint NOT NULL, database_oid oid NOT NULL,     -- == payload == live (security M5)
+    cutover_nonce uuid NOT NULL,                                                                  -- == payload == screening_gate_cutover
+    instance_attestation_id uuid NOT NULL REFERENCES screening_gate_instance_attestations (id),  -- == payload == current
+    worker_attestation_id uuid NULL REFERENCES screening_worker_attestations (id),
+    screening_policy_id uuid NOT NULL,          -- the aml_screening_policies row in force at execution (security M8)
+    settings_id uuid NOT NULL REFERENCES screening_gate_settings (id),
+    capacity_report_reference text NULL, capacity_report_sha256 text NULL CHECK (capacity_report_sha256 ~ '^[0-9a-f]{64}$'),
     capacity_accepted_persons_max bigint NULL CHECK (capacity_accepted_persons_max > 0),
-    compliance_reference        text NULL,
-    legal_review_reference      text NOT NULL,
-    evidence_reference          text NOT NULL,
-    valid_from                  timestamptz NOT NULL,    -- = executed_at
-    valid_until                 timestamptz NOT NULL,    -- = valid_from + payload validity (<= settings max)
-    change_request_id           uuid NOT NULL UNIQUE REFERENCES licensing_change_requests (id) ON DELETE RESTRICT,
+    persons_at_execution bigint NOT NULL,       -- exact count under app.tenant_id = tenant (I14)
+    persons_held_on_enable bigint NULL,         -- activation only: persons who would be held at once (ledger L-5; s6.2)
+    compliance_reference text NULL, legal_review_reference text NOT NULL, evidence_reference text NOT NULL,
+    valid_from timestamptz NOT NULL, valid_until timestamptz NOT NULL,
+    change_request_id uuid NOT NULL UNIQUE REFERENCES licensing_change_requests (id) ON DELETE RESTRICT,
     requested_by uuid NOT NULL, requested_by_person_id uuid NOT NULL,
-    approver_person_ids         uuid[] NOT NULL CHECK (cardinality(approver_person_ids) >= 1), -- the COUNTED approvers, snapshot
-    executed_by uuid NOT NULL,  executed_by_person_id uuid NOT NULL,
-    created_at                  timestamptz NOT NULL DEFAULT clock_timestamp(),
+    approver_person_ids uuid[] NOT NULL CHECK (cardinality(approver_person_ids) = 2),
+    executed_by uuid NOT NULL, executed_by_person_id uuid NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (tenant_id, id),
     CHECK ((mode = 'adoption') = (adopts_policy_id IS NOT NULL)),
-    CHECK (mode = 'adoption' OR worker_attestation_id IS NOT NULL),
+    CHECK (mode = 'adoption' OR (worker_attestation_id IS NOT NULL AND persons_held_on_enable IS NOT NULL)),
     CHECK (valid_until > valid_from),
     FOREIGN KEY (tenant_id, adopts_policy_id) REFERENCES aml_screening_trigger_policies (tenant_id, id) ON DELETE RESTRICT
 );
+CREATE INDEX screening_gate_authorisations_tj ON screening_gate_authorisations (tenant_id, licensing_jurisdiction_id, seq DESC);
 
--- Revocations (single actor, fail-safe direction). Either one authorisation, or every authorisation of (tenant, jurisdiction)
--- created before the revocation.
 CREATE TABLE screening_gate_revocations (
-    id                        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id                 uuid NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
-    licensing_jurisdiction_id uuid NOT NULL,
-    authorisation_id          uuid NULL,                 -- NULL = all of (tenant, jurisdiction) up to created_at
-    source                    text NOT NULL CHECK (source IN ('governed', 'break_glass')),
-    change_request_id         uuid NULL UNIQUE REFERENCES licensing_change_requests (id) ON DELETE RESTRICT,
-    incident_reference        text NULL,
-    reason_code               text NOT NULL CHECK (reason_code ~ '^[a-z0-9_]{1,64}$'),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), seq bigint NOT NULL UNIQUE,
+    tenant_id uuid NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
+    licensing_jurisdiction_id uuid NOT NULL REFERENCES jurisdictions (id) ON DELETE RESTRICT,  -- FK added (DB M10)
+    authorisation_id uuid NULL,              -- NULL = every authorisation of (T, J) with seq < this.seq (DB M3)
+    source text NOT NULL CHECK (source IN ('governed', 'break_glass')),
+    change_request_id uuid NULL UNIQUE REFERENCES licensing_change_requests (id) ON DELETE RESTRICT,
+    incident_reference text NULL, reason_code text NOT NULL CHECK (reason_code ~ '^[a-z0-9_]{1,64}$'),
     revoked_by uuid NULL, revoked_by_person_id uuid NULL, revoked_session_user name NOT NULL,
-    created_at                timestamptz NOT NULL DEFAULT clock_timestamp(),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (source, incident_reference, tenant_id, licensing_jurisdiction_id, authorisation_id),  -- break-glass idempotency (ledger L-3)
     CHECK ((source = 'governed') = (change_request_id IS NOT NULL AND revoked_by IS NOT NULL)),
     CHECK ((source = 'break_glass') = (incident_reference IS NOT NULL)),
     FOREIGN KEY (tenant_id, authorisation_id) REFERENCES screening_gate_authorisations (tenant_id, id) ON DELETE RESTRICT
 );
+CREATE INDEX screening_gate_revocations_tj ON screening_gate_revocations (tenant_id, licensing_jurisdiction_id, seq DESC);
 
--- Break-glass activation freezes (instance-wide; fail-safe; time-boxed; cannot be lifted early, s4.10).
 CREATE TABLE screening_gate_activation_freezes (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    frozen_until timestamptz NOT NULL, incident_reference text NOT NULL, reason_code text NOT NULL,
-    frozen_session_user name NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), seq bigint NOT NULL,
+    frozen_until timestamptz NOT NULL, incident_reference text NOT NULL UNIQUE,     -- idempotency (ledger L-3)
+    reason_code text NOT NULL, frozen_session_user name NOT NULL, drill boolean NOT NULL,
+    lifted_by_request_id uuid NULL,             -- never set by UPDATE: a lift is a separate row, below
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK (frozen_until > created_at)
 );
+CREATE TABLE screening_gate_freeze_lifts (      -- the two-Person governed early lift (security M7)
+    freeze_id uuid PRIMARY KEY REFERENCES screening_gate_activation_freezes (id),
+    change_request_id uuid NOT NULL UNIQUE REFERENCES licensing_change_requests (id), seq bigint NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
 
--- New column on the policy table (ADD COLUMN NULL: no rewrite; legacy rows stay NULL; FORCED by the guard, never the caller).
+-- The lock table (s4.9). Owner-only, FORCE RLS, NO runtime privilege: no runtime session can lock a row directly.
+CREATE TABLE screening_gate_locks (lock_key text PRIMARY KEY CHECK (lock_key ~ '^[a-z_]+(:[0-9a-f-]{36}){0,2}$'));
+
+-- New policy-table columns (ADD COLUMN NULL, no rewrite; FORCED by the guard; legacy rows stay NULL).
 ALTER TABLE aml_screening_trigger_policies ADD COLUMN gate_authorisation_id uuid NULL;
-ALTER TABLE aml_screening_trigger_policies ADD CONSTRAINT aml_screening_trigger_policies_gate_authorisation
-    FOREIGN KEY (tenant_id, gate_authorisation_id) REFERENCES screening_gate_authorisations (tenant_id, id) ON DELETE RESTRICT;
+ALTER TABLE aml_screening_trigger_policies ADD COLUMN gate_enabling_policy_id uuid NULL;   -- s3.1
+-- FKs: (tenant_id, gate_authorisation_id) -> screening_gate_authorisations (tenant_id, id); (tenant_id, gate_enabling_policy_id) -> self.
+CREATE INDEX aml_screening_trigger_policies_enabling ON aml_screening_trigger_policies (gate_enabling_policy_id) WHERE gate_enabling_policy_id IS NOT NULL;
 ```
 
-"Current authorisation" for (T, J) at time t, written C(T,J,t), is the latest `activation` row of (T, J) by `(created_at, id)` that
-meets all of: `valid_from <= t < valid_until`; not covered by a revocation (`authorisation_id = id`, or `authorisation_id IS NULL`
-with a revocation `created_at >= row.created_at`); `environment = rg_database_environment()`; and `system_identifier` and
-`database_oid` equal to the live values.
+**Retention (DB L3):** every evidence table is retained for the life of the database (low volume: configuration events only). The
+policy table's existing index covers the pair lookups.
 
-### 4.1 The activation guard (the core change)
+**Clock seam (QA H-4).** One pure helper decides currency. The guard and the executors call it with `clock_timestamp()` and the live
+values; tests call it with an explicit `p_now`:
+
+```sql
+CREATE FUNCTION screening_gate_authorisation_current(p_auth uuid, p_now timestamptz, p_env text, p_sysid bigint, p_dboid oid,
+                                                     OUT o_current boolean, OUT o_reason text)  -- reason: closed code or NULL
+    LANGUAGE plpgsql STABLE SET search_path = pg_catalog, public, pg_temp;   -- owner-only
+CREATE FUNCTION screening_gate_instance_attestation_current(p_now timestamptz, p_env text, p_sysid bigint, p_timeline integer,
+                                                            p_dboid oid, p_pm_start timestamptz, OUT o_id uuid, OUT o_reason text)
+    LANGUAGE plpgsql STABLE SET search_path = pg_catalog, public, pg_temp;   -- owner-only
+```
+
+C(T,J,t) is the latest **activation** row of (T, J) by `seq` for which `screening_gate_authorisation_current(..., t, live...)` is
+current. Coverage: not revoked by a row with `authorisation_id = id`, nor by a row with `authorisation_id IS NULL AND
+revocation.seq > authorisation.seq`; `valid_from <= t < valid_until`; environment, `system_identifier`, `database_oid` and
+`cutover_nonce` all equal live.
+
+### 4.1 The activation guard
 
 ```sql
 CREATE FUNCTION aml_screening_trigger_policies_activation_guard() RETURNS trigger
-    LANGUAGE plpgsql VOLATILE            -- NOT SECURITY DEFINER: it runs as the inserting definer function (owner) or the owner
-    SET search_path = pg_catalog, public, pg_temp;
-CREATE TRIGGER aml_screening_trigger_policies_20_activation_guard   -- fires after _10_guard (name order), BEFORE INSERT
-    BEFORE INSERT ON aml_screening_trigger_policies FOR EACH ROW
-    EXECUTE FUNCTION aml_screening_trigger_policies_activation_guard();
-ALTER TABLE aml_screening_trigger_policies ENABLE ALWAYS TRIGGER aml_screening_trigger_policies_20_activation_guard;
+    LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog, public, pg_temp;     -- SECURITY INVOKER (E-15)
+CREATE TRIGGER aml_screening_trigger_policies_99_activation_guard               -- 99: the LAST BEFORE INSERT trigger (security L5)
+    BEFORE INSERT ON aml_screening_trigger_policies FOR EACH ROW EXECUTE FUNCTION aml_screening_trigger_policies_activation_guard();
+-- ORIGIN-enabled (s5.5 replication stance). A catalogue test pins that no BEFORE INSERT trigger name sorts after it.
 ```
 
-Algorithm (every refusal is `AT004` with a closed HINT, so an old application maps it to its existing 400, F14):
-1. `NEW.created_at := clock_timestamp()`. If the caller supplied a `gate_authorisation_id`, refuse
-   (`gate_authorisation_stamp_forbidden`). It is always computed here.
-2. If `NOT NEW.gate_withdrawal`, go to step 9 (non-gating rows are never refused by this guard; switching off stays governed by F7 and F8).
-3. If `current_setting('transaction_isolation') <> 'read committed'`, refuse `gate_isolation_refused` (I11).
-4. Take `pg_advisory_xact_lock_shared(K3)`, then `pg_advisory_xact_lock_shared(K4(T,J))` (s4.9). Every later read sees all
-   revocations, freezes and settings committed before the locks were granted.
-5. Find the latest row L (by `(created_at, id)`) and the in-force row F of (T, J). If `L.gate_withdrawal AND F.gate_withdrawal`, this is a
-   **continuation**: set `NEW.gate_authorisation_id := <enabling row of F's run>.gate_authorisation_id`. If F's run is
-   `environment_mismatch` or `unexplained`, and NEW is a loosening (`screening_trigger_cmp` against F says looser), refuse
-   `gate_integrity_unresolved`. Otherwise go to step 9.
-6. **New enabling.** Refuse unless all of the following hold, in this order (first failure wins, one closed code each):
-   - `NEW.effective_from <= clock_timestamp()` → otherwise `gate_enabling_must_be_immediate` (E-6)
-   - `aml_screening_gate_environment_ok()` → `gate_environment_refused` (existing code, I8)
-   - a settings row for the anchored environment exists → `gate_activation_not_configured`
-   - no freeze row with `frozen_until > now()` → `gate_activation_frozen`
-   - no instance integrity problem (the p1 set of s11: `unexplained`, `environment_mismatch`, chain broken, guard not intact) → `gate_integrity_unresolved`
-   - no other run of tenant T classified `legacy_unauthorised` → `gate_tenant_has_unauthorised_gate`
-   - a **current instance attestation**: the latest attestation whose captured `system_identifier`, `timeline_id`,
-     `database_oid` and `postmaster_start_time` all equal the live values, `environment` = the anchor, and `valid_until > now()` →
-     `gate_instance_attestation_missing`
-   - C(T,J,now) exists → `gate_authorisation_required`. If none is current but an expired, revoked or mismatched one exists, the code is
-     sharper: `gate_authorisation_lapsed` / `gate_authorisation_revoked` / `gate_authorisation_identity_mismatch` /
-     `gate_authorisation_environment_mismatch`
-   - the authorisation's `worker_attestation_id` row has `valid_until > now()`, and a heartbeat of that provider is younger than 10
-     minutes with the same `synthetic` flag → `gate_worker_attestation_missing` (the heartbeat alone is no longer enough, s5.3)
-   - when the settings demand a persons cap: `count(DISTINCT person_id) FROM player_accounts WHERE tenant_id = T` <=
-     `capacity_accepted_persons_max` → `gate_capacity_exceeded`
-7. `NEW.gate_authorisation_id := C.id`.
-8. (Defence in depth) If `NEW.created_by_scope = 'platform'` (a governed loosening), new enabling is refused anyway
-   (`trigger_gate_enable_refused`, the existing code, F8).
-9. `RETURN NEW`. The chain trigger (AFTER INSERT) records the row (s5.6).
+**Refusal SQLSTATE** (DB H4): when `NEW.created_by_scope = 'platform'` (the row comes from a governed executor, F3), every refusal is
+**`LC050` + HINT**, so the licensing-change service keeps the code (F14). Otherwise it is **`AT004` + HINT** (routed author and owner
+setter; old applications map it to 400). Every HINT is registered in `aml.RefusalCodes` **and** the licensing-change refusal table
+(A-19).
 
-The guard binds **the owner** too, while it is enabled. It refuses the owner-only setter (F6), fixtures over the owner pool,
-and a hand-written `INSERT` by the owner. Only disabling or replacing it (owner DDL, detected, s5.5) or a superuser bypasses it.
+Algorithm:
+1. `PERFORM set_config('lock_timeout', '5s', true)` (saved and restored at exit). Take the **policy-pair lock row**
+   `policy:<T>:<J>` **exclusively** (`SELECT ... FOR UPDATE`, inserted first with `ON CONFLICT DO NOTHING` if missing; DB M2,
+   security L1). Re-taking it when the author or loosen apply already holds it is a no-op. `55P03` or `40P01` propagate and are mapped to a
+   retryable `gate_retry_later` (DB M8; s9).
+2. Force `NEW.created_at` monotonic (s3.1). If the caller supplied `gate_authorisation_id` or `gate_enabling_policy_id`, refuse
+   `gate_authorisation_stamp_forbidden`.
+3. **If `NOT NEW.gate_withdrawal`: `RETURN NEW` now.** No other lock, no isolation check, no settings, freeze, integrity, chain or
+   attestation read (I2, ledger M-2). The gate-off path takes only the pair row lock (plus K1-equivalent `loosening:<T>` on the governed
+   path, s4.9). Its chain append (AFTER INSERT) takes only the same pair row (the per-stream chain, s5.6).
+4. Isolation must be READ COMMITTED (`gate_isolation_refused`).
+5. Compute L and F with `screening_trigger_policy_pair`. **If F is gating: continuation.** Set
+   `NEW.gate_enabling_policy_id` to F's enabling row (s3.1) and `NEW.gate_authorisation_id` to that row's stamp (NULL for legacy). If
+   the run is `environment_mismatch` or `unexplained` and NEW is looser than F (`screening_trigger_cmp`), refuse
+   `gate_integrity_unresolved`. `RETURN NEW`.
+6. **New enabling.** Take `gate:global` **shared** (`FOR SHARE`), then `gate:<T>:<J>` **shared**. Then refuse unless all of the
+   following hold, in this fixed precedence (one closed code each; QA error-precedence tests use the HINT as discriminator):
+   1. `NEW.effective_from <= clock_timestamp()`, else `gate_enabling_must_be_immediate`
+   2. `aml_screening_gate_environment_ok()`, else `gate_environment_refused`
+   3. a settings row exists for the anchor, else `gate_activation_not_configured`
+   4. role separation (s5.5), else `gate_role_separation_violated`
+   5. no active freeze (`frozen_until > now` and not lifted), else `gate_activation_frozen`
+   6. no instance integrity state (`unexplained`, `environment_mismatch`, `guard_not_intact`; evaluated tenant by tenant with
+      non-vacuity, I14), else `gate_integrity_unresolved`. If the per-tenant read disagrees with the platform count: `gate_integrity_read_inconsistent`
+   7. no other legacy run of T, else `gate_tenant_has_unauthorised_gate`
+   8. a current instance attestation, with its confirmations when the settings require two, else `gate_instance_attestation_missing`
+   9. C(T,J,now) exists, else `gate_authorisation_required`, or sharper `_lapsed` / `_revoked` / `_identity_mismatch` / `_environment_mismatch`
+   10. the in-force screening policy is the authorisation's `screening_policy_id`, else `gate_screening_policy_changed`
+   11. the worker attestation of C is current and bound to the current instance attestation, and a heartbeat of that provider with
+       the same `synthetic` flag is younger than 10 minutes, else `gate_worker_attestation_missing`
+   12. when a cap is required: with `app.tenant_id` **set to T** (saved and restored; I14), `count(DISTINCT person_id)` of
+       `player_accounts` is at most `capacity_accepted_persons_max`, else `gate_capacity_exceeded`
+7. `NEW.gate_authorisation_id := C.id`; `NEW.gate_enabling_policy_id := NEW.id`.
+8. If `NEW.created_by_scope = 'platform'`, refuse `trigger_gate_enable_refused` (existing).
+9. `RETURN NEW`.
 
-### 4.2 Lifecycle table: effect on NEW activation and on an ALREADY-ACTIVE gate
+Notes on interaction (DB L6):
+- BEFORE INSERT triggers fire before an `ON CONFLICT` decision, so the pair lock is taken even if no row results (harmless).
+- `COPY` fires the guard for every row. Data-only restores of this table are unsupported (the backup tooling bans `--disable-triggers`, F17).
+- Any refusal rolls back the whole statement.
+
+### 4.2 Lifecycle: effect on NEW activation and on an ALREADY-ACTIVE gate
 
 | Event | Database behaviour | NEW enabling | ALREADY-ACTIVE gate | Alert / reconcile |
 |---|---|---|---|---|
-| Initial authorisation executed | one `activation` row; `valid_until = executed_at + validity` | allowed (s4.1 step 6) within validity | n/a | `aml.screening_gate_authorised` audit |
-| Activation (officer, routed author, gate on) | guard stamps `gate_authorisation_id` | consumed? **No**: the authorisation is a permission for (T, J) during validity, not a single-use token. Re-enabling within validity is allowed (E-7) | n/a | audit `aml.screening_gate_enabled` |
-| Expiry (`valid_until` passes) | nothing written | refused `gate_authorisation_lapsed` | **unchanged: keeps holding, nothing released** | `lapsed` p2 (staging) / p3 (dev, test); `expiring` p3 before the warning window |
-| Revocation (single actor) | one revocation row | refused `gate_authorisation_revoked` | **unchanged**. Switching off needs governed loosening | `revoked` p2/p3 |
-| Replacement (new activation for the same T, J) | new row. The latest current one wins for new enabling. Old rows stay (append-only) | allowed under the new one | runs keep their stamp. A run stamped with an old lapsed authorisation is `lapsed` until adopted (an adoption can name it) | `replacement` audit; reconcile lists runs on a superseded stamp |
-| Anchor differs from recorded | nothing written | refused `gate_authorisation_environment_mismatch` + instance-wide `gate_integrity_unresolved` | unchanged | `environment_mismatch` p1 |
-| Logical restore (new `system_identifier` or db oid) | nothing written | refused (`gate_authorisation_identity_mismatch`; no current attestation) | unchanged | `identity_mismatch` p2; `instance_attestation_stale` |
-| Physical clone or failover (same identity) | nothing written | refused until re-attestation (postmaster start or timeline differs) | unchanged; classification stays `authorised` (residual R-3) | `instance_attestation_stale` p2 when any current authorisation exists |
-| Approval racing a revocation | serialised by K4 (s4.9) | the later one wins: revoke-then-execute is refused `gate_authorisation_revoked_before_execution` | n/a | both audited |
-| Worker down | heartbeat ages out | refused `gate_worker_attestation_missing` | unchanged (fail-closed: persons stay held; existing `aml.screening_gate_trapped` and the parked monitors fire) | `gate_without_attested_worker` p2 |
-| Worker recovered | heartbeat fresh again | allowed again if the attestation is still valid | queue drains; releases happen only through the normal clear path (no bulk release) | alert clears on the next monitor pass |
-| Break-glass revoke / freeze | revocation or freeze row (`source = 'break_glass'`) | refused | unchanged | p2 + audit chain row |
+| Authorisation executed | one activation row (seq); records `persons_at_execution`, `persons_held_on_enable`, `screening_policy_id` | allowed within validity | n/a | `authorisation_created` p3 (out of band, R-5) |
+| Activation | guard stamps it | allowed again within validity (E-7, multi-use) | n/a | audit `aml.screening_gate_enabled` |
+| Expiry | nothing written | refused `_lapsed` | **unchanged, nothing released** | `gate_authorisation_lapsed`; `expiring` p3 |
+| Revocation | revocation row | refused `_revoked` | **unchanged** | `gate_authorisation_revoked` |
+| Replacement | new activation row; latest current wins | allowed | runs keep their stamp | runs on a superseded stamp listed |
+| Screening policy version changes | nothing written | refused `gate_screening_policy_changed` until re-authorised | unchanged | `gate_screening_policy_changed_since_authorisation` p3 |
+| Anchor differs | nothing | refused instance-wide | unchanged | `gate_environment_mismatch` p1 |
+| Logical restore or blue/green | nothing | refused | unchanged | `gate_identity_mismatch` p2; `instance_attestation_stale` |
+| Clone, restart or failover | nothing | refused until re-attestation | unchanged (R-3) | `instance_attestation_stale` p2 if any current authorisation exists |
+| Approve races revoke | serialised on the `gate:<T>:<J>` row | later one wins; `gate_authorisation_revoked_before_execution` | n/a | both audited |
+| Worker down or recovered | heartbeat ages out or returns | refused or allowed again | unchanged; release only by fresh clears | `gate_without_attested_worker` p2 |
+| Break-glass revoke or freeze | row (idempotent per incident) | refused | unchanged | p2 + chain |
+| Freeze lifted (governed, two Persons) or expired | lift row, or time passes | allowed again | unchanged | `freeze_active` clears |
+| A legacy pending gating row takes effect | nothing written by the database | n/a | the gate starts holding (pre-cut-over decision) | `legacy_pending_enabling` p1 (only if OD-G13 allowed applying) |
 
-The rule in every row: **a lapsed, revoked, mismatched or frozen state never turns an active gate off and never releases a held
-withdrawal. It blocks new enabling, raises an alert, and switching off needs the governed loosening.**
+**A lapsed, revoked, mismatched or frozen state never turns an active gate off and never releases a held withdrawal.**
 
 ### 4.3 Expiry and the open transaction
 
-The guard checks `valid_until > clock_timestamp()` at INSERT. An authorisation that lapses between INSERT and COMMIT (seconds) produces
-a gate that is `lapsed` from its first second. That is accepted: it is visible and alerted. E-6 (enabling rows are immediate) prevents
-the much larger window of a future-dated enabling row taking effect weeks after expiry or revocation.
+Unchanged from v2: the INSERT-to-COMMIT window (seconds) is accepted, visible and alerted. E-6 removes the long pending window.
 
-### 4.4 Revocation
+### 4.4 Revocation (v2.1: by sequence)
 
-- Governed kind `screening_gate_revoke` is **narrowing**: 0 approvals, executes in the filing transaction (F18). Any platform_admin
-  may file it, with no officer grant needed, because it is the fail-safe direction (the same rule as disabling the loosening capability,
-  `0190:595-596`, `0191:435-436`). Payload `{tenant_id, jurisdiction_id, authorisation_id | null, reason_code, evidence_reference}`.
-- Executor `screening_gate_revoke_apply(p_request uuid) RETURNS jsonb`: K3 shared, K4 exclusive, then insert one revocation row.
-  Refuses `gate_authorisation_not_found` (wrong T, J or id) and `gate_authorisation_already_revoked` (idempotent refusal, nothing
-  written).
-- Revoking an authorisation never writes a policy row (I2).
+- `screening_gate_revoke` (narrowing, 0 approvals, any platform_admin, executes on filing). Payload
+  `{tenant_id, jurisdiction_id, authorisation_id | null, reason_code, evidence_reference}`.
+- `screening_gate_revoke_apply`: takes `gate:global` shared, then `gate:<T>:<J>` exclusive, then `nextval` (so seq order equals
+  serialisation order), then inserts. Refusals: `gate_authorisation_not_found`, `gate_authorisation_already_revoked` (nothing written).
+- **"Revoked before execution"** (an authorisation request filed before a `NULL`-scope revocation): the authorise and adopt executors,
+  holding `gate:<T>:<J>` exclusive, refuse when a `NULL`-scope revocation of (T, J) exists whose `created_at >= request.created_at`.
+  Both are database `clock_timestamp()` values. This one comparison is by clock, because the licensing-change request has no event seq
+  at filing. **Residual:** a backwards step of the database host clock between filing and revocation can misorder them. Mitigation:
+  revocations also record `max(seq)` at their time, and the runbook says "after any clock incident, revoke again".
 
 ### 4.5 Replacement
 
-A replacement is a new `screening_gate_authorise` request for the same (T, J). It is two-person again: extending validity is a
-widening decision. The executor does not revoke the old row. The predicate C(T,J,t) picks the latest current one. Shortening is done
-by revoking and re-authorising.
+Unchanged: a new two-Person authorisation; extending validity is a widening; shortening is revoke plus re-authorise.
 
 ### 4.6 Environment mismatch, logical restore
 
-Covered by s3.7 and s4.2. Recovery path: (1) reconcile; (2) attestor re-attests the instance; (3) a governed `screening_gate_adopt`
-per gate run that should stay classified `authorised`, or a governed gate-off; (4) a new `screening_gate_authorise` before any new
-enabling. The database never re-binds an authorisation to a new identity by itself.
+The procedure order is fixed: (1) record the anchor if it is unrecorded (owner); (2) reconcile; (3) attest (two attestors in staging);
+(4) adopt or governed gate-off per run (gate-off needs OD-G10); (5) a new authorisation before new enabling. The database never
+re-binds an authorisation to a new identity. **After an actor-proof key rotation (`deploy/backup/rekey-actor-proof.sh`), open
+licensing-change requests whose proofs no longer verify must be re-filed** (operations M3).
 
-### 4.7 Physical clone (same `system_identifier`): residual and compensating control
+### 4.7 Instance attestation (v2.1: burden, two-person, semantics)
 
-A physical copy has the same `system_identifier`, database oid, anchor, authorisations and attestations. **The database cannot tell
-a clone from the original.** Compensating controls:
-1. **Instance attestation bound to the instance's life.** An attestation is current only while `pg_postmaster_start_time()` and
-   `(pg_control_checkpoint()).timeline_id` equal the captured values. A clone must be started, which gives a new postmaster start
-   time. PITR or promotion gives a new timeline. So every clone, restore, restart and failover makes new enabling impossible until a
-   named operator holding the attestor role re-attests. Plain restarts also need re-attestation. This is accepted because it blocks only
-   *new* enabling (a rare operation) and never touches active gates.
-2. **Attestation expiry** (`instance_attestation_max_age_seconds`, OD-G8), so a forgotten attestation does not live for ever.
-3. **External inventory** (operational, s5.7): each attestation is also recorded outside the database (ticket plus log shipping). Two
-   live attestations of the same `system_identifier` from different `server_addr`, or an attestation for a host not in the
-   inventory, is a P1 operations alert.
-4. **Residual R-3:** gates that were already authorised in the source stay `authorised` in the clone. An operator who re-attests a
-   clone without checking defeats control 1. Both are stated and accepted only with owner sign-off (OD-G8).
+- An attestation is **current** only while every one of these holds:
+  - the live `system_identifier`, `timeline_id`, `database_oid` and `pg_postmaster_start_time()` equal the captured values;
+  - `environment` equals the anchor;
+  - `valid_until > now`;
+  - when the settings say 2, a confirmation by a **different** attestor login exists.
+- Captured on the **primary** only: the attest function refuses `pg_is_in_recovery()`.
+- `timeline_id` increments on promotion and on PITR. A promoted replica therefore needs re-attestation.
+- `server_addr` is informational, because it is unreliable behind proxies (operations M3). The operator-supplied `instance_label` from
+  the external inventory is what the external check compares.
+- `checklist_reference` points at the completed no-clone checklist: hostname and instance id match the inventory, no other live instance
+  carries this `system_identifier` (external query), and the restore or restart was planned.
+- **Burden, stated honestly:** every restart blocks new enabling until re-attested. That is acceptable only because enabling is rare.
+  The risk of blind re-attestation is mitigated by the checklist, two-person confirmation in staging (OD-G8), and the external
+  inventory cross-check. Residual R-3 (an already-authorised gate in a clone stays `authorised`) remains an owner acceptance (OD-G8).
 
 ### 4.8 Worker failure and recovery
 
-There is no new path. The existing fail-closed behaviour stays (F10: persons stay held). New enabling depends on worker attestation
-plus a fresh heartbeat. Recovery never triggers bulk release: a person is released only by a fresh clear through the existing D10
-rules (0192 to 0194). The monitor loop (s11) runs outside the worker.
+Unchanged (fail closed; release only by fresh clears). **When funds are trapped and the loosening capability is inert** (operations
+H4), on-call follows this order:
+1. Restore the worker (the normal path).
+2. If the gate itself must go off, that is a release decision under OD-G10. It is executed either through the governed loosening (which needs
+   the capability configured) or through the owner setter path A1 (an owner credential plus one officer chain, recorded decision, D1
+   declared window).
+3. Never disable a trigger, and never touch holds.
 
-### 4.9 Concurrency: lock keys and ordering
+### 4.9 Concurrency: lock rows replace advisory locks (security H1, DB M2)
 
-| Key | Expression | Taken by (mode) |
+**Problem (security H1):** advisory keys are computable from published code, and `pg_advisory_lock` is PUBLIC-executable. Any
+session (the runtime role included) can hold `hashtextextended('screening_trigger:'||T||J, 191)` or the 190 key for as long as it
+likes. That blocks the author, **the governed gate-off** and, in v2, K3/K4/K5. The owner cannot revoke EXECUTE on `pg_catalog`
+functions (that needs superuser).
+
+**v2.1:** all serialisation uses `SELECT ... FOR UPDATE` / `FOR SHARE` on rows of `screening_gate_locks`.
+- The table is owner-only with no runtime privilege, so only owner-executed (SECURITY DEFINER) code can lock rows.
+- Rows are created on first use with `INSERT ... ON CONFLICT DO NOTHING`. `gate:global` is seeded by 0195.
+- Every locker first does `set_config('lock_timeout', '5s', true)`, so a waiter fails with retryable `55P03` instead of hanging.
+- One owner-only helper does all of this: `screening_gate_lock(p_key text, p_exclusive boolean)`.
+
+| Row key | Replaces | Taken by (mode) |
 |---|---|---|
-| K1 (existing) | `hashtextextended('screening_loosening:'\|\|tenant, 190)` | loosening validators and executors (excl.) |
-| K2 (existing) | `hashtextextended('screening_trigger:'\|\|tenant\|\|jur, 191)` | routed author, loosen apply (excl.) |
-| K3 (new) | `hashtextextended('screening_gate:global', 195)` | guard, authorise, adopt, revoke executors (**shared**); settings apply, instance and worker attestation, freeze, break-glass revoke-all (**exclusive**) |
-| K4 (new) | `hashtextextended('screening_gate:'\|\|tenant\|\|':'\|\|jur, 195)` | guard (**shared**); authorise, adopt, revoke, break-glass revoke (**exclusive**) |
-| K5 (new) | `hashtextextended('screening_gate:chain', 195)` | every chain append (**exclusive**, always last) |
+| `loosening:<T>` | advisory `screening_loosening:`\|\|T /190 | loosening validators and executors, capability configure (exclusive) |
+| `screening_policy:<T>:<J>` | advisory `T\|\|J`/0 (0189, 0190) | screening policy author and loosen apply (exclusive) |
+| `policy:<T>:<J>` | advisory `screening_trigger:`\|\|T\|\|J /191 | trigger author, loosen apply, **the guard** (exclusive); the policy-stream chain append (already held) |
+| `gate:global` | K3 | guard new-enabling branch, authorise, adopt, revoke (shared); settings apply, attestations, freeze, freeze lift, break-glass revoke-all (exclusive) |
+| `gate:<T>:<J>` | K4 | guard new-enabling branch (shared); authorise, adopt, revoke, break-glass revoke (exclusive) |
+| `chain:evidence` | K5 (evidence stream only) | evidence-table chain appends (exclusive, last) |
 
-**Global order: K1 → K2 → K3 → K4 → K5.** The guard runs inside the author (holding K2) or loosen apply (holding K1, K2) and adds K3s,
-K4s, K5. The executors take K3, K4, K5 after the licensing-change flow's request row lock. No path takes K2 after K3 or K4. No path
-takes K3 after K4. No path takes a request row lock while holding K3, K4 or K5. So the advisory locks cannot form a cycle. The
-licensing-change request row lock comes before K3 on the executor paths and is never taken by the guard.
+- **Global order:** `loosening:<T>` → `screening_policy:<T>:<J>` → `policy:<T>:<J>` → `gate:global` → `gate:<T>:<J>` → `chain:evidence`.
+- The licensing-change request row lock (taken by the flow) precedes `gate:*` on executor paths and is never taken by the guard.
+- **Gate-off path:** `[loosening:<T>] → policy:<T>:<J>` only. It never waits on `gate:*` or `chain:evidence` (I2, I13).
+- Migration 0197 replaces the three advisory calls in the existing functions (0189 `aml_screening_policy_author`, 0190
+  `screening_policy_loosen_assert` / `_apply` / configure classifier, 0191 `aml_screening_trigger_policy_author` /
+  `screening_trigger_loosen_assert` / `_apply` / classify branch). Each is a `CREATE OR REPLACE` with an unchanged signature, and the
+  only body change is the lock line plus the pair helper. The fingerprint diff between 0196 and 0197 must contain **only** those lines
+  (A-18).
+- **Residual DoS:** a runtime caller can still hold a lock **row** while its own transaction is open: it calls the author and then never commits.
+  The bound is `idle_in_transaction_session_timeout` on the runtime role. That is an operations setting applied by a role administrator,
+  because the role cannot change itself; this is activation-blocking for Tier N. Alongside it: `lock_timeout` in every waiter, and reconcile's
+  `gate_lock_contention` (p2), which reports waits longer than 30 s on `screening_gate_locks` with the holder's `usename` and
+  `application_name` from `pg_locks` and `pg_stat_activity`.
 
-Serialisation results (all under READ COMMITTED, I11):
-- **Author (enable) against revoke.** If the author holds K4 shared until COMMIT, revoke waits and then records a revocation after a committed
-  enabling: the gate is active and `revoked` (fail-safe, alerted). If revoke commits first, the guard, after getting K4, sees it and
-  refuses.
-- **Approve/execute against revoke.** Both take K4 exclusive. If revoke runs first, the executor re-validates and refuses
-  `gate_authorisation_revoked_before_execution` (a revocation with `authorisation_id IS NULL` created after the request was filed
-  covers it).
-- **Settings or attestation change against enabling.** K3 exclusive against K3 shared: a narrowing of settings or a new freeze is seen
-  by every later enabling.
-- **Chain.** K5 gives the chain a total order (low volume: configuration events only).
+Serialisation results (READ COMMITTED):
+- **Author vs revoke:** the enabling holds `gate:<T>:<J>` shared until COMMIT. Revoke then follows, so the gate becomes active and `revoked`. If revoke commits first, the guard refuses.
+- **Approve vs revoke:** both exclusive on `gate:<T>:<J>`. If revoke goes first, the executor refuses `_revoked_before_execution`.
+- **Settings narrowing or freeze vs enabling:** `gate:global` exclusive against shared. An enabling already past step 6 holds the shared lock and commits first. The narrowing or freeze applies to every later enabling. This is accepted and stated.
 
-### 4.10 Break-glass (separate NOLOGIN role; never disables the trigger)
+### 4.10 Break-glass (v2.1: cap, governed lift, idempotency, membership)
 
-- Role `igaming_gate_breakglass` (NOLOGIN, NOINHERIT on grantees, no table privileges). It is **provisioned out of band** by a
-  role administrator (s7.5). Migrations cannot create roles (F16), and no agent may (CLAUDE.md, environment safety). A named operator login is
-  made a member for a time box (`VALID UNTIL` on that login, or membership granted and revoked by the documented procedure, OD-G7).
-- Functions: SECURITY DEFINER, owned by the owner, EXECUTE granted **only** to `igaming_gate_breakglass`. Each checks
-  `pg_has_role(session_user, 'igaming_gate_breakglass', 'MEMBER') AND NOT pg_has_role(session_user, '<owner>', 'MEMBER')`, so the
-  owner cannot use break-glass as cover. Each requires `incident_reference` and `reason_code`, writes the row plus a chain entry,
-  and returns the row id:
-  - `screening_gate_breakglass_revoke(p_authorisation uuid, p_incident text, p_reason text)`: one authorisation; K3s, K4x.
-  - `screening_gate_breakglass_revoke_all(p_incident text, p_reason text)`: one `authorisation_id IS NULL` revocation per (T, J)
-    that has any authorisation; K3x.
-  - `screening_gate_breakglass_freeze(p_until timestamptz, p_incident text, p_reason text)`: no new enabling anywhere until
-    `p_until`; K3x. A freeze **cannot be lifted early** (lifting would be the widening direction). It lapses at `p_until`.
-- **Not available through break-glass:** inserting or extending an authorisation, changing settings, enabling a gate, switching a gate
-  off, releasing anything, disabling or replacing any trigger. Switching off a gate in an emergency stays the governed loosening or the
-  existing owner setter path A1 (OD-G7 asks whether that is acceptable).
+- Role `igaming_gate_breakglass` (NOLOGIN), provisioned out of band (s7.5).
+- **Membership time-boxing** (operations H4, security M7): PG16 has no time-boxed membership. The procedure is: a role administrator runs
+  `GRANT igaming_gate_breakglass TO <named login>` and `REVOKE` again within the incident, both under a ticket. Reconcile reports
+  `breakglass_membership_active` (p2) **whenever any login is a member**, and `attestor_membership_stale` (p3) for every attestor member
+  (PG16 records no grant time, so staleness is asserted by the external ticket review).
+- Functions: SECURITY DEFINER, EXECUTE only to the role. Each checks `session_user` is a member of the role and **not** of the owner,
+  and refuses no-ops (security H2: `revoke_all` when authorisations exist but zero rows would be written gives
+  `breakglass_noop_refused`). Each is idempotent by `incident_reference` (a repeat returns the existing row id).
+  - `screening_gate_breakglass_revoke(p_authorisation uuid, p_incident text, p_reason text)`
+  - `screening_gate_breakglass_revoke_all(p_incident text, p_reason text)`: platform-level table, so no tenant loop is needed (DB M10)
+  - `screening_gate_breakglass_freeze(p_until timestamptz, p_incident text, p_reason text, p_drill boolean)`: `p_until` must be at most
+    `now + COALESCE(settings.freeze_max_seconds, 259200)`, else `gate_freeze_exceeds_cap` (ledger L-2, security M7). A drill freeze
+    (`p_drill`) is limited to 15 minutes.
+- **Early lift:** governed kind `screening_gate_freeze_lift` (widening, two Persons, officers). A freeze otherwise lapses at `frozen_until`.
+- Break-glass can never: insert or extend an authorisation, change settings, enable or disable a gate, release anything, or touch any trigger.
+- **Drill** (operations H4): quarterly in staging. A drill freeze of a few minutes, a break-glass revoke on a synthetic tenant, and an
+  evidence template (incident id, logins granted and revoked with times, functions called, chain seq range, reconcile output before and
+  after).
 
 ---
 
