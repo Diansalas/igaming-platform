@@ -1,4 +1,4 @@
-# Screening activation gate: design v2.1 (GATE-B, architect)
+# Screening activation gate: design v2.2 (GATE-B, architect)
 
 - **Status: DESIGN ONLY. NOT IMPLEMENTED.** No migration, no code, no database access. Nothing here is a legal opinion, a
   compliance approval, production readiness or a provider validation. All providers stay MOCK.
@@ -17,6 +17,16 @@
 - **Replaces:** the first proposal of a database-enforced activation gate (D1 completion report s5 item 1 and s6,
   `d1-security-closure-record.md` s9.5 item 1 and s10.4, "CAPACITY-GATE-SWITCH"). That proposal left legacy gates in force
   and only flagged them.
+- **v2.2 (2026-10-27):** revised after five confirmation reviews of v2.1. All five were ACCEPTABLE AFTER CHANGES with no veto, and the earlier Highs are fixed. The second disposition table is s18.2. The main changes:
+  - No lock row is taken before actor-proof or LC040 admission, and a privileged watchdog bounds lock holding (s4.9).
+  - `inserted_at` is separated from the ordering `created_at` (s3.1).
+  - A replica-mode refusal trigger is added (s5.5).
+  - Role separation is extended and made consistent with the tier options (s5.5, s19).
+  - Authorisations are bound to the tier (s19).
+  - The lock-key CHECK defect is fixed (s4.0).
+  - Fingerprint and decision-table pins are added for 0197 (s7.1).
+  - Guard-level wiring tests and break-glass criteria are added (s15).
+  - A relative implementation-size estimate is added (s21).
 - **Who decides what:** s12 (owner decisions, split into merge-blocking and activation-blocking), s13 (engineering choices) and s19
   (the tier definition, an owner decision) are kept separate. Owner parameters are stored as configuration with **no shipped
   value**. When a parameter is absent, the system refuses.
@@ -67,7 +77,7 @@ checks. G5 (new in v2.1), the staging owner/runtime separation is not enforced (
 | ID | Invariant | How it is pinned (acceptance criteria in s15) |
 |---|---|---|
 | I1 | **The gate predicate never consults authorisation state.** `aml_screening_gate_denies`, `aml_hold_active`, `aml_screening_enqueue_due`, `aml_screening_gate_overdue` and `aml_screening_parked_*` read no `screening_gate_*` object. | A-10 (static pin plus mutant) |
-| I2 | **Nothing in this design writes a trigger-policy row that switches a gate off**, and nothing edits or deletes one. Switching off stays a governed loosening (F8) or the owner setter path A1 (F6). **Every gate-off path succeeds in every bad state** (frozen, unconfigured, unattested, unexplained, chain broken, tripwire failing, non-READ-COMMITTED). The guard's non-gating branch runs no check and takes only the policy-pair lock, and the chain append runs no check (ledger M-2). | A-21, A-9 |
+| I2 | **Nothing in this design writes a trigger-policy row that switches a gate off**, and nothing edits or deletes one. Switching off stays a governed loosening (F8) or the owner setter path A1 (F6). **No gate-off is refused because of a bad state** (frozen, unconfigured, unattested, unexplained, chain broken, tripwire failing, non-READ-COMMITTED). The guard's non-gating branch runs no check and takes only the policy-pair lock, and the chain append runs no check (ledger M-2). A gate-off **can** still wait for, or fail with retryable `55P03`/`40001` on, a lock held by an admitted concurrent writer. That wait is bounded by `lock_timeout` and by the watchdog (s4.9); it is not a refusal. | A-21, A-9 |
 | I3 | **No held withdrawal is released** by any new function. | A-9 writer pins on holds, lifts, requests, results, payouts and ledger |
 | I4 | **Classification is derived, never stored** in a column any role writes at runtime. | A-9 |
 | I5 | Evidence tables are owner-owned, FORCE RLS with an owner-only policy, append-only, and give the runtime role **zero** privileges. Deny triggers are `ENABLE ALWAYS`; insert guards and chain triggers are ORIGIN (s5.5). | A-9 |
@@ -78,7 +88,7 @@ checks. G5 (new in v2.1), the staging owner/runtime separation is not enforced (
 | I10 | Sanctions, PEP, hold and needs_officer behaviour is untouched. | A-9 |
 | I11 | The guard's gating branch and the executors run under READ COMMITTED only. | A-8 |
 | I12 | The licensing and operating-basis model is untouched, and no jurisdiction or country literal appears in a migration. | A-19 grep pin |
-| I13 (new) | **No runtime-callable session can block a governed gate-off.** Every serialisation uses row locks on the owner-only `screening_gate_locks` table, which the runtime role cannot lock directly. Advisory keys are no longer used (s4.9). | A-7, A-22 |
+| I13 (v2.2 wording) | **A runtime session cannot take a lock that a governed gate-off needs without first passing actor-proof or LC040 admission**, and any lock held by a runtime backend is **bounded by the watchdog** (s4.9). Serialisation in this slice uses row locks on the owner-only `screening_gate_locks` table, which the runtime role cannot lock directly, and filing-time validators take no lock. Advisory keys are removed **from the functions of this slice** only. The platform-wide advisory-lock squatting class (21 migrations, e.g. `residence_policy:` at `0181:373`, `:406`) is a **separate review item** (SEC-N1-PLATFORM). | A-7, A-21, A-22 |
 | I14 (new) | **No cross-tenant check may fail open.** A read over FORCE-RLS tenant tables is made tenant by tenant with `app.tenant_id` saved and restored, and is asserted non-vacuous against a platform-level count. A failed assertion refuses or reports p1 (s4.0). | A-23 |
 
 ---
@@ -100,9 +110,18 @@ For one (tenant T, jurisdiction J), L is the latest row by `(created_at, id)` an
   is one indexed lookup.
 - **Enabling rows are immediate** (E-6): `effective_from <= clock_timestamp()`. Continuations may be future-dated (up to 30 days, as
   today). This changes the UI and E2E for gate-on (s7.6, A-24).
-- **Monotonic `created_at` per (T, J)** (operations M5): the guard sets
-  `NEW.created_at := GREATEST(clock_timestamp(), max(created_at of (T,J)) + interval '1 microsecond')`. "Latest" therefore stays
-  consistent across a host clock step backwards. It never refuses: a gate-off must not fail because of the clock.
+- **Ordering time vs wall time** (v2.2, security N2; operations M5; ledger N-2):
+  - `created_at` is **for ordering only**. The guard sets `NEW.created_at := GREATEST(clock_timestamp(), last_created_at + 1 µs)`, where
+    `last_created_at` is kept **on the `policy:<T>:<J>` lock row**. The guard updates it under `FOR UPDATE`, so a concurrent commit makes a
+    REPEATABLE READ or SERIALIZABLE gate-off fail with retryable `40001` instead of silently landing below a gating row (ledger N-2).
+  - A new column `inserted_at timestamptz NOT NULL`, forced to `clock_timestamp()`, is the **wall time**. **Every validity test uses
+    `inserted_at`** (classification "valid at `E.inserted_at`", stamps, lapse), never `created_at`. So one clamped row far in the future
+    cannot make later enabling rows classify `unexplained`.
+  - Engaging the clamp (`created_at > clock_timestamp()`) leaves a trace: the chain row carries `clamped = true`, and reconcile reports
+    `clock_regression_clamped` (p2) and `created_at_ahead_of_clock` (p2) while any row's `created_at` is more than 2 minutes ahead of the
+    clock (an engineering tolerance).
+  - The 0198 pre-flight refuses (`GA098`) when any existing row has `created_at > now() + 2 minutes`.
+  - It never refuses a gate-off because of the clock.
 
 A shared helper `screening_trigger_policy_pair(p_tenant uuid, p_jur uuid, OUT latest ..., OUT in_force ...)` (owner-only, STABLE,
 DB L2) replaces the duplicated "latest / in force" queries in the author, the loosen validator and apply, the guard and classify.
@@ -160,7 +179,7 @@ The first matching row of this table wins:
 
 | Precedence | State | Definition | Severity (staging/production; development/test: see s11) |
 |---|---|---|---|
-| 1 | `unexplained` | E is not in the inventory, **and** E is not stamped with an `activation` authorisation of the same (T, J) that was valid at `E.created_at`. Or a post-cut-over gating row's `gate_enabling_policy_id` is NULL or points at another (T, J) | p1 |
+| 1 | `unexplained` | E is not in the inventory, **and** E is not stamped with an `activation` authorisation of the same (T, J) that was valid at `E.inserted_at` (wall time; v2.2, security N2). Or a post-cut-over gating row's `gate_enabling_policy_id` is NULL or points at another (T, J) | p1 |
 | 2 | `environment_mismatch` | the authorisation's `environment` is not equal to the anchor now (an **unrecorded anchor after a restore reads as production** and lands here first, operations M3) | p1 |
 | 3 | `identity_mismatch` | the authorisation's `system_identifier` or `database_oid` is not equal to the live value | p2 |
 | 4 | `revoked` | the authorisation (or adoption) is covered by a revocation (by sequence, s4.4) | p2 |
@@ -265,6 +284,8 @@ CREATE TABLE screening_gate_settings (
     seq bigint NOT NULL,                                            -- from screening_gate_event_seq (below)
     environment text NOT NULL CHECK (environment IN ('development', 'staging', 'test')),   -- never production (I8)
     tier text NOT NULL CHECK (tier IN ('S', 'N')),                  -- s19, OD-G0 (owner decision)
+    role_separation text NOT NULL CHECK (role_separation IN ('enforced', 'waived_tier_s')),  -- s5.5/s19 option S-b; CHECK (tier = 'S' OR role_separation = 'enforced')
+    s_to_n_verifier_record_sha256 text NULL,                        -- s19: external verifier countersignature (self-asserted to the DB)
     max_validity_seconds bigint NOT NULL CHECK (max_validity_seconds >= 3600),  -- OD-G1; 3600 = engineering floor (QA H-4)
     expiry_warning_seconds bigint NOT NULL CHECK (expiry_warning_seconds >= 0),
     capacity_report_required boolean NOT NULL, capacity_persons_cap_required boolean NOT NULL,  -- OD-G3
@@ -318,6 +339,7 @@ CREATE TABLE screening_gate_authorisations (
     tenant_id uuid NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
     licensing_jurisdiction_id uuid NOT NULL REFERENCES jurisdictions (id) ON DELETE RESTRICT,
     mode text NOT NULL CHECK (mode IN ('activation', 'adoption')),
+    tier text NOT NULL CHECK (tier IN ('S', 'N')),     -- v2.2 (security N5): must equal the current settings tier to be current
     adopts_policy_id uuid NULL,
     environment text NOT NULL, system_identifier bigint NOT NULL, database_oid oid NOT NULL,     -- == payload == live (security M5)
     cutover_nonce uuid NOT NULL,                                                                  -- == payload == screening_gate_cutover
@@ -354,7 +376,7 @@ CREATE TABLE screening_gate_revocations (
     incident_reference text NULL, reason_code text NOT NULL CHECK (reason_code ~ '^[a-z0-9_]{1,64}$'),
     revoked_by uuid NULL, revoked_by_person_id uuid NULL, revoked_session_user name NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (source, incident_reference, tenant_id, licensing_jurisdiction_id, authorisation_id),  -- break-glass idempotency (ledger L-3)
+    UNIQUE NULLS NOT DISTINCT (source, incident_reference, tenant_id, licensing_jurisdiction_id, authorisation_id),  -- idempotency incl. NULL authorisation_id (PG15+; security N6, ledger N-4)
     CHECK ((source = 'governed') = (change_request_id IS NOT NULL AND revoked_by IS NOT NULL)),
     CHECK ((source = 'break_glass') = (incident_reference IS NOT NULL)),
     FOREIGN KEY (tenant_id, authorisation_id) REFERENCES screening_gate_authorisations (tenant_id, id) ON DELETE RESTRICT
@@ -365,7 +387,6 @@ CREATE TABLE screening_gate_activation_freezes (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), seq bigint NOT NULL,
     frozen_until timestamptz NOT NULL, incident_reference text NOT NULL UNIQUE,     -- idempotency (ledger L-3)
     reason_code text NOT NULL, frozen_session_user name NOT NULL, drill boolean NOT NULL,
-    lifted_by_request_id uuid NULL,             -- never set by UPDATE: a lift is a separate row, below
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK (frozen_until > created_at)
 );
@@ -376,14 +397,22 @@ CREATE TABLE screening_gate_freeze_lifts (      -- the two-Person governed early
 );
 
 -- The lock table (s4.9). Owner-only, FORCE RLS, NO runtime privilege: no runtime session can lock a row directly.
-CREATE TABLE screening_gate_locks (lock_key text PRIMARY KEY CHECK (lock_key ~ '^[a-z_]+(:[0-9a-f-]{36}){0,2}$'));
+CREATE TABLE screening_gate_locks (
+    lock_key text PRIMARY KEY CHECK (lock_key ~ '^[a-z_]+(:(global|evidence|screening_gate|[0-9a-f-]{36})){1,2}$'),  -- v2.2 fix (DB N1): the v2.1 pattern rejected the seed keys
+    last_created_at timestamptz NULL           -- policy:<T>:<J> rows only: the ordering clock (s3.1)
+);
+-- A static test inserts EVERY key form s4.9 generates (seeds and per-(T,J) forms) into a scratch copy of the CHECK (A-26).
 
 -- New policy-table columns (ADD COLUMN NULL, no rewrite; FORCED by the guard; legacy rows stay NULL).
 ALTER TABLE aml_screening_trigger_policies ADD COLUMN gate_authorisation_id uuid NULL;
 ALTER TABLE aml_screening_trigger_policies ADD COLUMN gate_enabling_policy_id uuid NULL;   -- s3.1
+ALTER TABLE aml_screening_trigger_policies ADD COLUMN inserted_at timestamptz NULL;          -- wall time, forced (v2.2); NULL only on legacy rows
 -- FKs: (tenant_id, gate_authorisation_id) -> screening_gate_authorisations (tenant_id, id); (tenant_id, gate_enabling_policy_id) -> self.
 CREATE INDEX aml_screening_trigger_policies_enabling ON aml_screening_trigger_policies (gate_enabling_policy_id) WHERE gate_enabling_policy_id IS NOT NULL;
 ```
+
+**Chain table (DB N8):** `screening_gate_evidence_chain` has the indexes `(stream, seq)` UNIQUE and `(source_table, source_id)` UNIQUE, the latter so that completeness is checkable (s5.6). Chain trigger functions are declared VOLATILE.
+**Canonical encoder (DB N8):** sorted text arrays use `COLLATE "C"`, and every encoding starts with a per-table type tag (`<len>:<table>;`), so two tables can never produce colliding encodings.
 
 **Retention (DB L3):** every evidence table is retained for the life of the database (low volume: configuration events only). The
 policy table's existing index covers the pair lookups.
@@ -425,7 +454,8 @@ Algorithm:
    `policy:<T>:<J>` **exclusively** (`SELECT ... FOR UPDATE`, inserted first with `ON CONFLICT DO NOTHING` if missing; DB M2,
    security L1). Re-taking it when the author or loosen apply already holds it is a no-op. `55P03` or `40P01` propagate and are mapped to a
    retryable `gate_retry_later` (DB M8; s9).
-2. Force `NEW.created_at` monotonic (s3.1). If the caller supplied `gate_authorisation_id` or `gate_enabling_policy_id`, refuse
+2. Force `NEW.inserted_at := clock_timestamp()` and `NEW.created_at` monotonic from the lock row's `last_created_at`, then update
+   `last_created_at` (s3.1). If the caller supplied `gate_authorisation_id`, `gate_enabling_policy_id` or `inserted_at`, refuse
    `gate_authorisation_stamp_forbidden`.
 3. **If `NOT NEW.gate_withdrawal`: `RETURN NEW` now.** No other lock, no isolation check, no settings, freeze, integrity, chain or
    attestation read (I2, ledger M-2). The gate-off path takes only the pair row lock (plus K1-equivalent `loosening:<T>` on the governed
@@ -446,14 +476,19 @@ Algorithm:
       non-vacuity, I14), else `gate_integrity_unresolved`. If the per-tenant read disagrees with the platform count: `gate_integrity_read_inconsistent`
    7. no other legacy run of T, else `gate_tenant_has_unauthorised_gate`
    8. a current instance attestation, with its confirmations when the settings require two, else `gate_instance_attestation_missing`
-   9. C(T,J,now) exists, else `gate_authorisation_required`, or sharper `_lapsed` / `_revoked` / `_identity_mismatch` / `_environment_mismatch`
+   9. C(T,J,now) exists, else `gate_authorisation_required`, or sharper `_lapsed` / `_revoked` / `_identity_mismatch` / `_environment_mismatch`.
+      v2.2: C must also have `tier` = the current settings tier, else `gate_authorisation_tier_mismatch` (moving S to N invalidates every S authorisation; security N5)
+   9b. **Tier S only:** the worker attestation and the heartbeat are both `synthetic = true`, and the provider is the MOCK, else `gate_tier_s_requires_synthetic`. This is the only database-enforced part of "synthetic only". **That no real person data is present is a process control** (s19)
    10. the in-force screening policy is the authorisation's `screening_policy_id`, else `gate_screening_policy_changed`
    11. the worker attestation of C is current and bound to the current instance attestation, and a heartbeat of that provider with
        the same `synthetic` flag is younger than 10 minutes, else `gate_worker_attestation_missing`
-   12. when a cap is required: with `app.tenant_id` **set to T** (saved and restored; I14), `count(DISTINCT person_id)` of
+   12. when a cap is required: with `app.tenant_id` **set to T** (the previous value saved and restored **exactly**, including the empty
+       string; then the read-back `current_setting('app.tenant_id') = T` is asserted, DB N8; I14), `count(DISTINCT person_id)` of
        `player_accounts` is at most `capacity_accepted_persons_max`, else `gate_capacity_exceeded`
 7. `NEW.gate_authorisation_id := C.id`; `NEW.gate_enabling_policy_id := NEW.id`.
-8. If `NEW.created_by_scope = 'platform'`, refuse `trigger_gate_enable_refused` (existing).
+8. If `NEW.created_by_scope = 'platform'`, refuse `trigger_gate_enable_refused` (existing). This is defence in depth and is an
+   **equivalent mutant** when the earlier checks are intact (the `_10_guard` and the loosen validator refuse first). It is tested by disabling
+   the `_10_guard` admission on a private DB (QA).
 9. `RETURN NEW`.
 
 Notes on interaction (DB L6):
@@ -548,12 +583,31 @@ functions (that needs superuser).
 - Rows are created on first use with `INSERT ... ON CONFLICT DO NOTHING`. `gate:global` is seeded by 0195.
 - Every locker first does `set_config('lock_timeout', '5s', true)`, so a waiter fails with retryable `55P03` instead of hanging.
 - One owner-only helper does all of this: `screening_gate_lock(p_key text, p_exclusive boolean)`.
+- **v2.2 admission rule (security N1, High).** **No runtime-callable function takes any lock row before actor-proof consumption or LC040
+  admission.**
+  - These validate **without locking**: the filing-time asserts (`screening_trigger_loosen_assert`, `screening_policy_loosen_assert`,
+    the classifier branches at `0190:585` and `0191:425`, every `screening_gate_*_assert`) and `screening_gate_enable_preview`.
+  - These lock only **after** admission: the executors (LC040: an executed request of this transaction and actor), the routed authors
+    (after `aml_authorize` consumed the proof) and the guard (inside an admitted writer).
+  - Each executor **re-validates under its locks**. A narrowing request that turns out to be widening at execution is refused
+    `classification_changed_refile`.
+  - The `screening_gate_revoke` classifier branch validates payload shape only (DB N8).
+  - A catalogue/static test parses every runtime-executable function and fails if a lock call precedes the admission call (A-27).
+- **v2.2 watchdog (security N1, operations N2).** `idle_in_transaction_session_timeout` is **USERSET**: the runtime role can override it
+  for its own session, so it is **not a bound**. `statement_timeout` is user-settable too, and PG16 has no `transaction_timeout`. The bound
+  is therefore a **privileged watchdog**:
+  - An external job under role `igaming_gate_watchdog` (LOGIN, `pg_signal_backend`, plus `pg_read_all_stats` to see other roles' activity;
+    human-provisioned) terminates any **runtime-role** backend that holds a `screening_gate_locks` row lock longer than N seconds (N is an
+    engineering setting; default proposal 30 s).
+  - Each termination is logged and reported as `gate_lock_holder_terminated` (p2).
+  - The watchdog is **activation-blocking in both tiers** (s19). Until it exists, the residual is stated: an admitted runtime caller can hold
+    a lock row for as long as its connection lives.
 
 | Row key | Replaces | Taken by (mode) |
 |---|---|---|
 | `loosening:<T>` | advisory `screening_loosening:`\|\|T /190 | loosening validators and executors, capability configure (exclusive) |
 | `screening_policy:<T>:<J>` | advisory `T\|\|J`/0 (0189, 0190) | screening policy author and loosen apply (exclusive) |
-| `policy:<T>:<J>` | advisory `screening_trigger:`\|\|T\|\|J /191 | trigger author, loosen apply, **the guard** (exclusive); the policy-stream chain append (already held) |
+| `policy:<T>:<J>` | advisory `screening_trigger:`\|\|T\|\|J /191 | trigger author, loosen apply, **the guard** (exclusive); the policy-stream chain append (already held); **the adopt executor (exclusive, taken BEFORE `gate:global`, DB N8)** |
 | `gate:global` | K3 | guard new-enabling branch, authorise, adopt, revoke (shared); settings apply, attestations, freeze, freeze lift, break-glass revoke-all (exclusive) |
 | `gate:<T>:<J>` | K4 | guard new-enabling branch (shared); authorise, adopt, revoke, break-glass revoke (exclusive) |
 | `chain:evidence` | K5 (evidence stream only) | evidence-table chain appends (exclusive, last) |
@@ -566,11 +620,19 @@ functions (that needs superuser).
   `screening_trigger_loosen_assert` / `_apply` / classify branch). Each is a `CREATE OR REPLACE` with an unchanged signature, and the
   only body change is the lock line plus the pair helper. The fingerprint diff between 0196 and 0197 must contain **only** those lines
   (A-18).
-- **Residual DoS:** a runtime caller can still hold a lock **row** while its own transaction is open: it calls the author and then never commits.
-  The bound is `idle_in_transaction_session_timeout` on the runtime role. That is an operations setting applied by a role administrator,
-  because the role cannot change itself; this is activation-blocking for Tier N. Alongside it: `lock_timeout` in every waiter, and reconcile's
-  `gate_lock_contention` (p2), which reports waits longer than 30 s on `screening_gate_locks` with the holder's `usename` and
-  `application_name` from `pg_locks` and `pg_stat_activity`.
+- **Residual (v2.2 wording):** an admitted runtime caller can hold a lock row while its transaction stays open. The bound is the watchdog,
+  not `idle_in_transaction_session_timeout` (USERSET; it remains a recommended default but is not relied on).
+  - `lock_timeout` turns every wait into a retryable failure.
+  - `gate_lock_contention` (p2) reports waits longer than 30 s with the holder's `usename` and `application_name`. A non-superuser owner can
+    only read that with `pg_read_all_stats` or `pg_monitor`; that grant is a role-administrator step, unverified on RDS (DEFERRED with AWS,
+    operations N9).
+  - Runbook for `gate_retry_later`: read `gate_lock_contention`; the role administrator (or the watchdog) terminates the holder; retry
+    (ledger N-3).
+- **Fairness (DB N8):** a steady stream of `FOR SHARE` lockers can starve a `FOR UPDATE` waiter. The 5 s `lock_timeout` turns this into a
+  retryable failure, and the monitor counts retries.
+- **0197 swap timing (DB N8):** the advisory-to-row swap runs inside the write-quiet window. While old and new code coexist, mutual
+  exclusion is split between advisory and row locks for seconds. The swap of the screening-policy key is **atomic in one migration
+  for both `0189:67` and `0190:689`** (security N6).
 
 Serialisation results (READ COMMITTED):
 - **Author vs revoke:** the enabling holds `gate:<T>:<J>` shared until COMMIT. Revoke then follows, so the gate becomes active and `revoked`. If revoke commits first, the guard refuses.
@@ -594,7 +656,7 @@ Serialisation results (READ COMMITTED):
     (`p_drill`) is limited to 15 minutes.
 - **Early lift:** governed kind `screening_gate_freeze_lift` (widening, two Persons, officers). A freeze otherwise lapses at `frozen_until`.
 - Break-glass can never: insert or extend an authorisation, change settings, enable or disable a gate, release anything, or touch any trigger.
-- **Drill** (operations H4): quarterly in staging. A drill freeze of a few minutes, a break-glass revoke on a synthetic tenant, and an
+- **Drill** (operations H4, v2.2 cadence N11): at each staging deploy, and on a throwaway cluster in CI with the real NOLOGIN roles. A drill freeze of a few minutes, a break-glass revoke on a synthetic tenant, and an
   evidence template (incident id, logins granted and revoked with times, functions called, chain seq range, reconcile output before and
   after).
 
@@ -621,7 +683,7 @@ Serialisation results (READ COMMITTED):
 | P15 | `session_replication_role = replica` | owner / superuser | owner: no (superuser-only parameter; the manifest pins `pg_parameter_acl`) | superuser: deny triggers still fire (`ALWAYS`); insert guards do not (ORIGIN, s5.5); detected by D5 `misc_set` and by reconcile `gate_unexplained` |
 | P16 | anything | superuser | everything | detection outside the database only |
 | P17 (new) | **staging owner = RDS master** (F16), which has CREATEROLE and `rds_superuser`; it can grant itself attestor or break-glass membership | owner in staging | possible | refused by the role-separation check (s5.5); Tier S/N decision (s19) |
-| P18 (new) | squatting on advisory keys to block the author or **the governed gate-off** | any session | possible (security H1) | removed: lock rows only (s4.9). Residual: holding a row via an open transaction, bounded by `idle_in_transaction_session_timeout` |
+| P18 | squatting on advisory keys, or (v2.1 gap, security N1) calling a proof-less assert that took a lock row and then sleeping | any session / runtime | possible | v2.2: lock rows only, never before admission (s4.9); an admitted holder is bounded by the **watchdog**. The platform-wide advisory class outside this slice is a separate item |
 
 ### 5.2 Catalogue pins (writers, exposure, prefix loop)
 
@@ -650,6 +712,14 @@ Serialisation results (READ COMMITTED):
   `screening\_worker\_attest%`. It runs `REVOKE ALL ... FROM PUBLIC` and from the runtime role, and then grants back only the
   explicit allow-list. A new function is therefore closed by default. A catalogue test asserts the runtime-executable set equals
   the allow-list.
+- **v2.2 pins:**
+  - **Read filtering (security N7):** every runtime-executable function that reads any `screening_gate_*` table either filters by the session
+    tenant (AT002) or is platform-session-only. This is a catalogue test with a list, and each listed function has a negative test.
+  - **The closing prefix REVOKE covers sequences** (`screening_gate_event_seq`), because the default privileges in `init-app-role.sql`
+    would otherwise give the runtime USAGE (security L3).
+  - **`screening_gate_enable_preview` pin:** session-tenant bound (AT002), platform-session check, `LIMIT` and a local `statement_timeout`,
+    no lock.
+  - **No lock before admission** (A-27).
 - Other pins: FORCE RLS; no ACL entry for runtime or PUBLIC on any new table; `tgenabled` per the s5.5 table; `proconfig` holds the
   pinned `search_path` (and the hashing GUCs on hashing functions); the guard is the last BEFORE INSERT trigger.
 - **Post-suite check** (QA H-1): a test that runs last asserts every trigger in the s5.5 table has its specified `tgenabled`. It catches
@@ -670,20 +740,27 @@ No privilege, FORCE RLS, append-only, admission-guarded, chained, audited, recon
 chain, and read the actor-proof keys. The superuser can do everything. In-database controls therefore protect against runtime roles
 and accidents only.
 
-**Role separation (security H3; G5).** Required for any environment that has a settings row (that is, anywhere activation is possible):
+**Role separation (security H3, N4; G5).** Enforced wherever the settings say `role_separation = 'enforced'` (mandatory for Tier N,
+**and the default for Tier S**). The only alternative is the explicit Tier S option S-b (`waived_tier_s`, a two-Person settings decision),
+whose acceptance is spelled out in s19. Under S-b, every check below reports `role_separation_waived` (p2) instead of refusing. When
+enforced:
 - The owner role is NOSUPERUSER, NOCREATEROLE and **not** a member of `rds_superuser`. **Staging must stop defaulting
   `DB_OWNER_USER` to the RDS master** (F16): a separate owner role is created by the role administrator.
 - The attest functions and every governed executor refuse with `gate_role_separation_violated` when any of these holds:
   - the owner role has `rolcreaterole`, `rolsuper` or `rolbypassrls`;
   - the owner role is a member of `rds_superuser` (checked only if that role exists);
   - `session_user` (the API login, for executors) is a member of the owner role;
-  - an attestor or break-glass member is also an owner member.
+  - an attestor or break-glass member is also an owner member;
+  - (v2.2) the **API login itself** is SUPERUSER, CREATEROLE or BYPASSRLS, is a member of `rds_superuser`, or has any membership at all;
+  - (v2.2) any role other than the role administrator holds **ADMIN OPTION** on the attestor or break-glass roles
+    (`pg_auth_members.admin_option`), or any CREATEROLE holder other than the role administrator exists;
+  - (v2.2) the attestor or break-glass `session_user` **is** the API login.
 
   These are catalogue reads (`pg_roles`, `pg_auth_members`).
 - `internal/db/production_safety.go` `VerifyRuntimeRoleInProduction` (`:115-167`) is extended into
-  `VerifyRuntimeRoleSeparation`. It runs **for production and for any anchor where `screening_gate_settings` has a row** (read through an
-  owner-only definer function `screening_gate_settings_present()` that is runtime-executable and returns a boolean). In those
-  environments it refuses to start if the runtime role owns tables or has memberships.
+  `VerifyRuntimeRoleSeparation`. v2.2: it runs at startup **whenever the anchor is staging or production** (not only when settings exist), and
+  the monitor repeats the catalogue checks every pass (`role_separation_violated` p1, or `role_separation_waived` p2 under S-b). It refuses to
+  start if the runtime role owns tables or has memberships.
 
 **`ENABLE ALWAYS` vs ORIGIN (resolves security H3 against DB H5).** PostgreSQL's logical-replication apply worker runs with
 `session_replication_role = replica`. ALWAYS triggers fire there; ORIGIN triggers do not. RDS blue/green major upgrades use logical
@@ -691,15 +768,17 @@ replication, so this matters.
 
 | Trigger | Mode | Why |
 |---|---|---|
-| deny triggers (UPDATE, DELETE, TRUNCATE) on every evidence table; `aml_screening_trigger_policies_append_only`, `_no_truncate`; `database_environment_no_truncate` | **ALWAYS** | append-only tables never replicate an UPDATE, DELETE or TRUNCATE (the publisher refuses them), so ALWAYS never blocks a legitimate apply, and it stops a replica-mode bypass |
+| deny triggers (UPDATE, DELETE, TRUNCATE) on every evidence table; `aml_screening_trigger_policies_append_only`, `_no_truncate`; `database_environment_no_truncate`; **v2.2: a new `database_environment_deny` (UPDATE, DELETE) split out of `database_environment_guard`** | **ALWAYS** | the publisher's own deny triggers prevent UPDATE, DELETE and TRUNCATE on these tables, so none are ever published; ALWAYS therefore never blocks a legitimate apply, and it stops a replica-mode bypass |
+| **v2.2 (security N3): `screening_replica_mode_refuse` on every guarded table** (the policy table, every evidence table, `database_environment`), BEFORE INSERT OR UPDATE OR DELETE | **ALWAYS** | refuses (`GA010`) when `session_replication_role = 'replica'` unless the backend is a logical-replication apply or tablesync worker (`pg_stat_activity.backend_type` of `pg_backend_pid()`; the exact strings on PG16 and RDS are an open verification, Q11). This closes the plain `SET session_replication_role` bypass. A superuser can still alter the trigger itself, which D1 and D5 detect |
 | insert guards: `aml_screening_trigger_policies_10_guard`, `_99_activation_guard`, every evidence admission guard, `database_environment_guard` (it guards INSERT, UPDATE and DELETE in one function) | **ORIGIN** (unchanged default) | on a subscriber the apply worker has no session actor and no executed request, so ALWAYS insert guards would break replication. Replica mode is superuser-only (P15); a bypass is detected by `gate_unexplained` and by D5 |
 | chain triggers (AFTER INSERT) | **ORIGIN** | a subscriber receives the chain rows as data; firing locally would double-append |
 
 **Stance on logical replication of these tables:** allowed only as **whole-database replication for an upgrade or migration**,
 never as partial publication. The subscriber is a new instance, so it needs re-attestation, and identity-bound authorisations
 classify `identity_mismatch` after switchover and need adoption (s3.7). A catalogue test pins the modes above.
-`database_environment_guard` stays ORIGIN, as now (changing its UPDATE/DELETE half would need splitting the function; recorded as a
-follow-up, DB L-note).
+`database_environment_guard` keeps its INSERT half ORIGIN. Its UPDATE/DELETE half is split into the ALWAYS deny trigger above (v2.2).
+Startup options can set `session_replication_role` at connection time for a superuser. That gap is recorded, and Tier N requires
+pgaudit `misc_set` plus `log_connections` to see it.
 
 ### 5.6 Detection controls: independence stated honestly (security M6, operations H1/H2/H3/M6)
 
@@ -714,6 +793,10 @@ follow-up, DB L-note).
 - reads the raw chain and evidence rows and **recomputes every hash client-side** (its own code, never `screening_gate_chain_verify()`);
 - compares against the heads it stored previously in an external append-only store;
 - computes the catalogue manifest lines (D4) with inline SQL.
+
+**Completeness (security N3).** The external verifier checks a **one-to-one** correspondence: every evidence row and every post-cut-over
+policy row has exactly one chain entry, and every chain entry points to an existing row. Missing entries (rows inserted with chain triggers
+disabled) and orphan entries are p1. The in-database reconcile repeats the check as a tripwire.
 
 The chain is **two streams**: a per-(T,J) policy stream serialised by `policy:<T>:<J>`, and `chain:evidence` for configuration events.
 Each row carries `prev_hash` of its own stream. Ordering is by `seq` with **gaps allowed**: verification follows `prev_hash` links
@@ -734,7 +817,8 @@ The watermark is advisory, because the runtime role could reset it. The external
 - Owned by `security`. Generated in CI from a clean migrate of the release commit and signed with the release signing key.
 - Regenerated only by a release.
 - Scope: every `screening_gate_*` object, the policy-table triggers, the **gate predicate functions (I1 set) and the monitor functions**,
-  ACLs, `pg_parameter_acl`, and the event triggers.
+  ACLs, `pg_parameter_acl` (**must be empty**), **no `pg_db_role_setting` entry setting `session_replication_role`** for any role or
+  database (security N3), and the event triggers.
 
 **D5 (log shipping and pgaudit), D6 (role separation, above), D7 (owner-login alerts), D8 (key custody):** as v2. D5 is not
 available in this sandbox.
@@ -746,7 +830,9 @@ human. The monitor has these failure modes and detections (operations H1):
 - Each check runs in its own sub-transaction (savepoint). An exception becomes `monitor_check_failed:<problem>` (p2) and does not stop
   the other checks.
 - Single-flight: the monitor takes `monitor:screening_gate` with `FOR UPDATE NOWAIT` and skips the pass if it is held.
-  `statement_timeout = 30s` per check.
+  `statement_timeout = 30s` per check. v2.2 (security N6, operations N5): the single-flight row is reachable through the runtime-executable
+  summary, so a hostile holder could suppress passes. **A skipped pass also skips the export**, so the external dead-man's switch sees it as
+  stale. The `monitor_skipped` metric counts skips.
 - **Dead-man's switch:** every pass exports `last_pass_at` and the chain head to the external store. The external job raises if no pass
   arrives within 3 intervals.
 
@@ -793,6 +879,11 @@ persons_held_on_enable_preview}`.
 - `gate_authorisation_revoked_before_execution` (s4.4).
 - Counted approvals: exactly the 2 fresh distinct officer Persons, with the existing codes.
 - `0196` down restores the 0191 classifier wrapper and the approvals-officer trigger **byte for byte** (DB M4).
+- **v2.2:** the filing-time asserts and the classifier branches validate **without any lock** (s4.9 admission rule). `screening_gate_enable_preview`
+  is bound to the session tenant (AT002), refuses non-platform sessions, and runs with `LIMIT` and a local `statement_timeout`. Its count is
+  advisory only; the executor recomputes it.
+- **Accepted risk (DB L7):** any platform_admin can file a narrowing revoke. It is fail-safe, but it is also an availability lever (it stops new
+  enabling). It is audited and alerted (`revocation_created` p3).
 
 ### 6.3 Owner parameters
 
@@ -935,7 +1026,7 @@ As v2, plus:
 | T13 | deploy window | operator | old app with new schema | guard is in the database; fail-closed | no alerts until R2 (ordering rule) |
 | T14 | security posture | operator | down migrations | `GA095` outside development/test or with evidence | none |
 | T15 | everything | superuser | catalog edits, disable event triggers, `session_replication_role` | D5 log shipping to a store it cannot edit; cloud MFA | **cannot be prevented in the database** |
-| T16 | governed gate-off and activation availability | any session | advisory-key squatting (P18) | lock rows, `lock_timeout`, contention report | open-transaction holding, bounded by `idle_in_transaction_session_timeout` |
+| T16 | governed gate-off and activation availability | any session | lock squatting (P18) | lock rows only after admission; `lock_timeout`; watchdog; contention report | an admitted holder until the watchdog fires (N s); none if the watchdog is absent (activation-blocking) |
 | T17 | correctness of instance-wide checks | design defect | FORCE RLS empty reads (fail open) | platform-level evidence; tenant loop + non-vacuity (I14) | a defect in a new cross-tenant read without the assertion (A-23 pins the known ones) |
 | T18 | role separation | staging operator | owner = RDS master (P17) | separate owner role; `gate_role_separation_violated`; startup check | if the owner decision for Tier S waives it (s19) |
 | T19 | logical replication | upgrade operator | ALWAYS insert guards breaking apply, or replica-mode bypass | the s5.5 split | superuser replica-mode bypass of insert guards (detected) |
