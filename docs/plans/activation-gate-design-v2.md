@@ -907,11 +907,11 @@ capacity evidence (OD-G3: report digest and head-count cap). Mixing the two woul
 
 | Step | Content | Behaviour |
 |---|---|---|
-| **R1** (application, must reach **100 % of instances** before 0198) | codes in `aml.RefusalCodes` and the licensing-change refusal table; OpenAPI; Back Office texts; kinds registered; the **version probe**: the app reads `max(version)` of `schema_migrations` and enables the features at `>= 0196` / `>= 0198`; the retryable mapping of `55P03`/`40P01` in the aml routes (DB M8); fixtures and E2E on the sanctioned path (s15.3); `VerifyRuntimeRoleSeparation` (s5.5) | none |
-| **0195_screening_gate_evidence** | `SET LOCAL lock_timeout = '5s'`; pre-flight `GA098`; event sequence; lock table (+ `gate:global`, `chain:evidence`, `monitor:screening_gate` seed rows); settings, attestation, confirmation, worker attestation, authorisation, revocation, freeze, freeze-lift, chain tables (genesis row), catalogue-baseline table; admission and deny triggers (modes per s5.5); chain triggers on the evidence tables; helpers (`screening_gate_lock`, the clock-seam functions, canonical encoders); attest and break-glass functions; alert kinds; `schema_migrations.txid bigint DEFAULT txid_current()`; prefix revoke loop | inert (genesis row and lock seed rows only) |
+| **R1** (application, must reach **100 % of instances** before 0198) | codes in `aml.RefusalCodes` and the licensing-change refusal table; OpenAPI; Back Office texts; kinds registered; the **version probe** (the app reads `max(version)` of `schema_migrations`, refreshed every 60 s, and enables the features at `>= 0196` / `>= 0198`) **plus the per-instance probe deliverable** (operations N10): each instance reports its build version through a version endpoint or heartbeat row that **the pipeline** reads before applying 0198 (the opposite direction; the DB-side probe cannot prove 100 % rollout); **a read-only legacy-pending pre-flight check** shipped in R1 and CI (the same query as 0198's pre-flight, so operators learn before the deploy window whether 0198 would refuse, and can neutralise through governed loosening; DB N7); the retryable mapping of `55P03`/`40P01` in the aml routes (DB M8); fixtures and E2E on the sanctioned path (s15.3); `VerifyRuntimeRoleSeparation` (s5.5) | none |
+| **0195_screening_gate_evidence** | `SET LOCAL lock_timeout = '5s'`; pre-flight `GA098`; event sequence; lock table (+ `gate:global`, `chain:evidence`, `monitor:screening_gate` seed rows); settings, attestation, confirmation, worker attestation, authorisation, revocation, freeze, freeze-lift, chain tables (genesis row), catalogue-baseline table; admission and deny triggers (modes per s5.5); chain triggers on the evidence tables; helpers (`screening_gate_lock`, the clock-seam functions, canonical encoders); attest and break-glass functions; alert kinds; `ALTER TABLE schema_migrations ADD COLUMN txid bigint NULL` **then** `ALTER COLUMN txid SET DEFAULT txid_current()` (existing rows stay NULL; no rewrite; operations N4, DB N3; the txid is meaningless after a logical restore, operations N11); prefix revoke loop **including sequences** | inert (genesis row and lock seed rows only) |
 | **0196_screening_gate_governed_kinds** | five kinds; classifier wrapper branch; filing-time assert helpers; approvals-officer trigger extension; executors; executed-request reconcile part; prefix loop | inert: no settings, so everything refuses |
-| **0197_screening_locks_and_pair_helper** | `screening_trigger_policy_pair`; `CREATE OR REPLACE` of the 0189, 0190 and 0191 functions, swapping advisory locks for lock rows (s4.9) and the duplicated pair queries for the helper; **no other body change** (fingerprint-diff pin) | the same decisions; no runtime-reachable advisory keys |
-| **0198_screening_gate_activation_guard** (contract) | write-quiet window (operations M1); `LOCK ... SHARE ROW EXCLUSIVE` with `lock_timeout`; legacy-pending pre-flight (OD-G13); cut-over row + nonce; inventory (tenant by tenant + non-vacuity); columns `gate_authorisation_id`, `gate_enabling_policy_id` + FKs + index; the `_99_activation_guard`; the policy-stream chain trigger (**fresh start: the existing rows are covered by the inventory digest, not chained individually**; DB M7); `ENABLE ALWAYS` on `_append_only`, `_no_truncate`, `database_environment_no_truncate`; classify, reconcile, monitor summary, `screening_gate_settings_present`, catalogue check and baseline | new enabling refused everywhere until configured; existing gates unchanged |
+| **0197_screening_locks_and_pair_helper** | `screening_trigger_policy_pair`; `CREATE OR REPLACE` of the 0189, 0190 and 0191 functions, swapping advisory locks for lock rows (s4.9) and the duplicated pair queries for the helper; **no other body change** (fingerprint-diff pin). **v2.2 pins (ledger N-1, DB N5):** (i) the bodies of `aml_screening_gate_denies`, `aml_hold_active`, `aml_screening_enqueue_due`, `aml_screening_since`, `aml_screening_covers`, `aml_screening_gate_overdue` and `aml_screening_parked_*` are **md5-identical from 0194 through 0198**; (ii) the 0189/0190 **screening-policy** functions differ **only** in the lock line and do **not** adopt the trigger-policy pair helper; (iii) because the pair helper replaces the latest/in-force queries (`0191:187-193`, loosen validator), the helper mutants M60-M62 (in-force by `now()` instead of `clock_timestamp()`, latest filtered by `effective_from`, ordering without `id`) must be killed by the **existing, unchanged** suites `internal/aml/screening_d4_integration_test.go`, `internal/httpserver/aml_trigger_policy_tighten_only_integration_test.go` and `internal/licensingchange/screening_trigger_loosening_integration_test.go`; (iv) before/after **decision tables** over a fixed population, including the returned jsonb of `screening_trigger_loosen_apply` and `screening_policy_loosen_apply`, are identical. Runs in the write-quiet window | the same decisions; no runtime-reachable advisory keys **in this slice** |
+| **0198_screening_gate_activation_guard** (contract) | write-quiet window (operations M1); **v2.2 (operations N3, DB N4):** pause the gate monitors and the worker, then the **first statement** is `LOCK TABLE aml_screening_trigger_policies IN ACCESS EXCLUSIVE MODE` (one lock request: ADD COLUMN needs it anyway; no upgrade from a weaker lock). It is held for the minimum time under `lock_timeout = '5s'`. **Stated cost:** while it is held, the withdrawal-path reads of the trigger policies stall (bounded by that timeout; the payout path retries safely as today, parked rather than rejected); `created_at`-ahead pre-flight (s3.1); legacy-pending pre-flight (OD-G13); cut-over row + nonce; inventory (tenant by tenant + non-vacuity); columns `gate_authorisation_id`, `gate_enabling_policy_id` + FKs + index; the `_99_activation_guard`; the policy-stream chain trigger (**fresh start: the existing rows are covered by the inventory digest, not chained individually**; DB M7); `ENABLE ALWAYS` on `_append_only`, `_no_truncate`, `database_environment_no_truncate`; classify, reconcile, monitor summary, `screening_gate_settings_present`, catalogue check and baseline | new enabling refused everywhere until configured; existing gates unchanged |
 | R2 | monitor loop; read and reconcile routes; Back Office badge and filing forms | alerts start |
 | phase 2 (separate) | worker role split | needs role provisioning |
 
@@ -920,7 +920,7 @@ capacity evidence (OD-G3: report digest and head-count cap). Mixing the two woul
 | Down | Refused (`GA095`) when | Otherwise |
 |---|---|---|
 | 0198 | the anchor is `production`, `staging` or unrecorded; OR any settings, authorisation, revocation, attestation, freeze or lift row exists; OR any policy row has a non-NULL `gate_authorisation_id` or is a **gating** row created after cut-over | drops the guard, columns, cut-over, inventory, the policy-stream chain trigger and its chain rows, classify, monitor; restores the original trigger modes; byte-equal to 0197. **Note:** in development and test this deletes the policy-stream chain rows of non-gating post-cut-over rows (evidence loss accepted only under those anchors) |
-| 0197 | anchor not development/test | restores the 0196 bodies (advisory locks) byte for byte |
+| 0197 | (v2.2, DB N6) refused only if any 0198 object exists, or any lock row exists beyond the seeds. Allowed in development, test **and staging** otherwise | restores **the 0191-era bodies as last redefined before 0197** (advisory locks) byte for byte |
 | 0196 | anchor not development/test; OR any request of the five kinds exists | restores the 0191 classifier wrapper and approvals trigger **byte for byte** |
 | 0195 | anchor not development/test; OR any chain row beyond genesis; OR any evidence row | drops everything, including the `txid` column |
 
@@ -979,7 +979,27 @@ staging and production is forward-fix only.
 ### 7.7 Runbook completeness (operations M7)
 
 The runbook section must contain:
-- the activation order (s4.6);
+- **the activation order** (v2.2, operations; s4.6 holds only the restore order), as **one ordered checklist with an owner per step**:
+  1. owner decisions recorded (OD-G0 and the s12.2 list), including OD-G10 with after-hours criteria;
+  2. roles provisioned with named logins (role administrator);
+  3. watchdog running (operations);
+  4. separate owner role, or the S-b waiver recorded (s19);
+  5. settings via the governed kind (two officers);
+  6. instance attestation plus confirmation (two attestors);
+  7. worker attestation (attestor);
+  8. capacity report and preview reviewed (approvers);
+  9. `screening_gate_authorise` (requester plus two approvers);
+  10. the officer enables;
+  11. the manual chain-head anchor is recorded in the change ticket (Tier S) or by the external verifier (Tier N);
+  12. the named daily reviewer is assigned for the activation period.
+- **OD-G10 after-hours:** the criteria under which on-call may execute a gate-off (a release decision), the named approver **role**, and how
+  the emergency owner credential and the declared window are obtained (secrets-manager break-glass entry, ticket, second person);
+- an **acknowledged-until** mechanism for `lapsed`/`revoked` p2 problems: the monitor suppresses re-raising an acknowledged problem code
+  until a recorded date, which itself expires (operations; this is alert-noise control, not a state change);
+- `head_export_unconfigured` (p3) while the D3b store is not configured;
+- `gate_capacity_exceeded` remediation: re-authorise with new capacity evidence, or a governed gate-off under OD-G10; never automatic;
+- a shared environment must **never** be anchored development or test (operations);
+- the `gate_retry_later` procedure (s4.9);
 - **a per-problem triage table** (every s11 code: meaning, the first query to run, the remedy, who acts);
 - tamper decision trees for `gate_unexplained`, `evidence_chain_broken`, `guard_not_intact` and `ddl_outside_migration` (preserve evidence, stop
   enabling with a freeze, escalate to security, never "fix" rows);
@@ -999,7 +1019,7 @@ As v2, plus:
 - **V3b:** the 0196→0197 fingerprint diff contains only the lock-line and pair-helper changes.
 - **V5c:** restore through `deploy/backup/restore.sh` under the drill's rules (backup by the BYPASSRLS `igaming_backup`, restore without
   weakening RLS). This is a feasibility proof for classification after restore (QA M).
-- **V13:** drill additions to `deploy/drill/verify.sql` (operations M4): chain verify, classify and reconcile after restore; a PITR restore shows
+- **V13 (concrete deliverables, v2.2):** `deploy/drill/verify.sql` lines for chain verify, completeness, classify and reconcile; `deploy/backup/pitr-drill.sh` asserts `instance_attestation_stale` after PITR; `deploy/drill/tamper.sql` adds one guard-disable step whose detection is the negative control; a break-glass drill script on a throwaway cluster with the real NOLOGIN roles; the written RPO/head-ahead rule. The earlier wording follows. Drill additions to `deploy/drill/verify.sql` (operations M4): chain verify, classify and reconcile after restore; a PITR restore shows
   `instance_attestation_stale`; a tamper negative control (`deploy/drill/tamper.sql` gains one guard-disable step that must surface in
   reconcile); the D3b head-ahead rule; a real NOLOGIN-roles drill.
 - **V12b:** guard, executor, monitor and verify cost measured at 10,000 persons per tenant, recorded against the CAPACITY plan's figures
@@ -1101,7 +1121,7 @@ Closed problem vocabulary (severity column: staging/production anchor ; developm
 |---|---|---|
 | `gate_unexplained` | p1 ; p1 | s3.3 state 1 |
 | `gate_environment_mismatch` | p1 ; p1 | state 2 |
-| `gate_legacy_unauthorised` | p1 ; p2 | state 6 |
+| `gate_legacy_unauthorised` | p1 ; p2 | state 7 (v2.2 fix: precedence numbering of s3.3) |
 | `evidence_chain_broken` | p1 ; p1 | `screening_gate_chain_verify()` not NULL |
 | `guard_not_intact` | p1 ; p1 | tripwire (guard or deny trigger missing, not `A`, body digest differs) |
 | `inventory_digest_mismatch` | p1 ; p1 | inventory rows or digest differ from `screening_gate_cutover` |
@@ -1142,6 +1162,9 @@ purpose never page. In staging and production:
 - The monitor is single-flight with `statement_timeout`.
 - V12b measures all of it.
 
+**Metrics (operations, v2.2):** loop duration; last successful pass; a problem gauge by code; attestation age; authorisation expiry gauge;
+guard refusals by code; `monitor_skipped`; watchdog terminations.
+
 **Discriminator:** one open alert per problem code. **Routing:** severity is the only routing key the dispatcher supports today (F20).
 Per-environment behaviour is therefore achieved by the severity mapping above, not by routing. OD-G11 is rewritten accordingly.
 
@@ -1153,7 +1176,7 @@ Per-environment behaviour is therefore achieved by the severity mapping above, n
 
 | ID | Decision | Options | RECOMMENDATION |
 |---|---|---|---|
-| OD-M1 | Authorise a **role administrator** to provision the NOLOGIN attestor role, an attestor test login, and the verifier role in the CI database definitions and in agents' private scratch databases. This is needed because every money-path test that enables a gate needs a real attestation (ledger H-1, QA C-1). No test-only bypass exists, and `t.Skip` on a missing role is banned. | (a) provision in CI and scratch via a human-approved change to the CI definitions and the scratch-db script; (b) block the implementation | **(a)**. Under CLAUDE.md, agents never create roles: the human or orchestrator applies it |
+| OD-M1 | Authorise a **role administrator** to provision, in the CI database definitions, the E2E harness cluster and agents' private scratch databases (v2.2 full list, QA): the NOLOGIN attestor role with **two distinct attestor logins**; the NOLOGIN break-glass role with one member login; **a login that is a member of the owner role** (to prove owner exclusion); **an owner configuration with CREATEROLE** (and, where emulable, an `rds_superuser`-like membership) to exercise `gate_role_separation_violated`, otherwise listed as untestable with the substitute in s15.5; the BYPASSRLS verifier role (a superuser step); the watchdog role with `pg_signal_backend`. This is needed because every money-path test that enables a gate needs a real attestation (ledger H-1, QA C-1). No test-only bypass exists, and `t.Skip` on a missing role is banned. | (a) provision in CI and scratch via a human-approved change to the CI definitions and the scratch-db script; (b) block the implementation | **(a)**. Under CLAUDE.md, agents never create roles: the human or orchestrator applies it |
 | OD-M2 | Accept the merge with alert delivery still OPEN (ALERT-DELIVERY-1). Merge is strictly more restrictive than today. | accept; or block on delivery | accept for merge; delivery blocks activation in Tier N (s19) |
 
 ### 12.2 Block ACTIVATION (per environment)
@@ -1170,11 +1193,11 @@ Per-environment behaviour is therefore achieved by the severity mapping above, n
 | OD-G7 | break-glass holders; freeze cap (≤ 72 h structural); early lift (two Persons); emergency gate-off excluded | | revoke, revoke-all and freeze only; 24 h cap; quarterly drill |
 | OD-G8 | attestation maximum age; **confirmations (1 or 2)**; attestor population; acceptance of R-3 | | 30 days; 2 in staging and production; R-3 accepted in writing |
 | OD-G9 | phase 2 worker split | | before Tier N |
-| OD-G10 | withdrawal-release policy (a gate-off releases screening-only holds) | not invented | decide before any gate-off or activation |
+| OD-G10 | withdrawal-release policy (a gate-off releases screening-only holds), **including after-hours criteria, the named approver role and how the emergency owner credential and declared window are obtained** | not invented | decide before activation and before any gate-off outside development (ledger non-negotiable) |
 | OD-G11 | alert severity mapping as s11 (routing by severity only) + ALERT-DELIVERY-1 | | as s11; close ALERT-DELIVERY-1 for Tier N |
 | OD-G12 | external store (D3b, D5); KMS signing (R-5) | | WORM store in a separate account; KMS ADR |
 | OD-G13 | legacy **pending** gating rows at cut-over | (a) refuse to apply 0198 while any exist; (b) apply and classify p1 | (a) in staging and production; (b) in development and test |
-| OD-G14 | staging owner role: a separate owner, not the RDS master (P17) | required for Tier S / only for Tier N | part of OD-G0 (security and operations disagree) |
+| OD-G14 | staging owner role: a separate owner, not the RDS master (P17) | S-a enforced in Tier S (default) / S-b waived in Tier S with the exact acceptance of s19 | part of OD-G0. The design is consistent under either option: enforcement is the setting `role_separation` |
 
 ## 13. Engineering choices
 
@@ -1185,7 +1208,7 @@ token). E-8 continuation means both the latest and the in-force rows gate. E-9 k
 break-glass are NOLOGIN roles distinct from the owner; the owner is explicitly excluded. E-11 attestation bound to postmaster start
 and timeline. E-12 explicit production anchor in provisioning plus `anchor_unrecorded`. E-13 adoption exempt from worker attestation.
 E-14 monitor loop in every environment. E-15 the guard is SECURITY INVOKER (runs as the definer function or the owner). E-16
-containment is per tenant; instance-wide only for integrity states. E-17 the guard is a separate `_20_` trigger; the `_10_` guard is
+containment is per tenant; instance-wide only for integrity states. E-17 the guard is a separate trigger (named `_99_` since v2.1, superseding `_20_`); the `_10_` guard is
 not copied or changed.
 
 Superseded in v2.1: E-5 by E-23 (ALWAYS only for deny triggers), E-8 by the s3.1 continuation rule, E-9 by E-18 (lock rows). **v2.1 additions:** E-18 lock rows, not advisory keys. E-19 platform-level evidence tables. E-20 run identity by pointer column. E-21 forced
@@ -1210,7 +1233,10 @@ the capacity work in a separate slice.
 **v2.1:** v2's questions 1, 2, 4, 5 and 7 remain. Question 3 is answered by the `txid DEFAULT txid_current()` column. New questions:
 - Q8: does RDS blue/green carry these tables' triggers in the same modes on green? To be verified in the staging drill.
 - Q9: does `pg_is_in_recovery()`-gated attestation work for a managed failover where the new primary's timeline is visible immediately?
-- Q10: can the version probe be read by every instance before 0198 runs (pipeline integration)?
+- Q10: can the version probe be read by every instance before 0198 runs (pipeline integration)? (v2.2: superseded by the per-instance probe deliverable.)
+- Q11 (v2.2): the exact `pg_stat_activity.backend_type` strings of logical-replication apply and tablesync workers on PG16 and RDS (PG17 renamed them).
+- Q12 (v2.2): the timeline read: `(pg_control_checkpoint()).timeline_id` lags a promotion until the next checkpoint. v2.2 captures **both** that and the timeline parsed from `pg_walfile_name(pg_current_wal_lsn())` (first 8 hex digits), and requires both to match (DB N8).
+- Q13 (v2.2): whether `pg_read_all_stats` can be granted to the owner or monitor role on RDS for holder identity (DEFERRED with AWS).
 
 ---
 
