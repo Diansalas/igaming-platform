@@ -805,106 +805,117 @@ Unchanged, plus audit events for freeze lifts and confirmations (s10).
 
 ---
 
-## 7. Item 5: migration strategy (0195+)
+## 7. Item 5: migration strategy (0195+) (v2.1)
 
-### 7.1 Sequence (expand, then contract)
+### 7.1 Revised sequence
 
-| Step | Content | Effect on behaviour |
+The **capacity work stays separate.** Keyset batching, the enqueue-failure alert, priority lanes and the load test are their own slice and
+migrations, reviewed by ledger-finance for performance. The activation gate does not depend on them. Its only link is the owner's
+capacity evidence (OD-G3: report digest and head-count cap). Mixing the two would make one slice's rollback hold the other hostage.
+
+| Step | Content | Behaviour |
 |---|---|---|
-| **R1 (application release first)** | `aml.RefusalCodes` and the licensing-change refusal table gain every new code (s9). OpenAPI enums and Back Office texts too. Go registers the four kinds and **feature-detects** them (`to_regprocedure('public.screening_gate_authorise_apply(uuid)')`). If absent, filing answers `gate_authorisation_unavailable` (409) and the monitor loop is a no-op. Fixtures (`internal/testsupport/amlfix`) and E2E spec 10 learn to create settings, attestations and authorisations **through the real paths** | none |
-| **0195_screening_gate_evidence** | pre-flight `GA098` (refuses if any object exists or 0194 is not applied). Creates settings, instance attestation, worker attestation, authorisation, revocation, freeze, chain (plus genesis row) and catalogue-baseline tables with their guards, deny triggers (`ENABLE ALWAYS`) and chain triggers. Creates attest and break-glass functions (EXECUTE granted only if the NOLOGIN roles exist, else to nobody). Creates `screening_gate_chain_verify`. Seeds the three alert kinds. `ADD COLUMN gate_authorisation_id` (NULL, no rewrite) plus FK | **inert**: no row except the chain genesis; the policy table is not guarded yet |
-| **0196_screening_gate_governed_kinds** | inserts the four kinds into `licensing_change_kinds` (NO FORCE / FORCE dance as `0191:247-250`). Wraps `licensing_change_classify` (keeps every existing branch, the 0190 rule). Extends `licensing_change_approvals_screening_officer` to the widening kinds. Creates the four executors and the executed-request reconcile part | inert: every widening request refuses `gate_authorisation_not_configured` (no settings) |
-| **0197_screening_gate_activation_guard (contract)** | `LOCK TABLE aml_screening_trigger_policies IN SHARE ROW EXCLUSIVE MODE`. Writes `screening_gate_cutover` and `screening_gate_legacy_inventory` (snapshot, digest). Installs `_20_activation_guard` (`ENABLE ALWAYS`) and the chain trigger on the policy table. Creates `screening_gate_classify`, `screening_gate_reconcile`, `screening_gate_monitor_summary`, `screening_gate_catalogue_check` and the baseline rows | **new enabling is refused everywhere** until configured, attested and authorised. Existing gates are unchanged (classified, alerted) |
-| R2 (application) | monitor loop on; read and reconcile routes; Back Office classification badge and filing forms | alerts start |
-| Later slice (phase 2, not this one) | `igaming_screening_worker` role and worker process split; move heartbeat, claim and finish EXECUTE | needs human role provisioning |
+| **R1** (application, must reach **100 % of instances** before 0198) | codes in `aml.RefusalCodes` and the licensing-change refusal table; OpenAPI; Back Office texts; kinds registered; the **version probe**: the app reads `max(version)` of `schema_migrations` and enables the features at `>= 0196` / `>= 0198`; the retryable mapping of `55P03`/`40P01` in the aml routes (DB M8); fixtures and E2E on the sanctioned path (s15.3); `VerifyRuntimeRoleSeparation` (s5.5) | none |
+| **0195_screening_gate_evidence** | `SET LOCAL lock_timeout = '5s'`; pre-flight `GA098`; event sequence; lock table (+ `gate:global`, `chain:evidence`, `monitor:screening_gate` seed rows); settings, attestation, confirmation, worker attestation, authorisation, revocation, freeze, freeze-lift, chain tables (genesis row), catalogue-baseline table; admission and deny triggers (modes per s5.5); chain triggers on the evidence tables; helpers (`screening_gate_lock`, the clock-seam functions, canonical encoders); attest and break-glass functions; alert kinds; `schema_migrations.txid bigint DEFAULT txid_current()`; prefix revoke loop | inert (genesis row and lock seed rows only) |
+| **0196_screening_gate_governed_kinds** | five kinds; classifier wrapper branch; filing-time assert helpers; approvals-officer trigger extension; executors; executed-request reconcile part; prefix loop | inert: no settings, so everything refuses |
+| **0197_screening_locks_and_pair_helper** | `screening_trigger_policy_pair`; `CREATE OR REPLACE` of the 0189, 0190 and 0191 functions, swapping advisory locks for lock rows (s4.9) and the duplicated pair queries for the helper; **no other body change** (fingerprint-diff pin) | the same decisions; no runtime-reachable advisory keys |
+| **0198_screening_gate_activation_guard** (contract) | write-quiet window (operations M1); `LOCK ... SHARE ROW EXCLUSIVE` with `lock_timeout`; legacy-pending pre-flight (OD-G13); cut-over row + nonce; inventory (tenant by tenant + non-vacuity); columns `gate_authorisation_id`, `gate_enabling_policy_id` + FKs + index; the `_99_activation_guard`; the policy-stream chain trigger (**fresh start: the existing rows are covered by the inventory digest, not chained individually**; DB M7); `ENABLE ALWAYS` on `_append_only`, `_no_truncate`, `database_environment_no_truncate`; classify, reconcile, monitor summary, `screening_gate_settings_present`, catalogue check and baseline | new enabling refused everywhere until configured; existing gates unchanged |
+| R2 | monitor loop; read and reconcile routes; Back Office badge and filing forms | alerts start |
+| phase 2 (separate) | worker role split | needs role provisioning |
 
-**Classification is derived; no data is rewritten.** No existing row of `aml_screening_trigger_policies` (or any other table) is
-updated. Legacy rows keep `gate_authorisation_id = NULL`. The inventory is a new table.
-
-### 7.2 Rollback (down): exactly when it is refused
+### 7.2 Rollback (down; v2.1 narrows the refusal conditions, DB L4)
 
 | Down | Refused (`GA095`) when | Otherwise |
 |---|---|---|
-| 0197 | the anchor is `production`, `staging` or unrecorded (removing the guard weakens security); OR any row exists in settings, authorisations, revocations, attestations or freezes; OR any policy row has `gate_authorisation_id IS NOT NULL`; OR any policy row was created after `screening_gate_cutover.applied_at` | drops the guard, the policy-table chain trigger, classify, reconcile, monitor, the catalogue check and baseline, cutover and inventory. Restores the 0194 state byte for byte |
-| 0196 | anchor not `development`/`test`; OR any `licensing_change_requests` row of the four kinds exists (decision records would be lost, the `0191` down precedent) | restores the 0195 classifier wrapper and approvals trigger; drops kinds and executors |
-| 0195 | anchor not `development`/`test`; OR any chain row beyond genesis; OR any evidence row; OR any policy row with a non-NULL stamp | drops everything 0195 created, including the column |
+| 0198 | the anchor is `production`, `staging` or unrecorded; OR any settings, authorisation, revocation, attestation, freeze or lift row exists; OR any policy row has a non-NULL `gate_authorisation_id` or is a **gating** row created after cut-over | drops the guard, columns, cut-over, inventory, the policy-stream chain trigger and its chain rows, classify, monitor; restores the original trigger modes; byte-equal to 0197. **Note:** in development and test this deletes the policy-stream chain rows of non-gating post-cut-over rows (evidence loss accepted only under those anchors) |
+| 0197 | anchor not development/test | restores the 0196 bodies (advisory locks) byte for byte |
+| 0196 | anchor not development/test; OR any request of the five kinds exists | restores the 0191 classifier wrapper and approvals trigger **byte for byte** |
+| 0195 | anchor not development/test; OR any chain row beyond genesis; OR any evidence row | drops everything, including the `txid` column |
 
-This is stricter than `0191` down (development **and staging**): here staging is refused, because staging is where authorisations
-will be real decisions.
+Down tests record the anchor **before** running (DB L4). Fingerprints compare columns by **name and type, not `attnum`**: ADD then
+DROP COLUMN leaves an attnum hole.
 
-### 7.3 Mixed application versions
+**Sanctioned guard maintenance** (operations M2): a guard change is always a **forward migration** inside a declared window.
+`DISABLE TRIGGER` is never a maintenance step. It is p1 by design, and the backup tooling bans it (F17). In practice, rollback in
+staging and production is forward-fix only.
 
-| Combination | Behaviour | Acceptable? |
-|---|---|---|
-| Old app (pre-R1), schema 0197 | gating author call: `AT004` + unknown HINT, so 400 without a check code (F14 ignores unknown hints); nothing written. Licensing-change kinds unknown to Go: 400. Monitor absent: **no alerts** | yes for safety (fails closed). **No** for alerting, so R1 must precede 0197 (the order above) |
-| R1, schema 0194 | features detected absent: `gate_authorisation_unavailable`; the gate behaves as today (**G1 still open**) | transitional only |
-| R1/R2, schema 0197 | target state | yes |
-| Rolling deploy of the worker | no worker signature changes in 0195 to 0197 | yes |
+### 7.3 Mixed versions
 
-### 7.4 No activation by migration or service start (the pin)
+| Combination | Behaviour |
+|---|---|
+| old app (pre-R1) + 0198 | gating author call gives 400 without a code; the governed loosening path, when the guard refuses with LC050, gives 409 with a guard code (no 500, DB H4); no monitor. **Not allowed**: R1 must be at 100 % first (the pipeline checks the version probe of every instance) |
+| R1 + 0194 | features off (the probe); the gate as today |
+| R1/R2 + 0198 | target |
 
-Test A-17 (integration, `cmd/migrate` and `internal/aml`):
-1. Clean `migrate up` to head, then: `count(*)` of settings, authorisations, revocations, instance attestations, worker
-   attestations and freezes is 0. The chain holds the genesis row only (plus one row per pre-existing policy row in an upgrade). There is
-   no gating policy row.
-2. Upgrade from a 0194 fixture holding N gating runs: after `up`, the gating rows are byte-identical to before (`row_sha256` equal),
-   their count is unchanged, there is no stamp, and every run classifies as `legacy_unauthorised`. A fixed decision table of
-   `aml_screening_gate_denies(t, p, 'withdrawal')` over the fixture population is **identical before and after** (I1, I3).
-3. Static test: migration files `0195+` contain no `INSERT INTO` any settings, authorisation, attestation, freeze or revocation table,
-   and no call to an `_apply`, attest or break-glass function. `cmd/` and `internal/` production files reference the `_apply` functions
-   only from `internal/licensingchange` and never call the attest or break-glass functions.
-4. Start-up: the E2E harness boots `cmd/platform-api` on a fresh database; after start, counts are as in step 1. The monitor
-   loop may have raised alerts, but it wrote no evidence.
+### 7.4 No activation by migration or service start (A-17, corrected)
 
-### 7.5 `deploy/init-app-role.sql`
+1. After a clean `up`: zero rows in settings, attestations, confirmations, worker attestations, authorisations, revocations, freezes
+   and lifts. The chain holds **exactly** the 0195 genesis row plus the 0198 cut-over row. No policy row exists. Lock-table rows are
+   exactly the seeds. This resolves the v2 contradiction with I6, which counted per-row chain backfill.
+2. Upgrade from a 0194 fixture with N gating runs:
+   - the canonical digests of all policy rows are byte-identical before and after;
+   - every run is `legacy_unauthorised`;
+   - the `aml_screening_gate_denies` decision table over the fixture population is identical before and after.
+3. A static pin over the migrations and Go production files (as v2).
+4. Boot `cmd/platform-api` (E2E harness): the counts are as in step 1.
 
-- Add to the runtime EXECUTE list: `screening_gate_authorise_apply(uuid)`, `screening_gate_adopt_apply(uuid)`,
-  `screening_gate_revoke_apply(uuid)`, `screening_gate_settings_apply(uuid)`, `screening_gate_classify(uuid)`,
-  `screening_gate_reconcile()`, `screening_gate_monitor_summary()`.
-- Re-assert on every run (the pattern of `deploy/init-app-role.sql:261-269`, `:890-895`): `REVOKE ALL` from `igaming_runtime` and
-  PUBLIC on every new table and on the attest, break-glass, guard, chain and catalogue-check functions.
-- **No role is created in this file for production.** Optional `deploy/security/init-gate-roles.sql` (attestor, break-glass,
-  ddl-audit owner, all NOLOGIN) is for a role administrator. Agents never run it (CLAUDE.md environment safety, incident
-  2026-09-27). In CI it is applied by the CI database definitions under human-approved change.
+### 7.5 `deploy/init-app-role.sql` (v2.1)
 
-### 7.6 OpenAPI and UI
+- Grants: the five `_apply` executors, the five filing-time `_assert` helpers, `screening_gate_classify`, `screening_gate_reconcile`,
+  `screening_gate_monitor_summary`, `screening_gate_settings_present`, `screening_gate_enable_preview`.
+- **Ordering** (DB L5): every grant runs before a closing prefix-based `REVOKE ALL ... FROM PUBLIC, igaming_runtime` for
+  everything **not** on the allow-list, so a re-run can never leave an extra grant.
+- No role creation for production. `deploy/security/init-gate-roles.sql` (attestor, break-glass, verifier, ddl-audit owner) is for a
+  role administrator only.
 
-- `AMLScreeningRefusalCode` gains the guard codes (s9). The licensing-change refusal schema (the list around
-  `docs/api/openapi/platform-api.yaml:13060`, `13101`) gains the kind codes. Descriptions containing `: ` are quoted, the full YAML
-  is validated, and the backoffice and b2c vitest OpenAPI contract tests are run.
-- New read routes (platform session; `PermAMLCaseRead`; no person data):
-  `GET /v1/admin/tenants/{tenantID}/screening/gate-authorisations?jurisdiction_id=` (classification plus a summary of the current
-  authorisation) and `GET /v1/admin/platform/screening/gate-reconcile` (platform_admin; ids and codes).
-- Back Office: a classification badge on the trigger-policy panel, and filing forms for the four kinds (activation-blocking, not
-  merge-blocking: the licensing-change API can file them).
+### 7.6 OpenAPI, UI and E2E changes (QA H-2)
 
-### 7.7 Runbook (`docs/runbooks/aml-screening-triggers.md`, a new section)
+- **OpenAPI:** the s9 codes go into `AMLScreeningRefusalCode` and the licensing-change refusal schema (`platform-api.yaml:13060`,
+  `:13101`). New read routes as v2. Full YAML validated; vitest OpenAPI contract tests run.
+- **Immediate enabling breaks these, and each must change:**
 
-Covers: the order (owner decisions, then settings via governed kind, then roles provisioned, then instance attestation, then worker
-attestation, then `screening_gate_authorise`, then officer enables); after-restore and after-restart procedure (s3.7, s4.7);
-legacy gate handling (adopt or governed off; never by hand); break-glass procedure; reading the reconcile output; and the operational
-requirements D1, D3b, D4, D5, D7 with their owners.
+| Place | Change |
+|---|---|
+| `internal/httpserver/aml_trigger_policy_tighten_only_integration_test.go:37`, `:60` | future-dated gating bodies become immediate. A new assertion: a future-dated enabling gives `gate_enabling_must_be_immediate` |
+| `backoffice/e2e/lib/wd_aml.ts:195-199` (next full minute), `:234-241` (wait until effective) | gate-on submits "now" and asserts immediate effect; the wait stays for continuations only |
+| `backoffice/src/features/aml/ScreeningPage.tsx:207` | when `gate_withdrawal` turns a gate **on** (new enabling), the date picker is hidden and "now" is sent; continuations keep the picker |
+| Back Office vitest pins of that form | updated with an explicit "intentional pin change" entry |
 
-### 7.8 Verification matrix
+- **Test (A-24):** future-dated enabling is refused for every writer (routed author, owner setter, raw owner INSERT). The governed loosening
+  never enables (existing).
 
-| ID | Scenario | Expected |
-|---|---|---|
-| V1 | clean setup + `verify` | OK; A-17 step 1 |
-| V2 | upgrade from a database at 0194 with legacy gates | A-17 step 2; inventory = all rows; digest recorded |
-| V3 | fingerprints (functions, ACLs, comments, constraints, indexes, columns, kinds, triggers with `tgenabled`) | upgraded-from-0194 == clean setup; `down 3` == the 0194 database byte for byte (development anchor, empty evidence); `up` again == first up |
-| V4 | down refusals | `GA095` under production, staging and unrecorded anchors; `GA095` with any evidence row; `GA095` with a stamped row |
-| V5 | restored database: (a) `pg_dump` into a new database of the same cluster; (b) a pre-0197 dump restored then `up` | (a) `identity_mismatch` for authorised runs, legacy stays legacy, new enabling refused; (b) all gating runs legacy |
-| V6 | concurrent author vs revoke, approve vs revoke (barrier-driven, both orders, 100 iterations) | serialised as s4.9; no deadlock; no enabling after a committed revocation |
-| V7 | old app vs new schema | 400, no write, no check code |
-| V8 | new app vs old schema | `gate_authorisation_unavailable`, gate unchanged |
-| V9 | non-READ-COMMITTED enabling | `gate_isolation_refused` |
-| V10 | owner tamper drills (test cluster only): disable guard then insert gating row; edit an authorisation after disabling its deny trigger; replace the guard body | reconcile: `gate_unexplained`, `evidence_chain_broken`, `guard_not_intact` (tripwire); with D1 provisioned: `ddl_outside_migration` |
-| V11 | Playwright spec 10 updated (authorisation through the API by two officers, attestation by the harness's attestor) | green, no fixme |
-| V12 | guard cost at 10 000 persons (persons-cap count) | measured and recorded; it is not on the withdrawal path (enabling only) |
+### 7.7 Runbook completeness (operations M7)
+
+The runbook section must contain:
+- the activation order (s4.6);
+- **a per-problem triage table** (every s11 code: meaning, the first query to run, the remedy, who acts);
+- tamper decision trees for `gate_unexplained`, `evidence_chain_broken`, `guard_not_intact` and `ddl_outside_migration` (preserve evidence, stop
+  enabling with a freeze, escalate to security, never "fix" rows);
+- escalation contacts (roles, not names);
+- the break-glass procedure and evidence template;
+- alert-flood handling (one alert per problem code; how to acknowledge);
+- the p3 ticket route;
+- the trapped-funds path (s4.8);
+- the after-restore and after-restart procedure;
+- the D1 declared-window procedure.
+
+Every alert payload carries the runbook anchor.
+
+### 7.8 Verification matrix (v2.1 additions)
+
+As v2, plus:
+- **V3b:** the 0196→0197 fingerprint diff contains only the lock-line and pair-helper changes.
+- **V5c:** restore through `deploy/backup/restore.sh` under the drill's rules (backup by the BYPASSRLS `igaming_backup`, restore without
+  weakening RLS). This is a feasibility proof for classification after restore (QA M).
+- **V13:** drill additions to `deploy/drill/verify.sql` (operations M4): chain verify, classify and reconcile after restore; a PITR restore shows
+  `instance_attestation_stale`; a tamper negative control (`deploy/drill/tamper.sql` gains one guard-disable step that must surface in
+  reconcile); the D3b head-ahead rule; a real NOLOGIN-roles drill.
+- **V12b:** guard, executor, monitor and verify cost measured at 10,000 persons per tenant, recorded against the CAPACITY plan's figures
+  (operations H3).
 
 ---
 
-## 8. Threat model
+## 8. Threat model (v2 rows T1-T15 kept; T16-T21 added in v2.1)
 
 | # | Asset | Attacker | Path | Control | Residual |
 |---|---|---|---|---|---|
@@ -917,54 +928,49 @@ requirements D1, D3b, D4, D5, D7 with their owners.
 | T7 | activation availability | break-glass holder | freeze or revoke all | fail-safe only; audited; time-boxed membership; separate role | activation denial of service until `frozen_until` |
 | T8 | two-Person rule | colluding platform admins | grant each other `aml_officer`, then authorise | officer grants, quorum, audit, `authorisation_created` p3 alert | existing collusion residual (D1 report s5 item 4); OD-G4 |
 | T9 | governance of legacy gates | insider | adopt an unexplained (tampered) gate | digest binding; `unexplained` refused | none beyond T3 |
-| T10 | consistency | concurrent actors | approve vs revoke; author vs revoke | K3/K4 + READ COMMITTED | a lapse between INSERT and COMMIT (seconds, alerted) |
+| T10 | consistency | concurrent actors | approve vs revoke; author vs revoke | lock rows `gate:*` (v2.1; was K3/K4) + READ COMMITTED | a lapse between INSERT and COMMIT (seconds, alerted) |
 | T11 | tenant isolation | tenant staff | classify or read other tenants | session-tenant bound (AT002); platform-only for all-tenant reads | none new |
 | T12 | platform metadata | runtime | `screening_gate_monitor_summary` | counts per problem code only, no ids | aggregate counts visible to the runtime role |
 | T13 | deploy window | operator | old app with new schema | guard is in the database; fail-closed | no alerts until R2 (ordering rule) |
 | T14 | security posture | operator | down migrations | `GA095` outside development/test or with evidence | none |
 | T15 | everything | superuser | catalog edits, disable event triggers, `session_replication_role` | D5 log shipping to a store it cannot edit; cloud MFA | **cannot be prevented in the database** |
+| T16 | governed gate-off and activation availability | any session | advisory-key squatting (P18) | lock rows, `lock_timeout`, contention report | open-transaction holding, bounded by `idle_in_transaction_session_timeout` |
+| T17 | correctness of instance-wide checks | design defect | FORCE RLS empty reads (fail open) | platform-level evidence; tenant loop + non-vacuity (I14) | a defect in a new cross-tenant read without the assertion (A-23 pins the known ones) |
+| T18 | role separation | staging operator | owner = RDS master (P17) | separate owner role; `gate_role_separation_violated`; startup check | if the owner decision for Tier S waives it (s19) |
+| T19 | logical replication | upgrade operator | ALWAYS insert guards breaking apply, or replica-mode bypass | the s5.5 split | superuser replica-mode bypass of insert guards (detected) |
+| T20 | detection itself | owner / API compromise | replacing in-DB verify or monitor; silencing alerts | external verifier, client-side hashes, dead-man's switch | **alert delivery is OPEN (F20)**: until ALERT-DELIVERY-1 is closed, a p1 may reach nobody |
+| T21 | evidence semantics | owner forging a consistent authorisation and stamp | admission guards disabled | external only (D1, D3b, D5) | in-database classification shows `authorised` (s3.3 honesty) |
 
-## 9. New closed refusal codes
+## 9. Closed refusal codes (revised)
 
-| Code (HINT) | SQLSTATE | Raised by | HTTP |
-|---|---|---|---|
-| `gate_authorisation_required` | AT004 | activation guard | 400 (existing AT004 map) |
-| `gate_authorisation_lapsed` | AT004 | guard | 400 |
-| `gate_authorisation_revoked` | AT004 | guard | 400 |
-| `gate_authorisation_identity_mismatch` | AT004 / LC050 | guard / executors | 400 / 409 |
-| `gate_authorisation_environment_mismatch` | AT004 / LC050 | guard / executors | 400 / 409 |
-| `gate_instance_attestation_missing` | AT004 / LC050 | guard / executors | 400 / 409 |
-| `gate_worker_attestation_missing` | AT004 / LC050 | guard / authorise executor | 400 / 409 |
-| `gate_activation_not_configured` | AT004 | guard | 400 |
-| `gate_activation_frozen` | AT004 | guard | 400 |
-| `gate_integrity_unresolved` | AT004 / LC050 | guard / executors | 400 / 409 |
-| `gate_tenant_has_unauthorised_gate` | AT004 | guard | 400 |
-| `gate_enabling_must_be_immediate` | AT004 | guard | 400 |
-| `gate_isolation_refused` | AT004 | guard, executors | 400 |
-| `gate_capacity_exceeded` | AT004 / LC050 | guard / executors | 400 / 409 |
-| `gate_authorisation_stamp_forbidden` | AT004 | guard | 400 |
-| `gate_authorisation_not_configured` | LC050 | executors | 409 (existing LC050 map) |
-| `gate_authorisation_not_supported_for_tenant_licensing_model` | LC050 | executors | 409 |
-| `gate_authorisation_environment_refused` | LC050 | executors | 409 |
-| `gate_authorisation_duration_exceeds_configured_maximum` | LC050 | executors | 409 |
-| `gate_capacity_report_required` | LC050 | executors | 409 |
-| `gate_compliance_reference_required` | LC050 | executors | 409 |
-| `gate_approvals_below_configured_minimum` | LC050 | executors | 409 |
-| `gate_authorisation_revoked_before_execution` | LC050 | authorise and adopt executors | 409 |
-| `gate_adoption_target_invalid` | LC050 | adopt | 409 |
-| `gate_adoption_target_unexplained` | LC050 | adopt | 409 |
-| `gate_adoption_digest_mismatch` | LC050 | adopt | 409 |
-| `gate_guard_not_intact` | LC050 | executors (tripwire) | 409 |
-| `gate_authorisation_not_found` | LC050 | revoke | 409 |
-| `gate_authorisation_already_revoked` | LC050 | revoke | 409 |
-| `gate_settings_environment_refused` | LC050 | settings | 409 |
-| `gate_authorisation_unavailable` | n/a (Go) | R1 feature detection | 409 |
-| `attestor_role_required`, `breakglass_role_required`, `breakglass_incident_reference_required`, `attestation_validity_out_of_range` | GA001-GA004 | owner-side functions (no HTTP) | n/a |
-| down refused / pre-flight | GA095 / GA098 | migrations | n/a |
-
-Reused unchanged: `gate_environment_refused`, `trigger_gate_enable_refused`, `officer_grant_required`, `officer_quorum_not_met`.
-The exact AT004 and LC050 HTTP mapping must be confirmed against `internal/aml` and `internal/licensingchange/refusal.go` during
-implementation. The table above assumes the existing maps (AT004 gives 400, LC050 gives 409) and changes neither.
+- **Guard** (AT004, or LC050 when the row comes from a governed executor; s4.1):
+  `gate_authorisation_required`, `gate_authorisation_lapsed`, `gate_authorisation_revoked`,
+  `gate_authorisation_identity_mismatch`, `gate_authorisation_environment_mismatch`, `gate_instance_attestation_missing`,
+  `gate_worker_attestation_missing`, `gate_activation_not_configured`, `gate_activation_frozen`, `gate_integrity_unresolved`,
+  `gate_integrity_read_inconsistent` (new), `gate_tenant_has_unauthorised_gate`, `gate_enabling_must_be_immediate`,
+  `gate_isolation_refused`, `gate_capacity_exceeded`, `gate_authorisation_stamp_forbidden`, `gate_screening_policy_changed` (new),
+  `gate_role_separation_violated` (new).
+- **Executors and assert helpers** (LC050): `gate_authorisation_not_configured`,
+  `gate_authorisation_not_supported_for_tenant_licensing_model`, `gate_authorisation_environment_refused`,
+  `gate_authorisation_duration_exceeds_configured_maximum`, `gate_authorisation_duration_below_minimum` (new; 3600 s),
+  `gate_capacity_report_required`, `gate_compliance_reference_required`, `gate_authorisation_revoked_before_execution`,
+  `gate_adoption_target_invalid`, `gate_adoption_target_unexplained`, `gate_adoption_digest_mismatch`, `gate_guard_not_intact`,
+  `gate_authorisation_not_found`, `gate_authorisation_already_revoked`, `gate_settings_environment_refused`,
+  `gate_authorisation_binding_mismatch` (new: `cutover_nonce`, `database_oid` or `instance_attestation_id` not equal to live),
+  `gate_freeze_not_active` (new, for a lift), plus the reused `officer_grant_required`, `officer_quorum_not_met`,
+  `gate_role_separation_violated`, `gate_integrity_read_inconsistent`.
+  **Removed in v2.1:** `gate_approvals_below_configured_minimum` (approvals are pinned to 2).
+- **Retryable** (mapped in Go, not a HINT): `gate_retry_later` for `55P03` / `40P01` (aml routes 409 with Retry-After; licensing change
+  keeps its existing `ErrRetryableLockTimeout`).
+- **Go:** `gate_authorisation_unavailable` (the probe says features are off).
+- **Owner-side functions** (GA, no HTTP): `GA001 attestor_role_required`, `GA002 breakglass_role_required`,
+  `GA003 breakglass_incident_reference_required`, `GA004 attestation_validity_out_of_range`, `GA005 gate_freeze_exceeds_cap`,
+  `GA006 breakglass_noop_refused`, `GA007 attestation_not_on_primary`, `GA008 attestation_confirmation_by_same_login`,
+  `GA009 gate_role_separation_violated`. Migrations: `GA095` (down refused), `GA098` (pre-flight, including
+  `legacy_pending_enabling_present` as its detail).
+- Reused unchanged: `gate_environment_refused`, `trigger_gate_enable_refused`.
+- **Parity rule (A-19):** every HINT raised anywhere in 0195-0198 is in `aml.RefusalCodes`, in the licensing-change refusal table and in the
+  OpenAPI enum. A static test extracts the HINT literals from the migration files.
 
 ## 10. Audit events
 
@@ -977,7 +983,13 @@ implementation. The table above assumes the existing maps (AT004 gives 400, LC05
 | instance attested, worker attested, break-glass revoke, revoke all, freeze | database functions (no staff session) | evidence row + chain row (`session_user`, `inet_client_addr()`, `application_name`) + D5 logs | ticket or incident reference, reason |
 | reconcile and monitor runs | monitor loop | alerts (s3.5); external head export (D3b) | problem codes and counts |
 
-## 11. Reconciliation contract
+**v2.1 additions:** These are added to the v2 list: `aml.screening_gate_freeze_lifted` (governed); `instance_attestation_confirmed` and
+`breakglass_freeze` with its drill flag (database: evidence row + chain + D5). Every governed audit carries `persons_at_execution`,
+`persons_held_on_enable` and `screening_policy_id`.
+
+## 11. Reconciliation and monitor contract (v2.1)
+
+**v2 contract (kept; its severity column is SUPERSEDED by the per-environment mapping below, and the monitor-loop paragraph by s5.6):**
 
 ```sql
 -- Detailed (platform_admin session only; LC030 otherwise). Read-only. Ids and codes only, no person data.
@@ -1018,28 +1030,61 @@ Monitor loop: `aml.RunScreeningGateMonitor` is started in `cmd/platform-api/main
 compliance value. It raises the s3.5 alert kinds from the summary, and it exports the chain head (D3b) when the external store is
 configured. It never writes evidence or policy rows.
 
+**v2.1 changes:**
+
+- Signatures are as v2.
+- The reconcile and summary functions loop over tenants with `set_config` save and restore. Each per-tenant count is asserted against the
+  platform-level count. A mismatch is reported as `reconcile_read_inconsistent` (p1). It is never silently empty.
+
+**Severity per anchored environment** (operations H1). In development and test **every** problem is p3, so tests that tamper on
+purpose never page. In staging and production:
+
+| p1 | p2 | p3 |
+|---|---|---|
+| `gate_unexplained`, `gate_environment_mismatch`, `gate_legacy_unauthorised`, `legacy_pending_enabling`, `evidence_chain_broken`, `guard_not_intact`, `inventory_digest_mismatch`, `evidence_row_without_request`, `executed_request_without_row`, `ddl_outside_migration`, `reconcile_read_inconsistent`, `monitor_unavailable`; `ddl_audit_missing` (**Tier N only**) | `gate_identity_mismatch`, `gate_authorisation_lapsed`, `gate_authorisation_revoked`, `gate_without_attested_worker`, `gate_capacity_exceeded`, `instance_attestation_stale`, `anchor_unrecorded`, `gate_lock_contention`, `breakglass_membership_active`, `chain_behind_external_head`, `monitor_check_failed:<problem>` | `gate_authorisation_expiring`, `gate_screening_policy_changed_since_authorisation`, `authorisation_created`, `adoption_created`, `revocation_created`, `freeze_active`, `attestor_membership_stale`, `ddl_in_declared_window`; `ddl_audit_missing` (Tier S) |
+
+**Cost bounds** (operations H3):
+- `gate_capacity_exceeded` in the monitor uses an estimate: `pg_class.reltuples` scaled by the tenant's share, refreshed by an exact count at
+  most hourly. The guard and the executors always count exactly; it is a rare operation (rejected for the guard: s18).
+- Chain verify in the monitor is incremental from a watermark.
+- The monitor is single-flight with `statement_timeout`.
+- V12b measures all of it.
+
+**Discriminator:** one open alert per problem code. **Routing:** severity is the only routing key the dispatcher supports today (F20).
+Per-environment behaviour is therefore achieved by the severity mapping above, not by routing. OD-G11 is rewritten accordingly.
+
 ---
 
-## 12. Decisions requiring OWNER approval (not engineering)
+## 12. Owner decisions (v2.1: split by what they block)
 
-None of these has a shipped value. Absent means refuse.
+### 12.1 Block MERGING the implementation
 
 | ID | Decision | Options | RECOMMENDATION |
 |---|---|---|---|
-| OD-G1 | Maximum authorisation validity and expiry warning window, per environment | (a) 30 days; (b) 90 days; (c) 180 days; no-expiry is not offered | (b) 90 days for staging, a warning 14 days before. Development and test as the owner prefers. Short enough that capacity and compliance evidence is revisited |
-| OD-G2 | Production activation policy | (a) no production activation until a real provider (PROVIDER DEPENDENT), the phase 2 worker split, D1, D3b, D4 and D5 in production, a withdrawal-release policy, and a separate future migration lifting I8; (b) per-tenant production authorisation with an owner signature in addition; (c) never | **(a)**. This design adds no production path |
-| OD-G3 | Capacity acceptance: is a report required, is a persons cap required, which figures | (a) report + cap required in staging and production; (b) report only; (c) neither in development/test | (a) for staging and production, with figures from the CAPACITY plan load test (keyset batching, priority lanes) once built. The figures themselves are the owner's |
-| OD-G4 | Compliance requirements and approver population | min approvals 2 or 3; `aml_officer` only, or an MLRO-type role; compliance reference required or not | 2 counted officer approvals besides the requester, compliance reference required, approvers from the platform officer population (unchanged trust model) |
-| OD-G5 | Own-licence tenants | (a) keep refused; (b) design tenant-scope officer approval | (a) until a separate design (as C4-LOOSEN-1 D5) |
-| OD-G6 | Treatment deadline for legacy gates | (a) adopt or governed-off within an owner-set period, alert until then; (b) tolerate indefinitely with p2 | (a). **Never** an automatic switch-off |
-| OD-G7 | Break-glass: holders, time box, scope | (a) revoke, revoke-all and freeze only; (b) also an emergency gate-off | (a). Emergency gate-off stays the governed loosening or the documented owner setter A1 |
-| OD-G8 | Instance attestation: maximum age, attestor population, acceptance of residual R-3 | 7, 30 or 90 days; 1 or 2 attestors | 30 days, two named operators, R-3 accepted in writing |
-| OD-G9 | When the phase 2 worker separation is required | before staging with real persons; before production only | before any production activation and before staging with non-synthetic persons |
-| OD-G10 | Withdrawal-release policy when a gate is switched off (already open, D1-CLOSURE-1) | not invented here | unchanged: decide before activation |
-| OD-G11 | Alert routing; legacy severity in development/test | | p1 pages in staging/production; development/test to a channel |
-| OD-G12 | External log and chain-head store (D3b, D5); key custody (D8) | cloud WORM log, separate account; KMS signing | WORM store in a separate account; KMS follow-up ADR |
+| OD-M1 | Authorise a **role administrator** to provision the NOLOGIN attestor role, an attestor test login, and the verifier role in the CI database definitions and in agents' private scratch databases. This is needed because every money-path test that enables a gate needs a real attestation (ledger H-1, QA C-1). No test-only bypass exists, and `t.Skip` on a missing role is banned. | (a) provision in CI and scratch via a human-approved change to the CI definitions and the scratch-db script; (b) block the implementation | **(a)**. Under CLAUDE.md, agents never create roles: the human or orchestrator applies it |
+| OD-M2 | Accept the merge with alert delivery still OPEN (ALERT-DELIVERY-1). Merge is strictly more restrictive than today. | accept; or block on delivery | accept for merge; delivery blocks activation in Tier N (s19) |
 
-## 13. Engineering choices made here (reversible; for reviewers)
+### 12.2 Block ACTIVATION (per environment)
+
+| ID | Decision | Options | RECOMMENDATION |
+|---|---|---|---|
+| **OD-G0** | **Tier definition and per-tier controls (s19)** | Tier S/N as proposed; a single tier; other | owner decides. The two reviewer positions are presented in s19 without a decision |
+| OD-G1 | maximum validity, warning window | 30 / 90 / 180 days (≥ 3600 s floor) | 90 days, 14-day warning |
+| OD-G2 | production activation | (a) none until the Tier N prerequisites, a real provider and a separate migration lifting I8; (b) per-tenant owner signature; (c) never | (a) |
+| OD-G3 | capacity evidence and cap | report + cap required / report only / neither | report + cap for staging and production. It is head-count only; throughput is in the report |
+| OD-G4 | approver population; compliance reference; **future**: more than 2 approvals (needs a primitive change, s6.1) | | 2 officers (pinned), compliance reference required, primitive change deferred |
+| OD-G5 | own-licence tenants | keep refused / design | keep refused |
+| OD-G6 | deadline for legacy gates | | adopt or replace within an owner period; a gate-off is a release decision under OD-G10 |
+| OD-G7 | break-glass holders; freeze cap (≤ 72 h structural); early lift (two Persons); emergency gate-off excluded | | revoke, revoke-all and freeze only; 24 h cap; quarterly drill |
+| OD-G8 | attestation maximum age; **confirmations (1 or 2)**; attestor population; acceptance of R-3 | | 30 days; 2 in staging and production; R-3 accepted in writing |
+| OD-G9 | phase 2 worker split | | before Tier N |
+| OD-G10 | withdrawal-release policy (a gate-off releases screening-only holds) | not invented | decide before any gate-off or activation |
+| OD-G11 | alert severity mapping as s11 (routing by severity only) + ALERT-DELIVERY-1 | | as s11; close ALERT-DELIVERY-1 for Tier N |
+| OD-G12 | external store (D3b, D5); KMS signing (R-5) | | WORM store in a separate account; KMS ADR |
+| OD-G13 | legacy **pending** gating rows at cut-over | (a) refuse to apply 0198 while any exist; (b) apply and classify p1 | (a) in staging and production; (b) in development and test |
+| OD-G14 | staging owner role: a separate owner, not the RDS master (P17) | required for Tier S / only for Tier N | part of OD-G0 (security and operations disagree) |
+
+## 13. Engineering choices
 
 E-1 reuse licensing change (s6.1). E-2 classification derived, never stored. E-3 legacy by inventory membership, not timestamp. E-4
 guard codes on `AT004` and kind codes on `LC050` for old-app compatibility; new class `GA` only for non-HTTP functions. E-5 `ENABLE
@@ -1050,6 +1095,12 @@ and timeline. E-12 explicit production anchor in provisioning plus `anchor_unrec
 E-14 monitor loop in every environment. E-15 the guard is SECURITY INVOKER (runs as the definer function or the owner). E-16
 containment is per tenant; instance-wide only for integrity states. E-17 the guard is a separate `_20_` trigger; the `_10_` guard is
 not copied or changed.
+
+Superseded in v2.1: E-5 by E-23 (ALWAYS only for deny triggers), E-8 by the s3.1 continuation rule, E-9 by E-18 (lock rows). **v2.1 additions:** E-18 lock rows, not advisory keys. E-19 platform-level evidence tables. E-20 run identity by pointer column. E-21 forced
+monotonic `created_at` instead of refusing on clock regression. E-22 two chain streams; gaps allowed. E-23 deny triggers ALWAYS,
+insert guards and chain triggers ORIGIN. E-24 LC050 from the guard on governed paths. E-25 approvals pinned to 2. E-26 the clock-seam
+helpers. E-27 a fresh chain at cut-over with the inventory digest as anchor. E-28 the version probe instead of function presence. E-29
+the capacity work in a separate slice.
 
 ## 14. Open questions
 
@@ -1064,77 +1115,303 @@ not copied or changed.
    This is unchanged, but compliance should know it before authorising a re-enable.
 7. Should tenant-scope staff see the classification of their own tenant's gate? Platform-only in this design.
 
-## 15. Acceptance criteria for the implementation (all merge-blocking)
+**v2.1:** v2's questions 1, 2, 4, 5 and 7 remain. Question 3 is answered by the `txid DEFAULT txid_current()` column. New questions:
+- Q8: does RDS blue/green carry these tables' triggers in the same modes on green? To be verified in the staging drill.
+- Q9: does `pg_is_in_recovery()`-gated attestation work for a managed failover where the new primary's timeline is visible immediately?
+- Q10: can the version probe be read by every instance before 0198 runs (pipeline integration)?
 
-- **A-1** The guard refuses new enabling without a current authorisation on each of: the routed author, the owner setter over the owner
-  pool, and a raw owner INSERT. Each refusal has its closed code and writes nothing.
-- **A-2** A legacy run: a tightening continuation is accepted. New enabling of another jurisdiction of the same tenant is refused
-  `gate_tenant_has_unauthorised_gate`. Adoption flips the classification to `authorised` and changes no gate decision.
-- **A-3** With no settings, enabling is refused `gate_activation_not_configured` and authorising `gate_authorisation_not_configured`.
-- **A-4** Each owner parameter, when missing or violated, produces its code (duration, capacity report, cap, compliance reference,
-  min approvals).
-- **A-5** Lapse: the decision table of `aml_screening_gate_denies` over a fixed population is identical before and after expiry. New
-  enabling is refused `gate_authorisation_lapsed`. Reconcile reports it.
-- **A-6** Revocation: as A-5 with `gate_authorisation_revoked`. Single actor, executes when filed.
-- **A-7** Concurrency (V6): both orders of author vs revoke and approve vs revoke, deterministic, no deadlock in 100 iterations.
-- **A-8** Isolation refusal (V9).
-- **A-9** Catalogue pins of s5.2 (writers, FORCE RLS, ACLs, `tgenabled = 'A'`, search_path, EXECUTE grants), each with a
-  non-vacuity premise as in `screening_d7_integration_test.go:171-175`.
-- **A-10** I1 static pin: the gate and monitor functions reference no `screening_gate_` object (mutation-killed).
-- **A-11** A forged heartbeat with no worker attestation is refused `gate_worker_attestation_missing`.
-- **A-12** Instance attestation currency is tested through a pure helper that takes live values as an argument (a restart cannot be
-  simulated in CI), plus one end-to-end positive path.
-- **A-13** Restore (V5a) into a private database of the same cluster gives `identity_mismatch`.
-- **A-14** Adoption binds `policy_row_sha256`. Adopting an `unexplained` run is refused.
-- **A-15** Reconcile and monitor return every problem code of s11 from a fixture that produces it. Tamper fixtures run as the owner on a
-  private test database only (V10).
-- **A-16** `screening_gate_chain_verify()` detects an edited, deleted and inserted row.
-- **A-17** No activation by migration or start (s7.4, all four steps).
-- **A-18** Migration matrix V1 to V5, V7, V8, including fingerprints and every down refusal.
-- **A-19** Parity: every HINT raised in 0195 to 0197 is in `aml.RefusalCodes` or the licensing-change refusal table, and in the OpenAPI
-  enum (a static test in the style of the existing lic29 parity).
-- **A-20** Independent `security` review (blocking), `ledger-finance` sign-off that I1 to I3 hold, `qa` gate. Full local integration
-  suite, hosted CI and Playwright (spec 10 updated) all green. No assertion weakened. Intentional pin changes listed (the
-  trigger-policy writer pin must stay **unchanged**).
+---
 
-## 16. What blocks MERGING vs what blocks ACTIVATING
+## 15. Acceptance criteria (v2.1; all merge-blocking)
 
-**Blocks merging the implementation:** A-1 to A-20, the runbook section, the init-app-role changes, the OpenAPI and RefusalCodes
-parity, and the reviews. Merge does **not** need the new roles, D1, D5 or any owner decision. Without them the mechanism is
-inert and fails closed: no settings means no authorisation, and no attestor role means no attestation, so no new gate anywhere. That
-is safe to merge because it is strictly more restrictive than `01ea296`.
+### 15.1 Criteria
 
-**Blocks ACTIVATING (per environment):** owner decisions OD-G1, G3, G4, G6, G7, G8, G11 recorded and entered through
-`screening_gate_settings_configure`. Roles provisioned by a role administrator (attestor, break-glass; ddl-audit owner for
-staging). D1 event trigger, D4 external manifest job and D3b external head in staging. Every legacy gate of the tenant adopted or
-governed-off. The capacity work and accepted figures (CAPACITY plan). Back Office filing forms. **For production, additionally:**
-OD-G2, OD-G9 (phase 2 worker separation), OD-G10, OD-G12, D5 log shipping, a real provider and its attestation (PROVIDER
-DEPENDENT), the sanctions false-positive policy, and a separate future migration that lifts I8. None of these is authorised by this
-document.
+Every criterion names its test layer, the mutants it must kill (s15.2), and its non-vacuity premise. **QA writes or reviews these tests
+before implementation starts. The mutation run is performed by someone other than the implementer, and the survivor list is
+evidence.**
 
-## 17. Design choices independent reviewers should attack
+| ID | Criterion | Layer | Kills | Non-vacuity |
+|---|---|---|---|---|
+| A-1 | Enabling without C(T,J) is refused on the routed author, the owner setter (owner pool) and a raw owner INSERT, with codes; zero rows written | integration | M01 M02 M08 | the same call succeeds after `AuthoriseGate` |
+| A-2 | Legacy run: tightening and pending-off cancellation accepted (stamp and pointer inherited); another J of T refused; adoption flips the classification; the gate decision table is unchanged | integration | M03 M05 M27 M28 | the fixture has ≥1 legacy run and ≥1 held person |
+| A-3 | No settings: `gate_activation_not_configured` and `gate_authorisation_not_configured` | integration | M06 | succeeds once configured |
+| A-4 | Each owner parameter violated gives its code; validity floor 3600 | integration | M19 M24 | boundary values pass |
+| A-5 | Lapse via the clock seam (explicit `p_now`) plus one end-to-end lapse with a 3600 s authorisation and an owner-forged `valid_until` on a private DB **through the guard**; gate decisions unchanged | unit-SQL + integration | M09 M10 M41 | before lapse: allowed |
+| A-6 | Revocation by id and by `NULL` scope (seq coverage); gate decisions unchanged | integration | M12 M13 M42 | an unrevoked sibling stays current |
+| A-7 | Deterministic interleavings (s15.4); no deadlock; lock-order matrix | integration | M14 M15 M16 | each case observes a waiter in `pg_locks` before release |
+| A-8 | Non-READ-COMMITTED enabling refused; **gate-off under REPEATABLE READ succeeds** | integration | M17 | READ COMMITTED passes |
+| A-9 | Catalogue pins s5.2 (trigger-aware writers, exposure, prefix loop, RLS, ACL, modes, search_path, last trigger) + post-suite mode check | integration-catalogue | M37 M38 | detector premise: the owner setter is detected as a writer |
+| A-10 | I1: gate and monitor functions reference no `screening_gate_` object | static-catalogue | M40 | detector finds the guard's own reference |
+| A-11 | Forged heartbeat without a worker attestation, or with one bound to a stale instance attestation: refused | integration | M11 | an attested worker passes |
+| A-12 | Instance attestation currency through the pure helper (all six bound values, confirmations, primary-only) | unit-SQL | M21 M22 | the live tuple passes |
+| A-13 | Restore (V5a, V5c) gives `identity_mismatch`; unrecorded anchor gives `environment_mismatch` | integration (private DB) | M23 | the source DB classifies `authorised` |
+| A-14 | Adoption digest binding (canonical encoding with pinned GUCs; varied TimeZone/DateStyle in-session gives the same digest); `unexplained` refused | integration | M25 M26 | the correct digest passes |
+| A-15 | Reconcile and monitor return every s11 code from fixtures; per-check isolation (`monitor_check_failed`); `monitor_unavailable` by version | integration | M29 M30 | a clean fixture returns none |
+| A-16 | Chain verify (in-DB and the external client-side reference implementation) detects edit, delete, insert, reorder and a forged `prev_hash`; tolerates seq gaps | integration + unit (Go verifier) | M31 M32 M33 M34 | an untampered chain with gaps verifies |
+| A-17 | No activation by migration or start (s7.4) | integration + static + E2E | M35 M36 | the fixture upgrade has N > 0 gating runs |
+| A-18 | Migration matrix (V1-V5, V3b, V7, V8), down refusals, fingerprints by column name | integration (`cmd/migrate`) | M39 | down-then-up equals the first up |
+| A-19 | Parity of HINTs, RefusalCodes, licensing-change refusal table and OpenAPI; no jurisdiction literals | static | n/a | the extractor finds ≥ 40 hints |
+| A-20 | Reviews: security (blocking), ledger-finance, qa; full integration suite, hosted CI, Playwright (spec 10 updated) green; the affected-test list (s15.3) all pass with their stated assertions; the trigger-policy writer pin **unchanged** | process | — | — |
+| A-21 | **Gate-off succeeds** through the owner setter **and** `screening_trigger_loosen_apply` under each bad state: frozen, unconfigured, unattested, unexplained, chain broken, tripwire failing, non-READ-COMMITTED; and while `gate:global` and `chain:evidence` are held exclusively by another session | integration | M07 M18 | the same state refuses enabling |
+| A-22 | No runtime-role session can lock any `screening_gate_locks` row (42501), and no advisory key remains in any function body | integration + static | M14 | the owner can lock |
+| A-23 | Every cross-tenant read (guard step 6.6, classify, reconcile, monitor, inventory) raises or reports `_read_inconsistent` when its per-tenant read disagrees (fault injection: an RLS policy mutant) | integration | M20 | the consistent case reports nothing |
+| A-24 | Future-dated enabling refused for every writer; UI and E2E as in s7.6 | integration + vitest + E2E | M04 | a future-dated continuation is accepted |
+| A-25 | A production-configured `platform-api` refuses to start against a non-production anchor; `VerifyRuntimeRoleSeparation` refuses where settings exist | Go integration | M38 | a matching configuration starts |
 
-1. **E-6 (enabling rows immediate)** changes the routed author's behaviour for gate-on: no scheduled activation. Is any compliance
-   need lost? Does it break the backfill-grace expectations of operators?
-2. **E-8 continuation definition.** Can any sequence of future-dated continuations, governed loosenings and re-tightenings
-   produce a gating in-force row in a run that never had an authorised enabling row, without the guard seeing "new enabling"?
-3. **Adoption exempt from worker attestation (E-13).** Is a governed adoption of a gate with no worker a disguised approval of trapped
-   funds?
-4. **Containment scope (E-16).** Should a legacy gate freeze the whole instance, not just the tenant? Or is per-tenant already too
-   much for development databases full of test gates?
-5. **The guard is SECURITY INVOKER** and reads the authorisations under the inserting role. Verify that every inserting path (author,
-   setter, loosen apply, raw owner) can read the evidence tables under FORCE RLS with the tenant GUC as set at that point. A read
-   returning zero rows is a refusal (fail closed), but could produce a wrong code.
-6. **Lock design.** Is K3 shared/exclusive enough to make settings narrowing and freezes visible to an enabling already past step 4?
-   (It is designed so an enabling that holds K3 shared commits first and the freeze follows. Is that acceptable?)
-7. **Postmaster-start binding** forces re-attestation after every restart. Will operators re-attest blindly (making R-3 worse) or
-   find it too costly? Is timeline plus start time the right signal?
-8. **Persons-cap count** in the guard and executors: a `count(DISTINCT person_id)` over `player_accounts` per enabling. Cost is fine
-   for a rare operation, but is the right population counted (OQ5)?
-9. **R-5:** the two-Person rule is only as strong as actor-proof key custody, and the API process holds the keys. Is the p3
-   `authorisation_created` alert to an out-of-band channel enough until KMS (OD-G12)?
-10. **Down migrations refused in staging.** Does that block legitimate staging rollbacks in a way that tempts operators toward manual
-    DDL (which D1 would then flag)?
-11. **Reuse of the `screening_loosening_*` officer helpers** for authorisation: their names and their own-licence refusal code are
-    loosening-specific. Is reusing them a source of wrong refusal codes, and do they need generic wrappers?
-12. **Monitor summary** is runtime-executable and cross-tenant (counts only). Is that an acceptable disclosure surface?
+### 15.2 Mutation plan (QA H-3)
+
+**Harness:** each mutant is a `CREATE OR REPLACE` of one function body (or one trigger-mode or ACL statement) applied as the owner in a
+**private scratch database**, using the patching pattern the fixtures already use for controlled schema changes
+(`internal/licensingchange/screening_loosening_integration_test.go:250-262`). Then the named tests run, and the mutant must be killed. The runner
+is not the implementer. Survivors are listed as evidence with a disposition.
+
+| Mutant | Change | Killed by |
+|---|---|---|
+| M01 | drop the guard's new-enabling branch | A-1 |
+| M02 | guard ignores `created_by_scope`/owner path | A-1 |
+| M03 | continuation test `F gating` becomes `L AND F gating` (the v2 rule) | A-2 (pending-off cancel) |
+| M04 | drop the `effective_from <= now` check | A-24 |
+| M05 | continuation does not copy stamp or pointer | A-2, A-15 (`unexplained` would appear) |
+| M06 | skip the settings check | A-3 |
+| M07 | non-gating early exit moved after the checks | A-21 |
+| M08 | caller-supplied stamp accepted | A-1 |
+| M09 | `<` becomes `<=` at `valid_until` | A-5 |
+| M10 | max(valid_until) instead of the latest current by seq | A-5 |
+| M11 | worker attestation not bound to the current instance attestation | A-11 |
+| M12 | `NULL`-scope revocation ignored | A-6 |
+| M13 | revocation coverage by `created_at` instead of seq | A-6 (seq/clock fixture) |
+| M14 | `gate:<T>:<J>` shared/exclusive swapped; advisory lock reintroduced | A-7, A-22 |
+| M15 | lock order inverted (`gate:*` before `policy:*`) | A-7 lock-order matrix |
+| M16 | executor does not re-check revocation under the lock | A-7 |
+| M17 | isolation check removed | A-8 |
+| M18 | the chain trigger verifies or checks freeze | A-21 |
+| M19 | validity cap not enforced | A-4 |
+| M20 | per-tenant loop without non-vacuity | A-23 |
+| M21 | stored identity compared with itself instead of live | A-12 |
+| M22 | environment ignored | A-12, A-13 |
+| M23 | `database_oid` not compared | A-13 |
+| M24 | requester counted as approver; approvals older than 24 h counted | A-4 |
+| M25 | digest computed from `row::text` / without pinned GUCs | A-14 |
+| M26 | adoption of `unexplained` allowed | A-14 |
+| M27 | skip the freeze check | A-2 (freeze case), A-21 inverse |
+| M28 | skip the tenant legacy containment | A-2 |
+| M29 | classification precedence swapped (`authorised` before `revoked`) | A-15 (cross-product oracle) |
+| M30 | inventory membership replaced by the `created_at < cutover` test | A-15 (a backdated fixture) |
+| M31 | chain ignores `prev_hash` | A-16 |
+| M32 | row hash omits a column | A-16 |
+| M33 | verify checks only the head | A-16 |
+| M34 | verify requires contiguous seq | A-16 (gaps fixture) |
+| M35 | 0198 seeds a settings row | A-17 |
+| M36 | inventory writable after cut-over | A-17, A-9 |
+| M37 | attestor check does not exclude the owner | A-9 |
+| M38 | role-separation check removed | A-25 |
+| M39 | down not refused in staging | A-18 |
+| M40 | the gate predicate reads `screening_gate_*` | A-10 |
+| M41 | an authorisation treated as single-use (consumed at enabling) | A-5 (re-enable within validity) |
+| M42 | lapse or revocation writes a policy row / touches `aml_holds` (I2, I3) | A-6, A-9 writer pins |
+
+### 15.3 Fixtures (QA H-1, ledger H-1): one sanctioned path, no bypass
+
+- **`amlfix.AuthoriseGate(t, w, tenant, jur) uuid`** is the only sanctioned helper. It:
+  - ensures the settings row (the governed configure with the fixture's officer Persons, idempotent per DB);
+  - **attests the instance through a real attestor login** (re-attesting when not current, so it survives restarts and fresh scratch DBs;
+    `t.Fatal` if the role is missing, **never `t.Skip`**);
+  - attests the MOCK worker;
+  - files and approves `screening_gate_authorise` with two officer Persons;
+  - returns the authorisation id.
+
+  There is **no test-only guard bypass**.
+- **Call sites to migrate** (QA census): the 44 `setTrigger(..., gate=true)` callers; the `tw.gate()` users in the lic27b, lic29, lic30
+  and d10 suites; `triggerInput` in `internal/aml/screening_trigger_integration_test.go:109-130`; lic18 `:282-286`; lic23 `:116-120`;
+  adversarial `:269`; d10 `:358`.
+- **Trapdoor fixtures** (F23; four sites, not three). They disable only `_10_guard` to insert actor-less rows. With v2.1 the
+  `_99_activation_guard` stays enabled, so a gating row they insert needs `AuthoriseGate` first (their backdated `effective_from` is
+  allowed: it is `<= now`). They re-enable with the mode from the s5.5 table through `amlfix.RestoreTriggerMode`. The post-suite check
+  (A-9) catches a wrong mode.
+- A-20 lists every affected test file with the assertion it must keep unchanged (for example "held person stays held",
+  "loosening never enables"). The implementation record must show each one passing with the same assertion text.
+
+### 15.4 Deterministic interleavings (QA H-5)
+
+The test session holds the lock row (`SELECT ... FOR UPDATE` as the owner). It starts the operation in a goroutine, **polls
+`pg_locks` and `pg_stat_activity`** until that pid waits on the row, then releases. There are no sleeps.
+
+Cases:
+- author vs revoke (both orders);
+- approve/execute vs revoke;
+- break-glass revoke-all vs enabling;
+- settings narrowing vs an enabling past step 6;
+- freeze vs enabling;
+- two enablings of the same (T, J);
+- two executors of the same request;
+- authorise vs settings change;
+- gate-off while `gate:global` and `chain:evidence` are held (must not wait).
+
+A **lock-order matrix test** parses each function's sequence of `screening_gate_lock` calls from `prosrc` and asserts it follows the
+s4.9 order.
+
+### 15.5 Other test obligations (QA M items)
+
+- **Classification cross-product oracle:** a Go oracle over every combination of the s3.3 inputs (about 256 combinations) times 4 anchors,
+  compared with `screening_gate_classify`.
+- **Error-precedence tests:** for each pair of failing preconditions, the HINT of the higher-precedence one wins.
+- **Restore simulation feasibility:** V5c.
+- **Existing pins that change** (each listed as an intentional pin change):
+  - `internal/licensingchange/kinds_test.go` kind counts: **16 → 21** in v2.1 (QA counted 20 with four kinds; v2.1 adds `screening_gate_freeze_lift`);
+  - the staff step-up read count;
+  - the golden route table (two read routes);
+  - the staff mutation-audit static test;
+  - the `schemaSnapshot` extension;
+  - backup baselines and drill fingerprints (new tables and trigger modes).
+- **Cannot be tested here** (substitute evidence): event triggers (needs superuser; substitute: a staging drill record), pgaudit and log
+  shipping (operations evidence), a physical clone (substitute: the pure-helper tests A-12 + a drill), ALWAYS triggers firing under
+  `session_replication_role = replica` (superuser; substitute: catalogue mode pin + a CI-superuser test only if the human approves),
+  RDS function privileges (staging probe), real two-Person independence (process audit).
+- The s2 claim "verified by qa and code-reviewer" was replaced by "to be verified".
+
+## 16. What blocks MERGING vs ACTIVATING (v2.1)
+
+**MERGING:** A-1 to A-25 (written or reviewed by qa first; mutation run by a non-implementer); OD-M1 (role provisioning in CI and scratch
+DBs, human-applied); OD-M2; the runbook section; the init-app-role changes; parity. Merge does not need D1, D3b, D4, D5, delivery or any
+OD-G decision. Without them the mechanism is inert and fails closed.
+
+**ACTIVATING:** OD-G0 (tier) and the controls its tier requires (s19); OD-G1, G3, G4, G6, G7, G8, G10, G11, G13, G14; settings
+configured through the governed kind; roles provisioned; legacy gates of the tenant resolved; the capacity slice done and its figures
+accepted; Back Office forms; `idle_in_transaction_session_timeout` on the runtime role. **Production additionally:** OD-G2, G9, G12,
+a real provider (PROVIDER DEPENDENT), the sanctions false-positive policy, and a migration lifting I8.
+
+## 17. Choices reviewers should attack (v2.1)
+
+1. Platform-level evidence tables (E-19): is giving up tenant RLS on owner-only tables really free?
+2. ORIGIN insert guards (E-23): a superuser in replica mode bypasses the activation guard. Detected, not prevented. Acceptable?
+3. The single clock comparison left in "revoked before execution" (s4.4).
+4. The lock-row residual (open-transaction holding) and its dependence on an operations timeout.
+5. The two-stream chain (E-22): can a policy row be appended to the wrong stream or skip one under concurrency?
+6. The `persons_held_on_enable` preview ignores the backfill grace: is it misleading to approvers?
+7. The approval count pinned to 2 (E-25) until a primitive change.
+8. Tier S/N (s19) is not decided here. Does either position leave a gap neither reviewer named?
+9. v2 items 1 to 12 still stand, except 2 (resolved by M1), 6 (lock rows) and 10 (down rules narrowed).
+
+## 18. Review dispositions
+
+Status: **A** = accepted as proposed, **M** = accepted with modification, **R** = rejected, **O** = owner decision, **N** = not
+itemised in the relayed findings (generic hardening applied; the reviewer must confirm).
+
+| Finding | Status | Where fixed / reason |
+|---|---|---|
+| SEC-H1 advisory-lock DoS (K3/K4/K5 and existing K1/K2) | M | s4.9: lock rows on owner-only `screening_gate_locks`; K1, K2 and the 0189 key also replaced (0197); `lock_timeout`; reconcile reports **lock contention with holder identity** rather than "non-owner holders" (non-owner sessions can no longer hold rows directly); residual open-transaction holding stated; A-22 |
+| SEC-H2 FORCE RLS fail-open | A | s4.0 platform-level evidence; I14; tenant loop + non-vacuity; persons count under `app.tenant_id = T`; break-glass no-op refusal; A-23 |
+| SEC-H3 staging owner/runtime boundary; ENABLE ALWAYS on existing triggers | M | F16; P17; s5.5 role separation + `VerifyRuntimeRoleSeparation` for any anchor with settings; ALWAYS applied to deny triggers only, because of DB-H5 (resolution in s5.5); whether Tier S requires the separate staging owner is OD-G14 / OD-G0 |
+| SEC-M1 pending gate-off cancel is a continuation | A | s3.1, s3.4, s4.1 step 5; M03 |
+| SEC-M2 legacy future-dated gating rows | A + O | s3.2 pre-flight + `legacy_pending_enabling` p1; OD-G13 |
+| SEC-M3 unexplained on the enabling row; honesty | A | s3.3 + honesty paragraph; T21 |
+| SEC-M4 canonical hashing; gaps in chain | A | s4.0 canonical encoding; s5.6 gaps allowed; A-14, A-16 |
+| SEC-M5 payload binding (db oid, attestation id, nonce) | A | s3.2 nonce; s6.2 payload; `gate_authorisation_binding_mismatch` |
+| SEC-M6 compensating controls not independent | A | s5.6 independence table; external client-side verifier with a BYPASSRLS read role; D1 correlated with pipeline records; dead-man's switch; T20 |
+| SEC-M7 freeze cap, governed lift, membership time-boxing | A | s4.10; kind `screening_gate_freeze_lift` |
+| SEC-M8 bind to the screening-policy version | A | s4.0 `screening_policy_id`; guard step 6.10; reconcile p3 |
+| SEC-L1 guard takes the pair lock itself | A | s4.1 step 1 |
+| SEC-L2 exclude runtime-inducible states from the guard integrity set | A | s3.4 last paragraph |
+| SEC-L3 prefix revoke loop + REVOKE FROM PUBLIC | A | s5.2, s7.5 |
+| SEC-L4 trigger-aware writer detector | A | s5.2 |
+| SEC-L5 guard last BEFORE INSERT trigger | A | `_99_` name + pin, s4.1 |
+| SEC-L6, SEC-L7 | N | text not in the relay; covered generally by s5.2 pins; security to confirm |
+| SEC citations F2, F3, F12, F16, F21 | A | s1 rows rewritten |
+| SEC A-17 step 1 vs I6 / s7.1 chain backfill | A | fresh chain at cut-over (E-27); s7.4 step 1 |
+| DB-H1 min_approvals > 2 unreachable | A | s6.1 pinned to 2; column removed; OD-G4 future primitive change; code removed from s9 |
+| DB-H2 / DB-H3 FORCE RLS | A | as SEC-H2 |
+| DB-H4 AT004 in the governed path becomes 500 | A | F14; s4.1 LC050 on governed paths; parity A-19 |
+| DB-H5 ALWAYS fires on a logical subscriber | A | s5.5 split + replication stance; T19 |
+| DB-M2 guard takes the policy-pair lock exclusively first | A | s4.1 step 1 |
+| DB-M3 revocation by monotonic sequence | M | coverage by seq (s4.0, s4.4); "revoked before execution" keeps one clock comparison (the request has no seq at filing): residual stated |
+| DB-M4 definer assert helpers, pins, grants, byte-for-byte 0196 down | A | s5.2, s6.2, s7.2, s7.5 |
+| DB-M5 worker attestation bound to the current instance attestation | A | s4.0, guard 6.11, A-11 |
+| DB-M6 bigint; timeline semantics | A | s4.0, s4.7 |
+| DB-M7 chain backfill vs fresh; explicit column list | A | fresh start (E-27); canonical encoding |
+| DB-M8 lock_timeout + retryable 55P03/40P01 | A | s4.1 step 1, s9 `gate_retry_later`, R1 |
+| DB-M9 SET LOCAL lock_timeout in 0195-0198 | A | s7.1 |
+| DB-M10 revoke_all GUC; FK on revocation jurisdiction | A | platform-level table; FK added |
+| DB-L2 one pair helper | A | s3.1, 0197 |
+| DB-L3 indexes, retention | A | s4.0 |
+| DB-L4 down/fingerprint details | A | s7.2 |
+| DB-L5 init-app-role ordering | A | s7.5 |
+| DB-L6 ON CONFLICT / COPY notes | A | s4.1 notes |
+| LF-H-1 attestor role in CI; no Skip; affected-test list; no bypass | A + O | OD-M1; s15.3; A-20 |
+| LF-M-1 | A | as SEC-M1 |
+| LF-M-2 chain append does no checks; gate-off under every bad state | A | I2; s4.1 step 3; per-stream chain; A-21 |
+| LF-L-1 gate-off is a release decision (OD-G10) | A | s3.4, runbook s7.7, OD-G10 |
+| LF-L-2 freeze cap | A | s4.10 |
+| LF-L-3 break-glass idempotency | A | unique `incident_reference` (s4.0, s4.10) |
+| LF-L-4 lock_timeout | A | s4.9 |
+| LF-L-5 persons held on enable | M | recorded (preview + recomputed), shown to approvers, **not** a refusal (no invented threshold) |
+| QA-C-1 attestor role in the test cluster, scratch DBs, restarts | A + O | OD-M1; `AuthoriseGate` re-attests |
+| QA-H-1 fixture migration | M | s15.3. Four trapdoor sites (not three). With insert guards kept ORIGIN (DB-H5), "must use ENABLE ALWAYS" applies only to deny triggers, handled by `RestoreTriggerMode` + the post-suite check |
+| QA-H-2 immediate enabling breaks tests and UI | A | s7.6, A-24 |
+| QA-H-3 mutation plan | A | s15.2 (M01-M42) |
+| QA-H-4 clock seam; owner-forge test; minimum validity | A | s4.0 helpers; A-5; 3600 s floor |
+| QA-H-5 deterministic interleavings | A | s15.4 |
+| QA-M (oracle, restore feasibility, changed pins, error precedence, untestable list, tests before implementation, non-implementer mutation, s2 claim) | A | s15.1, s15.5, s2 heading. Item numbering M-1..M-10 was not relayed individually; each named item is covered |
+| OPS-H1 monitor failure modes, discriminator, delivery, per-environment severity | A + O | s3.5, s5.6, s11; OD-G11 rewritten (routing is by severity only); delivery in OD-M2 / s19 |
+| OPS-H2 D1 noise; declared windows; txid column; ddl_audit_missing p3 | M | s5.6; p3 in Tier S, p1 in Tier N (security disagrees: s19) |
+| OPS-H3 cost | M | s11 single-flight, timeout, incremental verify, V12b, head-count honesty. **Rejected:** a cached persons count **in the guard** (an exact count is cheap for a rare operation and a cache could be stale or runtime-influenced); accepted for the monitor |
+| OPS-H4 break-glass drill and trapped-funds path | A | s4.8, s4.10 |
+| OPS-H5 chain-trigger dependency | A | as LF-M-2 |
+| OPS-M1 migration locks, write-quiet window, R1 at 100 %, version probe | A | s7.1, s7.3 |
+| OPS-M2 sanctioned guard maintenance | A | s7.2 |
+| OPS-M3 attestation burden etc. | A | s4.7; s3.7 unrecorded-anchor row and ordering; rekey re-filing (s4.6) |
+| OPS-M4 drill additions; RPO/head-ahead | A | s3.7, V13 |
+| OPS-M5 clock monotonicity in the guard | M | forced monotonic `created_at` (E-21) instead of refusal, so a gate-off never fails on the clock (LF-M-2) |
+| OPS-M6 manifest ownership, signing, scope, monitor credential | A | s5.6 D4; verifier role |
+| OPS-M7 runbook completeness | A | s7.7 |
+| OPS-L1..L6 | N | text not in the relay; operations to confirm |
+| OPS-I2 anchor correction; production-anchor startup test | A | s3.7; A-25 |
+| OPS-SCOPING vs SECURITY | O | s19 (both positions; OD-G0) |
+
+**Rejected in full:** none. **Rejected in part:** OPS-H3 (a cached count in the guard). **Modified:** SEC-H1, SEC-H3, DB-M3,
+LF-L-5, QA-H-1, OPS-H2, OPS-M5 (reasons above).
+
+**New or remaining disagreements between reviewers:**
+1. Security (H3, ALWAYS everywhere) vs DB architecture (H5, logical replication). The split resolves it; security should confirm that ORIGIN
+   insert guards plus detection are acceptable.
+2. Operations (scoping, `ddl_audit_missing` p3) vs security (staging is where activation is real). This is owner decision s19.
+3. Operations M5 (refuse on clock regression) vs ledger M-2 (gate-off must always succeed). Resolved by forcing monotonic `created_at`;
+   both should confirm.
+4. QA H-1 ("use ENABLE ALWAYS" in the trapdoors) is superseded by the DB-H5 resolution; QA should confirm.
+
+## 19. Tiered activation proposal (OWNER DECISION OD-G0; not decided here)
+
+**Tier S:** synthetic persons only, the MOCK provider, development or staging anchor.
+**Tier N:** any non-synthetic person data, any real provider, or production.
+
+| Control | Operations position (Tier S) | Security position (Tier S) | Tier N (both) |
+|---|---|---|---|
+| In-database controls (guard, governed kinds, attestations, lock rows, classification, in-DB monitor) | required | required | required |
+| Owner decisions OD-G1, G3, G4, G6-G8, G10, G13 + settings | required | required | required (+ G2, G9, G12 for production) |
+| Role provisioning (attestor, break-glass) | required | required | required |
+| Runbook + break-glass drill | required | required | required |
+| **Separate staging owner role** (not the RDS master; OD-G14) | not required (synthetic data) | **required**: activation in staging is real activation of the control path | required |
+| **Alert delivery** (ALERT-DELIVERY-1 closed) | not required (dashboard review) | **required** for p1 | required |
+| D1 DDL event trigger | not required (`ddl_audit_missing` p3) | **required** (p1) | required, p1 |
+| D3b external verifier + external head store | not required | **required** (independent verification) | required |
+| D4 signed manifest compare | not required | required (by the same external job) | required |
+| D5 pgaudit + log shipping | not required | desirable | required |
+| `idle_in_transaction_session_timeout` on runtime | required | required | required |
+| Phase 2 worker split | not required | not required | required before production |
+
+The architect does not decide the tier. Points both positions share: a Tier S activation must never process non-synthetic persons, and
+moving a database from S to N is a new settings version (`tier = 'N'`, a widening that needs two Persons). Its executor refuses until
+the Tier N controls report present (D1 event trigger present, external head fresh, manifest compare fresh, all through a
+`screening_gate_tier_n_prerequisites()` check with codes `tier_n_prerequisite_missing:<control>`).
+
+## 20. Top remaining design risks (v2.1)
+
+1. **Alert delivery is OPEN.** Every detection control ends in an alert that may reach nobody until ALERT-DELIVERY-1 is closed.
+2. **Owner-forged consistent evidence** is invisible in the database (T21). It is caught only if D1, D3b and D5 actually run, and in Tier S they may not (s19).
+3. **R-5:** the API process holds the actor-proof keys, so the two-Person rule does not resist API compromise.
+4. **Lock-row holding** by an open runtime transaction depends on an operations timeout that the runtime role cannot be trusted to keep.
+5. **Superuser replica-mode bypass** of ORIGIN insert guards (the price of logical-replication compatibility).
+6. **Attestation burden** may cause blind re-attestation (R-3). The two-person confirmation helps only if the second attestor really checks.
+7. **The 0197 rewrite** of the 0189/0190/0191 functions (the lock swap) touches reviewed money-adjacent code. The fingerprint-diff pin is the only guard against accidental drift.
+8. **Feasibility unknowns:** `pg_control_*` and event triggers on RDS; blue/green trigger modes (Q8); the version probe in the pipeline (Q10).
+9. **"Revoked before execution"** keeps one clock comparison.
+10. **Test-suite migration scale** (about 60 call sites, 4 trapdoors, 21 kinds pin). A careless migration could weaken an assertion. A-20's "same assertion text" rule is the guard against that.
